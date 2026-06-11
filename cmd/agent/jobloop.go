@@ -87,13 +87,6 @@ func hasDeclaredHFInput(inputs []string) bool {
 	return false
 }
 
-func hfOfflineEnv(inputs []string) []string {
-	if !hasDeclaredHFInput(inputs) {
-		return nil
-	}
-	return nil
-}
-
 func hfProvisioningEnv(inputs []string) []string {
 	if !hasDeclaredHFInput(inputs) {
 		return nil
@@ -383,7 +376,6 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		env = append(env, dotenvVars...)
 	}
 	env = append(env, job.Env...)
-	env = append(env, hfOfflineEnv(job.Inputs)...)
 
 	didWork := false
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
@@ -680,7 +672,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			stopTelemetryUploader()
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
-			recordPrewarmFailure(cfg, job, prewarm)
+			prewarmExitCode := recordPrewarmFailure(cfg, job, prewarm)
 
 			// Setup-phase timeout (exit 124) at this boundary almost always
 			// indicates infrastructure trouble (rental network throughput,
@@ -709,7 +701,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			// the instance — see r2upload.Drain for the upload gate.
 			uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
 			uploadStartedUnix := time.Now().Unix()
-			logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID)
+			logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID, job.RunID)
 			if snapErr != nil {
 				fmt.Fprintf(os.Stderr, "snapshot log dir for prewarm-failed job %d: %v\n", job.ID, snapErr)
 			}
@@ -719,7 +711,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 				instanceID:        cfg.InstanceID,
 				jobID:             job.ID,
 				runID:             job.RunID,
-				exitCode:          1,
+				exitCode:          prewarmExitCode,
 				workDir:           runner.ExpandTilde(workDir),
 				logSnapshot:       logSnapshot,
 				diskPath:          cfg.DiskPath,
@@ -811,7 +803,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// Snapshot log dir so background uploads can read from it
 		// while the live log dir is cleaned for the next job
-		logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID)
+		logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID, job.RunID)
 		if snapErr != nil {
 			fmt.Fprintf(os.Stderr, "snapshot log dir for job %d: %v\n", job.ID, snapErr)
 		}
@@ -878,7 +870,11 @@ func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
 	writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
 }
 
-func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm setupPrewarmResult) {
+// recordPrewarmFailure writes failure artifacts and the R2 .complete marker
+// for a job whose setup prewarm failed. It returns the exit code it recorded
+// so callers (e.g. the background-upload repair path) reuse the same value
+// instead of clobbering it.
+func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm setupPrewarmResult) int {
 	paths := runner.NewJobPaths(cfg.LogDir, job.ID)
 	_ = os.MkdirAll(cfg.LogDir, 0o755)
 	if err := runner.ArchiveExistingFiles(cfg.LogDir, job.ID); err != nil {
@@ -894,13 +890,8 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 	if prewarm.err != nil {
 		reason = prewarm.err.Error()
 	}
-	// Preserve the underlying RunSetupCommand exit code when present so
-	// downstream classification can distinguish exit 124 (setup-phase
-	// timeout, infrastructure-side) from a generic exit 1 (code error).
 	ei := prewarm.exitInfo
-	if ei.ExitCode == 0 {
-		ei.ExitCode = 1
-	}
+	ei.ExitCode = prewarmFailureExitCode(prewarm)
 	_ = runner.WriteStatusFile(paths, ei)
 	_ = runner.WriteFailureReasonFile(paths, reason)
 	_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)
@@ -910,6 +901,19 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 		SetupEnd:     now,
 	})
 	r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+	return ei.ExitCode
+}
+
+// prewarmFailureExitCode preserves the underlying RunSetupCommand exit code
+// when present so downstream classification can distinguish exit 124
+// (setup-phase timeout, infrastructure-side) from a generic exit 1 (code
+// error). A zero exit code (prewarm failed without running a command) maps
+// to 1.
+func prewarmFailureExitCode(prewarm setupPrewarmResult) int {
+	if prewarm.exitInfo.ExitCode == 0 {
+		return 1
+	}
+	return prewarm.exitInfo.ExitCode
 }
 
 func appendPrewarmLogForFailure(jobLog, prewarmLog string) {
@@ -935,7 +939,6 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	setupTimeout := pickSetupTimeout(cfg)
 	env := agentRentalEnv(cfg)
 	env = append(env, job.Env...)
-	env = append(env, hfOfflineEnv(job.Inputs)...)
 	return runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: opsqueue.CommandJob{
@@ -1147,8 +1150,14 @@ func patchPhaseUploadWindow(logDir string, jobID, uploadStart, uploadEnd int64) 
 // snapshotLogDir copies the log directory contents to a temp dir so that
 // the main log dir can be cleaned for the next job while background uploads
 // read from the snapshot. The caller must os.RemoveAll the returned path.
-func snapshotLogDir(logDir string, jobID int64) (string, error) {
-	snapshot := filepath.Join(os.TempDir(), fmt.Sprintf("weft-logs-job-%d", jobID))
+//
+// The snapshot dir is keyed by job ID + run ID (like the setup-prewarm dir)
+// so a later attempt of the same job on the same instance gets its own
+// directory: the previous attempt's background upload ends with an
+// os.RemoveAll of its snapshot, which must not delete or be fed files from
+// the new attempt.
+func snapshotLogDir(logDir string, jobID, runID int64) (string, error) {
+	snapshot := filepath.Join(os.TempDir(), fmt.Sprintf("weft-logs-job-%d-%d", jobID, runID))
 	if err := os.MkdirAll(snapshot, 0o755); err != nil {
 		return "", err
 	}

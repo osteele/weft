@@ -113,6 +113,101 @@ func TestKillJob_SyncError(t *testing.T) {
 	}
 }
 
+// TestStopJob_CancelRunningJobRecordsCanceled is a regression test:
+// `weft cancel` on a running job must record status canceled, not killed.
+func TestStopJob_CancelRunningJobRecordsCanceled(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "test")
+	db.MarkRunningByID(database, jobID)
+	// Make this a tmux-session job (not queue-runner) so the cancel apply
+	// path must kill the tmux session.
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ? WHERE job_id = ?`, "test-session", jobID); err != nil {
+		t.Fatalf("set attempt session_name: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+	if job.UsesQueueRunner() {
+		t.Fatal("expected a tmux-session job, got queue-runner job")
+	}
+
+	var capturedCommands []string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		capturedCommands = append(capturedCommands, command)
+		if strings.Contains(command, "tmux has-session") {
+			return "NO\n", "", 0
+		}
+		return "", "", 0
+	})
+
+	result, err := StopJob(database, job, db.StatusCanceled, DefaultOptions())
+	if err != nil {
+		t.Fatalf("StopJob failed: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success to be true")
+	}
+	if result.Message != "Job wj1 canceled" {
+		t.Errorf("unexpected message: %q", result.Message)
+	}
+
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.Status != db.StatusCanceled {
+		t.Errorf("expected job status canceled, got %s", updatedJob.Status)
+	}
+	if updatedJob.EffectiveStatus() != db.StatusCanceled {
+		t.Errorf("expected effective status canceled, got %s", updatedJob.EffectiveStatus())
+	}
+
+	// The running process must still be stopped: tmux-session jobs need a
+	// tmux kill-session, which the cancel apply path previously skipped.
+	hasSessionKill := false
+	for _, cmd := range capturedCommands {
+		if strings.Contains(cmd, "tmux kill-session") {
+			hasSessionKill = true
+		}
+	}
+	if !hasSessionKill {
+		t.Errorf("expected tmux kill-session to be issued; got commands: %v", capturedCommands)
+	}
+}
+
+// TestStopJob_CancelPausedJobRecordsCanceled is a regression test:
+// `weft cancel` on a paused job must record canceled, not be converted to a kill.
+func TestStopJob_CancelPausedJobRecordsCanceled(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "test")
+	db.MarkRunningByID(database, jobID)
+	if err := db.MarkPausedByID(database, jobID); err != nil {
+		t.Fatalf("MarkPausedByID: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+	if job.Status != db.StatusPaused {
+		t.Fatalf("expected paused job, got %s", job.Status)
+	}
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "tmux has-session") {
+			return "NO\n", "", 0
+		}
+		return "", "", 0
+	})
+
+	result, err := StopJob(database, job, db.StatusCanceled, DefaultOptions())
+	if err != nil {
+		t.Fatalf("StopJob failed: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success to be true")
+	}
+
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.Status != db.StatusCanceled {
+		t.Errorf("expected job status canceled, got %s", updatedJob.Status)
+	}
+	if updatedJob.EffectiveStatus() != db.StatusCanceled {
+		t.Errorf("expected effective status canceled, got %s", updatedJob.EffectiveStatus())
+	}
+}
+
 func TestCancelQueuedJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")

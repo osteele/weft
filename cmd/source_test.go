@@ -160,7 +160,7 @@ func TestExtractSourceSnapshotRejectsTraversal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected traversal error")
 	}
-	if !strings.Contains(err.Error(), "escapes destination") {
+	if !strings.Contains(err.Error(), "escapes extraction root") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

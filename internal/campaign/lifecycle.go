@@ -2109,12 +2109,20 @@ func LaunchInstance(
 		}
 	}
 
+	// failLaunchInfra performs the shared post-create failure ritual: destroy
+	// the leaked provider instance, mark the launch failed with an
+	// infra_failure detail, orphan the claimed jobs, and log the failure.
+	failLaunchInfra := func(detail string, err error) {
+		destroyLeakedInstance(client, providerInstID, instanceID)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
+		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
+	}
+
 	// Record provider instance ID
 	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "failed to record provider ID: "+err.Error())
-		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=failed to record provider ID: %s", instanceID, err))
+		failLaunchInfra("provider ID recording failed", err)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
 
@@ -2161,19 +2169,13 @@ func LaunchInstance(
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "manifest generation failed: "+err.Error())
-		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=manifest generation failed: %s", instanceID, err))
+		failLaunchInfra("manifest generation failed", err)
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "manifest upload failed: "+err.Error())
-		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=manifest upload failed: %s", instanceID, err))
+		failLaunchInfra("manifest upload failed", err)
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
 
@@ -2196,10 +2198,7 @@ func LaunchInstance(
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "bootstrap upload failed: "+err.Error())
-		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=bootstrap upload failed: %s", instanceID, err))
+		failLaunchInfra("bootstrap upload failed", err)
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
@@ -2215,6 +2214,7 @@ func LaunchInstance(
 			destroyLeakedInstance(client, providerInstID, instanceID)
 			err := fmt.Errorf("runpod client does not support SSH bootstrap")
 			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, err.Error())
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance runpod bootstrap unsupported before destination acceptance")
 			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 				"launch_id=%d reason=infra_failure detail=%s", instanceID, err))
 			return instanceID, err
@@ -2229,17 +2229,23 @@ func LaunchInstance(
 			err = bootstrapper.BootstrapFromR2(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey)
 		}
 		if err != nil {
-			destroyLeakedInstance(client, providerInstID, instanceID)
-			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "runpod ssh bootstrap failed: "+err.Error())
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance runpod ssh bootstrap failed before destination acceptance")
-			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-				"launch_id=%d reason=infra_failure detail=runpod ssh bootstrap failed: %s", instanceID, err))
+			failLaunchInfra("runpod ssh bootstrap failed", err)
 			return instanceID, fmt.Errorf("runpod ssh bootstrap: %w", err)
 		}
 	}
 
 	// Update status to running — instance is now self-starting
 	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusRunning); err != nil {
+		if errors.Is(err, db.ErrLaunchTerminal) {
+			// The instance was terminated (e.g. user cancel) while the
+			// launch was finishing. Terminal status is sticky; the terminate
+			// path already destroyed the provider instance and reset the
+			// jobs, so report the launch as not running without re-failing
+			// the row.
+			oplog.Log(oplog.OpLaunchTerminated, oplog.WithDetailf(
+				"launch_id=%d detail=terminated during launch; final running write skipped", instanceID))
+			return instanceID, fmt.Errorf("instance %d terminated during launch: %w", instanceID, err)
+		}
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 

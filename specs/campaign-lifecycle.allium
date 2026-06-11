@@ -241,7 +241,8 @@ entity Instance {
         or (j.latest_attempt.end_time != null and j.latest_attempt.end_time > 0))
     is_retryable: termination_reason in {provider_failure, infra_failure,
                                           bootstrap_timeout, phase_stall,
-                                          preempted, account_credit_exhausted,
+                                          preempted, provider_timeout,
+                                          upload_stall, account_credit_exhausted,
                                           unknown}
 
     -- Status
@@ -317,7 +318,10 @@ config {
     -- likely to stall the sidecar's R2 PUTs.
     heartbeat_stale_threshold_early_life: Duration = 8.minutes
     heartbeat_early_life_window: Duration = 15.minutes
-    running_stall_timeout: Duration = 30.minutes
+    -- Running-phase stall terminate threshold: trigger when the heartbeat
+    -- is stale AND the running phase has been unchanged for this long.
+    -- Matches runningStaleTerminate in internal/campaign/status.go.
+    running_stall_timeout: Duration = 60.minutes
 
     -- Dud-Vast detection. When Vast reports the rental as `running` but
     -- no OnStart probe has appeared in R2 after this many minutes, the
@@ -1199,9 +1203,18 @@ rule ExtendGracePeriod {
     when: ExtendGrace(instance, additional_duration)
     requires: instance.status = grace
 
-    ensures: instance.grace_deadline = instance.grace_deadline + additional_duration
+    ensures: instance.grace_deadline = now + additional_duration
 
     @guidance
+        -- Absolute semantics: the new deadline is measured from the
+        -- moment the extension is applied (now + additional_duration),
+        -- NOT added to the existing deadline. Both the CLI
+        -- (cmd/instance.go) and agent (cmd/agent/grace_requests.go) set
+        -- the deadline to time.Now().Add(duration). This is what makes
+        -- the ResubmittedJobRuntimeDoesNotConsumeGrace invariant cohere:
+        -- a fresh idle window starts from the extension point regardless
+        -- of how much grace time had already elapsed.
+        --
         -- Weft writes duration string to R2 at
         -- grace/<instanceID>/extend/<requestID>.txt.
         -- Agent reads and updates its local deadline.
@@ -1499,13 +1512,19 @@ rule HeartbeatStale {
 
 rule ProviderInstanceDied {
     when: instance: Instance.provider_instance.status becomes exited
-    requires: instance.status in {launching, running, paused, grace}
+    requires: instance.status in {launching, running, paused}
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = provider_failure
     ensures: instance.ended_at = now
 
     @guidance
+        -- Grace-period instances are deliberately excluded from this
+        -- rule (instance_check.go skips the provider-dead path when
+        -- status = grace): a transient provider-API failure must not
+        -- kill an active grace session. Grace instances reach terminal
+        -- status via GracePeriodExpires / ReleaseGraceInstance instead.
+        --
         -- A concrete terminal provider status (exited, destroyed, error,
         -- dead) reported for a specific instance is terminal. A missing
         -- row from a provider-wide batch list is NOT a terminal signal:

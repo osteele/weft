@@ -370,8 +370,12 @@ func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 		}
 	}
 
-	// Also kill the process if it's running (queue runner may have started it)
-	return killQueueRunnerJob(job, timeout)
+	// Also kill the process if it's running. applyKillToRemote dispatches on
+	// the job's execution backend (queue-runner PID kill vs tmux session kill),
+	// so this covers both a queue-runner job the runner started after the
+	// cancel was requested and a cancel issued against an already-running
+	// tmux-session job.
+	return applyKillToRemote(job, timeout)
 }
 
 // KillQueueRunnerJob is an exported wrapper around killQueueRunnerJob for

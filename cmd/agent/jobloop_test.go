@@ -532,7 +532,7 @@ func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
 		t.Fatalf("write completion file: %v", err)
 	}
 
-	snapshot, err := snapshotLogDir(logDir, jobID)
+	snapshot, err := snapshotLogDir(logDir, jobID, 7)
 	if err != nil {
 		t.Fatalf("snapshotLogDir: %v", err)
 	}
@@ -543,6 +543,74 @@ func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(snapshot, "wj42.completion.json")); err != nil {
 		t.Fatalf("expected completion file in snapshot: %v", err)
+	}
+}
+
+// Regression test: snapshot dirs must be keyed by job ID + run ID so that a
+// second attempt of the same job on the same instance does not share a
+// directory with the first attempt's still-uploading snapshot. The first
+// attempt's background upload ends with os.RemoveAll of its snapshot; with a
+// job-ID-only key that deleted the second attempt's files (or uploaded stale
+// first-attempt files under the new attempt).
+func TestSnapshotLogDir_DistinctPerAttempt(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(43)
+
+	if err := os.WriteFile(filepath.Join(logDir, "wj43.log"), []byte("attempt 1\n"), 0o644); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+	first, err := snapshotLogDir(logDir, jobID, 1)
+	if err != nil {
+		t.Fatalf("snapshotLogDir attempt 1: %v", err)
+	}
+	defer os.RemoveAll(first)
+
+	if err := os.WriteFile(filepath.Join(logDir, "wj43.log"), []byte("attempt 2\n"), 0o644); err != nil {
+		t.Fatalf("rewrite log file: %v", err)
+	}
+	second, err := snapshotLogDir(logDir, jobID, 2)
+	if err != nil {
+		t.Fatalf("snapshotLogDir attempt 2: %v", err)
+	}
+	defer os.RemoveAll(second)
+
+	if first == second {
+		t.Fatalf("attempts share a snapshot dir: %s", first)
+	}
+
+	// Simulate attempt 1's background upload finishing (bgwork.go RemoveAll).
+	if err := os.RemoveAll(first); err != nil {
+		t.Fatalf("remove first snapshot: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(second, "wj43.log"))
+	if err != nil {
+		t.Fatalf("second attempt's snapshot lost after first attempt cleanup: %v", err)
+	}
+	if string(data) != "attempt 2\n" {
+		t.Fatalf("second snapshot content = %q, want attempt 2's log", data)
+	}
+}
+
+// Regression test: the exit code recorded for a failed prewarm (and reused by
+// the background-upload R2 marker repair) must preserve exit 124 (setup-phase
+// timeout) instead of clobbering it to 1.
+func TestPrewarmFailureExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		exit int
+		want int
+	}{
+		{"setup timeout preserved", runner.ExitCodeSetupTimeout, runner.ExitCodeSetupTimeout},
+		{"nonzero preserved", 2, 2},
+		{"zero maps to generic failure", 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pw := setupPrewarmResult{exitInfo: runner.ExitInfo{ExitCode: tc.exit}}
+			if got := prewarmFailureExitCode(pw); got != tc.want {
+				t.Fatalf("prewarmFailureExitCode(exit=%d) = %d, want %d", tc.exit, got, tc.want)
+			}
+		})
 	}
 }
 

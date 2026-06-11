@@ -86,6 +86,17 @@ func ExtractRunID(key string) int64 {
 
 // Grace-period control keys
 
+// Grace status states written by the agent's grace-wait loop into the
+// GraceStatus marker and read by the CLI/reconciler. GraceStateWaiting means
+// the agent is idle in grace polling for control messages; GraceStateRunning
+// means it is executing resubmitted jobs (the marker's deadline may be stale
+// while running); GraceStateCompleted means the grace session ended.
+const (
+	GraceStateWaiting   = "waiting"
+	GraceStateRunning   = "running"
+	GraceStateCompleted = "completed"
+)
+
 func GracePrefix(instanceID int64) string {
 	return fmt.Sprintf("grace/%d", instanceID)
 }

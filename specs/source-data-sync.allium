@@ -176,9 +176,15 @@ entity SourceSnapshot {
     built_at: Timestamp
 }
 
--- HostSourceState tracks what source snapshot is currently installed in a
--- host's sources directory, so weft can skip redundant rsyncs. There is
--- at most one active snapshot per (host, working_dir) pair at a time.
+-- SUPERSEDED by rsync incrementality (not implemented). HostSourceState was
+-- intended to track what source snapshot is currently installed in a host's
+-- sources directory so weft could skip redundant rsyncs via
+-- ReuseRecentOnPremSnapshot. No such DB-side skip cache exists: rsync's delta
+-- transfer already makes re-syncing an unchanged tree near-free, so weft
+-- always rsyncs. The entity and its consuming rules are retained as the
+-- documented intent rather than deleted, to avoid orphaning the per-job
+-- marker and remediation rules that reference them. There is at most one
+-- active snapshot per (host, working_dir) pair at a time.
 entity HostSourceState {
     host: jobs/Host
     working_dir: String
@@ -226,16 +232,22 @@ config {
     -- Size limit on an uncompressed source snapshot. Enforced before a
     -- tarball is written so a runaway working directory fails fast with
     -- a size report rather than filling up /tmp or R2.
-    max_source_bytes: Integer = 500_000_000     -- 500 MB
+    -- 500 MiB (binary), matching MaxSourceTarballBytes = 500 * 1024 * 1024
+    -- in internal/sync/tarball.go.
+    max_source_bytes: Integer = 524_288_000     -- 500 MiB
 
     -- Per-rsync deadlines.
     rsync_connect_timeout: Duration = 15.seconds   -- ssh connection window
     rsync_total_timeout: Duration = 30.seconds     -- one sync invocation
     rsync_cloud_ssh_timeout: Duration = 5.minutes  -- cloud instance over SSH
 
-    -- Time window during which an existing host snapshot whose content hash
-    -- matches the submitted snapshot can be reused without re-rsyncing.
-    -- Below this, we skip the rsync entirely.
+    -- SUPERSEDED by rsync incrementality. The 5-minute host-snapshot reuse
+    -- window (and the HostSourceState skip path) was never implemented:
+    -- rsync's own delta transfer makes a redundant re-sync of an unchanged
+    -- working tree near-free, so weft always invokes rsync rather than
+    -- maintaining a DB-side "recently synced" cache to skip it. Retained
+    -- only because ReuseRecentOnPremSnapshot and HostSourceState reference
+    -- it; see those declarations.
     host_snapshot_reuse_window: Duration = 5.minutes
 
     -- Maximum time the prestage orchestrator waits for all declared data
@@ -389,10 +401,12 @@ rule SyncSourceToOnPremHost {
         -- so a fresh host key never blocks the TUI on a tty prompt.
 }
 
--- Skip re-syncing when we know the host already has this exact snapshot
--- installed within the reuse window. Keyed on (host, working_dir, hash)
--- so moving a job between two projects in the same cwd does not reuse
--- stale state.
+-- SUPERSEDED by rsync incrementality (not implemented). This DB-side skip
+-- path was never built; weft relies on rsync's delta transfer instead and
+-- always invokes rsync. Retained as documented intent. Was: skip re-syncing
+-- when the host already has this exact snapshot installed within the reuse
+-- window, keyed on (host, working_dir, hash) so moving a job between two
+-- projects in the same cwd does not reuse stale state.
 rule ReuseRecentOnPremSnapshot {
     when: DispatchToOnPremHost(job, host)
     requires: exists HostSourceState{host: host, working_dir: job.working_dir}
@@ -638,8 +652,8 @@ rule EscalateToR2IsolatedSource {
         --   internal/db/lifecycle_events.go — CountJobDispatchFailuresMatching
         --                                     (trigger 1), CountJobFailedAttempts
         --                                     (trigger 2)
-        --   internal/srcsync/            — ComputeSourceSHA256,
-        --                                  UploadSourceToR2ForInputs
+        --   internal/sync/provenance.go  — ComputeSourceSHA256
+        --   internal/sync/r2upload.go    — UploadSourceToR2ForInputs
         --   internal/opsqueue/queue.go   — QueueEntry.SourceR2Key
         --   internal/opsqueue/commandqueue.go — CommandJob.SourceR2Key
         --
@@ -816,6 +830,15 @@ rule DownloadHFAssetOnDemand {
 -- Rules: cloud data staging
 -- ==========================================================================
 
+-- SPECIFIED-BUT-UNIMPLEMENTED (planned, not abandoned). The host->R2
+-- staging path described by this rule does not yet exist: there is no
+-- implementation of R2PutFromHost, so a cloud consumer that depends on an
+-- on-prem-produced (or previously-completed) output it cannot co-locate
+-- with currently fails with ErrArtifactMissing instead of having the
+-- artifact staged into R2. This rule is the intended design for the
+-- missing half; do not delete it. The companion on-prem path
+-- (OnPremStagingFromR2, below) is the implemented direction.
+--
 -- Producer job outputs that a consumer depends on via `--needs` and that
 -- are no longer reachable via same-instance co-location must be staged
 -- into R2 at a content-addressed key and referenced from the consumer's
@@ -844,9 +867,11 @@ rule CloudDataStagingViaR2 {
         )
 
     @guidance
-        -- Implementation anchors:
-        --   internal/r2resolve/             — R2 key resolution policy
-        --                                     (shared with on-prem variant)
+        -- NOT YET IMPLEMENTED: no host->R2 staging (R2PutFromHost) exists.
+        -- Until it is built, cloud consumers of unco-located on-prem
+        -- artifacts fail with ErrArtifactMissing. The anchors below
+        -- describe where the implementation is intended to live / partly
+        -- lives for the consumer-side manifest plumbing:
         --   internal/cloudneeds/            — spec parsing and producer lookup
         --   internal/cloud/wrapper.go CloudNeed struct — manifest entry shape
         -- The agent reads cloud_needs from the manifest and rclone-copies

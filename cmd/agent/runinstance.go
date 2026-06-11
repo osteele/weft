@@ -634,8 +634,13 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 
 				pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
 				if pgid, ok := runner.ReadPIDFile(pgidPath); ok {
-					runner.WriteKillReasonFile(runner.NewJobPaths(logDir, jobID), runner.KillReasonUserKill)
-					runner.KillProcessGroup(pgid)
+					// Graceful escalation: SIGTERM now, SIGKILL after the
+					// grace window. This gives the job a chance to flush
+					// checkpoints and lets the bash exit-capture trap write
+					// the status file. KillProcessGroupWithGrace also writes
+					// the kill-reason file.
+					runner.KillProcessGroupWithGrace(pgid, runner.DefaultKillGrace,
+						runner.NewJobPaths(logDir, jobID), runner.KillReasonUserKill)
 				}
 
 				r2Delete(r2Bucket, r2keys.InstanceKillJob(instanceID))

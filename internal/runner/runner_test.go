@@ -595,3 +595,80 @@ func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
 		t.Fatal("normal jobs should keep advanced GPU telemetry")
 	}
 }
+
+// TestStartJob_SetupFailureWritesCompletionAndCleansDebris: when the setup
+// phase fails, the queue runner must close out the attempt the same way
+// RunSingleJob does — completion record and failure reason written, finished
+// state recorded — and must not leave .pid/.pgid files or the job-*.json
+// queue payload behind.
+func TestStartJob_SetupFailureWritesCompletionAndCleansDebris(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	// A pixi.toml triggers the "pixi install" setup command; a fake pixi on
+	// PATH makes it fail deterministically with exit 9.
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "pixi.toml"), []byte("[project]\n"), 0644); err != nil {
+		t.Fatalf("write pixi.toml: %v", err)
+	}
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir fake bin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "pixi"), []byte("#!/bin/sh\necho 'setup boom' >&2\nexit 9\n"), 0755); err != nil {
+		t.Fatalf("write fake pixi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	jobID := int64(811)
+	job := &opsqueue.CommandJob{
+		ID:  jobID,
+		Dir: workDir,
+		Cmd: "echo should-not-run",
+	}
+	if err := writeJobFile(r.queueDir, job); err != nil {
+		t.Fatalf("write job file: %v", err)
+	}
+
+	err := r.startJob(jobID, job, nil)
+	if err == nil {
+		t.Fatal("expected setup failure error")
+	}
+	if !strings.Contains(err.Error(), "setup command failed") {
+		t.Fatalf("error = %v, want setup command failure", err)
+	}
+
+	paths := NewJobPaths(r.logDir, jobID)
+
+	// Status file written by RunSetupCommand with the setup exit code.
+	exitCode, ok := ReadStatusFile(paths.Status)
+	if !ok || exitCode != 9 {
+		t.Fatalf("status = (%d, %v), want (9, true)", exitCode, ok)
+	}
+
+	// Completion record and failure reason must exist (mirrors RunSingleJob).
+	if _, statErr := os.Stat(paths.Completion); statErr != nil {
+		t.Fatalf("completion record missing after setup failure: %v", statErr)
+	}
+	if reason := ReadFailureReasonFile(paths.FailureReason); reason == "" {
+		t.Fatal("failure_reason file missing or empty after setup failure")
+	}
+
+	// PID/PGID files written for the setup process must be cleaned up.
+	for _, path := range []string{paths.PID, paths.PGID} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("expected %s to be removed after setup failure, got err=%v", path, statErr)
+		}
+	}
+
+	// Queue payload must be removed so the job is not re-attempted.
+	if _, readErr := ReadJobFile(r.queueDir, jobID); readErr == nil {
+		t.Fatal("queue job file still present after setup failure")
+	}
+
+	// Terminal state recorded.
+	if f, found := r.state.Finished[fmt.Sprintf("%d", jobID)]; !found {
+		t.Fatal("finished state not recorded after setup failure")
+	} else if f.ExitCode != 9 {
+		t.Fatalf("finished exit code = %d, want 9", f.ExitCode)
+	}
+}

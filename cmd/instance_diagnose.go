@@ -429,7 +429,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 			}
 			if uf, ok := report.UploadFailures[j.ID]; ok {
 				fmt.Fprintf(&b, "    Upload:    truncated — %s (%s); %d/%d bytes in %.0fs\n",
-					uf.KilledBy, uf.Reason, uf.BytesUploaded, uf.BytesTotal, uf.ElapsedSeconds)
+					uf.Cause(), uf.Reason, uf.BytesUploaded, uf.BytesTotal, uf.ElapsedSeconds)
 			}
 			if desc := jobDescription(j); desc != "" {
 				fmt.Fprintf(&b, "    Command:   %s\n", desc)

@@ -29,7 +29,12 @@ type FailureMarker struct {
 	EndedAtUnix         int64   `json:"ended_at_unix"`
 	CeilingSeconds      float64 `json:"ceiling_seconds"`
 	StallTimeoutSeconds float64 `json:"stall_timeout_seconds"`
-	StderrTail          string  `json:"stderr_tail,omitempty"`
+	// Kind preserves the stall discrimination from [Result.StallKind]
+	// (never_started / mid_transfer / heartbeat / slow_pace) so displays can
+	// say which kind of stall fired. Empty for non-stall failures and for
+	// markers written by older agents, which display as a generic stall.
+	Kind       StallKind `json:"stall_kind,omitempty"`
+	StderrTail string    `json:"stderr_tail,omitempty"`
 
 	// Context fields the caller fills in. These describe what the failed
 	// drain was trying to upload — useful for the CLI display layer.
@@ -53,8 +58,21 @@ func NewFailureMarker(r Result) FailureMarker {
 		EndedAtUnix:         r.EndedAtUnix,
 		CeilingSeconds:      r.CeilingSeconds,
 		StallTimeoutSeconds: r.StallTimeoutSeconds,
+		Kind:                r.StallKind,
 		StderrTail:          r.StderrTail,
 	}
+}
+
+// Cause renders the marker's failure discriminator for display.
+// When the marker carries a stall kind (never_started / mid_transfer /
+// heartbeat / slow_pace) it is surfaced alongside the killed-by token, e.g.
+// "stall: mid_transfer". Markers written by older agents have no kind and
+// fall back to the generic killed-by token ("stall").
+func (m FailureMarker) Cause() string {
+	if m.Kind == "" || string(m.Kind) == m.KilledBy {
+		return m.KilledBy
+	}
+	return fmt.Sprintf("%s: %s", m.KilledBy, m.Kind)
 }
 
 // MarkerWriter abstracts the R2 PUT for tests. The agent's wrapper provides

@@ -76,12 +76,21 @@ func createSourceTarball(localDir string, excludes []string) (tmpPath string, sh
 			return nil
 		}
 
-		// Only include regular files and directories
-		if !info.Mode().IsRegular() && !info.IsDir() {
+		// Only include regular files, directories, and symlinks
+		isSymlink := info.Mode()&os.ModeSymlink != 0
+		if !info.Mode().IsRegular() && !info.IsDir() && !isSymlink {
 			return nil
 		}
 
-		header, err := tar.FileInfoHeader(info, "")
+		var linkTarget string
+		if isSymlink {
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", relPath, err)
+			}
+		}
+
+		header, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return fmt.Errorf("file info header for %s: %w", relPath, err)
 		}
@@ -101,7 +110,7 @@ func createSourceTarball(localDir string, excludes []string) (tmpPath string, sh
 			return fmt.Errorf("write header for %s: %w", relPath, err)
 		}
 
-		if info.IsDir() {
+		if info.IsDir() || isSymlink {
 			return nil
 		}
 

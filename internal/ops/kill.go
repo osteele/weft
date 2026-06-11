@@ -14,44 +14,69 @@ import (
 // tries to apply to remote. If successful, status is updated; if not, the
 // pending_status remains for later reconciliation during sync.
 func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	return StopJob(database, job, db.StatusKilled, opts)
+}
+
+// StopJob stops a live (running/starting/paused) job, recording targetStatus
+// (killed or canceled) as the user intent. The stop mechanics are identical
+// for both intents; only the recorded terminal status differs, so a user
+// cancel must land as canceled, not killed.
+// Uses the three-way merge model: sets pending_status as user intent, then
+// tries to apply to remote. If successful, status is updated; if not, the
+// pending_status remains for later reconciliation during sync.
+func StopJob(database *sql.DB, job *db.Job, targetStatus string, opts ExecuteOptions) (Result, error) {
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
 	}
 
-	if err := db.SetRequestedStatus(database, job.ID, db.StatusKilled); err != nil {
+	var requestOp, doneOp string
+	var noun string
+	switch targetStatus {
+	case db.StatusKilled:
+		requestOp, doneOp = oplog.OpJobKill, oplog.OpJobKilled
+		noun = "kill"
+	case db.StatusCanceled:
+		requestOp, doneOp = oplog.OpJobCancel, oplog.OpJobCancel
+		noun = "cancel"
+	default:
+		return Result{}, fmt.Errorf("unsupported stop status %q for job %s", targetStatus, ids.FormatJobID(job.ID))
+	}
+	verb := noun + "ed"
+
+	if err := db.SetRequestedStatus(database, job.ID, targetStatus); err != nil {
 		return Result{}, fmt.Errorf("set requested status: %w", err)
 	}
 
-	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killing job"))
+	oplog.LogJob(requestOp, job.ID, job.Host, oplog.WithDetailf("%sing job", noun))
 
-	outcome, err := requestJobStatus(database, job, db.StatusKilled, opts)
+	outcome, err := requestJobStatus(database, job, targetStatus, opts)
 	if err != nil {
 		return Result{}, err
 	}
 
 	if !outcome.hostAvailable {
-		oplog.LogJob(oplog.OpJobKill, job.ID, job.Host,
-			oplog.WithDetail("kill deferred: host unreachable"))
+		oplog.LogJob(requestOp, job.ID, job.Host,
+			oplog.WithDetailf("%s deferred: host unreachable", noun))
 		return Result{
 			Success:  true,
 			Deferred: !outcome.hostAvailable,
 			JobID:    job.ID,
-			Message:  fmt.Sprintf("Job %s kill pending (host unreachable)", ids.FormatJobID(job.ID)),
+			Message:  fmt.Sprintf("Job %s %s pending (host unreachable)", ids.FormatJobID(job.ID), noun),
 		}, nil
 	}
 
 	if !outcome.resolved {
-		return Result{}, fmt.Errorf("unable to reconcile kill for job %s (status: %s)", ids.FormatJobID(job.ID), outcome.currentStatus)
+		return Result{}, fmt.Errorf("unable to reconcile %s for job %s (status: %s)", noun, ids.FormatJobID(job.ID), outcome.currentStatus)
 	}
 
 	switch outcome.currentStatus {
-	case db.StatusKilled:
-		oplog.LogJob(oplog.OpJobKilled, job.ID, job.Host,
-			oplog.WithDetail("killed via reconciliation"))
+	case targetStatus:
+		oplog.LogJob(doneOp, job.ID, job.Host,
+			oplog.WithDetailf("%s via reconciliation", verb))
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %s killed", ids.FormatJobID(job.ID)),
+			Message: fmt.Sprintf("Job %s %s", ids.FormatJobID(job.ID), verb),
 		}, nil
 	case db.StatusCompleted:
 		return Result{
@@ -59,16 +84,15 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 			JobID:   job.ID,
 			Message: fmt.Sprintf("Job %s already completed", ids.FormatJobID(job.ID)),
 		}, nil
-	case db.StatusFailed, db.StatusDead:
+	case db.StatusFailed, db.StatusDead, db.StatusKilled:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %s already failed", ids.FormatJobID(job.ID)),
+			Message: fmt.Sprintf("Job %s already %s", ids.FormatJobID(job.ID), outcome.currentStatus),
 		}, nil
 	default:
-		return Result{}, fmt.Errorf("job %s remains %s after kill request", ids.FormatJobID(job.ID), outcome.currentStatus)
+		return Result{}, fmt.Errorf("job %s remains %s after %s request", ids.FormatJobID(job.ID), outcome.currentStatus, noun)
 	}
-
 }
 
 // CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.

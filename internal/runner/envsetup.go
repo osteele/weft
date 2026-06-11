@@ -161,7 +161,7 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 		timer := time.AfterFunc(timeout, func() {
 			timedOut.Store(true)
 			slog.Warn("setup timeout reached, sending SIGTERM", "component", "runner", "job_id", jobID, "timeout", timeout, "pgid", proc.PGID)
-			KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, "")
+			KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, "")
 		})
 		defer timer.Stop()
 	}

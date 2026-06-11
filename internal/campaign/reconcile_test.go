@@ -473,6 +473,86 @@ func TestReconcileLaunches_GraceWhenNoActiveJobs(t *testing.T) {
 	}
 }
 
+// Regression test: while the agent runs resubmitted jobs it rewrites the
+// grace status marker with state "running" and a possibly stale
+// (pre-extension) deadline. Reconcile must not treat that marker as grace —
+// stamping the stale deadline would let the grace-expiry check force-destroy
+// a working instance in the inter-job window.
+func TestApplyGraceStatusMarker_RunningStateDoesNotEnterGrace(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+
+	staleDeadline := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+	marker := fmt.Sprintf(`{"state":"running","deadline":%q,"failed_jobs":[42]}`, staleDeadline)
+
+	if applyGraceStatusMarker(marker, ci, database) {
+		t.Fatal("applyGraceStatusMarker = true for state=running, want false")
+	}
+
+	ci, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+	if ci.GraceDeadline != nil {
+		t.Errorf("GraceDeadline = %v, want nil (stale deadline must not be stamped)", *ci.GraceDeadline)
+	}
+}
+
+func TestApplyGraceStatusMarker_WaitingStateEntersGrace(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Minute).Truncate(time.Second)
+	marker := fmt.Sprintf(`{"state":"waiting","deadline":%q}`, deadline.Format(time.RFC3339))
+
+	if !applyGraceStatusMarker(marker, ci, database) {
+		t.Fatal("applyGraceStatusMarker = false for state=waiting, want true")
+	}
+
+	ci, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusGrace {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusGrace)
+	}
+	if ci.GraceDeadline == nil {
+		t.Fatal("GraceDeadline = nil, want marker deadline")
+	}
+	if *ci.GraceDeadline != deadline.Unix() {
+		t.Errorf("GraceDeadline = %d, want %d", *ci.GraceDeadline, deadline.Unix())
+	}
+}
+
 func TestReconcileLaunches_TerminalTransitionSyncsJobCompletions(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

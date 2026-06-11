@@ -40,7 +40,7 @@ func printUploadFailureForJob(database *sql.DB, job *db.Job) {
 		return
 	}
 	fmt.Printf("Upload:       truncated — %s (%s); %d/%d bytes in %.0fs\n",
-		marker.KilledBy, marker.Reason,
+		marker.Cause(), marker.Reason,
 		marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds)
 }
 

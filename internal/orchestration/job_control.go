@@ -107,7 +107,7 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 			Message: fmt.Sprintf("Job %s canceled", ids.FormatJobID(job.ID)),
 		}, nil
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
-		return ops.KillJob(database, job, opts)
+		return ops.StopJob(database, job, targetStatus, opts)
 	default:
 		return ops.Result{}, fmt.Errorf("job %s is %s; nothing to kill", ids.FormatJobID(job.ID), job.EffectiveStatus())
 	}

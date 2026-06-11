@@ -22,12 +22,26 @@ import (
 // NeedsCloudCompletionBackfill keeps returning true and a later sync that
 // finds the JSON will overwrite the placeholder values. This avoids silently
 // substituting wall-clock sync time as a completion timestamp.
-func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string, markerLastModified time.Time, runID int64) (int64, error) {
+//
+// killReason is the kill_reason from the completion record ("" when absent).
+// KillReasonUserKill means the non-zero exit was produced by weft's own kill
+// signal: the marker confirms the user's stop, so the attempt keeps its
+// user-intended killed/canceled status (with metadata backfilled) rather than
+// being recorded as failed.
+func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (int64, error) {
 	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
 		targetStatus = StatusFailed
 		outcome = AttemptOutcomeFailed
+		if killReason == KillReasonUserKill {
+			outcome = AttemptOutcomeCancelled
+			if cur := getAttemptStatus(database, jobID, false); IsTerminalStatus(cur) {
+				targetStatus = cur
+			} else {
+				targetStatus = StatusKilled
+			}
+		}
 	}
 	if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
 		return 0, err

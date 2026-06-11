@@ -76,14 +76,6 @@ func recordDrainOutcome(bucket string, target drainTarget, opts r2upload.Options
 		uploadHealth.recordSuccess()
 		return
 	}
-	if result.KilledBy == r2upload.KilledByStall || result.KilledBy == r2upload.KilledBySlowPace {
-		// Both signal "this instance can't move bytes to R2 well enough to
-		// be worth keeping alive". Count them together against the
-		// consecutive-stalls + idle-since-success threshold.
-		if decision := uploadHealth.recordStall(); decision.shouldSelfDestruct {
-			triggerUploadStallSelfDestruct(bucket, target, decision, result)
-		}
-	}
 	slog.Warn("upload drain failed",
 		"label", target.Label,
 		"status", result.Status,
@@ -107,14 +99,34 @@ func recordDrainOutcome(bucket string, target drainTarget, opts r2upload.Options
 	marker.SourcePath = opts.Source
 	marker.DestRemote = opts.DestRemote
 
+	// Write the marker BEFORE any self-destruct decision: if the stall
+	// threshold trips below, teardown must not race the marker out of
+	// existence. The marker write is bounded by drainMarkerTimeout, so a
+	// wedged R2 delays self-destruct by at most that window.
 	key := failureMarkerKey(target)
 	markerCtx, cancel := context.WithTimeout(context.Background(), drainMarkerTimeout)
 	defer cancel()
-	if err := r2upload.WriteFailureMarker(markerCtx, agentMarkerWriter{bucket: bucket}, key, marker, drainMarkerTimeout); err != nil {
+	if err := r2upload.WriteFailureMarker(markerCtx, newDrainMarkerWriter(bucket), key, marker, drainMarkerTimeout); err != nil {
 		// Best effort. We've already logged the underlying drain failure;
 		// surface only that the marker itself didn't land.
 		fmt.Fprintf(os.Stderr, "write upload-failure marker (%s): %v\n", key, err)
 	}
+
+	if result.KilledBy == r2upload.KilledByStall || result.KilledBy == r2upload.KilledBySlowPace {
+		// Both signal "this instance can't move bytes to R2 well enough to
+		// be worth keeping alive". Count them together against the
+		// consecutive-stalls + idle-since-success threshold.
+		if decision := uploadHealth.recordStall(); decision.shouldSelfDestruct {
+			triggerUploadStallSelfDestruct(bucket, target, decision, result)
+		}
+	}
+}
+
+// newDrainMarkerWriter builds the marker writer for recordDrainOutcome.
+// A var so tests can substitute a capturing writer to observe marker writes
+// (and their ordering relative to self-destruct).
+var newDrainMarkerWriter = func(bucket string) r2upload.MarkerWriter {
+	return agentMarkerWriter{bucket: bucket}
 }
 
 func failureMarkerKey(t drainTarget) string {
@@ -316,9 +328,8 @@ func triggerUploadStallSelfDestruct(bucket string, target drainTarget, decision 
 		return
 	}
 	if selfDestructCmd == "" {
-		// Not configured (non-cloud agent, tests, etc.). The marker has
-		// already been written by recordDrainOutcome's caller; nothing more
-		// to do here.
+		// Not configured (non-cloud agent, tests, etc.). recordDrainOutcome
+		// has already written the failure marker; nothing more to do here.
 		slog.Warn("upload stall self-destruct skipped: no self-destruct command configured",
 			"instance_id", instanceID)
 		return

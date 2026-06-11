@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2upload"
 )
 
 func TestFormatTimelineOffset(t *testing.T) {
@@ -182,6 +183,34 @@ func TestBuildTimeline(t *testing.T) {
 	last := timeline[len(timeline)-1]
 	if last.Timestamp != 1900 {
 		t.Errorf("last entry timestamp = %d, want 1900", last.Timestamp)
+	}
+}
+
+// Regression: the diagnose Upload line must surface the specific stall kind
+// from the failure marker, not collapse every stall into the bare token.
+func TestFormatInstanceDiagnoseReportUploadLineShowsStallKind(t *testing.T) {
+	inst := &db.Launch{ID: 1, CreatedAt: 100, Status: db.LaunchStatusFailed}
+	report := &instanceDiagnoseReport{
+		Instance:     inst,
+		Jobs:         []*db.Job{{ID: 42, Status: "failed"}},
+		Outcomes:     map[int64]string{},
+		PhaseTimings: map[int64]*db.JobPhaseTimings{},
+		Diagnosis:    instanceDiagnosis{Summary: "upload stalled"},
+		UploadFailures: map[int64]r2upload.FailureMarker{
+			42: {
+				Status:         r2upload.StatusStalled,
+				KilledBy:       r2upload.KilledByStall,
+				Kind:           r2upload.StallKindMidTransfer,
+				Reason:         "no progress for 30s",
+				BytesUploaded:  5,
+				BytesTotal:     10,
+				ElapsedSeconds: 31,
+			},
+		},
+	}
+	out := formatInstanceDiagnoseReport(report)
+	if !strings.Contains(out, "truncated — stall: mid_transfer (no progress for 30s)") {
+		t.Errorf("Upload line missing stall kind:\n%s", out)
 	}
 }
 

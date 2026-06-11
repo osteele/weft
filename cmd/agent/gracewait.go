@@ -24,7 +24,7 @@ import (
 
 // graceStatus is written to R2 as grace/<instanceID>/status.
 type graceStatus struct {
-	State      string  `json:"state"`    // "waiting", "running", "completed"
+	State      string  `json:"state"`    // controlplane.GraceState* values
 	Deadline   string  `json:"deadline"` // RFC3339
 	FailedJobs []int64 `json:"failed_jobs"`
 }
@@ -111,7 +111,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 	// Write initial status
 	writeGraceStatus(r2Bucket, prefix, graceStatus{
-		State:    "waiting",
+		State:    controlplane.GraceStateWaiting,
 		Deadline: deadline.Format(time.RFC3339),
 	})
 
@@ -160,7 +160,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			deadline = updatedDeadline
 			fmt.Printf("Grace period extended. New deadline: %s\n", deadline.Format(time.RFC3339))
 			writeGraceStatus(r2Bucket, prefix, graceStatus{
-				State:    "waiting",
+				State:    controlplane.GraceStateWaiting,
 				Deadline: deadline.Format(time.RFC3339),
 			})
 		}
@@ -179,7 +179,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 		// Update status to running
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
-			State:    "running",
+			State:    controlplane.GraceStateRunning,
 			Deadline: deadline.Format(time.RFC3339),
 		})
 
@@ -220,7 +220,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		// deadline still in R2.
 		fmt.Printf("Some jobs failed. Resuming grace period until %s\n", deadline.Format(time.RFC3339))
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
-			State:      "waiting",
+			State:      controlplane.GraceStateWaiting,
 			Deadline:   deadline.Format(time.RFC3339),
 			FailedJobs: failedJobs,
 		})

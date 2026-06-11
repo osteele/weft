@@ -304,6 +304,21 @@ type completedMarkerResult struct {
 	completed         bool
 }
 
+// processedMarkerWriter is the subset of r2.Client needed to mark a completion
+// as processed.
+type processedMarkerWriter interface {
+	PutMarker(ctx context.Context, key string) error
+}
+
+// markRejectedCompletionProcessed writes the .processed marker for a
+// completion that RecordCloudJobCompletion permanently rejected, so the
+// .complete marker is not re-read and re-rejected on every sync pass.
+// Transient errors (e.g. DB I/O) are left unprocessed so a later pass can
+// retry. Returns true if the marker was written.
+func markRejectedCompletionProcessed(ctx context.Context, w processedMarkerWriter, jobID, runID int64, err error) bool {
+	return campaign.MarkRejectedCompletionProcessed(ctx, w, jobID, runID, err)
+}
+
 // syncOneCompletedJobMarker processes a single completed-job R2 marker.
 func syncOneCompletedJobMarker(
 	ctx context.Context,
@@ -380,6 +395,7 @@ func syncOneCompletedJobMarker(
 		startTimeUnix int64
 		endTimeUnix   int64
 		failureReason string
+		killReason    string
 		source        = campaign.SourceResults
 		tmpDir        string
 		haveDownload  bool
@@ -394,7 +410,7 @@ func syncOneCompletedJobMarker(
 	if err == nil {
 		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err == nil {
 			haveDownload = true
-			exitCode, startTimeUnix, endTimeUnix, failureReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
+			exitCode, startTimeUnix, endTimeUnix, failureReason, killReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
 		}
 	}
 
@@ -416,9 +432,13 @@ func syncOneCompletedJobMarker(
 		}
 	}
 
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, markerLastModified, runID)
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
 		slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
+		// Defense in depth: if the rejection is permanent (transition
+		// validation), mark the completion processed so it is not re-read
+		// and re-rejected on every sync pass.
+		markRejectedCompletionProcessed(ctx, r2Client, jobID, runID, err)
 		os.RemoveAll(tmpDir)
 		return completedMarkerResult{}
 	}

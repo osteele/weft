@@ -919,7 +919,5 @@ func IsJobTerminal(displayStatus string) bool {
 // (grace: waiting for resubmission; paused: provider stopped, may resume).
 // When you have a Launch struct, prefer inst.IsTerminal() instead.
 func IsInstanceTerminal(status string) bool {
-	return status == db.LaunchStatusCompleted ||
-		status == db.LaunchStatusFailed ||
-		status == db.LaunchStatusCancelled
+	return db.IsTerminalLaunchStatus(status)
 }

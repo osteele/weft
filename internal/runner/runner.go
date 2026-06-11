@@ -575,6 +575,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		resolvedEnv, ei, err := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
 		if err != nil {
 			WriteStatusFile(paths, ei)
+			r.finishFailedSetup(jobID, paths, ei, startTime)
 			return fmt.Errorf("prepare .envrc environment: %w", err)
 		}
 		envVars = resolvedEnv
@@ -600,9 +601,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	if setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, jobID, expandedDir, envVars, paths, r.setupTimeout)
 		if setupErr != nil {
-			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
-			WriteFailureReasonFile(paths, failureReason)
-			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
+			r.finishFailedSetup(jobID, paths, ei, startTime)
 			return setupErr
 		}
 		if setupCmd == "uv sync" {
@@ -667,6 +666,44 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	return nil
+}
+
+// finishFailedSetup closes out a job whose setup phase failed before the main
+// process started, mirroring RunSingleJob's setup-failure handling: it writes
+// the failure-reason file and completion record (so the reconciler sees a
+// closed attempt rather than a half-started one), stops the OnJobStart hook,
+// records the finished state, and removes the PID files and queue payload that
+// would otherwise linger as debris. The status file has already been written
+// by the setup path (RunSetupCommand or the direnv branch).
+func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, startTime int64) {
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+	WriteFailureReasonFile(paths, failureReason)
+	oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
+
+	endTime := time.Now().Unix()
+	if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+		fmt.Fprintf(f, "end_time=%d\n", endTime)
+		f.Close()
+	}
+
+	killReason := ReadKillReasonFile(paths.KillReason)
+	WriteCompletionRecord(paths, ei, RunningJobState{}, killReason, failureReason, startTime, endTime, nil)
+
+	r.processesMu.Lock()
+	stopFn := r.hookStopFuncs[jobIDStr]
+	delete(r.hookStopFuncs, jobIDStr)
+	r.processesMu.Unlock()
+	if stopFn != nil {
+		stopFn()
+	}
+	if r.OnJobFinish != nil {
+		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+	}
+
+	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
+	CleanupPIDFiles(paths)
+	removeJobFile(r.queueDir, jobID)
 }
 
 // rejectPreflight records a preflight rejection without ever marking the

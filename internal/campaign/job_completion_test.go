@@ -3,11 +3,15 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/status"
 )
 
 func TestFinalizeStuckJobsWithR2Check_RecoverFromR2(t *testing.T) {
@@ -187,7 +191,7 @@ func TestSyncJobCompletionsFromR2_BackfillsTerminalLaunchAttempt(t *testing.T) {
 		if gotJobID != jobID {
 			t.Fatalf("jobID = %d, want %d", gotJobID, jobID)
 		}
-		if _, err := db.RecordCloudJobCompletion(dbConn, gotJobID, 0, 100, 200, "", time.Time{}, runID); err != nil {
+		if _, err := db.RecordCloudJobCompletion(dbConn, gotJobID, 0, 100, 200, "", "", time.Time{}, runID); err != nil {
 			t.Fatalf("RecordCloudJobCompletion: %v", err)
 		}
 		return true
@@ -204,5 +208,48 @@ func TestSyncJobCompletionsFromR2_BackfillsTerminalLaunchAttempt(t *testing.T) {
 	}
 	if job.Status != db.StatusCompleted {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusCompleted)
+	}
+}
+
+type fakeMarkerWriter struct {
+	keys []string
+}
+
+func (f *fakeMarkerWriter) PutMarker(_ context.Context, key string) error {
+	f.keys = append(f.keys, key)
+	return nil
+}
+
+// TestMarkRejectedCompletionProcessed_TransitionRejectionWritesMarker is a
+// regression test for completions rejected by transition validation being
+// re-fetched and re-rejected on every reconcile pass: the .processed marker
+// must be written so the .complete marker is not reprocessed.
+func TestMarkRejectedCompletionProcessed_TransitionRejectionWritesMarker(t *testing.T) {
+	w := &fakeMarkerWriter{}
+	rejection := fmt.Errorf("record completion: %w", &status.InvalidTransitionError{
+		From:   status.Completed,
+		To:     status.Failed,
+		Reason: "no rule exists for this transition",
+	})
+
+	if !MarkRejectedCompletionProcessed(context.Background(), w, 42, 7, rejection) {
+		t.Fatal("MarkRejectedCompletionProcessed = false, want true for transition-validation rejection")
+	}
+	want := r2keys.JobAttemptProcessed(42, 7)
+	if len(w.keys) != 1 || w.keys[0] != want {
+		t.Fatalf("PutMarker keys = %v, want [%s]", w.keys, want)
+	}
+}
+
+// TestMarkRejectedCompletionProcessed_TransientErrorLeavesMarkerUnprocessed
+// verifies that transient errors (DB I/O, etc.) do NOT mark the completion
+// processed, so a later reconcile pass can retry ingestion.
+func TestMarkRejectedCompletionProcessed_TransientErrorLeavesMarkerUnprocessed(t *testing.T) {
+	w := &fakeMarkerWriter{}
+	if MarkRejectedCompletionProcessed(context.Background(), w, 42, 7, errors.New("database is locked")) {
+		t.Fatal("MarkRejectedCompletionProcessed = true, want false for transient error")
+	}
+	if len(w.keys) != 0 {
+		t.Fatalf("PutMarker keys = %v, want none", w.keys)
 	}
 }

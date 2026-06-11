@@ -52,6 +52,14 @@ func TerminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []e
 				}
 			}
 
+			// Stamp the user's termination request time (spec:
+			// UserTerminatesInstance) before flipping status.
+			if err := db.SetLaunchTerminationRequested(database, instanceID); err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("record termination request for instance %s: %w", ids.FormatInstanceID(instanceID), err))
+				mu.Unlock()
+			}
+
 			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("update instance %s status: %w", ids.FormatInstanceID(instanceID), err))

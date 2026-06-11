@@ -1,12 +1,17 @@
 package syncorch
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/status"
 )
 
 func TestImportCloudTimeseriesFileUsesExplicitRunID(t *testing.T) {
@@ -110,5 +115,48 @@ func TestMarkStartedJobFromMarkerClearsSatisfiedPendingStatus(t *testing.T) {
 	}
 	if job.EffectiveStatus() != db.StatusRunning {
 		t.Fatalf("EffectiveStatus = %q, want %q", job.EffectiveStatus(), db.StatusRunning)
+	}
+}
+
+type fakeMarkerWriter struct {
+	keys []string
+}
+
+func (f *fakeMarkerWriter) PutMarker(_ context.Context, key string) error {
+	f.keys = append(f.keys, key)
+	return nil
+}
+
+// TestMarkRejectedCompletionProcessed_TransitionRejectionWritesMarker is a
+// regression test for completions rejected by transition validation being
+// re-read and re-rejected on every sync pass: the .processed marker must be
+// written so the .complete marker is not reprocessed.
+func TestMarkRejectedCompletionProcessed_TransitionRejectionWritesMarker(t *testing.T) {
+	w := &fakeMarkerWriter{}
+	rejection := fmt.Errorf("record completion: %w", &status.InvalidTransitionError{
+		From:   status.Completed,
+		To:     status.Failed,
+		Reason: "no rule exists for this transition",
+	})
+
+	if !markRejectedCompletionProcessed(context.Background(), w, 42, 7, rejection) {
+		t.Fatal("markRejectedCompletionProcessed = false, want true for transition-validation rejection")
+	}
+	want := r2keys.JobAttemptProcessed(42, 7)
+	if len(w.keys) != 1 || w.keys[0] != want {
+		t.Fatalf("PutMarker keys = %v, want [%s]", w.keys, want)
+	}
+}
+
+// TestMarkRejectedCompletionProcessed_TransientErrorLeavesMarkerUnprocessed
+// verifies that transient errors (DB I/O, etc.) do NOT mark the completion
+// processed, so a later sync pass can retry ingestion.
+func TestMarkRejectedCompletionProcessed_TransientErrorLeavesMarkerUnprocessed(t *testing.T) {
+	w := &fakeMarkerWriter{}
+	if markRejectedCompletionProcessed(context.Background(), w, 42, 7, errors.New("database is locked")) {
+		t.Fatal("markRejectedCompletionProcessed = true, want false for transient error")
+	}
+	if len(w.keys) != 0 {
+		t.Fatalf("PutMarker keys = %v, want none", w.keys)
 	}
 }

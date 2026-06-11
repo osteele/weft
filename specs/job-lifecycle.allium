@@ -146,6 +146,11 @@ entity Job {
     physical_latest_attempt: attempts.max_by(a => a.attempt_number)
     is_placed: host != null
     is_terminal: status in {completed, failed, dead, killed, canceled, draft}
+    -- User-visible derived status (see value DisplayStatus). Reports
+    -- `orphaned` when this job's latest attempt closed terminally but the
+    -- backing instance/launch failed or was canceled; otherwise mirrors the
+    -- stored status. Display/query only — never written back to `status`.
+    display_status: DisplayStatus
     -- queued+unplaced means no prospective assignment yet.
     is_unplaced_queue: status = queued and target_kind = unplaced
     -- Alias for UI counter use. The "in-flight placement" signal
@@ -200,6 +205,8 @@ entity Job {
         starting -> completed
         starting -> dead
         starting -> failed
+        starting -> killed
+        starting -> paused
         starting -> queued
         starting -> draft
         running -> completed
@@ -212,6 +219,7 @@ entity Job {
         running -> draft
         paused -> running
         paused -> killed
+        paused -> canceled
         paused -> failed
         paused -> queued
 
@@ -235,6 +243,19 @@ entity Job {
         dead -> completed
         killed -> completed
         canceled -> completed
+        -- An agent's .complete marker is ground truth about the job's
+        -- outcome; orphan recovery's dead/killed is a guess made before
+        -- the marker was observed, so an authoritative failed completion
+        -- may override those guessed terminal states. completed -> failed
+        -- remains forbidden: a stale failed marker must never overwrite a
+        -- later authoritative completed.
+        -- Carve-out: a completion whose kill_reason is user_kill was
+        -- produced by weft's own kill signal — it confirms the user's stop
+        -- rather than reporting a self-failure, so ingestion keeps the
+        -- user's killed/canceled status (backfilling exit metadata) instead
+        -- of taking this edge (db.RecordCloudJobCompletion).
+        dead -> failed
+        killed -> failed
 
         terminal: completed, dead, failed, killed, canceled, draft
     }
@@ -339,6 +360,18 @@ value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
 -- match.
 value Status = draft | queued | starting | running
              | paused | completed | failed | dead | killed | canceled
+
+-- User-visible derived status. This is NOT a stored attempt status and has
+-- no transition graph; it is computed by the effective-status view
+-- (internal/db/migrations/baseline_schema.sql) for display and query.
+-- It is the stored Status set plus `orphaned`, which surfaces when an
+-- attempt is terminal but its backing instance/launch died or was canceled
+-- (the job was orphaned by infrastructure death rather than by its own
+-- script outcome). `orphaned` never appears in the stored `status` field or
+-- the transition graph.
+value DisplayStatus = draft | queued | starting | running
+                    | paused | completed | failed | dead | killed | canceled
+                    | orphaned
 
 -- Placement scoring result
 value PlacementResult {
@@ -1170,7 +1203,7 @@ rule StdoutSilenceKillsJob {
 
 rule UserPausesJob {
     when: UserPause(job)
-    requires: job.status in {running, queued}
+    requires: job.status in {starting, running, queued}
 
     ensures: job.status = paused
 }
@@ -1184,7 +1217,7 @@ rule UserResumesJob {
 
 rule UserCancelsJob {
     when: UserCancel(job)
-    requires: job.status in {queued, running, pending_placement}
+    requires: job.status in {queued, running, paused, pending_placement}
 
     ensures: job.status = canceled
 
@@ -1226,7 +1259,7 @@ rule CancelSurvivesInstanceTermination {
 
 rule UserRequeuesJob {
     when: UserRequeue(job)
-    requires: job.status in {failed, dead, killed, canceled}
+    requires: job.status in {completed, failed, dead, killed, canceled}
 
     let new_attempt_number = job.latest_attempt.attempt_number + 1
 

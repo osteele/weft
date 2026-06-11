@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/session"
 )
@@ -438,7 +439,10 @@ func ReadManifestErrorFile(path string) string {
 
 // Kill reason constants written to the kill_reason file before sending signals.
 const (
-	KillReasonUserKill        = "user_kill"
+	// KillReasonUserKill aliases db.KillReasonUserKill: cloud completion
+	// ingestion matches on this value to preserve the user's killed/canceled
+	// status instead of recording the kill's non-zero exit as failed.
+	KillReasonUserKill        = db.KillReasonUserKill
 	KillReasonRunnerShutdown  = "runner_shutdown"
 	KillReasonStoppedDetected = "stopped_detected"
 	KillReasonOrphan          = "orphan"

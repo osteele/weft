@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
@@ -886,9 +887,27 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bo
 		return false
 	}
 
+	return applyGraceStatusMarker(data, ci, database)
+}
+
+// applyGraceStatusMarker parses a grace status marker and, when the agent is
+// actually idle in grace (state "waiting"), transitions the DB instance to
+// grace with the marker's deadline. The marker persists across the whole
+// grace-wait session: while the agent runs resubmitted jobs it rewrites the
+// marker with state "running", and the deadline in that marker may be stale
+// (pre-extension — see cmd/agent/gracewait.go). Treating a "running" (or any
+// non-"waiting") marker as grace would stamp an already-expired deadline and
+// let the expiry check force-destroy a working instance.
+func applyGraceStatusMarker(data string, ci *db.Launch, database *sql.DB) bool {
 	var payload graceStatusPayload
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
 		slog.Warn("failed to parse grace status", "component", "reconcile", "instance", ci.ID, "error", err)
+		return false
+	}
+
+	if payload.State != controlplane.GraceStateWaiting {
+		slog.Debug("grace status marker not in waiting state; skipping grace transition",
+			"component", "reconcile", "instance", ci.ID, "state", payload.State)
 		return false
 	}
 

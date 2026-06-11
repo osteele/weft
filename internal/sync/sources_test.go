@@ -504,7 +504,7 @@ func TestRsyncArgsUseNonInteractiveSSH(t *testing.T) {
 		"BuildRsyncArgs":            BuildRsyncArgs("host", "/tmp/src", "~/dst", []string{".git"}),
 		"BuildRsyncArgsWithOptions": BuildRsyncArgsWithOptions("host", "/tmp/src", "~/dst", nil, false),
 		"BuildExtraPathRsyncArgs":   BuildExtraPathRsyncArgs("host", "/tmp/x", "~/x"),
-		"BuildOutputSyncArgs":       BuildOutputSyncArgs("host", "~/remote", "/tmp/local", "output"),
+		"BuildOutputFileSyncArgs":   BuildOutputFileSyncArgs("host", "~/remote", "/tmp/local"),
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

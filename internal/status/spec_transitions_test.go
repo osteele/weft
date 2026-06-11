@@ -30,6 +30,8 @@ var allDeclaredTransitions = []struct {
 	{Starting, Completed, false},
 	{Starting, Dead, false},
 	{Starting, Failed, false},
+	{Starting, Killed, false},
+	{Starting, Paused, false},
 	{Starting, Queued, false},
 	{Starting, Draft, false},
 	{Running, Completed, false},
@@ -42,6 +44,7 @@ var allDeclaredTransitions = []struct {
 	{Running, Draft, false},
 	{Paused, Running, false},
 	{Paused, Killed, false},
+	{Paused, Canceled, false},
 	{Paused, Failed, false},
 	{Paused, Queued, false},
 
@@ -65,6 +68,8 @@ var allDeclaredTransitions = []struct {
 	{Dead, Completed, true},
 	{Killed, Completed, true},
 	{Canceled, Completed, true},
+	{Dead, Failed, true},
+	{Killed, Failed, true},
 }
 
 func TestSpec_EveryDeclaredTransitionIsAccepted(t *testing.T) {

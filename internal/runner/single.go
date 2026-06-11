@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -294,13 +295,23 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		timer := time.AfterFunc(cfg.MaxTime, func() {
 			timedOut.Store(true)
 			slog.Warn("max-time reached, sending SIGTERM", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime, "pgid", proc.PGID)
-			KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, "")
+			KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, "")
 		})
 		defer timer.Stop()
 	}
 
 	// Closed after Wait() so background goroutines can exit promptly.
 	processDone := make(chan struct{})
+
+	// processExitMu serializes watchdog firing against process exit. Without
+	// it, a watchdog tick that lands just as the process exits cleanly can set
+	// its fired flag after Wait() has returned (but before the exit-info
+	// overrides below run), mislabeling a clean exit as a watchdog kill.
+	// Watchdogs check processExited and set their fired flag under this lock;
+	// the wait path sets processExited under the same lock immediately after
+	// Wait() returns, after which no watchdog can fire.
+	var processExitMu sync.Mutex
+	processExited := false
 
 	// Sampling loop in background
 	samplingDone := make(chan struct{})
@@ -372,7 +383,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 					slog.Warn("fatal error detected in job logs, sending SIGTERM",
 						"component", "runner", "job_id", cfg.JobID,
 						"pattern", d.Pattern, "message", d.Message)
-					KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, d.Pattern)
+					KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, d.Pattern)
 					return
 				}
 			}
@@ -417,11 +428,19 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 					lastActivity = time.Now()
 				}
 				if armed && time.Since(lastActivity) >= timeout {
+					processExitMu.Lock()
+					if processExited {
+						// The process already exited cleanly; do not relabel
+						// its exit as a watchdog kill.
+						processExitMu.Unlock()
+						return
+					}
 					fired.Store(true)
+					processExitMu.Unlock()
 					slog.Warn("watchdog firing, sending SIGTERM",
 						"component", "runner", "job_id", cfg.JobID,
 						"reason", reason, "pgid", proc.PGID)
-					KillProcessGroupWithGrace(proc.PGID, 10*time.Second, paths, reason)
+					KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, reason)
 					return
 				}
 			}
@@ -468,6 +487,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Wait for process
 	waitErr := proc.Cmd.Wait()
+	processExitMu.Lock()
+	processExited = true
+	processExitMu.Unlock()
 	close(processDone)
 	ei := ExtractExitInfo(waitErr)
 

@@ -95,6 +95,7 @@ func TestRecordDrainOutcomeSerializesFailureMarker(t *testing.T) {
 	r := r2upload.Result{
 		Status:         r2upload.StatusStalled,
 		KilledBy:       r2upload.KilledByStall,
+		StallKind:      r2upload.StallKindMidTransfer,
 		Reason:         "no progress for 30s",
 		BytesUploaded:  123456,
 		BytesTotal:     1000000,
@@ -126,6 +127,59 @@ func TestRecordDrainOutcomeSerializesFailureMarker(t *testing.T) {
 	}
 	if !strings.Contains(got.Reason, "no progress") {
 		t.Errorf("Reason = %q, want 'no progress' phrase", got.Reason)
+	}
+	if got.Kind != r2upload.StallKindMidTransfer {
+		t.Errorf("Kind = %q, want %q (StallKind must survive the marker round-trip)",
+			got.Kind, r2upload.StallKindMidTransfer)
+	}
+}
+
+// orderRecordingWriter appends "marker" to the shared event log on every PUT
+// so tests can assert ordering against the self-destruct hook.
+type orderRecordingWriter struct {
+	events *[]string
+}
+
+func (w orderRecordingWriter) Put(_ context.Context, _ string, body io.Reader, _ string) error {
+	if _, err := io.ReadAll(body); err != nil {
+		return err
+	}
+	*w.events = append(*w.events, "marker")
+	return nil
+}
+
+// Regression: the failure marker must be written BEFORE self-destruct is
+// initiated — if teardown wins the race, the marker is lost and the CLI can
+// never explain why the instance died.
+func TestRecordDrainOutcomeWritesMarkerBeforeSelfDestruct(t *testing.T) {
+	origTracker := uploadHealth
+	origHook := uploadStallSelfDestructHook
+	origWriter := newDrainMarkerWriter
+	t.Cleanup(func() {
+		uploadHealth = origTracker
+		uploadStallSelfDestructHook = origHook
+		newDrainMarkerWriter = origWriter
+	})
+
+	var events []string
+	newDrainMarkerWriter = func(string) r2upload.MarkerWriter {
+		return orderRecordingWriter{events: &events}
+	}
+	uploadStallSelfDestructHook = func(string, int64, string, string, int64, string) {
+		events = append(events, "self-destruct")
+	}
+	uploadHealth = newTestTracker(1, 0) // fire on the first stall
+
+	stall := r2upload.Result{
+		Status: r2upload.StatusStalled, KilledBy: r2upload.KilledByStall,
+		StallKind: r2upload.StallKindNeverStarted, Reason: "never started",
+	}
+	recordDrainOutcome("bucket", drainTarget{JobID: 7, RunID: 1, Label: "order"},
+		r2upload.Options{Source: "/tmp/z/", DestRemote: "r2:bucket/z/"}, stall)
+
+	want := []string{"marker", "self-destruct"}
+	if len(events) != 2 || events[0] != want[0] || events[1] != want[1] {
+		t.Fatalf("event order = %v, want %v", events, want)
 	}
 }
 

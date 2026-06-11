@@ -304,3 +304,38 @@ func TestWatchdogDisabledWhenTimeoutZero(t *testing.T) {
 		t.Errorf("exit code = %d, want 0 (watchdogs disabled)", ei.ExitCode)
 	}
 }
+
+// TestCleanExitNotMislabeledAsSilenceKill: a job that exits 0 around the time
+// the silence watchdog would fire must be reported as a clean exit, not
+// relabeled as a silence-kill. Regression test for the race where a watchdog
+// tick landing just after the process exited could still set its fired flag;
+// the fix records process-exit state under the same lock the watchdog uses
+// before firing. Several iterations to give the (former) race a chance to
+// manifest.
+func TestCleanExitNotMislabeledAsSilenceKill(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		logDir := t.TempDir()
+		cfg := SingleJobConfig{
+			JobID: 760,
+			// Exits cleanly with no output after the watchdog arms.
+			Job:                  opsqueue.CommandJob{Cmd: "sleep 0.05"},
+			LogDir:               logDir,
+			SampleInterval:       50 * time.Millisecond,
+			StdoutSilenceTimeout: 150 * time.Millisecond,
+			WatchdogInitialGrace: time.Millisecond,
+			SkipProbes:           true,
+		}
+
+		ei, err := RunSingleJob(cfg)
+		if err != nil {
+			t.Fatalf("iteration %d: RunSingleJob: %v", i, err)
+		}
+		if ei.ExitCode != 0 {
+			t.Fatalf("iteration %d: exit code = %d, want 0 (clean exit mislabeled as watchdog kill)", i, ei.ExitCode)
+		}
+		paths := NewJobPaths(logDir, 760)
+		if _, statErr := os.Stat(paths.KillReason); statErr == nil {
+			t.Fatalf("iteration %d: kill-reason file written for a clean exit", i)
+		}
+	}
+}

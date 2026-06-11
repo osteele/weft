@@ -810,7 +810,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	// guess.
 	if marker, ok := fetchUploadFailureMarker(ctx, r2Client, jobID, runID); ok {
 		return nil, fmt.Errorf("log not in R2 for job %s — upload truncated: %s (%s, %d/%d bytes in %.0fs)",
-			ids.FormatJobID(jobID), marker.KilledBy, marker.Reason,
+			ids.FormatJobID(jobID), marker.Cause(), marker.Reason,
 			marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds)
 	}
 	return nil, fmt.Errorf("log not found in R2 for job %s (the job may not have produced output, or the instance was terminated before log upload)", ids.FormatJobID(jobID))

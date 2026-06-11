@@ -92,6 +92,8 @@ var transitions = []TransitionRule{
 	{From: Starting, To: Completed, UpdatesSynced: true},
 	{From: Starting, To: Dead, UpdatesSynced: true},
 	{From: Starting, To: Failed, UpdatesSynced: true},
+	{From: Starting, To: Killed, UpdatesSynced: true},
+	{From: Starting, To: Paused, UpdatesSynced: false},
 	{From: Starting, To: Queued, UpdatesSynced: false},
 
 	// --- From running ---
@@ -106,6 +108,7 @@ var transitions = []TransitionRule{
 	// --- From paused ---
 	{From: Paused, To: Running, UpdatesSynced: false},
 	{From: Paused, To: Killed, UpdatesSynced: true},
+	{From: Paused, To: Canceled, UpdatesSynced: true},
 	{From: Paused, To: Failed, UpdatesSynced: true},
 	{From: Paused, To: Queued, UpdatesSynced: false},
 
@@ -128,6 +131,14 @@ var transitions = []TransitionRule{
 	{From: Dead, To: Completed, UpdatesSynced: true, Authoritative: true},
 	{From: Killed, To: Completed, UpdatesSynced: true, Authoritative: true},
 	{From: Canceled, To: Completed, UpdatesSynced: true, Authoritative: true},
+	// The agent's .complete marker is ground truth about the job's outcome;
+	// orphan recovery's dead/killed is a guess made when the marker hadn't
+	// been observed yet. A failed completion may therefore override those
+	// guessed terminal states. Completed is deliberately NOT overridable by
+	// failed: a stale failed marker must never overwrite a later
+	// authoritative completed.
+	{From: Dead, To: Failed, UpdatesSynced: true, Authoritative: true},
+	{From: Killed, To: Failed, UpdatesSynced: true, Authoritative: true},
 
 	// --- To draft (user pulls job back to local-only) ---
 	{From: Starting, To: Draft, UpdatesSynced: false},

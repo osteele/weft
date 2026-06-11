@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/status"
 )
 
 func TestNeedsCloudCompletionBackfill_TerminalIncomplete(t *testing.T) {
@@ -60,7 +63,7 @@ func TestNeedsCloudCompletionBackfill_TerminalComplete(t *testing.T) {
 	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", time.Time{}, 0); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", "", time.Time{}, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -131,7 +134,7 @@ func TestRecordCloudJobCompletion_ZeroEndTimeUsesMarkerLastModified(t *testing.T
 	}
 
 	markerTime := time.Unix(1700000000, 0)
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", markerTime, 0); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", "", markerTime, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -184,7 +187,7 @@ func TestRecordCloudJobCompletion_ZeroEndTimeNoMarker(t *testing.T) {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", time.Time{}, 0); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 0, 0, "", "", time.Time{}, 0); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -260,7 +263,7 @@ func TestRecordCloudJobCompletion_UsesRunIDInsteadOfLatestAttempt(t *testing.T) 
 		t.Fatalf("GetLatestAttemptID second: %v", err)
 	}
 
-	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", time.Time{}, firstRunID); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", "", time.Time{}, firstRunID); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -329,7 +332,7 @@ func TestRecordCloudJobCompletion_FinalizesLaterSameLaunchOpenAttempt(t *testing
 		t.Fatalf("MarkQueuedJobRunning later: %v", err)
 	}
 
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", time.Time{}, firstRunID); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, firstRunID); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -399,7 +402,7 @@ func TestRecordCloudJobCompletion_SupersedesLaterOpenRetryAfterSuccess(t *testin
 		t.Fatalf("GetLatestAttemptID second: %v", err)
 	}
 
-	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", time.Time{}, firstRunID); err != nil {
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, firstRunID); err != nil {
 		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 
@@ -473,5 +476,224 @@ func TestNeedsCloudCompletionBackfill_StartTimeZero(t *testing.T) {
 	}
 	if !needs {
 		t.Fatal("needs backfill = false, want true (start_time=0 is unknown)")
+	}
+}
+
+// TestRecordCloudJobCompletion_FailedOverridesOrphanRecoveryGuess is a
+// regression test for failed R2 completions being dropped: the agent's
+// .complete marker is ground truth about the job's outcome, while orphan
+// recovery's dead/killed is a guess. A non-zero-exit completion arriving after
+// the attempt was already closed as dead or killed must override that guess.
+func TestRecordCloudJobCompletion_FailedOverridesOrphanRecoveryGuess(t *testing.T) {
+	for _, priorStatus := range []string{StatusDead, StatusKilled} {
+		t.Run(priorStatus, func(t *testing.T) {
+			database := SetupTestDB(t)
+
+			jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+			if err != nil {
+				t.Fatalf("RecordQueuedWithGPU: %v", err)
+			}
+			launchID, err := CreateLaunch(database, &Launch{
+				Status:   LaunchStatusCompleted,
+				Provider: "vastai",
+				GPUSpec:  "RTX_4090",
+			})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+			if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+				t.Fatalf("SetJobLaunchID: %v", err)
+			}
+			// Orphan recovery won the race and closed the attempt.
+			if _, err := database.Exec(
+				`UPDATE job_attempts
+				 SET status = ?, start_time = ?, end_time = ?, cloud_outcome = ?
+				 WHERE job_id = ? AND end_time IS NULL`,
+				priorStatus, int64(100), int64(150), AttemptOutcomeOrphaned, jobID,
+			); err != nil {
+				t.Fatalf("seed orphan-recovered attempt: %v", err)
+			}
+
+			if _, err := RecordCloudJobCompletion(database, jobID, 3, 100, 200, "exit_3", "", time.Time{}, 0); err != nil {
+				t.Fatalf("RecordCloudJobCompletion: %v", err)
+			}
+
+			var gotStatus, gotOutcome string
+			var gotExit, gotEnd sql.NullInt64
+			if err := database.QueryRow(
+				`SELECT status, cloud_outcome, exit_code, end_time
+				 FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+				jobID,
+			).Scan(&gotStatus, &gotOutcome, &gotExit, &gotEnd); err != nil {
+				t.Fatalf("query attempt: %v", err)
+			}
+			if gotStatus != StatusFailed {
+				t.Fatalf("status = %q, want %q", gotStatus, StatusFailed)
+			}
+			if gotOutcome != AttemptOutcomeFailed {
+				t.Fatalf("cloud_outcome = %q, want %q", gotOutcome, AttemptOutcomeFailed)
+			}
+			if !gotExit.Valid || gotExit.Int64 != 3 {
+				t.Fatalf("exit_code = %v, want 3 (marker's exit code)", gotExit)
+			}
+			if !gotEnd.Valid || gotEnd.Int64 != 200 {
+				t.Fatalf("end_time = %v, want 200", gotEnd)
+			}
+		})
+	}
+}
+
+// TestRecordCloudJobCompletion_StaleFailedDoesNotOverrideCompleted verifies
+// the deliberate asymmetry in the authority rule: a stale failed .complete
+// marker must never overwrite an attempt that already reached authoritative
+// completed. The rejection error is a transition-validation error, which the
+// sync layer treats as permanent (writes the .processed marker).
+func TestRecordCloudJobCompletion_StaleFailedDoesNotOverrideCompleted(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, 0); err != nil {
+		t.Fatalf("RecordCloudJobCompletion (completed): %v", err)
+	}
+
+	_, err = RecordCloudJobCompletion(database, jobID, 1, 100, 200, "exit_1", "", time.Time{}, 0)
+	if err == nil {
+		t.Fatal("stale failed completion accepted over authoritative completed, want rejection")
+	}
+	var ite *status.InvalidTransitionError
+	if !errors.As(err, &ite) {
+		t.Fatalf("error = %v (%T), want *status.InvalidTransitionError", err, err)
+	}
+
+	var gotStatus string
+	var gotExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, exit_code FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&gotStatus, &gotExit); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if gotStatus != StatusCompleted || !gotExit.Valid || gotExit.Int64 != 0 {
+		t.Fatalf("attempt = status %q exit %v, want completed/0 (unchanged)", gotStatus, gotExit)
+	}
+}
+
+// TestRecordCloudJobCompletion_UserKillPreservesStopIntent verifies that a
+// completion whose kill_reason is user_kill — i.e. the non-zero exit was
+// produced by weft's own kill signal — backfills metadata without rewriting
+// the user's killed/canceled status as failed. (The CLI stamps killed or
+// canceled immediately when the user stops a cloud job; the agent's marker
+// arrives later with the kill's exit code.)
+func TestRecordCloudJobCompletion_UserKillPreservesStopIntent(t *testing.T) {
+	for _, priorStatus := range []string{StatusKilled, StatusCanceled} {
+		t.Run(priorStatus, func(t *testing.T) {
+			database := SetupTestDB(t)
+
+			jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+			if err != nil {
+				t.Fatalf("RecordQueuedWithGPU: %v", err)
+			}
+			launchID, err := CreateLaunch(database, &Launch{
+				Status:   LaunchStatusRunning,
+				Provider: "vastai",
+				GPUSpec:  "RTX_4090",
+			})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+			if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+				t.Fatalf("SetJobLaunchID: %v", err)
+			}
+			// The CLI stamped the user's stop; exit metadata is not yet known.
+			if _, err := database.Exec(
+				`UPDATE job_attempts
+				 SET status = ?, start_time = ?, end_time = ?, exit_code = NULL
+				 WHERE job_id = ? AND end_time IS NULL`,
+				priorStatus, int64(100), int64(150), jobID,
+			); err != nil {
+				t.Fatalf("seed user-stopped attempt: %v", err)
+			}
+
+			if _, err := RecordCloudJobCompletion(database, jobID, 143, 100, 200, "", KillReasonUserKill, time.Time{}, 0); err != nil {
+				t.Fatalf("RecordCloudJobCompletion: %v", err)
+			}
+
+			var gotStatus, gotOutcome string
+			var gotExit sql.NullInt64
+			if err := database.QueryRow(
+				`SELECT status, cloud_outcome, exit_code
+				 FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+				jobID,
+			).Scan(&gotStatus, &gotOutcome, &gotExit); err != nil {
+				t.Fatalf("query attempt: %v", err)
+			}
+			if gotStatus != priorStatus {
+				t.Fatalf("status = %q, want %q (user stop intent preserved)", gotStatus, priorStatus)
+			}
+			if gotOutcome != AttemptOutcomeCancelled {
+				t.Fatalf("cloud_outcome = %q, want %q", gotOutcome, AttemptOutcomeCancelled)
+			}
+			if !gotExit.Valid || gotExit.Int64 != 143 {
+				t.Fatalf("exit_code = %v, want 143 (backfilled from marker)", gotExit)
+			}
+		})
+	}
+}
+
+// TestRecordCloudJobCompletion_UserKillOnOpenAttemptRecordsKilled verifies
+// that a user_kill completion arriving while the attempt is still open
+// (the CLI's status write was lost or raced) closes it as killed, not failed.
+func TestRecordCloudJobCompletion_UserKillOnOpenAttemptRecordsKilled(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		StatusRunning, int64(100), jobID,
+	); err != nil {
+		t.Fatalf("seed running attempt: %v", err)
+	}
+
+	if _, err := RecordCloudJobCompletion(database, jobID, 137, 100, 200, "", KillReasonUserKill, time.Time{}, 0); err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+
+	var gotStatus string
+	if err := database.QueryRow(
+		`SELECT status FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		jobID,
+	).Scan(&gotStatus); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if gotStatus != StatusKilled {
+		t.Fatalf("status = %q, want %q", gotStatus, StatusKilled)
 	}
 }

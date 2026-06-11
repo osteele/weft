@@ -1432,3 +1432,109 @@ func TestCancelNonTerminalCampaignInstances(t *testing.T) {
 		})
 	}
 }
+
+// Regression test: post-create launch failure paths must reset claimed jobs
+// (resetLaunchJobsForFailure), not leave them claimed on a dead launch until
+// the periodic repair pass. This exercises the "failed to record provider ID"
+// path by aborting the provider_instance_id write with a SQLite trigger.
+func TestLaunchInstanceProviderIDRecordFailureResetsJobs(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	var destroyedProviderID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			return &cloud.Instance{
+				ProviderID:  "prov-12345",
+				Status:      cloud.ProviderStatusRunning,
+				CostPerHour: 0.50,
+			}, nil
+		},
+		ShowInstanceFunc: func(string) (*cloud.Instance, error) {
+			return nil, errors.New("readback unavailable in test")
+		},
+		DestroyInstanceFunc: func(instanceID string) error {
+			destroyedProviderID = instanceID
+			return nil
+		},
+	}
+
+	job := &db.Job{
+		ID:      103,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{job},
+	}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	// Make SetLaunchProviderID fail so the post-create failure path runs.
+	if _, err := database.Exec(
+		`CREATE TRIGGER test_fail_provider_id_write
+		 BEFORE UPDATE OF provider_instance_id ON launches
+		 BEGIN SELECT RAISE(ABORT, 'simulated provider-id write failure'); END`,
+	); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	instanceID, err := LaunchInstance(
+		mockClient, nil, database, nil, group, offer,
+		LaunchOpts{},
+		r2Cfg, createOpts,
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(phase string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "record provider instance ID") {
+		t.Fatalf("error = %v, want record-provider-ID failure", err)
+	}
+	if destroyedProviderID != "prov-12345" {
+		t.Errorf("destroyed provider instance = %q, want prov-12345 (leak cleanup)", destroyedProviderID)
+	}
+
+	ci, getErr := db.GetLaunch(database, instanceID)
+	if getErr != nil {
+		t.Fatalf("get cloud instance: %v", getErr)
+	}
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
+	}
+
+	// The claimed job must be released immediately, not left for the
+	// periodic repair pass.
+	resetJob, jobErr := db.GetJobByID(database, job.ID)
+	if jobErr != nil {
+		t.Fatalf("GetJobByID: %v", jobErr)
+	}
+	if resetJob.LaunchID != nil {
+		t.Fatalf("job launch_id = %v, want nil (job should be reset on launch failure)", *resetJob.LaunchID)
+	}
+
+	attempts, attErr := db.GetLaunchAttempts(database, job.ID)
+	if attErr != nil {
+		t.Fatalf("get job attempts: %v", attErr)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].Outcome != db.AttemptOutcomeOrphaned {
+		t.Fatalf("attempt outcome = %q, want %q", attempts[0].Outcome, db.AttemptOutcomeOrphaned)
+	}
+}

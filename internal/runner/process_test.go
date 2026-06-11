@@ -235,3 +235,53 @@ func TestMergeEnvVars_ExpandsLeadingTildeValues(t *testing.T) {
 	assertEnvVar(t, result, "RJ_ARTIFACT_MANIFEST", "/srv/runner/artifacts/12.json")
 	assertEnvVar(t, result, "KEEP_LITERAL", "~artifact")
 }
+
+// TestKillProcessGroupWithGrace_AllowsSigtermHandlerToRun locks in the
+// graceful-escalation contract that user-initiated kills (e.g. the cloud
+// agent's kill poller) rely on: the SIGTERM lands immediately, but SIGKILL is
+// deferred for the grace window, so a process that traps SIGTERM gets to
+// flush state (and the bash exit-capture trap gets to record the exit)
+// before being force-killed.
+func TestKillProcessGroupWithGrace_AllowsSigtermHandlerToRun(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	marker := filepath.Join(dir, "flushed")
+	logFile := filepath.Join(dir, "out.log")
+
+	cmd := "trap 'echo done > " + marker + "; exit 143' TERM; " +
+		"echo ready > " + ready + "; sleep 30 & wait"
+	proc, err := StartProcess(cmd, dir, nil, logFile)
+	if err != nil {
+		t.Fatalf("StartProcess: %v", err)
+	}
+
+	// Wait for the trap to be installed before signaling.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, statErr := os.Stat(ready); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("process never wrote readiness marker")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	paths := NewJobPaths(dir, 990)
+	KillProcessGroupWithGrace(proc.PGID, 5*time.Second, paths, "test-reason")
+
+	waited := make(chan error, 1)
+	go func() { waited <- proc.Cmd.Wait() }()
+	select {
+	case <-waited:
+	case <-time.After(4 * time.Second):
+		t.Fatal("process did not exit from its SIGTERM trap within the grace window")
+	}
+
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("SIGTERM handler never ran (no flush marker): %v", statErr)
+	}
+	if got := ReadKillReasonFile(paths.KillReason); got != "test-reason" {
+		t.Fatalf("kill reason = %q, want %q", got, "test-reason")
+	}
+}

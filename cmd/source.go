@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2keys"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -467,39 +468,7 @@ func extractSourceSnapshot(ctx context.Context, store sourceObjectStore, key, di
 		return fmt.Errorf("fetch source tarball from R2 key %s: %w", key, err)
 	}
 	defer body.Close()
-	return readSourceTarball(body, func(hdr *tar.Header, tr *tar.Reader) error {
-		name := cleanSourcePath(hdr.Name)
-		if name == "" {
-			return nil
-		}
-		dest := filepath.Join(dir, filepath.FromSlash(name))
-		if !strings.HasPrefix(dest, filepath.Clean(dir)+string(os.PathSeparator)) {
-			return fmt.Errorf("tar entry escapes destination: %s", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			return os.MkdirAll(dest, 0o755)
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-				return err
-			}
-			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(f, tr)
-			closeErr := f.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			return closeErr
-		default:
-			if hdr.Typeflag == tar.TypeReg {
-				_, _ = io.Copy(io.Discard, tr)
-			}
-			return nil
-		}
-	})
+	return srcsync.ExtractTarballReader(body, dir)
 }
 
 func runRecursiveDiff(out io.Writer, left, right, leftLabel, rightLabel, target string) error {

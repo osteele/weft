@@ -556,9 +556,11 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				JobCount:  len(group.Jobs),
 				Detail:    fmt.Sprintf("provider=%s", offer.Provider),
 			})
+			mu.Lock()
 			result.Errors = append(result.Errors, fmt.Errorf("relaunch: no client for provider %s", offer.Provider))
 			result.Skipped += len(group.Jobs)
 			recordGroupReasons(result, cfg.ResetJobs, group, reason)
+			mu.Unlock()
 			continue
 		}
 

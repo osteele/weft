@@ -245,12 +245,21 @@ func ReadPIDFile(path string) (int, bool) {
 	return pid, true
 }
 
-// KillProcessGroup sends SIGTERM then SIGKILL to a process group.
+// KillProcessGroup sends SIGTERM immediately followed by SIGKILL to a process
+// group — there is no grace window, so the processes get no chance to handle
+// the SIGTERM (no checkpoint flush, no exit-capture trap). Use this only when
+// the group is already dead-in-effect (stopped, orphaned, or zombie cleanup).
+// For user-initiated kills and watchdog kills, use KillProcessGroupWithGrace
+// so the job can flush state and record its exit.
 func KillProcessGroup(pgid int) {
 	syscall.Kill(-pgid, syscall.SIGTERM)
-	// Give it a moment, then force kill
 	syscall.Kill(-pgid, syscall.SIGKILL)
 }
+
+// DefaultKillGrace is the standard window between SIGTERM and SIGKILL for
+// KillProcessGroupWithGrace — long enough for a job to flush state and record
+// its exit, short enough that kills feel prompt.
+const DefaultKillGrace = 10 * time.Second
 
 // KillProcessGroupWithGrace sends SIGTERM to the process group, then SIGKILL
 // after grace elapses. If reason is non-empty, it is written to the

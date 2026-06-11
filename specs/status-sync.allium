@@ -156,7 +156,8 @@ config {
     heartbeat_stale_threshold: Duration = 5.minutes
     heartbeat_stale_threshold_early_life: Duration = 8.minutes
     heartbeat_early_life_window: Duration = 15.minutes
-    running_stall_timeout: Duration = 30.minutes
+    -- Matches runningStaleTerminate in internal/campaign/status.go.
+    running_stall_timeout: Duration = 60.minutes
 
     -- Reconcile safety-net window
     recently_terminal_window: Duration = 30.minutes

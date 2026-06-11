@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -389,9 +390,67 @@ func (c *Launch) GraceStatusLabel() string {
 
 // IsTerminal reports whether the instance is in a terminal status.
 func (c *Launch) IsTerminal() bool {
-	return c.Status == LaunchStatusCompleted ||
-		c.Status == LaunchStatusFailed ||
-		c.Status == LaunchStatusCancelled
+	return IsTerminalLaunchStatus(c.Status)
+}
+
+// terminalLaunchStatuses is the single source of truth for terminal launch
+// statuses. Use IsTerminalLaunchStatus for predicate checks and
+// notTerminalLaunchClause for SQL guards.
+var terminalLaunchStatuses = []string{
+	LaunchStatusCompleted,
+	LaunchStatusFailed,
+	LaunchStatusCancelled,
+}
+
+// IsTerminalLaunchStatus reports whether status is a terminal launch status
+// (completed, failed, canceled).
+func IsTerminalLaunchStatus(status string) bool {
+	for _, s := range terminalLaunchStatuses {
+		if s == status {
+			return true
+		}
+	}
+	return false
+}
+
+// notTerminalLaunchClause returns a SQL fragment `status NOT IN (...)` and its
+// bind args, built from terminalLaunchStatuses.
+func notTerminalLaunchClause() (string, []any) {
+	return "status NOT IN (" + sqlPlaceholders(len(terminalLaunchStatuses)) + ")",
+		anySliceArgs(terminalLaunchStatuses)
+}
+
+// ErrLaunchTerminal reports that a non-terminal status write was skipped
+// because the launch is already in a terminal status. Terminal statuses are
+// sticky: late writers (e.g. a launch flow whose final "running" write lands
+// after the user terminated the instance) must not revive the row.
+var ErrLaunchTerminal = errors.New("launch already in terminal status")
+
+// errIfTerminalSkipped classifies a guarded non-terminal status UPDATE that
+// matched zero rows. If the row exists and is terminal, the write was
+// (correctly) skipped and ErrLaunchTerminal is returned so callers can notice
+// the launch already ended. A missing row remains a silent no-op, matching
+// the previous unguarded behavior.
+func errIfTerminalSkipped(db *sql.DB, id int64, res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	var status string
+	err = db.QueryRow(`SELECT status FROM launches WHERE id = ?`, id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if IsTerminalLaunchStatus(status) {
+		return ErrLaunchTerminal
+	}
+	return nil
 }
 
 // liveLaunchStatuses are launch statuses that still hold (or may still hold) a
@@ -990,9 +1049,10 @@ func ListStalePlannedLaunches(database *sql.DB, cutoff int64) ([]*Launch, error)
 }
 
 func ListNonTerminalLaunches(database *sql.DB) ([]*Launch, error) {
+	clause, terminalArgs := notTerminalLaunchClause()
 	rows, err := database.Query(
-		`SELECT `+launchSelectColumns+` FROM launches WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
-		LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled,
+		`SELECT `+launchSelectColumns+` FROM launches WHERE `+clause+` ORDER BY created_at DESC`,
+		terminalArgs...,
 	)
 	if err != nil {
 		return nil, err
@@ -1050,8 +1110,16 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 		case LaunchStatusRunning:
 			// COALESCE preserves launched_at on resume from paused/grace, so
 			// bootstrap-survival metrics anchor to the original launch.
-			_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ?`, status, now, id)
-			return err
+			// Terminal statuses are sticky: a late "running" write (e.g.
+			// LaunchInstance finishing after a user terminate) must not
+			// revive a row that already ended.
+			clause, terminalArgs := notTerminalLaunchClause()
+			res, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ? AND `+clause,
+				append([]any{status, now, id}, terminalArgs...)...)
+			if err != nil {
+				return err
+			}
+			return errIfTerminalSkipped(db, id, res)
 		case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
 			// Don't overwrite an already-terminal instance that has a SPECIFIC
 			// termination reason set (e.g., bootstrap_timeout → job_failure on
@@ -1061,8 +1129,7 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			// that DO know the specific reason can still record it.
 			var currentStatus, currentReason string
 			if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
-				isTerminal := currentStatus == LaunchStatusCompleted || currentStatus == LaunchStatusFailed || currentStatus == LaunchStatusCancelled
-				if isTerminal && currentReason != "" && currentReason != TerminationReasonUnknown {
+				if IsTerminalLaunchStatus(currentStatus) && currentReason != "" && currentReason != TerminationReasonUnknown {
 					return nil
 				}
 			}
@@ -1090,8 +1157,15 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, derivedReason, id)
 			return err
 		default:
-			_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
-			return err
+			// Terminal statuses are sticky against non-terminal writes
+			// (launching, paused, grace, ...).
+			clause, terminalArgs := notTerminalLaunchClause()
+			res, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ? AND `+clause,
+				append([]any{status, id}, terminalArgs...)...)
+			if err != nil {
+				return err
+			}
+			return errIfTerminalSkipped(db, id, res)
 		}
 	})
 	if err != nil {
@@ -1146,6 +1220,18 @@ func SetLaunchCordoned(db *sql.DB, id int64, cordoned bool, reason string) error
 		return sql.ErrNoRows
 	}
 	return EnsureRentalExecutionTarget(db, id)
+}
+
+// SetLaunchTerminationRequested stamps termination_requested_at for a
+// user-initiated terminate (UserTerminatesInstance in
+// specs/campaign-lifecycle.allium). It preserves an earlier request time and
+// leaves termination_intent_json (managed by the reconciler) untouched.
+func SetLaunchTerminationRequested(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE launches SET termination_requested_at = COALESCE(termination_requested_at, ?) WHERE id = ?`,
+		time.Now().Unix(), id,
+	)
+	return err
 }
 
 func UpdateLaunchTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
@@ -2930,13 +3016,19 @@ func SetLaunchGracePeriod(db *sql.DB, id int64, seconds int) error {
 }
 
 // SetLaunchGraceStarted transitions an instance to grace status with a deadline.
+// Terminal statuses are sticky: if the instance already ended (e.g. the user
+// terminated it), the transition is skipped and ErrLaunchTerminal is returned.
 func SetLaunchGraceStarted(db *sql.DB, id int64, deadline int64) error {
 	now := time.Now().Unix()
-	_, err := db.Exec(
-		`UPDATE launches SET status = ?, grace_started_at = ?, grace_deadline = ? WHERE id = ?`,
-		LaunchStatusGrace, now, deadline, id,
+	clause, terminalArgs := notTerminalLaunchClause()
+	res, err := db.Exec(
+		`UPDATE launches SET status = ?, grace_started_at = ?, grace_deadline = ? WHERE id = ? AND `+clause,
+		append([]any{LaunchStatusGrace, now, deadline, id}, terminalArgs...)...,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return errIfTerminalSkipped(db, id, res)
 }
 
 // ExtendLaunchGrace updates the grace deadline for an instance.
