@@ -244,9 +244,13 @@ invariant FirstMatchWinsOnHost {
 -- how those flags resolve into a placement query.
 value Constraints {
     gpu_class: String?          -- raw constraint string (pre-parse)
-    gpu_mem_gb: Integer?        -- min GPU memory per device
-    gpu_mem_strict: Boolean     -- if true, reject hosts whose only matching
-                                -- GPUs exceed gpu_mem_gb by a wide margin
+    gpu_mem_gb: Integer?        -- min GPU memory per device. The
+                                -- --gpu-mem-strict flag is NOT a placement
+                                -- constraint: strictness is resolved into
+                                -- this value (and the memory ceiling) at
+                                -- submit time (cmd/run.go
+                                -- resolveEffectiveGPUMemAndCeiling), before
+                                -- Constraints are built.
     max_compute_cap: String?    -- upper bound on CUDA compute capability
                                 -- (e.g. "9.0", "12.0"); inferred from the
                                 -- project's torch pin or an explicit
@@ -284,12 +288,19 @@ rule BuildConstraintsFromJob {
     when: PlacementEvaluationStarts(job)
 
     let tags = job.tags
-    let provider = parse_provider_from_tags(tags)  -- "rental:vastai" -> "vastai"
+    let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
+    let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
 
+    -- Torch-derived GPU-runtime constraints (arch caps, CUDA/driver floors)
+    -- are populated ONLY for jobs that request a GPU. CPU-only jobs carry
+    -- none of them, no matter what the project's torch pin implies.
     ensures: Constraints.built(
         gpu_class: job.gpu_class,
         gpu_mem_gb: job.gpu_mem_gb,
-        gpu_mem_strict: job.gpu_mem_strict,
+        max_compute_cap: requests_gpu ? job.max_compute_cap : null,
+        min_compute_cap: requests_gpu ? MinComputeCapForJob(job.working_dir) : null,
+        min_cuda_version: requests_gpu ? RuntimeFloorForJob(job).min_cuda_version : null,
+        min_driver_version: requests_gpu ? RuntimeFloorForJob(job).min_driver_version : null,
         provider: provider,
         inputs: job.inputs,
         tags: tags
@@ -297,9 +308,12 @@ rule BuildConstraintsFromJob {
 
     @guidance
         -- Implementation: placement.ConstraintsFromJob.
-        -- --gpu-mem-strict rejects hosts where the best matching device
-        -- has memory >> request; the policy guards against wastefully
-        -- placing a 24GB job on an 80GB A100 when a 3090 is free.
+        -- max_compute_cap comes from the persisted jobs.max_compute_cap
+        -- ("any" disables the filter); min_compute_cap is re-derived from
+        -- the torch pin; the CUDA/driver floors come from
+        -- placement.RuntimeFloorForJob, which applies the persisted CLI
+        -- --cuda-driver-min override at highest precedence (replace /
+        -- lower / clear semantics — see the Constraints field docs).
 }
 
 -- =========================================================================
@@ -313,6 +327,15 @@ rule EvaluateEligibility {
     -- still return a Score with placement_reasons explaining why they
     -- were rejected; those reasons surface in the TUI and `weft run`
     -- error output.
+
+    -- 0a. Cordoned targets take no new auto-placed work. (weft instance
+    --     cordon / host-level cordon; explicit --host bypasses the scorer.)
+    requires: not host.cordoned
+
+    -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
+    --     with a scoring penalty. Implementation: placement.AssessHostLoad —
+    --     rejection reasons "host overloaded: <detail>".
+    requires: AssessHostLoad(host, metrics).state != overloaded
 
     -- 1. Opt-in exclusion. Hosts marked opt-in-only in config are
     --    eligible only for jobs that explicitly name them.
@@ -398,6 +421,12 @@ rule EvaluateEligibility {
         --   "CUDA floor: host CUDA 12.0 < required 12.8" (fail on CUDA-compat floor)
         --   "not idle (2 jobs running)"  (fail on benchmark idleness)
         -- Implementation: placement.scoreHost, applyResourceHardConstraints.
+        -- Defense-in-depth note: CheckHostGPUConstraints also passes ANY
+        -- constraint set with no GPU request, unconditionally. Per this
+        -- spec's BuildConstraintsFromJob gating that state is unreachable
+        -- (caps/floors are only populated for GPU jobs); the code-level
+        -- bypass exists to neutralize legacy persisted constraints reaching
+        -- the checker through exported callers.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /
         -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
         -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
