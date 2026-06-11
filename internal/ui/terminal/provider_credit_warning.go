@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	dbpkg "github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/vastai"
@@ -100,6 +101,9 @@ func renderSharedTUIStatusLines(database *sql.DB, width int, targetCents int) []
 // Pass visibleRunning < 0 to skip the comparison.
 func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, visibleRunning int, targetCents int) []string {
 	lines := make([]string, 0, 3)
+	if daemon := renderDaemonStatusLine(width); daemon != "" {
+		lines = append(lines, daemon)
+	}
 	if line := renderSystemLine(database, width, visibleRunning, targetCents); line != "" {
 		lines = append(lines, line)
 	}
@@ -110,6 +114,27 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 		lines = append(lines, banner)
 	}
 	return lines
+}
+
+func renderDaemonStatusLine(width int) string {
+	status, err := daemoncontrol.CurrentStatus(daemoncontrol.DefaultPaths())
+	var msg string
+	switch {
+	case err != nil:
+		msg = "Daemon: status unavailable"
+	case status.ActiveBinaryStale:
+		msg = "Daemon: stale binary; run `weft daemon restart`"
+	case status.Live:
+		return ""
+	case status.Stale:
+		msg = "Daemon: stale"
+	default:
+		msg = "Daemon: stopped"
+	}
+	if width > 0 {
+		msg = truncateDisplayWidth(msg, width)
+	}
+	return tuiFailedStyle.Render(msg)
 }
 
 // renderPausedLaunchesBanner shows a warning when one or more launches are in

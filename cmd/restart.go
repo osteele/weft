@@ -115,6 +115,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("%d job(s) could not be restarted", len(errors))
 	}
+	ensureDaemonForWork(os.Stderr)
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 )
@@ -53,7 +54,23 @@ func queueReasonSummary(database *sql.DB, job *db.Job) string {
 	switch job.TargetKind() {
 	case db.JobTargetUnplaced:
 		return "awaiting assignment"
-	case db.JobTargetRentalInstance, db.JobTargetInventoryHost:
+	case db.JobTargetInventoryHost:
+		if job.LastSyncedStatus != db.StatusQueued {
+			status, err := daemoncontrol.CurrentStatus(daemoncontrol.DefaultPaths())
+			if err != nil {
+				return "waiting for daemon dispatch; daemon status unavailable"
+			}
+			switch {
+			case status.Live:
+				return "waiting for daemon dispatch"
+			case status.Stale:
+				return "waiting for daemon dispatch; daemon stale"
+			default:
+				return "waiting for daemon dispatch; daemon stopped"
+			}
+		}
+		return "waiting for assigned target to start the job"
+	case db.JobTargetRentalInstance:
 		return "waiting for assigned target to start the job"
 	default:
 		return ""

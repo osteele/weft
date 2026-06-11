@@ -993,14 +993,15 @@ func (m Model) renderHostDetailPanel(height int) string {
 
 func (m Model) renderHostsStatusBar() string {
 	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:jobs x:delete R:refresh")
+	daemon := renderDashboardDaemonStatus()
 
 	// Right-align the help text
-	gap := m.width - lipgloss.Width(help) - 2
+	gap := m.width - lipgloss.Width(help) - lipgloss.Width(daemon) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return " " + strings.Repeat(" ", gap) + help
+	return " " + daemon + strings.Repeat(" ", gap) + help
 }
 
 func (m Model) formatHostStatus(host *Host) string {

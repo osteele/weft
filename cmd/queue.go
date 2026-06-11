@@ -1363,6 +1363,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if ack != nil && ack.Message != "" {
 			fmt.Printf("  relay: %s\n", ack.Message)
 		}
+		if wasRequeued {
+			ensureDaemonForWork(os.Stderr)
+		}
 		return nil
 	}
 
@@ -1433,6 +1436,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {
 		reportQueueChangeSyncFailure(job.Host, syncErr)
+	}
+	if wasRequeued {
+		ensureDaemonForWork(os.Stderr)
 	}
 	return nil
 }

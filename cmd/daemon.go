@@ -110,7 +110,13 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	if err := daemoncontrol.WritePIDFile(paths.PIDFile, pid); err != nil {
 		return err
 	}
-	defer func() { _ = daemoncontrol.RemovePIDFileIfOwn(paths.PIDFile, pid) }()
+	if err := daemoncontrol.WriteMetadata(paths, pid, Version); err != nil {
+		return err
+	}
+	defer func() {
+		_ = daemoncontrol.RemovePIDFileIfOwn(paths.PIDFile, pid)
+		_ = daemoncontrol.RemoveMetadataFileIfOwn(paths, pid)
+	}()
 
 	database, err := db.Open()
 	if err != nil {
@@ -233,18 +239,17 @@ func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult,
 
 func runDaemonStart(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
-	if daemoncontrol.IsInstalled(paths) {
-		if err := daemoncontrol.Load(paths); err != nil {
-			return err
-		}
-		fmt.Printf("Started daemon via launchd (%s)\n", daemoncontrol.Label)
-		return nil
-	}
-	pid, err := daemoncontrol.StartDetached(paths)
+	status, started, err := ensureDaemonStarted(paths, 2*time.Second)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Started daemon (PID %d)\n", pid)
+	if started && status.Installed {
+		fmt.Printf("Started daemon via launchd (%s)\n", daemoncontrol.Label)
+	} else if started {
+		fmt.Printf("Started daemon (PID %d)\n", status.PID)
+	} else {
+		fmt.Printf("Daemon already running (PID %d)\n", status.PID)
+	}
 	fmt.Printf("stdout: %s\n", paths.StdoutLog)
 	fmt.Printf("stderr: %s\n", paths.StderrLog)
 	return nil
@@ -280,14 +285,17 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 }
 
 type daemonStatusView struct {
-	State        string             `json:"state"`
-	PID          int                `json:"pid,omitempty"`
-	PIDFile      string             `json:"pid_file"`
-	StdoutLog    string             `json:"stdout_log"`
-	StderrLog    string             `json:"stderr_log"`
-	Installed    bool               `json:"installed"`
-	LaunchdLabel string             `json:"launchd_label"`
-	Autopilot    autopilotStateView `json:"autopilot"`
+	State             string             `json:"state"`
+	PID               int                `json:"pid,omitempty"`
+	PIDFile           string             `json:"pid_file"`
+	StdoutLog         string             `json:"stdout_log"`
+	StderrLog         string             `json:"stderr_log"`
+	Installed         bool               `json:"installed"`
+	LaunchdLabel      string             `json:"launchd_label"`
+	ActiveBinaryStale bool               `json:"active_binary_stale,omitempty"`
+	DaemonVersion     string             `json:"daemon_version,omitempty"`
+	DaemonExecutable  string             `json:"daemon_executable,omitempty"`
+	Autopilot         autopilotStateView `json:"autopilot"`
 }
 
 func runDaemonStatus(cmd *cobra.Command, args []string) error {
@@ -306,14 +314,19 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load autopilot state: %w", err)
 	}
 	view := daemonStatusView{
-		State:        daemonProcessState(status),
-		PID:          status.PID,
-		PIDFile:      paths.PIDFile,
-		StdoutLog:    paths.StdoutLog,
-		StderrLog:    paths.StderrLog,
-		Installed:    status.Installed,
-		LaunchdLabel: daemoncontrol.Label,
-		Autopilot:    buildAutopilotStateView(apState),
+		State:             daemonProcessState(status),
+		PID:               status.PID,
+		PIDFile:           paths.PIDFile,
+		StdoutLog:         paths.StdoutLog,
+		StderrLog:         paths.StderrLog,
+		Installed:         status.Installed,
+		LaunchdLabel:      daemoncontrol.Label,
+		ActiveBinaryStale: status.ActiveBinaryStale,
+		Autopilot:         buildAutopilotStateView(apState),
+	}
+	if status.Metadata != nil {
+		view.DaemonVersion = status.Metadata.Version
+		view.DaemonExecutable = status.Metadata.Executable
 	}
 	if daemonStatusJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -325,6 +338,9 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf(" (pid %d)", status.PID)
 	}
 	fmt.Println()
+	if status.ActiveBinaryStale {
+		fmt.Println("warning: daemon binary is older than the current weft executable; run `weft daemon restart`")
+	}
 	fmt.Printf("pidfile: %s\n", paths.PIDFile)
 	fmt.Printf("stdout: %s\n", paths.StdoutLog)
 	fmt.Printf("stderr: %s\n", paths.StderrLog)
@@ -339,6 +355,8 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 
 func daemonProcessState(status daemoncontrol.Status) string {
 	switch {
+	case status.Live && status.ActiveBinaryStale:
+		return "stale"
 	case status.Live:
 		return "running"
 	case status.Stale:

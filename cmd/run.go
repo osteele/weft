@@ -865,6 +865,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if runDescription != "" {
 			fmt.Fprintf(w, "  Description: %s\n", runDescription)
 		}
+		ensureDaemonForWork(os.Stderr)
 		return nil
 	}
 
@@ -996,6 +997,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
+			ensureDaemonForWork(os.Stderr)
 			printAutoPlacementPending(cmd.OutOrStdout(), database, jobID, autoPlacementPendingReason)
 			return nil
 		}
@@ -1046,6 +1048,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		} else {
 			deferred = !syncHostWithProgress(database, host, runNoSync, rec)
 		}
+		ensureDaemonForWork(os.Stderr)
 
 		// wait/follow handlers call os.Exit, which would bypass the deferred
 		// PrintSummary. Print it now so the user sees phase timing before

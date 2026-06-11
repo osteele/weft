@@ -225,6 +225,7 @@ func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
 	if listGroupBy == "project" {
 		return usageErrorf("--tui does not support --group-by project")
 	}
+	ensureDaemonForWork(os.Stderr)
 
 	database, err := db.Open()
 	if err != nil {

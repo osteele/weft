@@ -1,6 +1,7 @@
 package daemoncontrol
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,12 +26,22 @@ type Paths struct {
 	PlistFile string
 }
 
+type Metadata struct {
+	PID               int    `json:"pid"`
+	Version           string `json:"version,omitempty"`
+	Executable        string `json:"executable,omitempty"`
+	ExecutableModTime int64  `json:"executable_mod_time,omitempty"`
+	StartedAt         int64  `json:"started_at"`
+}
+
 type Status struct {
-	PID       int
-	HasPID    bool
-	Live      bool
-	Installed bool
-	Stale     bool
+	PID               int
+	HasPID            bool
+	Live              bool
+	Installed         bool
+	Stale             bool
+	ActiveBinaryStale bool
+	Metadata          *Metadata
 }
 
 func DefaultPaths() Paths {
@@ -65,13 +76,83 @@ func CurrentStatus(paths Paths) (Status, error) {
 		return Status{HasPID: ok, Installed: IsInstalled(paths)}, err
 	}
 	live := ok && util.IsProcessAlive(pid)
+	metadata, _ := ReadMetadata(paths)
 	return Status{
-		PID:       pid,
-		HasPID:    ok,
-		Live:      live,
-		Installed: IsInstalled(paths),
-		Stale:     ok && !live,
+		PID:               pid,
+		HasPID:            ok,
+		Live:              live,
+		Installed:         IsInstalled(paths),
+		Stale:             ok && !live,
+		ActiveBinaryStale: live && activeBinaryStale(paths, metadata),
+		Metadata:          metadata,
 	}, nil
+}
+
+func MetadataPath(paths Paths) string {
+	return paths.PIDFile + ".json"
+}
+
+func ReadMetadata(paths Paths) (*Metadata, error) {
+	data, err := os.ReadFile(MetadataPath(paths))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var metadata Metadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, err
+	}
+	return &metadata, nil
+}
+
+func WriteMetadata(paths Paths, pid int, version string) error {
+	exe, _ := os.Executable()
+	metadata := Metadata{
+		PID:        pid,
+		Version:    version,
+		Executable: exe,
+		StartedAt:  time.Now().Unix(),
+	}
+	if info, err := os.Stat(exe); err == nil {
+		metadata.ExecutableModTime = info.ModTime().Unix()
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.PIDFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(MetadataPath(paths), data, 0o644)
+}
+
+func activeBinaryStale(paths Paths, metadata *Metadata) bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	isWeftExecutable := filepath.Base(exe) == "weft"
+	info, err := os.Stat(exe)
+	if err != nil {
+		return false
+	}
+	if metadata != nil && metadata.Executable != "" && metadata.ExecutableModTime > 0 {
+		if filepath.Clean(exe) != filepath.Clean(metadata.Executable) {
+			return false
+		}
+		return info.ModTime().Unix() > metadata.ExecutableModTime
+	}
+	if !isWeftExecutable {
+		return false
+	}
+	pidInfo, err := os.Stat(paths.PIDFile)
+	if err != nil {
+		return false
+	}
+	return info.ModTime().After(pidInfo.ModTime())
 }
 
 func WritePIDFile(path string, pid int) error {
@@ -101,6 +182,21 @@ func RemovePIDFileIfOwn(path string, pid int) error {
 	return os.Remove(path)
 }
 
+func RemoveMetadataFileIfOwn(paths Paths, pid int) error {
+	metadata, err := ReadMetadata(paths)
+	if err != nil {
+		return err
+	}
+	if metadata == nil || metadata.PID != pid {
+		return nil
+	}
+	if err := os.Remove(MetadataPath(paths)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else {
+		return err
+	}
+}
+
 func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	pid, ok, err := ReadPID(paths.PIDFile)
 	if err != nil {
@@ -117,7 +213,10 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	if err != nil {
 		return pid, true, err
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := proc.Signal(syscall.SIGTERM); errors.Is(err, os.ErrProcessDone) {
+		_ = os.Remove(paths.PIDFile)
+		return pid, true, nil
+	} else if err != nil {
 		return pid, true, err
 	}
 	deadline := time.Now().Add(timeout)
@@ -128,7 +227,21 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return pid, true, fmt.Errorf("daemon PID %d did not exit within %s", pid, timeout)
+	if err := proc.Signal(syscall.SIGKILL); errors.Is(err, os.ErrProcessDone) {
+		_ = os.Remove(paths.PIDFile)
+		return pid, true, nil
+	} else if err != nil {
+		return pid, true, err
+	}
+	deadline = time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !util.IsProcessAlive(pid) {
+			_ = os.Remove(paths.PIDFile)
+			return pid, true, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return pid, true, fmt.Errorf("daemon PID %d did not exit within %s after SIGKILL", pid, timeout)
 }
 
 func StartDetached(paths Paths) (int, error) {
@@ -162,5 +275,6 @@ func StartDetached(paths Paths) (int, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	return cmd.Process.Pid, cmd.Process.Release()
+	pid := cmd.Process.Pid
+	return pid, cmd.Process.Release()
 }

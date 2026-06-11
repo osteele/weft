@@ -1,10 +1,15 @@
 package daemoncontrol
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const stalePID = 99999999
@@ -75,5 +80,120 @@ func TestCurrentStatusClassifiesStalePID(t *testing.T) {
 	}
 	if !status.HasPID || status.Live || !status.Stale {
 		t.Fatalf("status = %+v, want stale PID", status)
+	}
+}
+
+func TestStopPIDKillsProcessThatIgnoresTerm(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:   filepath.Join(dir, "daemon.pid"),
+		StdoutLog: filepath.Join(dir, "out.log"),
+		StderrLog: filepath.Join(dir, "err.log"),
+		PlistFile: filepath.Join(dir, "daemon.plist"),
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessIgnoreTerm")
+	cmd.Env = append(os.Environ(), "WEFT_DAEMONCONTROL_HELPER=ignore-term")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
+	if err := WritePIDFile(paths.PIDFile, cmd.Process.Pid); err != nil {
+		t.Fatalf("WritePIDFile: %v", err)
+	}
+	pid, hadProcess, err := StopPID(paths, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StopPID: %v", err)
+	}
+	if pid != cmd.Process.Pid || !hadProcess {
+		t.Fatalf("StopPID = %d, %v; want %d, true", pid, hadProcess, cmd.Process.Pid)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("process still running after StopPID")
+	}
+	if _, err := os.Stat(paths.PIDFile); !os.IsNotExist(err) {
+		t.Fatalf("pidfile still exists after StopPID: %v", err)
+	}
+}
+
+func TestHelperProcessIgnoreTerm(t *testing.T) {
+	if os.Getenv("WEFT_DAEMONCONTROL_HELPER") != "ignore-term" {
+		return
+	}
+	signal.Ignore(syscall.SIGTERM)
+	select {}
+}
+
+func TestCurrentStatusIgnoresPIDFileFallbackOutsideWeftExecutable(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:   filepath.Join(dir, "daemon.pid"),
+		StdoutLog: filepath.Join(dir, "out.log"),
+		StderrLog: filepath.Join(dir, "err.log"),
+		PlistFile: filepath.Join(dir, "daemon.plist"),
+	}
+	if err := os.WriteFile(paths.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(paths.PIDFile, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	status, err := CurrentStatus(paths)
+	if err != nil {
+		t.Fatalf("CurrentStatus: %v", err)
+	}
+	if !status.Live || status.ActiveBinaryStale {
+		t.Fatalf("status = %+v, want live non-stale test binary", status)
+	}
+}
+
+func TestCurrentStatusDetectsStaleActiveBinaryFromMetadata(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:   filepath.Join(dir, "daemon.pid"),
+		StdoutLog: filepath.Join(dir, "out.log"),
+		StderrLog: filepath.Join(dir, "err.log"),
+		PlistFile: filepath.Join(dir, "daemon.plist"),
+	}
+	if err := os.WriteFile(paths.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	metadata := Metadata{
+		PID:               os.Getpid(),
+		Version:           "old",
+		Executable:        exe,
+		ExecutableModTime: time.Now().Add(-24 * time.Hour).Unix(),
+		StartedAt:         time.Now().Add(-24 * time.Hour).Unix(),
+	}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(MetadataPath(paths), data, 0o644); err != nil {
+		t.Fatalf("WriteFile metadata: %v", err)
+	}
+
+	status, err := CurrentStatus(paths)
+	if err != nil {
+		t.Fatalf("CurrentStatus: %v", err)
+	}
+	if !status.Live || !status.ActiveBinaryStale {
+		t.Fatalf("status = %+v, want live stale active binary", status)
 	}
 }

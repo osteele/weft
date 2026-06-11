@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -45,6 +46,8 @@ func init() {
 var tuiMouse bool
 
 func runTUI(cmd *cobra.Command, args []string) error {
+	ensureDaemonForWork(os.Stderr)
+
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {

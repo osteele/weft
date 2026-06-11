@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
@@ -1276,12 +1277,29 @@ func (m Model) renderSystemSummaryLines(width int) string {
 
 func (m Model) renderStatusBar() string {
 	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft c:rental P:prune")
+	daemon := renderDashboardDaemonStatus()
 
 	// Right-align the help text
-	gap := m.width - lipgloss.Width(help) - 2
+	gap := m.width - lipgloss.Width(help) - lipgloss.Width(daemon) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return " " + strings.Repeat(" ", gap) + help
+	return " " + daemon + strings.Repeat(" ", gap) + help
+}
+
+func renderDashboardDaemonStatus() string {
+	status, err := daemoncontrol.CurrentStatus(daemoncontrol.DefaultPaths())
+	switch {
+	case err != nil:
+		return errorStyle.Render("Daemon: status unavailable")
+	case status.ActiveBinaryStale:
+		return errorStyle.Render("Daemon: stale binary; run `weft daemon restart`")
+	case status.Live:
+		return ""
+	case status.Stale:
+		return errorStyle.Render("Daemon: stale")
+	default:
+		return errorStyle.Render("Daemon: stopped")
+	}
 }
