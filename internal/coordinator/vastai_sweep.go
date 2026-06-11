@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -204,8 +205,10 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
 	if exitCode == 0 {
 		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
+		notify.JobTerminal(c.db, jobID, db.StatusCompleted, &exitCode)
 	} else {
 		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("vastai exit=%d reason=%s", exitCode, failureReason))
+		notify.JobTerminal(c.db, jobID, db.StatusFailed, &exitCode)
 	}
 }
 

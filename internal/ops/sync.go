@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/hooks"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/opscore"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/remote"
@@ -79,7 +80,20 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 	if endTime == 0 {
 		endTime = time.Now().Unix()
 	}
-	return db.RecordCompletionByID(database, jobID, exitCode, endTime)
+	if err := db.RecordCompletionByID(database, jobID, exitCode, endTime); err != nil {
+		return err
+	}
+	notify.JobTerminal(database, jobID, terminalStatusForExit(exitCode), &exitCode)
+	return nil
+}
+
+// terminalStatusForExit maps an exit code to the terminal status used for
+// notifications, mirroring the oplog complete/fail branching.
+func terminalStatusForExit(exitCode int) string {
+	if exitCode == 0 {
+		return db.StatusCompleted
+	}
+	return db.StatusFailed
 }
 
 // CacheCompletedJobLog attempts to cache a completed job's log file locally.

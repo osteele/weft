@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -201,8 +202,10 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 	}
 	if *exitCode == 0 {
 		oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
+		notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
 	} else {
 		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
+		notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
 	}
 
 	// Don't clean up R2 markers here — leave them for the full sync pass
@@ -306,6 +309,8 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 		}
 		oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
 			oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))
+		manifestExit := 0
+		notify.JobTerminal(database, summary.JobID, db.StatusCompleted, &manifestExit)
 		slog.Debug("credited job completion from instance manifest",
 			"component", "reconcile", "instance", instanceID, "job_id", summary.JobID)
 	}

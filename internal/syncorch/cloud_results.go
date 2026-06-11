@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -450,8 +451,10 @@ func syncOneCompletedJobMarker(
 	}
 	if *exitCode == 0 {
 		oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
+		notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
 	} else {
 		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
+		notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
 	}
 
 	if haveDownload {

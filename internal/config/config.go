@@ -121,6 +121,9 @@ type Config struct {
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation" toml:"remediation"`
 
+	// Notifications configures a local command run when a job reaches a terminal status.
+	Notifications NotificationsConfig `yaml:"notifications" toml:"notifications"`
+
 	// Telemetry controls durable scheduling-analysis logs.
 	Telemetry TelemetryConfig `yaml:"telemetry" toml:"telemetry"`
 
@@ -209,6 +212,16 @@ var defaultSourceExcludeDirs = []string{"runs", "wand", "wandb"}
 // Bool returns a pointer to v for tri-state config fields.
 func Bool(v bool) *bool {
 	return &v
+}
+
+// NotificationsConfig configures local job-completion notifications.
+type NotificationsConfig struct {
+	// Command is run via `sh -c` when a job reaches a terminal status
+	// (completed or failed), with job context in WEFT_JOB_* environment
+	// variables: WEFT_JOB_ID, WEFT_JOB_STATUS, WEFT_JOB_EXIT_CODE,
+	// WEFT_JOB_DIR, WEFT_JOB_DESCRIPTION, WEFT_JOB_HOST, WEFT_JOB_SUMMARY.
+	// Empty disables notifications.
+	Command string `yaml:"command" toml:"command"`
 }
 
 // RemediationConfig holds configuration for automatic job failure remediation.
