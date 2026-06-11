@@ -1301,6 +1301,64 @@ func TestListTUIRecentFailedInstancesViewportKeepsHeader(t *testing.T) {
 	}
 }
 
+// TestSelectGroupedRowsForViewport_BlankAboveFailedSummary is a regression test
+// for the failed-instances summary losing its blank separator when the cursor
+// sat on another section. The collapsed summary is a header-only section (no
+// item rows), so the cursor-aware budget path handed it budget 0 and marked it
+// summaryOnly, which both dropped the blank above it and rewrote the header to
+// "… (0)". A header-only section can't be collapsed, so the separator must be
+// present regardless of cursor position.
+func TestSelectGroupedRowsForViewport_BlankAboveFailedSummary(t *testing.T) {
+	now := time.Now()
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           120,
+		height:          24,
+		title:           "Jobs",
+		jobs: []*db.Job{
+			{ID: 10, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: "done a", Project: "proj"},
+			{ID: 11, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: "done b", Project: "proj"},
+		},
+		recentFailedInstances: &recentFailedInstances{
+			items: []*db.Launch{
+				{ID: 91, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-5 * time.Minute).Unix())},
+				{ID: 92, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-6 * time.Minute).Unix())},
+				{ID: 93, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(now.Add(-7 * time.Minute).Unix())},
+			},
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				91: {JobID: 1, Status: db.StatusCompleted},
+				92: {JobID: 2, Status: db.StatusCompleted},
+			},
+		},
+	}
+	m.rebuildGroupedRows()
+
+	// Cursor on a Completed job (not the failed-instances header) takes the
+	// cursor-aware viewport path that previously suppressed the separator.
+	cursor := groupedRowIndexForJob(m.groupedRows, 10)
+	if cursor < 0 {
+		t.Fatal("could not locate cursor row for completed job")
+	}
+	lines := selectGroupedRowsForViewport(m.groupedRows, 20, cursor)
+
+	failedIdx := -1
+	for i, l := range lines {
+		if strings.HasPrefix(stripANSI(l.text), "▸ Recent failed instances:") {
+			failedIdx = i
+			break
+		}
+	}
+	if failedIdx < 0 {
+		t.Fatalf("failed-instances summary not in viewport:\n%s", joinViewportText(lines))
+	}
+	if got := stripANSI(lines[failedIdx].text); strings.Contains(got, "(0)") {
+		t.Fatalf("header-only section must not be rewritten to a summary count: %q", got)
+	}
+	if failedIdx == 0 || strings.TrimSpace(lines[failedIdx-1].text) != "" {
+		t.Fatalf("expected blank line above failed-instances summary, got:\n%s", joinViewportText(lines))
+	}
+}
+
 func TestListTUIUngroupedViewShowsSelectedJobDetail(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: false,

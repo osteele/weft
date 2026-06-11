@@ -3910,7 +3910,7 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 			for i := len(sections) - 1; i >= 0; i-- {
 				s := &sections[i]
 				total := len(s.rows)
-				if s.summaryOnly {
+				if s.summaryOnly || total == 0 {
 					continue
 				}
 				switch {
@@ -3962,6 +3962,14 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 		s.windowStart = 0
 		s.leadingEllipsis = false
 		switch b := budgets[i]; {
+		case total == 0:
+			// A header-only section (e.g. the collapsed "Recent failed
+			// instances" summary) has no rows to hide. Collapsing it would
+			// only drop its blank separator and append a bogus "(0)", so it
+			// is never summaryOnly: render the header verbatim.
+			s.summaryOnly = false
+			s.ellipsis = false
+			s.shownRows = 0
 		case b <= 0:
 			s.summaryOnly = true
 			s.ellipsis = false
@@ -4010,7 +4018,7 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 		// Collapse the furthest non-cursor, non-collapsed section first.
 		victim, bestDist := -1, -1
 		for i := range sections {
-			if i == cursorSection || sections[i].summaryOnly {
+			if i == cursorSection || sections[i].summaryOnly || len(sections[i].rowIdxs) == 0 {
 				continue
 			}
 			if d := absDistance(i, cursorSection); d > bestDist {
