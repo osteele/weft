@@ -74,6 +74,14 @@ func ReadStatusFile(host, statusFile string, timeout time.Duration) (*StatusFile
 // RecordJobCompletion records a job's completion in the database using the status file mtime.
 // This is the unified way to record job completion across all sync paths.
 func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int64) error {
+	// Capture the prior status before recording: RecordCompletionByID
+	// deliberately accepts re-records on already-terminal jobs (a status
+	// file is authoritative evidence), so success alone does not mean a NEW
+	// transition. Notify only when the job was previously non-terminal.
+	wasTerminal := false
+	if job, err := db.GetJobByID(database, jobID); err == nil && job != nil {
+		wasTerminal = db.IsTerminalStatus(job.Status)
+	}
 	// Use status file mtime as end time (when job actually completed)
 	// Fall back to current time if mtime not available
 	endTime := mtime
@@ -83,7 +91,9 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 	if err := db.RecordCompletionByID(database, jobID, exitCode, endTime); err != nil {
 		return err
 	}
-	notify.JobTerminal(database, jobID, terminalStatusForExit(exitCode), &exitCode)
+	if !wasTerminal {
+		notify.JobTerminal(database, jobID, terminalStatusForExit(exitCode), &exitCode)
+	}
 	return nil
 }
 
