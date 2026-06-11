@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,22 @@ func TestTildeExpansion(t *testing.T) {
 				t.Errorf("path %q should not be single-quoted in command %q", tt.path, tt.command)
 			}
 		})
+	}
+}
+
+func TestConnectionRetryIncludesNonConnectionStderr(t *testing.T) {
+	err := connectionRetry(
+		func() error { return errors.New("exit status 1") },
+		func() string { return "scp: output/exp_n06: not a regular file" },
+		"SCP",
+		false,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "scp failed") || !strings.Contains(msg, "not a regular file") || !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("error = %q, want stderr and exit status", msg)
 	}
 }
 

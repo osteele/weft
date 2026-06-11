@@ -57,15 +57,7 @@ func SyncJob(database *sql.DB, job *db.Job, timeout time.Duration) (SyncResult, 
 			continue
 		}
 		remotePath := ResolveRemotePath(root, spec.Path)
-		storedPath := LocalStoredPath(job.ID, spec.Path)
-		localPath := filepath.Join(localRoot, storedPath)
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return result, err
-		}
-		if err := ssh.CopyFromWithRetry(remotePath, job.Host, localPath); err != nil {
-			return result, err
-		}
-		size, sha, err := hashFile(localPath)
+		storedPath, size, sha, err := copyRemoteArtifact(job, spec, remotePath, localRoot, ssh.CopyFromWithRetry)
 		if err != nil {
 			return result, err
 		}
@@ -124,15 +116,7 @@ func SyncOutstandingJob(database *sql.DB, job *db.Job, timeout time.Duration) (S
 		}
 
 		remotePath := ResolveRemotePath(root, spec.Path)
-		storedPath := LocalStoredPath(job.ID, spec.Path)
-		localPath := filepath.Join(localRoot, storedPath)
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return result, err
-		}
-		if err := ssh.CopyFromWithRetry(remotePath, job.Host, localPath); err != nil {
-			return result, err
-		}
-		size, sha, err := hashFile(localPath)
+		storedPath, size, sha, err := copyRemoteArtifact(job, spec, remotePath, localRoot, ssh.CopyFromWithRetry)
 		if err != nil {
 			return result, err
 		}
@@ -149,6 +133,22 @@ func SyncOutstandingJob(database *sql.DB, job *db.Job, timeout time.Duration) (S
 		result.Added++
 	}
 	return result, nil
+}
+
+func copyRemoteArtifact(job *db.Job, spec ArtifactSpec, remotePath, localRoot string, copyFrom func(remotePath, host, localPath string) error) (storedPath string, size int64, sha string, err error) {
+	storedPath = LocalStoredPath(job.ID, spec.Path)
+	localPath := filepath.Join(localRoot, storedPath)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return "", 0, "", err
+	}
+	if err := copyFrom(remotePath, job.Host, localPath); err != nil {
+		return "", 0, "", fmt.Errorf("copy artifact %q from %s:%s to %s: %w", spec.Path, job.Host, remotePath, localPath, err)
+	}
+	size, sha, err = hashFile(localPath)
+	if err != nil {
+		return "", 0, "", err
+	}
+	return storedPath, size, sha, nil
 }
 
 // StoreLocalArtifact copies a local file into the artifact cache and records it

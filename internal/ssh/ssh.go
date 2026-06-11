@@ -424,6 +424,11 @@ func connectionRetry(op func() error, getOutput func() string, label string, ver
 	if err != nil && IsConnectionError(getOutput()) {
 		return fmt.Errorf("%s failed after %d attempts: %s: %w", strings.ToLower(label), MaxRetries, strings.TrimSpace(getOutput()), err)
 	}
+	if err != nil {
+		if output := strings.TrimSpace(getOutput()); output != "" {
+			return fmt.Errorf("%s failed: %s: %w", strings.ToLower(label), output, err)
+		}
+	}
 	return err
 }
 

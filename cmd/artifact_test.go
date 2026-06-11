@@ -278,6 +278,30 @@ func TestRunArtifactCatFallsBackToCloudOutputPath(t *testing.T) {
 	}
 }
 
+func TestRunArtifactCatResolvesArtifactFileWithOutputPrefix(t *testing.T) {
+	_, job := setupLaunchArtifactJobWithDB(t)
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + "output/exp_037/results.json": []byte(`{"ok":true}` + "\n"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runArtifactCat(cmd, []string{strconv.FormatInt(job.ID, 10), "output/exp_037/results.json"}); err != nil {
+		t.Fatalf("runArtifactCat: %v", err)
+	}
+	if got := out.String(); got != "{\"ok\":true}\n" {
+		t.Fatalf("stdout = %q, want JSON result", got)
+	}
+}
+
 func TestRunArtifactCatFallsBackToCloudArtifactsAliasPath(t *testing.T) {
 	_, job := setupLaunchArtifactJobWithDB(t)
 	runID := int64(0)

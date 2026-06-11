@@ -1,6 +1,12 @@
 package artifacts
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/osteele/weft/internal/db"
+)
 
 func TestParseManifest(t *testing.T) {
 	content := `{"job_id":42,"artifacts":[{"name":"a","path":"out/a.txt"}]}`
@@ -69,6 +75,30 @@ func TestLocalRelativePath(t *testing.T) {
 	for input, want := range cases {
 		if got := LocalRelativePath(input); got != want {
 			t.Fatalf("LocalRelativePath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCopyRemoteArtifactErrorIncludesContext(t *testing.T) {
+	job := &db.Job{
+		ID:   2877,
+		Host: "cool30",
+	}
+	spec := ArtifactSpec{Path: "output/exp_n06/summary.md"}
+	_, _, _, err := copyRemoteArtifact(job, spec, "~/code/project/output/exp_n06/summary.md", t.TempDir(), func(_, _, _ string) error {
+		return errors.New("scp failed: not a regular file")
+	})
+	if err == nil {
+		t.Fatal("expected copy error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`copy artifact "output/exp_n06/summary.md"`,
+		"cool30:~/code/project/output/exp_n06/summary.md",
+		"scp failed: not a regular file",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
 		}
 	}
 }
