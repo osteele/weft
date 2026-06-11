@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -153,6 +154,40 @@ func TestHostListIncludesActiveOnPremHostsWithoutRecentSyncOrCache(t *testing.T)
 	if !strings.Contains(line, "unknown/unknown") {
 		t.Fatalf("active host without cached specs should use unknown placeholders: %q", line)
 	}
+}
+
+func TestHostJobsShowsDashForQueuedJobsWithoutStartTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "active-host", "/tmp/project", "python train.py", "queued train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runHostJobs(nil, []string{"active-host"}); err != nil {
+			t.Fatalf("runHostJobs: %v", err)
+		}
+	})
+
+	line := findHostJobsLine(t, out, ids.FormatJobID(jobID))
+	if strings.Contains(line, "01/01") {
+		t.Fatalf("queued job showed Unix-zero start time: %q", line)
+	}
+	if !strings.Contains(line, "\t-\t") && !strings.Contains(line, " - ") {
+		t.Fatalf("queued job should show dash for missing start time: %q", line)
+	}
+}
+
+func findHostJobsLine(t *testing.T, output, jobID string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == jobID {
+			return line
+		}
+	}
+	t.Fatalf("job %q not found in output:\n%s", jobID, output)
+	return ""
 }
 
 func TestHostListIncludesRunningRentals(t *testing.T) {

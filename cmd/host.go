@@ -369,7 +369,7 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(w, "ID\tSTATUS\tSTARTED\tCOMMAND / DESCRIPTION\n")
 
 	for _, job := range jobs {
-		started := time.Unix(job.StartTime, 0).Format("01/02 15:04")
+		started := formatHostJobStarted(job.StartTime)
 
 		display := job.Description
 		if display == "" {
@@ -387,6 +387,13 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nTotal: %d active job(s) on %s\n", len(jobs), host)
 
 	return nil
+}
+
+func formatHostJobStarted(startTime int64) string {
+	if startTime <= 0 {
+		return "-"
+	}
+	return time.Unix(startTime, 0).Format("01/02 15:04")
 }
 
 func runHostLoad(cmd *cobra.Command, args []string) error {
