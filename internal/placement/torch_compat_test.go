@@ -1,6 +1,13 @@
 package placement
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/osteele/weft/internal/inventory"
+)
 
 func TestTorchMaxComputeCap(t *testing.T) {
 	cases := []struct {
@@ -190,5 +197,112 @@ func TestResolveMaxComputeCapForPersistence(t *testing.T) {
 		if got != c.want {
 			t.Errorf("ResolveMaxComputeCapForPersistence(%q, \"\") = %q, want %q", c.archMax, got, c.want)
 		}
+	}
+}
+
+func writeTestUVLockCu128(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	lock := `
+[[package]]
+name = "torch"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "nvidia-cuda-runtime-cu12"
+version = "12.8.90"
+`
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(lock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Regression for the wb18 driver-floor defect: a cu128 pip-wheel torch pin
+// must imply the CUDA FAMILY floor (12.0 / driver >=525), not the 12.8
+// toolkit floor (driver >=570) that excluded every on-prem host.
+func TestMinRuntimeFloorForJob_TorchPinUsesFamilyFloor(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "12.0" {
+		t.Errorf("MinCUDAVersion = %q, want %q (family floor)", rf.Req.MinCUDAVersion, "12.0")
+	}
+	if rf.Req.MinDriverVersion != 525 {
+		t.Errorf("MinDriverVersion = %d, want 525", rf.Req.MinDriverVersion)
+	}
+	if !strings.Contains(rf.CUDAOrigin, "torch 2.9.1+cu128") {
+		t.Errorf("CUDAOrigin = %q, want torch pin provenance", rf.CUDAOrigin)
+	}
+}
+
+// Library dependency floors are cited toolkit requirements and stay exact:
+// vLLM >= 0.17 needs CUDA 12.8 / driver 570 regardless of the torch family
+// floor.
+func TestMinRuntimeFloorForJob_LibraryFloorStaysExact(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+
+	rf, err := MinRuntimeFloorForJob(dir, `uv run --with "vllm==0.17.0" serve.py`)
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "12.8" {
+		t.Errorf("MinCUDAVersion = %q, want %q (vLLM library floor)", rf.Req.MinCUDAVersion, "12.8")
+	}
+	if rf.Req.MinDriverVersion != 570 {
+		t.Errorf("MinDriverVersion = %d, want 570", rf.Req.MinDriverVersion)
+	}
+	if !strings.Contains(rf.CUDAOrigin, "library") {
+		t.Errorf("CUDAOrigin = %q, want library floor provenance", rf.CUDAOrigin)
+	}
+}
+
+// End-to-end regression for wb18: hosts shaped like cool30 (driver 525.x,
+// CUDA 12.0) and cool100 (driver 550.x, CUDA 12.4) must be ELIGIBLE for a
+// GPU job from a cu128 torch-pin project; a genuinely old CUDA-11 host is
+// still rejected.
+func TestMinRuntimeFloor_OnPremHostsEligibleUnderCu128Pin(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	c := Constraints{
+		GPUClass:         "nvidia",
+		GPUMemGB:         8,
+		MinCUDAVersion:   rf.Req.MinCUDAVersion,
+		MinDriverVersion: rf.Req.MinDriverVersion,
+	}
+
+	cool30 := inventory.HostSpec{
+		Name:                "cool30-shaped",
+		NVIDIADriverVersion: "525.125.06",
+		CUDAVersion:         "12.0",
+		GPUs:                []inventory.GPUSpec{{Name: "RTX 3090", Class: "rtx3090", Memory: "24GB"}},
+	}
+	cool100 := inventory.HostSpec{
+		Name:                "cool100-shaped",
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GPUs:                []inventory.GPUSpec{{Name: "A100 80GB PCIe", Class: "a100", Memory: "80GB"}},
+	}
+	old := inventory.HostSpec{
+		Name:                "cuda11-host",
+		NVIDIADriverVersion: "450.80.02",
+		CUDAVersion:         "11.4",
+		GPUs:                []inventory.GPUSpec{{Name: "RTX 3090", Class: "rtx3090", Memory: "24GB"}},
+	}
+
+	for _, host := range []inventory.HostSpec{cool30, cool100} {
+		if ok, reasons := CheckHostGPUConstraints(host, c); !ok {
+			t.Errorf("%s should be eligible under cu128 family floor: %v", host.Name, reasons)
+		}
+	}
+	if ok, _ := CheckHostGPUConstraints(old, c); ok {
+		t.Errorf("CUDA-11 host should be rejected under cu128 family floor")
 	}
 }

@@ -349,3 +349,20 @@ func writeProjectPyproject(t *testing.T, dir, content string) {
 		t.Fatalf("write pyproject.toml: %v", err)
 	}
 }
+
+func TestCUDAFamilyFloor(t *testing.T) {
+	cases := []struct{ variant, want string }{
+		{"cu128", "12.0"},
+		{"cu121", "12.0"},
+		{"cu126", "12.0"},
+		{"cu118", "11.0"},
+		{"cu130", "13.0"},
+		{"cpu", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := CUDAFamilyFloor(c.variant); got != c.want {
+			t.Errorf("CUDAFamilyFloor(%q) = %q, want %q", c.variant, got, c.want)
+		}
+	}
+}

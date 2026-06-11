@@ -184,6 +184,22 @@ func TorchMinCUDAVersion(dir string) string {
 	return CUDAVariantVersion(pin.CudaVariant)
 }
 
+// CUDAFamilyFloor converts a torch CUDA wheel tag such as "cu128" to the
+// CUDA *family* compatibility floor: "12.0" for cu12x, "11.0" for cu11x,
+// "13.0" for cu13x. Pip wheels bundle the CUDA user-mode runtime and run on
+// any same-major driver under CUDA minor-version compatibility, so the host
+// floor implied by a pip-installed torch is the family base, not the wheel's
+// exact toolkit version. (Exact toolkit floors remain appropriate for
+// image-label-derived requirements, where the host's toolkit must match.)
+func CUDAFamilyFloor(cudaVariant string) string {
+	exact := CUDAVariantVersion(cudaVariant)
+	if exact == "" {
+		return ""
+	}
+	major, _, _ := strings.Cut(exact, ".")
+	return major + ".0"
+}
+
 // CUDARuntimePackages returns the names of CUDA runtime packages pinned in the
 // uv.lock at uvLockPath — the nvidia-*-cu12 family plus triton. These ship
 // native libraries bundled with a PyTorch wheel; when a job reuses an

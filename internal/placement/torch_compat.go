@@ -1,6 +1,7 @@
 package placement
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -151,31 +152,84 @@ func MinComputeCapForJob(dir string) string {
 	return TorchMinComputeCap(pin.Version, pin.CudaVariant)
 }
 
-// MinRuntimeRequirementsForJob resolves local, non-network NVIDIA runtime
+// RuntimeFloor is the resolved minimum NVIDIA runtime requirement for a job,
+// together with the provenance of its CUDA floor so displays can say where
+// the floor came from (e.g. "Driver floor: >=525 (CUDA >=12.0, from torch
+// 2.9.1+cu128)").
+type RuntimeFloor struct {
+	Req cloud.ImageRequirements
+	// CUDAOrigin labels the source that supplied the winning MinCUDAVersion:
+	// a torch pin, a library dependency floor, script metadata, or project
+	// config. Empty when no CUDA floor applies.
+	CUDAOrigin string
+	// DriverExplicit reports that MinDriverVersion was given explicitly
+	// (script metadata or .weft.toml) rather than backfilled from the CUDA
+	// floor.
+	DriverExplicit bool
+}
+
+// MinRuntimeFloorForJob resolves local, non-network NVIDIA runtime
 // requirements for a job. It mirrors the cloud planner's local sources:
 // project .weft.toml, script metadata, torch lockfile, and inline dependency
 // declarations. Image label fetching remains in the cloud campaign path.
-func MinRuntimeRequirementsForJob(dir, command string) cloud.ImageRequirements {
-	var req cloud.ImageRequirements
+//
+// The torch-pin contribution uses the CUDA *family* floor
+// (dataloc.CUDAFamilyFloor): pip wheels bundle their CUDA runtime and run on
+// any same-major driver under minor-version compatibility, so a cu128 pin
+// implies CUDA >=12.0 / driver >=525, not the 12.8 toolkit floor. Library
+// floors (e.g. vLLM) are cited toolkit requirements and stay exact.
+//
+// The returned error reports unparseable explicit requirements (script
+// metadata or .weft.toml); the floor still reflects the sources that parsed.
+func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
+	var rf RuntimeFloor
+	var parseErr error
+	merge := func(req cloud.ImageRequirements, origin string) {
+		before := rf.Req.MinCUDAVersion
+		rf.Req = imagereq.Merge(rf.Req, req)
+		if rf.Req.MinCUDAVersion != before {
+			rf.CUDAOrigin = origin
+		}
+	}
 	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
-		if explicit, err := imagereq.Explicit(minDriver, minCUDA); err == nil {
-			req = imagereq.Merge(req, explicit)
+		if explicit, err := imagereq.Explicit(minDriver, minCUDA); err != nil {
+			parseErr = fmt.Errorf(".weft.toml [cloud] min-driver/cuda-driver-min: %w", err)
+		} else {
+			rf.DriverExplicit = rf.DriverExplicit || explicit.MinDriverVersion > 0
+			merge(explicit, ".weft.toml [cloud]")
 		}
 	}
-	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil {
-		if explicit, err := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); err == nil {
-			req = imagereq.Merge(req, explicit)
+	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil && (meta.MinDriver != "" || meta.MinCUDA != "") {
+		if explicit, err := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); err != nil {
+			parseErr = fmt.Errorf("script [tool.weft] min-driver/cuda-driver-min: %w", err)
+		} else {
+			rf.DriverExplicit = rf.DriverExplicit || explicit.MinDriverVersion > 0
+			merge(explicit, "script [tool.weft]")
 		}
 	}
-	if torchCUDA := dataloc.TorchMinCUDAVersion(dir); torchCUDA != "" {
-		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
+	if pin := dataloc.ScanTorchPin(dir); pin != nil {
+		if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
+			major, _, _ := strings.Cut(family, ".")
+			origin := fmt.Sprintf("torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
+			merge(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
+		}
 	}
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
 	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
 	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: libCUDA})
+		merge(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
 	}
-	return imagereq.BackfillDriverFromCUDA(req)
+	rf.Req = imagereq.BackfillDriverFromCUDA(rf.Req)
+	return rf, parseErr
+}
+
+// MinRuntimeRequirementsForJob is the requirements-only form of
+// MinRuntimeFloorForJob; parse errors in explicit sources are ignored here
+// (daemon paths must not wedge on one job's bad metadata — submit-time
+// callers use MinRuntimeFloorForJob to surface them).
+func MinRuntimeRequirementsForJob(dir, command string) cloud.ImageRequirements {
+	rf, _ := MinRuntimeFloorForJob(dir, command)
+	return rf.Req
 }
 
 // MinDriverForCUDAVersion returns the NVIDIA driver-major floor for a CUDA

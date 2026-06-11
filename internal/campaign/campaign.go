@@ -856,6 +856,13 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	// [tool.weft]: a script may declare standard deps without configuring
 	// weft, and we still want those deps to drive CUDA-floor inference.
 	scriptDeps := dataloc.ScanScriptDependencies(localDir, command)
+	// Cloud offers keep the torch pin's EXACT CUDA floor, deliberately
+	// stricter than the on-prem family floor used by
+	// placement.MinRuntimeFloorForJob. On-prem hosts are known machines
+	// where minor-version compatibility (cu12x wheel on any R525+ driver)
+	// is reliable; rental offers report cuda_max_good values that have
+	// produced real cuda_driver_too_old failures when filtered only to the
+	// family floor (see campaign_test.go's driver-floor regression).
 	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
 		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
 		slog.Debug("auto-derived CUDA driver floor from torch pin",
