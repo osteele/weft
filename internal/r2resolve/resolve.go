@@ -21,6 +21,18 @@ import (
 
 const objectExistsTimeout = 20 * time.Second
 
+// Lister lists R2 objects under a prefix. *r2.Client satisfies it;
+// command-layer fakes can too.
+type Lister interface {
+	ListObjects(ctx context.Context, prefix string) ([]r2.ObjectInfo, error)
+}
+
+// Store adds the existence probe NeedR2Key needs on top of listing.
+type Store interface {
+	Lister
+	ObjectExists(ctx context.Context, key string) (bool, error)
+}
+
 // ErrArtifactMissing reports that no R2 key under the producer's prefixes
 // matches the requested artifact path. Callers that have producer/spec
 // context (e.g. cloudneeds.ResolveSpecs) can use errors.Is to discriminate
@@ -29,14 +41,14 @@ var ErrArtifactMissing = errors.New("artifact not found in cloud outputs")
 
 // ObjectExistsFunc is the R2 existence-check used by NeedR2Key. Exported so
 // tests can stub the R2 round-trip without a live client.
-var ObjectExistsFunc = func(ctx context.Context, client *r2.Client, key string) (bool, error) {
+var ObjectExistsFunc = func(ctx context.Context, client Store, key string) (bool, error) {
 	return client.ObjectExists(ctx, key)
 }
 
 // ListRunIDsFunc enumerates run IDs that have R2 keys under
 // jobs/<jobID>/runs/. Used by the fallback path when latest_run_id and
 // run-zero both miss. Exported so tests can stub without a live S3 client.
-var ListRunIDsFunc = func(ctx context.Context, client *r2.Client, jobID int64) ([]int64, error) {
+var ListRunIDsFunc = func(ctx context.Context, client Lister, jobID int64) ([]int64, error) {
 	prefix := r2keys.JobRunsPrefix(jobID)
 	objects, err := client.ListObjects(ctx, prefix)
 	if err != nil {
@@ -73,7 +85,7 @@ var ListRunIDsFunc = func(ctx context.Context, client *r2.Client, jobID int64) (
 // artifact files stay under the run that actually ran).
 //
 // Returns an error if no candidate exists.
-func NeedR2Key(ctx context.Context, client *r2.Client, jobID int64, latestRunID *int64, relPath string) (string, error) {
+func NeedR2Key(ctx context.Context, client Store, jobID int64, latestRunID *int64, relPath string) (string, error) {
 	tried := map[int64]struct{}{}
 	runIDs := []int64{0}
 	if latestRunID != nil && *latestRunID > 0 {

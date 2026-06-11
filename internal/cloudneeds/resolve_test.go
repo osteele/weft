@@ -26,7 +26,7 @@ func TestResolveSpecs_PrefersArtifactFilesKey(t *testing.T) {
 
 	prev := r2resolve.ObjectExistsFunc
 	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
-	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
 		return key == wantKey, nil
 	}
 
@@ -60,7 +60,7 @@ func TestResolveSpecs_FallsBackToRunZeroOutputsPrefix(t *testing.T) {
 	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
 
 	var checked []string
-	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
 		checked = append(checked, key)
 		return key == wantKey, nil
 	}
@@ -87,10 +87,10 @@ func TestResolveSpecs_ReturnsErrorWhenMissing(t *testing.T) {
 	spec := fmt.Sprintf("output/missing.pt:%d", producerID)
 	prev := r2resolve.ObjectExistsFunc
 	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
-	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, _ string) (bool, error) { return false, nil }
 	prevList := r2resolve.ListRunIDsFunc
 	t.Cleanup(func() { r2resolve.ListRunIDsFunc = prevList })
-	r2resolve.ListRunIDsFunc = func(_ context.Context, _ *r2.Client, _ int64) ([]int64, error) { return nil, nil }
+	r2resolve.ListRunIDsFunc = func(_ context.Context, _ r2resolve.Lister, _ int64) ([]int64, error) { return nil, nil }
 
 	_, err = ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
 	if err == nil {
@@ -112,12 +112,12 @@ func TestResolveSpecs_FallbackFindsArtifactUnderHistoricalRun(t *testing.T) {
 
 	prev := r2resolve.ObjectExistsFunc
 	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
-	r2resolve.ObjectExistsFunc = func(_ context.Context, _ *r2.Client, key string) (bool, error) {
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
 		return key == wantKey, nil
 	}
 	prevList := r2resolve.ListRunIDsFunc
 	t.Cleanup(func() { r2resolve.ListRunIDsFunc = prevList })
-	r2resolve.ListRunIDsFunc = func(_ context.Context, _ *r2.Client, jobID int64) ([]int64, error) {
+	r2resolve.ListRunIDsFunc = func(_ context.Context, _ r2resolve.Lister, jobID int64) ([]int64, error) {
 		if jobID != producerID {
 			return nil, nil
 		}

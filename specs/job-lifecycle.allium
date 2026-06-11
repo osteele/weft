@@ -837,6 +837,82 @@ rule ArtifactGetAllOutputPath {
         -- Implementation: cmd/artifact.go resolveArtifactOutputPathForAll.
 }
 
+rule ArtifactListGetConsistency {
+    when: UserRuns("weft artifact get" | "weft artifact cat", job, token)
+    requires: token names a row that "weft artifact list" prints for job
+
+    ensures: retrieval succeeds via one of, in order:
+        local artifact cache,
+        the job's R2 per-run objects (any target kind, not only rentals),
+        an on-demand sync from the job's inventory host
+    ensures: if every source misses, the error names each source checked
+
+    @guidance
+        -- The list output unions three sources (cached artifacts, host_data
+        -- job-output pointer records, live R2 listings); get must be able to
+        -- follow all of them or say why not. Inventory queue runners started
+        -- with --r2-bucket upload to the same per-run prefixes as rentals,
+        -- so the R2 fallback must not be gated on the job being a rental
+        -- job (bug wb16: a cool-host job's declared output listed but was
+        -- not retrievable). Implementation: cmd/artifact.go
+        -- fetchArtifactForJobs / runArtifactCat / fetchAllArtifactsForJobs,
+        -- with syncArtifactOnDemand as the host rung. Design:
+        -- docs/design/artifacts.md § Intended invariants.
+}
+
+rule ArtifactRetrievalErrorFidelity {
+    when: artifact retrieval download fails
+
+    ensures: the surfaced error states the transfer failure cause
+    ensures: "not found" is reported only when no source has the object
+
+    @guidance
+        -- A stalled 600MB download must not be reported as "artifact not
+        -- found" (bug wb20: the candidate-key loop let a later 404 from a
+        -- never-populated run prefix overwrite the real stall error).
+        -- Implementation: cmd/artifact.go resolves the concrete R2 key
+        -- first (resolveCloudOutputKey → r2resolve.NeedR2Key), downloads
+        -- once, and propagates non-NotFound errors unwrapped. Single-file
+        -- downloads above 8 MiB show a progress status line on a TTY so a
+        -- long transfer is distinguishable from a hang.
+}
+
+rule ArtifactRetrievalCoversAllRuns {
+    when: artifact list or retrieval consults R2
+    requires: the recorded latest run and run zero have no objects
+
+    ensures: runs discovered under jobs/<id>/runs/ are probed before
+             reporting nothing
+
+    @guidance
+        -- A superseded or canceled attempt's uploads outlive latest_run_id
+        -- (the wb19 pattern). Consumer staging already handled this via
+        -- r2resolve.NeedR2Key; retrieval must use the same policy rather
+        -- than a private [latest, 0] reimplementation. Implementation:
+        -- cmd/artifact.go listCloudJobOutputFiles fallback and
+        -- artifactRunIDCandidates, both delegating to internal/r2resolve.
+}
+
+rule CompletedOutputsSurviveWorkdirReuse {
+    when: job: Job completes with exit_code = 0 on an inventory host
+    requires: job declares outputs (--output local:, --produces, or
+              [tool.weft] outputs)
+
+    ensures: a later job reusing the same working directory cannot make the
+             completed job's declared outputs unretrievable
+
+    @guidance
+        -- PENDING IMPLEMENTATION (bug wb10; design:
+        -- docs/design/artifacts.md § Decision). Rentals and R2-enabled
+        -- inventory runners satisfy this today via per-run R2 upload plus
+        -- the SharedWorkdirUploadBarrierBeforeNextJob rule. Inventory hosts
+        -- without R2 currently record only a host_data pointer into the
+        -- shared working directory — the next job writing the same relative
+        -- path destroys the bytes. The decided fix is a completion-time
+        -- snapshot to ~/.cache/weft/artifacts/<jobID>/<run>/ on the host's
+        -- own disk (size-capped, GC'd), which needs no R2 credentials.
+}
+
 -- ==========================================================================
 -- Queue-runner dispatch and concurrency
 -- ==========================================================================

@@ -128,6 +128,11 @@ func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byt
 	return append([]byte(nil), data...), nil
 }
 
+func (s *fakeCloudArtifactStore) ObjectExists(_ context.Context, key string) (bool, error) {
+	_, ok := s.objects[key]
+	return ok, nil
+}
+
 func (s *fakeCloudArtifactStore) GetObjectReader(_ context.Context, key string) (io.ReadCloser, error) {
 	data, ok := s.objects[key]
 	if !ok {
@@ -213,7 +218,7 @@ func TestDownloadSingleCloudFileToPath_ArtifactsPathFromConventionOutputs(t *tes
 	}
 
 	dest := filepath.Join(t.TempDir(), "summary.md")
-	if err := downloadSingleCloudFileToPath(&cobra.Command{}, store, job, runner.OutputFile{RelPath: "artifacts/summary.md"}, dest); err != nil {
+	if err := downloadSingleCloudFileToPath(&cobra.Command{}, store, job, runner.OutputFile{RelPath: "artifacts/summary.md"}, dest, false); err != nil {
 		t.Fatalf("downloadSingleCloudFileToPath: %v", err)
 	}
 	data, err := os.ReadFile(dest)
@@ -352,6 +357,207 @@ func TestFetchAllArtifactsDownloadsCachedAndCloudOutputs(t *testing.T) {
 	}
 	if string(cloudData) != "cloud\n" {
 		t.Fatalf("cloud dest = %q, want cloud content", cloudData)
+	}
+}
+
+// stallingCloudStore reports objects as present but fails every transfer,
+// simulating a download that stalls past the idle timeout.
+type stallingCloudStore struct {
+	*fakeCloudArtifactStore
+}
+
+func (s *stallingCloudStore) DownloadObjectToWriterWithIdleTimeout(context.Context, string, io.Writer, time.Duration) (int64, error) {
+	return 0, errors.New("download stalled: no progress for 2m0s")
+}
+
+func (s *stallingCloudStore) DownloadObjectToFileWithIdleTimeout(context.Context, string, string, time.Duration) (int64, error) {
+	return 0, errors.New("download stalled: no progress for 2m0s")
+}
+
+func TestFetchCloudArtifactByToken_StallErrorIsNotReportedAsNotFound(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+	store := &stallingCloudStore{&fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, 0) + "output/representations/train.pkl": []byte("payload"),
+		},
+	}}
+
+	oldOutput := artifactOutput
+	artifactOutput = t.TempDir()
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	err := fetchCloudArtifactByToken(&cobra.Command{}, store, job, "output/representations/train.pkl", false)
+	if err == nil {
+		t.Fatal("expected stall error")
+	}
+	if !strings.Contains(err.Error(), "stalled") {
+		t.Fatalf("error = %q, want the stall cause preserved", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %q, must not be masked as not-found", err)
+	}
+}
+
+func TestFetchCloudArtifactByToken_FindsSupersededRunArtifact(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	instanceID := *job.LaunchID
+	if _, err := db.CreateAttempt(database, job.ID, "vastai:99999", &instanceID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID == 0 {
+		t.Fatalf("latest_run_id = %v, want non-zero", job.LatestRunID)
+	}
+	// Upload lives under a run that is neither latest_run_id nor run zero —
+	// the superseded-attempt case (latest_run_id moved past the run that ran).
+	supersededRun := *job.LatestRunID + 17
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, supersededRun) + "output/result.json": []byte("superseded\n"),
+		},
+	}
+
+	oldOutput := artifactOutput
+	artifactOutput = "-"
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := fetchCloudArtifactByToken(cmd, store, job, "output/result.json", false); err != nil {
+		t.Fatalf("fetchCloudArtifactByToken: %v", err)
+	}
+	if got := out.String(); got != "superseded\n" {
+		t.Fatalf("stdout = %q, want superseded content", got)
+	}
+}
+
+func TestRunArtifactCat_InventoryHostJobReadsR2Outputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp/project", "echo hi", "inventory r2")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(jobID, 0) + "output/metrics.json": []byte("{\"acc\":1}\n"),
+		},
+	}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := runArtifactCat(cmd, []string{strconv.FormatInt(jobID, 10), "output/metrics.json"}); err != nil {
+		t.Fatalf("runArtifactCat: %v", err)
+	}
+	if got := out.String(); got != "{\"acc\":1}\n" {
+		t.Fatalf("stdout = %q, want R2 content", got)
+	}
+}
+
+func TestFetchArtifactForJobs_SyncsOnDemandFromInventoryHost(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp/project", "echo hi", "on-demand sync")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return nil }
+	oldSync := syncArtifactsForJobFunc
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		syncArtifactsForJobFunc = oldSync
+	})
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "result.json")
+	if err := os.WriteFile(sourcePath, []byte("from host\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	syncCalled := false
+	syncArtifactsForJobFunc = func(database *sql.DB, job *db.Job, _ *r2.Client, _ time.Duration) error {
+		syncCalled = true
+		return artifacts.StoreLocalArtifact(database, job.ID, "output/result.json", sourcePath)
+	}
+
+	outDir := t.TempDir()
+	oldOutput := artifactOutput
+	artifactOutput = filepath.Join(outDir, "result.json")
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := fetchArtifactForJobs(cmd, []int64{jobID}, "output/result.json"); err != nil {
+		t.Fatalf("fetchArtifactForJobs: %v", err)
+	}
+	if !syncCalled {
+		t.Fatal("expected on-demand sync")
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "result.json"))
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if string(data) != "from host\n" {
+		t.Fatalf("dest = %q, want host content", data)
+	}
+}
+
+func TestFetchArtifactForJobs_NotFoundNamesCheckedSources(t *testing.T) {
+	db.SetupTestDB(t)
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp/project", "echo hi", "not found msg")
+	database.Close()
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return nil }
+	oldSync := syncArtifactsForJobFunc
+	syncArtifactsForJobFunc = func(*sql.DB, *db.Job, *r2.Client, time.Duration) error { return nil }
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		syncArtifactsForJobFunc = oldSync
+	})
+
+	err = fetchArtifactForJobs(&cobra.Command{}, []int64{jobID}, "output/missing.json")
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if !strings.Contains(err.Error(), "host-alpha") {
+		t.Fatalf("error = %q, want the checked host named", err)
+	}
+}
+
+func TestListCloudJobOutputFiles_DedupesArtifactSpelling(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+	payload := []byte("same payload")
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, 0) + "output/train.pkl":       payload,
+			r2keys.JobAttemptArtifactFilesPrefix(job.ID, 0) + "output/train.pkl": payload,
+		},
+	}
+
+	files := listCloudJobOutputFiles(store, job)
+	if len(files) != 1 {
+		t.Fatalf("files = %+v, want the dual upload collapsed to one row", files)
+	}
+	if files[0].RelPath != "output/train.pkl" {
+		t.Fatalf("RelPath = %q, want plain spelling preferred", files[0].RelPath)
 	}
 }
 

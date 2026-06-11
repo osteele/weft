@@ -353,6 +353,12 @@ See `cmd/run.go` for the full flow.
 and reconciles local state with remote reality (status files, process checks).
 See `cmd/sync.go` and `internal/ops/` for the reconciliation logic.
 
+### Job Outputs and Artifacts
+
+How job outputs are captured, stored, listed, retrieved, and staged onto
+consumer hosts — including the durability model and the role of R2 — is
+covered in [Artifact Store](artifacts.md).
+
 ## External Dependencies
 
 | Package | Purpose |
