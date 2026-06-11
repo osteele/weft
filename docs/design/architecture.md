@@ -4,6 +4,12 @@ This document describes the architecture and design of weft. The earlier
 coordinator daemon design is deprecated; current operation uses local CLI/TUI
 placement and durable remote agents.
 
+Per-subsystem deep dives live in [docs/architecture/](../architecture/):
+[placement](../architecture/placement.md),
+[sync](../architecture/sync.md),
+[job lifecycle](../architecture/job-lifecycle.md), and
+[instance lifecycle](../architecture/instance-lifecycle.md).
+
 ## Overview
 
 Weft is a workload scheduler for GPU compute clusters. It has two main runtime

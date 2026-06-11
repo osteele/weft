@@ -27,6 +27,7 @@ detail quickly.
 ## Architecture And Design
 
 - [Architecture](design/architecture.md) for the main system layout
+- [Subsystem Architecture](architecture/) — deep dives: [placement](architecture/placement.md), [sync](architecture/sync.md), [job lifecycle](architecture/job-lifecycle.md), [instance lifecycle](architecture/instance-lifecycle.md)
 - [Deprecated Coordinator Architecture](design/coordinator-architecture.md) for historical context only
 - [CLI, TUI, and Core Responsibilities](design/facade-core.md) for layering boundaries
 - [Comparison to SLURM](design/comparison-to-slurm.md) for scheduler tradeoffs
