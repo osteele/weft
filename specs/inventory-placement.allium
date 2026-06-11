@@ -349,12 +349,16 @@ rule EvaluateEligibility {
 
     @guidance
         -- Reasons for rejection are surfaced as human-readable strings
-        -- collected on the Score.placement_reasons list. Examples:
+        -- collected on the Score.placement_reasons list, prefixed with the
+        -- constraint kind so users can tell WHICH constraint rejected the
+        -- host. Examples:
         --   "has RTX 3090 GPU"           (pass)
         --   "no GPU with >=24GB"         (fail on memory)
         --   "no GPU matching ampere+"    (fail on class)
-        --   "no GPU with compute cap <= 9.0" (fail on torch arch ceiling)
-        --   "no GPU with compute cap >= 7.5" (fail on torch arch floor)
+        --   "arch cap: no GPU with compute cap <= 9.0" (fail on torch arch ceiling)
+        --   "arch floor: no GPU with compute cap >= 7.5" (fail on torch arch floor)
+        --   "driver floor: NVIDIA driver 550.120 < required >=570" (fail on driver floor)
+        --   "CUDA floor: host CUDA 12.0 < required 12.8" (fail on CUDA-compat floor)
         --   "not idle (2 jobs running)"  (fail on benchmark idleness)
         -- Implementation: placement.scoreHost, applyResourceHardConstraints.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /

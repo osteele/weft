@@ -198,7 +198,7 @@ func TestScoreHosts_RequiresRecordedCUDAVersion(t *testing.T) {
 	if score.Eligible {
 		t.Fatalf("host without cuda_version should be ineligible")
 	}
-	if !strings.Contains(strings.Join(score.Reasons, ", "), "no recorded CUDA compatibility >=12.4") {
+	if !strings.Contains(strings.Join(score.Reasons, ", "), "CUDA floor: no recorded CUDA compatibility, require >=12.4") {
 		t.Fatalf("reasons = %v", score.Reasons)
 	}
 }
@@ -227,7 +227,7 @@ func TestScoreHosts_RejectsOldNVIDIADriver(t *testing.T) {
 	if score.Eligible {
 		t.Fatalf("host with old driver should be ineligible")
 	}
-	if !strings.Contains(strings.Join(score.Reasons, ", "), "NVIDIA driver 550.120 < required 570") {
+	if !strings.Contains(strings.Join(score.Reasons, ", "), "driver floor: NVIDIA driver 550.120 < required >=570") {
 		t.Fatalf("reasons = %v", score.Reasons)
 	}
 }
@@ -2056,7 +2056,7 @@ func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
 	// Bound at sm_8.0: host-alpha eligible (A100=8.0 and 2080Ti=7.5 both <= 8.0);
 	// host-beta NOT eligible (3090 = 8.6 > 8.0); host-gamma eligible (unknown cap).
 	db := setupTestDB(t)
-	scores := scoreTestHosts(db, Constraints{MaxComputeCap: "8.0"})
+	scores := scoreTestHosts(db, Constraints{GPUMemGB: 1, MaxComputeCap: "8.0"})
 	var alpha, beta, gamma *Score
 	for i := range scores {
 		switch scores[i].Host {
@@ -2085,7 +2085,7 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 	// correctly rejected — MinComputeCap fails closed on unknown CUDA caps,
 	// matching the cloud-offer filter and the EXP-179 regression fix.
 	db := setupTestDB(t)
-	scores := scoreTestHosts(db, Constraints{MinComputeCap: "7.5"})
+	scores := scoreTestHosts(db, Constraints{GPUMemGB: 1, MinComputeCap: "7.5"})
 	for _, s := range scores {
 		switch s.Host {
 		case "host-alpha", "host-beta":
@@ -2117,7 +2117,7 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 		Name: "pascal-host",
 		GPUs: []inventory.GPUSpec{{Name: "GTX 1080 Ti", Class: "gtx1080ti", Memory: "11GB"}},
 	}
-	if ok, _ := CheckHostGPUConstraints(pascalHost, Constraints{MinComputeCap: "7.5"}); ok {
+	if ok, _ := CheckHostGPUConstraints(pascalHost, Constraints{GPUMemGB: 1, MinComputeCap: "7.5"}); ok {
 		t.Fatalf("GTX 1080 Ti host should be ineligible for min cap 7.5 (sm_6.1 below floor)")
 	}
 }
@@ -2181,5 +2181,36 @@ func TestFormatScoreRejectionDetail(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("FormatScoreRejectionDetail = %q, want %q", got, want)
 		}
+	}
+}
+
+// Regression: the legacy "compute-intensive" spelling must trigger the
+// cpu-intensive placement behavior (spill margin, scoring bonus) the same
+// as the canonical "cpu-intensive" tag.
+func TestHasComputeIntensiveTag_CanonicalizesLegacySpelling(t *testing.T) {
+	if !hasComputeIntensiveTag([]string{dbpkg.TagComputeIntensiveLegacy}) {
+		t.Fatal("legacy compute-intensive tag not recognized")
+	}
+	if !hasComputeIntensiveTag([]string{dbpkg.TagCPUIntensive}) {
+		t.Fatal("canonical cpu-intensive tag not recognized")
+	}
+	if hasComputeIntensiveTag([]string{"benchmark"}) {
+		t.Fatal("unrelated tag misclassified as cpu-intensive")
+	}
+}
+
+// Regression: torch-derived CUDA/driver floors and arch caps describe GPU
+// runtime compatibility and must never reject a host for a constraint set
+// with no GPU request — even when a caller populates them.
+func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
+	host := inventory.HostSpec{Name: "cpu-only"} // no GPUs, no driver recorded
+	ok, reasons := CheckHostGPUConstraints(host, Constraints{
+		MinDriverVersion: 570,
+		MinCUDAVersion:   "12.8",
+		MinComputeCap:    "7.5",
+		MaxComputeCap:    "9.0",
+	})
+	if !ok {
+		t.Fatalf("non-GPU constraints rejected host: %v", reasons)
 	}
 }

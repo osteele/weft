@@ -3014,6 +3014,17 @@ func HasBenchmarkTag(tags []string) bool {
 	return false
 }
 
+// HasCPUIntensiveTag reports whether the tag set marks the job as
+// cpu-intensive, accepting legacy spellings via canonicalization.
+func HasCPUIntensiveTag(tags []string) bool {
+	for _, tag := range tags {
+		if CanonicalizeTag(tag) == TagCPUIntensive {
+			return true
+		}
+	}
+	return false
+}
+
 // ProviderTag returns the canonical reserved provider tag for a provider name.
 func ProviderTag(provider string) (string, error) {
 	p := normalizeProviderName(provider)

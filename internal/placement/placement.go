@@ -585,7 +585,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	}
 
 	var gc GPUConstraint
-	if c.NeedsGPU() || c.MaxComputeCap != "" || c.MinComputeCap != "" || c.MinCUDAVersion != "" || c.MinDriverVersion > 0 {
+	if c.NeedsGPU() {
 		gc = ParseGPUConstraint(c.GPUClass)
 		eligible, reasons := CheckHostGPUConstraints(host, c)
 		if !eligible {
@@ -759,8 +759,12 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 // CheckHostGPUConstraints applies the shared hard GPU resource constraints to
 // a single host. A host is eligible only if one physical GPU satisfies the
 // requested class, memory floor, and compute-capability ceiling.
+//
+// Constraint sets without a GPU request always pass: the torch-derived caps
+// and CUDA/driver floors describe GPU-runtime compatibility, so they must
+// never reject a host for a CPU-only job even if a caller populated them.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
-	if !c.NeedsGPU() && c.MaxComputeCap == "" && c.MinComputeCap == "" && c.MinCUDAVersion == "" && c.MinDriverVersion == 0 {
+	if !c.NeedsGPU() {
 		return true, nil
 	}
 	if len(host.GPUs) == 0 {
@@ -769,18 +773,18 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 	if c.MinDriverVersion > 0 {
 		major := driverMajor(host.NVIDIADriverVersion)
 		if major == 0 {
-			return false, []string{fmt.Sprintf("no recorded NVIDIA driver >=%d", c.MinDriverVersion)}
+			return false, []string{fmt.Sprintf("driver floor: no recorded NVIDIA driver, require >=%d", c.MinDriverVersion)}
 		}
 		if major < c.MinDriverVersion {
-			return false, []string{fmt.Sprintf("NVIDIA driver %s < required %d", host.NVIDIADriverVersion, c.MinDriverVersion)}
+			return false, []string{fmt.Sprintf("driver floor: NVIDIA driver %s < required >=%d", host.NVIDIADriverVersion, c.MinDriverVersion)}
 		}
 	}
 	if c.MinCUDAVersion != "" {
 		if strings.TrimSpace(host.CUDAVersion) == "" {
-			return false, []string{fmt.Sprintf("no recorded CUDA compatibility >=%s", c.MinCUDAVersion)}
+			return false, []string{fmt.Sprintf("CUDA floor: no recorded CUDA compatibility, require >=%s", c.MinCUDAVersion)}
 		}
 		if compareDottedVersion(host.CUDAVersion, c.MinCUDAVersion) < 0 {
-			return false, []string{fmt.Sprintf("CUDA compatibility %s < required %s", host.CUDAVersion, c.MinCUDAVersion)}
+			return false, []string{fmt.Sprintf("CUDA floor: host CUDA %s < required %s", host.CUDAVersion, c.MinCUDAVersion)}
 		}
 	}
 
@@ -827,15 +831,15 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 	case c.GPUMemGB > 0 && !memMatched:
 		return false, []string{fmt.Sprintf("no GPU with >=%dGB", c.GPUMemGB)}
 	case c.MaxComputeCap != "" && !capMatched:
-		return false, []string{fmt.Sprintf("no GPU with compute cap <= %s", c.MaxComputeCap)}
+		return false, []string{fmt.Sprintf("arch cap: no GPU with compute cap <= %s", c.MaxComputeCap)}
 	case c.MinComputeCap != "" && !minCapMatched:
-		return false, []string{fmt.Sprintf("no GPU with compute cap >= %s", c.MinComputeCap)}
+		return false, []string{fmt.Sprintf("arch floor: no GPU with compute cap >= %s", c.MinComputeCap)}
 	case c.GPUClass != "" && c.GPUMemGB > 0:
 		return false, []string{fmt.Sprintf("no %s GPU with >=%dGB", c.GPUClass, c.GPUMemGB)}
 	case c.GPUClass != "" && c.MaxComputeCap != "":
-		return false, []string{fmt.Sprintf("no %s GPU with compute cap <= %s", c.GPUClass, c.MaxComputeCap)}
+		return false, []string{fmt.Sprintf("arch cap: no %s GPU with compute cap <= %s", c.GPUClass, c.MaxComputeCap)}
 	case c.GPUMemGB > 0 && c.MaxComputeCap != "":
-		return false, []string{fmt.Sprintf("no GPU with >=%dGB and compute cap <= %s", c.GPUMemGB, c.MaxComputeCap)}
+		return false, []string{fmt.Sprintf("arch cap: no GPU with >=%dGB and compute cap <= %s", c.GPUMemGB, c.MaxComputeCap)}
 	default:
 		return false, []string{"no GPU matching constraints"}
 	}
@@ -1507,9 +1511,10 @@ func hasBenchmarkTag(tags []string) bool {
 	return db.HasBenchmarkTag(tags)
 }
 
-// hasComputeIntensiveTag returns true if tags contain the compute-intensive tag.
+// hasComputeIntensiveTag returns true if tags contain the cpu-intensive tag
+// (including legacy spellings, via canonicalization).
 func hasComputeIntensiveTag(tags []string) bool {
-	return slices.Contains(tags, db.TagComputeIntensive)
+	return db.HasCPUIntensiveTag(tags)
 }
 
 // applyComputeIntensiveScoring adds a bonus proportional to the host's effective
