@@ -1059,6 +1059,11 @@ func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 	type capKey struct{ dir, cmd string }
 	resolveCache := map[capKey]string{}
 	resolveAndPersist := func(job *db.Job) string {
+		// Arch caps are GPU-runtime constraints; never backfill one onto a
+		// CPU-only job (it would display as an inert "Arch cap" blocker).
+		if !job.RequestsGPU() {
+			return ""
+		}
 		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 		k := capKey{localDir, job.Command}
 		if v, ok := resolveCache[k]; ok {

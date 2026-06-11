@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -205,19 +206,7 @@ func TestResolveMaxComputeCapForPersistence(t *testing.T) {
 func writeTestUVLockCu128(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	lock := `
-[[package]]
-name = "torch"
-version = "2.9.1"
-source = { registry = "https://pypi.org/simple" }
-
-[[package]]
-name = "nvidia-cuda-runtime-cu12"
-version = "12.8.90"
-`
-	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(lock), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	dataloc.WriteTestTorchPin(t, dir, "2.9.1", "cu128")
 	return dir
 }
 

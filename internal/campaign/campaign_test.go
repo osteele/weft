@@ -1463,7 +1463,7 @@ func TestGroupMaxComputeCap_LazyBackfillFromMissingTorchPin(t *testing.T) {
 	// makes the group unbounded.
 	jobs := []*db.Job{
 		{ID: 1, MaxComputeCap: "10.0"},
-		{ID: 2, MaxComputeCap: "", WorkingDir: "/nonexistent/path"},
+		{ID: 2, MaxComputeCap: "", WorkingDir: "/nonexistent/path", GPUClass: "nvidia"},
 	}
 	got := groupMaxComputeCap(nil, jobs)
 	if got != "" {
@@ -1491,6 +1491,7 @@ version = "12.4.5.8"
 			WorkingDir:    dir,
 			Command:       "uv run python train.py",
 			MaxComputeCap: "10.0",
+			GPUClass:      "nvidia",
 		},
 	}
 

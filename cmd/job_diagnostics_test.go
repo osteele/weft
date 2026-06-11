@@ -3,8 +3,10 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
@@ -127,5 +129,31 @@ func TestHasFailureSignal(t *testing.T) {
 				t.Errorf("hasFailureSignal = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Regression (wb18): weft info must show the constraint that actually
+// rejects hosts (the driver/CUDA floor) with its provenance, not just the
+// usually-inert arch cap.
+func TestDriverFloorLine_TorchPinProvenance(t *testing.T) {
+	dir := t.TempDir()
+	dataloc.WriteTestTorchPin(t, dir, "2.9.1", "cu128")
+	mem := 8
+	job := &db.Job{WorkingDir: dir, Command: "uv run train.py", GPUMemGB: &mem}
+
+	line := driverFloorLine(job)
+	if !strings.Contains(line, ">=525") {
+		t.Errorf("driverFloorLine = %q, want driver >=525 (family floor)", line)
+	}
+	if !strings.Contains(line, "CUDA >=12.0") || !strings.Contains(line, "torch 2.9.1+cu128") {
+		t.Errorf("driverFloorLine = %q, want CUDA floor with torch provenance", line)
+	}
+}
+
+func TestDriverFloorLine_NoTorchPin(t *testing.T) {
+	mem := 8
+	job := &db.Job{WorkingDir: t.TempDir(), Command: "python x.py", GPUMemGB: &mem}
+	if line := driverFloorLine(job); line != "" {
+		t.Errorf("driverFloorLine = %q, want empty for project without torch pin", line)
 	}
 }

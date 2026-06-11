@@ -722,23 +722,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if resolvedGPUMemGB != nil {
 		placementConstraints.GPUMemGB = *resolvedGPUMemGB
 	}
-	persistMaxComputeCap := placement.ResolveJobMaxComputeCapForPersistence(localDir, command)
-	if placementConstraints.NeedsGPU() && persistMaxComputeCap != "" && persistMaxComputeCap != placement.MaxComputeCapAny {
-		placementConstraints.MaxComputeCap = persistMaxComputeCap
-	}
+	// Torch-derived GPU-runtime constraints (arch cap, CUDA/driver floors)
+	// apply only to jobs that actually request a GPU, so CPU-only jobs don't
+	// carry an inert "Arch cap" that reads as a blocker.
+	persistMaxComputeCap := ""
 	if placementConstraints.NeedsGPU() {
+		persistMaxComputeCap = placement.ResolveJobMaxComputeCapForPersistence(localDir, command)
+		if persistMaxComputeCap != "" && persistMaxComputeCap != placement.MaxComputeCapAny {
+			placementConstraints.MaxComputeCap = persistMaxComputeCap
+		}
 		placementConstraints.MinComputeCap = placement.MinComputeCapForJob(localDir)
 		rf, rfErr := placement.MinRuntimeFloorForJob(localDir, command)
 		if rfErr != nil {
 			return fmt.Errorf("resolve CUDA/driver floor: %w", rfErr)
 		}
-		if runCUDADriverMin != "" {
-			// CLI is the highest-precedence explicit level: it replaces the
-			// inferred/metadata floor and may lower or clear it ("any").
-			if err := rf.ApplyExplicit("", runCUDADriverMin, "--cuda-driver-min"); err != nil {
-				return err
-			}
-			rf.FinalizeDriver()
+		// cliOverrides.MinCUDAVersion holds the already-validated canonical
+		// form of --cuda-driver-min (including the "any" sentinel).
+		if err := rf.ApplyCLIOverride(cliOverrides.MinCUDAVersion); err != nil {
+			return err
 		}
 		if rf.Req.MinCUDAVersion != "" {
 			placementConstraints.MinCUDAVersion = rf.Req.MinCUDAVersion

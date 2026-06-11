@@ -672,7 +672,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
 			return err
 		}
-		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
 		}
 		if len(updates) > 0 {
@@ -757,7 +757,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 
 	// Cloud jobs: reset to unplaced (the original instance is gone)
 	if job.IsLaunchJob() {
-		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
 		}
 		retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
@@ -789,7 +789,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if !job.HasInventoryHost() {
 		// Unplaced terminal jobs can always be retried. Missing host only
 		// disqualifies inventory-pinned retries (handled by HasInventoryHost).
-		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
 		}
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
@@ -818,7 +818,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	}
 	if relayEnabled(cfg, relayClient) {
 		// Refresh here since the relay path bypasses ops.RequeueJob (which does its own refresh).
-		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			slog.Warn("failed to refresh metadata", "error", err)
 		}
 		if err := db.RequeueByID(database, jobID); err != nil {
@@ -843,7 +843,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return err
 	}
 	if retryHost != "" || retryLaunchID != nil {
-		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
 		}
 		if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {

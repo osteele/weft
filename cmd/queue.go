@@ -998,7 +998,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	var oldStatus string
 	if statusChanged && editStatus == db.StatusQueued {
 		oldStatus = job.Status
-		if err := ops.RefreshProjectDerivedMetadata(database, jobID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
 		}
 		if err := db.RequeueByID(database, jobID); err != nil {

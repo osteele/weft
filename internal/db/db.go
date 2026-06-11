@@ -3932,6 +3932,14 @@ func (j *Job) DirectoryTailDisplay() string {
 	return tail
 }
 
+// RequestsGPU reports whether the job declares a GPU *resource* requirement
+// (gpu-class or gpu-mem). Torch-derived arch caps and CUDA/driver floors
+// apply only to such jobs. Contrast UsesGPU, which also counts a bare device
+// pin (--gpu 0): a device-pinned job is UsesGPU-true but RequestsGPU-false.
+func (j *Job) RequestsGPU() bool {
+	return j.GPUClass != "" || (j.GPUMemGB != nil && *j.GPUMemGB > 0)
+}
+
 // HasAssignedHost reports whether the job currently has a concrete host target.
 func (j *Job) HasAssignedHost() bool {
 	return j.HasInventoryHost()
@@ -4022,7 +4030,9 @@ const cudaVisibleDevicesPrefix = "CUDA_VISIBLE_DEVICES="
 
 // GetGPU returns the GPU (CUDA_VISIBLE_DEVICES) value for this job.
 // First checks the database GPU field, then falls back to parsing the command.
-// UsesGPU reports whether the job has any GPU requirement (device, class, or memory).
+// UsesGPU reports whether the job has any GPU association (device pin,
+// class, or memory). For constraint gating (arch caps, CUDA/driver floors)
+// use RequestsGPU, which excludes bare device pins.
 func (j *Job) UsesGPU() bool {
 	return j.GPU != "" || j.GPUClass != "" || j.GPUMemGB != nil
 }

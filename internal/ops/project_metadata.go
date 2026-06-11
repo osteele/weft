@@ -13,10 +13,11 @@ import (
 // RefreshProjectDerivedMetadata updates a job's stored inputs and output dirs
 // from the current project config and source scans, while preserving any
 // existing explicit input declarations already recorded on the job.
-func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, command string, existingInputs []string) error {
-	localDir := workdir.ResolveLocal(workingDir)
+func RefreshProjectDerivedMetadata(database *sql.DB, job *db.Job) error {
+	jobID, command := job.ID, job.Command
+	localDir := workdir.ResolveLocal(job.WorkingDir)
 
-	inputs := mergeStringSlices(config.ProjectInputs(localDir), existingInputs)
+	inputs := mergeStringSlices(config.ProjectInputs(localDir), job.Inputs)
 	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
 		inputs = mergeStringSlices(inputs, detected)
 	}
@@ -34,7 +35,13 @@ func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, co
 		return fmt.Errorf("refresh job output dirs: %w", err)
 	}
 
-	if err := db.SetJobMaxComputeCap(database, jobID, ResolveProjectMaxComputeCap(localDir, command)); err != nil {
+	// The torch-derived arch cap applies only to GPU jobs; refreshing a
+	// CPU-only job clears any stale inert cap rather than recomputing one.
+	maxCap := ""
+	if job.RequestsGPU() {
+		maxCap = ResolveProjectMaxComputeCap(localDir, command)
+	}
+	if err := db.SetJobMaxComputeCap(database, jobID, maxCap); err != nil {
 		return fmt.Errorf("refresh max_compute_cap: %w", err)
 	}
 

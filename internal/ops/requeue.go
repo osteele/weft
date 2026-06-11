@@ -17,7 +17,7 @@ import (
 // appending to the remote queue.
 func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	_ = opts
-	if err := RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+	if err := RefreshProjectDerivedMetadata(database, job); err != nil {
 		return Result{}, err
 	}
 	if err := db.RequeueByID(database, job.ID); err != nil {

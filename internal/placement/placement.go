@@ -109,21 +109,25 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	if c.NeedsGPU() {
 		localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 		c.MinComputeCap = MinComputeCapForJob(localDir)
-		// Parse errors in explicit metadata are logged at submit time; the
-		// daemon-side re-derivation must not wedge on one job's bad metadata.
-		rf, _ := MinRuntimeFloorForJob(localDir, j.Command)
-		if j.CLIResourceOverrides != nil && j.CLIResourceOverrides.MinCUDAVersion != "" {
-			// The persisted CLI override is the highest-precedence explicit
-			// level: it replaces the inferred/metadata floor and may lower
-			// or clear it ("any").
-			if err := rf.ApplyExplicit("", j.CLIResourceOverrides.MinCUDAVersion, "--cuda-driver-min"); err == nil {
-				rf.FinalizeDriver()
-			}
-		}
+		rf := RuntimeFloorForJob(j)
 		c.MinCUDAVersion = rf.Req.MinCUDAVersion
 		c.MinDriverVersion = rf.Req.MinDriverVersion
 	}
 	return c
+}
+
+// RuntimeFloorForJob resolves the effective CUDA/driver floor for a job,
+// applying the persisted CLI --cuda-driver-min override at highest
+// precedence (it replaces the inferred/metadata floor and may lower or clear
+// it). Parse errors in explicit metadata are logged at submit time; this
+// re-derivation must not wedge on one job's bad metadata.
+func RuntimeFloorForJob(j *db.Job) RuntimeFloor {
+	localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
+	rf, _ := MinRuntimeFloorForJob(localDir, j.Command)
+	if j.CLIResourceOverrides != nil {
+		_ = rf.ApplyCLIOverride(j.CLIResourceOverrides.MinCUDAVersion)
+	}
+	return rf
 }
 
 // NeedsGPU returns true if the constraints require GPU resources.

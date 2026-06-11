@@ -1169,8 +1169,16 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		} else if job.GPUClass != "" {
 			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
 		}
-		if job.MaxComputeCap != "" && job.MaxComputeCap != placement.MaxComputeCapAny {
-			fmt.Printf("Arch cap:    sm_%s (excludes GPUs with higher compute capability)\n", job.MaxComputeCap)
+		// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
+		// CPU-only job must not display an inert "Arch cap" that reads as
+		// the placement blocker.
+		if job.RequestsGPU() {
+			if job.MaxComputeCap != "" && job.MaxComputeCap != placement.MaxComputeCapAny {
+				fmt.Printf("Arch cap:    sm_%s (excludes GPUs with higher compute capability)\n", job.MaxComputeCap)
+			}
+			if line := driverFloorLine(job); line != "" {
+				fmt.Printf("Driver floor: %s\n", line)
+			}
 		}
 
 		// Show timing info
@@ -1533,4 +1541,27 @@ func formatMemoryKB(kb int64) string {
 	default:
 		return fmt.Sprintf("%d KB", kb)
 	}
+}
+
+// driverFloorLine renders the job's effective NVIDIA driver/CUDA floor with
+// its provenance, e.g. ">=525 (CUDA >=12.0, from torch 2.9.1+cu128)".
+// Returns "" when no floor applies. This is the constraint that actually
+// rejects hosts in placement (the arch cap above rarely does), so weft info
+// must show it.
+func driverFloorLine(job *db.Job) string {
+	rf := placement.RuntimeFloorForJob(job)
+	driver, cuda := rf.Req.MinDriverVersion, rf.Req.MinCUDAVersion
+	if driver <= 0 && cuda == "" {
+		return ""
+	}
+	// A non-empty CUDA floor always carries its origin (MergeInferred and
+	// ApplyExplicit set them together).
+	detail := ""
+	if cuda != "" {
+		detail = fmt.Sprintf("(CUDA >=%s, from %s)", cuda, rf.CUDAOrigin)
+	}
+	if driver > 0 {
+		return strings.TrimSpace(fmt.Sprintf(">=%d %s", driver, detail))
+	}
+	return detail
 }
