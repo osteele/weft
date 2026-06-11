@@ -45,15 +45,17 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 
 	sourceDir := localDir
 	applyExcludes := true
+	var stagedOverlayInputs []string
 	cleanup := func() {}
 	if len(inputs) > 0 {
 		onProgress("staging explicit inputs")
 		slog.Debug("source overlay: staging inputs", "component", "sync",
 			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs)
-		stagedDir, cleanupFn, err := stageSourceDirWithLocalInputs(localDir, inputs)
+		stagedDir, overlayInputs, cleanupFn, err := stageSourceDirWithLocalInputs(localDir, inputs)
 		if err != nil {
 			return "", err
 		}
+		stagedOverlayInputs = overlayInputs
 		if stagedDir != "" {
 			sourceDir = stagedDir
 			applyExcludes = false
@@ -76,7 +78,7 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 	if applyExcludes {
 		tmpPath, hash, err = CreateSourceTarball(sourceDir)
 	} else {
-		tmpPath, hash, err = createSourceTarball(sourceDir, nil)
+		tmpPath, hash, err = createSourceTarballWithOverlays(sourceDir, nil, stagedOverlayInputs)
 	}
 	if err != nil {
 		return "", fmt.Errorf("create source tarball: %w", err)
@@ -113,17 +115,22 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 	return key, nil
 }
 
-func stageSourceDirWithLocalInputs(localDir string, inputs []string) (string, func(), error) {
+func stageSourceDirWithLocalInputs(localDir string, inputs []string) (string, []string, func(), error) {
 	localDir, err := filepath.Abs(localDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve source directory: %w", err)
+		return "", nil, nil, fmt.Errorf("resolve source directory: %w", err)
 	}
 	overlays, err := LocalInputOverlays(localDir, inputs, RequireLocalInput)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	if len(overlays) == 0 {
-		return "", func() {}, nil
+		return "", nil, func() {}, nil
 	}
-	return buildSourceSnapshotWithOverlays(localDir, overlays)
+	names := make([]string, len(overlays))
+	for i, o := range overlays {
+		names[i] = o.Input
+	}
+	dir, cleanup, err := buildSourceSnapshotWithOverlays(localDir, overlays)
+	return dir, names, cleanup, err
 }

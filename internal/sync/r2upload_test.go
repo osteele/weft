@@ -1,8 +1,11 @@
 package sync
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,7 +38,7 @@ func TestStageSourceDirWithLocalInputs_OverridesGitignore(t *testing.T) {
 		t.Fatalf("expected gitignored file to be absent from base tarball")
 	}
 
-	stageDir, cleanup, err := stageSourceDirWithLocalInputs(localDir, []string{"local:data/conllu/"})
+	stageDir, _, cleanup, err := stageSourceDirWithLocalInputs(localDir, []string{"local:data/conllu/"})
 	if err != nil {
 		t.Fatalf("stageSourceDirWithLocalInputs: %v", err)
 	}
@@ -109,7 +112,7 @@ func TestOverlayTarball_EndToEnd(t *testing.T) {
 
 	// Stage with local: input overlay
 	inputs := []string{"hf:bert-base-cased", "local:data/conllu/"}
-	stagedDir, cleanup, err := stageSourceDirWithLocalInputs(localDir, inputs)
+	stagedDir, _, cleanup, err := stageSourceDirWithLocalInputs(localDir, inputs)
 	if err != nil {
 		t.Fatalf("stageSourceDirWithLocalInputs: %v", err)
 	}
@@ -221,5 +224,74 @@ func TestBuildSourceSnapshot_OverlaysLocalFileInput(t *testing.T) {
 	defer withOverlay.Cleanup()
 	if _, err := os.Stat(filepath.Join(withOverlay.Dir, "data", "calibration.db")); err != nil {
 		t.Fatalf("expected explicit local file input to be present: %v", err)
+	}
+}
+
+// Regression (wb18/wj2812): when declared local: inputs push the staged
+// source over the size limit, the error must name the inputs and point at
+// the asset store — .gitignore/.weftignore cannot exclude overlaid inputs.
+func TestUploadSource_OverlayOverflowAdvice(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "outputs", "representations")
+	if err := os.MkdirAll(big, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// .gitignore'd (so the base tree excludes it) but declared as an input.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("outputs/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, MaxSourceTarballBytes/4+1)
+	for i := range 5 {
+		if err := os.WriteFile(filepath.Join(big, fmt.Sprintf("part%d.pkl", i)), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stagedDir, overlayInputs, cleanup, err := stageSourceDirWithLocalInputs(dir, []string{"local:outputs/representations"})
+	if err != nil {
+		t.Fatalf("stageSourceDirWithLocalInputs: %v", err)
+	}
+	defer cleanup()
+	if stagedDir == "" {
+		t.Fatal("expected staged overlay dir")
+	}
+
+	_, _, err = createSourceTarballWithOverlays(stagedDir, nil, overlayInputs)
+	if err == nil {
+		t.Fatal("expected size-limit error")
+	}
+	if !errors.Is(err, ErrSourceTooLarge) {
+		t.Errorf("error not ErrSourceTooLarge: %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "local:outputs/representations") {
+		t.Errorf("error does not name the overlaid input:\n%s", msg)
+	}
+	if !strings.Contains(msg, "weft data publish") || !strings.Contains(msg, "--input asset:") {
+		t.Errorf("error does not point at the asset store:\n%s", msg)
+	}
+	if strings.Contains(msg, "Add large directories to .gitignore") {
+		t.Errorf("overlay overflow must not advise .gitignore:\n%s", msg)
+	}
+}
+
+// A plain (non-overlay) overflow keeps the exclude advice.
+func TestCreateSourceTarball_PlainOverflowAdvice(t *testing.T) {
+	dir := t.TempDir()
+	data := make([]byte, MaxSourceTarballBytes/4+1)
+	for i := range 5 {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := CreateSourceTarball(dir)
+	if err == nil {
+		t.Fatal("expected size-limit error")
+	}
+	if !errors.Is(err, ErrSourceTooLarge) {
+		t.Errorf("error not ErrSourceTooLarge: %v", err)
+	}
+	if !strings.Contains(err.Error(), ".weftignore") {
+		t.Errorf("plain overflow should advise excludes:\n%v", err)
 	}
 }

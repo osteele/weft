@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -29,7 +30,20 @@ func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err
 	return createSourceTarball(localDir, excludes)
 }
 
+// ErrSourceTooLarge reports that the source tree (plus any staged local:
+// input overlays) exceeds MaxSourceTarballBytes. Deterministic: retrying the
+// same working tree fails the same way.
+var ErrSourceTooLarge = errors.New("source exceeds size limit")
+
 func createSourceTarball(localDir string, excludes []string) (tmpPath string, sha256hex string, err error) {
+	return createSourceTarballWithOverlays(localDir, excludes, nil)
+}
+
+// createSourceTarballWithOverlays is createSourceTarball for staged trees
+// that include local: input overlays. overlayInputs (the declared input
+// names) selects the size-limit advice: overlaid inputs cannot be excluded
+// via .gitignore/.weftignore, so the remedy is the asset store.
+func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []string) (tmpPath string, sha256hex string, err error) {
 	tmpFile, err := os.CreateTemp("", "weft-source-*.tar.gz")
 	if err != nil {
 		return "", "", fmt.Errorf("create temp file: %w", err)
@@ -117,8 +131,9 @@ func createSourceTarball(localDir string, excludes []string) (tmpPath string, sh
 		totalBytes += info.Size()
 		if totalBytes > MaxSourceTarballBytes {
 			report := collectSizeReport(localDir, excludes)
-			return fmt.Errorf("source directory exceeds %s limit\n%s",
-				formatSize(MaxSourceTarballBytes), report)
+			return fmt.Errorf("%w: source directory exceeds %s limit\n%s\n%s",
+				ErrSourceTooLarge, formatSize(MaxSourceTarballBytes), report,
+				sizeLimitAdvice(overlayInputs))
 		}
 
 		f, err := os.Open(path)
@@ -209,8 +224,19 @@ func collectSizeReport(localDir string, excludes []string) string {
 		}
 	}
 
-	fmt.Fprintf(&b, "\nAdd large directories to .gitignore or .weftignore to exclude them.")
 	return b.String()
+}
+
+// sizeLimitAdvice returns the remediation line for a size-limit overflow.
+// A plain working tree can exclude large directories; a tree staged with
+// declared local: inputs cannot (the overlay deliberately bypasses
+// excludes), so the remedy is publishing them to the asset store.
+func sizeLimitAdvice(overlayInputs []string) string {
+	if len(overlayInputs) == 0 {
+		return "Add large directories to .gitignore or .weftignore to exclude them."
+	}
+	return fmt.Sprintf("The staged source includes declared local: inputs (%s), which cannot be excluded via .gitignore/.weftignore. Publish large inputs to the asset store instead: `weft data publish <path> --name <name>`, then reference them with `--input asset:<name>`.",
+		strings.Join(overlayInputs, ", "))
 }
 
 func formatSize(b int64) string {
