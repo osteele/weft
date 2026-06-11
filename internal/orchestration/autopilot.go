@@ -414,7 +414,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 
 	placed := prePlaced
-	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics)
+	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics, blockedReasons)
 
 	rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 		Apply:      true,
@@ -433,7 +433,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	rebalanced := len(rebalanceResult.Moves)
 	rebalanced += onPremRebalanced
 
-	reuseFilled, err := autoPilotFillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics)
+	reuseFilled, err := autoPilotFillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics, blockedReasons)
 	if err != nil {
 		oplog.Log("auto_pilot.reuse_fill_error", oplog.WithError(err))
 	}
@@ -614,7 +614,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			retryOptions.PreferReuse = true
 			retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, fallbackJobs, capacities, retryOptions)
 			if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
-				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, reuseDiagnostics)
+				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, reuseDiagnostics, blockedReasons)
 				if fallbackPlaced > 0 {
 					placed += fallbackPlaced
 					for _, assignment := range retryPlan.ReuseAssignments {
@@ -696,6 +696,7 @@ func fillReusableInstances(
 	scoped map[int64]struct{},
 	movingJobs map[int64]struct{},
 	reuseDiagnostics map[int64]string,
+	blockedReasons map[int64]string,
 ) (int, error) {
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -727,7 +728,7 @@ func fillReusableInstances(
 		return 0, nil
 	}
 	assignments, remaining := campaign.PlanReuse(candidates, capacities)
-	placed := submitAutoPilotReuseAssignments(ctx, database, r2Client, assignments, reuseDiagnostics)
+	placed := submitAutoPilotReuseAssignments(ctx, database, r2Client, assignments, reuseDiagnostics, blockedReasons)
 	if placed > 0 {
 		oplog.Log("auto_pilot.reuse_fill", oplog.WithDetailf("placed=%d candidates=%d reusable=%d", placed, len(candidates), len(capacities)))
 	}
@@ -1253,10 +1254,30 @@ func logAutoPilotOnPremDiagnostics(database *sql.DB, jobs []*db.Job) {
 	}
 }
 
-func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, reuseDiagnostics map[int64]string) int {
+func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment, reuseDiagnostics, blockedReasons map[int64]string) int {
 	placed := 0
+	sourceChecked := map[int64]error{}
 	for _, assignment := range assignments {
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
+			continue
+		}
+		// Deterministic source validation, before any claim. A job whose
+		// source cannot ship (e.g. over the size cap) is blocked on EVERY
+		// cloud avenue, so the error is the authoritative blocked reason —
+		// not a per-instance reuse diagnostic — and the job is skipped
+		// without creating attempt rows.
+		srcErr, checked := sourceChecked[assignment.Job.ID]
+		if !checked {
+			srcErr = campaign.ValidateJobSourceForCloud(assignment.Job)
+			sourceChecked[assignment.Job.ID] = srcErr
+		}
+		if srcErr != nil {
+			if blockedReasons != nil {
+				blockedReasons[assignment.Job.ID] = srcErr.Error()
+			}
+			oplog.LogJob("auto_pilot.reuse_skipped", assignment.Job.ID, "",
+				oplog.WithError(srcErr),
+				oplog.WithDetailf("instance=%d reason=source_validation", assignment.Instance.Instance.ID))
 			continue
 		}
 		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {

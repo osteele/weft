@@ -28,7 +28,7 @@ func TestTarballRoundTripPreservesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tarPath, _, err := createSourceTarball(srcDir, nil)
+	tarPath, _, err := createSourceTarballWithOverlays(srcDir, nil, nil)
 	if err != nil {
 		t.Fatalf("createSourceTarball: %v", err)
 	}

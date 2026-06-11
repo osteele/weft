@@ -501,6 +501,15 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
+	// Validate sources BEFORE claiming anything: a deterministic rejection
+	// (no local source, source over the size cap) discovered after the claim
+	// costs an attempt row per retry — the wj2812 churn pattern.
+	for _, job := range jobs {
+		if err := ValidateJobSourceForCloud(job); err != nil {
+			return err
+		}
+	}
+
 	payload := GracePayload{
 		Sources: []controlplane.SourceUpdate{},
 	}

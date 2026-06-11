@@ -27,17 +27,13 @@ const MaxSourceTarballBytes = 500 * 1024 * 1024 // 500 MB
 // Returns an error if the uncompressed source exceeds MaxSourceTarballBytes.
 func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err error) {
 	excludes := sourceExcludes(localDir)
-	return createSourceTarball(localDir, excludes)
+	return createSourceTarballWithOverlays(localDir, excludes, nil)
 }
 
 // ErrSourceTooLarge reports that the source tree (plus any staged local:
 // input overlays) exceeds MaxSourceTarballBytes. Deterministic: retrying the
 // same working tree fails the same way.
 var ErrSourceTooLarge = errors.New("source exceeds size limit")
-
-func createSourceTarball(localDir string, excludes []string) (tmpPath string, sha256hex string, err error) {
-	return createSourceTarballWithOverlays(localDir, excludes, nil)
-}
 
 // createSourceTarballWithOverlays is createSourceTarball for staged trees
 // that include local: input overlays. overlayInputs (the declared input
@@ -270,4 +266,14 @@ func shouldExclude(relPath string, info os.FileInfo, excludes []string) bool {
 		}
 	}
 	return false
+}
+
+// SourceSizeLimitError builds the ErrSourceTooLarge error for an estimated
+// snapshot of totalBytes, with the overlay-aware remediation advice but
+// without the per-file size report (pre-claim validation callers don't walk
+// twice for the listing; `weft source inspect` provides it on demand).
+func SourceSizeLimitError(totalBytes int64, overlayInputs []string) error {
+	return fmt.Errorf("%w: source snapshot is %s, over the %s cloud sync limit. %s",
+		ErrSourceTooLarge, formatSize(totalBytes), formatSize(MaxSourceTarballBytes),
+		sizeLimitAdvice(overlayInputs))
 }

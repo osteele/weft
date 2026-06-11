@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -320,7 +321,7 @@ func InspectSnapshotWithInputs(localDir string, inputs []string, topFiles, topDi
 	result.LargestTopLevel = topSnapshotItems(mapToSnapshotItems(topLevelBytes, nil), topDirs)
 
 	if !result.OverLimit {
-		tmpPath, hash, err := createSourceTarball(snap.Dir, nil)
+		tmpPath, hash, err := createSourceTarballWithOverlays(snap.Dir, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("create source tarball: %w", err)
 		}
@@ -335,4 +336,116 @@ func InspectSnapshotWithInputs(localDir string, inputs []string, topFiles, topDi
 	}
 
 	return result, nil
+}
+
+// EstimateSnapshotBytesWithInputs estimates the uncompressed size of the
+// source snapshot that UploadSourceToR2WithProgressForInputs would ship: the
+// working tree under source-sync excludes, plus any declared local: input
+// overlays (which deliberately bypass excludes). It walks without staging
+// copies, so callers can run it BEFORE claiming a job — a deterministic
+// over-limit answer must not cost an attempt row. Returns the total bytes
+// and the overlaid input names.
+func EstimateSnapshotBytesWithInputs(localDir string, inputs []string) (int64, []string, error) {
+	resolvedDir, err := filepath.Abs(localDir)
+	if err != nil {
+		return 0, nil, fmt.Errorf("resolve %s: %w", localDir, err)
+	}
+	overlays, err := LocalInputOverlays(resolvedDir, inputs, RequireLocalInput)
+	if err != nil {
+		return 0, nil, err
+	}
+	overlayRels := make([]string, 0, len(overlays))
+	names := make([]string, 0, len(overlays))
+	for _, o := range overlays {
+		overlayRels = append(overlayRels, o.Rel)
+		names = append(names, o.Input)
+	}
+
+	excludes := sourceExcludes(resolvedDir)
+	var total int64
+	err = filepath.Walk(resolvedDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			// Mirror createSourceTarballWithOverlays: an unreadable entry is
+			// skipped, not fatal — the pre-claim estimate must not reject a
+			// tree the real upload would ship.
+			if os.IsPermission(walkErr) {
+				if info != nil && info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			return walkErr
+		}
+		relPath, err := filepath.Rel(resolvedDir, path)
+		if err != nil {
+			return err
+		}
+		// Paths under an overlay are counted once, in the overlay pass below
+		// (the staged copy overwrites them, so the tarball holds one copy).
+		if relUnderAny(relPath, overlayRels) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if shouldExclude(relPath, info, excludes) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, nil, fmt.Errorf("walk %s: %w", resolvedDir, err)
+	}
+
+	for _, o := range overlays {
+		size, err := pathTreeBytes(o.Abs)
+		if err != nil {
+			return 0, nil, fmt.Errorf("measure declared input %q: %w", o.Input, err)
+		}
+		total += size
+	}
+	return total, names, nil
+}
+
+// relUnderAny reports whether rel equals or lies under any of the given
+// relative paths.
+func relUnderAny(rel string, roots []string) bool {
+	for _, root := range roots {
+		if rel == root || strings.HasPrefix(rel, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathTreeBytes sums the regular-file bytes under path (or the file's size
+// when path is a regular file).
+func pathTreeBytes(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		if info.Mode().IsRegular() {
+			return info.Size(), nil
+		}
+		return 0, nil
+	}
+	var total int64
+	err = filepath.Walk(path, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }

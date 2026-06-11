@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
 )
 
 type groupedAutoPilotPassTestOptions struct {
@@ -60,7 +62,7 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 		return QueueRebalanceResult{}, nil
 	}
 	if !opts.realFillReusableInstances {
-		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string) (int, error) {
+		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string, map[int64]string) (int, error) {
 			return 0, nil
 		}
 	}
@@ -1344,7 +1346,7 @@ func TestFillReusableInstancesRecordsRejectionReason(t *testing.T) {
 	}
 
 	diagnostics := map[int64]string{}
-	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics)
+	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics, map[int64]string{})
 	if err != nil {
 		t.Fatalf("fillReusableInstances: %v", err)
 	}
@@ -1595,5 +1597,64 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.
 	}
 	if len(seenUnplaced) == 0 || seenUnplaced[0] != other {
 		t.Errorf("planner saw %v, expected only [%d]", seenUnplaced, other)
+	}
+}
+
+// Regression (wb18/wj2812): a job whose source deterministically cannot ship
+// to the cloud (over the size cap) must be skipped before any claim, with
+// the validation error recorded as the AUTHORITATIVE blocked reason so weft
+// info shows the real blocker (and the asset-store remedy) instead of a
+// per-instance reuse diagnostic.
+func TestSubmitAutoPilotReuseAssignments_SourceTooLargeBlocksWithoutClaiming(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	dir := t.TempDir()
+	data := make([]byte, weftsync.MaxSourceTarballBytes/4+1)
+	for i := range 5 {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", dir, "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	reuseDiagnostics := map[int64]string{}
+	blockedReasons := map[int64]string{}
+	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
+		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
+		reuseDiagnostics, blockedReasons)
+
+	if placed != 0 {
+		t.Fatalf("placed = %d, want 0", placed)
+	}
+	reason := blockedReasons[jobID]
+	if !strings.Contains(reason, "weft data publish") && !strings.Contains(reason, "exceeds") && !strings.Contains(reason, "limit") {
+		t.Fatalf("blockedReasons = %q, want authoritative source-size reason", reason)
+	}
+	attempts, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLaunchAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("attempt rows = %d, want 0 (no claim on deterministic rejection)", len(attempts))
 	}
 }

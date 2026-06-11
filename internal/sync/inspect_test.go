@@ -144,3 +144,50 @@ func writeTestFileWithContent(t *testing.T, path string, content []byte) {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
 }
+
+// EstimateSnapshotBytesWithInputs must count declared local: input overlays
+// (which bypass excludes) exactly once, alongside the base tree under
+// excludes.
+func TestEstimateSnapshotBytesWithInputs(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteFile := func(rel string, size int) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWriteFile(".gitignore", len("data/\n"))
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile("main.py", 100)
+	mustWriteFile("data/big.bin", 5000) // gitignored, declared as input
+	mustWriteFile("data/nested/more.bin", 3000)
+
+	total, overlays, err := EstimateSnapshotBytesWithInputs(dir, []string{"local:data/"})
+	if err != nil {
+		t.Fatalf("EstimateSnapshotBytesWithInputs: %v", err)
+	}
+	want := int64(100 + len("data/\n") + 5000 + 3000)
+	if total != want {
+		t.Errorf("total = %d, want %d", total, want)
+	}
+	if len(overlays) != 1 || overlays[0] != "local:data/" {
+		t.Errorf("overlays = %v, want [local:data/]", overlays)
+	}
+
+	// A non-excluded overlay path must not be double-counted.
+	mustWriteFile("included/file.bin", 700)
+	total2, _, err := EstimateSnapshotBytesWithInputs(dir, []string{"local:included/"})
+	if err != nil {
+		t.Fatalf("EstimateSnapshotBytesWithInputs: %v", err)
+	}
+	want2 := int64(100 + len("data/\n") + 700)
+	if total2 != want2 {
+		t.Errorf("total = %d, want %d (overlay path counted once)", total2, want2)
+	}
+}

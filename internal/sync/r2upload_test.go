@@ -47,7 +47,7 @@ func TestStageSourceDirWithLocalInputs_OverridesGitignore(t *testing.T) {
 		t.Fatalf("expected a staged directory, got %q", stageDir)
 	}
 
-	stagedTar, _, err := createSourceTarball(stageDir, nil)
+	stagedTar, _, err := createSourceTarballWithOverlays(stageDir, nil, nil)
 	if err != nil {
 		t.Fatalf("createSourceTarball(stage,nil): %v", err)
 	}
@@ -123,7 +123,7 @@ func TestOverlayTarball_EndToEnd(t *testing.T) {
 	}
 
 	// Create tarball from staged dir (no excludes)
-	tmpPath, hashWithOverlay, err := createSourceTarball(stagedDir, nil)
+	tmpPath, hashWithOverlay, err := createSourceTarballWithOverlays(stagedDir, nil, nil)
 	if err != nil {
 		t.Fatalf("createSourceTarball(staged): %v", err)
 	}

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,7 +18,22 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
 )
+
+// testProjectDir returns a real working directory for jobs in submit tests:
+// the pre-claim source validation walks the tree, so fixtures need one.
+func testProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	tests := []struct {
@@ -635,7 +652,7 @@ func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
 		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -664,7 +681,7 @@ func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -724,7 +741,7 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateLaunch producer: %v", err)
 	}
-	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "echo producer", "producer", "")
+	producerID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "echo producer", "producer", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
 	}
@@ -732,7 +749,14 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 		t.Fatalf("SetJobLaunchID producer: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	consumerDir := testProjectDir(t)
+	if err := os.MkdirAll(filepath.Join(consumerDir, "data", "conllu"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(consumerDir, "data", "conllu", "en.conllu"), []byte("# sent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", consumerDir, "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -1002,7 +1026,7 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 		t.Fatalf("CreateLaunch dst: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -1092,7 +1116,7 @@ func TestSubmitJobsToInstanceForMove_RunningTargetWaitsForAckBeforeSourceCancel(
 		t.Fatalf("CreateLaunch dst: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -1173,7 +1197,7 @@ func TestSubmitJobsToInstanceForMove_NoAckStatusFlipStillWaitsForAck(t *testing.
 		t.Fatalf("CreateLaunch dst: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -1255,7 +1279,7 @@ func TestSubmitJobsToInstanceForMove_PersistsRequestBeforeFinalCheckFailure(t *t
 		t.Fatalf("CreateLaunch dst: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	jobID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -1309,5 +1333,65 @@ func TestSubmitJobsToInstanceForMove_PersistsRequestBeforeFinalCheckFailure(t *t
 	}
 	if intent.TargetRequestID != "req-before-fail" {
 		t.Fatalf("target request id = %q, want req-before-fail", intent.TargetRequestID)
+	}
+}
+
+// Regression for the wj2812 churn (wb18): a deterministic source rejection
+// (over the size cap) must fail BEFORE any claim, leaving zero attempt rows —
+// the claim-then-rollback cycle fabricated two attempt rows per autopilot
+// pass for two days.
+func TestSubmitJobsToInstanceValidatesSourceBeforeClaiming(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	dir := t.TempDir()
+	data := make([]byte, weftsync.MaxSourceTarballBytes/4+1)
+	for i := range 5 {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", dir, "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	attemptsBefore, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLaunchAttempts: %v", err)
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected submit to reject oversized source")
+	}
+	if !errors.Is(err, weftsync.ErrSourceTooLarge) {
+		t.Fatalf("error = %v, want ErrSourceTooLarge", err)
+	}
+
+	attemptsAfter, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLaunchAttempts: %v", err)
+	}
+	if len(attemptsAfter) != len(attemptsBefore) {
+		t.Fatalf("attempt rows changed %d -> %d; validation must precede claiming", len(attemptsBefore), len(attemptsAfter))
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if refreshed.LaunchID != nil {
+		t.Fatal("job was claimed onto the launch despite failing validation")
 	}
 }
