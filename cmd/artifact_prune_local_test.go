@@ -1,14 +1,18 @@
 package cmd
 
 import (
+	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/spf13/cobra"
 )
 
 func TestParsePruneTimeFilter_MutuallyExclusive(t *testing.T) {
@@ -170,6 +174,99 @@ func TestBuildLocalPrunePlan_OlderThanFilter(t *testing.T) {
 	}
 	if len(plan.Files) != 1 || plan.Files[0].RelPath != "output/old.txt" {
 		t.Fatalf("unexpected filtered files: %+v", plan.Files)
+	}
+}
+
+// writeRestorableOutput creates a restorable output/ file under scopeRoot and
+// records the backing job + asset so it qualifies for prune-local.
+func writeRestorableOutput(t *testing.T, database *sql.DB, scopeRoot, name string, size int) {
+	t.Helper()
+	outputDir := filepath.Join(scopeRoot, "output")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, name), bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	jobID, err := db.RecordQueued(database, "host-a", scopeRoot, "echo hi", "desc")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host: "host-a",
+		Asset: dataloc.DataAsset{
+			Kind: dataloc.AssetJobOutput,
+			ID:   strconv.FormatInt(jobID, 10) + "/output/" + name,
+		},
+		Path:      "output/" + name,
+		SizeBytes: int64(size),
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+}
+
+func TestPruneOneScope_ReturnsEffectiveTotals(t *testing.T) {
+	database := db.SetupTestDB(t)
+	prevOutputs, prevArtifacts := pruneOutputs, pruneArtifacts
+	pruneOutputs, pruneArtifacts = true, true
+	t.Cleanup(func() { pruneOutputs, pruneArtifacts = prevOutputs, prevArtifacts })
+
+	scopeA := t.TempDir()
+	scopeB := t.TempDir()
+	writeRestorableOutput(t, database, scopeA, "a.bin", 10)
+	writeRestorableOutput(t, database, scopeB, "b1.bin", 30)
+	writeRestorableOutput(t, database, scopeB, "b2.bin", 5)
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	resA, err := pruneOneScope(cmd, database, scopeA, pruneTimeFilter{}, true, nil, nil)
+	if err != nil {
+		t.Fatalf("pruneOneScope A: %v", err)
+	}
+	if resA.Files != 1 || resA.Bytes != 10 {
+		t.Fatalf("scope A result = %+v, want Files=1 Bytes=10", resA)
+	}
+	resB, err := pruneOneScope(cmd, database, scopeB, pruneTimeFilter{}, true, nil, nil)
+	if err != nil {
+		t.Fatalf("pruneOneScope B: %v", err)
+	}
+	if resB.Files != 2 || resB.Bytes != 35 {
+		t.Fatalf("scope B result = %+v, want Files=2 Bytes=35", resB)
+	}
+
+	if got := resA.Files + resB.Files; got != 3 {
+		t.Fatalf("rollup files = %d, want 3", got)
+	}
+	if got := resA.Bytes + resB.Bytes; got != 45 {
+		t.Fatalf("rollup bytes = %d, want 45", got)
+	}
+}
+
+func TestPrintPruneRollup(t *testing.T) {
+	dryRun := &bytes.Buffer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(dryRun)
+	printPruneRollup(cmd, 3, 12, 2048, true)
+	out := dryRun.String()
+	if !strings.Contains(out, "== Total (3 projects) ==") {
+		t.Fatalf("dry-run rollup missing header: %q", out)
+	}
+	if !strings.Contains(out, "Would free: 2.0 KiB (2,048 bytes) from 12 file(s) across 3 projects") {
+		t.Fatalf("dry-run rollup line wrong: %q", out)
+	}
+
+	apply := &bytes.Buffer{}
+	cmd.SetOut(apply)
+	printPruneRollup(cmd, 2, 7, 2048, false)
+	out = apply.String()
+	if !strings.Contains(out, "== Total (2 projects) ==") {
+		t.Fatalf("apply rollup missing header: %q", out)
+	}
+	if !strings.Contains(out, "Deleted: 7 file(s), reclaimed 2.0 KiB (2,048 bytes) across 2 projects") {
+		t.Fatalf("apply rollup line wrong: %q", out)
 	}
 }
 

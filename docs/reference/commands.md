@@ -475,6 +475,17 @@ weft artifact prune-local --older-than 7d --apply
 cd ~/code && weft artifact prune-local --apply
 ```
 
+When the command spans more than one project (auto-recursion or `--recursive
+on`), each project prints its own `== <project> ==` section and per-project
+summary, followed by a final cross-project rollup:
+
+```
+== Total (3 projects) ==
+Deleted: 42 file(s), reclaimed 4.2 GiB (4,512,233,984 bytes) across 3 projects
+```
+
+In dry-run mode the rollup reads `Would free: …` instead.
+
 While scanning, a single-line progress indicator on stderr reports the current
 phase (loading jobs, scanning R2 outputs, walking output directories). It is
 cleared when the scan completes and is suppressed on non-TTY output.

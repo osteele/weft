@@ -1181,9 +1181,12 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 	}
 
 	effectiveDryRun := !pruneLocalApply || pruneLocalDryRun
+	multiProject := len(scopes) > 1
 	totalDeleteFailures := 0
+	var rollupFiles int
+	var rollupBytes int64
 	for i, scope := range scopes {
-		if len(scopes) > 1 {
+		if multiProject {
 			if i > 0 {
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
@@ -1193,11 +1196,16 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "== %s ==\n", rel)
 		}
-		failures, err := pruneOneScope(cmd, database, scope, filter, effectiveDryRun, progress, jobs)
+		result, err := pruneOneScope(cmd, database, scope, filter, effectiveDryRun, progress, jobs)
 		if err != nil {
 			return err
 		}
-		totalDeleteFailures += failures
+		totalDeleteFailures += result.DeleteFailures
+		rollupFiles += result.Files
+		rollupBytes += result.Bytes
+	}
+	if multiProject {
+		printPruneRollup(cmd, len(scopes), rollupFiles, rollupBytes, effectiveDryRun)
 	}
 	if totalDeleteFailures > 0 {
 		return fmt.Errorf("failed to delete %d file(s)", totalDeleteFailures)
@@ -1205,10 +1213,30 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filter pruneTimeFilter, effectiveDryRun bool, progress *statusLine, jobs []*db.Job) (int, error) {
+// printPruneRollup writes the cross-project total after per-scope output when
+// prune-local ran over more than one project.
+func printPruneRollup(cmd *cobra.Command, projects, files int, bytes int64, dryRun bool) {
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintf(cmd.OutOrStdout(), "== Total (%d projects) ==\n", projects)
+	if dryRun {
+		fmt.Fprintf(
+			cmd.OutOrStdout(),
+			"Would free: %s (%s bytes) from %d file(s) across %d projects\n",
+			humanizeBytes(bytes), formatIntWithCommas(bytes), files, projects,
+		)
+	} else {
+		fmt.Fprintf(
+			cmd.OutOrStdout(),
+			"Deleted: %d file(s), reclaimed %s (%s bytes) across %d projects\n",
+			files, humanizeBytes(bytes), formatIntWithCommas(bytes), projects,
+		)
+	}
+}
+
+func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filter pruneTimeFilter, effectiveDryRun bool, progress *statusLine, jobs []*db.Job) (pruneScopeResult, error) {
 	plan, err := buildLocalPrunePlan(database, scopeRoot, pruneOutputs, pruneArtifacts, filter, progress, jobs)
 	if err != nil {
-		return 0, err
+		return pruneScopeResult{}, err
 	}
 	progress.Clear()
 
@@ -1219,7 +1247,7 @@ func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filte
 	if len(plan.Files) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No restorable local files matched in %s\n", plan.ScopeRoot)
 		printLocalPruneSummary(cmd, plan, effectiveDryRun, 0, 0)
-		return 0, nil
+		return pruneScopeResult{}, nil
 	}
 
 	sort.Slice(plan.Files, func(i, j int) bool {
@@ -1261,11 +1289,20 @@ func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filte
 		printLocalPruneSummary(cmd, plan, true, len(plan.Files), plan.Bytes)
 		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: no files deleted.\n")
 		fmt.Fprintf(cmd.OutOrStdout(), "To apply these deletions, run: %s\n", buildPruneLocalApplyCommand())
-	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d file(s), reclaimed %s (%d bytes)\n", deletedFiles, humanizeBytes(deletedBytes), deletedBytes)
-		printLocalPruneSummary(cmd, plan, false, deletedFiles, deletedBytes)
+		return pruneScopeResult{Files: len(plan.Files), Bytes: plan.Bytes}, nil
 	}
-	return deleteFailures, nil
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d file(s), reclaimed %s (%d bytes)\n", deletedFiles, humanizeBytes(deletedBytes), deletedBytes)
+	printLocalPruneSummary(cmd, plan, false, deletedFiles, deletedBytes)
+	return pruneScopeResult{Files: deletedFiles, Bytes: deletedBytes, DeleteFailures: deleteFailures}, nil
+}
+
+// pruneScopeResult captures the per-scope outcome so the caller can accumulate
+// a cross-project rollup. Files/Bytes are the effective totals: would-free in
+// dry-run mode, actually-deleted in apply mode.
+type pruneScopeResult struct {
+	Files          int
+	Bytes          int64
+	DeleteFailures int
 }
 
 // resolvePruneScopes returns the set of scope roots to prune. When recursive
