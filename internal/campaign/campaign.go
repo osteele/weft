@@ -660,16 +660,19 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			img, req, imagePullSecret := ResolveJobImageSettings(localDir, job.Command)
+			img, rfFloor, imagePullSecret := ResolveJobImageSettings(localDir, job.Command)
 			// Apply per-job CLI overrides (e.g. --cuda-driver-min) on top of
 			// project / script / lockfile-derived requirements. The CLI flag
 			// is the only place where the operator can express a constraint
 			// the lockfile and PEP 723 can't see — e.g. an isolated venv
-			// built on the rental with a known torch CUDA tag.
-			if job.CLIResourceOverrides != nil && job.CLIResourceOverrides.MinCUDAVersion != "" {
-				req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: job.CLIResourceOverrides.MinCUDAVersion})
-				req = imagereq.BackfillDriverFromCUDA(req)
+			// built on the rental with a known torch CUDA tag. It replaces
+			// the resolved floor and may lower or clear it ("any").
+			if job.CLIResourceOverrides != nil {
+				if err := rfFloor.ApplyCLIOverride(job.CLIResourceOverrides.MinCUDAVersion); err != nil {
+					slog.Warn("CLI cuda-driver-min override error", "component", "campaign", "job_id", job.ID, "error", err)
+				}
 			}
+			req := rfFloor.Req
 			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
@@ -812,9 +815,10 @@ func ResolveJobImage(localDir, command string) string {
 	return img
 }
 
-// ResolveJobImageSettings returns the Docker image and explicit image
-// requirements from project config and PEP 723 metadata.
-func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequirements, string) {
+// ResolveJobImageSettings returns the Docker image and the resolved NVIDIA
+// runtime floor (with CUDA-origin provenance and explicit-driver tracking)
+// from project config and PEP 723 metadata.
+func ResolveJobImageSettings(localDir, command string) (string, placement.RuntimeFloor, string) {
 	var projectCloud config.ProjectCloudConfig
 	var projectDir string
 	if cfg, path, err := config.LoadProjectConfigWithPath(localDir); err != nil {
@@ -824,10 +828,6 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 		projectDir = filepath.Dir(path)
 	}
 
-	req, err := imagereq.Explicit(projectCloud.MinDriver, projectCloud.MinCUDA)
-	if err != nil {
-		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
-	}
 	img := strings.TrimSpace(projectCloud.Image)
 	if override := resolveProjectImageOverride(projectCloud.ImageOverrides, projectDir, localDir, command); override != "" {
 		img = override
@@ -837,25 +837,23 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	}
 	imagePullSecret := projectCloud.ImagePullSecret
 
-	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-		slog.Warn("script metadata error in image resolution", "component", "campaign", "error", err)
+	meta, metaErr := dataloc.ScanScriptMeta(localDir, command)
+	if metaErr != nil {
+		slog.Warn("script metadata error in image resolution", "component", "campaign", "error", metaErr)
 	} else if meta != nil {
 		if meta.Image != "" {
 			img = meta.Image
-		}
-		if scriptReq, reqErr := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); reqErr != nil {
-			slog.Warn("script image requirement error", "component", "campaign", "error", reqErr)
-		} else {
-			req = imagereq.Merge(req, scriptReq)
 		}
 		if imagePullSecret == "" {
 			imagePullSecret = meta.ImagePullSecret
 		}
 	}
+
 	// PEP 723 top-level `dependencies = [...]` is read independently of
 	// [tool.weft]: a script may declare standard deps without configuring
 	// weft, and we still want those deps to drive CUDA-floor inference.
 	scriptDeps := dataloc.ScanScriptDependencies(localDir, command)
+	var rf placement.RuntimeFloor
 	// Cloud offers keep the torch pin's EXACT CUDA floor, deliberately
 	// stricter than the on-prem family floor used by
 	// placement.MinRuntimeFloorForJob. On-prem hosts are known machines
@@ -864,7 +862,7 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	// produced real cuda_driver_too_old failures when filtered only to the
 	// family floor (see campaign_test.go's driver-floor regression).
 	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
-		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: torchCUDA})
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: torchCUDA}, "torch pin")
 		slog.Debug("auto-derived CUDA driver floor from torch pin",
 			"component", "campaign", "cuda_floor", torchCUDA, "local_dir", localDir)
 	}
@@ -877,18 +875,29 @@ func ResolveJobImageSettings(localDir, command string) (string, cloud.ImageRequi
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
 	deps = append(deps, dataloc.ParseDepSpecs(scriptDeps)...)
 	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: libCUDA})
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
 		slog.Debug("auto-derived CUDA driver floor from inline library deps",
 			"component", "campaign", "cuda_floor", libCUDA, "local_dir", localDir)
 	}
-	// Back-fill a driver floor from the CUDA floor when nothing else supplied
-	// one. Auto-selected pytorch/nvidia base images bypass label fetching
+	// Explicit requirements replace the inferred floor and may lower or
+	// clear it ("any") — the user's escape hatch when the inferred floor is
+	// wrong for their stack. Script metadata outranks project config.
+	if err := rf.ApplyExplicit(projectCloud.MinDriver, projectCloud.MinCUDA, ".weft.toml [cloud]"); err != nil {
+		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
+	}
+	if meta != nil {
+		if err := rf.ApplyExplicit(meta.MinDriver, meta.MinCUDA, "script [tool.weft]"); err != nil {
+			slog.Warn("script image requirement error", "component", "campaign", "error", err)
+		}
+	}
+	// Derive the driver floor from the CUDA floor (explicit min-driver wins).
+	// Auto-selected pytorch/nvidia base images bypass label fetching
 	// (shouldFetchImageRequirements), so a project pinned at e.g. torch+cu128
 	// would otherwise emit `cuda>=12.8` without the matching `driver>=570`,
 	// and Vast can return offers whose advertised cuda_max_good clears the
 	// CUDA gate while driver_version is too old for the wheel at runtime.
-	req = imagereq.BackfillDriverFromCUDA(req)
-	return img, req, imagePullSecret
+	rf.FinalizeDriver()
+	return img, rf, imagePullSecret
 }
 
 func jobUsesFramework(localDir, command, framework string) bool {

@@ -168,11 +168,11 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 
 		// Build constraints from job metadata
 		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		img, req, imagePullSecret := campaign.ResolveJobImageSettings(localDir, job.Command)
+		img, jobFloor, imagePullSecret := campaign.ResolveJobImageSettings(localDir, job.Command)
 		group := campaign.ApplyImageMetadataRequirements(m.appConfig, []campaign.InstanceGroup{{
 			Image:            img,
-			MinDriverVersion: req.MinDriverVersion,
-			MinCUDAVersion:   req.MinCUDAVersion,
+			MinDriverVersion: jobFloor.Req.MinDriverVersion,
+			MinCUDAVersion:   jobFloor.Req.MinCUDAVersion,
 			ImagePullSecret:  imagePullSecret,
 			Jobs:             []*db.Job{job},
 		}})[0]
@@ -278,13 +278,13 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			gpuMemGB = *job.GPUMemGB
 		}
 		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		img, req, imagePullSecret := campaign.ResolveJobImageSettings(localDir, job.Command)
+		img, jobFloor, imagePullSecret := campaign.ResolveJobImageSettings(localDir, job.Command)
 		group := campaign.ApplyImageMetadataRequirements(m.appConfig, []campaign.InstanceGroup{{
 			GPUClass:         job.GPUClass,
 			GPUMemGB:         gpuMemGB,
 			Image:            img,
-			MinDriverVersion: req.MinDriverVersion,
-			MinCUDAVersion:   req.MinCUDAVersion,
+			MinDriverVersion: jobFloor.Req.MinDriverVersion,
+			MinCUDAVersion:   jobFloor.Req.MinCUDAVersion,
 			ImagePullSecret:  imagePullSecret,
 			Jobs:             []*db.Job{job},
 		}})[0]

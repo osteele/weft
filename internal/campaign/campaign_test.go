@@ -1087,11 +1087,13 @@ func TestSplitGroupsByImage_AppliesCLIMinCUDAOverride(t *testing.T) {
 	}
 }
 
-func TestSplitGroupsByImage_CLIMinCUDAMergesWithImageRequirement(t *testing.T) {
-	// CLI override 12.4 + project image whose own floor is 12.6 → max wins.
+func TestSplitGroupsByImage_CLIMinCUDAOverridesProjectFloor(t *testing.T) {
+	// CLI --cuda-driver-min is the highest-precedence explicit level: it
+	// REPLACES the project floor and may lower it (the user's escape hatch
+	// when the inferred/configured floor is wrong for their stack).
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, ".weft.toml")
-	// MinCUDA in [cloud] reaches imagereq.Explicit as the project floor.
+	// MinCUDA in [cloud] is the project-level explicit floor.
 	if err := os.WriteFile(cfg, []byte("[cloud]\nmin_cuda = \"12.6\"\n"), 0o644); err != nil {
 		t.Fatalf("write .weft.toml: %v", err)
 	}
@@ -1115,8 +1117,11 @@ func TestSplitGroupsByImage_CLIMinCUDAMergesWithImageRequirement(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(groups))
 	}
-	if groups[0].MinCUDAVersion != "12.6" {
-		t.Fatalf("MinCUDAVersion = %q, want 12.6 (max of CLI 12.4 and project 12.6)", groups[0].MinCUDAVersion)
+	if groups[0].MinCUDAVersion != "12.4" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.4 (CLI override replaces project floor)", groups[0].MinCUDAVersion)
+	}
+	if groups[0].MinDriverVersion != 550 {
+		t.Fatalf("MinDriverVersion = %d, want 550 (backfilled from CLI 12.4)", groups[0].MinDriverVersion)
 	}
 }
 

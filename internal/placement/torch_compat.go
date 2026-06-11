@@ -168,6 +168,80 @@ type RuntimeFloor struct {
 	DriverExplicit bool
 }
 
+// MergeInferred max-merges an inferred requirement (torch pin, library
+// floor) into the floor, recording origin when the contribution wins the
+// CUDA floor. Inferred sources never set DriverExplicit.
+func (rf *RuntimeFloor) MergeInferred(req cloud.ImageRequirements, origin string) {
+	before := rf.Req.MinCUDAVersion
+	rf.Req = imagereq.Merge(rf.Req, req)
+	if rf.Req.MinCUDAVersion != before {
+		rf.CUDAOrigin = origin
+	}
+}
+
+// ApplyExplicit applies a user-supplied min-driver / cuda-driver-min pair on
+// top of the inferred floor. Unlike inferred sources, explicit values
+// REPLACE rather than max-merge — the user may lower the floor — and the
+// cuda-driver-min spellings "any"/"none" clear it entirely. cuda-driver-min
+// accepts versions ("12.4"), torch wheel tags ("cu128"), and generation
+// names ("hopper") via ParseCUDADriverFloor. Call FinalizeDriver afterwards
+// to recompute the driver backfill.
+func (rf *RuntimeFloor) ApplyExplicit(minDriver, minCUDA, source string) error {
+	if minCUDA = strings.TrimSpace(minCUDA); minCUDA != "" {
+		parsed, err := ParseCUDADriverFloor(minCUDA)
+		if err != nil {
+			return fmt.Errorf("%s cuda-driver-min: %w", source, err)
+		}
+		rf.Req.MinCUDAVersion = parsed
+		if parsed == "" {
+			rf.CUDAOrigin = ""
+		} else {
+			rf.CUDAOrigin = source
+		}
+	}
+	if minDriver = strings.TrimSpace(minDriver); minDriver != "" {
+		n, err := strconv.Atoi(minDriver)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s min-driver must be a positive integer, got %q", source, minDriver)
+		}
+		rf.Req.MinDriverVersion = n
+		rf.DriverExplicit = true
+	}
+	return nil
+}
+
+// FinalizeDriver derives the driver floor from the CUDA floor unless an
+// explicit min-driver was given. Unlike imagereq.BackfillDriverFromCUDA
+// (whose raise-only semantics fit image-label merges), this REPLACES the
+// derived driver value, so an explicit cuda-driver-min that lowered the CUDA
+// floor lowers the driver floor with it. Idempotent; safe to call again
+// after a later ApplyExplicit.
+func (rf *RuntimeFloor) FinalizeDriver() {
+	if rf.DriverExplicit {
+		return
+	}
+	rf.Req.MinDriverVersion = 0
+	if rf.Req.MinCUDAVersion != "" {
+		rf.Req.MinDriverVersion = imagereq.MinDriverForCUDA(rf.Req.MinCUDAVersion)
+	}
+}
+
+// ApplyCLIOverride applies the --cuda-driver-min CLI value (the
+// highest-precedence explicit level: replaces the inferred/metadata floor,
+// may lower it, "any" clears it) and re-derives the driver floor. One method
+// so every resolution path uses the same label and the
+// ApplyExplicit-then-FinalizeDriver pairing cannot be forgotten.
+func (rf *RuntimeFloor) ApplyCLIOverride(minCUDA string) error {
+	if strings.TrimSpace(minCUDA) == "" {
+		return nil
+	}
+	if err := rf.ApplyExplicit("", minCUDA, "--cuda-driver-min"); err != nil {
+		return err
+	}
+	rf.FinalizeDriver()
+	return nil
+}
+
 // MinRuntimeFloorForJob resolves local, non-network NVIDIA runtime
 // requirements for a job. It mirrors the cloud planner's local sources:
 // project .weft.toml, script metadata, torch lockfile, and inline dependency
@@ -179,63 +253,39 @@ type RuntimeFloor struct {
 // implies CUDA >=12.0 / driver >=525, not the 12.8 toolkit floor. Library
 // floors (e.g. vLLM) are cited toolkit requirements and stay exact.
 //
+// Explicit sources are applied lowest-precedence first (.weft.toml [cloud],
+// then script [tool.weft]); each replaces the CUDA floor and may lower or
+// clear it. The CLI --cuda-driver-min level is applied by the caller on top.
+//
 // The returned error reports unparseable explicit requirements (script
 // metadata or .weft.toml); the floor still reflects the sources that parsed.
 func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	var rf RuntimeFloor
 	var parseErr error
-	merge := func(req cloud.ImageRequirements, origin string) {
-		before := rf.Req.MinCUDAVersion
-		rf.Req = imagereq.Merge(rf.Req, req)
-		if rf.Req.MinCUDAVersion != before {
-			rf.CUDAOrigin = origin
-		}
-	}
-	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
-		if explicit, err := imagereq.Explicit(minDriver, minCUDA); err != nil {
-			parseErr = fmt.Errorf(".weft.toml [cloud] min-driver/cuda-driver-min: %w", err)
-		} else {
-			rf.DriverExplicit = rf.DriverExplicit || explicit.MinDriverVersion > 0
-			merge(explicit, ".weft.toml [cloud]")
-		}
-	}
-	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil && (meta.MinDriver != "" || meta.MinCUDA != "") {
-		if explicit, err := imagereq.Explicit(meta.MinDriver, meta.MinCUDA); err != nil {
-			parseErr = fmt.Errorf("script [tool.weft] min-driver/cuda-driver-min: %w", err)
-		} else {
-			rf.DriverExplicit = rf.DriverExplicit || explicit.MinDriverVersion > 0
-			merge(explicit, "script [tool.weft]")
-		}
-	}
 	if pin := dataloc.ScanTorchPin(dir); pin != nil {
 		if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
 			major, _, _ := strings.Cut(family, ".")
 			origin := fmt.Sprintf("torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
-			merge(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
+			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
 		}
 	}
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
 	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
 	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		merge(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
 	}
-	rf.Req = imagereq.BackfillDriverFromCUDA(rf.Req)
+	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
+		if err := rf.ApplyExplicit(minDriver, minCUDA, ".weft.toml [cloud]"); err != nil {
+			parseErr = err
+		}
+	}
+	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil && (meta.MinDriver != "" || meta.MinCUDA != "") {
+		if err := rf.ApplyExplicit(meta.MinDriver, meta.MinCUDA, "script [tool.weft]"); err != nil {
+			parseErr = err
+		}
+	}
+	rf.FinalizeDriver()
 	return rf, parseErr
-}
-
-// MinRuntimeRequirementsForJob is the requirements-only form of
-// MinRuntimeFloorForJob; parse errors in explicit sources are ignored here
-// (daemon paths must not wedge on one job's bad metadata — submit-time
-// callers use MinRuntimeFloorForJob to surface them).
-func MinRuntimeRequirementsForJob(dir, command string) cloud.ImageRequirements {
-	rf, _ := MinRuntimeFloorForJob(dir, command)
-	return rf.Req
-}
-
-// MinDriverForCUDAVersion returns the NVIDIA driver-major floor for a CUDA
-// compatibility version, or zero when the mapping is unknown.
-func MinDriverForCUDAVersion(cuda string) int {
-	return imagereq.MinDriverForCUDA(cuda)
 }
 
 // MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded".

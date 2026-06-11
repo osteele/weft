@@ -483,7 +483,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if parseErr != nil {
 			return fmt.Errorf("--cuda-driver-min: %w", parseErr)
 		}
-		if canonical != "" {
+		if canonical == "" {
+			// "any"/"none" clears the inferred floor. Persist the sentinel
+			// so daemon-side re-derivation (ConstraintsFromJob, the cloud
+			// planner) honors the clear, not just this submit invocation.
+			cliOverrides.MinCUDAVersion = "any"
+		} else {
 			cliOverrides.MinCUDAVersion = canonical
 		}
 	}
@@ -723,18 +728,23 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if placementConstraints.NeedsGPU() {
 		placementConstraints.MinComputeCap = placement.MinComputeCapForJob(localDir)
-		req := placement.MinRuntimeRequirementsForJob(localDir, command)
-		if cliOverrides.MinCUDAVersion != "" {
-			req.MinCUDAVersion = placement.MaxCUDAVersion(req.MinCUDAVersion, cliOverrides.MinCUDAVersion)
-			if driver := placement.MinDriverForCUDAVersion(req.MinCUDAVersion); driver > req.MinDriverVersion {
-				req.MinDriverVersion = driver
+		rf, rfErr := placement.MinRuntimeFloorForJob(localDir, command)
+		if rfErr != nil {
+			return fmt.Errorf("resolve CUDA/driver floor: %w", rfErr)
+		}
+		if runCUDADriverMin != "" {
+			// CLI is the highest-precedence explicit level: it replaces the
+			// inferred/metadata floor and may lower or clear it ("any").
+			if err := rf.ApplyExplicit("", runCUDADriverMin, "--cuda-driver-min"); err != nil {
+				return err
 			}
+			rf.FinalizeDriver()
 		}
-		if req.MinCUDAVersion != "" {
-			placementConstraints.MinCUDAVersion = req.MinCUDAVersion
+		if rf.Req.MinCUDAVersion != "" {
+			placementConstraints.MinCUDAVersion = rf.Req.MinCUDAVersion
 		}
-		if req.MinDriverVersion > 0 {
-			placementConstraints.MinDriverVersion = req.MinDriverVersion
+		if rf.Req.MinDriverVersion > 0 {
+			placementConstraints.MinDriverVersion = rf.Req.MinDriverVersion
 		}
 	}
 	// Tip placement toward producers' live rental instances so --needs

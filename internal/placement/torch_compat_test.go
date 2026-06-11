@@ -1,11 +1,13 @@
 package placement
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -304,5 +306,106 @@ func TestMinRuntimeFloor_OnPremHostsEligibleUnderCu128Pin(t *testing.T) {
 	}
 	if ok, _ := CheckHostGPUConstraints(old, c); ok {
 		t.Errorf("CUDA-11 host should be rejected under cu128 family floor")
+	}
+}
+
+func writeScriptWithCUDADriverMin(t *testing.T, dir, value string) string {
+	t.Helper()
+	script := fmt.Sprintf(`# /// script
+# dependencies = []
+#
+# [tool.weft]
+# cuda-driver-min = %q
+# ///
+print("hi")
+`, value)
+	path := filepath.Join(dir, "train.py")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Regression for wb18: cuda-driver-min = "cu128" was silently discarded by a
+// float parse whose error was swallowed. The cuNNN spelling must parse, and
+// an explicit value must REPLACE (here: raise from family floor) rather than
+// be dropped.
+func TestMinRuntimeFloorForJob_CuNNNSpellingParses(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	writeScriptWithCUDADriverMin(t, dir, "cu128")
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "12.8" {
+		t.Errorf("MinCUDAVersion = %q, want %q (explicit cu128)", rf.Req.MinCUDAVersion, "12.8")
+	}
+	if rf.Req.MinDriverVersion != 570 {
+		t.Errorf("MinDriverVersion = %d, want 570", rf.Req.MinDriverVersion)
+	}
+	if !strings.Contains(rf.CUDAOrigin, "script [tool.weft]") {
+		t.Errorf("CUDAOrigin = %q, want script provenance", rf.CUDAOrigin)
+	}
+}
+
+// An explicit cuda-driver-min may LOWER the inferred floor: a library floor
+// of 13.0 drops to 12.0 / driver 525 when the user pins it down.
+func TestMinRuntimeFloorForJob_ExplicitLowersInferredFloor(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	writeScriptWithCUDADriverMin(t, dir, "12.0")
+
+	rf, err := MinRuntimeFloorForJob(dir, `uv run --with "vllm>=0.20" train.py`)
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "12.0" {
+		t.Errorf("MinCUDAVersion = %q, want %q (explicit lowers library floor)", rf.Req.MinCUDAVersion, "12.0")
+	}
+	if rf.Req.MinDriverVersion != 525 {
+		t.Errorf("MinDriverVersion = %d, want 525", rf.Req.MinDriverVersion)
+	}
+}
+
+// cuda-driver-min = "any" clears the inferred CUDA and driver floors.
+func TestMinRuntimeFloorForJob_AnyClearsFloors(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	writeScriptWithCUDADriverMin(t, dir, "any")
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "" || rf.Req.MinDriverVersion != 0 {
+		t.Errorf("floors = %q/%d, want cleared", rf.Req.MinCUDAVersion, rf.Req.MinDriverVersion)
+	}
+}
+
+// Unparseable explicit metadata returns an error (surfaced at submit time)
+// while the floor still reflects the sources that parsed.
+func TestMinRuntimeFloorForJob_GarbageErrors(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	writeScriptWithCUDADriverMin(t, dir, "garbage")
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err == nil {
+		t.Fatal("expected parse error for cuda-driver-min = garbage")
+	}
+	if rf.Req.MinCUDAVersion != "12.0" {
+		t.Errorf("MinCUDAVersion = %q, want family floor retained", rf.Req.MinCUDAVersion)
+	}
+}
+
+// An explicit min-driver is preserved exactly — the CUDA-floor backfill must
+// not raise it.
+func TestRuntimeFloor_ExplicitDriverNotRaised(t *testing.T) {
+	var rf RuntimeFloor
+	rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: "12.8"}, "torch pin")
+	if err := rf.ApplyExplicit("530", "", "script [tool.weft]"); err != nil {
+		t.Fatalf("ApplyExplicit: %v", err)
+	}
+	rf.FinalizeDriver()
+	if rf.Req.MinDriverVersion != 530 {
+		t.Errorf("MinDriverVersion = %d, want explicit 530 preserved", rf.Req.MinDriverVersion)
 	}
 }

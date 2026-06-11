@@ -26,16 +26,6 @@ func TestFromEnv(t *testing.T) {
 	}
 }
 
-func TestExplicit(t *testing.T) {
-	req, err := Explicit("535", "12.8")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.MinDriverVersion != 535 || req.MinCUDAVersion != "12.8" {
-		t.Fatalf("requirements = %+v", req)
-	}
-}
-
 func TestMinDriverForCUDA(t *testing.T) {
 	cases := []struct {
 		cuda string

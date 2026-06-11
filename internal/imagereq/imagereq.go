@@ -165,9 +165,12 @@ func MinDriverForCUDA(cuda string) int {
 //   - An explicit pin that already satisfies the CUDA floor is preserved.
 //
 // An explicit pin that does NOT satisfy the CUDA floor is raised. That's
-// intentional: an under-constrained driver against a known CUDA floor would
-// pick offers the job cannot actually run on. Returns req unchanged when no
-// CUDA floor is set or no driver mapping is known.
+// intentional FOR IMAGE-LABEL MERGES, where requirements only accumulate: an
+// under-constrained driver against a known CUDA floor would pick offers the
+// job cannot actually run on. User-explicit overrides that may LOWER the
+// floor are composed one layer up (placement.RuntimeFloor.ApplyExplicit /
+// FinalizeDriver), not here. Returns req unchanged when no CUDA floor is set
+// or no driver mapping is known.
 func BackfillDriverFromCUDA(req cloud.ImageRequirements) cloud.ImageRequirements {
 	if req.MinCUDAVersion == "" {
 		return req
@@ -222,26 +225,6 @@ func isCUDAVersion(s string) bool {
 		}
 	}
 	return true
-}
-
-func Explicit(minDriver, minCUDA string) (cloud.ImageRequirements, error) {
-	var req cloud.ImageRequirements
-	minDriver = strings.TrimSpace(minDriver)
-	if minDriver != "" {
-		n, err := strconv.Atoi(minDriver)
-		if err != nil || n <= 0 {
-			return req, fmt.Errorf("min-driver must be a positive integer, got %q", minDriver)
-		}
-		req.MinDriverVersion = n
-	}
-	minCUDA = strings.TrimSpace(minCUDA)
-	if minCUDA != "" {
-		if _, err := strconv.ParseFloat(minCUDA, 64); err != nil {
-			return req, fmt.Errorf("min-cuda must be a CUDA major.minor version, got %q", minCUDA)
-		}
-		req.MinCUDAVersion = minCUDA
-	}
-	return req, nil
 }
 
 func maxCUDAVersion(a, b string) string {

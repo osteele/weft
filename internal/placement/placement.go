@@ -15,12 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
-	"github.com/osteele/weft/internal/imagereq"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/transferbw"
@@ -111,13 +109,19 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	if c.NeedsGPU() {
 		localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 		c.MinComputeCap = MinComputeCapForJob(localDir)
-		req := MinRuntimeRequirementsForJob(localDir, j.Command)
+		// Parse errors in explicit metadata are logged at submit time; the
+		// daemon-side re-derivation must not wedge on one job's bad metadata.
+		rf, _ := MinRuntimeFloorForJob(localDir, j.Command)
 		if j.CLIResourceOverrides != nil && j.CLIResourceOverrides.MinCUDAVersion != "" {
-			req = imagereq.Merge(req, cloud.ImageRequirements{MinCUDAVersion: j.CLIResourceOverrides.MinCUDAVersion})
+			// The persisted CLI override is the highest-precedence explicit
+			// level: it replaces the inferred/metadata floor and may lower
+			// or clear it ("any").
+			if err := rf.ApplyExplicit("", j.CLIResourceOverrides.MinCUDAVersion, "--cuda-driver-min"); err == nil {
+				rf.FinalizeDriver()
+			}
 		}
-		req = imagereq.BackfillDriverFromCUDA(req)
-		c.MinCUDAVersion = req.MinCUDAVersion
-		c.MinDriverVersion = req.MinDriverVersion
+		c.MinCUDAVersion = rf.Req.MinCUDAVersion
+		c.MinDriverVersion = rf.Req.MinDriverVersion
 	}
 	return c
 }
@@ -1460,21 +1464,6 @@ func compareDottedVersion(a, b string) int {
 		}
 	}
 	return 0
-}
-
-func MaxCUDAVersion(a, b string) string {
-	a = strings.TrimSpace(a)
-	b = strings.TrimSpace(b)
-	switch {
-	case a == "":
-		return b
-	case b == "":
-		return a
-	case compareDottedVersion(b, a) > 0:
-		return b
-	default:
-		return a
-	}
 }
 
 func splitVersionInts(version string) []int {
