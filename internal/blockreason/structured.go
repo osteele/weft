@@ -49,6 +49,11 @@ type Structured struct {
 	LaunchDetail string           `json:"launch_detail,omitempty"`
 	Fingerprint  string           `json:"fingerprint,omitempty"`
 	Reuse        []ReuseRejection `json:"reuse,omitempty"`
+	// OnPrem records why every on-prem inventory host rejected the job
+	// (per-host rejection detail from the placement scorer). Persisting it
+	// here lets weft info/explain show the on-prem avenue after a daemon
+	// restart — previously it lived only in the oplog.
+	OnPrem string `json:"onprem,omitempty"`
 }
 
 // IsPlacementFailure reports whether the reason has the launch/reuse structure
@@ -58,7 +63,7 @@ func (s *Structured) IsPlacementFailure() bool {
 	if s == nil {
 		return false
 	}
-	return strings.TrimSpace(s.Launch) != "" || len(s.Reuse) > 0
+	return strings.TrimSpace(s.Launch) != "" || len(s.Reuse) > 0 || strings.TrimSpace(s.OnPrem) != ""
 }
 
 // Flat renders the structured reason as the one-line string used by display
@@ -69,6 +74,31 @@ func (s *Structured) Flat() string {
 		return ""
 	}
 	return strings.TrimSpace(s.Summary)
+}
+
+// MergeRecordedReuse overlays recorded reuse outcomes — actual match/submit
+// failures observed during the pass — onto the re-probed rejections. A
+// recorded entry replaces the probe's entry for the same instance and is
+// otherwise prepended: recorded outcomes reflect what actually happened,
+// while a post-hoc probe can disagree (e.g. the match reports compatible
+// after the submit already failed) and would hide the real failure.
+func (s *Structured) MergeRecordedReuse(recorded []ReuseRejection) {
+	if s == nil || len(recorded) == 0 {
+		return
+	}
+	byInstance := map[string]int{}
+	for i, r := range s.Reuse {
+		byInstance[r.Instance] = i
+	}
+	var prepend []ReuseRejection
+	for _, r := range recorded {
+		if i, ok := byInstance[r.Instance]; ok && r.Instance != "" {
+			s.Reuse[i] = r
+		} else {
+			prepend = append(prepend, r)
+		}
+	}
+	s.Reuse = append(prepend, s.Reuse...)
 }
 
 // ReuseHeadline is the compact reuse-side summary for a collapsed list row,
@@ -102,9 +132,12 @@ func (s *Structured) DetailLines() []string {
 		}
 		return nil
 	}
-	lines := make([]string, 0, 1+len(s.Reuse))
+	lines := make([]string, 0, 2+len(s.Reuse))
 	if launch := strings.TrimSpace(s.Launch); launch != "" {
 		lines = appendAvenueLines(lines, "new instance", launch, s.LaunchDetail)
+	}
+	if onPrem := strings.TrimSpace(s.OnPrem); onPrem != "" {
+		lines = appendAvenueLines(lines, "on-prem hosts", onPrem, "")
 	}
 	for _, r := range s.Reuse {
 		inst := strings.TrimSpace(r.Instance)

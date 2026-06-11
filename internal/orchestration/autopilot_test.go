@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
@@ -62,7 +64,7 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 		return QueueRebalanceResult{}, nil
 	}
 	if !opts.realFillReusableInstances {
-		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string, map[int64]string) (int, error) {
+		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string, map[int64]string, map[int64][]blockreason.ReuseRejection) (int, error) {
 			return 0, nil
 		}
 	}
@@ -1346,7 +1348,7 @@ func TestFillReusableInstancesRecordsRejectionReason(t *testing.T) {
 	}
 
 	diagnostics := map[int64]string{}
-	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics, map[int64]string{})
+	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics, map[int64]string{}, nil)
 	if err != nil {
 		t.Fatalf("fillReusableInstances: %v", err)
 	}
@@ -1641,7 +1643,7 @@ func TestSubmitAutoPilotReuseAssignments_SourceTooLargeBlocksWithoutClaiming(t *
 	blockedReasons := map[int64]string{}
 	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
 		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
-		reuseDiagnostics, blockedReasons)
+		reuseDiagnostics, blockedReasons, nil)
 
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0", placed)
@@ -1757,7 +1759,7 @@ func TestSubmitAutoPilotReuseAssignments_BackoffSkips(t *testing.T) {
 	reuseDiagnostics := map[int64]string{}
 	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
 		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
-		reuseDiagnostics, map[int64]string{})
+		reuseDiagnostics, map[int64]string{}, nil)
 
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0 (backoff window)", placed)
@@ -1775,5 +1777,70 @@ func TestSubmitAutoPilotReuseAssignments_BackoffSkips(t *testing.T) {
 	ev, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{Kind: db.EventReuseSkippedBackoff})
 	if err != nil || ev == nil || ev.JobID != jobID {
 		t.Fatalf("expected reuse.skipped.backoff event for job %d, got %+v err %v", jobID, ev, err)
+	}
+}
+
+// Recorded reuse failures and on-prem rejection detail must survive into the
+// persisted placement_blocked JSON, with recorded outcomes beating the
+// re-probed match result for the same instance.
+func TestFinalizeUnplacedBlockedReasons_PersistsRecordedReuseAndOnPrem(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+		GPUMemGB: 24,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	instLabel := ids.FormatInstanceID(instanceID)
+	blockedReasons := map[int64]string{}
+	structuredBlocked := map[int64]*blockreason.Structured{}
+	recordedReuse := map[int64][]blockreason.ReuseRejection{
+		jobID: {{Instance: instLabel, Reason: "submit failed: upload source: connection reset", Detail: "full error text"}},
+	}
+	onPremDetails := map[int64]string{
+		jobID: "cool30: driver floor: NVIDIA driver 525.125.06 < required >=570",
+	}
+
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
+		map[int64]string{}, recordedReuse, onPremDetails,
+		map[int64]*db.Job{jobID: job}, []int64{jobID},
+		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	s := blockreason.Parse(refreshed.PlacementBlockedJSON)
+	if s == nil {
+		t.Fatalf("placement_blocked did not decode: %q", refreshed.PlacementBlockedJSON)
+	}
+	var found *blockreason.ReuseRejection
+	for i := range s.Reuse {
+		if s.Reuse[i].Instance == instLabel {
+			found = &s.Reuse[i]
+		}
+	}
+	if found == nil || !strings.Contains(found.Reason, "submit failed") {
+		t.Fatalf("recorded reuse rejection missing or overridden by probe: %+v", s.Reuse)
+	}
+	if !strings.Contains(s.OnPrem, "cool30") {
+		t.Fatalf("on-prem detail not persisted: %q", s.OnPrem)
 	}
 }

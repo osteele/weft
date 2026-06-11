@@ -230,3 +230,64 @@ func TestStructuredMarshalRoundTripIncludesDetail(t *testing.T) {
 		t.Fatalf("ReuseRejection.Detail round trip: got %+v, want %+v", got.Reuse, s.Reuse)
 	}
 }
+
+// OnPrem persists the per-host on-prem rejection detail (previously
+// oplog-only) and surfaces it as its own avenue.
+func TestStructuredOnPremAvenue(t *testing.T) {
+	s := &Structured{
+		Summary: "no rental headroom; running instances couldn't accept this job",
+		Launch:  "no rental headroom",
+		OnPrem:  "2 hosts: cool30: driver floor: NVIDIA driver 525.125.06 < required >=570; cool100: host overloaded",
+	}
+	data := s.Marshal()
+	round := Parse(data)
+	if round == nil || round.OnPrem != s.OnPrem {
+		t.Fatalf("OnPrem did not round-trip: %+v", round)
+	}
+	if !round.IsPlacementFailure() {
+		t.Fatal("IsPlacementFailure = false with OnPrem set")
+	}
+	lines := round.DetailLines()
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "on-prem hosts") && strings.Contains(l, "cool30") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("DetailLines missing on-prem avenue: %v", lines)
+	}
+}
+
+// Recorded reuse outcomes overlay re-probed ones: same-instance entries are
+// replaced (the recorded failure is what actually happened), new instances
+// are prepended.
+func TestMergeRecordedReuse(t *testing.T) {
+	s := &Structured{
+		Summary: "x",
+		Launch:  "no rental headroom",
+		Reuse: []ReuseRejection{
+			{Instance: "wi1", Reason: "probe says compatible-ish"},
+			{Instance: "wi2", Reason: "GPU memory insufficient"},
+		},
+	}
+	s.MergeRecordedReuse([]ReuseRejection{
+		{Instance: "wi1", Reason: "submit failed: upload source: connection reset", Detail: "full err"},
+		{Instance: "wi3", Reason: "submit failed: no ack"},
+	})
+	if len(s.Reuse) != 3 {
+		t.Fatalf("reuse entries = %d, want 3", len(s.Reuse))
+	}
+	if s.Reuse[0].Instance != "wi3" {
+		t.Errorf("new recorded instance not prepended: %+v", s.Reuse)
+	}
+	var wi1 *ReuseRejection
+	for i := range s.Reuse {
+		if s.Reuse[i].Instance == "wi1" {
+			wi1 = &s.Reuse[i]
+		}
+	}
+	if wi1 == nil || !strings.Contains(wi1.Reason, "submit failed") {
+		t.Errorf("recorded outcome did not replace probe entry for wi1: %+v", s.Reuse)
+	}
+}
