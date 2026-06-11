@@ -1523,19 +1523,13 @@ type relaunchAttemptFacts struct {
 
 // backoffRemaining returns how long the caller must still wait before
 // re-launching this job, given count consecutive prior attempts. Zero means
-// the job is eligible. Returns zero if the last attempt's end time is unknown
-// (we can't measure elapsed time) — better to risk a redundant launch than
-// stall the job indefinitely.
+// the job is eligible (including when the last attempt's end time is
+// unknown — see retrypolicy.BackoffRemaining).
 func backoffRemaining(facts relaunchAttemptFacts, count int, now time.Time) time.Duration {
-	if count <= 0 || facts.LastAttemptEndTime == nil || *facts.LastAttemptEndTime <= 0 {
+	if facts.LastAttemptEndTime == nil {
 		return 0
 	}
-	delay := retrypolicy.BackoffDelayClamped(count - 1)
-	elapsed := now.Sub(time.Unix(*facts.LastAttemptEndTime, 0))
-	if elapsed >= delay {
-		return 0
-	}
-	return delay - elapsed
+	return retrypolicy.BackoffRemaining(count, time.Unix(*facts.LastAttemptEndTime, 0), now)
 }
 
 func attemptFactsForRelaunch(database *sql.DB, jobID int64) (relaunchAttemptFacts, error) {

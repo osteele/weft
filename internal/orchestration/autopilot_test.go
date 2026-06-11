@@ -1658,3 +1658,122 @@ func TestSubmitAutoPilotReuseAssignments_SourceTooLargeBlocksWithoutClaiming(t *
 		t.Fatalf("attempt rows = %d, want 0 (no claim on deterministic rejection)", len(attempts))
 	}
 }
+
+// Reuse backoff: the persisted reuse.submit_failed streak gates the
+// automatic reuse paths with growing delays (mirroring the relaunch
+// backoff); a reuse.submit_ok resets the streak.
+func TestReuseBackoffRemaining(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	now := time.Now()
+	failAt := func(ts time.Time) {
+		t.Helper()
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind:  db.EventReuseSubmitFailed,
+			JobID:      jobID,
+			OccurredAt: ts.Unix(),
+		}); err != nil {
+			t.Fatalf("InsertLifecycleEvent: %v", err)
+		}
+	}
+
+	if remaining, count := reuseBackoffRemaining(database, jobID, now); remaining != 0 || count != 0 {
+		t.Fatalf("fresh job: remaining=%v count=%d, want 0/0", remaining, count)
+	}
+
+	failAt(now.Add(-2 * time.Second))
+	remaining, count := reuseBackoffRemaining(database, jobID, now)
+	if count != 1 || remaining <= 0 {
+		t.Fatalf("after 1 failure 2s ago: remaining=%v count=%d, want positive backoff", remaining, count)
+	}
+
+	// Second consecutive failure grows the delay.
+	failAt(now.Add(-1 * time.Second))
+	remaining2, count2 := reuseBackoffRemaining(database, jobID, now)
+	if count2 != 2 || remaining2 <= remaining {
+		t.Fatalf("after 2 failures: remaining=%v count=%d, want longer than %v", remaining2, count2, remaining)
+	}
+
+	// A long-elapsed window clears the backoff but keeps the count.
+	if remaining, count := reuseBackoffRemaining(database, jobID, now.Add(10*time.Minute)); remaining != 0 || count != 2 {
+		t.Fatalf("elapsed window: remaining=%v count=%d, want 0/2", remaining, count)
+	}
+
+	// Success resets the streak.
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventReuseSubmitOK,
+		JobID:      jobID,
+		OccurredAt: now.Unix(),
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+	if remaining, count := reuseBackoffRemaining(database, jobID, now); remaining != 0 || count != 0 {
+		t.Fatalf("after submit_ok: remaining=%v count=%d, want streak reset", remaining, count)
+	}
+}
+
+// A job in its reuse backoff window is skipped (no claim, no submit) with a
+// diagnostic, and the skip is recorded once per (job, count).
+func TestSubmitAutoPilotReuseAssignments_BackoffSkips(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := db.RecordQueued(database, "", dir, "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventReuseSubmitFailed,
+		JobID:      jobID,
+		LaunchID:   instanceID,
+		OccurredAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+	reuseBackoffEventEmitted.Delete(jobID)
+
+	reuseDiagnostics := map[int64]string{}
+	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
+		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
+		reuseDiagnostics, map[int64]string{})
+
+	if placed != 0 {
+		t.Fatalf("placed = %d, want 0 (backoff window)", placed)
+	}
+	if diag := reuseDiagnostics[jobID]; !strings.Contains(diag, "reuse backoff") {
+		t.Fatalf("diagnostic = %q, want reuse backoff detail", diag)
+	}
+	attempts, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLaunchAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("attempt rows = %d, want 0", len(attempts))
+	}
+	ev, err := db.LatestLifecycleEvent(database, db.LifecycleEventFilter{Kind: db.EventReuseSkippedBackoff})
+	if err != nil || ev == nil || ev.JobID != jobID {
+		t.Fatalf("expected reuse.skipped.backoff event for job %d, got %+v err %v", jobID, ev, err)
+	}
+}

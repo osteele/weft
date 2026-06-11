@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/blockreason"
@@ -18,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/retrypolicy"
 )
 
 type GroupedAutoPilotResult struct {
@@ -1280,6 +1282,12 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 				oplog.WithDetailf("instance=%d reason=source_validation", assignment.Instance.Instance.ID))
 			continue
 		}
+		if remaining, count := reuseBackoffRemaining(database, assignment.Job.ID, time.Now()); remaining > 0 {
+			detail := fmt.Sprintf("reuse backoff %s remaining (after %d failed submit(s))", remaining.Truncate(time.Second), count)
+			emitReuseBackoffEvent(database, assignment.Job.ID, count, detail)
+			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID, detail)
+			continue
+		}
 		if ok, reason := campaign.MatchJobToInstanceWithUV(assignment.Job, assignment.Instance, r2Client); !ok {
 			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID,
 				fmt.Sprintf("could not reuse %s: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), reason))
@@ -1293,11 +1301,60 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 				oplog.WithDetailf("instance=%d", assignment.Instance.Instance.ID))
 			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID,
 				fmt.Sprintf("could not reuse %s: submit failed: %s", ids.FormatInstanceID(assignment.Instance.Instance.ID), SummarizeAutoPilotError(err)))
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventReuseSubmitFailed,
+				JobID:     assignment.Job.ID,
+				LaunchID:  assignment.Instance.Instance.ID,
+				ErrorText: SummarizeAutoPilotError(err),
+			})
 			continue
 		}
+		reuseBackoffEventEmitted.Delete(assignment.Job.ID)
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventReuseSubmitOK,
+			JobID:     assignment.Job.ID,
+			LaunchID:  assignment.Instance.Instance.ID,
+		})
 		placed++
 	}
 	return placed
+}
+
+// reuseBackoffEventEmitted tracks the last streak count for which a
+// reuse.skipped.backoff event was recorded per job, so the per-pass loop
+// emits at most one event per (job, count) pair (mirrors the relaunch
+// path's backoffEventEmitted).
+var reuseBackoffEventEmitted sync.Map
+
+// reuseBackoffRemaining derives the reuse-path backoff from the persisted
+// reuse.submit_failed streak. Zero means the job is eligible; an unknown
+// last-failure time also yields zero (better a redundant submit attempt than
+// stalling the job indefinitely). Only the automatic autopilot paths are
+// gated; manual weft job move bypasses this.
+func reuseBackoffRemaining(database *sql.DB, jobID int64, now time.Time) (time.Duration, int) {
+	count, lastFailureAt, err := db.ReuseFailureStreak(database, jobID)
+	if err != nil || count <= 0 || lastFailureAt <= 0 {
+		return 0, count
+	}
+	delay := retrypolicy.BackoffDelayClamped(count - 1)
+	elapsed := now.Sub(time.Unix(lastFailureAt, 0))
+	if elapsed >= delay {
+		return 0, count
+	}
+	return delay - elapsed, count
+}
+
+func emitReuseBackoffEvent(database *sql.DB, jobID int64, count int, detail string) {
+	if prev, ok := reuseBackoffEventEmitted.Load(jobID); ok && prev.(int) == count {
+		return
+	}
+	reuseBackoffEventEmitted.Store(jobID, count)
+	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:     db.EventReuseSkippedBackoff,
+		JobID:         jobID,
+		AttemptNumber: count,
+		Detail:        detail,
+	})
 }
 
 func jobsByIDInOrder(jobs map[int64]*db.Job, ids []int64) []*db.Job {

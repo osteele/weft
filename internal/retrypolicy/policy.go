@@ -34,6 +34,24 @@ func MaxPlacementAttempts() int {
 	return len(backoffDelays) + 1
 }
 
+// BackoffRemaining returns how long a caller must still wait, given count
+// consecutive prior failures, the time of the most recent failure, and now.
+// Zero means eligible. A zero/unknown last-failure time also yields zero —
+// better a redundant retry than stalling the work indefinitely. Shared by
+// the relaunch and reuse backoff paths so the window arithmetic cannot
+// drift between them.
+func BackoffRemaining(count int, last, now time.Time) time.Duration {
+	if count <= 0 || last.IsZero() || last.Unix() <= 0 {
+		return 0
+	}
+	delay := BackoffDelayClamped(count - 1)
+	elapsed := now.Sub(last)
+	if elapsed >= delay {
+		return 0
+	}
+	return delay - elapsed
+}
+
 func MaxAttempts() int {
 	return MaxPlacementAttempts()
 }

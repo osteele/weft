@@ -39,6 +39,14 @@ const (
 	// breaker as a result. Distinguishes auto-resume from manual reset.
 	EventRelaunchAutoProbeResumed = "relaunch.auto_probe_resumed"
 
+	// Reuse-path submit outcomes (the autopilot's instance-reuse pass).
+	// reuse.submit_failed events form the streak that drives the reuse
+	// backoff; reuse.submit_ok resets it. reuse.skipped.backoff records a
+	// backoff skip (deduped to one event per (job, streak count)).
+	EventReuseSubmitFailed   = "reuse.submit_failed"
+	EventReuseSubmitOK       = "reuse.submit_ok"
+	EventReuseSkippedBackoff = "reuse.skipped.backoff"
+
 	// EventPlacementIntentPruned records that the autopilot canceled a stale
 	// open placement intent (orchestrator died before resolving it). The
 	// detail field carries the intent id, originating operation, and the
@@ -429,6 +437,27 @@ func LatestJobDispatchFailureDetail(database *sql.DB, jobID int64, detailPrefix 
 		return "", err
 	}
 	return detail.String, nil
+}
+
+// ReuseFailureStreak returns the number of reuse.submit_failed events for
+// jobID since the most recent reuse.submit_ok (all of them when the job has
+// no success on record), and the time of the most recent failure. Drives the
+// autopilot's reuse backoff; persisted events make the streak survive
+// restarts, mirroring the relaunch path's attempt-row-derived backoff.
+func ReuseFailureStreak(database *sql.DB, jobID int64) (count int, lastFailureAt int64, err error) {
+	if database == nil || jobID == 0 {
+		return 0, 0, nil
+	}
+	err = database.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(occurred_at), 0) FROM lifecycle_events
+		WHERE job_id = ?
+		  AND event_kind = ?
+		  AND id > COALESCE((
+		      SELECT MAX(id) FROM lifecycle_events
+		      WHERE job_id = ? AND event_kind = ?), 0)`,
+		jobID, EventReuseSubmitFailed, jobID, EventReuseSubmitOK,
+	).Scan(&count, &lastFailureAt)
+	return count, lastFailureAt, err
 }
 
 // CountLifecycleEventsByKind returns event counts grouped by kind, ordered by count descending.
