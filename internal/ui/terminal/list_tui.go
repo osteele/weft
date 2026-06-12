@@ -597,7 +597,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("Refresh error: %v", msg.err)
 			return m, nil
 		}
-		m.jobs = msg.jobs
+		m.jobs = m.visibleJobsForLoadedMsg(msg.jobs)
 		m.launchLiveByID = msg.launchLiveByID
 		m.launchStatusByID = msg.launchStatusByID
 		m.placingJobIDs = msg.placingJobIDs
@@ -1104,6 +1104,27 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m listTUIModel) visibleJobsForLoadedMsg(jobs []*db.Job) []*db.Job {
+	if !m.unprocessedView || !m.isStatusGroupedView() {
+		return jobs
+	}
+	return excludeEffectiveStatus(jobs, db.StatusCanceled)
+}
+
+func excludeEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
+	if len(jobs) == 0 {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == status {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered
 }
 
 func (m listTUIModel) quickLaunchStatusPinned() bool {

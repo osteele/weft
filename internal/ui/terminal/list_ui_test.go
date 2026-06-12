@@ -166,6 +166,41 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedUnprocessedHidesCanceledJobs(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusCanceled, Description: "handled cancel"},
+		{ID: 2, Status: db.StatusKilled, Description: "needs review"},
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		unprocessedView: true,
+		width:           100,
+		height:          20,
+		title:           "Jobs",
+	}
+
+	next, _ := m.Update(listJobsLoadedMsg{jobs: jobs})
+	got := next.(listTUIModel)
+
+	if len(got.jobs) != 1 || got.jobs[0].ID != 2 {
+		t.Fatalf("visible jobs = %#v, want only killed job", got.jobs)
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Jobs • unprocessed (1)") {
+		t.Fatalf("title count should ignore hidden canceled jobs, got:\n%s", out)
+	}
+	if strings.Contains(out, "handled cancel") {
+		t.Fatalf("grouped unprocessed view should hide canceled jobs, got:\n%s", out)
+	}
+
+	flat := listTUIModel{unprocessedView: true}
+	next, _ = flat.Update(listJobsLoadedMsg{jobs: jobs})
+	flatGot := next.(listTUIModel)
+	if len(flatGot.jobs) != 2 {
+		t.Fatalf("flat unprocessed jobs = %d, want 2", len(flatGot.jobs))
+	}
+}
+
 func TestListTUIToggleStatusAreaIncreasesBodyRows(t *testing.T) {
 	m := listTUIModel{
 		width:  100,
