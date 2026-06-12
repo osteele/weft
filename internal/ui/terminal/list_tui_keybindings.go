@@ -75,7 +75,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 				m.statusMessage = "Move lookup canceled"
 				return m, nil
 			}
-			m.shutdown()
+			m.shutdownForQuit()
 			return m, tea.Quit
 		}},
 		{keys: "ctrl+z", action: "suspend", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {

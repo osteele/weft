@@ -86,11 +86,20 @@ func newHostsTUIModel(database *sql.DB) hostsTUIModel {
 }
 
 func (m *hostsTUIModel) shutdown() {
+	if m.cancel != nil {
+		m.cancel()
+	}
 	if m.syncWorker != nil {
 		m.syncWorker.Stop()
 	}
+}
+
+func (m *hostsTUIModel) shutdownForQuit() {
 	if m.cancel != nil {
 		m.cancel()
+	}
+	if m.syncWorker != nil {
+		stopSyncWorkerAfterQuit(m.syncWorker)
 	}
 }
 
@@ -371,10 +380,10 @@ func (m hostsTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m hostsTUIModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "q":
-		m.shutdown()
+		m.shutdownForQuit()
 		return m, tea.Quit
 	case "esc":
-		m.shutdown()
+		m.shutdownForQuit()
 		return m, tea.Quit
 	case "up", "k":
 		if m.cursor > 0 {

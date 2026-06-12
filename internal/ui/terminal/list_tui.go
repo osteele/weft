@@ -442,6 +442,13 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 }
 
 func (m *listTUIModel) shutdown() {
+	m.shutdownImmediate()
+	if m.syncWorker != nil {
+		m.syncWorker.Stop()
+	}
+}
+
+func (m *listTUIModel) shutdownImmediate() {
 	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 	_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
 	if m.dbWatcher != nil {
@@ -450,8 +457,12 @@ func (m *listTUIModel) shutdown() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+}
+
+func (m *listTUIModel) shutdownForQuit() {
+	m.shutdownImmediate()
 	if m.syncWorker != nil {
-		m.syncWorker.Stop()
+		stopSyncWorkerAfterQuit(m.syncWorker)
 	}
 }
 

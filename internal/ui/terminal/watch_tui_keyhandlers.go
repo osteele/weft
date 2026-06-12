@@ -80,6 +80,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.dbWatcher.Close()
 		}
 		m.cancel()
+		stopSyncWorkerAfterQuit(m.syncWorker)
 		return m, tea.Quit
 	case "ctrl+z":
 		return m, tea.Suspend
@@ -388,6 +389,7 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.dbWatcher.Close()
 		}
 		m.cancel()
+		stopSyncWorkerAfterQuit(m.syncWorker)
 		return m, tea.Quit
 	case "ctrl+z":
 		return m, tea.Suspend
