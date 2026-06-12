@@ -86,6 +86,25 @@ print("serve")
 	}
 }
 
+func TestValidatePinnedImageCUDACompatibilityIgnoresExplicitProviderFloor(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "serve.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["vllm==0.8.5"]
+# [tool.weft]
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# cuda-driver-min = "12.5"
+# ///
+print("serve")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", ""); err != nil {
+		t.Fatalf("explicit provider floor should not reject pinned image: %v", err)
+	}
+}
+
 func TestValidatePinnedImageCUDACompatibilityAllowsNewerImage(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "serve.py")

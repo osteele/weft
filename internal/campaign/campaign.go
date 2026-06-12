@@ -823,18 +823,29 @@ func ResolveJobImage(localDir, command string) string {
 }
 
 // ValidatePinnedImageCUDACompatibility rejects explicit CUDA images whose CUDA
-// toolkit is older than the resolved Python runtime floor. Auto-selected images
-// are handled elsewhere; this protects user-pinned images from launching jobs
-// that are known to fail at CUDA wheel or engine initialization.
+// toolkit is older than the dependency-inferred Python runtime floor.
+// Auto-selected images are handled elsewhere; this protects user-pinned images
+// from launching jobs that are known to fail at CUDA wheel or engine
+// initialization. Explicit cuda-driver-min metadata is a host/provider floor,
+// so it does not by itself make an older image invalid.
 func ValidatePinnedImageCUDACompatibility(localDir, command, cliMinCUDA string) error {
 	img, rf, _ := ResolveJobImageSettings(localDir, command)
 	if strings.TrimSpace(img) == "" {
 		return nil
 	}
+	if strings.TrimSpace(cliMinCUDA) != "" {
+		parsed, err := placement.ParseCUDADriverFloor(cliMinCUDA)
+		if err != nil {
+			return err
+		}
+		if parsed == "" {
+			return nil
+		}
+	}
 	if err := rf.ApplyCLIOverride(cliMinCUDA); err != nil {
 		return err
 	}
-	reqCUDA := strings.TrimSpace(rf.Req.MinCUDAVersion)
+	reqCUDA := strings.TrimSpace(rf.InferredMinCUDAVersion)
 	if reqCUDA == "" {
 		return nil
 	}
@@ -847,7 +858,7 @@ func ValidatePinnedImageCUDACompatibility(localDir, command, cliMinCUDA string) 
 	if imageParts == nil || reqParts == nil || cmpVersionComponents(imageParts, reqParts) >= 0 {
 		return nil
 	}
-	origin := strings.TrimSpace(rf.CUDAOrigin)
+	origin := strings.TrimSpace(rf.InferredCUDAOrigin)
 	if origin == "" {
 		origin = "resolved dependencies"
 	}

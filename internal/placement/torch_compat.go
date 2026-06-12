@@ -162,6 +162,12 @@ type RuntimeFloor struct {
 	// a torch pin, a library dependency floor, script metadata, or project
 	// config. Empty when no CUDA floor applies.
 	CUDAOrigin string
+	// InferredMinCUDAVersion records the highest dependency-derived CUDA
+	// toolkit floor before explicit provider floors replace Req.MinCUDAVersion.
+	// Submit-time pinned-image validation uses this: explicit cuda-driver-min
+	// constrains host/provider compatibility, not the image toolkit version.
+	InferredMinCUDAVersion string
+	InferredCUDAOrigin     string
 	// DriverExplicit reports that MinDriverVersion was given explicitly
 	// (script metadata or .weft.toml) rather than backfilled from the CUDA
 	// floor.
@@ -173,9 +179,17 @@ type RuntimeFloor struct {
 // CUDA floor. Inferred sources never set DriverExplicit.
 func (rf *RuntimeFloor) MergeInferred(req cloud.ImageRequirements, origin string) {
 	before := rf.Req.MinCUDAVersion
+	inferredBefore := rf.InferredMinCUDAVersion
 	rf.Req = imagereq.Merge(rf.Req, req)
 	if rf.Req.MinCUDAVersion != before {
 		rf.CUDAOrigin = origin
+	}
+	rf.InferredMinCUDAVersion = imagereq.Merge(
+		cloud.ImageRequirements{MinCUDAVersion: rf.InferredMinCUDAVersion},
+		req,
+	).MinCUDAVersion
+	if rf.InferredMinCUDAVersion != inferredBefore {
+		rf.InferredCUDAOrigin = origin
 	}
 }
 
