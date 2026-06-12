@@ -2475,6 +2475,157 @@ func TestListTUIDaemonRestartFailureMessage(t *testing.T) {
 	}
 }
 
+func TestListTUIMouseClickGroupedVastCreditWarningOpensBilling(t *testing.T) {
+	SeedProviderCreditWarningForTesting(t, "WARNING: Vast.ai credits low ($5.00 < $10.00)")
+	var opened []string
+	oldOpen := listOpenURLFunc
+	listOpenURLFunc = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	t.Cleanup(func() { listOpenURLFunc = oldOpen })
+
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          12,
+		jobs:            nil,
+	}
+	m.rebuildGroupedRows()
+	layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
+	if layout.vastCreditWarningY < 0 {
+		t.Fatal("expected actionable Vast.ai credit warning row")
+	}
+
+	next, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      layout.vastCreditWarningY,
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Opening Vast.ai billing..." {
+		t.Fatalf("statusMessage = %q, want open progress", got.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected open command")
+	}
+	msg, ok := cmd().(listURLOpenedMsg)
+	if !ok {
+		t.Fatalf("open command returned %T", msg)
+	}
+	if msg.url != vastaiBillingURL {
+		t.Fatalf("opened url = %q, want %q", msg.url, vastaiBillingURL)
+	}
+	if len(opened) != 1 || opened[0] != vastaiBillingURL {
+		t.Fatalf("opened = %v, want [%q]", opened, vastaiBillingURL)
+	}
+
+	next, _ = got.Update(msg)
+	got = next.(listTUIModel)
+	if got.statusMessage != "Opened Vast.ai billing" {
+		t.Fatalf("statusMessage = %q, want success", got.statusMessage)
+	}
+}
+
+func TestListTUIMouseClickFlatVastCreditWarningOpensBilling(t *testing.T) {
+	SeedProviderCreditWarningForTesting(t, "WARNING: Vast.ai credits low ($5.00 < $10.00)")
+	var opened []string
+	oldOpen := listOpenURLFunc
+	listOpenURLFunc = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	t.Cleanup(func() { listOpenURLFunc = oldOpen })
+
+	m := listTUIModel{
+		title:  "Jobs",
+		width:  100,
+		height: 12,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	warningY, actionable := m.flatVastCreditWarningY()
+	if !actionable || warningY < 0 {
+		t.Fatal("expected actionable Vast.ai credit warning row")
+	}
+
+	next, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      warningY,
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Opening Vast.ai billing..." {
+		t.Fatalf("statusMessage = %q, want open progress", got.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected open command")
+	}
+	msg, ok := cmd().(listURLOpenedMsg)
+	if !ok {
+		t.Fatalf("open command returned %T", msg)
+	}
+	if msg.url != vastaiBillingURL {
+		t.Fatalf("opened url = %q, want %q", msg.url, vastaiBillingURL)
+	}
+	if len(opened) != 1 || opened[0] != vastaiBillingURL {
+		t.Fatalf("opened = %v, want [%q]", opened, vastaiBillingURL)
+	}
+}
+
+func TestListTUIMouseClickCreditWarningIgnoresNonVastLowCredit(t *testing.T) {
+	for _, warning := range []string{
+		"WARNING: RunPod credits low ($5.00 < $10.00)",
+		"WARNING: Vast.ai credit check failed (owner: Extra inputs are not permitted)",
+	} {
+		t.Run(warning, func(t *testing.T) {
+			SeedProviderCreditWarningForTesting(t, warning)
+			calls := 0
+			oldOpen := listOpenURLFunc
+			listOpenURLFunc = func(url string) error {
+				calls++
+				return nil
+			}
+			t.Cleanup(func() { listOpenURLFunc = oldOpen })
+
+			m := listTUIModel{
+				title:  "Jobs",
+				width:  100,
+				height: 12,
+				jobs: []*db.Job{
+					{ID: 101, Status: db.StatusQueued, Description: "queued"},
+				},
+			}
+			_, actionable := m.flatVastCreditWarningY()
+			if actionable {
+				t.Fatalf("warning %q should not be actionable", warning)
+			}
+			_, cmd := m.Update(tea.MouseMsg{
+				Button: tea.MouseButtonLeft,
+				Action: tea.MouseActionPress,
+				Y:      10,
+			})
+			if cmd != nil {
+				t.Fatalf("warning %q produced command", warning)
+			}
+			if calls != 0 {
+				t.Fatalf("open calls = %d, want 0", calls)
+			}
+		})
+	}
+}
+
+func TestListTUIOpenURLFailureMessage(t *testing.T) {
+	m := listTUIModel{}
+	next, _ := m.Update(listURLOpenedMsg{url: vastaiBillingURL, err: errors.New("boom")})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Open browser failed: boom" {
+		t.Fatalf("statusMessage = %q, want failure", got.statusMessage)
+	}
+}
+
 func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
 	m := listTUIModel{
 		title:           "Jobs",

@@ -75,14 +75,7 @@ type pausedLaunchBannerSummary struct {
 // renderProviderCreditWarningLine returns a red warning line when any enabled
 // provider account appears to be low on credits.
 func renderProviderCreditWarningLine(width int) string {
-	warning := providerCreditWarningText()
-	if warning == "" {
-		return ""
-	}
-	if width > 0 {
-		warning = truncateDisplayWidth(warning, width)
-	}
-	return tuiFailedStyle.Render(warning)
+	return renderProviderCreditWarningLineView(width).line
 }
 
 // renderSharedTUIStatusLine returns a dim status line shared by TUIs,
@@ -105,14 +98,16 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 }
 
 type sharedTUIStatusLinesView struct {
-	lines            []string
-	daemonLineIndex  int
-	daemonActionable bool
+	lines                       []string
+	daemonLineIndex             int
+	daemonActionable            bool
+	vastCreditWarningLineIndex  int
+	vastCreditWarningActionable bool
 }
 
 func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning int, targetCents int, daemonActionHint bool) sharedTUIStatusLinesView {
 	lines := make([]string, 0, 3)
-	view := sharedTUIStatusLinesView{daemonLineIndex: -1}
+	view := sharedTUIStatusLinesView{daemonLineIndex: -1, vastCreditWarningLineIndex: -1}
 	if daemon := renderDaemonStatusLineView(width, daemonActionHint); daemon.line != "" {
 		view.daemonLineIndex = len(lines)
 		view.daemonActionable = daemon.actionable
@@ -121,14 +116,33 @@ func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning 
 	if line := renderSystemLine(database, width, visibleRunning, targetCents); line != "" {
 		lines = append(lines, line)
 	}
-	if warning := renderProviderCreditWarningLine(width); warning != "" {
-		lines = append(lines, warning)
+	if warning := renderProviderCreditWarningLineView(width); warning.line != "" {
+		view.vastCreditWarningLineIndex = len(lines)
+		view.vastCreditWarningActionable = warning.vastActionable
+		lines = append(lines, warning.line)
 	}
 	if banner := renderPausedLaunchesBanner(database, width); banner != "" {
 		lines = append(lines, banner)
 	}
 	view.lines = lines
 	return view
+}
+
+type providerCreditWarningLineView struct {
+	line           string
+	vastActionable bool
+}
+
+func renderProviderCreditWarningLineView(width int) providerCreditWarningLineView {
+	warning := providerCreditWarningText()
+	if warning == "" {
+		return providerCreditWarningLineView{}
+	}
+	actionable := strings.Contains(warning, "WARNING: Vast.ai credits low")
+	if width > 0 {
+		warning = truncateDisplayWidth(warning, width)
+	}
+	return providerCreditWarningLineView{line: tuiFailedStyle.Render(warning), vastActionable: actionable}
 }
 
 func renderDaemonStatusLine(width int) string {

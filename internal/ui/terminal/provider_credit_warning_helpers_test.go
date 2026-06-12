@@ -41,3 +41,28 @@ func SuppressProviderCreditWarningForTesting(t *testing.T) {
 		providerCreditWarningCache.mu.Unlock()
 	})
 }
+
+func SeedProviderCreditWarningForTesting(t *testing.T, warning string) {
+	t.Helper()
+
+	prevFetch := providerCreditWarningFetch
+	providerCreditWarningFetch = func() string { return warning }
+
+	providerCreditWarningCache.mu.Lock()
+	prevWarn := providerCreditWarningCache.warning
+	prevExp := providerCreditWarningCache.expires
+	prevInit := providerCreditWarningCache.initialized
+	providerCreditWarningCache.warning = warning
+	providerCreditWarningCache.expires = time.Now().Add(time.Hour)
+	providerCreditWarningCache.initialized = true
+	providerCreditWarningCache.mu.Unlock()
+
+	t.Cleanup(func() {
+		providerCreditWarningFetch = prevFetch
+		providerCreditWarningCache.mu.Lock()
+		providerCreditWarningCache.warning = prevWarn
+		providerCreditWarningCache.expires = prevExp
+		providerCreditWarningCache.initialized = prevInit
+		providerCreditWarningCache.mu.Unlock()
+	})
+}

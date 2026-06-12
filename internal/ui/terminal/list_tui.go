@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -137,21 +139,31 @@ type listDaemonRestartedMsg struct {
 	err error
 }
 
+type listURLOpenedMsg struct {
+	url string
+	err error
+}
+
 type groupedViewLayout struct {
-	visibleRows       []groupedViewportLine
-	statusLine        string
-	sharedStatusLines []string
-	autoPilotLine     string
-	errorDetailsLines []string
-	selectedDetails   []string
-	budgetPanelLines  []string
-	controlsLine      string
-	maxBodyLines      int
-	daemonStatusY     int
-	daemonActionable  bool
+	visibleRows                 []groupedViewportLine
+	statusLine                  string
+	sharedStatusLines           []string
+	autoPilotLine               string
+	errorDetailsLines           []string
+	selectedDetails             []string
+	budgetPanelLines            []string
+	controlsLine                string
+	maxBodyLines                int
+	daemonStatusY               int
+	daemonActionable            bool
+	vastCreditWarningY          int
+	vastCreditWarningActionable bool
 }
 
 var listRestartDaemonFunc = restartDaemonForListTUI
+var listOpenURLFunc = openURLForListTUI
+
+const vastaiBillingURL = "https://cloud.vast.ai/billing/"
 
 type listGroupMode string
 
@@ -1072,6 +1084,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = fmt.Sprintf("Daemon restarted (PID %d)", msg.pid)
 		return m, nil
 
+	case listURLOpenedMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Open browser failed: %v", msg.err)
+			return m, nil
+		}
+		m.statusMessage = "Opened Vast.ai billing"
+		return m, nil
+
 	case listProjectCandidatesLoadedMsg:
 		m.projectCandidatesLoading = false
 		if msg.err != nil {
@@ -1371,30 +1391,36 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	footerLines := baseFooterLines + len(errorDetailsLines)
 	maxBodyLines := max(0, m.height-1-footerLines) // 1 for title
 	daemonStatusY := -1
+	vastCreditWarningY := -1
+	sharedStatusBaseY := 1 + maxBodyLines + 1
+	if m.projectInputActive {
+		sharedStatusBaseY += len(m.projectFilterPromptLines())
+	}
+	sharedStatusBaseY += len(errorDetailsLines)
+	sharedStatusBaseY += len(selectedDetailLines)
+	if statusLine != "" {
+		sharedStatusBaseY++
+	}
 	if sharedStatus.daemonActionable && sharedStatus.daemonLineIndex >= 0 {
-		daemonStatusY = 1 + maxBodyLines + 1
-		if m.projectInputActive {
-			daemonStatusY += len(m.projectFilterPromptLines())
-		}
-		daemonStatusY += len(errorDetailsLines)
-		daemonStatusY += len(selectedDetailLines)
-		if statusLine != "" {
-			daemonStatusY++
-		}
-		daemonStatusY += sharedStatus.daemonLineIndex
+		daemonStatusY = sharedStatusBaseY + sharedStatus.daemonLineIndex
+	}
+	if sharedStatus.vastCreditWarningActionable && sharedStatus.vastCreditWarningLineIndex >= 0 {
+		vastCreditWarningY = sharedStatusBaseY + sharedStatus.vastCreditWarningLineIndex
 	}
 	return groupedViewLayout{
-		visibleRows:       selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow()),
-		statusLine:        statusLine,
-		sharedStatusLines: sharedStatus.lines,
-		autoPilotLine:     autoPilotLine,
-		errorDetailsLines: errorDetailsLines,
-		selectedDetails:   selectedDetailLines,
-		budgetPanelLines:  budgetPanelLines,
-		controlsLine:      m.groupedControlsText(eta.HasQueued),
-		maxBodyLines:      maxBodyLines,
-		daemonStatusY:     daemonStatusY,
-		daemonActionable:  sharedStatus.daemonActionable,
+		visibleRows:                 selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow()),
+		statusLine:                  statusLine,
+		sharedStatusLines:           sharedStatus.lines,
+		autoPilotLine:               autoPilotLine,
+		errorDetailsLines:           errorDetailsLines,
+		selectedDetails:             selectedDetailLines,
+		budgetPanelLines:            budgetPanelLines,
+		controlsLine:                m.groupedControlsText(eta.HasQueued),
+		maxBodyLines:                maxBodyLines,
+		daemonStatusY:               daemonStatusY,
+		daemonActionable:            sharedStatus.daemonActionable,
+		vastCreditWarningY:          vastCreditWarningY,
+		vastCreditWarningActionable: sharedStatus.vastCreditWarningActionable,
 	}
 }
 
@@ -1660,18 +1686,21 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.isGroupedView() {
-		if cmd := m.handleGroupedDaemonStatusClick(msg.Y); cmd != nil {
+		if cmd := m.handleGroupedStatusClick(msg.Y); cmd != nil {
 			return m, cmd
 		}
 		m.selectGroupedMouseRow(msg.Y)
 		return m, nil
 	}
+	if cmd := m.handleFlatStatusClick(msg.Y); cmd != nil {
+		return m, cmd
+	}
 	m.selectFlatMouseRow(msg.Y)
 	return m, nil
 }
 
-func (m *listTUIModel) handleGroupedDaemonStatusClick(y int) tea.Cmd {
-	if !m.isUJGroupedView() || m.hideStatusArea {
+func (m *listTUIModel) handleGroupedStatusClick(y int) tea.Cmd {
+	if m.hideStatusArea {
 		return nil
 	}
 	rows := m.groupedRows
@@ -1679,11 +1708,40 @@ func (m *listTUIModel) handleGroupedDaemonStatusClick(y int) tea.Cmd {
 		rows = []groupedStatusRow{{text: "None"}}
 	}
 	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
-	if !layout.daemonActionable || y != layout.daemonStatusY {
+	if m.isUJGroupedView() && layout.daemonActionable && y == layout.daemonStatusY {
+		m.statusMessage = "Restarting daemon..."
+		return restartDaemonListCmd()
+	}
+	if layout.vastCreditWarningActionable && y == layout.vastCreditWarningY {
+		m.statusMessage = "Opening Vast.ai billing..."
+		return openURLListCmd(vastaiBillingURL)
+	}
+	return nil
+}
+
+func (m *listTUIModel) handleFlatStatusClick(y int) tea.Cmd {
+	if m.hideStatusArea {
 		return nil
 	}
-	m.statusMessage = "Restarting daemon..."
-	return restartDaemonListCmd()
+	warningY, actionable := m.flatVastCreditWarningY()
+	if !actionable || y != warningY {
+		return nil
+	}
+	m.statusMessage = "Opening Vast.ai billing..."
+	return openURLListCmd(vastaiBillingURL)
+}
+
+func (m listTUIModel) flatVastCreditWarningY() (int, bool) {
+	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, -1, m.autoRunRateTargetCents, false)
+	if !sharedStatus.vastCreditWarningActionable || sharedStatus.vastCreditWarningLineIndex < 0 {
+		return -1, false
+	}
+	y := 2 + m.flatBodyRows() + 1
+	if m.projectInputActive {
+		y += len(m.projectFilterPromptLines())
+	}
+	y += len(m.selectedJobDetailLines())
+	return y + sharedStatus.vastCreditWarningLineIndex, true
 }
 
 func (m listTUIModel) isUJGroupedView() bool {
@@ -3239,6 +3297,23 @@ func restartDaemonListCmd() tea.Cmd {
 	return func() tea.Msg {
 		pid, err := listRestartDaemonFunc()
 		return listDaemonRestartedMsg{pid: pid, err: err}
+	}
+}
+
+func openURLListCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		return listURLOpenedMsg{url: url, err: listOpenURLFunc(url)}
+	}
+}
+
+func openURLForListTUI(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "linux":
+		return exec.Command("xdg-open", url).Start()
+	default:
+		return nil
 	}
 }
 
