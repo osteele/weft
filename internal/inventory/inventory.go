@@ -104,6 +104,7 @@ type GPUSpec struct {
 type HostSpec struct {
 	Name                string            `yaml:"name"`
 	OS                  string            `yaml:"os"`
+	OSRelease           string            `yaml:"os_release,omitempty"` // e.g. "ubuntu:20.04:Ubuntu 20.04.6 LTS"
 	Arch                string            `yaml:"arch"`
 	CPUCores            int               `yaml:"cpu_cores"`
 	Memory              string            `yaml:"memory"`
@@ -111,6 +112,8 @@ type HostSpec struct {
 	GPUs                []GPUSpec         `yaml:"gpus"`
 	NVIDIADriverVersion string            `yaml:"nvidia_driver,omitempty"` // e.g. "550.120"
 	CUDAVersion         string            `yaml:"cuda_version,omitempty"`  // max CUDA compatibility reported by the NVIDIA driver, e.g. "12.4"
+	GLIBCVersion        string            `yaml:"glibc_version,omitempty"` // e.g. "2.31"
+	GLIBCXXMaxVersion   string            `yaml:"glibcxx_max,omitempty"`   // max GLIBCXX symbol from libstdc++.so.6, e.g. "3.4.28"
 	CPUFactor           float64           `yaml:"cpu_factor"`              // relative CPU perf (1.0 = baseline)
 	GPUFactor           float64           `yaml:"gpu_factor"`              // relative GPU perf (1.0 = baseline)
 	HFCacheDir          string            `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)

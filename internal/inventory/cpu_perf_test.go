@@ -55,14 +55,20 @@ func TestLookupCPUFactor_MostSpecificWins(t *testing.T) {
 
 func TestHostSpecFromHostInfo_SetsCPUFactor(t *testing.T) {
 	info := &hostinfo.Host{
-		CPUs:     40,
-		CPUModel: "Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz",
-		Arch:     "Linux x86_64",
-		MemTotal: "754Gi",
+		CPUs:              40,
+		CPUModel:          "Intel(R) Xeon(R) Silver 4210R CPU @ 2.40GHz",
+		Arch:              "Linux x86_64",
+		MemTotal:          "754Gi",
+		OSRelease:         "ubuntu:20.04:Ubuntu 20.04.6 LTS",
+		GLIBCVersion:      "2.31",
+		GLIBCXXMaxVersion: "3.4.28",
 	}
 	spec := HostSpecFromHostInfo("testhost", info, "")
 	if spec.CPUFactor != 0.8 {
 		t.Errorf("CPUFactor = %.1f, want 0.8 for Xeon Silver 4210R", spec.CPUFactor)
+	}
+	if spec.OSRelease != "ubuntu:20.04:Ubuntu 20.04.6 LTS" || spec.GLIBCVersion != "2.31" || spec.GLIBCXXMaxVersion != "3.4.28" {
+		t.Errorf("toolchain facts not copied: %+v", spec)
 	}
 }
 

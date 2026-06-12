@@ -2166,6 +2166,80 @@ wheels = [
 	}
 }
 
+func TestConstraintsFromJob_PySRToolchainFloorAppliesToCPUJob(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fit.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["pysr"]
+# ///
+print("fit")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	job := &dbpkg.Job{
+		ID:         1,
+		WorkingDir: dir,
+		Command:    "uv run fit.py",
+	}
+	constraints := ConstraintsFromJob(job)
+	if constraints.NeedsGPU() {
+		t.Fatalf("PySR CPU job unexpectedly needs GPU: %+v", constraints)
+	}
+	if constraints.MinGLIBCXXVersion != "3.4.30" {
+		t.Fatalf("MinGLIBCXXVersion = %q, want 3.4.30", constraints.MinGLIBCXXVersion)
+	}
+}
+
+func TestConstraintsFromJob_UVRunWithJuliacallToolchainFloor(t *testing.T) {
+	job := &dbpkg.Job{
+		ID:      1,
+		Command: `uv run --with "juliacall>=0.9" fit.py`,
+	}
+	constraints := ConstraintsFromJob(job)
+	if constraints.MinGLIBCXXVersion != "3.4.30" {
+		t.Fatalf("MinGLIBCXXVersion = %q, want 3.4.30", constraints.MinGLIBCXXVersion)
+	}
+}
+
+func TestConstraintsFromJob_ObservedGLIBCXXDiagnosisFloor(t *testing.T) {
+	job := &dbpkg.Job{
+		ID:             1,
+		Command:        "python fit.py",
+		ErrorDiagnosis: `{"pattern":"glibcxx_version_not_found","details":{"required_glibcxx":"3.4.30"}}`,
+	}
+	constraints := ConstraintsFromJob(job)
+	if constraints.MinGLIBCXXVersion != "3.4.30" {
+		t.Fatalf("MinGLIBCXXVersion = %q, want observed 3.4.30", constraints.MinGLIBCXXVersion)
+	}
+}
+
+func TestCheckHostGPUConstraints_GLIBCXXFloorRejectsOldHostForCPUJob(t *testing.T) {
+	host := inventory.HostSpec{Name: "cool30", GLIBCXXMaxVersion: "3.4.28"}
+	ok, reasons := CheckHostGPUConstraints(host, Constraints{
+		MinGLIBCXXVersion: "3.4.30",
+		GLIBCXXOrigin:     "pysr",
+	})
+	if ok {
+		t.Fatal("expected old libstdc++ host to be rejected")
+	}
+	if got := strings.Join(reasons, ", "); !strings.Contains(got, "host libstdc++ 3.4.28 < required 3.4.30") {
+		t.Fatalf("reasons = %v", reasons)
+	}
+}
+
+func TestCheckHostGPUConstraints_GLIBCXXFloorAllowsNewOrUnknownHost(t *testing.T) {
+	for _, host := range []inventory.HostSpec{
+		{Name: "studio", GLIBCXXMaxVersion: "3.4.30"},
+		{Name: "legacy-without-probe"},
+	} {
+		ok, reasons := CheckHostGPUConstraints(host, Constraints{MinGLIBCXXVersion: "3.4.30"})
+		if !ok {
+			t.Fatalf("%s rejected: %v", host.Name, reasons)
+		}
+	}
+}
+
 func TestFormatScoreRejectionDetail(t *testing.T) {
 	scores := []Score{
 		{Host: "cool30", Reasons: []string{"no GPU with compute cap >= 7.5"}},

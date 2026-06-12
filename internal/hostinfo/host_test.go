@@ -1,6 +1,7 @@
 package hostinfo
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,25 +82,30 @@ func TestUpdateFrom_OverwritesAllFields(t *testing.T) {
 
 	now := time.Now()
 	source := &Host{
-		Status:            HostStatusOnline,
-		Arch:              "Linux x86_64",
-		OS:                "5.15.0",
-		Model:             "server",
-		CPUs:              16,
-		CPUModel:          "Xeon",
-		CPUFreq:           "3.2 GHz",
-		MemTotal:          "256G",
-		MemUsed:           "100G",
-		LoadAvg:           "4.0, 3.0, 2.0",
-		DiskFree:          200 * 1024 * 1024,
-		DiskTotal:         1000 * 1024 * 1024,
-		GPUs:              []GPUInfo{{Index: 0, Name: "V100"}},
-		LastCheck:         now,
-		QueueStatus:       QueueCheckChecked,
-		QueueRunnerActive: true,
-		QueuedJobCount:    5,
-		CurrentQueueJob:   "123",
-		RunningJobs:       []HostRunningJob{{ID: 1}, {ID: 2}},
+		Status:              HostStatusOnline,
+		Arch:                "Linux x86_64",
+		OS:                  "5.15.0",
+		OSRelease:           "ubuntu:22.04:Ubuntu 22.04.5 LTS",
+		Model:               "server",
+		CPUs:                16,
+		CPUModel:            "Xeon",
+		CPUFreq:             "3.2 GHz",
+		MemTotal:            "256G",
+		MemUsed:             "100G",
+		LoadAvg:             "4.0, 3.0, 2.0",
+		DiskFree:            200 * 1024 * 1024,
+		DiskTotal:           1000 * 1024 * 1024,
+		GPUs:                []GPUInfo{{Index: 0, Name: "V100"}},
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GLIBCVersion:        "2.35",
+		GLIBCXXMaxVersion:   "3.4.30",
+		LastCheck:           now,
+		QueueStatus:         QueueCheckChecked,
+		QueueRunnerActive:   true,
+		QueuedJobCount:      5,
+		CurrentQueueJob:     "123",
+		RunningJobs:         []HostRunningJob{{ID: 1}, {ID: 2}},
 	}
 
 	existing.UpdateFrom(source)
@@ -118,6 +124,27 @@ func TestUpdateFrom_OverwritesAllFields(t *testing.T) {
 	}
 	if len(existing.RunningJobs) != 2 {
 		t.Errorf("RunningJobs not updated")
+	}
+	if existing.OSRelease != "ubuntu:22.04:Ubuntu 22.04.5 LTS" || existing.GLIBCXXMaxVersion != "3.4.30" {
+		t.Errorf("toolchain facts not updated: os_release=%q glibcxx=%q", existing.OSRelease, existing.GLIBCXXMaxVersion)
+	}
+}
+
+func TestParseHostInfo_ToolchainFacts(t *testing.T) {
+	output := strings.Join([]string{
+		"ARCH:Linux x86_64",
+		"OS:5.15.0-generic",
+		"OSRELEASE:ubuntu:20.04:Ubuntu 20.04.6 LTS",
+		"GLIBC:2.31",
+		"GLIBCXX:3.4.28",
+		"",
+	}, "\n")
+	host := ParseHostInfo(output)
+	if host.OSRelease != "ubuntu:20.04:Ubuntu 20.04.6 LTS" {
+		t.Fatalf("OSRelease = %q", host.OSRelease)
+	}
+	if host.GLIBCVersion != "2.31" || host.GLIBCXXMaxVersion != "3.4.28" {
+		t.Fatalf("toolchain = glibc %q glibcxx %q", host.GLIBCVersion, host.GLIBCXXMaxVersion)
 	}
 }
 

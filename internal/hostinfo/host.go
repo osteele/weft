@@ -59,6 +59,7 @@ type Host struct {
 	Status    HostStatus
 	Arch      string // e.g., "Linux x86_64", "Darwin arm64"
 	OS        string // e.g., "5.15.0-generic"
+	OSRelease string // e.g., "ubuntu:20.04:Ubuntu 20.04.6 LTS"
 	Model     string // e.g., "Mac14,6" or "MacBook Pro (16-inch, 2023)"
 	CPUs      int
 	CPUModel  string // e.g., "Apple M2 Max" or "Intel Core i9-9900K"
@@ -72,6 +73,8 @@ type Host struct {
 	// NVIDIA driver/CUDA compatibility, when nvidia-smi is available.
 	NVIDIADriverVersion string
 	CUDAVersion         string
+	GLIBCVersion        string
+	GLIBCXXMaxVersion   string
 	LastCheck           time.Time
 	Error               string // connection error message (not displayed as error)
 
@@ -98,6 +101,7 @@ type Host struct {
 // The awk script captures GPU name lines and their following stats lines
 const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`echo "OS:$(uname -r)"; ` +
+	`if [ -r /etc/os-release ]; then . /etc/os-release; echo "OSRELEASE:${ID:-}:${VERSION_ID:-}:${PRETTY_NAME:-}"; fi; ` +
 	`echo "CPUS:$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo -)"; ` +
 	`echo "LOAD:$(uptime | sed 's/.*load average[s]*: //')"; ` +
 	// Disk space: df -k on home directory, output in 1K blocks (portable)
@@ -124,6 +128,13 @@ const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`sysctl -n hw.model 2>/dev/null | sed 's/^/MODEL:/' || true; ` +
 	// CPU model: macOS uses brand_string, Linux uses /proc/cpuinfo
 	`(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2) | sed 's/^[[:space:]]*//' | sed 's/^/CPUMODEL:/' || true; ` +
+	// Linux toolchain facts for native-runtime compatibility.
+	`ldd --version 2>/dev/null | head -n1 | sed -n 's/.* \([0-9][0-9.]*\)$/GLIBC:\1/p'; ` +
+	`if command -v strings >/dev/null 2>&1; then ` +
+	`libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc[+][+][.]so[.]6/ {print $NF; exit}'); ` +
+	`if [ -z "$libstdcpp" ]; then for p in /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib64/libstdc++.so.6 /usr/lib/libstdc++.so.6; do [ -r "$p" ] && libstdcpp=$p && break; done; fi; ` +
+	`if [ -n "$libstdcpp" ]; then strings "$libstdcpp" 2>/dev/null | sed -n 's/^GLIBCXX_\([0-9][0-9.]*\)$/\1/p' | sort -V | tail -n1 | sed 's/^/GLIBCXX:/'; fi; ` +
+	`fi; ` +
 	// macOS GPU: system_profiler (brief format)
 	`system_profiler SPDisplaysDataType 2>/dev/null | grep -E '(Chipset Model|VRAM|Total Number of Cores|Metal)' | sed 's/^[[:space:]]*/MACGPU:/' || true; ` +
 	// Linux GPU: nvidia-smi table output (name + stats lines)
@@ -161,6 +172,8 @@ func ParseHostInfo(output string) *Host {
 				host.Arch = value
 			case "OS":
 				host.OS = value
+			case "OSRELEASE":
+				host.OSRelease = value
 			case "MODEL":
 				host.Model = value
 			case "CPUMODEL":
@@ -228,6 +241,10 @@ func ParseHostInfo(output string) *Host {
 				host.NVIDIADriverVersion = firstVersionToken(value)
 			case "GPUCUDA":
 				host.CUDAVersion = firstVersionToken(value)
+			case "GLIBC":
+				host.GLIBCVersion = firstVersionToken(value)
+			case "GLIBCXX":
+				host.GLIBCXXMaxVersion = firstVersionToken(value)
 			}
 		}
 	}
@@ -460,6 +477,9 @@ func (h *Host) UpdateFrom(source *Host) {
 	if source.OS != "" {
 		h.OS = source.OS
 	}
+	if source.OSRelease != "" {
+		h.OSRelease = source.OSRelease
+	}
 	if source.Model != "" {
 		h.Model = source.Model
 	}
@@ -489,6 +509,18 @@ func (h *Host) UpdateFrom(source *Host) {
 	}
 	if source.GPUs != nil {
 		h.GPUs = source.GPUs
+	}
+	if source.NVIDIADriverVersion != "" {
+		h.NVIDIADriverVersion = source.NVIDIADriverVersion
+	}
+	if source.CUDAVersion != "" {
+		h.CUDAVersion = source.CUDAVersion
+	}
+	if source.GLIBCVersion != "" {
+		h.GLIBCVersion = source.GLIBCVersion
+	}
+	if source.GLIBCXXMaxVersion != "" {
+		h.GLIBCXXMaxVersion = source.GLIBCXXMaxVersion
 	}
 	if !source.LastCheck.IsZero() {
 		h.LastCheck = source.LastCheck

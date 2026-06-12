@@ -4,6 +4,7 @@ package placement
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -86,6 +87,11 @@ type Constraints struct {
 	// `nvidia_driver`). Empty/zero disables the corresponding filter.
 	MinCUDAVersion   string
 	MinDriverVersion int
+
+	// Minimum native userland compatibility required by the job. These apply
+	// to CPU and GPU jobs because on-prem execution uses the host userland.
+	MinGLIBCXXVersion string
+	GLIBCXXOrigin     string
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
@@ -113,7 +119,39 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 		c.MinCUDAVersion = rf.Req.MinCUDAVersion
 		c.MinDriverVersion = rf.Req.MinDriverVersion
 	}
+	localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
+	if floor := ToolchainFloorForJob(localDir, j.Command); floor.GLIBCXXVersion != "" {
+		c.MinGLIBCXXVersion = floor.GLIBCXXVersion
+		c.GLIBCXXOrigin = floor.Name
+	}
+	if observed := observedGLIBCXXFloor(j.ErrorDiagnosis); observed != "" {
+		if c.MinGLIBCXXVersion == "" || compareDottedVersion(observed, c.MinGLIBCXXVersion) > 0 {
+			c.MinGLIBCXXVersion = observed
+			c.GLIBCXXOrigin = "observed failure diagnosis"
+		}
+	}
 	return c
+}
+
+type diagnosisToolchainDetails struct {
+	Pattern string `json:"pattern"`
+	Details struct {
+		RequiredGLIBCXX string `json:"required_glibcxx"`
+	} `json:"details"`
+}
+
+func observedGLIBCXXFloor(diagnosis string) string {
+	if strings.TrimSpace(diagnosis) == "" {
+		return ""
+	}
+	var d diagnosisToolchainDetails
+	if err := json.Unmarshal([]byte(diagnosis), &d); err != nil {
+		return ""
+	}
+	if d.Pattern != "glibcxx_version_not_found" {
+		return ""
+	}
+	return strings.TrimSpace(d.Details.RequiredGLIBCXX)
 }
 
 // RuntimeFloorForJob resolves the effective CUDA/driver floor for a job,
@@ -764,14 +802,24 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	return s
 }
 
-// CheckHostGPUConstraints applies the shared hard GPU resource constraints to
-// a single host. A host is eligible only if one physical GPU satisfies the
-// requested class, memory floor, and compute-capability ceiling.
+// CheckHostGPUConstraints applies shared hard compatibility constraints to a
+// single host. Toolchain floors apply to CPU and GPU jobs; GPU resource and
+// NVIDIA runtime floors apply only to jobs with a GPU request. A GPU host is
+// eligible only if one physical GPU satisfies the requested class, memory
+// floor, and compute-capability ceiling.
 //
-// Constraint sets without a GPU request always pass: the torch-derived caps
-// and CUDA/driver floors describe GPU-runtime compatibility, so they must
-// never reject a host for a CPU-only job even if a caller populated them.
+// Constraint sets without a GPU request ignore torch-derived caps and
+// CUDA/driver floors because those describe GPU-runtime compatibility.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
+	if c.MinGLIBCXXVersion != "" && strings.TrimSpace(host.GLIBCXXMaxVersion) != "" {
+		if compareDottedVersion(host.GLIBCXXMaxVersion, c.MinGLIBCXXVersion) < 0 {
+			origin := ""
+			if c.GLIBCXXOrigin != "" {
+				origin = fmt.Sprintf(", from %s", c.GLIBCXXOrigin)
+			}
+			return false, []string{fmt.Sprintf("GLIBCXX floor: host libstdc++ %s < required %s%s", host.GLIBCXXMaxVersion, c.MinGLIBCXXVersion, origin)}
+		}
+	}
 	if !c.NeedsGPU() {
 		return true, nil
 	}
@@ -1240,6 +1288,9 @@ func DescribeConstraints(c Constraints) string {
 	}
 	if c.MaxComputeCap != "" {
 		parts = append(parts, fmt.Sprintf("compute-cap<=%s", c.MaxComputeCap))
+	}
+	if c.MinGLIBCXXVersion != "" {
+		parts = append(parts, fmt.Sprintf("glibcxx>=%s", c.MinGLIBCXXVersion))
 	}
 	if len(c.Inputs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d inputs", len(c.Inputs)))

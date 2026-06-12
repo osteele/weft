@@ -288,6 +288,14 @@ func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	return rf, parseErr
 }
 
+// ToolchainFloorForJob resolves local, non-network native userland
+// requirements that are visible from dependency declarations.
+func ToolchainFloorForJob(dir, command string) dataloc.ToolchainFloor {
+	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
+	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
+	return dataloc.LibraryToolchainFloorFromDeps(deps)
+}
+
 // MaxComputeCapAny is the persisted-cap sentinel for "explicitly unbounded".
 const MaxComputeCapAny = dataloc.MaxComputeCapAny
 

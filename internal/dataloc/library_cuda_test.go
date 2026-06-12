@@ -73,6 +73,38 @@ func TestScanUVRunWith(t *testing.T) {
 	}
 }
 
+func TestLibraryToolchainFloorFromDeps(t *testing.T) {
+	tests := []struct {
+		name string
+		deps []DepSpec
+		want string
+	}{
+		{
+			name: "pysr implies julia libstdc++ floor",
+			deps: []DepSpec{{Name: "pysr", Spec: ""}},
+			want: "3.4.30",
+		},
+		{
+			name: "juliacall implies julia libstdc++ floor",
+			deps: []DepSpec{{Name: "juliacall", Spec: ">=0.9"}},
+			want: "3.4.30",
+		},
+		{
+			name: "unrelated dependency",
+			deps: []DepSpec{{Name: "numpy", Spec: ""}},
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := LibraryToolchainFloorFromDeps(tc.deps)
+			if got.GLIBCXXVersion != tc.want {
+				t.Fatalf("GLIBCXXVersion = %q, want %q", got.GLIBCXXVersion, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseDepSpec(t *testing.T) {
 	cases := []struct {
 		in   string

@@ -150,6 +150,18 @@ func TestDiagnoseFailedAttemptFromLog_PatternRegistry(t *testing.T) {
 			detail:  "cuda_error_code",
 		},
 		{
+			name:    "glibcxx version not found",
+			log:     "ImportError: /home/user/.julia/juliaup/julia-1.12/lib/libjulia-internal.so.1.12: version `GLIBCXX_3.4.30' not found",
+			pattern: "glibcxx_version_not_found",
+			detail:  "required_glibcxx",
+		},
+		{
+			name:    "glibc version not found",
+			log:     "ImportError: /opt/tool/libnative.so: version `GLIBC_2.34' not found",
+			pattern: "glibc_version_not_found",
+			detail:  "required_glibc",
+		},
+		{
 			name:    "disk full",
 			log:     "OSError: [Errno 28] No space left on device",
 			pattern: "disk_full",

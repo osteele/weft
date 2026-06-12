@@ -219,6 +219,42 @@ var failurePatternRules = []failurePatternRule{
 		},
 	},
 	{
+		patternID:  "glibcxx_version_not_found",
+		category:   "environment",
+		message:    "Host libstdc++ is too old for the job runtime",
+		solution:   "Retry on a host or image with a newer OS userland, such as Ubuntu 22.04 or newer, or install a compatible libstdc++ for the job environment.",
+		confidence: 0.98,
+		re:         regexp.MustCompile("(?is)version [`'\"]GLIBCXX_([0-9.]+)['\"] not found"),
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			if len(match) > 1 {
+				details["required_glibcxx"] = strings.TrimSpace(match[1])
+			}
+			if soFile := firstSubmatch(`(?i)(/[^\s:]+\.so(?:\.\d+)*):[^\n]*version [`+"`"+`'"]GLIBCXX_`, logContent); soFile != "" {
+				details["loaded_library"] = soFile
+			}
+			return details
+		},
+	},
+	{
+		patternID:  "glibc_version_not_found",
+		category:   "environment",
+		message:    "Host glibc is too old for the job runtime",
+		solution:   "Retry on a host or image with a newer OS userland, or use binaries built for the host's older glibc.",
+		confidence: 0.98,
+		re:         regexp.MustCompile("(?is)version [`'\"]GLIBC_([0-9.]+)['\"] not found"),
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			if len(match) > 1 {
+				details["required_glibc"] = strings.TrimSpace(match[1])
+			}
+			if soFile := firstSubmatch(`(?i)(/[^\s:]+\.so(?:\.\d+)*):[^\n]*version [`+"`"+`'"]GLIBC_`, logContent); soFile != "" {
+				details["loaded_library"] = soFile
+			}
+			return details
+		},
+	},
+	{
 		// CUDA / NVIDIA shared-library symbol mismatch. Fires before the
 		// generic module_not_found rule below: the failure surfaces as a
 		// Python ImportError, but the cause is an incoherent CUDA stack
