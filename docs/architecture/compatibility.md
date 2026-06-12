@@ -47,6 +47,13 @@ floor is derived from the CUDA floor unless explicitly given. The shared
 value type is `cloud.ImageRequirements` (`MinCUDAVersion`,
 `MinDriverVersion`), used for job floors and image-label requirements alike.
 
+Host-side scalar version floors are also represented as
+`compat.Requirement` values (`internal/compat`): CUDA, NVIDIA driver, and
+GLIBCXX all use the same version-min checker and violation formatter during
+on-prem screening. The legacy scalar fields on `placement.Constraints`
+remain synchronized as compatibility shadows while other placement surfaces
+still consume them directly.
+
 The compute-capability bounds travel separately: `MaxComputeCapForJob` /
 `MinComputeCapForJob` resolve from script metadata or the torch pin, and the
 cap is persisted on the job (`max_compute_cap`, three-state encoding — see
@@ -150,18 +157,19 @@ job for its retry.
 These are documented debt; the redesign direction is in
 [docs/planning/compatibility-model.md](../planning/compatibility-model.md).
 
-**Narrow OS-toolchain modeling.** Weft now records OS release, glibc, and max
-`GLIBCXX_*` host facts, infers a `GLIBCXX_3.4.30` floor for PySR/Juliacall,
-and diagnoses `GLIBCXX_*` / `GLIBC_*` loader failures. This fixes the wj2872
-incident class, but it is still a curated slice, not a general OS package or
-native-binary inference model.
+**Narrow OS-toolchain modeling.** Host records include OS release, glibc, and
+max `GLIBCXX_*` facts; PySR/Juliacall infer a `GLIBCXX_3.4.30` floor; and
+`GLIBCXX_*` / `GLIBC_*` loader failures have diagnosis patterns. This covers
+the wj2872 incident class, but it is still a curated slice, not a general OS
+package or native-binary inference model.
 
-**No unified requirement representation.** Requirements live in three
-vocabularies — `RuntimeFloor`/`ImageRequirements` (CUDA + driver),
-GPU constraints (class/memory/caps), and per-axis persisted job columns —
-resolved by three divergent paths (see placement.md § Known debt and the
-roadmap item "Unify constraint resolution"). Adding a compatibility axis is a
-cross-cutting code change rather than a registry entry.
+**Partial unified requirement representation.** On-prem scalar version floors
+share `compat.Requirement` / `compat.FactSet` / `compat.Violation`, but the
+broader system still has multiple vocabularies: `RuntimeFloor` /
+`ImageRequirements` for CUDA derivation and image labels, GPU constraints for
+class/memory/caps, and per-axis persisted job columns. The remaining work is
+to persist resolved requirement sets and move cloud offer/reuse paths onto
+the same checker.
 
 **Diagnosis does not close the loop.** Runtime-discovered incompatibilities
 are not converted into host facts or job requirements, so a retry can be

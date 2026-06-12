@@ -2164,6 +2164,9 @@ wheels = [
 	if gpuConstraints.MaxComputeCap != "12.0" {
 		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpuConstraints.MaxComputeCap)
 	}
+	if len(gpuConstraints.VersionRequirements) == 0 {
+		t.Fatal("GPU job version requirements are empty, want CUDA/driver floors")
+	}
 }
 
 func TestConstraintsFromJob_PySRToolchainFloorAppliesToCPUJob(t *testing.T) {
@@ -2188,6 +2191,9 @@ print("fit")
 	}
 	if constraints.MinGLIBCXXVersion != "3.4.30" {
 		t.Fatalf("MinGLIBCXXVersion = %q, want 3.4.30", constraints.MinGLIBCXXVersion)
+	}
+	if len(constraints.VersionRequirements) != 1 {
+		t.Fatalf("version requirements = %+v, want one GLIBCXX floor", constraints.VersionRequirements)
 	}
 }
 

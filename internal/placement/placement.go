@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -92,6 +93,11 @@ type Constraints struct {
 	// to CPU and GPU jobs because on-prem execution uses the host userland.
 	MinGLIBCXXVersion string
 	GLIBCXXOrigin     string
+
+	// VersionRequirements is the unified representation for scalar
+	// compatibility floors. Legacy scalar fields above remain synchronized as
+	// compatibility shadows during the migration.
+	VersionRequirements []compat.Requirement
 }
 
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
@@ -112,14 +118,13 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 	if c.NeedsGPU() && j.MaxComputeCap != "" && j.MaxComputeCap != MaxComputeCapAny {
 		c.MaxComputeCap = j.MaxComputeCap
 	}
+	localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 	if c.NeedsGPU() {
-		localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 		c.MinComputeCap = MinComputeCapForJob(localDir)
 		rf := RuntimeFloorForJob(j)
 		c.MinCUDAVersion = rf.Req.MinCUDAVersion
 		c.MinDriverVersion = rf.Req.MinDriverVersion
 	}
-	localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
 	if floor := ToolchainFloorForJob(localDir, j.Command); floor.GLIBCXXVersion != "" {
 		c.MinGLIBCXXVersion = floor.GLIBCXXVersion
 		c.GLIBCXXOrigin = floor.Name
@@ -130,7 +135,44 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 			c.GLIBCXXOrigin = "observed failure diagnosis"
 		}
 	}
+	c.VersionRequirements = versionRequirementsFromConstraints(c)
 	return c
+}
+
+func versionRequirementsFromConstraints(c Constraints) []compat.Requirement {
+	var reqs []compat.Requirement
+	if c.NeedsGPU() {
+		if c.MinDriverVersion > 0 {
+			reqs = append(reqs, compat.Requirement{
+				Axis:          compat.AxisNVIDIADriver,
+				Comparator:    compat.ComparatorVersionMin,
+				Value:         strconv.Itoa(c.MinDriverVersion),
+				MissingPolicy: compat.MissingFailClosed,
+			})
+		}
+		if c.MinCUDAVersion != "" {
+			reqs = append(reqs, compat.Requirement{
+				Axis:          compat.AxisCUDA,
+				Comparator:    compat.ComparatorVersionMin,
+				Value:         c.MinCUDAVersion,
+				MissingPolicy: compat.MissingFailClosed,
+			})
+		}
+	}
+	if c.MinGLIBCXXVersion != "" {
+		reqs = append(reqs, compat.Requirement{
+			Axis:          compat.AxisGLIBCXX,
+			Comparator:    compat.ComparatorVersionMin,
+			Value:         c.MinGLIBCXXVersion,
+			Origin:        c.GLIBCXXOrigin,
+			MissingPolicy: compat.MissingFailOpen,
+		})
+	}
+	return reqs
+}
+
+func VersionRequirementsFromJob(j *db.Job) []compat.Requirement {
+	return ConstraintsFromJob(j).VersionRequirements
 }
 
 type diagnosisToolchainDetails struct {
@@ -811,37 +853,18 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 // Constraint sets without a GPU request ignore torch-derived caps and
 // CUDA/driver floors because those describe GPU-runtime compatibility.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
-	if c.MinGLIBCXXVersion != "" && strings.TrimSpace(host.GLIBCXXMaxVersion) != "" {
-		if compareDottedVersion(host.GLIBCXXMaxVersion, c.MinGLIBCXXVersion) < 0 {
-			origin := ""
-			if c.GLIBCXXOrigin != "" {
-				origin = fmt.Sprintf(", from %s", c.GLIBCXXOrigin)
-			}
-			return false, []string{fmt.Sprintf("GLIBCXX floor: host libstdc++ %s < required %s%s", host.GLIBCXXMaxVersion, c.MinGLIBCXXVersion, origin)}
-		}
+	reqs := c.VersionRequirements
+	if len(reqs) == 0 {
+		reqs = versionRequirementsFromConstraints(c)
+	}
+	if violations := compat.Check(reqs, hostCompatibilityFacts(host)); len(violations) > 0 {
+		return false, []string{compat.FormatViolation(violations[0])}
 	}
 	if !c.NeedsGPU() {
 		return true, nil
 	}
 	if len(host.GPUs) == 0 {
 		return false, []string{"no GPUs"}
-	}
-	if c.MinDriverVersion > 0 {
-		major := driverMajor(host.NVIDIADriverVersion)
-		if major == 0 {
-			return false, []string{fmt.Sprintf("driver floor: no recorded NVIDIA driver, require >=%d", c.MinDriverVersion)}
-		}
-		if major < c.MinDriverVersion {
-			return false, []string{fmt.Sprintf("driver floor: NVIDIA driver %s < required >=%d", host.NVIDIADriverVersion, c.MinDriverVersion)}
-		}
-	}
-	if c.MinCUDAVersion != "" {
-		if strings.TrimSpace(host.CUDAVersion) == "" {
-			return false, []string{fmt.Sprintf("CUDA floor: no recorded CUDA compatibility, require >=%s", c.MinCUDAVersion)}
-		}
-		if compareDottedVersion(host.CUDAVersion, c.MinCUDAVersion) < 0 {
-			return false, []string{fmt.Sprintf("CUDA floor: host CUDA %s < required %s", host.CUDAVersion, c.MinCUDAVersion)}
-		}
 	}
 
 	gc := ParseGPUConstraint(c.GPUClass)
@@ -899,6 +922,20 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 	default:
 		return false, []string{"no GPU matching constraints"}
 	}
+}
+
+func hostCompatibilityFacts(host inventory.HostSpec) compat.FactSet {
+	facts := compat.FactSet{}
+	if strings.TrimSpace(host.CUDAVersion) != "" {
+		facts[compat.AxisCUDA] = strings.TrimSpace(host.CUDAVersion)
+	}
+	if driverMajor(host.NVIDIADriverVersion) > 0 {
+		facts[compat.AxisNVIDIADriver] = strings.TrimSpace(host.NVIDIADriverVersion)
+	}
+	if strings.TrimSpace(host.GLIBCXXMaxVersion) != "" {
+		facts[compat.AxisGLIBCXX] = strings.TrimSpace(host.GLIBCXXMaxVersion)
+	}
+	return facts
 }
 
 func gpuMatchesConstraints(gpu inventory.GPUSpec, gc GPUConstraint, c Constraints, memGB int, gpuCap string) bool {

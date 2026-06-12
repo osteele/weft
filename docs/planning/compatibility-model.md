@@ -129,10 +129,11 @@ Each phase is independently shippable and useful.
 2. **Unify resolution** (subsumes roadmap "Unify constraint resolution"):
    introduce Requirement/Facts/Violation types and re-express the existing
    CUDA/driver/arch checks through the single resolver and checker,
-   behavior-preserving. Submit persists the resolved requirement set (one
-   JSON column; existing per-axis columns remain as query shadows);
-   placement trusts it; the reuse path uses the same checker, retiring its
-   inline partial checks.
+   behavior-preserving. On-prem scalar version floors (CUDA, NVIDIA driver,
+   GLIBCXX) use the unified checker without schema changes. Full resolution
+   unification persists the resolved requirement set (one JSON column;
+   existing per-axis columns remain as query shadows), makes placement trust
+   it, and moves the reuse path to the same checker.
 3. **Registry-fy the knowledge**: move the curated tables (CUDA→driver,
    torch arch bounds, library floors, image facts) behind axis declarations.
 4. **Feedback**: diagnosis observations become persisted requirements/fact
