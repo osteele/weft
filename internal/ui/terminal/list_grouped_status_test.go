@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/jobview"
@@ -1642,6 +1643,77 @@ func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *t
 	}
 	if !strings.Contains(out, "move target wi3656 -> cool30 (non-authoritative)") {
 		t.Fatalf("expected non-authoritative target suffix, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTruncation(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	targetLaunchID := int64(3737)
+	targetAttemptID := int64(11)
+	job := &db.Job{
+		ID:                 2921,
+		Status:             db.StatusQueued,
+		Project:            "llm-perf-models",
+		Description:        "EXP-037 #7 CAP long description",
+		QueueBlockedReason: "run-rate target exceeded",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 72, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			2921: {
+				JobID:  2921,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1,
+					State:           db.MoveIntentStateOpen,
+					TargetAttemptID: &targetAttemptID,
+					TargetLabel:     "wi3737",
+					Phase:           "waiting for destination attempt",
+					AttemptsByID: map[int64]db.JobAttempt{
+						targetAttemptID: {
+							ID:            targetAttemptID,
+							JobID:         2921,
+							AttemptNumber: 2,
+							LaunchID:      &targetLaunchID,
+							Status:        db.StatusQueued,
+						},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	var blockedLine, fallbackLine, placingLine string
+	section := ""
+	for _, line := range lines {
+		plain := stripANSI(line)
+		switch {
+		case strings.HasPrefix(plain, "Queued "):
+			section = "queued"
+		case strings.HasPrefix(plain, "Placing "):
+			section = "placing"
+		case strings.Contains(plain, "blocked: run-rate target exceeded"):
+			blockedLine = line
+		case section == "queued" && strings.Contains(plain, "wj2921"):
+			fallbackLine = line
+		case section == "placing" && strings.Contains(plain, "wj2921"):
+			placingLine = line
+		}
+	}
+	if blockedLine == "" || fallbackLine == "" || placingLine == "" {
+		t.Fatalf("expected blocked, fallback, and placing rows, got:\n%s", stripANSI(out))
+	}
+	if blockedLine == stripANSI(blockedLine) {
+		t.Fatalf("expected fallback blocked header to be styled dim, got %q", blockedLine)
+	}
+	if fallbackLine == stripANSI(fallbackLine) {
+		t.Fatalf("expected fallback row to be styled dim after truncation, got %q", fallbackLine)
+	}
+	if placingLine != stripANSI(placingLine) {
+		t.Fatalf("expected active placing row to remain full contrast, got %q", placingLine)
 	}
 }
 

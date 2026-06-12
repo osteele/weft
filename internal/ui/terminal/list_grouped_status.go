@@ -387,7 +387,7 @@ func appendBlockedGroupedJobRows(
 		}
 		jobs := buckets[key]
 		rows = append(rows, groupedStatusRow{
-			text:      fmt.Sprintf("  %s: %s (%d)", key.kind, key.reason, len(jobs)),
+			text:      groupedStatusBlockedBucketHeader(key, jobs),
 			isBlocked: true,
 			section:   section.key,
 		})
@@ -401,6 +401,19 @@ func appendBlockedGroupedJobRows(
 		rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 	}
 	return rows
+}
+
+func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) string {
+	text := fmt.Sprintf("  %s: %s (%d)", key.kind, key.reason, len(jobs))
+	if len(jobs) == 0 {
+		return text
+	}
+	for _, job := range jobs {
+		if job == nil || !job.DisplayMoveDim {
+			return text
+		}
+	}
+	return moveAttemptDimStyle.Render(text)
 }
 
 // activeIncidentSummary describes one fingerprint affecting ≥2 jobs in the
@@ -867,12 +880,6 @@ func appendGroupedStatusJobRow(
 	}
 	prefix := fmt.Sprintf("%s- %s %s — %s ", indent, glyph, jobID, projectCol)
 	line := prefix + desc + suffix
-	if job != nil && job.TargetKind() == db.JobTargetInventoryHost && overloadedHostsByName[strings.TrimSpace(job.Host)] {
-		line = tuiFailedStyle.Render(line)
-	}
-	if job != nil && job.DisplayMoveDim {
-		line = moveAttemptDimStyle.Render(line)
-	}
 	if width > 0 {
 		prefixWidth := lipgloss.Width(prefix)
 		suffixWidth := lipgloss.Width(suffix)
@@ -889,6 +896,12 @@ func appendGroupedStatusJobRow(
 			}
 			line += strings.Repeat(" ", padding) + suffix
 		}
+	}
+	if job != nil && job.TargetKind() == db.JobTargetInventoryHost && overloadedHostsByName[strings.TrimSpace(job.Host)] {
+		line = tuiFailedStyle.Render(line)
+	}
+	if job != nil && job.DisplayMoveDim {
+		line = moveAttemptDimStyle.Render(line)
 	}
 	return append(rows, groupedStatusRow{
 		text:    line,
