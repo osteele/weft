@@ -64,7 +64,7 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 				err error
 			}, 1)
 			go func() {
-				res, err := hostSyncFn(database, host, sshTimeout, opts.StartQueueRunner, opts.EnsureQueueRunner)
+				res, err := hostSyncFn(database, host, sshTimeout, hostTimeout, opts.StartQueueRunner, opts.EnsureQueueRunner)
 				done <- struct {
 					res ops.HostSyncResult
 					err error
@@ -102,17 +102,18 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 	return result
 }
 
-func syncHostWithTimeoutDetailed(database *sql.DB, host string, timeout time.Duration, startQueueRunner bool, ensureQueueRunner func(string) (bool, error)) (ops.HostSyncResult, error) {
+func syncHostWithTimeoutDetailed(database *sql.DB, host string, timeout, sourceTimeout time.Duration, startQueueRunner bool, ensureQueueRunner func(string) (bool, error)) (ops.HostSyncResult, error) {
 	onQueueStart := func(string) (bool, error) { return false, nil }
 	if startQueueRunner && ensureQueueRunner != nil {
 		onQueueStart = ensureQueueRunner
 	}
 	return ops.SyncHost(database, host, ops.HostSyncOptions{
-		Timeout:      timeout,
-		SkipSamples:  true,
-		UseBatchSync: true,
-		NoQueueStart: !startQueueRunner,
-		Logger:       ops.NewSilentSyncLogger(),
+		Timeout:       timeout,
+		SourceTimeout: sourceTimeout,
+		SkipSamples:   true,
+		UseBatchSync:  true,
+		NoQueueStart:  !startQueueRunner,
+		Logger:        ops.NewSilentSyncLogger(),
 	}, onQueueStart)
 }
 

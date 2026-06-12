@@ -173,6 +173,9 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 }
 
 func displayDispatchBlockedDetail(detail string) string {
+	if normalized := normalizeSourceSyncInFlightDetail(detail); normalized != "" {
+		return normalized
+	}
 	const prefix = "input staging failed: scan HF cache on "
 	rest, ok := strings.CutPrefix(detail, prefix)
 	if !ok {
@@ -195,6 +198,15 @@ func displayDispatchBlockedDetail(detail string) string {
 		return "input staging failed: HF cache scan timed out"
 	}
 	return "input staging failed: HF cache scan timed out after " + duration
+}
+
+func normalizeSourceSyncInFlightDetail(detail string) string {
+	detail = strings.TrimSpace(detail)
+	const marker = "source sync already in flight"
+	if !strings.Contains(detail, marker) {
+		return ""
+	}
+	return marker
 }
 
 // annotateBlockedReason prepends `[<rel> ago]` (and merges in `retry #N`

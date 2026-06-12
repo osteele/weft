@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 )
 
-func withHostSyncFn(t *testing.T, fn func(*sql.DB, string, time.Duration, bool, func(string) (bool, error)) (ops.HostSyncResult, error)) {
+func withHostSyncFn(t *testing.T, fn func(*sql.DB, string, time.Duration, time.Duration, bool, func(string) (bool, error)) (ops.HostSyncResult, error)) {
 	t.Helper()
 	prev := hostSyncFn
 	hostSyncFn = fn
@@ -18,7 +18,7 @@ func withHostSyncFn(t *testing.T, fn func(*sql.DB, string, time.Duration, bool, 
 }
 
 func TestSyncHosts_ConnectionErrorClassifiesAsUnreachable(t *testing.T) {
-	withHostSyncFn(t, func(_ *sql.DB, host string, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
+	withHostSyncFn(t, func(_ *sql.DB, host string, _, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
 		return ops.HostSyncResult{}, errors.New("ssh: connect to host " + host + " port 22: Operation timed out")
 	})
 
@@ -36,7 +36,7 @@ func TestSyncHosts_ConnectionErrorClassifiesAsUnreachable(t *testing.T) {
 }
 
 func TestSyncHosts_NonConnectionErrorClassifiesAsSlow(t *testing.T) {
-	withHostSyncFn(t, func(_ *sql.DB, _ string, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
+	withHostSyncFn(t, func(_ *sql.DB, _ string, _, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
 		return ops.HostSyncResult{}, errors.New("parse output: unexpected token")
 	})
 
@@ -54,7 +54,7 @@ func TestSyncHosts_NonConnectionErrorClassifiesAsSlow(t *testing.T) {
 }
 
 func TestSyncHosts_DeadlineClassifiesAsSlow(t *testing.T) {
-	withHostSyncFn(t, func(_ *sql.DB, _ string, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
+	withHostSyncFn(t, func(_ *sql.DB, _ string, _, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
 		time.Sleep(200 * time.Millisecond)
 		return ops.HostSyncResult{}, nil
 	})
@@ -73,7 +73,7 @@ func TestSyncHosts_DeadlineClassifiesAsSlow(t *testing.T) {
 }
 
 func TestSyncHosts_SuccessClassifiesAsReached(t *testing.T) {
-	withHostSyncFn(t, func(_ *sql.DB, _ string, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
+	withHostSyncFn(t, func(_ *sql.DB, _ string, _, _ time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
 		return ops.HostSyncResult{Updated: 3}, nil
 	})
 
@@ -90,5 +90,30 @@ func TestSyncHosts_SuccessClassifiesAsReached(t *testing.T) {
 	}
 	if len(res.Unreachable)+len(res.Slow) != 0 {
 		t.Errorf("Unreachable=%v Slow=%v, both want empty", res.Unreachable, res.Slow)
+	}
+}
+
+func TestSyncHostsPassesHostTimeoutAsSourceTimeout(t *testing.T) {
+	var gotSSHTimeout, gotSourceTimeout time.Duration
+	withHostSyncFn(t, func(_ *sql.DB, _ string, sshTimeout, sourceTimeout time.Duration, _ bool, _ func(string) (bool, error)) (ops.HostSyncResult, error) {
+		gotSSHTimeout = sshTimeout
+		gotSourceTimeout = sourceTimeout
+		return ops.HostSyncResult{}, nil
+	})
+
+	res := SyncHosts(nil, SyncOptions{
+		Hosts:       []string{"epsilon"},
+		SSHTimeout:  5 * time.Second,
+		HostTimeout: 10 * time.Minute,
+	})
+
+	if !res.Completed {
+		t.Fatalf("Completed = false, want true")
+	}
+	if gotSSHTimeout != 5*time.Second {
+		t.Fatalf("ssh timeout = %s, want 5s", gotSSHTimeout)
+	}
+	if gotSourceTimeout != 10*time.Minute {
+		t.Fatalf("source timeout = %s, want 10m", gotSourceTimeout)
 	}
 }

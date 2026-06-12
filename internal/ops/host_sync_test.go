@@ -344,7 +344,7 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 		return "", "", 0
 	})
 
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 		return "", "", 0
 	})
 
-	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
 	if err == nil {
 		t.Fatal("expected ensureQueuedJobsOnRemote to surface the sync failure")
 	}
@@ -401,6 +401,134 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 	}
 	if job.LastSyncedStatus != "" {
 		t.Errorf("expected LastSyncedStatus empty (unsynced), got %q", job.LastSyncedStatus)
+	}
+}
+
+func TestEnsureQueuedJobsOnRemote_SourceSyncFailureSkipsSameDirJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workingDir := t.TempDir()
+
+	jobID1, err := db.RecordQueued(database, "test-host", workingDir, "echo one", "sync-fail one")
+	if err != nil {
+		t.Fatalf("record queued job 1: %v", err)
+	}
+	jobID2, err := db.RecordQueued(database, "test-host", workingDir, "echo two", "sync-fail two")
+	if err != nil {
+		t.Fatalf("record queued job 2: %v", err)
+	}
+
+	syncCalls := 0
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		syncCalls++
+		return fmt.Errorf("rsync timeout")
+	}))
+
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			appendCount++
+			t.Errorf("unexpected append after source sync failure: %s", command)
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+	if err == nil {
+		t.Fatal("expected ensureQueuedJobsOnRemote to surface the sync failure")
+	}
+	if ensured != 0 {
+		t.Errorf("expected 0 jobs ensured (sync failed), got %d", ensured)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("syncCalls = %d, want 1 for shared working dir", syncCalls)
+	}
+	if appendCount != 0 {
+		t.Fatalf("appendCount = %d, want 0", appendCount)
+	}
+	for _, jobID := range []int64{jobID1, jobID2} {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("get job %d: %v", jobID, err)
+		}
+		if job.LastSyncedStatus != "" {
+			t.Errorf("job %d LastSyncedStatus = %q, want empty", jobID, job.LastSyncedStatus)
+		}
+	}
+}
+
+func TestEnsureQueuedJobsOnRemote_SourceSyncLeaseContentionDefers(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workingDir := t.TempDir()
+
+	jobID, err := db.RecordQueued(database, "test-host", workingDir, "echo hello", "sync-busy job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	remoteDir := workingDir
+	scope := sourceSyncLeaseScope("test-host", remoteDir)
+	acquired, err := db.AcquireAutoLease(database, scope, "other-source-sync", sourceSyncLeaseTTL)
+	if err != nil || !acquired {
+		t.Fatalf("seed source sync lease: acquired=%v err=%v", acquired, err)
+	}
+
+	syncCalls := 0
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		syncCalls++
+		t.Fatal("source sync should not run while another caller holds the lease")
+		return nil
+	}))
+
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			appendCount++
+			t.Errorf("unexpected append while source sync is already in flight: %s", command)
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+	if ensured != 0 {
+		t.Errorf("ensured = %d, want 0", ensured)
+	}
+	if contacted {
+		t.Error("contacted = true, want false")
+	}
+	if syncCalls != 0 {
+		t.Fatalf("syncCalls = %d, want 0", syncCalls)
+	}
+	if appendCount != 0 {
+		t.Fatalf("appendCount = %d, want 0", appendCount)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LastSyncedStatus != "" {
+		t.Errorf("LastSyncedStatus = %q, want empty", job.LastSyncedStatus)
+	}
+}
+
+func TestSourceSyncLeaseTTLTracksLongSourceTimeout(t *testing.T) {
+	if got := sourceSyncLeaseTTLFor(5 * time.Second); got != sourceSyncLeaseTTL {
+		t.Fatalf("short timeout TTL = %s, want default %s", got, sourceSyncLeaseTTL)
+	}
+	if got := sourceSyncLeaseTTLFor(10 * time.Minute); got != 11*time.Minute {
+		t.Fatalf("long timeout TTL = %s, want 11m", got)
 	}
 }
 
@@ -449,7 +577,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsAlreadySynced(t *testing.T) {
 	}
 
 	// No SSH mock needed — should skip without making SSH calls
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
@@ -498,7 +626,7 @@ func TestEnsureQueuedJobsOnRemote_RedispatchesSyncedQueuedJobWithMissingPayload(
 		}
 	})
 
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
@@ -527,7 +655,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
 		t.Fatalf("set pending status: %v", err)
 	}
 
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, slog.Default())
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}

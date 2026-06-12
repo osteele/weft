@@ -74,11 +74,13 @@ func Resolve(job *db.Job, opts Options) Result {
 
 // ReasonKind classifies a visible reason for compact UI labels.
 func ReasonKind(reason string) Kind {
-	switch strings.TrimSpace(campaign.SanitizeBlockedReason(reason)) {
-	case "daemon placement pending",
-		"inventory-tagged: waiting for on-prem host":
+	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
+	switch {
+	case cleaned == "daemon placement pending",
+		cleaned == "inventory-tagged: waiting for on-prem host",
+		strings.Contains(cleaned, "source sync already in flight"):
 		return KindWaiting
-	case "":
+	case cleaned == "":
 		return KindNone
 	default:
 		return KindBlocked

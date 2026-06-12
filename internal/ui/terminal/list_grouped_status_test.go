@@ -527,6 +527,29 @@ func TestRenderJobListGroupedStatusPlainAt_UsesActionableReasonAfterFailedCloudR
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_SourceSyncInFlightIsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:                 2030,
+			Status:             db.StatusQueued,
+			Host:               "cool30",
+			Project:            "proj",
+			Description:        "waiting on source sync",
+			CreatedAt:          4_400,
+			QueueBlockedReason: "source sync already in flight",
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if !strings.Contains(out, "  waiting: source sync already in flight (1)") {
+		t.Fatalf("missing waiting source-sync header:\n%s", out)
+	}
+	if strings.Contains(out, "  blocked: source sync already in flight") {
+		t.Fatalf("source sync in flight rendered as blocked:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_ShowsOnPremOnlyPlacementReasonForInventoryJob(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{

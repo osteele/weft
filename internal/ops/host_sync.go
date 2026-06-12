@@ -47,11 +47,17 @@ const minHFInputStageTimeout = 10 * time.Minute
 // genuine cleared interval still records.
 const dispatchEventDedupeWindow = 5 * time.Minute
 
+// sourceSyncLeaseTTL is longer than the source rsync process timeout. It keeps
+// overlapping daemon passes from spawning identical rsyncs when the host-sync
+// wrapper has already moved on but the previous sync cleanup is still unwinding.
+const sourceSyncLeaseTTL = 2 * time.Minute
+
 // HostSyncOptions configures a full host sync.
 type HostSyncOptions struct {
-	Timeout      time.Duration
-	SkipSamples  bool
-	NoQueueStart bool
+	Timeout       time.Duration
+	SourceTimeout time.Duration
+	SkipSamples   bool
+	NoQueueStart  bool
 	// Mode controls which sync work to perform. Zero value uses full behavior.
 	Mode SyncMode
 	// UseBatchSync uses batched SSH calls for queue-runner jobs (faster for many jobs).
@@ -107,6 +113,10 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	mode := opts.mode()
 	seenJobs := make(map[int64]bool)
 	timeout := effectiveSyncTimeout(opts.Timeout)
+	sourceTimeout := effectiveSyncTimeout(opts.SourceTimeout)
+	if opts.SourceTimeout <= 0 {
+		sourceTimeout = timeout
+	}
 
 	queueOpsResult, err := ProcessDeferredQueueOps(database, host, timeout)
 	if err != nil {
@@ -213,7 +223,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		// Runs regardless of HostContacted so brand-new jobs with no other
 		// active jobs on the host can still be pushed.
 		if mode == SyncModeFull {
-			ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout, syncLog)
+			ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout, sourceTimeout, syncLog)
 			result.Updated += ensured
 			if contacted {
 				result.HostContacted = true
@@ -644,7 +654,7 @@ func runIDsCompatible(want *int64, got int64) bool {
 // once per host, syncs sources (deduplicated by working directory), and appends
 // jobs to the remote queue (or submits via sbatch for Slurm hosts).
 // Returns (ensured count, host contacted, error).
-func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Duration, syncLog *slog.Logger) (int, bool, error) {
+func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTimeout time.Duration, syncLog *slog.Logger) (int, bool, error) {
 	jobs, err := db.ListUnsyncedQueuedJobs(database, host)
 	if err != nil {
 		return 0, false, err
@@ -779,6 +789,8 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 
 	ensured := 0
 	syncedDirs := make(map[string]bool)
+	sourceSyncFailedDirs := make(map[string]error)
+	sourceSyncDeferredDirs := make(map[string]string)
 	sourceSHAByDir := make(map[string]string)
 	var failures []string
 	recordFailure := func(jobID int64, stage string, err error) {
@@ -793,10 +805,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		recordQueueDispatchOK(database, jobID)
 	}
 	recordDeferred := func(jobID int64, stage string, err error) {
+		detail := stage
+		if err != nil {
+			detail = stage + ": " + err.Error()
+		}
 		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
 			EventKind: db.EventQueueDispatchDeferred,
 			JobID:     jobID,
-			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
+			Detail:    truncateDispatchDetail(detail),
 		}, dispatchEventDedupeWindow)
 	}
 	for _, job := range jobs {
@@ -927,6 +943,14 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if !useR2Source && job.WorkingDir != "" {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+			if err := sourceSyncFailedDirs[remoteDir]; err != nil {
+				recordFailure(job.ID, "source sync failed", err)
+				continue
+			}
+			if reason := sourceSyncDeferredDirs[remoteDir]; reason != "" {
+				recordDeferred(job.ID, reason, fmt.Errorf("%s", reason))
+				continue
+			}
 			if !syncedDirs[remoteDir] {
 				sourceSHA256 := ""
 				if hash, hashErr := srcsync.ComputeSourceSHA256(localDir); hashErr != nil {
@@ -934,7 +958,32 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 				} else {
 					sourceSHA256 = hash
 				}
-				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+				leaseScope := sourceSyncLeaseScope(job.Host, remoteDir)
+				leaseOwner := sourceSyncLeaseOwner()
+				acquired, leaseErr := db.AcquireAutoLease(database, leaseScope, leaseOwner, sourceSyncLeaseTTLFor(sourceTimeout))
+				if leaseErr != nil {
+					recordFailure(job.ID, "source sync lease failed", leaseErr)
+					continue
+				}
+				if !acquired {
+					reason := "source sync already in flight"
+					sourceSyncDeferredDirs[remoteDir] = reason
+					recordDeferred(job.ID, reason, nil)
+					oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+						oplog.WithDetailf("%s: %s", reason, remoteDir),
+					)
+					continue
+				}
+				leaseReleased := false
+				releaseLease := func() {
+					if leaseReleased {
+						return
+					}
+					leaseReleased = true
+					_ = db.ReleaseAutoLease(database, leaseScope, leaseOwner)
+				}
+				if err := srcsync.SyncSourcesToHostWithTimeout(job.Host, localDir, remoteDir, job.Inputs, sourceTimeout); err != nil {
+					releaseLease()
 					if ssh.IsConnectionError(err.Error()) {
 						// Host is offline — bail out silently, but
 						// record a deferred event so the TUI sees a
@@ -948,15 +997,18 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 						oplog.WithDetail("source sync failed"),
 						oplog.WithError(err),
 					)
-					syncedDirs[remoteDir] = true // don't retry same dir
+					sourceSyncFailedDirs[remoteDir] = err
 					recordFailure(job.ID, "source sync failed", err)
 					continue
 				}
 				if err := srcsync.WriteRemoteSourceMarker(job.Host, remoteDir, sourceSHA256, timeout); err != nil {
+					releaseLease()
 					if ssh.IsConnectionError(err.Error()) {
 						return ensured, contacted, nil
 					}
 					syncLog.Debug("source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
+				} else {
+					releaseLease()
 				}
 				syncedDirs[remoteDir] = true
 				sourceSHAByDir[remoteDir] = sourceSHA256
@@ -1311,6 +1363,26 @@ const needsStageLeaseTTL = 15 * time.Minute
 
 func needsStageLeaseScope(host, markerName string) string {
 	return fmt.Sprintf("needs-stage:%s:%s", host, markerName)
+}
+
+func sourceSyncLeaseScope(host, remoteDir string) string {
+	return fmt.Sprintf("source-sync:%s:%s", host, url.PathEscape(remoteDir))
+}
+
+func sourceSyncLeaseTTLFor(sourceTimeout time.Duration) time.Duration {
+	leaseTTL := sourceSyncLeaseTTL
+	if sourceTimeout > 0 && sourceTimeout+time.Minute > leaseTTL {
+		leaseTTL = sourceTimeout + time.Minute
+	}
+	return leaseTTL
+}
+
+func sourceSyncLeaseOwner() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s:pid=%d:%d", host, os.Getpid(), time.Now().UnixNano())
 }
 
 func needsStageLeaseOwner() string {

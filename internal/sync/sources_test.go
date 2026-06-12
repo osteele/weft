@@ -1,11 +1,14 @@
 package sync
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +24,49 @@ func TestDefaultExcludes(t *testing.T) {
 			t.Errorf("DefaultExcludes() missing expected pattern %q", pattern)
 		}
 	}
+}
+
+func TestRunCommandWithTimeoutKillsProcessGroup(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := runCommandWithTimeout(ctx, "sh", []string{"-c", "sleep 60 & echo $! > " + pidFile + "; wait"}, outputCombined)
+	if err == nil {
+		t.Fatal("runCommandWithTimeout returned nil error for timed-out command")
+	}
+	data, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("read child pid: %v", readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if parseErr != nil {
+		t.Fatalf("parse child pid: %v", parseErr)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("child process %d survived command timeout", pid)
+}
+
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 func TestSyncSourcesExcludesCustomOutputDirs(t *testing.T) {

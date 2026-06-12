@@ -504,6 +504,32 @@ func TestHydrateInventoryDispatchBlockedReasons_FailureAfterOKReappears(t *testi
 	}
 }
 
+func TestHydrateInventoryDispatchBlockedReasons_NormalizesSourceSyncInFlight(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventQueueDispatchDeferred,
+		JobID:     jobID,
+		Detail:    "source sync already in flight: ~/code/research/project: source sync already in flight: ~/code/research/project",
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if jobs[0].QueueBlockedReason != "source sync already in flight" {
+		t.Fatalf("QueueBlockedReason = %q, want normalized source sync reason", jobs[0].QueueBlockedReason)
+	}
+}
+
 func TestHydrateInventoryDispatchBlockedReasons_RespectsExistingReason(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")

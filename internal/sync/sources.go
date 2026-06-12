@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	gosync "sync"
+	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
@@ -31,6 +32,7 @@ type SyncFunc func(host, localDir, remoteDir string, excludes []string) error
 var (
 	syncFunc          SyncFunc = defaultSyncFunc
 	extraPathSyncFunc SyncFunc = defaultExtraPathSyncFunc
+	syncFuncDefault   bool     = true
 )
 
 // SetSyncFunc replaces the sync execution function.
@@ -38,11 +40,14 @@ var (
 func SetSyncFunc(fn SyncFunc) func() {
 	original := syncFunc
 	originalExtraPath := extraPathSyncFunc
+	originalDefault := syncFuncDefault
 	syncFunc = fn
 	extraPathSyncFunc = fn
+	syncFuncDefault = false
 	return func() {
 		syncFunc = original
 		extraPathSyncFunc = originalExtraPath
+		syncFuncDefault = originalDefault
 	}
 }
 
@@ -267,6 +272,31 @@ func SyncSources(host, localDir, remoteDir string) error {
 	return err
 }
 
+// SyncSourcesWithTimeout rsyncs localDir to host:remoteDir with the supplied
+// process timeout. This is used by background host syncs that can afford longer
+// source transfers than interactive commands.
+func SyncSourcesWithTimeout(host, localDir, remoteDir string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = rsyncTimeout
+	}
+	excludes := sourceExcludes(localDir)
+	start := time.Now()
+	var err error
+	if syncFuncDefault {
+		err = defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir, excludes, true, timeout)
+	} else {
+		err = syncFunc(host, localDir, remoteDir, excludes)
+	}
+	dur := time.Since(start)
+	oplog.Log("sync.sources",
+		oplog.WithHost(host),
+		oplog.WithDuration(dur),
+		oplog.WithDetailf("%s -> %s", localDir, remoteDir),
+		oplog.WithError(err),
+	)
+	return err
+}
+
 // BuildExtraPathRsyncArgs constructs rsync arguments for syncing an extra path
 // to a remote host. Unlike BuildRsyncArgs, this does NOT use --delete since the
 // remote directory may contain content from other sources.
@@ -369,12 +399,9 @@ func defaultExtraPathSyncFuncWithTimeout(host, localDir, remoteDir string, timeo
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderrBuf.String())
+	msg, err := runCommandWithTimeout(ctx, "rsync", args, outputStderr)
+	if err != nil {
+		msg = strings.TrimSpace(msg)
 		if isIgnorableRsyncError(err, msg) {
 			return nil
 		}
@@ -440,12 +467,9 @@ func defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir string, exclu
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderrBuf.String())
+	msg, err := runCommandWithTimeout(ctx, "rsync", args, outputStderr)
+	if err != nil {
+		msg = strings.TrimSpace(msg)
 		if isIgnorableRsyncError(err, msg) {
 			return nil
 		}
@@ -498,9 +522,8 @@ func SyncFile(host, localPath, remotePath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", args...)
 	start := time.Now()
-	err := cmd.Run()
+	_, err := runCommandWithTimeout(ctx, "rsync", args, outputStderr)
 	oplog.Log("sync.file",
 		oplog.WithHost(host),
 		oplog.WithDuration(time.Since(start)),
@@ -539,9 +562,8 @@ func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "rsync", args...)
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, err := runCommandWithTimeout(ctx, "rsync", args, outputCombined)
 	dur := time.Since(start)
 	oplog.Log("sync.sources_ssh",
 		oplog.WithHost(target),
@@ -550,7 +572,53 @@ func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
 		oplog.WithError(err),
 	)
 	if err != nil {
-		return fmt.Errorf("rsync to %s:%s: %w\n%s", target, remoteDir, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("rsync to %s:%s: %w\n%s", target, remoteDir, err, strings.TrimSpace(out))
 	}
 	return nil
+}
+
+type commandOutputMode int
+
+const (
+	outputStderr commandOutputMode = iota
+	outputCombined
+)
+
+func runCommandWithTimeout(ctx context.Context, name string, args []string, mode commandOutputMode) (string, error) {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var stdoutBuf, stderrBuf bytes.Buffer
+	switch mode {
+	case outputCombined:
+		cmd.Stdout = &stdoutBuf
+		cmd.Stderr = &stderrBuf
+	default:
+		cmd.Stderr = &stderrBuf
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return commandOutput(stdoutBuf, stderrBuf, mode), err
+	case <-ctx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		err := <-done
+		if err == nil {
+			err = ctx.Err()
+		}
+		return commandOutput(stdoutBuf, stderrBuf, mode), err
+	}
+}
+
+func commandOutput(stdoutBuf, stderrBuf bytes.Buffer, mode commandOutputMode) string {
+	if mode == outputCombined {
+		return stdoutBuf.String() + stderrBuf.String()
+	}
+	return stderrBuf.String()
 }

@@ -160,3 +160,15 @@ func TestReasonsDetailFiltersHistory(t *testing.T) {
 		t.Fatalf("Reasons() = %q, want %q", got, want)
 	}
 }
+
+func TestReasonKindSourceSyncInFlightIsWaiting(t *testing.T) {
+	for _, reason := range []string{
+		"source sync already in flight",
+		"[14m ago] source sync already in flight",
+		"source sync already in flight: ~/code/research/project",
+	} {
+		if got := ReasonKind(reason); got != KindWaiting {
+			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindWaiting)
+		}
+	}
+}
