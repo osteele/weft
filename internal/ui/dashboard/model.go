@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/cloudproviders"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/llm"
@@ -63,6 +64,7 @@ type Model struct {
 	spinner                 spinner.Model // Loading spinner
 	flash                   FlashState
 	hostSummaryTickerOffset int
+	daemonRestartInProgress bool
 
 	// Process stats for running jobs
 	processStats      *ssh.ProcessStats
@@ -843,6 +845,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startSyncTicker())
+		if cmd := m.ensureCurrentDaemonForTick(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		// Always refresh job list to pick up new jobs created elsewhere
 		cmds = append(cmds, m.refreshJobs())
 		// Request syncs for hosts based on their job activity
@@ -968,6 +973,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.startHostSummaryTicker()
+
+	case daemonRestartedMsg:
+		m.daemonRestartInProgress = false
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Daemon restart failed: %v", msg.err), true)
+		}
+		if msg.action == daemoncontrol.EnsureNoop {
+			return m, nil
+		}
+		return m, m.setFlash(fmt.Sprintf("Daemon restarted (PID %d)", msg.pid), false)
 
 	case FlashExpiredMsg:
 		m.flash.HandleExpired()

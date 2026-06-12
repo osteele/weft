@@ -239,14 +239,16 @@ func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult,
 
 func runDaemonStart(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
-	status, started, err := ensureDaemonStarted(paths, 2*time.Second)
+	status, action, err := ensureDaemonStarted(paths, 2*time.Second)
 	if err != nil {
 		return err
 	}
-	if started && status.Installed {
+	if action == daemoncontrol.EnsureStarted && status.Installed {
 		fmt.Printf("Started daemon via launchd (%s)\n", daemoncontrol.Label)
-	} else if started {
+	} else if action == daemoncontrol.EnsureStarted {
 		fmt.Printf("Started daemon (PID %d)\n", status.PID)
+	} else if action == daemoncontrol.EnsureRestarted {
+		fmt.Printf("Restarted daemon (PID %d)\n", status.PID)
 	} else {
 		fmt.Printf("Daemon already running (PID %d)\n", status.PID)
 	}

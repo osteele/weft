@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2454,9 +2455,9 @@ func TestListTUIMouseClickGroupedDaemonWarningRestartsDaemon(t *testing.T) {
 	withStoppedDaemonStatus(t)
 	calls := 0
 	oldRestart := listRestartDaemonFunc
-	listRestartDaemonFunc = func() (int, error) {
+	listRestartDaemonFunc = func() (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
 		calls++
-		return 4242, nil
+		return daemoncontrol.Status{PID: 4242, Live: true}, daemoncontrol.EnsureRestarted, nil
 	}
 	t.Cleanup(func() { listRestartDaemonFunc = oldRestart })
 
@@ -2507,6 +2508,71 @@ func TestListTUIDaemonRestartFailureMessage(t *testing.T) {
 	got := next.(listTUIModel)
 	if got.statusMessage != "Daemon restart failed: boom" {
 		t.Fatalf("statusMessage = %q, want failure", got.statusMessage)
+	}
+}
+
+func TestListTUISyncTickRestartsStaleDaemon(t *testing.T) {
+	withStaleDaemonStatus(t)
+	calls := 0
+	oldRestart := listRestartDaemonFunc
+	listRestartDaemonFunc = func() (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		calls++
+		return daemoncontrol.Status{PID: 5150, Live: true}, daemoncontrol.EnsureRestarted, nil
+	}
+	t.Cleanup(func() { listRestartDaemonFunc = oldRestart })
+
+	m := listTUIModel{
+		groupedByStatus:  true,
+		pendingSyncHosts: map[string]struct{}{},
+	}
+	cmd := m.ensureCurrentDaemonForTick()
+	if !m.daemonRestartInProgress {
+		t.Fatal("expected daemon restart to be marked in progress")
+	}
+	if m.statusMessage != "Restarting daemon..." {
+		t.Fatalf("statusMessage = %q, want restart progress", m.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected stale daemon check to return restart command")
+	}
+	msg, ok := cmd().(listDaemonRestartedMsg)
+	if !ok {
+		t.Fatalf("restart command returned %T", msg)
+	}
+	if msg.pid != 5150 {
+		t.Fatalf("restart pid = %d, want 5150", msg.pid)
+	}
+	if calls != 1 {
+		t.Fatalf("restart calls = %d, want 1", calls)
+	}
+
+	next, _ := m.Update(listDaemonRestartedMsg{pid: 5150, action: daemoncontrol.EnsureRestarted})
+	got := next.(listTUIModel)
+	if got.daemonRestartInProgress {
+		t.Fatal("daemon restart in-progress flag was not cleared")
+	}
+	if got.statusMessage != "Daemon restarted (PID 5150)" {
+		t.Fatalf("statusMessage = %q, want success", got.statusMessage)
+	}
+}
+
+func TestListTUISyncTickDoesNotDuplicateDaemonRestart(t *testing.T) {
+	withStaleDaemonStatus(t)
+	oldRestart := listRestartDaemonFunc
+	listRestartDaemonFunc = func() (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		t.Fatal("restart function should not be called while restart is in progress")
+		return daemoncontrol.Status{}, daemoncontrol.EnsureNoop, nil
+	}
+	t.Cleanup(func() { listRestartDaemonFunc = oldRestart })
+
+	m := listTUIModel{
+		groupedByStatus:         true,
+		daemonRestartInProgress: true,
+		pendingSyncHosts:        map[string]struct{}{},
+	}
+	cmd := m.ensureCurrentDaemonForTick()
+	if cmd != nil {
+		t.Fatal("expected no daemon restart command while restart is in progress")
 	}
 }
 
@@ -2699,6 +2765,32 @@ func withStoppedDaemonStatus(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { daemonStatusPaths = oldPaths })
+}
+
+func withStaleDaemonStatus(t *testing.T) {
+	t.Helper()
+	withStoppedDaemonStatus(t)
+	paths := daemonStatusPaths()
+	if err := os.WriteFile(paths.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write daemon pid: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	metadata := daemoncontrol.Metadata{
+		PID:               os.Getpid(),
+		Executable:        exe,
+		ExecutableModTime: 1,
+		StartedAt:         time.Now().Add(-time.Hour).Unix(),
+	}
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("marshal daemon metadata: %v", err)
+	}
+	if err := os.WriteFile(daemoncontrol.MetadataPath(paths), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write daemon metadata: %v", err)
+	}
 }
 
 func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {

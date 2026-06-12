@@ -5,6 +5,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/llm"
 	"github.com/osteele/weft/internal/monitor"
@@ -159,6 +160,12 @@ type logTickMsg time.Time
 type createTickMsg time.Time
 type hostRefreshTickMsg time.Time
 type hostSummaryTickMsg time.Time
+
+type daemonRestartedMsg struct {
+	pid    int
+	action daemoncontrol.EnsureAction
+	err    error
+}
 
 // Host-related messages
 type hostsLoadedMsg struct {

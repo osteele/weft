@@ -44,6 +44,14 @@ type Status struct {
 	Metadata          *Metadata
 }
 
+type EnsureAction string
+
+const (
+	EnsureNoop      EnsureAction = ""
+	EnsureStarted   EnsureAction = "started"
+	EnsureRestarted EnsureAction = "restarted"
+)
+
 func DefaultPaths() Paths {
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".cache", "weft")
@@ -153,6 +161,31 @@ func activeBinaryStale(paths Paths, metadata *Metadata) bool {
 		return false
 	}
 	return info.ModTime().After(pidInfo.ModTime())
+}
+
+func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error) {
+	status, err := CurrentStatus(paths)
+	if err != nil {
+		return status, EnsureNoop, err
+	}
+	if status.Live && !status.ActiveBinaryStale {
+		return status, EnsureNoop, nil
+	}
+	if status.Live && status.ActiveBinaryStale {
+		status, err = Restart(paths, 5*time.Second, wait)
+		return status, EnsureRestarted, err
+	}
+	if status.Installed {
+		if err := Load(paths); err != nil {
+			return status, EnsureNoop, err
+		}
+	} else {
+		if _, err := StartDetached(paths); err != nil {
+			return status, EnsureNoop, err
+		}
+	}
+	status, err = WaitForLive(paths, wait)
+	return status, EnsureStarted, err
 }
 
 func WritePIDFile(path string, pid int) error {
@@ -277,4 +310,40 @@ func StartDetached(paths Paths) (int, error) {
 	}
 	pid := cmd.Process.Pid
 	return pid, cmd.Process.Release()
+}
+
+func Restart(paths Paths, stopTimeout, wait time.Duration) (Status, error) {
+	if IsInstalled(paths) {
+		if err := Unload(paths); err != nil {
+			return Status{}, err
+		}
+	}
+	if _, _, err := StopPID(paths, stopTimeout); err != nil {
+		return Status{}, err
+	}
+	if IsInstalled(paths) {
+		if err := Load(paths); err != nil {
+			return Status{}, err
+		}
+	} else if _, err := StartDetached(paths); err != nil {
+		return Status{}, err
+	}
+	return WaitForLive(paths, wait)
+}
+
+func WaitForLive(paths Paths, wait time.Duration) (Status, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		status, err := CurrentStatus(paths)
+		if err != nil {
+			return status, err
+		}
+		if status.Live {
+			return status, nil
+		}
+		if time.Now().After(deadline) {
+			return status, fmt.Errorf("daemon did not report running within %s", wait)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

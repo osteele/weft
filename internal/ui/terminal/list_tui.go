@@ -58,6 +58,7 @@ type listTUIModel struct {
 	pendingSyncHosts           map[string]struct{}
 	nextSyncTickAt             time.Time
 	statusMessage              string
+	daemonRestartInProgress    bool
 	dbWatcher                  *dbwatch.Source
 	debounceActive             bool
 	debouncePending            bool
@@ -135,8 +136,9 @@ type listTUIModel struct {
 }
 
 type listDaemonRestartedMsg struct {
-	pid int
-	err error
+	pid    int
+	action daemoncontrol.EnsureAction
+	err    error
 }
 
 type listURLOpenedMsg struct {
@@ -739,6 +741,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case listSyncTickMsg:
 		m.nextSyncTickAt = time.Now().Add(throttledInterval(listTUISyncInterval, m.focused))
 		cmds := []tea.Cmd{m.scheduleListSyncTick()}
+		if cmd := m.ensureCurrentDaemonForTick(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
 			cmds = append(cmds, m.reloadJobs())
@@ -1077,8 +1082,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.reloadJobs()
 
 	case listDaemonRestartedMsg:
+		m.daemonRestartInProgress = false
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("Daemon restart failed: %v", msg.err)
+			return m, nil
+		}
+		if msg.action == daemoncontrol.EnsureNoop {
 			return m, nil
 		}
 		m.statusMessage = fmt.Sprintf("Daemon restarted (PID %d)", msg.pid)
@@ -1730,6 +1739,10 @@ func (m *listTUIModel) handleGroupedStatusClick(y int) tea.Cmd {
 	}
 	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
 	if m.isUJGroupedView() && layout.daemonActionable && y == layout.daemonStatusY {
+		if m.daemonRestartInProgress {
+			return nil
+		}
+		m.daemonRestartInProgress = true
 		m.statusMessage = "Restarting daemon..."
 		return restartDaemonListCmd()
 	}
@@ -3316,9 +3329,22 @@ func formatAutoPilotLaunchedSummary(count int, launchedClass string) string {
 
 func restartDaemonListCmd() tea.Cmd {
 	return func() tea.Msg {
-		pid, err := listRestartDaemonFunc()
-		return listDaemonRestartedMsg{pid: pid, err: err}
+		status, action, err := listRestartDaemonFunc()
+		return listDaemonRestartedMsg{pid: status.PID, action: action, err: err}
 	}
+}
+
+func (m *listTUIModel) ensureCurrentDaemonForTick() tea.Cmd {
+	if m.daemonRestartInProgress {
+		return nil
+	}
+	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
+	if err != nil || !status.ActiveBinaryStale {
+		return nil
+	}
+	m.daemonRestartInProgress = true
+	m.statusMessage = "Restarting daemon..."
+	return restartDaemonListCmd()
 }
 
 func openURLListCmd(url string) tea.Cmd {
@@ -3338,37 +3364,8 @@ func openURLForListTUI(url string) error {
 	}
 }
 
-func restartDaemonForListTUI() (int, error) {
-	paths := daemoncontrol.DefaultPaths()
-	if daemoncontrol.IsInstalled(paths) {
-		if err := daemoncontrol.Unload(paths); err != nil {
-			return 0, err
-		}
-	}
-	if _, _, err := daemoncontrol.StopPID(paths, 5*time.Second); err != nil {
-		return 0, err
-	}
-	if daemoncontrol.IsInstalled(paths) {
-		if err := daemoncontrol.Load(paths); err != nil {
-			return 0, err
-		}
-	} else if _, err := daemoncontrol.StartDetached(paths); err != nil {
-		return 0, err
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		status, err := daemoncontrol.CurrentStatus(paths)
-		if err != nil {
-			return 0, err
-		}
-		if status.Live {
-			return status.PID, nil
-		}
-		if time.Now().After(deadline) {
-			return 0, fmt.Errorf("daemon did not report running within %s", 2*time.Second)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+func restartDaemonForListTUI() (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+	return daemoncontrol.EnsureCurrent(daemoncontrol.DefaultPaths(), 2*time.Second)
 }
 
 func (m listTUIModel) startQuickLaunch(progress chan<- listQuickLaunchProgressMsg, done chan<- listQuickLaunchDoneMsg) tea.Cmd {
