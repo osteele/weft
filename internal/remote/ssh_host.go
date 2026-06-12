@@ -165,8 +165,9 @@ func (h *SSHHost) GetLastCommandForJob(jobID int64) (string, error) {
 // Returns nil if the job has not completed.
 func (h *SSHHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {
 	statusPattern := session.StatusFilePattern(jobID)
+	statusFile := session.SimpleStatusFile(jobID)
 	// Get both exit code content and file mtime in one command
-	cmd := fmt.Sprintf(`f=$(ls %s 2>/dev/null | head -1); if [ -n "$f" ]; then echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusPattern)
+	cmd := fmt.Sprintf(`if [ -f %s ]; then f=%s; else f=$(ls %s 2>/dev/null | head -1); fi; if [ -n "$f" ]; then c="${f%%.status}.completion.json"; rid=""; if [ -f "$c" ]; then rid=$(sed -n 's/.*"run_id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$c" | head -1); fi; echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)|${rid}"; fi`, statusFile, statusFile, statusPattern)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {
 		return nil, err
@@ -191,8 +192,12 @@ func (h *SSHHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {
 	if len(parts) >= 2 {
 		mtime, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 	}
+	var runID int64
+	if len(parts) >= 3 {
+		runID, _ = strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
+	}
 
-	return &CompletionInfo{ExitCode: exitCode, EndTime: mtime}, nil
+	return &CompletionInfo{ExitCode: exitCode, EndTime: mtime, RunID: runID}, nil
 }
 
 // IsProcessRunning checks if the job's process is still running via PID file.

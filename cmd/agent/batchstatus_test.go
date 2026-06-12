@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -180,6 +181,43 @@ func TestBatchStatus_PendingMissingPayloadDoesNotHideStatusFile(t *testing.T) {
 
 	if !strings.HasPrefix(strings.TrimSpace(output), "JOB|42|COMPLETED|1|") {
 		t.Fatalf("batchStatus output = %q, want completed", strings.TrimSpace(output))
+	}
+}
+
+func TestBatchStatus_CompletedIncludesRunID(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	stateFile := filepath.Join(queueDir, "default.state.json")
+	if err := os.WriteFile(stateFile, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.status"), []byte("1\n"), 0644); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+	rec, err := json.Marshal(runner.CompletionRecord{RunID: 1234, ExitCode: 1, EndTime: 1700000000})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.completion.json"), rec, 0644); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42})
+	})
+
+	parts := strings.Split(strings.TrimSpace(output), "|")
+	if len(parts) < 6 || parts[5] != "1234" {
+		t.Fatalf("batchStatus output = %q, want run_id field 1234", strings.TrimSpace(output))
 	}
 }
 

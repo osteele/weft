@@ -258,6 +258,63 @@ func TestBatchSyncCompletedWithFailureReasonAlsoRecordsDispatchBlock(t *testing.
 	}
 }
 
+func TestBatchSyncCompletedIgnoresStaleRunID(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "stale completion")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark first attempt running: %v", err)
+	}
+	exit := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exit, 1700000010); err != nil {
+		t.Fatalf("close first attempt: %v", err)
+	}
+	if err := db.RequeueFreshAttemptByTarget(database, jobID, "batch-host", nil); err != nil {
+		t.Fatalf("fresh retry attempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("latest run id is nil")
+	}
+	freshRunID := *job.LatestRunID
+	if freshRunID <= 1 {
+		t.Fatalf("fresh run id = %d, want a retry attempt id", freshRunID)
+	}
+	jobByID := map[int64]*db.Job{jobID: job}
+	statuses := map[int64]queueBatchStatus{
+		jobID: {ExitCode: &exit, Mtime: 1700000020, RunID: freshRunID - 1},
+	}
+
+	updated, err := applyBatchStatuses(database, []int64{jobID}, jobByID, statuses, time.Second)
+	if err != nil {
+		t.Fatalf("applyBatchStatuses: %v", err)
+	}
+	if updated != 0 {
+		t.Fatalf("expected stale completion to be ignored, got %d updates", updated)
+	}
+
+	result, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get result: %v", err)
+	}
+	if result.LatestRunID == nil || *result.LatestRunID != freshRunID {
+		t.Fatalf("latest run id = %v, want %d", result.LatestRunID, freshRunID)
+	}
+	if result.Status != db.StatusQueued {
+		t.Fatalf("status = %s, want queued", result.Status)
+	}
+	if result.ExitCode != nil {
+		t.Fatalf("exit code = %v, want nil on fresh retry", *result.ExitCode)
+	}
+}
+
 // TestBatchSyncSkipsUnknownJobs validates that jobs not in the agent's response
 // are silently skipped (no status change).
 func TestBatchSyncSkipsUnknownJobs(t *testing.T) {

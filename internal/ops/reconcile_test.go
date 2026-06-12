@@ -1,12 +1,14 @@
 package ops
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/session"
 )
 
@@ -52,6 +54,52 @@ func TestApplyPauseToRemote_CreatesMarkerFile(t *testing.T) {
 	}
 	if !killCalled {
 		t.Error("expected kill -STOP command to be called")
+	}
+}
+
+func TestApplyQueueToRemoteStagesNeedsBeforeAppend(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	var calls []string
+	prevSourceSync := queueSourceSync
+	queueSourceSync = func(job *db.Job, timeout time.Duration) (string, error) {
+		calls = append(calls, "source")
+		return "source-sha", nil
+	}
+	prevStager := queueNeedsStager
+	queueNeedsStager = func(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration, getR2Client func() (*r2.Client, error)) map[int64]error {
+		calls = append(calls, "stage")
+		return nil
+	}
+	prevAppender := queueAppender
+	queueAppender = func(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
+		calls = append(calls, "append")
+		if sourceSHA256 != "source-sha" {
+			t.Fatalf("source sha = %q, want source-sha", sourceSHA256)
+		}
+		return nil
+	}
+	defer func() {
+		queueSourceSync = prevSourceSync
+		queueNeedsStager = prevStager
+		queueAppender = prevAppender
+	}()
+
+	if err := applyQueueToRemote(database, job, time.Second); err != nil {
+		t.Fatalf("applyQueueToRemote: %v", err)
+	}
+	want := []string{"source", "stage", "append"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
 

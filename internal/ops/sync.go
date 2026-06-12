@@ -169,7 +169,7 @@ type quickStatus struct {
 
 type remoteQueue interface {
 	// StatusFile returns (exitCode, mtime, completed) where mtime is the file modification time
-	StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool])
+	StatusFile(host string, jobID int64, expectedRunID *int64, timeout time.Duration) (int, int64, Option[bool])
 	CurrentJob(host string, jobID int64, timeout time.Duration) Option[bool]
 	InQueue(host string, jobID int64, timeout time.Duration) Option[bool]
 	ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool]
@@ -578,7 +578,7 @@ func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Dur
 // probeStatusFile checks if a job has a status file (completed)
 // Returns (exitCode, mtime, Some(true)) if completed, (0, 0, Some(false)) if definitely not, (0, 0, None) on error
 func probeStatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
-	return queueRemoteClient.StatusFile(host, jobID, timeout)
+	return queueRemoteClient.StatusFile(host, jobID, nil, timeout)
 }
 
 // probeCurrentJob checks if a job is the current job in the queue runner
@@ -609,11 +609,16 @@ func clearCurrentJobIfMatches(host string, jobID int64, timeout time.Duration) {
 
 type sshQueueRemote struct{}
 
-func (sshQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
+func (sshQueueRemote) StatusFile(host string, jobID int64, expectedRunID *int64, timeout time.Duration) (int, int64, Option[bool]) {
 	statusPattern := session.StatusFilePattern(jobID)
+	statusFile := session.SimpleStatusFile(jobID)
+	var expected int64
+	if expectedRunID != nil {
+		expected = *expectedRunID
+	}
 	// Get both exit code content and file mtime in one command
 	// stat -c %Y gives mtime as unix timestamp on Linux
-	cmd := fmt.Sprintf(`f=$(ls %s 2>/dev/null | head -1); if [ -n "$f" ]; then echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusPattern)
+	cmd := fmt.Sprintf(`if [ -f %s ]; then f=%s; else f=$(ls %s 2>/dev/null | head -1); fi; if [ -n "$f" ]; then c="${f%%.status}.completion.json"; rid=""; if [ -f "$c" ]; then rid=$(sed -n 's/.*"run_id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$c" | head -1); fi; if [ %d -gt 0 ] && [ -n "$rid" ] && [ "$rid" != "%d" ]; then exit 0; fi; echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusFile, statusFile, statusPattern, expected, expected)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return 0, 0, None[bool]()

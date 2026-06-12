@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -92,14 +93,16 @@ func batchStatus(jobIDs []int64) {
 			fmt.Sscanf(exitCodeStr, "%d", &exitCode)
 			mtime := fileMtime(statusFile)
 			fr := readFailureReason(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, exitCode, mtime, fr)
+			runID := completionRunID(logDir, jobID)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s\n", jobID, exitCode, mtime, runID, fr)
 			continue
 		}
 
 		// Fall back to finished state when the status file is unavailable.
 		if finished, ok := state.Finished[idStr]; ok {
 			fr := readFailureReason(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, finished.ExitCode, finished.FinishedAt, fr)
+			runID := completionRunID(logDir, jobID)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s\n", jobID, finished.ExitCode, finished.FinishedAt, runID, fr)
 			continue
 		}
 
@@ -144,6 +147,19 @@ func readFailureReason(logDir string, jobID int64) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func completionRunID(logDir string, jobID int64) int64 {
+	path := filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return 0
+	}
+	return rec.RunID
 }
 
 func fileMtime(path string) int64 {

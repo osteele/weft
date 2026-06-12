@@ -16,6 +16,7 @@ type queueBatchStatus struct {
 	State         queueState
 	ExitCode      *int
 	Mtime         int64
+	RunID         int64
 	GPUDevices    string
 	FailureReason string
 }
@@ -175,6 +176,10 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 			updated++
 		default:
 			if status.ExitCode != nil {
+				if status.RunID != 0 && job.LatestRunID != nil && status.RunID != *job.LatestRunID {
+					slog.Debug("ignoring stale completed queue status", "component", "sync", "job_id", job.ID, "remote_run_id", status.RunID, "latest_run_id", *job.LatestRunID)
+					continue
+				}
 				recordQueueDispatchOK(database, job.ID)
 				metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 				if metaErr != nil {
@@ -277,11 +282,21 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 			if parts[4] != "" {
 				mtime, _ = strconv.ParseInt(parts[4], 10, 64)
 			}
+			var runID int64
 			failureReason := ""
-			if len(parts) >= 6 && parts[5] != "" {
+			if len(parts) >= 7 {
+				if parts[5] != "" {
+					runID, _ = strconv.ParseInt(parts[5], 10, 64)
+				}
+				if parts[6] != "" {
+					failureReason = strings.TrimSpace(parts[6])
+				}
+			} else if len(parts) >= 6 && parts[5] != "" {
+				// TODO(remove after 2026-06-12): legacy agents emitted failure_reason
+				// in field 5 before COMPLETED lines included run_id.
 				failureReason = strings.TrimSpace(parts[5])
 			}
-			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, FailureReason: failureReason}
+			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, RunID: runID, FailureReason: failureReason}
 		case "PREFLIGHT_REJECTED":
 			// Format: JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
 			var mtime int64

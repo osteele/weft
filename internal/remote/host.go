@@ -8,6 +8,7 @@ import (
 type CompletionInfo struct {
 	ExitCode int
 	EndTime  int64 // Unix timestamp from status file mtime
+	RunID    int64 // job_attempts.id from completion.json when available
 }
 
 // QueueEntry represents a job to be added to a queue.

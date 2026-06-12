@@ -15,6 +15,7 @@ type mockQueueRemote struct {
 	statusExitCode int
 	statusMtime    int64
 	statusOption   Option[bool]
+	statusRunID    int64
 	current        Option[bool]
 	inQueue        Option[bool]
 	process        Option[bool]
@@ -25,7 +26,10 @@ type mockQueueRemote struct {
 	rusage         string
 }
 
-func (m mockQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
+func (m mockQueueRemote) StatusFile(host string, jobID int64, expectedRunID *int64, timeout time.Duration) (int, int64, Option[bool]) {
+	if expectedRunID != nil && m.statusRunID != 0 && m.statusRunID != *expectedRunID {
+		return 0, 0, Some(false)
+	}
 	return m.statusExitCode, m.statusMtime, m.statusOption
 }
 
@@ -332,6 +336,107 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 	if updated.ExitCode == nil || *updated.ExitCode != exitCode {
 		t.Fatalf("expected exit code %d, got %v", exitCode, updated.ExitCode)
+	}
+}
+
+func TestSyncQueueRunnerJobIgnoresStaleCompletionRunID(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark first attempt running: %v", err)
+	}
+	exitCode := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exitCode, 1700000010); err != nil {
+		t.Fatalf("close first attempt: %v", err)
+	}
+	if err := db.RequeueFreshAttemptByTarget(database, jobID, "queue-host", nil); err != nil {
+		t.Fatalf("fresh retry attempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("latest run id is nil")
+	}
+	freshRunID := *job.LatestRunID
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeTrue,
+		CompletionInfo:  &remote.CompletionInfo{ExitCode: exitCode, EndTime: 1700001000, RunID: freshRunID - 1},
+		InQueueResult:   remote.ProbeTrue,
+	}
+	host := &remote.MockHost{}
+
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second, SkipSamples: true})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
+	}
+	if syncResult.Updated {
+		t.Fatalf("stale completion should not update the fresh retry")
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.Status != db.StatusQueued {
+		t.Fatalf("status = %s, want queued", updated.Status)
+	}
+	if updated.LatestRunID == nil || *updated.LatestRunID != freshRunID {
+		t.Fatalf("latest run id = %v, want %d", updated.LatestRunID, freshRunID)
+	}
+	if updated.ExitCode != nil {
+		t.Fatalf("exit code = %v, want nil on fresh retry", *updated.ExitCode)
+	}
+}
+
+func TestProbeRemoteStatusIgnoresStaleCompletionRunID(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark first attempt running: %v", err)
+	}
+	exitCode := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exitCode, 1700000010); err != nil {
+		t.Fatalf("close first attempt: %v", err)
+	}
+	if err := db.RequeueFreshAttemptByTarget(database, jobID, "queue-host", nil); err != nil {
+		t.Fatalf("fresh retry attempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("latest run id is nil")
+	}
+	freshRunID := *job.LatestRunID
+	mock := mockQueueRemote{
+		statusExitCode: exitCode,
+		statusMtime:    1700001000,
+		statusOption:   Some(true),
+		statusRunID:    freshRunID - 1,
+		inQueue:        Some(true),
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	status, err := ProbeRemoteStatus(job, time.Second)
+	if err != nil {
+		t.Fatalf("ProbeRemoteStatus: %v", err)
+	}
+	if status != db.StatusQueued {
+		t.Fatalf("status = %s, want queued", status)
 	}
 }
 

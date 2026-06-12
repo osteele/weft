@@ -7,10 +7,13 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/runner"
 )
 
 func TestStageCloudNeeds_Success(t *testing.T) {
 	workDir := t.TempDir()
+	homeDir := filepath.Join(workDir, ".home")
+	t.Setenv("HOME", homeDir)
 	needs := []cloud.CloudNeed{{
 		Spec:  "output/model.pt:41",
 		Path:  "output/model.pt",
@@ -38,6 +41,39 @@ func TestStageCloudNeeds_Success(t *testing.T) {
 	}
 	if string(data) != "ok" {
 		t.Fatalf("staged content = %q, want ok", string(data))
+	}
+	marker := runner.ArtifactSatisfiedFile(filepath.Join(homeDir, ".cache", "weft", "logs"), "output/model.pt", 41)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected satisfied marker %s: %v", marker, err)
+	}
+}
+
+func TestStageCloudNeeds_NamedAssetWritesMarker(t *testing.T) {
+	workDir := t.TempDir()
+	homeDir := filepath.Join(workDir, ".home")
+	t.Setenv("HOME", homeDir)
+	needs := []cloud.CloudNeed{{
+		Spec:  "asset:trace-v1",
+		Path:  "data/trace.jsonl",
+		R2Key: "assets/sha256/abc",
+	}}
+
+	prev := copyCloudNeedFromR2Func
+	t.Cleanup(func() { copyCloudNeedFromR2Func = prev })
+	copyCloudNeedFromR2Func = func(_, _, targetPath string) error {
+		return os.WriteFile(targetPath, []byte("ok"), 0o644)
+	}
+
+	if err := stageCloudNeeds("bucket", 123, workDir, needs); err != nil {
+		t.Fatalf("stageCloudNeeds: %v", err)
+	}
+	marker := runner.NamedAssetSatisfiedFile(filepath.Join(homeDir, ".cache", "weft", "logs"), "trace-v1")
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(data) != "0\n" {
+		t.Fatalf("marker = %q, want 0", string(data))
 	}
 }
 

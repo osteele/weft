@@ -100,6 +100,26 @@ func TestCheckDependencies_ArtifactWaiting(t *testing.T) {
 	}
 }
 
+func TestCheckDependencies_NamedAsset(t *testing.T) {
+	dir := t.TempDir()
+	satisfiedPath := NamedAssetSatisfiedFile(dir, "trace-v1")
+	os.WriteFile(satisfiedPath, []byte("0\n"), 0644)
+
+	result := CheckDependencies("", []string{"asset:trace-v1"}, dir)
+	if result.Result != DepOK {
+		t.Errorf("expected OK, got %v", result.Result)
+	}
+}
+
+func TestCheckDependencies_NamedAssetWaiting(t *testing.T) {
+	dir := t.TempDir()
+
+	result := CheckDependencies("", []string{"asset:trace-v1"}, dir)
+	if result.Result != DepWaiting {
+		t.Errorf("expected Waiting, got %v", result.Result)
+	}
+}
+
 func TestCheckDependencies_ArtifactFailed(t *testing.T) {
 	dir := t.TempDir()
 	// Write a satisfied file with non-zero exit code

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -16,6 +17,13 @@ const RemoteArtifactsDir = "~/.cache/weft/artifacts"
 // RemoteManifestPath returns the remote manifest path for a job.
 func RemoteManifestPath(jobID int64) string {
 	return fmt.Sprintf("%s/%d.json", RemoteArtifactsDir, jobID)
+}
+
+// NamedAssetSatisfiedFile returns the satisfied marker file for a named asset
+// staged from the asset store.
+func NamedAssetSatisfiedFile(logDir string, name string) string {
+	encoded := url.PathEscape(name)
+	return filepath.Join(logDir, fmt.Sprintf("asset-%s.satisfied", encoded))
 }
 
 // LocalArtifactsDir returns the local artifact store root.

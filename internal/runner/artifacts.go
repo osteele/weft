@@ -88,6 +88,12 @@ func ArtifactSatisfiedFile(logDir string, path string, version int64) string {
 	return filepath.Join(logDir, fmt.Sprintf("artifact-%d-%s.satisfied", version, encoded))
 }
 
+// NamedAssetSatisfiedFile returns the satisfied marker file for a named asset
+// staged from the asset store.
+func NamedAssetSatisfiedFile(logDir string, name string) string {
+	return artifacts.NamedAssetSatisfiedFile(logDir, name)
+}
+
 // RecordProducedArtifacts ensures --produces declarations are present in the
 // artifact manifest, so they are uploaded/downloadable even when outside
 // convention-based output directories.

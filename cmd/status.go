@@ -295,10 +295,26 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	// Override queued status for jobs whose last cloud attempt failed
 	applyAttemptOutcomeOverrides(database, []*db.Job{job})
 
-	// If the effective state is already terminal, use cached result.
-	if isWaitTerminalStatus(job.EffectiveStatus()) {
+	// If the effective state is already terminal, use cached result unless
+	// the caller explicitly requested sync. Queue-runner status files are
+	// authoritative same-run evidence and can arrive after a transient failed
+	// mark, so explicit sync still gets a chance to repair them.
+	if isWaitTerminalStatus(job.EffectiveStatus()) && !(statusSync && job.HasInventoryHost() && job.UsesQueueRunner()) {
 		printJobStatus(database, job, exitOnComplete)
 		return
+	}
+
+	// For explicit sync of a terminal queue-runner job, still perform a
+	// direct per-job probe. The earlier targeted host sync can skip terminal
+	// rows, but a same-run status file may be the authoritative correction.
+	if statusSync && job.HasInventoryHost() && job.UsesQueueRunner() && isWaitTerminalStatus(job.EffectiveStatus()) {
+		if _, syncErr := ops.SyncJob(database, job, ops.DefaultSyncOptions()); syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", ids.FormatJobID(job.ID), syncErr)
+		}
+		updated, err := db.GetJobByID(database, jobID)
+		if err == nil && updated != nil {
+			job = updated
+		}
 	}
 
 	// Sync host to update job status from remote when a host exists.

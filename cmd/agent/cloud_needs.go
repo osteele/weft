@@ -50,6 +50,9 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 			oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging fail: %s", label), oplog.WithError(err))
 			return fmt.Errorf("cloud artifact staging failed for %q: %w", label, err)
 		}
+		if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
+			return err
+		}
 
 		fmt.Printf("Job %d: cloud artifact staging success: %s\n", jobID, label)
 		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging success: %s", label))
@@ -59,6 +62,31 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 	oplog.LogJob(oplog.OpJobSync, jobID, "",
 		oplog.WithDetailf("cloud artifact staging complete (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
 	)
+	return nil
+}
+
+func writeCloudNeedSatisfiedMarker(jobID int64, spec string) error {
+	parsed, err := runner.ParseNeedsSpec(spec)
+	if err != nil {
+		return fmt.Errorf("parse cloud need marker %q: %w", spec, err)
+	}
+	homeDir, _ := os.UserHomeDir()
+	if homeDir == "" {
+		homeDir = "/tmp"
+	}
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	var marker string
+	if parsed.IsAsset() {
+		marker = runner.NamedAssetSatisfiedFile(logDir, parsed.AssetName)
+	} else {
+		marker = runner.ArtifactSatisfiedFile(logDir, parsed.Path, parsed.Version)
+	}
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		return fmt.Errorf("create cloud need marker dir for job %d: %w", jobID, err)
+	}
+	if err := os.WriteFile(marker, []byte("0\n"), 0o644); err != nil {
+		return fmt.Errorf("write cloud need marker for job %d: %w", jobID, err)
+	}
 	return nil
 }
 

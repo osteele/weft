@@ -280,7 +280,7 @@ func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 		*lastNeeds = needs
 		reply := make(map[string]remoteNeedState, len(needs))
 		for _, n := range needs {
-			reply[n.markerName] = remoteNeedState{markerExists: true, fileSize: -1, stagingSize: -1}
+			reply[n.markerName] = remoteNeedState{markerExists: true, fileSize: 1, stagingSize: -1}
 		}
 		return reply, nil
 	}
@@ -298,6 +298,63 @@ func TestStageArtifactNeedsForHost_BatchesProbeAcrossJobs(t *testing.T) {
 	}
 	if got := len(*lastNeeds); got != 2 {
 		t.Fatalf("probe saw %d needs, want 2 (one per consumer)", got)
+	}
+}
+
+func TestStageArtifactNeedsForHost_NamedAssetRestagesWhenMarkerExistsButFileMissing(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "trace-v1",
+		ContentHash: "0123456789abcdef",
+		SizeBytes:   123,
+		TargetPath:  "data/trace.jsonl",
+	}); err != nil {
+		t.Fatalf("upsert named asset: %v", err)
+	}
+
+	consumerID, err := db.RecordQueued(database, "host-alpha", "/tmp/project", "consume", "consumer")
+	if err != nil {
+		t.Fatalf("record consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{"asset:trace-v1"}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("get consumer: %v", err)
+	}
+
+	probeCalls, lastNeeds := stubProbeRemoteNeedsState(t, nil)
+	probeRemoteNeedsStateFunc = func(_ string, needs []pendingNeed, _ time.Duration) (map[string]remoteNeedState, error) {
+		*probeCalls++
+		*lastNeeds = needs
+		reply := make(map[string]remoteNeedState, len(needs))
+		for _, n := range needs {
+			reply[n.markerName] = remoteNeedState{markerExists: true, fileSize: -1, stagingSize: -1}
+		}
+		return reply, nil
+	}
+
+	getR2 := func() (*r2.Client, error) {
+		return nil, fmt.Errorf("r2 requested")
+	}
+	failed := stageArtifactNeedsForHost(database, "host-alpha", []*db.Job{consumer}, time.Second, getR2)
+	err = failed[consumer.ID]
+	if err == nil || !strings.Contains(err.Error(), "r2 requested") {
+		t.Fatalf("expected stale marker to trigger staging and fail on R2 setup, got %v", err)
+	}
+	if *probeCalls != 1 {
+		t.Fatalf("probeCalls = %d, want 1", *probeCalls)
+	}
+	if len(*lastNeeds) != 1 {
+		t.Fatalf("probe saw %d needs, want 1", len(*lastNeeds))
+	}
+	need := (*lastNeeds)[0]
+	if need.markerName != "asset-trace-v1.satisfied" {
+		t.Fatalf("markerName = %q, want asset marker", need.markerName)
+	}
+	if need.remotePath != "/tmp/project/data/trace.jsonl" {
+		t.Fatalf("remotePath = %q, want target path under working dir", need.remotePath)
 	}
 }
 
@@ -401,6 +458,72 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 	}
 	if job.LastSyncedStatus != "" {
 		t.Errorf("expected LastSyncedStatus empty (unsynced), got %q", job.LastSyncedStatus)
+	}
+}
+
+func TestEnsureQueuedJobsOnRemote_SkipsJobOnArtifactStagingFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "asset-needs job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"asset:missing-asset"}); err != nil {
+		t.Fatalf("set needs: %v", err)
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		t.Fatal("source sync should not run when artifact staging fails first")
+		return nil
+	}))
+
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			appendCount++
+			t.Errorf("unexpected append after artifact staging failure: %s", command)
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+	if err == nil {
+		t.Fatal("expected ensureQueuedJobsOnRemote to surface the artifact staging failure")
+	}
+	if ensured != 0 {
+		t.Errorf("expected 0 jobs ensured (artifact staging failed), got %d", ensured)
+	}
+	if appendCount != 0 {
+		t.Fatalf("appendCount = %d, want 0", appendCount)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("job %s artifact needs staging failed", ids.FormatJobID(jobID))) {
+		t.Fatalf("error = %q, want job-specific artifact staging failure", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LastSyncedStatus != "" {
+		t.Errorf("expected LastSyncedStatus empty (unsynced), got %q", job.LastSyncedStatus)
+	}
+
+	var detail string
+	if err := database.QueryRow(`
+		SELECT COALESCE(detail, '')
+		FROM lifecycle_events
+		WHERE job_id = ? AND event_kind = ?
+		ORDER BY id DESC
+		LIMIT 1`, jobID, db.EventQueueDispatchFailed).Scan(&detail); err != nil {
+		t.Fatalf("query lifecycle event: %v", err)
+	}
+	if !strings.Contains(detail, "artifact needs staging failed") {
+		t.Fatalf("expected artifact staging lifecycle detail, got %q", detail)
 	}
 }
 

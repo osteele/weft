@@ -33,6 +33,8 @@ type ReconcileOptions struct {
 }
 
 var queueSourceSync = syncQueueJobSources
+var queueNeedsStager = stageArtifactNeedsForHost
+var queueAppender = AppendJobToQueueWithSourceAndR2
 
 func syncQueueJobSources(job *db.Job, timeout time.Duration) (string, error) {
 	if job.WorkingDir == "" {
@@ -503,7 +505,13 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	if err != nil {
 		return err
 	}
-	return AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, "")
+	if failures := queueNeedsStager(database, job.Host, []*db.Job{job}, timeout, defaultR2Client); len(failures) > 0 {
+		if err := failures[job.ID]; err != nil {
+			return fmt.Errorf("stage artifact needs: %w", err)
+		}
+		return fmt.Errorf("stage artifact needs: unknown failure")
+	}
+	return queueAppender(job, timeout, sourceSHA256, "")
 }
 
 // QueueJobToRemote applies the standard on-prem queue dispatch path for an
@@ -604,7 +612,7 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 // probeQueueRunnerJobStatus checks status for queue-runner managed jobs.
 func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, error) {
 	// Check if job is completed (has status file)
-	exitCode, _, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
+	exitCode, _, found := queueRemoteClient.StatusFile(job.Host, job.ID, job.LatestRunID, timeout)
 	if found.IsSome() && found.Unwrap() {
 		_ = exitCode // Exit code available if needed
 		return db.StatusCompleted, nil

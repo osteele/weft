@@ -35,27 +35,31 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 1: Check if status file exists (job completed)
 	completedResult, completionInfo := prober.ProbeCompleted(job.ID)
 	if completedResult == remote.ProbeTrue && completionInfo != nil {
-		recordQueueDispatchOK(database, job.ID)
-		metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
-		if metaErr != nil {
-			return SyncResult{HostContacted: true}, metaErr
+		if completionInfo.RunID != 0 && job.LatestRunID != nil && completionInfo.RunID != *job.LatestRunID {
+			completedResult = remote.ProbeFalse
+		} else {
+			recordQueueDispatchOK(database, job.ID)
+			metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
+			if metaErr != nil {
+				return SyncResult{HostContacted: true}, metaErr
+			}
+			// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
+			endTime := completionInfo.EndTime
+			if metaEndTime > 0 {
+				endTime = metaEndTime
+			}
+			if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, endTime); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+			CacheCompletedJobLog(job, timeout)
+			// Fetch resource usage data (best-effort)
+			_, _ = updateJobResourceUsage(database, job, timeout)
+			_ = syncJobTimeseries(database, job, timeout)
+			_ = syncJobTelemetry(database, job, timeout)
+			// Clear the current job marker on remote if it matches this job.
+			clearCurrentJobIfMatches(job.Host, job.ID, timeout)
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
-		// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
-		endTime := completionInfo.EndTime
-		if metaEndTime > 0 {
-			endTime = metaEndTime
-		}
-		if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, endTime); err != nil {
-			return SyncResult{HostContacted: true}, err
-		}
-		CacheCompletedJobLog(job, timeout)
-		// Fetch resource usage data (best-effort)
-		_, _ = updateJobResourceUsage(database, job, timeout)
-		_ = syncJobTimeseries(database, job, timeout)
-		_ = syncJobTelemetry(database, job, timeout)
-		// Clear the current job marker on remote if it matches this job.
-		clearCurrentJobIfMatches(job.Host, job.ID, timeout)
-		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
 	// Probe 2: Check if job is the current job in queue runner

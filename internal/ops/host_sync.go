@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -747,22 +748,22 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			return r2Client, r2ClientErr
 		}
 		r2ClientLoaded = true
-		cfg, err := config.Load()
-		if err != nil {
-			r2ClientErr = fmt.Errorf("load config for cloud dependencies: %w", err)
-			return nil, r2ClientErr
-		}
-		r2Client, r2ClientErr = r2.New(r2.Config{
-			AccountID:       cfg.Vastai.R2.AccountID,
-			AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
-			SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
-			Bucket:          cfg.Vastai.R2.Bucket,
-		})
+		r2Client, r2ClientErr = defaultR2Client()
 		if r2ClientErr != nil {
 			r2ClientErr = fmt.Errorf("create R2 client for cloud dependencies: %w", r2ClientErr)
 			return nil, r2ClientErr
 		}
 		return r2Client, nil
+	}
+
+	var failures []string
+	recordFailure := func(jobID int64, stage string, err error) {
+		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
+		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+			EventKind: db.EventQueueDispatchFailed,
+			JobID:     jobID,
+			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
+		}, dispatchEventDedupeWindow)
 	}
 
 	// Stage rental-produced --needs artifacts for every queued job on this host
@@ -779,8 +780,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		seenStage[job.ID] = true
 		allQueued = append(allQueued, job)
 	}
-	for jobID, err := range stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client) {
+	stageFailures := stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client)
+	for jobID, err := range stageFailures {
 		syncLog.Debug("artifact needs staging failed", "job_id", jobID, "host", host, "error", err)
+		recordFailure(jobID, "artifact needs staging failed", err)
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, host,
 			oplog.WithDetail("artifact needs staging failed"),
 			oplog.WithError(err),
@@ -811,15 +814,6 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	sourceSyncFailedDirs := make(map[string]error)
 	sourceSyncDeferredDirs := make(map[string]string)
 	sourceSHAByDir := make(map[string]string)
-	var failures []string
-	recordFailure := func(jobID int64, stage string, err error) {
-		failures = append(failures, fmt.Sprintf("job %s %s: %v", ids.FormatJobID(jobID), stage, err))
-		_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
-			EventKind: db.EventQueueDispatchFailed,
-			JobID:     jobID,
-			Detail:    truncateDispatchDetail(stage + ": " + err.Error()),
-		}, dispatchEventDedupeWindow)
-	}
 	recordDispatchOK := func(jobID int64) {
 		recordQueueDispatchOK(database, jobID)
 	}
@@ -835,6 +829,9 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}, dispatchEventDedupeWindow)
 	}
 	for _, job := range jobs {
+		if _, failed := stageFailures[job.ID]; failed {
+			continue
+		}
 		ready, reason, err := cloudDepsReady(database, job)
 		if err != nil {
 			recordFailure(job.ID, "dependency check failed", err)
@@ -1146,6 +1143,19 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	return ensured, contacted, nil
 }
 
+func defaultR2Client() (*r2.Client, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config for R2: %w", err)
+	}
+	return r2.New(r2.Config{
+		AccountID:       cfg.Vastai.R2.AccountID,
+		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
+		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
+		Bucket:          cfg.Vastai.R2.Bucket,
+	})
+}
+
 // truncateDispatchDetail caps a dispatch failure detail at a length suitable
 // for storage and TUI display. rsync errors can be multi-line and very long;
 // the first line is usually the actionable summary.
@@ -1297,7 +1307,7 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 			pending = append(pending, pendingNeed{
 				spec:             spec,
 				path:             asset.TargetPath,
-				markerName:       "asset-" + url.PathEscape(name) + ".satisfied",
+				markerName:       filepath.Base(artifacts.NamedAssetSatisfiedFile("", name)),
 				remotePath:       strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(asset.TargetPath, "/"),
 				preResolvedR2Key: r2keys.NamedAsset(asset.ContentHash),
 			})
@@ -1389,7 +1399,8 @@ func stageArtifactNeedsForHost(database *sql.DB, host string, jobs []*db.Job, ti
 		}
 		var todo []pendingNeed
 		for _, n := range pending {
-			if !state[n.markerName].markerExists {
+			ent := state[n.markerName]
+			if !ent.markerExists || ent.fileSize < 0 {
 				todo = append(todo, n)
 			}
 		}
