@@ -1,16 +1,62 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
 )
+
+type fakeDataPublishR2 struct {
+	objects map[string][]byte
+}
+
+func (f *fakeDataPublishR2) ObjectExists(_ context.Context, key string) (bool, error) {
+	_, ok := f.objects[key]
+	return ok, nil
+}
+
+func (f *fakeDataPublishR2) PutObject(_ context.Context, key string, body io.Reader, _ string) error {
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, body); err != nil {
+		return err
+	}
+	f.objects[key] = buf.Bytes()
+	return nil
+}
+
+func setupDataPublishTest(t *testing.T, r2Client dataPublishR2Client) {
+	t.Helper()
+	db.SetupTestDB(t)
+	oldName := dataPublishName
+	oldTargetPath := dataPublishTargetPath
+	oldHost := dataPublishHost
+	oldBuildR2 := dataPublishBuildR2Client
+	oldCopyFrom := dataPublishCopyFrom
+	t.Cleanup(func() {
+		dataPublishName = oldName
+		dataPublishTargetPath = oldTargetPath
+		dataPublishHost = oldHost
+		dataPublishBuildR2Client = oldBuildR2
+		dataPublishCopyFrom = oldCopyFrom
+	})
+	dataPublishName = ""
+	dataPublishTargetPath = ""
+	dataPublishHost = ""
+	dataPublishBuildR2Client = func(_ *config.Config) (dataPublishR2Client, error) {
+		return r2Client, nil
+	}
+}
 
 func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 	database := db.SetupTestDB(t)
@@ -200,6 +246,99 @@ func TestRunDataWhereCheckpoint(t *testing.T) {
 	})
 	if !strings.Contains(out, "studio") {
 		t.Fatalf("output missing host: %q", out)
+	}
+}
+
+func TestRunDataPublishRemoteHostFlag(t *testing.T) {
+	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
+	setupDataPublishTest(t, r2Client)
+
+	dataPublishName = "remote-trace"
+	dataPublishHost = "cool30"
+	dataPublishTargetPath = "data/mooncake/toolagent_trace.jsonl"
+	dataPublishCopyFrom = func(remotePath, host, localPath string) error {
+		if host != "cool30" {
+			return fmt.Errorf("host = %s, want cool30", host)
+		}
+		if remotePath != "/remote/toolagent_trace.jsonl" {
+			return fmt.Errorf("remotePath = %s", remotePath)
+		}
+		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runDataPublish(nil, []string{"/remote/toolagent_trace.jsonl"}); err != nil {
+			t.Fatalf("runDataPublish: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Published asset:remote-trace") {
+		t.Fatalf("output missing publish line: %q", out)
+	}
+	if len(r2Client.objects) != 1 {
+		t.Fatalf("uploaded objects = %d, want 1", len(r2Client.objects))
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	asset, err := db.GetNamedAssetByName(database, "remote-trace")
+	if err != nil {
+		t.Fatalf("GetNamedAssetByName: %v", err)
+	}
+	if asset.TargetPath != "data/mooncake/toolagent_trace.jsonl" {
+		t.Fatalf("target path = %s", asset.TargetPath)
+	}
+	if asset.SizeBytes != int64(len("trace data")) {
+		t.Fatalf("size = %d", asset.SizeBytes)
+	}
+}
+
+func TestRunDataPublishRemoteSCPStyle(t *testing.T) {
+	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
+	setupDataPublishTest(t, r2Client)
+
+	dataPublishName = "remote-trace"
+	dataPublishTargetPath = "data/mooncake/toolagent_trace.jsonl"
+	dataPublishCopyFrom = func(remotePath, host, localPath string) error {
+		if host != "cool30" || remotePath != "/remote/toolagent_trace.jsonl" {
+			return fmt.Errorf("copy = %s:%s", host, remotePath)
+		}
+		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+	}
+
+	if err := runDataPublish(nil, []string{"cool30:/remote/toolagent_trace.jsonl"}); err != nil {
+		t.Fatalf("runDataPublish: %v", err)
+	}
+	if len(r2Client.objects) != 1 {
+		t.Fatalf("uploaded objects = %d, want 1", len(r2Client.objects))
+	}
+}
+
+func TestRunDataPublishRemoteRejectsAmbiguousHostSyntax(t *testing.T) {
+	setupDataPublishTest(t, &fakeDataPublishR2{objects: make(map[string][]byte)})
+	dataPublishName = "remote-trace"
+	dataPublishHost = "cool30"
+	dataPublishTargetPath = "data/file"
+
+	err := runDataPublish(nil, []string{"cool100:/remote/file"})
+	if err == nil || !strings.Contains(err.Error(), "cannot combine --host with host:path source") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRunDataPublishRemoteRequiresTargetPath(t *testing.T) {
+	setupDataPublishTest(t, &fakeDataPublishR2{objects: make(map[string][]byte)})
+	dataPublishName = "remote-trace"
+	dataPublishHost = "cool30"
+	dataPublishCopyFrom = func(_, _, localPath string) error {
+		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+	}
+
+	err := runDataPublish(nil, []string{"/remote/file"})
+	if err == nil || !strings.Contains(err.Error(), "remote publish requires --target-path") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

@@ -191,6 +191,11 @@ laptop$ weft data publish output/exp207_eval_texts.pkl \
   --name exp207-eval-llama8b
 # Published asset:exp207-eval-llama8b — uploaded, 187 MB (target path output/exp207_eval_texts.pkl)
 
+# Publish a file that currently lives on an on-prem host:
+laptop$ weft data publish --host cool30 /data/traces/toolagent.jsonl \
+  --name toolagent-trace \
+  --target-path data/traces/toolagent.jsonl
+
 # Consume from any cloud rental or on-prem host with R2 access:
 laptop$ weft run --gpu a100 \
   --input asset:exp207-eval-llama8b \
@@ -209,12 +214,23 @@ hint that pins the consumer to a host where the file is already present
 transports the bytes through R2 and works from any host. Use `checkpoint:`
 when the file is already on a specific GPU host (e.g. a fine-tuned model on
 cool100) and you want to avoid re-copying it. Use `asset:` when the file is
-on your laptop or you want any-host availability.
+on your laptop, on a remote host but should become portable, or you want
+any-host availability.
 
 **`asset:NAME` vs `--needs path:<job-id>`.** Use `--needs` when the file is
 the output of another weft job — weft already auto-tracks files in
 `output/` and pulls them from the producer's R2 artifacts. Use `asset:` for
 files you publish explicitly (no producer job).
+
+For multi-step data pipelines, choose the edge type by how the bytes should
+move:
+
+- Use `--produces`/`--needs` for files produced by an upstream weft job.
+- Use `weft data publish --host HOST PATH --name NAME --target-path PATH` and
+  `--input asset:NAME` for a host-local file that should become portable.
+- Use `weft data add --host HOST PATH --name NAME` and
+  `--input checkpoint:NAME` only when the consumer must run on a host that
+  already has that file or directory.
 
 Republishing under the same name overwrites the name → hash mapping.
 Identical bytes skip the upload (content-addressed). v1 is single-file only;
@@ -1182,8 +1198,9 @@ When you don't specify a host, weft picks the best one. The scoring considers:
 
 - **GPU constraints**: `--gpu-class` and `--gpu-mem` filter out hosts without
   the right hardware
-- **Data locality**: `--input` assets on a host earn a bonus; missing data
-  incurs a transfer penalty
+- **Data locality**: HF inputs already on a host earn a bonus; missing HF data
+  incurs a transfer penalty. `checkpoint:` and `corpus:` inputs require a host
+  that already has the asset.
 - **Current load**: hosts with lower GPU/CPU utilization and shorter queues
   score higher
 

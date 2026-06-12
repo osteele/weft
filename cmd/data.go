@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
+	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -35,6 +36,7 @@ var (
 
 	dataPublishName       string
 	dataPublishTargetPath string
+	dataPublishHost       string
 
 	dataEvictHost     string
 	dataEvictLastUsed string
@@ -100,9 +102,9 @@ Examples:
 }
 
 var dataPublishCmd = &cobra.Command{
-	Use:   "publish <local-path>",
-	Short: "Publish a local file as a named asset usable from any host",
-	Long: `Upload a local file to R2 under a stable name and register it in the
+	Use:   "publish [--host <host>] <path>",
+	Short: "Publish a file as a named asset usable from any host",
+	Long: `Upload a local or remote file to R2 under a stable name and register it in the
 named_assets table. Jobs can then declare ` + "`--input asset:<name>`" + ` to consume
 the file from any host (cloud rental or on-prem with R2 access), without
 pinning placement to a particular host the way ` + "`checkpoint:`" + ` does.
@@ -119,6 +121,8 @@ workspace.
 Examples:
   weft data publish output/exp207_eval_texts.pkl --name exp207-eval-llama8b
   weft data publish ~/data/grads.bin --name lm2-grads-v3 --target-path data/grads.bin
+  weft data publish --host cool30 /data/traces/toolagent.jsonl --name toolagent-trace --target-path data/toolagent.jsonl
+  weft data publish cool30:/data/traces/toolagent.jsonl --name toolagent-trace --target-path data/toolagent.jsonl
 `,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runDataPublish,
@@ -140,6 +144,13 @@ Examples:
 	RunE: runDataEvict,
 }
 
+var (
+	dataPublishBuildR2Client = func(cfg *config.Config) (dataPublishR2Client, error) {
+		return buildR2Client(cfg)
+	}
+	dataPublishCopyFrom = ssh.CopyFromWithRetry
+)
+
 func init() {
 	rootCmd.AddCommand(dataCmd)
 	dataCmd.PersistentFlags().BoolVar(&dataJSON, "json", false, "Print machine-readable JSON output")
@@ -155,6 +166,7 @@ func init() {
 
 	dataPublishCmd.Flags().StringVar(&dataPublishName, "name", "", "Stable name to publish under (required)")
 	dataPublishCmd.Flags().StringVar(&dataPublishTargetPath, "target-path", "", "Workspace-relative path to stage into at consumer launch time (default: derived from local path)")
+	dataPublishCmd.Flags().StringVar(&dataPublishHost, "host", "", "Remote host where the source file lives")
 	_ = dataPublishCmd.MarkFlagRequired("name")
 
 	dataFetchCmd.Flags().StringVar(&dataFetchHost, "host", "", "On-prem host that should cache the asset")
@@ -635,13 +647,21 @@ func formatBytes(size int64) string {
 }
 
 func runDataPublish(cmd *cobra.Command, args []string) error {
-	srcPath := filepath.Clean(runner.ExpandTilde(args[0]))
 	name := strings.TrimSpace(dataPublishName)
 	if name == "" {
 		return fmt.Errorf("--name is required")
 	}
 	if strings.ContainsAny(name, " \t\n/") {
 		return fmt.Errorf("--name %q: must not contain whitespace or slashes", name)
+	}
+
+	source, err := resolvePublishSource(args[0])
+	if err != nil {
+		return err
+	}
+	srcPath := source.LocalPath
+	if source.Cleanup != nil {
+		defer source.Cleanup()
 	}
 
 	info, err := os.Stat(srcPath)
@@ -654,6 +674,9 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 
 	targetPath := strings.TrimSpace(dataPublishTargetPath)
 	if targetPath == "" {
+		if source.Remote {
+			return fmt.Errorf("remote publish requires --target-path")
+		}
 		targetPath = derivePublishTargetPath(srcPath)
 	}
 	targetPath = strings.TrimPrefix(targetPath, "/")
@@ -665,7 +688,7 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	r2Client, err := buildR2Client(cfg)
+	r2Client, err := dataPublishBuildR2Client(cfg)
 	if err != nil {
 		return fmt.Errorf("build R2 client: %w", err)
 	}
@@ -679,7 +702,10 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 	}
 	key := r2keys.NamedAsset(sumHex)
 
-	ctx := cmd.Context()
+	ctx := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		ctx = cmd.Context()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -713,10 +739,78 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 	if exists {
 		action = "registered (bytes already in R2)"
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Published asset:%s — %s, %s (target path %s)\n",
+	out := io.Writer(os.Stdout)
+	if cmd != nil {
+		out = cmd.OutOrStdout()
+	}
+	fmt.Fprintf(out, "Published asset:%s — %s, %s (target path %s)\n",
 		name, action, formatBytes(size), targetPath)
-	fmt.Fprintf(cmd.OutOrStdout(), "Consumers: weft run --input asset:%s ...\n", name)
+	fmt.Fprintf(out, "Consumers: weft run --input asset:%s ...\n", name)
 	return nil
+}
+
+type publishSource struct {
+	LocalPath string
+	Remote    bool
+	Cleanup   func()
+}
+
+func resolvePublishSource(raw string) (publishSource, error) {
+	flagHost := strings.TrimSpace(dataPublishHost)
+	if host, path, ok := parseRemotePublishArg(raw); ok {
+		if flagHost != "" {
+			return publishSource{}, fmt.Errorf("cannot combine --host with host:path source")
+		}
+		return copyRemotePublishSource(host, path)
+	}
+	if flagHost != "" {
+		return copyRemotePublishSource(flagHost, raw)
+	}
+	return publishSource{LocalPath: filepath.Clean(runner.ExpandTilde(raw))}, nil
+}
+
+func parseRemotePublishArg(raw string) (host, path string, ok bool) {
+	before, after, found := strings.Cut(raw, ":")
+	if !found || before == "" || after == "" {
+		return "", "", false
+	}
+	if strings.Contains(before, "/") || strings.HasPrefix(before, ".") {
+		return "", "", false
+	}
+	return before, after, true
+}
+
+func copyRemotePublishSource(host, remotePath string) (publishSource, error) {
+	host = strings.TrimSpace(host)
+	remotePath = strings.TrimSpace(remotePath)
+	if host == "" {
+		return publishSource{}, fmt.Errorf("--host is required for remote publish")
+	}
+	if remotePath == "" {
+		return publishSource{}, fmt.Errorf("remote path is required")
+	}
+	tmp, err := os.CreateTemp("", "weft-data-publish-*")
+	if err != nil {
+		return publishSource{}, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return publishSource{}, fmt.Errorf("close temp file: %w", err)
+	}
+	if err := dataPublishCopyFrom(remotePath, host, tmpPath); err != nil {
+		os.Remove(tmpPath)
+		return publishSource{}, fmt.Errorf("copy %s:%s: %w", host, remotePath, err)
+	}
+	return publishSource{
+		LocalPath: tmpPath,
+		Remote:    true,
+		Cleanup: func() {
+			if err := os.Remove(tmpPath); err != nil {
+				slog.Warn("remove temp publish file", "path", tmpPath, "error", err)
+			}
+		},
+	}, nil
 }
 
 func sha256File(path string) (string, int64, error) {
@@ -733,7 +827,7 @@ func sha256File(path string) (string, int64, error) {
 	return fmt.Sprintf("%x", h.Sum(nil)), size, nil
 }
 
-func uploadFileToR2(ctx context.Context, client r2Uploader, path, key string) error {
+func uploadFileToR2(ctx context.Context, client dataPublishR2Client, path, key string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -742,9 +836,10 @@ func uploadFileToR2(ctx context.Context, client r2Uploader, path, key string) er
 	return client.PutObject(ctx, key, f, "application/octet-stream")
 }
 
-// r2Uploader is the minimal R2 surface uploadFileToR2 needs (allows tests to
-// substitute without dragging in the real S3 client).
-type r2Uploader interface {
+// dataPublishR2Client is the minimal R2 surface data publishing needs (allows
+// tests to substitute without dragging in the real S3 client).
+type dataPublishR2Client interface {
+	ObjectExists(ctx context.Context, key string) (bool, error)
 	PutObject(ctx context.Context, key string, body io.Reader, contentType string) error
 }
 

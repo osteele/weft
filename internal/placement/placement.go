@@ -702,6 +702,12 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		s.Reasons = append(s.Reasons, "host idle (benchmark-isolation)")
 	}
 
+	if reason := missingNonTransportableInputReason(database, host.Name, c.Inputs); reason != "" {
+		s.Eligible = false
+		s.Reasons = append(s.Reasons, reason)
+		return s
+	}
+
 	// --- Time-based scoring ---
 	// Compute estimated completion time as: queue drain + data transfer + job run.
 	// Score = -completion_time_minutes (lower time = higher score).
@@ -842,6 +848,45 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	}
 
 	return s
+}
+
+func missingNonTransportableInputReason(database *sql.DB, host string, inputs []string) string {
+	if database == nil || len(inputs) == 0 {
+		return ""
+	}
+	for _, ref := range inputs {
+		asset, ok := dataloc.ParseAssetRef(ref)
+		if !ok || !isNonTransportableInput(asset.Kind) {
+			continue
+		}
+		entries, err := dataloc.FindAssetHosts(database, asset)
+		if err != nil {
+			slog.Warn("failed to find asset hosts", "component", "placement", "asset", asset, "error", err)
+			continue
+		}
+		if len(entries) == 0 {
+			return fmt.Sprintf("missing %s: no host has this non-transportable input", asset.Ref())
+		}
+		holders := make([]string, 0, len(entries))
+		isLocal := false
+		for _, e := range entries {
+			holders = append(holders, e.Host)
+			if e.Host == host {
+				isLocal = true
+			}
+		}
+		if isLocal {
+			continue
+		}
+		slices.Sort(holders)
+		holders = slices.Compact(holders)
+		return fmt.Sprintf("missing %s on this host; present on %s", asset.Ref(), strings.Join(holders, ", "))
+	}
+	return ""
+}
+
+func isNonTransportableInput(kind dataloc.AssetKind) bool {
+	return kind == dataloc.AssetCheckpoint || kind == dataloc.AssetCorpus
 }
 
 // CheckHostGPUConstraints applies shared hard compatibility constraints to a

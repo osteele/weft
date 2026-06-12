@@ -290,6 +290,22 @@ weft data requests
 weft data requests --host cool100
 ```
 
+#### weft data publish
+
+Publish a single local or remote file as a portable named asset. Consumers use
+`--input asset:<name>` and Weft stages the file into the consumer workdir at
+the recorded target path.
+
+```bash
+weft data publish <local-path> --name <name> [--target-path <path>]
+weft data publish --host <host> <remote-path> --name <name> --target-path <path>
+weft data publish <host>:<remote-path> --name <name> --target-path <path>
+```
+
+Remote publish requires `--target-path` because an absolute path on another
+host does not define where the file should appear in the consumer workspace.
+Directories are not supported.
+
 ### weft db
 
 Manage the local jobs database (`~/.config/weft/jobs.db`): take consistent

@@ -337,6 +337,72 @@ func TestScoreHosts_DataLocality_MultipleInputs(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_CheckpointInputPinsToHolderEvenWithZeroSize(t *testing.T) {
+	db := setupTestDB(t)
+	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
+		Host:      "host-beta",
+		Asset:     dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "trace"},
+		Path:      "data/mooncake",
+		SizeBytes: 0,
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scores := scoreTestHosts(db, Constraints{
+		Inputs: []string{"checkpoint:trace"},
+		Tags:   []string{dbpkg.TagCPUIntensive},
+	})
+
+	holder := findScore(scores, "host-beta")
+	if !holder.Eligible {
+		t.Fatalf("checkpoint holder should be eligible, reasons: %v", holder.Reasons)
+	}
+	for _, host := range []string{"host-alpha", "host-gamma"} {
+		score := findScore(scores, host)
+		if score.Eligible {
+			t.Fatalf("%s should be ineligible without checkpoint", host)
+		}
+		if !hasReasonContaining(score.Reasons, "missing checkpoint:trace on this host; present on host-beta") {
+			t.Fatalf("%s missing reason = %v", host, score.Reasons)
+		}
+	}
+}
+
+func TestScoreHosts_CheckpointInputWithoutKnownHolderBlocksPlacement(t *testing.T) {
+	db := setupTestDB(t)
+	scores := scoreTestHosts(db, Constraints{Inputs: []string{"checkpoint:trace"}})
+
+	for _, score := range scores {
+		if score.Eligible {
+			t.Fatalf("%s should be ineligible when no host has checkpoint", score.Host)
+		}
+		if !hasReasonContaining(score.Reasons, "missing checkpoint:trace: no host has this non-transportable input") {
+			t.Fatalf("%s missing reason = %v", score.Host, score.Reasons)
+		}
+	}
+}
+
+func TestScoreHosts_MultipleCheckpointInputsRequireSameHolder(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+	for _, entry := range []dataloc.HostDataEntry{
+		{Host: "host-alpha", Asset: dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "a"}, LastSeen: now},
+		{Host: "host-beta", Asset: dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "b"}, LastSeen: now},
+	} {
+		if err := dataloc.RecordAsset(db, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	scores := scoreTestHosts(db, Constraints{Inputs: []string{"checkpoint:a", "checkpoint:b"}})
+	for _, score := range scores {
+		if score.Eligible {
+			t.Fatalf("%s should be ineligible without all checkpoint inputs", score.Host)
+		}
+	}
+}
+
 func TestScoreHosts_CombinedConstraints(t *testing.T) {
 	db := setupTestDB(t)
 	now := time.Now()
@@ -1480,6 +1546,15 @@ func findScore(scores []Score, host string) Score {
 		}
 	}
 	return Score{}
+}
+
+func hasReasonContaining(reasons []string, substr string) bool {
+	for _, reason := range reasons {
+		if strings.Contains(reason, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractTransferMinutes parses the transfer time from a reason like "~2m transfer for 1 missing inputs (static)".

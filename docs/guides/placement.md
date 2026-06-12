@@ -89,8 +89,10 @@ weft run \
 ```
 
 Hugging Face inputs influence score reasons and placement ranking. A host that
-already has the asset local avoids transfer time and ranks better. `local:`
-inputs are synced before execution but are not scored as reusable data assets.
+already has the asset local avoids transfer time and ranks better. `checkpoint:`
+and `corpus:` inputs are host-local assets: placement requires a host that
+already has each declared asset. `local:` inputs are synced before execution but
+are not scored as reusable data assets.
 
 Use tags when you need to change the placement domain:
 
