@@ -79,6 +79,9 @@ func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testi
 	if _, err := database.Exec(`UPDATE launches SET created_at = ? WHERE id = ?`, launchCreatedAt, launchID); err != nil {
 		t.Fatalf("set launch created_at: %v", err)
 	}
+	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &launchID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
 
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -94,6 +97,12 @@ func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testi
 	}
 	if ps.DisplayAt != launchCreatedAt {
 		t.Fatalf("DisplayAt = %d, want %d", ps.DisplayAt, launchCreatedAt)
+	}
+	if ps.Move == nil {
+		t.Fatal("expected move display")
+	}
+	if ps.Move.Phase != "waiting for destination acceptance" {
+		t.Fatalf("move phase = %q", ps.Move.Phase)
 	}
 }
 

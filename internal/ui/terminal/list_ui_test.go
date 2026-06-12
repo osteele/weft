@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/orchestration"
 )
@@ -359,6 +360,28 @@ func TestListTUICountAutoPilotActionableQueuedJobsIncludesRentalQueue(t *testing
 	}
 }
 
+func TestListTUIAutopilotCountsExcludeOpenMoveIntentUnplacedJobs(t *testing.T) {
+	m := listTUIModel{
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued},
+			{ID: 2, Status: db.StatusQueued},
+		},
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			2: {
+				JobID: 2,
+				Move:  &jobview.MoveDisplay{State: db.MoveIntentStateOpen},
+			},
+		},
+	}
+
+	if got, want := m.countUnplacedQueuedJobs(), 1; got != want {
+		t.Fatalf("countUnplacedQueuedJobs() = %d, want %d", got, want)
+	}
+	if got, want := m.countAutoPilotActionableQueuedJobs(), 1; got != want {
+		t.Fatalf("countAutoPilotActionableQueuedJobs() = %d, want %d", got, want)
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T) {
 	m := listTUIModel{
 		autoBlockReasons: map[int64]string{
@@ -382,6 +405,27 @@ func TestListTUIPruneAutoBlockReasonsKeepsOnlyVisibleUnplacedQueued(t *testing.T
 	}
 	if _, ok := m.autoBlockReasons[3]; ok {
 		t.Fatal("expected non-visible job block reason to be pruned")
+	}
+}
+
+func TestListTUIPruneAutoBlockReasonsDropsOpenMoveIntentUnplacedJob(t *testing.T) {
+	m := listTUIModel{
+		autoBlockReasons: map[int64]string{
+			1: "run-rate headroom exhausted",
+		},
+		jobs: []*db.Job{{ID: 1, Status: db.StatusQueued}},
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			1: {
+				JobID: 1,
+				Move:  &jobview.MoveDisplay{State: db.MoveIntentStateOpen},
+			},
+		},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if _, ok := m.autoBlockReasons[1]; ok {
+		t.Fatalf("expected open-move job block reason to be pruned, got %v", m.autoBlockReasons)
 	}
 }
 
@@ -635,6 +679,33 @@ func TestGroupedJobsWithAutoReasonsOnlyAppliesToUnplacedQueuedJobs(t *testing.T)
 	}
 	if decorated[1] != placed {
 		t.Fatal("expected placed queued job to be returned unchanged")
+	}
+}
+
+func TestGroupedJobsWithAutoReasonsSkipsOpenMoveIntentJobs(t *testing.T) {
+	moving := &db.Job{ID: 10, Status: db.StatusQueued}
+	m := listTUIModel{
+		jobs: []*db.Job{moving},
+		autoBlockReasons: map[int64]string{
+			10: "run-rate headroom exhausted",
+		},
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			10: {
+				JobID: 10,
+				Move:  &jobview.MoveDisplay{State: db.MoveIntentStateOpen},
+			},
+		},
+	}
+
+	decorated := m.groupedJobsWithAutoReasons()
+	if len(decorated) != 1 {
+		t.Fatalf("decorated len = %d, want 1", len(decorated))
+	}
+	if decorated[0] != moving {
+		t.Fatalf("expected moving job to remain undecorated, got %#v", decorated[0])
+	}
+	if line := m.groupedAutoPilotStatusText(0); strings.Contains(line, "1 unplaced") {
+		t.Fatalf("auto-pilot line = %q, want open-move job excluded from unplaced count", line)
 	}
 }
 

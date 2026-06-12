@@ -1622,7 +1622,7 @@ func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *t
 					TargetAttemptID: &targetAttemptID,
 					SourceLabel:     "wi3656",
 					TargetLabel:     "cool30",
-					Phase:           "waiting for destination attempt",
+					Phase:           "waiting for destination acceptance",
 					AttemptsByID: map[int64]db.JobAttempt{
 						sourceAttemptID: {ID: sourceAttemptID, JobID: 2538, AttemptNumber: 1, LaunchID: &sourceLaunchID, Status: db.StatusRunning},
 						targetAttemptID: {ID: targetAttemptID, JobID: 2538, AttemptNumber: 2, Host: "cool30", Status: db.StatusQueued},
@@ -1670,7 +1670,7 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTru
 					State:           db.MoveIntentStateOpen,
 					TargetAttemptID: &targetAttemptID,
 					TargetLabel:     "wi3737",
-					Phase:           "waiting for destination attempt",
+					Phase:           "waiting for destination acceptance",
 					AttemptsByID: map[int64]db.JobAttempt{
 						targetAttemptID: {
 							ID:            targetAttemptID,

@@ -31,6 +31,7 @@ type selectedJobContext struct {
 	overloadedHostsByName map[string]bool
 	siblingJobs           []*db.Job
 	moveByJob             map[int64]*jobview.MoveDisplay
+	openIntentJobIDs      map[int64]struct{}
 	// cloudConfigured is true when at least one cloud provider client is
 	// available. When true, an unplaced job whose only blocker is "no local
 	// host matched ..." is not actionable (autopilot is responsible for
@@ -198,7 +199,8 @@ func renderJobFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) str
 	}
 	parts = appendJobStatusParts(parts, job, ctx, now)
 	if job.TargetKind() == db.JobTargetUnplaced {
-		parts = appendUnplacedParts(parts, job, ctx.cloudConfigured)
+		_, suppressBlockedReason := ctx.openIntentJobIDs[job.ID]
+		parts = appendUnplacedParts(parts, job, ctx.cloudConfigured, suppressBlockedReason)
 	}
 	if sibling := waitingForSiblingJobID(job, ctx); sibling > 0 {
 		parts = append(parts, "waiting for "+ids.FormatJobID(sibling))
@@ -570,10 +572,13 @@ func selectedJobElapsedCost(job *db.Job, ctx selectedJobContext, now time.Time) 
 	return elapsed.Hours() * *obs.Rate, true
 }
 
-func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool) []string {
+func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool, suppressBlockedReason bool) []string {
 	parts = append(parts, "unplaced")
 	if req := formatResourceRequest(job); req != "" {
 		parts = append(parts, "wants "+req)
+	}
+	if suppressBlockedReason {
+		return parts
 	}
 	reasons := blockreason.Reasons(job, blockreason.Options{CloudConfigured: cloudConfigured})
 	if len(reasons) > 0 {

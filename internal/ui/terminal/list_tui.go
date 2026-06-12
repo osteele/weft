@@ -1494,10 +1494,22 @@ func (m *listTUIModel) resumeAutoPilotNow() {
 	m.autoNextPassAt = time.Time{}
 }
 
+func (m listTUIModel) hasOpenPlacementIntent(jobID int64) bool {
+	status, ok := m.placementStatusByJob[jobID]
+	if !ok {
+		return false
+	}
+	return status.HasOpenIntent || (status.Move != nil && status.Move.State == db.MoveIntentStateOpen)
+}
+
+func (m listTUIModel) isAutopilotVisibleUnplaced(job *db.Job) bool {
+	return job != nil && job.IsUnplacedAwaitingPlacement() && !m.hasOpenPlacementIntent(job.ID)
+}
+
 func (m listTUIModel) countUnplacedQueuedJobs() int {
 	n := 0
 	for _, job := range m.jobs {
-		if job.IsUnplacedAwaitingPlacement() {
+		if m.isAutopilotVisibleUnplaced(job) {
 			n++
 		}
 	}
@@ -1507,11 +1519,11 @@ func (m listTUIModel) countUnplacedQueuedJobs() int {
 func (m listTUIModel) countAutoPilotActionableQueuedJobs() int {
 	n := 0
 	for _, job := range m.jobs {
-		if job.IsUnplacedAwaitingPlacement() {
+		if m.isAutopilotVisibleUnplaced(job) {
 			n++
 			continue
 		}
-		if job != nil && job.EffectiveStatus() == db.StatusQueued && job.IsRentalJob() {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued && job.IsRentalJob() && !m.hasOpenPlacementIntent(job.ID) {
 			n++
 		}
 	}
@@ -1622,6 +1634,7 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		overloadedHostsByName: m.overloadedHostsByName,
 		siblingJobs:           m.jobs,
 		moveByJob:             moveDisplayMap(m.placementStatusByJob),
+		openIntentJobIDs:      openIntentJobIDMap(m.placementStatusByJob),
 		cloudConfigured:       len(m.cloudClients) > 0,
 	}, time.Now())
 }
@@ -1635,6 +1648,22 @@ func moveDisplayMap(statusByJob map[int64]jobview.PlacementStatus) map[int64]*jo
 		if status.Move != nil {
 			out[jobID] = status.Move
 		}
+	}
+	return out
+}
+
+func openIntentJobIDMap(statusByJob map[int64]jobview.PlacementStatus) map[int64]struct{} {
+	if len(statusByJob) == 0 {
+		return nil
+	}
+	out := make(map[int64]struct{})
+	for jobID, status := range statusByJob {
+		if status.HasOpenIntent || (status.Move != nil && status.Move.State == db.MoveIntentStateOpen) {
+			out[jobID] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -3435,7 +3464,7 @@ func formatQuickLaunchEventLine(event campaign.LaunchEvent) string {
 func (m listTUIModel) effectiveBlockedDetail() map[int64]*blockreason.Structured {
 	detail := make(map[int64]*blockreason.Structured)
 	for _, job := range m.jobs {
-		if job == nil || !job.IsUnplacedAwaitingPlacement() {
+		if !m.isAutopilotVisibleUnplaced(job) {
 			continue
 		}
 		if d := m.autoBlockDetail[job.ID]; d != nil {
@@ -3464,7 +3493,7 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	visibleUnplaced := make(map[int64]struct{}, len(m.jobs))
 	visibleBlockedReasons := make(map[int64]struct{}, len(m.jobs))
 	for _, job := range m.jobs {
-		if job.IsUnplacedAwaitingPlacement() {
+		if m.isAutopilotVisibleUnplaced(job) {
 			visibleUnplaced[job.ID] = struct{}{}
 			visibleBlockedReasons[job.ID] = struct{}{}
 			continue
@@ -3554,7 +3583,7 @@ func (m listTUIModel) groupedJobsWithAutoReasons() []*db.Job {
 			continue
 		}
 		reason, ok := blockReasons[job.ID]
-		if !ok || strings.TrimSpace(reason) == "" || !job.IsUnplacedAwaitingPlacement() {
+		if !ok || strings.TrimSpace(reason) == "" || !m.isAutopilotVisibleUnplaced(job) {
 			decorated = append(decorated, job)
 			continue
 		}
@@ -3573,7 +3602,7 @@ func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[i
 	reasons := make(map[int64]string)
 	headroom, hasRunRateHeadroom := m.currentRunRateHeadroomCents()
 	for _, job := range jobs {
-		if job == nil || !job.IsUnplacedAwaitingPlacement() {
+		if !m.isAutopilotVisibleUnplaced(job) {
 			continue
 		}
 		displayJob := jobWithDisplayPlacementReasons(job, headroom, hasRunRateHeadroom)

@@ -185,6 +185,39 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_OpenMoveSuppressesUnplacedBlockedReason(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	memGB := 132
+	job := &db.Job{
+		ID:                 2921,
+		GPUClass:           "ampere+",
+		GPUMemGB:           &memGB,
+		Status:             db.StatusQueued,
+		CreatedAt:          now.Add(-37 * time.Minute).Unix(),
+		QueueBlockedReason: "run-rate headroom exhausted",
+	}
+	lines := renderSelectedJobDetail(job, selectedJobContext{
+		openIntentJobIDs: map[int64]struct{}{2921: {}},
+		moveByJob: map[int64]*jobview.MoveDisplay{
+			2921: {
+				State:       db.MoveIntentStateOpen,
+				TargetLabel: "wi3738",
+				Phase:       "waiting for destination acceptance",
+				CreatedAt:   now.Add(-24 * time.Minute).Unix(),
+			},
+		},
+	}, now)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"Job: wj2921", "unplaced", "ampere+", "≥132GB", "Move:  -> wi3738", "waiting for destination acceptance"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in detail lines, got:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "blocked:") || strings.Contains(joined, "run-rate headroom") {
+		t.Fatalf("stale blocked reason rendered for open move:\n%s", joined)
+	}
+}
+
 func TestSelectedJobDetail_UnplacedHidesResetReasonWithLiveBlocker(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	memGB := 34

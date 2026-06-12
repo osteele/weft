@@ -201,7 +201,7 @@ func moveIntentPhase(intent *db.MoveIntent) string {
 	case db.MoveIntentStateOpen:
 		switch {
 		case intent.TargetAttemptID != nil:
-			return "waiting for destination attempt"
+			return "waiting for destination acceptance"
 		case intent.TargetRequestID != "":
 			return "waiting for destination launch"
 		case intent.TargetKind == db.MoveTargetNew:
