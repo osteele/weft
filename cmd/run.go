@@ -148,6 +148,145 @@ func submitJobToCloudReuse(database *sql.DB, r2Client *r2.Client, instanceID int
 	return cloudReuseSubmitFailed, duration, err
 }
 
+func trySubmitJobToGraceReuse(cmd *cobra.Command, database *sql.DB, jobID int64) (bool, error) {
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return false, fmt.Errorf("load queued job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	if job == nil || !job.IsUnplacedQueued() {
+		return false, nil
+	}
+	inst, matchedJob, err := findGraceRetryCandidate(database, job, time.Now())
+	if err != nil {
+		return false, err
+	}
+	if inst == nil {
+		return false, nil
+	}
+
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: found warm instance %s from failed job %s, but cannot submit automatically: %v\n",
+			ids.FormatInstanceID(inst.ID), ids.FormatJobID(matchedJob.ID), err)
+		return false, nil
+	}
+
+	outcome, _, err := submitJobToCloudReuse(database, r2Client, inst.ID, job)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: found warm instance %s from failed job %s, but automatic submit failed: %v\n",
+			ids.FormatInstanceID(inst.ID), ids.FormatJobID(matchedJob.ID), err)
+		return false, nil
+	}
+	switch outcome {
+	case cloudReuseAckReceived:
+		fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted and assigned to warm instance %s\n",
+			ids.FormatJobID(jobID), ids.FormatInstanceID(inst.ID))
+		return true, nil
+	case cloudReuseAckNotObserved:
+		fmt.Fprintf(os.Stderr, "warning: warm instance %s did not acknowledge job %s before the short submit timeout; continuing with normal placement\n",
+			ids.FormatInstanceID(inst.ID), ids.FormatJobID(jobID))
+		return false, nil
+	default:
+		return false, nil
+	}
+}
+
+func findGraceRetryCandidate(database *sql.DB, job *db.Job, now time.Time) (*db.Launch, *db.Job, error) {
+	if job == nil || job.WorkingDir == "" || job.Command == "" {
+		return nil, nil, nil
+	}
+	launches, err := db.ListLaunches(database)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list launches: %w", err)
+	}
+	var bestLaunch *db.Launch
+	var bestJob *db.Job
+	for _, inst := range launches {
+		if !launchInActiveGrace(inst, now) {
+			continue
+		}
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list jobs for %s: %w", ids.FormatInstanceID(inst.ID), err)
+		}
+		for _, prior := range jobs {
+			if !matchesGraceRetryJob(job, prior) {
+				continue
+			}
+			if bestLaunch == nil || graceCandidateNewer(inst, bestLaunch) {
+				bestLaunch = inst
+				bestJob = prior
+			}
+		}
+	}
+	return bestLaunch, bestJob, nil
+}
+
+func launchInActiveGrace(inst *db.Launch, now time.Time) bool {
+	if inst == nil || inst.Status != db.LaunchStatusGrace {
+		return false
+	}
+	if inst.GraceDeadline == nil {
+		return true
+	}
+	return *inst.GraceDeadline > now.Unix()
+}
+
+func graceCandidateNewer(a, b *db.Launch) bool {
+	if a == nil {
+		return false
+	}
+	if b == nil {
+		return true
+	}
+	aStarted, bStarted := int64(0), int64(0)
+	if a.GraceStartedAt != nil {
+		aStarted = *a.GraceStartedAt
+	}
+	if b.GraceStartedAt != nil {
+		bStarted = *b.GraceStartedAt
+	}
+	if aStarted != bStarted {
+		return aStarted > bStarted
+	}
+	return a.ID > b.ID
+}
+
+func matchesGraceRetryJob(job, prior *db.Job) bool {
+	if job == nil || prior == nil {
+		return false
+	}
+	if prior.Status != db.StatusFailed {
+		return false
+	}
+	if job.WorkingDir == "" || prior.WorkingDir == "" || job.WorkingDir != prior.WorkingDir {
+		return false
+	}
+	return sameRetryCommandShape(job.Command, prior.Command)
+}
+
+func sameRetryCommandShape(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	aScripts := normalizedPythonScripts(a)
+	bScripts := normalizedPythonScripts(b)
+	return len(aScripts) == 1 && len(bScripts) == 1 && aScripts[0] == bScripts[0]
+}
+
+func normalizedPythonScripts(command string) []string {
+	scripts := dataloc.ExtractPythonScripts(command)
+	for i, script := range scripts {
+		scripts[i] = filepath.Clean(strings.Trim(script, `"'`))
+	}
+	return scripts
+}
+
 type draftRunParams struct {
 	Config        *config.Config
 	Host          string
@@ -996,6 +1135,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		if host == "" {
+			accepted, err := trySubmitJobToGraceReuse(cmd, database, jobID)
+			if err != nil {
+				return err
+			}
+			if accepted {
+				return nil
+			}
 			reasons := []string{autoPlacementPendingReason}
 			if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)

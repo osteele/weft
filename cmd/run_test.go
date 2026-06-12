@@ -167,6 +167,150 @@ func TestSubmitJobToCloudReuse_SubmitFailure(t *testing.T) {
 	}
 }
 
+func TestSameRetryCommandShape(t *testing.T) {
+	tests := []struct {
+		name string
+		a    string
+		b    string
+		want bool
+	}{
+		{
+			name: "exact command",
+			a:    "uv run python train.py --lr 1e-4",
+			b:    "uv run python train.py --lr 1e-4",
+			want: true,
+		},
+		{
+			name: "same script different args",
+			a:    "uv run python train.py --lr 1e-4",
+			b:    "uv run python train.py --lr 5e-5",
+			want: true,
+		},
+		{
+			name: "same script different runner",
+			a:    "python train.py",
+			b:    "uv run python train.py",
+			want: true,
+		},
+		{
+			name: "different script",
+			a:    "python train.py",
+			b:    "python eval.py",
+			want: false,
+		},
+		{
+			name: "ambiguous multiple scripts",
+			a:    "python train.py && python eval.py",
+			b:    "python train.py",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sameRetryCommandShape(tt.a, tt.b); got != tt.want {
+				t.Fatalf("sameRetryCommandShape(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindGraceRetryCandidate_MatchesFailedSameScript(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now()
+	deadline := now.Add(5 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:        db.LaunchStatusGrace,
+		Provider:      "vastai",
+		GPUClass:      "a100",
+		GPUMemGB:      80,
+		GraceDeadline: &deadline,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	priorID, err := db.RecordQueued(database, "", "/tmp/project", "uv run python serve.py --old", "failed")
+	if err != nil {
+		t.Fatalf("RecordQueued prior: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, priorID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	ended := now.Add(-time.Minute).Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, exit_code = 1, cloud_outcome = ? WHERE job_id = ? AND launch_id = ?`,
+		db.StatusFailed, ended, db.AttemptOutcomeFailed, priorID, instanceID,
+	); err != nil {
+		t.Fatalf("mark prior failed: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python serve.py --fixed", "retry")
+	if err != nil {
+		t.Fatalf("RecordQueued retry: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	inst, prior, err := findGraceRetryCandidate(database, job, now)
+	if err != nil {
+		t.Fatalf("findGraceRetryCandidate: %v", err)
+	}
+	if inst == nil || inst.ID != instanceID {
+		t.Fatalf("instance = %#v, want id %d", inst, instanceID)
+	}
+	if prior == nil || prior.ID != priorID {
+		t.Fatalf("prior = %#v, want id %d", prior, priorID)
+	}
+}
+
+func TestFindGraceRetryCandidate_IgnoresExpiredGrace(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now()
+	deadline := now.Add(-time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:        db.LaunchStatusGrace,
+		Provider:      "vastai",
+		GPUClass:      "a100",
+		GPUMemGB:      80,
+		GraceDeadline: &deadline,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	priorID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "failed")
+	if err != nil {
+		t.Fatalf("RecordQueued prior: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, priorID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, exit_code = 1, cloud_outcome = ? WHERE job_id = ? AND launch_id = ?`,
+		db.StatusFailed, now.Add(-2*time.Minute).Unix(), db.AttemptOutcomeFailed, priorID, instanceID,
+	); err != nil {
+		t.Fatalf("mark prior failed: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "retry")
+	if err != nil {
+		t.Fatalf("RecordQueued retry: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	inst, prior, err := findGraceRetryCandidate(database, job, now)
+	if err != nil {
+		t.Fatalf("findGraceRetryCandidate: %v", err)
+	}
+	if inst != nil || prior != nil {
+		t.Fatalf("candidate = (%#v, %#v), want nil", inst, prior)
+	}
+}
+
 func TestScanRunScriptMetaRejectsMalformedPEP723(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "train.py")
