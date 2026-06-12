@@ -2,7 +2,9 @@ package ops
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -136,14 +138,24 @@ func TestRecordJobOutputs_KilledJob(t *testing.T) {
 
 func TestRecordJobOutputs_LocalOutput(t *testing.T) {
 	database := setupArtifactTestDB(t)
+	prev := snapshotRemoteJobOutputFunc
+	t.Cleanup(func() { snapshotRemoteJobOutputFunc = prev })
+	snapshotRemoteJobOutputFunc = func(_ *sql.DB, job *db.Job, relPath string, _ time.Duration) (string, error) {
+		if job.ID != 46 || relPath != "cache/representations" {
+			t.Fatalf("snapshot args = job %d path %q", job.ID, relPath)
+		}
+		return "~/.cache/weft/artifacts/46/7/outputs/cache/representations", nil
+	}
 
 	exitCode := 0
+	runID := int64(7)
 	job := &db.Job{
-		ID:       46,
-		Host:     "host-beta",
-		Status:   db.StatusCompleted,
-		ExitCode: &exitCode,
-		Outputs:  []string{"local:cache/representations/"},
+		ID:          46,
+		Host:        "host-beta",
+		Status:      db.StatusCompleted,
+		ExitCode:    &exitCode,
+		Outputs:     []string{"local:cache/representations/"},
+		LatestRunID: &runID,
 	}
 
 	RecordJobOutputs(database, job)
@@ -158,7 +170,36 @@ func TestRecordJobOutputs_LocalOutput(t *testing.T) {
 	if entries[0].Asset.Kind != dataloc.AssetJobOutput || entries[0].Asset.ID != "46/cache/representations" {
 		t.Fatalf("unexpected asset = %+v", entries[0].Asset)
 	}
-	if entries[0].Path != "cache/representations" {
-		t.Fatalf("path = %q, want %q", entries[0].Path, "cache/representations")
+	if entries[0].Path != "~/.cache/weft/artifacts/46/7/outputs/cache/representations" {
+		t.Fatalf("path = %q, want snapshot path", entries[0].Path)
+	}
+}
+
+func TestRecordJobOutputs_LocalOutputSnapshotFailureSkipsMutablePath(t *testing.T) {
+	database := setupArtifactTestDB(t)
+	prev := snapshotRemoteJobOutputFunc
+	t.Cleanup(func() { snapshotRemoteJobOutputFunc = prev })
+	snapshotRemoteJobOutputFunc = func(*sql.DB, *db.Job, string, time.Duration) (string, error) {
+		return "", errors.New("missing output")
+	}
+
+	exitCode := 0
+	job := &db.Job{
+		ID:         47,
+		Host:       "host-beta",
+		WorkingDir: "/tmp/project",
+		Status:     db.StatusCompleted,
+		ExitCode:   &exitCode,
+		Outputs:    []string{"local:output/result.json"},
+	}
+
+	RecordJobOutputs(database, job)
+
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no mutable host_data entry after snapshot failure, got %d", len(entries))
 	}
 }

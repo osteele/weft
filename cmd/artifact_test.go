@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
@@ -834,6 +835,69 @@ func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *t
 	}
 	if entries[0].Path != "output/bayes_course/exp_178.json" {
 		t.Fatalf("artifact path = %q", entries[0].Path)
+	}
+}
+
+func TestSyncRecordedJobOutputAssetsUsesSnapshotPath(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := dataloc.InitSchema(database); err != nil {
+		t.Fatalf("InitSchema: %v", err)
+	}
+
+	entry := dataloc.HostDataEntry{
+		Host: "studio",
+		Asset: dataloc.DataAsset{
+			Kind: dataloc.AssetJobOutput,
+			ID:   "52/output/result.json",
+		},
+		Path:     "~/.cache/weft/artifacts/52/9/outputs/output/result.json",
+		LastSeen: time.Now(),
+	}
+	if err := dataloc.RecordAsset(database, entry); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+
+	prev := storeRemoteJobOutputAssetFunc
+	t.Cleanup(func() { storeRemoteJobOutputAssetFunc = prev })
+	var gotRemotePath string
+	storeRemoteJobOutputAssetFunc = func(database *sql.DB, job *db.Job, relPath, remotePath string, _ func(string, string, string) error) error {
+		gotRemotePath = remotePath
+		return db.UpsertArtifact(database, db.Artifact{
+			JobID:      job.ID,
+			Path:       relPath,
+			StoredPath: filepath.Join("52", relPath),
+		})
+	}
+
+	job := &db.Job{
+		ID:         52,
+		Host:       "studio",
+		WorkingDir: "/tmp/project",
+	}
+	result, err := syncRecordedJobOutputAssets(database, job)
+	if err != nil {
+		t.Fatalf("syncRecordedJobOutputAssets: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+	if gotRemotePath != "~/.cache/weft/artifacts/52/9/outputs/output/result.json" {
+		t.Fatalf("remote path = %q, want snapshot path", gotRemotePath)
+	}
+	art, err := db.FindArtifactByNameOrPath(database, 52, "output/result.json")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if art.Path != "output/result.json" {
+		t.Fatalf("artifact path = %q", art.Path)
+	}
+}
+
+func TestRecordedJobOutputRemotePathResolvesLegacyRelativePath(t *testing.T) {
+	job := &db.Job{WorkingDir: "~/project"}
+	got := recordedJobOutputRemotePath(job, "output/result.json")
+	if got != "~/project/output/result.json" {
+		t.Fatalf("remote path = %q", got)
 	}
 }
 

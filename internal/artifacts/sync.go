@@ -151,6 +151,30 @@ func copyRemoteArtifact(job *db.Job, spec ArtifactSpec, remotePath, localRoot st
 	return storedPath, size, sha, nil
 }
 
+// StoreRemoteArtifact copies a remote file into the local artifact cache and
+// records it in the artifact database.
+func StoreRemoteArtifact(database *sql.DB, job *db.Job, relPath, remotePath string, copyFrom func(remotePath, host, localPath string) error) error {
+	if job == nil || strings.TrimSpace(relPath) == "" || strings.TrimSpace(remotePath) == "" {
+		return nil
+	}
+	localRoot, err := LocalArtifactsDir()
+	if err != nil {
+		return err
+	}
+	spec := ArtifactSpec{Path: relPath}
+	storedPath, size, sha, err := copyRemoteArtifact(job, spec, remotePath, localRoot, copyFrom)
+	if err != nil {
+		return err
+	}
+	return db.UpsertArtifact(database, db.Artifact{
+		JobID:      job.ID,
+		Path:       relPath,
+		StoredPath: storedPath,
+		SizeBytes:  size,
+		SHA256:     sha,
+	})
+}
+
 // StoreLocalArtifact copies a local file into the artifact cache and records it
 // in the artifact database.
 func StoreLocalArtifact(database *sql.DB, jobID int64, relPath, sourcePath string) error {

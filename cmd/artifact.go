@@ -1963,6 +1963,12 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return artifacts.SyncResult{}, nil
 	}
 
+	if result, err := syncRecordedJobOutputAssets(database, job); err != nil {
+		return artifacts.SyncResult{}, err
+	} else if result.Added > 0 {
+		return result, nil
+	}
+
 	outputFiles := completionOutputFilesFunc(job)
 	if len(outputFiles) > 0 {
 		totalMB := runner.TotalSizeMB(outputFiles)
@@ -1979,6 +1985,46 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		}
 	}
 	return storeLocalOutputFiles(database, job.ID, localDir, outputFiles)
+}
+
+func syncRecordedJobOutputAssets(database *sql.DB, job *db.Job) (artifacts.SyncResult, error) {
+	result := artifacts.SyncResult{}
+	entries, err := listJobOutputAssets(database, job.ID)
+	if err != nil {
+		return result, err
+	}
+	if len(entries) == 0 {
+		return result, nil
+	}
+	prefix := fmt.Sprintf("%d/", job.ID)
+	for _, entry := range entries {
+		relPath := strings.TrimPrefix(entry.Asset.ID, prefix)
+		relPath = strings.TrimSpace(relPath)
+		if relPath == "" || strings.TrimSpace(entry.Path) == "" {
+			result.Skipped++
+			continue
+		}
+		remotePath := recordedJobOutputRemotePath(job, entry.Path)
+		host := entry.Host
+		if host == "" {
+			host = job.Host
+		}
+		copyJob := *job
+		copyJob.Host = host
+		if err := storeRemoteJobOutputAssetFunc(database, &copyJob, relPath, remotePath, ssh.CopyFromWithRetry); err != nil {
+			return result, err
+		}
+		result.Added++
+	}
+	return result, nil
+}
+
+func recordedJobOutputRemotePath(job *db.Job, recordedPath string) string {
+	recordedPath = strings.TrimSpace(recordedPath)
+	if strings.HasPrefix(recordedPath, "/") || strings.HasPrefix(recordedPath, "~") {
+		return recordedPath
+	}
+	return artifacts.ResolveRemotePath(job.WorkingDir, recordedPath)
 }
 
 // syncCloudJobOutputs downloads convention-based outputs and artifact manifest
@@ -2135,12 +2181,13 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 }
 
 var (
-	syncLocalJobArtifacts     = artifacts.SyncJob
-	syncCloudJobArtifactsFunc = syncCloudJobArtifacts
-	completionOutputFilesFunc = completionOutputFiles
-	syncJobOutputsFunc        = syncJobOutputs
-	syncArtifactsForJobFunc   = syncArtifactsForJob
-	buildArtifactR2Client     = func() cloudOutputStore {
+	syncLocalJobArtifacts         = artifacts.SyncJob
+	syncCloudJobArtifactsFunc     = syncCloudJobArtifacts
+	completionOutputFilesFunc     = completionOutputFiles
+	syncJobOutputsFunc            = syncJobOutputs
+	syncArtifactsForJobFunc       = syncArtifactsForJob
+	storeRemoteJobOutputAssetFunc = artifacts.StoreRemoteArtifact
+	buildArtifactR2Client         = func() cloudOutputStore {
 		cfg, err := config.Load()
 		if err != nil {
 			return nil
