@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path"
 	"slices"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
@@ -257,21 +259,18 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)
 	}
 
-	// Disk check: compute incremental inputs (HF models) + UV sync
+	// Disk check: compute incremental inputs (HF models) + setup scratch.
 	if cap.DiskFreeGB > 0 || inst.DiskGB > 0 {
-		incrementalInputs := subtractInputs(job.Inputs, cap.ProvisionedInputs)
-		incrementalDiskGB := estimateInputsDisk(incrementalInputs)
-
-		// Account for cold uv sync disk from the local cache when available,
-		// and fall back to R2 when a client is provided.
-		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		if localDir != "" {
-			uvBytes := estimateGroupUVBytes([]string{localDir}, r2Client)
-			incrementalDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
+		need := estimateReuseJobDiskNeedGB(job, cap, r2Client)
+		if need.diskFloorGB > 0 && inst.DiskGB > 0 && need.diskFloorGB > inst.DiskGB {
+			return false, fmt.Sprintf("disk insufficient: disk floor=%dGB instance=%dGB", need.diskFloorGB, inst.DiskGB)
 		}
-
-		if incrementalDiskGB > 0 && incrementalDiskGB > cap.DiskFreeGB {
-			return false, fmt.Sprintf("disk insufficient: need=%dGB free=%dGB", incrementalDiskGB, cap.DiskFreeGB)
+		if need.totalGB > 0 && need.totalGB > cap.DiskFreeGB {
+			detail := ""
+			if need.reason != "" {
+				detail = " (" + need.reason + ")"
+			}
+			return false, fmt.Sprintf("disk insufficient: need=%dGB free=%dGB%s", need.totalGB, cap.DiskFreeGB, detail)
 		}
 	}
 
@@ -281,6 +280,111 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
+}
+
+type reuseDiskNeed struct {
+	totalGB     int
+	diskFloorGB int
+	reason      string
+}
+
+func estimateReuseJobDiskNeedGB(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) reuseDiskNeed {
+	if job == nil {
+		return reuseDiskNeed{}
+	}
+
+	inputGB := estimateInputsDisk(subtractInputs(job.Inputs, cap.ProvisionedInputs))
+	setupGB, setupReason := estimateReuseSetupDiskGB(job, cap, r2Client)
+	runtimeGB := EstimateRuntimeDiskGB(job)
+	floorGB := jobDiskFloorGB(job)
+
+	return reuseDiskNeed{
+		totalGB:     inputGB + setupGB + runtimeGB,
+		diskFloorGB: floorGB,
+		reason:      setupReason,
+	}
+}
+
+func estimateReuseSetupDiskGB(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (int, string) {
+	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	if localDir == "" {
+		return 0, ""
+	}
+	sourceDirs := []string{localDir}
+	if bytes, ok := estimateGroupUVBytesFromManifest(sourceDirs, r2Client); ok {
+		return int(math.Ceil(float64(bytes) / 1e9)), ""
+	}
+	if !hasCUDAPackages(sourceDirs) {
+		return NonCUDAOverheadGB, "setup estimate from non-CUDA dependency fallback"
+	}
+
+	image := ""
+	if cap.Instance != nil {
+		image = cap.Instance.DockerImage
+	}
+	if isPyTorchImage(image) && pyTorchImageShortcutLikely(localDir) {
+		return CUDAOverheadWithPyTorchImageGB, "setup estimate assumes PyTorch image provides torch"
+	}
+	if image == "" {
+		image = cloud.DefaultImage
+	}
+	return CUDAOverheadGB, fmt.Sprintf("CUDA packages not provided by image %s", image)
+}
+
+func estimateGroupUVBytesFromManifest(sourceDirs []string, r2Client *r2.Client) (int64, bool) {
+	lockfileHashes := estimate.LockfileHash(sourceDirs)
+	if len(lockfileHashes) == 0 {
+		return 0, false
+	}
+	manifests := estimate.FetchUVManifests(r2Client, lockfileHashes, "linux-amd64")
+	if len(manifests) == 0 {
+		return 0, false
+	}
+	return estimate.EstimateUVSyncBytes(manifests), true
+}
+
+func pyTorchImageShortcutLikely(localDir string) bool {
+	req, ok := pythonVersionRequestForReuse(localDir)
+	if !ok {
+		return true
+	}
+	return req == "3.11"
+}
+
+func pythonVersionRequestForReuse(localDir string) (string, bool) {
+	data, err := os.ReadFile(path.Join(localDir, ".python-version"))
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+	if line == "" {
+		return "", false
+	}
+	if idx := strings.Index(line, ":"); idx >= 0 {
+		return "", true
+	}
+	parts := strings.Split(line, ".")
+	if len(parts) < 2 {
+		return "", true
+	}
+	return parts[0] + "." + parts[1], true
+}
+
+func jobDiskFloorGB(job *db.Job) int {
+	if job == nil {
+		return 0
+	}
+	switch {
+	case job.CLIResourceOverrides != nil && job.CLIResourceOverrides.DiskGB != nil:
+		return max(0, *job.CLIResourceOverrides.DiskGB)
+	case job.Metadata != nil && job.Metadata.Disk != nil && job.Metadata.Disk.DiskGB > 0:
+		return job.Metadata.Disk.DiskGB
+	default:
+		if meta := scanJobScriptMeta(job); meta != nil && meta.DiskGB > 0 {
+			return meta.DiskGB
+		}
+	}
+	return 0
 }
 
 // subtractInputs returns inputs in job that are not in provisioned (set difference).
@@ -401,7 +505,8 @@ func consumeReuseJob(cap *InstanceCapacity, job *db.Job) {
 		}
 	}
 
-	cap.DiskFreeGB -= estimateInputsDisk(incremental)
+	need := estimateReuseJobDiskNeedGB(job, *cap, nil)
+	cap.DiskFreeGB -= need.totalGB
 	if cap.DiskFreeGB < 0 {
 		cap.DiskFreeGB = 0
 	}

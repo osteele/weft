@@ -860,6 +860,34 @@ rule GPUMemoryHardwareCeilingResolution {
         -- internal/campaign/reuse.go matchJobToInstance.
 }
 
+rule FreshRentalDiskEstimate {
+    when: BuildOfferSearchFilter(group)
+       OR LaunchInstance(group, options)
+
+    ensures:
+        group.requested_disk_gb >= DefaultMinDiskGB
+        group.requested_disk_gb >= ExplicitDiskFloorGB(group)
+        group.requested_disk_gb >= EstimatedDeclaredAndObservedInputsGB(group)
+            + EstimatedUVSyncGB(group)
+            + ImageAndSetupOverheadGB(group)
+            + ExplicitRuntimeDiskGB(group)
+        HistoricalDiskPeakUsable(group) implies
+            group.requested_disk_gb >= EmpiricalDiskRequirementGB(group)
+
+    @guidance
+        -- Fresh rental disk sizing combines declared inputs, observed
+        -- post-mortem inputs, cached uv-lock manifests (or a package-count
+        -- fallback), Docker/workspace overhead, CUDA setup overhead, explicit
+        -- runtime scratch, empirical history, and user disk floors. PyTorch
+        -- images use reduced CUDA setup overhead for launch sizing; reuse
+        -- admission is stricter because it checks remaining free disk on a
+        -- mutable live instance.
+        --
+        -- Historical disk telemetry above the plausibility bound is rejected
+        -- and surfaced as an anomaly instead of silently clamped.
+        -- Implementation: internal/campaign/disk.go EstimateGroupDisk.
+}
+
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
 
@@ -2523,6 +2551,31 @@ rule InstanceReuseGPUMemoryCheck {
         -- conservative behavior. Recording the offer's actual memory at
         -- launch time (see LaunchInstance) is required so that running
         -- rentals are eligible for reuse by new jobs with memory constraints.
+}
+
+rule InstanceReuseDiskCheck {
+    when: MatchJobToInstance(job, instance)
+
+    ensures:
+        ExplicitDiskFloorGB(job) > 0 implies
+            instance.disk_gb >= ExplicitDiskFloorGB(job)
+        instance.disk_free_gb >= EstimatedReuseIncrementalDiskGB(job, instance)
+
+    @guidance
+        -- Reuse admission checks remaining disk, not just the original
+        -- requested disk. The incremental estimate includes inputs not
+        -- already provisioned on the instance, cached uv-sync manifest bytes
+        -- when present, explicit runtime scratch, and image-aware setup
+        -- fallback. CUDA projects on CUDA-only images require full CUDA setup
+        -- headroom because those images do not provide the project's torch
+        -- wheel. PyTorch images may use reduced setup headroom only when the
+        -- system-torch shortcut is plausibly compatible; uncertain cases are
+        -- treated as full CUDA setup.
+        --
+        -- A reuse rejection is preferable to accepting a job that can make a
+        -- shared rental terminate with disk_full. Implementation:
+        -- internal/campaign/reuse.go MatchJobToInstance and
+        -- estimateReuseJobDiskNeedGB.
 }
 
 rule AutoPilotRunRateSubset {
