@@ -15,6 +15,7 @@ type pattern struct {
 	patternID      string // e.g., "missing_hf_model"
 	category       string // "data", "code", "environment"
 	message        string // human-readable template
+	solution       string
 	remediable     bool
 	fatalAtRuntime bool // if true, kill the job immediately when detected in live logs
 	// extractAssets extracts data asset refs from regex match groups.
@@ -35,6 +36,40 @@ type failurePatternRule struct {
 }
 
 var failurePatternRules = []failurePatternRule{
+	{
+		patternID:  "cli_argument_drift",
+		category:   "environment",
+		message:    "CLI argument is not supported by the resolved tool version",
+		solution:   "The resolved tool version dropped or renamed the reported flag; pin the tool version that supports it or update the flag.",
+		confidence: 0.9,
+		re:         regexp.MustCompile(`(?is)(?:error:\s*)?unrecognized arguments?:\s+(--[A-Za-z0-9][A-Za-z0-9_-]*)`),
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			if len(match) > 1 {
+				details["flag"] = strings.TrimSpace(match[1])
+			}
+			if tool := firstSubmatch(`(?m)^(?:usage:\s*)?([A-Za-z0-9_.-]+)(?:\s|\[)`, logContent); tool != "" {
+				details["tool"] = tool
+			}
+			return details
+		},
+	},
+	{
+		patternID:  "python_attribute_version_mismatch",
+		category:   "environment",
+		message:    "Python library version mismatch during model or tokenizer load",
+		solution:   "Pin a compatible pair of the model-serving library and transformers/tokenizers, or update the code for the resolved APIs.",
+		confidence: 0.85,
+		re:         regexp.MustCompile(`(?is)(?:AutoTokenizer|AutoModel|transformers|tokenizer|model|vllm).{0,160}AttributeError:.*has no attribute|AttributeError:.*has no attribute.*(?:AutoTokenizer|AutoModel|transformers|tokenizer|model|vllm)`),
+	},
+	{
+		patternID:  "cuda_image_wheel_mismatch",
+		category:   "environment",
+		message:    "Selected CUDA image is older than the resolved Python CUDA wheels",
+		solution:   "Use an image whose CUDA version is at least the wheel CUDA requirement, pin older compatible wheels, or omit the image and let weft choose one.",
+		confidence: 0.9,
+		re:         regexp.MustCompile(`(?is)(?:engine core|engine_core|vllm).*?(?:CUDA|cu12[0-9]|driver|wheel).*?(?:mismatch|incompatible|too old|failed)|(?:CUDA|driver).*?(?:too old|insufficient|incompatible).*?(?:vllm|engine core|engine_core|wheel)`),
+	},
 	{
 		patternID:  "cuda_driver_too_old",
 		category:   "environment",
@@ -304,6 +339,7 @@ func (p *pattern) Match(logContent string) *ErrorDiagnosis {
 		Pattern:    p.patternID,
 		Category:   p.category,
 		Message:    p.message,
+		Solution:   p.solution,
 		Remediable: p.remediable,
 		Details:    matches[0],
 	}
@@ -318,6 +354,14 @@ func (p *pattern) Match(logContent string) *ErrorDiagnosis {
 
 // Data patterns: missing HF models/datasets, missing files (remediable)
 var dataPatterns = []*pattern{
+	{
+		re:         regexp.MustCompile(`(?is)uv run python\s+\S+.*(?:FileNotFoundError|No such file or directory):\s*(?:\[[^\]]+\]\s*)?(?:'|")?(vllm|sglang|accelerate|torchrun)(?:'|")?`),
+		patternID:  "pep723_console_script_missing",
+		category:   "environment",
+		message:    "PEP 723 inline dependencies were not installed for the invoked console script",
+		solution:   "Invoke the script as `uv run <script>` instead of `uv run python <script>` so uv installs the script's PEP 723 inline dependencies and exposes console scripts.",
+		remediable: false,
+	},
 	{
 		// HuggingFace gated-repo access denied. The repo exists but the
 		// HF_TOKEN doesn't have access approval for it. Distinguished from

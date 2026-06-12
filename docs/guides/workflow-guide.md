@@ -377,6 +377,28 @@ select a PyTorch CUDA image when no image is configured:
 # ///
 ```
 
+For serving jobs that need a pinned CUDA base image, keep the vLLM and
+Transformers versions matched. This pin set is known to work on CUDA 12.4:
+
+```python
+# /// script
+# requires-python = ">=3.10,<3.13"
+# dependencies = [
+#   "vllm==0.8.5",
+#   "transformers==4.51.3",
+# ]
+# [tool.weft]
+# gpu = "ampere+>=24GB"
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# inputs = ["hf:gpt2"]
+# ///
+```
+
+Invoke PEP 723 scripts as `uv run script.py`, not `uv run python script.py`.
+The latter runs Python without installing the script's inline dependencies, so
+console scripts such as `vllm` may be missing even though they are declared in
+the script metadata.
+
 For SGLang, use the project runtime image path unless you have a known-good
 custom image. Weft infers this image for commands whose script name clearly
 contains `sglang`, but declaring it in script metadata is more robust:

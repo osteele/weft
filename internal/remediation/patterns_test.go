@@ -287,6 +287,33 @@ func TestDiagnoseFailedAttempt_RuntimeGuidance(t *testing.T) {
 			wantPattern: "vllm_setup",
 		},
 		{
+			name: "pep723 console script missing",
+			log: `+ uv run python serve.py
+Traceback (most recent call last):
+  File "serve.py", line 17, in <module>
+    subprocess.run(["vllm", "serve"], check=True)
+FileNotFoundError: [Errno 2] No such file or directory: 'vllm'`,
+			wantPattern: "pep723_console_script_missing",
+		},
+		{
+			name:        "cli argument drift",
+			log:         "usage: vllm serve [-h]\nvllm: error: unrecognized arguments: --guided-decoding-backend",
+			wantPattern: "cli_argument_drift",
+		},
+		{
+			name: "attribute version mismatch",
+			log: `Traceback (most recent call last):
+  File "bench.py", line 12, in <module>
+    tokenizer = AutoTokenizer.from_pretrained(model)
+AttributeError: 'LlamaTokenizerFast' object has no attribute 'tokenizer_config'`,
+			wantPattern: "python_attribute_version_mismatch",
+		},
+		{
+			name:        "cuda image wheel mismatch",
+			log:         "vllm engine core failed to initialize: CUDA wheel cu128 is incompatible with image CUDA 12.4",
+			wantPattern: "cuda_image_wheel_mismatch",
+		},
+		{
 			name: "cuda driver too old",
 			log: `RuntimeError: The NVIDIA driver on your system is too old (found version 12040).
 Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx`,
