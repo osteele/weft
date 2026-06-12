@@ -32,6 +32,7 @@ type failurePatternRule struct {
 	solution   string
 	confidence float64
 	re         *regexp.Regexp
+	match      func(string) []string
 	details    func([]string, string) map[string]any
 }
 
@@ -104,12 +105,30 @@ var failurePatternRules = []failurePatternRule{
 		re:         regexp.MustCompile(`(?is)No usable temporary directory found|could not find a usable temporary directory`),
 	},
 	{
+		patternID:  "python_first_party_import_path",
+		category:   "code",
+		message:    "First-party Python package is not on sys.path",
+		solution:   "Run the script through uv without an extra python interpreter layer, for example `uv run experiments/script.py` instead of `uv run python experiments/script.py`.",
+		confidence: 0.95,
+		match:      firstPartyImportPathMatch,
+		details: func(match []string, logContent string) map[string]any {
+			details := map[string]any{}
+			if len(match) > 1 {
+				details["missing_module"] = match[1]
+			}
+			if len(match) > 2 {
+				details["script"] = match[2]
+			}
+			return details
+		},
+	},
+	{
 		patternID:  "sglang_setup",
 		category:   "environment",
 		message:    "SGLang runtime setup is incomplete",
 		solution:   "Use the documented SGLang path: a script PEP 723 block or .weft.toml image override with ghcr.io/osteele/sglang-runtime:v0.5.10.post1 plus the required CUDA/driver floors.",
 		confidence: 0.9,
-		re:         regexp.MustCompile(`(?is)(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma).*(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file)|(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file).*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)`),
+		re:         regexp.MustCompile(`(?im)(ModuleNotFoundError:\s*No module named ['"](sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)(?:[.'"][^'"]*)?['"]|ImportError:[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)|cannot import name[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)|(?:error while loading shared libraries|cannot open shared object file)[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma))`),
 		details: func(match []string, logContent string) map[string]any {
 			return map[string]any{"framework": "sglang"}
 		},
@@ -120,7 +139,7 @@ var failurePatternRules = []failurePatternRule{
 		message:    "vLLM runtime setup is incomplete",
 		solution:   "Use the documented vLLM path: declare the vLLM dependency in PEP 723 or pyproject.toml, run through uv, and let weft select a PyTorch CUDA image and disk headroom.",
 		confidence: 0.9,
-		re:         regexp.MustCompile(`(?is)(vllm|flashinfer).*(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file)|(ModuleNotFoundError|ImportError|cannot import|No module named|error while loading shared libraries|cannot open shared object file).*(vllm|flashinfer)`),
+		re:         regexp.MustCompile(`(?im)(ModuleNotFoundError:\s*No module named ['"](vllm|flashinfer)(?:[.'"][^'"]*)?['"]|ImportError:[^\n]*(vllm|flashinfer)|cannot import name[^\n]*(vllm|flashinfer)|(?:error while loading shared libraries|cannot open shared object file)[^\n]*(vllm|flashinfer))`),
 		details: func(match []string, logContent string) map[string]any {
 			return map[string]any{"framework": "vllm"}
 		},
@@ -315,6 +334,56 @@ var failurePatternRules = []failurePatternRule{
 	},
 }
 
+func firstPartyImportPathMatch(logContent string) []string {
+	missing := firstSubmatch(`(?m)ModuleNotFoundError:\s*No module named ['"]([A-Za-z_][A-Za-z0-9_]*)['"]`, logContent)
+	if missing == "" {
+		return nil
+	}
+	command := firstSubmatch(`(?m)^cmd:\s*(.+)$`, logContent)
+	if command == "" {
+		return nil
+	}
+	script := pythonScriptArg(command)
+	if script == "" {
+		return nil
+	}
+	topPackage, _, ok := strings.Cut(script, "/")
+	if !ok || topPackage != missing {
+		return nil
+	}
+	tracebackLine := firstSubmatch(`(?m)^(\s*from\s+`+regexp.QuoteMeta(missing)+`\.[A-Za-z0-9_.]+\s+import\s+.+)$`, logContent)
+	if tracebackLine == "" {
+		return nil
+	}
+	return []string{tracebackLine + "\n" + "ModuleNotFoundError: No module named '" + missing + "'", missing, script}
+}
+
+func pythonScriptArg(command string) string {
+	fields := strings.Fields(command)
+	for i, field := range fields {
+		if !pythonExecutableToken(field) || i+1 >= len(fields) {
+			continue
+		}
+		next := strings.Trim(fields[i+1], `"'`)
+		if strings.HasSuffix(next, ".py") && strings.Contains(next, "/") {
+			return next
+		}
+	}
+	return ""
+}
+
+func pythonExecutableToken(token string) bool {
+	token = strings.Trim(token, `"'`)
+	if token == "python" {
+		return true
+	}
+	if strings.HasPrefix(token, "python") {
+		rest := strings.TrimPrefix(token, "python")
+		return regexp.MustCompile(`^[0-9]+(?:\.[0-9]+)?$`).MatchString(rest)
+	}
+	return false
+}
+
 func cudaCompatFromDriverAPIVersion(version string) string {
 	if len(version) < 4 {
 		return ""
@@ -333,7 +402,12 @@ func cudaCompatFromDriverAPIVersion(version string) string {
 
 func matchFailurePattern(logContent, detectedBy string) *ErrorDiagnosis {
 	for _, rule := range failurePatternRules {
-		match := rule.re.FindStringSubmatch(logContent)
+		var match []string
+		if rule.match != nil {
+			match = rule.match(logContent)
+		} else {
+			match = rule.re.FindStringSubmatch(logContent)
+		}
 		if match == nil {
 			continue
 		}

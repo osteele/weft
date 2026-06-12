@@ -1,6 +1,9 @@
 package remediation
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDiagnoseFromLog_DataPriority(t *testing.T) {
 	// Log contains both a data error and a code error; data should win
@@ -61,6 +64,67 @@ ImportError: /opt/conda/lib/python3.11/site-packages/torch/lib/../../nvidia/cusp
 	}
 	if lib, _ := d.StructuredDetails["expected_in_library"].(string); lib != "libnvJitLink.so.12" {
 		t.Errorf("expected expected_in_library libnvJitLink.so.12, got %q", lib)
+	}
+}
+
+func TestDiagnoseFromLog_FirstPartyImportPathBeatsVLLMSetup(t *testing.T) {
+	log := `=== START Thu Jun 11 13:48:59 UTC 2026 ===
+cmd: uv run --with "vllm>=0.8.5" --with "transformers>=4.45" python experiments/exp_037_vllm_capacity_cliff.py --phase 1
+===
+Installed 154 packages in 2.71s
+Traceback (most recent call last):
+  File "/workspace/llm-performance-models/experiments/exp_037_vllm_capacity_cliff.py", line 36, in <module>
+    from experiments._experiment_utils import write_artifact_manifest
+ModuleNotFoundError: No module named 'experiments'`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected a diagnosis")
+	}
+	if d.Pattern != "python_first_party_import_path" {
+		t.Fatalf("pattern = %q, want python_first_party_import_path", d.Pattern)
+	}
+	if d.Message != "First-party Python package is not on sys.path" {
+		t.Fatalf("message = %q", d.Message)
+	}
+	if got := d.StructuredDetails["missing_module"]; got != "experiments" {
+		t.Fatalf("missing_module = %v, want experiments", got)
+	}
+}
+
+func TestDiagnoseFromLog_FirstPartyImportPathForPlainModuleNotFound(t *testing.T) {
+	log := `=== START Thu Jun 11 21:43:40 CST 2026 ===
+cmd: uv run python experiments/exp_n06_mooncake_reported_comparison.py --policies LRUCache
+===
+Traceback (most recent call last):
+  File "/mnt/hbnas/home/oliver_30/code/research/llm-performance-models/experiments/exp_n06_mooncake_reported_comparison.py", line 26, in <module>
+    from experiments._experiment_utils import write_artifact_manifest
+ModuleNotFoundError: No module named 'experiments'`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected a diagnosis")
+	}
+	if d.Pattern != "python_first_party_import_path" {
+		t.Fatalf("pattern = %q, want python_first_party_import_path", d.Pattern)
+	}
+	if !strings.Contains(d.Solution, "uv run experiments/script.py") {
+		t.Fatalf("solution should mention direct uv run form, got %q", d.Solution)
+	}
+}
+
+func TestDiagnoseFromLog_VLLMSetupRequiresFrameworkImportFailure(t *testing.T) {
+	log := `Traceback (most recent call last):
+  File "serve.py", line 1, in <module>
+    import vllm
+ModuleNotFoundError: No module named 'vllm'`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected a diagnosis")
+	}
+	if d.Pattern != "vllm_setup" {
+		t.Fatalf("pattern = %q, want vllm_setup", d.Pattern)
 	}
 }
 
