@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ops"
@@ -2379,6 +2380,101 @@ func TestListTUIMouseClickIgnoresGroupedHeaderAndFooter(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedDaemonWarningShowsClickHint(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	m := listTUIModel{
+		title:                  "Jobs",
+		groupedByStatus:        true,
+		groupedUnprocessedView: true,
+		width:                  100,
+		height:                 12,
+		jobs:                   nil,
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Daemon: stopped; click to start") {
+		t.Fatalf("expected daemon click hint, got:\n%s", out)
+	}
+}
+
+func TestListTUIGroupedDaemonWarningClickHintOnlyInUJ(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          12,
+		jobs:            nil,
+	}
+	m.rebuildGroupedRows()
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "click to") {
+		t.Fatalf("non-uj grouped view should not show daemon click hint, got:\n%s", out)
+	}
+}
+
+func TestListTUIMouseClickGroupedDaemonWarningRestartsDaemon(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	calls := 0
+	oldRestart := listRestartDaemonFunc
+	listRestartDaemonFunc = func() (int, error) {
+		calls++
+		return 4242, nil
+	}
+	t.Cleanup(func() { listRestartDaemonFunc = oldRestart })
+
+	m := listTUIModel{
+		title:                  "Jobs",
+		groupedByStatus:        true,
+		groupedUnprocessedView: true,
+		width:                  100,
+		height:                 12,
+		jobs:                   nil,
+	}
+	m.rebuildGroupedRows()
+	layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
+	if layout.daemonStatusY < 0 {
+		t.Fatal("expected actionable daemon status row")
+	}
+
+	next, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      layout.daemonStatusY,
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Restarting daemon..." {
+		t.Fatalf("statusMessage = %q, want restart progress", got.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected restart command")
+	}
+	msg, ok := cmd().(listDaemonRestartedMsg)
+	if !ok {
+		t.Fatalf("restart command returned %T", msg)
+	}
+	if calls != 1 {
+		t.Fatalf("restart calls = %d, want 1", calls)
+	}
+
+	next, _ = got.Update(msg)
+	got = next.(listTUIModel)
+	if got.statusMessage != "Daemon restarted (PID 4242)" {
+		t.Fatalf("statusMessage = %q, want success", got.statusMessage)
+	}
+}
+
+func TestListTUIDaemonRestartFailureMessage(t *testing.T) {
+	m := listTUIModel{}
+	next, _ := m.Update(listDaemonRestartedMsg{err: errors.New("boom")})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Daemon restart failed: boom" {
+		t.Fatalf("statusMessage = %q, want failure", got.statusMessage)
+	}
+}
+
 func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
 	m := listTUIModel{
 		title:           "Jobs",
@@ -2402,6 +2498,21 @@ func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
 	if job := got.selectedGroupedJob(); job == nil || job.ID != 102 {
 		t.Fatalf("selected grouped job = %+v, want wj102", job)
 	}
+}
+
+func withStoppedDaemonStatus(t *testing.T) {
+	t.Helper()
+	oldPaths := daemonStatusPaths
+	dir := t.TempDir()
+	daemonStatusPaths = func() daemoncontrol.Paths {
+		return daemoncontrol.Paths{
+			PIDFile:   filepath.Join(dir, "daemon.pid"),
+			StdoutLog: filepath.Join(dir, "daemon.stdout.log"),
+			StderrLog: filepath.Join(dir, "daemon.stderr.log"),
+			PlistFile: filepath.Join(dir, "com.osteele.weft.daemon.plist"),
+		}
+	}
+	t.Cleanup(func() { daemonStatusPaths = oldPaths })
 }
 
 func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {

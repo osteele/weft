@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/hostinfo"
@@ -130,6 +131,27 @@ type listTUIModel struct {
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
 }
+
+type listDaemonRestartedMsg struct {
+	pid int
+	err error
+}
+
+type groupedViewLayout struct {
+	visibleRows       []groupedViewportLine
+	statusLine        string
+	sharedStatusLines []string
+	autoPilotLine     string
+	errorDetailsLines []string
+	selectedDetails   []string
+	budgetPanelLines  []string
+	controlsLine      string
+	maxBodyLines      int
+	daemonStatusY     int
+	daemonActionable  bool
+}
+
+var listRestartDaemonFunc = restartDaemonForListTUI
 
 type listGroupMode string
 
@@ -1042,6 +1064,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quickLaunchStatusHoldUntil = time.Now().Add(10 * time.Second)
 		return m, m.reloadJobs()
 
+	case listDaemonRestartedMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Daemon restart failed: %v", msg.err)
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Daemon restarted (PID %d)", msg.pid)
+		return m, nil
+
 	case listProjectCandidatesLoadedMsg:
 		m.projectCandidatesLoading = false
 		if msg.err != nil {
@@ -1228,19 +1258,85 @@ func (m listTUIModel) groupedView() string {
 		rows = []groupedStatusRow{{text: "None"}}
 	}
 
+	layout := m.buildGroupedViewLayout(rows, groupedJobs)
+	selectedRow := m.selectedGroupedRow()
+	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
+	rowWidth := m.width
+	bodyLinesWritten := 0
+	for _, row := range layout.visibleRows {
+		line := truncateDisplayWidth(row.text, rowWidth)
+		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
+			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateJobs[rj.ID] {
+				line = applyHostMateMarkerForJob(line, rj)
+			}
+		}
+		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
+			if matesActive {
+				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
+			}
+			line = renderSelectedRow(line, m.width)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+		bodyLinesWritten++
+	}
+	for bodyLinesWritten < layout.maxBodyLines {
+		b.WriteString("\n")
+		bodyLinesWritten++
+	}
+
+	// Visually separate grouped job rows from footer lines.
+	b.WriteString("\n")
+	if m.projectInputActive {
+		for _, line := range m.projectFilterPromptLines() {
+			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
+			b.WriteString("\n")
+		}
+	}
+	for _, line := range layout.errorDetailsLines {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
+		b.WriteString("\n")
+	}
+	for _, line := range layout.selectedDetails {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
+		b.WriteString("\n")
+	}
+	if layout.statusLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)))
+		b.WriteString("\n")
+	}
+	for _, line := range layout.sharedStatusLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if layout.autoPilotLine != "" {
+		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)))
+		b.WriteString("\n")
+	}
+	for _, line := range layout.budgetPanelLines {
+		b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
+		b.WriteString("\n")
+	}
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.controlsLine, m.width)))
+	return b.String()
+}
+
+func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJobs []*db.Job) groupedViewLayout {
 	// Build footer lines first so we can reserve space for them.
 	// Per-job ETA now lives on the "Job:" line in selectedDetailLines, so
 	// no standalone campaign-wide ETA line is rendered.
 	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
 	statusLine := m.groupedStatusText()
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
-	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning, m.autoRunRateTargetCents)
+	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, visibleRunning, m.autoRunRateTargetCents, m.isUJGroupedView())
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
 	if m.hideStatusArea {
 		statusLine = ""
-		sharedStatusLines = nil
+		sharedStatus.lines = nil
+		sharedStatus.daemonLineIndex = -1
+		sharedStatus.daemonActionable = false
 		autoPilotLine = ""
 		errorDetailsLines = nil
 		selectedDetailLines = nil
@@ -1252,7 +1348,7 @@ func (m listTUIModel) groupedView() string {
 	if statusLine != "" {
 		baseFooterLines++
 	}
-	baseFooterLines += len(sharedStatusLines)
+	baseFooterLines += len(sharedStatus.lines)
 	baseFooterLines += len(selectedDetailLines)
 	if autoPilotLine != "" {
 		baseFooterLines++
@@ -1272,72 +1368,34 @@ func (m listTUIModel) groupedView() string {
 			errorDetailsLines = truncateErrorDetailsLines(errorDetailsLines, maxDetailLines)
 		}
 	}
-	controlsLine := m.groupedControlsText(eta.HasQueued)
-	// Reserve: 1 title + 1 blank separator + footer lines.
-	footerLines := baseFooterLines
-	footerLines += len(errorDetailsLines)
+	footerLines := baseFooterLines + len(errorDetailsLines)
 	maxBodyLines := max(0, m.height-1-footerLines) // 1 for title
-	selectedRow := m.selectedGroupedRow()
-	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
-	rowWidth := m.width
-	visibleRows := selectGroupedRowsForViewport(rows, maxBodyLines, selectedRow)
-	bodyLinesWritten := 0
-	for _, row := range visibleRows {
-		line := truncateDisplayWidth(row.text, rowWidth)
-		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
-			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateJobs[rj.ID] {
-				line = applyHostMateMarkerForJob(line, rj)
-			}
+	daemonStatusY := -1
+	if sharedStatus.daemonActionable && sharedStatus.daemonLineIndex >= 0 {
+		daemonStatusY = 1 + maxBodyLines + 1
+		if m.projectInputActive {
+			daemonStatusY += len(m.projectFilterPromptLines())
 		}
-		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
-			if matesActive {
-				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
-			}
-			line = renderSelectedRow(line, m.width)
+		daemonStatusY += len(errorDetailsLines)
+		daemonStatusY += len(selectedDetailLines)
+		if statusLine != "" {
+			daemonStatusY++
 		}
-		b.WriteString(line)
-		b.WriteString("\n")
-		bodyLinesWritten++
+		daemonStatusY += sharedStatus.daemonLineIndex
 	}
-	for bodyLinesWritten < maxBodyLines {
-		b.WriteString("\n")
-		bodyLinesWritten++
+	return groupedViewLayout{
+		visibleRows:       selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow()),
+		statusLine:        statusLine,
+		sharedStatusLines: sharedStatus.lines,
+		autoPilotLine:     autoPilotLine,
+		errorDetailsLines: errorDetailsLines,
+		selectedDetails:   selectedDetailLines,
+		budgetPanelLines:  budgetPanelLines,
+		controlsLine:      m.groupedControlsText(eta.HasQueued),
+		maxBodyLines:      maxBodyLines,
+		daemonStatusY:     daemonStatusY,
+		daemonActionable:  sharedStatus.daemonActionable,
 	}
-
-	// Visually separate grouped job rows from footer lines.
-	b.WriteString("\n")
-	if m.projectInputActive {
-		for _, line := range m.projectFilterPromptLines() {
-			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
-			b.WriteString("\n")
-		}
-	}
-	for _, line := range errorDetailsLines {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
-	}
-	for _, line := range selectedDetailLines {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
-	}
-	if statusLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(statusLine, m.width)))
-		b.WriteString("\n")
-	}
-	for _, line := range sharedStatusLines {
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	if autoPilotLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(autoPilotLine, m.width)))
-		b.WriteString("\n")
-	}
-	for _, line := range budgetPanelLines {
-		b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
-	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(controlsLine, m.width)))
-	return b.String()
 }
 
 func (m listTUIModel) syncInProgress() bool {
@@ -1602,11 +1660,34 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.isGroupedView() {
+		if cmd := m.handleGroupedDaemonStatusClick(msg.Y); cmd != nil {
+			return m, cmd
+		}
 		m.selectGroupedMouseRow(msg.Y)
 		return m, nil
 	}
 	m.selectFlatMouseRow(msg.Y)
 	return m, nil
+}
+
+func (m *listTUIModel) handleGroupedDaemonStatusClick(y int) tea.Cmd {
+	if !m.isUJGroupedView() || m.hideStatusArea {
+		return nil
+	}
+	rows := m.groupedRows
+	if len(rows) == 0 {
+		rows = []groupedStatusRow{{text: "None"}}
+	}
+	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
+	if !layout.daemonActionable || y != layout.daemonStatusY {
+		return nil
+	}
+	m.statusMessage = "Restarting daemon..."
+	return restartDaemonListCmd()
+}
+
+func (m listTUIModel) isUJGroupedView() bool {
+	return m.groupedByStatus && m.groupedUnprocessedView
 }
 
 func (m *listTUIModel) selectFlatMouseRow(y int) {
@@ -1671,49 +1752,7 @@ func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
 	if len(rows) == 0 {
 		rows = []groupedStatusRow{{text: "None"}}
 	}
-
-	groupedJobs := m.groupedJobsWithAutoReasons()
-	statusLine := m.groupedStatusText()
-	visibleRunning := countVisibleRunningJobs(groupedJobs)
-	sharedStatusLines := renderSharedTUIStatusLinesWithVisibleRunning(m.database, m.width, visibleRunning, m.autoRunRateTargetCents)
-	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
-	errorDetailsLines := m.groupedErrorDetailsLines()
-	selectedDetailLines := m.selectedJobDetailLines()
-	if m.hideStatusArea {
-		statusLine = ""
-		sharedStatusLines = nil
-		autoPilotLine = ""
-		errorDetailsLines = nil
-		selectedDetailLines = nil
-	}
-	baseFooterLines := 2
-	if m.projectInputActive {
-		baseFooterLines += len(m.projectFilterPromptLines())
-	}
-	if statusLine != "" {
-		baseFooterLines++
-	}
-	baseFooterLines += len(sharedStatusLines)
-	baseFooterLines += len(selectedDetailLines)
-	if autoPilotLine != "" {
-		baseFooterLines++
-	}
-	if m.autoRunRateInputActive {
-		baseFooterLines += len(renderAutoBudgetPanel(m.currentBudgetState()))
-	}
-	availableForBodyAndDetails := max(0, m.height-1-baseFooterLines)
-	if len(errorDetailsLines) > 0 {
-		maxDetailLines := availableForBodyAndDetails
-		if len(rows) > 0 && maxDetailLines > 0 {
-			maxDetailLines--
-		}
-		if len(errorDetailsLines) > maxDetailLines {
-			errorDetailsLines = truncateErrorDetailsLines(errorDetailsLines, maxDetailLines)
-		}
-	}
-	footerLines := baseFooterLines + len(errorDetailsLines)
-	maxBodyLines := max(0, m.height-1-footerLines)
-	return selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow())
+	return m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons()).visibleRows
 }
 
 func (m listTUIModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -3193,6 +3232,46 @@ func formatAutoPilotLaunchedSummary(count int, launchedClass string) string {
 		return "launched 1 instance"
 	default:
 		return fmt.Sprintf("launched %d instances", count)
+	}
+}
+
+func restartDaemonListCmd() tea.Cmd {
+	return func() tea.Msg {
+		pid, err := listRestartDaemonFunc()
+		return listDaemonRestartedMsg{pid: pid, err: err}
+	}
+}
+
+func restartDaemonForListTUI() (int, error) {
+	paths := daemoncontrol.DefaultPaths()
+	if daemoncontrol.IsInstalled(paths) {
+		if err := daemoncontrol.Unload(paths); err != nil {
+			return 0, err
+		}
+	}
+	if _, _, err := daemoncontrol.StopPID(paths, 5*time.Second); err != nil {
+		return 0, err
+	}
+	if daemoncontrol.IsInstalled(paths) {
+		if err := daemoncontrol.Load(paths); err != nil {
+			return 0, err
+		}
+	} else if _, err := daemoncontrol.StartDetached(paths); err != nil {
+		return 0, err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status, err := daemoncontrol.CurrentStatus(paths)
+		if err != nil {
+			return 0, err
+		}
+		if status.Live {
+			return status.PID, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, fmt.Errorf("daemon did not report running within %s", 2*time.Second)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

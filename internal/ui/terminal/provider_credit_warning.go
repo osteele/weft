@@ -42,6 +42,7 @@ var (
 		}
 		return user.ClientBalance, nil
 	}
+	daemonStatusPaths = daemoncontrol.DefaultPaths
 
 	providerCreditWarningCache struct {
 		mu          sync.Mutex
@@ -100,9 +101,22 @@ func renderSharedTUIStatusLines(database *sql.DB, width int, targetCents int) []
 // "System (global): " when the global running count differs from visibleRunning.
 // Pass visibleRunning < 0 to skip the comparison.
 func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, visibleRunning int, targetCents int) []string {
+	return renderSharedTUIStatusLinesView(database, width, visibleRunning, targetCents, false).lines
+}
+
+type sharedTUIStatusLinesView struct {
+	lines            []string
+	daemonLineIndex  int
+	daemonActionable bool
+}
+
+func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning int, targetCents int, daemonActionHint bool) sharedTUIStatusLinesView {
 	lines := make([]string, 0, 3)
-	if daemon := renderDaemonStatusLine(width); daemon != "" {
-		lines = append(lines, daemon)
+	view := sharedTUIStatusLinesView{daemonLineIndex: -1}
+	if daemon := renderDaemonStatusLineView(width, daemonActionHint); daemon.line != "" {
+		view.daemonLineIndex = len(lines)
+		view.daemonActionable = daemon.actionable
+		lines = append(lines, daemon.line)
 	}
 	if line := renderSystemLine(database, width, visibleRunning, targetCents); line != "" {
 		lines = append(lines, line)
@@ -113,28 +127,54 @@ func renderSharedTUIStatusLinesWithVisibleRunning(database *sql.DB, width int, v
 	if banner := renderPausedLaunchesBanner(database, width); banner != "" {
 		lines = append(lines, banner)
 	}
-	return lines
+	view.lines = lines
+	return view
 }
 
 func renderDaemonStatusLine(width int) string {
-	status, err := daemoncontrol.CurrentStatus(daemoncontrol.DefaultPaths())
+	return renderDaemonStatusLineView(width, false).line
+}
+
+type daemonStatusLineView struct {
+	line       string
+	actionable bool
+}
+
+func renderDaemonStatusLineView(width int, actionHint bool) daemonStatusLineView {
+	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
 	var msg string
+	actionable := false
 	switch {
 	case err != nil:
 		msg = "Daemon: status unavailable"
 	case status.ActiveBinaryStale:
-		msg = "Daemon: stale binary; run `weft daemon restart`"
+		actionable = true
+		if actionHint {
+			msg = "Daemon: stale binary; click to restart"
+		} else {
+			msg = "Daemon: stale binary; run `weft daemon restart`"
+		}
 	case status.Live:
-		return ""
+		return daemonStatusLineView{}
 	case status.Stale:
-		msg = "Daemon: stale"
+		actionable = true
+		if actionHint {
+			msg = "Daemon: stale; click to restart"
+		} else {
+			msg = "Daemon: stale"
+		}
 	default:
-		msg = "Daemon: stopped"
+		actionable = true
+		if actionHint {
+			msg = "Daemon: stopped; click to start"
+		} else {
+			msg = "Daemon: stopped"
+		}
 	}
 	if width > 0 {
 		msg = truncateDisplayWidth(msg, width)
 	}
-	return tuiFailedStyle.Render(msg)
+	return daemonStatusLineView{line: tuiFailedStyle.Render(msg), actionable: actionable}
 }
 
 // renderPausedLaunchesBanner shows a warning when one or more launches are in
