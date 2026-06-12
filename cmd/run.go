@@ -664,6 +664,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--needs: %w", err)
 		}
 	}
+	if err := campaign.ValidatePinnedImageCUDACompatibility(localDir, command, cliOverrides.MinCUDAVersion); err != nil {
+		return err
+	}
 	if len(runNeeds) > 0 {
 		resolvedHost, allNeeds, err := resolveArtifactNeedsPlacement(database, runNeeds, host)
 		if err != nil {

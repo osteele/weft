@@ -1,6 +1,8 @@
 package campaign
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,66 @@ func TestChooseAutoImageForMinCUDA(t *testing.T) {
 	}
 	if got := chooseAutoImageForMinCUDA(12.8, true); got != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
 		t.Fatalf("chooseAutoImageForMinCUDA(12.8,true) = %q", got)
+	}
+}
+
+func TestValidatePinnedImageCUDACompatibilityRejectsOlderImage(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "serve.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["vllm>=0.17,<0.18"]
+# [tool.weft]
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# ///
+print("serve")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", "")
+	if err == nil {
+		t.Fatal("expected pinned image CUDA mismatch")
+	}
+	for _, want := range []string{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "CUDA 12.4", "CUDA >=12.8"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestValidatePinnedImageCUDACompatibilityAllowsOverrideAny(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "serve.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["vllm>=0.17,<0.18"]
+# [tool.weft]
+# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+# ///
+print("serve")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", "any"); err != nil {
+		t.Fatalf("override any should allow pinned image: %v", err)
+	}
+}
+
+func TestValidatePinnedImageCUDACompatibilityAllowsNewerImage(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "serve.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["vllm>=0.17"]
+# [tool.weft]
+# image = "nvidia/cuda:13.0.0-runtime-ubuntu22.04"
+# ///
+print("serve")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", ""); err != nil {
+		t.Fatalf("newer image should be compatible: %v", err)
 	}
 }
 

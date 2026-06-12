@@ -4,6 +4,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"path"
@@ -813,6 +814,39 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 func ResolveJobImage(localDir, command string) string {
 	img, _, _ := ResolveJobImageSettings(localDir, command)
 	return img
+}
+
+// ValidatePinnedImageCUDACompatibility rejects explicit CUDA images whose CUDA
+// toolkit is older than the resolved Python runtime floor. Auto-selected images
+// are handled elsewhere; this protects user-pinned images from launching jobs
+// that are known to fail at CUDA wheel or engine initialization.
+func ValidatePinnedImageCUDACompatibility(localDir, command, cliMinCUDA string) error {
+	img, rf, _ := ResolveJobImageSettings(localDir, command)
+	if strings.TrimSpace(img) == "" {
+		return nil
+	}
+	if err := rf.ApplyCLIOverride(cliMinCUDA); err != nil {
+		return err
+	}
+	reqCUDA := strings.TrimSpace(rf.Req.MinCUDAVersion)
+	if reqCUDA == "" {
+		return nil
+	}
+	imageCUDA, _, ok := parseCUDAImage(img)
+	if !ok {
+		return nil
+	}
+	imageParts := cudaVersionComponents(imageCUDA)
+	reqParts := cudaVersionComponents(reqCUDA)
+	if imageParts == nil || reqParts == nil || cmpVersionComponents(imageParts, reqParts) >= 0 {
+		return nil
+	}
+	origin := strings.TrimSpace(rf.CUDAOrigin)
+	if origin == "" {
+		origin = "resolved dependencies"
+	}
+	return fmt.Errorf("pinned image %s provides CUDA %s, but %s requires CUDA >=%s; use a CUDA >=%s image, pin compatible dependencies, or override with cuda-driver-min=any if this is intentional",
+		img, imageCUDA, origin, reqCUDA, reqCUDA)
 }
 
 // ResolveJobImageSettings returns the Docker image and the resolved NVIDIA
