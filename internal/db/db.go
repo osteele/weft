@@ -272,6 +272,37 @@ func (j *Job) UsesPreemptiblePlacement() bool {
 	return j.HasTag(TagPreemptible)
 }
 
+// RequestedGPUCount returns the exact single-host GPU count requested for the
+// job. A zero or missing override means one GPU for GPU-shaped jobs.
+func (j *Job) RequestedGPUCount() int {
+	if j == nil || j.CLIResourceOverrides == nil || j.CLIResourceOverrides.GPUCount == nil {
+		return 1
+	}
+	if *j.CLIResourceOverrides.GPUCount < 1 {
+		return 1
+	}
+	return *j.CLIResourceOverrides.GPUCount
+}
+
+// RequestedInterconnect returns the requested intra-host GPU interconnect.
+func (j *Job) RequestedInterconnect() string {
+	if j == nil || j.CLIResourceOverrides == nil {
+		return ""
+	}
+	return strings.TrimSpace(j.CLIResourceOverrides.Interconnect)
+}
+
+// RequestedCPUCores returns the explicit minimum CPU core/vCPU floor.
+func (j *Job) RequestedCPUCores() int {
+	if j == nil || j.CLIResourceOverrides == nil || j.CLIResourceOverrides.CPUCores == nil {
+		return 0
+	}
+	if *j.CLIResourceOverrides.CPUCores < 0 {
+		return 0
+	}
+	return *j.CLIResourceOverrides.CPUCores
+}
+
 // CLIResourceOverrides records explicit resource choices from submission or
 // later edit/retry commands. Only fields the user explicitly set are
 // populated. On retry, these are re-applied on top of the current script
@@ -285,8 +316,11 @@ type CLIResourceOverrides struct {
 	Host           string `json:"host,omitempty"`
 	GPU            string `json:"gpu,omitempty"`
 	GPUClass       string `json:"gpu_class,omitempty"`
+	GPUCount       *int   `json:"gpu_count,omitempty"`
 	GPUMemGB       *int   `json:"gpu_mem_gb,omitempty"`
 	GPUMemStrict   *bool  `json:"gpu_mem_strict,omitempty"`
+	Interconnect   string `json:"interconnect,omitempty"`
+	CPUCores       *int   `json:"cpu_cores,omitempty"`
 	DiskGB         *int   `json:"disk_gb,omitempty"`
 	RuntimeDiskGB  *int   `json:"runtime_disk_gb,omitempty"`
 	MinCUDAVersion string `json:"min_cuda_version,omitempty"`
@@ -1333,7 +1367,8 @@ func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverri
 
 // IsEmpty reports whether no fields are populated.
 func (o *CLIResourceOverrides) IsEmpty() bool {
-	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUMemGB == nil && o.GPUMemStrict == nil &&
+	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
+		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinCUDAVersion == ""
 }
 

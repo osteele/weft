@@ -209,12 +209,17 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		MinReliability:   minReliability,
 		MinDriverVersion: group.MinDriverVersion,
 		MinCUDAVersion:   group.MinCUDAVersion,
+		NumGPUs:          normalizedGPUCount(group.NumGPUs),
+		Interconnect:     strings.TrimSpace(group.Interconnect),
 		// Legacy GPU memory upper metadata is intentionally not passed to search.
 		// Offer selection relies on cost/runtime scoring after the hard
 		// minimum compatibility filters.
 	}
 	if group.HasComputeIntensiveJob() {
 		c.MinCPUCoresEffective = computeCPUCoresFloor()
+	}
+	if group.CPUCores > c.MinCPUCoresEffective {
+		c.MinCPUCoresEffective = group.CPUCores
 	}
 	if group.HasPreemptibleJob() {
 		c.InstanceType = cloud.InstanceTypeInterruptible
@@ -427,6 +432,33 @@ func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 	return filtered, removed
 }
 
+func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
+	req := strings.ToLower(strings.TrimSpace(group.Interconnect))
+	if len(offers) == 0 || req == "" || req == "any" {
+		return offers, 0
+	}
+	filtered := make([]cloud.Offer, 0, len(offers))
+	removed := 0
+	for _, o := range offers {
+		name := strings.ToLower(o.GPUName + " " + o.DataCenter)
+		hasNVLinkSignal := strings.Contains(name, "nvlink") || strings.Contains(name, "sxm")
+		switch req {
+		case "nvlink":
+			if !hasNVLinkSignal {
+				removed++
+				continue
+			}
+		case "pcie":
+			if hasNVLinkSignal {
+				removed++
+				continue
+			}
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered, removed
+}
+
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
 func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
 	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy.Profile(), minSurvival)
@@ -446,6 +478,16 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		offers = vramFiltered
 	}
 	stats.AfterVRAM = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	if topoFiltered, removed := filterOffersByInterconnect(offers, group); removed > 0 {
+		slog.Debug("filtered offers by interconnect requirement",
+			"interconnect", group.Interconnect,
+			"filtered", removed, "remaining", len(topoFiltered))
+		offers = topoFiltered
+	}
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result
@@ -796,9 +838,10 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
 func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%.2f/%d/%s",
+	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%s/%s/%s",
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
-		c.MinReliability, c.MinCPUCoresEffective, provider)
+		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
+		c.MinCPUCoresEffective, c.MinCUDAVersion, c.InstanceType, provider)
 }
 
 type providerSearchResult struct {
@@ -819,6 +862,9 @@ func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
 	parts = append(parts, fmt.Sprintf("num_gpus=%d", numGPUs))
 	if c.InstanceType != "" {
 		parts = append(parts, "instance_type="+c.InstanceType)
+	}
+	if c.Interconnect != "" {
+		parts = append(parts, "interconnect="+c.Interconnect)
 	}
 	if len(c.ExcludeGeos) > 0 {
 		geos := append([]string(nil), c.ExcludeGeos...)

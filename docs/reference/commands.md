@@ -86,8 +86,13 @@ Use `start <job-id>` to start a queued job immediately.
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `gh200`, `ampere+`)
+- `--gpus N`: Require exactly N GPUs on one host or rental instance
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default, except when the value matches a known hardware ceiling — see below)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
+- `--interconnect any|pcie|nvlink`: Multi-GPU topology requirement (`any` is the default for `--gpus N`)
+- `--nvlink-required`: Alias for `--interconnect nvlink`
+- `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
+- `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
 
 **Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
 specific model and `--gpu-mem` matches that model's actual capacity (A100

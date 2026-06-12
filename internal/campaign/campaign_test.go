@@ -374,6 +374,7 @@ func TestInstanceGroupGPUSpec(t *testing.T) {
 		{InstanceGroup{GPUClass: "A100", GPUMemGB: 24, MaxGPUMemGB: 48}, "A100 ≥24GB"},
 		{InstanceGroup{GPUMemGB: 24, MaxGPUMemGB: 24}, "≥24GB"},
 		{InstanceGroup{GPUClass: "V100", GPUMemGB: 22, MaxGPUMemGB: 20}, "V100 ≥22GB"},
+		{InstanceGroup{GPUClass: "AMPERE+", NumGPUs: 2, GPUMemGB: 40}, "2x AMPERE+ ≥40GB"},
 	}
 	for _, tt := range tests {
 		got := tt.group.GPUSpec()
@@ -450,6 +451,51 @@ func TestMergeCompatibleGroups_PreservesMostRestrictiveMinComputeCap(t *testing.
 	}
 	if merged[0].MinComputeCap != "8.0" {
 		t.Fatalf("MinComputeCap = %q, want 8.0", merged[0].MinComputeCap)
+	}
+}
+
+func TestMergeCompatibleGroups_PreservesResourceShape(t *testing.T) {
+	groups := []InstanceGroup{
+		{
+			GPUClass:     "AMPERE+",
+			NumGPUs:      2,
+			GPUMemGB:     40,
+			CPUCores:     12,
+			Interconnect: "any",
+			Jobs:         []*db.Job{{ID: 1}},
+		},
+		{
+			GPUClass:     "AMPERE+",
+			NumGPUs:      2,
+			GPUMemGB:     42,
+			CPUCores:     24,
+			Interconnect: "any",
+			Jobs:         []*db.Job{{ID: 2}},
+		},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("len(merged) = %d, want 1", len(merged))
+	}
+	if merged[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", merged[0].NumGPUs)
+	}
+	if merged[0].CPUCores != 24 {
+		t.Fatalf("CPUCores = %d, want 24", merged[0].CPUCores)
+	}
+	if merged[0].Interconnect != "any" {
+		t.Fatalf("Interconnect = %q, want any", merged[0].Interconnect)
+	}
+}
+
+func TestMergeCompatibleGroups_DifferentGPUCountsStaySeparate(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "AMPERE+", NumGPUs: 1, GPUMemGB: 40, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "AMPERE+", NumGPUs: 2, GPUMemGB: 40, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 2 {
+		t.Fatalf("len(merged) = %d, want 2", len(merged))
 	}
 }
 
@@ -536,6 +582,37 @@ func TestSplitToParallel_PreservesCUDADriverFloors(t *testing.T) {
 		}
 		if g.MinDriverVersion != 570 {
 			t.Errorf("result[%d].MinDriverVersion = %d, want 570", i, g.MinDriverVersion)
+		}
+	}
+}
+
+func TestSplitToParallel_PreservesResourceShape(t *testing.T) {
+	groups := []InstanceGroup{
+		{
+			GPUClass:     "AMPERE+",
+			NumGPUs:      2,
+			GPUMemGB:     42,
+			CPUCores:     24,
+			Interconnect: "any",
+			Jobs: []*db.Job{
+				{ID: 1, GPUMemGB: intPtr(40)},
+				{ID: 2, GPUMemGB: intPtr(42)},
+			},
+		},
+	}
+	result := SplitToParallel(groups)
+	if len(result) != 2 {
+		t.Fatalf("len(result) = %d, want 2", len(result))
+	}
+	for i, g := range result {
+		if g.NumGPUs != 2 {
+			t.Errorf("result[%d].NumGPUs = %d, want 2", i, g.NumGPUs)
+		}
+		if g.CPUCores != 24 {
+			t.Errorf("result[%d].CPUCores = %d, want 24", i, g.CPUCores)
+		}
+		if g.Interconnect != "any" {
+			t.Errorf("result[%d].Interconnect = %q, want any", i, g.Interconnect)
 		}
 	}
 }
@@ -1015,6 +1092,31 @@ func TestSplitGroupsByImage_UnionVastCapAdd(t *testing.T) {
 	}
 	if len(groups[0].Jobs) != 2 {
 		t.Fatalf("expected both jobs in same group, got %d jobs", len(groups[0].Jobs))
+	}
+}
+
+func TestSplitGroupsByImage_PreservesResourceShape(t *testing.T) {
+	groups := SplitGroupsByImage(nil, []InstanceGroup{
+		{
+			GPUClass:     "AMPERE+",
+			NumGPUs:      2,
+			GPUMemGB:     40,
+			CPUCores:     24,
+			Interconnect: "any",
+			Jobs:         []*db.Job{{ID: 1, Command: "python train.py"}},
+		},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", groups[0].NumGPUs)
+	}
+	if groups[0].CPUCores != 24 {
+		t.Fatalf("CPUCores = %d, want 24", groups[0].CPUCores)
+	}
+	if groups[0].Interconnect != "any" {
+		t.Fatalf("Interconnect = %q, want any", groups[0].Interconnect)
 	}
 }
 

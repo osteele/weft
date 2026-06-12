@@ -55,6 +55,7 @@ weft run --gpu nvidia 'python train.py'
 weft run --gpu 'nvidia>=24GB' 'python train.py'
 weft run --gpu ampere+ 'python train.py'
 weft run --gpu-class a100 --gpu-mem 60 'python train.py'
+weft run --gpu h100 --gpus 4 --gpu-mem 80 'python train.py'
 ```
 
 GPU class matching supports exact models (`a100`, `rtx3090`, `gh200`),
@@ -77,6 +78,32 @@ RTX 4090 24GB, RTX 3090 24GB, etc. (see `internal/vastai/hardware_memory.go`
 for the full table). For non-ceiling values like `--gpu-mem 60`, the +2GB
 headroom is still applied (effective floor 62GB) — the same behaviour as
 before.
+
+Use `--gpus N` when the job needs multiple GPUs visible on the same host or
+rental instance. The count is an exact single-host shape: `--gpus 4` searches
+for one target with four GPUs, not four separate one-GPU targets. On rentals,
+Weft passes the count to provider offer search and instance creation. On
+hosts, the runner exposes the selected devices through `CUDA_VISIBLE_DEVICES`.
+
+```bash
+weft run --tag rental --gpu h100 --gpus 4 --gpu-mem 80 \
+  -m "TP=4 vLLM run" \
+  'uv run experiments/multigpu.py --tp 4'
+```
+
+Topology constraints are optional:
+
+```bash
+weft run --gpu h100 --gpus 4 --interconnect nvlink 'python train.py'
+weft run --gpu h100 --gpus 4 --nvlink-required 'python train.py'
+```
+
+`--interconnect any` is the default for multi-GPU requests. `nvlink` is a hard
+filter when provider metadata or the offer name contains an explicit NVLink/SXM
+signal; Weft does not assume that an unknown multi-GPU offer has NVLink. `pcie`
+rejects offers with explicit NVLink/SXM signals. Use `--cpu-cores N` to require
+a minimum effective CPU core/vCPU count on rental offers; `cpu-intensive` still
+uses `WEFT_COMPUTE_CPU_CORES` as its default floor.
 
 Use `--input` to declare data the job needs:
 

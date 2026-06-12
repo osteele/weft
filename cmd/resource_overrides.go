@@ -25,6 +25,10 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		return &db.CLIResourceOverrides{}
 	}
 	clone := *source
+	if source.GPUCount != nil {
+		v := *source.GPUCount
+		clone.GPUCount = &v
+	}
 	if source.GPUMemGB != nil {
 		v := *source.GPUMemGB
 		clone.GPUMemGB = &v
@@ -40,6 +44,10 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 	if source.RuntimeDiskGB != nil {
 		v := *source.RuntimeDiskGB
 		clone.RuntimeDiskGB = &v
+	}
+	if source.CPUCores != nil {
+		v := *source.CPUCores
+		clone.CPUCores = &v
 	}
 	return &clone
 }

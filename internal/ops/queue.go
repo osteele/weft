@@ -47,7 +47,10 @@ func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceS
 		CPUAllotment: job.CPUAllotment,
 		GPU:          job.GPU,
 		GPUClass:     job.GPUClass,
+		GPUCount:     job.RequestedGPUCount(),
 		GPUMemGB:     job.GPUMemGB,
+		Interconnect: job.RequestedInterconnect(),
+		CPUCores:     job.RequestedCPUCores(),
 		Tags:         job.Tags,
 		OutputDirs:   job.OutputDirs,
 		Outputs:      job.Outputs,
@@ -79,8 +82,11 @@ type QueueJobParams struct {
 	Tags         []string
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
 	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
+	GPUCount     int    // Exact GPU count requested on this host
 	GPUMemGB     *int   // GPU memory reservation in GB per device
-	GPUMemMaxGB  *int   // Legacy GPU memory upper metadata; ignored by placement
+	Interconnect string
+	CPUCores     int
+	GPUMemMaxGB  *int // Legacy GPU memory upper metadata; ignored by placement
 	DepSpec      string
 	CPUAllotment *int
 	OutputDirs   []string // convention-based output directories from .weft.toml

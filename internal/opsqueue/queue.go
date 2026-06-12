@@ -59,7 +59,10 @@ type QueueEntry struct {
 	CPUAllotment *int
 	GPU          string
 	GPUClass     string
+	GPUCount     int
 	GPUMemGB     *int
+	Interconnect string
+	CPUCores     int
 	Tags         []string
 	OutputDirs   []string
 	Outputs      []string

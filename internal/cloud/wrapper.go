@@ -2,17 +2,22 @@ package cloud
 
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-instance.
 type AgentJob struct {
-	ID         int64    `json:"id"`
-	RunID      int64    `json:"run_id,omitempty"`
-	Command    string   `json:"cmd"`
-	Dir        string   `json:"dir,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Priority   int      `json:"priority,omitempty"`
-	UsesGPU    bool     `json:"uses_gpu,omitempty"`
-	OutputDirs []string `json:"output_dirs,omitempty"`
-	Outputs    []string `json:"outputs,omitempty"`
-	Produces   []string `json:"produces,omitempty"`
-	Needs      []string `json:"needs,omitempty"`
+	ID           int64    `json:"id"`
+	RunID        int64    `json:"run_id,omitempty"`
+	Command      string   `json:"cmd"`
+	Dir          string   `json:"dir,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Priority     int      `json:"priority,omitempty"`
+	UsesGPU      bool     `json:"uses_gpu,omitempty"`
+	GPUClass     string   `json:"gpu_class,omitempty"`
+	GPUCount     int      `json:"gpu_count,omitempty"`
+	GPUMemGB     int      `json:"gpu_mem_gb,omitempty"`
+	Interconnect string   `json:"interconnect,omitempty"`
+	CPUCores     int      `json:"cpu_cores,omitempty"`
+	OutputDirs   []string `json:"output_dirs,omitempty"`
+	Outputs      []string `json:"outputs,omitempty"`
+	Produces     []string `json:"produces,omitempty"`
+	Needs        []string `json:"needs,omitempty"`
 	// Inputs are the declared input refs (e.g. "hf:Qwen/Qwen2.5-7B").
 	// Used by the agent to identify which HF cache entries belong to the
 	// current workload vs. stale assets from prior reuse.

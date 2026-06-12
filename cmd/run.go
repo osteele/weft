@@ -94,8 +94,11 @@ var (
 	runAfter         int64
 	runAfterAny      int64
 	runGPU           string
+	runGPUCount      int
 	runGPUMem        int
 	runGPUMemStrict  bool
+	runInterconnect  string
+	runCPUCores      int
 	runDiskGB        int
 	runRuntimeDiskGB int
 	runGPUClass      string
@@ -397,8 +400,13 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
+	runCmd.Flags().IntVar(&runGPUCount, "gpus", 0, "Exact number of GPUs to expose on one host or rental instance")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
+	runCmd.Flags().StringVar(&runInterconnect, "interconnect", "", "Multi-GPU interconnect requirement: any, pcie, or nvlink")
+	runCmd.Flags().Bool("nvlink-required", false, "Alias for --interconnect=nvlink")
+	runCmd.Flags().Bool("same-host", false, "Require all requested GPUs on one host (default for --gpus)")
+	runCmd.Flags().IntVar(&runCPUCores, "cpu-cores", 0, "Minimum effective CPU cores/vCPUs for rental placement")
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
@@ -476,6 +484,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if runGPUClass == "" && runGPU == "" {
 			runGPUClass = fromJob.GPUClass
 		}
+		if runGPUCount == 0 {
+			if count := fromJob.RequestedGPUCount(); count > 1 {
+				runGPUCount = count
+			}
+		}
 		if runProvider == "" {
 			if provider, ok := db.RequestedProvider(fromJob.Tags); ok {
 				runProvider = provider
@@ -483,6 +496,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runGPUMem == 0 && fromJob.GPUMemGB != nil {
 			runGPUMem = *fromJob.GPUMemGB
+		}
+		if runInterconnect == "" {
+			runInterconnect = fromJob.RequestedInterconnect()
+		}
+		if runCPUCores == 0 {
+			runCPUCores = fromJob.RequestedCPUCores()
 		}
 		if fromJob.Metadata != nil && fromJob.Metadata.Disk != nil {
 			if runDiskGB == 0 {
@@ -601,6 +620,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runGPUClass != "" {
 		cliOverrides.GPUClass = runGPUClass
 	}
+	if runGPUCount != 0 {
+		count := runGPUCount
+		cliOverrides.GPUCount = &count
+	}
 	if runGPUMem != 0 {
 		mem := runGPUMem
 		cliOverrides.GPUMemGB = &mem
@@ -608,6 +631,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("gpu-mem-strict") {
 		s := runGPUMemStrict
 		cliOverrides.GPUMemStrict = &s
+	}
+	if runInterconnect != "" {
+		cliOverrides.Interconnect = runInterconnect
+	}
+	if runCPUCores != 0 {
+		cores := runCPUCores
+		cliOverrides.CPUCores = &cores
 	}
 	if cmd.Flags().Changed("disk") {
 		disk := runDiskGB
@@ -647,6 +677,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runGPUClass = meta.GPUClass
 			applied = append(applied, fmt.Sprintf("gpu-class=%s", meta.GPUClass))
 		}
+		if !cmd.Flags().Changed("gpus") && runGPUCount == 0 && meta.GPUCount > 0 {
+			runGPUCount = meta.GPUCount
+			applied = append(applied, fmt.Sprintf("gpus=%d", meta.GPUCount))
+		}
 		if runGPUMem == 0 && meta.GPUMemGB > 0 {
 			runGPUMem = meta.GPUMemGB
 			applied = append(applied, fmt.Sprintf("gpu-mem=%dGB", meta.GPUMemGB))
@@ -654,6 +688,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("gpu-mem-strict") && meta.GPUMemStrict != nil {
 			runGPUMemStrict = *meta.GPUMemStrict
 			applied = append(applied, fmt.Sprintf("gpu-mem-strict=%t", runGPUMemStrict))
+		}
+		if !cmd.Flags().Changed("interconnect") && !cmd.Flags().Changed("nvlink-required") && runInterconnect == "" && meta.Interconnect != "" {
+			runInterconnect = meta.Interconnect
+			applied = append(applied, fmt.Sprintf("interconnect=%s", meta.Interconnect))
+		}
+		if !cmd.Flags().Changed("cpu-cores") && runCPUCores == 0 && meta.CPUCores > 0 {
+			runCPUCores = meta.CPUCores
+			applied = append(applied, fmt.Sprintf("cpu-cores=%d", meta.CPUCores))
 		}
 		if !cmd.Flags().Changed("disk") && runDiskGB == 0 && meta.DiskGB > 0 {
 			runDiskGB = meta.DiskGB
@@ -748,6 +790,46 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runWait && runNoWait {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
+	}
+	if cmd.Flags().Changed("nvlink-required") {
+		required, _ := cmd.Flags().GetBool("nvlink-required")
+		if required {
+			if runInterconnect != "" && !strings.EqualFold(runInterconnect, "nvlink") {
+				return fmt.Errorf("--nvlink-required cannot be combined with --interconnect=%s", runInterconnect)
+			}
+			runInterconnect = "nvlink"
+		}
+	}
+	if cmd.Flags().Changed("same-host") {
+		sameHost, _ := cmd.Flags().GetBool("same-host")
+		if !sameHost && runGPUCount > 1 {
+			return fmt.Errorf("--same-host=false is not supported; multi-GPU requests are single-host only")
+		}
+	}
+	if runGPUCount < 0 {
+		return fmt.Errorf("--gpus must be >= 1")
+	}
+	if runCPUCores < 0 {
+		return fmt.Errorf("--cpu-cores must be >= 1")
+	}
+	var normalizeErr error
+	runInterconnect, normalizeErr = normalizeInterconnect(runInterconnect)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	if runGPUCount > 1 && runInterconnect == "" {
+		runInterconnect = "any"
+	}
+	if runGPUCount > 0 {
+		count := runGPUCount
+		cliOverrides.GPUCount = &count
+	}
+	if runInterconnect != "" {
+		cliOverrides.Interconnect = runInterconnect
+	}
+	if runCPUCores > 0 {
+		cores := runCPUCores
+		cliOverrides.CPUCores = &cores
 	}
 	providerFlagChanged := cmd.Flags().Changed("provider")
 	if providerFlagChanged {
@@ -854,12 +936,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
-		GPUClass: gpuClass,
-		Provider: requestedProvider,
-		Inputs:   runInputs,
-		Command:  command,
-		Project:  projectName,
-		Tags:     runTags,
+		GPUClass:     gpuClass,
+		Provider:     requestedProvider,
+		NumGPUs:      runGPUCount,
+		CPUCores:     runCPUCores,
+		Interconnect: runInterconnect,
+		Inputs:       runInputs,
+		Command:      command,
+		Project:      projectName,
+		Tags:         runTags,
 	}
 	if resolvedGPUMemGB != nil {
 		placementConstraints.GPUMemGB = *resolvedGPUMemGB
@@ -1409,6 +1494,18 @@ func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {
 		return nil, fmt.Errorf("invalid script metadata: %w", err)
 	}
 	return scriptMeta, nil
+}
+
+func normalizeInterconnect(value string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	switch v {
+	case "", "any", "pcie", "nvlink":
+		return v, nil
+	case "none":
+		return "any", nil
+	default:
+		return "", fmt.Errorf("--interconnect must be one of any, pcie, nvlink")
+	}
 }
 
 func evaluateRecentOnPremPlacement(database *sql.DB, constraints placement.Constraints) (*placement.PlacementPlan, bool, error) {

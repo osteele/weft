@@ -59,6 +59,19 @@ import torch
 			want: &ScriptMeta{GPUMemGB: 8, GPUMemStrict: boolPtr(true)},
 		},
 		{
+			name: "multi-gpu shape",
+			content: `# /// script
+# [tool.weft]
+# gpu = "h100"
+# gpus = 4
+# gpu-mem = 80
+# interconnect = "nvlink"
+# cpu-cores = 32
+# ///
+`,
+			want: &ScriptMeta{GPU: "h100", GPUCount: 4, GPUMemGB: 80, Interconnect: "nvlink", CPUCores: 32},
+		},
+		{
 			name: "disk settings",
 			content: `# /// script
 # [tool.weft]
@@ -423,8 +436,17 @@ import torch
 			if got.GPUClass != tt.want.GPUClass {
 				t.Errorf("GPUClass: got %q, want %q", got.GPUClass, tt.want.GPUClass)
 			}
+			if got.GPUCount != tt.want.GPUCount {
+				t.Errorf("GPUCount: got %d, want %d", got.GPUCount, tt.want.GPUCount)
+			}
 			if got.GPUMemGB != tt.want.GPUMemGB {
 				t.Errorf("GPUMemGB: got %d, want %d", got.GPUMemGB, tt.want.GPUMemGB)
+			}
+			if got.Interconnect != tt.want.Interconnect {
+				t.Errorf("Interconnect: got %q, want %q", got.Interconnect, tt.want.Interconnect)
+			}
+			if got.CPUCores != tt.want.CPUCores {
+				t.Errorf("CPUCores: got %d, want %d", got.CPUCores, tt.want.CPUCores)
 			}
 			if got.DiskGB != tt.want.DiskGB {
 				t.Errorf("DiskGB: got %d, want %d", got.DiskGB, tt.want.DiskGB)

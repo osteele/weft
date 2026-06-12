@@ -392,6 +392,9 @@ func BuildNewOptionsWithSurvival(
 	group := campaign.InstanceGroup{
 		GPUClass:      job.GPUClass,
 		Provider:      provider,
+		NumGPUs:       job.RequestedGPUCount(),
+		CPUCores:      job.RequestedCPUCores(),
+		Interconnect:  job.RequestedInterconnect(),
 		MaxComputeCap: campaign.GroupMaxComputeCap(nil, []*db.Job{job}),
 		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
 		Jobs:          []*db.Job{job},
@@ -527,6 +530,9 @@ func LaunchNewForJob(
 	group := campaign.InstanceGroup{
 		GPUClass:      job.GPUClass,
 		Provider:      provider,
+		NumGPUs:       job.RequestedGPUCount(),
+		CPUCores:      job.RequestedCPUCores(),
+		Interconnect:  job.RequestedInterconnect(),
 		MaxComputeCap: campaign.GroupMaxComputeCap(database, []*db.Job{job}),
 		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
 		Jobs:          []*db.Job{job},
@@ -753,6 +759,9 @@ func executeMoveOption(
 	offer := *opt.Offer
 	group := campaign.InstanceGroup{
 		GPUClass:      job.GPUClass,
+		NumGPUs:       job.RequestedGPUCount(),
+		CPUCores:      job.RequestedCPUCores(),
+		Interconnect:  job.RequestedInterconnect(),
 		MaxComputeCap: campaign.GroupMaxComputeCap(database, []*db.Job{job}),
 		MinComputeCap: campaign.GroupMinComputeCap([]*db.Job{job}),
 		Jobs:          []*db.Job{job},

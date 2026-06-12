@@ -858,6 +858,7 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 		if price <= 0 {
 			continue
 		}
+		price *= float64(numGPUs)
 		offers = append(offers, cloud.Offer{
 			ProviderID:  gt.ID,
 			Provider:    cloud.ProviderRunpod,
@@ -908,6 +909,7 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 		if price <= 0 {
 			continue
 		}
+		price *= float64(numGPUs)
 
 		offerID := firstString(row, "id", "gpuTypeId", "gpuId", "displayName")
 		if offerID == "" {

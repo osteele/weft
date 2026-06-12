@@ -552,11 +552,22 @@ func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) 
 	// GPU class-based job
 	if job.Data.GPUClass != "" {
 		memPerDevice := GetJobGPUMem(job.Data, DefaultGPUMemGB)
-		device, reason, ok := inv.pickBestGPUForClassWithMode(state, job.Data.GPUClass, memPerDevice, strictIsolation)
-		if !ok {
-			return false, nil, reason
+		count := requestedGPUCount(job.Data)
+		temp := cloneStateForGPUSelection(state)
+		devices := make([]string, 0, count)
+		var lastReason string
+		for i := 0; i < count; i++ {
+			device, reason, ok := inv.pickBestGPUForClassWithMode(temp, job.Data.GPUClass, memPerDevice, strictIsolation)
+			if !ok {
+				if lastReason == "" {
+					lastReason = reason
+				}
+				return false, nil, fmt.Sprintf("need %d %s GPU(s), found %d available: %s", count, job.Data.GPUClass, len(devices), lastReason)
+			}
+			devices = append(devices, device)
+			temp.AddRunning(fmt.Sprintf("__weft_select_%d", i), RunningJobState{GPUDevices: []string{device}, GPUMemGB: memPerDevice})
 		}
-		return true, []string{device}, ""
+		return true, devices, ""
 	}
 
 	devices := GetJobGPUDevices(job.Data)
@@ -575,6 +586,26 @@ func (inv *GPUInventory) CanStartGPUJobWithReason(state *State, job *RunnerJob) 
 		}
 	}
 	return true, devices, ""
+}
+
+func requestedGPUCount(job *opsqueue.CommandJob) int {
+	if job == nil || job.GPUCount <= 1 {
+		return 1
+	}
+	return job.GPUCount
+}
+
+func cloneStateForGPUSelection(state *State) *State {
+	if state == nil {
+		return &State{Running: map[string]RunningJobState{}}
+	}
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	running := make(map[string]RunningJobState, len(state.Running))
+	for k, v := range state.Running {
+		running[k] = v
+	}
+	return &State{Running: running}
 }
 
 const defaultNonBenchmarkGPUBusyUtilThreshold = 50
@@ -679,4 +710,28 @@ func FormatGPUDeviceEnv(devices []string) string {
 		return ""
 	}
 	return fmt.Sprintf("CUDA_VISIBLE_DEVICES=%s", strings.Join(devices, ","))
+}
+
+func WeftGPUShapeEnv(job *opsqueue.CommandJob, devices []string) []string {
+	if job == nil {
+		return nil
+	}
+	count := requestedGPUCount(job)
+	if count <= 1 && len(devices) > 1 {
+		count = len(devices)
+	}
+	env := []string{fmt.Sprintf("WEFT_NUM_GPUS=%d", count)}
+	if job.GPUClass != "" {
+		env = append(env, "WEFT_GPU_CLASS="+job.GPUClass)
+	}
+	if job.GPUMem != nil && *job.GPUMem > 0 {
+		env = append(env, fmt.Sprintf("WEFT_GPU_MEM_GB=%d", *job.GPUMem))
+	}
+	if job.Interconnect != "" {
+		env = append(env, "WEFT_INTERCONNECT="+job.Interconnect)
+	}
+	if job.CPUCores > 0 {
+		env = append(env, fmt.Sprintf("WEFT_CPU_CORES=%d", job.CPUCores))
+	}
+	return env
 }

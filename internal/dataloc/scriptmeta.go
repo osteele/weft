@@ -15,8 +15,11 @@ import (
 type ScriptMeta struct {
 	GPU           string // GPU constraint (e.g., "nvidia", "ampere+", "a100")
 	GPUClass      string // GPU class/generation
+	GPUCount      int    // Exact number of GPUs requested on one host
 	GPUMemGB      int    // Requested GPU memory in GB (headroom may be applied by CLI)
 	GPUMemStrict  *bool  // Exact gpu-mem matching (no headroom), when explicitly set
+	Interconnect  string // Requested intra-host interconnect: any, pcie, nvlink
+	CPUCores      int    // Minimum effective CPU cores/vCPUs
 	DiskGB        int    // Total rental disk floor in GB
 	RuntimeDiskGB int    // Extra scratch/cache disk headroom in GB
 	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
@@ -48,7 +51,8 @@ type ScriptMeta struct {
 // this; counting Dependencies here would cause restart to clear GPU fields
 // for any deps-only script.
 func (m *ScriptMeta) isEmpty() bool {
-	return m.GPU == "" && m.GPUClass == "" && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
+	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
+		m.Interconnect == "" && m.CPUCores == 0 &&
 		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
@@ -87,10 +91,15 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			if v, ok := wt.Get("gpu-class").(string); ok {
 				meta.GPUClass = v
 			}
+			meta.GPUCount = parsePositiveInt(firstPresent(wt, "gpus", "gpu-count", "gpu_count"))
 			meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
 			if v, ok := wt.Get("gpu-mem-strict").(bool); ok {
 				meta.GPUMemStrict = &v
 			}
+			if v, ok := wt.Get("interconnect").(string); ok {
+				meta.Interconnect = strings.TrimSpace(v)
+			}
+			meta.CPUCores = parsePositiveInt(firstPresent(wt, "cpu-cores", "cpu_cores"))
 			meta.DiskGB = parseDiskGB(firstPresent(wt, "disk", "disk-gb", "disk_gb"))
 			meta.RuntimeDiskGB = parseDiskGB(firstPresent(wt, "runtime-disk", "runtime-disk-gb", "runtime_disk_gb"))
 			if v, ok := wt.Get("gpu-arch-max").(string); ok {
@@ -277,6 +286,21 @@ func extractPEP723Block(content string) string {
 // Accepts int64 or string formats like "40", "40GB", ">=80GB".
 func parseGPUMem(v interface{}) int {
 	return parseDiskGB(v)
+}
+
+func parsePositiveInt(v interface{}) int {
+	switch val := v.(type) {
+	case int64:
+		if val > 0 {
+			return int(val)
+		}
+	case string:
+		var n int
+		if _, err := fmt.Sscanf(strings.TrimSpace(val), "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // parseDiskGB interprets a disk size as an integer GB count.

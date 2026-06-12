@@ -128,6 +128,7 @@ type OfferConstraints struct {
 	MinDriverVersion     int      // minimum NVIDIA driver major version (0 = no floor)
 	MinCUDAVersion       string   // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
 	NumGPUs              int      // number of GPUs needed (default 1)
+	Interconnect         string   // required intra-host interconnect: any, pcie, nvlink
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
 	InstanceType         string   // desired rental type ("on-demand" or "interruptible")

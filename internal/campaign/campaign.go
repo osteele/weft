@@ -43,12 +43,22 @@ func vramTierOf(memGB int) int {
 	return memGB // above all tiers
 }
 
+func normalizedGPUCount(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	return n
+}
+
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
 	GPUClass         string   // Normalized GPU class (uppercase), e.g. "H100"
 	Provider         string   // Requested provider ("vastai" or "runpod"), empty = any
+	NumGPUs          int      // Exact number of GPUs requested on one host/rental (0/1 = one)
 	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
+	CPUCores         int      // Minimum effective CPU cores/vCPUs
+	Interconnect     string   // Requested intra-host interconnect: any, pcie, nvlink
 	MaxGPUMemGB      int      // Legacy metadata retained for old rows; not used for placement
 	DiskGB           int      // Estimated disk space needed (0 = use default)
 	Image            string   // Docker image override/default for this group ("" = use global default)
@@ -68,6 +78,13 @@ type InstanceGroup struct {
 	// bound".
 	MinComputeCap string
 	Jobs          []*db.Job
+}
+
+func cloneInstanceGroupWithJobs(g InstanceGroup, jobs []*db.Job) InstanceGroup {
+	clone := g
+	clone.Jobs = append([]*db.Job(nil), jobs...)
+	clone.VastCapAdd = append([]string(nil), g.VastCapAdd...)
+	return clone
 }
 
 // ApplyImageMetadataRequirements augments groups with constraints declared by
@@ -268,6 +285,9 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		}
 
 		jobGPU := strings.TrimSpace(info.job.GPUClass)
+		jobGPUCount := info.job.RequestedGPUCount()
+		jobCPUCores := info.job.RequestedCPUCores()
+		jobInterconnect := strings.TrimSpace(info.job.RequestedInterconnect())
 		jobPreemptible := info.job.UsesPreemptiblePlacement()
 		jobProvider, _ := db.RequestedProvider(info.job.Tags)
 
@@ -279,6 +299,12 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 				continue
 			}
 			if !strings.EqualFold(g.group.Provider, jobProvider) {
+				continue
+			}
+			if normalizedGPUCount(g.group.NumGPUs) != normalizedGPUCount(jobGPUCount) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(g.group.Interconnect), jobInterconnect) {
 				continue
 			}
 			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
@@ -306,6 +332,9 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			if mem > g.group.GPUMemGB {
 				g.group.GPUMemGB = mem
 			}
+			if jobCPUCores > g.group.CPUCores {
+				g.group.CPUCores = jobCPUCores
+			}
 			for id := range info.hfInputs {
 				g.hfUnion[id] = struct{}{}
 			}
@@ -316,11 +345,14 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 			groups = append(groups, groupState{
 				group: InstanceGroup{
-					GPUClass:    strings.ToUpper(jobGPU),
-					Provider:    jobProvider,
-					GPUMemGB:    mem,
-					Preemptible: jobPreemptible,
-					Jobs:        []*db.Job{info.job},
+					GPUClass:     strings.ToUpper(jobGPU),
+					Provider:     jobProvider,
+					NumGPUs:      jobGPUCount,
+					GPUMemGB:     mem,
+					CPUCores:     jobCPUCores,
+					Interconnect: jobInterconnect,
+					Preemptible:  jobPreemptible,
+					Jobs:         []*db.Job{info.job},
 				},
 				hfUnion: hfUnion,
 			})
@@ -519,6 +551,12 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if !strings.EqualFold(merged[i].Provider, g.Provider) {
 				continue
 			}
+			if normalizedGPUCount(merged[i].NumGPUs) != normalizedGPUCount(g.NumGPUs) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(merged[i].Interconnect), strings.TrimSpace(g.Interconnect)) {
+				continue
+			}
 			if vramTierOf(merged[i].GPUMemGB) != vramTierOf(g.GPUMemGB) {
 				continue
 			}
@@ -535,6 +573,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if g.DiskGB > merged[i].DiskGB {
 				merged[i].DiskGB = g.DiskGB
 			}
+			if g.CPUCores > merged[i].CPUCores {
+				merged[i].CPUCores = g.CPUCores
+			}
 			merged[i].MaxComputeCap = mergeMaxComputeCap(merged[i].MaxComputeCap, g.MaxComputeCap)
 			merged[i].MinComputeCap = mergeMinComputeCap(merged[i].MinComputeCap, g.MinComputeCap)
 			// Preserve hard CUDA/driver floors across the merge — they're
@@ -548,19 +589,7 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 		}
 		if !found {
 			// Copy the group to avoid mutating the original
-			merged = append(merged, InstanceGroup{
-				GPUClass:         g.GPUClass,
-				Provider:         g.Provider,
-				GPUMemGB:         g.GPUMemGB,
-				DiskGB:           g.DiskGB,
-				Image:            g.Image,
-				Preemptible:      g.Preemptible,
-				MaxComputeCap:    g.MaxComputeCap,
-				MinComputeCap:    g.MinComputeCap,
-				MinDriverVersion: g.MinDriverVersion,
-				MinCUDAVersion:   g.MinCUDAVersion,
-				Jobs:             append([]*db.Job(nil), g.Jobs...),
-			})
+			merged = append(merged, cloneInstanceGroupWithJobs(g, g.Jobs))
 		}
 	}
 
@@ -576,19 +605,9 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 	var result []InstanceGroup
 	for _, g := range groups {
 		if len(g.Jobs) <= 1 {
-			result = append(result, InstanceGroup{
-				GPUClass:         g.GPUClass,
-				Provider:         g.Provider,
-				GPUMemGB:         g.GPUMemGB,
-				DiskGB:           g.DiskGB,
-				Image:            g.Image,
-				Preemptible:      g.Preemptible,
-				MaxComputeCap:    g.MaxComputeCap,
-				MinComputeCap:    g.MinComputeCap,
-				MinDriverVersion: g.MinDriverVersion,
-				MinCUDAVersion:   g.MinCUDAVersion,
-				Jobs:             append([]*db.Job(nil), g.Jobs...),
-			})
+			split := cloneInstanceGroupWithJobs(g, g.Jobs)
+			split.MaxGPUMemGB = 0
+			result = append(result, split)
 			continue
 		}
 		for _, job := range g.Jobs {
@@ -596,19 +615,12 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 			if job.GPUMemGB != nil {
 				mem = *job.GPUMemGB
 			}
-			result = append(result, InstanceGroup{
-				GPUClass:         g.GPUClass,
-				Provider:         g.Provider,
-				GPUMemGB:         mem,
-				DiskGB:           g.DiskGB,
-				Image:            g.Image,
-				Preemptible:      g.Preemptible,
-				MaxComputeCap:    groupMaxComputeCap(nil, []*db.Job{job}),
-				MinComputeCap:    groupMinComputeCap([]*db.Job{job}),
-				MinDriverVersion: g.MinDriverVersion,
-				MinCUDAVersion:   g.MinCUDAVersion,
-				Jobs:             []*db.Job{job},
-			})
+			split := cloneInstanceGroupWithJobs(g, []*db.Job{job})
+			split.GPUMemGB = mem
+			split.MaxGPUMemGB = 0
+			split.MaxComputeCap = groupMaxComputeCap(nil, []*db.Job{job})
+			split.MinComputeCap = groupMinComputeCap([]*db.Job{job})
+			result = append(result, split)
 		}
 	}
 	sortGroups(result)
@@ -788,21 +800,15 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 		}
 
 		for _, sub := range subs {
-			result = append(result, InstanceGroup{
-				GPUClass:         g.GPUClass,
-				Provider:         g.Provider,
-				GPUMemGB:         g.GPUMemGB,
-				DiskGB:           g.DiskGB,
-				Image:            sub.image,
-				MinDriverVersion: sub.minDriverVersion,
-				MinCUDAVersion:   sub.minCUDAVersion,
-				ImagePullSecret:  sub.imagePullSecret,
-				VastCapAdd:       sub.vastCapAdd,
-				Preemptible:      g.Preemptible,
-				MaxComputeCap:    groupMaxComputeCap(database, sub.jobs),
-				MinComputeCap:    groupMinComputeCap(sub.jobs),
-				Jobs:             sub.jobs,
-			})
+			split := cloneInstanceGroupWithJobs(g, sub.jobs)
+			split.Image = sub.image
+			split.MinDriverVersion = sub.minDriverVersion
+			split.MinCUDAVersion = sub.minCUDAVersion
+			split.ImagePullSecret = sub.imagePullSecret
+			split.VastCapAdd = append([]string(nil), sub.vastCapAdd...)
+			split.MaxComputeCap = groupMaxComputeCap(database, sub.jobs)
+			split.MinComputeCap = groupMinComputeCap(sub.jobs)
+			result = append(result, split)
 		}
 	}
 	return result
@@ -1289,6 +1295,9 @@ func (g InstanceGroup) GPUSpec() string {
 		spec = "≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	default:
 		spec = "GPU"
+	}
+	if normalizedGPUCount(g.NumGPUs) > 1 {
+		spec = strconv.Itoa(normalizedGPUCount(g.NumGPUs)) + "x " + spec
 	}
 	return spec
 }

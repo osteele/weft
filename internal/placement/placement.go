@@ -53,13 +53,16 @@ func LoadHostNames() ([]string, error) {
 
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
-	GPUClass string   // Required GPU class (e.g., "a100"); empty = no preference
-	Provider string   // Requested rental provider (e.g., "vastai", "runpod"); empty = any
-	GPUMemGB int      // Minimum GPU memory in GB; 0 = no minimum
-	Inputs   []string // Asset refs the job reads (for locality scoring)
-	Command  string   // For predictor-based scoring; empty = skip
-	Project  string   // For predictor-based scoring; empty = skip
-	Tags     []string // Job tags; benchmark-isolation triggers idle-host requirement
+	GPUClass     string   // Required GPU class (e.g., "a100"); empty = no preference
+	Provider     string   // Requested rental provider (e.g., "vastai", "runpod"); empty = any
+	NumGPUs      int      // Exact number of GPUs requested on one host/rental (0/1 = one)
+	GPUMemGB     int      // Minimum GPU memory in GB; 0 = no minimum
+	CPUCores     int      // Minimum effective CPU cores/vCPUs
+	Interconnect string   // Requested intra-host interconnect: any, pcie, nvlink
+	Inputs       []string // Asset refs the job reads (for locality scoring)
+	Command      string   // For predictor-based scoring; empty = skip
+	Project      string   // For predictor-based scoring; empty = skip
+	Tags         []string // Job tags; benchmark-isolation triggers idle-host requirement
 
 	// PreferredInstanceIDs is a soft preference toward reusing these specific
 	// rental instances. Used to co-locate a consumer on its --needs
@@ -103,11 +106,14 @@ type Constraints struct {
 // ConstraintsFromJob builds Constraints from a db.Job's fields.
 func ConstraintsFromJob(j *db.Job) Constraints {
 	c := Constraints{
-		GPUClass: j.GPUClass,
-		Inputs:   j.Inputs,
-		Command:  j.Command,
-		Project:  j.Project,
-		Tags:     j.Tags,
+		GPUClass:     j.GPUClass,
+		NumGPUs:      j.RequestedGPUCount(),
+		CPUCores:     j.RequestedCPUCores(),
+		Interconnect: j.RequestedInterconnect(),
+		Inputs:       j.Inputs,
+		Command:      j.Command,
+		Project:      j.Project,
+		Tags:         j.Tags,
 	}
 	if provider, ok := db.RequestedProvider(j.Tags); ok {
 		c.Provider = provider
@@ -212,7 +218,7 @@ func RuntimeFloorForJob(j *db.Job) RuntimeFloor {
 
 // NeedsGPU returns true if the constraints require GPU resources.
 func (c Constraints) NeedsGPU() bool {
-	return c.GPUClass != "" || c.GPUMemGB > 0
+	return c.GPUClass != "" || c.GPUMemGB > 0 || c.NumGPUs > 1
 }
 
 // HostMetrics holds live utilization data for a host, used for soft scoring.

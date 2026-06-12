@@ -939,16 +939,26 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	setupTimeout := pickSetupTimeout(cfg)
 	env := agentRentalEnv(cfg)
 	env = append(env, job.Env...)
+	var gpuMem *int
+	if job.GPUMemGB > 0 {
+		v := job.GPUMemGB
+		gpuMem = &v
+	}
 	return runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: opsqueue.CommandJob{
-			Cmd:        job.Command,
-			Tags:       append([]string(nil), job.Tags...),
-			OutputDirs: append([]string(nil), job.OutputDirs...),
-			Outputs:    append([]string(nil), job.Outputs...),
-			Produces:   append([]string(nil), job.Produces...),
-			Needs:      append([]string(nil), job.Needs...),
-			Env:        env,
+			Cmd:          job.Command,
+			Tags:         append([]string(nil), job.Tags...),
+			GPUClass:     job.GPUClass,
+			GPUCount:     job.GPUCount,
+			GPUMem:       gpuMem,
+			Interconnect: job.Interconnect,
+			CPUCores:     job.CPUCores,
+			OutputDirs:   append([]string(nil), job.OutputDirs...),
+			Outputs:      append([]string(nil), job.Outputs...),
+			Produces:     append([]string(nil), job.Produces...),
+			Needs:        append([]string(nil), job.Needs...),
+			Env:          env,
 		},
 		LogDir:               cfg.LogDir,
 		WorkingDir:           workDir,

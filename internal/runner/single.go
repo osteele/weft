@@ -180,15 +180,22 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Resolve GPU devices
 	var gpuDevices []string
 	if job.GPUClass != "" {
-		memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
-		// For single-job mode, use empty state — no other jobs running
-		emptyState := NewState()
-		device, ok := gpuInv.PickBestGPUForClass(emptyState, job.GPUClass, memPerDevice)
-		if ok {
-			gpuDevices = []string{device}
+		canStart, devices, reason := gpuInv.CanStartGPUJobWithReason(NewState(), &RunnerJob{Data: job, ID: cfg.JobID})
+		if !canStart {
+			if requestedGPUCount(job) > 1 {
+				appendSetupLog(paths.Log, []byte("weft: GPU preflight failed: "+reason+"\n"))
+				return ExitInfo{ExitCode: 1}, fmt.Errorf("GPU preflight failed: %s", reason)
+			}
+		} else {
+			gpuDevices = devices
 		}
 	} else {
 		gpuDevices = GetJobGPUDevices(job)
+	}
+	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
+		msg := fmt.Sprintf("requested=%d visible=%d", requested, len(gpuDevices))
+		appendSetupLog(paths.Log, []byte("weft: GPU count preflight failed: "+msg+"\n"))
+		return ExitInfo{ExitCode: 1}, fmt.Errorf("GPU count preflight failed: %s", msg)
 	}
 	// Auto-assign GPU on GPU hosts when no explicit constraint was given.
 	if len(gpuDevices) == 0 && len(gpuInv.Devices) > 0 {
@@ -202,6 +209,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		cudaEnv := FormatGPUDeviceEnv(gpuDevices)
 		envVars = append(envVars, cudaEnv)
 	}
+	envVars = append(envVars, WeftGPUShapeEnv(job, gpuDevices)...)
 
 	// Write gpu_devices to meta file
 	if len(gpuDevices) > 0 {

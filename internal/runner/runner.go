@@ -469,6 +469,9 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	paths := NewJobPaths(r.logDir, jobID)
+	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
+		return r.rejectPreflight(jobID, paths, fmt.Sprintf("gpu_count_preflight_failed: requested=%d visible=%d", requested, len(gpuDevices)))
+	}
 
 	// Expand ~ in working directory (needed for the preflight marker read).
 	expandedDir := job.Dir
@@ -594,6 +597,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		cudaEnv := FormatGPUDeviceEnv(gpuDevices)
 		envVars = append(envVars, cudaEnv)
 	}
+	envVars = append(envVars, WeftGPUShapeEnv(job, gpuDevices)...)
 
 	// Run environment setup as a separate phase. Use expandedDir, not
 	// job.Dir: in R2-isolated mode the latter still points at the

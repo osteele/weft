@@ -23,21 +23,29 @@ func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 	if job.LatestRunID != nil {
 		runID = *job.LatestRunID
 	}
-	return cloud.AgentJob{
-		ID:         job.ID,
-		RunID:      runID,
-		Command:    job.EffectiveCommand(),
-		Dir:        remoteDir,
-		Tags:       append([]string(nil), job.Tags...),
-		Priority:   job.Priority,
-		UsesGPU:    job.UsesGPU(),
-		OutputDirs: append([]string(nil), job.OutputDirs...),
-		Outputs:    append([]string(nil), job.Outputs...),
-		Produces:   append([]string(nil), job.Produces...),
-		Needs:      append([]string(nil), job.Needs...),
-		Inputs:     append([]string(nil), job.Inputs...),
-		Env:        append([]string(nil), job.EnvVars...),
+	agentJob := cloud.AgentJob{
+		ID:           job.ID,
+		RunID:        runID,
+		Command:      job.EffectiveCommand(),
+		Dir:          remoteDir,
+		Tags:         append([]string(nil), job.Tags...),
+		Priority:     job.Priority,
+		UsesGPU:      job.UsesGPU(),
+		GPUClass:     job.GPUClass,
+		GPUCount:     job.RequestedGPUCount(),
+		Interconnect: job.RequestedInterconnect(),
+		CPUCores:     job.RequestedCPUCores(),
+		OutputDirs:   append([]string(nil), job.OutputDirs...),
+		Outputs:      append([]string(nil), job.Outputs...),
+		Produces:     append([]string(nil), job.Produces...),
+		Needs:        append([]string(nil), job.Needs...),
+		Inputs:       append([]string(nil), job.Inputs...),
+		Env:          append([]string(nil), job.EnvVars...),
 	}
+	if job.GPUMemGB != nil {
+		agentJob.GPUMemGB = *job.GPUMemGB
+	}
+	return agentJob
 }
 
 func newCloudAgentJob(job *db.Job, remoteDir string) (cloud.AgentJob, error) {

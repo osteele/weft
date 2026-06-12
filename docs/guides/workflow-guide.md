@@ -273,6 +273,8 @@ you can declare requirements inside the script using a
 # dependencies = ["torch", "transformer_lens"]
 #
 # [tool.weft]
+# gpu = "h100"
+# gpus = 4
 # gpu-mem = 40
 # inputs = ["hf:gpt2"]
 # ///
@@ -284,8 +286,11 @@ Supported keys (all optional):
 |-------------|------------------|---------------------|
 | `gpu`       | string           | `--gpu`             |
 | `gpu-class` | string           | `--gpu-class`       |
+| `gpus` / `gpu-count` | int    | `--gpus`            |
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
 | `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
+| `interconnect` | string (`any`, `pcie`, `nvlink`) | `--interconnect` |
+| `cpu-cores` | int             | `--cpu-cores`       |
 | `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
 | `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |
 | `gpu-arch-max`   | string      | *(no CLI flag — overrides auto-inferred GPU arch upper bound; see below)* |

@@ -343,6 +343,27 @@ func TestOfferConstraintsForGroup_NoComputeIntensive(t *testing.T) {
 	}
 }
 
+func TestOfferConstraintsForGroup_MultiGPUShape(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:     "H100",
+		NumGPUs:      4,
+		GPUMemGB:     80,
+		CPUCores:     32,
+		Interconnect: "nvlink",
+		Jobs:         []*db.Job{{ID: 1, Tags: []string{"rental"}}},
+	}
+	c := offerConstraintsForGroup(group, 0.95)
+	if c.NumGPUs != 4 {
+		t.Errorf("NumGPUs = %d, want 4", c.NumGPUs)
+	}
+	if c.MinCPUCoresEffective != 32 {
+		t.Errorf("MinCPUCoresEffective = %d, want 32", c.MinCPUCoresEffective)
+	}
+	if c.Interconnect != "nvlink" {
+		t.Errorf("Interconnect = %q, want nvlink", c.Interconnect)
+	}
+}
+
 func TestScoreGrouping_CheapPrefersMerged(t *testing.T) {
 	// With survival < 1, merging saves retry overhead (fewer instances to fail).
 	// Merged: 1 group with 2 jobs, pays setup once per retry
