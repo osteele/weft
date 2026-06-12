@@ -213,6 +213,60 @@ func TestMatchJobToInstance_GPUMemoryRollsBackPostHeadroom(t *testing.T) {
 	}
 }
 
+func TestMatchJobToInstance_RejectsCUDAFloorFromPlacementConstraints(t *testing.T) {
+	job := &db.Job{
+		GPUClass: "nvidia",
+		CLIResourceOverrides: &db.CLIResourceOverrides{
+			MinCUDAVersion: "12.8",
+		},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "nvidia",
+			GPUMemGB:        80,
+			CUDAVersion:     12.4,
+			ResolvedGPUName: "A100",
+		},
+		DiskFreeGB: 100,
+	}
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("MatchJobToInstance() = true, want false for CUDA floor")
+	}
+	if !strings.Contains(reason, "CUDA compatibility insufficient") {
+		t.Fatalf("reason = %q, want CUDA compatibility detail", reason)
+	}
+
+	cap.Instance.CUDAVersion = 12.8
+	got, reason = MatchJobToInstance(job, cap)
+	if !got {
+		t.Fatalf("MatchJobToInstance() = false, want true after CUDA floor met: %s", reason)
+	}
+}
+
+func TestMatchJobToInstance_RejectsComputeCapFromPlacementConstraints(t *testing.T) {
+	job := &db.Job{
+		GPUClass:      "h100",
+		MaxComputeCap: "8.0",
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "h100",
+			GPUMemGB:        80,
+			CUDAVersion:     12.8,
+			ResolvedGPUName: "H100",
+		},
+		DiskFreeGB: 100,
+	}
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("MatchJobToInstance() = true, want false for compute cap")
+	}
+	if !strings.Contains(reason, "compute capability too new") {
+		t.Fatalf("reason = %q, want compute-cap detail", reason)
+	}
+}
+
 func TestMatchJobToInstance_DiskCompatibility(t *testing.T) {
 	tests := []struct {
 		name              string

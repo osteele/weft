@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
@@ -258,6 +259,9 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if jobMemGB > 0 && jobMemGB > inst.GPUMemGB {
 		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)
 	}
+	if ok, reason := matchPlacementCompatibility(job, inst); !ok {
+		return false, reason
+	}
 
 	// Disk check: compute incremental inputs (HF models) + setup scratch.
 	if cap.DiskFreeGB > 0 || inst.DiskGB > 0 {
@@ -280,6 +284,43 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
+}
+
+func matchPlacementCompatibility(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil {
+		return true, ""
+	}
+	constraints := placement.ConstraintsFromJob(job)
+	if !constraints.NeedsGPU() {
+		return true, ""
+	}
+	if !instanceMeetsMinCUDAVersion(inst, constraints.MinCUDAVersion) {
+		if inst.CUDAVersion <= 0 {
+			return false, fmt.Sprintf("CUDA compatibility unknown: need>=%s", constraints.MinCUDAVersion)
+		}
+		return false, fmt.Sprintf("CUDA compatibility insufficient: need>=%s instance=%.1f", constraints.MinCUDAVersion, inst.CUDAVersion)
+	}
+	gpuCap := instanceComputeCap(inst)
+	if constraints.MaxComputeCap != "" && gpuCap != "" && placement.CompareComputeCap(gpuCap, constraints.MaxComputeCap) > 0 {
+		return false, fmt.Sprintf("compute capability too new: job<=%s instance=%s", constraints.MaxComputeCap, gpuCap)
+	}
+	if constraints.MinComputeCap != "" && (gpuCap == "" || placement.CompareComputeCap(gpuCap, constraints.MinComputeCap) < 0) {
+		if gpuCap == "" {
+			return false, fmt.Sprintf("compute capability unknown: need>=%s", constraints.MinComputeCap)
+		}
+		return false, fmt.Sprintf("compute capability too old: job>=%s instance=%s", constraints.MinComputeCap, gpuCap)
+	}
+	return true, ""
+}
+
+func instanceComputeCap(inst *db.Launch) string {
+	if inst == nil {
+		return ""
+	}
+	if cap := placement.ComputeCapForGPU(inst.ResolvedGPUName); cap != "" {
+		return cap
+	}
+	return placement.ComputeCapForGPU(inst.GPUClass)
 }
 
 type reuseDiskNeed struct {
