@@ -57,9 +57,12 @@ weft run --gpu ampere+ 'python train.py'
 weft run --gpu-class a100 --gpu-mem 60 'python train.py'
 ```
 
-GPU class matching supports exact models (`a100`, `rtx3090`), generations
-(`ampere`), minimum generations (`ampere+`), and families (`nvidia`, `apple`).
-Bare RTX model numbers such as `3090` are normalized to `rtx3090`.
+GPU class matching supports exact models (`a100`, `rtx3090`, `gh200`),
+generations (`ampere`, `hopper`), minimum generations (`ampere+`), and
+families (`nvidia`, `apple`). Bare RTX model numbers such as `3090` are
+normalized to `rtx3090`. Use `gh200` when the job needs a Grace Hopper
+superchip specifically; `hopper` remains a broad generation constraint that
+can also match H100 and H200.
 
 The `>=NGB` form on `--gpu` is a hardware capacity floor. For example,
 `--gpu a100>=80GB` matches 80GB A100 offers exactly; it does not add the

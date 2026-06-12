@@ -166,6 +166,16 @@ func TestResolveGPUFilter(t *testing.T) {
 			wantNames: []string{"H200 NVL"},
 		},
 		{
+			name:      "exact model gh200",
+			gpuClass:  "gh200",
+			wantNames: []string{"GH200", "GH200 Superchip", "Grace Hopper"},
+		},
+		{
+			name:      "grace hopper alias",
+			gpuClass:  "grace-hopper",
+			wantNames: []string{"Grace Hopper"},
+		},
+		{
 			name:          "prefix a100sxm+ min-mode",
 			gpuClass:      "A100 SXM+",
 			wantNames:     nil,
@@ -283,6 +293,9 @@ func TestGPUClassMatchesOfferName(t *testing.T) {
 		{name: "a6000 matches RTX A6000", gpuClass: "a6000", gpuName: "RTX A6000", want: true},
 		{name: "rtx-5090 matches RTX 5090", gpuClass: "rtx-5090", gpuName: "RTX 5090", want: true},
 		{name: "v100 matches Tesla V100", gpuClass: "v100", gpuName: "Tesla V100", want: true},
+		{name: "gh200 matches GH200", gpuClass: "gh200", gpuName: "GH200", want: true},
+		{name: "gh200 rejects H100", gpuClass: "gh200", gpuName: "H100 SXM", want: false},
+		{name: "hopper matches GH200", gpuClass: "hopper", gpuName: "GH200", want: true},
 		{name: "volta matches Tesla V100", gpuClass: "volta", gpuName: "Tesla V100", want: true},
 		{name: "volta rejects turing", gpuClass: "volta", gpuName: "RTX 2080 Ti", want: false},
 	}

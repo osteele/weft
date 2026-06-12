@@ -31,6 +31,8 @@ func TestProblemModelsClassifyConsistently(t *testing.T) {
 		{"RTX PRO 6000 WS", GenBlackwell, "12.0"},
 		{"A100", GenAmpere, "8.0"},
 		{"H100", GenHopper, "9.0"},
+		{"GH200", GenHopper, "9.0"},
+		{"Grace Hopper", GenHopper, "9.0"},
 	}
 	for _, c := range cases {
 		if got := ComputeCapForGPU(c.name); got != c.cap {

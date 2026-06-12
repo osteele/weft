@@ -85,7 +85,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
-- `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
+- `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `gh200`, `ampere+`)
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default, except when the value matches a known hardware ceiling — see below)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
 

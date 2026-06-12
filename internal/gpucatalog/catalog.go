@@ -131,6 +131,9 @@ var Entries = []Entry{
 	{"H100 PCIE", GenHopper, "9.0"},
 	{"H200", GenHopper, "9.0"},
 	{"H200 NVL", GenHopper, "9.0"},
+	{"GH200", GenHopper, "9.0"},
+	{"GH200 Superchip", GenHopper, "9.0"},
+	{"Grace Hopper", GenHopper, "9.0"},
 
 	{"RTX 5090", GenBlackwell, "12.0"},
 	{"RTX 5080", GenBlackwell, "12.0"},
@@ -148,11 +151,12 @@ var Entries = []Entry{
 }
 
 var computeCapAliases = map[string]string{
-	"a100": "8.0",
-	"a30":  "8.0",
-	"h100": "9.0",
-	"h200": "9.0",
-	"b300": "10.0",
+	"a100":  "8.0",
+	"a30":   "8.0",
+	"h100":  "9.0",
+	"h200":  "9.0",
+	"gh200": "9.0",
+	"b300":  "10.0",
 }
 
 var (

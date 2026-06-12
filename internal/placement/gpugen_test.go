@@ -14,6 +14,7 @@ func TestGenerationOf(t *testing.T) {
 		{"rtx3090", GenAmpere},
 		{"rtx2080ti", GenTuring},
 		{"h100", GenHopper},
+		{"gh200", GenHopper},
 		{"rtx4090", GenAdaLovelace},
 		{"m2max", GenAppleM2},
 		{"b200", GenBlackwell},
@@ -84,6 +85,7 @@ func TestParseGPUConstraint(t *testing.T) {
 		{"v100+", constraintMinGen, GenVolta, "v100"},
 		{"rtx3090+", constraintMinGen, GenAmpere, "rtx3090"},
 		{"h100+", constraintMinGen, GenHopper, "h100"},
+		{"gh200+", constraintMinGen, GenHopper, "gh200"},
 		{"a5000+", constraintMinGen, GenAmpere, "a5000"},
 
 		// Family matching
@@ -148,9 +150,13 @@ func TestMatchesGPU(t *testing.T) {
 
 		// Hopper minimum
 		{"hopper+", "h100", true},
+		{"hopper+", "gh200", true},
 		{"hopper+", "b200", true},     // Blackwell > Hopper
 		{"hopper+", "a100", false},    // Ampere < Hopper
 		{"hopper+", "rtx4090", false}, // Ada < Hopper
+		{"gh200", "gh200", true},
+		{"gh200", "h100", false},
+		{"gh200", "h200", false},
 
 		// Apple cross-family blocked
 		{"ampere+", "m1max", false},
@@ -223,6 +229,10 @@ func TestMatchesGPUFullName(t *testing.T) {
 		{"turing+", "NVIDIA A100-PCIE-80GB", true},   // Ampere > Turing
 		{"turing+", "NVIDIA GeForce RTX 3090", true}, // Ampere > Turing
 		{"hopper+", "NVIDIA A100-PCIE-80GB", false},  // Ampere < Hopper
+		{"hopper", "NVIDIA GH200 480GB", true},
+		{"gh200", "NVIDIA GH200 480GB", true},
+		{"gh200", "NVIDIA H100 80GB HBM3", false},
+		{"gh200", "NVIDIA H200", false},
 
 		// Family matching on full names
 		{"nvidia", "NVIDIA A100-PCIE-80GB", true},
@@ -283,12 +293,14 @@ func TestSubsumes(t *testing.T) {
 		{"hopper+", "ampere+", false},
 		{"hopper+", "blackwell", true},
 		{"hopper+", "h100", true},
+		{"hopper+", "gh200", true},
 		{"hopper+", "a100", false},
 
 		// ExactGen subsumes models within that generation
 		{"ampere", "a100", true},
 		{"ampere", "rtx3090", true},
 		{"ampere", "h100", false},
+		{"hopper", "gh200", true},
 		{"ampere", "rtx2080ti", false},
 		{"ampere", "ampere", true},
 		{"ampere", "hopper", false},
@@ -332,6 +344,7 @@ func TestMinCUDAForGPU(t *testing.T) {
 		{"A100 SXM4", 11.0},
 		{"H100", 12.0},
 		{"H200", 12.0},
+		{"GH200", 12.0},
 		{"B200", 12.8},
 		{"Unknown GPU", 0},
 	}
