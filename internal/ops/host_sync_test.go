@@ -532,6 +532,27 @@ func TestSourceSyncLeaseTTLTracksLongSourceTimeout(t *testing.T) {
 	}
 }
 
+// TestEffectiveSourceSyncTimeout guards against the regression where source
+// rsync inherited the few-second SSH status-probe Timeout. The daemon host-sync
+// worker passes a 5s Timeout and leaves SourceTimeout unset; before the fix that
+// SIGKILL'd source rsync mid-connect, blocking the job with "source sync failed:
+// ... timed out after 5s". Source sync must instead get the source-sync default.
+func TestEffectiveSourceSyncTimeout(t *testing.T) {
+	// Unset SourceTimeout must not fall back to the short status Timeout.
+	got := effectiveSourceSyncTimeout(HostSyncOptions{Timeout: 5 * time.Second})
+	if got != defaultSourceSyncTimeout {
+		t.Fatalf("unset SourceTimeout with 5s Timeout = %s, want source default %s", got, defaultSourceSyncTimeout)
+	}
+	if got <= 5*time.Second {
+		t.Fatalf("source sync budget %s is too short to survive SSH connect setup", got)
+	}
+
+	// An explicit SourceTimeout is honored verbatim (the syncorch path sets it).
+	if got := effectiveSourceSyncTimeout(HostSyncOptions{Timeout: 5 * time.Second, SourceTimeout: 30 * time.Second}); got != 30*time.Second {
+		t.Fatalf("explicit SourceTimeout = %s, want 30s", got)
+	}
+}
+
 func TestSyncHost_SurfacesQueueDispatchFailure(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -47,6 +47,14 @@ const (
 	EventReuseSubmitOK       = "reuse.submit_ok"
 	EventReuseSkippedBackoff = "reuse.skipped.backoff"
 
+	// Per-host source-sync health. source_sync.timeout events form the streak
+	// that drives source-sync backoff and wedged-host auto-cordon;
+	// source_sync.ok resets it. These are host-keyed (JobID = 0, Detail =
+	// host name), not per-job, because a wedged working-dir mount blocks every
+	// job that targets that host. See ops.HostSourceSyncTimeoutStreak callers.
+	EventSourceSyncTimeout = "source_sync.timeout"
+	EventSourceSyncOK      = "source_sync.ok"
+
 	// EventPlacementIntentPruned records that the autopilot canceled a stale
 	// open placement intent (orchestrator died before resolving it). The
 	// detail field carries the intent id, originating operation, and the
@@ -456,6 +464,29 @@ func ReuseFailureStreak(database *sql.DB, jobID int64) (count int, lastFailureAt
 		      SELECT MAX(id) FROM lifecycle_events
 		      WHERE job_id = ? AND event_kind = ?), 0)`,
 		jobID, EventReuseSubmitFailed, jobID, EventReuseSubmitOK,
+	).Scan(&count, &lastFailureAt)
+	return count, lastFailureAt, err
+}
+
+// HostSourceSyncTimeoutStreak returns the number of source_sync.timeout events
+// for a host since its most recent source_sync.ok (all of them when the host
+// has no success on record), and the time of the most recent timeout. The
+// streak drives source-sync backoff and wedged-host auto-cordon. Host-level
+// events use JobID = 0 and store the host name in Detail, so the query keys on
+// (event_kind, detail) rather than job_id.
+func HostSourceSyncTimeoutStreak(database *sql.DB, host string) (count int, lastFailureAt int64, err error) {
+	host = strings.TrimSpace(host)
+	if database == nil || host == "" {
+		return 0, 0, nil
+	}
+	err = database.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(occurred_at), 0) FROM lifecycle_events
+		WHERE event_kind = ?
+		  AND detail = ?
+		  AND id > COALESCE((
+		      SELECT MAX(id) FROM lifecycle_events
+		      WHERE event_kind = ? AND detail = ?), 0)`,
+		EventSourceSyncTimeout, host, EventSourceSyncOK, host,
 	).Scan(&count, &lastFailureAt)
 	return count, lastFailureAt, err
 }

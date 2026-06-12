@@ -25,6 +25,13 @@ import (
 // (bulk transfer over potentially-slow links).
 const rsyncConnectTimeout = 15 * time.Second
 
+// ErrSourceSyncTimeout marks a source-sync rsync that the context deadline
+// killed rather than one that failed cleanly. It lets dispatch callers tell a
+// wedged host (rsync hangs on an unresponsive working dir — e.g. a stuck
+// hard-NFS mount — and is SIGKILL'd) apart from a transient rsync error, so
+// they can back off and re-place instead of hammering the host every tick.
+var ErrSourceSyncTimeout = errors.New("source sync timed out")
+
 // SyncFunc is the function signature for syncing sources to a remote host.
 // Tests can replace it with SetSyncFunc to avoid spawning rsync processes.
 type SyncFunc func(host, localDir, remoteDir string, excludes []string) error
@@ -407,9 +414,9 @@ func defaultExtraPathSyncFuncWithTimeout(host, localDir, remoteDir string, timeo
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			if msg != "" {
-				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %w", host, remoteDir, timeout, msg, err)
+				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %v: %w", host, remoteDir, timeout, msg, err, ErrSourceSyncTimeout)
 			}
-			return fmt.Errorf("rsync to %s:%s timed out after %s: %w", host, remoteDir, timeout, err)
+			return fmt.Errorf("rsync to %s:%s timed out after %s: %v: %w", host, remoteDir, timeout, err, ErrSourceSyncTimeout)
 		}
 		if msg != "" {
 			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)
@@ -475,9 +482,9 @@ func defaultSyncFuncWithDeleteAndTimeout(host, localDir, remoteDir string, exclu
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			if msg != "" {
-				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %w", host, remoteDir, timeout, msg, err)
+				return fmt.Errorf("rsync to %s:%s timed out after %s: %s: %v: %w", host, remoteDir, timeout, msg, err, ErrSourceSyncTimeout)
 			}
-			return fmt.Errorf("rsync to %s:%s timed out after %s: %w", host, remoteDir, timeout, err)
+			return fmt.Errorf("rsync to %s:%s timed out after %s: %v: %w", host, remoteDir, timeout, err, ErrSourceSyncTimeout)
 		}
 		if msg != "" {
 			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)

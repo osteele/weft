@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -51,6 +52,27 @@ const dispatchEventDedupeWindow = 5 * time.Minute
 // overlapping daemon passes from spawning identical rsyncs when the host-sync
 // wrapper has already moved on but the previous sync cleanup is still unwinding.
 const sourceSyncLeaseTTL = 2 * time.Minute
+
+// defaultSourceSyncTimeout is the source-sync rsync budget used when a caller
+// leaves HostSyncOptions.SourceTimeout unset. Source sync rsyncs the working
+// tree over a freshly established SSH connection, so it needs far more than the
+// few-second SSH status-probe budget carried by HostSyncOptions.Timeout. A
+// status probe timing out is cheap and retried next tick; a source rsync
+// SIGKILL'd mid-connect leaves the job blocked indefinitely. Bounded well under
+// the SyncModeFull host lease (15m).
+const defaultSourceSyncTimeout = 2 * time.Minute
+
+// effectiveSourceSyncTimeout returns the budget for source-tree rsync. Unlike
+// the SSH status timeout, it never falls back to HostSyncOptions.Timeout: an
+// unset SourceTimeout uses defaultSourceSyncTimeout so a slow-to-connect host
+// cannot wedge a queued job behind a connect-time SIGKILL. Callers that need a
+// tighter or looser budget set SourceTimeout explicitly.
+func effectiveSourceSyncTimeout(opts HostSyncOptions) time.Duration {
+	if opts.SourceTimeout > 0 {
+		return opts.SourceTimeout
+	}
+	return defaultSourceSyncTimeout
+}
 
 // HostSyncOptions configures a full host sync.
 type HostSyncOptions struct {
@@ -113,10 +135,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	mode := opts.mode()
 	seenJobs := make(map[int64]bool)
 	timeout := effectiveSyncTimeout(opts.Timeout)
-	sourceTimeout := effectiveSyncTimeout(opts.SourceTimeout)
-	if opts.SourceTimeout <= 0 {
-		sourceTimeout = timeout
-	}
+	sourceTimeout := effectiveSourceSyncTimeout(opts)
 
 	queueOpsResult, err := ProcessDeferredQueueOps(database, host, timeout)
 	if err != nil {
@@ -943,6 +962,16 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		if !useR2Source && job.WorkingDir != "" {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+			// Back off when this host's source sync has been timing out: a
+			// wedged working-dir mount makes every rsync hang until SIGKILL,
+			// so retrying each tick just piles up unkillable rsyncs. Skip the
+			// attempt until the streak's backoff elapses.
+			if remaining := sourceSyncBackoffRemaining(database, job.Host, time.Now()); remaining > 0 {
+				reason := fmt.Sprintf("source sync backing off (%s unresponsive), retry in %s", job.Host, remaining.Round(time.Second))
+				sourceSyncDeferredDirs[remoteDir] = reason
+				recordDeferred(job.ID, reason, nil)
+				continue
+			}
 			if err := sourceSyncFailedDirs[remoteDir]; err != nil {
 				recordFailure(job.ID, "source sync failed", err)
 				continue
@@ -999,6 +1028,12 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 					)
 					sourceSyncFailedDirs[remoteDir] = err
 					recordFailure(job.ID, "source sync failed", err)
+					if errors.Is(err, srcsync.ErrSourceSyncTimeout) {
+						// Wedge signal: rsync was SIGKILL'd on an
+						// unresponsive dir. Extend the host's streak so
+						// backoff and (past threshold) auto-cordon kick in.
+						recordSourceSyncTimeout(database, job.Host)
+					}
 					continue
 				}
 				if err := srcsync.WriteRemoteSourceMarker(job.Host, remoteDir, sourceSHA256, timeout); err != nil {
@@ -1012,6 +1047,12 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				}
 				syncedDirs[remoteDir] = true
 				sourceSHAByDir[remoteDir] = sourceSHA256
+				// Recovery: a clean sync after a timeout streak resets the
+				// streak and lifts any wedge auto-cordon. Only emit the ok
+				// event when recovering so healthy syncs don't bloat the log.
+				if cnt, _, streakErr := db.HostSourceSyncTimeoutStreak(database, job.Host); streakErr == nil && cnt > 0 {
+					recordSourceSyncOK(database, job.Host, syncLog)
+				}
 			}
 		}
 
@@ -1092,6 +1133,13 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		recordDispatchOK(job.ID)
 		ensured++
 	}
+	// Past the wedge threshold this auto-cordons the host and unplaces its
+	// queued inventory jobs so the autopilot re-places them on a healthy host.
+	// Runs each pass that reached here (i.e. the host had queued work): cheap,
+	// idempotent, and a no-op below threshold or once the host is auto-cordoned
+	// and drained. Unconditional so a host already over threshold but currently
+	// in backoff (no fresh attempt this pass) is still cordoned and re-placed.
+	maybeHandleSourceSyncWedge(database, host, syncLog)
 	if len(failures) > 0 {
 		return ensured, contacted, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}

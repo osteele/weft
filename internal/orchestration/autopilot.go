@@ -118,6 +118,15 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		oplog.Log("auto_pilot.stale_cloud_host_requeued",
 			oplog.WithDetailf("actions=%d job_ids=%v", len(stale.Actions), jobIDs))
 	}
+
+	// Lift wedge auto-cordons whose retest cooldown has elapsed so a host whose
+	// source-sync mount has recovered rejoins placement automatically. Still-
+	// wedged hosts re-cordon on their next failed dispatch.
+	if lifted, err := ops.AutoUncordonRecoveredSourceSyncHosts(database, time.Now()); err != nil {
+		oplog.Log("auto_pilot.source_sync_uncordon_error", oplog.WithError(err))
+	} else if lifted > 0 {
+		oplog.Log("auto_pilot.source_sync_uncordon", oplog.WithDetailf("hosts=%d", lifted))
+	}
 	moveRetryLaunches, err := fulfillOpenMoveToNewIntents(ctx, database, scoped)
 	if err != nil {
 		oplog.Log("auto_pilot.move_intents_retry_error", oplog.WithError(err))
