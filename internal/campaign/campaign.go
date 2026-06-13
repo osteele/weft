@@ -960,7 +960,7 @@ func jobUsesFramework(localDir, command, framework string) bool {
 		if fileContains(filepath.Join(localDir, "pyproject.toml"), framework) {
 			return true
 		}
-		for _, script := range dataloc.ExtractPythonScripts(command) {
+		for _, script := range dataloc.ExtractPythonScriptsInDir(localDir, command) {
 			if !filepath.IsAbs(script) {
 				script = filepath.Join(localDir, script)
 			}
@@ -984,7 +984,7 @@ func resolveProjectImageOverride(overrides map[string]string, projectDir, localD
 	if len(overrides) == 0 || projectDir == "" {
 		return ""
 	}
-	scripts := dataloc.ExtractPythonScripts(command)
+	scripts := dataloc.ExtractPythonScriptsInDir(localDir, command)
 	if len(scripts) == 0 {
 		return ""
 	}

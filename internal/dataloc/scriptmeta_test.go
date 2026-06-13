@@ -500,6 +500,42 @@ import torch
 	}
 }
 
+func TestScanScriptMetaModuleForm(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "scripts", "exp032_gpt2_medium_probe_sweep.py")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(script, []byte(`# /// script
+# [tool.weft]
+# gpu = "nvidia"
+# gpu-mem = 16
+# inputs = ["hf:gpt2-medium"]
+# outputs = ["local:output/gpt2-medium_layer_sweep_distance.json"]
+# tags = ["compute-intensive", "exp-032", "rq33"]
+# ///
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	meta, err := ScanScriptMeta(dir, "uv run python -m scripts.exp032_gpt2_medium_probe_sweep")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected metadata, got nil")
+	}
+	if meta.GPU != "nvidia" {
+		t.Errorf("GPU: got %q, want nvidia", meta.GPU)
+	}
+	if meta.GPUMemGB != 16 {
+		t.Errorf("GPUMemGB: got %d, want 16", meta.GPUMemGB)
+	}
+	assertStringSlice(t, "Inputs", meta.Inputs, []string{"hf:gpt2-medium"})
+	assertStringSlice(t, "Outputs", meta.Outputs, []string{"local:output/gpt2-medium_layer_sweep_distance.json"})
+	assertStringSlice(t, "Tags", meta.Tags, []string{"compute-intensive", "exp-032", "rq33"})
+}
+
 func TestScanScriptMetaWithImage(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "train.py")

@@ -314,7 +314,7 @@ var (
 // (and their local imports) for HF model/dataset references. Falls back to empty
 // if no .py files are found in the command.
 func ScanPythonHFRefsForCommand(dir, command string) []string {
-	scripts := ExtractPythonScripts(command)
+	scripts := ExtractPythonScriptsInDir(dir, command)
 	if len(scripts) == 0 {
 		return nil
 	}
@@ -359,11 +359,73 @@ func ExtractPythonScripts(command string) []string {
 	tokens := strings.Fields(command)
 	var scripts []string
 	for _, tok := range tokens {
+		tok = strings.Trim(tok, `"'`)
 		if strings.HasSuffix(tok, ".py") && !strings.Contains(tok, "=") {
 			scripts = append(scripts, tok)
 		}
 	}
 	return scripts
+}
+
+// ExtractPythonScriptsInDir returns Python script file paths referenced by a
+// shell command, including local modules invoked with `python -m module`.
+func ExtractPythonScriptsInDir(dir, command string) []string {
+	tokens := strings.Fields(command)
+	scripts := ExtractPythonScripts(command)
+	seen := make(map[string]struct{}, len(scripts))
+	for _, script := range scripts {
+		seen[script] = struct{}{}
+	}
+
+	for i, tok := range tokens {
+		if !isPythonExecToken(strings.Trim(tok, `"'`)) {
+			continue
+		}
+		module := pythonModuleArg(tokens[i+1:])
+		if module == "" {
+			continue
+		}
+		script := resolveLocalPythonModule(dir, module)
+		if script == "" {
+			continue
+		}
+		if _, ok := seen[script]; ok {
+			continue
+		}
+		seen[script] = struct{}{}
+		scripts = append(scripts, script)
+	}
+	return scripts
+}
+
+func pythonModuleArg(tokens []string) string {
+	for i, tok := range tokens {
+		tok = strings.Trim(tok, `"'`)
+		if tok == "-m" {
+			if i+1 >= len(tokens) {
+				return ""
+			}
+			return strings.Trim(tokens[i+1], `"'`)
+		}
+		if !strings.HasPrefix(tok, "-") {
+			return ""
+		}
+	}
+	return ""
+}
+
+func resolveLocalPythonModule(dir, module string) string {
+	if dir == "" || module == "" || strings.HasPrefix(module, "-") || strings.Contains(module, string(filepath.Separator)) {
+		return ""
+	}
+	relBase := strings.ReplaceAll(module, ".", string(filepath.Separator))
+	for _, rel := range []string{relBase + ".py", filepath.Join(relBase, "__main__.py")} {
+		abs := filepath.Join(dir, rel)
+		if info, err := os.Stat(abs); err == nil && !info.IsDir() {
+			return rel
+		}
+	}
+	return ""
 }
 
 // findLocalImports parses a Python file for import statements and resolves them

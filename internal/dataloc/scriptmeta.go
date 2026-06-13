@@ -201,7 +201,7 @@ func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
 // declares no weft-specific settings.
 func ScanScriptDependencies(dir, command string) []string {
 	var out []string
-	for _, script := range ExtractPythonScripts(command) {
+	for _, script := range ExtractPythonScriptsInDir(dir, command) {
 		abs := script
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(dir, abs)
@@ -236,7 +236,7 @@ func ScanScriptDependencies(dir, command string) []string {
 // readFirstPythonScript reads and returns the content of the first readable
 // .py file referenced in a shell command. Returns "" if none is found.
 func readFirstPythonScript(dir, command string) string {
-	for _, script := range ExtractPythonScripts(command) {
+	for _, script := range ExtractPythonScriptsInDir(dir, command) {
 		abs := script
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(dir, abs)

@@ -260,6 +260,30 @@ func TestExtractPythonScripts(t *testing.T) {
 	}
 }
 
+func TestExtractPythonScriptsInDirResolvesLocalModules(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "scripts/exp032_gpt2_medium_probe_sweep.py", "")
+	writePyFile(t, dir, "pkg/runner/__main__.py", "")
+
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"python module", "python -m scripts.exp032_gpt2_medium_probe_sweep", []string{"scripts/exp032_gpt2_medium_probe_sweep.py"}},
+		{"uv python module", "uv run python -m scripts.exp032_gpt2_medium_probe_sweep", []string{"scripts/exp032_gpt2_medium_probe_sweep.py"}},
+		{"python flags before module", "python -u -m scripts.exp032_gpt2_medium_probe_sweep --epochs 10", []string{"scripts/exp032_gpt2_medium_probe_sweep.py"}},
+		{"package main", "python -m pkg.runner", []string{"pkg/runner/__main__.py"}},
+		{"third-party module", "python -m pytest", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractPythonScriptsInDir(dir, tt.command)
+			assertSetEqual(t, got, tt.want)
+		})
+	}
+}
+
 func TestScanPythonHFRefsForCommand_ScopesToScript(t *testing.T) {
 	dir := t.TempDir()
 	writePyFile(t, dir, "train.py", `
