@@ -116,6 +116,19 @@ func NewInstanceCapacity(inst *db.Launch, runningJobCount int) (InstanceCapacity
 	return cap, true
 }
 
+func newInstanceCapacityFromDB(database *sql.DB, inst *db.Launch, runningJobCount int) (InstanceCapacity, bool, error) {
+	cap, ok := NewInstanceCapacity(inst, runningJobCount)
+	if !ok {
+		return InstanceCapacity{}, false, nil
+	}
+	free, err := estimateReusableDiskFree(database, inst)
+	if err != nil {
+		return InstanceCapacity{}, false, err
+	}
+	cap.DiskFreeGB = free
+	return cap, true, nil
+}
+
 // FindReusableInstances returns non-terminal cloud instances that could accept new jobs.
 // Returns instances with status "grace" or "running".
 func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
@@ -149,7 +162,11 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 		if ok, _ := instanceAcceptsReuseWithLiveState(inst, liveStates[inst.ID], now); !ok {
 			continue
 		}
-		if cap, ok := NewInstanceCapacity(inst, jobCounts[inst.ID]); ok {
+		cap, ok, err := newInstanceCapacityFromDB(database, inst, jobCounts[inst.ID])
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			result = append(result, cap)
 		}
 	}
@@ -197,6 +214,90 @@ func estimateDiskFree(inst *db.Launch) int {
 		return 0
 	}
 	return free
+}
+
+func estimateReusableDiskFree(database *sql.DB, inst *db.Launch) (int, error) {
+	free := estimateDiskFree(inst)
+	if database == nil || inst == nil || inst.ID == 0 || inst.DiskGB == 0 {
+		return free, nil
+	}
+	jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
+	if err != nil {
+		return 0, fmt.Errorf("list jobs for %s disk accounting: %w", ids.FormatInstanceID(inst.ID), err)
+	}
+	if len(jobs) == 0 {
+		return free, nil
+	}
+
+	provisionedInputs := append([]string(nil), inst.ProvisionedInputs...)
+	setupByProject := map[string]int{}
+	cap := InstanceCapacity{
+		Instance:          inst,
+		DiskFreeGB:        free,
+		ProvisionedInputs: provisionedInputs,
+	}
+	extraInputsGB := 0
+	runtimeGB := 0
+	for _, job := range jobs {
+		if !launchJobConsumesDisk(job) {
+			continue
+		}
+		incremental := subtractInputs(job.Inputs, provisionedInputs)
+		extraInputsGB += estimateInputsDisk(incremental)
+		for _, input := range incremental {
+			if !slices.Contains(provisionedInputs, input) {
+				provisionedInputs = append(provisionedInputs, input)
+			}
+		}
+		cap.ProvisionedInputs = provisionedInputs
+
+		setupGB, _ := estimateReuseSetupDiskGB(job, cap, nil)
+		key := reuseSetupDiskKey(job)
+		if key == "" {
+			runtimeGB += setupGB
+		} else if setupGB > setupByProject[key] {
+			setupByProject[key] = setupGB
+		}
+		runtimeGB += EstimateRuntimeDiskGB(job)
+	}
+
+	setupGB := 0
+	for _, gb := range setupByProject {
+		setupGB += gb
+	}
+	// estimateDiskFree already reserves one CUDA-sized setup/cache budget.
+	// Reused instances need additional budgets for other projects that have
+	// already left virtualenvs and package caches behind.
+	setupGB = max(0, setupGB-CUDAOverheadGB)
+
+	free -= extraInputsGB + setupGB + runtimeGB
+	if free < 0 {
+		return 0, nil
+	}
+	return free, nil
+}
+
+func launchJobConsumesDisk(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	switch job.Status {
+	case db.StatusCanceled, db.StatusKilled, db.StatusDraft:
+		return false
+	default:
+		return true
+	}
+}
+
+func reuseSetupDiskKey(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	dir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	if dir == "" {
+		return ""
+	}
+	return dir
 }
 
 // estimateInputsDisk estimates disk usage for a set of input refs in GB.
@@ -655,6 +756,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			return err
 		}
 	}
+	if err := validateJobsFitReusableInstance(database, inst, jobs, r2Client); err != nil {
+		return err
+	}
 
 	payload := GracePayload{
 		Sources: []controlplane.SourceUpdate{},
@@ -865,6 +969,30 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
 			}
 		}
+	}
+	return nil
+}
+
+func validateJobsFitReusableInstance(database *sql.DB, inst *db.Launch, jobs []*db.Job, r2Client *r2.Client) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	cap, ok, err := newInstanceCapacityFromDB(database, inst, 0)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("instance %s cannot accept reused jobs", ids.FormatInstanceID(inst.ID))
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		ok, reason := MatchJobToInstanceWithUV(job, cap, r2Client)
+		if !ok {
+			return fmt.Errorf("instance %s cannot accept job %s: %s", ids.FormatInstanceID(inst.ID), ids.FormatJobID(job.ID), reason)
+		}
+		consumeReuseJob(&cap, job)
 	}
 	return nil
 }

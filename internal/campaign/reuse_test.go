@@ -35,6 +35,15 @@ func testProjectDir(t *testing.T) string {
 	return dir
 }
 
+func testCUDAProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := testProjectDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -130,6 +139,110 @@ func TestFindReusableInstances_SkipsLaunchAfterDiskFailure(t *testing.T) {
 	}
 	if len(instances) != 0 {
 		t.Fatalf("FindReusableInstances returned %d instances, want 0", len(instances))
+	}
+}
+
+func TestFindReusableInstancesAccountsForPriorProjectDisk(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	graceDeadline := now + 3600
+	graceStarted := now - 60
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:             db.LaunchStatusGrace,
+		Provider:           "vastai",
+		GPUClass:           "nvidia",
+		GPUMemGB:           24,
+		DiskGB:             55,
+		GraceStartedAt:     &graceStarted,
+		GraceDeadline:      &graceDeadline,
+		GracePeriodSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	for _, dir := range []string{testCUDAProjectDir(t), testCUDAProjectDir(t)} {
+		jobID, err := db.RecordQueuedWithGPU(database, "", dir, "uv run python train.py", "prior", "nvidia")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU prior: %v", err)
+		}
+		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID prior: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			    SET status = ?, start_time = ?, end_time = ?, exit_code = 0, cloud_outcome = ?
+			  WHERE job_id = ? AND launch_id = ?`,
+			db.StatusCompleted, now-120, now-60, db.AttemptOutcomeCompleted, jobID, instanceID,
+		); err != nil {
+			t.Fatalf("mark prior completed: %v", err)
+		}
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+	if len(instances) != 1 {
+		t.Fatalf("FindReusableInstances returned %d instances, want 1", len(instances))
+	}
+	if instances[0].DiskFreeGB != 13 {
+		t.Fatalf("DiskFreeGB = %d, want 13 after cumulative setup accounting", instances[0].DiskFreeGB)
+	}
+}
+
+func TestSubmitJobsToInstanceRejectsCumulativeDiskOvercommit(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	graceDeadline := now + 3600
+	graceStarted := now - 60
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:             db.LaunchStatusGrace,
+		Provider:           "vastai",
+		GPUClass:           "nvidia",
+		GPUMemGB:           24,
+		DiskGB:             55,
+		GraceStartedAt:     &graceStarted,
+		GraceDeadline:      &graceDeadline,
+		GracePeriodSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	for _, dir := range []string{testCUDAProjectDir(t), testCUDAProjectDir(t)} {
+		jobID, err := db.RecordQueuedWithGPU(database, "", dir, "uv run python train.py", "prior", "nvidia")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU prior: %v", err)
+		}
+		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID prior: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			    SET status = ?, start_time = ?, end_time = ?, exit_code = 0, cloud_outcome = ?
+			  WHERE job_id = ? AND launch_id = ?`,
+			db.StatusCompleted, now-120, now-60, db.AttemptOutcomeCompleted, jobID, instanceID,
+		); err != nil {
+			t.Fatalf("mark prior completed: %v", err)
+		}
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", testCUDAProjectDir(t), "uv run python train.py", "new", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU new: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected cumulative disk rejection")
+	}
+	if !strings.Contains(err.Error(), "disk insufficient") {
+		t.Fatalf("error = %v, want disk insufficient", err)
 	}
 }
 
