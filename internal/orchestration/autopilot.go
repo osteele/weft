@@ -252,6 +252,12 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			OverloadMoved: overloadMoved,
 		}, nil
 	}
+	plannedCandidateIDs := make(map[int64]struct{}, len(unplaced))
+	for _, job := range unplaced {
+		if job != nil {
+			plannedCandidateIDs[job.ID] = struct{}{}
+		}
+	}
 	onPremDetails := logAutoPilotOnPremDiagnostics(database, unplaced)
 	r2Client, _ := BuildR2Client(cfg)
 
@@ -492,6 +498,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			if _, ok := scoped[job.ID]; !ok {
 				continue
 			}
+		}
+		if _, planned := plannedCandidateIDs[job.ID]; !planned {
+			continue
 		}
 		allCandidates = append(allCandidates, job.ID)
 		if len(launchScope) == 0 {

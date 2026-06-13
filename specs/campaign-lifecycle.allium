@@ -2639,11 +2639,14 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- absent" guards would skip — masking the real reason.
         --
         -- finalizeUnplacedBlockedReasons settles every still-unplaced
-        -- candidate: it first guarantees an authoritative launch-path reason
-        -- (including for jobs the planner classified as neither launch nor
-        -- blocked, via placementFailureStructured with the
-        -- unclassifiedLaunchReason placeholder), then appends the reuse
-        -- diagnostic as trailing detail. Reuse diagnostics are also recorded
+        -- candidate from the pass's planner input: it first guarantees an
+        -- authoritative launch-path reason (including for jobs the planner
+        -- classified as neither launch nor blocked, via
+        -- placementFailureStructured with the unclassifiedLaunchReason
+        -- placeholder), then appends the reuse diagnostic as trailing detail.
+        -- Jobs that become unplaced after the planner snapshot wait for the
+        -- next pass instead of inheriting this pass's safety-net reason.
+        -- Reuse diagnostics are also recorded
         -- to the oplog (auto_pilot.reuse_fill_blocked / reuse_skipped /
         -- reuse_failed). Implementation: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass, finalizeUnplacedBlockedReasons.

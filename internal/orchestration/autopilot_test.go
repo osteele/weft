@@ -1530,6 +1530,69 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 	}
 }
 
+func TestRunGroupedAutoPilotPass_DoesNotBlockJobCreatedAfterPlannerSnapshot(t *testing.T) {
+	// Regression: a job that appears after the planner snapshot was getting
+	// swept into the fresh "remaining unplaced" scan and stamped with the
+	// safety-net "no launch path determined" reason, even though the current
+	// plan never considered it.
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+
+	plannedID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python planned.py", "planned", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU planned: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+	})
+
+	var lateID int64
+	autoPilotBuildPlan = func(database *sql.DB, _ *config.Config, jobs []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		if len(jobs) != 1 || jobs[0].ID != plannedID {
+			t.Fatalf("planner jobs = %+v, want only %d", jobs, plannedID)
+		}
+		var err error
+		lateID, err = db.RecordQueuedWithGPU(database, "", t.TempDir(), "python late.py", "late", "A100")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU late: %v", err)
+		}
+		assigned, err := db.AssignJobHost(database, plannedID, "host-alpha")
+		if err != nil {
+			t.Fatalf("AssignJobHost planned: %v", err)
+		}
+		if !assigned {
+			t.Fatalf("planned job %d was not assigned", plannedID)
+		}
+		return campaign.AutoPlacementPlan{
+			LaunchJobIDs:   []int64{plannedID},
+			BlockedReasons: map[int64]string{},
+		}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatal("newly-created job must wait for the next pass, not relaunch in this pass")
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if result.BlockedReasons[lateID] != "" {
+		t.Fatalf("late job blocked reason = %q, want none from this pass", result.BlockedReasons[lateID])
+	}
+	late, err := db.GetJobByID(database, lateID)
+	if err != nil {
+		t.Fatalf("GetJobByID late: %v", err)
+	}
+	if got := strings.Join(late.PlacementReasons, "\n"); got != "" {
+		t.Fatalf("late placement reasons = %q, want none from this pass", got)
+	}
+}
+
 func TestAddAutoPilotBlockedReasonCombinesDistinctPaths(t *testing.T) {
 	reasons := map[int64]string{
 		1951: "run-rate headroom exhausted ($0.24/hr free, this group needs $1.52/hr)",
