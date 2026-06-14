@@ -16,8 +16,16 @@ var DefaultJobDuration = Estimate{
 
 // DurationPrediction bundles a runtime estimate with estimator metadata.
 type DurationPrediction struct {
-	Estimate Estimate
-	Metadata *predictor.RuntimeMetadata
+	Estimate  Estimate
+	Metadata  *predictor.RuntimeMetadata
+	Quantiles *predictor.QuantilePrediction
+}
+
+// DecisionDurationQuantiles is the bounded grid Weft asks job-estimator to
+// return for downstream asymmetric-cost decisions. Consumers interpolate when
+// their exact critical fractile falls between grid points.
+func DecisionDurationQuantiles() []float64 {
+	return []float64{0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95}
 }
 
 // EstimateJobDurationDetailed returns a single-job prediction plus runtime metadata.
@@ -54,6 +62,7 @@ func EstimateJobDurationsDetailedWithProgress(predCfg *predictor.Config, batchJo
 		return nil
 	}
 
+	batchJobs = withDecisionDurationQuantiles(batchJobs)
 	results, err := predictor.ResolvePredictBatchWithProgress(*predCfg, batchJobs, progress)
 	if err != nil || results == nil {
 		return nil
@@ -66,12 +75,24 @@ func EstimateJobDurationsDetailedWithProgress(predCfg *predictor.Config, batchJo
 				ApplyResidualCorrection(id, job.Project, job.GPUClass, job.Command, r)
 			}
 			estimates[id] = DurationPrediction{
-				Estimate: FromSeconds(r.DurationS.Mean, r.DurationS.Lower, r.DurationS.Upper),
-				Metadata: r.DurationMetadata,
+				Estimate:  FromSeconds(r.DurationS.Mean, r.DurationS.Lower, r.DurationS.Upper),
+				Metadata:  r.DurationMetadata,
+				Quantiles: r.DurationQuantiles,
 			}
 		}
 	}
 	return estimates
+}
+
+func withDecisionDurationQuantiles(batchJobs []predictor.BatchJob) []predictor.BatchJob {
+	out := append([]predictor.BatchJob(nil), batchJobs...)
+	quantiles := DecisionDurationQuantiles()
+	for i := range out {
+		if len(out[i].DurationQuantiles) == 0 {
+			out[i].DurationQuantiles = append([]float64(nil), quantiles...)
+		}
+	}
+	return out
 }
 
 func batchJobByID(batchJobs []predictor.BatchJob, id int64) *predictor.BatchJob {

@@ -13,6 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,15 +117,70 @@ type estimatorModelStatus struct {
 
 // Result holds predictions for all targets.
 type Result struct {
-	DurationS        *Prediction      `json:"duration_s"`
-	DurationMetadata *RuntimeMetadata `json:"duration_metadata,omitempty"`
-	PeakRSSKB        *Prediction      `json:"peak_rss_kb"`
-	MaxGPUMemMiB     *Prediction      `json:"max_gpu_mem_mib"`
-	Levels           map[string]any   `json:"levels,omitempty"`
-	Level0           map[string]any   `json:"l0,omitempty"`
-	Level1           map[string]any   `json:"l1,omitempty"`
-	Level2           map[string]any   `json:"l2,omitempty"`
-	Level3           map[string]any   `json:"l3,omitempty"`
+	DurationS         *Prediction         `json:"duration_s"`
+	DurationMetadata  *RuntimeMetadata    `json:"duration_metadata,omitempty"`
+	DurationQuantiles *QuantilePrediction `json:"duration_quantiles,omitempty"`
+	PeakRSSKB         *Prediction         `json:"peak_rss_kb"`
+	MaxGPUMemMiB      *Prediction         `json:"max_gpu_mem_mib"`
+	Levels            map[string]any      `json:"levels,omitempty"`
+	Level0            map[string]any      `json:"l0,omitempty"`
+	Level1            map[string]any      `json:"l1,omitempty"`
+	Level2            map[string]any      `json:"l2,omitempty"`
+	Level3            map[string]any      `json:"l3,omitempty"`
+}
+
+// QuantilePrediction is the decision-time duration surface returned by
+// job-estimator for requested fractiles.
+type QuantilePrediction struct {
+	Quantiles map[string]float64 `json:"quantiles,omitempty"`
+	Source    string             `json:"source,omitempty"`
+	N         int                `json:"n,omitempty"`
+	MeanLog   float64            `json:"mean_log,omitempty"`
+}
+
+// Quantile returns a requested quantile, linearly interpolating between the
+// nearest returned fractiles when the exact key is absent.
+func (q *QuantilePrediction) Quantile(fractile float64) (float64, bool) {
+	if q == nil || len(q.Quantiles) == 0 || math.IsNaN(fractile) {
+		return 0, false
+	}
+	fractile = math.Max(0, math.Min(1, fractile))
+	type point struct {
+		q     float64
+		value float64
+	}
+	points := make([]point, 0, len(q.Quantiles))
+	for key, value := range q.Quantiles {
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(key), 64); err == nil {
+			points = append(points, point{q: parsed, value: value})
+		}
+	}
+	if len(points) == 0 {
+		return 0, false
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].q < points[j].q })
+	if fractile <= points[0].q {
+		return points[0].value, true
+	}
+	last := points[len(points)-1]
+	if fractile >= last.q {
+		return last.value, true
+	}
+	for i := 1; i < len(points); i++ {
+		lo := points[i-1]
+		hi := points[i]
+		if math.Abs(fractile-lo.q) < 1e-9 {
+			return lo.value, true
+		}
+		if fractile <= hi.q {
+			if hi.q <= lo.q {
+				return hi.value, true
+			}
+			t := (fractile - lo.q) / (hi.q - lo.q)
+			return lo.value + (hi.value-lo.value)*t, true
+		}
+	}
+	return last.value, true
 }
 
 // Meta is the sidecar metadata written alongside trained models.
@@ -192,12 +250,13 @@ var backgroundRetrains = struct {
 }
 
 type predictionCacheKey struct {
-	modelDir   string
-	host       string
-	project    string
-	gpuClass   string
-	workingDir string
-	command    string
+	modelDir          string
+	host              string
+	project           string
+	gpuClass          string
+	workingDir        string
+	command           string
+	durationQuantiles string
 }
 
 type backgroundRetrainState struct {
@@ -539,15 +598,29 @@ func invalidateStatusCache(cfg Config) {
 	_ = os.Remove(cfg.statusCachePath())
 }
 
-func predictionKey(cfg Config, host, project, gpuClass, workingDir, command string) predictionCacheKey {
+func predictionKey(cfg Config, host, project, gpuClass, workingDir, command string, durationQuantiles []float64) predictionCacheKey {
 	return predictionCacheKey{
-		modelDir:   cfg.modelDir(),
-		host:       host,
-		project:    project,
-		gpuClass:   gpuClass,
-		workingDir: workingDir,
-		command:    command,
+		modelDir:          cfg.modelDir(),
+		host:              host,
+		project:           project,
+		gpuClass:          gpuClass,
+		workingDir:        workingDir,
+		command:           command,
+		durationQuantiles: quantileCacheKey(durationQuantiles),
 	}
+}
+
+func quantileCacheKey(values []float64) string {
+	if len(values) == 0 {
+		return ""
+	}
+	cloned := append([]float64(nil), values...)
+	sort.Float64s(cloned)
+	parts := make([]string, 0, len(cloned))
+	for _, v := range cloned {
+		parts = append(parts, strconv.FormatFloat(v, 'g', -1, 64))
+	}
+	return strings.Join(parts, ",")
 }
 
 func cachedPrediction(key predictionCacheKey) (*Result, bool) {
@@ -595,16 +668,31 @@ func cloneResult(result *Result) *Result {
 		metadata = &cloned
 	}
 	return &Result{
-		DurationS:        clonePrediction(result.DurationS),
-		DurationMetadata: metadata,
-		PeakRSSKB:        clonePrediction(result.PeakRSSKB),
-		MaxGPUMemMiB:     clonePrediction(result.MaxGPUMemMiB),
-		Levels:           cloneAnyMap(result.Levels),
-		Level0:           cloneAnyMap(result.Level0),
-		Level1:           cloneAnyMap(result.Level1),
-		Level2:           cloneAnyMap(result.Level2),
-		Level3:           cloneAnyMap(result.Level3),
+		DurationS:         clonePrediction(result.DurationS),
+		DurationMetadata:  metadata,
+		DurationQuantiles: cloneQuantilePrediction(result.DurationQuantiles),
+		PeakRSSKB:         clonePrediction(result.PeakRSSKB),
+		MaxGPUMemMiB:      clonePrediction(result.MaxGPUMemMiB),
+		Levels:            cloneAnyMap(result.Levels),
+		Level0:            cloneAnyMap(result.Level0),
+		Level1:            cloneAnyMap(result.Level1),
+		Level2:            cloneAnyMap(result.Level2),
+		Level3:            cloneAnyMap(result.Level3),
 	}
+}
+
+func cloneQuantilePrediction(pred *QuantilePrediction) *QuantilePrediction {
+	if pred == nil {
+		return nil
+	}
+	cloned := *pred
+	if pred.Quantiles != nil {
+		cloned.Quantiles = make(map[string]float64, len(pred.Quantiles))
+		for k, v := range pred.Quantiles {
+			cloned.Quantiles[k] = v
+		}
+	}
+	return &cloned
 }
 
 func cloneAnyMap(values map[string]any) map[string]any {
@@ -683,7 +771,7 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 	if err := preparePredictorForUse(cfg); err != nil {
 		return nil, err
 	}
-	key := predictionKey(cfg, host, project, gpuClass, "", command)
+	key := predictionKey(cfg, host, project, gpuClass, "", command, nil)
 	if result, ok := cachedPrediction(key); ok {
 		return result, nil
 	}
@@ -706,12 +794,13 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 
 // BatchJob describes a single job for batch prediction.
 type BatchJob struct {
-	ID         int64  `json:"id"`
-	Command    string `json:"command"`
-	Host       string `json:"host"`
-	Project    string `json:"project"`
-	GPUClass   string `json:"gpu_class"`
-	WorkingDir string `json:"working_dir,omitempty"`
+	ID                int64     `json:"id"`
+	Command           string    `json:"command"`
+	Host              string    `json:"host"`
+	Project           string    `json:"project"`
+	GPUClass          string    `json:"gpu_class"`
+	WorkingDir        string    `json:"working_dir,omitempty"`
+	DurationQuantiles []float64 `json:"duration_quantiles,omitempty"`
 }
 
 // batchResultEntry is the JSON shape returned by predict-batch per job.
@@ -745,7 +834,7 @@ func PredictBatchWithProgress(cfg Config, jobs []BatchJob, progress func(string)
 	keysByBatchID := make(map[int64]predictionCacheKey)
 	idsByKey := make(map[predictionCacheKey][]int64)
 	for _, job := range jobs {
-		key := predictionKey(cfg, job.Host, job.Project, job.GPUClass, job.WorkingDir, job.Command)
+		key := predictionKey(cfg, job.Host, job.Project, job.GPUClass, job.WorkingDir, job.Command, job.DurationQuantiles)
 		if cached, ok := cachedPrediction(key); ok {
 			results[job.ID] = cached
 			continue

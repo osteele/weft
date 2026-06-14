@@ -998,6 +998,7 @@ type offerRuntimePrediction struct {
 	jobEstimates         []estimate.Estimate
 	jobDurations         []time.Duration
 	adjustedJobDurations []time.Duration
+	jobQuantiles         []*predictor.QuantilePrediction
 	metadata             []*predictor.RuntimeMetadata
 	feasible             bool
 	complete             bool
@@ -1141,6 +1142,7 @@ func predictOfferRuntimes(
 	type runtimeAccum struct {
 		jobEstimates []estimate.Estimate
 		jobDurations []time.Duration
+		jobQuantiles []*predictor.QuantilePrediction
 		metadata     []*predictor.RuntimeMetadata
 		count        int
 		feasible     bool
@@ -1164,11 +1166,12 @@ func predictOfferRuntimes(
 					continue
 				}
 				batchJobs = append(batchJobs, predictor.BatchJob{
-					ID:         nextID,
-					Command:    job.Command,
-					Project:    job.Project,
-					GPUClass:   offer.GPUName,
-					WorkingDir: job.WorkingDir,
+					ID:                nextID,
+					Command:           job.Command,
+					Project:           job.Project,
+					GPUClass:          offer.GPUName,
+					WorkingDir:        job.WorkingDir,
+					DurationQuantiles: estimate.DecisionDurationQuantiles(),
 				})
 				refs[nextID] = batchRef{groupIdx: groupIdx, offerKey: key, jobIdx: jobIdx}
 				nextID++
@@ -1203,6 +1206,7 @@ func predictOfferRuntimes(
 			accum = &runtimeAccum{
 				jobEstimates: make([]estimate.Estimate, expected[ref.groupIdx][ref.offerKey]),
 				jobDurations: make([]time.Duration, expected[ref.groupIdx][ref.offerKey]),
+				jobQuantiles: make([]*predictor.QuantilePrediction, expected[ref.groupIdx][ref.offerKey]),
 				metadata:     make([]*predictor.RuntimeMetadata, expected[ref.groupIdx][ref.offerKey]),
 				feasible:     true,
 			}
@@ -1215,6 +1219,7 @@ func predictOfferRuntimes(
 			result.DurationS.Upper,
 		)
 		accum.jobDurations[ref.jobIdx] = time.Duration(result.DurationS.Mean * float64(time.Second))
+		accum.jobQuantiles[ref.jobIdx] = result.DurationQuantiles
 		accum.metadata[ref.jobIdx] = result.DurationMetadata
 		if result.DurationMetadata != nil && result.DurationMetadata.Feasible != nil && !*result.DurationMetadata.Feasible {
 			accum.feasible = false
@@ -1241,6 +1246,7 @@ func predictOfferRuntimes(
 				totalRunHrs:  totalRunHrs,
 				jobEstimates: append([]estimate.Estimate(nil), accum.jobEstimates...),
 				jobDurations: append([]time.Duration(nil), accum.jobDurations...),
+				jobQuantiles: append([]*predictor.QuantilePrediction(nil), accum.jobQuantiles...),
 				metadata:     append([]*predictor.RuntimeMetadata(nil), accum.metadata...),
 				feasible:     accum.feasible,
 				complete:     complete,
@@ -1993,8 +1999,10 @@ func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGr
 
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
+	jobDurationQuantiles := make(map[int64]*predictor.QuantilePrediction, len(group.Jobs))
 	jobRuntimeMetadata := make(map[int64]predictor.RuntimeMetadata, len(group.Jobs))
 	jobDurationList := make([]time.Duration, 0, len(group.Jobs))
+	jobQuantileList := make([]*predictor.QuantilePrediction, 0, len(group.Jobs))
 	jobMetadataList := make([]*predictor.RuntimeMetadata, 0, len(group.Jobs))
 	runtimePred := offerRuntimePrediction{feasible: true, complete: true}
 	gpuLabel := offer.GPUName
@@ -2009,7 +2017,11 @@ func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGr
 		}
 		runEst = runEst.Add(pred.Estimate)
 		jobDurations[job.ID] = pred.Estimate.Mean
+		if pred.Quantiles != nil {
+			jobDurationQuantiles[job.ID] = pred.Quantiles
+		}
 		jobDurationList = append(jobDurationList, pred.Estimate.Mean)
+		jobQuantileList = append(jobQuantileList, pred.Quantiles)
 		if pred.Estimate.Mean <= 0 {
 			runtimePred.complete = false
 		}
@@ -2022,6 +2034,7 @@ func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGr
 		jobMetadataList = append(jobMetadataList, pred.Metadata)
 	}
 	runtimePred.jobDurations = jobDurationList
+	runtimePred.jobQuantiles = jobQuantileList
 	runtimePred.metadata = jobMetadataList
 	runtimePred.totalRunHrs = runEst.Mean.Hours()
 	runtimePred = adjustRuntimePrediction(runtimePred, makeDefaultNeutralDurations(len(group.Jobs)))
@@ -2035,11 +2048,12 @@ func estimateReuseGroupWithSharedData(ctx reuseEstimateContext, group InstanceGr
 	setupHrs := waitEst.Mean.Hours() + provision.Mean.Hours() + jobSetup.Mean.Hours() + upload.Mean.Hours()
 
 	est := CostEstimate{
-		Group:              group,
-		Offer:              groupOffer,
-		Breakdown:          estimate.Breakdown{Provision: provision, JobSetup: jobSetup, Run: runEst, Upload: upload, Total: total},
-		JobDurations:       jobDurations,
-		JobRuntimeMetadata: jobRuntimeMetadata,
+		Group:                group,
+		Offer:                groupOffer,
+		Breakdown:            estimate.Breakdown{Provision: provision, JobSetup: jobSetup, Run: runEst, Upload: upload, Total: total},
+		JobDurations:         jobDurations,
+		JobDurationQuantiles: jobDurationQuantiles,
+		JobRuntimeMetadata:   jobRuntimeMetadata,
 		SetupOverhead: waitEst.Mean +
 			provision.Mean +
 			jobSetup.Mean +
@@ -2337,11 +2351,15 @@ func applySelectedOfferRuntimePrediction(est CostEstimate, pred offerRuntimePred
 	}
 
 	est.JobDurations = make(map[int64]time.Duration, len(est.Group.Jobs))
+	est.JobDurationQuantiles = make(map[int64]*predictor.QuantilePrediction, len(est.Group.Jobs))
 	for idx, job := range est.Group.Jobs {
 		if job == nil {
 			continue
 		}
 		est.JobDurations[job.ID] = jobDurations[idx]
+		if idx < len(pred.jobQuantiles) && pred.jobQuantiles[idx] != nil {
+			est.JobDurationQuantiles[job.ID] = pred.jobQuantiles[idx]
+		}
 	}
 
 	runMean := time.Duration(runHours * float64(time.Hour))

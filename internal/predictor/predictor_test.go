@@ -3,6 +3,7 @@ package predictor
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -760,6 +761,63 @@ func TestPredictBatchCachesResultsAcrossCalls(t *testing.T) {
 	}
 	if first[1] == nil || first[2] == nil || second[3] == nil {
 		t.Fatalf("expected cached predictions for all ids, got %#v / %#v", first, second)
+	}
+}
+
+func TestPredictBatchCacheSeparatesDurationQuantileRequests(t *testing.T) {
+	clearPredictionCache()
+	original := runPredictBatchCLI
+	t.Cleanup(func() {
+		runPredictBatchCLI = original
+		clearPredictionCache()
+	})
+
+	calls := 0
+	runPredictBatchCLI = func(_ Config, jobs []BatchJob) ([]byte, error) {
+		calls++
+		entries := make([]map[string]any, 0, len(jobs))
+		for _, job := range jobs {
+			entry := map[string]any{
+				"id": job.ID,
+				"duration_s": map[string]any{
+					"mean":  float64(3600),
+					"std":   float64(60),
+					"lower": float64(3500),
+					"upper": float64(3700),
+				},
+			}
+			if len(job.DurationQuantiles) > 0 {
+				entry["duration_quantiles"] = map[string]any{
+					"quantiles": map[string]any{"0.5": float64(3600), "0.9": float64(7200)},
+					"source":    "command",
+					"n":         8,
+					"mean_log":  math.Log(3600),
+				}
+			}
+			entries = append(entries, entry)
+		}
+		return json.Marshal(entries)
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: t.TempDir()}
+	if _, err := PredictBatch(cfg, []BatchJob{{ID: 1, Project: "p", GPUClass: "A100", Command: "python train.py"}}); err != nil {
+		t.Fatalf("PredictBatch without quantiles: %v", err)
+	}
+	withQuantiles, err := PredictBatch(cfg, []BatchJob{{ID: 2, Project: "p", GPUClass: "A100", Command: "python train.py", DurationQuantiles: []float64{0.5, 0.9}}})
+	if err != nil {
+		t.Fatalf("PredictBatch with quantiles: %v", err)
+	}
+
+	if calls != 2 {
+		t.Fatalf("runPredictBatchCLI calls = %d, want 2", calls)
+	}
+	q := withQuantiles[2].DurationQuantiles
+	if q == nil {
+		t.Fatal("expected duration quantiles")
+	}
+	got, ok := q.Quantile(0.7)
+	if !ok || got != 5400 {
+		t.Fatalf("Quantile(0.7) = %v, %v; want 5400, true", got, ok)
 	}
 }
 

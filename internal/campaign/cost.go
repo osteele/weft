@@ -22,17 +22,19 @@ var estimateJobDurationsDetailedForCosts = estimate.EstimateJobDurationsDetailed
 
 // CostEstimate holds the cost projection for one instance group.
 type CostEstimate struct {
-	Group              InstanceGroup
-	Offer              GroupOffer
-	Breakdown          estimate.Breakdown
-	JobDurations       map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
-	JobRuntimeMetadata map[int64]predictor.RuntimeMetadata
-	SetupOverhead      time.Duration
-	DownloadBytes      int64         // total bytes of HF model inputs to download
-	DownloadTime       time.Duration // estimated download time from offer bandwidth
-	UVSyncBytes        int64         // estimated cold uv sync download bytes
-	TotalTime          time.Duration
-	TotalCost          float64
+	Group                InstanceGroup
+	Offer                GroupOffer
+	Breakdown            estimate.Breakdown
+	JobDurations         map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
+	JobDurationQuantiles map[int64]*predictor.QuantilePrediction
+	JobRuntimeMetadata   map[int64]predictor.RuntimeMetadata
+	CampaignEffect       *CampaignEffect
+	SetupOverhead        time.Duration
+	DownloadBytes        int64         // total bytes of HF model inputs to download
+	DownloadTime         time.Duration // estimated download time from offer bandwidth
+	UVSyncBytes          int64         // estimated cold uv sync download bytes
+	TotalTime            time.Duration
+	TotalCost            float64
 
 	// Survival model fields (zero values if no model available)
 	SurvivalProb     float64 // 0-1, probability of completing without provider-side failure
@@ -97,6 +99,7 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 	var wg sync.WaitGroup
 	var allManifests map[string]*estimate.UVManifestRef
 	var allPredictions map[int64]estimate.DurationPrediction
+	var campaignEffect *CampaignEffect
 
 	// Step 1: HF model sizes (network calls to HuggingFace API)
 	var modelProgress func(resolved, total int)
@@ -127,16 +130,29 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 			allPredictions = estimateJobDurationsDetailedForCosts(predCfg, allBatchJobs)
 		}()
 	}
+	if database != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			campaignEffect, err = cachedCampaignEffect(database)
+			if err != nil {
+				slog.Debug("campaign effect estimate unavailable", "component", "cost", "error", err)
+			}
+		}()
+	}
 
 	wg.Wait()
 	jobsDone := 0
 
 	for i, go_ := range groupOffers {
 		est := CostEstimate{
-			Group:              go_.Group,
-			Offer:              go_,
-			JobDurations:       make(map[int64]time.Duration),
-			JobRuntimeMetadata: make(map[int64]predictor.RuntimeMetadata),
+			Group:                go_.Group,
+			Offer:                go_,
+			JobDurations:         make(map[int64]time.Duration),
+			JobDurationQuantiles: make(map[int64]*predictor.QuantilePrediction),
+			JobRuntimeMetadata:   make(map[int64]predictor.RuntimeMetadata),
+			CampaignEffect:       campaignEffect,
 		}
 
 		if go_.Offer == nil {
@@ -194,6 +210,9 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 				}
 				est.JobDurations[job.ID] = jobEstimate.Mean
 				runEst = runEst.Add(jobEstimate)
+				if jobIdx < len(pred.jobQuantiles) && pred.jobQuantiles[jobIdx] != nil {
+					est.JobDurationQuantiles[job.ID] = pred.jobQuantiles[jobIdx]
+				}
 				if jobIdx < len(pred.metadata) && pred.metadata[jobIdx] != nil {
 					est.JobRuntimeMetadata[job.ID] = *pred.metadata[jobIdx]
 				}
@@ -203,6 +222,9 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 				if pred, ok := allPredictions[job.ID]; ok {
 					est.JobDurations[job.ID] = pred.Estimate.Mean
 					runEst = runEst.Add(pred.Estimate)
+					if pred.Quantiles != nil {
+						est.JobDurationQuantiles[job.ID] = pred.Quantiles
+					}
 					if pred.Metadata != nil {
 						est.JobRuntimeMetadata[job.ID] = *pred.Metadata
 					}
