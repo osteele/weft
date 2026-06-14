@@ -490,6 +490,64 @@ func TestRunDraftWithPositionalHostRecordsHost(t *testing.T) {
 	}
 }
 
+func TestRunForwardsDashPassthroughArgs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	resetRunGlobals(t)
+	runDraft = true
+	runDir = dir
+	runDescription = "dash passthrough"
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	// Drive the flagset so cobra records ArgsLenAtDash, mirroring how the real
+	// command parses `weft run uv run x.py -- --models gpt2`.
+	argv := []string{"uv", "run", "scripts/profile.py", "--", "--models", "gpt2", "--max-model-len", "4096"}
+	if err := cmd.Flags().Parse(argv); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	args := cmd.Flags().Args()
+	if got := cmd.ArgsLenAtDash(); got != 3 {
+		t.Fatalf("ArgsLenAtDash = %d, want 3", got)
+	}
+
+	// Regression: the Args validator previously rejected >2 positionals, so the
+	// dashed form printed help instead of submitting.
+	if err := runCmd.Args(cmd, args); err != nil {
+		t.Fatalf("run args rejected dashed form: %v", err)
+	}
+	if err := runRun(cmd, args); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(jobs))
+	}
+	job := jobs[0]
+	want := "uv run scripts/profile.py --models gpt2 --max-model-len 4096"
+	if job.Command != want {
+		t.Fatalf("command = %q, want %q", job.Command, want)
+	}
+	// No positional host: the dashed form leaves placement to auto-select.
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty (auto-place)", job.Host)
+	}
+}
+
 func TestEvaluateRecentOnPremPlacementRequiresFreshMetrics(t *testing.T) {
 	database := db.SetupTestDB(t)
 	inventory.UseTestHosts(t)

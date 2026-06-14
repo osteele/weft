@@ -56,10 +56,20 @@ Examples:
 		if runKillJobID > 0 {
 			return nil
 		}
-		// --from mode: 0 args (copies from source job) or 1 arg (command override)
+		// An explicit `--` separator means every following token forms the
+		// command (e.g. `weft run uv run x.py -- --flag`); the host comes only
+		// from --host in that form, so any positional count is acceptable.
+		dashed := cmd.ArgsLenAtDash() >= 0
+		// --from mode: 0 args (copies from source job) or a command override.
 		if runFrom > 0 {
-			if len(args) > 1 {
+			if len(args) > 1 && !dashed {
 				return fmt.Errorf("--from accepts at most one positional argument (command override)")
+			}
+			return nil
+		}
+		if dashed {
+			if len(args) == 0 {
+				return fmt.Errorf("requires <command> argument")
 			}
 			return nil
 		}
@@ -527,13 +537,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runNeeds = append([]string(nil), fromJob.Needs...)
 		}
 
-		// Allow overriding command from positional arg
+		// Allow overriding command from positional args. Joining supports the
+		// passthrough form `weft run --from N -- python eval.py --flag`.
 		if len(args) > 0 {
-			command = args[0]
+			command = strings.Join(args, " ")
 		}
 	} else {
-		// Parse positional args
-		if len(args) == 1 {
+		// Parse positional args. An explicit `--` separator means all
+		// positionals form the command and the host comes only from --host
+		// (e.g. `weft run uv run x.py -- --models gpt2`). Without `--`,
+		// preserve the single-command form and the legacy `<host> <command>`
+		// two-arg form.
+		if cmd.ArgsLenAtDash() >= 0 {
+			command = strings.Join(args, " ")
+		} else if len(args) == 1 {
 			command = args[0]
 		} else if len(args) == 2 && host == "" {
 			host = args[0]
