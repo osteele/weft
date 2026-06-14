@@ -152,6 +152,7 @@ var (
 	listKeyGroupedView       = listKeyBinding{keys: "v", action: "group"}
 	listKeyListView          = listKeyBinding{keys: "v", action: "group"}
 	listKeyInstances         = listKeyBinding{keys: "i", action: "instances"}
+	listKeyInstanceFailures  = listKeyBinding{keys: "f", action: "instance failures"}
 	listKeyHosts             = listKeyBinding{keys: "H", action: "hosts"}
 	listKeyDashboard         = listKeyBinding{keys: "D", action: "dashboard"}
 	listKeyRefresh           = listKeyBinding{keys: "r", action: "refresh"}
@@ -292,16 +293,6 @@ func handleGroupedDisclosureKey(m listTUIModel, action groupedDisclosureAction) 
 		}
 	}
 
-	if rowIdx := m.selectedGroupedRow(); rowIdx >= 0 && rowIdx < len(m.groupedRows) &&
-		m.groupedRows[rowIdx].expandToggle == failedInstancesSectionKey {
-		next := setState(m.expandedFailedInstances)
-		if next != m.expandedFailedInstances {
-			m.expandedFailedInstances = next
-			m.rebuildGroupedRows()
-		}
-		return m, nil
-	}
-
 	job := m.selectedGroupedJob()
 	if job == nil {
 		return m, nil
@@ -437,6 +428,15 @@ func listGroupedKeyBindings() []listKeyBinding {
 		}},
 		listKeyBinding{keys: listKeyInstances.keys, action: listKeyInstances.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
+		}},
+		listKeyBinding{keys: listKeyInstanceFailures.keys, action: listKeyInstanceFailures.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if !m.hasRecentInstanceFailures() {
+				m.statusMessage = "No recent instance failures"
+				return m, nil
+			}
+			m.showInstanceFailures = true
+			m.instanceFailuresScroll = 0
+			return m, nil
 		}},
 		listKeyBinding{keys: listKeyHosts.keys, action: listKeyHosts.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return switchToHostsMsg{} }

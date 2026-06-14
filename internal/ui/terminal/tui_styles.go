@@ -11,6 +11,7 @@ var (
 	tuiRunningColor   = lipgloss.Color("10")  // green — active/running/selected
 	tuiCompletedColor = lipgloss.Color("243") // gray — completed, dim, terminal
 	tuiFailedColor    = lipgloss.Color("196") // red — errors, failures
+	tuiWarnColor      = lipgloss.Color("214") // amber — warnings, attention-needed
 	tuiSelectedBg     = lipgloss.Color("240") // dark gray — row highlight
 )
 
@@ -21,6 +22,7 @@ var (
 	tuiRunningStyle     = lipgloss.NewStyle().Foreground(tuiRunningColor)
 	tuiDimStyle         = lipgloss.NewStyle().Foreground(tuiCompletedColor)
 	tuiFailedStyle      = lipgloss.NewStyle().Foreground(tuiFailedColor)
+	tuiWarnStyle        = lipgloss.NewStyle().Foreground(tuiWarnColor)
 	tuiSelectedRowStyle = lipgloss.NewStyle().Background(tuiSelectedBg)
 	tuiCursorStyle      = lipgloss.NewStyle().Foreground(tuiAccentColor).Bold(true)
 )

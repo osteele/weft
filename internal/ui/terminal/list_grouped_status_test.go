@@ -1727,11 +1727,11 @@ func failedInstanceRowText(rows []groupedStatusRow) string {
 
 func TestAppendRecentFailedInstanceRows_NilOrEmptyEmitsNothing(t *testing.T) {
 	now := time.Unix(10_000, 0)
-	if got := appendRecentFailedInstanceRows(nil, nil, 0, 0, false, false, now); got != nil {
+	if got := appendRecentFailedInstanceRows(nil, nil, 0, 0, now); got != nil {
 		t.Fatalf("nil failures should produce no rows, got %d", len(got))
 	}
 	empty := &recentFailedInstances{items: nil}
-	if got := appendRecentFailedInstanceRows(nil, empty, 0, 0, false, false, now); got != nil {
+	if got := appendRecentFailedInstanceRows(nil, empty, 0, 0, now); got != nil {
 		t.Fatalf("empty items should produce no rows, got %d", len(got))
 	}
 }
@@ -1842,7 +1842,7 @@ func TestRenderJobListGroupedStatusPlainAt_RecentFailedInstancesSection(t *testi
 	}
 }
 
-func TestAppendRecentFailedInstanceRows_ExpandTogglesFYIBuckets(t *testing.T) {
+func TestAppendRecentFailedInstanceRows_RendersAllBuckets(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	failures := &recentFailedInstances{
 		items: []*db.Launch{
@@ -1859,25 +1859,21 @@ func TestAppendRecentFailedInstanceRows_ExpandTogglesFYIBuckets(t *testing.T) {
 		},
 	}
 
-	collapsed := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, false, now))
-	for _, want := range []string{"▸ Recent failed instances", "1 failed", "2 succeeded", "1 dud", "newest 5m ago"} {
-		if !strings.Contains(collapsed, want) {
-			t.Fatalf("collapsed view should summarize %q:\n%s", want, collapsed)
+	// The plain (non-interactive) section renders every bucket in full, with no
+	// disclosure markers — the interactive fold now lives in the footer instead.
+	out := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, now))
+	for _, want := range []string{
+		"Recent failed instances",
+		"1 failed · 2 succeeded · 1 dud",
+		"failed (1)", "succeeded (2)", "dud (1)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plain section should render %q:\n%s", want, out)
 		}
 	}
-	for _, hidden := range []string{"failed (1)", "succeeded (2)", "dud (1)", "boom", "no agent"} {
-		if strings.Contains(collapsed, hidden) {
-			t.Fatalf("collapsed view should hide detailed row content %q:\n%s", hidden, collapsed)
-		}
-	}
-
-	expanded := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, true, true, now))
-	if !strings.Contains(expanded, "▾") {
-		t.Fatalf("expanded toggle should carry a ▾ marker:\n%s", expanded)
-	}
-	for _, want := range []string{"succeeded (2)", "dud (1)"} {
-		if !strings.Contains(expanded, want) {
-			t.Fatalf("expanded view should reveal %q:\n%s", want, expanded)
+	for _, marker := range []string{"▸", "▾"} {
+		if strings.Contains(out, marker) {
+			t.Fatalf("plain section should carry no disclosure markers, found %q:\n%s", marker, out)
 		}
 	}
 }
@@ -1964,6 +1960,82 @@ func TestAppendRecentFailedInstanceRows_OutcomesClusterAndCost(t *testing.T) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
 	}
+}
+
+func TestBuildInstanceHealthFooter(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	line := func(v instanceHealthFooterView) string {
+		if len(v.lines) != 1 {
+			t.Fatalf("expected exactly one footer line, got %d", len(v.lines))
+		}
+		return stripANSI(v.lines[0])
+	}
+
+	t.Run("quiet renders nothing", func(t *testing.T) {
+		if v := buildInstanceHealthFooter(nil, 120, now); len(v.lines) != 0 {
+			t.Fatalf("expected empty footer, got %+v", v)
+		}
+	})
+
+	t.Run("abnormal not clustered is one warning line", func(t *testing.T) {
+		failures := &recentFailedInstances{
+			items: []*db.Launch{
+				{ID: 1, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(9_700), ActualSpendCents: 37},
+			},
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}},
+		}
+		out := line(buildInstanceHealthFooter(failures, 120, now))
+		for _, want := range []string{"⚠", "Instances: 1 failed", "$0.37 wasted", "f diagnose"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("footer line missing %q:\n%s", want, out)
+			}
+		}
+		// The breakdown detail lives in the overlay, not the footer.
+		if strings.Contains(out, "succeeded") || strings.Contains(out, "[f]") {
+			t.Fatalf("footer line should not carry expansion detail:\n%s", out)
+		}
+	})
+
+	t.Run("fully recovered is calm", func(t *testing.T) {
+		failures := &recentFailedInstances{
+			items: []*db.Launch{
+				{ID: 1, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "x", EndedAt: testInt64Ptr(9_700)},
+				{ID: 2, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "y", EndedAt: testInt64Ptr(9_600)},
+			},
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				1: {JobID: 1, Status: db.StatusCompleted},
+				2: {JobID: 2, Status: db.StatusCompleted},
+			},
+		}
+		out := line(buildInstanceHealthFooter(failures, 120, now))
+		if strings.Contains(out, "⚠") {
+			t.Fatalf("recovered-only footer should not warn:\n%s", out)
+		}
+		if !strings.Contains(out, "2 instances recovered") {
+			t.Fatalf("recovered-only footer should report recovery:\n%s", out)
+		}
+	})
+
+	t.Run("clustered is one red line", func(t *testing.T) {
+		failures := &recentFailedInstances{
+			items: []*db.Launch{
+				{ID: 1, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "a", EndedAt: testInt64Ptr(9_700), ActualSpendCents: 11},
+				{ID: 2, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "b", EndedAt: testInt64Ptr(9_600), ActualSpendCents: 20},
+				{ID: 3, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "c", EndedAt: testInt64Ptr(9_500)},
+			},
+			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+				1: {JobID: 1, Status: db.StatusFailed},
+				2: {JobID: 2, Status: db.StatusFailed},
+				3: {JobID: 3, Status: db.StatusFailed},
+			},
+		}
+		out := line(buildInstanceHealthFooter(failures, 160, now))
+		for _, want := range []string{"⚠ Clustered instance failures", "provider vastai", "(3)", "$0.31 wasted", "f diagnose"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("clustered footer line missing %q:\n%s", want, out)
+			}
+		}
+	})
 }
 
 // TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster ensures

@@ -57,8 +57,7 @@ type groupedStatusRenderOptions struct {
 	// output. The failed-instances section uses it to decide whether to
 	// collapse the FYI buckets behind an expand toggle (TUI) or render all
 	// buckets unconditionally (plain output).
-	interactive             bool
-	expandedFailedInstances bool
+	interactive bool
 }
 
 type groupedStatusLaunchingETA struct {
@@ -248,7 +247,13 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		rows = append(rows, groupedStatusRow{text: ""})
 	}
 
-	rows = appendRecentFailedInstanceRows(rows, opts.failedInstances, projectWidth, width, opts.interactive, opts.expandedFailedInstances, now)
+	// The interactive TUI renders recent abnormal instance terminations as a
+	// severity-gated footer element (buildInstanceHealthFooter), not as a list
+	// section. Non-interactive/plain output (exit summaries, `weft jobs list
+	// --group-by status`) keeps the full inline section.
+	if !opts.interactive {
+		rows = appendRecentFailedInstanceRows(rows, opts.failedInstances, projectWidth, width, now)
+	}
 
 	if len(rows) == 0 {
 		return nil
@@ -1365,10 +1370,6 @@ var failureOutcomeOrder = []failureOutcome{
 	failureSeriesSucceeded, failureDud,
 }
 
-// failureFYIOutcomes are the buckets collapsed behind an expand toggle in the
-// interactive TUI: the work either finished or never started.
-var failureFYIOutcomes = []failureOutcome{failureSeriesSucceeded, failureDud}
-
 func failureGroupLabel(o failureOutcome) string {
 	switch o {
 	case failureSeriesFailed:
@@ -1510,31 +1511,26 @@ func failureClusterFactor(items []*db.Launch) string {
 	return dominantFailureFactor(clusterItems)
 }
 
-func newestFailureAge(items []*db.Launch, now time.Time) string {
-	var newest int64
-	for _, f := range items {
-		e := launchEndedAt(f)
-		if e > newest {
-			newest = e
-		}
-	}
-	if newest <= 0 {
-		return ""
-	}
-	return shortRelativeTime(now.Unix() - newest)
+// recentFailedInstanceSummary is the classified view of recent abnormal
+// instance terminations, shared by the non-interactive inline section
+// (appendRecentFailedInstanceRows) and the interactive footer element
+// (buildInstanceHealthFooter). present is false when nothing abnormal remains
+// after filtering normal terminations.
+type recentFailedInstanceSummary struct {
+	present       bool
+	byOutcome     map[failureOutcome][]*db.Launch
+	outcomeOf     map[int64]failureOutcome
+	total         int
+	wastedCents   int
+	clusterFactor string
+	headerSpan    string
+	summaryParts  []string
 }
 
-func appendRecentFailedInstanceRows(
-	rows []groupedStatusRow,
-	failures *recentFailedInstances,
-	projectWidth, width int,
-	interactive, expanded bool,
-	now time.Time,
-) []groupedStatusRow {
+func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Time) recentFailedInstanceSummary {
 	if failures == nil {
-		return rows
+		return recentFailedInstanceSummary{}
 	}
-
 	renderable := make([]*db.Launch, 0, len(failures.items))
 	for _, f := range failures.items {
 		if f == nil || db.IsNormalInstanceTermination(f.TerminationReason) {
@@ -1544,7 +1540,7 @@ func appendRecentFailedInstanceRows(
 	}
 	total := len(renderable)
 	if total == 0 {
-		return rows
+		return recentFailedInstanceSummary{}
 	}
 
 	byOutcome := make(map[failureOutcome][]*db.Launch)
@@ -1571,53 +1567,105 @@ func appendRecentFailedInstanceRows(
 			summaryParts = append(summaryParts, failureCountPhrase(o, n))
 		}
 	}
-	clusterFactor := failureClusterFactor(renderable)
-	headerSpan := formatFailureSpan(renderable, now)
-	if interactive {
-		if !expanded {
-			summary := "Recent failed instances: " + strings.Join(summaryParts, " · ")
-			if clusterFactor != "" {
-				summary += " · " + clusterFactor + " cluster"
-			}
-			if age := newestFailureAge(renderable, now); age != "" {
-				summary += " · newest " + age
-			}
-			if wastedCents > 0 {
-				summary += fmt.Sprintf(" · $%.2f wasted", float64(wastedCents)/100)
-			}
-			rows = append(rows, groupedStatusRow{
-				text:         applyDisclosureMarker(summary, false),
-				isHeader:     true,
-				section:      failedInstancesSectionKey,
-				expandToggle: failedInstancesSectionKey,
-			})
-			rows = append(rows, groupedStatusRow{text: ""})
-			return rows
+
+	return recentFailedInstanceSummary{
+		present:       true,
+		byOutcome:     byOutcome,
+		outcomeOf:     outcomeOf,
+		total:         total,
+		wastedCents:   wastedCents,
+		clusterFactor: failureClusterFactor(renderable),
+		headerSpan:    formatFailureSpan(renderable, now),
+		summaryParts:  summaryParts,
+	}
+}
+
+// instanceHealthFooterView is the interactive-TUI footer rendering of recent
+// abnormal instance terminations: a single, severity-gated line in the footer's
+// System zone (empty when the fleet is quiet) that replaces the inline list
+// section. The full grouped breakdown lives in the `f` diagnose overlay.
+type instanceHealthFooterView struct {
+	lines []string
+}
+
+// instanceHealthHeadline summarizes the attention buckets (failed / awaiting
+// placement / dud) for the collapsed token. When every abnormal termination
+// recovered, it reports the calmer "N instances recovered" with attention=false
+// so the caller can render it dim rather than as a warning.
+func instanceHealthHeadline(s recentFailedInstanceSummary) (text string, attention bool) {
+	parts := make([]string, 0, 3)
+	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureDud} {
+		if n := len(s.byOutcome[o]); n > 0 {
+			parts = append(parts, failureCountPhrase(o, n))
 		}
+	}
+	if len(parts) == 0 {
+		return pluralize(s.total, "instance recovered", "instances recovered"), false
+	}
+	return "Instances: " + strings.Join(parts, " · "), true
+}
+
+func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now time.Time) instanceHealthFooterView {
+	s := summarizeRecentFailedInstances(failures, now)
+	if !s.present {
+		return instanceHealthFooterView{}
+	}
+
+	parts := make([]string, 0, 3)
+	style := tuiWarnStyle
+	if s.clusterFactor != "" {
+		// A run sharing a machine/provider/GPU is a systemic fault, not bad luck.
+		style = tuiFailedStyle
+		parts = append(parts, fmt.Sprintf("⚠ Clustered instance failures — %s (%d)", s.clusterFactor, s.total))
+	} else if headline, attention := instanceHealthHeadline(s); attention {
+		parts = append(parts, "⚠ "+headline)
+	} else {
+		style = tuiDimStyle
+		parts = append(parts, headline)
+	}
+	if s.wastedCents > 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f wasted", float64(s.wastedCents)/100))
+	}
+	parts = append(parts, "f diagnose")
+
+	line := style.Render(truncateDisplayWidth(strings.Join(parts, " · "), width))
+	return instanceHealthFooterView{lines: []string{line}}
+}
+
+// appendRecentFailedInstanceRows renders the full inline "Recent failed
+// instances" section for non-interactive/plain output (exit summaries and
+// `weft jobs list --group-by status`). The live TUI renders this data as a
+// severity-gated footer element instead (buildInstanceHealthFooter), so this
+// path is never used interactively.
+func appendRecentFailedInstanceRows(
+	rows []groupedStatusRow,
+	failures *recentFailedInstances,
+	projectWidth, width int,
+	now time.Time,
+) []groupedStatusRow {
+	s := summarizeRecentFailedInstances(failures, now)
+	if !s.present {
+		return rows
 	}
 
 	headerText := "Recent failed instances"
-	if headerSpan != "" {
-		headerText += " — " + headerSpan
+	if s.headerSpan != "" {
+		headerText += " — " + s.headerSpan
 	}
-	headerText += fmt.Sprintf(" (%d):", total)
-	if interactive {
-		headerText = applyDisclosureMarker(headerText, true)
-	}
+	headerText += fmt.Sprintf(" (%d):", s.total)
 	rows = append(rows, groupedStatusRow{
-		text:         headerText,
-		isHeader:     true,
-		section:      failedInstancesSectionKey,
-		expandToggle: failedInstancesSectionKey,
+		text:     headerText,
+		isHeader: true,
+		section:  failedInstancesSectionKey,
 	})
 
 	// Summary line: full breakdown, overall span, wasted spend.
-	summary := "  " + strings.Join(summaryParts, " · ")
-	if headerSpan != "" {
-		summary += " — " + headerSpan
+	summary := "  " + strings.Join(s.summaryParts, " · ")
+	if s.headerSpan != "" {
+		summary += " — " + s.headerSpan
 	}
-	if wastedCents > 0 {
-		summary += fmt.Sprintf(" · $%.2f wasted", float64(wastedCents)/100)
+	if s.wastedCents > 0 {
+		summary += fmt.Sprintf(" · $%.2f wasted", float64(s.wastedCents)/100)
 	}
 	rows = append(rows, groupedStatusRow{
 		text:      summary,
@@ -1630,16 +1678,16 @@ func appendRecentFailedInstanceRows(
 	// terminations (e.g. CLI timeouts) so a slow-API hour doesn't masquerade
 	// as a systemic provider failure — the rows still appear above for
 	// cost/postmortem accounting, they just don't contribute to clustering.
-	if clusterFactor != "" {
+	if s.clusterFactor != "" {
 		rows = append(rows, groupedStatusRow{
-			text:      "  ⚠ clustered failures — common factor: " + clusterFactor,
+			text:      "  ⚠ clustered failures — common factor: " + s.clusterFactor,
 			isBlocked: true,
 			section:   failedInstancesSectionKey,
 		})
 	}
 
 	appendGroup := func(rows []groupedStatusRow, o failureOutcome) []groupedStatusRow {
-		items := byOutcome[o]
+		items := s.byOutcome[o]
 		if len(items) == 0 {
 			return rows
 		}
@@ -1654,7 +1702,7 @@ func appendRecentFailedInstanceRows(
 		})
 		for _, item := range items {
 			rows = append(rows, groupedStatusRow{
-				text:    formatLaunchFailureRow(item, failures, outcomeOf[item.ID], projectWidth, width, now),
+				text:    formatLaunchFailureRow(item, failures, s.outcomeOf[item.ID], projectWidth, width, now),
 				launch:  item,
 				section: failedInstancesSectionKey,
 			})
@@ -1662,43 +1710,9 @@ func appendRecentFailedInstanceRows(
 		return rows
 	}
 
-	// Attention buckets always render in full.
-	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureReplacedRunning} {
+	// Attention buckets first, then the FYI buckets (succeeded, dud).
+	for _, o := range failureOutcomeOrder {
 		rows = appendGroup(rows, o)
-	}
-
-	// FYI buckets (succeeded, dud): rendered in full in plain output;
-	// collapsed behind an in-place expand toggle in the interactive TUI.
-	fyiItems := make([]*db.Launch, 0)
-	fyiParts := make([]string, 0, len(failureFYIOutcomes))
-	for _, o := range failureFYIOutcomes {
-		if n := len(byOutcome[o]); n > 0 {
-			fyiItems = append(fyiItems, byOutcome[o]...)
-			fyiParts = append(fyiParts, failureCountPhrase(o, n))
-		}
-	}
-	switch {
-	case len(fyiItems) == 0:
-		// Nothing to show or collapse.
-	case !interactive || expanded:
-		for _, o := range failureFYIOutcomes {
-			rows = appendGroup(rows, o)
-		}
-	default:
-		toggle := fmt.Sprintf("  + %d more: %s", len(fyiItems), strings.Join(fyiParts, ", "))
-		if span := formatFailureSpan(fyiItems, now); span != "" {
-			toggle += " — " + span
-		}
-		rows = append(rows, groupedStatusRow{
-			text:         applyDisclosureMarker(toggle, expanded),
-			section:      failedInstancesSectionKey,
-			expandToggle: failedInstancesSectionKey,
-		})
-		if expanded {
-			for _, o := range failureFYIOutcomes {
-				rows = appendGroup(rows, o)
-			}
-		}
 	}
 
 	rows = append(rows, groupedStatusRow{text: ""})

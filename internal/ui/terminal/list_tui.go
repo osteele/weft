@@ -94,7 +94,8 @@ type listTUIModel struct {
 	autoBlockReasons           map[int64]string
 	autoBlockDetail            map[int64]*blockreason.Structured
 	expandedBlocked            map[int64]bool
-	expandedFailedInstances    bool
+	showInstanceFailures       bool
+	instanceFailuresScroll     int
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
 	autopilotPaused            bool
@@ -152,6 +153,7 @@ type groupedViewLayout struct {
 	sharedStatusLines           []string
 	autoPilotLine               string
 	errorDetailsLines           []string
+	instanceHealthLines         []string
 	selectedDetails             []string
 	budgetPanelLines            []string
 	controlsLine                string
@@ -518,6 +520,22 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "?", "esc", "q", "enter":
 				m.showHelp = false
 				return m, nil
+			}
+			return m, nil
+		}
+		if m.showInstanceFailures {
+			page := max(1, m.height-3)
+			switch msg.String() {
+			case "f", "esc", "q", "enter":
+				m.showInstanceFailures = false
+			case "up", "k":
+				m.instanceFailuresScroll = max(0, m.instanceFailuresScroll-1)
+			case "down", "j":
+				m.instanceFailuresScroll = min(m.instanceFailuresMaxScroll(), m.instanceFailuresScroll+1)
+			case "pgup", "b":
+				m.instanceFailuresScroll = max(0, m.instanceFailuresScroll-page)
+			case "pgdown", " ":
+				m.instanceFailuresScroll = min(m.instanceFailuresMaxScroll(), m.instanceFailuresScroll+page)
 			}
 			return m, nil
 		}
@@ -1200,6 +1218,9 @@ func (m listTUIModel) baseView() string {
 	if m.showHelp {
 		return m.renderListHelpView()
 	}
+	if m.showInstanceFailures {
+		return m.renderInstanceFailuresView()
+	}
 	if m.isGroupedView() {
 		return m.groupedView()
 	}
@@ -1366,6 +1387,10 @@ func (m listTUIModel) groupedView() string {
 		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)))
 		b.WriteString("\n")
 	}
+	for _, line := range layout.instanceHealthLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	for _, line := range layout.sharedStatusLines {
 		b.WriteString(line)
 		b.WriteString("\n")
@@ -1393,6 +1418,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
+	instanceHealthLines := buildInstanceHealthFooter(m.recentFailedInstances, m.width, time.Now()).lines
 	if m.hideStatusArea {
 		statusLine = ""
 		sharedStatus.lines = nil
@@ -1401,6 +1427,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		autoPilotLine = ""
 		errorDetailsLines = nil
 		selectedDetailLines = nil
+		instanceHealthLines = nil
 	}
 	baseFooterLines := 2 // blank separator + controls
 	if m.projectInputActive {
@@ -1411,6 +1438,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	}
 	baseFooterLines += len(sharedStatus.lines)
 	baseFooterLines += len(selectedDetailLines)
+	baseFooterLines += len(instanceHealthLines)
 	if autoPilotLine != "" {
 		baseFooterLines++
 	}
@@ -1442,6 +1470,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	if statusLine != "" {
 		sharedStatusBaseY++
 	}
+	sharedStatusBaseY += len(instanceHealthLines)
 	if sharedStatus.daemonActionable && sharedStatus.daemonLineIndex >= 0 {
 		daemonStatusY = sharedStatusBaseY + sharedStatus.daemonLineIndex
 	}
@@ -1454,6 +1483,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		sharedStatusLines:           sharedStatus.lines,
 		autoPilotLine:               autoPilotLine,
 		errorDetailsLines:           errorDetailsLines,
+		instanceHealthLines:         instanceHealthLines,
 		selectedDetails:             selectedDetailLines,
 		budgetPanelLines:            budgetPanelLines,
 		controlsLine:                m.groupedControlsText(eta.HasQueued),
@@ -1463,6 +1493,69 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		vastCreditWarningY:          vastCreditWarningY,
 		vastCreditWarningActionable: sharedStatus.vastCreditWarningActionable,
 	}
+}
+
+// hasRecentInstanceFailures reports whether the `f` diagnose overlay has any
+// content to show — abnormal terminations exist within the recent window.
+func (m listTUIModel) hasRecentInstanceFailures() bool {
+	return m.isStatusGroupedView() && summarizeRecentFailedInstances(m.recentFailedInstances, time.Now()).present
+}
+
+// instanceFailuresLines renders the full grouped-by-outcome failure section
+// (the same body as the plain `weft jobs list` section) for the diagnose
+// overlay, trimming the trailing blank separator.
+func (m listTUIModel) instanceFailuresLines() []string {
+	rows := appendRecentFailedInstanceRows(nil, m.recentFailedInstances, 0, m.width, time.Now())
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, truncateDisplayWidth(r.text, m.width))
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+func (m listTUIModel) instanceFailuresBodyHeight() int {
+	return max(1, m.height-2) // title + footer
+}
+
+func (m listTUIModel) instanceFailuresMaxScroll() int {
+	return max(0, len(m.instanceFailuresLines())-m.instanceFailuresBodyHeight())
+}
+
+// renderInstanceFailuresView is the read-only `f` diagnose overlay: a scrollable
+// view of recent instance failures grouped by the fate of the jobs they carried,
+// with a clear esc/q return to the list — the richer counterpart to the
+// one-line footer.
+func (m listTUIModel) renderInstanceFailuresView() string {
+	if m.width <= 0 || m.height <= 0 {
+		return "Loading..."
+	}
+	lines := m.instanceFailuresLines()
+	bodyHeight := m.instanceFailuresBodyHeight()
+	maxScroll := max(0, len(lines)-bodyHeight)
+	scroll := min(m.instanceFailuresScroll, maxScroll)
+	end := min(len(lines), scroll+bodyHeight)
+
+	var b strings.Builder
+	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth("Instance failures — recent abnormal terminations", m.width)))
+	b.WriteString("\n")
+	shown := 0
+	for _, ln := range lines[scroll:end] {
+		b.WriteString(ln)
+		b.WriteString("\n")
+		shown++
+	}
+	for ; shown < bodyHeight; shown++ {
+		b.WriteString("\n")
+	}
+	foot := "esc/q back · ↑/↓ scroll"
+	if maxScroll > 0 {
+		foot += fmt.Sprintf("  ·  %d–%d of %d", scroll+1, end, len(lines))
+	}
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(foot, m.width)))
+	return b.String()
 }
 
 func (m listTUIModel) syncInProgress() bool {
@@ -1752,7 +1845,7 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
-	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.autoRunRateInputActive {
+	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.showInstanceFailures || m.autoRunRateInputActive {
 		return m, nil
 	}
 	if m.isGroupedView() {
@@ -2723,10 +2816,9 @@ func (m *listTUIModel) rebuildGroupedRows() {
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
 			},
-			blockedDetail:           m.effectiveBlockedDetail(),
-			expandedBlocked:         m.expandedBlocked,
-			interactive:             true,
-			expandedFailedInstances: m.expandedFailedInstances,
+			blockedDetail:   m.effectiveBlockedDetail(),
+			expandedBlocked: m.expandedBlocked,
+			interactive:     true,
 		})
 	} else {
 		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
