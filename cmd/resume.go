@@ -34,7 +34,7 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 	defer service.Close()
 
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
+	jobIDs, err := ParseJobIDsForJobCommand(args)
 	if err != nil {
 		return err
 	}

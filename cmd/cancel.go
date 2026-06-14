@@ -13,7 +13,7 @@ import (
 )
 
 var cancelCmd = &cobra.Command{
-	Use:     "cancel <wj-id>...",
+	Use:     "cancel <job-id>...",
 	Aliases: []string{"remove"},
 	Short:   "Cancel one or more jobs (queued or running)",
 	Long: `Cancel jobs by removing them from the queue or killing them if running.
@@ -21,12 +21,12 @@ var cancelCmd = &cobra.Command{
 For queued jobs: removes from both the remote queue file and the local database.
 For running jobs: kills the job process.
 
-The top-level form requires wj-prefixed IDs. Use 'weft job cancel' to pass
-bare numeric IDs.
+Accepts bare numeric IDs (123) or wj-prefixed IDs (wj123). Instance IDs (wi...)
+are rejected, since cancel operates only on jobs.
 
 Examples:
-  weft cancel wj123
-  weft cancel wj123 wj124 wj125`,
+  weft cancel 123
+  weft cancel wj123 wj124 125`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runCancelExplicitPrefix,
 }
@@ -36,7 +36,7 @@ func init() {
 }
 
 func runCancelExplicitPrefix(cmd *cobra.Command, args []string) error {
-	return runCancelWithParser(cmd, args, ParseJobIDsWithExplicitPrefix)
+	return runCancelWithParser(cmd, args, ParseJobIDsForJobCommand)
 }
 
 func runCancel(cmd *cobra.Command, args []string) error {

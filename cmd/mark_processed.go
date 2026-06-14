@@ -39,7 +39,7 @@ func runMarkUnprocessed(_ *cobra.Command, args []string) error {
 }
 
 func setProcessedTag(args []string, processed bool) error {
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
+	jobIDs, err := ParseJobIDsForJobCommand(args)
 	if err != nil {
 		return err
 	}

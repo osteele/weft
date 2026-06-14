@@ -211,27 +211,29 @@ func TestParseJobIDArg(t *testing.T) {
 	}
 }
 
-func TestParseJobIDsWithExplicitPrefix(t *testing.T) {
+func TestParseJobIDsForJobCommand(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
 		want    []int64
 		wantErr bool
 	}{
-		{name: "accepts prefixed", args: []string{"wj10", "11"}, want: []int64{10, 11}},
-		{name: "rejects no prefix", args: []string{"10", "11"}, wantErr: true},
+		// Regression (BR2): bare numerics are accepted for job-only commands.
+		{name: "accepts bare numerics", args: []string{"10", "11"}, want: []int64{10, 11}},
+		{name: "accepts wj prefix", args: []string{"wj10", "11"}, want: []int64{10, 11}},
+		{name: "accepts bare range", args: []string{"10:12"}, want: []int64{10, 11, 12}},
 		{name: "rejects instance prefix", args: []string{"wi10"}, wantErr: true},
-		{name: "rejects mixed job and instance prefixes", args: []string{"wj10", "wi11"}, wantErr: true},
+		{name: "rejects instance mixed with job", args: []string{"wj10", "wi11"}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ParseJobIDsWithExplicitPrefix(tt.args)
+			got, err := ParseJobIDsForJobCommand(tt.args)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("ParseJobIDsWithExplicitPrefix() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("ParseJobIDsForJobCommand() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("ParseJobIDsWithExplicitPrefix() = %v, want %v", got, tt.want)
+				t.Fatalf("ParseJobIDsForJobCommand() = %v, want %v", got, tt.want)
 			}
 		})
 	}

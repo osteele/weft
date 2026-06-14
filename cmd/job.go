@@ -486,7 +486,7 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 }
 
 func runJobPriority(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
+	jobIDs, err := ParseJobIDsForJobCommand(args)
 	if err != nil {
 		return err
 	}
@@ -925,7 +925,7 @@ func runJobStartNowBare(cmd *cobra.Command, args []string) error {
 }
 
 func runJobStartNowExplicitPrefix(cmd *cobra.Command, args []string) error {
-	return runJobStartNowWithParser(cmd, args, ParseJobIDsWithExplicitPrefix)
+	return runJobStartNowWithParser(cmd, args, ParseJobIDsForJobCommand)
 }
 
 func runJobStartNowWithParser(cmd *cobra.Command, args []string, parser func([]string) ([]int64, error)) error {
@@ -988,11 +988,14 @@ var runJobInfoFromInfoFunc = runJobInfo
 var runInstanceStatusFromInfoFunc = runInstanceStatus
 
 func runInfo(cmd *cobra.Command, args []string) error {
-	kind, err := resolveIDTargetKind(args)
-	if err != nil {
-		return err
+	// info/show is a read-only router. Route to instances only when an explicit
+	// wi prefix is present; bare numerics (and wj IDs) resolve to jobs, since an
+	// instance is always wi-prefixed and a bare number is never an instance.
+	sawJob, sawInstance := idPrefixesSeen(args)
+	if sawJob && sawInstance {
+		return usageErrorf("cannot mix job and instance IDs in one command; use only wj... or only wi...")
 	}
-	if kind == idTargetInstance {
+	if sawInstance {
 		return runInstanceStatusFromInfoFunc(cmd, args)
 	}
 	return runJobInfoFromInfoFunc(cmd, args)

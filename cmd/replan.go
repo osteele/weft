@@ -30,7 +30,7 @@ func init() {
 }
 
 func runReplan(_ *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args)
+	jobIDs, err := ParseJobIDsForJobCommand(args)
 	if err != nil {
 		return err
 	}

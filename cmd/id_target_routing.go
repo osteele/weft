@@ -19,12 +19,10 @@ const (
 	idTargetInstance
 )
 
-// resolveIDTargetKind infers whether args refer to jobs or instances.
-// It requires at least one explicit prefix (wj/wi) across all arguments.
-func resolveIDTargetKind(args []string) (idTargetKind, error) {
-	sawJob := false
-	sawInstance := false
-
+// idPrefixesSeen reports which explicit ID prefixes (wj/wi) appear across the
+// arguments. Bare numerics set neither flag — they carry no entity hint, and
+// since instance IDs are always wi-prefixed a bare number is only ever a job.
+func idPrefixesSeen(args []string) (sawJob, sawInstance bool) {
 	for _, arg := range args {
 		for _, token := range splitIDPrefixScanTokens(arg) {
 			token = strings.ToLower(strings.TrimSpace(token))
@@ -36,6 +34,16 @@ func resolveIDTargetKind(args []string) (idTargetKind, error) {
 			}
 		}
 	}
+	return sawJob, sawInstance
+}
+
+// resolveIDTargetKind infers whether args refer to jobs or instances.
+// It requires at least one explicit prefix (wj/wi) across all arguments, so
+// bare numerics are reported as ambiguous. Use this only for commands that
+// genuinely dispatch to both entity types (e.g. the destructive terminate
+// router); job-only commands should use ParseJobIDsForJobCommand instead.
+func resolveIDTargetKind(args []string) (idTargetKind, error) {
+	sawJob, sawInstance := idPrefixesSeen(args)
 
 	if sawJob && sawInstance {
 		return idTargetUnknown, usageErrorf("cannot mix job and instance IDs in one command; use only wj... or only wi...")

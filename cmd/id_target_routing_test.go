@@ -99,6 +99,49 @@ func TestRunInfoRoutesToInstanceStatus(t *testing.T) {
 	}
 }
 
+func TestRunInfoRoutesBareNumericToJob(t *testing.T) {
+	origInst := runInstanceStatusFromInfoFunc
+	origJob := runJobInfoFromInfoFunc
+	t.Cleanup(func() {
+		runInstanceStatusFromInfoFunc = origInst
+		runJobInfoFromInfoFunc = origJob
+	})
+
+	var routed string
+	runInstanceStatusFromInfoFunc = func(_ *cobra.Command, _ []string) error { routed = "instance"; return nil }
+	runJobInfoFromInfoFunc = func(_ *cobra.Command, _ []string) error { routed = "job"; return nil }
+
+	// Regression (BR2): `weft info 3000` (bare numeric) must resolve to a job
+	// rather than erroring as ambiguous — instances are always wi-prefixed.
+	routed = ""
+	if err := runInfo(&cobra.Command{}, []string{"3000"}); err != nil {
+		t.Fatalf("runInfo(bare) error = %v", err)
+	}
+	if routed != "job" {
+		t.Fatalf("bare numeric routed to %q, want job", routed)
+	}
+
+	routed = ""
+	if err := runInfo(&cobra.Command{}, []string{"wj3000", "3001"}); err != nil {
+		t.Fatalf("runInfo(wj) error = %v", err)
+	}
+	if routed != "job" {
+		t.Fatalf("wj-prefixed routed to %q, want job", routed)
+	}
+
+	// An explicit wi route still wins, and a wj+wi mix is still rejected.
+	routed = ""
+	if err := runInfo(&cobra.Command{}, []string{"wi42"}); err != nil {
+		t.Fatalf("runInfo(wi) error = %v", err)
+	}
+	if routed != "instance" {
+		t.Fatalf("wi routed to %q, want instance", routed)
+	}
+	if err := runInfo(&cobra.Command{}, []string{"wj1", "wi2"}); err == nil {
+		t.Fatal("expected error for mixed job/instance IDs")
+	}
+}
+
 func TestRunStatusTopLevelRoutesToInstanceStatus(t *testing.T) {
 	origInst := runInstanceStatusFromStatusFunc
 	t.Cleanup(func() {

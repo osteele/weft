@@ -66,7 +66,7 @@ func init() {
 }
 
 func runTagAdd(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args[:len(args)-1])
+	jobIDs, err := ParseJobIDsForJobCommand(args[:len(args)-1])
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runTagRemove(cmd *cobra.Command, args []string) error {
-	jobIDs, err := ParseJobIDsWithExplicitPrefix(args[:len(args)-1])
+	jobIDs, err := ParseJobIDsForJobCommand(args[:len(args)-1])
 	if err != nil {
 		return err
 	}

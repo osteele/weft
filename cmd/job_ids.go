@@ -138,15 +138,15 @@ func parseJobIDArg(arg string) ([]int64, error) {
 	return []int64{id}, nil
 }
 
-// ParseJobIDsWithExplicitPrefix parses job IDs and requires at least one explicit
-// "wj" prefix across the provided args. Instance-prefixed IDs ("wi") are rejected.
-func ParseJobIDsWithExplicitPrefix(args []string) ([]int64, error) {
-	kind, err := resolveIDTargetKind(args)
-	if err != nil {
-		return nil, err
-	}
-	if kind != idTargetJob {
-		return nil, usageErrorf("ambiguous ID(s): use wj... for jobs")
+// ParseJobIDsForJobCommand parses job IDs for a command that operates only on
+// jobs. Bare numerics (3000) and wj-prefixed IDs (wj3000) are both accepted; an
+// explicit instance prefix (wi3000) is rejected with a clear message so an
+// instance ID is never silently treated as a job. Because these commands have
+// no instance counterpart, a bare number is unambiguous and need not carry a
+// "wj" prefix.
+func ParseJobIDsForJobCommand(args []string) ([]int64, error) {
+	if _, sawInstance := idPrefixesSeen(args); sawInstance {
+		return nil, usageErrorf("instance ID(s) given to a job-only command; use a bare job number or a wj... prefix")
 	}
 	return ParseJobIDs(args)
 }
