@@ -210,10 +210,16 @@ hf_validate_token() {
 hf_download() {
   _repo_type="$1"
   _repo_id="$2"
+  # Skip native-checkpoint dirs (e.g. Meta llama original/consolidated.*.pth)
+  # for model repos; transformers/vLLM never load them.
+  set -- --repo-type "$_repo_type"
+  if [ "$_repo_type" = model ]; then set -- "$@" --exclude 'original/*'; fi
   if command -v hf >/dev/null 2>&1; then
-    hf download --repo-type "$_repo_type" "$_repo_id" 2>&1
+    hf download "$@" "$_repo_id" 2>&1
   elif command -v huggingface-cli >/dev/null 2>&1; then
-    huggingface-cli download --repo-type "$_repo_type" "$_repo_id" 2>&1
+    huggingface-cli download "$@" "$_repo_id" 2>&1
+  elif [ "$_repo_type" = model ]; then
+    python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2], ignore_patterns=["original/*"])' "$_repo_id" "$_repo_type"
   else
     python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2])' "$_repo_id" "$_repo_type"
   fi

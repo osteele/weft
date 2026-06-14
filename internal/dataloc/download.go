@@ -277,6 +277,15 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 	repoIDPython := strconv.Quote(asset.ID)
 	revisionPython := strconv.Quote(revision)
 
+	// Skip native-checkpoint dirs (e.g. Meta llama original/consolidated.*.pth)
+	// for model repos; transformers/vLLM never load them.
+	cliExclude := ""
+	pyIgnore := ""
+	if repoType == "model" {
+		cliExclude = " --exclude '" + RedundantHFModelExcludeGlob + "'"
+		pyIgnore = ", ignore_patterns=[" + strconv.Quote(RedundantHFModelExcludeGlob) + "]"
+	}
+
 	// Expand PATH so hf/hf_xet and Python tools installed by mise, Homebrew,
 	// or user-local installers are found in non-interactive SSH sessions.
 	// Forward HF token: prefer local Weft token (so gated models work
@@ -314,9 +323,9 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 			"fi; "+
 			"fi; "+
 			"if [ -n \"${_hfdl:-}\" ]; then "+
-			"$_hfdl --repo-type %s --revision %s %s >/dev/null; "+
+			"$_hfdl --repo-type %s --revision %s %s%s >/dev/null; "+
 			"elif python3 -c 'import huggingface_hub' >/dev/null 2>&1; then "+
-			"python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id=%s, repo_type=%s, revision=%s)\" >/dev/null; "+
+			"python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id=%s, repo_type=%s, revision=%s%s)\" >/dev/null; "+
 			"else "+
 			"echo 'huggingface_hub not available on remote host (need hf_xet, hf CLI, or python3 package huggingface_hub)' >&2; "+
 			"echo \"diagnostic: HOME=${HOME:-} PATH=$PATH python3=$(command -v python3 2>/dev/null || true) hf=$(command -v hf 2>/dev/null || true)\" >&2; "+
@@ -325,9 +334,11 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 		repoType,
 		revisionQuoted,
 		repoIDQuoted,
+		cliExclude,
 		repoIDPython,
 		repoTypePython,
 		revisionPython,
+		pyIgnore,
 	)
 	return prefix + body, nil
 }

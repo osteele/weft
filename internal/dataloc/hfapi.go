@@ -157,6 +157,12 @@ func FetchHFModelSize(modelID string) (int64, error) {
 
 	var totalSize int64
 	for _, f := range files {
+		// Skip native-checkpoint files that transformers/vLLM never load (e.g.
+		// Meta llama original/consolidated.*.pth). Counting them inflates the
+		// disk estimate and they are also excluded from the actual download.
+		if isRedundantHFModelPath(f.Path) {
+			continue
+		}
 		fileSize := f.Size
 		if f.LFS != nil && f.LFS.Size > 0 {
 			fileSize = f.LFS.Size

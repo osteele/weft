@@ -29,6 +29,21 @@ type DataAsset struct {
 	ID   string    // e.g., "meta-llama/Llama-3-8B", "wikitext"
 }
 
+// RedundantHFModelExcludeGlob is the fnmatch-style pattern passed to HF download
+// tools (`hf download --exclude`, snapshot_download ignore_patterns) to skip
+// native-checkpoint directories that transformers/vLLM never load — most
+// notably Meta's `original/consolidated.*.pth` Llama weights. Skipping these
+// avoids a redundant multi-GB download that has blown setup-time budgets. Only
+// applied to HF *model* inputs (datasets keep their full snapshot).
+const RedundantHFModelExcludeGlob = "original/*"
+
+// isRedundantHFModelPath reports whether a repo-relative file path is a native
+// checkpoint artifact skipped by default for HF model inputs. It mirrors
+// RedundantHFModelExcludeGlob for local size estimation.
+func isRedundantHFModelPath(path string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(path, "./"), "original/")
+}
+
 // ParseAssetRef parses a string like "hf:meta-llama/Llama-3-8B" into a DataAsset.
 // Format: "<kind-prefix>:<id>"
 // Supported prefixes: "hf" (HuggingFace model), "hf-dataset", "checkpoint"

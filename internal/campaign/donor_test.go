@@ -227,6 +227,10 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	if !strings.Contains(script, "hf_download dataset \"wikitext\"") {
 		t.Error("donor script should download HF datasets")
 	}
+	// FR1: model downloads skip redundant native checkpoints (original/).
+	if !strings.Contains(script, "--exclude 'original/*'") {
+		t.Error("donor hf_download should exclude original/* for model repos")
+	}
 
 	// Should write ready marker
 	if !strings.Contains(script, "donor/42/.ready") {

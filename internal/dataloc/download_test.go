@@ -53,6 +53,13 @@ func TestBuildHFDownloadCommand_Model(t *testing.T) {
 	if !strings.Contains(cmd, "meta-llama/Llama-3-8B") {
 		t.Fatalf("command missing repo id: %s", cmd)
 	}
+	// FR1: skip native-checkpoint dirs for model repos.
+	if !strings.Contains(cmd, "--exclude 'original/*'") {
+		t.Fatalf("model download missing native-checkpoint exclude: %s", cmd)
+	}
+	if !strings.Contains(cmd, `ignore_patterns=["original/*"]`) {
+		t.Fatalf("model snapshot_download missing ignore_patterns: %s", cmd)
+	}
 }
 
 func TestBuildHFDownloadCommand_Dataset(t *testing.T) {
@@ -65,6 +72,10 @@ func TestBuildHFDownloadCommand_Dataset(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "refs/pr/1") {
 		t.Fatalf("command missing revision: %s", cmd)
+	}
+	// FR1: datasets keep their full snapshot — no native-checkpoint exclude.
+	if strings.Contains(cmd, "original/") {
+		t.Fatalf("dataset download should not exclude original/: %s", cmd)
 	}
 }
 

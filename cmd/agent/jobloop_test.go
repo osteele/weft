@@ -501,6 +501,9 @@ func TestHFDownloadScriptDownloadsModelsAndDatasets(t *testing.T) {
 		"ensure_hf_download_tool",
 		"hf_download 'model' 'org/model'",
 		"hf_download 'dataset' 'org/data'",
+		// FR1: model downloads skip redundant native checkpoints; datasets don't.
+		"--exclude 'original/*'",
+		`ignore_patterns=["original/*"]`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)

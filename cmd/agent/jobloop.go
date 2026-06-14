@@ -471,7 +471,11 @@ func hfDownloadScript(assets []dataloc.DataAsset) string {
 	b.WriteString("}\n")
 	b.WriteString("hf_download() {\n")
 	b.WriteString("  _repo_type=\"$1\"; _repo_id=\"$2\"\n")
-	b.WriteString("  if command -v hf >/dev/null 2>&1; then hf download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; elif command -v huggingface-cli >/dev/null 2>&1; then huggingface-cli download --repo-type \"$_repo_type\" \"$_repo_id\" 2>&1; else python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2])' \"$_repo_id\" \"$_repo_type\"; fi\n")
+	// Skip native-checkpoint dirs (e.g. Meta llama original/consolidated.*.pth)
+	// for model repos; transformers/vLLM never load them.
+	b.WriteString("  set -- --repo-type \"$_repo_type\"\n")
+	b.WriteString("  if [ \"$_repo_type\" = model ]; then set -- \"$@\" --exclude 'original/*'; fi\n")
+	b.WriteString("  if command -v hf >/dev/null 2>&1; then hf download \"$@\" \"$_repo_id\" 2>&1; elif command -v huggingface-cli >/dev/null 2>&1; then huggingface-cli download \"$@\" \"$_repo_id\" 2>&1; elif [ \"$_repo_type\" = model ]; then python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2], ignore_patterns=[\"original/*\"])' \"$_repo_id\" \"$_repo_type\"; else python3 -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(repo_id=sys.argv[1], repo_type=sys.argv[2])' \"$_repo_id\" \"$_repo_type\"; fi\n")
 	b.WriteString("}\n")
 	// hf_validate_token pings /whoami once when HF_TOKEN is set. huggingface-hub
 	// v1.x surfaces 401/403 on token-bearing requests as a misleading "not

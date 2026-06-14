@@ -63,6 +63,49 @@ func TestFetchHFModelSize(t *testing.T) {
 	}
 }
 
+func TestFetchHFModelSize_SkipsRedundantNativeCheckpoints(t *testing.T) {
+	// FR1: original/consolidated.*.pth is a native checkpoint vLLM/transformers
+	// never load; it must not inflate the size estimate.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/models/meta-llama/Llama-3.1-8B/tree/main" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[
+				{"path":"config.json","size":1000},
+				{"path":"model.safetensors","size":1,"lfs":{"size":16000000000}},
+				{"path":"original/consolidated.00.pth","size":1,"lfs":{"size":16000000000}},
+				{"path":"original/params.json","size":200}
+			]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+
+	size, err := FetchHFModelSize("meta-llama/Llama-3.1-8B")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := int64(16000001000); size != want {
+		t.Errorf("got size %d, want %d (original/ excluded)", size, want)
+	}
+}
+
+func TestIsRedundantHFModelPath(t *testing.T) {
+	redundant := []string{"original/consolidated.00.pth", "original/params.json", "./original/x"}
+	kept := []string{"model.safetensors", "config.json", "tokenizer.json", "originals/x.bin"}
+	for _, p := range redundant {
+		if !isRedundantHFModelPath(p) {
+			t.Errorf("isRedundantHFModelPath(%q) = false, want true", p)
+		}
+	}
+	for _, p := range kept {
+		if isRedundantHFModelPath(p) {
+			t.Errorf("isRedundantHFModelPath(%q) = true, want false", p)
+		}
+	}
+}
+
 func TestFetchHFModelSize_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
