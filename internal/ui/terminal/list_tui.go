@@ -4102,6 +4102,27 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 		}
 		return out
 	}
+	normalizeSectionWindow := func(s *sectionState) {
+		total := len(s.rowIdxs)
+		if total == 0 || s.summaryOnly {
+			return
+		}
+		indicatorLines := 0
+		if s.leadingEllipsis {
+			indicatorLines++
+		}
+		if s.ellipsis {
+			indicatorLines++
+		}
+		// If the ellipsis markers cost as many lines as the hidden rows, show
+		// the rows instead.
+		if s.shownRows+indicatorLines >= total {
+			s.windowStart = 0
+			s.leadingEllipsis = false
+			s.ellipsis = false
+			s.shownRows = total
+		}
+	}
 
 	// Locate the cursor's section and its offset within that section.
 	cursorSection, cursorOffset := -1, -1
@@ -4199,6 +4220,7 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 			s.summaryOnly = false
 			s.ellipsis = true
 			s.shownRows = b
+			normalizeSectionWindow(s)
 		}
 	}
 	// anchorCursorWindow positions the cursor section's visible window so it
@@ -4222,6 +4244,7 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 		s.windowStart = start
 		s.leadingEllipsis = start > 0
 		s.ellipsis = start+b < total
+		normalizeSectionWindow(s)
 	}
 	// Show the cursor's row only when the viewport has room beyond one header per
 	// section; at the extreme where headers alone fill the viewport, preserve the

@@ -1712,6 +1712,45 @@ func TestListTUIGroupedViewRevealsCursorInAbbreviatedSection(t *testing.T) {
 	}
 }
 
+func TestSelectGroupedRowsForViewport_DoesNotSpendEllipsisOnSingleHiddenRow(t *testing.T) {
+	launchID := int64(3816)
+	jobs := []*db.Job{
+		{ID: 2982, Status: db.StatusRunning, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "structural-probes", Description: "EXP-032/RQ33: GPT-2-medium", StartTime: 1},
+		{ID: 2994, Status: db.StatusRunning, Host: "cool30", Project: "markov-attention", Description: "EXP-218 Eleuther", StartTime: 1},
+		{ID: 3001, Status: db.StatusRunning, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "markov-attention", Description: "EXP-218 gpt2-large", StartTime: 1},
+		{ID: 2991, Status: db.StatusQueued, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "markov-attention", Description: "EXP-218 EleutherAI/pythia-160m", QueuedAt: 1},
+		{ID: 2992, Status: db.StatusQueued, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "markov-attention", Description: "EXP-218 gpt2-medium", QueuedAt: 1},
+		{ID: 3000, Status: db.StatusQueued, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "llm-performance-models", Description: "EXP-344 Tier1 PILOT", QueuedAt: 1},
+		{ID: 2998, Status: db.StatusPendingPlacement, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "continuous-thought", Description: "EXP-059 lr-sweep", CreatedAt: 1},
+		{ID: 2997, Status: db.StatusPendingPlacement, Project: "continuous-thought", Description: "EXP-059 lr-sweep lr=2e-5", CreatedAt: 1, PlacementReasons: []string{"could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"}},
+		{ID: 2999, Status: db.StatusPendingPlacement, Project: "continuous-thought", Description: "EXP-059 lr-sweep lr=5e-5", CreatedAt: 1, PlacementReasons: []string{"could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"}},
+		{ID: 2966, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Project: "chunk-boundary-probes", Description: "EXP-003: BLT pretrained boundary", EndTime: testInt64Ptr(2)},
+		{ID: 2995, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Project: "markov-attention", Description: "EXP-218 EleutherAI/pythia-1.4b", EndTime: testInt64Ptr(2)},
+		{ID: 2949, Status: db.StatusFailed, Project: "structural-probes", Description: "EXP-032/RQ33: GPT-2-medium direct distance", EndTime: testInt64Ptr(2)},
+		{ID: 2950, Status: db.StatusFailed, Project: "structural-probes", Description: "EXP-116/RQ68: Gamma aleatoric", EndTime: testInt64Ptr(2)},
+		{ID: 2964, Status: db.StatusFailed, Project: "chunk-boundary-probes", Description: "EXP-003: BLT pretrained boundary export", EndTime: testInt64Ptr(2)},
+		{ID: 2978, Status: db.StatusFailed, Project: "continuous-thought", Description: "EXP-059 perturbation", EndTime: testInt64Ptr(2)},
+		{ID: 2954, Status: db.StatusKilled, Project: "chunk-boundary-probes", Description: "EXP-003: BLT pretrained boundary export", EndTime: testInt64Ptr(2)},
+	}
+	rows := buildGroupedStatusRows(jobs, 120, nil, nil)
+	cursorRowIdx := groupedRowIndexForJob(rows, 2966)
+	if cursorRowIdx < 0 {
+		t.Fatal("completed job wj2966 row not found")
+	}
+
+	lines := selectGroupedRowsForViewport(rows, 29, cursorRowIdx)
+	text := joinViewportText(lines)
+	if !strings.Contains(text, "wj3001") {
+		t.Fatalf("third running job should replace a same-cost ellipsis:\n%s", text)
+	}
+	if strings.Contains(text, "Running (3):\n-   wj2982") && strings.Contains(text, "\n...\n\nQueued (3):") {
+		t.Fatalf("running section used ellipsis despite room for the hidden row:\n%s", text)
+	}
+	if len(lines) > 29 {
+		t.Fatalf("viewport exceeded budget: %d > 29\n%s", len(lines), text)
+	}
+}
+
 func TestAllocateSectionBudgets_Invariants(t *testing.T) {
 	secs := []sectionAlloc{
 		{total: 20, minVisible: 2},
