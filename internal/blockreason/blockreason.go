@@ -134,6 +134,9 @@ func visibleReason(job *db.Job, reason string, opts Options) string {
 	reason = campaign.SanitizeBlockedReason(reason)
 	if opts.Compact {
 		reason = StripContractRef(reason)
+		if IsReuseOnlyDiagnostic(reason) {
+			return ""
+		}
 	}
 	if reason == "" {
 		return ""
@@ -188,4 +191,35 @@ func isUnplacedResetReason(reason string) bool {
 		(strings.Contains(r, "job reset to unplaced queue") ||
 			strings.Contains(r, "job returned to unplaced queue") ||
 			strings.Contains(r, "returned from cloud instance to unplaced queue"))
+}
+
+// IsReuseOnlyDiagnostic reports whether a reason only explains why running
+// instances could not opportunistically accept a job. It is useful secondary
+// detail, but it is not an authoritative reason that a rental-eligible job is
+// unplaced when launching a new instance is still possible.
+func IsReuseOnlyDiagnostic(reason string) bool {
+	reason = strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
+	if reason == "" {
+		return false
+	}
+	parts := strings.Split(reason, "; ")
+	seen := false
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !isReuseDiagnosticPart(part) {
+			return false
+		}
+		seen = true
+	}
+	return seen
+}
+
+func isReuseDiagnosticPart(reason string) bool {
+	return strings.HasPrefix(reason, "could not reuse running instances:") ||
+		strings.HasPrefix(reason, "could not reuse wi") ||
+		strings.HasPrefix(reason, "reuse blocked:") ||
+		strings.HasPrefix(reason, "reuse backoff ")
 }

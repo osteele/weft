@@ -938,6 +938,9 @@ func finalizeUnplacedBlockedReasons(
 		if _, ok := remainingByID[jobID]; !ok {
 			continue
 		}
+		if _, ok := blockedReasons[jobID]; !ok {
+			continue
+		}
 		addAutoPilotBlockedReason(blockedReasons, jobID, diag)
 	}
 	// Attach the structured launch/reuse breakdown to any still-unplaced job

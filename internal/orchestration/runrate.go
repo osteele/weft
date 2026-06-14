@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -39,6 +40,9 @@ func PruneStaleRunRateBlockReason(reason string, headroomCents int) (string, boo
 	if reason == "" {
 		return "", false
 	}
+	if blockreason.IsReuseOnlyDiagnostic(reason) {
+		return "", true
+	}
 	parts := strings.Split(reason, "; ")
 	kept := make([]string, 0, len(parts))
 	changed := false
@@ -57,7 +61,11 @@ func PruneStaleRunRateBlockReason(reason string, headroomCents int) (string, boo
 	if !changed {
 		return reason, false
 	}
-	return strings.Join(kept, "; "), true
+	pruned := strings.Join(kept, "; ")
+	if blockreason.IsReuseOnlyDiagnostic(pruned) {
+		return "", true
+	}
+	return pruned, true
 }
 
 func ParseRunRateBlockedNeedCents(reason string) (int, bool) {

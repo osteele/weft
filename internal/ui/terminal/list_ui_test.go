@@ -497,15 +497,30 @@ func TestListTUIPruneAutoBlockReasonsDropsStaleRunRateSegment(t *testing.T) {
 
 	m.pruneAutoBlockReasons()
 
-	got := m.autoBlockReasons[1]
-	if strings.Contains(got, "run-rate headroom exhausted") {
-		t.Fatalf("autoBlockReasons[1] = %q, want stale run-rate segment pruned", got)
+	if len(m.autoBlockReasons) != 0 {
+		t.Fatalf("autoBlockReasons = %v, want reuse-only blocker pruned", m.autoBlockReasons)
 	}
-	if !strings.Contains(got, "reuse blocked") {
-		t.Fatalf("autoBlockReasons[1] = %q, want remaining reuse reason", got)
+	if m.autoPersistentBlocked != "" || m.autoPersistentBlockedN != 0 {
+		t.Fatalf("persistent blocked = %q/%d, want cleared", m.autoPersistentBlocked, m.autoPersistentBlockedN)
 	}
-	if !strings.Contains(m.autoPersistentBlocked, "reuse blocked") {
-		t.Fatalf("persistent blocked = %q, want recomputed reuse summary", m.autoPersistentBlocked)
+}
+
+func TestListTUIPruneAutoBlockReasonsDropsReuseOnlyDiagnostic(t *testing.T) {
+	reason := "could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"
+	m := listTUIModel{
+		autoPersistentBlocked:  reason,
+		autoPersistentBlockedN: 1,
+		autoBlockReasons:       map[int64]string{1: reason},
+		jobs:                   []*db.Job{{ID: 1, Status: db.StatusQueued}},
+	}
+
+	m.pruneAutoBlockReasons()
+
+	if len(m.autoBlockReasons) != 0 {
+		t.Fatalf("autoBlockReasons = %v, want reuse-only blocker pruned", m.autoBlockReasons)
+	}
+	if m.autoPersistentBlocked != "" || m.autoPersistentBlockedN != 0 {
+		t.Fatalf("persistent blocked = %q/%d, want cleared", m.autoPersistentBlocked, m.autoPersistentBlockedN)
 	}
 }
 
@@ -604,8 +619,8 @@ func TestListTUIPrunesPersistedStaleRunRateSegment(t *testing.T) {
 
 	reasons := m.visibleUnplacedBlockedReasonsForJobs([]*db.Job{job})
 
-	if got := reasons[jobID]; got != reuseReason {
-		t.Fatalf("visible reason = %q, want %q", got, reuseReason)
+	if got := reasons[jobID]; got != "" {
+		t.Fatalf("visible reason = %q, want none", got)
 	}
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {

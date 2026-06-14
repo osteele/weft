@@ -2056,3 +2056,36 @@ func TestFinalizeUnplacedBlockedReasons_PersistsRecordedReuseAndOnPrem(t *testin
 		t.Fatalf("on-prem detail not persisted: %q", s.OnPrem)
 	}
 }
+
+func TestFinalizeUnplacedBlockedReasons_DropsReuseOnlyNonCandidate(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	blockedReasons := map[int64]string{}
+	structuredBlocked := map[int64]*blockreason.Structured{}
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
+		map[int64]string{jobID: "could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"},
+		nil, nil, map[int64]*db.Job{jobID: job}, nil, nil, nil)
+
+	if len(blockedReasons) != 0 {
+		t.Fatalf("blockedReasons = %v, want no reuse-only blocker", blockedReasons)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	if len(refreshed.PlacementReasons) != 0 {
+		t.Fatalf("placement reasons = %#v, want none", refreshed.PlacementReasons)
+	}
+	if refreshed.PlacementBlockedJSON != "" {
+		t.Fatalf("placement_blocked = %q, want empty", refreshed.PlacementBlockedJSON)
+	}
+}

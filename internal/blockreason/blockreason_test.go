@@ -43,6 +43,16 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			source: SourceAutoPilot,
 		},
 		{
+			name: "reuse-only autopilot diagnostic hidden",
+			job: &db.Job{
+				ID:     10,
+				Status: db.StatusQueued,
+			},
+			opts: Options{
+				AutoPilotReason: "could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB",
+			},
+		},
+		{
 			name: "unplaced uses latest persisted placement reason",
 			job: &db.Job{
 				ID:               3,
@@ -52,6 +62,14 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			want:   "planner: no offers",
 			kind:   KindBlocked,
 			source: SourcePlacement,
+		},
+		{
+			name: "reuse-only placement history hidden",
+			job: &db.Job{
+				ID:               11,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"},
+			},
 		},
 		{
 			name: "daemon placement pending is waiting",

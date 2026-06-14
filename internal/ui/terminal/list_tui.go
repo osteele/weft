@@ -3536,6 +3536,11 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 			changed = true
 			continue
 		}
+		if blockreason.IsReuseOnlyDiagnostic(reason) {
+			delete(m.autoBlockReasons, jobID)
+			changed = true
+			continue
+		}
 		if hasRunRateHeadroom {
 			if pruned, prunedChanged := pruneStaleRunRateBlockReason(reason, headroom); prunedChanged {
 				if pruned == "" {
