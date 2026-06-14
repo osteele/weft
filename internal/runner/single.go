@@ -542,10 +542,17 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	WriteStatusFile(paths, ei)
 	WriteLogFooter(paths, ei)
 
-	// Failure detection
+	// Failure detection. A run-phase MaxTime overrun forces exit 124, which the
+	// shared classifier would otherwise read as setup_timeout (124 is also the
+	// setup budget code). We know here that the run phase timed out, so label it
+	// run_timeout to keep the two distinguishable in `weft info`.
 	var failureReason string
 	if ei.ExitCode != 0 {
-		failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+		if timedOut.Load() {
+			failureReason = FailureReasonRunTimeout
+		} else {
+			failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+		}
 		WriteFailureReasonFile(paths, failureReason)
 	}
 

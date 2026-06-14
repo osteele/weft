@@ -255,6 +255,34 @@ func TestRunSingleJob_FailingCommand(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_RunTimeoutClassifiedAsRunTimeout(t *testing.T) {
+	// FR2: a run-phase MaxTime overrun forces exit 124, but it must be labeled
+	// run_timeout, not setup_timeout (which shares exit code 124).
+	logDir := t.TempDir()
+
+	cfg := SingleJobConfig{
+		JobID:          77,
+		Job:            opsqueue.CommandJob{Cmd: "sleep 30"},
+		LogDir:         logDir,
+		MaxTime:        200 * time.Millisecond,
+		SampleInterval: 50 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 124 {
+		t.Errorf("exit code = %d, want 124 (timed out)", ei.ExitCode)
+	}
+
+	reason := ReadFailureReasonFile(NewJobPaths(logDir, 77).FailureReason)
+	if reason != FailureReasonRunTimeout {
+		t.Fatalf("failure reason = %q, want %q (run-phase timeout must not be setup_timeout)", reason, FailureReasonRunTimeout)
+	}
+}
+
 func TestRunSingleJob_WorkingDir(t *testing.T) {
 	logDir := t.TempDir()
 	workDir := t.TempDir()

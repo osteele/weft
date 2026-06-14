@@ -68,6 +68,7 @@ const (
 	FailureReasonTorchPreflight   = "torch_preflight_failed"
 	FailureReasonDiskFull         = "disk_full"
 	FailureReasonSetupTimeout     = "setup_timeout"
+	FailureReasonRunTimeout       = "run_timeout"
 )
 
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.

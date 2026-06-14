@@ -281,7 +281,9 @@ func humanizeFailureReason(reason string) string {
 	case "timeout":
 		return "timed out"
 	case "setup_timeout":
-		return "setup phase timed out (likely slow rental network); will retry on a different rental"
+		return "setup phase exceeded its time budget (slow rental network/download or heavy uv sync); will retry on a different rental"
+	case "run_timeout":
+		return "run phase exceeded its --max-time budget"
 	case "killed_stdout_silence":
 		return "killed: no stdout output for the silence-watchdog timeout"
 	case "killed_gpu_idle":

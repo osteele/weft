@@ -48,3 +48,19 @@ func TestHumanizeFailureReason_SetupTimeoutNamesInfra(t *testing.T) {
 		t.Errorf("setup_timeout label must be single-line; got %q", got)
 	}
 }
+
+func TestHumanizeFailureReason_DistinguishesSetupAndRunTimeout(t *testing.T) {
+	// FR2: setup-phase and run-phase timeouts must read differently and both
+	// name the budget they exceeded.
+	setup := humanizeFailureReason("setup_timeout")
+	run := humanizeFailureReason("run_timeout")
+	if setup == run || run == "run timeout" {
+		t.Fatalf("run_timeout should have distinct, descriptive text; got setup=%q run=%q", setup, run)
+	}
+	if !strings.Contains(strings.ToLower(setup), "setup") || !strings.Contains(strings.ToLower(setup), "budget") {
+		t.Errorf("setup_timeout text should name the setup budget; got %q", setup)
+	}
+	if !strings.Contains(strings.ToLower(run), "run") || !strings.Contains(strings.ToLower(run), "budget") {
+		t.Errorf("run_timeout text should name the run budget; got %q", run)
+	}
+}
