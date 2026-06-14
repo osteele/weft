@@ -421,6 +421,8 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 						for _, jobID := range plan.LaunchJobIDs {
 							blockedReasons[jobID] = reason
 						}
+						remainingByID, candidateIDs := remainingLaunchCandidates(database, plan.LaunchJobIDs)
+						finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, candidateIDs, capacities, r2Client)
 						return &GroupedAutoPilotResult{
 							Placed:            0,
 							Launched:          moveRetryLaunches,
@@ -966,6 +968,32 @@ func finalizeUnplacedBlockedReasons(
 		}
 	}
 	persistBlockedReasonsForUnplaced(database, blockedReasons, structuredBlocked)
+}
+
+func remainingLaunchCandidates(database *sql.DB, launchJobIDs []int64) (map[int64]*db.Job, []int64) {
+	remainingByID := map[int64]*db.Job{}
+	if database == nil || len(launchJobIDs) == 0 {
+		return remainingByID, nil
+	}
+	launchScope := make(map[int64]struct{}, len(launchJobIDs))
+	for _, jobID := range launchJobIDs {
+		launchScope[jobID] = struct{}{}
+	}
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return remainingByID, nil
+	}
+	candidateIDs := make([]int64, 0, len(launchScope))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		remainingByID[job.ID] = job
+		if _, ok := launchScope[job.ID]; ok {
+			candidateIDs = append(candidateIDs, job.ID)
+		}
+	}
+	return remainingByID, candidateIDs
 }
 
 func autoReplanStuckInventoryJobs(database *sql.DB, scoped map[int64]struct{}, movingJobs map[int64]struct{}) (int, error) {

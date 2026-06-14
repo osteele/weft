@@ -847,6 +847,70 @@ func TestRunGroupedAutoPilotPass_RunRateNoneFitBlocksAll(t *testing.T) {
 	}
 }
 
+func TestRunGroupedAutoPilotPass_RunRateNoneFitPersistsOverStaleReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	staleReason := "job wj2980 declares input \"checkpoint:regmatrix\", which weft cannot provision onto a cloud rental instance"
+	appendPlacementReason(database, jobID, staleReason)
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("[campaign]\nauto_run_rate_soft_target = 1.0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	restoreConfig := config.SetConfigPathsForTesting(cfgPath, filepath.Join(cfgDir, "config.yaml"))
+	defer restoreConfig()
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalBuildPlanWithOptions := autoPilotBuildPlanWithOptions
+	originalRelaunch := autoPilotRelaunch
+	originalSubmit := autoPilotSubmitJobsToInstance
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotBuildPlanWithOptions = originalBuildPlanWithOptions
+		autoPilotRelaunch = originalRelaunch
+		autoPilotSubmitJobsToInstance = originalSubmit
+	})
+
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			LaunchGroups:           []campaign.LaunchGroup{{JobIDs: []int64{jobID}, CostPerHourCents: 150}},
+			LaunchJobIDs:           []int64{jobID},
+			LaunchRateCentsPerHour: 150,
+			BlockedReasons:         map[int64]string{},
+		}, nil
+	}
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity, _ campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{}}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		t.Fatalf("autoPilotRelaunch should not run when no subset fits")
+		return nil, nil
+	}
+
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if got := result.BlockedReasons[jobID]; !strings.Contains(got, "no subset fits") {
+		t.Fatalf("blocked reason = %q, want no-subset-fits marker", got)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if len(job.PlacementReasons) < 2 {
+		t.Fatalf("placement reasons = %#v, want stale reason plus persisted run-rate reason", job.PlacementReasons)
+	}
+	latest := job.PlacementReasons[len(job.PlacementReasons)-1]
+	if !strings.Contains(latest, "run-rate target exceeded") || !strings.Contains(latest, "no subset fits") {
+		t.Fatalf("latest placement reason = %q, want persisted run-rate no-subset reason", latest)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_ReuseFallbackExecutesAssignmentsWithoutLaunch(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "job", "A100")
