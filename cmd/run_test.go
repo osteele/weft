@@ -78,7 +78,7 @@ func TestFastSubmitPendingReasonForRecentOnPrem(t *testing.T) {
 	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{"EXP-127"}, true, unplaced); got != current {
 		t.Fatalf("cloud-eligible reason = %q, want %q", got, current)
 	}
-	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, true, unplaced); got != "no eligible on-prem host in recent DB state" {
+	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, true, unplaced); got != "waiting for an eligible on-prem host" {
 		t.Fatalf("inventory unplaced reason = %q", got)
 	}
 	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, false, nil); got != "recent host state unavailable" {

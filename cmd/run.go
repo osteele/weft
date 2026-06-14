@@ -1483,7 +1483,7 @@ func fastSubmitPendingReasonForRecentOnPrem(current string, tags []string, recen
 		return "recent host state unavailable"
 	}
 	if plan != nil && plan.Unplaced {
-		return "no eligible on-prem host in recent DB state"
+		return "waiting for an eligible on-prem host"
 	}
 	return current
 }
