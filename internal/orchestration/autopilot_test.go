@@ -24,12 +24,19 @@ import (
 
 type groupedAutoPilotPassTestOptions struct {
 	realFillReusableInstances bool
+	placeInventory            func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)
 }
 
 type groupedAutoPilotPassTestOption func(*groupedAutoPilotPassTestOptions)
 
 func withRealFillReusableInstances(opts *groupedAutoPilotPassTestOptions) {
 	opts.realFillReusableInstances = true
+}
+
+func withPlaceInventory(fn func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)) groupedAutoPilotPassTestOption {
+	return func(opts *groupedAutoPilotPassTestOptions) {
+		opts.placeInventory = fn
+	}
 }
 
 func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database *sql.DB, scopedJobs []*db.Job, optionFns ...groupedAutoPilotPassTestOption) (*GroupedAutoPilotResult, error) {
@@ -46,6 +53,7 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 	origFillReusable := autoPilotFillReusableInstances
 	origCreditHealth := autoPilotCheckProviderCreditHealth
 	origPlaceComputeIntensive := autoPilotPlaceComputeIntensive
+	origPlaceInventory := autoPilotPlaceInventory
 	t.Cleanup(func() {
 		autoPilotDrainOverloadedInventoryHosts = origDrain
 		autoPilotRebalanceQueuedRentalJobsToOnPrem = origOnPremRebalance
@@ -53,6 +61,7 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 		autoPilotFillReusableInstances = origFillReusable
 		autoPilotCheckProviderCreditHealth = origCreditHealth
 		autoPilotPlaceComputeIntensive = origPlaceComputeIntensive
+		autoPilotPlaceInventory = origPlaceInventory
 	})
 	autoPilotDrainOverloadedInventoryHosts = func(context.Context, *sql.DB, *config.Config, map[int64]struct{}, map[int64]struct{}) (int, error) {
 		return 0, nil
@@ -73,6 +82,16 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 	}
 	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
 		return jobs, 0
+	}
+	// Inventory placement does live SSH metric collection; neutralize it by
+	// default so inventory tests assert the "waiting" reason without probing
+	// real hosts. Tests exercising successful assignment inject their own.
+	if opts.placeInventory != nil {
+		autoPilotPlaceInventory = opts.placeInventory
+	} else {
+		autoPilotPlaceInventory = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+			return jobs, 0
+		}
 	}
 	return RunGroupedAutoPilotPass(ctx, database, scopedJobs)
 }
@@ -332,6 +351,72 @@ func TestRunGroupedAutoPilotPass_InventoryTaggedJobsBypassCloudPlanner(t *testin
 	}
 	if len(job.PlacementReasons) == 0 || job.PlacementReasons[len(job.PlacementReasons)-1] != inventoryAwaitingReason {
 		t.Fatalf("inventory placement_reasons did not end with %q: %v", inventoryAwaitingReason, job.PlacementReasons)
+	}
+}
+
+// TestRunGroupedAutoPilotPass_AssignsInventoryJobOnPrem is the regression test
+// for the daemon assigning inventory jobs on-prem itself. Previously the
+// autopilot pass only marked inventory jobs "waiting for on-prem host" and
+// relied on the interactive hostsync worker to assign them, so they sat
+// unplaced whenever no TUI was open. Now an inventory job an on-prem host can
+// take is assigned by the pass, counted in Placed, and carries no awaiting
+// reason.
+func TestRunGroupedAutoPilotPass_AssignsInventoryJobOnPrem(t *testing.T) {
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+
+	invID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "inventory job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU inventory: %v", err)
+	}
+	if err := db.SetJobTags(database, invID, []string{db.TagInventory}); err != nil {
+		t.Fatalf("SetJobTags inventory: %v", err)
+	}
+
+	// Inject a placement that assigns the job on-prem, standing in for the
+	// real on-prem scorer (which does live SSH metric collection).
+	placeInventory := func(database *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		placed := 0
+		remaining := make([]*db.Job, 0, len(jobs))
+		for _, j := range jobs {
+			if j == nil {
+				continue
+			}
+			assigned, assignErr := db.AssignJobHost(database, j.ID, "host-alpha")
+			if assignErr != nil || !assigned {
+				remaining = append(remaining, j)
+				continue
+			}
+			placed++
+		}
+		return remaining, placed
+	}
+
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil, withPlaceInventory(placeInventory))
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	if result.Placed != 1 {
+		t.Fatalf("Placed = %d, want 1", result.Placed)
+	}
+	if reason, blocked := result.BlockedReasons[invID]; blocked {
+		t.Fatalf("assigned inventory job should carry no blocked reason, got %q", reason)
+	}
+
+	job, err := db.GetJobByID(database, invID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "host-alpha" {
+		t.Fatalf("inventory job host = %q, want host-alpha", job.Host)
+	}
+	for _, r := range job.PlacementReasons {
+		if r == inventoryAwaitingReason {
+			t.Fatalf("assigned inventory job should not carry %q: %v", inventoryAwaitingReason, job.PlacementReasons)
+		}
 	}
 }
 

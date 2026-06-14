@@ -53,6 +53,7 @@ var autoPilotCheckProviderCreditHealth = CheckProviderCreditHealth
 var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
 var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
+var autoPilotPlaceInventory = placeInventoryOnPrem
 var autoPilotLaunchMoveIntentRetry = launchMoveIntentRetry
 var autoPilotDrainOverloadedInventoryHosts = drainOverloadedInventoryHosts
 var autoPilotRebalanceQueuedRentalJobsToOnPrem = rebalanceQueuedRentalJobsToOnPrem
@@ -199,14 +200,23 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		// headroom exhausted" reasons on cloud-eligible jobs) and never
 		// execute because the rentalScope filter at line 337 — and
 		// relaunch.go:1756/2041 — correctly exclude inventory jobs from
-		// cloud launches. Placement onto on-prem hosts happens in
-		// internal/app/hostsync/worker.go.
+		// cloud launches. The autopilot pass itself assigns them on-prem
+		// below (autoPilotPlaceInventory); the interactive hostsync worker
+		// (internal/app/hostsync/worker.go) remains a secondary path for
+		// when a TUI is open.
 		if job.HasTag(db.TagInventory) {
 			inventoryAwaiting = append(inventoryAwaiting, job)
 			continue
 		}
 		unplaced = append(unplaced, job)
 	}
+	// Assign inventory jobs to an eligible on-prem host in the always-on
+	// daemon pass. Only jobs no host can take remain to receive the
+	// "waiting for on-prem host" reason. Without this, inventory placement
+	// depended entirely on the interactive hostsync worker, so jobs sat
+	// unplaced whenever no TUI was open or its single sync goroutine was
+	// starved by a hung cloud sync.
+	inventoryAwaiting, inventoryPlaced := autoPilotPlaceInventory(database, cfg, inventoryAwaiting)
 	inventoryAwaitingReasons = persistInventoryAwaitingReasons(database, inventoryAwaiting)
 	if len(unplaced) == 0 {
 		rebalanceResult, rebErr := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
@@ -216,12 +226,14 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		})
 		if rebErr != nil {
 			return &GroupedAutoPilotResult{
+				Placed:        inventoryPlaced,
 				Launched:      moveRetryLaunches,
 				AutoReplanned: autoReplanned,
 				OverloadMoved: overloadMoved,
 			}, rebErr
 		}
 		return &GroupedAutoPilotResult{
+			Placed:        inventoryPlaced,
 			Rebalanced:    onPremRebalanced + len(rebalanceResult.Moves),
 			Launched:      moveRetryLaunches,
 			AutoReplanned: autoReplanned,
@@ -230,6 +242,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	}
 
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
+	prePlaced += inventoryPlaced
 	if len(unplaced) == 0 {
 		rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
@@ -1280,6 +1293,69 @@ func placeComputeIntensiveOnPremBeforeRental(database *sql.DB, cfg *config.Confi
 		placed++
 		oplog.LogJob("auto_pilot.compute_intensive_onprem", job.ID, onPrem.Host,
 			oplog.WithDetailf("onprem_min=%.0f", onPrem.CompletionEst.Mean.Minutes()))
+	}
+	return remaining, placed
+}
+
+// placeInventoryOnPrem assigns inventory-tagged jobs to an eligible on-prem
+// host during the autopilot pass, so the always-on daemon — not just the
+// interactive hostsync worker — performs the assignment. Returns the
+// still-unplaced jobs (for the caller to mark "waiting for on-prem host")
+// and the number placed.
+//
+// Inventory jobs never spill to rental, so unlike
+// placeComputeIntensiveOnPremBeforeRental there is no rental-estimate
+// comparison: a job is either placed on an eligible host or left waiting.
+// Dispatch of the assigned job to its host queue then happens through the
+// same sync path that already serves daemon-assigned compute-intensive
+// on-prem jobs.
+func placeInventoryOnPrem(database *sql.DB, cfg *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+	if database == nil || len(jobs) == 0 {
+		return jobs, 0
+	}
+	hostNames, err := placement.LoadHostNames()
+	if err != nil || len(hostNames) == 0 {
+		return jobs, 0
+	}
+	metrics := placement.CollectMetrics(database, hostNames, 5*time.Second)
+	if len(metrics) == 0 {
+		return jobs, 0
+	}
+	onPremSource := &placement.OnPremSource{Metrics: metrics}
+	remaining := make([]*db.Job, 0, len(jobs))
+	placed := 0
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		constraints := placement.ConstraintsFromJob(job)
+		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Predictor:   predict,
+			Sources:     []placement.CandidateSource{onPremSource},
+			Database:    database,
+		})
+		if err != nil || plan == nil || plan.Unplaced {
+			remaining = append(remaining, job)
+			continue
+		}
+		pick := plan.Fast
+		if pick == nil {
+			pick = plan.Cheap
+		}
+		if pick == nil || pick.Kind != placement.CandidateOnPrem || pick.OnPrem == nil || pick.OnPrem.Host == "" {
+			remaining = append(remaining, job)
+			continue
+		}
+		assigned, err := db.AssignJobHost(database, job.ID, pick.OnPrem.Host)
+		if err != nil || !assigned {
+			remaining = append(remaining, job)
+			continue
+		}
+		placed++
+		oplog.LogJob("auto_pilot.inventory_onprem", job.ID, pick.OnPrem.Host,
+			oplog.WithDetailf("onprem_min=%.0f", pick.OnPrem.CompletionEst.Mean.Minutes()))
 	}
 	return remaining, placed
 }

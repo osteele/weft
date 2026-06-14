@@ -890,16 +890,24 @@ invariant PlacementReasonsExplainUnplaced {
 -- Autopilot interaction
 -- =========================================================================
 
--- The cloud autopilot (specs/campaign-lifecycle.allium § AutoPilotPass) is
--- hands-off for inventory-tagged unplaced jobs. Each autopilot pass:
+-- The cloud autopilot (specs/campaign-lifecycle.allium § AutoPilotPass)
+-- keeps inventory-tagged jobs away from the cloud planner, but is itself
+-- responsible for assigning them on-prem. Each autopilot pass:
 --   1. Partitions unplaced jobs by the "inventory" tag before invoking
 --      the cloud planner (BuildAutoPlacementPlan).
---   2. Routes inventory-tagged jobs to on-prem dispatch
---      (internal/app/hostsync/worker.go), which is responsible for
---      assigning them to a host queue.
+--   2. Assigns each inventory-tagged job to an eligible on-prem host
+--      using the on-prem scorer (placeInventoryOnPrem in
+--      internal/orchestration/autopilot.go). Inventory jobs never spill
+--      to rental, so this is on-prem-only with no rental comparison.
+--      Because the autopilot pass runs in the always-on daemon, this
+--      assignment does not depend on an interactive TUI being open. The
+--      interactive hostsync worker (internal/app/hostsync/worker.go
+--      checkUnplacedJobs) remains a secondary assigner for when a TUI is
+--      running, but is no longer the sole path.
 --   3. Surfaces "inventory-tagged: waiting for on-prem host" as the
---      authoritative blocked reason on each such job, both in
---      job.placement_reasons and in the pass's BlockedReasons map.
+--      authoritative blocked reason ONLY on jobs no on-prem host could
+--      take this pass, both in job.placement_reasons and in the pass's
+--      BlockedReasons map.
 --
 -- Letting the cloud planner see inventory-tagged jobs would build phantom
 -- launch groups (since rental_scope correctly rejects them at launch time),
