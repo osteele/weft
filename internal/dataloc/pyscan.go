@@ -322,10 +322,7 @@ func ScanPythonHFRefsForCommand(dir, command string) []string {
 	var files []string
 	seen := map[string]struct{}{}
 	for _, script := range scripts {
-		abs := script
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(dir, abs)
-		}
+		abs := resolveScriptPath(dir, command, script)
 		if _, err := os.Stat(abs); err != nil {
 			continue
 		}
@@ -396,6 +393,60 @@ func ExtractPythonScriptsInDir(dir, command string) []string {
 		scripts = append(scripts, script)
 	}
 	return scripts
+}
+
+// commandLeadingCD returns the directory named by a leading `cd <dir>` segment
+// in a shell command (the common `cd sub/dir && ...` form), or "" when the
+// command does not begin with a cd. Only a single literal directory token is
+// recognized — no shell expansion, globbing, variable substitution, or quoted
+// paths containing spaces.
+func commandLeadingCD(command string) string {
+	s := strings.TrimSpace(command)
+	if s != "cd" && !strings.HasPrefix(s, "cd ") {
+		return ""
+	}
+	end := len(s)
+	for _, sep := range []string{"&&", ";", "|", "\n"} {
+		if idx := strings.Index(s, sep); idx >= 0 && idx < end {
+			end = idx
+		}
+	}
+	fields := strings.Fields(s[:end])
+	if len(fields) < 2 {
+		return ""
+	}
+	target := strings.Trim(fields[1], `"'`)
+	if target == "" || target == "-" || strings.ContainsAny(target, "$*?~`") {
+		return ""
+	}
+	return target
+}
+
+// resolveScriptPath resolves a (possibly relative) script token from a shell
+// command to a path. Relative tokens are resolved against the job working dir
+// and — when the command begins with a literal `cd <dir> &&` — against that
+// directory too, so a script launched like `cd sub && uv run train.py` is
+// found. Returns the first candidate that exists on disk, else the working-dir
+// candidate (preserving prior behavior when nothing matches).
+func resolveScriptPath(dir, command, script string) string {
+	if filepath.IsAbs(script) {
+		return script
+	}
+	primary := filepath.Join(dir, script)
+	candidates := []string{primary}
+	if cd := commandLeadingCD(command); cd != "" {
+		base := cd
+		if !filepath.IsAbs(base) {
+			base = filepath.Join(dir, cd)
+		}
+		candidates = append(candidates, filepath.Join(base, script))
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return primary
 }
 
 func pythonModuleArg(tokens []string) string {

@@ -500,6 +500,59 @@ import torch
 	}
 }
 
+func TestScanScriptMetaResolvesThroughLeadingCD(t *testing.T) {
+	// FR3: `weft run 'cd sub && uv run train.py'` must read the script's
+	// [tool.weft] metadata even though the script lives in a cd'd subdirectory.
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "experiments", "probe")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "train.py"), []byte(`# /// script
+# [tool.weft]
+# gpu-mem = 80
+# image = "vllm/vllm-openai:latest"
+# inputs = ["hf:gpt2"]
+# ///
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	meta, err := ScanScriptMeta(dir, "cd experiments/probe && uv run train.py --models gpt2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected metadata via cd-resolved path, got nil")
+	}
+	if meta.GPUMemGB != 80 {
+		t.Errorf("GPUMemGB: got %d, want 80", meta.GPUMemGB)
+	}
+	if meta.Image != "vllm/vllm-openai:latest" {
+		t.Errorf("Image: got %q, want vllm/vllm-openai:latest", meta.Image)
+	}
+	assertStringSlice(t, "Inputs", meta.Inputs, []string{"hf:gpt2"})
+}
+
+func TestCommandLeadingCD(t *testing.T) {
+	cases := map[string]string{
+		"cd sub && uv run train.py": "sub",
+		"cd a/b/c && python x.py":   "a/b/c",
+		"  cd sub ; python x.py":    "sub",
+		`cd "sub" && python x.py`:   "sub",
+		"uv run train.py":           "",
+		"python cd.py":              "",
+		"cd $HOME && python x.py":   "",
+		"cd - && python x.py":       "",
+		"cd":                        "",
+	}
+	for command, want := range cases {
+		if got := commandLeadingCD(command); got != want {
+			t.Errorf("commandLeadingCD(%q) = %q, want %q", command, got, want)
+		}
+	}
+}
+
 func TestScanScriptMetaModuleForm(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "scripts", "exp032_gpt2_medium_probe_sweep.py")
