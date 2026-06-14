@@ -765,47 +765,45 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	if err := initSchema(db); err != nil {
+	migrated, err := initSchema(db)
+	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	if err := startupRepairFn(db); err != nil {
-		if IsDatabaseLocked(err) {
-			slog.Warn("startup repair deferred due database lock; continuing with existing schema/state", "error", err)
-		} else if IsDatabaseReadOnly(err) {
-			slog.Debug("startup repair deferred due read-only database; continuing with existing schema/state", "error", err)
-		} else {
-			db.Close()
-			return nil, fmt.Errorf("startup repair: %w", err)
+	if migrated {
+		if err := startupRepairFn(db); err != nil {
+			if IsDatabaseLocked(err) {
+				slog.Warn("startup repair deferred due database lock; continuing with existing schema/state", "error", err)
+			} else if IsDatabaseReadOnly(err) {
+				slog.Debug("startup repair deferred due read-only database; continuing with existing schema/state", "error", err)
+			} else {
+				db.Close()
+				return nil, fmt.Errorf("startup repair: %w", err)
+			}
 		}
 	}
 
 	return db, nil
 }
 
-// OpenForReading tries Open() first; when the database cannot be opened
-// writable because it is locked or read-only, it falls back to OpenReadOnly()
-// so that read-only commands can still display data.
+// OpenForReading opens the database for display commands. On a current schema
+// this does not run startup repair, so routine status/list commands do not take
+// the repair writer path. The returned handle is still writable because many
+// display commands opportunistically run a fast sync before rendering.
 //
-// After either path, the on-disk schema version (PRAGMA user_version) is
-// compared against this binary's currentSchemaVersion. A mismatch in
-// either direction is surfaced as ErrSchemaMismatch instead of returning
-// a stale or future-incompatible handle:
+// If the writable open path is unavailable because another process holds the
+// writer lock, OpenForReading falls back to a read-only handle so commands can
+// still display the last known state.
 //
-//   - If on-disk < binary: a migration is owed but did not run, typically
-//     because another process held the writer lock and Open()'s migration
-//     step was deferred to the read-only fallback. Without this guard,
-//     downstream queries would fail deep in execution with confusing
-//     "no such column" errors.
-//
-//   - If on-disk > binary: a newer weft has migrated the DB. Continuing
-//     would be unsafe; the user should upgrade.
+// After either path, the applied migration version is compared against this
+// binary's current schema version. A stale schema returns ErrSchemaMismatch
+// instead of letting later queries fail with missing-column errors.
 func OpenForReading() (*sql.DB, error) {
 	database, err := Open()
 	if err != nil {
 		if IsDatabaseLocked(err) || IsDatabaseReadOnly(err) {
-			slog.Debug("database not writable, opening read-only (startup repair deferred)", "error", err)
+			slog.Debug("database not writable, opening read-only", "error", err)
 		} else {
 			return nil, err
 		}
@@ -854,15 +852,15 @@ func SetDBPath(path string) func() {
 // initSchema brings the database up to the current schema version. The whole
 // schema is the squashed v1 baseline; later changes are versioned goose
 // migrations. See internal/db/migrations.
-func initSchema(db *sql.DB) error {
+func initSchema(db *sql.DB) (bool, error) {
 	ctx := context.Background()
 
 	pending, err := migrations.HasPending(ctx, db)
 	if err != nil {
-		return fmt.Errorf("check pending migrations: %w", err)
+		return false, fmt.Errorf("check pending migrations: %w", err)
 	}
 	if !pending {
-		return nil
+		return false, nil
 	}
 
 	// Snapshot a database that already holds data before migrating, so a bad
@@ -871,7 +869,10 @@ func initSchema(db *sql.DB) error {
 		backupBeforeMigration(db, int(migrations.Version(ctx, db)))
 	}
 
-	return migrations.Up(ctx, db)
+	if err := migrations.Up(ctx, db); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // databaseHasSchema reports whether the database already contains weft's
@@ -914,8 +915,9 @@ func dedupeArtifactsForUniqueIndexes(db *sql.DB) error {
 	return nil
 }
 
-// startupRepair runs on every Open(), not just during schema migration.
-// It performs data cleanup, repairs, and recreates views/triggers.
+// startupRepair runs after schema migration. It performs data cleanup, repairs,
+// and view validation that should happen when this binary has just brought an
+// older database up to the current schema.
 func startupRepair(db *sql.DB) error {
 	// Clean up stale attempt data: close duplicate open attempts and
 	// ensure orphaned cloud jobs have fresh unplaced attempts.

@@ -53,9 +53,9 @@ func TestSchemaMatchesGolden(t *testing.T) {
 	}
 }
 
-// TestValidateViews_DetectsBrokenView confirms validateViews (run at the end
-// of startupRepair on every Open) fails loudly when a view references a column
-// that does not exist — the symptom of a schema change missing its migration.
+// TestValidateViews_DetectsBrokenView confirms validateViews fails loudly when
+// a view references a column that does not exist — the symptom of a schema
+// change missing its migration.
 func TestValidateViews_DetectsBrokenView(t *testing.T) {
 	db := SetupTestDB(t)
 

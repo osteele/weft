@@ -288,7 +288,7 @@ func autopilotStateExitCode(view autopilotStateView) int {
 }
 
 func runAutopilotStatus(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
+	database, err := db.OpenForReading()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

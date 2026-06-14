@@ -217,15 +217,10 @@ func TestOpenRepairsPlaceholderProjects(t *testing.T) {
 	if _, err := database.Exec(`UPDATE jobs SET project = '.' WHERE id = ?`, jobID); err != nil {
 		t.Fatalf("seed placeholder job project: %v", err)
 	}
-	if err := database.Close(); err != nil {
-		t.Fatalf("close database: %v", err)
-	}
-
-	database, err = Open()
-	if err != nil {
-		t.Fatalf("reopen database: %v", err)
-	}
 	defer database.Close()
+	if err := startupRepair(database); err != nil {
+		t.Fatalf("startup repair: %v", err)
+	}
 
 	job, err := GetJobByID(database, jobID)
 	if err != nil {

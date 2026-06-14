@@ -146,7 +146,11 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	database, err := db.OpenForReading()
+	openDB := db.OpenForReading
+	if listCleanup > 0 {
+		openDB = db.Open
+	}
+	database, err := openDB()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}

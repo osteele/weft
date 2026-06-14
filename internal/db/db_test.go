@@ -2325,7 +2325,7 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 		t.Fatalf("insert job_cloud_attempts: %v", err)
 	}
 
-	if err := initSchema(database); err != nil {
+	if _, err := initSchema(database); err != nil {
 		t.Fatalf("initSchema: %v", err)
 	}
 
@@ -3767,13 +3767,9 @@ func TestStartupRepair_FixesCompletedCloudAttemptsMissingExitCode(t *testing.T) 
 		t.Fatalf("pre-condition job status = %q, want %q", job.Status, StatusCompleted)
 	}
 
-	database.Close()
-
-	database, err = Open()
-	if err != nil {
+	if err := startupRepair(database); err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
 
 	job, err = GetJobByID(database, jobID)
 	if err != nil {
@@ -3883,14 +3879,9 @@ func TestRepairOrphanedCompletedAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	database.Close()
-
-	// Re-open triggers startupRepair which includes repairOrphanedCompletedAttempts.
-	database, err = Open()
-	if err != nil {
+	if err := startupRepair(database); err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
 
 	job, err := GetJobByID(database, jobA)
 	if err != nil {
