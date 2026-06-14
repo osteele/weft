@@ -133,9 +133,28 @@ type Config struct {
 	// Autopilot holds singleton-autopilot policy knobs (intervention behavior).
 	Autopilot AutopilotConfig `yaml:"autopilot" toml:"autopilot"`
 
+	// Bug selects the backing issue tracker for `weft bug`.
+	Bug BugConfig `yaml:"bug" toml:"bug"`
+
 	// AutomapDirs lists local prefixes that should reuse the same relative path
 	// on remote hosts; defaults to ["~"].
 	AutomapDirs []string `yaml:"automap_dirs" toml:"automap_dirs"`
+}
+
+const (
+	BugTrackerGitHub = "github"
+	BugTrackerLocal  = "local"
+)
+
+// BugConfig configures the backing issue tracker for `weft bug`.
+type BugConfig struct {
+	// Tracker selects the bug tracker backend. Valid values are "github" and
+	// "local"; empty defaults to "github".
+	Tracker string `yaml:"tracker" toml:"tracker"`
+
+	// GitHubRepo optionally overrides the GitHub repository used by the gh CLI,
+	// in OWNER/REPO form. Empty lets gh infer the current repository.
+	GitHubRepo string `yaml:"github_repo" toml:"github_repo"`
 }
 
 // AutopilotConfig gates optional autopilot interventions that change a job's
@@ -983,6 +1002,23 @@ func (c *Config) AutoReplanStuckInventoryDispatchEnabled() bool {
 		return false
 	}
 	return c.Autopilot.AutoReplanStuckInventoryDispatch
+}
+
+// BugTracker returns the configured bug tracker backend. Empty configuration
+// defaults to GitHub.
+func (c *Config) BugTracker() (string, error) {
+	if c == nil {
+		return BugTrackerGitHub, nil
+	}
+	tracker := strings.ToLower(strings.TrimSpace(c.Bug.Tracker))
+	switch tracker {
+	case "", BugTrackerGitHub:
+		return BugTrackerGitHub, nil
+	case BugTrackerLocal:
+		return BugTrackerLocal, nil
+	default:
+		return "", fmt.Errorf("unknown bug tracker %q (expected github or local)", c.Bug.Tracker)
+	}
 }
 
 var (

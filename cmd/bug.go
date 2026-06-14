@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 )
@@ -28,6 +29,15 @@ var (
 	bugListAll           bool
 	bugCloseReason       string
 )
+
+type bugTracker interface {
+	Report(db.BugReport) error
+	Note(id, note string) error
+	List(all bool) error
+	Show(id string) error
+	Close(id, reason string) error
+	Reopen(id string) error
+}
 
 var bugCmd = &cobra.Command{
 	Use:   "bug",
@@ -76,6 +86,13 @@ var bugReopenCmd = &cobra.Command{
 	RunE:  runBugReopen,
 }
 
+var bugTrackerCmd = &cobra.Command{
+	Use:   "tracker [github|local]",
+	Short: "Show or set the Weft bug tracker backend",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runBugTrackerConfig,
+}
+
 func init() {
 	rootCmd.AddCommand(bugCmd)
 	bugCmd.AddCommand(bugReportCmd)
@@ -84,6 +101,7 @@ func init() {
 	bugCmd.AddCommand(bugShowCmd)
 	bugCmd.AddCommand(bugCloseCmd)
 	bugCmd.AddCommand(bugReopenCmd)
+	bugCmd.AddCommand(bugTrackerCmd)
 
 	bugReportCmd.Flags().StringVar(&bugReportTitle, "title", "", "bug title")
 	bugReportCmd.Flags().StringVar(&bugReportKind, "kind", "bug", "bug kind")
@@ -102,12 +120,6 @@ func init() {
 }
 
 func runBugReport(_ *cobra.Command, args []string) error {
-	database, err := db.OpenBugDB()
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-
 	title := strings.TrimSpace(bugReportTitle)
 	if title == "" {
 		title = strings.TrimSpace(strings.Join(args, " "))
@@ -116,7 +128,11 @@ func runBugReport(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	bug, created, err := db.ReportBug(database, db.BugReport{
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.Report(db.BugReport{
 		Title:       title,
 		Kind:        bugReportKind,
 		Scope:       bugReportScope,
@@ -129,6 +145,100 @@ func runBugReport(_ *cobra.Command, args []string) error {
 		Detail:      bugReportDetail,
 		Note:        bugReportNote,
 	})
+}
+
+func runBugNote(_ *cobra.Command, args []string) error {
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.Note(args[0], strings.TrimSpace(strings.Join(args[1:], " ")))
+}
+
+func runBugList(_ *cobra.Command, _ []string) error {
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.List(bugListAll)
+}
+
+func runBugShow(_ *cobra.Command, args []string) error {
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.Show(args[0])
+}
+
+func runBugClose(_ *cobra.Command, args []string) error {
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.Close(args[0], bugCloseReason)
+}
+
+func runBugReopen(_ *cobra.Command, args []string) error {
+	tracker, err := currentBugTracker()
+	if err != nil {
+		return err
+	}
+	return tracker.Reopen(args[0])
+}
+
+func runBugTrackerConfig(_ *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		tracker, err := cfg.BugTracker()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Bug tracker: %s\n", tracker)
+		if strings.TrimSpace(cfg.Bug.GitHubRepo) != "" {
+			fmt.Printf("GitHub repo: %s\n", strings.TrimSpace(cfg.Bug.GitHubRepo))
+		}
+		return nil
+	}
+	if err := config.SetBugTrackerSetting(args[0]); err != nil {
+		return err
+	}
+	fmt.Printf("Bug tracker set to %s in %s\n", strings.ToLower(strings.TrimSpace(args[0])), config.ConfigPath())
+	return nil
+}
+
+func currentBugTracker() (bugTracker, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	tracker, err := cfg.BugTracker()
+	if err != nil {
+		return nil, err
+	}
+	switch tracker {
+	case config.BugTrackerLocal:
+		return localBugTracker{}, nil
+	case config.BugTrackerGitHub:
+		return newGitHubBugTracker(cfg.Bug.GitHubRepo), nil
+	default:
+		return nil, fmt.Errorf("unknown bug tracker %q", tracker)
+	}
+}
+
+type localBugTracker struct{}
+
+func (localBugTracker) Report(report db.BugReport) error {
+	database, err := db.OpenBugDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	bug, created, err := db.ReportBug(database, report)
 	if err != nil {
 		return err
 	}
@@ -140,17 +250,16 @@ func runBugReport(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runBugNote(_ *cobra.Command, args []string) error {
+func (localBugTracker) Note(idText, note string) error {
 	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	id, err := db.ParseBugID(args[0])
+	id, err := db.ParseBugID(idText)
 	if err != nil {
 		return err
 	}
-	note := strings.TrimSpace(strings.Join(args[1:], " "))
 	if err := db.AddBugNote(database, id, note); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("bug %s not found", db.FormatBugID(id))
@@ -161,13 +270,13 @@ func runBugNote(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runBugList(_ *cobra.Command, _ []string) error {
+func (localBugTracker) List(all bool) error {
 	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	bugs, err := db.ListBugs(database, bugListAll)
+	bugs, err := db.ListBugs(database, all)
 	if err != nil {
 		return err
 	}
@@ -181,13 +290,13 @@ func runBugList(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func runBugShow(_ *cobra.Command, args []string) error {
+func (localBugTracker) Show(idText string) error {
 	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	id, err := db.ParseBugID(args[0])
+	id, err := db.ParseBugID(idText)
 	if err != nil {
 		return err
 	}
@@ -213,17 +322,17 @@ func runBugShow(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runBugClose(_ *cobra.Command, args []string) error {
+func (localBugTracker) Close(idText, reason string) error {
 	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	id, err := db.ParseBugID(args[0])
+	id, err := db.ParseBugID(idText)
 	if err != nil {
 		return err
 	}
-	if err := db.CloseBug(database, id, bugCloseReason); err != nil {
+	if err := db.CloseBug(database, id, reason); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("open bug %s not found", db.FormatBugID(id))
 		}
@@ -233,13 +342,13 @@ func runBugClose(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-func runBugReopen(_ *cobra.Command, args []string) error {
+func (localBugTracker) Reopen(idText string) error {
 	database, err := db.OpenBugDB()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-	id, err := db.ParseBugID(args[0])
+	id, err := db.ParseBugID(idText)
 	if err != nil {
 		return err
 	}

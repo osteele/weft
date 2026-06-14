@@ -601,17 +601,31 @@ This command:
 
 ### weft bug
 
-Record and inspect local Weft bug reports. Bug reports are stored in
-`~/.config/weft/bugs.db`, a small SQLite database that is separate from the
-main jobs database, and use `wb<id>` identifiers. The command is intended to
-remain usable when `~/.config/weft/jobs.db` has a schema mismatch or another
-job-database failure. Bug reports are for Weft runtime defects and invariant
-violations, not for normal job failures or feature requests.
+Record and inspect Weft bug reports. By default, `weft bug` uses GitHub issues
+through the `gh` CLI and uses GitHub issue numbers (`#123`). Configure the
+legacy local tracker to keep reports in `~/.config/weft/bugs.db`, a small
+SQLite database that is separate from the main jobs database and uses `wb<id>`
+identifiers:
+
+```toml
+[bug]
+tracker = "local"
+```
+
+You can also set it from the CLI:
+
+```bash
+weft bug tracker local
+weft bug tracker github
+```
+
+Bug reports are for Weft runtime defects and invariant violations, not for
+normal job failures or feature requests.
 
 Older bug records that were written to `jobs.db` are imported into `bugs.db`
-the first time `weft bug` opens the standalone bug database. Imported records
-keep their original detail and notes, and receive an import note with the
-legacy bug id.
+the first time `weft bug` opens the standalone bug database in local-tracker
+mode. Imported records keep their original detail and notes, and receive an
+import note with the legacy bug id.
 
 ```bash
 weft bug report --title "runner pending job is missing queue payload" \
@@ -622,19 +636,19 @@ weft bug report --title "runner pending job is missing queue payload" \
   --host studio \
   --detail "raw maintainer details"
 
-weft bug note wb123 "additional context from a later observation"
+weft bug note #123 "additional context from a later observation"
 weft bug list
 weft bug list --all
-weft bug show wb123
-weft bug close wb123 --reason "fixed in e95f1f4e"
-weft bug reopen wb123
+weft bug show #123
+weft bug close #123 --reason "fixed in e95f1f4e"
+weft bug reopen #123
 ```
 
 `report` returns a bug number. If another open bug has the same fingerprint,
-Weft updates that bug instead of creating a duplicate, increments its occurrence
-count, and refreshes the stored context. If the fingerprint belongs to a closed
-bug, `report` fails and tells you to reopen that bug or choose a different
-fingerprint.
+Weft updates that bug instead of creating a duplicate. If the fingerprint
+belongs to a closed bug, `report` fails and tells you to reopen that bug or
+choose a different fingerprint. The local tracker also increments an occurrence
+count and refreshes the stored context.
 
 Important fields:
 
@@ -648,8 +662,9 @@ Important fields:
   failures that should not be shown as normal user remediation advice
 
 When Weft detects an internal invariant failure that might otherwise mislead
-users, status output may show a concise `Weft bug wb123` message instead of raw
-implementation details. Use `weft bug show wb123` for the maintainer record.
+users, status output may show a concise `Weft bug #123` or `Weft bug wb123`
+message instead of raw implementation details. Use `weft bug show <id>` for the
+maintainer record.
 
 ### weft job inspect / diff
 

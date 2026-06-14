@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,11 +9,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
 func TestBugCommandsLifecycle(t *testing.T) {
 	db.SetupTestBugDB(t)
+	setupLocalBugTrackerConfig(t)
 	restoreBugFlags(t)
 
 	bugReportScope = "infrastructure"
@@ -79,6 +82,7 @@ func TestBugCommandsLifecycle(t *testing.T) {
 
 func TestBugReportDoesNotOpenMainJobsDB(t *testing.T) {
 	bugDB := db.SetupTestBugDB(t)
+	setupLocalBugTrackerConfig(t)
 	restoreBugFlags(t)
 
 	jobsPath := filepath.Join(t.TempDir(), "jobs.db")
@@ -102,6 +106,71 @@ func TestBugReportDoesNotOpenMainJobsDB(t *testing.T) {
 	}
 	if len(bugs) != 1 {
 		t.Fatalf("len(bugs) = %d, want 1", len(bugs))
+	}
+}
+
+func TestGitHubBugReportCreatesIssueWithMetadata(t *testing.T) {
+	restoreBugFlags(t)
+	var calls [][]string
+	oldRun := runGitHubCLI
+	runGitHubCLI = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(joined, "issue list"):
+			return []byte(`[]`), nil
+		case strings.HasPrefix(joined, "label create"):
+			return []byte{}, nil
+		case strings.HasPrefix(joined, "issue create"):
+			return []byte("https://github.com/osteele/weft/issues/42\n"), nil
+		default:
+			t.Fatalf("unexpected gh call: %v", args)
+			return nil, nil
+		}
+	}
+	t.Cleanup(func() { runGitHubCLI = oldRun })
+
+	report := db.BugReport{
+		Title:       "github backed bug",
+		Kind:        "invariant",
+		Scope:       "infrastructure",
+		Fingerprint: "unit.github.report",
+		Detail:      "maintainer detail",
+	}
+	out := captureStdout(t, func() {
+		if err := newGitHubBugTracker("osteele/weft").Report(report); err != nil {
+			t.Fatalf("Report: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Reported #42: github backed bug") {
+		t.Fatalf("report output = %q", out)
+	}
+
+	var createArgs []string
+	for _, args := range calls {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "create" {
+			createArgs = args
+			break
+		}
+	}
+	if createArgs == nil {
+		t.Fatalf("missing issue create call: %#v", calls)
+	}
+	body := strings.Join(createArgs, "\n")
+	for _, want := range []string{"<!-- weft-bug -->", "<!-- weft-bug-fingerprint:unit.github.report -->", "--repo\nosteele/weft"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("issue create args missing %q:\n%v", want, createArgs)
+		}
+	}
+}
+
+func setupLocalBugTrackerConfig(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	restore := config.SetConfigPathsForTesting(filepath.Join(dir, "config.toml"), filepath.Join(dir, "config.yaml"))
+	t.Cleanup(restore)
+	if err := config.SetBugTrackerSetting(config.BugTrackerLocal); err != nil {
+		t.Fatalf("SetBugTrackerSetting: %v", err)
 	}
 }
 

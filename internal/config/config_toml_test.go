@@ -66,6 +66,39 @@ func TestLoadFallsBackToLegacyYAMLConfig(t *testing.T) {
 	}
 }
 
+func TestBugTrackerDefaultAndOverride(t *testing.T) {
+	dir := t.TempDir()
+	restore := SetConfigPathsForTesting(filepath.Join(dir, "config.toml"), filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker, err := cfg.BugTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker != BugTrackerGitHub {
+		t.Fatalf("default bug tracker = %q, want %q", tracker, BugTrackerGitHub)
+	}
+
+	if err := SetBugTrackerSetting(BugTrackerLocal); err != nil {
+		t.Fatalf("SetBugTrackerSetting: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker, err = cfg.BugTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker != BugTrackerLocal {
+		t.Fatalf("configured bug tracker = %q, want %q", tracker, BugTrackerLocal)
+	}
+}
+
 func TestLoadTOMLDecodesNestedVastaiR2Config(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "config.toml")

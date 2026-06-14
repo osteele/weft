@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
 	toml "github.com/pelletier/go-toml"
@@ -124,6 +125,28 @@ func SetProviderEnabledSetting(provider cloud.Provider, enabled *bool) error {
 			return nil
 		}
 		tree.SetPath(path, *enabled)
+		return nil
+	})
+}
+
+// SetBugTrackerSetting updates bug.tracker in the global TOML config. Empty
+// removes the key so the compiled default applies.
+func SetBugTrackerSetting(tracker string) error {
+	normalized := strings.ToLower(strings.TrimSpace(tracker))
+	switch normalized {
+	case "", BugTrackerGitHub, BugTrackerLocal:
+	default:
+		return fmt.Errorf("unknown bug tracker %q (expected github or local)", tracker)
+	}
+	return UpdateGlobalTOML(func(tree *toml.Tree) error {
+		path := []string{"bug", "tracker"}
+		if normalized == "" {
+			if err := tree.DeletePath(path); err != nil && err.Error() != "no such key to delete" {
+				return fmt.Errorf("delete bug.tracker: %w", err)
+			}
+			return nil
+		}
+		tree.SetPath(path, normalized)
 		return nil
 	})
 }
