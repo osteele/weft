@@ -231,6 +231,68 @@ var cudaPackages = []string{
 	"jax", "jaxlib", "tensorflow", "vllm", "sglang",
 }
 
+// heavyDepInstalledGB approximates the installed footprint (venv plus a share of
+// the uv cache) of large ML frameworks. Used to add disk headroom for deps
+// declared only on the job command — PEP-723 inline `dependencies` or
+// `uv run --with` — which never appear in uv.lock and so are invisible to the
+// manifest/lockfile-based env estimate.
+var heavyDepInstalledGB = map[string]int{
+	"torch":      8,
+	"vllm":       14, // vllm wheel + flashinfer/xformers on top of torch
+	"sglang":     14,
+	"tensorflow": 6,
+	"jax":        3,
+	"jaxlib":     4,
+}
+
+// canonicalDepName extracts the lowercase package name from a dependency spec
+// like "torch==2.4.0", "vllm>=0.5", or "nvidia-cudnn-cu12[extra]".
+func canonicalDepName(spec string) string {
+	s := strings.ToLower(strings.TrimSpace(spec))
+	for i, r := range s {
+		if !(r == '-' || r == '_' || r == '.' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+// commandDepHeadroomGB returns extra disk headroom (GB) for heavy ML frameworks
+// declared on a job command via PEP-723 inline `dependencies` or `uv run --with`.
+// Such deps are not in uv.lock, so the manifest/lockfile env estimate misses
+// them entirely — the gap that sized a vLLM-in-PEP-723 job for only its tiny
+// model input and then ran out of disk installing the env. Deduplicated across
+// the group's jobs (one shared venv per instance). A dep also present in
+// pyproject/uv.lock would be counted twice, but over-provisioning disk is cheap
+// relative to a disk_full failure, and redundant script+project declaration is
+// rare.
+func commandDepHeadroomGB(group InstanceGroup) int {
+	seen := map[string]bool{}
+	total := 0
+	consider := func(raw string) {
+		name := canonicalDepName(raw)
+		if name == "" || seen[name] {
+			return
+		}
+		if gb, ok := heavyDepInstalledGB[name]; ok {
+			seen[name] = true
+			total += gb
+		}
+	}
+	for _, job := range group.Jobs {
+		if job == nil {
+			continue
+		}
+		for _, d := range dataloc.ScanScriptDependencies(job.WorkingDir, job.Command) {
+			consider(d)
+		}
+		for _, d := range dataloc.ScanUVRunWith(job.Command) {
+			consider(d.Name)
+		}
+	}
+	return total
+}
+
 // EstimateGroupDisk computes the required disk space in GB for an instance group
 // based on the deduplicated HF input footprint, deduplicated uv sync footprint,
 // explicit runtime headroom, and fixed project overhead. Returns at least
@@ -255,8 +317,13 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	}
 	unresolvedFallbackBytes := int64(len(unresolved)) * UnresolvedHFFallbackGB * 1_000_000_000
 
+	// Heavy frameworks declared only on the command (PEP-723 deps / uv --with)
+	// are not in uv.lock, so estimateGroupUVBytes cannot see them. Detect them
+	// here so the CUDA venv overhead applies even without pyproject deps.
+	cmdHeavyGB := commandDepHeadroomGB(group)
+
 	overhead := BaseOverheadGB + imageOverheadGB(group.Image)
-	if hasCUDAPackages(group.SourceDirs()) {
+	if hasCUDAPackages(group.SourceDirs()) || cmdHeavyGB > 0 {
 		if isPyTorchImage(group.Image) {
 			overhead += CUDAOverheadWithPyTorchImageGB
 		} else {
@@ -271,6 +338,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
 	inputDiskGB += overhead
+	inputDiskGB += cmdHeavyGB
 	inputDiskGB += groupRuntimeDiskGB(group)
 
 	// Use the larger of history-based and input-based estimates.

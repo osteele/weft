@@ -36,6 +36,48 @@ func TestEstimateGroupDisk_MinFloor(t *testing.T) {
 	}
 }
 
+func TestCommandDepHeadroomGB_UVRunWithDedup(t *testing.T) {
+	// FR4: heavy frameworks named via `uv run --with` are not in uv.lock, so
+	// they must contribute explicit headroom, deduplicated across jobs.
+	group := InstanceGroup{Jobs: []*db.Job{
+		{ID: 1, Command: "uv run --with vllm --with torch bench.py"},
+		{ID: 2, Command: "uv run --with torch other.py"},
+	}}
+	got := commandDepHeadroomGB(group)
+	want := heavyDepInstalledGB["vllm"] + heavyDepInstalledGB["torch"]
+	if got != want {
+		t.Fatalf("commandDepHeadroomGB = %d, want %d (vllm+torch, torch deduped)", got, want)
+	}
+}
+
+func TestCommandDepHeadroomGB_FromPEP723Script(t *testing.T) {
+	// FR4: the reported case — vLLM declared in a PEP-723 block, not pyproject.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bench.py"), []byte(`# /// script
+# dependencies = ["vllm>=0.5", "numpy"]
+# ///
+print("bench")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 1, Command: "uv run bench.py", WorkingDir: dir}}}
+	if got := commandDepHeadroomGB(group); got != heavyDepInstalledGB["vllm"] {
+		t.Fatalf("commandDepHeadroomGB = %d, want %d", got, heavyDepInstalledGB["vllm"])
+	}
+}
+
+func TestEstimateGroupDisk_CommandHeavyDepsExceedFloor(t *testing.T) {
+	// vllm+sglang+torch headroom plus CUDA overhead must push above the 50GB
+	// floor, where previously a tiny model input left the env undersized.
+	group := InstanceGroup{Jobs: []*db.Job{
+		{ID: 1, Command: "uv run --with vllm --with sglang --with torch bench.py"},
+	}}
+	disk, _ := EstimateGroupDisk(group, nil, nil)
+	if disk <= DefaultMinDiskGB {
+		t.Fatalf("disk = %d, want > %d for a vllm+sglang+torch env", disk, DefaultMinDiskGB)
+	}
+}
+
 func TestEstimateRuntimeDiskGB_DoesNotInferFromCommand(t *testing.T) {
 	job := &db.Job{ID: 1, Command: "uv sync --project scripts/vllm-profiling && python bench.py"}
 	if disk := EstimateRuntimeDiskGB(job); disk != 0 {
