@@ -72,13 +72,13 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			},
 		},
 		{
-			name: "daemon placement pending is waiting",
+			name: "placement pending is waiting",
 			job: &db.Job{
 				ID:               7,
 				Status:           db.StatusQueued,
-				PlacementReasons: []string{"daemon placement pending"},
+				PlacementReasons: []string{"placement pending"},
 			},
-			want:   "daemon placement pending",
+			want:   "placement pending",
 			kind:   KindWaiting,
 			source: SourcePlacement,
 		},

@@ -72,7 +72,7 @@ func TestShellQuote(t *testing.T) {
 }
 
 func TestFastSubmitPendingReasonForRecentOnPrem(t *testing.T) {
-	const current = "daemon placement pending"
+	const current = "placement pending"
 	unplaced := &placement.PlacementPlan{Unplaced: true}
 
 	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{"EXP-127"}, true, unplaced); got != current {

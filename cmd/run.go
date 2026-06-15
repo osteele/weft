@@ -1120,7 +1120,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
 		var placementResult *placement.PlacementResult
 		var placementPlan *placement.PlacementPlan
-		autoPlacementPendingReason := "daemon placement pending"
+		autoPlacementPendingReason := "placement pending"
 		autoPlacedFromDB := false
 
 		if host == "" {

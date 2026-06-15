@@ -104,7 +104,7 @@ entity Job {
     -- (HasPrefix "no local host matched " / matches `^\d+ hosts?: `) are
     -- expected hand-offs to autopilot, not blockers, and SHOULD be hidden
     -- from at-a-glance "blocked:" labels. Routine scheduler handoff states
-    -- such as "daemon placement pending" may be shown as "waiting:" instead.
+    -- such as "placement pending" may be shown as "waiting:" instead.
     -- They remain in the underlying list for diagnostic detail views.
     placement_reasons: List<String>
     cloud_instance: CloudInstance?

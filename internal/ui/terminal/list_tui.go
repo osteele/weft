@@ -690,7 +690,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else if len(m.jobs) == 0 {
 			if !m.quickLaunchStatusProtected() {
-				m.statusMessage = "No jobs match this view."
+				// The empty-state message renders in the body, not the status area.
+				m.statusMessage = ""
 			}
 		} else {
 			if !m.quickLaunchStatusProtected() {
@@ -1330,21 +1331,26 @@ func (m listTUIModel) groupedView() string {
 	}
 
 	var b strings.Builder
-	title := fmt.Sprintf("%s (%d)", m.displayTitle(), len(m.jobs))
+	title := fmt.Sprintf("%s (%d) • group:%s", m.displayTitle(), len(m.jobs), listGroupModeLabel(m.effectiveGroupMode()))
 	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
 	b.WriteString("\n")
 
 	groupedJobs := m.groupedJobsWithAutoReasons()
 	rows := m.groupedRows
-	if len(rows) == 0 {
-		rows = []groupedStatusRow{{text: "None"}}
-	}
 
 	layout := m.buildGroupedViewLayout(rows, groupedJobs)
 	selectedRow := m.selectedGroupedRow()
 	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
 	rowWidth := m.width
 	bodyLinesWritten := 0
+	if len(rows) == 0 {
+		// Empty view: the message goes in the body — under the title, separated
+		// by a blank line — where jobs would otherwise be listed.
+		b.WriteString("\n")
+		b.WriteString(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateBaseText(), m.width)))
+		b.WriteString("\n")
+		bodyLinesWritten = 2
+	}
 	for _, row := range layout.visibleRows {
 		line := truncateDisplayWidth(row.text, rowWidth)
 		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
@@ -1676,11 +1682,13 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 		return ""
 	}
 	autoState := autopilotFooterState(m.autopilotPaused)
-	line := "group:" + listGroupModeLabel(m.effectiveGroupMode())
+	// The group-mode indicator lives on the title line; the controls line is
+	// keyboard shortcuts only.
+	line := ""
 	if m.isStatusGroupedView() {
-		line += fmt.Sprintf("  %s (%s)", listKeyGroupedAuto.footerToken(), autoState)
+		line = fmt.Sprintf("%s (%s)  ", listKeyGroupedAuto.footerToken(), autoState)
 	}
-	line += "  " + listKeyRefresh.footerToken()
+	line += listKeyRefresh.footerToken()
 	if m.selectedGroupedJob() != nil {
 		line += "  " + listKeyAttempts.footerToken()
 		line += "  " + listKeyKillCancel.footerToken()
@@ -1867,9 +1875,6 @@ func (m *listTUIModel) handleGroupedStatusClick(y int) tea.Cmd {
 		return nil
 	}
 	rows := m.groupedRows
-	if len(rows) == 0 {
-		rows = []groupedStatusRow{{text: "None"}}
-	}
 	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
 	if m.isUJGroupedView() && layout.daemonActionable && y == layout.daemonStatusY {
 		if m.daemonRestartInProgress {
@@ -1974,9 +1979,6 @@ func (m *listTUIModel) selectGroupedMouseRow(y int) {
 
 func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
 	rows := m.groupedRows
-	if len(rows) == 0 {
-		rows = []groupedStatusRow{{text: "None"}}
-	}
 	return m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons()).visibleRows
 }
 
@@ -2762,11 +2764,18 @@ func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {
 }
 
 func (m listTUIModel) emptyStateText() string {
+	if m.statusMessage != "" && !m.syncInProgress() {
+		return "No jobs in this view. " + m.statusMessage
+	}
+	return m.emptyStateBaseText()
+}
+
+// emptyStateBaseText is the sync-aware empty-view message without the
+// statusMessage variant. The grouped view uses it directly because its footer
+// already carries the status and auto-pilot lines.
+func (m listTUIModel) emptyStateBaseText() string {
 	if m.syncInProgress() {
 		return "No jobs in this view yet. Waiting for startup sync and DB updates..."
-	}
-	if m.statusMessage != "" {
-		return "No jobs in this view. " + m.statusMessage
 	}
 	return "No jobs match this view."
 }

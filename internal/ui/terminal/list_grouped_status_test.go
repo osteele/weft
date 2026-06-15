@@ -333,17 +333,17 @@ func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaitin
 			Project:          "semantic-composition",
 			Description:      "EXP-050",
 			CreatedAt:        4_400,
-			PlacementReasons: []string{"daemon placement pending"},
+			PlacementReasons: []string{"placement pending"},
 		},
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	waitingWant := "  waiting: daemon placement pending (1)"
+	waitingWant := "  waiting: placement pending (1)"
 	if !strings.Contains(out, waitingWant) {
 		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
 	}
-	if strings.Contains(out, "blocked: daemon placement pending") {
-		t.Fatalf("daemon placement pending rendered as blocked:\n%s", out)
+	if strings.Contains(out, "blocked: placement pending") {
+		t.Fatalf("placement pending rendered as blocked:\n%s", out)
 	}
 }
 
@@ -1985,7 +1985,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}},
 		}
 		out := line(buildInstanceHealthFooter(failures, 120, now))
-		for _, want := range []string{"⚠", "Instances: 1 failed", "$0.37 wasted", "f diagnose"} {
+		for _, want := range []string{"⚠", "Instances: 1 failed", "latest 5m ago", "$0.37 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("footer line missing %q:\n%s", want, out)
 			}
@@ -2030,7 +2030,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			},
 		}
 		out := line(buildInstanceHealthFooter(failures, 160, now))
-		for _, want := range []string{"⚠ Clustered instance failures", "provider vastai", "(3)", "$0.31 wasted", "f diagnose"} {
+		for _, want := range []string{"⚠ Clustered instance failures", "provider vastai", "(3)", "latest 5m ago", "$0.31 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("clustered footer line missing %q:\n%s", want, out)
 			}

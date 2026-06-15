@@ -1524,6 +1524,7 @@ type recentFailedInstanceSummary struct {
 	wastedCents   int
 	clusterFactor string
 	headerSpan    string
+	newestAge     string
 	summaryParts  []string
 }
 
@@ -1546,12 +1547,16 @@ func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Ti
 	byOutcome := make(map[failureOutcome][]*db.Launch)
 	outcomeOf := make(map[int64]failureOutcome, total)
 	wastedCents := 0
+	var newest int64
 	for _, f := range renderable {
 		o := classifyFailureOutcome(f, failures)
 		byOutcome[o] = append(byOutcome[o], f)
 		outcomeOf[f.ID] = o
 		if f.ActualSpendCents > 0 {
 			wastedCents += f.ActualSpendCents
+		}
+		if e := launchEndedAt(f); e > newest {
+			newest = e
 		}
 	}
 	for o := range byOutcome {
@@ -1568,6 +1573,11 @@ func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Ti
 		}
 	}
 
+	newestAge := ""
+	if newest > 0 {
+		newestAge = shortRelativeTime(now.Unix() - newest)
+	}
+
 	return recentFailedInstanceSummary{
 		present:       true,
 		byOutcome:     byOutcome,
@@ -1576,6 +1586,7 @@ func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Ti
 		wastedCents:   wastedCents,
 		clusterFactor: failureClusterFactor(renderable),
 		headerSpan:    formatFailureSpan(renderable, now),
+		newestAge:     newestAge,
 		summaryParts:  summaryParts,
 	}
 }
@@ -1623,13 +1634,19 @@ func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now t
 		style = tuiDimStyle
 		parts = append(parts, headline)
 	}
+	if s.newestAge != "" {
+		parts = append(parts, "latest "+s.newestAge)
+	}
 	if s.wastedCents > 0 {
 		parts = append(parts, fmt.Sprintf("$%.2f wasted", float64(s.wastedCents)/100))
 	}
-	parts = append(parts, "f diagnose")
 
-	line := style.Render(truncateDisplayWidth(strings.Join(parts, " · "), width))
-	return instanceHealthFooterView{lines: []string{line}}
+	// The action hint is parenthesized so it reads as an aside, not another data
+	// field in the · -separated row. The key is sourced from the binding so it
+	// tracks any rebind; "diagnose" is a friendlier label than the binding action.
+	hint := "  (" + listKeyInstanceFailures.keys + ":diagnose)"
+	line := strings.Join(parts, " · ") + hint
+	return instanceHealthFooterView{lines: []string{style.Render(truncateDisplayWidth(line, width))}}
 }
 
 // appendRecentFailedInstanceRows renders the full inline "Recent failed

@@ -76,7 +76,7 @@ func Resolve(job *db.Job, opts Options) Result {
 func ReasonKind(reason string) Kind {
 	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
 	switch {
-	case cleaned == "daemon placement pending",
+	case cleaned == "placement pending",
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"):
 		return KindWaiting
