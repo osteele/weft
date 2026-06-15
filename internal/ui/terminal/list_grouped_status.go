@@ -58,6 +58,10 @@ type groupedStatusRenderOptions struct {
 	// collapse the FYI buckets behind an expand toggle (TUI) or render all
 	// buckets unconditionally (plain output).
 	interactive bool
+	// daemonStopped is true when the placement daemon is not running. It
+	// annotates the "placement pending" waiting reason so users know nothing
+	// will place the job until the daemon is restarted.
+	daemonStopped bool
 }
 
 type groupedStatusLaunchingETA struct {
@@ -392,7 +396,7 @@ func appendBlockedGroupedJobRows(
 		}
 		jobs := buckets[key]
 		rows = append(rows, groupedStatusRow{
-			text:      groupedStatusBlockedBucketHeader(key, jobs),
+			text:      groupedStatusBlockedBucketHeader(key, jobs, opts.daemonStopped),
 			isBlocked: true,
 			section:   section.key,
 		})
@@ -408,8 +412,12 @@ func appendBlockedGroupedJobRows(
 	return rows
 }
 
-func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) string {
-	text := fmt.Sprintf("  %s: %s (%d)", key.kind, key.reason, len(jobs))
+func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job, daemonStopped bool) string {
+	reason := key.reason
+	if daemonStopped && reason == blockreason.ReasonPlacementPending {
+		reason += " — daemon stopped"
+	}
+	text := fmt.Sprintf("  %s: %s (%d)", key.kind, reason, len(jobs))
 	if len(jobs) == 0 {
 		return text
 	}
@@ -1525,6 +1533,7 @@ type recentFailedInstanceSummary struct {
 	clusterFactor string
 	headerSpan    string
 	newestAge     string
+	newestAt      int64
 	summaryParts  []string
 }
 
@@ -1587,6 +1596,7 @@ func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Ti
 		clusterFactor: failureClusterFactor(renderable),
 		headerSpan:    formatFailureSpan(renderable, now),
 		newestAge:     newestAge,
+		newestAt:      newest,
 		summaryParts:  summaryParts,
 	}
 }
@@ -1616,7 +1626,19 @@ func instanceHealthHeadline(s recentFailedInstanceSummary) (text string, attenti
 	return "Instances: " + strings.Join(parts, " · "), true
 }
 
-func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now time.Time) instanceHealthFooterView {
+// clusterStaleAfter is how long a clustered fault stays red once the fleet has
+// recovered (an instance has reached running since the newest failure).
+const clusterStaleAfter = 12 * time.Hour
+
+// clusterStillRed reports whether a clustered fault should render red: within
+// the staleness window, or with no successful launch (reached running) since
+// the newest failure. Otherwise it has gone stale and renders dim.
+func clusterStillRed(newestAt, lastRunningAt int64, now time.Time) bool {
+	recoveredSince := lastRunningAt > newestAt
+	return now.Unix()-newestAt <= int64(clusterStaleAfter/time.Second) || !recoveredSince
+}
+
+func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now time.Time, lastRunningAt int64) instanceHealthFooterView {
 	s := summarizeRecentFailedInstances(failures, now)
 	if !s.present {
 		return instanceHealthFooterView{}
@@ -1625,9 +1647,15 @@ func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now t
 	parts := make([]string, 0, 3)
 	style := tuiWarnStyle
 	if s.clusterFactor != "" {
-		// A run sharing a machine/provider/GPU is a systemic fault, not bad luck.
-		style = tuiFailedStyle
-		parts = append(parts, fmt.Sprintf("⚠ Clustered instance failures — %s (%d)", s.clusterFactor, s.total))
+		// A run sharing a machine/provider/GPU is a systemic fault. The red
+		// colour alone carries the alert (no warning icon); it dims once the
+		// fault is stale.
+		if clusterStillRed(s.newestAt, lastRunningAt, now) {
+			style = tuiFailedStyle
+		} else {
+			style = tuiDimStyle
+		}
+		parts = append(parts, fmt.Sprintf("Clustered instance failures — %s (%d)", s.clusterFactor, s.total))
 	} else if headline, attention := instanceHealthHeadline(s); attention {
 		parts = append(parts, "⚠ "+headline)
 	} else {

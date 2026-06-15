@@ -149,6 +149,14 @@ func renderDaemonStatusLine(width int) string {
 	return renderDaemonStatusLineView(width, false).line
 }
 
+// placementDaemonStopped reports whether the placement daemon is not running,
+// so the unplaced "placement pending" reason can say so. On a status read
+// error it returns false (no annotation rather than a misleading one).
+func placementDaemonStopped() bool {
+	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
+	return err == nil && !status.Live
+}
+
 type daemonStatusLineView struct {
 	line       string
 	actionable bool

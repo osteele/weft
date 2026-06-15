@@ -347,6 +347,28 @@ func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaitin
 	}
 }
 
+func TestBuildGroupedStatusRows_PlacementPendingDaemonStopped(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{ID: 2583, Status: db.StatusQueued, Project: "p", Description: "x", CreatedAt: 4_400, PlacementReasons: []string{"placement pending"}},
+	}
+	render := func(daemonStopped bool) string {
+		rows := buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{now: now, daemonStopped: daemonStopped})
+		var b strings.Builder
+		for _, r := range rows {
+			b.WriteString(stripANSI(r.text) + "\n")
+		}
+		return b.String()
+	}
+
+	if out := render(true); !strings.Contains(out, "waiting: placement pending — daemon stopped (1)") {
+		t.Fatalf("stopped daemon should annotate the reason, got:\n%s", out)
+	}
+	if out := render(false); !strings.Contains(out, "waiting: placement pending (1)") || strings.Contains(out, "daemon stopped") {
+		t.Fatalf("running daemon should leave the reason plain, got:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_RendersInventoryHandoffAsWaiting(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
@@ -1972,7 +1994,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 	}
 
 	t.Run("quiet renders nothing", func(t *testing.T) {
-		if v := buildInstanceHealthFooter(nil, 120, now); len(v.lines) != 0 {
+		if v := buildInstanceHealthFooter(nil, 120, now, 0); len(v.lines) != 0 {
 			t.Fatalf("expected empty footer, got %+v", v)
 		}
 	})
@@ -1984,7 +2006,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			},
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}},
 		}
-		out := line(buildInstanceHealthFooter(failures, 120, now))
+		out := line(buildInstanceHealthFooter(failures, 120, now, 0))
 		for _, want := range []string{"⚠", "Instances: 1 failed", "latest 5m ago", "$0.37 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("footer line missing %q:\n%s", want, out)
@@ -2007,7 +2029,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 				2: {JobID: 2, Status: db.StatusCompleted},
 			},
 		}
-		out := line(buildInstanceHealthFooter(failures, 120, now))
+		out := line(buildInstanceHealthFooter(failures, 120, now, 0))
 		if strings.Contains(out, "⚠") {
 			t.Fatalf("recovered-only footer should not warn:\n%s", out)
 		}
@@ -2016,7 +2038,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 		}
 	})
 
-	t.Run("clustered is one red line", func(t *testing.T) {
+	t.Run("clustered is one line with no warning icon", func(t *testing.T) {
 		failures := &recentFailedInstances{
 			items: []*db.Launch{
 				{ID: 1, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "a", EndedAt: testInt64Ptr(9_700), ActualSpendCents: 11},
@@ -2029,13 +2051,41 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 				3: {JobID: 3, Status: db.StatusFailed},
 			},
 		}
-		out := line(buildInstanceHealthFooter(failures, 160, now))
-		for _, want := range []string{"⚠ Clustered instance failures", "provider vastai", "(3)", "latest 5m ago", "$0.31 wasted", "(f:diagnose)"} {
+		out := line(buildInstanceHealthFooter(failures, 160, now, 0))
+		if strings.Contains(out, "⚠") {
+			t.Fatalf("clustered line should carry no warning icon (colour conveys severity):\n%s", out)
+		}
+		for _, want := range []string{"Clustered instance failures", "provider vastai", "(3)", "latest 5m ago", "$0.31 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("clustered footer line missing %q:\n%s", want, out)
 			}
 		}
 	})
+}
+
+func TestClusterStillRed(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	within12h := now.Unix() - 3600 // 1h ago
+	over12h := now.Unix() - 50_000 // ~13.9h ago
+
+	cases := []struct {
+		name          string
+		newestAt      int64
+		lastRunningAt int64
+		want          bool
+	}{
+		{"recent fault stays red", within12h, now.Unix(), true},
+		{"old fault with no run since stays red", over12h, over12h - 100, true},
+		{"old fault with no successful launch ever stays red", over12h, 0, true},
+		{"old fault recovered since goes dim", over12h, over12h + 100, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clusterStillRed(tc.newestAt, tc.lastRunningAt, now); got != tc.want {
+				t.Fatalf("clusterStillRed = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster ensures

@@ -27,6 +27,11 @@ const (
 	KindWaiting Kind = "waiting"
 )
 
+// ReasonPlacementPending is the visible reason for an unplaced job awaiting
+// auto-placement. It is produced on the submit path and recognized by the
+// classifier and TUI, so it lives here as a single shared binding.
+const ReasonPlacementPending = "placement pending"
+
 // Options controls blocker resolution for a UI surface.
 type Options struct {
 	// AutoPilotReason is the latest in-memory blocker returned by an
@@ -76,7 +81,7 @@ func Resolve(job *db.Job, opts Options) Result {
 func ReasonKind(reason string) Kind {
 	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
 	switch {
-	case cleaned == "placement pending",
+	case cleaned == ReasonPlacementPending,
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"):
 		return KindWaiting
