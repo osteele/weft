@@ -49,24 +49,72 @@ func (v *usageView) Render(width, height int, snap Snapshot, _ bool) string {
 	b.WriteString(renderDailySpendSparkline(snap.LLMDailySpend, width-4))
 	b.WriteString("\n")
 
-	// Stubs for additional usage signals.
+	// Compute: GPU-hours accrued per window, split cloud vs on-prem.
 	b.WriteString("\n")
 	b.WriteString(titleStyle.Render("Compute · GPU-hours"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("  (not tracked yet — the jobs table has cost but not GPU-hours;"))
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("   compute by multiplying job duration × GPU count when added)"))
-	b.WriteString("\n")
+	b.WriteString(renderGPUHours(snap))
 
+	// Data transfer: HF downloads + R2 uploads (cloud jobs only — the byte
+	// counters are written by the cloud wrapper, not on-prem syncs).
 	b.WriteString("\n")
-	b.WriteString(titleStyle.Render("Data transfer · HF + R2"))
+	b.WriteString(titleStyle.Render("Data transfer · HF + R2") + dimStyle.Render("   (cloud jobs only)"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("  (not tracked yet — the sync layer has byte counters per"))
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("   transfer, but they aren't persisted to the DB)"))
-	b.WriteString("\n")
+	b.WriteString(renderTransfer(snap))
 
 	_ = height
+	return b.String()
+}
+
+// renderGPUHours shows GPU-hours over the 24h/7d/30d windows with a cloud +
+// on-prem split.
+func renderGPUHours(snap Snapshot) string {
+	windows := []struct {
+		label string
+		u     UsageRollup
+	}{
+		{"last 24h", snap.Usage24h},
+		{"last 7d", snap.Usage7d},
+		{"last 30d", snap.Usage30d},
+	}
+	if snap.Usage24h.GPUHoursTotal() == 0 &&
+		snap.Usage7d.GPUHoursTotal() == 0 &&
+		snap.Usage30d.GPUHoursTotal() == 0 {
+		return dimStyle.Render("  (none recorded)\n")
+	}
+	var b strings.Builder
+	for _, w := range windows {
+		b.WriteString(fmt.Sprintf("  %-9s %s   %s\n",
+			dimStyle.Render(w.label),
+			accentStyle.Render(fmt.Sprintf("%8.1f GPU-h", w.u.GPUHoursTotal())),
+			dimStyle.Render(fmt.Sprintf("(cloud %.1f · on-prem %.1f)",
+				w.u.GPUHoursCloud, w.u.GPUHoursOnprem))))
+	}
+	return b.String()
+}
+
+// renderTransfer shows HF download + R2 upload byte totals per window.
+func renderTransfer(snap Snapshot) string {
+	windows := []struct {
+		label string
+		u     UsageRollup
+	}{
+		{"last 24h", snap.Usage24h},
+		{"last 7d", snap.Usage7d},
+		{"last 30d", snap.Usage30d},
+	}
+	if snap.Usage24h.HFDownBytes == 0 && snap.Usage24h.R2UpBytes == 0 &&
+		snap.Usage7d.HFDownBytes == 0 && snap.Usage7d.R2UpBytes == 0 &&
+		snap.Usage30d.HFDownBytes == 0 && snap.Usage30d.R2UpBytes == 0 {
+		return dimStyle.Render("  (none recorded)\n")
+	}
+	var b strings.Builder
+	for _, w := range windows {
+		b.WriteString(fmt.Sprintf("  %-9s %s down · %s up\n",
+			dimStyle.Render(w.label),
+			accentStyle.Render(fmt.Sprintf("HF %8s", formatBytes(w.u.HFDownBytes))),
+			accentStyle.Render(fmt.Sprintf("R2 %8s", formatBytes(w.u.R2UpBytes)))))
+	}
 	return b.String()
 }
 
@@ -104,6 +152,21 @@ func formatTokens(n int64) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
+}
+
+// formatBytes renders a byte count in IEC units (KiB/MiB/GiB/TiB). Local to the
+// dashtabs package because the byte-formatters elsewhere are unexported.
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func renderDailySpendSparkline(days []llmusage.DaySpend, width int) string {

@@ -35,7 +35,22 @@ type Snapshot struct {
 	LLMUsage24h     []llmusage.FeatureUsage
 	LLMUsage7d      []llmusage.FeatureUsage
 	LLMDailySpend   []llmusage.DaySpend // last 30 days, newest first
+	Usage24h        UsageRollup
+	Usage7d         UsageRollup
+	Usage30d        UsageRollup
 }
+
+// UsageRollup holds consumption quantities over a single time window: GPU-hours
+// (split cloud vs on-prem) and transferred bytes (cloud jobs only).
+type UsageRollup struct {
+	GPUHoursCloud  float64
+	GPUHoursOnprem float64
+	HFDownBytes    int64 // HuggingFace download bytes (cache delta)
+	R2UpBytes      int64 // R2 upload bytes (results + workspace)
+}
+
+// GPUHoursTotal is the combined cloud + on-prem GPU-hours.
+func (u UsageRollup) GPUHoursTotal() float64 { return u.GPUHoursCloud + u.GPUHoursOnprem }
 
 // CloudInstances returns the union of LiveInstances and StaleInstances. Views
 // that don't care about the distinction (e.g. History) use this; Fleet uses
@@ -202,7 +217,32 @@ func LoadSnapshot(database *sql.DB, opts LoadOpts, logger *slog.Logger) Snapshot
 	} else {
 		snap.LLMDailySpend = days
 	}
+
+	// Consumption quantities (GPU-hours, transfer bytes) over the same windows
+	// the LLM section uses, plus a 30d window for the Usage view's trend.
+	snap.Usage24h = loadUsageRollup(database, now.Add(-24*time.Hour).Unix(), logger)
+	snap.Usage7d = loadUsageRollup(database, now.Add(-7*24*time.Hour).Unix(), logger)
+	snap.Usage30d = loadUsageRollup(database, now.Add(-30*24*time.Hour).Unix(), logger)
 	return snap
+}
+
+// loadUsageRollup reads GPU-hours and transfer bytes for one window, logging
+// and zeroing any individual query that fails.
+func loadUsageRollup(database *sql.DB, sinceUnix int64, logger *slog.Logger) UsageRollup {
+	var r UsageRollup
+	if cloud, onprem, err := db.SumGPUHoursSince(database, sinceUnix); err != nil {
+		logger.Debug("dashtabs: gpu-hours rollup", "err", err)
+	} else {
+		r.GPUHoursCloud = cloud
+		r.GPUHoursOnprem = onprem
+	}
+	if hf, r2, err := db.SumTransferBytesSince(database, sinceUnix); err != nil {
+		logger.Debug("dashtabs: transfer-bytes rollup", "err", err)
+	} else {
+		r.HFDownBytes = hf
+		r.R2UpBytes = r2
+	}
+	return r
 }
 
 // LoadSnapshotWithHosts is like LoadSnapshot but also takes a host list (e.g.
