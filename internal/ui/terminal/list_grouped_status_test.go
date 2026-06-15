@@ -1994,7 +1994,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 	}
 
 	t.Run("quiet renders nothing", func(t *testing.T) {
-		if v := buildInstanceHealthFooter(nil, 120, now, 0); len(v.lines) != 0 {
+		if v := buildInstanceHealthFooter(nil, 120, now); len(v.lines) != 0 {
 			t.Fatalf("expected empty footer, got %+v", v)
 		}
 	})
@@ -2006,7 +2006,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			},
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}},
 		}
-		out := line(buildInstanceHealthFooter(failures, 120, now, 0))
+		out := line(buildInstanceHealthFooter(failures, 120, now))
 		for _, want := range []string{"⚠", "Instances: 1 failed", "latest 5m ago", "$0.37 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("footer line missing %q:\n%s", want, out)
@@ -2029,7 +2029,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 				2: {JobID: 2, Status: db.StatusCompleted},
 			},
 		}
-		out := line(buildInstanceHealthFooter(failures, 120, now, 0))
+		out := line(buildInstanceHealthFooter(failures, 120, now))
 		if strings.Contains(out, "⚠") {
 			t.Fatalf("recovered-only footer should not warn:\n%s", out)
 		}
@@ -2051,7 +2051,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 				3: {JobID: 3, Status: db.StatusFailed},
 			},
 		}
-		out := line(buildInstanceHealthFooter(failures, 160, now, 0))
+		out := line(buildInstanceHealthFooter(failures, 160, now))
 		if strings.Contains(out, "⚠") {
 			t.Fatalf("clustered line should carry no warning icon (colour conveys severity):\n%s", out)
 		}
@@ -2063,29 +2063,38 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 	})
 }
 
-func TestClusterStillRed(t *testing.T) {
-	now := time.Unix(1_000_000, 0)
-	within12h := now.Unix() - 3600 // 1h ago
-	over12h := now.Unix() - 50_000 // ~13.9h ago
+func TestSummaryHasUnresolved(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failed := func(id int64) *db.Launch {
+		return &db.Launch{ID: id, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "x", EndedAt: testInt64Ptr(9_500)}
+	}
+	summary := func(items []*db.Launch, outcomes map[int64]db.LaunchJobOutcome) recentFailedInstanceSummary {
+		return summarizeRecentFailedInstances(&recentFailedInstances{items: items, jobOutcomeByLaunchID: outcomes}, now)
+	}
 
-	cases := []struct {
-		name          string
-		newestAt      int64
-		lastRunningAt int64
-		want          bool
-	}{
-		{"recent fault stays red", within12h, now.Unix(), true},
-		{"old fault with no run since stays red", over12h, over12h - 100, true},
-		{"old fault with no successful launch ever stays red", over12h, 0, true},
-		{"old fault recovered since goes dim", over12h, over12h + 100, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := clusterStillRed(tc.newestAt, tc.lastRunningAt, now); got != tc.want {
-				t.Fatalf("clusterStillRed = %v, want %v", got, tc.want)
-			}
+	t.Run("a failed job is unresolved", func(t *testing.T) {
+		s := summary([]*db.Launch{failed(1)}, map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}})
+		if !s.hasUnresolved() {
+			t.Fatal("a failed job should be unresolved")
+		}
+	})
+
+	t.Run("a dud (instance never ran a job) is unresolved", func(t *testing.T) {
+		s := summary([]*db.Launch{failed(1)}, nil)
+		if !s.hasUnresolved() {
+			t.Fatal("a dud should be unresolved")
+		}
+	})
+
+	t.Run("all chains recovered to a running launch is resolved", func(t *testing.T) {
+		s := summary([]*db.Launch{failed(1), failed(2)}, map[int64]db.LaunchJobOutcome{
+			1: {JobID: 1, Status: db.StatusCompleted},
+			2: {JobID: 2, Status: db.StatusRunning},
 		})
-	}
+		if s.hasUnresolved() {
+			t.Fatal("all-recovered failures should be resolved")
+		}
+	})
 }
 
 // TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster ensures

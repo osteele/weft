@@ -1325,21 +1325,6 @@ func SetLaunchProviderRunningAt(db *sql.DB, id int64, t time.Time) error {
 	return err
 }
 
-// LatestInstanceRunningAt returns the most recent time any launch's instance
-// reached the provider-running state, or 0 when none have. It marks fleet
-// recovery: a successful launch since a cluster of failures.
-func LatestInstanceRunningAt(db *sql.DB) (int64, error) {
-	var ts sql.NullInt64
-	err := db.QueryRow(`SELECT MAX(provider_running_at) FROM launches WHERE provider_running_at IS NOT NULL`).Scan(&ts)
-	if err != nil {
-		return 0, err
-	}
-	if !ts.Valid {
-		return 0, nil
-	}
-	return ts.Int64, nil
-}
-
 // SetLaunchProviderID sets the provider-neutral instance ID for a cloud instance.
 // Also stamps launched_at if it is still null, so that bootstrap-timeout rules
 // have an anchor even when the launching goroutine is wedged in a provider-

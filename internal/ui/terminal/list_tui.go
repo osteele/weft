@@ -113,7 +113,6 @@ type listTUIModel struct {
 	launchSpinner              spinner.Model
 	launchSpinnerRunning       bool
 	recentFailedInstances      *recentFailedInstances
-	lastInstanceRunningAt      int64
 	placementDaemonStopped     bool
 	hostMetricsByName          map[string]*hostinfo.Host
 	hostInfoByName             map[string]*db.CachedHostInfo
@@ -256,7 +255,6 @@ type listJobsLoadedMsg struct {
 	launchStageETAByName     map[string]groupedStatusLaunchingStageETA
 	launchStageEnteredAtByID map[int64]int64
 	recentFailedInstances    *recentFailedInstances
-	lastInstanceRunningAt    int64
 	placementDaemonStopped   bool
 	hostInfoByName           map[string]*db.CachedHostInfo
 	cordonedHostsByName      map[string]bool
@@ -644,7 +642,6 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launchStageETAByName = msg.launchStageETAByName
 		m.launchStageEnteredAtByID = msg.launchStageEnteredAtByID
 		m.recentFailedInstances = msg.recentFailedInstances
-		m.lastInstanceRunningAt = msg.lastInstanceRunningAt
 		m.placementDaemonStopped = msg.placementDaemonStopped
 		m.hostInfoByName = msg.hostInfoByName
 		m.cordonedHostsByName = msg.cordonedHostsByName
@@ -1430,7 +1427,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
-	instanceHealthLines := buildInstanceHealthFooter(m.recentFailedInstances, m.width, time.Now(), m.lastInstanceRunningAt).lines
+	instanceHealthLines := buildInstanceHealthFooter(m.recentFailedInstances, m.width, time.Now()).lines
 	if m.hideStatusArea {
 		statusLine = ""
 		sharedStatus.lines = nil
@@ -3006,8 +3003,6 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
 		overloadedHostsByName := loadOverloadedHostsByName(database, jobs)
 		autopilotPaused, autopilotPausedReason := autopilotPauseState(database)
-		// 0 on error keeps clusters red (fail toward showing the alert).
-		lastInstanceRunningAt, _ := db.LatestInstanceRunningAt(database)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
 			launchLiveByID:           launchLiveByID,
@@ -3021,7 +3016,6 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			launchStageETAByName:     stageETAByName,
 			launchStageEnteredAtByID: stageEnteredAtByID,
 			recentFailedInstances:    loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now()),
-			lastInstanceRunningAt:    lastInstanceRunningAt,
 			placementDaemonStopped:   placementDaemonStopped(),
 			hostInfoByName:           hostInfoByName,
 			cordonedHostsByName:      cordonedHostsByName,

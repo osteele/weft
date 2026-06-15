@@ -1533,7 +1533,6 @@ type recentFailedInstanceSummary struct {
 	clusterFactor string
 	headerSpan    string
 	newestAge     string
-	newestAt      int64
 	summaryParts  []string
 }
 
@@ -1596,7 +1595,6 @@ func summarizeRecentFailedInstances(failures *recentFailedInstances, now time.Ti
 		clusterFactor: failureClusterFactor(renderable),
 		headerSpan:    formatFailureSpan(renderable, now),
 		newestAge:     newestAge,
-		newestAt:      newest,
 		summaryParts:  summaryParts,
 	}
 }
@@ -1609,13 +1607,19 @@ type instanceHealthFooterView struct {
 	lines []string
 }
 
-// instanceHealthHeadline summarizes the attention buckets (failed / awaiting
-// placement / dud) for the collapsed token. When every abnormal termination
-// recovered, it reports the calmer "N instances recovered" with attention=false
-// so the caller can render it dim rather than as a warning.
+// attentionOutcomes are the buckets that mean a recent failure left a job
+// unable to run: it failed, is still awaiting placement, or wasted an instance
+// that never carried a job. The complement (replaced/running, succeeded) needs
+// no attention.
+var attentionOutcomes = []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureDud}
+
+// instanceHealthHeadline summarizes the attention buckets for the collapsed
+// token. When every abnormal termination recovered, it reports the calmer
+// "N instances recovered" with attention=false so the caller can render it dim
+// rather than as a warning.
 func instanceHealthHeadline(s recentFailedInstanceSummary) (text string, attention bool) {
-	parts := make([]string, 0, 3)
-	for _, o := range []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureDud} {
+	parts := make([]string, 0, len(attentionOutcomes))
+	for _, o := range attentionOutcomes {
 		if n := len(s.byOutcome[o]); n > 0 {
 			parts = append(parts, failureCountPhrase(o, n))
 		}
@@ -1626,19 +1630,18 @@ func instanceHealthHeadline(s recentFailedInstanceSummary) (text string, attenti
 	return "Instances: " + strings.Join(parts, " · "), true
 }
 
-// clusterStaleAfter is how long a clustered fault stays red once the fleet has
-// recovered (an instance has reached running since the newest failure).
-const clusterStaleAfter = 12 * time.Hour
-
-// clusterStillRed reports whether a clustered fault should render red: within
-// the staleness window, or with no successful launch (reached running) since
-// the newest failure. Otherwise it has gone stale and renders dim.
-func clusterStillRed(newestAt, lastRunningAt int64, now time.Time) bool {
-	recoveredSince := lastRunningAt > newestAt
-	return now.Unix()-newestAt <= int64(clusterStaleAfter/time.Second) || !recoveredSince
+// hasUnresolved reports whether any recent failure left a job unable to run.
+// False means every failure chain recovered to a running launch.
+func (s recentFailedInstanceSummary) hasUnresolved() bool {
+	for _, o := range attentionOutcomes {
+		if len(s.byOutcome[o]) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
-func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now time.Time, lastRunningAt int64) instanceHealthFooterView {
+func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now time.Time) instanceHealthFooterView {
 	s := summarizeRecentFailedInstances(failures, now)
 	if !s.present {
 		return instanceHealthFooterView{}
@@ -1647,13 +1650,11 @@ func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now t
 	parts := make([]string, 0, 3)
 	style := tuiWarnStyle
 	if s.clusterFactor != "" {
-		// A run sharing a machine/provider/GPU is a systemic fault. The red
-		// colour alone carries the alert (no warning icon); it dims once the
-		// fault is stale.
-		if clusterStillRed(s.newestAt, lastRunningAt, now) {
+		// A run sharing a machine/provider/GPU is a systemic fault. Red when any
+		// failure left a job unable to run; amber when every chain recovered to a
+		// running launch. The colour alone carries severity, so no warning icon.
+		if s.hasUnresolved() {
 			style = tuiFailedStyle
-		} else {
-			style = tuiDimStyle
 		}
 		parts = append(parts, fmt.Sprintf("Clustered instance failures — %s (%d)", s.clusterFactor, s.total))
 	} else if headline, attention := instanceHealthHeadline(s); attention {
