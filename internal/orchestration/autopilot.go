@@ -968,6 +968,32 @@ func finalizeUnplacedBlockedReasons(
 			}
 		}
 	}
+	// Attach a launch+reuse breakdown to jobs the run-rate gate blocked from
+	// launching. The gate's flat reason names only the budget verdict; when the
+	// running instances also genuinely refused the job (e.g. insufficient GPU
+	// memory or a class mismatch), probing them here recovers that second
+	// avenue so the TUI disclosure and weft diagnose show both reasons. An
+	// instance that could accept the job (busy-but-compatible) yields no reuse
+	// rejection, so placementFailureStructured returns Reuse-empty and the
+	// budget reason stays the whole story — no fabricated "couldn't accept"
+	// detail.
+	if structuredBlocked != nil {
+		for jobID, flat := range blockedReasons {
+			if _, done := structuredBlocked[jobID]; done {
+				continue
+			}
+			if !isRunRateBudgetReason(flat) {
+				continue
+			}
+			job, ok := remainingByID[jobID]
+			if !ok || job == nil {
+				continue
+			}
+			if s := placementFailureStructured(job, capacities, r2Client, flat); len(s.Reuse) > 0 {
+				structuredBlocked[jobID] = s
+			}
+		}
+	}
 	// Overlay observed outcomes on the structured breakdowns before they
 	// persist: recorded reuse failures beat re-probed entries, and the
 	// per-host on-prem rejection detail (previously oplog-only) rides along
@@ -1686,6 +1712,19 @@ func blockReasonBase(launch string) string {
 func isPlaceholderLaunchReason(s string) bool {
 	return strings.HasPrefix(s, noRentalHeadroomLaunchReason) ||
 		strings.HasPrefix(s, unclassifiedLaunchReason)
+}
+
+// isRunRateBudgetReason reports whether a flat blocked reason is the run-rate
+// (budget) gate's verdict — the launch-side blocker emitted when launching new
+// instances would breach the configured run-rate target. Unlike the
+// placeholders above this is an authoritative launch reason, not a safety-net
+// fallback, but finalizeUnplacedBlockedReasons still reattaches reuse detail to
+// it so the second operative reason (why running instances refused the job)
+// survives alongside the budget verdict. Matches the "no subset fits",
+// "headroom exhausted", and auto-launch variants.
+func isRunRateBudgetReason(s string) bool {
+	return strings.Contains(s, "run-rate target exceeded") ||
+		strings.Contains(s, "run-rate headroom exhausted")
 }
 
 func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {

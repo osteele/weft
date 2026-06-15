@@ -2089,3 +2089,125 @@ func TestFinalizeUnplacedBlockedReasons_DropsReuseOnlyNonCandidate(t *testing.T)
 		t.Fatalf("placement_blocked = %q, want empty", refreshed.PlacementBlockedJSON)
 	}
 }
+
+// A job the run-rate gate blocked from launching, whose running instances also
+// genuinely refuse it, must persist BOTH operative reasons: the budget verdict
+// as the launch blocker and the per-instance reuse rejections. Before this, the
+// gate's flat budget string was the only thing persisted, so the TUI had no
+// structured breakdown to expand and the "won't run on existing host" reason
+// was lost.
+func TestFinalizeUnplacedBlockedReasons_RunRateBlockedAttachesReuseBreakdown(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100_PCIE",
+		GPUClass: "A100",
+		GPUMemGB: 40,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	mem := 48
+	job.GPUClass = "A100"
+	job.GPUMemGB = &mem
+
+	runRate := "run-rate target exceeded (no subset fits): target $3.50/hr, current $3.42/hr + planned $4.36/hr = $7.78/hr (headroom $0.08/hr, cheapest group $4.36/hr)"
+	blockedReasons := map[int64]string{jobID: runRate}
+	structuredBlocked := map[int64]*blockreason.Structured{}
+
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
+		map[int64]string{}, nil, nil,
+		map[int64]*db.Job{jobID: job}, nil,
+		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	if got := blockedReasons[jobID]; got != runRate {
+		t.Fatalf("compact reason changed: got %q, want unchanged budget verdict", got)
+	}
+
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	s := blockreason.Parse(refreshed.PlacementBlockedJSON)
+	if s == nil {
+		t.Fatalf("placement_blocked did not decode: %q", refreshed.PlacementBlockedJSON)
+	}
+	if !s.IsPlacementFailure() {
+		t.Fatalf("expected an expandable placement failure, got %+v", s)
+	}
+	if !strings.Contains(s.Launch, "run-rate target exceeded") {
+		t.Fatalf("launch blocker = %q, want the budget verdict", s.Launch)
+	}
+	if len(s.Reuse) == 0 {
+		t.Fatalf("expected reuse rejections recovered by probing, got none")
+	}
+	if !strings.Contains(s.Reuse[0].Reason, "GPU memory insufficient") {
+		t.Fatalf("reuse rejection = %q, want GPU memory diagnostic", s.Reuse[0].Reason)
+	}
+}
+
+// When the run-rate gate blocks a launch but a running instance could actually
+// accept the job (compatible, merely busy), there is only one operative reason
+// — the budget verdict. The finalize step must not fabricate a reuse-side
+// breakdown in that case, leaving placement_blocked empty so the row stays a
+// plain, non-expandable budget blocker.
+func TestFinalizeUnplacedBlockedReasons_RunRateBlockedCompatibleInstanceStaysBudgetOnly(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100_SXM4",
+		GPUClass: "A100",
+		GPUMemGB: 80,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	mem := 48
+	job.GPUClass = "A100"
+	job.GPUMemGB = &mem
+
+	runRate := "run-rate target exceeded (no subset fits): target $3.50/hr, current $3.42/hr + planned $4.36/hr = $7.78/hr (headroom $0.08/hr, cheapest group $4.36/hr)"
+	blockedReasons := map[int64]string{jobID: runRate}
+	structuredBlocked := map[int64]*blockreason.Structured{}
+
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
+		map[int64]string{}, nil, nil,
+		map[int64]*db.Job{jobID: job}, nil,
+		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	if refreshed.PlacementBlockedJSON != "" {
+		t.Fatalf("placement_blocked = %q, want empty (budget-only blocker)", refreshed.PlacementBlockedJSON)
+	}
+}
