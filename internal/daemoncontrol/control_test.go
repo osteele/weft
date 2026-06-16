@@ -83,6 +83,51 @@ func TestCurrentStatusClassifiesStalePID(t *testing.T) {
 	}
 }
 
+func TestCurrentStatusClassifiesZombiePIDAsStale(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:   filepath.Join(dir, "daemon.pid"),
+		StdoutLog: filepath.Join(dir, "out.log"),
+		StderrLog: filepath.Join(dir, "err.log"),
+		PlistFile: filepath.Join(dir, "daemon.plist"),
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessExitImmediately")
+	cmd.Env = append(os.Environ(), "WEFT_DAEMONCONTROL_HELPER=exit-immediately")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Wait()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for !processIsZombie(cmd.Process.Pid) {
+		if time.Now().After(deadline) {
+			t.Skip("could not observe helper process as zombie")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := WritePIDFile(paths.PIDFile, cmd.Process.Pid); err != nil {
+		t.Fatalf("WritePIDFile: %v", err)
+	}
+	status, err := CurrentStatus(paths)
+	if err != nil {
+		t.Fatalf("CurrentStatus: %v", err)
+	}
+	if !status.HasPID || status.Live || !status.Stale {
+		t.Fatalf("status = %+v, want stale zombie PID", status)
+	}
+	pid, hadProcess, err := StopPID(paths, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StopPID: %v", err)
+	}
+	if pid != cmd.Process.Pid || hadProcess {
+		t.Fatalf("StopPID = %d, %v; want %d, false", pid, hadProcess, cmd.Process.Pid)
+	}
+	if _, err := os.Stat(paths.PIDFile); !os.IsNotExist(err) {
+		t.Fatalf("pidfile still exists after StopPID: %v", err)
+	}
+}
+
 func TestStopPIDKillsProcessThatIgnoresTerm(t *testing.T) {
 	dir := t.TempDir()
 	paths := Paths{
@@ -132,6 +177,13 @@ func TestHelperProcessIgnoreTerm(t *testing.T) {
 	}
 	signal.Ignore(syscall.SIGTERM)
 	select {}
+}
+
+func TestHelperProcessExitImmediately(t *testing.T) {
+	if os.Getenv("WEFT_DAEMONCONTROL_HELPER") != "exit-immediately" {
+		return
+	}
+	os.Exit(0)
 }
 
 func TestCurrentStatusIgnoresPIDFileFallbackOutsideWeftExecutable(t *testing.T) {

@@ -83,7 +83,7 @@ func CurrentStatus(paths Paths) (Status, error) {
 	if err != nil {
 		return Status{HasPID: ok, Installed: IsInstalled(paths)}, err
 	}
-	live := ok && util.IsProcessAlive(pid)
+	live := ok && daemonProcessLive(pid)
 	metadata, _ := ReadMetadata(paths)
 	return Status{
 		PID:               pid,
@@ -191,7 +191,7 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 func WritePIDFile(path string, pid int) error {
 	if existing, ok, err := ReadPID(path); err != nil {
 		return err
-	} else if ok && util.IsProcessAlive(existing) {
+	} else if ok && daemonProcessLive(existing) {
 		return fmt.Errorf("daemon already running with PID %d", existing)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -238,7 +238,7 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	if !ok {
 		return 0, false, nil
 	}
-	if !util.IsProcessAlive(pid) {
+	if !daemonProcessLive(pid) {
 		_ = os.Remove(paths.PIDFile)
 		return pid, false, nil
 	}
@@ -254,7 +254,7 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !util.IsProcessAlive(pid) {
+		if !daemonProcessLive(pid) {
 			_ = os.Remove(paths.PIDFile)
 			return pid, true, nil
 		}
@@ -268,13 +268,28 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	}
 	deadline = time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !util.IsProcessAlive(pid) {
+		if !daemonProcessLive(pid) {
 			_ = os.Remove(paths.PIDFile)
 			return pid, true, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return pid, true, fmt.Errorf("daemon PID %d did not exit within %s after SIGKILL", pid, timeout)
+}
+
+func daemonProcessLive(pid int) bool {
+	if !util.IsProcessAlive(pid) {
+		return false
+	}
+	return !processIsZombie(pid)
+}
+
+func processIsZombie(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 func StartDetached(paths Paths) (int, error) {
