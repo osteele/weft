@@ -117,6 +117,19 @@ func TestLoadHostsFromDir_InvalidYAML(t *testing.T) {
 	}
 }
 
+func TestHostsDirUsesConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	restoreConfig := config.SetConfigPathsForTesting(filepath.Join(dir, "config.toml"), filepath.Join(dir, "config.yaml"))
+	t.Cleanup(restoreConfig)
+	restoreHostsDir := SetHostsDir("")
+	t.Cleanup(restoreHostsDir)
+
+	want := filepath.Join(dir, "hosts")
+	if got := HostsDir(); got != want {
+		t.Fatalf("HostsDir() = %q, want %q", got, want)
+	}
+}
+
 func TestLoadHosts_MergesConfigAndDiscoveredHosts(t *testing.T) {
 	dir := t.TempDir()
 	hostsDir := filepath.Join(dir, "hosts")

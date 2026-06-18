@@ -3,11 +3,39 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+func TestDefaultConfigDirHonorsXDGConfigHome(t *testing.T) {
+	got := configDirFromEnv(false, "/tmp/weft-xdg-config", "/home/alice", 123)
+	want := filepath.Join("/tmp/weft-xdg-config", "weft")
+	if got != want {
+		t.Fatalf("configDirFromEnv = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultConfigDirIgnoresRelativeXDGConfigHome(t *testing.T) {
+	got := configDirFromEnv(false, "relative-xdg", "/home/alice", 123)
+	want := filepath.Join("/home/alice", ".config", "weft")
+	if got != want {
+		t.Fatalf("configDirFromEnv = %q, want %q", got, want)
+	}
+}
+
+func TestConfigPathIsIsolatedFromUserHomeDuringGoTest(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("home directory unavailable")
+	}
+	userConfigDir := filepath.Join(home, ".config", "weft")
+	if strings.HasPrefix(filepath.Clean(configPath), filepath.Clean(userConfigDir)+string(os.PathSeparator)) || filepath.Clean(configPath) == filepath.Clean(userConfigDir) {
+		t.Fatalf("configPath = %q points at user config dir %q during go test", configPath, userConfigDir)
+	}
+}
 
 func TestLoadPrefersTOMLConfig(t *testing.T) {
 	dir := t.TempDir()

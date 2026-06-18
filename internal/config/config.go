@@ -1027,17 +1027,50 @@ var (
 )
 
 func init() {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	configDir := defaultConfigDir()
+	if configDir == "" {
 		return
 	}
-	configPath = filepath.Join(home, ".config", "weft", "config.toml")
-	legacyConfigPath = filepath.Join(home, ".config", "weft", "config.yaml")
+	configPath = filepath.Join(configDir, "config.toml")
+	legacyConfigPath = filepath.Join(configDir, "config.yaml")
+}
+
+func defaultConfigDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return configDirFromEnv(runningUnderGoTest(), os.Getenv("XDG_CONFIG_HOME"), home, os.Getpid())
+}
+
+func configDirFromEnv(testMode bool, xdgConfigHome, home string, pid int) string {
+	if testMode {
+		return filepath.Join(os.TempDir(), fmt.Sprintf("weft-test-%d", pid), "config", "weft")
+	}
+	if xdg := strings.TrimSpace(xdgConfigHome); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "weft")
+	}
+	if strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "weft")
+}
+
+func runningUnderGoTest() bool {
+	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
 }
 
 // ConfigPath returns the path to the config file
 func ConfigPath() string {
 	return configPath
+}
+
+// ConfigDir returns the directory that contains global weft config files.
+func ConfigDir() string {
+	if configPath == "" {
+		return ""
+	}
+	return filepath.Dir(configPath)
 }
 
 // Load reads the config file, returning defaults if it doesn't exist.

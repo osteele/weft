@@ -25,8 +25,10 @@ func HostsDir() string {
 	if hostsDirOverride != "" {
 		return hostsDirOverride
 	}
-	home := os.Getenv("HOME")
-	return filepath.Join(home, ".config", "weft", "hosts")
+	if dir := config.ConfigDir(); dir != "" {
+		return filepath.Join(dir, "hosts")
+	}
+	return ""
 }
 
 // SetHosts overrides the runtime inventory. Intended for testing.
