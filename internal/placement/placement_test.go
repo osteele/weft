@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2241,6 +2242,94 @@ wheels = [
 	}
 	if len(gpuConstraints.VersionRequirements) == 0 {
 		t.Fatal("GPU job version requirements are empty, want CUDA/driver floors")
+	}
+}
+
+func TestResolveConstraintsMatchesPersistedJobResolution(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.6.0%2Bcu128-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	gpuCount := 2
+	cpuCores := 16
+	cli := &dbpkg.CLIResourceOverrides{
+		GPUCount:       &gpuCount,
+		Interconnect:   "nvlink",
+		CPUCores:       &cpuCores,
+		MinCUDAVersion: "12.4",
+	}
+	submitResolved, err := ResolveConstraints(ConstraintSource{
+		GPUClass:     "nvidia",
+		NumGPUs:      2,
+		GPUMemGB:     24,
+		CPUCores:     16,
+		Interconnect: "nvlink",
+		Inputs:       []string{"hf:model"},
+		Command:      "uv run train.py",
+		Project:      "proj",
+		Tags:         []string{"rental", "provider:vastai"},
+		LocalDir:     dir,
+		CLIOverrides: cli,
+	})
+	if err != nil {
+		t.Fatalf("ResolveConstraints: %v", err)
+	}
+
+	mem := 24
+	jobResolved := ResolveConstraintsFromJob(&dbpkg.Job{
+		WorkingDir:           dir,
+		Command:              "uv run train.py",
+		Project:              "proj",
+		Tags:                 []string{"rental", "provider:vastai"},
+		GPUClass:             "nvidia",
+		GPUMemGB:             &mem,
+		MaxComputeCap:        submitResolved.MaxComputeCapForPersistence,
+		CLIResourceOverrides: cli,
+		Inputs:               []string{"hf:model"},
+	})
+
+	if !reflect.DeepEqual(jobResolved.Constraints, submitResolved.Constraints) {
+		t.Fatalf("job constraints differ from submit constraints\njob:    %+v\nsubmit: %+v", jobResolved.Constraints, submitResolved.Constraints)
+	}
+	if jobResolved.MaxComputeCapForPersistence != submitResolved.MaxComputeCapForPersistence {
+		t.Fatalf("max cap persistence = %q, want %q", jobResolved.MaxComputeCapForPersistence, submitResolved.MaxComputeCapForPersistence)
+	}
+}
+
+func TestResolveConstraintsPrefersFreshConcreteMaxComputeCap(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu128" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu128/torch-2.6.0%2Bcu128-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	resolved := ResolveConstraintsFromJob(&dbpkg.Job{
+		WorkingDir:    dir,
+		Command:       "uv run train.py",
+		GPUClass:      "nvidia",
+		MaxComputeCap: "9.0",
+	})
+	if resolved.MaxComputeCapForPersistence != "12.0" {
+		t.Fatalf("MaxComputeCapForPersistence = %q, want fresh 12.0", resolved.MaxComputeCapForPersistence)
+	}
+	if resolved.Constraints.MaxComputeCap != "12.0" {
+		t.Fatalf("Constraints.MaxComputeCap = %q, want fresh 12.0", resolved.Constraints.MaxComputeCap)
 	}
 }
 

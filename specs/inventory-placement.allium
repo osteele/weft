@@ -307,12 +307,15 @@ rule BuildConstraintsFromJob {
     )
 
     @guidance
-        -- Implementation: placement.ConstraintsFromJob.
-        -- max_compute_cap comes from the persisted jobs.max_compute_cap
-        -- ("any" disables the filter); min_compute_cap is re-derived from
-        -- the torch pin; the CUDA/driver floors come from
-        -- placement.RuntimeFloorForJob, which applies the persisted CLI
-        -- --cuda-driver-min override at highest precedence (replace /
+        -- Implementation: placement.ResolveConstraints, with
+        -- placement.ConstraintsFromJob adapting persisted jobs into the
+        -- shared resolver input. max_compute_cap comes from the persisted
+        -- jobs.max_compute_cap ("any" disables the filter), but a fresh
+        -- concrete derivation from the current source tree wins over a stale
+        -- concrete persisted value. min_compute_cap is re-derived from the
+        -- torch pin; the CUDA/driver floors come from
+        -- placement.MinRuntimeFloorForJob plus persisted CLI
+        -- --cuda-driver-min overrides at highest precedence (replace /
         -- lower / clear semantics — see the Constraints field docs).
 }
 

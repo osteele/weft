@@ -103,46 +103,138 @@ type Constraints struct {
 	VersionRequirements []compat.Requirement
 }
 
-// ConstraintsFromJob builds Constraints from a db.Job's fields.
-func ConstraintsFromJob(j *db.Job) Constraints {
+// ConstraintSource is the normalized input to placement constraint
+// resolution. Submit-time code and persisted jobs both adapt into this shape
+// so GPU runtime inference and override precedence live in one place.
+type ConstraintSource struct {
+	GPUClass               string
+	Provider               string
+	NumGPUs                int
+	GPUMemGB               int
+	CPUCores               int
+	Interconnect           string
+	Inputs                 []string
+	Command                string
+	Project                string
+	Tags                   []string
+	PreferredInstanceIDs   []int64
+	LocalDir               string
+	PersistedMaxComputeCap string
+	CLIOverrides           *db.CLIResourceOverrides
+	ErrorDiagnosis         string
+}
+
+// ResolvedConstraints is the result of resolving a ConstraintSource.
+// MaxComputeCapForPersistence is the three-state value that should be stored
+// on jobs.max_compute_cap for GPU jobs.
+type ResolvedConstraints struct {
+	Constraints                 Constraints
+	MaxComputeCapForPersistence string
+}
+
+// ResolveConstraints resolves placement constraints from normalized
+// submit-time or persisted-job inputs. It returns errors for invalid explicit
+// runtime floors so submit can fail fast.
+func ResolveConstraints(src ConstraintSource) (ResolvedConstraints, error) {
+	return resolveConstraints(src, true)
+}
+
+func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (ResolvedConstraints, error) {
 	c := Constraints{
-		GPUClass:     j.GPUClass,
-		NumGPUs:      j.RequestedGPUCount(),
-		CPUCores:     j.RequestedCPUCores(),
-		Interconnect: j.RequestedInterconnect(),
-		Inputs:       j.Inputs,
-		Command:      j.Command,
-		Project:      j.Project,
-		Tags:         j.Tags,
+		GPUClass:             src.GPUClass,
+		Provider:             src.Provider,
+		NumGPUs:              src.NumGPUs,
+		GPUMemGB:             src.GPUMemGB,
+		CPUCores:             src.CPUCores,
+		Interconnect:         src.Interconnect,
+		Inputs:               src.Inputs,
+		Command:              src.Command,
+		Project:              src.Project,
+		Tags:                 src.Tags,
+		PreferredInstanceIDs: src.PreferredInstanceIDs,
 	}
-	if provider, ok := db.RequestedProvider(j.Tags); ok {
-		c.Provider = provider
+	if c.Provider == "" {
+		if provider, ok := db.RequestedProvider(src.Tags); ok {
+			c.Provider = provider
+		}
 	}
-	if j.GPUMemGB != nil {
-		c.GPUMemGB = *j.GPUMemGB
-	}
-	if c.NeedsGPU() && j.MaxComputeCap != "" && j.MaxComputeCap != MaxComputeCapAny {
-		c.MaxComputeCap = j.MaxComputeCap
-	}
-	localDir := workdir.ResolveLocal(j.EffectiveWorkingDir())
+
+	resolved := ResolvedConstraints{Constraints: c}
 	if c.NeedsGPU() {
-		c.MinComputeCap = MinComputeCapForJob(localDir)
-		rf := RuntimeFloorForJob(j)
+		maxCap := strings.TrimSpace(src.PersistedMaxComputeCap)
+		derivedMaxCap := ResolveJobMaxComputeCapForPersistence(src.LocalDir, src.Command)
+		switch {
+		case maxCap == "":
+			maxCap = derivedMaxCap
+		case maxCap != MaxComputeCapAny && derivedMaxCap != "" && derivedMaxCap != MaxComputeCapAny && derivedMaxCap != maxCap:
+			maxCap = derivedMaxCap
+		}
+		resolved.MaxComputeCapForPersistence = maxCap
+		if maxCap != "" && maxCap != MaxComputeCapAny {
+			c.MaxComputeCap = maxCap
+		}
+		c.MinComputeCap = MinComputeCapForJob(src.LocalDir)
+		rf, rfErr := MinRuntimeFloorForJob(src.LocalDir, src.Command)
+		if src.CLIOverrides != nil {
+			if err := rf.ApplyCLIOverride(src.CLIOverrides.MinCUDAVersion); err != nil && failOnRuntimeFloorError {
+				return resolved, err
+			}
+		}
+		if rfErr != nil && failOnRuntimeFloorError {
+			return resolved, fmt.Errorf("resolve CUDA/driver floor: %w", rfErr)
+		}
 		c.MinCUDAVersion = rf.Req.MinCUDAVersion
 		c.MinDriverVersion = rf.Req.MinDriverVersion
 	}
-	if floor := ToolchainFloorForJob(localDir, j.Command); floor.GLIBCXXVersion != "" {
+	if floor := ToolchainFloorForJob(src.LocalDir, src.Command); floor.GLIBCXXVersion != "" {
 		c.MinGLIBCXXVersion = floor.GLIBCXXVersion
 		c.GLIBCXXOrigin = floor.Name
 	}
-	if observed := observedGLIBCXXFloor(j.ErrorDiagnosis); observed != "" {
+	if observed := observedGLIBCXXFloor(src.ErrorDiagnosis); observed != "" {
 		if c.MinGLIBCXXVersion == "" || compareDottedVersion(observed, c.MinGLIBCXXVersion) > 0 {
 			c.MinGLIBCXXVersion = observed
 			c.GLIBCXXOrigin = "observed failure diagnosis"
 		}
 	}
 	c.VersionRequirements = versionRequirementsFromConstraints(c)
-	return c
+	resolved.Constraints = c
+	return resolved, nil
+}
+
+// ConstraintSourceFromJob adapts a persisted job into the shared constraint
+// resolver input.
+func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
+	src := ConstraintSource{
+		GPUClass:               j.GPUClass,
+		NumGPUs:                j.RequestedGPUCount(),
+		CPUCores:               j.RequestedCPUCores(),
+		Interconnect:           j.RequestedInterconnect(),
+		Inputs:                 j.Inputs,
+		Command:                j.Command,
+		Project:                j.Project,
+		Tags:                   j.Tags,
+		LocalDir:               workdir.ResolveLocal(j.EffectiveWorkingDir()),
+		PersistedMaxComputeCap: j.MaxComputeCap,
+		CLIOverrides:           j.CLIResourceOverrides,
+		ErrorDiagnosis:         j.ErrorDiagnosis,
+	}
+	if j.GPUMemGB != nil {
+		src.GPUMemGB = *j.GPUMemGB
+	}
+	return src
+}
+
+// ResolveConstraintsFromJob resolves Constraints from a db.Job. It is
+// best-effort because persisted jobs may contain stale or invalid script
+// metadata; those parse failures should not wedge placement display.
+func ResolveConstraintsFromJob(j *db.Job) ResolvedConstraints {
+	resolved, _ := resolveConstraints(ConstraintSourceFromJob(j), false)
+	return resolved
+}
+
+// ConstraintsFromJob builds Constraints from a db.Job's fields.
+func ConstraintsFromJob(j *db.Job) Constraints {
+	return ResolveConstraintsFromJob(j).Constraints
 }
 
 func versionRequirementsFromConstraints(c Constraints) []compat.Requirement {

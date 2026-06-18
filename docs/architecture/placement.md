@@ -49,18 +49,16 @@ All torch-derived GPU-runtime constraints apply **only to jobs that request a
 GPU** (`db.Job.RequestsGPU`: gpu-class or gpu-mem set). CPU-only jobs carry
 none of them regardless of the project's torch pin.
 
-### Known debt: three resolution paths
+### Shared resolution path
 
-Constraints are resolved in three places that should be one (roadmap:
-"Unify constraint resolution"):
-
-1. **Submit time** (`cmd/run.go`): resolves and persists `max_compute_cap`,
-   builds the dry-run/placement constraints.
-2. **Placement time** (`placement.ConstraintsFromJob` →
-   `RuntimeFloorForJob`): re-derives floors from the working tree on every
-   evaluation; trusts persisted `max_compute_cap`.
-3. **Reuse matching** (`campaign.MatchJobToInstanceWithUV`): inline checks of
-   GPU class/memory/disk only — it does not evaluate CUDA/driver floors.
+Submit-time placement, persisted-job placement, launch grouping, and
+existing-instance reuse all resolve through `placement.ResolveConstraints`.
+Callers adapt either CLI inputs or a `db.Job` into `placement.ConstraintSource`;
+the resolver applies GPU-runtime inference and CLI/metadata override precedence
+once, returns the `placement.Constraints` used by scoring, and returns the
+three-state `max_compute_cap` value that should be stored on the job. If a
+persisted concrete cap disagrees with the current source tree, the fresh
+derived cap wins and launch grouping persists it back.
 
 ## Eligibility and scoring
 

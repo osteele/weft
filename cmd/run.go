@@ -953,46 +953,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB)
 
 	// Placement scoring (used for auto-placement and dry-run)
-	placementConstraints := placement.Constraints{
+	gpuMemGB := 0
+	if resolvedGPUMemGB != nil {
+		gpuMemGB = *resolvedGPUMemGB
+	}
+	resolvedConstraints, err := placement.ResolveConstraints(placement.ConstraintSource{
 		GPUClass:     gpuClass,
 		Provider:     requestedProvider,
 		NumGPUs:      runGPUCount,
+		GPUMemGB:     gpuMemGB,
 		CPUCores:     runCPUCores,
 		Interconnect: runInterconnect,
 		Inputs:       runInputs,
 		Command:      command,
 		Project:      projectName,
 		Tags:         runTags,
+		LocalDir:     localDir,
+		CLIOverrides: cliOverrides,
+	})
+	if err != nil {
+		return err
 	}
-	if resolvedGPUMemGB != nil {
-		placementConstraints.GPUMemGB = *resolvedGPUMemGB
-	}
-	// Torch-derived GPU-runtime constraints (arch cap, CUDA/driver floors)
-	// apply only to jobs that actually request a GPU, so CPU-only jobs don't
-	// carry an inert "Arch cap" that reads as a blocker.
-	persistMaxComputeCap := ""
-	if placementConstraints.NeedsGPU() {
-		persistMaxComputeCap = placement.ResolveJobMaxComputeCapForPersistence(localDir, command)
-		if persistMaxComputeCap != "" && persistMaxComputeCap != placement.MaxComputeCapAny {
-			placementConstraints.MaxComputeCap = persistMaxComputeCap
-		}
-		placementConstraints.MinComputeCap = placement.MinComputeCapForJob(localDir)
-		rf, rfErr := placement.MinRuntimeFloorForJob(localDir, command)
-		if rfErr != nil {
-			return fmt.Errorf("resolve CUDA/driver floor: %w", rfErr)
-		}
-		// cliOverrides.MinCUDAVersion holds the already-validated canonical
-		// form of --cuda-driver-min (including the "any" sentinel).
-		if err := rf.ApplyCLIOverride(cliOverrides.MinCUDAVersion); err != nil {
-			return err
-		}
-		if rf.Req.MinCUDAVersion != "" {
-			placementConstraints.MinCUDAVersion = rf.Req.MinCUDAVersion
-		}
-		if rf.Req.MinDriverVersion > 0 {
-			placementConstraints.MinDriverVersion = rf.Req.MinDriverVersion
-		}
-	}
+	placementConstraints := resolvedConstraints.Constraints
+	persistMaxComputeCap := resolvedConstraints.MaxComputeCapForPersistence
 	// Tip placement toward producers' live rental instances so --needs
 	// consumers co-locate with their producers and can read outputs from
 	// the shared workdir (the classifier in internal/campaign/

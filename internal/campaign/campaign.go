@@ -1103,26 +1103,13 @@ func cmpVersionComponents(a, b []int) int {
 // lazily resolved against the current torch pin and persisted back, so
 // legacy rows and post-refresh retries pick up a fresh value here rather
 // than requiring a separate refresh call.
-//
-// Caps share by (localDir, command), so the resolveCache avoids re-reading
-// uv.lock per job in groups of identical scripts.
 func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
-	type capKey struct{ dir, cmd string }
-	resolveCache := map[capKey]string{}
 	resolveAndPersist := func(job *db.Job) string {
-		// Arch caps are GPU-runtime constraints; never backfill one onto a
-		// CPU-only job (it would display as an inert "Arch cap" blocker).
-		if !job.RequestsGPU() {
+		if job == nil || !job.RequestsGPU() {
 			return ""
 		}
-		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		k := capKey{localDir, job.Command}
-		if v, ok := resolveCache[k]; ok {
-			return v
-		}
-		v := placement.ResolveJobMaxComputeCapForPersistence(localDir, job.Command)
-		resolveCache[k] = v
-		if v != "" && database != nil {
+		v := placement.ResolveConstraintsFromJob(job).MaxComputeCapForPersistence
+		if v != "" && v != job.MaxComputeCap && database != nil {
 			if err := db.SetJobMaxComputeCap(database, job.ID, v); err != nil {
 				slog.Warn("failed to persist resolved max_compute_cap",
 					"component", "campaign", "job_id", job.ID, "error", err)
@@ -1161,20 +1148,12 @@ func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 }
 
 func groupMinComputeCap(jobs []*db.Job) string {
-	type capKey struct{ dir string }
-	resolveCache := map[capKey]string{}
 	maxMinCap := ""
 	for _, job := range jobs {
 		if job == nil {
 			continue
 		}
-		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		k := capKey{localDir}
-		cap, ok := resolveCache[k]
-		if !ok {
-			cap = placement.MinComputeCapForJob(localDir)
-			resolveCache[k] = cap
-		}
+		cap := placement.ResolveConstraintsFromJob(job).Constraints.MinComputeCap
 		if cap != "" && (maxMinCap == "" || placement.CompareComputeCap(cap, maxMinCap) > 0) {
 			maxMinCap = cap
 		}

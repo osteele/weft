@@ -327,6 +327,7 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
+	constraints := placement.ConstraintsFromJob(job)
 
 	if job.HasTag(db.TagCPUIntensive) {
 		floor := computeCPUCoresFloor()
@@ -339,11 +340,11 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	// GPU class check (normalized aliases + Vast class mapping semantics)
-	if !gpuClassCompatible(job.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
-		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", job.GPUClass, inst.GPUClass)
+	if !gpuClassCompatible(constraints.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
+		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", constraints.GPUClass, inst.GPUClass)
 	}
-	if broadNVIDIAConstraint(job.GPUClass) && premiumAcceleratorClass(inst.GPUClass, inst.ResolvedGPUName) {
-		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", job.GPUClass, inst.DisplayGPUBrief())
+	if broadNVIDIAConstraint(constraints.GPUClass) && premiumAcceleratorClass(inst.GPUClass, inst.ResolvedGPUName) {
+		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", constraints.GPUClass, inst.DisplayGPUBrief())
 	}
 
 	// GPU memory check. IntendedMemGB resolves the persisted gpu_mem_gb
@@ -354,13 +355,13 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	// failing with "insufficient", but a stored value of "50" stays "50"
 	// (no spurious +2GB cushion at the capacity comparison boundary).
 	jobMemGB := 0
-	if job.GPUMemGB != nil {
-		jobMemGB = vastai.IntendedMemGB(job.GPUClass, *job.GPUMemGB)
+	if constraints.GPUMemGB > 0 {
+		jobMemGB = vastai.IntendedMemGB(constraints.GPUClass, constraints.GPUMemGB)
 	}
 	if jobMemGB > 0 && jobMemGB > inst.GPUMemGB {
 		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)
 	}
-	if ok, reason := matchPlacementCompatibility(job, inst); !ok {
+	if ok, reason := matchPlacementCompatibility(constraints, inst); !ok {
 		return false, reason
 	}
 
@@ -387,11 +388,10 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	return true, ""
 }
 
-func matchPlacementCompatibility(job *db.Job, inst *db.Launch) (bool, string) {
-	if job == nil || inst == nil {
+func matchPlacementCompatibility(constraints placement.Constraints, inst *db.Launch) (bool, string) {
+	if inst == nil {
 		return true, ""
 	}
-	constraints := placement.ConstraintsFromJob(job)
 	if !constraints.NeedsGPU() {
 		return true, ""
 	}
