@@ -43,7 +43,9 @@ func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 // therefore can't go through RunStreaming; the bare host name bypasses the
 // override and lets ssh fall back to ~/.ssh/config.
 func Command(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
-	return sshCommand(host, remoteCmd, extraArgs...)
+	args := BatchModeArgs(time.Duration(defaultConnTimeout) * time.Second)
+	args = append(args, extraArgs...)
+	return sshCommand(host, remoteCmd, args...)
 }
 
 // scpCommand creates an exec.Cmd for SCP. Identity flags are injected
@@ -349,7 +351,7 @@ func RunInteractive(host string, command string) error {
 
 // RunStreaming runs an SSH command and streams output to the provided writers
 func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
-	cmd := sshCommand(host, command)
+	cmd := sshCommand(host, command, BatchModeArgs(time.Duration(defaultConnTimeout)*time.Second)...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()

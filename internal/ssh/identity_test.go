@@ -114,6 +114,9 @@ func TestCommand_AppliesHostOverride(t *testing.T) {
 	if !slices.Contains(args, "IdentityAgent=none") || !slices.Contains(args, "/path/to/agent_studio_key") {
 		t.Fatalf("Command args = %v, want IdentityAgent=none and the per-host key", args)
 	}
+	if !slices.Contains(args, "BatchMode=yes") {
+		t.Fatalf("Command args = %v, want BatchMode=yes to prevent password prompts", args)
+	}
 }
 
 // TestHostTarget_NoOverride: with no per-host user override the host
