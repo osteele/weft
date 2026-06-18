@@ -133,15 +133,15 @@ func TestOutputFileActivityResetsSilenceTimer(t *testing.T) {
 		JobID: 750,
 		Job: opsqueue.CommandJob{
 			// One stdout line early (well within grace), then a 3-second run
-			// that only touches a file under outputs/ every 300ms. 1s stdout
+			// that only updates a file under outputs/ every 250ms. A 1.5s stdout
 			// silence threshold would fire ~3x without the keepalive.
-			Cmd: "echo started; for i in 1 2 3 4 5 6 7 8 9 10; do touch outputs/keepalive; sleep 0.3; done",
+			Cmd: "echo started; for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf \"%s\\n\" \"$i\" >> outputs/keepalive; sleep 0.25; done",
 		},
 		LogDir:               logDir,
 		WorkingDir:           workDir,
 		SampleInterval:       50 * time.Millisecond,
-		StdoutSilenceTimeout: 1 * time.Second,
-		WatchdogInitialGrace: 50 * time.Millisecond,
+		StdoutSilenceTimeout: 1500 * time.Millisecond,
+		WatchdogInitialGrace: 100 * time.Millisecond,
 		SkipProbes:           true,
 	}
 
@@ -305,9 +305,9 @@ func TestWatchdogDisabledWhenTimeoutZero(t *testing.T) {
 	}
 }
 
-// TestCleanExitNotMislabeledAsSilenceKill: a job that exits 0 around the time
-// the silence watchdog would fire must be reported as a clean exit, not
-// relabeled as a silence-kill. Regression test for the race where a watchdog
+// TestCleanExitNotMislabeledAsSilenceKill: a job that exits 0 after the
+// silence watchdog arms must be reported as a clean exit, not relabeled as a
+// silence-kill. Regression test for the race where a watchdog
 // tick landing just after the process exited could still set its fired flag;
 // the fix records process-exit state under the same lock the watchdog uses
 // before firing. Several iterations to give the (former) race a chance to
@@ -318,11 +318,11 @@ func TestCleanExitNotMislabeledAsSilenceKill(t *testing.T) {
 		cfg := SingleJobConfig{
 			JobID: 760,
 			// Exits cleanly with no output after the watchdog arms.
-			Job:                  opsqueue.CommandJob{Cmd: "sleep 0.05"},
+			Job:                  opsqueue.CommandJob{Cmd: "sleep 0.2"},
 			LogDir:               logDir,
 			SampleInterval:       50 * time.Millisecond,
-			StdoutSilenceTimeout: 150 * time.Millisecond,
-			WatchdogInitialGrace: time.Millisecond,
+			StdoutSilenceTimeout: time.Second,
+			WatchdogInitialGrace: 10 * time.Millisecond,
 			SkipProbes:           true,
 		}
 

@@ -38,6 +38,8 @@ func initTestRunner(t *testing.T) (*Runner, string) {
 	r.state = NewState()
 	r.cpuConfig = DefaultCPUConfig()
 	r.cpuCount = 8
+	fixedNow := time.Unix(1_700_000_000, 0).UTC()
+	r.nowFunc = func() time.Time { return fixedNow }
 
 	oplogPath := filepath.Join(baseDir, "operations.log")
 	if err := oplog.Init(oplogPath, 0); err != nil {
@@ -178,8 +180,8 @@ func TestTryStartNextJob_BenchmarkWarmupRecordsPendingReason(t *testing.T) {
 	r, _ := initTestRunner(t)
 
 	r.state.AddRunning("900", RunningJobState{
-		StartedAt:   time.Now().Unix(),
-		WarmupUntil: time.Now().Unix() + 60,
+		StartedAt:   r.now().Unix(),
+		WarmupUntil: r.now().Unix() + 60,
 	})
 
 	jobID := int64(123)
@@ -205,6 +207,26 @@ func TestTryStartNextJob_BenchmarkWarmupRecordsPendingReason(t *testing.T) {
 		t.Fatalf("pending reason = %q, want %q", got, want)
 	}
 	assertJobNotStarted(t, r.logDir, jobID)
+}
+
+func TestWarmupActiveUsesInjectedClock(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	now := time.Unix(1_800_000_000, 0).UTC()
+	r.nowFunc = func() time.Time { return now }
+	r.state.AddRunning("900", RunningJobState{
+		StartedAt:   now.Unix(),
+		WarmupUntil: now.Add(time.Minute).Unix(),
+	})
+
+	if !r.warmupActive() {
+		t.Fatal("expected warmup to be active before injected clock reaches warmup_until")
+	}
+
+	now = now.Add(61 * time.Second)
+	if r.warmupActive() {
+		t.Fatal("expected warmup to end after injected clock passes warmup_until")
+	}
 }
 
 func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testing.T) {
@@ -456,7 +478,7 @@ func TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists(t *testing.T) {
 
 	// Add the job to running state
 	r.state.AddRunning(jobIDStr, RunningJobState{
-		StartedAt: time.Now().Unix() - 10,
+		StartedAt: r.now().Unix() - 10,
 	})
 
 	// Simulate waitForJob goroutine still tracking the process
@@ -504,7 +526,7 @@ func TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter(t *testing.T) {
 	// Add the job to running state but do NOT add to r.processes
 	// (simulates a runner restart where wait goroutines are gone)
 	r.state.AddRunning(jobIDStr, RunningJobState{
-		StartedAt: time.Now().Unix() - 10,
+		StartedAt: r.now().Unix() - 10,
 	})
 
 	r.refreshRunningJobs()
@@ -565,7 +587,7 @@ func TestRefreshRunningJobs_RecoversZombieWrapper(t *testing.T) {
 	os.WriteFile(paths.PGID, []byte(fmt.Sprintf("%d\n", pid)), 0644)
 
 	r.state.AddRunning(jobIDStr, RunningJobState{
-		StartedAt: time.Now().Unix() - 10,
+		StartedAt: r.now().Unix() - 10,
 	})
 
 	r.refreshRunningJobs()

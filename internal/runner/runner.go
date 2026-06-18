@@ -47,6 +47,7 @@ type Runner struct {
 	hookStopFuncs  map[string]func()   // jobID -> stop function from OnJobStart
 	processesMu    sync.Mutex
 	lastSampleTime time.Time
+	nowFunc        func() time.Time
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
@@ -119,8 +120,16 @@ func New(cfg Config) *Runner {
 		benchCfg:        DefaultBenchmarkConfig(),
 		processes:       make(map[string]*Process),
 		hookStopFuncs:   make(map[string]func()),
+		nowFunc:         time.Now,
 		stopCh:          make(chan struct{}),
 	}
+}
+
+func (r *Runner) now() time.Time {
+	if r.nowFunc != nil {
+		return r.nowFunc()
+	}
+	return time.Now()
 }
 
 // Run starts the main loop. Blocks until shutdown.
@@ -520,7 +529,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
-	startTime := time.Now().Unix()
+	startTime := r.now().Unix()
 
 	oplog.LogJob(oplog.OpJobStart, jobID, "", oplog.WithDetailf("cmd=%s", command))
 	fmt.Printf("==========================================\n")
@@ -685,7 +694,7 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 	WriteFailureReasonFile(paths, failureReason)
 	oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
 
-	endTime := time.Now().Unix()
+	endTime := r.now().Unix()
 	if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 		fmt.Fprintf(f, "end_time=%d\n", endTime)
 		f.Close()
@@ -737,7 +746,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	ei := ExtractExitInfo(err)
 	slog.Info("process exited", "component", "runner", "job_id", jobID, "exit_code", ei.ExitCode, "signaled", ei.Signaled, "error", err)
 
-	endTime := time.Now().Unix()
+	endTime := r.now().Unix()
 	duration := endTime - startTime
 
 	// Write status and log footer. The wrapper shell may have already
@@ -904,7 +913,7 @@ func (r *Runner) refreshRunningJobs() {
 			if !hasProc {
 				exitCode, _ := ReadStatusFile(paths.Status)
 				ei := ExitInfo{ExitCode: exitCode}
-				endTime := time.Now().Unix()
+				endTime := r.now().Unix()
 				rs, _ := r.state.GetRunning(jobIDStr)
 				if exitCode == 0 {
 					oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered)"))
@@ -957,7 +966,7 @@ func (r *Runner) refreshRunningJobs() {
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
 			rs, _ := r.state.GetRunning(jobIDStr)
 			WriteRusageFile(paths, rs)
-			endTime := time.Now().Unix()
+			endTime := r.now().Unix()
 			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, "stopped", rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 			r.state.RemoveRunning(jobIDStr)
@@ -1020,7 +1029,7 @@ func (r *Runner) refreshRunningJobs() {
 		// synthetic ExitCode: 1.
 		if exitCode, ok := ReadStatusFile(paths.Status); ok {
 			ei := ExitInfo{ExitCode: exitCode}
-			endTime := time.Now().Unix()
+			endTime := r.now().Unix()
 			rs, _ := r.state.GetRunning(jobIDStr)
 			if exitCode == 0 {
 				oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered after orphan check)"))
@@ -1042,7 +1051,7 @@ func (r *Runner) refreshRunningJobs() {
 		orphanEI := ExitInfo{ExitCode: 1}
 		WriteStatusFile(paths, orphanEI)
 		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
-		endTime := time.Now().Unix()
+		endTime := r.now().Unix()
 		rs, _ := r.state.GetRunning(jobIDStr)
 		WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
 		WriteRusageFile(paths, rs)
@@ -1058,7 +1067,7 @@ func (r *Runner) refreshRunningJobs() {
 }
 
 func (r *Runner) sampleRunningJobs() {
-	now := time.Now()
+	now := r.now()
 	updated := false
 
 	for _, jobIDStr := range r.state.RunningIDs() {
@@ -1109,7 +1118,7 @@ func (r *Runner) sampleRunningJobs() {
 }
 
 func (r *Runner) adjustRunningJobAllotments() {
-	now := time.Now()
+	now := r.now()
 	updated := false
 
 	for _, jobIDStr := range r.state.RunningIDs() {
@@ -1170,7 +1179,7 @@ func tickerChan(ticker *time.Ticker) <-chan time.Time {
 }
 
 func (r *Runner) warmupActive() bool {
-	now := time.Now().Unix()
+	now := r.now().Unix()
 	for _, rs := range r.state.RunningSnapshot() {
 		if rs.WarmupUntil > now {
 			return true
