@@ -281,78 +281,93 @@ func (r *Runner) tryStartNextJob() {
 		return
 	}
 
-	// Pop the next job
-	jobID, ok := r.state.PopPending()
-	if !ok {
+	pending := r.state.PendingSnapshot()
+	if len(pending) == 0 {
 		return
 	}
 
-	// Load job data
+	headDecision, ok := r.evaluatePendingJob(pending[0], true)
+	if !ok {
+		r.requeueUnreadablePending(pending[0])
+		return
+	}
+	if headDecision.benchmarkIdleReason != "" {
+		r.markBenchmarkIdleWait(headDecision)
+		if r.tryStartAfterGatedBenchmark(pending[1:]) {
+			r.saveState()
+			return
+		}
+		r.saveState()
+		return
+	}
+
+	r.applyPendingDecision(headDecision)
+}
+
+type pendingStartDecision struct {
+	jobID               int64
+	job                 *opsqueue.CommandJob
+	rj                  *RunnerJob
+	canStart            bool
+	reason              string
+	benchmarkIdleReason string
+	resolvedGPUDevices  []string
+	waitedForPostJob    bool
+}
+
+func (r *Runner) evaluatePendingJob(jobID int64, waitForPostJob bool) (pendingStartDecision, bool) {
 	job, err := ReadJobFile(r.queueDir, jobID)
 	if err != nil {
-		reason := fmt.Sprintf("missing queue payload: %v", err)
-		fmt.Fprintf(os.Stderr, "Job %s: cannot read job file: %v\n", ids.FormatJobID(jobID), err)
-		r.state.AddPendingWithReason(jobID, reason)
-		r.saveState()
-		return
+		return pendingStartDecision{}, false
 	}
+	return r.evaluateLoadedPendingJob(jobID, job, waitForPostJob), true
+}
+
+func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob, waitForPostJob bool) pendingStartDecision {
 	rj := &RunnerJob{Data: job, ID: jobID}
-
-	// Wait for prior post-job uploads from this workdir before reusing it.
-	if r.PostJobManager != nil {
-		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+	decision := pendingStartDecision{
+		jobID: jobID,
+		job:   job,
+		rj:    rj,
 	}
 
-	// Check exclusive constraints
+	if waitForPostJob && r.PostJobManager != nil {
+		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+		decision.waitedForPostJob = true
+	}
+
+	// Check exclusive constraints.
 	if AnyRunningExclusive(r.state, r.queueDir) {
-		r.state.AddPendingWithReason(jobID, "exclusive gate: waiting for another exclusive job to finish")
-		r.saveState()
-		return
+		decision.reason = "exclusive gate: waiting for another exclusive job to finish"
+		return decision
 	}
 
 	runningCount := r.state.RunningCount()
 	if HasExclusiveOrBenchmarkTag(rj) && runningCount > 0 {
-		reason := fmt.Sprintf("exclusive gate: waiting for %d running job(s) to finish", runningCount)
+		decision.reason = fmt.Sprintf("exclusive gate: waiting for %d running job(s) to finish", runningCount)
 		if HasBenchmarkTag(rj) {
-			reason = fmt.Sprintf("benchmark gate: waiting for %d running job(s) to finish", runningCount)
+			decision.reason = fmt.Sprintf("benchmark gate: waiting for %d running job(s) to finish", runningCount)
 		}
-		r.state.AddPendingWithReason(jobID, reason)
-		r.saveState()
-		return
+		return decision
 	}
 
-	// Benchmark: wait for system idle
+	// Benchmark: wait for system idle.
 	if HasBenchmarkTag(rj) {
 		reason := r.benchCfg.SystemIdleCheck()
 		if reason != "" {
-			if reason != r.benchmarkLastReason {
-				oplog.LogJob("benchmark.waiting", jobID, "", oplog.WithDetail(reason))
-				r.benchmarkLastReason = reason
-			}
-			r.benchmarkIdleCount = 0
-			r.state.AddPendingWithReason(jobID, "benchmark gate: "+reason)
-			r.saveState()
-			return
+			decision.reason = "benchmark gate: " + reason
+			decision.benchmarkIdleReason = reason
+			return decision
 		}
-		r.benchmarkIdleCount++
-		if r.benchmarkIdleCount < r.benchCfg.IdleSamples {
-			r.state.AddPendingWithReason(jobID, fmt.Sprintf("benchmark gate: confirming idle (%d/%d)", r.benchmarkIdleCount, r.benchCfg.IdleSamples))
-			r.saveState()
-			return
-		}
-		oplog.LogJob("benchmark.idle_confirmed", jobID, "", oplog.WithDetailf("samples=%d", r.benchmarkIdleCount))
-		r.benchmarkIdleCount = 0
-		r.benchmarkLastReason = ""
 	}
 
-	// Check CPU capacity
+	// Check CPU capacity.
 	if runningCount > 0 {
 		currentAllotment := r.state.TotalAllotment()
 		nextAllotment := r.jobAllotment(job)
 		if currentAllotment+nextAllotment > r.cpuConfig.HostUtilizationTarget {
-			r.state.AddPendingWithReason(jobID, fmt.Sprintf("cpu gate: %d%% + %d%% > %d%% target", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget))
-			r.saveState()
-			return
+			decision.reason = fmt.Sprintf("cpu gate: %d%% + %d%% > %d%% target", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget)
+			return decision
 		}
 	}
 
@@ -363,19 +378,22 @@ func (r *Runner) tryStartNextJob() {
 	if r.cpuConfig.HostLoadCeiling > 0 && r.cpuCount > 0 {
 		loadPct := int((HostLoadAvg1() * 100.0) / float64(r.cpuCount))
 		if loadPct >= r.cpuConfig.HostLoadCeiling {
-			r.state.AddPendingWithReason(jobID, fmt.Sprintf("host load gate: %d%% >= %d%% ceiling (1-min loadavg / %d cores)", loadPct, r.cpuConfig.HostLoadCeiling, r.cpuCount))
-			r.saveState()
-			return
+			decision.reason = fmt.Sprintf("host load gate: %d%% >= %d%% ceiling (1-min loadavg / %d cores)", loadPct, r.cpuConfig.HostLoadCeiling, r.cpuCount)
+			return decision
 		}
 	}
 
-	// Refresh actual GPU memory snapshot before GPU checks (only for GPU jobs)
+	// Refresh actual GPU memory snapshot before GPU checks (only for GPU jobs).
 	jobHasGPU := job.GPUClass != "" || len(GetJobGPUDevices(job)) > 0
 	if jobHasGPU {
+		if r.gpuInv == nil {
+			decision.reason = "gpu gate: inventory unavailable"
+			return decision
+		}
 		r.gpuInv.RefreshDeviceMemSnapshot()
 	}
 
-	// Check GPU capacity and resolve devices
+	// Check GPU capacity and resolve devices.
 	var resolvedGPUDevices []string
 	if jobHasGPU {
 		var canStart bool
@@ -387,24 +405,129 @@ func (r *Runner) tryStartNextJob() {
 			} else {
 				gpuReason = "gpu gate: " + gpuReason
 			}
-			r.state.AddPendingWithReason(jobID, gpuReason)
-			r.saveState()
-			return
+			decision.reason = gpuReason
+			return decision
 		}
 	}
 
 	// Auto-assign GPU on hosts with GPUs when the job has no GPU constraints.
 	// Without this, CUDA defaults to GPU 0, causing OOM when GPU 0 is loaded.
-	if !jobHasGPU && len(r.gpuInv.Devices) > 0 {
+	if !jobHasGPU && r.gpuInv != nil && len(r.gpuInv.Devices) > 0 {
 		r.gpuInv.RefreshDeviceMemSnapshot()
 		if device := r.gpuInv.PickLeastLoadedGPU(r.state); device != "" {
 			resolvedGPUDevices = []string{device}
 		}
 	}
 
+	decision.canStart = true
+	decision.resolvedGPUDevices = resolvedGPUDevices
+	return decision
+}
+
+func (r *Runner) requeueUnreadablePending(jobID int64) {
+	// Pop the next job
+	poppedID, ok := r.state.PopPending()
+	if !ok {
+		return
+	}
+	if poppedID != jobID {
+		r.state.AddPending(poppedID)
+		return
+	}
+
+	// Load job data
+	_, err := ReadJobFile(r.queueDir, jobID)
+	if err != nil {
+		reason := fmt.Sprintf("missing queue payload: %v", err)
+		fmt.Fprintf(os.Stderr, "Job %s: cannot read job file: %v\n", ids.FormatJobID(jobID), err)
+		r.state.AddPendingWithReason(jobID, reason)
+		r.saveState()
+		return
+	}
+}
+
+func (r *Runner) applyPendingDecision(decision pendingStartDecision) {
+	jobID := decision.jobID
+	job := decision.job
+	rj := decision.rj
+
+	if !decision.canStart {
+		if _, ok := r.state.PopPending(); !ok {
+			return
+		}
+		r.state.AddPendingWithReason(jobID, decision.reason)
+		r.saveState()
+		return
+	}
+
+	// Benchmark: confirm consecutive idle samples before starting.
+	if HasBenchmarkTag(rj) {
+		r.benchmarkIdleCount++
+		if r.benchmarkIdleCount < r.benchCfg.IdleSamples {
+			if _, ok := r.state.PopPending(); !ok {
+				return
+			}
+			r.state.AddPendingWithReason(jobID, fmt.Sprintf("benchmark gate: confirming idle (%d/%d)", r.benchmarkIdleCount, r.benchCfg.IdleSamples))
+			r.saveState()
+			return
+		}
+		oplog.LogJob("benchmark.idle_confirmed", jobID, "", oplog.WithDetailf("samples=%d", r.benchmarkIdleCount))
+		r.benchmarkIdleCount = 0
+		r.benchmarkLastReason = ""
+	}
+
+	r.state.RemovePending(jobID)
+
+	// Wait for prior post-job uploads from this workdir before reusing it.
+	if r.PostJobManager != nil && !decision.waitedForPostJob {
+		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+	}
+
+	r.startPendingJob(decision)
+}
+
+func (r *Runner) markBenchmarkIdleWait(decision pendingStartDecision) {
+	reason := decision.benchmarkIdleReason
+	if reason != r.benchmarkLastReason {
+		oplog.LogJob("benchmark.waiting", decision.jobID, "", oplog.WithDetail(reason))
+		r.benchmarkLastReason = reason
+	}
+	r.benchmarkIdleCount = 0
+	r.state.SetPendingReason(decision.jobID, decision.reason)
+}
+
+func (r *Runner) tryStartAfterGatedBenchmark(candidateIDs []int64) bool {
+	for _, jobID := range candidateIDs {
+		job, err := ReadJobFile(r.queueDir, jobID)
+		if err != nil {
+			continue
+		}
+		if HasBenchmarkTag(&RunnerJob{Data: job, ID: jobID}) {
+			continue
+		}
+		decision := r.evaluateLoadedPendingJob(jobID, job, false)
+		if !decision.canStart {
+			continue
+		}
+		if depResult := CheckDependencies(decision.job.Deps, decision.job.Needs, r.logDir); depResult.Result != DepOK {
+			continue
+		}
+		r.state.RemovePending(jobID)
+		if r.PostJobManager != nil {
+			r.PostJobManager.WaitForWorkdir(ExpandTilde(decision.job.Dir))
+		}
+		r.startPendingJob(decision)
+		return true
+	}
+	return false
+}
+
+func (r *Runner) startPendingJob(decision pendingStartDecision) {
+	jobID := decision.jobID
+	job := decision.job
 	// Start the job
-	slog.Info("job starting", "component", "runner", "job_id", jobID, "running_count", runningCount, "gpu_class", job.GPUClass, "resolved_gpu", resolvedGPUDevices)
-	err = r.startJob(jobID, job, resolvedGPUDevices)
+	slog.Info("job starting", "component", "runner", "job_id", jobID, "running_count", r.state.RunningCount(), "gpu_class", job.GPUClass, "resolved_gpu", decision.resolvedGPUDevices)
+	err := r.startJob(jobID, job, decision.resolvedGPUDevices)
 	if err == errRequeue {
 		slog.Debug("job requeued", "component", "runner", "job_id", jobID)
 		r.state.AddPending(jobID)

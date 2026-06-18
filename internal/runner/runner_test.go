@@ -81,6 +81,43 @@ func assertJobNotStarted(t *testing.T, logDir string, jobID int64) {
 	}
 }
 
+func cleanupRunnerProcesses(t *testing.T, r *Runner) {
+	t.Helper()
+	t.Cleanup(func() {
+		r.processesMu.Lock()
+		processes := make([]*Process, 0, len(r.processes))
+		for _, proc := range r.processes {
+			processes = append(processes, proc)
+		}
+		r.processesMu.Unlock()
+		for _, proc := range processes {
+			KillProcessGroup(proc.PGID)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			r.processesMu.Lock()
+			remaining := len(r.processes)
+			r.processesMu.Unlock()
+			if remaining == 0 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+}
+
+func forceBenchmarkIdleGate(r *Runner) {
+	r.benchCfg = BenchmarkConfig{
+		CPUThreshold:  -1,
+		RAMThreshold:  101,
+		GPUThreshold:  101,
+		VRAMThreshold: 101,
+		IdleSamples:   1,
+	}
+	r.cpuConfig.HostLoadCeiling = 0
+	r.gpuInv = &GPUInventory{}
+}
+
 func TestTryStartNextJob_GPUClassBlockedByExternalVRAM_RequeuesWithoutStarting(t *testing.T) {
 	r, oplogPath := initTestRunner(t)
 
@@ -207,6 +244,136 @@ func TestTryStartNextJob_BenchmarkWarmupRecordsPendingReason(t *testing.T) {
 		t.Fatalf("pending reason = %q, want %q", got, want)
 	}
 	assertJobNotStarted(t, r.logDir, jobID)
+}
+
+func TestTryStartNextJob_SkipsBenchmarkIdleGateForLaterJob(t *testing.T) {
+	r, _ := initTestRunner(t)
+	cleanupRunnerProcesses(t, r)
+	forceBenchmarkIdleGate(r)
+
+	benchmarkID := int64(121)
+	benchmark := &opsqueue.CommandJob{
+		ID:   benchmarkID,
+		Dir:  t.TempDir(),
+		Cmd:  "echo benchmark",
+		Tags: []string{"benchmark-isolation"},
+	}
+	if err := writeJobFile(r.queueDir, benchmark); err != nil {
+		t.Fatalf("write benchmark job file: %v", err)
+	}
+
+	laterID := int64(122)
+	later := &opsqueue.CommandJob{
+		ID:  laterID,
+		Dir: t.TempDir(),
+		Cmd: "sleep 5",
+	}
+	if err := writeJobFile(r.queueDir, later); err != nil {
+		t.Fatalf("write later job file: %v", err)
+	}
+
+	r.state.AddPending(benchmarkID)
+	r.state.AddPending(laterID)
+
+	r.tryStartNextJob()
+
+	if got := r.state.Pending; len(got) != 1 || got[0] != benchmarkID {
+		t.Fatalf("pending = %v, want [%d]", got, benchmarkID)
+	}
+	if _, ok := r.state.Running[fmt.Sprintf("%d", laterID)]; !ok {
+		t.Fatalf("later job %d was not started; running=%v", laterID, r.state.Running)
+	}
+	gotReason := r.state.PendingReasons[fmt.Sprintf("%d", benchmarkID)]
+	if !strings.HasPrefix(gotReason, "benchmark gate: cpu=") {
+		t.Fatalf("benchmark pending reason = %q, want cpu benchmark gate", gotReason)
+	}
+	assertJobNotStarted(t, r.logDir, benchmarkID)
+}
+
+func TestTryStartNextJob_DoesNotSkipBenchmarkForLaterBenchmark(t *testing.T) {
+	r, _ := initTestRunner(t)
+	forceBenchmarkIdleGate(r)
+
+	firstID := int64(131)
+	first := &opsqueue.CommandJob{
+		ID:   firstID,
+		Dir:  t.TempDir(),
+		Cmd:  "echo first",
+		Tags: []string{"benchmark-isolation"},
+	}
+	secondID := int64(132)
+	second := &opsqueue.CommandJob{
+		ID:   secondID,
+		Dir:  t.TempDir(),
+		Cmd:  "echo second",
+		Tags: []string{"benchmark-isolation"},
+	}
+	for _, job := range []*opsqueue.CommandJob{first, second} {
+		if err := writeJobFile(r.queueDir, job); err != nil {
+			t.Fatalf("write job file %d: %v", job.ID, err)
+		}
+		r.state.AddPending(job.ID)
+	}
+
+	r.tryStartNextJob()
+
+	if got := r.state.Pending; len(got) != 2 || got[0] != firstID || got[1] != secondID {
+		t.Fatalf("pending = %v, want [%d %d]", got, firstID, secondID)
+	}
+	if got := r.state.RunningCount(); got != 0 {
+		t.Fatalf("running count = %d, want 0", got)
+	}
+	gotReason := r.state.PendingReasons[fmt.Sprintf("%d", firstID)]
+	if !strings.HasPrefix(gotReason, "benchmark gate: cpu=") {
+		t.Fatalf("benchmark pending reason = %q, want cpu benchmark gate", gotReason)
+	}
+}
+
+func TestTryStartNextJob_SkipsDependencyBlockedCandidateAfterBenchmark(t *testing.T) {
+	r, _ := initTestRunner(t)
+	cleanupRunnerProcesses(t, r)
+	forceBenchmarkIdleGate(r)
+
+	benchmarkID := int64(141)
+	waitingID := int64(142)
+	eligibleID := int64(143)
+	jobs := []*opsqueue.CommandJob{
+		{
+			ID:   benchmarkID,
+			Dir:  t.TempDir(),
+			Cmd:  "echo benchmark",
+			Tags: []string{"benchmark-isolation"},
+		},
+		{
+			ID:   waitingID,
+			Dir:  t.TempDir(),
+			Cmd:  "echo waiting",
+			Deps: "999999",
+		},
+		{
+			ID:  eligibleID,
+			Dir: t.TempDir(),
+			Cmd: "sleep 5",
+		},
+	}
+	for _, job := range jobs {
+		if err := writeJobFile(r.queueDir, job); err != nil {
+			t.Fatalf("write job file %d: %v", job.ID, err)
+		}
+		r.state.AddPending(job.ID)
+	}
+
+	r.tryStartNextJob()
+
+	if got := r.state.Pending; len(got) != 2 || got[0] != benchmarkID || got[1] != waitingID {
+		t.Fatalf("pending = %v, want [%d %d]", got, benchmarkID, waitingID)
+	}
+	if _, ok := r.state.Running[fmt.Sprintf("%d", eligibleID)]; !ok {
+		t.Fatalf("eligible job %d was not started; running=%v", eligibleID, r.state.Running)
+	}
+	if _, ok := r.state.Running[fmt.Sprintf("%d", waitingID)]; ok {
+		t.Fatalf("dependency-blocked job %d should not start", waitingID)
+	}
 }
 
 func TestWarmupActiveUsesInjectedClock(t *testing.T) {

@@ -253,6 +253,13 @@ func (s *State) PeekPending() (int64, bool) {
 	return s.Pending[0], true
 }
 
+// PendingSnapshot returns the current pending queue order.
+func (s *State) PendingSnapshot() []int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.Pending)
+}
+
 func (s *State) popPendingLocked() (int64, bool) {
 	if len(s.Pending) == 0 {
 		return 0, false
