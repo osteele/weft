@@ -1093,3 +1093,66 @@ func TestRunArtifactListQueuedNotStartedShowsPlacementContext(t *testing.T) {
 		t.Fatalf("missing placement context, got:\n%s", out)
 	}
 }
+
+func TestRunArtifactListOnPremEmptyShowsHostOutputHint(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordJobStarting(database, "cool30", "/mnt/project", "echo hi", "artifact list")
+	if err != nil {
+		t.Fatalf("RecordJobStarting: %v", err)
+	}
+	if err := db.UpdateJobRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateJobRunning: %v", err)
+	}
+	if err := db.RecordCompletionByID(database, jobID, 0, time.Now().Unix()); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+	if err := db.SetJobOutputDirs(database, jobID, []string{"output/"}); err != nil {
+		t.Fatalf("SetJobOutputDirs: %v", err)
+	}
+
+	prevListSync := artifactListSync
+	t.Cleanup(func() {
+		artifactListSync = prevListSync
+	})
+	artifactListSync = false
+
+	outBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+
+	if err := runArtifactList(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+
+	out := outBuf.String()
+	for _, want := range []string{
+		"No cached artifacts.",
+		"On-prem job outputs are not uploaded to R2.",
+		"cool30:/mnt/project/output/",
+		"weft artifact sync " + ids.FormatJobID(jobID),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestArtifactNotFoundMessageForOnPremNamesHostOutputLocations(t *testing.T) {
+	job := &db.Job{
+		ID:         42,
+		Host:       "cool30",
+		WorkingDir: "/mnt/project",
+		OutputDirs: []string{"output/"},
+	}
+
+	got := artifactNotFoundMessage(job, "metrics.json", true)
+	for _, want := range []string{
+		"checked local cache, R2, cool30 via artifact sync",
+		"on-prem outputs are not uploaded to R2",
+		"cool30:/mnt/project/output/",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("message missing %q, got %q", want, got)
+		}
+	}
+}

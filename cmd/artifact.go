@@ -404,6 +404,8 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 				for _, line := range queuedPlacementLines(database, job) {
 					fmt.Fprintf(cmd.OutOrStdout(), "%-12s %s\n", line.Label+":", line.Value)
 				}
+			} else if job.HasInventoryHost() {
+				writeInventoryArtifactHint(cmd, job)
 			}
 			continue
 		}
@@ -2238,10 +2240,68 @@ func artifactNotFoundMessage(job *db.Job, token string, r2Checked bool) string {
 		checked = append(checked, "R2")
 	}
 	if job != nil && job.HasInventoryHost() {
-		checked = append(checked, job.Host)
+		checked = append(checked, job.Host+" via artifact sync")
 	}
-	return fmt.Sprintf("artifact %q not found for job %s (checked %s)",
+	msg := fmt.Sprintf("artifact %q not found for job %s (checked %s)",
 		token, ids.FormatJobID(job.ID), strings.Join(checked, ", "))
+	if job != nil && job.HasInventoryHost() {
+		msg += "; on-prem outputs are not uploaded to R2"
+		if locations := inventoryOutputLocations(job); len(locations) > 0 {
+			msg += "; expected output locations include " + strings.Join(locations, ", ")
+		}
+	}
+	return msg
+}
+
+func writeInventoryArtifactHint(cmd *cobra.Command, job *db.Job) {
+	fmt.Fprintln(cmd.OutOrStdout(), "On-prem job outputs are not uploaded to R2.")
+	if locations := inventoryOutputLocations(job); len(locations) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations include %s.\n", strings.Join(locations, ", "))
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Run `weft artifact sync %s` to pull host outputs into the local artifact cache, or inspect the files over SSH.\n", ids.FormatJobID(job.ID))
+}
+
+func inventoryOutputLocations(job *db.Job) []string {
+	if job == nil || !job.HasInventoryHost() {
+		return nil
+	}
+	root := strings.TrimSpace(job.EffectiveWorkingDir())
+	if root == "" {
+		return nil
+	}
+	var rels []string
+	if len(job.OutputDirs) > 0 {
+		rels = append(rels, job.OutputDirs...)
+	} else {
+		rels = append(rels, config.DefaultOutputDirs...)
+	}
+	for _, ref := range job.Outputs {
+		if path, ok := runner.FilesystemOutputRefPath(ref); ok {
+			rels = append(rels, path)
+		}
+	}
+	seen := map[string]struct{}{}
+	var locations []string
+	for _, rel := range rels {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			continue
+		}
+		remotePath := artifacts.ResolveRemotePath(root, rel)
+		if strings.HasSuffix(rel, "/") && !strings.HasSuffix(remotePath, "/") {
+			remotePath += "/"
+		}
+		location := job.Host + ":" + remotePath
+		if _, ok := seen[location]; ok {
+			continue
+		}
+		seen[location] = struct{}{}
+		locations = append(locations, location)
+		if len(locations) >= 3 {
+			break
+		}
+	}
+	return locations
 }
 
 func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, timeout time.Duration) error {
