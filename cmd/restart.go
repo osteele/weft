@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -670,7 +671,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		if err != nil {
 			return err
 		}
-		if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
+		if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 			return err
 		}
 		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
@@ -745,7 +746,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if err != nil {
 		return err
 	}
-	if err := validatePinnedHostQueueGate(job.Host, job.GPUClass, job.GPUMemGB); err != nil {
+	if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 		return err
 	}
 

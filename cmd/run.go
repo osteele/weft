@@ -1047,7 +1047,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("dependency job %s runs on host %s; relay submission must target the same host %s", ids.FormatJobID(depID), depJob.Host, host)
 			}
 		}
-		if err := validatePinnedHostQueueGate(host, gpuClass, resolvedGPUMemGB); err != nil {
+		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
 			return err
 		}
 
@@ -1179,7 +1179,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Disk:        diskMeta,
 		}
 
-		if err := validatePinnedHostQueueGate(host, gpuClass, resolvedGPUMemGB); err != nil {
+		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
 			return err
 		}
 
@@ -1393,7 +1393,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))
 
-	if err := validatePinnedHostQueueGate(host, gpuClass, resolvedGPUMemGB); err != nil {
+	if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
 		return err
 	}
 

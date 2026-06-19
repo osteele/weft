@@ -17,42 +17,36 @@ const queueBlockedReasonTimeout = 5 * time.Second
 // validatePinnedHostQueueGate rejects queue submissions that are
 // deterministically impossible for a pinned inventory host using local
 // inventory data only.
-func validatePinnedHostQueueGate(host, gpuClass string, gpuMemGB *int) error {
+func validatePinnedHostQueueGate(host string, constraints placement.Constraints) error {
 	host = strings.TrimSpace(host)
-	gpuClass = strings.TrimSpace(gpuClass)
+	constraints.GPUClass = strings.TrimSpace(constraints.GPUClass)
 	if host == "" || db.IsLaunchHost(host) {
-		return nil
-	}
-	requiredMemGB := 0
-	if gpuMemGB != nil {
-		requiredMemGB = *gpuMemGB
-	}
-	if gpuClass == "" && requiredMemGB <= 0 {
 		return nil
 	}
 
 	spec := inventory.FindHost(host)
-	if spec == nil || len(spec.GPUs) == 0 {
+	if spec == nil {
 		return nil
 	}
 
-	knownClass := gpuClass == ""
-	knownMem := requiredMemGB <= 0
-	for _, gpu := range spec.GPUs {
-		knownClass = knownClass || gpu.Class != "" || gpu.Name != ""
-		knownMem = knownMem || inventory.ParseMemGB(gpu.Memory) > 0
-	}
-	if !knownClass || !knownMem {
-		return nil
+	if constraints.NeedsGPU() {
+		if len(spec.GPUs) == 0 {
+			return nil
+		}
+		knownClass := constraints.GPUClass == ""
+		knownMem := constraints.GPUMemGB <= 0
+		for _, gpu := range spec.GPUs {
+			knownClass = knownClass || gpu.Class != "" || gpu.Name != ""
+			knownMem = knownMem || inventory.ParseMemGB(gpu.Memory) > 0
+		}
+		if !knownClass || !knownMem {
+			return nil
+		}
 	}
 
-	constraints := placement.Constraints{
-		GPUClass: gpuClass,
-		GPUMemGB: requiredMemGB,
-	}
 	if ok, reasons := placement.CheckHostGPUConstraints(*spec, constraints); !ok {
-		if len(reasons) == 1 && gpuClass != "" && reasons[0] == fmt.Sprintf("no %s GPU", gpuClass) {
-			return fmt.Errorf("gpu gate: no GPU matching class %s", gpuClass)
+		if len(reasons) == 1 && constraints.GPUClass != "" && reasons[0] == fmt.Sprintf("no %s GPU", constraints.GPUClass) {
+			return fmt.Errorf("gpu gate: no GPU matching class %s", constraints.GPUClass)
 		}
 		return fmt.Errorf("gpu gate: %s", strings.Join(reasons, "; "))
 	}

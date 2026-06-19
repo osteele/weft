@@ -9,8 +9,10 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // startJobOptions controls how a job is started immediately on the remote host.
@@ -191,7 +193,23 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if opts.GPUMemMaxGB != nil {
 		gpuMemMaxGB = opts.GPUMemMaxGB
 	}
-	if err := validatePinnedHostQueueGate(opts.Host, opts.GPUClass, gpuMemGB); err != nil {
+	gpuMem := 0
+	if gpuMemGB != nil {
+		gpuMem = *gpuMemGB
+	}
+	resolvedConstraints, err := placement.ResolveConstraints(placement.ConstraintSource{
+		GPUClass: opts.GPUClass,
+		GPUMemGB: gpuMem,
+		Inputs:   opts.Inputs,
+		Command:  opts.Command,
+		Project:  opts.Project,
+		Tags:     opts.Tags,
+		LocalDir: workdir.ResolveLocal(opts.WorkingDir),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePinnedHostQueueGate(opts.Host, resolvedConstraints.Constraints); err != nil {
 		return nil, err
 	}
 

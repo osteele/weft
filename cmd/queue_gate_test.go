@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/placement"
 )
 
 func TestValidatePinnedHostQueueGateRejectsDeterministicMismatch(t *testing.T) {
@@ -17,7 +19,7 @@ func TestValidatePinnedHostQueueGateRejectsDeterministicMismatch(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	err := validatePinnedHostQueueGate("cool30", "ampere+", nil)
+	err := validatePinnedHostQueueGate("cool30", placement.Constraints{GPUClass: "ampere+"})
 	if err == nil {
 		t.Fatal("expected deterministic mismatch to be rejected")
 	}
@@ -32,7 +34,7 @@ func TestValidatePinnedHostQueueGateAllowsUnknownHostData(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	if err := validatePinnedHostQueueGate("cool30", "ampere+", nil); err != nil {
+	if err := validatePinnedHostQueueGate("cool30", placement.Constraints{GPUClass: "ampere+"}); err != nil {
 		t.Fatalf("expected unknown host GPU data to pass, got %v", err)
 	}
 }
@@ -48,7 +50,7 @@ func TestValidatePinnedHostQueueGateAllowsMatchingHost(t *testing.T) {
 	})
 	t.Cleanup(restore)
 
-	if err := validatePinnedHostQueueGate("cool30", "ampere+", nil); err != nil {
+	if err := validatePinnedHostQueueGate("cool30", placement.Constraints{GPUClass: "ampere+"}); err != nil {
 		t.Fatalf("expected matching host to pass, got %v", err)
 	}
 }
@@ -65,11 +67,38 @@ func TestValidatePinnedHostQueueGateRejectsInsufficientMemory(t *testing.T) {
 	t.Cleanup(restore)
 
 	mem := 26
-	err := validatePinnedHostQueueGate("cool30", "nvidia", &mem)
+	err := validatePinnedHostQueueGate("cool30", placement.Constraints{GPUClass: "nvidia", GPUMemGB: mem})
 	if err == nil {
 		t.Fatal("expected insufficient memory to be rejected")
 	}
 	if got, want := err.Error(), "gpu gate: no GPU with >=26GB"; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestValidatePinnedHostQueueGateRejectsRuntimeFloor(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{
+		{
+			Name:                "cool30",
+			NVIDIADriverVersion: "525.125.06",
+			CUDAVersion:         "12.0",
+			GPUs: []inventory.GPUSpec{
+				{Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24576MiB", Indices: []int{0}},
+			},
+		},
+	})
+	t.Cleanup(restore)
+
+	err := validatePinnedHostQueueGate("cool30", placement.Constraints{
+		GPUClass:         "nvidia",
+		GPUMemGB:         20,
+		MinCUDAVersion:   "12.8",
+		MinDriverVersion: 570,
+	})
+	if err == nil {
+		t.Fatal("expected runtime floor mismatch to be rejected")
+	}
+	if got := err.Error(); !strings.Contains(got, "driver floor: NVIDIA driver 525.125.06 < required >=570") {
+		t.Fatalf("error = %q, want driver floor rejection", got)
 	}
 }
