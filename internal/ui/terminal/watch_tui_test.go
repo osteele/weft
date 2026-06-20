@@ -25,6 +25,7 @@ func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 	// goroutines). When the cache holds a "credits low" warning, the extra
 	// line displaces expected rows from the fixed 20-line viewport — a
 	// known order-dependent flake. Pin both caches to a clean state.
+	// (The daemon-status line is pinned hermetically in TestMain.)
 	SuppressProviderCreditWarningForTesting(t)
 
 	cloudInstance := &db.Launch{

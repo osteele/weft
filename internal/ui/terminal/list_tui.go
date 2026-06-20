@@ -3484,7 +3484,7 @@ func (m *listTUIModel) ensureCurrentDaemonForTick() tea.Cmd {
 	if m.daemonRestartInProgress {
 		return nil
 	}
-	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
+	status, err := daemonStatusProbe(daemonStatusPaths())
 	if err != nil || !status.ActiveBinaryStale {
 		return nil
 	}

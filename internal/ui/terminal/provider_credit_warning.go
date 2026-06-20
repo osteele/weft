@@ -43,6 +43,12 @@ var (
 		return user.ClientBalance, nil
 	}
 	daemonStatusPaths = daemoncontrol.DefaultPaths
+	// daemonStatusProbe is the seam through which View() reads real daemon
+	// state. Tests override it (see SuppressDaemonStatusForTesting) so layout
+	// assertions don't depend on whether a healthy weft daemon happens to be
+	// running on the host — otherwise a "Daemon: …" line displaces expected
+	// rows from a fixed-height test viewport.
+	daemonStatusProbe = daemoncontrol.CurrentStatus
 
 	providerCreditWarningCache struct {
 		mu          sync.Mutex
@@ -153,7 +159,7 @@ func renderDaemonStatusLine(width int) string {
 // so the unplaced "placement pending" reason can say so. On a status read
 // error it returns false (no annotation rather than a misleading one).
 func placementDaemonStopped() bool {
-	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
+	status, err := daemonStatusProbe(daemonStatusPaths())
 	return err == nil && !status.Live
 }
 
@@ -163,7 +169,7 @@ type daemonStatusLineView struct {
 }
 
 func renderDaemonStatusLineView(width int, actionHint bool) daemonStatusLineView {
-	status, err := daemoncontrol.CurrentStatus(daemonStatusPaths())
+	status, err := daemonStatusProbe(daemonStatusPaths())
 	var msg string
 	actionable := false
 	switch {

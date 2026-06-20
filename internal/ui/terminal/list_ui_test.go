@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -2725,45 +2724,30 @@ func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
 	}
 }
 
+// withStoppedDaemonStatus makes View() render the "Daemon: stopped" line by
+// pinning the status probe to a not-live daemon. It drives daemonStatusProbe
+// directly (rather than seeding filesystem fixtures) so it composes with the
+// hermetic TestMain default — see main_test.go.
 func withStoppedDaemonStatus(t *testing.T) {
 	t.Helper()
-	oldPaths := daemonStatusPaths
-	dir := t.TempDir()
-	daemonStatusPaths = func() daemoncontrol.Paths {
-		return daemoncontrol.Paths{
-			PIDFile:   filepath.Join(dir, "daemon.pid"),
-			StdoutLog: filepath.Join(dir, "daemon.stdout.log"),
-			StderrLog: filepath.Join(dir, "daemon.stderr.log"),
-			PlistFile: filepath.Join(dir, "com.osteele.weft.daemon.plist"),
-		}
+	prev := daemonStatusProbe
+	daemonStatusProbe = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+		return daemoncontrol.Status{}, nil
 	}
-	t.Cleanup(func() { daemonStatusPaths = oldPaths })
+	t.Cleanup(func() { daemonStatusProbe = prev })
 }
 
+// withStaleDaemonStatus makes View()/tick see a live daemon running a stale
+// binary (the "Daemon: stale binary" / auto-restart path). The stale-detection
+// logic itself is covered by the daemoncontrol package's own tests; here we
+// only assert the TUI's reaction to a stale status.
 func withStaleDaemonStatus(t *testing.T) {
 	t.Helper()
-	withStoppedDaemonStatus(t)
-	paths := daemonStatusPaths()
-	if err := os.WriteFile(paths.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
-		t.Fatalf("write daemon pid: %v", err)
+	prev := daemonStatusProbe
+	daemonStatusProbe = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+		return daemoncontrol.Status{PID: os.Getpid(), Live: true, ActiveBinaryStale: true}, nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable: %v", err)
-	}
-	metadata := daemoncontrol.Metadata{
-		PID:               os.Getpid(),
-		Executable:        exe,
-		ExecutableModTime: 1,
-		StartedAt:         time.Now().Add(-time.Hour).Unix(),
-	}
-	data, err := json.Marshal(metadata)
-	if err != nil {
-		t.Fatalf("marshal daemon metadata: %v", err)
-	}
-	if err := os.WriteFile(daemoncontrol.MetadataPath(paths), append(data, '\n'), 0o644); err != nil {
-		t.Fatalf("write daemon metadata: %v", err)
-	}
+	t.Cleanup(func() { daemonStatusProbe = prev })
 }
 
 func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {
