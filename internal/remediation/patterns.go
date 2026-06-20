@@ -210,7 +210,7 @@ var failurePatternRules = []failurePatternRule{
 		category:   "environment",
 		message:    "SSH connection lost",
 		confidence: 0.85,
-		re:         regexp.MustCompile(`(?is)Connection reset|Broken pipe|Host is unreachable|No route to host|ssh:.*disconnect`),
+		re:         regexp.MustCompile(`(?is)ssh:.*(?:Connection reset|disconnect|Broken pipe)|Connection to .* closed by remote host|Host is unreachable|No route to host`),
 	},
 	{
 		patternID:  "timeout",
@@ -490,6 +490,20 @@ var dataPatterns = []*pattern{
 		remediable: false,
 		// extractAssets intentionally nil — the asset isn't auto-fetchable;
 		// the user has to request access on huggingface.co first.
+	},
+	{
+		re:         regexp.MustCompile(`(?is)huggingface\.co/([^/\s'")]+/[^/\s'")]+)/resolve/.*?(?:LocalEntryNotFoundError|couldn'?t connect to 'https://huggingface\.co'.*?cached files|cannot find the requested files in the local cache)`),
+		patternID:  "hf_network_cache_miss",
+		category:   "data",
+		message:    "HuggingFace model unavailable: network request failed and local cache is missing",
+		solution:   "Declare the model as a Weft input (for example `--input hf:<model-id>`) or pre-stage it on the target host, then retry.",
+		remediable: false,
+		extractAssets: func(match []string) []string {
+			if len(match) < 2 {
+				return nil
+			}
+			return []string{"hf:" + match[1]}
+		},
 	},
 	{
 		re:         regexp.MustCompile(`(?i)(?:FileNotFoundError|OSError|No such file or directory).*huggingface/hub/models--([^\s/]+--[^\s/]+)`),

@@ -71,6 +71,29 @@ ConnectionError: HTTPSConnectionPool(host='huggingface.co', port=443): Read time
 	}
 }
 
+func TestDataPatterns_HFNetworkCacheMissBeatsSSHDisconnect(t *testing.T) {
+	log := `'(ProtocolError('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer')), '(Request ID: 47dbd0f3-eafa-494f-ae31-027b91043797)')' thrown while requesting HEAD https://huggingface.co/microsoft/phi-1/resolve/main/tokenizer_config.json
+huggingface_hub.errors.LocalEntryNotFoundError: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache.
+OSError: We couldn't connect to 'https://huggingface.co' to load the files, and couldn't find them in the cached files.`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected HF network/cache-miss diagnosis")
+	}
+	if d.Pattern != "hf_network_cache_miss" {
+		t.Fatalf("pattern = %q, want hf_network_cache_miss", d.Pattern)
+	}
+	if d.Category != "data" {
+		t.Errorf("category = %q, want data", d.Category)
+	}
+	if len(d.MissingAssets) != 1 || d.MissingAssets[0] != "hf:microsoft/phi-1" {
+		t.Errorf("missing assets = %v, want [hf:microsoft/phi-1]", d.MissingAssets)
+	}
+	if d.Remediable {
+		t.Error("network/cache miss should not auto-remediate; the retry may need network or explicit input declaration")
+	}
+}
+
 func TestDataPatterns_MissingHFModel(t *testing.T) {
 	log := `Traceback (most recent call last):
   File "train.py", line 10, in <module>

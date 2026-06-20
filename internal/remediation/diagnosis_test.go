@@ -236,6 +236,11 @@ func TestDiagnoseFailedAttemptFromLog_PatternRegistry(t *testing.T) {
 			pattern: "ssh_disconnect",
 		},
 		{
+			name:    "http connection reset is not ssh disconnect",
+			log:     "requests.exceptions.ConnectionError: ConnectionResetError(54, 'Connection reset by peer') while requesting https://huggingface.co/model/config.json",
+			pattern: "unknown",
+		},
+		{
 			name:    "timeout",
 			log:     "agent timed out: budget 3600 seconds elapsed 3610 seconds",
 			pattern: "timeout",

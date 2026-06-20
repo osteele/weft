@@ -58,7 +58,7 @@ RULES: list[PatternRule] = [
         "SSH connection lost",
         0.85,
         re.compile(
-            r"Connection reset|Broken pipe|Host is unreachable|No route to host|ssh:.*disconnect",
+            r"ssh:.*(?:Connection reset|disconnect|Broken pipe)|Connection to .* closed by remote host|Host is unreachable|No route to host",
             re.I | re.S,
         ),
     ),
