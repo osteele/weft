@@ -2007,10 +2007,13 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{1: {JobID: 1, Status: db.StatusFailed}},
 		}
 		out := line(buildInstanceHealthFooter(failures, 120, now))
-		for _, want := range []string{"⚠", "Instances: 1 failed", "latest 5m ago", "$0.37 wasted", "(f:diagnose)"} {
+		for _, want := range []string{"Launch failures: 1 failed", "latest 5m ago", "$0.37 wasted", "(f:diagnose)"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("footer line missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, "⚠") {
+			t.Fatalf("footer line should not render a warning icon:\n%s", out)
 		}
 		// The breakdown detail lives in the overlay, not the footer.
 		if strings.Contains(out, "succeeded") || strings.Contains(out, "[f]") {

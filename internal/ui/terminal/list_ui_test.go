@@ -1182,7 +1182,7 @@ func TestListTUIInstanceHealthFooterToken(t *testing.T) {
 	if strings.Contains(out, "Recent failed instances") {
 		t.Fatalf("interactive view must not render the inline section, got:\n%s", out)
 	}
-	for _, want := range []string{"Instances: 1 failed", "f:diagnose"} {
+	for _, want := range []string{"Launch failures: 1 failed", "f:diagnose"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in one-line footer, got:\n%s", want, out)
 		}
@@ -1265,7 +1265,7 @@ func TestListTUIInstanceFailuresOverlayContent(t *testing.T) {
 	// The one-line footer leads with the attention bucket (the dud); the
 	// recovered (succeeded) detail belongs in the overlay, not the footer.
 	footer := stripANSI(m.View())
-	if !strings.Contains(footer, "Instances: 1 dud") || !strings.Contains(footer, "f:diagnose") {
+	if !strings.Contains(footer, "Launch failures: 1 dud") || !strings.Contains(footer, "f:diagnose") {
 		t.Fatalf("footer should be a one-line dud token:\n%s", footer)
 	}
 	if strings.Contains(footer, "succeeded") {

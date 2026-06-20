@@ -1627,7 +1627,7 @@ func instanceHealthHeadline(s recentFailedInstanceSummary) (text string, attenti
 	if len(parts) == 0 {
 		return pluralize(s.total, "instance recovered", "instances recovered"), false
 	}
-	return "Instances: " + strings.Join(parts, " · "), true
+	return "Launch failures: " + strings.Join(parts, " · "), true
 }
 
 // hasUnresolved reports whether any recent failure left a job unable to run.
@@ -1658,7 +1658,7 @@ func buildInstanceHealthFooter(failures *recentFailedInstances, width int, now t
 		}
 		parts = append(parts, fmt.Sprintf("Clustered instance failures — %s (%d)", s.clusterFactor, s.total))
 	} else if headline, attention := instanceHealthHeadline(s); attention {
-		parts = append(parts, "⚠ "+headline)
+		parts = append(parts, headline)
 	} else {
 		style = tuiDimStyle
 		parts = append(parts, headline)
