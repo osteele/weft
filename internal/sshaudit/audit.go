@@ -111,23 +111,7 @@ func auditLogPath() string {
 	if path := strings.TrimSpace(os.Getenv("WEFT_SSH_AUDIT_LOG")); path != "" {
 		return path
 	}
-	if !isTestBinary() {
-		return ""
-	}
-	if path := strings.TrimSpace(os.Getenv("WEFT_TEST_SSH_LOG")); path != "" {
-		return path
-	}
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
-		return filepath.Join(u.HomeDir, ".cache", "weft", "test-ssh.jsonl")
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".cache", "weft", "test-ssh.jsonl")
-	}
-	return filepath.Join(os.TempDir(), "weft-test-ssh.jsonl")
-}
-
-func isTestBinary() bool {
-	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test")
+	return ""
 }
 
 func localUser() string {

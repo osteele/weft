@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 func TestFilterJobsByEffectiveStatusExcludesHostlessRunningFromRunning(t *testing.T) {
@@ -431,6 +432,8 @@ func TestCollectJobsForListWithFiltersOverridesProject(t *testing.T) {
 }
 
 func TestPrintJobsGroupedStatus(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	prevGroupBy := listGroupBy
 	prevFormat := listFormat
 	listGroupBy = "status"
@@ -459,6 +462,8 @@ func TestPrintJobsGroupedStatus(t *testing.T) {
 }
 
 func TestPrintJobsGroupedProject(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	prevGroupBy := listGroupBy
 	prevFormat := listFormat
 	listGroupBy = "project"
@@ -549,6 +554,14 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read pipe: %v", err)
 	}
 	return string(data)
+}
+
+func stubEmptyQueueStatus(t *testing.T) {
+	t.Helper()
+	cleanupSSH := ssh.SetRunner(func(string, string) (string, string, error) {
+		return "", "", nil
+	})
+	t.Cleanup(cleanupSSH)
 }
 
 // recordFailedJob opens a fresh temp DB for the test, records a job, and

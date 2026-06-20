@@ -76,6 +76,14 @@ func TestLogWritesOpsAndAuditFile(t *testing.T) {
 	}
 }
 
+func TestAuditLogPathRequiresExplicitEnv(t *testing.T) {
+	t.Setenv("WEFT_SSH_AUDIT_LOG", "")
+
+	if got := auditLogPath(); got != "" {
+		t.Fatalf("auditLogPath() = %q, want empty without WEFT_SSH_AUDIT_LOG", got)
+	}
+}
+
 func containsAll(s string, needles ...string) bool {
 	for _, needle := range needles {
 		if !strings.Contains(s, needle) {

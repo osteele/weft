@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -200,6 +201,7 @@ func TestDecodeQueueDependencies(t *testing.T) {
 
 func TestRunEditReplacesTags(t *testing.T) {
 	database := db.SetupTestDB(t)
+	stubSourceSync(t)
 
 	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 	if err != nil {
@@ -267,6 +269,7 @@ func TestRunEditReplacesTags(t *testing.T) {
 
 func TestRunEditClearsTags(t *testing.T) {
 	database := db.SetupTestDB(t)
+	stubSourceSync(t)
 
 	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 	if err != nil {
@@ -321,6 +324,7 @@ func TestRunEditClearsTags(t *testing.T) {
 
 func TestRunEditRemovesTag(t *testing.T) {
 	database := db.SetupTestDB(t)
+	stubSourceSync(t)
 
 	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 	if err != nil {
@@ -384,6 +388,14 @@ func TestRunEditRemovesTag(t *testing.T) {
 			t.Fatalf("remoteTags[%d] = %q, want %q", i, remoteTags[i], wantTags[i])
 		}
 	}
+}
+
+func stubSourceSync(t *testing.T) {
+	t.Helper()
+	cleanup := srcsync.SetSyncFunc(func(string, string, string, []string) error {
+		return nil
+	})
+	t.Cleanup(cleanup)
 }
 
 func TestRunEditRemovesCanonicalizedTag(t *testing.T) {

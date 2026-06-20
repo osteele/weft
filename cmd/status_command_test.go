@@ -86,6 +86,8 @@ func TestRunStatusFullSyncUsesNormalCloudSyncTimeout(t *testing.T) {
 }
 
 func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "bounded status", "")
 	if err != nil {
@@ -128,6 +130,8 @@ func TestRunStatusInventorySyncUsesBoundedStatusTimeout(t *testing.T) {
 }
 
 func TestRunStatusSkipsLiveSyncWhenDaemonSyncIsFresh(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "fresh status", "")
 	if err != nil {
@@ -163,6 +167,8 @@ func TestRunStatusSkipsLiveSyncWhenDaemonSyncIsFresh(t *testing.T) {
 }
 
 func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "forced status", "")
 	if err != nil {
@@ -199,6 +205,8 @@ func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
 }
 
 func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "active status", ""); err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
@@ -406,6 +414,8 @@ func TestShouldRefreshInstanceLiveStateUsesDaemonCloudFreshness(t *testing.T) {
 }
 
 func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "id format", "")
 	if err != nil {
@@ -427,6 +437,8 @@ func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
 }
 
 func TestRunJobInfoUnplacedQueuedStatusIsDisambiguated(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
 	database := db.SetupTestDB(t)
 
 	// Unplaced job: no host, no launch. Bare "queued" next to an attempt
