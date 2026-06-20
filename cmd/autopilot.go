@@ -175,26 +175,27 @@ func init() {
 // autopilotStateView is the JSON shape returned by `weft autopilot status --json`.
 // Stable contract — agents may parse this. Timestamps are RFC3339.
 type autopilotStateView struct {
-	State              autopilotStateName `json:"state"`
-	Paused             bool               `json:"paused"`
-	PausedAt           *string            `json:"paused_at,omitempty"`
-	PausedBy           string             `json:"paused_by,omitempty"`
-	PausedReason       string             `json:"paused_reason,omitempty"`
-	ActiveRunnerPID    int                `json:"active_runner_pid,omitempty"`
-	ActiveRunnerLabel  string             `json:"active_runner_label,omitempty"`
-	ActiveRunnerHost   string             `json:"active_runner_host,omitempty"`
-	ActiveBinaryPath   string             `json:"active_binary_path,omitempty"`
-	ActiveBinaryStale  bool               `json:"active_binary_stale,omitempty"`
-	PassStartedAt      *string            `json:"pass_started_at,omitempty"`
-	PassAgeSeconds     int64              `json:"pass_age_seconds,omitempty"`
-	HeartbeatAt        *string            `json:"heartbeat_at,omitempty"`
-	HeartbeatAgeS      int64              `json:"heartbeat_age_seconds,omitempty"`
-	StaleAfterSeconds  int64              `json:"stale_after_seconds"`
-	LastPassFinishedAt *string            `json:"last_pass_finished_at,omitempty"`
-	LastPassDurationMS int64              `json:"last_pass_duration_ms,omitempty"`
-	LastPassSummary    string             `json:"last_pass_summary,omitempty"`
-	LastPassError      string             `json:"last_pass_error,omitempty"`
-	OrphanStreaks      []orphanStreakView `json:"orphan_streaks,omitempty"`
+	State              autopilotStateName   `json:"state"`
+	Paused             bool                 `json:"paused"`
+	PausedAt           *string              `json:"paused_at,omitempty"`
+	PausedBy           string               `json:"paused_by,omitempty"`
+	PausedReason       string               `json:"paused_reason,omitempty"`
+	ActiveRunnerPID    int                  `json:"active_runner_pid,omitempty"`
+	ActiveRunnerLabel  string               `json:"active_runner_label,omitempty"`
+	ActiveRunnerHost   string               `json:"active_runner_host,omitempty"`
+	ActiveBinaryPath   string               `json:"active_binary_path,omitempty"`
+	ActiveBinaryStale  bool                 `json:"active_binary_stale,omitempty"`
+	PassStartedAt      *string              `json:"pass_started_at,omitempty"`
+	PassAgeSeconds     int64                `json:"pass_age_seconds,omitempty"`
+	HeartbeatAt        *string              `json:"heartbeat_at,omitempty"`
+	HeartbeatAgeS      int64                `json:"heartbeat_age_seconds,omitempty"`
+	StaleAfterSeconds  int64                `json:"stale_after_seconds"`
+	LastPassFinishedAt *string              `json:"last_pass_finished_at,omitempty"`
+	LastPassDurationMS int64                `json:"last_pass_duration_ms,omitempty"`
+	LastPassSummary    string               `json:"last_pass_summary,omitempty"`
+	LastPassError      string               `json:"last_pass_error,omitempty"`
+	OrphanStreaks      []orphanStreakView   `json:"orphan_streaks,omitempty"`
+	PriceAuthBlocks    []priceAuthBlockView `json:"blocked_on_price_authorization,omitempty"`
 	// Incidents lists active placement incidents (fingerprints affecting ≥2
 	// unplaced jobs) — see `weft incidents` for the dedicated CLI.
 	Incidents []IncidentSummary `json:"incidents,omitempty"`
@@ -309,6 +310,9 @@ func runAutopilotStatus(cmd *cobra.Command, args []string) error {
 			})
 		}
 	}
+	if blocks, err := collectPriceAuthorizationBlocks(database); err == nil && len(blocks) > 0 {
+		view.PriceAuthBlocks = blocks
+	}
 	if incs, err := collectIncidents(database); err == nil && len(incs) > 0 {
 		view.Incidents = incs
 	}
@@ -382,6 +386,27 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 		}
 		if desc != "" {
 			fmt.Fprintf(&b, ": %s", desc)
+		}
+	}
+	if len(view.PriceAuthBlocks) > 0 {
+		fmt.Fprintf(&b, "\n  blocked_on_price_authorization: %d %s",
+			len(view.PriceAuthBlocks),
+			pluralWord(len(view.PriceAuthBlocks), "job", "jobs"))
+		for _, block := range view.PriceAuthBlocks {
+			desc := strings.TrimSpace(block.Description)
+			if desc == "" {
+				desc = strings.TrimSpace(block.Project)
+			}
+			if desc != "" {
+				desc = " — " + truncateForTable(desc, 48)
+			}
+			fmt.Fprintf(&b, "\n    %s %s%s", block.JobID, block.GPUBucket, desc)
+			if block.Reason != "" {
+				fmt.Fprintf(&b, "\n      reason: %s", truncateForTable(block.Reason, 120))
+			}
+			if block.AuthorizeCommand != "" {
+				fmt.Fprintf(&b, "\n      authorize: %s", block.AuthorizeCommand)
+			}
 		}
 	}
 	for _, inc := range view.Incidents {

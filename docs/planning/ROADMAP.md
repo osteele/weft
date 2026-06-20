@@ -28,7 +28,6 @@ instead of maintaining its own provisioning infrastructure.
 | Resume interrupted campaigns | Medium | Recover quickly after interruption by continuing from persisted state rather than restarting all work. | `--resume` flag, JSON state file |
 | Seed-first validation | Medium | Reduce blast radius by validating the setup path on one seed before provisioning full scale. | `--seed-first` flag |
 | Price-gate market median | Low | The price-authorization error message already has a structurally present market-median informational field, but it currently always displays `0`. Compute the median across the candidate offer list at search time and thread it into the displayed context. This does not affect the gate decision, only the operator-facing explanation. | — |
-| Price-authorization block visibility | Medium | `weft autopilot status` does not yet have a dedicated `blocked_on_price_authorization` section comparable to `orphan_streaks`. Add a status surface for jobs blocked by price authorization so operators can see when autopilot is stopped by an explicit spend gate rather than ordinary placement churn. | — |
 | First-party import diagnosis precision | Medium | Fix wb27: when a traceback reports `ModuleNotFoundError` for a local first-party package such as `experiments`, diagnose the invocation/sys.path problem instead of `vllm_setup` or generic missing dependency. The classifier should use the failing module and traceback frame, check whether the module exists in the synced source tree, and suggest `uv run <script>` for PEP 723 scripts launched as `uv run python <script>`. | — |
 | Image-aware launch grouping | Medium | Split or explicitly price groups that mix jobs whose images are technically compatible but have very different setup-disk economics, such as CUDA-devel vLLM jobs and torch jobs that would be cheaper on PyTorch images. This should prevent fresh launches from creating shared rentals that are valid for CUDA but inefficient for later setup phases. | — |
 | Unified setup disk model | Medium | Move launch sizing, reuse admission, and candidate scoring onto one image-aware setup disk model. It should reason about cached uv manifests, PyTorch image package reuse, Python-version shortcut eligibility, and CUDA-only image fallbacks without duplicating constants across launch and reuse paths. | — |
@@ -129,25 +128,15 @@ on-prem hosts ever become first-class table-backed entities, and avoids
 collisions with Go's pervasive use of "instance" for type/struct instances
 when grepping.
 
-## Structured termination reasons for credit exhaustion (partially landed)
+## Create-time credit-exhaustion termination reason
 
-The `TerminationReasonAccountCreditExhausted` constant now exists in
-`internal/db/cloud_instances.go`, the bidding filter excludes it via the
-`NOT IN` list (`internal/bidding/build.go`), and operators can apply it
-retroactively via `weft instance mark-credit-exhausted` (see
-`cmd/instance_mark_credit_exhausted.go`). This was triggered by a Vast.ai
-credit-exhaustion incident that destroyed running instances — the operator
-needed a way to label those rows as credit-related so they didn't poison
-the survival model.
-
-Still pending (the original deferral): wire CreateInstance-time
-credit-exhaustion failures through the new constant. Today every
-`UpdateLaunchStatus` write site that observes
-`errors.Is(err, cloud.ErrAccountCreditExhausted)` still writes
-`TerminationReasonInfraFailure` (or `TerminationReasonProviderFailure`)
-plus a substring-matching detail. The bidding filter's LIKE patterns on
-`termination_detail` remain as the safety net for those rows until the
-call-site survey is done.
+Wire CreateInstance-time credit-exhaustion failures through
+`TerminationReasonAccountCreditExhausted`. Today every `UpdateLaunchStatus`
+write site that observes `errors.Is(err, cloud.ErrAccountCreditExhausted)`
+still writes `TerminationReasonInfraFailure` (or
+`TerminationReasonProviderFailure`) plus a substring-matching detail. The
+bidding filter's LIKE patterns on `termination_detail` remain as the safety
+net for those rows until the call-site survey is done.
 
 Right trigger to finish the work:
 
@@ -158,9 +147,9 @@ Right trigger to finish the work:
   cancellation, etc.) — at which point auditing the existing
   `cloud.ErrAccountCreditExhausted` call sites becomes cheap.
 
-Until then: the structured constant + the LIKE-pattern net cover both the
-retroactive-reclassification path and the legacy `provider_failure` +
-detail path. Keep the two phrase lists in sync by hand.
+Until this is implemented, keep the credit-error phrase lists in
+`internal/vastai/client.go isAccountCreditError` and
+`internal/bidding/build.go LoadInstanceOutcomes` in sync by hand.
 
 ## Banner monitors (deferred)
 
@@ -430,14 +419,11 @@ const (
 would let UI surfaces format consistently and let any future fourth
 shutdown signal slot in cleanly. Mechanical refactor; small surface.
 
-## Unified asset graph (post-named-assets)
+## Unified asset graph
 
-`asset:NAME` (named assets, shipped 2026-05-25) unblocks the laptop → any-host
-data flow that `checkpoint:` could not. It does so by carrying a parallel
-`named_assets` table and a parallel resolution path next to the producer-job
-`--needs path:JOB` form. Long-term these should converge into a single asset
-graph that subsumes `hf:`, `hf-dataset:`, `checkpoint:`, `corpus:`,
-`job-output:`/`--needs`, and `asset:` under one record type:
+Converge `asset:NAME`, producer-job `--needs path:JOB`, `hf:`,
+`hf-dataset:`, `checkpoint:`, `corpus:`, and `job-output:` into a single asset
+graph instead of maintaining per-kind resolution paths:
 
 ```
 Asset {
@@ -462,9 +448,9 @@ Benefits:
 
 This is a multi-PR data-model change touching placement, prewarm, donor,
 cloud_provision_guard, eviction, and at least the cloud and on-prem staging
-paths. The shipped `named_assets` table is shaped to extend additively: an
-`asset_locations(asset_id, transport, path, host)` table sits on top of it
-without migrating existing rows.
+paths. One additive migration path is an
+`asset_locations(asset_id, transport, path, host)` table layered over existing
+asset identity records.
 
 Bears on **RQ-F4** (where intermediate artifacts should be materialized) and
 extends **§sec:planes:data** in the systems paper. Sequencing: defer until
@@ -520,13 +506,13 @@ The cloud sync was changed to gate on per-attempt `.processed` markers (see
   agent hooks (`runner.OnJobStart` / `OnJobFinish` signature), the SSH-fallback
   reader (`internal/ops/r2_fallback.go`), and the key fallback in
   `controlplane/keys.go` (could then be deleted).
-- **Prune legacy job-scoped `.processed` markers.** Before the attempt-scoped
-  fix landed, the cloud sync wrote `jobs/X/.processed` after processing a
-  job. Those keys are now inert (no reader consults them at the job grain),
-  but they remain in R2. A background sweep — e.g. inside the existing
-  `coordinator.vastaiSweep` or a periodic janitor — could delete
-  `jobs/X/.processed` whenever any `jobs/X/runs/*/.processed` key exists.
-  Safe to defer indefinitely; the keys are small and harmless.
+- **Prune legacy job-scoped `.processed` markers.** Legacy cloud sync wrote
+  `jobs/X/.processed` after processing a job. Those keys are now inert (no
+  reader consults them at the job grain), but they remain in R2. A background
+  sweep — e.g. inside the existing `coordinator.vastaiSweep` or a periodic
+  janitor — could delete `jobs/X/.processed` whenever any
+  `jobs/X/runs/*/.processed` key exists. Safe to defer indefinitely; the keys
+  are small and harmless.
 
 ## Dashboard: persistent system-state snapshots
 

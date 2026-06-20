@@ -31,6 +31,12 @@ orphaned jobs. Host sync still runs: explicit `weft sync`, daemon sync, and TUI
 background sync can dispatch queued jobs whose host or live rental-instance
 target is already known.
 
+If a launch is stopped by the spend gate, `weft autopilot status` includes a
+`blocked_on_price_authorization` section listing the affected jobs, GPU bucket,
+reason, and an authorization command such as
+`weft job authorize-price wj2404 --up-to 2.50`. The same data appears in
+`weft autopilot status --json` under `blocked_on_price_authorization`.
+
 ## Enabling and disabling
 
 The autopilot is enabled or disabled globally. Toggle it from the CLI:
