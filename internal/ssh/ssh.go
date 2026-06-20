@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/retry"
+	"github.com/osteele/weft/internal/sshaudit"
 )
 
 var (
@@ -45,6 +46,7 @@ func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 func Command(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
 	args := BatchModeArgs(time.Duration(defaultConnTimeout) * time.Second)
 	args = append(args, extraArgs...)
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 	return sshCommand(host, remoteCmd, args...)
 }
 
@@ -171,12 +173,14 @@ func EscapeForSingleQuotes(s string) string {
 
 // Run executes an SSH command and returns stdout, stderr, and error
 func Run(host string, command string) (string, string, error) {
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), 0)
 	return runner(host, command)
 }
 
 // RunWithStdin executes an SSH command with data piped to stdin.
 // Returns stdout, stderr, and error.
 func RunWithStdin(host, command, stdin string) (string, string, error) {
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 	cmd := sshCommand(host, command, BatchModeArgs(time.Duration(defaultConnTimeout)*time.Second)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -198,6 +202,7 @@ func RunWithContext(ctx context.Context, host string, command string) (string, s
 			return "", "", context.DeadlineExceeded
 		}
 	}
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), timeout)
 
 	if runnerWithTimeout != nil {
 		stdout, stderr, err := runnerWithTimeout(host, command, timeout)
@@ -231,6 +236,7 @@ func RunWithContext(ctx context.Context, host string, command string) (string, s
 // TryRunWithTimeout is like RunWithTimeout but returns ErrPoolBusy immediately
 // if all pool slots for the host are occupied. Use for periodic/best-effort fetches.
 func TryRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), timeout)
 	if runnerWithTimeout != nil {
 		return runnerWithTimeout(host, command, timeout)
 	}
@@ -247,6 +253,7 @@ func TryRunWithContext(ctx context.Context, host string, command string) (string
 			return "", "", context.DeadlineExceeded
 		}
 	}
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), timeout)
 
 	if runnerWithTimeout != nil {
 		stdout, stderr, err := runnerWithTimeout(host, command, timeout)
@@ -279,6 +286,7 @@ func TryRunWithContext(ctx context.Context, host string, command string) (string
 // RunWithTimeout executes an SSH command with a timeout and connection options
 // to prevent hanging on unreachable hosts or password prompts
 func RunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	sshaudit.Log(sshaudit.KindCommand, hostTarget(host), timeout)
 	// If a mock is set via SetRunner, use it (timeout is handled by the mock wrapper)
 	if runnerWithTimeout != nil {
 		return runnerWithTimeout(host, command, timeout)
@@ -342,6 +350,7 @@ func RunWithRetryVerbose(host string, command string, verbose bool) (string, str
 
 // RunInteractive runs an SSH command that may require terminal interaction
 func RunInteractive(host string, command string) error {
+	sshaudit.Log(sshaudit.KindInteractive, hostTarget(host), 0)
 	cmd := sshCommand(host, command, "-t")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -351,6 +360,7 @@ func RunInteractive(host string, command string) error {
 
 // RunStreaming runs an SSH command and streams output to the provided writers
 func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
+	sshaudit.Log(sshaudit.KindStreaming, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 	cmd := sshCommand(host, command, BatchModeArgs(time.Duration(defaultConnTimeout)*time.Second)...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -359,6 +369,7 @@ func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
 
 // CopyTo copies a local file to a remote host using scp (single attempt, no retries).
 func CopyTo(localPath, host, remotePath string) error {
+	sshaudit.Log(sshaudit.KindSCP, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 	cmd := scpCommand(host, localPath, scpTarget(host, remotePath))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -372,6 +383,7 @@ func CopyTo(localPath, host, remotePath string) error {
 func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) error {
 	var lastStderr string
 	return connectionRetry(func() error {
+		sshaudit.Log(sshaudit.KindSCP, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 		cmd := scpCommand(host, localPath, scpTarget(host, remotePath))
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -395,6 +407,7 @@ func CopyFromWithRetry(remotePath, host, localPath string) error {
 func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) error {
 	var lastStderr string
 	return connectionRetry(func() error {
+		sshaudit.Log(sshaudit.KindSCP, hostTarget(host), time.Duration(defaultConnTimeout)*time.Second)
 		cmd := scpCommand(host, scpTarget(host, remotePath), localPath)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr

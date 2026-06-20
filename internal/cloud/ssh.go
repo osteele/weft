@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/retry"
+	"github.com/osteele/weft/internal/sshaudit"
 )
 
 var sshIdentity struct {
@@ -34,6 +35,7 @@ func SSHIdentityFile() string {
 
 // SSHRun executes a command on a remote host via SSH.
 func SSHRun(target string, sshOpts []string, command string) (string, error) {
+	sshaudit.Log(sshaudit.KindCommand, target, 0)
 	args := append([]string{}, sshOpts...)
 	args = append(args, target, command)
 	cmd := exec.Command("ssh", args...)

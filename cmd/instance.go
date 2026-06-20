@@ -26,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/retrypolicy"
+	"github.com/osteele/weft/internal/sshaudit"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
@@ -1259,11 +1260,13 @@ func markReleasedInstanceFailed(database *sql.DB, instanceID int64) error {
 
 func execSSH(inst *cloud.Instance) error {
 	args := append([]string{"ssh"}, cloud.InstanceSSHArgs(inst)...)
-	args = append(args, cloud.InstanceSSHTarget(inst))
+	target := cloud.InstanceSSHTarget(inst)
+	args = append(args, target)
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		return fmt.Errorf("ssh not found: %w", err)
 	}
+	sshaudit.Log(sshaudit.KindInteractive, target, 0)
 	return syscall.Exec(sshPath, args, os.Environ())
 }
 

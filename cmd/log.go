@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/sshaudit"
 	"github.com/osteele/weft/internal/status"
 	"github.com/spf13/cobra"
 )
@@ -540,6 +541,7 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 
 	if logFollow {
 		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
+		sshaudit.Log(sshaudit.KindStreaming, target, 0)
 		sshCmd := exec.Command("ssh", sshArgs...)
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr

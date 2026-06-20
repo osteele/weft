@@ -58,6 +58,12 @@ ssh <host> 'tail -50 ~/.cache/weft/queue/runner-default.log'
 These logs record job state changes, sync operations, and queue runner decisions.
 Use these to understand why jobs were started/stopped and debug unexpected behavior.
 
+SSH and SCP attempts are recorded as `ssh.exec` entries with `kind`, `user`,
+`host`, and optional `target` / `timeout_ms` detail fields. During Go tests,
+SSH/SCP attempts are also appended to a durable JSONL audit file at
+`~/.cache/weft/test-ssh.jsonl`; set `WEFT_TEST_SSH_LOG=/path/to/file` or
+`WEFT_SSH_AUDIT_LOG=/path/to/file` to choose a different file.
+
 ## Process state detection
 
 Jobs have two process identifiers:

@@ -41,6 +41,7 @@ const (
 	OpDeferredExec    = "op.deferred.exec"
 	OpTUIAction       = "tui.action"
 	OpCLICommand      = "cli.command"
+	OpSSH             = "ssh.exec"
 	OpAgentStart      = "agent.start"
 	OpAgentStop       = "agent.stop"
 	OpAgentVersion    = "agent.version"

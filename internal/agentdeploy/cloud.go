@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/osteele/weft/internal/sshaudit"
 )
 
 // DeployToSSH deploys a pre-built agent binary to a remote host via scp.
@@ -34,6 +36,7 @@ func DeployToSSH(localBinaryPath, sshTarget string, sshOpts []string, remotePath
 	}
 	scpArgs = append(scpArgs, localBinaryPath, sshTarget+":"+tmpPath)
 
+	sshaudit.Log(sshaudit.KindSCP, sshTarget, 0)
 	cmd := exec.Command("scp", scpArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("scp agent to %s: %w\n%s", sshTarget, err, strings.TrimSpace(string(out)))
@@ -43,6 +46,7 @@ func DeployToSSH(localBinaryPath, sshTarget string, sshOpts []string, remotePath
 	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", tmpPath, tmpPath, remotePath)
 	sshArgs := append([]string{}, sshOpts...)
 	sshArgs = append(sshArgs, sshTarget, installCmd)
+	sshaudit.Log(sshaudit.KindCommand, sshTarget, 0)
 	cmd = exec.Command("ssh", sshArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("install agent on %s: %w\n%s", sshTarget, err, strings.TrimSpace(string(out)))
