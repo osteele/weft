@@ -1547,7 +1547,7 @@ func formatMemoryKB(kb int64) string {
 }
 
 // driverFloorLine renders the job's effective NVIDIA driver/CUDA floor with
-// its provenance, e.g. ">=525 (CUDA >=12.0, from torch 2.9.1+cu128)".
+// its provenance, e.g. ">=570 (CUDA >=12.8, from torch 2.9.1+cu128 operational floor)".
 // Returns "" when no floor applies. This is the constraint that actually
 // rejects hosts in placement (the arch cap above rarely does), so weft info
 // must show it.

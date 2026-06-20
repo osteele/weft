@@ -29,15 +29,18 @@ falling back to `pyproject.toml`):
 - *CUDA/driver floor* (`min_cuda_version` / `min_driver_version`): resolved
   by `placement.MinRuntimeFloorForJob` with provenance
   (`RuntimeFloor.CUDAOrigin`). The torch-pin contribution is the CUDA
-  **family** floor (cu12x → `12.0` → driver ≥525): pip wheels bundle their
-  CUDA runtime and run on any same-major driver under minor-version
-  compatibility. Library dependency floors (e.g. vLLM) are cited toolkit
-  requirements and stay exact, as do image-label requirements on the cloud
-  path (a deliberate asymmetry — see the comment in
-  `campaign.ResolveJobImageSettings`).
+  **family** floor plus curated operational raises. The family floor keeps
+  broad pip-wheel compatibility (cu12x -> `12.0` -> driver >=525) because
+  wheels bundle their CUDA runtime and usually run on same-major drivers under
+  minor-version compatibility. The operational table raises known bad wheel
+  lines when runtime evidence shows the family floor is too low (for example,
+  torch 2.9.x+cu128 -> `12.8` -> driver >=570). Library dependency floors
+  (e.g. vLLM) are cited toolkit requirements and stay exact, as do
+  image-label requirements on the cloud path (a deliberate asymmetry — see
+  the comment in `campaign.ResolveJobImageSettings`).
 
 **Override hierarchy** for the CUDA/driver floor, lowest to highest
-precedence: inferred (torch family ⊔ library floors, max-merged) →
+precedence: inferred (torch family/operational ⊔ library floors, max-merged) →
 `.weft.toml [cloud]` → script `[tool.weft]` → CLI `--cuda-driver-min`. Each
 explicit level **replaces** the floor (it may lower it); `"any"` clears it.
 An explicit `min-driver` is preserved exactly, never raised by the
@@ -123,14 +126,14 @@ What persists vs. what is in-memory only:
 
 `weft info <job>` shows the GPU constraint, the arch cap (GPU jobs only),
 and the derived driver/CUDA floor with provenance ("Driver floor: >=525
-(CUDA >=12.0, from torch 2.9.1+cu128)") — the floor, not the cap, is what
-usually rejects hosts.
+(CUDA >=12.0, from torch 2.6.0+cu128 family)") — the floor, not the cap, is
+what usually rejects hosts.
 
 ## File map
 
 | Package | Role |
 |---|---|
-| `internal/placement` | Constraints, eligibility, scoring, torch-compat inference (`torch_compat.go`), GPU class/generation parsing (`gpugen.go`), host load (`overload.go`) |
+| `internal/placement` | Constraints, eligibility, scoring, torch-compat inference and operational floors (`torch_compat.go`), GPU class/generation parsing (`gpugen.go`), host load (`overload.go`) |
 | `internal/inventory` | Host capability records (`~/.config/weft/hosts/*.yaml`), GPU specs, test fixtures |
 | `internal/dataloc` | Torch pin scanning, CUDA variant/family floors, script metadata (PEP 723), HF data locality |
 | `internal/imagereq` | CUDA-toolkit→driver floor table, image-label requirement resolution (raise-only merges) |

@@ -205,16 +205,21 @@ func TestResolveMaxComputeCapForPersistence(t *testing.T) {
 
 func writeTestUVLockCu128(t *testing.T) string {
 	t.Helper()
+	return writeTestUVLockCu128Version(t, "2.9.1")
+}
+
+func writeTestUVLockCu128Version(t *testing.T, version string) string {
+	t.Helper()
 	dir := t.TempDir()
-	dataloc.WriteTestTorchPin(t, dir, "2.9.1", "cu128")
+	dataloc.WriteTestTorchPin(t, dir, version, "cu128")
 	return dir
 }
 
-// Regression for the wb18 driver-floor defect: a cu128 pip-wheel torch pin
-// must imply the CUDA FAMILY floor (12.0 / driver >=525), not the 12.8
+// Regression for the wb18 driver-floor defect: older cu128 pip-wheel torch
+// pins still use the CUDA FAMILY floor (12.0 / driver >=525), not the 12.8
 // toolkit floor (driver >=570) that excluded every on-prem host.
 func TestMinRuntimeFloorForJob_TorchPinUsesFamilyFloor(t *testing.T) {
-	dir := writeTestUVLockCu128(t)
+	dir := writeTestUVLockCu128Version(t, "2.6.0")
 
 	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
 	if err != nil {
@@ -226,8 +231,29 @@ func TestMinRuntimeFloorForJob_TorchPinUsesFamilyFloor(t *testing.T) {
 	if rf.Req.MinDriverVersion != 525 {
 		t.Errorf("MinDriverVersion = %d, want 525", rf.Req.MinDriverVersion)
 	}
-	if !strings.Contains(rf.CUDAOrigin, "torch 2.9.1+cu128") {
+	if !strings.Contains(rf.CUDAOrigin, "torch 2.6.0+cu128") {
 		t.Errorf("CUDAOrigin = %q, want torch pin provenance", rf.CUDAOrigin)
+	}
+}
+
+// Regression for wb32: torch 2.9.x cu128 is known to fail on cool30's
+// 525/CUDA-12.0 driver, so placement needs an operational floor above the
+// theoretical CUDA-family floor.
+func TestMinRuntimeFloorForJob_TorchCu128OperationalFloor(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "12.8" {
+		t.Errorf("MinCUDAVersion = %q, want 12.8 (operational floor)", rf.Req.MinCUDAVersion)
+	}
+	if rf.Req.MinDriverVersion != 570 {
+		t.Errorf("MinDriverVersion = %d, want 570", rf.Req.MinDriverVersion)
+	}
+	if !strings.Contains(rf.CUDAOrigin, "operational floor") {
+		t.Errorf("CUDAOrigin = %q, want operational floor provenance", rf.CUDAOrigin)
 	}
 }
 
@@ -252,12 +278,11 @@ func TestMinRuntimeFloorForJob_LibraryFloorStaysExact(t *testing.T) {
 	}
 }
 
-// End-to-end regression for wb18: hosts shaped like cool30 (driver 525.x,
-// CUDA 12.0) and cool100 (driver 550.x, CUDA 12.4) must be ELIGIBLE for a
-// GPU job from a cu128 torch-pin project; a genuinely old CUDA-11 host is
-// still rejected.
+// End-to-end regression for wb18: older cu128 pins should still admit hosts
+// shaped like cool30 (driver 525.x, CUDA 12.0) and cool100 (driver 550.x,
+// CUDA 12.4); a genuinely old CUDA-11 host is still rejected.
 func TestMinRuntimeFloor_OnPremHostsEligibleUnderCu128Pin(t *testing.T) {
-	dir := writeTestUVLockCu128(t)
+	dir := writeTestUVLockCu128Version(t, "2.6.0")
 	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
 	if err != nil {
 		t.Fatalf("MinRuntimeFloorForJob: %v", err)
@@ -298,6 +323,48 @@ func TestMinRuntimeFloor_OnPremHostsEligibleUnderCu128Pin(t *testing.T) {
 	}
 }
 
+func TestMinRuntimeFloor_Torch291Cu128RejectsCool30(t *testing.T) {
+	dir := writeTestUVLockCu128(t)
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	c := Constraints{
+		GPUClass:         "nvidia",
+		GPUMemGB:         8,
+		MinCUDAVersion:   rf.Req.MinCUDAVersion,
+		MinDriverVersion: rf.Req.MinDriverVersion,
+	}
+
+	cool30 := inventory.HostSpec{
+		Name:                "cool30-shaped",
+		NVIDIADriverVersion: "525.125.06",
+		CUDAVersion:         "12.0",
+		GPUs:                []inventory.GPUSpec{{Name: "RTX 3090", Class: "rtx3090", Memory: "24GB"}},
+	}
+	cool100 := inventory.HostSpec{
+		Name:                "cool100-shaped",
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GPUs:                []inventory.GPUSpec{{Name: "A100 80GB PCIe", Class: "a100", Memory: "80GB"}},
+	}
+	newerDriver := inventory.HostSpec{
+		Name:                "cuda128-host",
+		NVIDIADriverVersion: "570.86.15",
+		CUDAVersion:         "12.8",
+		GPUs:                []inventory.GPUSpec{{Name: "A100 80GB PCIe", Class: "a100", Memory: "80GB"}},
+	}
+
+	for _, host := range []inventory.HostSpec{cool30, cool100} {
+		if ok, reasons := CheckHostGPUConstraints(host, c); ok {
+			t.Errorf("%s should be rejected under torch 2.9.1 cu128 operational floor: %v", host.Name, reasons)
+		}
+	}
+	if ok, reasons := CheckHostGPUConstraints(newerDriver, c); !ok {
+		t.Errorf("newer driver host should be eligible under torch 2.9.1 cu128 operational floor: %v", reasons)
+	}
+}
+
 func writeScriptWithCUDADriverMin(t *testing.T, dir, value string) string {
 	t.Helper()
 	script := fmt.Sprintf(`# /// script
@@ -317,8 +384,8 @@ print("hi")
 
 // Regression for wb18: cuda-driver-min = "cu128" was silently discarded by a
 // float parse whose error was swallowed. The cuNNN spelling must parse, and
-// an explicit value must REPLACE (here: raise from family floor) rather than
-// be dropped.
+// an explicit value must REPLACE the inferred floor provenance rather than be
+// dropped.
 func TestMinRuntimeFloorForJob_CuNNNSpellingParses(t *testing.T) {
 	dir := writeTestUVLockCu128(t)
 	writeScriptWithCUDADriverMin(t, dir, "cu128")
@@ -380,8 +447,8 @@ func TestMinRuntimeFloorForJob_GarbageErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected parse error for cuda-driver-min = garbage")
 	}
-	if rf.Req.MinCUDAVersion != "12.0" {
-		t.Errorf("MinCUDAVersion = %q, want family floor retained", rf.Req.MinCUDAVersion)
+	if rf.Req.MinCUDAVersion != "12.8" {
+		t.Errorf("MinCUDAVersion = %q, want operational floor retained", rf.Req.MinCUDAVersion)
 	}
 }
 

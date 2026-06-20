@@ -262,13 +262,17 @@ value Constraints {
                                 -- on cu128 implies sm_75+. No explicit user
                                 -- override exists yet.
     min_cuda_version: String?   -- host CUDA-compatibility floor. For a
-                                -- pip-wheel torch pin this is the CUDA
-                                -- FAMILY floor (cu12x -> "12.0"): pip wheels
-                                -- bundle their CUDA runtime and run on any
-                                -- same-major driver under minor-version
-                                -- compatibility. Library dependency floors
-                                -- (e.g. vLLM >= 0.17 -> "12.8") are cited
-                                -- toolkit requirements and stay exact, as do
+                                -- pip-wheel torch pin this starts at the CUDA
+                                -- FAMILY floor (cu12x -> "12.0") because
+                                -- pip wheels bundle their CUDA runtime and
+                                -- generally run on same-major drivers under
+                                -- minor-version compatibility. A curated
+                                -- operational floor may raise this for known
+                                -- wheel lines that fail on older same-major
+                                -- drivers (for example torch 2.9.x+cu128 ->
+                                -- "12.8"). Library dependency floors (e.g.
+                                -- vLLM >= 0.17 -> "12.8") are cited toolkit
+                                -- requirements and stay exact, as do
                                 -- image-label-derived requirements on the
                                 -- cloud path. Explicit cuda-driver-min
                                 -- metadata REPLACES the inferred floor (it
@@ -387,11 +391,13 @@ rule EvaluateEligibility {
     -- 5a. NVIDIA driver floor. The host's recorded driver major must meet
     --     the floor; a host with NO recorded driver fails when a floor is
     --     set (fail-closed — we cannot prove compatibility). For pip-wheel
-    --     torch pins the floor derives from the CUDA FAMILY floor (cu12x ->
+    --     torch pins the floor starts from the CUDA FAMILY floor (cu12x ->
     --     driver >=525), not the wheel's exact toolkit version: pip wheels
-    --     run under CUDA minor-version compatibility on any same-major
-    --     driver. Exact toolkit floors apply only to library-dependency
-    --     floors and image-label requirements.
+    --     usually run under CUDA minor-version compatibility on same-major
+    --     drivers. Curated operational floors may raise specific wheel lines
+    --     when runtime evidence shows the family floor is too low. Exact
+    --     toolkit floors also apply to library-dependency floors and
+    --     image-label requirements.
     if c.min_driver_version != null:
         requires: host.nvidia_driver_major != null
             and host.nvidia_driver_major >= c.min_driver_version

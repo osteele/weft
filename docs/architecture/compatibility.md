@@ -24,7 +24,7 @@ failures on on-prem hosts:
 
 | Axis | Job-side source | Environment-side fact | Enforced at |
 |---|---|---|---|
-| CUDA toolkit floor | torch pin (family floor), curated library floors, `[tool.weft]`, `.weft.toml [cloud]`, `--cuda-driver-min` | host `cuda_version`, image `NVIDIA_REQUIRE_CUDA` label, offer CUDA | submit fast-fail, screening, image selection |
+| CUDA toolkit floor | torch pin (family floor plus operational raises), curated library floors, `[tool.weft]`, `.weft.toml [cloud]`, `--cuda-driver-min` | host `cuda_version`, image `NVIDIA_REQUIRE_CUDA` label, offer CUDA | submit fast-fail, screening, image selection |
 | NVIDIA driver floor | backfilled from CUDA floor via `imagereq.MinDriverForCUDA`, or explicit `min-driver` | host `nvidia_driver`, offer driver | screening |
 | Compute-capability cap/floor | torch wheel kernel tables (`dataloc`), `gpu-arch-max` | GPU model → cap via `internal/gpucatalog` | screening, offer filtering |
 | GPU class | `--gpu`/`--gpu-class`, script metadata | host/offer GPU model (normalized class) | screening |
@@ -41,11 +41,12 @@ gaps](#known-gaps).
 `placement.RuntimeFloor` (`internal/placement/torch_compat.go`) is the
 resolved minimum NVIDIA runtime requirement for a job, carrying provenance
 (`CUDAOrigin`) so every surface can say *where* a floor came from ("Driver
-floor: >=525 (CUDA >=12.0, from torch 2.9.1+cu128)"). Inferred sources
-max-merge; explicit sources replace (and may lower) the floor; the driver
-floor is derived from the CUDA floor unless explicitly given. The shared
-value type is `cloud.ImageRequirements` (`MinCUDAVersion`,
-`MinDriverVersion`), used for job floors and image-label requirements alike.
+floor: >=570 (CUDA >=12.8, from torch 2.9.1+cu128 operational floor)").
+Inferred sources max-merge; explicit sources replace (and may lower) the
+floor; the driver floor is derived from the CUDA floor unless explicitly
+given. The shared value type is `cloud.ImageRequirements`
+(`MinCUDAVersion`, `MinDriverVersion`), used for job floors and image-label
+requirements alike.
 
 Host-side scalar version floors are also represented as
 `compat.Requirement` values (`internal/compat`): CUDA, NVIDIA driver, and
@@ -185,7 +186,7 @@ a novel failure signature.
 
 | Package | Role |
 |---|---|
-| `internal/placement` | `RuntimeFloor` resolution with provenance, compute-cap bounds, host screening (`torch_compat.go`, `placement.go`) |
+| `internal/placement` | `RuntimeFloor` resolution with provenance, torch operational floors, compute-cap bounds, host screening (`torch_compat.go`, `placement.go`) |
 | `internal/imagereq` | OCI image-label fetching, `NVIDIA_REQUIRE_CUDA` parsing, CUDA→driver floor table |
 | `internal/campaign` | Image resolution/selection/merging (`campaign.go`, `imagecompat.go`), submit fast-fail, offer filtering |
 | `internal/dataloc` | Torch pin scanning, CUDA variant/family floors, torch wheel arch tables, library CUDA floors, PEP 723 metadata |

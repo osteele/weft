@@ -142,11 +142,11 @@ func TestDriverFloorLine_TorchPinProvenance(t *testing.T) {
 	job := &db.Job{WorkingDir: dir, Command: "uv run train.py", GPUMemGB: &mem}
 
 	line := driverFloorLine(job)
-	if !strings.Contains(line, ">=525") {
-		t.Errorf("driverFloorLine = %q, want driver >=525 (family floor)", line)
+	if !strings.Contains(line, ">=570") {
+		t.Errorf("driverFloorLine = %q, want driver >=570 (operational floor)", line)
 	}
-	if !strings.Contains(line, "CUDA >=12.0") || !strings.Contains(line, "torch 2.9.1+cu128") {
-		t.Errorf("driverFloorLine = %q, want CUDA floor with torch provenance", line)
+	if !strings.Contains(line, "CUDA >=12.8") || !strings.Contains(line, "torch 2.9.1+cu128 operational floor") {
+		t.Errorf("driverFloorLine = %q, want operational CUDA floor with torch provenance", line)
 	}
 }
 

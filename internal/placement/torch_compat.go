@@ -261,11 +261,11 @@ func (rf *RuntimeFloor) ApplyCLIOverride(minCUDA string) error {
 // project .weft.toml, script metadata, torch lockfile, and inline dependency
 // declarations. Image label fetching remains in the cloud campaign path.
 //
-// The torch-pin contribution uses the CUDA *family* floor
-// (dataloc.CUDAFamilyFloor): pip wheels bundle their CUDA runtime and run on
-// any same-major driver under minor-version compatibility, so a cu128 pin
-// implies CUDA >=12.0 / driver >=525, not the 12.8 toolkit floor. Library
-// floors (e.g. vLLM) are cited toolkit requirements and stay exact.
+// The torch-pin contribution starts with the CUDA *family* floor
+// (dataloc.CUDAFamilyFloor): pip wheels bundle their CUDA runtime and often run
+// on same-major drivers under minor-version compatibility. A known operational
+// floor may then raise that for wheel lines observed to need a newer driver.
+// Library floors (e.g. vLLM) are cited toolkit requirements and stay exact.
 //
 // Explicit sources are applied lowest-precedence first (.weft.toml [cloud],
 // then script [tool.weft]); each replaces the CUDA floor and may lower or
@@ -282,11 +282,20 @@ func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 			origin := fmt.Sprintf("torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
 			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
 		}
+		if cuda, origin := torchOperationalCUDAFloor(pin); cuda != "" {
+			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, origin)
+		}
 	}
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
 	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
 	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
+		const origin = "library dependency CUDA floor"
+		before := rf.Req.MinCUDAVersion
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, origin)
+		if rf.Req.MinCUDAVersion == before && rf.Req.MinCUDAVersion == libCUDA {
+			rf.CUDAOrigin = origin
+			rf.InferredCUDAOrigin = origin
+		}
 	}
 	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
 		if err := rf.ApplyExplicit(minDriver, minCUDA, ".weft.toml [cloud]"); err != nil {
@@ -300,6 +309,63 @@ func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	}
 	rf.FinalizeDriver()
 	return rf, parseErr
+}
+
+func torchOperationalCUDAFloor(pin *dataloc.TorchPin) (string, string) {
+	if pin == nil {
+		return "", ""
+	}
+	cudaVariant := strings.ToLower(strings.TrimSpace(pin.CudaVariant))
+	if cudaVariant == "" || cudaVariant == "cpu" {
+		return "", ""
+	}
+	// The CUDA family floor remains the theoretical ABI floor, but observed
+	// torch 2.9.x cu128 wheels fail on cool30's 525/CUDA 12.0 driver. Treat
+	// that wheel line as requiring its exact toolkit tier unless the user
+	// explicitly lowers or clears the floor with cuda-driver-min.
+	if cudaVariant == "cu128" && torchVersionAtLeast(pin.Version, 2, 9) {
+		cuda := dataloc.CUDAVariantVersion(cudaVariant)
+		if cuda != "" {
+			return cuda, fmt.Sprintf("torch %s+%s operational floor", pin.Version, cudaVariant)
+		}
+	}
+	return "", ""
+}
+
+func torchVersionAtLeast(version string, wantMajor, wantMinor int) bool {
+	major, minor, ok := parseTorchMajorMinor(version)
+	if !ok {
+		return false
+	}
+	if major != wantMajor {
+		return major > wantMajor
+	}
+	return minor >= wantMinor
+}
+
+func parseTorchMajorMinor(version string) (int, int, bool) {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		return 0, 0, false
+	}
+	if idx := strings.Index(v, "+"); idx >= 0 {
+		v = v[:idx]
+	}
+	for _, sep := range []string{"a", "b", "rc", ".dev", "-"} {
+		if idx := strings.Index(v, sep); idx >= 0 {
+			v = v[:idx]
+		}
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // ToolchainFloorForJob resolves local, non-network native userland
