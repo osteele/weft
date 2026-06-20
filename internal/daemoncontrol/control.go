@@ -142,16 +142,24 @@ func activeBinaryStale(paths Paths, metadata *Metadata) bool {
 	if err != nil {
 		return false
 	}
-	isWeftExecutable := filepath.Base(exe) == "weft"
 	info, err := os.Stat(exe)
 	if err != nil {
 		return false
 	}
+	return activeBinaryStaleForExecutable(paths, metadata, exe, info.ModTime())
+}
+
+func activeBinaryStaleForExecutable(paths Paths, metadata *Metadata, exe string, exeModTime time.Time) bool {
+	isWeftExecutable := filepath.Base(exe) == "weft"
 	if metadata != nil && metadata.Executable != "" && metadata.ExecutableModTime > 0 {
-		if filepath.Clean(exe) != filepath.Clean(metadata.Executable) {
-			return false
+		startedWithModTime := time.Unix(metadata.ExecutableModTime, 0)
+		if daemonInfo, err := os.Stat(metadata.Executable); err == nil && daemonInfo.ModTime().After(startedWithModTime) {
+			return true
 		}
-		return info.ModTime().Unix() > metadata.ExecutableModTime
+		if filepath.Clean(exe) == filepath.Clean(metadata.Executable) {
+			return exeModTime.After(startedWithModTime)
+		}
+		return isWeftExecutable && exeModTime.After(startedWithModTime)
 	}
 	if !isWeftExecutable {
 		return false
@@ -160,7 +168,7 @@ func activeBinaryStale(paths Paths, metadata *Metadata) bool {
 	if err != nil {
 		return false
 	}
-	return info.ModTime().After(pidInfo.ModTime())
+	return exeModTime.After(pidInfo.ModTime())
 }
 
 func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error) {

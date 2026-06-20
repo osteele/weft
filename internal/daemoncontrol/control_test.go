@@ -249,3 +249,61 @@ func TestCurrentStatusDetectsStaleActiveBinaryFromMetadata(t *testing.T) {
 		t.Fatalf("status = %+v, want live stale active binary", status)
 	}
 }
+
+func TestActiveBinaryStaleDetectsDifferentCurrentWeftPath(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{PIDFile: filepath.Join(dir, "daemon.pid")}
+	old := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	current := time.Now().Truncate(time.Second)
+
+	daemonExe := filepath.Join(dir, "repo", "weft")
+	if err := os.MkdirAll(filepath.Dir(daemonExe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemonExe, []byte("old daemon binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(daemonExe, old, old); err != nil {
+		t.Fatalf("Chtimes daemon exe: %v", err)
+	}
+
+	currentExe := filepath.Join(dir, "go", "bin", "weft")
+	metadata := &Metadata{
+		PID:               os.Getpid(),
+		Executable:        daemonExe,
+		ExecutableModTime: old.Unix(),
+		StartedAt:         old.Unix(),
+	}
+	if !activeBinaryStaleForExecutable(paths, metadata, currentExe, current) {
+		t.Fatal("different current weft path newer than daemon binary was not considered stale")
+	}
+}
+
+func TestActiveBinaryStaleIgnoresDifferentNonWeftExecutablePath(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{PIDFile: filepath.Join(dir, "daemon.pid")}
+	old := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	current := time.Now().Truncate(time.Second)
+
+	daemonExe := filepath.Join(dir, "repo", "weft")
+	if err := os.MkdirAll(filepath.Dir(daemonExe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemonExe, []byte("old daemon binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(daemonExe, old, old); err != nil {
+		t.Fatalf("Chtimes daemon exe: %v", err)
+	}
+
+	testExe := filepath.Join(dir, "daemoncontrol.test")
+	metadata := &Metadata{
+		PID:               os.Getpid(),
+		Executable:        daemonExe,
+		ExecutableModTime: old.Unix(),
+		StartedAt:         old.Unix(),
+	}
+	if activeBinaryStaleForExecutable(paths, metadata, testExe, current) {
+		t.Fatal("different non-weft executable path should not be considered stale")
+	}
+}
