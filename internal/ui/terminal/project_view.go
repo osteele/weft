@@ -354,7 +354,7 @@ func formatProjectWatchRow(job *db.Job, bucket string, now time.Time) string {
 		desc = job.EffectiveCommand()
 	}
 	row := fmt.Sprintf("#%-5d %-16s %-12s %-14s %-12s %s", job.ID, status, host, dir, when, desc)
-	if display := queueblock.Display(job, nil); display.Blocked {
+	if display := queueblock.Display(job, nil); display.Kind != "" {
 		if summary := explain.SummaryLine(explain.ForJob(nil, job, now)); summary != "" {
 			row += "  " + summary
 		} else {

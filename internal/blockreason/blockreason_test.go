@@ -179,11 +179,14 @@ func TestReasonsDetailFiltersHistory(t *testing.T) {
 	}
 }
 
-func TestReasonKindSourceSyncInFlightIsWaiting(t *testing.T) {
+func TestReasonKindSourceSyncReasonsAreWaiting(t *testing.T) {
 	for _, reason := range []string{
 		"source sync already in flight",
 		"[14m ago] source sync already in flight",
 		"source sync already in flight: ~/code/research/project",
+		"[21s ago, retry #2] source sync failed: rsync to cool30:~/code/research/project timed out",
+		"source sync backing off (cool30 unresponsive), retry in 30s",
+		"source sync deferred (host unreachable)",
 	} {
 		if got := ReasonKind(reason); got != KindWaiting {
 			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindWaiting)

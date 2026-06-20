@@ -620,7 +620,7 @@ func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 		projectWidth, campaign.JobProjectLabel(job),
 		desc,
 	)
-	if display.Blocked {
+	if display.Kind != "" {
 		row += "  " + watchDimStyle.Render(display.Reason)
 	}
 	return row

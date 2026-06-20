@@ -573,6 +573,30 @@ func TestRenderJobListGroupedStatusPlainAt_SourceSyncInFlightIsWaiting(t *testin
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_SourceSyncFailureIsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	reason := "[21s ago, retry #2] source sync failed: rsync to cool30:~/code/research/project timed out"
+	jobs := []*db.Job{
+		{
+			ID:                 2031,
+			Status:             db.StatusQueued,
+			Host:               "cool30",
+			Project:            "proj",
+			Description:        "waiting on source sync",
+			CreatedAt:          4_400,
+			QueueBlockedReason: reason,
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	if !strings.Contains(out, "  waiting: "+reason+" (1)") {
+		t.Fatalf("missing waiting source-sync failure header:\n%s", out)
+	}
+	if strings.Contains(out, "  blocked: "+reason) {
+		t.Fatalf("source sync failure rendered as blocked:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_ShowsOnPremOnlyPlacementReasonForInventoryJob(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{

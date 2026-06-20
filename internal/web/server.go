@@ -563,8 +563,12 @@ func buildJobTooltipHTML(job *db.Job, lookup queueblock.Lookup) template.HTML {
 	cmd := job.EffectiveCommand()
 	writeRow("Command", cmd, true)
 
-	if display := queueblock.Display(job, lookup); display.Blocked {
-		writeRow("Blocked", display.Reason, true)
+	if display := queueblock.Display(job, lookup); display.Kind != "" {
+		label := "Blocked"
+		if display.Kind == queueblock.KindWaiting {
+			label = "Waiting"
+		}
+		writeRow(label, display.Reason, true)
 	}
 
 	// Timing

@@ -52,7 +52,7 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	display := queueblock.Display(job, nil)
 	state := job.EffectiveStatus()
 	reason := ""
-	if display.Blocked {
+	if display.Kind != "" {
 		state = display.Status
 		reason = display.Reason
 	}
@@ -74,8 +74,9 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	if block, ok := LatestInventoryDispatchBlock(database, job, now); ok {
 		x.Confidence = "high"
 		x.PrimaryReason = annotateDispatchBlock(block, now)
-		if !display.Blocked {
-			x.State = "blocked"
+		kind := queueblock.ReasonKind(block.Detail)
+		if display.Kind == "" {
+			x.State = kind
 		}
 		x.Evidence = append(x.Evidence, Evidence{Label: "dispatch", Value: fmt.Sprintf("%s %s ago", block.Kind, shortAge(now, block.OccurredAt))})
 		if block.RetryCount > 1 {
@@ -91,14 +92,14 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 			Option{Label: "replan", Detail: "return the job to the unplaced pool for host or rental placement"},
 		)
 		if age >= InventoryDispatchReplanThreshold {
-			x.SuggestedAction = fmt.Sprintf("replan: dispatch has been blocked for %s", shortDuration(age))
+			x.SuggestedAction = fmt.Sprintf("replan: dispatch has been waiting for %s", shortDuration(age))
 			x.AutoReplanAllowed = true
 		} else {
 			x.SuggestedAction = fmt.Sprintf("wait: auto-replan threshold is %s", InventoryDispatchReplanThreshold)
 		}
 		return x
 	}
-	if display.Blocked {
+	if display.Kind != "" {
 		x.Options = append(x.Options, Option{Label: "wait", Detail: "let the current queue or placement condition clear"})
 		if job.TargetKind() != db.JobTargetUnplaced {
 			x.Options = append(x.Options, Option{Label: "replan", Detail: "return the job to the unplaced pool"})

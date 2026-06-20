@@ -437,14 +437,14 @@ func (m watchModel) selectedProjectStatusDetail() string {
 		return ""
 	}
 	display := queueblock.Display(lineMeta.job, nil)
-	if !display.Blocked {
+	if display.Kind == "" {
 		return ""
 	}
 	reason := campaign.SanitizeBlockedReason(display.Reason)
 	if reason == "" {
 		return ""
 	}
-	return fmt.Sprintf("#%d blocked: %s", lineMeta.job.ID, reason)
+	return fmt.Sprintf("#%d %s: %s", lineMeta.job.ID, display.Kind, reason)
 }
 
 func (m watchModel) selectedProjectJob() (*db.Job, string) {

@@ -27,6 +27,20 @@ func TestDisplay_QueuedWithReasonIsBlocked(t *testing.T) {
 	if !got.Blocked {
 		t.Fatalf("expected Blocked=true, got %#v", got)
 	}
+	if got.Kind != "blocked" {
+		t.Errorf("Kind = %q, want blocked", got.Kind)
+	}
+}
+
+func TestDisplay_SourceSyncFailureIsWaiting(t *testing.T) {
+	job := &db.Job{ID: 1, Status: db.StatusQueued, QueueBlockedReason: "[21s ago, retry #2] source sync failed: rsync timed out"}
+	got := Display(job, nil)
+	if got.Blocked {
+		t.Fatalf("expected Blocked=false for retryable source sync, got %#v", got)
+	}
+	if got.Status != "waiting" || got.Kind != "waiting" {
+		t.Fatalf("Display = %#v, want waiting status/kind", got)
+	}
 }
 
 func TestDisplay_RunningIsNotBlockable(t *testing.T) {

@@ -1074,7 +1074,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.Tombstoned {
 			tombstone = " [tombstoned, ignored by autopilot]"
 		}
-		if display.Blocked {
+		if display.Kind != "" {
 			fmt.Printf("Status:      %s%s\n", display.Status, tombstone)
 			// A placement-avenue failure carries a structured launch/reuse
 			// breakdown — print every avenue, not just the truncated head of

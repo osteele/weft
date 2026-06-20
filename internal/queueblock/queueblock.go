@@ -14,7 +14,13 @@ type DisplayState struct {
 	Status  string
 	Reason  string
 	Blocked bool
+	Kind    string
 }
+
+const (
+	KindBlocked = "blocked"
+	KindWaiting = "waiting"
+)
 
 // Lookup maps host -> job id -> queue block reason.
 type Lookup map[string]map[int64]string
@@ -104,15 +110,30 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 		reason = reasonForJob(job, lookup)
 	}
 	if isBlockable(status) && reason != "" {
+		kind := ReasonKind(reason)
 		return DisplayState{
-			Status:  "blocked",
+			Status:  kind,
 			Reason:  reason,
-			Blocked: true,
+			Blocked: kind == KindBlocked,
+			Kind:    kind,
 		}
 	}
 	return DisplayState{
 		Status: status,
 		Reason: reason,
+	}
+}
+
+func ReasonKind(reason string) string {
+	cleaned := strings.TrimSpace(reason)
+	switch {
+	case strings.Contains(cleaned, "source sync already in flight"),
+		strings.Contains(cleaned, "source sync backing off"),
+		strings.Contains(cleaned, "source sync deferred"),
+		strings.Contains(cleaned, "source sync failed"):
+		return KindWaiting
+	default:
+		return KindBlocked
 	}
 }
 

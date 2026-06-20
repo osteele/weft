@@ -83,7 +83,10 @@ func ReasonKind(reason string) Kind {
 	switch {
 	case cleaned == ReasonPlacementPending,
 		cleaned == "inventory-tagged: waiting for on-prem host",
-		strings.Contains(cleaned, "source sync already in flight"):
+		strings.Contains(cleaned, "source sync already in flight"),
+		strings.Contains(cleaned, "source sync backing off"),
+		strings.Contains(cleaned, "source sync deferred"),
+		strings.Contains(cleaned, "source sync failed"):
 		return KindWaiting
 	case cleaned == "":
 		return KindNone

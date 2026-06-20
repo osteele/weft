@@ -693,7 +693,7 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 
 	fmt.Printf("Job ID:   %s\n", ids.FormatJobID(job.ID))
 	fmt.Printf("Host:     %s\n", job.TargetDisplay())
-	if display.Blocked {
+	if display.Kind != "" {
 		fmt.Printf("Status:   %s\n", display.Status)
 		fmt.Printf("Reason:   %s\n", display.Reason)
 	} else {

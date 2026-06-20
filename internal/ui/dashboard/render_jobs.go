@@ -900,8 +900,12 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	}
 
 	status := job.EffectiveStatus()
-	if display := queueblock.Display(job, nil); display.Blocked {
-		b.WriteString(labelStyle.Render("Blocked"))
+	if display := queueblock.Display(job, nil); display.Kind != "" {
+		label := "Blocked"
+		if display.Kind == queueblock.KindWaiting {
+			label = "Waiting"
+		}
+		b.WriteString(labelStyle.Render(label))
 		b.WriteString(valueStyle.Render(display.Reason))
 		b.WriteString("\n")
 	}

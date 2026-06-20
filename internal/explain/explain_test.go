@@ -34,8 +34,8 @@ func TestForJobExplainsInventoryDispatchBlock(t *testing.T) {
 	}
 
 	x := ForJob(database, job, now)
-	if x.State != "blocked" {
-		t.Fatalf("State = %q, want blocked", x.State)
+	if x.State != "waiting" {
+		t.Fatalf("State = %q, want waiting", x.State)
 	}
 	if !x.AutoReplanAllowed {
 		t.Fatal("AutoReplanAllowed = false, want true")
@@ -45,6 +45,9 @@ func TestForJobExplainsInventoryDispatchBlock(t *testing.T) {
 	}
 	if !strings.Contains(x.SuggestedAction, "replan") {
 		t.Fatalf("SuggestedAction = %q, want replan", x.SuggestedAction)
+	}
+	if !strings.Contains(x.SuggestedAction, "waiting") {
+		t.Fatalf("SuggestedAction = %q, want waiting wording", x.SuggestedAction)
 	}
 }
 

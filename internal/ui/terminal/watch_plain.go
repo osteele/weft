@@ -379,12 +379,20 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 		b.WriteString("  none\n")
 	} else {
 		for _, host := range snapshot.OnPremHosts {
-			running, queued, blocked := countHostJobStates(host.Jobs)
+			running, queued, waiting, blocked := countHostJobStates(host.Jobs)
 			switch {
-			case blocked > 0 && queued > 0:
-				b.WriteString(fmt.Sprintf("  %s  %d running  %d blocked  %d queued\n", host.Name, running, blocked, queued))
-			case blocked > 0:
-				b.WriteString(fmt.Sprintf("  %s  %d running  %d blocked\n", host.Name, running, blocked))
+			case blocked > 0 || waiting > 0:
+				parts := []string{fmt.Sprintf("%s  %d running", host.Name, running)}
+				if blocked > 0 {
+					parts = append(parts, fmt.Sprintf("%d blocked", blocked))
+				}
+				if waiting > 0 {
+					parts = append(parts, fmt.Sprintf("%d waiting", waiting))
+				}
+				if queued > 0 {
+					parts = append(parts, fmt.Sprintf("%d queued", queued))
+				}
+				b.WriteString("  " + strings.Join(parts, "  ") + "\n")
 			case queued > 0:
 				b.WriteString(fmt.Sprintf("  %s  %d running  %d queued\n", host.Name, running, queued))
 			default:
@@ -393,9 +401,11 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 			for _, job := range host.Jobs {
 				display := queueblock.Display(job, nil)
 				if !display.Blocked {
-					continue
+					if display.Kind != queueblock.KindWaiting {
+						continue
+					}
 				}
-				b.WriteString(fmt.Sprintf("    #%d  blocked  %s\n", job.ID, display.Reason))
+				b.WriteString(fmt.Sprintf("    #%d  %s  %s\n", job.ID, display.Kind, display.Reason))
 			}
 		}
 	}
@@ -426,18 +436,20 @@ func formatUnplacedJobsSection(jobs []*db.Job) string {
 	return b.String()
 }
 
-func countHostJobStates(jobs []*db.Job) (running, queued, blocked int) {
+func countHostJobStates(jobs []*db.Job) (running, queued, waiting, blocked int) {
 	for _, job := range jobs {
 		switch queueblock.Display(job, nil).Status {
-		case "blocked":
+		case queueblock.KindBlocked:
 			blocked++
+		case queueblock.KindWaiting:
+			waiting++
 		case db.StatusQueued:
 			queued++
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			running++
 		}
 	}
-	return running, queued, blocked
+	return running, queued, waiting, blocked
 }
 
 // watchJobsPlain watches specific jobs by ID, printing their status periodically
