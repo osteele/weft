@@ -106,6 +106,18 @@ func TestResolveGPUFilter(t *testing.T) {
 			wantNames: []string{"Tesla V100"},
 		},
 		{
+			// wj3135 regression: "t4" must resolve to the Vast.ai gpu_name
+			// "Tesla T4"; the bare "T4" filter matches no offers.
+			name:      "t4 maps to Tesla T4",
+			gpuClass:  "t4",
+			wantNames: []string{"Tesla T4"},
+		},
+		{
+			name:      "T4 uppercase maps to Tesla T4",
+			gpuClass:  "T4",
+			wantNames: []string{"Tesla T4"},
+		},
+		{
 			name:          "volta generation constraint",
 			gpuClass:      "volta",
 			wantNames:     nil,

@@ -177,3 +177,47 @@ func TestHardwareMemoryTableHasCorePinnedModels(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveMemGB_T4Reachable is the regression for wj3135: the user-facing
+// class "t4" normalizes to "t4", but the table previously keyed the Tesla T4
+// only under "teslat4" (the gpu_name normalization), so its 16GB ceiling was
+// invisible. A request for a 16GB T4 must filter `gpu_ram>=16`, not `>=18`
+// (16+headroom), or no T4 offer — every T4 ships 16GB — can ever match.
+func TestEffectiveMemGB_T4Reachable(t *testing.T) {
+	if got := EffectiveMemGB("t4", 16); got != 16 {
+		t.Errorf("EffectiveMemGB(\"t4\", 16) = %d, want 16 (exact ceiling, no headroom)", got)
+	}
+	if got := EffectiveMemGB("T4", 16); got != 16 {
+		t.Errorf("EffectiveMemGB(\"T4\", 16) = %d, want 16", got)
+	}
+	if !KnownHardwareMemoryGB("t4", 16) {
+		t.Error("KnownHardwareMemoryGB(\"t4\", 16) = false, want true")
+	}
+}
+
+// TestMaxHardwareMemGB covers the ceiling lookup used to clamp the blanket
+// default reservation down to a named card's real VRAM.
+func TestMaxHardwareMemGB(t *testing.T) {
+	cases := []struct {
+		class  string
+		wantGB int
+		wantOK bool
+	}{
+		{"t4", 16, true},   // single-size small card — the wj3135 case
+		{"T4", 16, true},   // case-insensitive
+		{"a100", 80, true}, // multi-size: max of {40,80}
+		{"rtx2080ti", 11, true},
+		{"a6000", 48, true},   // bare workstation class resolves via rtx-prefix retry
+		{"v100", 32, true},    // max of {16,32}
+		{"nvidia", 0, false},  // family — no single ceiling
+		{"ampere+", 0, false}, // generation — no single ceiling
+		{"", 0, false},
+		{"0,1", 0, false}, // device index, not a class
+	}
+	for _, tc := range cases {
+		gotGB, gotOK := MaxHardwareMemGB(tc.class)
+		if gotGB != tc.wantGB || gotOK != tc.wantOK {
+			t.Errorf("MaxHardwareMemGB(%q) = (%d, %v), want (%d, %v)", tc.class, gotGB, gotOK, tc.wantGB, tc.wantOK)
+		}
+	}
+}

@@ -31,6 +31,11 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 	if !minMode && norm == "rtx4080" {
 		return []string{"RTX 4080", "RTX 4080S"}, nil
 	}
+	if !minMode && norm == "t4" {
+		// Vast.ai labels the T4 as "Tesla T4"; the bare "T4" the user types
+		// matches no offers. Mirror the v100 alias so "--gpu t4" resolves.
+		return []string{"Tesla T4"}, nil
+	}
 	if !minMode && norm == "v100" {
 		return []string{"Tesla V100"}, nil
 	}

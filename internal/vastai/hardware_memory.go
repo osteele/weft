@@ -2,6 +2,7 @@ package vastai
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
 )
@@ -15,7 +16,11 @@ const defaultHeadroomGB = 2
 
 // hardwareMemoryByClass maps a normalized GPU class name to the canonical
 // memory sizes (per GPU, in GB) that ship in that model. Keys are
-// inventory.NormalizeGPUClass results — e.g. "a100", "h100", "rtx4090".
+// inventory.NormalizeGPUClass results for the *user-facing* class spelling
+// (what reaches OfferConstraints.GPUClass), e.g. "a100", "h100", "rtx4090",
+// "t4" — not the Vast.ai gpu_name normalization ("teslat4"). Lookups go
+// through hardwareMemSizes, which also retries with an "rtx" prefix so bare
+// workstation classes ("a6000", "2080ti") resolve to their "rtx…" keys.
 //
 // The table is used to:
 //  1. Detect when a user's requested memory matches the hardware exactly,
@@ -69,6 +74,7 @@ var hardwareMemoryByClass = map[string][]int{
 	"rtx2080ti": {11},
 	"rtx2080":   {8},
 	"rtx2070":   {8},
+	"t4":        {16},
 	"teslat4":   {16},
 	"v100":      {16, 32},
 }
@@ -129,13 +135,53 @@ func IntendedMemGB(class string, requested int) int {
 	return requested
 }
 
+// hardwareMemSizes returns the canonical per-GPU memory sizes (GB) for a
+// user-facing GPU class, or (nil, false) when the class is empty, a family
+// ("nvidia"), a generation, or otherwise not a single known model. A trailing
+// "+" (min-mode) is stripped before lookup. When the bare normalized class
+// misses, it retries with an "rtx" prefix, mirroring resolveGPUFilter so
+// workstation classes like "a6000"/"2080ti" reach their "rtx…" keys.
+func hardwareMemSizes(class string) ([]int, bool) {
+	norm := inventory.NormalizeGPUClass(strings.TrimSuffix(strings.TrimSpace(class), "+"))
+	if norm == "" {
+		return nil, false
+	}
+	if sizes, ok := hardwareMemoryByClass[norm]; ok {
+		return sizes, true
+	}
+	if !strings.HasPrefix(norm, "rtx") {
+		if sizes, ok := hardwareMemoryByClass["rtx"+norm]; ok {
+			return sizes, true
+		}
+	}
+	return nil, false
+}
+
+// MaxHardwareMemGB returns the largest per-GPU VRAM (GB) shipped by a named GPU
+// class, and whether the class is a recognized single model. Used to clamp the
+// blanket default GPU-memory reservation down to a named card's real capacity
+// so a request like "--gpu t4" (16GB) doesn't inherit a 20GB default that no
+// T4 offer can satisfy. Returns (0, false) for empty/family/generation classes.
+func MaxHardwareMemGB(class string) (int, bool) {
+	sizes, ok := hardwareMemSizes(class)
+	if !ok || len(sizes) == 0 {
+		return 0, false
+	}
+	maxGB := sizes[0]
+	for _, s := range sizes[1:] {
+		if s > maxGB {
+			maxGB = s
+		}
+	}
+	return maxGB, true
+}
+
 // rollbackToHardwareCeiling returns (resolved, true) when (class, requested)
 // is either an exact known hardware ceiling or matches (ceiling +
 // defaultHeadroomGB) for one. Centralises the rollback logic so the search
 // filter and the reuse check stay in lockstep.
 func rollbackToHardwareCeiling(class string, requested int) (int, bool) {
-	norm := inventory.NormalizeGPUClass(class)
-	sizes, ok := hardwareMemoryByClass[norm]
+	sizes, ok := hardwareMemSizes(class)
 	if !ok {
 		return 0, false
 	}
@@ -160,7 +206,7 @@ func KnownHardwareMemoryGB(class string, memGB int) bool {
 	if memGB <= 0 {
 		return false
 	}
-	sizes, ok := hardwareMemoryByClass[inventory.NormalizeGPUClass(class)]
+	sizes, ok := hardwareMemSizes(class)
 	if !ok {
 		return false
 	}

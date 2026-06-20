@@ -875,7 +875,7 @@ func TestResolveGPUMem_ReturnsCeiling(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{MaxGPUMemMiB: &Prediction{Upper: 20 * 1024}}, nil // 20GB
 		}
-		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0)
+		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0, 0)
 		if floor == nil || *floor < 20 {
 			t.Fatalf("floor = %v, want >= 20", floor)
 		}
@@ -892,7 +892,7 @@ func TestResolveGPUMem_ReturnsCeiling(t *testing.T) {
 			return &Result{MaxGPUMemMiB: &Prediction{Upper: 20 * 1024}}, nil // 20GB
 		}
 		explicit := 48
-		floor, ceiling, predicted := ResolveGPUMem(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		floor, ceiling, predicted := ResolveGPUMem(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0, 0)
 		if floor == nil || *floor != explicit {
 			t.Fatalf("floor = %v, want %d", floor, explicit)
 		}
@@ -912,7 +912,7 @@ func TestResolveGPUMem_ReturnsCeiling(t *testing.T) {
 			return &Result{MaxGPUMemMiB: &Prediction{Upper: 10 * 1024}}, nil // 10GB
 		}
 		// fallbackGB=16 is larger than prediction, so floor=16, ceiling should be >= 16
-		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0)
+		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0, 0)
 		if floor == nil || *floor != 16 {
 			t.Fatalf("floor = %v, want 16", floor)
 		}
@@ -936,7 +936,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return nil, fmt.Errorf("should not be called")
 		}
-		got, estimated := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		got, estimated := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0, 0)
 		if got == nil || *got != 48 {
 			t.Fatalf("ResolveGPUMemGB explicit = %v, want 48", got)
 		}
@@ -949,7 +949,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{MaxGPUMemMiB: &Prediction{Upper: 25 * 1024}}, nil // 25GB
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0, 0)
 		if got == nil || *got != 25 {
 			t.Fatalf("ResolveGPUMemGB predicted = %v, want 25", got)
 		}
@@ -962,7 +962,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{}, nil
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0, 0)
 		if got == nil || *got != 20 {
 			t.Fatalf("ResolveGPUMemGB fallback = %v, want 20", got)
 		}
@@ -975,7 +975,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{}, nil // no prediction
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25, 0)
 		if got == nil || *got != 25 {
 			t.Fatalf("ResolveGPUMemGB with oom floor = %v, want 25", got)
 		}
@@ -988,7 +988,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{MaxGPUMemMiB: &Prediction{Upper: 50 * 1024}}, nil // 50GB
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25, 0)
 		if got == nil || *got != 50 {
 			t.Fatalf("ResolveGPUMemGB predictor>floor = %v, want 50", got)
 		}
@@ -1001,12 +1001,91 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return nil, fmt.Errorf("should not be called")
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, false, "", "proj", "", "echo hi", 20, 0)
+		got, estimated := ResolveGPUMemGB(cfg, nil, false, "", "proj", "", "echo hi", 20, 0, 0)
 		if got != nil {
 			t.Fatalf("ResolveGPUMemGB cpu job = %v, want nil", *got)
 		}
 		if estimated {
 			t.Fatalf("expected cpu job reservation to report estimated=false")
+		}
+	})
+}
+
+// TestResolveGPUMem_ClassMemCeiling is the wj3135 regression: a "--gpu t4" job
+// with no --gpu-mem must not inherit the 20GB blanket default (no 16GB T4 offer
+// can satisfy gpu_ram>=20). The fallback default is clamped to the named class
+// ceiling, but a real demand signal (prediction or OOM floor) above the ceiling
+// is left intact so the too-small pin surfaces as "no offers" pre-launch.
+func TestResolveGPUMem_ClassMemCeiling(t *testing.T) {
+	original := predictFunc
+	t.Cleanup(func() { predictFunc = original })
+	cfg := Config{ProjectPath: "/tmp/job-estimator"}
+
+	noPrediction := func(Config, string, string, string, string) (*Result, error) {
+		return &Result{}, nil
+	}
+	predict := func(gb int) func(Config, string, string, string, string) (*Result, error) {
+		return func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: float64(gb) * 1024}}, nil
+		}
+	}
+
+	t.Run("fallback default clamps to ceiling", func(t *testing.T) {
+		predictFunc = noPrediction
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "t4", "python infer.py", 20, 0, 16)
+		if got == nil || *got != 16 {
+			t.Fatalf("clamped fallback = %v, want 16", got)
+		}
+	})
+
+	t.Run("small prediction under ceiling still clamps fallback", func(t *testing.T) {
+		predictFunc = predict(4) // gpt2-sized; loses max to fallback 20
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "t4", "python infer.py", 20, 0, 16)
+		if got == nil || *got != 16 {
+			t.Fatalf("clamped fallback with small prediction = %v, want 16", got)
+		}
+	})
+
+	t.Run("ceiling at or above default is a no-op", func(t *testing.T) {
+		predictFunc = noPrediction
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0, 80)
+		if got == nil || *got != 20 {
+			t.Fatalf("no-clamp default = %v, want 20", got)
+		}
+	})
+
+	t.Run("prediction above ceiling is not clamped", func(t *testing.T) {
+		predictFunc = predict(18) // exceeds the 16GB ceiling
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "t4", "python train.py", 20, 0, 16)
+		if got == nil || *got != 20 {
+			t.Fatalf("prediction-above-ceiling = %v, want 20 (surfaces as no-offers)", got)
+		}
+	})
+
+	t.Run("oom floor above ceiling is not clamped", func(t *testing.T) {
+		predictFunc = noPrediction
+		// fallback below the OOM floor so the floor wins the max and the
+		// above-ceiling guard is the thing under test.
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "t4", "python train.py", 10, 18, 16)
+		if got == nil || *got != 18 {
+			t.Fatalf("oom-floor-above-ceiling = %v, want 18 (surfaces as no-offers)", got)
+		}
+	})
+
+	t.Run("explicit request is never clamped", func(t *testing.T) {
+		predictFunc = noPrediction
+		explicit := 24
+		got, _ := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "t4", "python train.py", 20, 0, 16)
+		if got == nil || *got != 24 {
+			t.Fatalf("explicit = %v, want 24 (left to fail loudly)", got)
+		}
+	})
+
+	t.Run("no ceiling known is a no-op", func(t *testing.T) {
+		predictFunc = noPrediction
+		got, _ := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "nvidia", "python train.py", 20, 0, 0)
+		if got == nil || *got != 20 {
+			t.Fatalf("no-ceiling = %v, want 20", got)
 		}
 	})
 }

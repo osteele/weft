@@ -1338,8 +1338,17 @@ func PredictedGPUMemCeilingGB(p *Prediction) (int, bool) {
 // oversized GPUs. Without an explicit floor, the floor uses the maximum of the
 // predictor, OOM floor, and fallback. The ceiling snaps the predictor's upper
 // bound to the next standard VRAM tier.
+//
+// classMemCeilingGB, when > 0, is the hardware VRAM ceiling of a named GPU
+// class (e.g. 16 for "t4"). It clamps a non-explicit floor that was set by the
+// blanket fallback default — so "--gpu t4" with no --gpu-mem searches
+// gpu_ram>=16, not the unsatisfiable >=20. A real demand signal (prediction or
+// OOM floor) above the ceiling is never clamped: that means the named card is
+// genuinely too small, which must surface as "no offers" before launch rather
+// than be silently downgraded onto hardware that will OOM. Pass 0 when the
+// class has no known ceiling (family/generation/unknown).
 // Returns (floor, ceiling, predicted) where ceiling is nil if no prediction available.
-func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (floor *int, ceiling *int, predicted bool) {
+func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int, classMemCeilingGB int) (floor *int, ceiling *int, predicted bool) {
 	hasGPURequest := needsGPU || explicit != nil
 	if !hasGPURequest {
 		return nil, nil, false
@@ -1377,6 +1386,16 @@ func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuC
 		return nil, nil, false
 	}
 
+	// Clamp the blanket fallback default down to the named class's VRAM
+	// ceiling. Guarded so only the fallback is clamped: when both the
+	// prediction and OOM floor are within the ceiling, the only thing pushing
+	// memGB above it is fallbackGB. A prediction or OOM floor above the ceiling
+	// means the card is too small and is left to surface as "no offers".
+	if classMemCeilingGB > 0 && memGB > classMemCeilingGB &&
+		predictedGB <= classMemCeilingGB && oomFloorGB <= classMemCeilingGB {
+		memGB = classMemCeilingGB
+	}
+
 	floorPtr := &memGB
 	var ceilingPtr *int
 	if ceilingGB > 0 {
@@ -1393,8 +1412,8 @@ func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuC
 // ResolveGPUMemGB returns the effective GPU memory reservation for a job.
 // Explicit reservations win. Otherwise, the OOM floor (from prior failures),
 // predictor output, and fallbackGB are considered — the maximum wins.
-func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (*int, bool) {
-	floor, _, predicted := ResolveGPUMem(cfg, explicit, needsGPU, host, project, gpuClass, command, fallbackGB, oomFloorGB)
+func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int, classMemCeilingGB int) (*int, bool) {
+	floor, _, predicted := ResolveGPUMem(cfg, explicit, needsGPU, host, project, gpuClass, command, fallbackGB, oomFloorGB, classMemCeilingGB)
 	return floor, predicted
 }
 

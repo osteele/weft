@@ -70,7 +70,7 @@ func (m Model) createJob() tea.Cmd {
 		}
 		predCfg := placement.PredictorConfigFromApp(m.appConfig)
 		projectName := db.DeriveProject(workingDir, command)
-		gpuMemGB, gpuMemMaxGB, _ := predictor.ResolveGPUMem(predCfg, nil, gpuInput != "", host, projectName, "", command, opsqueue.DefaultGPUMemGB, 0)
+		gpuMemGB, gpuMemMaxGB, _ := predictor.ResolveGPUMem(predCfg, nil, gpuInput != "", host, projectName, "", command, opsqueue.DefaultGPUMemGB, 0, 0)
 		params := ops.QueueJobParams{
 			Host:         host,
 			WorkingDir:   workingDir,

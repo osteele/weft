@@ -25,7 +25,16 @@ func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu str
 		pcfg = buildPredictorConfig(cfg)
 	}
 	needsGPU := gpu != "" || gpuClass != ""
-	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
+	// When the job names a specific small GPU class, cap the blanket default
+	// reservation to that card's VRAM so "--gpu t4" (16GB) doesn't inherit the
+	// 20GB default that no T4 offer can satisfy. Try the dedicated class first,
+	// then the raw --gpu spec (a family/index/family+mem spec has no single
+	// ceiling and resolves to 0).
+	classCeilingGB, ok := vastai.MaxHardwareMemGB(gpuClass)
+	if !ok {
+		classCeilingGB, _ = vastai.MaxHardwareMemGB(gpu)
+	}
+	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB, classCeilingGB)
 	if floor != nil {
 		effective := applyGPUMemHeadroom(*floor, explicit != nil, strict, false, gpuClass)
 		if effective != *floor {
