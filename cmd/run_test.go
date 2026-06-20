@@ -588,6 +588,51 @@ func TestEvaluateRecentOnPremPlacementUsesDBMetricsOnly(t *testing.T) {
 	}
 }
 
+func TestEvaluateRecentOnPremPlacementSkipsRentalTaggedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	inventory.UseTestHosts(t)
+	now := time.Now().Unix()
+	for _, host := range []string{"host-alpha", "host-beta", "host-gamma"} {
+		_, err := database.Exec(`INSERT INTO host_contention_obs (host, gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at)
+			VALUES (?, ?, ?, ?, ?, ?)`, host, 5, 10, 0, 0, now)
+		if err != nil {
+			t.Fatalf("insert contention obs: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		constraints placement.Constraints
+	}{
+		{
+			name:        "rental tag",
+			constraints: placement.Constraints{GPUClass: "a100", GPUMemGB: 80, Tags: []string{db.TagRental}},
+		},
+		{
+			name:        "provider tag",
+			constraints: placement.Constraints{GPUClass: "a100", GPUMemGB: 80, Tags: []string{db.TagProviderVastai}, Provider: "vastai"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, recent, err := evaluateRecentOnPremPlacement(database, tt.constraints)
+			if err != nil {
+				t.Fatalf("evaluateRecentOnPremPlacement: %v", err)
+			}
+			if !recent {
+				t.Fatal("recent = false, want true")
+			}
+			if plan == nil || !plan.Unplaced {
+				t.Fatalf("plan = %#v, want unplaced", plan)
+			}
+			if plan.Fast != nil || plan.Cheap != nil || plan.Fastest != nil {
+				t.Fatalf("plan selected on-prem candidate despite rental/provider constraint: %#v", plan)
+			}
+		})
+	}
+}
+
 func newRunTestCommand() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("provider", "", "")

@@ -1510,6 +1510,9 @@ func normalizeInterconnect(value string) (string, error) {
 }
 
 func evaluateRecentOnPremPlacement(database *sql.DB, constraints placement.Constraints) (*placement.PlacementPlan, bool, error) {
+	if db.HasRentalTag(constraints.Tags) || constraints.Provider != "" {
+		return &placement.PlacementPlan{Unplaced: true}, true, nil
+	}
 	hostNames, err := placement.LoadHostNames()
 	if err != nil {
 		return nil, false, fmt.Errorf("load host inventory: %w", err)
