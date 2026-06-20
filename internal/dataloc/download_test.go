@@ -125,7 +125,7 @@ func detachedDownloadMock(t *testing.T, exitCode int, capturedStderr string) com
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "123456789\n", "", nil
-		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
 			// Spawn succeeded.
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
@@ -218,7 +218,7 @@ func TestDownloadAssetToHost_FinalCacheScanUsesCallerContext(t *testing.T) {
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "123456789\n", "", nil
-		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", nil
@@ -254,7 +254,7 @@ func TestDownloadAssetToHost_ReportsIncompleteCacheAfterSuccessfulDownload(t *te
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "123456789\n", "", nil
-		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", nil
@@ -292,9 +292,12 @@ func TestRunDetachedRemoteCommand_CancelKillsRemote(t *testing.T) {
 	var killed bool
 	hostCommandRunner = func(ctx context.Context, _ string, command string) (string, string, error) {
 		switch {
-		case strings.Contains(command, "nohup bash -c"):
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
 			return "OK\n", "", nil
 		case strings.Contains(command, "kill -TERM"):
+			if !strings.Contains(command, `kill -TERM -- "-$_pid"`) {
+				t.Fatalf("kill command should terminate the detached process group: %s", command)
+			}
 			killed = true
 			return "", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):

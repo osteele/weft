@@ -220,3 +220,15 @@ func TestSessionWriteAfterClose(t *testing.T) {
 		t.Error("expected error writing to closed session")
 	}
 }
+
+func TestReadyTimeoutForConnectUsesFloor(t *testing.T) {
+	if got := readyTimeoutForConnect(10); got != 45*time.Second {
+		t.Fatalf("readyTimeoutForConnect(10) = %s, want 45s", got)
+	}
+}
+
+func TestReadyTimeoutForConnectHonorsLongConnectTimeout(t *testing.T) {
+	if got := readyTimeoutForConnect(60); got != 65*time.Second {
+		t.Fatalf("readyTimeoutForConnect(60) = %s, want 65s", got)
+	}
+}

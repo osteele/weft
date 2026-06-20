@@ -862,12 +862,12 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", 0
 		// Daemonized download path (runDetachedRemoteCommand in
-		// internal/dataloc/download.go): the spawn issues a `nohup bash
-		// -c ... cmd.sh ...` invocation; each poll calls
+		// internal/dataloc/download.go): the spawn issues a `nohup ...
+		// cmd.sh ...` invocation; each poll calls
 		// `if [ -f "$D/status" ]`. The test cares about the request
 		// completing, not what the download actually did — return OK to
 		// spawn, STATUS=0 to the first poll.
-		case strings.Contains(command, "nohup bash -c") && strings.Contains(command, "cmd.sh"):
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
 			return "OK\n", "", 0
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", 0

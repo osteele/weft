@@ -132,7 +132,13 @@ cat > "$D/cmd.sh" <<'%s'
 %s
 %s
 chmod +x "$D/cmd.sh"
-nohup bash -c "trap '_e=\$?; echo \$_e > \"$D/status\"; exit \$_e' EXIT TERM INT; bash \"$D/cmd.sh\"" > "$D/stdout.log" 2> "$D/stderr.log" < /dev/null &
+if command -v setsid >/dev/null 2>&1; then
+  nohup setsid bash -c "trap '_e=\$?; echo \$_e > \"$D/status\"; exit \$_e' EXIT TERM INT; bash \"$D/cmd.sh\"" > "$D/stdout.log" 2> "$D/stderr.log" < /dev/null &
+  echo group > "$D/kill-mode"
+else
+  nohup bash -c "trap '_e=\$?; echo \$_e > \"$D/status\"; exit \$_e' EXIT TERM INT; bash \"$D/cmd.sh\"" > "$D/stdout.log" 2> "$D/stderr.log" < /dev/null &
+  echo process > "$D/kill-mode"
+fi
 echo $! > "$D/pid"
 disown 2>/dev/null || true
 echo OK
@@ -160,7 +166,14 @@ fi
 `, runDir)
 
 	killCmd := fmt.Sprintf(`D=%s
-if [ -f "$D/pid" ]; then kill -TERM $(cat "$D/pid") 2>/dev/null || true; fi
+if [ -f "$D/pid" ]; then
+  _pid=$(cat "$D/pid")
+  if [ "$(cat "$D/kill-mode" 2>/dev/null)" = group ]; then
+    kill -TERM -- "-$_pid" 2>/dev/null || kill -TERM "$_pid" 2>/dev/null || true
+  else
+    kill -TERM "$_pid" 2>/dev/null || true
+  fi
+fi
 `, runDir)
 
 	slog.Debug("detached remote command spawned", "host", host, "run_id", runID)

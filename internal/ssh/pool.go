@@ -27,7 +27,7 @@ var (
 	defaultPoolSize     = 4
 	defaultMaxParallel  = 8
 	defaultConnTimeout  = 10 // seconds, passed to ssh -o ConnectTimeout
-	defaultReadyTimeout = 15 * time.Second
+	defaultReadyTimeout = readyTimeoutForConnect(defaultConnTimeout)
 	defaultPool         *SessionPool
 	poolOnce            sync.Once
 
@@ -65,9 +65,21 @@ func init() {
 	if s := os.Getenv("WEFT_SSH_CONNECT_TIMEOUT"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultConnTimeout = n
-			defaultReadyTimeout = time.Duration(n+5) * time.Second
+			defaultReadyTimeout = readyTimeoutForConnect(n)
 		}
 	}
+}
+
+func readyTimeoutForConnect(connectSeconds int) time.Duration {
+	// ConnectTimeout only covers establishing the TCP connection. Some reachable
+	// hosts can take longer to finish login shell startup and emit the pool ready
+	// marker, especially after network/VPN changes or cold SSH auth paths.
+	const minReadyTimeout = 45 * time.Second
+	timeout := time.Duration(connectSeconds+5) * time.Second
+	if timeout < minReadyTimeout {
+		return minReadyTimeout
+	}
+	return timeout
 }
 
 // Configure applies SSH-pool and identity settings from a loaded config.
@@ -86,7 +98,7 @@ func Configure(cfg *config.Config) {
 	}
 	if n := cfg.SSH.ConnectTimeout; n > 0 && os.Getenv("WEFT_SSH_CONNECT_TIMEOUT") == "" {
 		defaultConnTimeout = n
-		defaultReadyTimeout = time.Duration(n+5) * time.Second
+		defaultReadyTimeout = readyTimeoutForConnect(n)
 	}
 	sshIdentityFile = cfg.Cloud.SSH.ExpandedIdentityFile()
 	sshUserByHost = make(map[string]string, len(cfg.Hosts))
@@ -156,7 +168,7 @@ func SetMinConnectTimeout(d time.Duration) {
 	secs := int(d.Seconds())
 	if secs > defaultConnTimeout {
 		defaultConnTimeout = secs
-		defaultReadyTimeout = time.Duration(secs+5) * time.Second
+		defaultReadyTimeout = readyTimeoutForConnect(secs)
 	}
 }
 
