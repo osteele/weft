@@ -20,10 +20,11 @@ const (
 )
 
 type Paths struct {
-	PIDFile   string
-	StdoutLog string
-	StderrLog string
-	PlistFile string
+	PIDFile    string
+	SocketFile string
+	StdoutLog  string
+	StderrLog  string
+	PlistFile  string
 }
 
 type Metadata struct {
@@ -56,10 +57,11 @@ func DefaultPaths() Paths {
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".cache", "weft")
 	return Paths{
-		PIDFile:   filepath.Join(cacheDir, "daemon.pid"),
-		StdoutLog: filepath.Join(cacheDir, "daemon.stdout.log"),
-		StderrLog: filepath.Join(cacheDir, "daemon.stderr.log"),
-		PlistFile: filepath.Join(home, "Library", "LaunchAgents", Label+".plist"),
+		PIDFile:    filepath.Join(cacheDir, "daemon.pid"),
+		SocketFile: filepath.Join(cacheDir, "daemon.sock"),
+		StdoutLog:  filepath.Join(cacheDir, "daemon.stdout.log"),
+		StderrLog:  filepath.Join(cacheDir, "daemon.stderr.log"),
+		PlistFile:  filepath.Join(home, "Library", "LaunchAgents", Label+".plist"),
 	}
 }
 
@@ -152,14 +154,13 @@ func activeBinaryStale(paths Paths, metadata *Metadata) bool {
 func activeBinaryStaleForExecutable(paths Paths, metadata *Metadata, exe string, exeModTime time.Time) bool {
 	isWeftExecutable := filepath.Base(exe) == "weft"
 	if metadata != nil && metadata.Executable != "" && metadata.ExecutableModTime > 0 {
-		startedWithModTime := time.Unix(metadata.ExecutableModTime, 0)
-		if daemonInfo, err := os.Stat(metadata.Executable); err == nil && daemonInfo.ModTime().After(startedWithModTime) {
+		if daemonInfo, err := os.Stat(metadata.Executable); err == nil && daemonInfo.ModTime().Unix() > metadata.ExecutableModTime {
 			return true
 		}
 		if filepath.Clean(exe) == filepath.Clean(metadata.Executable) {
-			return exeModTime.After(startedWithModTime)
+			return exeModTime.Unix() > metadata.ExecutableModTime
 		}
-		return isWeftExecutable && exeModTime.After(startedWithModTime)
+		return isWeftExecutable && exeModTime.Unix() > metadata.ExecutableModTime
 	}
 	if !isWeftExecutable {
 		return false

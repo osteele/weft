@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sort"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemonapi"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
@@ -262,7 +266,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		if len(waitRequests) == 0 {
 			return fmt.Errorf("no valid job IDs to wait for")
 		}
-		results, err := waitForJobsCompletion(database, waitRequests, statusWaitTimeout, tracker)
+		results, err := waitForJobsCompletion(cmd.Context(), database, waitRequests, statusWaitTimeout, tracker)
 		if err != nil {
 			if errors.Is(err, errWaitTimeout) {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -416,7 +420,7 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 	}
 }
 
-func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
+func waitForJobsCompletion(ctx context.Context, database *sql.DB, jobs []jobStatusRequest, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
 	final := make(map[int64]*db.Job, len(jobs))
 	pending := make(map[int64]struct{})
 	order := make([]int64, 0, len(jobs))
@@ -447,6 +451,108 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 	}
 	fmt.Println()
 
+	if usedDaemon, err := waitForJobsCompletionViaDaemon(ctx, database, final, pending, order, lastReported, timeout); usedDaemon {
+		return final, err
+	}
+	return waitForJobsCompletionPolling(database, final, pending, order, lastReported, timeout, tracker)
+}
+
+func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final map[int64]*db.Job, pending map[int64]struct{}, order []int64, lastReported map[int64]string, timeout time.Duration) (bool, error) {
+	if len(order) == 0 {
+		return true, nil
+	}
+	paths := daemoncontrol.DefaultPaths()
+	if _, _, err := ensureDaemonStartedFunc(paths, 2*time.Second); err != nil {
+		return false, nil
+	}
+	watcher, err := dialDaemonWatchJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
+	if err != nil {
+		return false, nil
+	}
+	defer watcher.Close()
+
+	reportChange := func(job *db.Job) {
+		if job == nil {
+			return
+		}
+		if last, ok := lastReported[job.ID]; !ok || last != job.Status {
+			lastReported[job.ID] = job.Status
+			printJobStatusLine(job)
+		}
+	}
+	pendingTimeoutErr := func() error {
+		pendingIDs := make([]int64, 0, len(pending))
+		for id := range pending {
+			pendingIDs = append(pendingIDs, id)
+		}
+		return fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+	}
+
+	received := false
+	for len(pending) > 0 {
+		event, err := watcher.Next()
+		if err != nil {
+			if !received && errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return true, fmt.Errorf("daemon watch: %w", err)
+		}
+		received = true
+		switch event.Type {
+		case daemonapi.EventSnapshot, daemonapi.EventDone:
+			for _, snapshot := range event.Jobs {
+				if _, ok := pending[snapshot.ID]; !ok {
+					continue
+				}
+				job, err := db.GetJobByID(database, snapshot.ID)
+				if err != nil {
+					return true, err
+				}
+				final[snapshot.ID] = job
+				if job == nil {
+					fmt.Printf("Job %s not found\n", ids.FormatJobID(snapshot.ID))
+					delete(pending, snapshot.ID)
+					continue
+				}
+				reportChange(job)
+				if isWaitTerminalStatus(job.Status) {
+					delete(pending, snapshot.ID)
+				}
+			}
+			if event.Type == daemonapi.EventDone && len(pending) > 0 {
+				return true, pendingTimeoutErr()
+			}
+		case daemonapi.EventError:
+			if event.Error == context.DeadlineExceeded.Error() {
+				return true, pendingTimeoutErr()
+			}
+			return true, fmt.Errorf("daemon watch: %s", event.Error)
+		}
+	}
+	return true, nil
+}
+
+func dialDaemonWatchJobs(ctx context.Context, socketPath string, order []int64, timeout time.Duration, wait time.Duration) (*daemonapi.Watcher, error) {
+	deadline := time.Now().Add(wait)
+	var lastErr error
+	for {
+		watcher, err := daemonapi.DialWatchJobs(ctx, socketPath, order, timeout)
+		if err == nil {
+			return watcher, nil
+		}
+		lastErr = err
+		if wait <= 0 || time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pending map[int64]struct{}, order []int64, lastReported map[int64]string, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 

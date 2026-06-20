@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemonapi"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
@@ -131,6 +132,12 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	watchServer, err := daemonapi.StartServer(ctx, database, paths.SocketFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: start daemon watch socket: %v\n", err)
+	} else {
+		defer watchServer.Close()
+	}
 	changeSource := openDBChangeSource("daemon")
 	if changeSource != nil {
 		defer changeSource.Close()

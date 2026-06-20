@@ -279,6 +279,34 @@ func TestActiveBinaryStaleDetectsDifferentCurrentWeftPath(t *testing.T) {
 	}
 }
 
+func TestActiveBinaryStaleIgnoresSameSecondMetadataPrecision(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{PIDFile: filepath.Join(dir, "daemon.pid")}
+	recorded := time.Now().Truncate(time.Second)
+	actual := recorded.Add(750 * time.Millisecond)
+
+	exe := filepath.Join(dir, "go", "bin", "weft")
+	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, []byte("daemon binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(exe, actual, actual); err != nil {
+		t.Fatalf("Chtimes exe: %v", err)
+	}
+
+	metadata := &Metadata{
+		PID:               os.Getpid(),
+		Executable:        exe,
+		ExecutableModTime: recorded.Unix(),
+		StartedAt:         recorded.Unix(),
+	}
+	if activeBinaryStaleForExecutable(paths, metadata, exe, actual) {
+		t.Fatal("same-second executable mtime should not make daemon stale")
+	}
+}
+
 func TestActiveBinaryStaleIgnoresDifferentNonWeftExecutablePath(t *testing.T) {
 	dir := t.TempDir()
 	paths := Paths{PIDFile: filepath.Join(dir, "daemon.pid")}
