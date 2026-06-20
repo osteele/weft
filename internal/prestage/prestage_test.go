@@ -1,11 +1,15 @@
 package prestage
 
 import (
+	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/ssh"
 	_ "modernc.org/sqlite"
 )
 
@@ -184,5 +188,48 @@ func TestPlan_TotalBytes_Empty(t *testing.T) {
 	plan := &Plan{Host: "host-alpha"}
 	if got := plan.TotalBytes(); got != 0 {
 		t.Errorf("TotalBytes: got %d, want 0", got)
+	}
+}
+
+func TestRunTransferPullCopiesDirectoryContents(t *testing.T) {
+	var calls []struct {
+		host    string
+		command string
+	}
+	restore := ssh.SetRunner(func(host, command string) (string, string, error) {
+		calls = append(calls, struct {
+			host    string
+			command string
+		}{host: host, command: command})
+		if host == "host-beta" {
+			return "", "ssh: Could not resolve hostname host-alpha", errors.New("exit status 255")
+		}
+		return "", "", nil
+	})
+	t.Cleanup(restore)
+
+	err := runTransfer(context.Background(), Transfer{
+		Asset:      dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "microsoft/phi-1"},
+		SourceHost: "host-beta",
+		RemotePath: "/cache/hub/models--microsoft--phi-1",
+	}, "host-alpha", "/target/hub")
+	if err != nil {
+		t.Fatalf("runTransfer: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2: %#v", len(calls), calls)
+	}
+
+	push := calls[0].command
+	if !strings.Contains(push, "'/cache/hub/models--microsoft--phi-1/' host-alpha:'/target/hub/models--microsoft--phi-1/'") {
+		t.Fatalf("push command = %q, want source and destination directory contents", push)
+	}
+
+	pull := calls[1].command
+	if !strings.Contains(pull, "mkdir -p '/target/hub/models--microsoft--phi-1'") {
+		t.Fatalf("pull command = %q, want destination directory mkdir", pull)
+	}
+	if !strings.Contains(pull, "host-beta:'/cache/hub/models--microsoft--phi-1/' '/target/hub/models--microsoft--phi-1/'") {
+		t.Fatalf("pull command = %q, want source contents copied into destination directory", pull)
 	}
 }

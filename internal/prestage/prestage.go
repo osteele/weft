@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -171,9 +172,11 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 // which works when the target can reach the source but not vice versa.
 func runTransfer(ctx context.Context, t Transfer, targetHost string, hfCacheDir string) error {
 	destPath := filepath.Join(hfCacheDir, filepath.Base(t.RemotePath))
+	srcPath := rsyncDirectoryContents(t.RemotePath)
+	dstPath := rsyncDirectoryContents(destPath)
 
-	pushCmd := fmt.Sprintf("rsync -az --timeout=300 %s %s:%s",
-		t.RemotePath, targetHost, destPath)
+	pushCmd := fmt.Sprintf("rsync -az --timeout=300 %s %s",
+		shellQuote(srcPath), rsyncRemoteArg(targetHost, dstPath))
 	_, stderr, err := ssh.RunWithContext(ctx, t.SourceHost, pushCmd)
 	if err == nil {
 		return nil
@@ -186,12 +189,24 @@ func runTransfer(ctx context.Context, t Transfer, targetHost string, hfCacheDir 
 		return pushErr
 	}
 
-	pullCmd := fmt.Sprintf("mkdir -p %s && rsync -az --timeout=300 %s:%s %s",
-		hfCacheDir, t.SourceHost, t.RemotePath, destPath)
+	pullCmd := fmt.Sprintf("mkdir -p %s && rsync -az --timeout=300 %s %s",
+		shellQuote(destPath), rsyncRemoteArg(t.SourceHost, srcPath), shellQuote(dstPath))
 	_, stderr2, err2 := ssh.RunWithContext(ctx, targetHost, pullCmd)
 	if err2 != nil {
 		// Report both errors so it's clear what was tried
 		return fmt.Errorf("push (%w); pull: rsync: %s: %v", pushErr, stderr2, err2)
 	}
 	return nil
+}
+
+func rsyncDirectoryContents(path string) string {
+	return strings.TrimRight(path, "/") + "/"
+}
+
+func rsyncRemoteArg(host, path string) string {
+	return host + ":" + shellQuote(path)
+}
+
+func shellQuote(s string) string {
+	return "'" + ssh.EscapeForSingleQuotes(s) + "'"
 }
