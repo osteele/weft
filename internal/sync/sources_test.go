@@ -114,7 +114,7 @@ func TestBuildRsyncArgs(t *testing.T) {
 			localDir:  "/Users/osteele/code/research/compression-lab",
 			remoteDir: "~/code/research/compression-lab",
 			excludes:  []string{".git", "__pycache__"},
-			wantFlags: []string{"-az", "--delete", "--exclude", ".git", "--exclude", "__pycache__"},
+			wantFlags: []string{"-az", "--no-owner", "--no-group", "--delete", "--exclude", ".git", "--exclude", "__pycache__"},
 			wantSrc:   "/Users/osteele/code/research/compression-lab/",
 			wantDst:   "host-beta:~/code/research/compression-lab/",
 		},
@@ -163,6 +163,24 @@ func TestBuildRsyncArgs(t *testing.T) {
 			for _, flag := range tt.wantFlags {
 				if !strings.Contains(joined, flag) {
 					t.Errorf("args missing expected flag %q in: %s", flag, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestOutboundSourceRsyncArgsDoNotPreserveOwnerGroup(t *testing.T) {
+	cases := map[string][]string{
+		"source":            BuildRsyncArgs("host", "/tmp/src", "~/dst", []string{".git"}),
+		"source-no-delete":  BuildRsyncArgsWithOptions("host", "/tmp/src", "~/dst", nil, false),
+		"extra-local-input": BuildExtraPathRsyncArgs("host", "/tmp/data", "~/data"),
+		"source-ssh-helper": outboundRsyncArchiveArgs(),
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{"-az", "--no-owner", "--no-group"} {
+				if !slices.Contains(args, want) {
+					t.Fatalf("%s: args missing %s: %v", name, want, args)
 				}
 			}
 		})

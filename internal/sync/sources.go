@@ -25,6 +25,10 @@ import (
 // (bulk transfer over potentially-slow links).
 const rsyncConnectTimeout = 15 * time.Second
 
+func outboundRsyncArchiveArgs() []string {
+	return []string{"-az", "--no-owner", "--no-group"}
+}
+
 // ErrSourceSyncTimeout marks a source-sync rsync that the context deadline
 // killed rather than one that failed cleanly. It lets dispatch callers tell a
 // wedged host (rsync hangs on an unresponsive working dir — e.g. a stuck
@@ -183,7 +187,7 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 
 // BuildRsyncArgsWithOptions constructs rsync arguments with an optional --delete.
 func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []string, delete bool) []string {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout)}
+	args := append(outboundRsyncArchiveArgs(), "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout))
 	if delete {
 		args = append(args, "--delete")
 	}
@@ -308,7 +312,7 @@ func SyncSourcesWithTimeout(host, localDir, remoteDir string, timeout time.Durat
 // to a remote host. Unlike BuildRsyncArgs, this does NOT use --delete since the
 // remote directory may contain content from other sources.
 func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout)}
+	args := append(outboundRsyncArchiveArgs(), "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout))
 	src, dst := rsyncPathSrcDst(host, localDir, remoteDir, localPathIsDir(localDir))
 	args = append(args, src, dst)
 	return args
@@ -524,7 +528,7 @@ func SyncTree(host, localDir, remoteDir string, delete bool) error {
 
 // SyncFile copies a single file to a remote path on the target host.
 func SyncFile(host, localPath, remotePath string) error {
-	args := []string{"-az", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout), localPath, ssh.RsyncTarget(host) + ":" + remotePath}
+	args := append(outboundRsyncArchiveArgs(), "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout), localPath, ssh.RsyncTarget(host)+":"+remotePath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
 	defer cancel()
@@ -557,7 +561,7 @@ const extraPathRsyncTimeout = 10 * time.Minute
 func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
 	excludes := sourceExcludes(localDir)
 
-	args := []string{"-az", "--delete", "-e", sshCmd}
+	args := append(outboundRsyncArchiveArgs(), "--delete", "-e", sshCmd)
 	args = append(args, gitignoreFilters(localDir)...)
 	for _, pattern := range excludes {
 		args = append(args, "--exclude", pattern)
