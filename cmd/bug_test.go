@@ -51,6 +51,18 @@ func TestBugCommandsLifecycle(t *testing.T) {
 		t.Fatalf("show output = %q", out)
 	}
 
+	if err := runBugNote(&cobra.Command{}, []string{"wb1", "agent's", "note"}); err != nil {
+		t.Fatalf("runBugNote with apostrophe: %v", err)
+	}
+	out = captureStdout(t, func() {
+		if err := runBugShow(&cobra.Command{}, []string{"wb1"}); err != nil {
+			t.Fatalf("runBugShow after apostrophe note: %v", err)
+		}
+	})
+	if !strings.Contains(out, "agent's note") {
+		t.Fatalf("show output missing apostrophe note = %q", out)
+	}
+
 	bugCloseReason = "fixed"
 	out = captureStdout(t, func() {
 		if err := runBugClose(&cobra.Command{}, []string{"wb1"}); err != nil {
@@ -77,6 +89,71 @@ func TestBugCommandsLifecycle(t *testing.T) {
 	})
 	if !strings.Contains(out, "wb1") || !strings.Contains(out, "open") {
 		t.Fatalf("list after reopen output = %q", out)
+	}
+}
+
+func TestBugNoteTreatsFlagLikeTextAfterBugID(t *testing.T) {
+	restoreBugFlags(t)
+	var got []string
+	cmd := &cobra.Command{
+		Use:  "note [--stdin] <bug-id> [text...]",
+		Args: usageArgs(validateBugNoteArgs),
+		RunE: func(_ *cobra.Command, args []string) error {
+			got = append([]string(nil), args...)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&bugNoteStdin, "stdin", false, "read note text from stdin")
+	cmd.Flags().SetInterspersed(false)
+	cmd.SetArgs([]string{"wb1", "--looks-like-a-flag", "value"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute command: %v", err)
+	}
+	want := []string{"wb1", "--looks-like-a-flag", "value"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestBugNoteStdin(t *testing.T) {
+	db.SetupTestBugDB(t)
+	setupLocalBugTrackerConfig(t)
+	restoreBugFlags(t)
+
+	if err := runBugReport(&cobra.Command{}, []string{"stdin", "bug"}); err != nil {
+		t.Fatalf("runBugReport: %v", err)
+	}
+
+	bugNoteStdin = true
+	withStdin(t, "line one\nline two\n", func() {
+		if err := runBugNote(&cobra.Command{}, []string{"wb1"}); err != nil {
+			t.Fatalf("runBugNote --stdin: %v", err)
+		}
+	})
+	out := captureStdout(t, func() {
+		if err := runBugShow(&cobra.Command{}, []string{"wb1"}); err != nil {
+			t.Fatalf("runBugShow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "line one\nline two") {
+		t.Fatalf("show output missing stdin note = %q", out)
+	}
+}
+
+func TestValidateBugNoteArgs(t *testing.T) {
+	restoreBugFlags(t)
+
+	bugNoteStdin = false
+	err := validateBugNoteArgs(&cobra.Command{}, []string{"wb1"})
+	if err == nil || !strings.Contains(err.Error(), "bug note text is required") {
+		t.Fatalf("missing note error = %v", err)
+	}
+
+	bugNoteStdin = true
+	err = validateBugNoteArgs(&cobra.Command{}, []string{"wb1", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "--stdin expects exactly one bug id") {
+		t.Fatalf("stdin plus text error = %v", err)
 	}
 }
 
@@ -187,6 +264,7 @@ func restoreBugFlags(t *testing.T) {
 	oldReportSummary := bugReportSummary
 	oldReportDetail := bugReportDetail
 	oldReportNote := bugReportNote
+	oldBugNoteStdin := bugNoteStdin
 	oldListAll := bugListAll
 	oldCloseReason := bugCloseReason
 	t.Cleanup(func() {
@@ -201,6 +279,7 @@ func restoreBugFlags(t *testing.T) {
 		bugReportSummary = oldReportSummary
 		bugReportDetail = oldReportDetail
 		bugReportNote = oldReportNote
+		bugNoteStdin = oldBugNoteStdin
 		bugListAll = oldListAll
 		bugCloseReason = oldCloseReason
 	})
@@ -215,6 +294,31 @@ func restoreBugFlags(t *testing.T) {
 	bugReportSummary = ""
 	bugReportDetail = ""
 	bugReportNote = ""
+	bugNoteStdin = false
 	bugListAll = false
 	bugCloseReason = ""
+}
+
+func withStdin(t *testing.T, text string, fn func()) {
+	t.Helper()
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdin = r
+	defer func() {
+		os.Stdin = oldStdin
+		_ = r.Close()
+	}()
+
+	if _, err := w.WriteString(text); err != nil {
+		t.Fatalf("write stdin pipe: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdin pipe writer: %v", err)
+	}
+
+	fn()
 }

@@ -636,12 +636,13 @@ weft bug report --title "runner pending job is missing queue payload" \
   --host studio \
   --detail "raw maintainer details"
 
-weft bug note #123 "additional context from a later observation"
+weft bug note '#123' "additional context from a later observation"
+printf '%s\n' "context with 'quotes'" | weft bug note --stdin '#123'
 weft bug list
 weft bug list --all
-weft bug show #123
-weft bug close #123 --reason "fixed in e95f1f4e"
-weft bug reopen #123
+weft bug show '#123'
+weft bug close '#123' --reason "fixed in e95f1f4e"
+weft bug reopen '#123'
 ```
 
 `report` returns a bug number. If another open bug has the same fingerprint,

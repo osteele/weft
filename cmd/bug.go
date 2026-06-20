@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ var (
 	bugReportSummary     string
 	bugReportDetail      string
 	bugReportNote        string
+	bugNoteStdin         bool
 	bugListAll           bool
 	bugCloseReason       string
 )
@@ -52,9 +55,9 @@ var bugReportCmd = &cobra.Command{
 }
 
 var bugNoteCmd = &cobra.Command{
-	Use:   "note <bug-id> <text>",
+	Use:   "note [--stdin] <bug-id> [text...]",
 	Short: "Add context to an existing Weft bug",
-	Args:  cobra.MinimumNArgs(2),
+	Args:  usageArgs(validateBugNoteArgs),
 	RunE:  runBugNote,
 }
 
@@ -115,6 +118,9 @@ func init() {
 	bugReportCmd.Flags().StringVar(&bugReportDetail, "detail", "", "maintainer detail")
 	bugReportCmd.Flags().StringVar(&bugReportNote, "note", "", "initial note")
 
+	bugNoteCmd.Flags().BoolVar(&bugNoteStdin, "stdin", false, "read note text from stdin")
+	bugNoteCmd.Flags().SetInterspersed(false)
+
 	bugListCmd.Flags().BoolVar(&bugListAll, "all", false, "include closed bugs")
 	bugCloseCmd.Flags().StringVar(&bugCloseReason, "reason", "", "close reason")
 }
@@ -148,11 +154,35 @@ func runBugReport(_ *cobra.Command, args []string) error {
 }
 
 func runBugNote(_ *cobra.Command, args []string) error {
+	note := strings.TrimSpace(strings.Join(args[1:], " "))
+	if bugNoteStdin {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		note = strings.TrimRight(string(data), "\r\n")
+	}
 	tracker, err := currentBugTracker()
 	if err != nil {
 		return err
 	}
-	return tracker.Note(args[0], strings.TrimSpace(strings.Join(args[1:], " ")))
+	return tracker.Note(args[0], note)
+}
+
+func validateBugNoteArgs(_ *cobra.Command, args []string) error {
+	if bugNoteStdin {
+		if len(args) != 1 {
+			return fmt.Errorf("--stdin expects exactly one bug id and no note text")
+		}
+		return nil
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("bug id is required")
+	}
+	if len(args) == 1 {
+		return fmt.Errorf("bug note text is required: pass text after the bug id, or pipe text with --stdin")
+	}
+	return nil
 }
 
 func runBugList(_ *cobra.Command, _ []string) error {
