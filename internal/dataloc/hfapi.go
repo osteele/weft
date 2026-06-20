@@ -23,6 +23,12 @@ var ErrHFModelNotFound = errors.New("HF model not found")
 
 var ErrHFRefIsDataset = errors.New("HF ref resolves to a dataset, not a model; use hf-dataset: prefix")
 
+// ErrHFInvalidModelID is returned when a hf: ref's id is not a structurally
+// valid HuggingFace model id (e.g. "hf:gpt2 9", with embedded whitespace).
+// Such refs never correspond to a real download, so the estimator must not
+// apply the unknown-model disk fallback to them.
+var ErrHFInvalidModelID = errors.New("HF ref is not a valid model id")
+
 var fetchHFDatasetURL = "https://huggingface.co/api/datasets/%s"
 
 // hfModelSizeCache caches model sizes in-process to avoid redundant API calls
@@ -251,12 +257,23 @@ func ResolveInputSizes(inputs []string, localDB *sql.DB) (totalBytes int64, unre
 		switch asset.Kind {
 		case AssetHFModel:
 			size, resolveErr := resolveModelSize(asset, localDB)
-			if resolveErr != nil {
-				unresolved = append(unresolved, input)
-				errs = append(errs, fmt.Errorf("%s: %w", input, resolveErr))
+			if resolveErr == nil {
+				totalBytes += size
 				continue
 			}
-			totalBytes += size
+			// The ref did not resolve. A structurally invalid ref (e.g.
+			// "hf:gpt2 9") is a phantom that never downloads, so it must not
+			// receive the unknown-model disk fallback that EstimateGroupDisk
+			// applies per unresolved ref. A plausible model that is merely
+			// unreachable (gated/private), or a dataset mis-prefixed as a model,
+			// keeps the fallback — both may correspond to a real download, so
+			// over-provisioning is the safe choice.
+			if !IsHFModelID(asset.ID) {
+				errs = append(errs, fmt.Errorf("%s: %w", input, ErrHFInvalidModelID))
+				continue
+			}
+			unresolved = append(unresolved, input)
+			errs = append(errs, fmt.Errorf("%s: %w", input, resolveErr))
 		case AssetCorpus:
 			totalBytes += resolveAssetSizeFromDB(asset, localDB)
 		}

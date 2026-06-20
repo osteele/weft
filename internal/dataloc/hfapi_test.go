@@ -300,3 +300,55 @@ func TestResolveModelSize_DatasetRefSurfacesClearError(t *testing.T) {
 		t.Fatalf("err = %v, want ErrHFRefIsDataset", err)
 	}
 }
+
+// TestResolveInputSizes_FallbackClassification verifies that the unknown-model
+// disk fallback (driven by the returned `unresolved` list) is NOT applied to
+// structurally invalid refs (e.g. "hf:gpt2 9"), which are phantoms that never
+// download — but IS still applied to plausible unreachable models and to
+// datasets mis-prefixed as models, since both may correspond to a real download
+// and over-provisioning is the safe choice.
+func TestResolveInputSizes_FallbackClassification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/gpt2/tree/main":
+			w.Write([]byte(`[{"path":"model.safetensors","size":111,"lfs":{"size":500000000}}]`))
+		case "/api/datasets/allenai/c4":
+			w.Write([]byte(`{"id":"allenai/c4"}`)) // exists as a dataset
+		default:
+			http.NotFound(w, r) // models 404; non-c4 datasets 404
+		}
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+
+	inputs := []string{
+		"hf:gpt2",             // valid + resolvable -> counted
+		"hf:gpt2 9",           // structurally invalid phantom -> excluded, no fallback
+		"hf:allenai/c4",       // dataset mis-prefixed as model -> keeps fallback
+		"hf:acme/Gated-Model", // plausible but unreachable -> keeps fallback
+	}
+	total, unresolved, err := ResolveInputSizes(inputs, nil)
+	if err == nil {
+		t.Fatal("expected aggregated errors for the problem refs")
+	}
+	if total != 500000000 {
+		t.Errorf("total = %d, want 500000000 (only the valid model counts)", total)
+	}
+	// Both the mis-prefixed dataset and the gated model keep the safe fallback;
+	// only the structurally invalid "hf:gpt2 9" is dropped.
+	wantUnresolved := map[string]bool{"hf:allenai/c4": true, "hf:acme/Gated-Model": true}
+	if len(unresolved) != len(wantUnresolved) {
+		t.Errorf("unresolved = %v, want %v", unresolved, wantUnresolved)
+	}
+	for _, u := range unresolved {
+		if !wantUnresolved[u] {
+			t.Errorf("unexpected unresolved ref %q (malformed phantom must not drive the fallback)", u)
+		}
+	}
+	if !errors.Is(err, ErrHFInvalidModelID) {
+		t.Errorf("expected ErrHFInvalidModelID in error chain, got %v", err)
+	}
+	if !errors.Is(err, ErrHFRefIsDataset) {
+		t.Errorf("expected ErrHFRefIsDataset in error chain, got %v", err)
+	}
+}
