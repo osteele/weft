@@ -838,6 +838,36 @@ func TestGroupedJobsWithAutoReasons_UnprocessedGroupedViewExcludesCanceledKeepsK
 	}
 }
 
+func TestCollectLaunchIDsForListIncludesOpenMoveAttempts(t *testing.T) {
+	sourceLaunchID := int64(3946)
+	targetLaunchID := int64(3978)
+	sourceAttemptID := int64(91)
+	targetAttemptID := int64(92)
+	job := &db.Job{ID: 3190, Status: db.StatusRunning, LaunchID: &sourceLaunchID}
+
+	got := collectLaunchIDsForList([]*db.Job{job}, map[int64]jobview.PlacementStatus{
+		3190: {
+			JobID: 3190,
+			Move: &jobview.MoveDisplay{
+				State:           db.MoveIntentStateOpen,
+				SourceAttemptID: &sourceAttemptID,
+				TargetAttemptID: &targetAttemptID,
+				AttemptsByID: map[int64]db.JobAttempt{
+					sourceAttemptID: {ID: sourceAttemptID, JobID: 3190, LaunchID: &sourceLaunchID},
+					targetAttemptID: {ID: targetAttemptID, JobID: 3190, LaunchID: &targetLaunchID},
+				},
+			},
+		},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("launch IDs = %v, want source and target", got)
+	}
+	if got[0] != sourceLaunchID || got[1] != targetLaunchID {
+		t.Fatalf("launch IDs = %v, want [%d %d]", got, sourceLaunchID, targetLaunchID)
+	}
+}
+
 func TestListTUIJobsLoadedClearsStalePersistentBlockedSummaryWhenNoUnplacedJobs(t *testing.T) {
 	m := listTUIModel{
 		autoPersistentBlocked:  "no offers available",

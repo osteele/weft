@@ -2964,18 +2964,12 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			return listJobsLoadedMsg{jobs: jobs, err: err}
 		}
 		orchestration.HydrateUnplacedBlockedReasons(database, jobs)
-		launchIDs := make([]int64, 0, len(jobs))
-		seen := make(map[int64]bool, len(jobs))
-		for _, job := range jobs {
-			if job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-				continue
-			}
-			if seen[*job.LaunchID] {
-				continue
-			}
-			seen[*job.LaunchID] = true
-			launchIDs = append(launchIDs, *job.LaunchID)
+		placementStatusByJob, placementErr := jobview.PlacementStatusForJobs(database, jobs, time.Now())
+		if placementErr != nil {
+			placementStatusByJob = map[int64]jobview.PlacementStatus{}
 		}
+		displayJobs := jobview.ExpandJobsForOpenMoves(jobs, placementStatusByJob)
+		launchIDs := collectLaunchIDsForList(displayJobs, placementStatusByJob)
 		launchLiveByID, liveErr := db.GetLaunchLiveStates(database, launchIDs)
 		if liveErr != nil {
 			launchLiveByID = map[int64]*db.LaunchLiveState{}
@@ -2993,11 +2987,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			bootstrapP50 = 0
 			bootstrapSamples = 0
 		}
-		stageETAByName, stageEnteredAtByID := loadLaunchingStageETA(database, jobs, launchLiveByID)
-		placementStatusByJob, placementErr := jobview.PlacementStatusForJobs(database, jobs, time.Now())
-		if placementErr != nil {
-			placementStatusByJob = map[int64]jobview.PlacementStatus{}
-		}
+		stageETAByName, stageEnteredAtByID := loadLaunchingStageETA(database, displayJobs, launchLiveByID)
 		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
@@ -3028,6 +3018,37 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 }
 
 const recentFailedInstanceWindow = 24 * time.Hour
+
+func collectLaunchIDsForList(jobs []*db.Job, placementStatusByJob map[int64]jobview.PlacementStatus) []int64 {
+	seen := make(map[int64]struct{}, len(jobs))
+	launchIDs := make([]int64, 0, len(jobs))
+	add := func(id *int64) {
+		if id == nil || *id <= 0 {
+			return
+		}
+		if _, ok := seen[*id]; ok {
+			return
+		}
+		seen[*id] = struct{}{}
+		launchIDs = append(launchIDs, *id)
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		add(job.LaunchID)
+	}
+	for _, status := range placementStatusByJob {
+		move := status.Move
+		if move == nil {
+			continue
+		}
+		for _, attempt := range move.AttemptsByID {
+			add(attempt.LaunchID)
+		}
+	}
+	return launchIDs
+}
 
 func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[int64]*db.LaunchLiveState) (map[string]groupedStatusLaunchingStageETA, map[int64]int64) {
 	stageByName := make(map[string]groupedStatusLaunchingStageETA)
