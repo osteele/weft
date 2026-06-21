@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,6 +308,57 @@ func TestCreditManifestCompletions_SkipsFailedAndUnlistedJobs(t *testing.T) {
 	}
 }
 
+func TestReconcileLaunches_CancelledContextSkipsProviderCalls(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var calls int32
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			atomic.AddInt32(&calls, 1)
+			return nil, nil
+		},
+		ShowInstanceFunc: func(string) (*cloud.Instance, error) {
+			atomic.AddInt32(&calls, 1)
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
+		},
+	}
+
+	// A cancelled context (as on quit) must stop the reconcile before it issues
+	// any provider calls or DB writes, so a quitting TUI's lease release isn't
+	// starved by an in-flight reconcile pass.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	r := NewReconciler()
+	done := make(chan struct{})
+	go func() {
+		_, _ = r.ReconcileLaunches(ctx, database, []cloud.Client{mockClient}, nil)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReconcileLaunches did not return promptly under a cancelled context")
+	}
+	if n := atomic.LoadInt32(&calls); n != 0 {
+		t.Fatalf("provider called %d times under a cancelled context; want 0", n)
+	}
+}
+
 func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
@@ -342,7 +394,7 @@ func TestReconcileLaunches_DeadInstance(t *testing.T) {
 
 	// Use zero deadConfirmTime so the instance is terminated immediately (no hysteresis wait).
 	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: -1}
-	result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -404,7 +456,7 @@ func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	}
 
 	// With nil r2Client, grace detection is skipped — no reconciliation
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -480,7 +532,7 @@ func TestReconcileLaunches_GraceIgnoredWithActiveJobs(t *testing.T) {
 		return true
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -544,7 +596,7 @@ func TestReconcileLaunches_GraceWhenNoActiveJobs(t *testing.T) {
 		return true
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -689,7 +741,7 @@ func TestReconcileLaunches_TerminalTransitionSyncsJobCompletions(t *testing.T) {
 
 	rec := NewReconciler()
 	rec.deadConfirmTime = -1 // skip hysteresis
-	result, err := rec.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := rec.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -760,7 +812,7 @@ func TestReconcileLaunches_SyncFailureOrphansJob(t *testing.T) {
 
 	rec := NewReconciler()
 	rec.deadConfirmTime = -1 // skip hysteresis
-	_, err = rec.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	_, err = rec.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -813,7 +865,7 @@ func TestReconcileLaunches_RunningInstance(t *testing.T) {
 	}
 
 	// Reconcile — nothing should change
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -884,7 +936,7 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -972,7 +1024,7 @@ func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1043,7 +1095,7 @@ func TestReconcileLaunches_SafetyNetMarksDestroyConfirmedWhenProviderGone(t *tes
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1118,7 +1170,7 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 
 	reconciler := NewReconciler()
 	for i := 0; i < minProbeFailureAttempts-1; i++ {
-		result, err := reconciler.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+		result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 		if err != nil {
 			t.Fatalf("reconcile attempt %d: %v", i+1, err)
 		}
@@ -1127,7 +1179,7 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 		}
 	}
 
-	result, err := reconciler.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile final attempt: %v", err)
 	}
@@ -1174,7 +1226,7 @@ func TestReconcileLaunches_GraceExpiry_DestroysProvider(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1233,7 +1285,7 @@ func TestReconcileLaunches_SafetyNet_DestroysLeakedInstance(t *testing.T) {
 
 	// Reconcile — the main loop won't see this instance (it's already failed),
 	// but the safety-net pass should catch and destroy it.
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1278,7 +1330,7 @@ func TestReconcileLaunches_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1317,7 +1369,7 @@ func TestReconcileLaunches_DeadInstanceHysteresis(t *testing.T) {
 	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: 10 * time.Millisecond}
 
 	// First call: instance appears dead but hasn't been confirmed yet.
-	result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile (first): %v", err)
 	}
@@ -1333,7 +1385,7 @@ func TestReconcileLaunches_DeadInstanceHysteresis(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Second call: now confirmed dead, should terminate.
-	result, err = r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err = r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile (second): %v", err)
 	}
@@ -1413,7 +1465,7 @@ func TestReconcileLaunches_TransientAPIError_SkipsInstance(t *testing.T) {
 
 	// Run multiple reconciliation passes — instance must remain running
 	for i := 0; i < 5; i++ {
-		result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+		result, err := r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 		if err != nil {
 			t.Fatalf("reconcile pass %d: %v", i+1, err)
 		}
@@ -1462,7 +1514,7 @@ func TestReconcileLaunches_BatchFetch_UsesListAllInstances(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1515,7 +1567,7 @@ func TestReconcileLaunches_BatchFetchMissCallsShowInstance(t *testing.T) {
 		},
 	}
 
-	if _, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil); err != nil {
+	if _, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if showCalls == 0 {
@@ -1567,7 +1619,7 @@ func TestReconcileLaunches_BatchFetchMissShowAlive(t *testing.T) {
 		},
 	}
 
-	if _, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil); err != nil {
+	if _, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if showCalls == 0 {

@@ -29,11 +29,13 @@ func TestListTUIQuitSchedulesSyncWorkerCleanup(t *testing.T) {
 		syncWorker: worker,
 	}
 
-	_, cmd, handled := handleListKeyBinding(model, "q", listCommonKeyBindings(false))
+	next, cmd, handled := handleListKeyBinding(model, "q", listCommonKeyBindings(false))
 	if !handled {
 		t.Fatal("expected q to be handled")
 	}
-	assertQuitCmd(t, cmd)
+	// Quit cancels background work and schedules the sync-worker cleanup right
+	// away, but defers the (potentially slow) auto-lease release to a command so
+	// it never blocks the update goroutine.
 	if cleanupCalls != 1 {
 		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls)
 	}
@@ -42,6 +44,19 @@ func TestListTUIQuitSchedulesSyncWorkerCleanup(t *testing.T) {
 	default:
 		t.Fatal("expected quit to cancel context immediately")
 	}
+	lm, ok := next.(listTUIModel)
+	if !ok {
+		t.Fatalf("expected listTUIModel, got %T", next)
+	}
+	if !lm.quitting {
+		t.Fatal("expected quit to enter the quitting state")
+	}
+	if cmd == nil {
+		t.Fatal("expected a teardown command")
+	}
+	// The teardown resolves to listQuitNowMsg, which the model turns into quit.
+	_, quitCmd := lm.Update(listQuitNowMsg{})
+	assertQuitCmd(t, quitCmd)
 }
 
 func TestHostsTUIQuitSchedulesSyncWorkerCleanup(t *testing.T) {

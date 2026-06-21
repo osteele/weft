@@ -38,7 +38,7 @@ func SyncState(ctx context.Context, database *sql.DB, reconciler *campaign.Recon
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, err := reconciler.ReconcileLaunches(database, clients, r2Client)
+			r, err := reconciler.ReconcileLaunches(ctx, database, clients, r2Client)
 			if err != nil {
 				slog.Warn("reconcile failed", "component", "cloudsync", "error", err)
 				return

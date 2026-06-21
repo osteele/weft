@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 	"testing"
@@ -30,7 +31,7 @@ func TestSyncCloudStateForTUI_ReusesReconciler(t *testing.T) {
 
 	var seen []*campaign.Reconciler
 	var syncResults []bool
-	deps.SyncCloudStateWithTimeoutAndResults = func(_ *config.Config, _ *sql.DB, r *campaign.Reconciler, _ time.Duration, _ bool, sr bool) (CloudSyncResult, bool) {
+	deps.SyncCloudStateWithTimeoutAndResults = func(_ context.Context, _ *config.Config, _ *sql.DB, r *campaign.Reconciler, _ time.Duration, _ bool, sr bool) (CloudSyncResult, bool) {
 		seen = append(seen, r)
 		syncResults = append(syncResults, sr)
 		return CloudSyncResult{}, true

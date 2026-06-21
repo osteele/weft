@@ -38,6 +38,12 @@ const listDBChangeDebounce = 200 * time.Millisecond
 const listTUISyncInterval = TerminalSyncInterval
 const listAutoLeaseTTL = 30 * time.Second
 
+// listQuitTeardownCap bounds how long the TUI shows "Quitting…" while releasing
+// auto-leases before exiting anyway. The release contends with the background
+// cloud-sync write lock (SQLite busy_timeout), so cap it to keep quit fast; an
+// abandoned lease self-expires via listAutoLeaseTTL.
+const listQuitTeardownCap = 1 * time.Second
+
 // backgroundSyncKey is the pendingSyncHosts sentinel for the non-worker
 // startup / tick cloud sync, which is not tied to a specific host.
 const backgroundSyncKey = ""
@@ -132,6 +138,7 @@ type listTUIModel struct {
 	moveLookupJobID            int64
 	moveLookupSeq              int64
 	focused                    bool
+	quitting                   bool
 	appConfig                  *config.Config
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
@@ -281,6 +288,9 @@ type listDBWatchEventMsg struct {
 
 type listDBRefreshTriggeredMsg struct{}
 type listSyncTickMsg struct{}
+
+// listQuitNowMsg ends the program once quit teardown finishes or its cap fires.
+type listQuitNowMsg struct{}
 type listSyncWorkerResultMsg struct {
 	result hostsync.Result
 }
@@ -453,21 +463,79 @@ func (m *listTUIModel) shutdown() {
 }
 
 func (m *listTUIModel) shutdownImmediate() {
-	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
-	_ = db.ReleaseAutoLease(m.database, m.quickLaunchScope, m.autoLeaseOwner)
-	if m.dbWatcher != nil {
-		_ = m.dbWatcher.Close()
-	}
+	// Cancel background work first so it stops contending for the DB write
+	// lock, then release the auto-leases off the calling goroutine (this path
+	// runs on a view switch) so a contended release can't freeze the UI. An
+	// abandoned release self-expires via listAutoLeaseTTL.
 	if m.cancel != nil {
 		m.cancel()
 	}
+	if m.dbWatcher != nil {
+		_ = m.dbWatcher.Close()
+	}
+	database, owner := m.database, m.autoLeaseOwner
+	scope, quickScope := m.autoLeaseScope, m.quickLaunchScope
+	go func() {
+		if database == nil || owner == "" {
+			return
+		}
+		if scope != "" {
+			_ = db.ReleaseAutoLease(database, scope, owner)
+		}
+		if quickScope != "" {
+			_ = db.ReleaseAutoLease(database, quickScope, owner)
+		}
+	}()
 }
 
-func (m *listTUIModel) shutdownForQuit() {
-	m.shutdownImmediate()
+// beginQuit runs the non-blocking part of teardown on the update goroutine:
+// cancel background work (so it stops contending for the DB write lock) and
+// close the file watcher. The auto-lease release — which can block on the
+// cloud-sync write lock for up to busy_timeout — is deferred to quitTeardownCmd
+// so it never freezes rendering. See list_tui_keybindings.go's quit handler.
+func (m listTUIModel) beginQuit() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.dbWatcher != nil {
+		_ = m.dbWatcher.Close()
+	}
 	if m.syncWorker != nil {
 		stopSyncWorkerAfterQuit(m.syncWorker)
 	}
+}
+
+// quitTeardownCmd releases the auto-leases off the update goroutine, then
+// signals quit. A competing cap timer guarantees quit happens within
+// listQuitTeardownCap even if the release is stuck behind the cloud-sync write
+// lock; an abandoned lease self-expires via its TTL.
+func (m listTUIModel) quitTeardownCmd() tea.Cmd {
+	database := m.database
+	scope := m.autoLeaseScope
+	quickScope := m.quickLaunchScope
+	owner := m.autoLeaseOwner
+	release := func() tea.Msg {
+		if database != nil && owner != "" {
+			if scope != "" {
+				_ = db.ReleaseAutoLease(database, scope, owner)
+			}
+			if quickScope != "" {
+				_ = db.ReleaseAutoLease(database, quickScope, owner)
+			}
+		}
+		return listQuitNowMsg{}
+	}
+	capCmd := tea.Tick(listQuitTeardownCap, func(time.Time) tea.Msg { return listQuitNowMsg{} })
+	return tea.Batch(release, capCmd)
+}
+
+// renderQuittingView is shown while quit teardown runs.
+func (m listTUIModel) renderQuittingView() string {
+	const msg = "Quitting…"
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, msg)
+	}
+	return msg
 }
 
 func (m listTUIModel) Init() tea.Cmd {
@@ -494,6 +562,14 @@ func (m listTUIModel) Init() tea.Cmd {
 }
 
 func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.quitting {
+		// Teardown in progress: ignore input and other messages; only the quit
+		// signal (release done, or cap elapsed) ends the program.
+		if _, ok := msg.(listQuitNowMsg); ok {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -1206,6 +1282,9 @@ func (m listTUIModel) waitForQuickLaunchDone() tea.Cmd {
 }
 
 func (m listTUIModel) View() string {
+	if m.quitting {
+		return m.renderQuittingView()
+	}
 	if m.rebalancePreview.active {
 		return m.rebalancePreview.View(m.width, m.height)
 	}
@@ -3249,7 +3328,7 @@ func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {
 // reconciler (which performs orphan sweep + termination reconcile) still runs
 // every list-TUI tick.
 func (m listTUIModel) runBackgroundCloudSync(full bool) tea.Cmd {
-	return m.runBackgroundSyncFn(full, syncCloudStateForTUI)
+	return m.runBackgroundSyncFn(full, syncCloudStateForTUICtx)
 }
 
 func (m *listTUIModel) enqueueBackgroundCloudSync(cmds []tea.Cmd, full bool) []tea.Cmd {
@@ -3263,13 +3342,13 @@ func (m *listTUIModel) enqueueBackgroundCloudSync(cmds []tea.Cmd, full bool) []t
 	return append(cmds, m.runBackgroundCloudSync(full))
 }
 
-func (m listTUIModel) runBackgroundSyncFn(full bool, fn func(*sql.DB, bool) []string) tea.Cmd {
+func (m listTUIModel) runBackgroundSyncFn(full bool, fn func(context.Context, *sql.DB, bool) []string) tea.Cmd {
 	database := m.database
 	ctx := m.ctx
 	return func() tea.Msg {
 		done := make(chan listSyncFinishedMsg, 1)
 		go func() {
-			done <- listSyncFinishedMsg{warnings: fn(database, full), full: full}
+			done <- listSyncFinishedMsg{warnings: fn(ctx, database, full), full: full}
 		}()
 		select {
 		case msg := <-done:
@@ -3280,7 +3359,7 @@ func (m listTUIModel) runBackgroundSyncFn(full bool, fn func(*sql.DB, bool) []st
 	}
 }
 
-func syncListTUIData(database *sql.DB, full bool) []string {
+func syncListTUIData(ctx context.Context, database *sql.DB, full bool) []string {
 	timeout := FastSyncTimeout
 	if full {
 		timeout = NormalSyncTimeout
@@ -3291,7 +3370,7 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 			warnings = append(warnings, note)
 		}
 	}
-	warnings = append(warnings, syncCloudStateForTUI(database, full)...)
+	warnings = append(warnings, syncCloudStateForTUICtx(ctx, database, full)...)
 	return compactWarnings(warnings)
 }
 

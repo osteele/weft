@@ -116,7 +116,13 @@ func (r *Reconciler) confirmTime() time.Duration {
 // ReconcileLaunches checks all running/launching instances against the
 // cloud provider and marks dead ones as failed (or completed if R2 has
 // a completion marker). r2Client may be nil, in which case completion detection is skipped.
-func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
+func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return &ReconcileResult{}, nil
+	}
 	instances, err := db.ListRunningLaunches(database)
 	if err != nil {
 		return nil, err
@@ -176,10 +182,16 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	if ctx.Err() != nil {
+		return result, nil
+	}
 	for _, ci := range instances {
 		wg.Add(1)
 		go func(ci *db.Launch) {
 			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
 			reconciled, terminated, jobsUpdated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
 			mu.Lock()
 			if reconciled {
@@ -215,6 +227,9 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	if err != nil {
 		slog.Warn("failed to list recently terminal instances", "component", "reconcile", "error", err)
 	}
+	if ctx.Err() != nil {
+		return result, nil
+	}
 	var wg2 sync.WaitGroup
 	for _, ci := range recentlyTerminal {
 		providerID := ci.EffectiveProviderID()
@@ -226,6 +241,9 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		wg2.Add(1)
 		go func(ci *db.Launch, providerID string, client cloud.Client) {
 			defer wg2.Done()
+			if ctx.Err() != nil {
+				return
+			}
 			inst, err := client.ShowInstance(providerID)
 			if errors.Is(err, cloud.ErrInstanceNotFound) {
 				if markTerminationIntentDestroyed(database, ci, time.Now()) {

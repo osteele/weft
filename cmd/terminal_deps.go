@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -56,8 +57,8 @@ func terminalSyncCloudStateWithTimeout(cfg *config.Config, database *sql.DB, rec
 	return terminal.CloudSyncResult(result), completed
 }
 
-func terminalSyncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (terminal.CloudSyncResult, bool) {
-	result, completed := syncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, syncResults)
+func terminalSyncCloudStateWithTimeoutAndResults(ctx context.Context, cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (terminal.CloudSyncResult, bool) {
+	result, completed := syncCloudStateWithTimeoutAndResults(ctx, cfg, database, reconciler, timeout, verbose, syncResults)
 	return terminal.CloudSyncResult(result), completed
 }
 

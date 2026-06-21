@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"time"
 
@@ -38,11 +39,12 @@ func syncCloudState(cfg *config.Config, database *sql.DB, reconciler *campaign.R
 // if it does not complete within timeout. The sync may continue in the
 // background and still update the database later.
 func syncCloudStateWithTimeout(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool) (cloudSyncResult, bool) {
-	return syncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, true)
+	return syncCloudStateWithTimeoutAndResults(context.Background(), cfg, database, reconciler, timeout, verbose, true)
 }
 
-func syncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (cloudSyncResult, bool) {
+func syncCloudStateWithTimeoutAndResults(ctx context.Context, cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (cloudSyncResult, bool) {
 	res := syncorch.SyncCloud(cfg, database, syncorch.CloudSyncOptions{
+		Context:     ctx,
 		Verbose:     verbose,
 		Reconciler:  reconciler,
 		SyncResults: syncResults,

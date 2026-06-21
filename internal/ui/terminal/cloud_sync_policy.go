@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"sync"
@@ -20,6 +21,13 @@ var (
 // syncCloudStateForTUI runs one cloud sync phase using the shared TUI timeout
 // policy and returns user-facing warnings when the sync times out.
 func syncCloudStateForTUI(database *sql.DB, full bool) []string {
+	return syncCloudStateForTUICtx(context.Background(), database, full)
+}
+
+// syncCloudStateForTUICtx is syncCloudStateForTUI bound to a context, so a
+// quitting or cancelled TUI can stop an in-flight background cloud sync instead
+// of letting it hold the DB write lock.
+func syncCloudStateForTUICtx(ctx context.Context, database *sql.DB, full bool) []string {
 	timeout := FastCloudSyncTimeout
 	if full {
 		timeout = NormalCloudSyncTimeout
@@ -27,7 +35,7 @@ func syncCloudStateForTUI(database *sql.DB, full bool) []string {
 
 	cfg, _ := config.Load()
 	syncResults := full
-	result, completed := syncCloudStateWithTimeoutAndResults(cfg, database, tuiCloudReconciler(), timeout, false, syncResults)
+	result, completed := syncCloudStateWithTimeoutAndResults(ctx, cfg, database, tuiCloudReconciler(), timeout, false, syncResults)
 	warnings := append([]string(nil), result.Warnings...)
 	if !completed {
 		warnings = append(warnings, degraded.CloudSyncTimedOutWaitingForDB(timeout.String()))
@@ -96,9 +104,9 @@ func syncCloudDatabaseOnlyForTUI(database *sql.DB, timeout time.Duration) []stri
 	}
 }
 
-func syncCloudStateWithTimeoutAndResults(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (CloudSyncResult, bool) {
+func syncCloudStateWithTimeoutAndResults(ctx context.Context, cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, timeout time.Duration, verbose bool, syncResults bool) (CloudSyncResult, bool) {
 	if deps.SyncCloudStateWithTimeoutAndResults != nil {
-		return deps.SyncCloudStateWithTimeoutAndResults(cfg, database, reconciler, timeout, verbose, syncResults)
+		return deps.SyncCloudStateWithTimeoutAndResults(ctx, cfg, database, reconciler, timeout, verbose, syncResults)
 	}
 	return syncCloudStateWithTimeout(cfg, database, reconciler, timeout, verbose)
 }

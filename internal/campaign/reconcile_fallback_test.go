@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestReconcileLaunches_FallbackInstanceNotFound_DoesNotMarkDead(t *testing.T
 		lastProviderStatus: make(map[int64]string),
 		deadConfirmTime:    -1,
 	}
-	if _, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil); err != nil {
+	if _, err := r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 

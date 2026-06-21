@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -57,7 +58,7 @@ type Dependencies struct {
 	SyncRentalJobsStatus                              func(*sql.DB) bool
 	SyncCloudState                                    func(*config.Config, *sql.DB, *campaign.Reconciler, bool) CloudSyncResult
 	SyncCloudStateWithTimeout                         func(*config.Config, *sql.DB, *campaign.Reconciler, time.Duration, bool) (CloudSyncResult, bool)
-	SyncCloudStateWithTimeoutAndResults               func(*config.Config, *sql.DB, *campaign.Reconciler, time.Duration, bool, bool) (CloudSyncResult, bool)
+	SyncCloudStateWithTimeoutAndResults               func(context.Context, *config.Config, *sql.DB, *campaign.Reconciler, time.Duration, bool, bool) (CloudSyncResult, bool)
 	SyncCloudStateWithClients                         func(*config.Config, *sql.DB, *campaign.Reconciler, []cloud.Client, *r2.Client, bool) CloudSyncResult
 	TerminateInstancesParallel                        func(*sql.DB, []int64) (int, []error)
 	PrintWatchExitReport                              func(*sql.DB, []int64)
