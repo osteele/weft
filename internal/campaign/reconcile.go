@@ -546,6 +546,21 @@ func (r *Reconciler) getSetupSurvival(database *sql.DB, command, workingDir stri
 	return s
 }
 
+// resultsVerifyVerdict combines the manifest's two verification signals into a
+// verified flag and, when not verified, a reason code for display. An
+// incomplete upload is the more actionable signal, so it takes precedence over
+// a coverage gap when both are present.
+func resultsVerifyVerdict(uploadsOK, covers bool) (verified bool, detail string) {
+	switch {
+	case uploadsOK && covers:
+		return true, ""
+	case !uploadsOK:
+		return false, db.ResultsVerifyDetailUploadsIncomplete
+	default:
+		return false, db.ResultsVerifyDetailManifestMissingJobs
+	}
+}
+
 // verifyInstanceResults reads the R2 completion manifest for a completed instance
 // and sets the results_verified flag based on upload statuses.
 func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int64) {
@@ -554,13 +569,15 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 		// Legacy marker or missing — leave results_verified as NULL
 		return
 	}
-	verified := manifest.AllUploadsOK() && completionManifestCoversLaunchJobs(database, instanceID, manifest)
-	if err := db.UpdateLaunchResultsVerified(database, instanceID, verified); err != nil {
+	uploadsOK := manifest.AllUploadsOK()
+	covers := completionManifestCoversLaunchJobs(database, instanceID, manifest)
+	verified, detail := resultsVerifyVerdict(uploadsOK, covers)
+	if err := db.UpdateLaunchResultsVerified(database, instanceID, verified, detail); err != nil {
 		slog.Warn("failed to update results_verified", "component", "reconcile", "instance", instanceID, "error", err)
 		return
 	}
 	if !verified {
-		slog.Warn("instance completed but uploads were partial/failed", "component", "reconcile", "instance", instanceID)
+		slog.Warn("instance completed but results unverified", "component", "reconcile", "instance", instanceID, "detail", detail)
 	}
 }
 
@@ -573,16 +590,18 @@ func completionManifestCoversLaunchJobs(database *sql.DB, instanceID int64, mani
 		seen[job.JobID] = struct{}{}
 	}
 
+	// Expected jobs are those dispatched to this launch — keyed on launch_id,
+	// which is written when the job is routed to the instance. Do not filter on
+	// cloud_outcome: at instance-termination time the per-job completion may not
+	// yet be credited from R2 (the attempt can still read "queued"), which would
+	// make this query return zero rows and spuriously fail verification even
+	// though the manifest reports every upload OK.
 	rows, err := database.Query(
 		`SELECT DISTINCT job_id
 		   FROM job_attempts
 		  WHERE launch_id = ?
-		    AND cloud_outcome IN (?, ?, ?, ?)`,
+		    AND job_id IS NOT NULL`,
 		instanceID,
-		db.AttemptOutcomeCompleted,
-		db.AttemptOutcomeFailed,
-		db.AttemptOutcomeOrphaned,
-		db.AttemptOutcomePreempted,
 	)
 	if err != nil {
 		slog.Warn("failed to verify completion manifest coverage", "component", "reconcile", "instance", instanceID, "error", err)

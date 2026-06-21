@@ -711,7 +711,14 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if ci.Status == db.LaunchStatusCompleted {
 			switch {
 			case ci.ResultsVerified != nil && !*ci.ResultsVerified:
-				fmt.Printf("  Results: UNVERIFIED (upload was partial/failed)\n")
+				switch ci.ResultsVerifyDetail {
+				case db.ResultsVerifyDetailUploadsIncomplete:
+					fmt.Printf("  Results: UNVERIFIED (one or more job uploads were partial/failed)\n")
+				case db.ResultsVerifyDetailManifestMissingJobs:
+					fmt.Printf("  Results: UNVERIFIED (completion manifest is missing results for some jobs)\n")
+				default:
+					fmt.Printf("  Results: UNVERIFIED (results upload could not be confirmed)\n")
+				}
 			case ci.ResultsVerified != nil && *ci.ResultsVerified:
 				fmt.Printf("  Results: verified\n")
 			}

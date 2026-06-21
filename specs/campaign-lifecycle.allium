@@ -214,8 +214,15 @@ entity Instance {
     cordon_reason: String?
     cordoned_at: Timestamp?
 
-    -- Result verification
-    results_verified: Boolean?          -- nil=legacy, true=ok, false=partial
+    -- Result verification (set by the reconciler from the R2 completion
+    -- manifest when an instance terminates completed). A false verdict has
+    -- two causes, distinguished by results_verify_detail: a job's upload_status
+    -- was not "ok" (uploads_incomplete), or the manifest omits a job the launch
+    -- ran (manifest_missing_jobs). Coverage is keyed on launch membership
+    -- (written at dispatch), not on credited cloud_outcome, so verification
+    -- does not race per-job completion crediting from R2.
+    results_verified: Boolean?          -- nil=legacy, true=ok, false=unverified
+    results_verify_detail: String?      -- reason code when results_verified=false
 
     -- Relationships
     jobs: jobs/Job with cloud_instance = this

@@ -81,11 +81,19 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyRepairMoveIntentLaunchConfirmTrigger},
 		&goose.GoFunc{RunDB: dropRepairMoveIntentLaunchConfirmTrigger},
 	)
+	// Go-only: a column add must guard with columnExists so re-applying the
+	// latest migration (e.g. the pre-migration-backup upgrade path) does not
+	// fail on a duplicate column.
+	addResultsVerifyDetail := goose.NewGoMigration(
+		23,
+		&goose.GoFunc{RunDB: applyAddResultsVerifyDetailColumn},
+		&goose.GoFunc{RunDB: dropAddResultsVerifyDetailColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -171,6 +179,30 @@ func dropAddAbandonedAttemptFields(ctx context.Context, db *sql.DB) error {
 	} {
 		_, _ = db.ExecContext(ctx, stmt)
 	}
+	return nil
+}
+
+// applyAddResultsVerifyDetailColumn adds launches.results_verify_detail, a
+// reason code recorded when results_verified is set false so the display can
+// distinguish an upload failure from a completion manifest that omits a job.
+func applyAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launches", "results_verify_detail")
+	if err != nil {
+		return fmt.Errorf("inspect launches.results_verify_detail: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE launches ADD COLUMN results_verify_detail TEXT`,
+	); err != nil {
+		return fmt.Errorf("add launches.results_verify_detail: %w", err)
+	}
+	return nil
+}
+
+func dropAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN results_verify_detail`)
 	return nil
 }
 
@@ -607,7 +639,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

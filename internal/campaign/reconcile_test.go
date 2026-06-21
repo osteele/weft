@@ -94,6 +94,94 @@ func TestCompletionManifestCoversLaunchJobs_MissingJob(t *testing.T) {
 	}
 }
 
+// TestCompletionManifestCoversLaunchJobs_UncreditedAttempt reproduces the
+// false-negative behind the "completed but results upload was partial/failed"
+// label: an instance terminates "completed" before the per-job completion is
+// credited from R2, so the attempt still reads "queued" (no cloud_outcome, no
+// end_time) even though the manifest reports the upload OK. Coverage must key
+// on launch_id (written at dispatch), not on a credited cloud_outcome, or the
+// job's results are spuriously marked unverified.
+func TestCompletionManifestCoversLaunchJobs_UncreditedAttempt(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'echo ok', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	// Attempt dispatched to the launch but left uncredited: status queued,
+	// cloud_outcome NULL, end_time NULL — the stuck-on-completed-launch state.
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	manifest := &runner.InstanceCompletionManifest{
+		Jobs: []runner.JobCompletionSummary{{JobID: 1, ExitCode: 0, UploadStatus: "ok"}},
+	}
+	if !completionManifestCoversLaunchJobs(database, instanceID, manifest) {
+		t.Fatal("uncredited attempt dispatched to the launch must still be covered by the manifest")
+	}
+}
+
+func TestResultsVerifyVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		uploadsOK    bool
+		covers       bool
+		wantVerified bool
+		wantDetail   string
+	}{
+		{"verified", true, true, true, ""},
+		{"upload failure", false, true, false, db.ResultsVerifyDetailUploadsIncomplete},
+		{"coverage miss", true, false, false, db.ResultsVerifyDetailManifestMissingJobs},
+		{"upload failure takes precedence", false, false, false, db.ResultsVerifyDetailUploadsIncomplete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verified, detail := resultsVerifyVerdict(tc.uploadsOK, tc.covers)
+			if verified != tc.wantVerified || detail != tc.wantDetail {
+				t.Fatalf("resultsVerifyVerdict(%v, %v) = (%v, %q); want (%v, %q)",
+					tc.uploadsOK, tc.covers, verified, detail, tc.wantVerified, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestUpdateLaunchResultsVerifiedPersistsDetail round-trips the verdict through
+// the DB to verify the results_verify_detail column and its scan are wired up.
+func TestUpdateLaunchResultsVerifiedPersistsDetail(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.UpdateLaunchResultsVerified(database, instanceID, false, db.ResultsVerifyDetailManifestMissingJobs); err != nil {
+		t.Fatalf("UpdateLaunchResultsVerified: %v", err)
+	}
+	got, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.ResultsVerified == nil || *got.ResultsVerified {
+		t.Fatalf("ResultsVerified = %v; want false", got.ResultsVerified)
+	}
+	if got.ResultsVerifyDetail != db.ResultsVerifyDetailManifestMissingJobs {
+		t.Fatalf("ResultsVerifyDetail = %q; want %q", got.ResultsVerifyDetail, db.ResultsVerifyDetailManifestMissingJobs)
+	}
+}
+
 // attemptStateForJob returns the latest attempt's status, cloud_outcome, and
 // exit_code for a job, plus the total number of attempts.
 func attemptStateForJob(t *testing.T, database *sql.DB, jobID int64) (status, outcome string, exitCode sql.NullInt64, attemptCount int) {

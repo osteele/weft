@@ -30,7 +30,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		termination_reason, termination_detail,
 		disk_gb, provisioned_inputs,
 		termination_requested_at, termination_intent_json,
-		results_verified,
+		results_verified, results_verify_detail,
 		machine_id, docker_image,
 		provider_running_at,
 		instance_type, max_bid_price_cents, on_demand_ref_cents,
@@ -236,6 +236,10 @@ type Launch struct {
 	// Result verification (set by reconciler from R2 completion manifest)
 	// nil = not checked (legacy marker), true = all uploads OK, false = uploads partial/failed
 	ResultsVerified *bool
+	// ResultsVerifyDetail is a reason code explaining a false ResultsVerified:
+	// ResultsVerifyDetailUploadsIncomplete or ResultsVerifyDetailManifestMissingJobs.
+	// Empty when verified or not yet evaluated.
+	ResultsVerifyDetail string
 
 	// Instance capacity (for reuse matching)
 	DiskGB            int      // Container disk allocation requested at create (max of createOpts.DiskGB and group estimate); not the host machine's total disk.
@@ -1187,9 +1191,22 @@ func UpdateLaunchOnDemandRefCents(db *sql.DB, id int64, cents int) error {
 	return err
 }
 
-// UpdateLaunchResultsVerified sets the results_verified flag on a cloud instance.
-func UpdateLaunchResultsVerified(db *sql.DB, id int64, verified bool) error {
-	_, err := db.Exec(`UPDATE launches SET results_verified = ? WHERE id = ?`, verified, id)
+// Reason codes for Launch.ResultsVerifyDetail, recorded when results_verified
+// is set false so the display can distinguish the two failure modes.
+const (
+	// ResultsVerifyDetailUploadsIncomplete: at least one job in the completion
+	// manifest reported a non-"ok" upload status (partial/failed/empty).
+	ResultsVerifyDetailUploadsIncomplete = "uploads_incomplete"
+	// ResultsVerifyDetailManifestMissingJobs: the completion manifest does not
+	// cover every job the launch ran — that job's results may be missing.
+	ResultsVerifyDetailManifestMissingJobs = "manifest_missing_jobs"
+)
+
+// UpdateLaunchResultsVerified sets the results_verified flag on a cloud
+// instance. detail is a reason code (ResultsVerifyDetail*) explaining a false
+// verdict; pass "" when verified.
+func UpdateLaunchResultsVerified(db *sql.DB, id int64, verified bool, detail string) error {
+	_, err := db.Exec(`UPDATE launches SET results_verified = ?, results_verify_detail = ? WHERE id = ?`, verified, detail, id)
 	return err
 }
 
@@ -2309,6 +2326,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var terminationRequestedAt sql.NullInt64
 	var terminationIntentJSON sql.NullString
 	var resultsVerified sql.NullBool
+	var resultsVerifyDetail sql.NullString
 	var machineID sql.NullString
 	var dockerImage sql.NullString
 	var providerRunningAt sql.NullInt64
@@ -2334,7 +2352,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&terminationReason, &terminationDetail,
 		&diskGB, &provisionedInputsJSON,
 		&terminationRequestedAt, &terminationIntentJSON,
-		&resultsVerified,
+		&resultsVerified, &resultsVerifyDetail,
 		&machineID, &dockerImage,
 		&providerRunningAt,
 		&instanceType, &maxBidPriceCents, &onDemandRefCents,
@@ -2472,6 +2490,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		v := resultsVerified.Bool
 		c.ResultsVerified = &v
 	}
+	c.ResultsVerifyDetail = resultsVerifyDetail.String
 	if machineID.Valid {
 		c.MachineID = machineID.String
 	}

@@ -189,7 +189,14 @@ func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map
 		return "terminated by user"
 	case db.TerminationReasonCompleted:
 		if inst.ResultsVerified != nil && !*inst.ResultsVerified {
-			return "completed but results upload was partial/failed"
+			switch inst.ResultsVerifyDetail {
+			case db.ResultsVerifyDetailUploadsIncomplete:
+				return "completed but one or more job uploads were partial/failed"
+			case db.ResultsVerifyDetailManifestMissingJobs:
+				return "completed but the completion manifest is missing results for some jobs"
+			default:
+				return "completed but results upload could not be confirmed"
+			}
 		}
 		return "completed successfully"
 	case db.TerminationReasonAccountCreditExhausted:
