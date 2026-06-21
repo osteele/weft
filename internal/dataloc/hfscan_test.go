@@ -1,6 +1,9 @@
 package dataloc
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -49,6 +52,53 @@ func TestHFCacheScanCommand_DoesNotRunDuWhenIncompleteListIsEmpty(t *testing.T) 
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("scan command missing safe incomplete-size fragment %q:\n%s", want, cmd)
 		}
+	}
+}
+
+// TestHFCacheScanCommand_ClassifiesUnreadableEntry is a regression test for the
+// cool30 failure where a shared NAS HF cache entry owned by another user
+// (root:root, mode 770, created by a root-context container download) was
+// misreported as "no-snapshots". The scanner needs search permission on the
+// entry dir to stat snapshots/; without it, the snapshot is invisible and the
+// entry must be classified "unreadable", not "no-snapshots".
+func TestHFCacheScanCommand_ClassifiesUnreadableEntry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses permission bits")
+	}
+	hub := filepath.Join(t.TempDir(), "hub")
+
+	// A normal, readable entry (control) and one the user cannot search into.
+	for _, name := range []string{"datasets--readable--ok", "datasets--locked--ent"} {
+		snap := filepath.Join(hub, name, "snapshots", "rev")
+		if err := os.MkdirAll(snap, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(snap, "README.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	locked := filepath.Join(hub, "datasets--locked--ent")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) // restore so TempDir cleanup can recurse
+
+	cmd := exec.Command("sh", "-c", hfCacheScanCommand())
+	// HF_HUB_CACHE wins over HF_HOME/$HOME in ResolveHFCacheDirShellVar.
+	cmd.Env = append(os.Environ(), "HF_HUB_CACHE="+hub)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("scan command failed: %v", err)
+	}
+	byID := map[string]string{}
+	for _, r := range parseHFCacheDetailedOutput(string(out)) {
+		byID[r.Asset.ID] = r.Status
+	}
+	if got := byID["readable/ok"]; got != "ok" {
+		t.Errorf("readable entry status = %q, want ok", got)
+	}
+	if got := byID["locked/ent"]; got != "unreadable" {
+		t.Errorf("unreadable entry status = %q, want unreadable", got)
 	}
 }
 

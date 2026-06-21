@@ -278,6 +278,51 @@ func TestDownloadAssetToHost_ReportsIncompleteCacheAfterSuccessfulDownload(t *te
 	}
 }
 
+// TestDownloadAssetToHost_ReportsUnreadableCacheAsOwnershipIssue is a regression
+// test for the cool30 failure where a root-owned cache entry on a shared NAS
+// surfaced as a misleading "no-snapshots after download". An unreadable entry
+// must produce an ownership/permission diagnosis pointing at chown, not the
+// generic post-download status wording that implies a broken download.
+func TestDownloadAssetToHost_ReportsUnreadableCacheAsOwnershipIssue(t *testing.T) {
+	origHostRunner := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = origHostRunner })
+	origInterval := detachedPollInterval
+	detachedPollInterval = 1 * time.Millisecond
+	t.Cleanup(func() { detachedPollInterval = origInterval })
+
+	entryPath := "/mnt/hbnas/home/oliver_30/.cache/huggingface/hub/datasets--google-research-datasets--mbpp"
+	hostCommandRunner = func(_ context.Context, _ string, command string) (string, string, error) {
+		switch {
+		case strings.Contains(command, "df -Pk"):
+			return "123456789\n", "", nil
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", nil
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", nil
+		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+			return "0\tunreadable\t" + entryPath + "\n", "", nil
+		default:
+			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
+		}
+	}
+
+	_, err := DownloadAssetToHost(context.Background(), "cool30",
+		DataAsset{Kind: AssetHFDataset, ID: "google-research-datasets/mbpp"}, "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "not readable by the weft user") || !strings.Contains(msg, "owned by another user") {
+		t.Fatalf("expected ownership/permission diagnosis, got: %q", msg)
+	}
+	if !strings.Contains(msg, entryPath) {
+		t.Fatalf("error should name the offending cache path, got: %q", msg)
+	}
+	if strings.Contains(msg, "no-snapshots") {
+		t.Fatalf("error must not use the misleading no-snapshots wording: %q", msg)
+	}
+}
+
 // TestRunDetachedRemoteCommand_CancelKillsRemote verifies that when the
 // caller's context is cancelled mid-poll, the helper sends a SIGTERM to
 // the remote PID before returning ctx.Err(). Without this, weft data fetch

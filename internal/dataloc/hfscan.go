@@ -27,8 +27,10 @@ func ScanHFCache(host string) ([]DataAsset, error) {
 // ScanHFCacheDetailed scans the HuggingFace cache on a remote host and returns
 // entries with full path and size information for each well-formed asset.
 // Entries that fail structural validation (doubly-nested cache, missing
-// snapshots/) are logged and dropped — they are not loadable via the normal
-// HF resolver. Sizes exclude *.incomplete blobs (partial downloads).
+// snapshots/) or that the weft user cannot read (owned by another user, e.g.
+// a root-context container download into a shared cache) are logged and
+// dropped — they are not loadable via the normal HF resolver. Sizes exclude
+// *.incomplete blobs (partial downloads).
 func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
 	return ScanHFCacheDetailedContext(context.Background(), host)
 }
@@ -69,7 +71,9 @@ for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _d
 for _d in "${_dirs[@]}"; do
   _name=$(basename "$_d")
   _status="ok"
-  if [ -d "$_d/$_name" ]; then
+  if [ ! -r "$_d" ] || [ ! -x "$_d" ]; then
+    _status="unreadable"
+  elif [ -d "$_d/$_name" ]; then
     _status="nested"
   elif [ ! -d "$_d/snapshots" ]; then
     _status="no-snapshots"
@@ -99,7 +103,9 @@ done`
 
 // hfScanResult is the parsed form of a single line emitted by the
 // ScanHFCacheDetailed shell script. Status is one of "ok", "nested",
-// "no-snapshots", "incomplete", or a comma-joined combination.
+// "no-snapshots", "unreadable", "incomplete", or a comma-joined combination.
+// "unreadable" means the entry directory exists but is not readable/searchable
+// by the weft user (a cache ownership/permission issue, not a download fault).
 type hfScanResult struct {
 	Asset     DataAsset
 	Path      string

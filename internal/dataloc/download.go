@@ -64,6 +64,11 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 		if result.Status == "ok" {
 			return hostDataEntryFromScanResult(host, result), nil
 		}
+		if result.Status == "unreadable" {
+			return HostDataEntry{}, fmt.Errorf(
+				"asset %s cache entry on %s (%s) is not readable by the weft user — it is owned by another user, typically a root-context container download into the shared HF cache. The snapshot likely exists but weft cannot read it; fix ownership of that directory (chown to the weft user) rather than re-downloading",
+				asset, host, result.Path)
+		}
 		return HostDataEntry{}, fmt.Errorf("asset %s cache entry on %s is %s after download", asset, host, result.Status)
 	}
 
