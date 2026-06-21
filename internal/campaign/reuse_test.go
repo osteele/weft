@@ -44,6 +44,30 @@ func testCUDAProjectDir(t *testing.T) string {
 	return dir
 }
 
+func TestMatchPlacementCompatibility_EnforcesArchFloorWithoutGPURequest(t *testing.T) {
+	// A torch job that did not request a GPU still carries a MinComputeCap floor
+	// resolved from its torch wheel. Routing must enforce that floor rather than
+	// short-circuiting on !NeedsGPU(). Regression for wj3229 (GTX 1080 Ti, sm_61,
+	// below the torch sm_75 floor) being routed onto a generic fleet worker.
+	floor := placement.Constraints{MinComputeCap: "7.5"}
+	if floor.NeedsGPU() {
+		t.Fatal("precondition: floored constraints should not request a GPU")
+	}
+
+	if ok, reason := matchPlacementCompatibility(floor, &db.Launch{ResolvedGPUName: "GTX 1080 Ti"}); ok {
+		t.Fatalf("sm_61 GPU accepted for sm_75-floor job; want rejection (reason=%q)", reason)
+	}
+	if ok, reason := matchPlacementCompatibility(floor, &db.Launch{ResolvedGPUName: "A100 PCIE"}); !ok {
+		t.Fatalf("sm_80 GPU rejected for sm_75-floor job; want acceptance (reason=%q)", reason)
+	}
+
+	// A genuinely unconstrained job (no GPU request, no floor) still matches any
+	// worker — the early-return path must be preserved.
+	if ok, reason := matchPlacementCompatibility(placement.Constraints{}, &db.Launch{ResolvedGPUName: "GTX 1080 Ti"}); !ok {
+		t.Fatalf("unconstrained job rejected from a GPU worker; want acceptance (reason=%q)", reason)
+	}
+}
+
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	tests := []struct {
 		name         string

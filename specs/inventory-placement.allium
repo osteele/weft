@@ -294,17 +294,22 @@ rule BuildConstraintsFromJob {
     let tags = job.tags
     let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
     let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
+    -- A torch project will use CUDA whenever a GPU is present on the worker, so
+    -- a job placed there must respect the wheel's arch range even if it never
+    -- declared a GPU. Without this, a GPU-agnostic torch job can be routed onto
+    -- an arch-incompatible card and die with "no kernel image" (wj3229).
+    let uses_gpu_runtime = requests_gpu or ProjectUsesTorch(job.working_dir)
 
-    -- Torch-derived GPU-runtime constraints (arch caps, CUDA/driver floors)
-    -- are populated ONLY for jobs that request a GPU. CPU-only jobs carry
-    -- none of them, no matter what the project's torch pin implies.
+    -- Torch-derived GPU-runtime constraints (arch caps, CUDA/driver floors) are
+    -- populated for jobs that request a GPU OR live in a torch project. A
+    -- non-torch CPU-only job carries none of them.
     ensures: Constraints.built(
         gpu_class: job.gpu_class,
         gpu_mem_gb: job.gpu_mem_gb,
-        max_compute_cap: requests_gpu ? job.max_compute_cap : null,
-        min_compute_cap: requests_gpu ? MinComputeCapForJob(job.working_dir) : null,
-        min_cuda_version: requests_gpu ? RuntimeFloorForJob(job).min_cuda_version : null,
-        min_driver_version: requests_gpu ? RuntimeFloorForJob(job).min_driver_version : null,
+        max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
+        min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
+        min_cuda_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_cuda_version : null,
+        min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
         provider: provider,
         inputs: job.inputs,
         tags: tags

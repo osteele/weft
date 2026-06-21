@@ -163,7 +163,11 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 	}
 
 	resolved := ResolvedConstraints{Constraints: c}
-	if c.NeedsGPU() {
+	// Resolve torch arch/CUDA bounds for any torch project, not only jobs that
+	// explicitly request a GPU. A torch script will use CUDA whenever a GPU is
+	// present on the worker, so a GPU-agnostic job placed on an arch-incompatible
+	// card still hits "no kernel image" — the bounds must filter that worker out.
+	if c.NeedsGPU() || dataloc.ProjectUsesTorch(src.LocalDir) {
 		maxCap := strings.TrimSpace(src.PersistedMaxComputeCap)
 		derivedMaxCap := ResolveJobMaxComputeCapForPersistence(src.LocalDir, src.Command)
 		switch {
@@ -315,6 +319,17 @@ func RuntimeFloorForJob(j *db.Job) RuntimeFloor {
 // NeedsGPU returns true if the constraints require GPU resources.
 func (c Constraints) NeedsGPU() bool {
 	return c.GPUClass != "" || c.GPUMemGB > 0 || c.NumGPUs > 1
+}
+
+// HasGPURuntimeBounds reports whether the constraints carry any GPU-runtime
+// compatibility bound that a placement target must satisfy. Beyond an explicit
+// GPU request, a torch project resolves arch caps and CUDA floors even for jobs
+// that did not request a GPU (see ResolveConstraints): such a job will use any
+// GPU present on the worker, so an arch-incompatible card must still filter the
+// worker out. Eligibility and routing checks gate on this rather than NeedsGPU.
+func (c Constraints) HasGPURuntimeBounds() bool {
+	return c.NeedsGPU() || c.MinComputeCap != "" || c.MaxComputeCap != "" ||
+		c.MinCUDAVersion != "" || c.MinDriverVersion > 0
 }
 
 // HostMetrics holds live utilization data for a host, used for soft scoring.
@@ -775,7 +790,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	}
 
 	var gc GPUConstraint
-	if c.NeedsGPU() {
+	if c.HasGPURuntimeBounds() {
 		gc = ParseGPUConstraint(c.GPUClass)
 		eligible, reasons := CheckHostGPUConstraints(host, c)
 		if !eligible {
@@ -1003,13 +1018,13 @@ func isNonTransportableInput(kind dataloc.AssetKind) bool {
 }
 
 // CheckHostGPUConstraints applies shared hard compatibility constraints to a
-// single host. Toolchain floors apply to CPU and GPU jobs; GPU resource and
-// NVIDIA runtime floors apply only to jobs with a GPU request. A GPU host is
-// eligible only if one physical GPU satisfies the requested class, memory
-// floor, and compute-capability ceiling.
-//
-// Constraint sets without a GPU request ignore torch-derived caps and
-// CUDA/driver floors because those describe GPU-runtime compatibility.
+// single host. Toolchain floors apply to CPU and GPU jobs. GPU resource floors
+// (class, memory) apply only to jobs with a GPU request, while arch caps and
+// NVIDIA runtime floors apply to any job carrying GPU-runtime bounds — including
+// a torch job that resolved those bounds without requesting a GPU. A GPU host is
+// eligible only if one physical GPU satisfies the requested class, memory floor,
+// and compute-capability range; a GPU-less host is eligible for an arch-only
+// torch job, which runs on CPU there.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
 	reqs := c.VersionRequirements
 	if len(reqs) == 0 {
@@ -1018,10 +1033,16 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 	if violations := compat.Check(reqs, hostCompatibilityFacts(host)); len(violations) > 0 {
 		return false, []string{compat.FormatViolation(violations[0])}
 	}
-	if !c.NeedsGPU() {
+	if !c.HasGPURuntimeBounds() {
 		return true, nil
 	}
 	if len(host.GPUs) == 0 {
+		// A job with an explicit GPU request needs a GPU host. A torch job that
+		// only carries arch/CUDA bounds (no GPU request) runs on CPU here, so a
+		// GPU-less host is eligible — the bounds only constrain GPU workers.
+		if !c.NeedsGPU() {
+			return true, nil
+		}
 		return false, []string{"no GPUs"}
 	}
 

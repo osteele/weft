@@ -147,8 +147,20 @@ func logTailMentionsDiskFull(tail string) bool {
 }
 
 func logTailMentionsCUDADriverTooOld(tail string) bool {
-	return strings.Contains(tail, "nvidia driver on your system is too old") ||
-		strings.Contains(tail, "driver version is insufficient for cuda runtime version")
+	// torch emits a non-fatal "NVIDIA driver on your system is too old" UserWarning
+	// at import/init even when the job later fails for an unrelated reason (e.g. a
+	// heartbeat-stale SIGTERM). Only a fatal occurrence — outside a UserWarning
+	// line — should classify the failure as driver-too-old.
+	for _, line := range strings.Split(tail, "\n") {
+		if strings.Contains(line, "userwarning") {
+			continue
+		}
+		if strings.Contains(line, "nvidia driver on your system is too old") ||
+			strings.Contains(line, "driver version is insufficient for cuda runtime version") {
+			return true
+		}
+	}
+	return false
 }
 
 // JobPaths holds all file paths for a job.

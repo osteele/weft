@@ -392,7 +392,10 @@ func matchPlacementCompatibility(constraints placement.Constraints, inst *db.Lau
 	if inst == nil {
 		return true, ""
 	}
-	if !constraints.NeedsGPU() {
+	// A job without an explicit GPU request can still carry arch/CUDA bounds when
+	// it is a torch project (see placement.ResolveConstraints). Those bounds must
+	// be enforced at routing too, or the job lands on an arch-incompatible worker.
+	if !constraints.HasGPURuntimeBounds() {
 		return true, ""
 	}
 	if !instanceMeetsMinCUDAVersion(inst, constraints.MinCUDAVersion) {

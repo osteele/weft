@@ -2243,9 +2243,18 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 	}
 }
 
-func TestConstraintsFromJobIgnoresTorchCapsForCPUJob(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+func TestConstraintsFromJob_TorchArchCapsApplyToCPUTorchJob(t *testing.T) {
+	// A torch project's arch/CUDA bounds must be resolved even for a job that does
+	// not explicitly request a GPU: the autopilot can still place such a job on a
+	// GPU worker, where torch uses an arch-incompatible card and fails with
+	// "no kernel image". Regression for wj3229 (GTX 1080 Ti, sm_61, below the
+	// torch sm_75 floor) landing on a generic fleet worker.
+	torchDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(torchDir, "pyproject.toml"),
+		[]byte("[project]\ndependencies = [\"torch\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(torchDir, "uv.lock"), []byte(`
 [[package]]
 name = "torch"
 version = "2.6.0"
@@ -2257,35 +2266,52 @@ wheels = [
 		t.Fatalf("write uv.lock: %v", err)
 	}
 
-	cpuJob := &dbpkg.Job{
-		ID:            1,
-		WorkingDir:    dir,
-		Command:       "uv run python script.py",
-		MaxComputeCap: "12.0",
+	cpuTorch := ConstraintsFromJob(&dbpkg.Job{
+		ID:         1,
+		WorkingDir: torchDir,
+		Command:    "uv run python script.py",
+	})
+	if cpuTorch.NeedsGPU() {
+		t.Fatalf("torch CPU job unexpectedly needs GPU: %+v", cpuTorch)
 	}
-	cpuConstraints := ConstraintsFromJob(cpuJob)
-	if cpuConstraints.NeedsGPU() {
-		t.Fatalf("CPU job unexpectedly needs GPU: %+v", cpuConstraints)
+	if cpuTorch.MinComputeCap != "7.5" {
+		t.Fatalf("torch CPU job MinComputeCap = %q, want 7.5", cpuTorch.MinComputeCap)
 	}
-	if cpuConstraints.MinComputeCap != "" || cpuConstraints.MaxComputeCap != "" {
-		t.Fatalf("CPU job compute caps = min %q max %q, want empty", cpuConstraints.MinComputeCap, cpuConstraints.MaxComputeCap)
+	if cpuTorch.MaxComputeCap != "12.0" {
+		t.Fatalf("torch CPU job MaxComputeCap = %q, want 12.0", cpuTorch.MaxComputeCap)
 	}
 
-	gpuJob := &dbpkg.Job{
-		ID:            2,
-		WorkingDir:    dir,
+	// A non-torch project resolves no arch caps for a CPU job.
+	plainDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(plainDir, "pyproject.toml"),
+		[]byte("[project]\ndependencies = [\"numpy\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	plain := ConstraintsFromJob(&dbpkg.Job{
+		ID:         2,
+		WorkingDir: plainDir,
+		Command:    "uv run python script.py",
+	})
+	if plain.MinComputeCap != "" || plain.MaxComputeCap != "" {
+		t.Fatalf("non-torch CPU job caps = min %q max %q, want empty",
+			plain.MinComputeCap, plain.MaxComputeCap)
+	}
+
+	// A GPU job continues to resolve torch-derived caps and version floors.
+	gpu := ConstraintsFromJob(&dbpkg.Job{
+		ID:            3,
+		WorkingDir:    torchDir,
 		Command:       "uv run python script.py",
 		GPUClass:      "nvidia",
 		MaxComputeCap: "12.0",
+	})
+	if gpu.MinComputeCap == "" {
+		t.Fatal("GPU job min compute cap is empty, want torch-derived cap")
 	}
-	gpuConstraints := ConstraintsFromJob(gpuJob)
-	if gpuConstraints.MinComputeCap == "" {
-		t.Fatalf("GPU job min compute cap is empty, want torch-derived cap")
+	if gpu.MaxComputeCap != "12.0" {
+		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpu.MaxComputeCap)
 	}
-	if gpuConstraints.MaxComputeCap != "12.0" {
-		t.Fatalf("GPU job max compute cap = %q, want 12.0", gpuConstraints.MaxComputeCap)
-	}
-	if len(gpuConstraints.VersionRequirements) == 0 {
+	if len(gpu.VersionRequirements) == 0 {
 		t.Fatal("GPU job version requirements are empty, want CUDA/driver floors")
 	}
 }
@@ -2501,5 +2527,35 @@ func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
 	})
 	if !ok {
 		t.Fatalf("non-GPU constraints rejected host: %v", reasons)
+	}
+}
+
+func TestCheckHostGPUConstraints_ArchFloorWithoutGPURequest(t *testing.T) {
+	// A torch job carrying only an arch floor (no GPU request, resolved from its
+	// wheel) must still be filtered off a GPU host whose only card sits below the
+	// floor — torch would use that card and die with "no kernel image". Regression
+	// for wj3229 (GTX 1080 Ti, sm_61, below the torch sm_75 floor).
+	floor := Constraints{MinComputeCap: "7.5"}
+	if floor.NeedsGPU() {
+		t.Fatal("precondition: arch-floor constraints should not request a GPU")
+	}
+
+	below := inventory.HostSpec{Name: "below", GPUs: []inventory.GPUSpec{{
+		Name: "NVIDIA GeForce GTX 1080 Ti", Class: "gtx1080ti", Memory: "11GB", Indices: []int{0},
+	}}}
+	if ok, reasons := CheckHostGPUConstraints(below, floor); ok {
+		t.Fatalf("sm_61 host accepted for sm_75-floor job; want rejection (reasons=%v)", reasons)
+	}
+
+	at := inventory.HostSpec{Name: "at", GPUs: []inventory.GPUSpec{{
+		Name: "NVIDIA GeForce RTX 2080 Ti", Class: "rtx2080ti", Memory: "11GB", Indices: []int{0},
+	}}}
+	if ok, reasons := CheckHostGPUConstraints(at, floor); !ok {
+		t.Fatalf("sm_75 host rejected for sm_75-floor job; want acceptance (reasons=%v)", reasons)
+	}
+
+	// A GPU-less host runs the job on CPU, so the arch floor does not disqualify it.
+	if ok, reasons := CheckHostGPUConstraints(inventory.HostSpec{Name: "cpu-only"}, floor); !ok {
+		t.Fatalf("CPU-only host rejected for arch-floor job; want acceptance (reasons=%v)", reasons)
 	}
 }

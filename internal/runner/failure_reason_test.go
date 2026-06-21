@@ -152,6 +152,41 @@ func TestDetectFailureReasonFromExitInfoAndLog_DiskFullFromQuotaExceeded(t *test
 	}
 }
 
+func TestDetectFailureReasonFromExitInfoAndLog_DriverWarningNotClassified(t *testing.T) {
+	binDir := t.TempDir()
+	writeFakeCommand(t, binDir, "dmesg", "#!/bin/sh\nexit 1\n")
+	writeFakeCommand(t, binDir, "df", "#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted on'\necho '/dev/root 1000 100 900 10% /'\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// torch emits this UserWarning at import even when the job later dies for an
+	// unrelated reason (here a heartbeat-stale SIGTERM, exit 143). It must not be
+	// classified as driver-too-old. Regression for wj3230.
+	warnLog := "/x/torch/cuda/__init__.py:187: UserWarning: CUDA initialization: " +
+		"The NVIDIA driver on your system is too old (found version 12020).\n" +
+		"trainer killed\n"
+	warnPath := filepath.Join(t.TempDir(), "warn.log")
+	if err := os.WriteFile(warnPath, []byte(warnLog), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 143}, warnPath); got == FailureReasonCUDADriverTooOld {
+		t.Fatalf("benign driver UserWarning misclassified as %q", got)
+	}
+
+	// A fatal driver error (not a UserWarning line) still classifies.
+	for _, fatal := range []string{
+		"RuntimeError: The NVIDIA driver on your system is too old (found version 12020).\n",
+		"CUDA error: CUDA driver version is insufficient for CUDA runtime version\n",
+	} {
+		logPath := filepath.Join(t.TempDir(), "fatal.log")
+		if err := os.WriteFile(logPath, []byte(fatal), 0o644); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+		if got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 1}, logPath); got != FailureReasonCUDADriverTooOld {
+			t.Fatalf("fatal driver error %q classified as %q, want %q", fatal, got, FailureReasonCUDADriverTooOld)
+		}
+	}
+}
+
 func writeFakeCommand(t *testing.T, dir, name, script string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
