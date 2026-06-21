@@ -292,7 +292,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBlockedReason(t *testing.T) {
 	if !strings.Contains(out, lineWant) {
 		t.Fatalf("missing %q in output:\n%s", lineWant, out)
 	}
-	blockedWant := "  blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m (1)"
+	blockedWant := "  blocked: first retry budget exceeded: elapsed 1h2m >= limit 45m"
 	if !strings.Contains(out, blockedWant) {
 		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
 	}
@@ -315,7 +315,7 @@ func TestRenderJobListGroupedStatusPlainAt_UsesPersistedPlacementReason(t *testi
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	blockedWant := "  blocked: planner: no offers from providers for gpu=A100 vram>=82GB disk>=50GB reliability>=0.85 (1)"
+	blockedWant := "  blocked: planner: no offers from providers for gpu=A100 vram>=82GB disk>=50GB reliability>=0.85"
 	if !strings.Contains(out, blockedWant) {
 		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
 	}
@@ -338,7 +338,7 @@ func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaitin
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	waitingWant := "  waiting: placement pending (1)"
+	waitingWant := "  waiting: placement pending"
 	if !strings.Contains(out, waitingWant) {
 		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
 	}
@@ -361,10 +361,10 @@ func TestBuildGroupedStatusRows_PlacementPendingDaemonStopped(t *testing.T) {
 		return b.String()
 	}
 
-	if out := render(true); !strings.Contains(out, "waiting: placement pending — daemon stopped (1)") {
+	if out := render(true); !strings.Contains(out, "waiting: placement pending — daemon stopped") {
 		t.Fatalf("stopped daemon should annotate the reason, got:\n%s", out)
 	}
-	if out := render(false); !strings.Contains(out, "waiting: placement pending (1)") || strings.Contains(out, "daemon stopped") {
+	if out := render(false); !strings.Contains(out, "waiting: placement pending") || strings.Contains(out, "daemon stopped") {
 		t.Fatalf("running daemon should leave the reason plain, got:\n%s", out)
 	}
 }
@@ -383,7 +383,7 @@ func TestRenderJobListGroupedStatusPlainAt_RendersInventoryHandoffAsWaiting(t *t
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	waitingWant := "  waiting: inventory-tagged: waiting for on-prem host (1)"
+	waitingWant := "  waiting: inventory-tagged: waiting for on-prem host"
 	if !strings.Contains(out, waitingWant) {
 		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
 	}
@@ -541,7 +541,7 @@ func TestRenderJobListGroupedStatusPlainAt_UsesActionableReasonAfterFailedCloudR
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	blockedWant := "  blocked: " + actionable + " (1)"
+	blockedWant := "  blocked: " + actionable
 	if !strings.Contains(out, blockedWant) {
 		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
 	}
@@ -565,8 +565,11 @@ func TestRenderJobListGroupedStatusPlainAt_SourceSyncInFlightIsWaiting(t *testin
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	if !strings.Contains(out, "  waiting: source sync already in flight (1)") {
+	if !strings.Contains(out, "  waiting: source sync already in flight\n") {
 		t.Fatalf("missing waiting source-sync header:\n%s", out)
+	}
+	if strings.Contains(out, "  waiting: source sync already in flight (1)") {
+		t.Fatalf("single-job waiting header should omit count:\n%s", out)
 	}
 	if strings.Contains(out, "  blocked: source sync already in flight") {
 		t.Fatalf("source sync in flight rendered as blocked:\n%s", out)
@@ -589,7 +592,7 @@ func TestRenderJobListGroupedStatusPlainAt_SourceSyncFailureIsWaiting(t *testing
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	if !strings.Contains(out, "  waiting: "+reason+" (1)") {
+	if !strings.Contains(out, "  waiting: "+reason+"\n") {
 		t.Fatalf("missing waiting source-sync failure header:\n%s", out)
 	}
 	if strings.Contains(out, "  blocked: "+reason) {
@@ -615,7 +618,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsOnPremOnlyPlacementReasonForInve
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	blockedWant := "  blocked: 3 hosts: host is opt-in only (specify with --host) (1)"
+	blockedWant := "  blocked: 3 hosts: host is opt-in only (specify with --host)"
 	if !strings.Contains(out, blockedWant) {
 		t.Fatalf("missing %q in output:\n%s", blockedWant, out)
 	}
@@ -651,7 +654,7 @@ func TestRenderJobListGroupedStatusPlainAt_GroupsUnplacedByBlockedReason(t *test
 
 	// Subheaders present with correct counts, in first-seen order.
 	ampereHead := "  blocked: " + reasonAmpere + " (2)"
-	nvidiaHead := "  blocked: " + reasonNvidia + " (1)"
+	nvidiaHead := "  blocked: " + reasonNvidia
 	hunk3090 := "  blocked: " + reason3090 + " (3)"
 	for _, want := range []string{ampereHead, nvidiaHead, hunk3090} {
 		if !strings.Contains(out, want) {
@@ -965,7 +968,7 @@ func TestRenderJobListGroupedStatusPlainAt_UnplacedWithoutBlockedReasonStaysUngr
 	}
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
 
-	headWant := "  blocked: " + reason + " (1)"
+	headWant := "  blocked: " + reason
 	if !strings.Contains(out, headWant) {
 		t.Fatalf("missing subheader %q in output:\n%s", headWant, out)
 	}

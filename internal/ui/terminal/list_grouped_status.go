@@ -417,7 +417,10 @@ func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job
 	if daemonStopped && reason == blockreason.ReasonPlacementPending {
 		reason += " — daemon stopped"
 	}
-	text := fmt.Sprintf("  %s: %s (%d)", key.kind, reason, len(jobs))
+	text := fmt.Sprintf("  %s: %s", key.kind, reason)
+	if len(jobs) != 1 {
+		text += fmt.Sprintf(" (%d)", len(jobs))
+	}
 	if len(jobs) == 0 {
 		return text
 	}
