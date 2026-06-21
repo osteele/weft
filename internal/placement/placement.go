@@ -58,6 +58,7 @@ type Constraints struct {
 	NumGPUs      int      // Exact number of GPUs requested on one host/rental (0/1 = one)
 	GPUMemGB     int      // Minimum GPU memory in GB; 0 = no minimum
 	CPUCores     int      // Minimum effective CPU cores/vCPUs
+	CPUMemGB     int      // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
 	Interconnect string   // Requested intra-host interconnect: any, pcie, nvlink
 	Inputs       []string // Asset refs the job reads (for locality scoring)
 	Command      string   // For predictor-based scoring; empty = skip
@@ -112,6 +113,7 @@ type ConstraintSource struct {
 	NumGPUs                int
 	GPUMemGB               int
 	CPUCores               int
+	CPUMemGB               int
 	Interconnect           string
 	Inputs                 []string
 	Command                string
@@ -146,6 +148,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		NumGPUs:              src.NumGPUs,
 		GPUMemGB:             src.GPUMemGB,
 		CPUCores:             src.CPUCores,
+		CPUMemGB:             src.CPUMemGB,
 		Interconnect:         src.Interconnect,
 		Inputs:               src.Inputs,
 		Command:              src.Command,
@@ -208,6 +211,7 @@ func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
 		GPUClass:               j.GPUClass,
 		NumGPUs:                j.RequestedGPUCount(),
 		CPUCores:               j.RequestedCPUCores(),
+		CPUMemGB:               j.RequestedCPUMemGB(),
 		Interconnect:           j.RequestedInterconnect(),
 		Inputs:                 j.Inputs,
 		Command:                j.Command,
@@ -780,6 +784,17 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			return s
 		}
 		s.Reasons = append(s.Reasons, reasons...)
+	}
+
+	// Hard constraint: declared host/system-RAM floor (--cpu-mem). Applies to
+	// CPU-only jobs too, so it lives outside the NeedsGPU() block. Unknown host
+	// RAM (0) does not disqualify.
+	if c.CPUMemGB > 0 {
+		if hostMemGB := inventory.ParseMemGB(host.Memory); hostMemGB > 0 && hostMemGB < c.CPUMemGB {
+			s.Eligible = false
+			s.Reasons = append(s.Reasons, fmt.Sprintf("host RAM %dGB below required %dGB", hostMemGB, c.CPUMemGB))
+			return s
+		}
 	}
 
 	applyHistoricalFailureRisk(database, &s, host, c)

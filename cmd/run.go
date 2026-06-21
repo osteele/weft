@@ -110,6 +110,8 @@ var (
 	runGPUMemStrict  bool
 	runInterconnect  string
 	runCPUCores      int
+	runCPUMem        int
+	runCPUMemStrict  bool
 	runDiskGB        int
 	runRuntimeDiskGB int
 	runGPUClass      string
@@ -418,6 +420,8 @@ func init() {
 	runCmd.Flags().Bool("nvlink-required", false, "Alias for --interconnect=nvlink")
 	runCmd.Flags().Bool("same-host", false, "Require all requested GPUs on one host (default for --gpus)")
 	runCmd.Flags().IntVar(&runCPUCores, "cpu-cores", 0, "Minimum effective CPU cores/vCPUs for rental placement")
+	runCmd.Flags().IntVar(&runCPUMem, "cpu-mem", 0, "Minimum host/system RAM in GB; filters rental offers and gates on-prem hosts")
+	runCmd.Flags().BoolVar(&runCPUMemStrict, "cpu-mem-strict", false, "Use exact cpu-mem matching without default safety headroom")
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
@@ -513,6 +517,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runCPUCores == 0 {
 			runCPUCores = fromJob.RequestedCPUCores()
+		}
+		if runCPUMem == 0 && fromJob.CLIResourceOverrides != nil && fromJob.CLIResourceOverrides.CPUMemGB != nil {
+			runCPUMem = *fromJob.CLIResourceOverrides.CPUMemGB
+			if fromJob.CLIResourceOverrides.CPUMemStrict != nil {
+				runCPUMemStrict = *fromJob.CLIResourceOverrides.CPUMemStrict
+			}
 		}
 		if fromJob.Metadata != nil && fromJob.Metadata.Disk != nil {
 			if runDiskGB == 0 {
@@ -715,6 +725,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runCPUCores = meta.CPUCores
 			applied = append(applied, fmt.Sprintf("cpu-cores=%d", meta.CPUCores))
 		}
+		if !cmd.Flags().Changed("cpu-mem") && runCPUMem == 0 && meta.CPUMemGB > 0 {
+			runCPUMem = meta.CPUMemGB
+			applied = append(applied, fmt.Sprintf("cpu-mem=%dGB", meta.CPUMemGB))
+		}
+		if !cmd.Flags().Changed("cpu-mem-strict") && meta.CPUMemStrict != nil {
+			runCPUMemStrict = *meta.CPUMemStrict
+			applied = append(applied, fmt.Sprintf("cpu-mem-strict=%t", runCPUMemStrict))
+		}
 		if !cmd.Flags().Changed("disk") && runDiskGB == 0 && meta.DiskGB > 0 {
 			runDiskGB = meta.DiskGB
 			applied = append(applied, fmt.Sprintf("disk=%dGB", meta.DiskGB))
@@ -830,6 +848,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runCPUCores < 0 {
 		return fmt.Errorf("--cpu-cores must be >= 1")
 	}
+	if runCPUMem < 0 {
+		return fmt.Errorf("--cpu-mem must be >= 1")
+	}
 	var normalizeErr error
 	runInterconnect, normalizeErr = normalizeInterconnect(runInterconnect)
 	if normalizeErr != nil {
@@ -848,6 +869,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runCPUCores > 0 {
 		cores := runCPUCores
 		cliOverrides.CPUCores = &cores
+	}
+	if runCPUMem > 0 {
+		mem := runCPUMem
+		cliOverrides.CPUMemGB = &mem
+		if runCPUMemStrict {
+			strict := true
+			cliOverrides.CPUMemStrict = &strict
+		}
 	}
 	providerFlagChanged := cmd.Flags().Changed("provider")
 	if providerFlagChanged {
@@ -963,6 +992,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		NumGPUs:      runGPUCount,
 		GPUMemGB:     gpuMemGB,
 		CPUCores:     runCPUCores,
+		CPUMemGB:     db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
 		Interconnect: runInterconnect,
 		Inputs:       runInputs,
 		Command:      command,

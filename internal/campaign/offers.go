@@ -221,6 +221,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 	if group.CPUCores > c.MinCPUCoresEffective {
 		c.MinCPUCoresEffective = group.CPUCores
 	}
+	c.MinHostRAMGB = group.CPUMemGB
 	if group.HasPreemptibleJob() {
 		c.InstanceType = cloud.InstanceTypeInterruptible
 	}
@@ -432,6 +433,26 @@ func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 	return filtered, removed
 }
 
+// filterOffersByHostRAM drops offers whose host/system RAM is below the group's
+// declared --cpu-mem floor. Offers with unknown host RAM (RAMGB == 0, e.g. every
+// RunPod offer, which carries no host-RAM field) are kept: weft has no signal to
+// judge them on, so excluding them would silently drop the whole provider.
+func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
+	if len(offers) == 0 || group.CPUMemGB <= 0 {
+		return offers, 0
+	}
+	filtered := make([]cloud.Offer, 0, len(offers))
+	removed := 0
+	for _, o := range offers {
+		if o.RAMGB > 0 && o.RAMGB < group.CPUMemGB {
+			removed++
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered, removed
+}
+
 func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	req := strings.ToLower(strings.TrimSpace(group.Interconnect))
 	if len(offers) == 0 || req == "" || req == "any" {
@@ -478,6 +499,16 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		offers = vramFiltered
 	}
 	stats.AfterVRAM = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	if ramFiltered, removed := filterOffersByHostRAM(offers, group); removed > 0 {
+		slog.Debug("filtered offers by host RAM requirement",
+			"required_min_gb", group.CPUMemGB,
+			"filtered", removed, "remaining", len(ramFiltered))
+		offers = ramFiltered
+	}
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

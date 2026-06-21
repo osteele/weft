@@ -63,6 +63,7 @@ type OfferConstraints struct {
 	NumGPUs              int      // number of GPUs needed (default 1)
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores
+	MinHostRAMGB         int      // minimum host/system RAM in GB (Vast.ai cpu_ram, reported in MB)
 	InstanceType         string   // "on-demand" or "interruptible"
 }
 

@@ -1773,6 +1773,51 @@ func TestInventoryTag_DoesNotSkipLocalPlacement(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_CPUMemGate(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+
+	// CPU-only job (no GPU constraint) requiring 128 GB host RAM. The gate must
+	// apply outside the NeedsGPU() block. Test hosts: host-alpha 256GB,
+	// host-beta 64GB, host-gamma 96GB.
+	scores, err := ScoreHosts(db, Constraints{CPUMemGB: 128})
+	if err != nil {
+		t.Fatalf("ScoreHosts: %v", err)
+	}
+	alpha := findScore(scores, "host-alpha")
+	beta := findScore(scores, "host-beta")
+	gamma := findScore(scores, "host-gamma")
+
+	if !alpha.Eligible {
+		t.Errorf("host-alpha (256GB) should be eligible for a 128GB floor; reasons=%v", alpha.Reasons)
+	}
+	if beta.Eligible {
+		t.Errorf("host-beta (64GB) should be ineligible for a 128GB floor")
+	}
+	if gamma.Eligible {
+		t.Errorf("host-gamma (96GB) should be ineligible for a 128GB floor")
+	}
+	hasRAMReason := false
+	for _, r := range beta.Reasons {
+		if strings.Contains(r, "host RAM") {
+			hasRAMReason = true
+			break
+		}
+	}
+	if !hasRAMReason {
+		t.Errorf("host-beta reasons should name the RAM shortfall; got %v", beta.Reasons)
+	}
+
+	// No floor -> all hosts eligible on the RAM dimension.
+	noFloor, err := ScoreHosts(db, Constraints{CPUMemGB: 0})
+	if err != nil {
+		t.Fatalf("ScoreHosts(no floor): %v", err)
+	}
+	if !findScore(noFloor, "host-beta").Eligible {
+		t.Errorf("host-beta should be eligible with no RAM floor")
+	}
+}
+
 func TestComputeIntensiveTag_PrefersMoreCores(t *testing.T) {
 	inventory.UseTestHosts(t)
 	db := setupTestDB(t)

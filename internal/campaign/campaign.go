@@ -58,6 +58,7 @@ type InstanceGroup struct {
 	NumGPUs          int      // Exact number of GPUs requested on one host/rental (0/1 = one)
 	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
 	CPUCores         int      // Minimum effective CPU cores/vCPUs
+	CPUMemGB         int      // Supremum of host/system RAM (effective) across all jobs in the group
 	Interconnect     string   // Requested intra-host interconnect: any, pcie, nvlink
 	MaxGPUMemGB      int      // Legacy metadata retained for old rows; not used for placement
 	DiskGB           int      // Estimated disk space needed (0 = use default)
@@ -287,6 +288,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		jobGPU := strings.TrimSpace(info.job.GPUClass)
 		jobGPUCount := info.job.RequestedGPUCount()
 		jobCPUCores := info.job.RequestedCPUCores()
+		jobCPUMem := info.job.RequestedCPUMemGB()
 		jobInterconnect := strings.TrimSpace(info.job.RequestedInterconnect())
 		jobPreemptible := info.job.UsesPreemptiblePlacement()
 		jobProvider, _ := db.RequestedProvider(info.job.Tags)
@@ -335,6 +337,9 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			if jobCPUCores > g.group.CPUCores {
 				g.group.CPUCores = jobCPUCores
 			}
+			if jobCPUMem > g.group.CPUMemGB {
+				g.group.CPUMemGB = jobCPUMem
+			}
 			for id := range info.hfInputs {
 				g.hfUnion[id] = struct{}{}
 			}
@@ -350,6 +355,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 					NumGPUs:      jobGPUCount,
 					GPUMemGB:     mem,
 					CPUCores:     jobCPUCores,
+					CPUMemGB:     jobCPUMem,
 					Interconnect: jobInterconnect,
 					Preemptible:  jobPreemptible,
 					Jobs:         []*db.Job{info.job},
@@ -575,6 +581,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			}
 			if g.CPUCores > merged[i].CPUCores {
 				merged[i].CPUCores = g.CPUCores
+			}
+			if g.CPUMemGB > merged[i].CPUMemGB {
+				merged[i].CPUMemGB = g.CPUMemGB
 			}
 			merged[i].MaxComputeCap = mergeMaxComputeCap(merged[i].MaxComputeCap, g.MaxComputeCap)
 			merged[i].MinComputeCap = mergeMinComputeCap(merged[i].MinComputeCap, g.MinComputeCap)

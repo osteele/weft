@@ -43,6 +43,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 		NumGPUs:              constraints.NumGPUs,
 		ExcludeGeos:          constraints.ExcludeGeos,
 		MinCPUCoresEffective: constraints.MinCPUCoresEffective,
+		MinHostRAMGB:         constraints.MinHostRAMGB,
 		InstanceType:         constraints.InstanceType,
 	}
 	offers, err := c.inner.SearchOffers(vc)

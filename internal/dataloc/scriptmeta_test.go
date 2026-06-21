@@ -59,6 +59,25 @@ import torch
 			want: &ScriptMeta{GPUMemGB: 8, GPUMemStrict: boolPtr(true)},
 		},
 		{
+			name: "cpu-mem integer",
+			content: `# /// script
+# [tool.weft]
+# cpu-mem = 32
+# ///
+`,
+			want: &ScriptMeta{CPUMemGB: 32},
+		},
+		{
+			name: "cpu-mem string with >= and GB, strict",
+			content: `# /// script
+# [tool.weft]
+# cpu-mem = ">=64GB"
+# cpu-mem-strict = true
+# ///
+`,
+			want: &ScriptMeta{CPUMemGB: 64, CPUMemStrict: boolPtr(true)},
+		},
+		{
 			name: "multi-gpu shape",
 			content: `# /// script
 # [tool.weft]

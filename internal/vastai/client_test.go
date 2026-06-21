@@ -779,6 +779,17 @@ func TestBuildSearchFilter_CPUCores(t *testing.T) {
 	}
 }
 
+func TestBuildSearchFilter_HostRAM(t *testing.T) {
+	// cpu_ram is reported in MB, so 32 GB -> cpu_ram>=32768.
+	filter, _ := buildSearchFilter(OfferConstraints{MinHostRAMGB: 32})
+	if !strings.Contains(filter, "cpu_ram>=32768") {
+		t.Errorf("filter %q missing cpu_ram>=32768", filter)
+	}
+	if got, _ := buildSearchFilter(OfferConstraints{}); strings.Contains(got, "cpu_ram") {
+		t.Errorf("filter %q should not constrain cpu_ram when MinHostRAMGB is 0", got)
+	}
+}
+
 // TestBuildSearchFilter_HardwareCeilingDoesNotInflateMem is the regression
 // for wj2265 and peers: when the request names a known hardware ceiling
 // (A100 80GB) the search filter must emit `gpu_ram>=80`, not `>=82`, or

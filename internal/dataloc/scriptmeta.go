@@ -20,6 +20,8 @@ type ScriptMeta struct {
 	GPUMemStrict  *bool  // Exact gpu-mem matching (no headroom), when explicitly set
 	Interconnect  string // Requested intra-host interconnect: any, pcie, nvlink
 	CPUCores      int    // Minimum effective CPU cores/vCPUs
+	CPUMemGB      int    // Minimum host/system RAM in GB (headroom may be applied by CLI)
+	CPUMemStrict  *bool  // Exact cpu-mem matching (no headroom), when explicitly set
 	DiskGB        int    // Total rental disk floor in GB
 	RuntimeDiskGB int    // Extra scratch/cache disk headroom in GB
 	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
@@ -52,7 +54,7 @@ type ScriptMeta struct {
 // for any deps-only script.
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
-		m.Interconnect == "" && m.CPUCores == 0 &&
+		m.Interconnect == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
 		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
@@ -100,6 +102,10 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 				meta.Interconnect = strings.TrimSpace(v)
 			}
 			meta.CPUCores = parsePositiveInt(firstPresent(wt, "cpu-cores", "cpu_cores"))
+			meta.CPUMemGB = parseDiskGB(firstPresent(wt, "cpu-mem", "cpu-mem-gb", "cpu_mem_gb"))
+			if v, ok := wt.Get("cpu-mem-strict").(bool); ok {
+				meta.CPUMemStrict = &v
+			}
 			meta.DiskGB = parseDiskGB(firstPresent(wt, "disk", "disk-gb", "disk_gb"))
 			meta.RuntimeDiskGB = parseDiskGB(firstPresent(wt, "runtime-disk", "runtime-disk-gb", "runtime_disk_gb"))
 			if v, ok := wt.Get("gpu-arch-max").(string); ok {

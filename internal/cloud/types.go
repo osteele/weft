@@ -131,6 +131,7 @@ type OfferConstraints struct {
 	Interconnect         string   // required intra-host interconnect: any, pcie, nvlink
 	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
+	MinHostRAMGB         int      // minimum host/system RAM in GB (0 = no floor)
 	InstanceType         string   // desired rental type ("on-demand" or "interruptible")
 }
 

@@ -303,6 +303,35 @@ func (j *Job) RequestedCPUCores() int {
 	return *j.CLIResourceOverrides.CPUCores
 }
 
+// CPUMemHeadroomGB is the safety margin added to a non-strict --cpu-mem
+// declaration: host-RAM transients (e.g. multi-copy weight processing during
+// model load) spike above steady-state, so the placement floor sits a little
+// above the declared value unless the user requests exact matching.
+const CPUMemHeadroomGB = 2
+
+// EffectiveCPUMemGB resolves a raw --cpu-mem declaration to the placement floor:
+// the raw value plus CPUMemHeadroomGB unless strict matching was requested.
+// Shared by the submit path and RequestedCPUMemGB so headroom lives in one place.
+func EffectiveCPUMemGB(rawGB int, strict bool) int {
+	if rawGB <= 0 {
+		return 0
+	}
+	if strict {
+		return rawGB
+	}
+	return rawGB + CPUMemHeadroomGB
+}
+
+// RequestedCPUMemGB returns the effective host/system-RAM floor in GB. The raw
+// --cpu-mem value is stored (pre-headroom) so this resolves idempotently on retry.
+func (j *Job) RequestedCPUMemGB() int {
+	if j == nil || j.CLIResourceOverrides == nil || j.CLIResourceOverrides.CPUMemGB == nil {
+		return 0
+	}
+	strict := j.CLIResourceOverrides.CPUMemStrict != nil && *j.CLIResourceOverrides.CPUMemStrict
+	return EffectiveCPUMemGB(*j.CLIResourceOverrides.CPUMemGB, strict)
+}
+
 // CLIResourceOverrides records explicit resource choices from submission or
 // later edit/retry commands. Only fields the user explicitly set are
 // populated. On retry, these are re-applied on top of the current script
@@ -321,6 +350,8 @@ type CLIResourceOverrides struct {
 	GPUMemStrict   *bool  `json:"gpu_mem_strict,omitempty"`
 	Interconnect   string `json:"interconnect,omitempty"`
 	CPUCores       *int   `json:"cpu_cores,omitempty"`
+	CPUMemGB       *int   `json:"cpu_mem_gb,omitempty"`
+	CPUMemStrict   *bool  `json:"cpu_mem_strict,omitempty"`
 	DiskGB         *int   `json:"disk_gb,omitempty"`
 	RuntimeDiskGB  *int   `json:"runtime_disk_gb,omitempty"`
 	MinCUDAVersion string `json:"min_cuda_version,omitempty"`
@@ -1371,6 +1402,7 @@ func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverri
 func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
+		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
 		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinCUDAVersion == ""
 }
 

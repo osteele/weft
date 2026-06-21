@@ -766,6 +766,10 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	if c.MinCPUCoresEffective > 0 {
 		parts = append(parts, fmt.Sprintf("cpu_cores_effective>=%d", c.MinCPUCoresEffective))
 	}
+	if c.MinHostRAMGB > 0 {
+		// cpu_ram is reported in MB.
+		parts = append(parts, fmt.Sprintf("cpu_ram>=%d", c.MinHostRAMGB*1024))
+	}
 	if c.MinReliability > 0 {
 		parts = append(parts, fmt.Sprintf("reliability>=%g", c.MinReliability))
 	}
