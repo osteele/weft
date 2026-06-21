@@ -795,6 +795,7 @@ func Open() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	configureSQLitePool(db)
 
 	migrated, err := initSchema(db)
 	if err != nil {
@@ -859,6 +860,7 @@ func OpenReadOnly() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database read-only: %w", err)
 	}
+	configureSQLitePool(database)
 	// sql.Open is lazy; verify the connection works.
 	if err := database.Ping(); err != nil {
 		database.Close()
@@ -878,6 +880,14 @@ func SetDBPath(path string) func() {
 	return func() {
 		dbPath = original
 	}
+}
+
+func configureSQLitePool(database *sql.DB) {
+	// SQLite permits only one writer. Keep each process from opening dozens
+	// of connections to the same DB, while still allowing existing code that
+	// performs nested reads during a transaction to make progress.
+	database.SetMaxOpenConns(4)
+	database.SetMaxIdleConns(2)
 }
 
 // initSchema brings the database up to the current schema version. The whole

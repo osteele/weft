@@ -181,6 +181,23 @@ func ResumeAutopilot(database *sql.DB) (*AutopilotState, error) {
 //
 // A claim aged past staleAfter is reclaimed automatically.
 func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity) (claimed, paused bool, existing *AutopilotState, err error) {
+	result, err := RetryOnDatabaseLockedValue(context.Background(), "claim autopilot pass", func() (autopilotClaimResult, error) {
+		claimed, paused, existing, err := tryClaimAutopilotPassOnce(database, pid, label, host, staleAfter, binary)
+		return autopilotClaimResult{claimed: claimed, paused: paused, existing: existing}, err
+	})
+	if err != nil {
+		return false, false, nil, err
+	}
+	return result.claimed, result.paused, result.existing, nil
+}
+
+type autopilotClaimResult struct {
+	claimed  bool
+	paused   bool
+	existing *AutopilotState
+}
+
+func tryClaimAutopilotPassOnce(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity) (claimed, paused bool, existing *AutopilotState, err error) {
 	tx, err := database.BeginTx(context.Background(), nil)
 	if err != nil {
 		return false, false, nil, err
@@ -297,22 +314,24 @@ func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleA
 // HeartbeatAutopilotPass updates the heartbeat timestamp if pid still owns the
 // slot. Returns ErrAutopilotPassLost if another runner has taken over.
 func HeartbeatAutopilotPass(database *sql.DB, pid int) error {
-	res, err := database.Exec(`
-		UPDATE autopilot_state
-		   SET last_heartbeat = ?
-		 WHERE id = 1 AND active_runner_pid = ?
-	`, time.Now().Unix(), pid)
-	if err != nil {
-		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrAutopilotPassLost
-	}
-	return nil
+	return RetryOnDatabaseLocked(context.Background(), "heartbeat autopilot pass", func() error {
+		res, err := database.Exec(`
+			UPDATE autopilot_state
+			   SET last_heartbeat = ?
+			 WHERE id = 1 AND active_runner_pid = ?
+		`, time.Now().Unix(), pid)
+		if err != nil {
+			return err
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 0 {
+			return ErrAutopilotPassLost
+		}
+		return nil
+	})
 }
 
 // ReleaseAutopilotPass clears the active runner slot if pid owns it, recording
@@ -322,17 +341,19 @@ func ReleaseAutopilotPass(database *sql.DB, pid int, duration time.Duration, sum
 	if passErr != nil {
 		errText = passErr.Error()
 	}
-	_, err := database.Exec(`
-		UPDATE autopilot_state
-		   SET active_runner_pid = NULL, active_runner_label = NULL, active_runner_host = NULL,
-		       active_binary_path = NULL, active_binary_size = NULL, active_binary_mtime = NULL,
-		       active_binary_dev = NULL, active_binary_ino = NULL,
-		       pass_started_at = NULL, last_heartbeat = NULL,
-		       last_pass_finished_at = ?, last_pass_duration_ms = ?,
-		       last_pass_summary = ?, last_pass_error = ?
-		 WHERE id = 1 AND active_runner_pid = ?
-	`, time.Now().Unix(), duration.Milliseconds(), summary, errText, pid)
-	return err
+	return RetryOnDatabaseLocked(context.Background(), "release autopilot pass", func() error {
+		_, err := database.Exec(`
+			UPDATE autopilot_state
+			   SET active_runner_pid = NULL, active_runner_label = NULL, active_runner_host = NULL,
+			       active_binary_path = NULL, active_binary_size = NULL, active_binary_mtime = NULL,
+			       active_binary_dev = NULL, active_binary_ino = NULL,
+			       pass_started_at = NULL, last_heartbeat = NULL,
+			       last_pass_finished_at = ?, last_pass_duration_ms = ?,
+			       last_pass_summary = ?, last_pass_error = ?
+			 WHERE id = 1 AND active_runner_pid = ?
+		`, time.Now().Unix(), duration.Milliseconds(), summary, errText, pid)
+		return err
+	})
 }
 
 // ErrAutopilotPassLost is returned by HeartbeatAutopilotPass when another

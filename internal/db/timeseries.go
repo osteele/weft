@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -108,6 +109,12 @@ func InsertTimeseriesForRun(database *sql.DB, jobID, runID int64, samples []Time
 }
 
 func insertTimeseriesForRun(database *sql.DB, jobID int64, runID *int64, samples []TimeseriesSample) error {
+	return RetryOnDatabaseLocked(context.Background(), "insert timeseries", func() error {
+		return insertTimeseriesForRunOnce(database, jobID, runID, samples)
+	})
+}
+
+func insertTimeseriesForRunOnce(database *sql.DB, jobID int64, runID *int64, samples []TimeseriesSample) error {
 	tx, err := database.Begin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)

@@ -11,6 +11,12 @@ import (
 // AcquireAutoLease attempts to acquire (or renew) a scoped lease for the caller.
 // It returns true when the lease is held by owner after this call.
 func AcquireAutoLease(database *sql.DB, scope string, owner string, ttl time.Duration) (bool, error) {
+	return RetryOnDatabaseLockedValue(context.Background(), "acquire auto lease", func() (bool, error) {
+		return acquireAutoLeaseOnce(database, scope, owner, ttl)
+	})
+}
+
+func acquireAutoLeaseOnce(database *sql.DB, scope string, owner string, ttl time.Duration) (bool, error) {
 	if database == nil || scope == "" || owner == "" || ttl <= 0 {
 		return false, nil
 	}
@@ -79,11 +85,13 @@ func ReleaseAutoLease(database *sql.DB, scope string, owner string) error {
 	if database == nil || scope == "" || owner == "" {
 		return nil
 	}
-	_, err := database.Exec(`DELETE FROM auto_leases WHERE scope = ? AND owner = ?`, scope, owner)
-	if isNoSuchTable(err) {
-		return nil
-	}
-	return err
+	return RetryOnDatabaseLocked(context.Background(), "release auto lease", func() error {
+		_, err := database.Exec(`DELETE FROM auto_leases WHERE scope = ? AND owner = ?`, scope, owner)
+		if isNoSuchTable(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 func ensureAutoLeasesTable(database *sql.DB) error {
