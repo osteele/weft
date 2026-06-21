@@ -27,6 +27,9 @@ func RefreshProjectDerivedMetadata(database *sql.DB, job *db.Job) error {
 	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
 		inputs = mergeStringSlices(inputs, meta.Inputs)
 	}
+	// Re-correct hf:-misprefixed datasets so a restart/requeue does not
+	// reintroduce the raw hf: form from PEP-723 metadata.
+	inputs, _ = dataloc.NormalizeMisprefixedHFDatasets(inputs)
 	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
 		return fmt.Errorf("refresh job inputs: %w", err)
 	}

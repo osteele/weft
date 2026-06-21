@@ -354,6 +354,35 @@ func hfRefIsDataset(ref string) bool {
 	return exists
 }
 
+// NormalizeMisprefixedHFDatasets rewrites `hf:X` input refs to `hf-dataset:X`
+// when X exists as a HuggingFace dataset — a common declaration error, since
+// datasets are not models, that otherwise causes weft to stage the ref as a
+// model (which fails) and the job to fetch the dataset live at runtime. Returns
+// the normalized inputs and the original refs that were corrected (for caller
+// warnings). Refs already shadowed by an explicit `hf-dataset:X` are left for
+// the caller's existing dedup. The dataset probe is memoized and fails safe
+// (a network error leaves the ref unchanged).
+func NormalizeMisprefixedHFDatasets(inputs []string) (out, corrected []string) {
+	hasDatasetForm := make(map[string]bool)
+	for _, in := range inputs {
+		if a, ok := ParseAssetRef(in); ok && a.Kind == AssetHFDataset {
+			hasDatasetForm[a.ID] = true
+		}
+	}
+	out = make([]string, 0, len(inputs))
+	for _, in := range inputs {
+		a, ok := ParseAssetRef(in)
+		if ok && a.Kind == AssetHFModel && !hasDatasetForm[a.ID] && hfRefIsDataset(a.ID) {
+			out = append(out, DataAsset{Kind: AssetHFDataset, ID: a.ID}.Ref())
+			corrected = append(corrected, in)
+			hasDatasetForm[a.ID] = true
+			continue
+		}
+		out = append(out, in)
+	}
+	return out, corrected
+}
+
 // ClearHFModelSizeCache clears the in-process model size cache (for testing).
 func ClearHFModelSizeCache() {
 	hfModelSizeCache = sync.Map{}

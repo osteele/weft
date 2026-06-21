@@ -772,6 +772,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runEnvVars = append(runEnvVars, applyEnvMap(meta.Env)...)
 			applied = append(applied, fmt.Sprintf("env=%v", meta.Env))
 		}
+		if meta.HFOffline != nil && *meta.HFOffline {
+			// Opt-in: run with HF offline so a fully-staged job never touches
+			// the network. Declared inputs are pre-staged (and the staging gate
+			// blocks jobs whose declared inputs aren't available); the user
+			// asserts the job loads no undeclared HF assets at runtime.
+			runEnvVars = append(runEnvVars, hfOfflineEnvVars()...)
+			applied = append(applied, "hf-offline=true")
+		}
 		if len(applied) > 0 {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Script metadata: %s\n", strings.Join(applied, ", "))
 		}
@@ -785,6 +793,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"Warning: dropping %s — also declared as hf-dataset. Use hf-dataset:<id> for HF datasets.\n",
 			strings.Join(removed, ", "))
+	}
+	if normalized, corrected := dataloc.NormalizeMisprefixedHFDatasets(runInputs); len(corrected) > 0 {
+		runInputs = normalized
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"Warning: %s declared as hf: but resolves to an HF dataset; staging as hf-dataset:. Declare hf-dataset:<id> to silence this.\n",
+			strings.Join(corrected, ", "))
 	}
 	runEnvVars, err = applySecretEnv(runEnvVars, runInputs, runHFToken, runHFTokenFrom, runSecretVars)
 	if err != nil {
@@ -2070,6 +2084,16 @@ func printCommandRecommendations(command string) bool {
 // dropModelRefsShadowedByDatasetRefs removes any "hf:<id>" entry from inputs
 // when "hf-dataset:<id>" is also present, returning the filtered slice and
 // the dropped refs.
+// hfOfflineEnvVars returns the environment that pins a job to the local HF
+// cache (no network), used when a script opts in via [tool.weft] hf-offline.
+func hfOfflineEnvVars() []string {
+	return []string{
+		"HF_HUB_OFFLINE=1",
+		"TRANSFORMERS_OFFLINE=1",
+		"HF_DATASETS_OFFLINE=1",
+	}
+}
+
 func dropModelRefsShadowedByDatasetRefs(inputs []string) (filtered, removed []string) {
 	datasets := make(map[string]bool)
 	for _, s := range inputs {

@@ -112,6 +112,14 @@ func remediateData(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 			}
 		}
 		return retryJob(ctx, diagJSON, "re-synced sources and retried")
+
+	case "hf_transient_network":
+		// The asset exists and is reachable; only the live fetch was
+		// interrupted by a transient reset. Re-queue and retry — a later pass
+		// after the blip clears succeeds. No pre-staging (the asset is
+		// reachable) and no host clear (that would re-route an on-prem job
+		// through the rental path); declaring the input is the permanent fix.
+		return retryJob(ctx, diagJSON, "transient HF network reset; re-queued and retried")
 	}
 
 	storeDiagnosis(ctx, diagJSON, ctx.Job.RetryCount)

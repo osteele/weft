@@ -94,6 +94,40 @@ OSError: We couldn't connect to 'https://huggingface.co' to load the files, and 
 	}
 }
 
+func TestDataPatterns_HFTransientNetwork_DatasetRetryable(t *testing.T) {
+	// A dataset live-fetch interrupted by a reset: the model-shaped
+	// hf_network_cache_miss pattern does not match the dataset URL, so this
+	// gets the remediable transient pattern.
+	log := `ConnectionResetError(54, 'Connection reset by peer') thrown while requesting HEAD https://huggingface.co/datasets/google-research-datasets/mbpp/resolve/main/README.md
+huggingface_hub.errors.LocalEntryNotFoundError: An error happened while trying to locate the file on the Hub.
+datasets.exceptions.DatasetNotFoundError: ConnectionError: Couldn't reach 'google-research-datasets/mbpp' on the Hub`
+
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected a transient-network diagnosis")
+	}
+	if d.Pattern != "hf_transient_network" {
+		t.Fatalf("pattern = %q, want hf_transient_network", d.Pattern)
+	}
+	if d.Category != "data" {
+		t.Errorf("category = %q, want data", d.Category)
+	}
+	if !d.Remediable {
+		t.Error("transient HF network reset should auto-retry")
+	}
+}
+
+func TestDataPatterns_HFTransientNetwork_RequiresReset(t *testing.T) {
+	// No reset signal -> a genuinely missing/gated asset, which must NOT be
+	// treated as transient-retryable (it would loop without helping).
+	log := `huggingface_hub.errors.LocalEntryNotFoundError: cannot find the requested files in the local cache.
+ConnectionError: Couldn't reach 'some/dataset' on the Hub`
+
+	if d := DiagnoseFromLog(log); d != nil && d.Pattern == "hf_transient_network" {
+		t.Errorf("no reset present; should not classify as hf_transient_network (remediable=%v)", d.Remediable)
+	}
+}
+
 func TestDataPatterns_MissingHFModel(t *testing.T) {
 	log := `Traceback (most recent call last):
   File "train.py", line 10, in <module>

@@ -506,6 +506,20 @@ var dataPatterns = []*pattern{
 		},
 	},
 	{
+		// Transient HuggingFace network failure: a reset/interrupted live
+		// request co-occurring with an HF give-up. The asset exists and is
+		// reachable on a clean sweep, so this is retry-safe (distinct from
+		// hf_network_cache_miss, which is a permanent missing-declaration).
+		// Gated on the reset signal — not bare LocalEntryNotFoundError — so a
+		// genuinely missing/gated asset does not get retried.
+		re:         regexp.MustCompile(`(?is)(?:ConnectionResetError|Connection reset by peer).*?(?:LocalEntryNotFoundError|[Cc]ouldn'?t reach\b.*?\bon the Hub)`),
+		patternID:  "hf_transient_network",
+		category:   "data",
+		message:    "HuggingFace fetch failed on a transient network reset; the asset exists but the live request was interrupted",
+		solution:   "Auto-retried on a fresh sweep. Declare the asset as a Weft input (hf:<model> / hf-dataset:<dataset>) so it is pre-staged and the job can run offline.",
+		remediable: true,
+	},
+	{
 		re:         regexp.MustCompile(`(?i)(?:FileNotFoundError|OSError|No such file or directory).*huggingface/hub/models--([^\s/]+--[^\s/]+)`),
 		patternID:  "missing_hf_model",
 		category:   "data",

@@ -78,6 +78,15 @@ import torch
 			want: &ScriptMeta{CPUMemGB: 64, CPUMemStrict: boolPtr(true)},
 		},
 		{
+			name: "hf-offline",
+			content: `# /// script
+# [tool.weft]
+# hf-offline = true
+# ///
+`,
+			want: &ScriptMeta{HFOffline: boolPtr(true)},
+		},
+		{
 			name: "multi-gpu shape",
 			content: `# /// script
 # [tool.weft]

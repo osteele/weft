@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -298,6 +300,40 @@ func TestResolveModelSize_DatasetRefSurfacesClearError(t *testing.T) {
 	}
 	if !errors.Is(err, ErrHFRefIsDataset) {
 		t.Fatalf("err = %v, want ErrHFRefIsDataset", err)
+	}
+}
+
+func TestNormalizeMisprefixedHFDatasets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/datasets/google-research-datasets/mbpp" {
+			w.WriteHeader(http.StatusOK) // exists as a dataset
+			return
+		}
+		http.NotFound(w, r) // everything else is not a dataset
+	}))
+	defer server.Close()
+	setupHFTestServer(t, server)
+	hfDatasetExistsCache = sync.Map{}
+	t.Cleanup(func() { hfDatasetExistsCache = sync.Map{} })
+
+	inputs := []string{
+		"hf:google-research-datasets/mbpp", // dataset mis-prefixed as model -> rewrite
+		"hf:microsoft/phi-1",               // genuine model (not a dataset) -> untouched
+		"hf-dataset:already/correct",       // already a dataset ref -> untouched
+		"local:data/",                      // non-HF ref -> untouched
+	}
+	out, corrected := NormalizeMisprefixedHFDatasets(inputs)
+	want := []string{
+		"hf-dataset:google-research-datasets/mbpp",
+		"hf:microsoft/phi-1",
+		"hf-dataset:already/correct",
+		"local:data/",
+	}
+	if !reflect.DeepEqual(out, want) {
+		t.Errorf("out = %v, want %v", out, want)
+	}
+	if len(corrected) != 1 || corrected[0] != "hf:google-research-datasets/mbpp" {
+		t.Errorf("corrected = %v, want [hf:google-research-datasets/mbpp]", corrected)
 	}
 }
 
