@@ -233,7 +233,16 @@ func SyncInstanceState(
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
 			switch verb {
 			case PhaseSetup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
-				if j := findJobInSlice(jobs, phaseJobID); j != nil {
+				adoptObservedMoveTarget(ctx, database, r2Client, instanceID, phaseJobID)
+				j := findJobInSlice(jobs, phaseJobID)
+				if j == nil {
+					var err error
+					j, err = db.GetJobByID(database, phaseJobID)
+					if err != nil && err != sql.ErrNoRows {
+						slog.Warn("failed to refresh phase job", "component", "sync", "job_id", phaseJobID, "error", err)
+					}
+				}
+				if j != nil {
 					if j.Status == db.StatusQueued {
 						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
 							slog.Warn("failed to mark job running from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
@@ -250,6 +259,14 @@ func SyncInstanceState(
 					}
 					jobState.HasStartedJob = true
 				}
+			}
+		}
+
+		if ci != nil && ci.AgentReadyAtUnix == nil && jobState.HasStartedJob {
+			if err := db.SetLaunchAgentReadyAtIfUnset(database, instanceID, time.Now()); err == nil {
+				now := time.Now().Unix()
+				ci.AgentReadyAtUnix = &now
+				confirmMoveIntentsForReadyLaunch(ctx, database, r2Client, instanceID)
 			}
 		}
 
@@ -347,6 +364,38 @@ func confirmMoveIntentsForReadyLaunch(ctx context.Context, database *sql.DB, r2C
 	}
 	if err := db.ConfirmOpenMoveIntentsForTargetLaunch(database, instanceID, "target agent_ready"); err != nil {
 		slog.Warn("confirm move intents for ready launch", "component", "sync", "instance", instanceID, "error", err)
+		return
+	}
+	stopMoveIntentSources(ctx, r2Client, sourceStops)
+}
+
+func adoptObservedMoveTarget(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobID int64) {
+	intent, err := db.GetOpenMoveIntent(database, jobID)
+	if err != nil {
+		slog.Warn("read open move intent for phase job", "component", "sync", "job_id", jobID, "instance", instanceID, "error", err)
+		return
+	}
+	if intent == nil || intent.TargetLaunchID == nil || *intent.TargetLaunchID != instanceID {
+		return
+	}
+	if intent.TargetAttemptID == nil {
+		slog.Warn("phase job has open move intent without target attempt", "component", "sync", "job_id", jobID, "instance", instanceID, "intent_id", intent.ID)
+		return
+	}
+
+	var sourceStops []db.MoveIntentSourceStop
+	stops, err := db.ListMoveIntentSourceStopsForTargetLaunch(database, instanceID)
+	if err != nil {
+		slog.Warn("list move source stops for observed phase", "component", "sync", "job_id", jobID, "instance", instanceID, "intent_id", intent.ID, "error", err)
+	} else {
+		for _, stop := range stops {
+			if stop.IntentID == intent.ID {
+				sourceStops = append(sourceStops, stop)
+			}
+		}
+	}
+	if err := db.ConfirmMoveTargetAccepted(database, intent.ID, fmt.Sprintf("target phase reported %s", ids.FormatJobID(jobID))); err != nil {
+		slog.Warn("confirm move intent from phase job", "component", "sync", "job_id", jobID, "instance", instanceID, "intent_id", intent.ID, "error", err)
 		return
 	}
 	stopMoveIntentSources(ctx, r2Client, sourceStops)

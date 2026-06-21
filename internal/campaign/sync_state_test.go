@@ -159,6 +159,131 @@ func TestConfirmMoveIntentsForReadyLaunchStopsCloudSource(t *testing.T) {
 	}
 }
 
+func TestSyncInstanceState_PhaseConfirmsHiddenMoveTarget(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "runpod", GPUSpec: "RTX_3090"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, command, tombstoned)
+		 VALUES (104, '/tmp', 'RTX_3090', 'python train.py', 0)`,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 104, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceAttemptID, err := db.GetLatestAttemptID(database, 104)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:           104,
+		SourceAttemptID: &sourceAttemptID,
+		SourceLaunchID:  &sourceLaunch,
+		TargetKind:      db.MoveTargetNew,
+		TargetLaunchID:  &targetLaunch,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, 104, "", &targetLaunch, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+
+	ci, err := db.GetLaunch(database, targetLaunch)
+	if err != nil {
+		t.Fatalf("GetLaunch target: %v", err)
+	}
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		sendGraceCancelAttempts = prevSendCancel
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return "running:104"
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return ""
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 104, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	canceledByLaunch := map[int64][]int64{}
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, launchID int64, attemptIDs []int64) error {
+		canceledByLaunch[launchID] = append(canceledByLaunch[launchID], attemptIDs...)
+		return nil
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	if synced.JobsUpdated != 1 {
+		t.Fatalf("JobsUpdated = %d, want 1", synced.JobsUpdated)
+	}
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != db.MoveIntentStateConfirmed {
+		t.Fatalf("intent state = %q, want confirmed", gotIntent.State)
+	}
+	job, err := db.GetJobByID(database, 104)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("job status = %q, want running", job.Status)
+	}
+	if job.LaunchID == nil || *job.LaunchID != targetLaunch {
+		t.Fatalf("job launch = %v, want %d", job.LaunchID, targetLaunch)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID != targetAttemptID {
+		t.Fatalf("latest run = %v, want target attempt %d", job.LatestRunID, targetAttemptID)
+	}
+	if got := canceledByLaunch[sourceLaunch]; len(got) != 1 || got[0] != sourceAttemptID {
+		t.Fatalf("source cancel-attempts = %v, want [%d]", canceledByLaunch, sourceAttemptID)
+	}
+	ci, err = db.GetLaunch(database, targetLaunch)
+	if err != nil {
+		t.Fatalf("GetLaunch refreshed: %v", err)
+	}
+	if ci.AgentReadyAtUnix == nil {
+		t.Fatal("agent_ready_at_unix was not recorded")
+	}
+	var sourceReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, sourceAttemptID).Scan(&sourceReason); err != nil {
+		t.Fatalf("read source abandoned reason: %v", err)
+	}
+	if sourceReason != db.AttemptAbandonedMoveTargetAccepted {
+		t.Fatalf("source abandoned reason = %q, want %q", sourceReason, db.AttemptAbandonedMoveTargetAccepted)
+	}
+}
+
 func TestReconcilePendingMoveTargetRequestAckConfirmsAndStopsSource(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
