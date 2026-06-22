@@ -38,6 +38,54 @@ func DialWatchJobs(ctx context.Context, socketPath string, jobIDs []int64, timeo
 	return &Watcher{conn: conn, decoder: json.NewDecoder(conn)}, nil
 }
 
+func DialDaemonInfo(ctx context.Context, socketPath string) (DaemonInfo, error) {
+	event, err := roundTrip(ctx, socketPath, Request{Type: RequestDaemonInfo, ClientPID: os.Getpid()})
+	if err != nil {
+		return DaemonInfo{}, err
+	}
+	if event.Type == EventError {
+		return DaemonInfo{}, fmt.Errorf("daemon info: %s", event.Error)
+	}
+	if event.Type != EventDaemonInfo || event.Daemon == nil {
+		return DaemonInfo{}, fmt.Errorf("daemon info: unexpected response %q", event.Type)
+	}
+	return *event.Daemon, nil
+}
+
+func DialShutdown(ctx context.Context, socketPath string) error {
+	event, err := roundTrip(ctx, socketPath, Request{Type: RequestShutdown, ClientPID: os.Getpid()})
+	if err != nil {
+		return err
+	}
+	if event.Type == EventError {
+		return fmt.Errorf("daemon shutdown: %s", event.Error)
+	}
+	if event.Type != EventDone {
+		return fmt.Errorf("daemon shutdown: unexpected response %q", event.Type)
+	}
+	return nil
+}
+
+func roundTrip(ctx context.Context, socketPath string, req Request) (Event, error) {
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return Event{}, err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return Event{}, fmt.Errorf("send daemon request: %w", err)
+	}
+	var event Event
+	if err := json.NewDecoder(conn).Decode(&event); err != nil {
+		return Event{}, fmt.Errorf("read daemon response: %w", err)
+	}
+	return event, nil
+}
+
 func (w *Watcher) Next() (Event, error) {
 	var event Event
 	if err := w.decoder.Decode(&event); err != nil {

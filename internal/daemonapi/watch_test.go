@@ -53,6 +53,47 @@ func TestWatchJobsEmitsInitialAndTerminalSnapshots(t *testing.T) {
 	}
 }
 
+func TestDaemonInfoAndShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	shutdown := make(chan struct{}, 1)
+	want := DaemonInfo{
+		PID:               os.Getpid(),
+		Version:           "test-version",
+		Executable:        "/tmp/weft",
+		ExecutableModTime: 123,
+		StartedAt:         456,
+	}
+	server, err := StartServerWithOptions(ctx, nil, socketPath, ServerOptions{
+		Info: want,
+		Shutdown: func() {
+			shutdown <- struct{}{}
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartServerWithOptions: %v", err)
+	}
+	defer server.Close()
+
+	got, err := DialDaemonInfo(ctx, socketPath)
+	if err != nil {
+		t.Fatalf("DialDaemonInfo: %v", err)
+	}
+	if got != want {
+		t.Fatalf("DialDaemonInfo = %+v, want %+v", got, want)
+	}
+	if err := DialShutdown(ctx, socketPath); err != nil {
+		t.Fatalf("DialShutdown: %v", err)
+	}
+	select {
+	case <-shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not called")
+	}
+}
+
 func insertWatchTestJob(t *testing.T, database *sql.DB, id int64, status string) {
 	t.Helper()
 	if _, err := database.Exec(

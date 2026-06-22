@@ -1,9 +1,11 @@
 package daemoncontrol
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/daemonapi"
 	"github.com/osteele/weft/internal/util"
 )
 
@@ -21,6 +24,7 @@ const (
 
 type Paths struct {
 	PIDFile    string
+	LockFile   string
 	SocketFile string
 	StdoutLog  string
 	StderrLog  string
@@ -58,11 +62,49 @@ func DefaultPaths() Paths {
 	cacheDir := filepath.Join(home, ".cache", "weft")
 	return Paths{
 		PIDFile:    filepath.Join(cacheDir, "daemon.pid"),
+		LockFile:   filepath.Join(cacheDir, "daemon.lock"),
 		SocketFile: filepath.Join(cacheDir, "daemon.sock"),
 		StdoutLog:  filepath.Join(cacheDir, "daemon.stdout.log"),
 		StderrLog:  filepath.Join(cacheDir, "daemon.stderr.log"),
 		PlistFile:  filepath.Join(home, "Library", "LaunchAgents", Label+".plist"),
 	}
+}
+
+type Lock struct {
+	file *os.File
+}
+
+func AcquireLock(paths Paths) (*Lock, error) {
+	if paths.LockFile == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.LockFile), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(paths.LockFile, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("daemon lock already held: %s", paths.LockFile)
+		}
+		return nil, fmt.Errorf("lock daemon lock file: %w", err)
+	}
+	return &Lock{file: f}, nil
+}
+
+func (l *Lock) Close() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	err := syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	if closeErr := l.file.Close(); err == nil {
+		err = closeErr
+	}
+	l.file = nil
+	return err
 }
 
 func ReadPID(path string) (int, bool, error) {
@@ -177,6 +219,24 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 	if err != nil {
 		return status, EnsureNoop, err
 	}
+	if info, ok, err := SocketDaemonInfo(paths, 100*time.Millisecond); err != nil {
+		return status, EnsureNoop, err
+	} else if ok {
+		if status.Live && status.PID != info.PID {
+			if _, _, err := stopLivePID(paths, status.PID, 5*time.Second); err != nil {
+				return status, EnsureNoop, err
+			}
+		}
+		if !status.Live || status.PID != info.PID {
+			if err := RepairPIDFilesFromDaemonInfo(paths, info); err != nil {
+				return status, EnsureNoop, err
+			}
+			status, err = CurrentStatus(paths)
+			if err != nil {
+				return status, EnsureNoop, err
+			}
+		}
+	}
 	if status.Live && !status.ActiveBinaryStale {
 		return status, EnsureNoop, nil
 	}
@@ -203,6 +263,10 @@ func WritePIDFile(path string, pid int) error {
 	} else if ok && daemonProcessLive(existing) {
 		return fmt.Errorf("daemon already running with PID %d", existing)
 	}
+	return writePIDFileValue(path, pid)
+}
+
+func writePIDFileValue(path string, pid int) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -211,6 +275,38 @@ func WritePIDFile(path string, pid int) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func WriteMetadataFromDaemonInfo(paths Paths, info daemonapi.DaemonInfo) error {
+	metadata := Metadata{
+		PID:               info.PID,
+		Version:           info.Version,
+		Executable:        info.Executable,
+		ExecutableModTime: info.ExecutableModTime,
+		StartedAt:         info.StartedAt,
+	}
+	if metadata.StartedAt == 0 {
+		metadata.StartedAt = time.Now().Unix()
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.PIDFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(MetadataPath(paths), data, 0o644)
+}
+
+func RepairPIDFilesFromDaemonInfo(paths Paths, info daemonapi.DaemonInfo) error {
+	if info.PID <= 0 {
+		return fmt.Errorf("daemon socket reported invalid PID %d", info.PID)
+	}
+	if err := writePIDFileValue(paths.PIDFile, info.PID); err != nil {
+		return err
+	}
+	return WriteMetadataFromDaemonInfo(paths, info)
 }
 
 func RemovePIDFileIfOwn(path string, pid int) error {
@@ -245,18 +341,26 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 		return 0, false, err
 	}
 	if !ok {
-		return 0, false, nil
+		return StopSocketDaemon(paths, timeout)
 	}
 	if !daemonProcessLive(pid) {
 		_ = os.Remove(paths.PIDFile)
+		socketPID, hadProcess, err := StopSocketDaemon(paths, timeout)
+		if err != nil || hadProcess {
+			return socketPID, hadProcess, err
+		}
 		return pid, false, nil
 	}
+	return stopLivePID(paths, pid, timeout)
+}
+
+func stopLivePID(paths Paths, pid int, timeout time.Duration) (int, bool, error) {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return pid, true, err
 	}
 	if err := proc.Signal(syscall.SIGTERM); errors.Is(err, os.ErrProcessDone) {
-		_ = os.Remove(paths.PIDFile)
+		_ = RemovePIDFileIfOwn(paths.PIDFile, pid)
 		return pid, true, nil
 	} else if err != nil {
 		return pid, true, err
@@ -264,13 +368,13 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !daemonProcessLive(pid) {
-			_ = os.Remove(paths.PIDFile)
+			_ = RemovePIDFileIfOwn(paths.PIDFile, pid)
 			return pid, true, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if err := proc.Signal(syscall.SIGKILL); errors.Is(err, os.ErrProcessDone) {
-		_ = os.Remove(paths.PIDFile)
+		_ = RemovePIDFileIfOwn(paths.PIDFile, pid)
 		return pid, true, nil
 	} else if err != nil {
 		return pid, true, err
@@ -278,12 +382,36 @@ func StopPID(paths Paths, timeout time.Duration) (int, bool, error) {
 	deadline = time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !daemonProcessLive(pid) {
-			_ = os.Remove(paths.PIDFile)
+			_ = RemovePIDFileIfOwn(paths.PIDFile, pid)
 			return pid, true, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return pid, true, fmt.Errorf("daemon PID %d did not exit within %s after SIGKILL", pid, timeout)
+}
+
+func StopSocketDaemon(paths Paths, timeout time.Duration) (int, bool, error) {
+	info, ok, err := SocketDaemonInfo(paths, 100*time.Millisecond)
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	if !daemonProcessLive(info.PID) {
+		_ = os.Remove(paths.SocketFile)
+		_ = RemovePIDFileIfOwn(paths.PIDFile, info.PID)
+		return info.PID, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), minDuration(timeout, time.Second))
+	_ = daemonapi.DialShutdown(ctx, paths.SocketFile)
+	cancel()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !daemonProcessLive(info.PID) {
+			_ = RemovePIDFileIfOwn(paths.PIDFile, info.PID)
+			return info.PID, true, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return stopLivePID(paths, info.PID, timeout)
 }
 
 func daemonProcessLive(pid int) bool {
@@ -334,6 +462,53 @@ func StartDetached(paths Paths) (int, error) {
 	}
 	pid := cmd.Process.Pid
 	return pid, cmd.Process.Release()
+}
+
+func EnsureSocketAvailable(paths Paths, timeout time.Duration) error {
+	info, ok, err := SocketDaemonInfo(paths, timeout)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return fmt.Errorf("daemon already running on socket %s with PID %d", paths.SocketFile, info.PID)
+	}
+	return nil
+}
+
+func SocketDaemonInfo(paths Paths, timeout time.Duration) (daemonapi.DaemonInfo, bool, error) {
+	if paths.SocketFile == "" {
+		return daemonapi.DaemonInfo{}, false, nil
+	}
+	if _, err := os.Lstat(paths.SocketFile); errors.Is(err, os.ErrNotExist) {
+		return daemonapi.DaemonInfo{}, false, nil
+	} else if err != nil {
+		return daemonapi.DaemonInfo{}, false, fmt.Errorf("stat daemon socket: %w", err)
+	}
+	conn, err := net.DialTimeout("unix", paths.SocketFile, timeout)
+	if err != nil {
+		if removeErr := os.Remove(paths.SocketFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return daemonapi.DaemonInfo{}, false, fmt.Errorf("remove stale daemon socket: %w", removeErr)
+		}
+		return daemonapi.DaemonInfo{}, false, nil
+	}
+	_ = conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	info, err := daemonapi.DialDaemonInfo(ctx, paths.SocketFile)
+	if err != nil {
+		return daemonapi.DaemonInfo{}, false, fmt.Errorf("daemon socket is in use but did not answer as weft: %w", err)
+	}
+	if info.PID <= 0 {
+		return daemonapi.DaemonInfo{}, false, fmt.Errorf("daemon socket reported invalid PID %d", info.PID)
+	}
+	return info, true, nil
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func Restart(paths Paths, stopTimeout, wait time.Duration) (Status, error) {

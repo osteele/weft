@@ -16,11 +16,14 @@ import (
 )
 
 const (
-	RequestWatchJobs = "watch_jobs"
+	RequestWatchJobs  = "watch_jobs"
+	RequestDaemonInfo = "daemon_info"
+	RequestShutdown   = "shutdown"
 
-	EventSnapshot = "snapshot"
-	EventDone     = "done"
-	EventError    = "error"
+	EventSnapshot   = "snapshot"
+	EventDone       = "done"
+	EventError      = "error"
+	EventDaemonInfo = "daemon_info"
 )
 
 type Request struct {
@@ -40,18 +43,38 @@ type JobSnapshot struct {
 }
 
 type Event struct {
-	Type  string        `json:"type"`
-	Jobs  []JobSnapshot `json:"jobs,omitempty"`
-	Error string        `json:"error,omitempty"`
+	Type   string        `json:"type"`
+	Jobs   []JobSnapshot `json:"jobs,omitempty"`
+	Daemon *DaemonInfo   `json:"daemon,omitempty"`
+	Error  string        `json:"error,omitempty"`
 }
 
 type Server struct {
 	listener   net.Listener
 	socketPath string
 	closeOnce  sync.Once
+	info       DaemonInfo
+	shutdown   func()
+}
+
+type DaemonInfo struct {
+	PID               int    `json:"pid"`
+	Version           string `json:"version,omitempty"`
+	Executable        string `json:"executable,omitempty"`
+	ExecutableModTime int64  `json:"executable_mod_time,omitempty"`
+	StartedAt         int64  `json:"started_at,omitempty"`
+}
+
+type ServerOptions struct {
+	Info     DaemonInfo
+	Shutdown func()
 }
 
 func StartServer(ctx context.Context, database *sql.DB, socketPath string) (*Server, error) {
+	return StartServerWithOptions(ctx, database, socketPath, ServerOptions{})
+}
+
+func StartServerWithOptions(ctx context.Context, database *sql.DB, socketPath string, opts ServerOptions) (*Server, error) {
 	if socketPath == "" {
 		return nil, fmt.Errorf("empty daemon watch socket path")
 	}
@@ -67,7 +90,12 @@ func StartServer(ctx context.Context, database *sql.DB, socketPath string) (*Ser
 		_ = os.Remove(socketPath)
 		return nil, fmt.Errorf("chmod daemon watch socket: %w", err)
 	}
-	s := &Server{listener: listener, socketPath: socketPath}
+	s := &Server{
+		listener:   listener,
+		socketPath: socketPath,
+		info:       opts.Info,
+		shutdown:   opts.Shutdown,
+	}
 	go s.acceptLoop(ctx, database)
 	go func() {
 		<-ctx.Done()
@@ -114,11 +142,11 @@ func (s *Server) acceptLoop(ctx context.Context, database *sql.DB) {
 			}
 			continue
 		}
-		go handleConn(ctx, database, conn)
+		go s.handleConn(ctx, database, conn)
 	}
 }
 
-func handleConn(ctx context.Context, database *sql.DB, conn net.Conn) {
+func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn) {
 	defer conn.Close()
 	var req Request
 	decoder := json.NewDecoder(conn)
@@ -128,6 +156,14 @@ func handleConn(ctx context.Context, database *sql.DB, conn net.Conn) {
 		return
 	}
 	switch req.Type {
+	case RequestDaemonInfo:
+		info := s.info
+		_ = encoder.Encode(Event{Type: EventDaemonInfo, Daemon: &info})
+	case RequestShutdown:
+		_ = encoder.Encode(Event{Type: EventDone})
+		if s.shutdown != nil {
+			go s.shutdown()
+		}
 	case RequestWatchJobs:
 		watchJobs(ctx, database, encoder, req)
 	default:

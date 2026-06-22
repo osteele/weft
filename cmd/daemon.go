@@ -108,6 +108,14 @@ func init() {
 func runDaemonRun(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
 	pid := os.Getpid()
+	lock, err := daemoncontrol.AcquireLock(paths)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := daemoncontrol.EnsureSocketAvailable(paths, 100*time.Millisecond); err != nil {
+		return err
+	}
 	if err := daemoncontrol.WritePIDFile(paths.PIDFile, pid); err != nil {
 		return err
 	}
@@ -132,12 +140,14 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	watchServer, err := daemonapi.StartServer(ctx, database, paths.SocketFile)
+	watchServer, err := daemonapi.StartServerWithOptions(ctx, database, paths.SocketFile, daemonapi.ServerOptions{
+		Info:     daemonInfo(pid, Version),
+		Shutdown: stop,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: start daemon watch socket: %v\n", err)
-	} else {
-		defer watchServer.Close()
+		return fmt.Errorf("start daemon watch socket: %w", err)
 	}
+	defer watchServer.Close()
 	changeSource := openDBChangeSource("daemon")
 	if changeSource != nil {
 		defer changeSource.Close()
@@ -170,6 +180,21 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		}
 		runAutopilot = reason != autopilotWakeTimer || autopilotTimerRunsPass(lastOutcome)
 	}
+}
+
+func daemonInfo(pid int, version string) daemonapi.DaemonInfo {
+	info := daemonapi.DaemonInfo{
+		PID:       pid,
+		Version:   version,
+		StartedAt: time.Now().Unix(),
+	}
+	if exe, err := os.Executable(); err == nil {
+		info.Executable = exe
+		if stat, err := os.Stat(exe); err == nil {
+			info.ExecutableModTime = stat.ModTime().Unix()
+		}
+	}
+	return info
 }
 
 func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) (time.Duration, autopilotOutcome) {

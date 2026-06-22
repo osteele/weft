@@ -3,6 +3,7 @@ package daemoncontrol
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -10,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/daemonapi"
 )
 
 const stalePID = 99999999
@@ -81,6 +84,116 @@ func TestCurrentStatusClassifiesStalePID(t *testing.T) {
 	if !status.HasPID || status.Live || !status.Stale {
 		t.Fatalf("status = %+v, want stale PID", status)
 	}
+}
+
+func TestAcquireLockRejectsSecondHolder(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{LockFile: filepath.Join(dir, "daemon.lock")}
+	lock, err := AcquireLock(paths)
+	if err != nil {
+		t.Fatalf("AcquireLock first: %v", err)
+	}
+	defer lock.Close()
+	if second, err := AcquireLock(paths); err == nil {
+		second.Close()
+		t.Fatal("AcquireLock allowed a second holder")
+	}
+}
+
+func TestEnsureCurrentRepairsPIDFileFromLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := shortTestSocketPath(t)
+	paths := Paths{
+		PIDFile:    filepath.Join(dir, "daemon.pid"),
+		LockFile:   filepath.Join(dir, "daemon.lock"),
+		SocketFile: socketPath,
+		StdoutLog:  filepath.Join(dir, "out.log"),
+		StderrLog:  filepath.Join(dir, "err.log"),
+		PlistFile:  filepath.Join(dir, "daemon.plist"),
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	stat, err := os.Stat(exe)
+	if err != nil {
+		t.Fatalf("Stat executable: %v", err)
+	}
+	server, err := daemonapi.StartServerWithOptions(t.Context(), nil, paths.SocketFile, daemonapi.ServerOptions{
+		Info: daemonapi.DaemonInfo{
+			PID:               os.Getpid(),
+			Version:           "test-version",
+			Executable:        exe,
+			ExecutableModTime: stat.ModTime().Unix(),
+			StartedAt:         time.Now().Unix(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartServerWithOptions: %v", err)
+	}
+	defer server.Close()
+
+	status, action, err := EnsureCurrent(paths, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureCurrent: %v", err)
+	}
+	if action != EnsureNoop || !status.Live || status.PID != os.Getpid() {
+		t.Fatalf("EnsureCurrent = status %+v action %q, want repaired live noop", status, action)
+	}
+	pid, ok, err := ReadPID(paths.PIDFile)
+	if err != nil {
+		t.Fatalf("ReadPID: %v", err)
+	}
+	if !ok || pid != os.Getpid() {
+		t.Fatalf("ReadPID = %d, %v; want %d, true", pid, ok, os.Getpid())
+	}
+	metadata, err := ReadMetadata(paths)
+	if err != nil {
+		t.Fatalf("ReadMetadata: %v", err)
+	}
+	if metadata == nil || metadata.PID != os.Getpid() || metadata.Version != "test-version" {
+		t.Fatalf("metadata = %+v, want repaired daemon metadata", metadata)
+	}
+}
+
+func TestEnsureSocketAvailableRejectsLiveWeftSocket(t *testing.T) {
+	paths := Paths{SocketFile: shortTestSocketPath(t)}
+	server, err := daemonapi.StartServerWithOptions(t.Context(), nil, paths.SocketFile, daemonapi.ServerOptions{
+		Info: daemonapi.DaemonInfo{PID: os.Getpid(), Version: "test-version"},
+	})
+	if err != nil {
+		t.Fatalf("StartServerWithOptions: %v", err)
+	}
+	defer server.Close()
+
+	if err := EnsureSocketAvailable(paths, 100*time.Millisecond); err == nil {
+		t.Fatal("EnsureSocketAvailable accepted a live daemon socket")
+	}
+}
+
+func TestEnsureSocketAvailableRemovesStaleSocketPath(t *testing.T) {
+	paths := Paths{SocketFile: shortTestSocketPath(t)}
+	listener, err := net.Listen("unix", paths.SocketFile)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close listener: %v", err)
+	}
+
+	if err := EnsureSocketAvailable(paths, 100*time.Millisecond); err != nil {
+		t.Fatalf("EnsureSocketAvailable: %v", err)
+	}
+	if _, err := os.Lstat(paths.SocketFile); !os.IsNotExist(err) {
+		t.Fatalf("stale socket path still exists: %v", err)
+	}
+}
+
+func shortTestSocketPath(t *testing.T) string {
+	t.Helper()
+	path := fmt.Sprintf("/tmp/weft-dc-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
 }
 
 func TestCurrentStatusClassifiesZombiePIDAsStale(t *testing.T) {
