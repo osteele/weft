@@ -15,6 +15,13 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
 
 - Places jobs automatically by GPU class, memory, queue depth, data locality,
   and estimated resource use.
+- Matches jobs to compatible hosts and cloud offers by NVIDIA driver, CUDA, and
+  GPU compute-capability floors inferred from your `torch` pin and curated
+  library requirements — and picks (and merges) the Docker image for cloud jobs
+  from the same package analysis, so you rarely specify an image by hand.
+- Supports reproducible benchmarking: isolation tags keep a measured job off
+  shared or busy hardware, and per-job CPU/GPU telemetry is recorded for
+  performance analysis across GPU, model, and configuration sweeps.
 - Detects overloaded on-prem hosts, drains movable jobs to healthier local or
   rental capacity, and marks overloaded hosts/jobs in terminal dashboards.
 - Runs jobs in durable remote sessions managed by a Go agent.

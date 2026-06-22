@@ -1,138 +1,206 @@
-# SkyPilot Backend Integration Plan
+# SkyPilot External Executor Integration Plan
 
 Status: **Plan** — describes intended design, not current implementation.
 
-## Context
+## Decision
 
-Weft currently provisions cloud GPU instances via direct Vast.ai and RunPod API
-calls in `internal/campaign/`. SkyPilot is a multi-cloud GPU scheduler with
-integrations for 20+ cloud providers, spot instance management, and automatic
-failover.
+Use Weft as the local ledger and agent/human front door, and use SkyPilot as an
+external executor. This is the shallow integration path: Weft records jobs,
+project association, tags, processed bookkeeping, and query surfaces; SkyPilot
+owns cloud resource selection, cluster lifecycle, retry/recovery, and raw task
+execution.
 
-This plan describes how weft could use SkyPilot as a cloud provider abstraction
-layer — replacing or supplementing the direct Vast.ai/RunPod calls — while
-retaining weft's own placement scoring, cost modeling, and lifecycle management.
+This replaces the earlier "SkyPilot as provider facade" idea. SkyPilot is a
+scheduler/control plane, not a low-level provider like Vast.ai or RunPod, so
+deep provider integration would create lifecycle ownership conflicts.
 
-See also: `docs/design/comparison-to-skypilot.md` for architectural differences.
+See also: `docs/design/comparison-to-skypilot.md`.
 
-## Design Principle
+## Goals
 
-SkyPilot would serve as a **provider facade** — weft decides *whether* to burst
-to cloud and *which GPU class* to request; SkyPilot decides *which provider and
-region* to provision from. Weft retains ownership of placement scoring (local
-queue wait vs. cloud cost), data locality tracking, and the job lifecycle.
+- Give agents one reliable habit: submit, inspect, watch, and mark processed
+  through Weft.
+- Include SkyPilot jobs in `weft jobs list --unprocessed`, grouped status
+  views, and project-scoped views.
+- Preserve local Weft job IDs (`wj...`) as the canonical address for imported
+  and Weft-submitted SkyPilot jobs.
+- Keep SkyPilot lifecycle ownership explicit instead of pretending SkyPilot
+  jobs are Weft-managed rental instances.
+- Make the first implementation useful without importing Weft telemetry, R2
+  output streaming, grace periods, or placement scoring.
 
-## What SkyPilot Would Provide
+## Non-Goals
 
-### Multi-provider access
-Currently weft talks to Vast.ai and RunPod directly. SkyPilot adds AWS, GCP,
-Azure, Lambda, CoreWeave, and 15+ others through a single interface. Weft would
-gain access to these providers without writing per-provider API integrations.
+- Do not make SkyPilot a native `internal/campaign` provider in the first
+  version.
+- Do not create `Launch` / `CloudInstance` rows for SkyPilot jobs.
+- Do not run the Weft Go agent inside SkyPilot clusters in the first version.
+- Do not promise Weft R2 output collection, per-run telemetry, Weft grace
+  periods, or survival-model placement for external jobs.
+- Do not use SkyPilot labels or task state as the authoritative processed
+  marker. Processed bookkeeping remains a Weft-local tag.
 
-### Spot instance management
-SkyPilot handles spot/preemptible instance lifecycle: automatic failover to
-on-demand when spot is preempted, cross-region retry, and managed checkpointing.
-Weft's current grace-period system (R2-based control messages) handles
-failure-tolerant sessions but doesn't manage spot-specific retry logic.
+## User Model
 
-### Instance type selection within a provider
-Given a GPU requirement like "A100 80GB", SkyPilot finds the cheapest matching
-instance type across regions and availability zones. Weft currently does this
-manually for Vast.ai (searching offers by GPU spec and sorting by price).
+The user or coding agent should be able to do this:
 
-### Cloud credential management
-SkyPilot handles multi-cloud authentication. Weft currently requires users to
-configure Vast.ai API keys and R2 credentials separately.
-
-## What Weft Retains
-
-### Placement scoring (local vs. cloud)
-SkyPilot doesn't model on-prem queue wait or local data locality. Weft's Monte
-Carlo completion-time simulation compares running locally (free but queued) vs.
-bursting to cloud (setup overhead + rental cost). This decision happens before
-SkyPilot is involved.
-
-### Data locality and transfer cost modeling
-Weft tracks per-host HF model caches and computes transfer time penalties from
-measured bandwidth. SkyPilot colocates with cloud storage regions but doesn't
-track individual model cache state. Weft's `--input hf:<model>` declarations
-feed disk estimation and download time modeling that SkyPilot doesn't replicate.
-
-### Disk estimation
-Weft queries the HuggingFace API for model sizes, estimates UV dependency
-install sizes from cached manifests, and computes total disk requirements. This
-determines minimum instance disk size — information weft would pass to SkyPilot
-as a constraint.
-
-### Job lifecycle and result collection
-Weft's agent wrapper, R2-based result collection, grace period system, and
-local SQLite job tracking remain unchanged. SkyPilot provisions the instance;
-weft deploys its agent and manages the job.
-
-### Survival modeling and risk-adjusted cost
-Weft's Beta-Binomial survival model estimates instance failure risk per GPU
-family/price bucket. SkyPilot handles spot failover operationally but doesn't
-expose survival probabilities for cost optimization.
-
-### On-prem scheduling
-SkyPilot is cloud-only. Weft's queue runner, SLURM backend, and on-prem
-placement continue to operate independently.
-
-## Integration Architecture
-
-```
-User: weft run --gpu a100>=80GB "train.py"
-          │
-          ▼
-  Weft placement scorer
-  ├── On-prem hosts (queue runner / SLURM)
-  ├── Direct cloud (Vast.ai / RunPod)  ← existing path
-  └── SkyPilot cloud (AWS / GCP / Azure / ...)  ← new path
-          │
-          ▼
-  SkyPilot: cheapest instance across providers
-          │
-          ▼
-  Weft agent deployed via SSH → job runs → results via R2
+```bash
+weft sky submit --gpu a100 'python train.py'
+weft sky sync
+weft jobs list --unprocessed
+weft project watch
+weft log wj123
+weft mark-processed wj123
 ```
 
-SkyPilot would be a new backend alongside `queue_runner`, `slurm`, and `vastai`,
-selected when the user configures SkyPilot-managed providers or when weft's
-placement scorer determines cloud burst is optimal and SkyPilot offers a cheaper
-option than direct Vast.ai/RunPod.
+An existing SkyPilot job can be imported:
 
-## What Weft Features Are Absent or Changed with SkyPilot
+```bash
+weft sky import --project my-project <sky-job-id>
+```
 
-| Feature | Status |
-|---|---|
-| **Grace period (R2 control messages)** | Unclear — SkyPilot manages instance lifecycle differently; grace-wait polling may conflict with SkyPilot's own retry/failover |
-| **Instance SSH access (`weft instance ssh`)** | SkyPilot provides `sky ssh`; weft would need to bridge or defer to it |
-| **Direct provider queries** | Weft currently queries Vast.ai offers for pricing; with SkyPilot this is delegated |
-| **Per-instance cost tracking** | SkyPilot tracks cost at the cluster level; weft's per-instance `cost_per_hour_cents` would need a different data source |
-| **Donor/seed copy orchestration** | SkyPilot doesn't support phone-tree data fan-out; this would still use weft's direct SSH |
+After import, the job is addressed as `wj...` in Weft. The external SkyPilot ID
+is detail, not the primary user-facing identity.
+
+## Data Model
+
+Add an external binding table:
+
+| Field | Purpose |
+| --- | --- |
+| `job_id` | Local Weft job identity |
+| `attempt_id` | Optional local attempt row for Weft-submitted external jobs |
+| `executor` | `skypilot` |
+| `external_job_id` | SkyPilot job/request identifier |
+| `external_task_id` | Optional SkyPilot task identifier |
+| `external_cluster_id` / `external_cluster_name` | Cluster context for logs/status/UI |
+| `raw_status` / `raw_status_message` | Last observed SkyPilot status |
+| `normalized_status` | Weft status bucket |
+| `submitted_from_working_dir` / `submitted_from_project` | Project-scoping provenance |
+| `dashboard_url` | Optional SkyPilot dashboard/API link |
+| `created_at` / `last_observed_at` | Local bookkeeping |
+
+Idempotency key: `(executor, external_job_id, external_task_id)`.
+
+Use `jobs.backend = "skypilot"` and `jobs.target_kind = "external-executor"` for
+these rows. They are not `rental-instance` jobs.
+
+## Status Mapping
+
+The first adapter should normalize coarsely:
+
+| SkyPilot state family | Weft status |
+| --- | --- |
+| pending, submitted, starting, provisioning, recovering | queued |
+| running | running |
+| succeeded, completed | completed |
+| failed | failed |
+| cancelling, cancelled, canceled | canceled |
+| stopped, killed | killed |
+
+Unknown non-terminal states should remain `queued` with the raw status visible in
+`weft job info`. Unknown terminal/error states should become `failed`.
+
+If SkyPilot cannot be reached during sync, leave the Weft status unchanged and
+record a staleness warning. Do not infer failure from an unavailable SkyPilot
+query.
+
+## CLI Surface
+
+Phase 1 commands:
+
+- `weft sky submit [weft run-like flags] <command>`: create the Weft row first,
+  submit to SkyPilot, then store the external binding.
+- `weft sky import [--project NAME] [--cwd DIR] <external-id>`: mirror an
+  existing SkyPilot job into Weft.
+- `weft sky sync [--project NAME]`: refresh external bindings.
+- `weft log <wj-id>`: for `backend=skypilot`, call SkyPilot logs through the
+  binding.
+- `weft kill|cancel <wj-id>`: for `backend=skypilot`, call SkyPilot cancel and
+  wait for a later sync to confirm terminal status.
+
+Existing surfaces should include these jobs without separate commands:
+
+- `weft jobs list --unprocessed`
+- `weft jobs list --project NAME`
+- `weft project watch [NAME]`
+- grouped status TUI
+- `weft job info <wj-id>`
+
+## TUI / Display
+
+SkyPilot jobs appear in the normal grouped status buckets after normalization.
+They must not appear as Unplaced just because Weft has no Host or Launch row.
+
+Selected-job detail should render an external-executor host line such as:
+
+```text
+Host: SkyPilot - cluster <name> - raw <status>
+```
+
+The display must not imply a Weft-managed instance, Weft cost meter, grace
+period, R2 phase, or agent telemetry unless a future adapter actually imports
+those signals.
+
+## Implementation Phases
+
+1. **Schema and DB access**
+   - Add `skypilot` backend and `external-executor` target kind.
+   - Add `external_job_bindings`.
+   - Add idempotent upsert/list/get helpers.
+
+2. **Read/import path**
+   - Implement `weft sky import`.
+   - Implement `weft sky sync`.
+   - Add status normalization tests.
+   - Include external jobs in project and unprocessed queries.
+
+3. **Display path**
+   - Teach grouped/flat job lists to render external executor targets.
+   - Add `weft job info` external binding details.
+   - Add stale-sync warnings.
+
+4. **Submit path**
+   - Implement `weft sky submit`.
+   - Generate a SkyPilot task from a conservative subset of Weft run flags:
+     command, working directory/source mount, GPU class/count/memory, env, and
+     description.
+   - Store the Weft job before invoking SkyPilot.
+
+5. **Operations**
+   - Route `weft log` through SkyPilot for external jobs.
+   - Route `weft cancel` through SkyPilot for external jobs.
+   - Add watch/project-watch refresh hooks for external sync.
+
+6. **Hardening**
+   - Add duplicate-import protection.
+   - Add read-only fallback behavior when sync cannot write the DB.
+   - Add fixture-based tests for representative `sky jobs queue --output json`
+     payloads.
+   - Document unsupported features clearly in `weft job info`.
 
 ## Open Questions
 
-1. **Lifecycle ownership**: Who owns the instance lifecycle? If SkyPilot manages
-   spot failover, weft's grace period and R2 control messages may conflict. One
-   option: use SkyPilot for provisioning only, then detach and let weft manage
-   the running instance.
+- Which SkyPilot interface should the first adapter use: CLI JSON output, API
+  server, or a thin Python helper?
+- How stable are SkyPilot job IDs across managed-job recovery and cluster
+  replacement?
+- What source packaging model is safest for `weft sky submit`: SkyPilot
+  `file_mounts`, working-tree archive, or a minimal command wrapper?
+- Should Weft import SkyPilot cost estimates when available, and how should
+  those be distinguished from Weft's direct rental cost meter?
+- Should imported jobs default to the current directory's project, or require
+  `--project` unless SkyPilot metadata already records one?
 
-2. **Language boundary**: SkyPilot is Python; weft is Go. Integration options:
-   - Shell out to `sky` CLI (simple but slow, limited error handling)
-   - Use SkyPilot's REST API if/when available
-   - Write a thin Python sidecar that wraps SkyPilot's Python API
+## Later Deepening
 
-3. **Cost data flow**: Weft's placement scorer needs real-time pricing to
-   compare local-vs-cloud. SkyPilot's `sky show-gpus` provides catalog pricing
-   but not the same granularity as Vast.ai's offer-level pricing. How to unify?
+If SkyPilot-backed execution becomes a high-volume path, reconsider deeper
+integration only after the shallow ledger path is stable. Candidate later work:
 
-4. **Checkpoint integration**: SkyPilot's managed spot includes automatic
-   checkpointing. Weft's jobs don't currently checkpoint. Should weft adopt
-   SkyPilot's checkpointing protocol, or treat spot instances as unreliable and
-   rely on weft's existing retry logic?
-
-5. **When to use SkyPilot vs. direct providers**: Vast.ai and RunPod often have
-   lower prices than major cloud providers for GPU workloads. SkyPilot adds
-   breadth but may not improve cost for the GPU-heavy workloads weft typically
-   runs. Should SkyPilot be a fallback when direct providers lack capacity?
+- Import SkyPilot cost and dashboard links.
+- Import logs into Weft's local log cache.
+- Add optional artifact import from SkyPilot storage mounts.
+- Run a Weft agent inside SkyPilot tasks for telemetry/R2 output collection.
+- Compare Weft direct providers and SkyPilot offers in placement. This should be
+  a separate design, because it reopens lifecycle ownership and cost-model
+  questions.

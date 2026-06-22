@@ -12,6 +12,16 @@ job lifecycle on durable, managed infrastructure. **Weft** manages a persistent
 on-prem GPU cluster with cloud burst for overflow, using prediction-driven
 placement that integrates data locality, runtime estimation, and cost modeling.
 
+Weft is also built to be a **measurement instrument**: it is designed for
+GPU/model/configuration sweeps where the goal is performance analysis, not just
+getting the job done. That motivation shows up as benchmark isolation gates
+(running a measured job alone on quiesced hardware), always-on per-job telemetry
+(CPU/GPU/memory time series persisted per run), and an environment-compatibility
+layer that infers the driver/CUDA/arch each job needs and the image it should
+run in. Some of these have SkyPilot analogues and some don't (detailed below),
+but together they are a deliberate design center, sharpened by weft's cheap,
+shared, heterogeneous substrate.
+
 Many of the per-feature differences below are not independent design choices.
 They follow from one root decision: **weft is built around the Vast.ai
 marketplace** (cheapest GPUs, no durable volumes, stop/resume bidding
@@ -27,6 +37,10 @@ Use **weft** when:
   resulting reliability variance with a survival model
 - Your jobs recur and benefit from learned runtime prediction
 - You want ML-artifact-aware data locality (HF model caches per host)
+- You run GPU/model/configuration sweeps and want reproducible per-job
+  measurement (isolation gates + telemetry) for performance analysis
+- You want job→host→image compatibility inferred from your `torch` pin rather
+  than chosen by hand
 
 Use **SkyPilot** when:
 - Your compute is cloud- or cluster-based (20+ clouds, Kubernetes, Slurm)
@@ -100,6 +114,10 @@ scoring algorithms that don't benefit from SkyPilot's provider integrations.
 | **Heterogeneous workloads** | Training, eval, benchmarking, inference | General cloud jobs |
 | **Heterogeneous GPU support** | Per-host GPU specs + roofline performance scaling | Instance type selection |
 | **Cold-start handling** | Roofline estimates from hardware specs | — |
+| **Per-job resource telemetry** | Agent samples CPU/RSS/disk/net + per-GPU mem/util/power/clocks on every host (on-prem or cloud, no orchestrator); persisted as a per-run time series + high-water marks in SQLite; feeds runtime prediction | Per-job GPU metrics via DCGM + Prometheus + Grafana, **Kubernetes-only**, opt-in Helm; CPU/mem via Node Exporter; dashboard observability, not fed back into scheduling |
+| **Benchmark / exclusive isolation** | `exclusive` (run alone on a shared host) and `benchmark-isolation` (whole-system idle-gate + upload barrier + optional GPU warmup; rejects `interruptible`) | No first-class benchmark mode; exclusivity by requesting all cluster resources; fresh per-task clusters give noisy-neighbor isolation by default |
+| **Environment compatibility filtering** | Hard-filters hosts and offers by NVIDIA driver, CUDA, and GPU compute-cap floors derived from the `torch` pin + curated library tables | Accelerator-type match; driver/CUDA arrive with the cloud VM/image, not filtered from your lockfile |
+| **Container image selection** | Auto-selects/upgrades/merges the cloud image from the project's `torch` CUDA pin + GPU-class constraint | No auto-selection from requirements; pinned-CUDA default images or explicit `image_id` |
 | **Compute substrate** | On-prem hosts + Vast.ai, RunPod (direct API) | 20+ clouds + Kubernetes + Slurm |
 | **Spot / interruptible request** | Opt-in (`interruptible` tag); on-demand by default | `--use-spot`; can mix spot + on-demand (`any_of`) |
 | **Interruption model** | Detects same-instance pause→resume (Vast.ai bidding) | Vanish-style preemption, relaunch elsewhere |
@@ -278,19 +296,92 @@ server with a browser dashboard and a Python SDK. SkyPilot also ships an officia
 Agent Skill that teaches coding agents its CLI, where weft shapes the commands
 themselves (blocking waits, success-coded exits) for agent use.
 
+### Benchmarking and Measurement
+
+Weft is designed to double as a measurement instrument for GPU/model/config
+sweeps, and two mechanisms serve that:
+
+- **Isolation gates** (`internal/runner/benchmark.go`, `specs/inventory-placement.allium`).
+  The `exclusive` tag makes the queue runner run a job alone on a shared host.
+  The `benchmark-isolation` tag goes further: placement requires the *whole
+  system* to be idle (CPU/RAM/GPU/VRAM below thresholds, counting processes weft
+  did not launch), a benchmark barrier waits for background R2 uploads to drain
+  before timing starts, GPU warmup is available, and submit rejects combining it
+  with `interruptible` so a pause/resume can't move the job to different
+  hardware mid-measurement.
+- **Per-job telemetry** (`internal/runner/sampling.go`, `internal/db/telemetry.go`).
+  The agent samples CPU, RSS, disk and network I/O, and per-GPU memory,
+  utilization, power, PCIe, and clocks on a fixed interval, on whatever host the
+  job lands on. Samples persist as a per-run time series plus high-water marks
+  in SQLite, keyed to the job record, and feed both the runtime-prediction model
+  and placement telemetry (`docs/design/placement-telemetry.md`).
+
+How much of this distinguishes weft from SkyPilot is mixed, and most of the
+difference traces back to substrate:
+
+- *Isolation* is largely a default on SkyPilot's substrate rather than a missing
+  feature. SkyPilot's normal model is one task per fresh, dedicated cluster, so
+  noisy-neighbor isolation is free; co-tenant exclusivity on a shared cluster is
+  expressible by having a task request all the cluster's resources. What SkyPilot
+  does **not** have is a benchmark mode that gates on whole-host quiescence,
+  barriers on background transfers, or warms up the GPU — but on ephemeral
+  dedicated nodes much of that motivation dissolves. Weft needs the gates
+  precisely because its on-prem hosts are shared and persistent.
+- *Telemetry collection* is not novel. SkyPilot already surfaces per-job GPU
+  metrics (DCGM + Prometheus + Grafana) and CPU/memory (Node Exporter). The
+  differences are that weft's collection is **substrate-independent** (it runs in
+  the agent on a bare Vast.ai box or an on-prem machine with no Kubernetes,
+  Prometheus, or Helm stack), is **persisted and SQL-queryable per run** rather
+  than living in a metrics backend for dashboards, and **closes the loop** by
+  feeding placement prediction. Bolting DCGM-style collection onto SkyPilot is
+  easy; reproducing the no-orchestrator capture and the prediction feedback is
+  the part that isn't.
+
+So the benchmarking story is a genuine design center for weft, but it is "weft
+manufactures on a shared substrate what SkyPilot's ephemeral substrate grants by
+default, plus a prediction loop SkyPilot doesn't build," not "a capability
+SkyPilot fundamentally cannot have."
+
+### Environment Compatibility and Image Selection
+
+Weft derives the NVIDIA runtime a job needs and the image it should run in from
+the project's package requirements (`docs/architecture/compatibility.md`):
+
+- **Compatibility floors**: `dataloc.ScanTorchPin` reads `uv.lock` /
+  `pyproject.toml`, maps the `torch` wheel to CUDA and compute-capability bounds,
+  and merges curated library floors (e.g. vLLM's CUDA floor, PySR's GLIBCXX
+  floor). The resolved driver/CUDA/arch floors hard-filter both on-prem hosts and
+  Vast.ai offers, and fast-fail impossible jobs at submit.
+- **Image selection**: for cloud jobs, weft auto-selects the pytorch image
+  matching the project's CUDA pin, auto-upgrades it when a GPU-class constraint
+  implies a newer CUDA, and merges mutually compatible jobs onto one image and
+  instance — so users rarely name an image at all.
+
+This is the clearest weft-unique area, and it too is substrate-driven. SkyPilot
+does no image selection from your requirements: you take a default image (which
+pins a particular CUDA) or set `image_id` explicitly, and it does not infer a
+driver floor from your lockfile to screen hosts. On managed clouds it doesn't
+need to — the driver ships with the VM and the image you choose defines the
+runtime. Weft has to model the (image, host driver, GPU arch) triangle because
+Vast.ai hosts carry heterogeneous, independently-varying drivers that the image
+does not control, and because picking a wrong-CUDA image is a fatal, fixed-disk
+failure on that substrate. The capability is not trivial to add to SkyPilot, but
+on SkyPilot's substrate it is also less necessary.
+
 ## Where SkyPilot Could Complement Weft
 
-SkyPilot could serve as a cloud-provider abstraction layer alongside weft's direct
-Vast.ai/RunPod calls in `internal/campaign/`, giving weft access to managed clouds,
-Kubernetes, and Slurm, plus SkyPilot's managed-spot recovery. But the value is
-asymmetric on weft's current substrate: Vast.ai is typically much cheaper than the
-managed clouds SkyPilot targets, and weft already handles cloud provisioning
-directly because it needs tight integration with disk estimation (required disk
-from declared `--input hf:<model>` dependencies), per-model download modeling, the
-survival model, and local-vs-cloud cost comparison. SkyPilot provides none of
-these. Embedding SkyPilot *inside* weft also collides with weft's
+SkyPilot is most valuable as an external executor for clouds and clusters Weft
+does not directly manage, not as a low-level provider hidden inside Weft's
+`internal/campaign/` path. A deep provider integration would collide with Weft's
 lifecycle ownership (grace period, agent-over-SSH, R2 result collection,
-per-instance cost) and adds a Go↔Python boundary; see
-`docs/planning/skypilot-backend.md` for the open questions. SkyPilot is most useful
-to a weft user *as a standalone tool* for one-off runs on clouds weft doesn't
-reach, rather than as an embedded backend.
+per-instance cost) and add a Go/Python control-plane boundary while still not
+providing Weft's disk estimation, data-locality modeling, survival model, or
+local-vs-cloud cost comparison.
+
+The more useful integration is shallow: Weft keeps the local job ledger,
+project-scoped queries, processed/unprocessed bookkeeping, and agent-facing
+CLI/TUI surfaces, while SkyPilot owns external execution and recovery. That lets
+agents keep asking Weft for "my unprocessed jobs" without requiring Weft to
+pretend SkyPilot jobs are Weft-managed rental instances. See
+`docs/planning/skypilot-backend.md` for the planned ledger/front-door
+integration.
