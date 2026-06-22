@@ -1145,6 +1145,33 @@ laptop$ weft run \
   'uv run python train.py'
 ```
 
+### Mirroring SkyPilot jobs
+
+Use `weft sky` when SkyPilot should own cloud resource selection and cluster
+lifecycle, but you still want Weft's local job ledger, project views,
+`--unprocessed` filtering, logs, cancel surface, and processed bookkeeping.
+
+```bash
+laptop$ weft sky submit --gpu a100 -m "SkyPilot training" 'python train.py'
+# Job wj123 submitted to SkyPilot as 42
+
+laptop$ weft sky sync
+laptop$ weft job list --unprocessed
+laptop$ weft log wj123
+laptop$ weft job mark-processed wj123
+```
+
+To mirror a job that was submitted outside Weft:
+
+```bash
+laptop$ weft sky import --project calibration 42
+```
+
+SkyPilot jobs are external-executor jobs, not Weft rental instances. Weft does
+not create `wi...` instance rows for them, run the Weft cloud agent, collect R2
+outputs, apply grace periods, or report direct rental costs unless a future
+adapter imports those signals explicitly.
+
 ### Chaining jobs after rental runs
 
 You can chain downstream jobs to rental/ephemeral producers with `--after`,

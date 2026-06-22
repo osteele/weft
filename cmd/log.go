@@ -250,6 +250,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	if job == nil {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return runSkyLogForJob(cmd, database, job)
+	}
 
 	// For terminal jobs, default to showing the full log unless the user
 	// explicitly requested a specific range or line count.

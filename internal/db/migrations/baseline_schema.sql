@@ -188,6 +188,27 @@ CREATE TABLE IF NOT EXISTS "jobs" (
 		campaign_job_index INTEGER,
 		requested_status TEXT
 	, gpu_mem_max_gb INTEGER, cli_overrides TEXT, max_compute_cap TEXT, priority INTEGER NOT NULL DEFAULT 0, job_metadata TEXT, placement_blocked TEXT);
+CREATE TABLE IF NOT EXISTS external_job_bindings (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+	attempt_id INTEGER REFERENCES job_attempts(id),
+	executor TEXT NOT NULL,
+	external_job_id TEXT NOT NULL,
+	external_task_id TEXT NOT NULL DEFAULT '',
+	external_cluster_id TEXT,
+	external_cluster_name TEXT,
+	raw_status TEXT,
+	raw_status_message TEXT,
+	normalized_status TEXT,
+	submitted_from_working_dir TEXT,
+	submitted_from_project TEXT,
+	dashboard_url TEXT,
+	created_at INTEGER NOT NULL,
+	last_observed_at INTEGER,
+	UNIQUE(executor, external_job_id, external_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_external_job_bindings_job ON external_job_bindings(job_id);
+CREATE INDEX IF NOT EXISTS idx_external_job_bindings_executor ON external_job_bindings(executor);
 CREATE TABLE IF NOT EXISTS host_info_cache (
 		name TEXT PRIMARY KEY,
 		arch TEXT,
@@ -878,7 +899,8 @@ CREATE VIEW IF NOT EXISTS job_status AS
 		)
 		SELECT
 			j.id,
-			CASE WHEN et.kind = 'inventory_host' THEN et.host
+			CASE WHEN COALESCE(la.backend, j.backend) = 'skypilot' THEN ''
+			     WHEN et.kind = 'inventory_host' THEN et.host
 			     WHEN et.kind = 'rental_instance' THEN ''
 			     WHEN la.launch_id IS NOT NULL THEN ''
 			     ELSE COALESCE(la.host, '')
@@ -990,6 +1012,8 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
+				WHEN COALESCE(la.backend, j.backend) = 'skypilot'
+				THEN 'external_executor'
 				WHEN la.end_time IS NOT NULL
 				     AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
 				THEN 'unplaced'

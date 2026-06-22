@@ -18,7 +18,8 @@ WITH latest_attempt AS (
 )
 SELECT
 	j.id,
-	CASE WHEN et.kind = 'inventory_host' THEN et.host
+	CASE WHEN COALESCE(la.backend, j.backend) = 'skypilot' THEN ''
+	     WHEN et.kind = 'inventory_host' THEN et.host
 	     WHEN et.kind = 'rental_instance' THEN ''
 	     WHEN la.launch_id IS NOT NULL THEN ''
 	     ELSE COALESCE(la.host, '')
@@ -118,6 +119,8 @@ SELECT
 	j.campaign_job_index,
 	la.id AS latest_run_id,
 	CASE
+		WHEN COALESCE(la.backend, j.backend) = 'skypilot'
+		THEN 'external_executor'
 		WHEN la.end_time IS NOT NULL
 		     AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
 		THEN 'unplaced'

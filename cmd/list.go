@@ -731,6 +731,7 @@ func showJob(database *sql.DB, id int64) error {
 		fmt.Printf("Tags:         %s\n", strings.Join(tags, ", "))
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
+	printExternalBindingSummary(database, job, "External:     ", "              ")
 	if job.StartTime > 0 {
 		fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
 	} else {
@@ -755,6 +756,37 @@ func showJob(database *sql.DB, id int64) error {
 	printJobAttemptSummary(database, job)
 
 	return nil
+}
+
+func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nextPrefix string) {
+	if database == nil || job == nil || job.Backend != db.BackendSkyPilot {
+		return
+	}
+	binding, err := db.GetExternalJobBindingByJobID(database, job.ID)
+	if err != nil || binding == nil {
+		fmt.Printf("%sSkyPilot (binding unavailable)\n", firstPrefix)
+		return
+	}
+	parts := []string{"SkyPilot"}
+	if binding.ExternalJobID != "" {
+		parts = append(parts, "job "+binding.ExternalJobID)
+	}
+	if binding.ExternalTaskID != "" {
+		parts = append(parts, "task "+binding.ExternalTaskID)
+	}
+	if binding.ExternalClusterName != "" {
+		parts = append(parts, "cluster "+binding.ExternalClusterName)
+	}
+	if binding.RawStatus != "" {
+		parts = append(parts, "raw "+binding.RawStatus)
+	}
+	fmt.Printf("%s%s\n", firstPrefix, strings.Join(parts, " · "))
+	if binding.RawStatusMessage != "" {
+		fmt.Printf("%s%s\n", nextPrefix, binding.RawStatusMessage)
+	}
+	if binding.DashboardURL != "" {
+		fmt.Printf("%s%s\n", nextPrefix, binding.DashboardURL)
+	}
 }
 
 func printJobMoveSummary(database *sql.DB, job *db.Job) {

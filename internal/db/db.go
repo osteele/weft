@@ -113,6 +113,7 @@ const (
 	JobTargetUnplaced       JobTargetKind = "unplaced"
 	JobTargetInventoryHost  JobTargetKind = "inventory_host"
 	JobTargetRentalInstance JobTargetKind = "rental_instance"
+	JobTargetExternal       JobTargetKind = "external_executor"
 )
 
 // UsesQueueRunner reports whether this job should be managed by the queue runner backend.
@@ -145,6 +146,9 @@ func (j *Job) IsLaunchJob() bool {
 func (j *Job) TargetKind() JobTargetKind {
 	if j == nil {
 		return JobTargetUnplaced
+	}
+	if j.Backend == BackendSkyPilot {
+		return JobTargetExternal
 	}
 	if j.LaunchID != nil && *j.LaunchID > 0 {
 		return JobTargetRentalInstance
@@ -220,6 +224,8 @@ func (j *Job) ProviderName() string {
 // TargetDisplay returns a user-facing label for the current target.
 func (j *Job) TargetDisplay() string {
 	switch j.TargetKind() {
+	case JobTargetExternal:
+		return "SkyPilot"
 	case JobTargetRentalInstance:
 		if j != nil && j.LaunchID != nil && *j.LaunchID > 0 {
 			return ids.FormatInstanceID(*j.LaunchID)
@@ -741,6 +747,7 @@ const (
 const BackendQueueRunner = "queue-runner"
 const BackendSlurm = "slurm"
 const BackendVastai = "vastai"
+const BackendSkyPilot = "skypilot"
 
 // Status constants re-exported from internal/status (canonical source of truth).
 const (

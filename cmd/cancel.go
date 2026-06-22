@@ -61,6 +61,20 @@ func runCancelWithParser(cmd *cobra.Command, args []string, parser func([]string
 	for _, jobID := range jobIDs {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("cancel"), oplog.WithJobID(jobID))
 
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
+			continue
+		}
+		if handled, err := cancelSkyJob(cmd, database, job); handled {
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
+				continue
+			}
+			cancelled++
+			continue
+		}
+
 		result, err := orchestration.KillOrCancelJob(database, jobID, "canceled", ops.TimeoutNormal)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))

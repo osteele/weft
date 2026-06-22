@@ -382,6 +382,6 @@ The more useful integration is shallow: Weft keeps the local job ledger,
 project-scoped queries, processed/unprocessed bookkeeping, and agent-facing
 CLI/TUI surfaces, while SkyPilot owns external execution and recovery. That lets
 agents keep asking Weft for "my unprocessed jobs" without requiring Weft to
-pretend SkyPilot jobs are Weft-managed rental instances. See
-`docs/planning/skypilot-backend.md` for the planned ledger/front-door
-integration.
+pretend SkyPilot jobs are Weft-managed rental instances. The implemented
+front-door is `weft sky submit`, `weft sky import`, and `weft sky sync`; see
+`docs/reference/commands.md` and `docs/guides/workflow-guide.md` for usage.

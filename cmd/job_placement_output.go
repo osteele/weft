@@ -34,6 +34,8 @@ func queuedPlacementLines(database *sql.DB, job *db.Job) []jobPlacementLine {
 
 func placementSummary(job *db.Job) string {
 	switch job.TargetKind() {
+	case db.JobTargetExternal:
+		return "external executor"
 	case db.JobTargetUnplaced:
 		return "unplaced, awaiting assignment"
 	case db.JobTargetRentalInstance:
@@ -52,6 +54,8 @@ func queueReasonSummary(database *sql.DB, job *db.Job) string {
 		}
 	}
 	switch job.TargetKind() {
+	case db.JobTargetExternal:
+		return "waiting for external executor status"
 	case db.JobTargetUnplaced:
 		return "awaiting assignment"
 	case db.JobTargetInventoryHost:

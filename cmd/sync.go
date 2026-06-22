@@ -122,6 +122,19 @@ func runSync(cmd *cobra.Command, args []string) error {
 	hostsReached := result.HostsReached
 	hostsUnreachable := len(result.HostsUnreachable)
 	hostsSlow := len(result.HostsSlow)
+	if !explicitHosts {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		skyUpdated, skyMissing, skyErr := syncSkyBindings(ctx, database, "")
+		cancel()
+		if skyErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: SkyPilot sync skipped: %v\n", skyErr)
+		} else {
+			totalUpdated += skyUpdated
+			if syncVerbose && (skyUpdated > 0 || skyMissing > 0) {
+				fmt.Fprintf(os.Stderr, "Synced %d SkyPilot job(s); %d missing from SkyPilot queue\n", skyUpdated, skyMissing)
+			}
+		}
+	}
 
 	// Deploy agent binary and start queue runners only in full mode (after sync completes)
 	if syncFull {

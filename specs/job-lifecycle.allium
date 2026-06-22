@@ -321,7 +321,52 @@ entity JobAttempt {
         and failure_reason != null
 }
 
--- Job processes get a small set of WEFT_* environment variables that let
+-- A mirrored job owned by an external scheduler/control plane. The binding
+-- keeps Weft's job ID as the canonical local identity while preserving the
+-- external identifiers needed for status refresh, log passthrough, cancel, and
+-- links to the external UI.
+entity ExternalJobBinding {
+    job: Job
+    attempt: JobAttempt?
+    executor: ExternalExecutor
+    external_job_id: String
+    external_task_id: String?
+    external_cluster_id: String?
+    external_cluster_name: String?
+    raw_status: String?
+    raw_status_message: String?
+    submitted_from_working_dir: String?
+    submitted_from_project: String?
+    dashboard_url: String?
+    created_at: Timestamp
+    last_observed_at: Timestamp?
+
+    -- The latest normalized status produced by the executor adapter. This is
+    -- advisory until written to Job.status by status-sync.allium.
+    normalized_status: Status?
+}
+
+invariant ExternalJobIdentityIsLocal {
+    -- Agent and human-facing surfaces address external jobs by wj<id>. The
+    -- external job id is an implementation detail used by sync/log/cancel
+    -- adapters and may be non-unique across executors or SkyPilot clusters.
+    for binding in ExternalJobBindings:
+        binding.job.backend = skypilot
+        and binding.job.target_kind = external_executor
+        and (binding.submitted_from_project = null
+             or binding.job.project = binding.submitted_from_project)
+}
+
+invariant ExternalJobsUseWeftBookkeeping {
+    -- The processed/unprocessed distinction is always a Weft tag on the local
+    -- job row. SkyPilot state, cluster tags, and task labels must not be used
+    -- as the authoritative processed marker.
+    for binding in ExternalJobBindings:
+        ProcessedState(binding.job) = binding.job.tags.contains(processed)
+}
+
+-- Job processes launched by the weft runner get a small set of WEFT_*
+-- environment variables that let
 -- them detect they are running under weft and reflect on their runtime
 -- environment:
 --   WEFT_JOB_ID           weft DB id of the job (always set)
@@ -336,13 +381,23 @@ entity JobAttempt {
 --                         interruptible pause/resume). Absent on first
 --                         boot. Detected by an agent-written sentinel.
 -- The legacy RJ_* prefix is also set for backward compatibility.
+-- External-executor jobs such as SkyPilot jobs do not get these variables
+-- unless the external task definition explicitly injects them.
 
-value Tag = exclusive | benchmark_isolation | rental | inventory | compute_intensive
+value Tag = processed | exclusive | benchmark_isolation | rental | inventory
+          | compute_intensive | cpu_intensive | interruptible
 
 -- unplaced is represented as target = null on the attempt.
-value TargetKind = unplaced | inventory_host | rental_instance
+value TargetKind = unplaced | inventory_host | rental_instance | external_executor
 
-value Backend = queue_runner | slurm | vastai
+value Backend = queue_runner | slurm | vastai | skypilot
+
+-- External executors are schedulers/control planes that own execution for a
+-- mirrored job. Weft owns the durable job identity, project scoping, tags,
+-- processed bookkeeping, and user/agent-facing query surfaces; the external
+-- executor owns resource selection, cluster lifecycle, retry policy, and raw
+-- logs unless a later integration explicitly imports those artifacts.
+value ExternalExecutor = skypilot
 
 -- Failure reasons detected by the runner from exit info and system probes.
 -- Dynamic values: "signal_<name>" for other signals, "exit_<N>" for
@@ -448,6 +503,120 @@ rule SubmitDraft {
         status: queued,
         backend: job.backend
     )
+}
+
+rule SubmitExternalExecutorJob {
+    when: SubmitExternalExecutorJob(command, working_dir, options)
+    requires: options.executor = skypilot
+
+    -- Weft records the job before invoking SkyPilot so all later agent-facing
+    -- commands have a stable wj<id> even if the external submission is slow,
+    -- asynchronous, or fails after allocating an external request id.
+    ensures: Job.created(
+        command: command,
+        working_dir: working_dir,
+        project: options.project,
+        description: options.description,
+        gpu_class: options.gpu_class,
+        gpu_mem_gb: options.gpu_mem_gb,
+        inputs: options.inputs,
+        outputs: options.outputs,
+        tags: options.tags,
+        env_vars: options.env_vars,
+        dep_spec: options.dep_spec,
+        backend: skypilot,
+        target_kind: external_executor,
+        status: queued,
+        host: null,
+        created_at: now,
+        retry_count: 0
+    )
+    ensures: ExternalSubmissionRequested(job)
+
+    if ExternalSubmissionAccepted(job, external_ids):
+        ensures: JobAttempt.created(
+            job: job,
+            attempt_number: 1,
+            status: queued,
+            target: null,
+            host: null,
+            backend: skypilot
+        )
+        ensures: ExternalJobBinding.created(
+            job: job,
+            attempt: job.latest_attempt,
+            executor: skypilot,
+            external_job_id: external_ids.job_id,
+            external_task_id: external_ids.task_id,
+            external_cluster_id: external_ids.cluster_id,
+            external_cluster_name: external_ids.cluster_name,
+            submitted_from_working_dir: working_dir,
+            submitted_from_project: options.project,
+            created_at: now
+        )
+    else:
+        ensures: job.status = dead
+        ensures: job.error_message = ExternalSubmissionError(job)
+
+    @guidance
+        -- This is the Option C integration shape: Weft is the ledger/front
+        -- door and SkyPilot is an external executor. The submission path may
+        -- shell out to `sky` or use a SkyPilot API, but it must not bypass
+        -- the local job row. Weft does not run its Go agent, does not create
+        -- a CloudInstance/Launch row, and does not promise R2 output
+        -- collection or Weft telemetry for this job unless a later adapter
+        -- implements those imports explicitly.
+}
+
+rule ImportExternalExecutorJob {
+    when: ImportExternalExecutorJob(executor, external_job, options)
+    requires: executor = skypilot
+
+    -- Import is for jobs that were submitted outside Weft but should appear
+    -- in the same project-scoped and unprocessed-job surfaces. The importer
+    -- must require or infer a project; otherwise it records the job under the
+    -- current directory's project only when the user explicitly requests that
+    -- association.
+    ensures: Job.created(
+        command: external_job.command,
+        working_dir: options.working_dir,
+        project: options.project,
+        description: options.description ?? external_job.name,
+        gpu_class: external_job.gpu_class,
+        gpu_mem_gb: external_job.gpu_mem_gb,
+        inputs: [],
+        outputs: [],
+        tags: options.tags,
+        env_vars: [],
+        dep_spec: null,
+        backend: skypilot,
+        target_kind: external_executor,
+        status: NormalizeExternalStatus(external_job.status),
+        host: null,
+        created_at: external_job.created_at ?? now,
+        retry_count: 0
+    )
+    ensures: ExternalJobBinding.created(
+        job: job,
+        attempt: null,
+        executor: skypilot,
+        external_job_id: external_job.id,
+        external_task_id: external_job.task_id,
+        external_cluster_id: external_job.cluster_id,
+        external_cluster_name: external_job.cluster_name,
+        raw_status: external_job.status,
+        submitted_from_working_dir: options.working_dir,
+        submitted_from_project: options.project,
+        dashboard_url: external_job.dashboard_url,
+        created_at: now,
+        last_observed_at: now,
+        normalized_status: job.status
+    )
+
+    @guidance
+        -- Import is idempotent on (executor, external_job_id,
+        -- external_task_id). Re-import refreshes the existing binding and
+        -- job status instead of creating a duplicate local job.
 }
 
 -- ==========================================================================
@@ -1810,6 +1979,14 @@ rule JobLogCommandReadsSelectedAttempt {
         -- For cloud jobs, the R2 run ID is selected_attempt.id, the
         -- job_attempts primary key, and the keys are scoped under:
         --   jobs/<jobID>/runs/<selected_attempt.id>/...
+        --
+        -- For external-executor jobs, the command routes through
+        -- ExternalJobBinding to the executor adapter (for SkyPilot, `sky logs`
+        -- or the API equivalent). The local wj<id> remains the command
+        -- address. If the external executor has no retained log for the
+        -- selected attempt, the command reports that absence directly; it
+        -- must not scan Weft R2 paths or remote SSH hosts looking for an
+        -- unrelated log.
         --
         -- Missing or empty log objects for the selected attempt are
         -- authoritative. The command may return zero bytes or a not-found

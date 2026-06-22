@@ -33,7 +33,8 @@ use "./campaign-lifecycle.allium" as cloud
 -- Source identifies what signal triggered a status transition.
 -- Determines whether the transition is authoritative (can override terminal).
 value SyncSource = ssh_sync | slurm_sync | r2_completion | r2_phase
-                 | reconcile | user_action | cleanup | queue_runner | placement
+                 | external_sync | reconcile | user_action | cleanup
+                 | queue_runner | placement
 
 -- Agent execution phase reported via R2. Format: "verb:jobID" or bare verb.
 value AgentPhase = setup | running | finalizing | uploading
@@ -151,6 +152,10 @@ config {
 
     -- R2 fetch timeout
     r2_marker_timeout: Duration = 3.seconds
+
+    -- External scheduler status query timeout. This keeps SkyPilot refreshes
+    -- from blocking TUI/list updates behind cloud-provider or SSH sync work.
+    external_sync_timeout: Duration = 5.seconds
 
     -- Heartbeat and stall thresholds
     heartbeat_stale_threshold: Duration = 5.minutes
@@ -421,6 +426,70 @@ rule SyncTmuxJob {
         -- 2. Read .pgid/.pid, then `ps -o stat=` for pause detection
         -- 3. Read {jobID}.status file for exit code
         -- 4. If running/paused and session gone with no status → dead
+}
+
+-- External-executor sync mirrors SkyPilot state into Weft's local database.
+-- It does not probe SSH, R2 markers, or cloud-provider instance state.
+rule SyncExternalExecutorJob {
+    when: SyncJobTriggered(job, mode)
+    requires: job.backend = skypilot
+    requires: exists(binding: jobs/ExternalJobBinding { job = job })
+
+    let observation = QueryExternalExecutor(binding.executor, binding.external_job_id,
+                                            binding.external_task_id,
+                                            timeout: ExternalSyncTimeout(mode))
+
+    if observation.available:
+        ensures: binding.raw_status = observation.raw_status
+        ensures: binding.raw_status_message = observation.message
+        ensures: binding.last_observed_at = now
+        ensures: binding.normalized_status = NormalizeExternalStatus(observation.raw_status)
+        ensures: job.status = binding.normalized_status
+        ensures: job.exit_code = observation.exit_code when observation.exit_code != null
+        ensures: job.error_message = observation.message when observation.failed
+    else:
+        -- Lack of contact with SkyPilot is not proof that the job died.
+        ensures: job.status unchanged
+        ensures: ExternalSyncWarningRecorded(job, observation.error)
+
+    @guidance
+        -- SkyPilot owns scheduling, cluster lifecycle, spot recovery, and raw
+        -- task execution. Weft only mirrors observable state into its DB so
+        -- `weft jobs list`, `weft project watch`, and unprocessed triage keep
+        -- one local source of truth.
+        --
+        -- Status normalization is intentionally coarse and bucket-oriented:
+        --   pending/submitted/starting/provisioning/recovering -> queued
+        --   running                                           -> running
+        --   succeeded/completed                               -> completed
+        --   failed/cancelled/canceled                         -> failed/canceled
+        --   stopped/killed                                    -> killed
+        -- Unknown non-terminal states remain queued with raw_status visible
+        -- in `weft job info`; unknown terminal/error states become failed.
+        --
+        -- Sync is idempotent on ExternalJobBinding. It may be invoked by
+        -- explicit `weft sky sync`, normal `weft sync`, or TUI/watch refresh.
+        -- It must not create or mutate CloudInstance/Launch rows, must not
+        -- consume R2 `.complete` markers, and must not mark the job processed.
+        -- Processed/unprocessed remains controlled by the local `processed`
+        -- tag (`weft mark-processed`).
+}
+
+rule ExternalExecutorCancel {
+    when: UserRequestsCancel(job)
+    requires: job.backend = skypilot
+    requires: exists(binding: jobs/ExternalJobBinding { job = job })
+
+    ensures: ExternalCancelRequested(binding.executor, binding.external_job_id,
+                                     binding.external_task_id)
+    ensures: job.status in {killed, canceled} once external cancel is observed
+
+    @guidance
+        -- Cancel is a passthrough to SkyPilot (`sky cancel` / API equivalent)
+        -- plus later status mirroring. The local status may enter a pending
+        -- user-action state while the external request is in flight, but Weft
+        -- must not try to kill an SSH process, terminate a Weft Launch, or
+        -- clean up a provider instance for an external-executor job.
 }
 
 -- Status file detection: job completed on remote host.
@@ -1148,9 +1217,11 @@ rule ExplicitSync {
         ensures: SyncHostRequested(host, full)
 
     ensures: ReconcilePassTriggered()
+    ensures: ExternalExecutorSyncTriggered(all_jobs.where(j => j.backend = skypilot))
 
     @guidance
-        -- Default mode: SSH host sync + cloud reconcile.
+        -- Default mode: SSH host sync + cloud reconcile + external-executor
+        -- status refresh for mirrored SkyPilot jobs.
         -- Uses normal timeouts (30s per host).
         -- Agent deployment and queue runner startup require --full flag
         -- to avoid slow SSH operations on unreachable hosts blocking
@@ -1171,6 +1242,10 @@ rule TUIPeriodicSync {
     -- Cloud: reconcile runs on its own 60s ticker inside the worker
     ensures: CloudReconcileTriggered()
 
+    -- External executors: refresh mirrored scheduler state for visible jobs
+    -- without touching SSH, R2, or provider instance APIs.
+    ensures: ExternalExecutorSyncTriggered(visible_jobs.where(j => j.backend = skypilot))
+
     -- Always reload jobs from DB to pick up changes from any source
     ensures: TUIJobsReloaded()
 
@@ -1187,6 +1262,10 @@ rule TUIPeriodicSync {
         -- instance/provider reconciliation only. Full TUI cloud refreshes
         -- use the 60s cloud timeout and may additionally sync R2 job
         -- result markers.
+        -- External-executor refreshes are separate from cloud reconcile:
+        -- SkyPilot jobs are synced through ExternalJobBinding and normalized
+        -- into Job.status, but they never participate in launch/instance
+        -- reconciliation.
         --
         -- The worker sends a result to the TUI when Updated > 0
         -- (including both instance-level reconciliation AND job status
@@ -1239,6 +1318,13 @@ rule TUIPeriodicSync {
         --   - Completed / Failed / Killed/Canceled: terminal buckets.
         --   - In grouped unprocessed outcome triage, canceled rows are
         --     omitted while killed rows remain visible.
+        --
+        -- SkyPilot/external-executor jobs use these same buckets after
+        -- status normalization. They are not Unplaced just because Weft has
+        -- no Host or Launch row; target_kind=external_executor means the
+        -- external scheduler owns placement. Raw SkyPilot statuses may be
+        -- shown in job detail/info, but bucket placement is driven only by
+        -- the normalized Job.status stored in the DB.
         --
         -- Blocked/waiting-reason consolidation (Queued and Unplaced sections
         -- only): within each of these sections, jobs carrying a visible
@@ -1361,19 +1447,28 @@ rule TUIPeriodicSync {
         --     runpod; the "@ <Display>" suffix is omitted entirely for
         --     unknown providers). The va:/rp: prefix on wi<id> is NOT
         --     used on the Host line.
+        --   - external executor: "Host: SkyPilot", optionally followed by
+        --     the external cluster name/id, raw status, and dashboard URL
+        --     when available from ExternalJobBinding. The line must not
+        --     imply a Weft-managed rental instance, cost meter, grace period,
+        --     or R2-backed agent phase.
         --
         -- Per-reload plumbing for the above:
         --   - db.GetLaunchesByIDs batch-loads all Launch rows for the
         --     rental jobs on screen (parallels GetLaunchLiveStates).
         --   - db.LoadCachedHostInfo is called per distinct inventory
         --     host in the loaded job set.
+        --   - db.GetExternalJobBindings batch-loads the SkyPilot/external
+        --     bindings for external_executor jobs on screen.
         --   - Both populate maps on listJobsLoadedMsg / listTUIModel:
-        --     launchByID and hostInfoByName. Rendering reads only from
-        --     these maps — no per-render DB queries.
-        --   - The four lookup maps (launchByID, hostInfoByName,
-        --     launch-live-state map, sibling job slice) are bundled into
-        --     a selectedJobContext struct in list_selected_detail.go and
-        --     passed into renderSelectedJobDetail(job, ctx, now).
+        --     launchByID, hostInfoByName, and externalBindingByJobID.
+        --     Rendering reads only from these maps — no per-render DB
+        --     queries.
+        --   - The lookup maps (launchByID, hostInfoByName,
+        --     externalBindingByJobID, launch-live-state map, sibling job
+        --     slice) are bundled into a selectedJobContext struct in
+        --     list_selected_detail.go and passed into
+        --     renderSelectedJobDetail(job, ctx, now).
         --
         -- System line (formerly "shared-status"):
         --   - Always rendered, whether or not a job is selected.

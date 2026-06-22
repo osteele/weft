@@ -380,6 +380,46 @@ weft db gc --keep 5 --apply
 weft db gc --keep 0 --apply
 ```
 
+### weft sky
+
+Submit or mirror SkyPilot managed jobs while keeping Weft as the local job
+ledger.
+
+```bash
+weft sky submit [flags] <command>
+weft sky import --project NAME [--cwd DIR] <sky-job-id>
+weft sky sync [--project NAME]
+```
+
+SkyPilot jobs get normal Weft job IDs (`wj...`) and appear in
+`weft job list`, project views, `--unprocessed` queries, `weft log`, and
+`weft cancel`. SkyPilot remains the external executor: it owns cloud resource
+selection, cluster lifecycle, retries, and raw task execution. Weft does not
+create rental instance rows, run its cloud agent, collect R2 outputs, or report
+direct rental costs for these jobs.
+
+**Common flags:**
+- `--project NAME`: associate the mirrored job with a Weft project
+- `--cwd DIR`: working directory/source mount recorded for the job
+- `-m, --message TEXT`: local Weft description
+- `--gpu` / `--gpu-class`: SkyPilot accelerator class
+- `--gpu-count N`: accelerator count
+- `--gpu-mem GB`: GPU memory hint in the generated SkyPilot task
+- `-e, --env KEY=VALUE`: environment variable in the generated task
+- `-t, --tag TAG`: local Weft tag for filtering and processed bookkeeping
+
+Examples:
+
+```bash
+weft sky submit --gpu a100 -m "SkyPilot training" 'python train.py'
+weft sky sync
+weft job list --unprocessed
+weft log wj123
+weft cancel wj123
+
+weft sky import --project calibration 42
+```
+
 ### weft artifact
 
 Track and retrieve job outputs through a durable local artifact store.
