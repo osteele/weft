@@ -25,8 +25,9 @@ func prepareLaunchExecutionPlan(
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
 	onProgress campaign.PlanProgressFunc,
+	options campaign.LaunchExecutionPlanOptions,
 ) (launchExecutionPlan, error) {
-	return campaign.PrepareLaunchExecutionPlanWithProgress(
+	return campaign.PrepareLaunchExecutionPlanWithProgressAndOptions(
 		database,
 		clients,
 		providerErr,
@@ -39,6 +40,7 @@ func prepareLaunchExecutionPlan(
 		overheadModel,
 		survivalModel,
 		onProgress,
+		options,
 	)
 }
 

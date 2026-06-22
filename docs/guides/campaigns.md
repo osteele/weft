@@ -21,6 +21,11 @@ If a job is preempted or its instance fails, the relaunch is also
 associated with the same campaign (and links to its predecessor attempt),
 so the campaign captures the full history of the original launch.
 
+For benchmark coverage campaigns that should avoid reusing the same Vast.ai
+physical machine, launch with `weft start instance --distinct-machines`. See
+[Distinct physical machines](instances.md#distinct-physical-machines) for
+syntax and `--avoid`.
+
 ## Campaign-scoped commands
 
 Most operations are per-instance (see [instances guide](instances.md#managing-instances)).

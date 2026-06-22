@@ -77,6 +77,8 @@ table campaigns
   col 2 created_at INTEGER notnull=1 default=<none> pk=0
   col 3 ended_at INTEGER notnull=0 default=<none> pk=0
   col 4 estimated_cost_cents INTEGER notnull=0 default=<none> pk=0
+  col 5 distinct_machines INTEGER notnull=1 default=0 pk=0
+  col 6 avoid_machines TEXT notnull=0 default=<none> pk=0
   check (status IN ('planned', 'launching', 'running', 'completed', 'failed', 'canceled'))
 table data_requests
   col 0 id INTEGER notnull=0 default=<none> pk=1

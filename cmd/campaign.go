@@ -254,6 +254,17 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 	if c.EndedAt != nil {
 		fmt.Printf("  Ended:      %s\n", time.Unix(*c.EndedAt, 0).Format(time.RFC3339))
 	}
+	if c.DistinctMachines {
+		covered, err := db.CampaignCoveredMachineIDs(database, c.ID)
+		if err != nil {
+			return fmt.Errorf("get covered machines: %w", err)
+		}
+		inflight, err := db.CampaignInflightMachineIDs(database, c.ID)
+		if err != nil {
+			return fmt.Errorf("get in-flight machines: %w", err)
+		}
+		fmt.Printf("  Distinct:   covered %d, in-flight %d, avoided %d\n", len(covered), len(inflight), len(c.AvoidMachines))
+	}
 
 	instances, err := db.GetCampaignInstances(database, c.ID)
 	if err != nil {

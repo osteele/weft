@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -22,14 +24,20 @@ type Campaign struct {
 	CreatedAt          int64
 	EndedAt            *int64
 	EstimatedCostCents int // sum of per-instance cost estimates at launch time
+	DistinctMachines   bool
+	AvoidMachines      []string
 }
 
 // CreateCampaign inserts a new campaign batch record and returns its ID.
 func CreateCampaign(db *sql.DB, c *Campaign) (int64, error) {
 	now := time.Now().Unix()
+	avoidMachinesJSON, err := encodeStringSliceForDB(c.AvoidMachines)
+	if err != nil {
+		return 0, err
+	}
 	result, err := db.Exec(
-		`INSERT INTO campaigns (status, created_at, estimated_cost_cents) VALUES (?, ?, ?)`,
-		c.Status, now, c.EstimatedCostCents,
+		`INSERT INTO campaigns (status, created_at, estimated_cost_cents, distinct_machines, avoid_machines) VALUES (?, ?, ?, ?, ?)`,
+		c.Status, now, c.EstimatedCostCents, boolToInt(c.DistinctMachines), avoidMachinesJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -40,27 +48,22 @@ func CreateCampaign(db *sql.DB, c *Campaign) (int64, error) {
 // GetCampaign retrieves a campaign by ID.
 func GetCampaign(db *sql.DB, id int64) (*Campaign, error) {
 	row := db.QueryRow(
-		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns WHERE id = ?`, id,
+		campaignSelectSQL()+` WHERE id = ?`, id,
 	)
-	var c Campaign
-	var endedAt sql.NullInt64
-	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents)
+	c, err := scanCampaign(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if endedAt.Valid {
-		c.EndedAt = &endedAt.Int64
-	}
-	return &c, nil
+	return c, nil
 }
 
 // ListCampaigns returns all campaigns ordered by creation time descending.
 func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 	rows, err := db.Query(
-		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns ORDER BY created_at DESC`,
+		campaignSelectSQL() + ` ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, err
@@ -73,8 +76,7 @@ func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 func GetMostRecentCampaign(db *sql.DB) (*Campaign, error) {
 	return getMostRecentCampaignByQuery(
 		db,
-		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0)
-		 FROM campaigns
+		campaignSelectSQL()+`
 		 ORDER BY created_at DESC, id DESC
 		 LIMIT 1`,
 	)
@@ -85,8 +87,7 @@ func GetMostRecentCampaign(db *sql.DB) (*Campaign, error) {
 func GetMostRecentCampaignByStatus(db *sql.DB, status string) (*Campaign, error) {
 	return getMostRecentCampaignByQuery(
 		db,
-		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0)
-		 FROM campaigns
+		campaignSelectSQL()+`
 		 WHERE status = ?
 		 ORDER BY created_at DESC, id DESC
 		 LIMIT 1`,
@@ -97,7 +98,7 @@ func GetMostRecentCampaignByStatus(db *sql.DB, status string) (*Campaign, error)
 // ListActiveCampaigns returns campaigns that are not in a terminal status.
 func ListActiveCampaigns(db *sql.DB) ([]*Campaign, error) {
 	rows, err := db.Query(
-		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
+		campaignSelectSQL()+` WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
 		CampaignStatusCompleted, CampaignStatusFailed, CampaignStatusCancelled,
 	)
 	if err != nil {
@@ -110,33 +111,48 @@ func ListActiveCampaigns(db *sql.DB) ([]*Campaign, error) {
 func scanCampaigns(rows *sql.Rows) ([]*Campaign, error) {
 	var campaigns []*Campaign
 	for rows.Next() {
-		var c Campaign
-		var endedAt sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents); err != nil {
+		c, err := scanCampaign(rows)
+		if err != nil {
 			return nil, err
 		}
-		if endedAt.Valid {
-			c.EndedAt = &endedAt.Int64
-		}
-		campaigns = append(campaigns, &c)
+		campaigns = append(campaigns, c)
 	}
 	return campaigns, rows.Err()
 }
 
 func getMostRecentCampaignByQuery(db *sql.DB, query string, args ...any) (*Campaign, error) {
 	row := db.QueryRow(query, args...)
-	var c Campaign
-	var endedAt sql.NullInt64
-	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents)
+	c, err := scanCampaign(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	return c, err
+}
+
+type campaignScanner interface {
+	Scan(dest ...any) error
+}
+
+func campaignSelectSQL() string {
+	return `SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0),
+		       COALESCE(distinct_machines, 0), COALESCE(avoid_machines, '')
+		  FROM campaigns`
+}
+
+func scanCampaign(row campaignScanner) (*Campaign, error) {
+	var c Campaign
+	var endedAt sql.NullInt64
+	var distinct int
+	var avoidMachinesJSON string
+	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents, &distinct, &avoidMachinesJSON)
 	if err != nil {
 		return nil, err
 	}
 	if endedAt.Valid {
 		c.EndedAt = &endedAt.Int64
 	}
+	c.DistinctMachines = distinct != 0
+	c.AvoidMachines = decodeStringSliceFromDB(avoidMachinesJSON)
 	return &c, nil
 }
 
@@ -151,4 +167,52 @@ func UpdateCampaignStatus(db *sql.DB, id int64, status string) error {
 		_, err := db.Exec(`UPDATE campaigns SET status = ? WHERE id = ?`, status, id)
 		return err
 	}
+}
+
+func encodeStringSliceForDB(values []string) (any, error) {
+	cleaned := normalizeStringSlice(values)
+	if len(cleaned) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(cleaned)
+	if err != nil {
+		return nil, err
+	}
+	return string(data), nil
+}
+
+func decodeStringSliceFromDB(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil
+	}
+	return normalizeStringSlice(out)
+}
+
+func normalizeStringSlice(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

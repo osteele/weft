@@ -51,6 +51,8 @@ type LaunchOpts struct {
 	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
+	DistinctMachines    bool                      // exclude covered/in-flight/avoided physical machines within the campaign
+	AvoidMachines       []string                  // resolved provider machine IDs to exclude for distinct-machine campaigns
 	// MoveTargetClaim, if true, uses each job's open MoveIntent to create a
 	// hidden target attempt on this launch. The source stays authoritative
 	// until the target launch is accepted.
@@ -573,6 +575,63 @@ func recordRunpodObservedBootstrapPhase(database *sql.DB, campaignID *int64, lau
 	}
 }
 
+func validateDistinctMachineOffers(offers []cloud.Offer) error {
+	for _, offer := range offers {
+		if offer.Provider != cloud.ProviderVastai {
+			return fmt.Errorf("distinct-machine launches require Vast.ai machine_id support; provider %q is unsupported", offer.Provider)
+		}
+		if strings.TrimSpace(offer.MachineID) == "" {
+			return fmt.Errorf("distinct-machine launches require provider machine_id; offer %s has none", offer.Key())
+		}
+	}
+	return nil
+}
+
+func DistinctMachineClients(clients []cloud.Client) ([]cloud.Client, error) {
+	filtered := make([]cloud.Client, 0, len(clients))
+	for _, client := range clients {
+		if client != nil && client.Provider() == cloud.ProviderVastai {
+			filtered = append(filtered, client)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("distinct-machine launches require Vast.ai machine_id support; no Vast.ai provider is available")
+	}
+	return filtered, nil
+}
+
+func DistinctMachineAvoidanceKeys(avoidMachines []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, machineID := range avoidMachines {
+		if key := db.ProviderMachineKey(string(cloud.ProviderVastai), machineID); key != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+func distinctMachineExclusions(database *sql.DB, campaignID int64, avoidMachines []string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	covered, err := db.CampaignCoveredMachineIDs(database, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	for key := range covered {
+		out[key] = struct{}{}
+	}
+	inflight, err := db.CampaignInflightMachineIDs(database, campaignID)
+	if err != nil {
+		return nil, err
+	}
+	for key := range inflight {
+		out[key] = struct{}{}
+	}
+	for key := range DistinctMachineAvoidanceKeys(avoidMachines) {
+		out[key] = struct{}{}
+	}
+	return out, nil
+}
+
 var (
 	retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
 	replanChainPattern  = regexp.MustCompile(`chain\s+(\d+)/(\d+)`)
@@ -813,6 +872,11 @@ func launchCampaignWithStager(
 	if len(offers) != len(groups) {
 		return nil, fmt.Errorf("offers/groups mismatch: %d offers for %d groups", len(offers), len(groups))
 	}
+	if opts.DistinctMachines {
+		if err := validateDistinctMachineOffers(offers); err != nil {
+			return nil, err
+		}
+	}
 
 	if onEvent != nil {
 		onEvent(LaunchEvent{
@@ -853,6 +917,8 @@ func launchCampaignWithStager(
 	campaignRec := &db.Campaign{
 		Status:             db.CampaignStatusLaunching,
 		EstimatedCostCents: estimatedCostCents,
+		DistinctMachines:   opts.DistinctMachines,
+		AvoidMachines:      opts.AvoidMachines,
 	}
 	campaignID, err := db.CreateCampaign(database, campaignRec)
 	if err != nil {
@@ -865,6 +931,14 @@ func launchCampaignWithStager(
 	campaignCreatedAt := time.Now()
 	if c, err := db.GetCampaign(database, campaignID); err == nil && c != nil && c.CreatedAt > 0 {
 		campaignCreatedAt = time.Unix(c.CreatedAt, 0)
+	}
+	selectedMachineKeys := map[string]struct{}{}
+	if opts.DistinctMachines {
+		for _, offer := range offers {
+			if key := offerMachineClaimKey(offer); key != "" {
+				selectedMachineKeys[key] = struct{}{}
+			}
+		}
 	}
 	appCfg, cfgErr := config.Load()
 	if cfgErr != nil {
@@ -1215,15 +1289,33 @@ func launchCampaignWithStager(
 				JobIDs:   priceGateJobIDs(group),
 				DB:       database,
 			}
+			coverageExclusions := map[string]struct{}{}
+			if opts.DistinctMachines {
+				var coverageErr error
+				coverageExclusions, coverageErr = distinctMachineExclusions(database, campaignID, opts.AvoidMachines)
+				if coverageErr != nil {
+					mu.Lock()
+					launchErrors = append(launchErrors, fmt.Errorf("%s: coverage exclusion: %w", group.GPUSpec(), coverageErr))
+					mu.Unlock()
+					return
+				}
+				currentMachineKey := offerMachineClaimKey(ofr)
+				for key := range selectedMachineKeys {
+					if key != currentMachineKey {
+						coverageExclusions[key] = struct{}{}
+					}
+				}
+			}
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
 				return searchAuthorizedReplacementOffer(gateCtx, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
-					return SearchBestOfferForGroupWithProfile(
+					return SearchBestOfferForGroupWithProfileAndMachineExclusions(
 						clients,
 						group,
 						survivalModel,
 						jobDurationHrs,
 						bidding.ConstantSetup(setupOverheadHrs),
 						exclude,
+						coverageExclusions,
 						opts.ScoringProfile(),
 						minReliability,
 						opts.MinSurvival,

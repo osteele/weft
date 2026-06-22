@@ -163,7 +163,19 @@ weft start instance --yes               # Skip TUI, launch all groups
 weft start instance --jobs wj42,wj43    # Filter to specific job IDs
 weft start instance --min-survival 0    # Disable survival floor (allow all offers)
 weft start instance --min-survival 0.6  # Stricter survival floor
+weft start instance --distinct-machines --jobs wj42,wj43
+weft start instance --distinct-machines --avoid wi123 --avoid wj456
 ```
+
+### Distinct physical machines
+
+Use `--distinct-machines` for benchmark or coverage runs where selected jobs
+should land on different Vast.ai physical machines. Weft keys this on Vast.ai's
+per-offer `machine_id`, so RunPod is not supported for this mode.
+
+`--avoid` can be repeated or comma-separated. Each token may be a raw
+`machine_id`, an instance id such as `wi123`, or a job id such as `wj456`.
+Unresolvable avoid tokens produce warnings and are skipped.
 
 ### Interruptible jobs
 

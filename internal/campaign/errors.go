@@ -11,3 +11,7 @@ var ErrNoLaunchGroups = errors.New("no instance groups to launch")
 // ErrNoReplacementOffer is returned when an offer disappears and no replacement
 // can be found.
 var ErrNoReplacementOffer = errors.New("no replacement offer found")
+
+// ErrDistinctMachinesExhausted is returned when coverage anti-affinity removes
+// every otherwise eligible offer.
+var ErrDistinctMachinesExhausted = errors.New("all distinct machines covered or in-flight")

@@ -51,6 +51,8 @@ var (
 	instanceLaunchProject           string
 	instanceLaunchTUI               bool
 	instanceLaunchPlain             bool
+	instanceLaunchDistinctMachines  bool
+	instanceLaunchAvoid             []string
 )
 
 func addInstanceLaunchFlags(cmd *cobra.Command) {
@@ -71,6 +73,8 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceLaunchProject, "project", "", "Filter unplaced jobs by project name")
 	cmd.Flags().BoolVar(&instanceLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&instanceLaunchPlain, "plain", false, "Force plain non-interactive mode")
+	cmd.Flags().BoolVar(&instanceLaunchDistinctMachines, "distinct-machines", false, "Launch on distinct Vast.ai physical machines")
+	cmd.Flags().StringArrayVar(&instanceLaunchAvoid, "avoid", nil, "Machine, instance, or job to avoid for --distinct-machines (repeatable, comma-separated)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
@@ -164,10 +168,13 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 
 	// Parse budget limits
 	opts := parseLaunchOpts()
+	if err := applyDistinctMachineLaunchOptions(database, &opts); err != nil {
+		return err
+	}
 
 	// Dry run: print plan table
 	if instanceLaunchDryRun {
-		return runDryRunPlan(database, cfg, groups, opts.Strategy, opts.MinSurvival)
+		return runDryRunPlan(database, cfg, groups, opts)
 	}
 
 	// Check R2 config before entering interactive mode
@@ -349,25 +356,42 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	if providerErr != nil {
 		clients = nil
 	}
+	if opts.DistinctMachines && providerErr == nil {
+		clients, providerErr = campaign.DistinctMachineClients(clients)
+	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
 	fmt.Println("Searching for GPU offers...")
 	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
-	prep, err := campaign.PrepareLaunchExecutionPlanWithProgress(
-		database,
-		clients,
-		providerErr,
-		groups,
-		nil,
-		opts.ScoringProfile(),
-		opts.MinSurvival,
-		cfg.CampaignReliability(),
-		&predCfg,
-		overheadModel,
-		survivalModel,
-		reportPlanProgress,
-	)
+	planOptions := campaign.LaunchExecutionPlanOptions{
+		InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+	}
+	var prep campaign.LaunchExecutionPlan
+	var err error
+	if opts.DistinctMachines {
+		prep, err = campaign.PrepareNewInstanceLaunchPlanWithOptions(
+			database, clients, providerErr, groups, nil,
+			opts.ScoringProfile(), opts.MinSurvival, cfg.CampaignReliability(),
+			&predCfg, overheadModel, survivalModel, reportPlanProgress, planOptions,
+		)
+	} else {
+		prep, err = campaign.PrepareLaunchExecutionPlanWithProgressAndOptions(
+			database,
+			clients,
+			providerErr,
+			groups,
+			nil,
+			opts.ScoringProfile(),
+			opts.MinSurvival,
+			cfg.CampaignReliability(),
+			&predCfg,
+			overheadModel,
+			survivalModel,
+			reportPlanProgress,
+			planOptions,
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -520,20 +544,26 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	return nil
 }
 
-func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, strategy bidding.SelectionStrategy, minSurvival float64) error {
+func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) error {
 	clients, providerErr := buildCloudClients(cfg)
 	if providerErr != nil {
 		clients = nil
 	}
+	if opts.DistinctMachines && providerErr == nil {
+		clients, providerErr = campaign.DistinctMachineClients(clients)
+	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
-	reusable, _ := campaign.FindReusableInstances(database)
+	var reusable []campaign.InstanceCapacity
+	if !opts.DistinctMachines {
+		reusable, _ = campaign.FindReusableInstances(database)
+	}
 	if providerErr != nil && len(reusable) == 0 {
 		return providerErr
 	}
 	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
-	plans, _ := campaign.BuildProfilePlansWithProgress(
+	plans, _ := campaign.BuildProfilePlansWithProgressAndOptions(
 		database,
 		clients,
 		groups,
@@ -541,14 +571,17 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		&predCfg,
 		overheadModel,
 		survivalModel,
-		[]bidding.ScoreProfile{strategy.Profile()},
+		[]bidding.ScoreProfile{opts.ScoringProfile()},
 		cfg.CampaignReliability(),
-		minSurvival,
+		opts.MinSurvival,
 		reportPlanProgress,
+		campaign.PlanOptions{
+			InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+		},
 	)
-	plan, ok := plans[strategy.Profile().ID]
+	plan, ok := plans[opts.ScoringProfile().ID]
 	if !ok {
-		return fmt.Errorf("could not build dry-run plan for strategy %s", strategy)
+		return fmt.Errorf("could not build dry-run plan for strategy %s", opts.Strategy)
 	}
 	requestedJobs := 0
 	for _, group := range groups {
@@ -566,7 +599,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		estimates = plan.NewCandidate.Estimates
 	}
 
-	printSurvivalRejections(groupOffers, minSurvival)
+	printSurvivalRejections(groupOffers, opts.MinSurvival)
 	if len(groupOffers) == 0 {
 		if len(plan.ReuseAssignments) == requestedJobs {
 			fmt.Println("All jobs can be assigned to existing instances. No new instances needed.")
@@ -618,7 +651,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 
 	total := campaign.TotalEstimatedCostFromEstimates(estimates)
 	fmt.Printf("\nEstimated total: ~$%.2f\n", total)
-	if line := campaign.FormatNewsvendorRecommendation(campaign.RecommendInstanceCount(estimates, strategy.Profile())); line != "" {
+	if line := campaign.FormatNewsvendorRecommendation(campaign.RecommendInstanceCount(estimates, opts.ScoringProfile())); line != "" {
 		fmt.Println(line)
 	}
 	fmt.Println("To launch interactively: weft launch instances")
@@ -926,6 +959,7 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		Strategy:            strategy,
 		MinSurvival:         instanceLaunchMinSurvival,
 		SkipWorkdirDeletion: instanceLaunchSkipWorkdirDelete,
+		DistinctMachines:    instanceLaunchDistinctMachines,
 	}
 	if instanceLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(instanceLaunchMaxSpend, "$")
@@ -957,6 +991,27 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		}
 	}
 	return opts
+}
+
+func applyDistinctMachineLaunchOptions(database *sql.DB, opts *campaign.LaunchOpts) error {
+	if opts == nil {
+		return nil
+	}
+	if len(instanceLaunchAvoid) > 0 && !opts.DistinctMachines {
+		return fmt.Errorf("--avoid requires --distinct-machines")
+	}
+	if !opts.DistinctMachines {
+		return nil
+	}
+	avoidMachines, warnings, err := db.ResolveAvoidMachineIDs(database, instanceLaunchAvoid)
+	if err != nil {
+		return fmt.Errorf("resolve --avoid: %w", err)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
+	opts.AvoidMachines = avoidMachines
+	return nil
 }
 
 // executeReuseAssignments submits jobs to their assigned instances via R2.

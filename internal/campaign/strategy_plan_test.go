@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -845,6 +846,48 @@ func TestRankGroupOffersForPlanning_NoMachineRaceAcrossGroups(t *testing.T) {
 	}
 	if offers[1].Offer.MachineID != "29150" {
 		t.Fatalf("second group should fall through to next-cheapest machine 29150 (44696 taken), got %q", offers[1].Offer.MachineID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 10,
+			Jobs:     []*db.Job{{ID: 1, Project: "p", Command: "x"}},
+		},
+		Offers: []cloud.Offer{
+			{Provider: cloud.ProviderVastai, ProviderID: "covered-offer", MachineID: "covered", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.10, DLPerf: 10},
+			{Provider: cloud.ProviderVastai, ProviderID: "fresh-offer", MachineID: "fresh", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.20, DLPerf: 10},
+		},
+	}}
+	offers, _ := rankGroupOffersFromPredictionsWithMachineExclusions(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		map[string]struct{}{"vastai/covered": {}},
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.MachineID != "fresh" {
+		t.Fatalf("selected machine = %q, want fresh", offers[0].Offer.MachineID)
+	}
+
+	offers, _ = rankGroupOffersFromPredictionsWithMachineExclusions(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		map[string]struct{}{"vastai/covered": {}, "vastai/fresh": {}},
+	)
+	if len(offers) != 1 || !errors.Is(offers[0].Err, ErrDistinctMachinesExhausted) {
+		t.Fatalf("expected distinct-machine exhaustion, got %#v", offers)
 	}
 }
 

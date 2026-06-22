@@ -2290,20 +2290,34 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 		sendCampaignPhase("launching worker instances")
 
-		prep, err := prepareLaunchExecutionPlan(
-			database,
-			clients,
-			providerErr,
-			m.groups,
-			m.selected,
-			profile,
-			opts.MinSurvival,
-			m.appConfig.CampaignReliability(),
-			predCfg,
-			overheadModel,
-			survivalModel,
-			nil,
-		)
+		planOptions := campaign.LaunchExecutionPlanOptions{
+			InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+		}
+		var prep launchExecutionPlan
+		var err error
+		if opts.DistinctMachines {
+			prep, err = campaign.PrepareNewInstanceLaunchPlanWithOptions(
+				database, clients, providerErr, m.groups, m.selected,
+				profile, opts.MinSurvival, m.appConfig.CampaignReliability(),
+				predCfg, overheadModel, survivalModel, nil, planOptions,
+			)
+		} else {
+			prep, err = prepareLaunchExecutionPlan(
+				database,
+				clients,
+				providerErr,
+				m.groups,
+				m.selected,
+				profile,
+				opts.MinSurvival,
+				m.appConfig.CampaignReliability(),
+				predCfg,
+				overheadModel,
+				survivalModel,
+				nil,
+				planOptions,
+			)
+		}
 		if err != nil {
 			sendLaunchPlanReady(0, nil)
 			return instancesLaunchedMsg{err: err}

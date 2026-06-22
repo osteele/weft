@@ -19,11 +19,19 @@ type LaunchExecutionPlan struct {
 	Estimates         []CostEstimate
 }
 
+type LaunchExecutionPlanOptions struct {
+	InitialClaimedMachines map[string]struct{}
+}
+
 func PrepareLaunchExecutionPlan(database *sql.DB, clients []cloud.Client, providerErr error, groups []InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel) (LaunchExecutionPlan, error) {
 	return PrepareLaunchExecutionPlanWithProgress(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, nil)
 }
 
 func PrepareLaunchExecutionPlanWithProgress(database *sql.DB, clients []cloud.Client, providerErr error, groups []InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel, onProgress PlanProgressFunc) (LaunchExecutionPlan, error) {
+	return PrepareLaunchExecutionPlanWithProgressAndOptions(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, onProgress, LaunchExecutionPlanOptions{})
+}
+
+func PrepareLaunchExecutionPlanWithProgressAndOptions(database *sql.DB, clients []cloud.Client, providerErr error, groups []InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel, onProgress PlanProgressFunc, options LaunchExecutionPlanOptions) (LaunchExecutionPlan, error) {
 	selectedGroups, requestedJobs := SelectLaunchGroups(groups, selected)
 	plan := LaunchExecutionPlan{RequestedJobs: requestedJobs}
 	if requestedJobs == 0 {
@@ -37,7 +45,7 @@ func PrepareLaunchExecutionPlanWithProgress(database *sql.DB, clients []cloud.Cl
 
 	effectiveMinSurvival := survivalModel.HealthFloor(minSurvival)
 
-	plans, _ := BuildProfilePlansWithProgress(
+	plans, _ := BuildProfilePlansWithProgressAndOptions(
 		database,
 		clients,
 		selectedGroups,
@@ -49,6 +57,7 @@ func PrepareLaunchExecutionPlanWithProgress(database *sql.DB, clients []cloud.Cl
 		minReliability,
 		effectiveMinSurvival,
 		onProgress,
+		PlanOptions{InitialClaimedMachines: options.InitialClaimedMachines},
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {
@@ -110,6 +119,24 @@ func PrepareNewInstanceLaunchPlan(
 	survivalModel *bidding.SurvivalModel,
 	onProgress PlanProgressFunc,
 ) (LaunchExecutionPlan, error) {
+	return PrepareNewInstanceLaunchPlanWithOptions(database, clients, providerErr, groups, selected, profile, minSurvival, minReliability, predCfg, overheadModel, survivalModel, onProgress, LaunchExecutionPlanOptions{})
+}
+
+func PrepareNewInstanceLaunchPlanWithOptions(
+	database *sql.DB,
+	clients []cloud.Client,
+	providerErr error,
+	groups []InstanceGroup,
+	selected map[int64]bool,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+	minReliability float64,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	onProgress PlanProgressFunc,
+	options LaunchExecutionPlanOptions,
+) (LaunchExecutionPlan, error) {
 	selectedGroups, requestedJobs := SelectLaunchGroups(groups, selected)
 	plan := LaunchExecutionPlan{RequestedJobs: requestedJobs}
 	if requestedJobs == 0 {
@@ -120,7 +147,7 @@ func PrepareNewInstanceLaunchPlan(
 	}
 
 	effectiveMinSurvival := survivalModel.HealthFloor(minSurvival)
-	plans, _ := BuildProfilePlansWithProgress(
+	plans, _ := BuildProfilePlansWithProgressAndOptions(
 		database,
 		clients,
 		selectedGroups,
@@ -132,6 +159,7 @@ func PrepareNewInstanceLaunchPlan(
 		minReliability,
 		effectiveMinSurvival,
 		onProgress,
+		PlanOptions{InitialClaimedMachines: options.InitialClaimedMachines},
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {

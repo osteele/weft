@@ -147,6 +147,8 @@ CREATE TABLE IF NOT EXISTS "campaigns" (
 		created_at INTEGER NOT NULL,
 		ended_at INTEGER,
 		estimated_cost_cents INTEGER,
+		distinct_machines INTEGER NOT NULL DEFAULT 0,
+		avoid_machines TEXT,
 		CONSTRAINT campaigns_status_check CHECK (status IN ('planned', 'launching', 'running', 'completed', 'failed', 'canceled'))
 	);
 CREATE TABLE IF NOT EXISTS provider_status_transitions (

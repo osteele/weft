@@ -89,11 +89,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddResultsVerifyDetailColumn},
 		&goose.GoFunc{RunDB: dropAddResultsVerifyDetailColumn},
 	)
+	addCampaignMachineAntiAffinity := goose.NewGoMigration(
+		24,
+		&goose.GoFunc{RunDB: applyAddCampaignMachineAntiAffinity},
+		&goose.GoFunc{RunDB: dropAddCampaignMachineAntiAffinity},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -203,6 +208,37 @@ func applyAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
 
 func dropAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN results_verify_detail`)
+	return nil
+}
+
+func applyAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"distinct_machines", `ALTER TABLE campaigns ADD COLUMN distinct_machines INTEGER NOT NULL DEFAULT 0`},
+		{"avoid_machines", `ALTER TABLE campaigns ADD COLUMN avoid_machines TEXT`},
+	} {
+		exists, err := columnExists(ctx, db, "campaigns", col.name)
+		if err != nil {
+			return fmt.Errorf("inspect campaigns.%s: %w", col.name, err)
+		}
+		if !exists {
+			if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("add campaigns.%s: %w", col.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func dropAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error {
+	for _, stmt := range []string{
+		`ALTER TABLE campaigns DROP COLUMN avoid_machines`,
+		`ALTER TABLE campaigns DROP COLUMN distinct_machines`,
+	} {
+		_, _ = db.ExecContext(ctx, stmt)
+	}
 	return nil
 }
 
@@ -639,7 +675,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

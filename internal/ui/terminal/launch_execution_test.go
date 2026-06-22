@@ -127,6 +127,7 @@ func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		campaign.LaunchExecutionPlanOptions{},
 	)
 	if err != nil {
 		t.Fatalf("prepareLaunchExecutionPlan: %v", err)

@@ -109,6 +109,24 @@ entity Campaign {
     ended_at: Timestamp?
     estimated_cost_cents: Integer
 
+    -- Machine anti-affinity (coverage). When distinct_machines is set, this
+    -- campaign is a benchmark coverage set: each member job is one datapoint
+    -- and no two successful datapoints may share a physical machine. Offer
+    -- selection (CoverageOfferExclusion) and infra-failure replacement
+    -- (CoverageReplacementResearchesOffer) exclude already-covered and
+    -- in-flight machines — but NOT failed or boot-failed machines, whose
+    -- hardware is left uncovered and therefore stays eligible. Requires a
+    -- provider that exposes per-offer machine_id; see
+    -- MachineAntiAffinityRequiresMachineID.
+    distinct_machines: Boolean
+
+    -- Operator-supplied physical machines to avoid, resolved to provider
+    -- machine_ids from `--avoid` tokens (a raw machine_id, an instance id,
+    -- or a job id — see ResolveAvoidTarget). Unioned into the offer-exclusion
+    -- set alongside the derived covered/in-flight sets. Used to repair,
+    -- resume, or extend a coverage campaign.
+    avoid_machines: List<String>
+
     -- Relationships
     instances: Instance with campaign = this
 
@@ -123,6 +141,23 @@ entity Campaign {
     -- Implementation: internal/campaign/reconcile.go allCampaignJobsTerminal,
     -- via db.GetLaunchJobsIncludingAttempts (launch_job_membership view).
     jobs: jobs/Job with attempts.any(a => a.cloud_instance in instances)
+
+    -- Physical machines already COVERED by a successful datapoint: instances
+    -- that hosted a completed member job. Failed and boot-failed instances are
+    -- excluded by construction — their hardware is still uncovered. The
+    -- machine identity is offer.machine_id.
+    -- Implementation: the success+in-flight generalization of
+    -- db.FailedMoveTargetMachineIDs — attempt -> launch -> machine_id join,
+    -- scoped to the campaign and keyed on cloud_outcome = completed.
+    covered_instances: instances where jobs.any(j => j.status == completed)
+
+    -- Physical machines currently BEING covered: non-terminal instances in
+    -- this campaign that have a resolved offer.machine_id. This closes the gap
+    -- between the per-pass claim (OfferClaimInPassExclusion) and a replacement
+    -- launched in a later pass against a refreshed offer pool.
+    inflight_instances: instances
+        where status not in {completed, failed, canceled}
+          and offer.machine_id != null
 
     transitions status {
         planned -> launching
@@ -807,6 +842,167 @@ rule OfferClaimInPassExclusion {
         -- and internal/campaign/offers.go thread a claimedMachines /
         -- claimedOffers pair through the per-group loop;
         -- filterOffersByClaim and recordOfferClaim are the helpers.
+}
+
+-- ==========================================================================
+-- Machine anti-affinity (coverage campaigns)
+-- ==========================================================================
+--
+-- A coverage campaign (Campaign.distinct_machines) collects one benchmark
+-- datapoint per distinct physical machine. The anti-affinity is keyed on
+-- COVERAGE, not failure: a machine is excluded once it has produced a
+-- successful datapoint (covered_instances) or is currently producing one
+-- (inflight_instances), plus any operator avoid_machines. A machine whose
+-- run FAILED or FAILED TO BOOT is left uncovered and therefore stays
+-- eligible — even a re-attempt on that same machine is correct, because no
+-- datapoint has been collected from it.
+--
+-- This is the persistent / cross-pass generalization of the per-pass
+-- OfferClaimInPassExclusion: that rule prevents two groups in ONE ranking
+-- pass from claiming the same machine; these rules additionally exclude
+-- machines covered or in-flight from PRIOR passes and replacements, and the
+-- operator-supplied avoid set.
+
+-- A token passed to `weft ... --avoid <token>` identifying a physical machine
+-- to exclude. All three kinds resolve to a single provider machine_id.
+value AvoidTargetKind = machine_id | instance | job
+
+rule ResolveAvoidTarget {
+    when: ResolveAvoidTarget(token)
+
+    ensures:
+        token.kind == machine_id implies result == token.value
+    ensures:
+        token.kind == instance implies result == Instance(token.value).offer.machine_id
+    ensures:
+        token.kind == job implies
+            result == Job(token.value).latest_attempt.cloud_instance.offer.machine_id
+
+    @guidance
+        -- `--avoid` accepts a raw provider machine_id, an instance id (wiNN),
+        -- or a job id (wjNN); repeatable and/or comma-separated. An instance
+        -- resolves to its own offer.machine_id; a job resolves to the
+        -- machine_id of its LATEST attempt's launch (deliberately the latest
+        -- attempt, distinct from the all-successful coverage set — `--avoid
+        -- wjNN` means "not where wjNN most recently ran").
+        --
+        -- A token that never landed on a machine (job never started, or an
+        -- instance/job whose offer.machine_id is empty) resolves to nothing
+        -- and MUST be reported as a warning, not silently dropped, so the
+        -- operator knows the exclusion had no effect.
+        --
+        -- Resolved machine_ids are unioned into Campaign.avoid_machines.
+}
+
+-- The coverage exclusion that offer selection enforces for a distinct_machines
+-- campaign. Extends the per-pass claim by pre-seeding the claimed-machine set
+-- with the campaign's covered, in-flight, and avoid machines BEFORE ranking.
+rule CoverageOfferExclusion {
+    when: RankGroupOffers(raw_offers_per_group) for campaign
+    requires: campaign.distinct_machines
+
+    ensures:
+        for each offer o selected for a group in campaign:
+            o.machine_id not in campaign.covered_instances.offer.machine_id
+            and o.machine_id not in campaign.inflight_instances.offer.machine_id
+            and o.machine_id not in campaign.avoid_machines
+
+    @guidance
+        -- Implementation: thread an initial exclusion set into
+        -- filterOffersByClaim's claimedMachines map (keyed
+        -- provider/machine_id, matching recordOfferClaim) before the
+        -- per-group loop in rankGroupOffersFromPredictions /
+        -- RankGroupOffersWithProfile. The covered + in-flight machine_ids
+        -- come from the success+in-flight generalization of
+        -- db.FailedMoveTargetMachineIDs scoped to the campaign; the avoid set
+        -- comes from ResolveAvoidTarget. No new offer-filter stage is needed —
+        -- the existing claim machinery already excludes claimed machines and
+        -- already has the RunPod empty-machine_id behavior described in
+        -- MachineAntiAffinityRequiresMachineID.
+}
+
+-- The defining property: failures never exclude their machine.
+invariant FailedMachinesRemainEligible {
+    for campaign where campaign.distinct_machines:
+        for instance in campaign.instances
+            where instance.termination_reason in {provider_failure, infra_failure,
+                                                   bootstrap_timeout, phase_stall,
+                                                   preempted, job_failure, disk_full}
+              and not campaign.covered_instances.contains(instance):
+            instance.offer.machine_id not in campaign.avoid_machines implies
+                instance.offer.machine_id may be reselected
+
+    @guidance
+        -- A failed or boot-failed machine produced no datapoint, so coverage
+        -- anti-affinity must NOT exclude it. The only ways a once-failed
+        -- machine becomes excluded are (a) a later attempt SUCCEEDS on it
+        -- (now covered) or (b) the operator names it via `--avoid`. This is
+        -- the inverse of the move-repair path (FailedMoveTargetMachineIDs),
+        -- which excludes failed machines; the coverage query selects success.
+}
+
+-- For a coverage campaign, an infra-failure replacement must RE-SEARCH offers
+-- with the coverage exclusion rather than reuse the failed instance's offer.
+rule CoverageReplacementResearchesOffer {
+    when: instance: Instance.status transitions_to failed
+    requires: instance.is_retryable
+          and instance.campaign.distinct_machines
+
+    ensures: the replacement instance's offer is chosen by a fresh offer search
+             subject to CoverageOfferExclusion (NOT copied from instance.offer)
+    ensures: instance.offer.machine_id not in instance.campaign.avoid_machines
+             implies the replacement MAY reselect instance.offer.machine_id
+             (the failed machine is uncovered)
+
+    @guidance
+        -- This overrides RelaunchAfterInfraFailure for distinct_machines
+        -- campaigns. The base rule reuses offer: instance.offer, which pins
+        -- the replacement to the same physical machine — correct for a plain
+        -- infra retry, wrong for coverage, where the campaign must keep making
+        -- progress across machines and must not get stuck re-creating a dead
+        -- box. The replacement re-runs offer search + CoverageOfferExclusion.
+        -- Note the just-failed machine is still eligible (it is uncovered);
+        -- excluding the covered + in-flight set is what spreads coverage.
+}
+
+-- When the exclusion empties the eligible offer pool, say so explicitly.
+rule CoverageExhaustion {
+    when: RankGroupOffers(raw_offers_per_group) for campaign
+    requires: campaign.distinct_machines
+    requires: no offer survives CoverageOfferExclusion for a group
+
+    ensures: the group is reported as "all distinct machines covered or in-flight"
+             rather than repeating a covered machine or stalling silently
+
+    @guidance
+        -- For an interactive launch this is an error; for repair/resume/extend
+        -- of an existing campaign it is the natural completion signal (the
+        -- matrix is full). Surface it through the existing filterStats /
+        -- unplaced-reason path, distinguished from ordinary "no offers" so the
+        -- operator can tell saturation apart from a market/constraint miss.
+}
+
+-- Provider capability gate: coverage anti-affinity needs a real per-offer
+-- physical machine id, which only some providers expose.
+invariant MachineAntiAffinityRequiresMachineID {
+    for campaign where campaign.distinct_machines:
+        campaign.instances.all(i => i.provider.name == "vastai")
+
+    @guidance
+        -- Only Vast.ai populates a per-offer machine_id at search time
+        -- (OfferSnapshot.machine_id), so only Vast.ai supports pre-launch
+        -- machine anti-affinity. RunPod offers carry NO machine identity:
+        -- offer search returns GPU TYPES, and ProviderID is the GPU-type id,
+        -- not a machine — the machine_id only exists after a pod is created.
+        -- (Implementation: internal/runpod/client.go buildOffersFromGraphQL
+        -- sets ProviderID = gt.ID and never sets MachineID.)
+        --
+        -- v1 policy: a distinct_machines launch/repair/resume targeting a
+        -- non-Vast.ai provider MUST fail loudly at request time, naming the
+        -- provider and the unsupported capability — it MUST NOT silently
+        -- downgrade to no anti-affinity (which would let the campaign quietly
+        -- re-cover machines). A best-effort post-create reject-and-relaunch
+        -- mode for RunPod is explicitly deferred.
 }
 
 rule GPUMemoryHardwareCeilingResolution {

@@ -45,8 +45,9 @@ type StrategyPlan struct {
 
 // PlanOptions configures scoring behavior for launch planning.
 type PlanOptions struct {
-	OpportunityCostWeight float64
-	PreferReuse           bool
+	OpportunityCostWeight  float64
+	PreferReuse            bool
+	InitialClaimedMachines map[string]struct{}
 }
 
 func defaultPlanOptions() PlanOptions {
@@ -132,8 +133,9 @@ type planEvaluator struct {
 	reuseInputMu    sync.Mutex
 	reuseInputBytes map[string]int64
 
-	opportunityCostWeight float64
-	preferReuse           bool
+	opportunityCostWeight  float64
+	preferReuse            bool
+	initialClaimedMachines map[string]struct{}
 }
 
 type reuseEstimateCacheEntry struct {
@@ -150,22 +152,23 @@ func newPlanEvaluator(
 	options PlanOptions,
 ) *planEvaluator {
 	if options.OpportunityCostWeight <= 0 {
-		options = defaultPlanOptions()
+		options.OpportunityCostWeight = defaultPlanOptions().OpportunityCostWeight
 	}
 	return &planEvaluator{
-		database:              database,
-		predCfg:               predCfg,
-		overheadModel:         overheadModel,
-		survivalModel:         survivalModel,
-		minSurvival:           minSurvival,
-		setupFactory:          OfferSetupOverheadFactory(database, overheadModel),
-		rawEvalCache:          make(map[string]map[int]map[string]offerRuntimePrediction),
-		estimateCache:         make(map[string][]CostEstimate),
-		reuseEstimates:        make(map[string]reuseEstimateCacheEntry),
-		reusePredictions:      make(map[string]map[int64]estimate.DurationPrediction),
-		reuseInputBytes:       make(map[string]int64),
-		opportunityCostWeight: options.OpportunityCostWeight,
-		preferReuse:           options.PreferReuse,
+		database:               database,
+		predCfg:                predCfg,
+		overheadModel:          overheadModel,
+		survivalModel:          survivalModel,
+		minSurvival:            minSurvival,
+		setupFactory:           OfferSetupOverheadFactory(database, overheadModel),
+		rawEvalCache:           make(map[string]map[int]map[string]offerRuntimePrediction),
+		estimateCache:          make(map[string][]CostEstimate),
+		reuseEstimates:         make(map[string]reuseEstimateCacheEntry),
+		reusePredictions:       make(map[string]map[int64]estimate.DurationPrediction),
+		reuseInputBytes:        make(map[string]int64),
+		opportunityCostWeight:  options.OpportunityCostWeight,
+		preferReuse:            options.PreferReuse,
+		initialClaimedMachines: cloneStringSet(options.InitialClaimedMachines),
 	}
 }
 
@@ -252,6 +255,36 @@ func BuildProfilePlansWithProgress(
 	minSurvival float64,
 	onProgress PlanProgressFunc,
 ) (map[string]StrategyPlan, []GroupRawOffers) {
+	return BuildProfilePlansWithProgressAndOptions(
+		database,
+		clients,
+		splitGroups,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		profiles,
+		minReliability,
+		minSurvival,
+		onProgress,
+		defaultPlanOptions(),
+	)
+}
+
+func BuildProfilePlansWithProgressAndOptions(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profiles []bidding.ScoreProfile,
+	minReliability float64,
+	minSurvival float64,
+	onProgress PlanProgressFunc,
+	options PlanOptions,
+) (map[string]StrategyPlan, []GroupRawOffers) {
 	plans := make(map[string]StrategyPlan, len(profiles))
 	if len(splitGroups) == 0 {
 		return plans, nil
@@ -285,7 +318,7 @@ func BuildProfilePlansWithProgress(
 		defaultProfilePlanSpecs(profiles),
 		minSurvival,
 		onProgress,
-		defaultPlanOptions(),
+		options,
 	), splitRaw
 }
 
@@ -791,7 +824,7 @@ func (e *planEvaluator) evaluateRawOffers(raw []GroupRawOffers) rawOfferEvaluati
 }
 
 func (e *planEvaluator) selectOffers(eval rawOfferEvaluation, profile bidding.ScoreProfile) ([]GroupOffer, []offerRuntimePrediction) {
-	return rankGroupOffersFromPredictions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival)
+	return rankGroupOffersFromPredictionsWithMachineExclusions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival, e.initialClaimedMachines)
 }
 
 func (e *planEvaluator) estimateSelectedOffers(groupOffers []GroupOffer, selected []offerRuntimePrediction) []CostEstimate {
@@ -1036,6 +1069,18 @@ func rankGroupOffersFromPredictions(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) ([]GroupOffer, []offerRuntimePrediction) {
+	return rankGroupOffersFromPredictionsWithMachineExclusions(raw, predicted, survivalModel, setupFactory, profile, minSurvival, nil)
+}
+
+func rankGroupOffersFromPredictionsWithMachineExclusions(
+	raw []GroupRawOffers,
+	predicted map[int]map[string]offerRuntimePrediction,
+	survivalModel *bidding.SurvivalModel,
+	setupFactory SetupOverheadFactory,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+	initialClaimedMachines map[string]struct{},
+) ([]GroupOffer, []offerRuntimePrediction) {
 	results := make([]GroupOffer, len(raw))
 	selected := make([]offerRuntimePrediction, len(raw))
 	// Track machines (and specific offer IDs) already claimed by earlier
@@ -1046,7 +1091,7 @@ func rankGroupOffersFromPredictions(
 	// rejections). Filtering each group's offer pool against earlier
 	// selections eliminates the race at its source. The exclusion is
 	// in-pass only — global cross-pass ordering is the autopilot's job.
-	claimedMachines := make(map[string]struct{})
+	claimedMachines := cloneStringSet(initialClaimedMachines)
 	claimedOffers := make(map[string]struct{})
 	for i, r := range raw {
 		if r.Err != nil {
@@ -1059,6 +1104,10 @@ func rankGroupOffersFromPredictions(
 			setupOverhead = setupFactory(r.Group)
 		}
 		availableOffers := filterOffersByClaim(r.Offers, claimedMachines, claimedOffers)
+		if len(r.Offers) > 0 && len(availableOffers) == 0 && len(claimedMachines) > 0 {
+			results[i] = GroupOffer{Group: r.Group, Err: ErrDistinctMachinesExhausted}
+			continue
+		}
 
 		if offerPredictions, ok := predicted[i]; ok {
 			if ranked, ok := rankOfferWithPredictedRuntime(
@@ -2449,8 +2498,8 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 	}
 	out := offers[:0:0]
 	for _, o := range offers {
-		if o.MachineID != "" {
-			if _, taken := claimedMachines[string(o.Provider)+"/"+o.MachineID]; taken {
+		if key := offerMachineClaimKey(o); key != "" {
+			if _, taken := claimedMachines[key]; taken {
 				continue
 			}
 		}
@@ -2467,10 +2516,22 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 // recordOfferClaim marks an offer as claimed for the remainder of the
 // ranking pass.
 func recordOfferClaim(o cloud.Offer, claimedMachines, claimedOffers map[string]struct{}) {
-	if o.MachineID != "" {
-		claimedMachines[string(o.Provider)+"/"+o.MachineID] = struct{}{}
+	if key := offerMachineClaimKey(o); key != "" {
+		claimedMachines[key] = struct{}{}
 	}
 	if o.ProviderID != "" {
 		claimedOffers[string(o.Provider)+"/"+o.ProviderID] = struct{}{}
 	}
+}
+
+func offerMachineClaimKey(o cloud.Offer) string {
+	return db.ProviderMachineKey(string(o.Provider), o.MachineID)
+}
+
+func cloneStringSet(in map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(in))
+	for key := range in {
+		out[key] = struct{}{}
+	}
+	return out
 }
