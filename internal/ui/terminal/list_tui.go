@@ -1939,10 +1939,11 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.isGroupedView() {
-		if cmd := m.handleGroupedStatusClick(msg.Y); cmd != nil {
+		layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
+		if cmd := m.handleGroupedStatusClick(msg.Y, layout); cmd != nil {
 			return m, cmd
 		}
-		m.selectGroupedMouseRow(msg.Y)
+		m.selectGroupedMouseRow(msg.Y, layout.visibleRows)
 		return m, nil
 	}
 	if cmd := m.handleFlatStatusClick(msg.Y); cmd != nil {
@@ -1952,12 +1953,10 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *listTUIModel) handleGroupedStatusClick(y int) tea.Cmd {
+func (m *listTUIModel) handleGroupedStatusClick(y int, layout groupedViewLayout) tea.Cmd {
 	if m.hideStatusArea {
 		return nil
 	}
-	rows := m.groupedRows
-	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
 	if m.isUJGroupedView() && layout.daemonActionable && y == layout.daemonStatusY {
 		if m.daemonRestartInProgress {
 			return nil
@@ -2033,11 +2032,10 @@ func (m listTUIModel) flatBodyRows() int {
 	return max(0, m.height-2-1-footerBlockLines)
 }
 
-func (m *listTUIModel) selectGroupedMouseRow(y int) {
+func (m *listTUIModel) selectGroupedMouseRow(y int, visibleRows []groupedViewportLine) {
 	if y < 1 {
 		return
 	}
-	visibleRows := m.groupedViewportRows()
 	bodyRow := y - 1
 	if bodyRow < 0 || bodyRow >= len(visibleRows) {
 		return
@@ -3978,6 +3976,7 @@ type groupedViewportSection struct {
 	headerRowIndex int
 	itemCount      int
 	rows           []groupedStatusRow
+	rowIdxs        []int
 	shownRows      int
 	ellipsis       bool
 	summaryOnly    bool
@@ -4005,6 +4004,7 @@ func parseGroupedViewportSections(rows []groupedStatusRow) []groupedViewportSect
 				title:          title,
 				headerRowIndex: i,
 				rows:           make([]groupedStatusRow, 0, 8),
+				rowIdxs:        make([]int, 0, 8),
 			}
 			active = true
 			continue
@@ -4013,6 +4013,7 @@ func parseGroupedViewportSections(rows []groupedStatusRow) []groupedViewportSect
 			continue
 		}
 		current.rows = append(current.rows, row)
+		current.rowIdxs = append(current.rowIdxs, i)
 		if (row.job != nil || row.launch != nil) && !row.isBlocked {
 			current.itemCount++
 		}
@@ -4248,29 +4249,14 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 	}
 	type sectionState struct {
 		groupedViewportSection
-		rowIdxs         []int
 		windowStart     int
 		leadingEllipsis bool
 	}
 	parsed := parseGroupedViewportSections(rows)
 	sections := make([]sectionState, 0, len(parsed))
 	for _, section := range parsed {
-		rowIdxs := make([]int, 0, len(rows))
-		for i := range rows {
-			if i <= section.headerRowIndex {
-				continue
-			}
-			if rows[i].isHeader {
-				break
-			}
-			if strings.TrimSpace(rows[i].text) == "" {
-				continue
-			}
-			rowIdxs = append(rowIdxs, i)
-		}
 		sections = append(sections, sectionState{
 			groupedViewportSection: section,
-			rowIdxs:                rowIdxs,
 		})
 	}
 	render := func() []groupedViewportLine {

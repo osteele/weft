@@ -1492,6 +1492,60 @@ func reportedGroupedJobs() []*db.Job {
 	return jobs
 }
 
+func manyTerminalGroupedJobs(completed, failed int) []*db.Job {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusRunning, Host: "cool30", Description: "run 1", Project: "proj"},
+		{ID: 2, Status: db.StatusRunning, Host: "cool30", Description: "run 2", Project: "proj"},
+		{ID: 3, Status: db.StatusQueued, Host: "cool30", Description: "queued 1", Project: "proj"},
+	}
+	for i := 0; i < completed; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(1000 + i), Status: db.StatusCompleted, ExitCode: testIntPtr(0), Description: fmt.Sprintf("done %d", i), Project: "proj"})
+	}
+	for i := 0; i < failed; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(2000 + i), Status: db.StatusFailed, Description: fmt.Sprintf("fail %d", i), Project: "proj"})
+	}
+	return jobs
+}
+
+func BenchmarkSelectGroupedRowsForViewportManyTerminalRows(b *testing.B) {
+	rows := buildGroupedStatusRows(manyTerminalGroupedJobs(100, 100), 120, nil, nil)
+	cursorRowIdx := groupedRowIndexForJob(rows, 2050)
+	if cursorRowIdx < 0 {
+		b.Fatal("cursor job row not found")
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		lines := selectGroupedRowsForViewport(rows, 20, cursorRowIdx)
+		if len(lines) == 0 {
+			b.Fatal("empty viewport")
+		}
+	}
+}
+
+func BenchmarkListTUIGroupedViewManyTerminalRows(b *testing.B) {
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           120,
+		height:          24,
+		jobs:            manyTerminalGroupedJobs(100, 100),
+	}
+	m.rebuildGroupedRows()
+	for pos, rowIdx := range m.groupedSelectableRows {
+		if j := m.groupedRows[rowIdx].job; j != nil && j.ID == 2050 {
+			m.cursor = pos
+			break
+		}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		out := m.View()
+		if !strings.Contains(out, "wj2050") {
+			b.Fatal("cursor job not visible")
+		}
+	}
+}
+
 // TestSelectGroupedRowsForViewport_CursorRowAlwaysVisible is the regression test
 // for the reported bug: arrow navigation onto a job in an abbreviated section
 // must keep that job on screen. The cursor sits on the last Completed job, which
