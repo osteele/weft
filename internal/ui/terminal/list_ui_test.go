@@ -2833,15 +2833,21 @@ func TestListTUIGroupedViewMarksSelectedRowWhenHostMatesActive(t *testing.T) {
 		groupedByStatus: true,
 		width:           100,
 		height:          20,
+		overloadedHostsByName: map[string]bool{
+			"cool30": true,
+		},
 		jobs: []*db.Job{
 			{ID: 101, Host: "cool30", Status: db.StatusRunning, Description: "selected"},
-			{ID: 102, Host: "cool30", Status: db.StatusQueued, Description: "mate"},
+			{ID: 102, Host: "cool30", Status: db.StatusRunning, Description: "mate"},
 			{ID: 103, Host: "cool100", Status: db.StatusQueued, Description: "other"},
 		},
 	}
 	m.rebuildGroupedRows()
 
 	out := stripANSI(m.View())
+	if strings.Contains(out, "[38;5;") {
+		t.Fatalf("grouped view exposed ANSI parameters after stripping:\n%s", out)
+	}
 	lines := strings.Split(out, "\n")
 	selectedLine := lineContaining(t, lines, "wj101")
 	mateLine := lineContaining(t, lines, "wj102")

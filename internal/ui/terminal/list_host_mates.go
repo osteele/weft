@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -109,9 +110,8 @@ func applyHostMateMarkerForJob(line string, job *db.Job) string {
 }
 
 func applyStyledHostMateMarker(line, styled string) string {
-	runes := []rune(line)
-	if len(runes) == 0 {
+	if ansi.StringWidth(line) == 0 {
 		return styled
 	}
-	return styled + string(runes[1:])
+	return styled + ansi.TruncateLeft(line, 1, "")
 }

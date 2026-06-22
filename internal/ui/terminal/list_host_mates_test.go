@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -144,6 +145,22 @@ func TestApplyHostMateMarkerPreservesWidth(t *testing.T) {
 		if visualWidth(got) != visualWidth(line) {
 			t.Errorf("applyHostMateMarker(%q) width = %d, want %d", line, visualWidth(got), visualWidth(line))
 		}
+	}
+}
+
+func TestApplyHostMateMarkerDoesNotExposeLeadingANSI(t *testing.T) {
+	line := "\x1b[38;5;196m- ⌂ wj3256 — dependency-routing\x1b[0m"
+
+	got := applyHostMateMarker(line)
+	plain := stripANSI(got)
+	if strings.Contains(plain, "[38;5;196m") {
+		t.Fatalf("marker overlay exposed ANSI parameters: %q", plain)
+	}
+	if plain != "▎ ⌂ wj3256 — dependency-routing" {
+		t.Fatalf("applyHostMateMarker() = %q, want marker over first visible cell", plain)
+	}
+	if visualWidth(got) != visualWidth(line) {
+		t.Fatalf("applyHostMateMarker() width = %d, want %d", visualWidth(got), visualWidth(line))
 	}
 }
 
