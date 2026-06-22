@@ -2514,9 +2514,9 @@ func TestHasComputeIntensiveTag_CanonicalizesLegacySpelling(t *testing.T) {
 	}
 }
 
-// Regression: torch-derived CUDA/driver floors and arch caps describe GPU
-// runtime compatibility and must never reject a host for a constraint set
-// with no GPU request — even when a caller populates them.
+// Regression: torch-derived CUDA/driver floors and arch caps describe CUDA
+// runtime compatibility and must never reject a CPU-only host for a constraint
+// set with no GPU request — even when a caller populates them.
 func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
 	host := inventory.HostSpec{Name: "cpu-only"} // no GPUs, no driver recorded
 	ok, reasons := CheckHostGPUConstraints(host, Constraints{
@@ -2527,6 +2527,27 @@ func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
 	})
 	if !ok {
 		t.Fatalf("non-GPU constraints rejected host: %v", reasons)
+	}
+}
+
+func TestCheckHostGPUConstraints_NonGPUTorchJobAllowsAppleGPU(t *testing.T) {
+	// A torch job that does not request a GPU may carry CUDA arch bounds because
+	// it would opportunistically use CUDA on NVIDIA hosts. Those CUDA bounds do
+	// not apply to an Apple/MPS-only host, so the host remains eligible.
+	floor := Constraints{MinComputeCap: "7.5", MaxComputeCap: "12.0"}
+	if floor.NeedsGPU() {
+		t.Fatal("precondition: torch runtime bounds should not request a GPU")
+	}
+
+	host := inventory.HostSpec{
+		Name: "studio",
+		OS:   "darwin",
+		GPUs: []inventory.GPUSpec{{
+			Name: "Apple M2 Max (38 cores)", Class: "m2max", Memory: "64GB", Indices: []int{0},
+		}},
+	}
+	if ok, reasons := CheckHostGPUConstraints(host, floor); !ok {
+		t.Fatalf("Apple/MPS host rejected for CUDA arch-bound non-GPU job; want acceptance (reasons=%v)", reasons)
 	}
 }
 

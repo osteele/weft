@@ -1019,12 +1019,12 @@ func isNonTransportableInput(kind dataloc.AssetKind) bool {
 
 // CheckHostGPUConstraints applies shared hard compatibility constraints to a
 // single host. Toolchain floors apply to CPU and GPU jobs. GPU resource floors
-// (class, memory) apply only to jobs with a GPU request, while arch caps and
-// NVIDIA runtime floors apply to any job carrying GPU-runtime bounds — including
-// a torch job that resolved those bounds without requesting a GPU. A GPU host is
-// eligible only if one physical GPU satisfies the requested class, memory floor,
-// and compute-capability range; a GPU-less host is eligible for an arch-only
-// torch job, which runs on CPU there.
+// (class, memory) apply only to jobs with a GPU request, while CUDA arch caps
+// apply to any job carrying GPU-runtime bounds on a CUDA-capable host —
+// including a torch job that resolved those bounds without requesting a GPU. A
+// CUDA-capable host is eligible only if one physical GPU satisfies the requested
+// class, memory floor, and compute-capability range; a CPU-only or non-CUDA GPU
+// host is eligible for an arch-only torch job, which runs without CUDA there.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
 	reqs := c.VersionRequirements
 	if len(reqs) == 0 {
@@ -1034,6 +1034,12 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 		return false, []string{compat.FormatViolation(violations[0])}
 	}
 	if !c.HasGPURuntimeBounds() {
+		return true, nil
+	}
+	if !c.NeedsGPU() && !hostHasCUDACapableGPU(host) {
+		// Torch-derived CUDA bounds protect GPU-agnostic jobs from landing on
+		// incompatible CUDA workers. On CPU-only or non-CUDA GPU hosts (for
+		// example Apple/MPS), those CUDA bounds do not apply.
 		return true, nil
 	}
 	if len(host.GPUs) == 0 {
@@ -1101,6 +1107,23 @@ func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []st
 	default:
 		return false, []string{"no GPU matching constraints"}
 	}
+}
+
+func hostHasCUDACapableGPU(host inventory.HostSpec) bool {
+	if strings.TrimSpace(host.CUDAVersion) != "" || driverMajor(host.NVIDIADriverVersion) > 0 {
+		return true
+	}
+	for _, gpu := range host.GPUs {
+		if ComputeCapForGPU(gpu.Class) != "" || ComputeCapForGPU(gpu.Name) != "" {
+			return true
+		}
+		class := strings.ToLower(strings.TrimSpace(gpu.Class))
+		name := strings.ToLower(strings.TrimSpace(gpu.Name))
+		if strings.Contains(class, "nvidia") || strings.Contains(name, "nvidia") {
+			return true
+		}
+	}
+	return false
 }
 
 func hostCompatibilityFacts(host inventory.HostSpec) compat.FactSet {

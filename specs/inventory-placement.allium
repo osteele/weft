@@ -294,10 +294,12 @@ rule BuildConstraintsFromJob {
     let tags = job.tags
     let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
     let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
-    -- A torch project will use CUDA whenever a GPU is present on the worker, so
-    -- a job placed there must respect the wheel's arch range even if it never
-    -- declared a GPU. Without this, a GPU-agnostic torch job can be routed onto
-    -- an arch-incompatible card and die with "no kernel image" (wj3229).
+    -- A torch project will use CUDA whenever a CUDA-capable GPU is present on
+    -- the worker, so a job placed there must respect the wheel's arch range
+    -- even if it never declared a GPU. Without this, a GPU-agnostic torch job
+    -- can be routed onto an arch-incompatible NVIDIA card and die with "no
+    -- kernel image" (wj3229). Non-CUDA GPU hosts such as Apple/MPS-only
+    -- machines follow the CPU-only path for these CUDA arch bounds.
     let uses_gpu_runtime = requests_gpu or ProjectUsesTorch(job.working_dir)
 
     -- Torch-derived GPU-runtime constraints (arch caps, CUDA/driver floors) are
@@ -362,25 +364,29 @@ rule EvaluateEligibility {
     if c.gpu_mem_gb != null:
         requires: host.gpus.any(g => g.memory_gb >= c.gpu_mem_gb)
 
-    -- 4. GPU compute-capability upper bound (torch wheel compatibility).
-    --    Eligible if at least one GPU on the host has a known cap at or
-    --    below the bound. GPUs with unknown caps pass — we cannot prove
-    --    they violate. The bound is inferred from the project's pinned
-    --    torch version + CUDA wheel variant unless the user overrides it
-    --    with [tool.weft] gpu-arch-max.
+    -- 4. CUDA compute-capability upper bound (torch wheel compatibility).
+    --    Applies to CUDA-capable hosts. Eligible if at least one CUDA GPU on
+    --    the host has a known cap at or below the bound. GPUs with unknown
+    --    caps pass — we cannot prove they violate. Non-CUDA GPU hosts do not
+    --    need to satisfy this CUDA bound for jobs that did not request a GPU.
+    --    The bound is inferred from the project's pinned torch version + CUDA
+    --    wheel variant unless the user overrides it with [tool.weft]
+    --    gpu-arch-max.
     if c.max_compute_cap != null:
         requires: host.gpus.any(g =>
             ComputeCapForGPU(g.class) == null
             or ComputeCapForGPU(g.class) <= c.max_compute_cap)
 
-    -- 5. GPU compute-capability lower bound (torch wheel compatibility).
-    --    Eligible if at least one GPU on the host has a known cap at or
-    --    above the bound. The bound is inferred from the project's pinned
-    --    torch + CUDA wheel variant (TorchMinComputeCap). The asymmetry
-    --    with #4 is deliberate: for the LOWER bound, unknown-to-weft GPUs
-    --    must be REJECTED, not passed. "Unknown" means weft's catalog has
-    --    no compute-cap for the model — silently treating that as
-    --    "probably fine" produced the EXP-179 wj2240 regression in which
+    -- 5. CUDA compute-capability lower bound (torch wheel compatibility).
+    --    Applies to CUDA-capable hosts. Eligible if at least one CUDA GPU on
+    --    the host has a known cap at or above the bound. The bound is inferred
+    --    from the project's pinned torch + CUDA wheel variant
+    --    (TorchMinComputeCap). Non-CUDA GPU hosts do not need to satisfy this
+    --    CUDA bound for jobs that did not request a GPU. The asymmetry with #4
+    --    is deliberate: for the LOWER bound, unknown-to-weft CUDA GPUs must be
+    --    REJECTED, not passed. "Unknown" means weft's catalog has no
+    --    compute-cap for the model — silently treating that as "probably fine"
+    --    produced the EXP-179 wj2240 regression in which
     --    Vast.ai offered GTX 1080 Tis (Pascal, sm_61) that weft did not
     --    recognize and dispatched the job onto them despite a torch-derived
     --    sm_75 floor. The cloud-offer filter
