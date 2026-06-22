@@ -919,6 +919,68 @@ func TestListTUIDBDebounceQueuesTrailingRefresh(t *testing.T) {
 	}
 }
 
+func TestListTUIReloadRequestsCoalesceWhileReloadInProgress(t *testing.T) {
+	m := listTUIModel{
+		reloadInProgress: true,
+	}
+
+	cmd := m.requestReloadJobs()
+	if cmd != nil {
+		t.Fatal("reload request during active reload should not start another command")
+	}
+	if !m.reloadPending {
+		t.Fatal("reload request during active reload should mark a trailing reload")
+	}
+
+	next, trailingCmd := m.Update(listJobsLoadedMsg{})
+	got := next.(listTUIModel)
+	if trailingCmd == nil {
+		t.Fatal("completed reload with pending request should schedule one trailing reload")
+	}
+	if !got.reloadInProgress {
+		t.Fatal("trailing reload command should mark reloadInProgress")
+	}
+	if got.reloadPending {
+		t.Fatal("reloadPending should clear when trailing reload is scheduled")
+	}
+}
+
+func TestNewListTUIModelDelegatesBackgroundWorkToLiveDaemon(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobs := []*db.Job{{ID: 1, Status: db.StatusQueued, Tags: []string{"rental"}}}
+
+	m := newListTUIModel(database, nil, jobs, "Jobs", true, true, "")
+	defer m.shutdown()
+
+	if m.syncEnabled {
+		t.Fatal("syncEnabled should be disabled when the live daemon owns background sync")
+	}
+	if m.syncWorker != nil {
+		t.Fatal("syncWorker should not start when the live daemon owns background sync")
+	}
+	if cmd := m.runAutoPilot(); cmd != nil {
+		t.Fatal("runAutoPilot should not start a pass when the live daemon owns autopilot")
+	}
+	if m.autoInProgress {
+		t.Fatal("runAutoPilot should leave autoInProgress false when delegated to the daemon")
+	}
+}
+
+func TestNewListTUIModelKeepsForegroundBackgroundWorkWhenDaemonStopped(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	database := db.SetupTestDB(t)
+
+	m := newListTUIModel(database, nil, nil, "Jobs", true, true, "")
+	defer m.shutdown()
+
+	if !m.syncEnabled {
+		t.Fatal("syncEnabled should remain true when no live daemon is available")
+	}
+	if m.syncWorker == nil {
+		t.Fatal("syncWorker should start when no live daemon is available")
+	}
+}
+
 func TestListTUIQuickLaunchProgressUpdatesStatus(t *testing.T) {
 	progressCh := make(chan listQuickLaunchProgressMsg)
 	m := listTUIModel{
@@ -1808,6 +1870,7 @@ func TestListTUIGroupedViewPlacesSharedStatusAboveControls(t *testing.T) {
 }
 
 func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
+	withStoppedDaemonStatus(t)
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoInProgress:  true,

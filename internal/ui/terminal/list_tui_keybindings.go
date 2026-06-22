@@ -199,7 +199,7 @@ func listFlatKeyBindings() []listKeyBinding {
 			} else {
 				m.statusMessage = "Showing all jobs"
 			}
-			return m, m.reloadJobs()
+			return m, m.requestReloadJobs()
 		}},
 		listKeyBinding{keys: listKeyToggleQueuedDraft.keys, action: listKeyToggleQueuedDraft.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if m.statusView == db.StatusDraft {
@@ -209,7 +209,7 @@ func listFlatKeyBindings() []listKeyBinding {
 				m.statusView = db.StatusDraft
 				m.statusMessage = "Showing draft jobs"
 			}
-			return m, m.reloadJobs()
+			return m, m.requestReloadJobs()
 		}},
 		listKeyBinding{keys: listKeyKillCancel.keys, aliases: listKeyKillCancel.aliases, action: listKeyKillCancel.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.currentSelectedJob()

@@ -68,6 +68,8 @@ type listTUIModel struct {
 	dbWatcher                  *dbwatch.Source
 	debounceActive             bool
 	debouncePending            bool
+	reloadInProgress           bool
+	reloadPending              bool
 	syncWorker                 *hostsync.Worker
 	ctx                        context.Context
 	cancel                     context.CancelFunc
@@ -401,8 +403,9 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 	cfg, _ := config.Load()
 	cloudClients, _ := buildCloudClients(cfg)
 
+	foregroundSyncEnabled := syncEnabled && !listTUIDelegatesBackgroundWorkToDaemon()
 	var sw *hostsync.Worker
-	if syncEnabled {
+	if foregroundSyncEnabled {
 		r2Client, _ := buildR2Client(cfg)
 		sw = hostsync.New(database, cloudClients, r2Client, cfg)
 		sw.Start()
@@ -420,7 +423,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		unprocessedView:        unprocessedView,
 		statusView:             statusView,
 		jobs:                   jobs,
-		syncEnabled:            syncEnabled,
+		syncEnabled:            foregroundSyncEnabled,
 		pendingSyncHosts:       map[string]struct{}{},
 		nextSyncTickAt:         time.Now().Add(throttledInterval(listTUISyncInterval, true)),
 		syncWorker:             sw,
@@ -441,7 +444,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		launchSpinner:          s,
 	}
 	model.rebuildGroupedRows()
-	if syncEnabled {
+	if foregroundSyncEnabled {
 		if sw != nil {
 			for _, j := range jobs {
 				if j != nil && j.Host != "" {
@@ -453,6 +456,11 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		}
 	}
 	return model
+}
+
+func listTUIDelegatesBackgroundWorkToDaemon() bool {
+	status, err := daemonStatusProbe(daemonStatusPaths())
+	return err == nil && status.Live
 }
 
 func (m *listTUIModel) shutdown() {
@@ -702,8 +710,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyAIAssistDone(msg)
 
 	case listJobsLoadedMsg:
+		m.reloadInProgress = false
+		trailingReload := m.reloadPending
+		m.reloadPending = false
 		if msg.err != nil {
 			m.statusMessage = fmt.Sprintf("Refresh error: %v", msg.err)
+			if trailingReload {
+				return m, m.requestReloadJobs()
+			}
 			return m, nil
 		}
 		m.jobs = m.visibleJobsForLoadedMsg(msg.jobs)
@@ -745,6 +759,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.launchSpinnerRunning = true
 			cmds = append(cmds, m.launchSpinner.Tick)
 		}
+		if trailingReload {
+			cmds = append(cmds, m.requestReloadJobs())
+		}
 		return m, tea.Batch(cmds...)
 
 	case listSyncFinishedMsg:
@@ -759,7 +776,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusMessage = "Running full sync..."
 				}
 			}
-			return m, tea.Batch(m.reloadJobs(), m.runBackgroundSync(true))
+			return m, tea.Batch(m.requestReloadJobs(), m.runBackgroundSync(true))
 		}
 
 		delete(m.pendingSyncHosts, backgroundSyncKey)
@@ -777,7 +794,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMessage = ""
 			}
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case listDBWatcherReadyMsg:
 		if msg.err != nil {
@@ -808,7 +825,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case listDBRefreshTriggeredMsg:
-		cmds := []tea.Cmd{m.reloadJobs()}
+		cmds := []tea.Cmd{m.requestReloadJobs()}
 		if m.debouncePending {
 			m.debouncePending = false
 			m.debounceActive = true
@@ -840,7 +857,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(
-			m.reloadJobs(),
+			m.requestReloadJobs(),
 			m.requestGroupedMoveOptionsForActivePicker(),
 			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return listSyncWorkerResultMsg{result: r}
@@ -855,7 +872,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.syncWorker != nil {
 			m.requestActiveSyncs()
-			cmds = append(cmds, m.reloadJobs())
+			cmds = append(cmds, m.requestReloadJobs())
 			// The worker owns cloud result-marker sync; the TUI tick only needs
 			// cloud instance reconciliation so it stays cheap and non-overlapping.
 			cmds = m.enqueueBackgroundCloudSync(cmds, false)
@@ -968,7 +985,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMessage = ""
 			}
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case watchKillDoneMsg:
 		if msg.err != nil {
@@ -980,7 +997,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMessage = fmt.Sprintf("Job #%d killed", msg.jobID)
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case watchCordonDoneMsg:
 		if msg.err != nil {
@@ -992,7 +1009,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			verb = "Cordoned"
 		}
 		m.statusMessage = fmt.Sprintf("%s %s", verb, msg.targetLabel)
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case watchUnplaceDoneMsg:
 		if msg.err != nil {
@@ -1004,7 +1021,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.job != nil {
 			m.statusMessage = fmt.Sprintf("Job #%d unplaced", msg.job.ID)
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case watchProcessDoneMsg:
 		if msg.err != nil {
@@ -1016,7 +1033,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMessage = fmt.Sprintf("Job #%d marked as processed", msg.jobID)
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case moveOptionsReadyMsg:
 		// Legacy path; grouped list uses listMoveOptionsReadyMsg with request IDs.
@@ -1106,10 +1123,10 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.action == moveExecuteActionLaunchNew {
 			m.statusMessage = fmt.Sprintf("Launched new instance %s for job #%d", msg.targetDesc, msg.jobID)
-			return m, m.reloadJobs()
+			return m, m.requestReloadJobs()
 		}
 		m.statusMessage = fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc)
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case rebalancePreviewLoadedMsg:
 		if !m.rebalancePreview.active || !m.rebalancePreview.loading {
@@ -1144,7 +1161,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusMessage = fmt.Sprintf("Rebalanced %d job(s); %d over budget", msg.count, msg.overBudget)
-		cmds := []tea.Cmd{m.reloadJobs()}
+		cmds := []tea.Cmd{m.requestReloadJobs()}
 		if cmd := m.runAutoPilot(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1188,7 +1205,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMessage = status
 		m.quickLaunchStatusHoldUntil = time.Now().Add(10 * time.Second)
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 
 	case listDaemonRestartedMsg:
 		m.daemonRestartInProgress = false
@@ -2242,7 +2259,7 @@ func (m listTUIModel) handleProjectFilterInputKey(msg tea.KeyMsg) (tea.Model, te
 		} else {
 			m.statusMessage = "Project filter: " + project
 		}
-		return m, m.reloadJobs()
+		return m, m.requestReloadJobs()
 	case "backspace", "ctrl+h":
 		if m.projectInputValue != "" {
 			runes := []rune(m.projectInputValue)
@@ -2360,7 +2377,7 @@ func (m listTUIModel) toggleSelectedGroupedPriority() (tea.Model, tea.Cmd) {
 	} else {
 		m.statusMessage = fmt.Sprintf("Job #%d priority cleared", job.ID)
 	}
-	return m, m.reloadJobs()
+	return m, m.requestReloadJobs()
 }
 
 func (m listTUIModel) beginGroupedMove() (tea.Model, tea.Cmd) {
@@ -2825,7 +2842,7 @@ func (m listTUIModel) renderListHelpView() string {
 }
 
 func (m listTUIModel) triggerManualRefresh() (listTUIModel, tea.Cmd) {
-	cmds := []tea.Cmd{m.reloadJobs()}
+	cmds := []tea.Cmd{m.requestReloadJobs()}
 	if !m.quickLaunchStatusProtected() {
 		m.statusMessage = "Refreshing..."
 	}
@@ -3024,6 +3041,15 @@ func (m listTUIModel) pageSize() int {
 		return max(1, len(m.groupedViewportRows()))
 	}
 	return max(1, m.flatBodyRows())
+}
+
+func (m *listTUIModel) requestReloadJobs() tea.Cmd {
+	if m.reloadInProgress {
+		m.reloadPending = true
+		return nil
+	}
+	m.reloadInProgress = true
+	return m.reloadJobs()
 }
 
 func (m listTUIModel) reloadJobs() tea.Cmd {
@@ -3427,7 +3453,7 @@ func (m listTUIModel) toggleAutopilot() (tea.Model, tea.Cmd) {
 		m.clearAutoPilotPersistentState()
 		m.resumeAutoPilotNow()
 		m.statusMessage = "Auto-pilot enabled"
-		return m, tea.Batch(m.runAutoPilot(), m.reloadJobs())
+		return m, tea.Batch(m.runAutoPilot(), m.requestReloadJobs())
 	}
 	if _, err := db.PauseAutopilot(m.database, autopilotActor(), ""); err != nil {
 		m.statusMessage = "Auto-pilot: pause failed: " + err.Error()
@@ -3439,11 +3465,14 @@ func (m listTUIModel) toggleAutopilot() (tea.Model, tea.Cmd) {
 	m.clearAutoPilotPersistentState()
 	_ = db.ReleaseAutoLease(m.database, m.autoLeaseScope, m.autoLeaseOwner)
 	m.statusMessage = "Auto-pilot paused"
-	return m, m.reloadJobs()
+	return m, m.requestReloadJobs()
 }
 
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	if !m.isStatusGroupedView() || m.autopilotPaused || m.autoInProgress || m.database == nil {
+		return nil
+	}
+	if listTUIDelegatesBackgroundWorkToDaemon() {
 		return nil
 	}
 	if !m.autoNextPassAt.IsZero() && time.Now().Before(m.autoNextPassAt) {
