@@ -277,6 +277,14 @@ value Constraints {
                                 -- cloud path. Explicit cuda-driver-min
                                 -- metadata REPLACES the inferred floor (it
                                 -- may lower it); the value "any" clears it.
+                                -- A Python dependency floor constrains
+                                -- host/provider driver compatibility, not
+                                -- submit-time acceptance of a user-pinned
+                                -- CUDA image: modern wheels bundle CUDA
+                                -- user-space libraries, so an older image
+                                -- tag is not by itself proof the job cannot
+                                -- run. Image-label requirements remain exact
+                                -- environment floors when labels are fetched.
     min_driver_version: Integer? -- NVIDIA driver-major floor. Backfilled
                                 -- from min_cuda_version via the CUDA-toolkit
                                 -- driver table unless an explicit min-driver
@@ -408,7 +416,10 @@ rule EvaluateEligibility {
     --     drivers. Curated operational floors may raise specific wheel lines
     --     when runtime evidence shows the family floor is too low. Exact
     --     toolkit floors also apply to library-dependency floors and
-    --     image-label requirements.
+    --     image-label requirements. These floors gate host/provider
+    --     compatibility; they are not a submit-time rejection solely because a
+    --     user-pinned image tag reports an older CUDA toolkit than a bundled
+    --     Python wheel dependency floor.
     if c.min_driver_version != null:
         requires: host.nvidia_driver_major != null
             and host.nvidia_driver_major >= c.min_driver_version

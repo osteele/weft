@@ -78,13 +78,14 @@ The library-floor table is the template for requirements that static analysis
 cannot see: when a package's native requirements are invisible to wheel
 metadata, a curated entry keyed on the dependency name supplies the floor.
 
-## Surface 1: submit-time fast-fail
+## Surface 1: submit-time validation
 
-`campaign.ValidatePinnedImageCUDACompatibility` (called from `cmd/run.go` on
-submit and retry) resolves the job's image and runtime floor, then rejects
-explicitly pinned CUDA images whose toolkit is older than the resolved wheel
-floor — the job would fail at import time on any host, so it never enters the
-queue. This is currently the only impossible-by-construction check at submit.
+`campaign.ValidateCUDADriverMinOverride` (called from `cmd/run.go` on submit
+and retry) validates explicit CUDA-floor override syntax. Submit does not
+reject pinned CUDA images whose tag is older than a Python dependency floor:
+modern torch/vLLM wheels bundle their CUDA user-space libraries, so the hard
+compatibility gate is the host or rental driver floor, backed up by the
+agent-side torch CUDA preflight.
 
 ## Surface 2: image selection and requirement computation
 

@@ -1,6 +1,9 @@
 package runner
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestPreflightEnv_InheritsHomeFromOsEnviron is a regression test for the
 // 2026-05-28 incident in which cloud jobs failed with `uv: command not found`.
@@ -30,4 +33,20 @@ func TestPreflightEnv_JobEnvOverridesParent(t *testing.T) {
 	t.Setenv("HF_HOME", "/parent/hf")
 	assertEnvVar(t, preflightEnv([]string{"HF_HOME=/workspace/.cache/huggingface"}),
 		"HF_HOME", "/workspace/.cache/huggingface")
+}
+
+func TestTorchPreflightCommandRequiresWorkingCUDA(t *testing.T) {
+	if strings.Contains(torchPreflightCommand, "torch.cuda.init() if torch.cuda.is_available() else None") {
+		t.Fatal("preflight must not skip CUDA initialization when torch reports CUDA unavailable")
+	}
+	for _, want := range []string{
+		"not torch.cuda.is_available()",
+		"torch.cuda.init()",
+		"torch.zeros(1, device='cuda')",
+		"torch.cuda.synchronize()",
+	} {
+		if !strings.Contains(torchPreflightCommand, want) {
+			t.Fatalf("preflight command %q missing %q", torchPreflightCommand, want)
+		}
+	}
 }

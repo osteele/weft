@@ -4,7 +4,6 @@ package campaign
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log/slog"
 	"os"
 	"path"
@@ -831,17 +830,15 @@ func ResolveJobImage(localDir, command string) string {
 	return img
 }
 
-// ValidatePinnedImageCUDACompatibility rejects explicit CUDA images whose CUDA
-// toolkit is older than the dependency-inferred Python runtime floor.
-// Auto-selected images are handled elsewhere; this protects user-pinned images
-// from launching jobs that are known to fail at CUDA wheel or engine
-// initialization. Explicit cuda-driver-min metadata is a host/provider floor,
-// so it does not by itself make an older image invalid.
-func ValidatePinnedImageCUDACompatibility(localDir, command, cliMinCUDA string) error {
-	img, rf, _ := ResolveJobImageSettings(localDir, command)
-	if strings.TrimSpace(img) == "" {
-		return nil
-	}
+// ValidateCUDADriverMinOverride validates the CLI CUDA-floor override.
+//
+// Pinned Docker image CUDA versions are not a submit-time hard gate for Python
+// dependencies whose wheels bundle CUDA user-space libraries: those jobs are
+// governed by the rental driver's compatibility floor and by the agent-side
+// torch preflight. Treating the image tag as the dependency runtime floor
+// rejected valid bundled-wheel jobs, so this check intentionally does not
+// compare image CUDA against inferred library floors.
+func ValidateCUDADriverMinOverride(cliMinCUDA string) error {
 	if strings.TrimSpace(cliMinCUDA) != "" {
 		parsed, err := placement.ParseCUDADriverFloor(cliMinCUDA)
 		if err != nil {
@@ -851,28 +848,7 @@ func ValidatePinnedImageCUDACompatibility(localDir, command, cliMinCUDA string) 
 			return nil
 		}
 	}
-	if err := rf.ApplyCLIOverride(cliMinCUDA); err != nil {
-		return err
-	}
-	reqCUDA := strings.TrimSpace(rf.InferredMinCUDAVersion)
-	if reqCUDA == "" {
-		return nil
-	}
-	imageCUDA, _, ok := parseCUDAImage(img)
-	if !ok {
-		return nil
-	}
-	imageParts := cudaVersionComponents(imageCUDA)
-	reqParts := cudaVersionComponents(reqCUDA)
-	if imageParts == nil || reqParts == nil || cmpVersionComponents(imageParts, reqParts) >= 0 {
-		return nil
-	}
-	origin := strings.TrimSpace(rf.InferredCUDAOrigin)
-	if origin == "" {
-		origin = "resolved dependencies"
-	}
-	return fmt.Errorf("pinned image %s provides CUDA %s, but %s requires CUDA >=%s; use a CUDA >=%s image, pin compatible dependencies, or override with cuda-driver-min=any if this is intentional",
-		img, imageCUDA, origin, reqCUDA, reqCUDA)
+	return nil
 }
 
 // ResolveJobImageSettings returns the Docker image and the resolved NVIDIA

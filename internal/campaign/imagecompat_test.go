@@ -1,8 +1,6 @@
 package campaign
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -44,82 +42,31 @@ func TestChooseAutoImageForMinCUDA(t *testing.T) {
 	}
 }
 
-func TestValidatePinnedImageCUDACompatibilityRejectsOlderImage(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "serve.py")
-	if err := os.WriteFile(script, []byte(`# /// script
-# dependencies = ["vllm>=0.17,<0.18"]
-# [tool.weft]
-# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
-# ///
-print("serve")
-`), 0o644); err != nil {
-		t.Fatalf("write script: %v", err)
+func TestValidateCUDADriverMinOverrideAllowsEmptyValue(t *testing.T) {
+	if err := ValidateCUDADriverMinOverride(""); err != nil {
+		t.Fatalf("empty CUDA driver floor should be accepted: %v", err)
 	}
+}
 
-	err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", "")
+func TestValidateCUDADriverMinOverrideAllowsAny(t *testing.T) {
+	if err := ValidateCUDADriverMinOverride("any"); err != nil {
+		t.Fatalf("cuda-driver-min=any should be accepted: %v", err)
+	}
+}
+
+func TestValidateCUDADriverMinOverrideAllowsVersion(t *testing.T) {
+	if err := ValidateCUDADriverMinOverride("12.5"); err != nil {
+		t.Fatalf("valid CUDA driver floor should be accepted: %v", err)
+	}
+}
+
+func TestValidateCUDADriverMinOverrideRejectsInvalidValue(t *testing.T) {
+	err := ValidateCUDADriverMinOverride("not-a-cuda-version")
 	if err == nil {
-		t.Fatal("expected pinned image CUDA mismatch")
+		t.Fatal("expected invalid cuda-driver-min to be rejected")
 	}
-	for _, want := range []string{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "CUDA 12.4", "CUDA >=12.8"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err, want)
-		}
-	}
-}
-
-func TestValidatePinnedImageCUDACompatibilityAllowsOverrideAny(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "serve.py")
-	if err := os.WriteFile(script, []byte(`# /// script
-# dependencies = ["vllm>=0.17,<0.18"]
-# [tool.weft]
-# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
-# ///
-print("serve")
-`), 0o644); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", "any"); err != nil {
-		t.Fatalf("override any should allow pinned image: %v", err)
-	}
-}
-
-func TestValidatePinnedImageCUDACompatibilityIgnoresExplicitProviderFloor(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "serve.py")
-	if err := os.WriteFile(script, []byte(`# /// script
-# dependencies = ["vllm==0.8.5"]
-# [tool.weft]
-# image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
-# cuda-driver-min = "12.5"
-# ///
-print("serve")
-`), 0o644); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", ""); err != nil {
-		t.Fatalf("explicit provider floor should not reject pinned image: %v", err)
-	}
-}
-
-func TestValidatePinnedImageCUDACompatibilityAllowsNewerImage(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "serve.py")
-	if err := os.WriteFile(script, []byte(`# /// script
-# dependencies = ["vllm>=0.17"]
-# [tool.weft]
-# image = "nvidia/cuda:13.0.0-runtime-ubuntu22.04"
-# ///
-print("serve")
-`), 0o644); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-
-	if err := ValidatePinnedImageCUDACompatibility(dir, "uv run serve.py", ""); err != nil {
-		t.Fatalf("newer image should be compatible: %v", err)
+	if !strings.Contains(err.Error(), "unrecognized CUDA driver floor") {
+		t.Fatalf("error %q missing invalid floor context", err)
 	}
 }
 

@@ -517,6 +517,15 @@ config {
 -- internal/cloud/wrapper.go CampaignManifest.RequiredDriverMajor;
 -- internal/campaign/lifecycle.go (manifest population).
 
+-- Defense in depth after setup: when a job has been assigned CUDA devices and
+-- the project uses torch, the agent must run a torch CUDA preflight before the
+-- user command. The preflight is fail-closed: it must require
+-- torch.cuda.is_available(), initialize CUDA, and execute a tiny CUDA operation
+-- on the assigned device. If any step fails, the job fails in setup with a
+-- CUDA/driver diagnosis instead of silently running the user script on CPU.
+-- Implementation: internal/runner/torch_preflight.go runTorchPreflight;
+-- internal/runner/single.go (call site before user command).
+
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil
 -- AND Err != nil; checking Offer == nil before Err mis-classifies provider

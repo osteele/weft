@@ -11,9 +11,10 @@ import (
 )
 
 // torchPreflightCommand is the snippet we run before the user command on
-// GPU-using torch jobs. It loads torch, exercises the CUDA initialization
-// path that surfaces driver-too-old errors, and exits.
-const torchPreflightCommand = `python -c "import torch; torch.cuda.init() if torch.cuda.is_available() else None; print('weft: torch preflight ok')"`
+// GPU-using torch jobs. It requires CUDA to be available, initializes it, and
+// performs a tiny device allocation so driver/runtime mismatches fail before
+// the user script can silently fall back to CPU.
+const torchPreflightCommand = `python -c "import sys, torch; sys.exit('torch.cuda.is_available() is false') if not torch.cuda.is_available() else None; torch.cuda.init(); torch.zeros(1, device='cuda').sum().item(); torch.cuda.synchronize(); print('weft: torch preflight ok')"`
 
 // torchPreflightTimeout caps the preflight at a short wall-clock budget.
 // The check itself takes ~1-3s on a healthy host; we allow 30s so cold
