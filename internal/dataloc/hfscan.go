@@ -73,15 +73,25 @@ for _d in "${_dirs[@]}"; do
   _status="ok"
   if [ ! -r "$_d" ] || [ ! -x "$_d" ]; then
     _status="unreadable"
-  elif [ -d "$_d/$_name" ]; then
-    _status="nested"
   elif [ ! -d "$_d/snapshots" ]; then
-    _status="no-snapshots"
+    if [ -d "$_d/$_name" ]; then
+      _status="nested"
+    else
+      _status="no-snapshots"
+    fi
   fi
   _bytes=""
   if _g=$(du -sb "$_d" 2>/dev/null) && [ -n "$_g" ]; then
     _bytes=$(printf '%s' "$_g" | awk 'NR==1{print $1}')
-    _inc=$(find "$_d" -name '*.incomplete' -type f -exec du -sb {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+    if [ "$_status" = "ok" ] && [ -d "$_d/$_name" ]; then
+      _nested=$(du -sb "$_d/$_name" 2>/dev/null | awk 'NR==1{print $1}')
+      if [ -n "$_nested" ] && [ "$_nested" != "0" ]; then _bytes=$((_bytes - _nested)); fi
+    fi
+    if [ "$_status" = "ok" ] && [ -d "$_d/$_name" ]; then
+      _inc=$(find "$_d" -path "$_d/$_name" -prune -o -name '*.incomplete' -type f -exec du -sb {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+    else
+      _inc=$(find "$_d" -name '*.incomplete' -type f -exec du -sb {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+    fi
     if [ -n "$_inc" ] && [ "$_inc" != "0" ]; then
       _bytes=$((_bytes - _inc))
       if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi
@@ -90,7 +100,15 @@ for _d in "${_dirs[@]}"; do
   if [ -z "$_bytes" ]; then
     if _g=$(du -sk "$_d" 2>/dev/null) && [ -n "$_g" ]; then
       _bytes=$(printf '%s' "$_g" | awk 'NR==1{printf "%d", $1*1024}')
-      _inc_kb=$(find "$_d" -name '*.incomplete' -type f -exec du -sk {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+      if [ "$_status" = "ok" ] && [ -d "$_d/$_name" ]; then
+        _nested_kb=$(du -sk "$_d/$_name" 2>/dev/null | awk 'NR==1{print $1}')
+        if [ -n "$_nested_kb" ] && [ "$_nested_kb" != "0" ]; then _bytes=$((_bytes - _nested_kb*1024)); fi
+      fi
+      if [ "$_status" = "ok" ] && [ -d "$_d/$_name" ]; then
+        _inc_kb=$(find "$_d" -path "$_d/$_name" -prune -o -name '*.incomplete' -type f -exec du -sk {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+      else
+        _inc_kb=$(find "$_d" -name '*.incomplete' -type f -exec du -sk {} + 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+      fi
       if [ -n "$_inc_kb" ] && [ "$_inc_kb" != "0" ]; then
         _bytes=$((_bytes - _inc_kb*1024))
         if [ "$_status" = "ok" ]; then _status="incomplete"; else _status="$_status,incomplete"; fi

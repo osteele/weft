@@ -102,6 +102,41 @@ func TestHFCacheScanCommand_ClassifiesUnreadableEntry(t *testing.T) {
 	}
 }
 
+func TestHFCacheScanCommand_AllowsValidEntryWithNestedDebris(t *testing.T) {
+	hub := filepath.Join(t.TempDir(), "hub")
+	entry := filepath.Join(hub, "models--meta-llama--Llama-3.2-3B")
+	for _, dir := range []string{
+		filepath.Join(entry, "snapshots", "rev"),
+		filepath.Join(entry, "blobs"),
+		filepath.Join(entry, "models--meta-llama--Llama-3.2-3B", "snapshots", "rev"),
+		filepath.Join(entry, "models--meta-llama--Llama-3.2-3B", "blobs"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(entry, "blobs", "top"), []byte("top"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(entry, "models--meta-llama--Llama-3.2-3B", "blobs", "nested.incomplete"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", "-c", hfCacheScanCommand())
+	cmd.Env = append(os.Environ(), "HF_HUB_CACHE="+hub)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("scan command failed: %v", err)
+	}
+	results := parseHFCacheDetailedOutput(string(out))
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1: %s", len(results), out)
+	}
+	if got := results[0].Status; got != "ok" {
+		t.Fatalf("status = %q, want ok for valid top-level cache with stale nested debris; output:\n%s", got, out)
+	}
+}
+
 func TestHfDirToID(t *testing.T) {
 	tests := []struct {
 		dir  string
