@@ -312,13 +312,29 @@ func TestListHostSyncRequestPromotesUnsyncedQueuedInventoryJobs(t *testing.T) {
 	}
 }
 
-func TestListHostSyncRequestKeepsStatusModeForDispatchedQueuedJobs(t *testing.T) {
+func TestListHostSyncRequestKeepsStatusModeForRecentlyDispatchedQueuedJobs(t *testing.T) {
 	req := listHostSyncRequest("cool30", []*db.Job{
-		{ID: 1811, Host: "cool30", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued},
+		{ID: 1811, Host: "cool30", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued, QueuedAt: time.Now().Unix()},
 	})
 
 	if req.Mode != ops.SyncModeStatus {
 		t.Fatalf("request mode = %q, want %q", req.Mode, ops.SyncModeStatus)
+	}
+}
+
+func TestListHostSyncRequestPromotesStaleDispatchedQueuedJobs(t *testing.T) {
+	req := listHostSyncRequest("cool30", []*db.Job{
+		{
+			ID:               1811,
+			Host:             "cool30",
+			Status:           db.StatusQueued,
+			LastSyncedStatus: db.StatusQueued,
+			QueuedAt:         time.Now().Add(-time.Minute).Unix(),
+		},
+	})
+
+	if req.Mode != ops.SyncModeFull {
+		t.Fatalf("request mode = %q, want %q", req.Mode, ops.SyncModeFull)
 	}
 }
 

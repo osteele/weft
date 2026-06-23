@@ -54,11 +54,37 @@ func TestGetHostSyncModePromotesUnsyncedQueuedInventoryJob(t *testing.T) {
 
 func TestGetHostSyncModeKeepsStatusForAlreadyDispatchedQueuedJob(t *testing.T) {
 	jobs := []*db.Job{
-		{ID: 1, Host: "test-host", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued},
+		{ID: 1, Host: "test-host", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued, QueuedAt: time.Now().Unix()},
 	}
 
 	if got := GetHostSyncMode(jobs); got != ops.SyncModeStatus {
 		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeStatus)
+	}
+}
+
+func TestGetHostSyncModePromotesStaleDispatchedQueuedJob(t *testing.T) {
+	jobs := []*db.Job{
+		{
+			ID:               1,
+			Host:             "test-host",
+			Status:           db.StatusQueued,
+			LastSyncedStatus: db.StatusQueued,
+			QueuedAt:         time.Now().Add(-queuedDispatchReconcileGrace - time.Second).Unix(),
+		},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeFull {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeFull)
+	}
+}
+
+func TestGetHostSyncModePromotesDispatchedQueuedJobWithoutQueuedAt(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Host: "test-host", Status: db.StatusQueued, LastSyncedStatus: db.StatusQueued},
+	}
+
+	if got := GetHostSyncMode(jobs); got != ops.SyncModeFull {
+		t.Fatalf("GetHostSyncMode() = %v, want %v", got, ops.SyncModeFull)
 	}
 }
 

@@ -638,6 +638,8 @@ func GetHostSyncMode(jobs []*db.Job) ops.SyncMode {
 	return ops.SyncModeStatus
 }
 
+const queuedDispatchReconcileGrace = 30 * time.Second
+
 func needsQueuedDispatchSync(job *db.Job) bool {
 	if job == nil || !job.HasInventoryHost() || job.Status != db.StatusQueued {
 		return false
@@ -645,5 +647,14 @@ func needsQueuedDispatchSync(job *db.Job) bool {
 	if job.PendingStatus != nil && *job.PendingStatus == db.StatusQueued {
 		return true
 	}
-	return job.PendingStatus == nil && job.LastSyncedStatus != db.StatusQueued
+	if job.PendingStatus != nil {
+		return false
+	}
+	if job.LastSyncedStatus != db.StatusQueued {
+		return true
+	}
+	if job.QueuedAt == 0 {
+		return true
+	}
+	return time.Since(time.Unix(job.QueuedAt, 0)) >= queuedDispatchReconcileGrace
 }
