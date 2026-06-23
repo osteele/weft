@@ -103,9 +103,11 @@ entity Job {
     -- any cloud provider is configured, the on-prem rejection reasons
     -- (HasPrefix "no local host matched " / matches `^\d+ hosts?: `) are
     -- expected hand-offs to autopilot, not blockers, and SHOULD be hidden
-    -- from at-a-glance "blocked:" labels. Routine scheduler handoff states
-    -- such as "placement pending" may be shown as "waiting:" instead.
-    -- They remain in the underlying list for diagnostic detail views.
+    -- from at-a-glance "blocked:" labels. The persisted "placement pending"
+    -- value is a scheduler handoff sentinel, not user-facing text; UI
+    -- surfaces SHOULD render it as the current wait state, e.g. "autopilot",
+    -- "autopilot placing jobs", "autopilot paused", or "autopilot not
+    -- running".
     placement_reasons: List<String>
     cloud_instance: CloudInstance?
 

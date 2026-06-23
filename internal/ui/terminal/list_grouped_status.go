@@ -58,10 +58,12 @@ type groupedStatusRenderOptions struct {
 	// collapse the FYI buckets behind an expand toggle (TUI) or render all
 	// buckets unconditionally (plain output).
 	interactive bool
-	// daemonStopped is true when the placement daemon is not running. It
-	// annotates the "placement pending" waiting reason so users know nothing
-	// will place the job until the daemon is restarted.
-	daemonStopped bool
+	// daemonStopped/autopilot* fields translate the persisted placement-pending
+	// sentinel into a concrete scheduler wait state.
+	daemonStopped              bool
+	autopilotPaused            bool
+	autopilotActive            bool
+	autopilotPassStartedAtUnix int64
 }
 
 type groupedStatusLaunchingETA struct {
@@ -384,7 +386,7 @@ func appendBlockedGroupedJobRows(
 	order := make([]blockedReasonBucketKey, 0, len(section.jobs))
 	buckets := make(map[blockedReasonBucketKey][]*db.Job, len(section.jobs))
 	for _, job := range section.jobs {
-		key := blockedBucketKey(job, section.key, opts.blockedDetail, sharedLaunch != "")
+		key := blockedBucketKey(job, section.key, opts, sharedLaunch != "")
 		if _, ok := buckets[key]; !ok {
 			order = append(order, key)
 		}
@@ -396,7 +398,7 @@ func appendBlockedGroupedJobRows(
 		}
 		jobs := buckets[key]
 		rows = append(rows, groupedStatusRow{
-			text:      groupedStatusBlockedBucketHeader(key, jobs, opts.daemonStopped),
+			text:      groupedStatusBlockedBucketHeader(key, jobs),
 			isBlocked: true,
 			section:   section.key,
 		})
@@ -412,11 +414,8 @@ func appendBlockedGroupedJobRows(
 	return rows
 }
 
-func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job, daemonStopped bool) string {
+func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) string {
 	reason := key.reason
-	if daemonStopped && reason == blockreason.ReasonPlacementPending {
-		reason += " — daemon stopped"
-	}
 	text := fmt.Sprintf("  %s: %s", key.kind, reason)
 	if len(jobs) != 1 {
 		text += fmt.Sprintf(" (%d)", len(jobs))
@@ -634,8 +633,9 @@ type blockedReasonBucketKey struct {
 	reason string
 }
 
-func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockreason.Structured, launchHoisted bool) blockedReasonBucketKey {
+func blockedBucketKey(job *db.Job, sectionKey string, opts groupedStatusRenderOptions, launchHoisted bool) blockedReasonBucketKey {
 	if job != nil {
+		detail := opts.blockedDetail
 		if d := detail[job.ID]; d != nil {
 			if launchHoisted && d.IsPlacementFailure() {
 				// When there are no actual reuse rejections to enumerate, the
@@ -653,7 +653,7 @@ func blockedBucketKey(job *db.Job, sectionKey string, detail map[int64]*blockrea
 			}
 		}
 	}
-	return groupedStatusBlockedReason(job, sectionKey)
+	return groupedStatusBlockedReason(job, sectionKey, opts)
 }
 
 // appendBlockedDisclosureRows marks an expandable blocked job row with a
@@ -820,14 +820,17 @@ func launchingInstanceHeaderRow(bucket *launchingJobBucket, sectionKey string, w
 	}
 }
 
-func groupedStatusBlockedReason(job *db.Job, sectionKey string) blockedReasonBucketKey {
+func groupedStatusBlockedReason(job *db.Job, sectionKey string, opts groupedStatusRenderOptions) blockedReasonBucketKey {
 	if job == nil {
 		return blockedReasonBucketKey{}
 	}
 	if sectionKey != "queued" && sectionKey != "unplaced" {
 		return blockedReasonBucketKey{}
 	}
-	resolved := blockreason.Resolve(job, blockreason.Options{Compact: true})
+	resolved := blockreason.Resolve(job, blockreason.Options{
+		Compact:                true,
+		PendingPlacementReason: groupedStatusPendingPlacementReason(job, opts),
+	})
 	if resolved.Reason == "" {
 		return blockedReasonBucketKey{}
 	}
@@ -836,6 +839,20 @@ func groupedStatusBlockedReason(job *db.Job, sectionKey string) blockedReasonBuc
 		kind = blockreason.KindBlocked
 	}
 	return blockedReasonBucketKey{kind: kind, reason: resolved.Reason}
+}
+
+func groupedStatusPendingPlacementReason(job *db.Job, opts groupedStatusRenderOptions) string {
+	switch {
+	case opts.autopilotPaused:
+		return "autopilot paused"
+	case opts.daemonStopped:
+		return "autopilot not running"
+	case opts.autopilotActive && opts.autopilotPassStartedAtUnix > 0 &&
+		(job == nil || job.CreatedAt == 0 || opts.autopilotPassStartedAtUnix >= job.CreatedAt):
+		return "autopilot placing jobs"
+	default:
+		return blockreason.DefaultPendingPlacementReason
+	}
 }
 
 func appendGroupedStatusJobRow(

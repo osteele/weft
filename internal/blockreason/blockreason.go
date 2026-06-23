@@ -27,10 +27,12 @@ const (
 	KindWaiting Kind = "waiting"
 )
 
-// ReasonPlacementPending is the visible reason for an unplaced job awaiting
-// auto-placement. It is produced on the submit path and recognized by the
-// classifier and TUI, so it lives here as a single shared binding.
+// ReasonPlacementPending is the persisted sentinel for an unplaced job awaiting
+// async auto-placement. UI surfaces should render it through PendingPlacementReason
+// instead of showing this storage value directly.
 const ReasonPlacementPending = "placement pending"
+
+const DefaultPendingPlacementReason = "autopilot"
 
 // Options controls blocker resolution for a UI surface.
 type Options struct {
@@ -44,6 +46,10 @@ type Options struct {
 
 	// Compact hides non-actionable history from at-a-glance labels.
 	Compact bool
+
+	// PendingPlacementReason is the display text for ReasonPlacementPending.
+	// Empty uses DefaultPendingPlacementReason.
+	PendingPlacementReason string
 }
 
 // Result is the resolved current blocker for a compact UI label.
@@ -82,6 +88,10 @@ func ReasonKind(reason string) Kind {
 	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
 	switch {
 	case cleaned == ReasonPlacementPending,
+		cleaned == DefaultPendingPlacementReason,
+		cleaned == "autopilot placing jobs",
+		cleaned == "autopilot paused",
+		cleaned == "autopilot not running",
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),
@@ -148,6 +158,12 @@ func visibleReason(job *db.Job, reason string, opts Options) string {
 	}
 	if reason == "" {
 		return ""
+	}
+	if reason == ReasonPlacementPending {
+		if replacement := strings.TrimSpace(opts.PendingPlacementReason); replacement != "" {
+			return replacement
+		}
+		return DefaultPendingPlacementReason
 	}
 	if isUnplacedResetReason(reason) {
 		return ""

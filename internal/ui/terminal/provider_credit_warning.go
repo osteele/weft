@@ -156,8 +156,9 @@ func renderDaemonStatusLine(width int) string {
 }
 
 // placementDaemonStopped reports whether the placement daemon is not running,
-// so the unplaced "placement pending" reason can say so. On a status read
-// error it returns false (no annotation rather than a misleading one).
+// so the unplaced placement-pending sentinel can render as a concrete wait
+// state. On a status read error it returns false (no annotation rather than a
+// misleading one).
 func placementDaemonStopped() bool {
 	status, err := daemonStatusProbe(daemonStatusPaths())
 	return err == nil && !status.Live

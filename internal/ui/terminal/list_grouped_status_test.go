@@ -324,7 +324,7 @@ func TestRenderJobListGroupedStatusPlainAt_UsesPersistedPlacementReason(t *testi
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaiting(t *testing.T) {
+func TestRenderJobListGroupedStatusPlainAt_RendersPlacementPendingAsAutopilotWait(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
 		{
@@ -338,22 +338,23 @@ func TestRenderJobListGroupedStatusPlainAt_RendersDaemonPlacementPendingAsWaitin
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	waitingWant := "  waiting: placement pending"
+	waitingWant := "  waiting: autopilot"
 	if !strings.Contains(out, waitingWant) {
 		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
 	}
-	if strings.Contains(out, "blocked: placement pending") {
-		t.Fatalf("placement pending rendered as blocked:\n%s", out)
+	if strings.Contains(out, "placement pending") {
+		t.Fatalf("raw placement pending sentinel rendered:\n%s", out)
 	}
 }
 
-func TestBuildGroupedStatusRows_PlacementPendingDaemonStopped(t *testing.T) {
+func TestBuildGroupedStatusRows_PlacementPendingSchedulerStates(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
 		{ID: 2583, Status: db.StatusQueued, Project: "p", Description: "x", CreatedAt: 4_400, PlacementReasons: []string{"placement pending"}},
 	}
-	render := func(daemonStopped bool) string {
-		rows := buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{now: now, daemonStopped: daemonStopped})
+	render := func(opts groupedStatusRenderOptions) string {
+		opts.now = now
+		rows := buildGroupedStatusRowsWithOptions(jobs, 0, opts)
 		var b strings.Builder
 		for _, r := range rows {
 			b.WriteString(stripANSI(r.text) + "\n")
@@ -361,11 +362,17 @@ func TestBuildGroupedStatusRows_PlacementPendingDaemonStopped(t *testing.T) {
 		return b.String()
 	}
 
-	if out := render(true); !strings.Contains(out, "waiting: placement pending — daemon stopped") {
-		t.Fatalf("stopped daemon should annotate the reason, got:\n%s", out)
+	if out := render(groupedStatusRenderOptions{daemonStopped: true}); !strings.Contains(out, "waiting: autopilot not running") {
+		t.Fatalf("stopped daemon should render not-running wait, got:\n%s", out)
 	}
-	if out := render(false); !strings.Contains(out, "waiting: placement pending") || strings.Contains(out, "daemon stopped") {
-		t.Fatalf("running daemon should leave the reason plain, got:\n%s", out)
+	if out := render(groupedStatusRenderOptions{autopilotPaused: true}); !strings.Contains(out, "waiting: autopilot paused") {
+		t.Fatalf("paused autopilot should render paused wait, got:\n%s", out)
+	}
+	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_500}); !strings.Contains(out, "waiting: autopilot placing jobs") {
+		t.Fatalf("active autopilot should render placing wait, got:\n%s", out)
+	}
+	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_000}); !strings.Contains(out, "waiting: autopilot") {
+		t.Fatalf("pass started before job should render autopilot wait, got:\n%s", out)
 	}
 }
 

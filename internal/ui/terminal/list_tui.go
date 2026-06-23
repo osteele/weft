@@ -108,6 +108,8 @@ type listTUIModel struct {
 	showAutoPilotErrorDetails  bool
 	autopilotPaused            bool
 	autopilotPausedReason      string
+	autopilotActive            bool
+	autopilotPassStartedAt     time.Time
 	launchLiveByID             map[int64]*db.LaunchLiveState
 	launchStatusByID           map[int64]string
 	placingJobIDs              map[int64]struct{}
@@ -271,6 +273,8 @@ type listJobsLoadedMsg struct {
 	autoPassPhase            autoPilotPhaseHint
 	autopilotPaused          bool
 	autopilotPausedReason    string
+	autopilotActive          bool
+	autopilotPassStartedAt   time.Time
 	err                      error
 }
 
@@ -739,6 +743,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoPassPhase = msg.autoPassPhase
 		m.autopilotPaused = msg.autopilotPaused
 		m.autopilotPausedReason = msg.autopilotPausedReason
+		m.autopilotActive = msg.autopilotActive
+		m.autopilotPassStartedAt = msg.autopilotPassStartedAt
 		m.pruneAutoBlockReasons()
 		if m.countAutoPilotActionableQueuedJobs() == 0 {
 			m.autoPersistentBlocked = ""
@@ -2922,10 +2928,13 @@ func (m *listTUIModel) rebuildGroupedRows() {
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
 			},
-			blockedDetail:   m.effectiveBlockedDetail(),
-			expandedBlocked: m.expandedBlocked,
-			interactive:     true,
-			daemonStopped:   m.placementDaemonStopped,
+			blockedDetail:              m.effectiveBlockedDetail(),
+			expandedBlocked:            m.expandedBlocked,
+			interactive:                true,
+			daemonStopped:              m.placementDaemonStopped,
+			autopilotPaused:            m.autopilotPaused,
+			autopilotActive:            m.autoInProgress || m.autopilotActive,
+			autopilotPassStartedAtUnix: m.pendingPlacementPassStartedAtUnix(),
 		})
 	} else {
 		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
@@ -3095,7 +3104,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
 		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
 		overloadedHostsByName := loadOverloadedHostsByName(database, jobs)
-		autopilotPaused, autopilotPausedReason := autopilotPauseState(database)
+		autopilotPaused, autopilotPausedReason, autopilotActive, autopilotPassStartedAt := autopilotPlacementWaitState(database)
 		return listJobsLoadedMsg{
 			jobs:                     jobs,
 			launchLiveByID:           launchLiveByID,
@@ -3116,8 +3125,21 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			autoPassPhase:            loadLatestAutoPilotPhase(database),
 			autopilotPaused:          autopilotPaused,
 			autopilotPausedReason:    autopilotPausedReason,
+			autopilotActive:          autopilotActive,
+			autopilotPassStartedAt:   autopilotPassStartedAt,
 		}
 	}
+}
+
+func autopilotPlacementWaitState(database *sql.DB) (paused bool, pausedReason string, active bool, passStartedAt time.Time) {
+	if database == nil {
+		return false, "", false, time.Time{}
+	}
+	state, err := db.LoadAutopilotState(database)
+	if err != nil || state == nil {
+		return false, "", false, time.Time{}
+	}
+	return state.Paused, strings.TrimSpace(state.PausedReason), state.IsActive(time.Now(), orchestration.AutopilotPassStaleAfter), state.PassStartedAt
 }
 
 const recentFailedInstanceWindow = 24 * time.Hour
@@ -3856,14 +3878,34 @@ func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[i
 		}
 		displayJob := jobWithDisplayPlacementReasons(job, headroom, hasRunRateHeadroom)
 		result := blockreason.Resolve(displayJob, blockreason.Options{
-			AutoPilotReason: m.autoBlockReasons[job.ID],
-			Compact:         true,
+			AutoPilotReason:        m.autoBlockReasons[job.ID],
+			Compact:                true,
+			PendingPlacementReason: m.pendingPlacementReasonForJob(job),
 		})
 		if result.Blocked {
 			reasons[job.ID] = result.Reason
 		}
 	}
 	return reasons
+}
+
+func (m listTUIModel) pendingPlacementReasonForJob(job *db.Job) string {
+	return groupedStatusPendingPlacementReason(job, groupedStatusRenderOptions{
+		daemonStopped:              m.placementDaemonStopped,
+		autopilotPaused:            m.autopilotPaused,
+		autopilotActive:            m.autoInProgress || m.autopilotActive,
+		autopilotPassStartedAtUnix: m.pendingPlacementPassStartedAtUnix(),
+	})
+}
+
+func (m listTUIModel) pendingPlacementPassStartedAtUnix() int64 {
+	if !m.autoPassStartedAt.IsZero() {
+		return m.autoPassStartedAt.Unix()
+	}
+	if !m.autopilotPassStartedAt.IsZero() {
+		return m.autopilotPassStartedAt.Unix()
+	}
+	return 0
 }
 
 func jobWithDisplayPlacementReasons(job *db.Job, headroomCents int, hasRunRateHeadroom bool) *db.Job {

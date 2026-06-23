@@ -72,13 +72,25 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			},
 		},
 		{
-			name: "placement pending is waiting",
+			name: "placement pending sentinel is mapped to waiting text",
 			job: &db.Job{
 				ID:               7,
 				Status:           db.StatusQueued,
 				PlacementReasons: []string{"placement pending"},
 			},
-			want:   "placement pending",
+			want:   "autopilot",
+			kind:   KindWaiting,
+			source: SourcePlacement,
+		},
+		{
+			name: "placement pending uses caller display text",
+			job: &db.Job{
+				ID:               12,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"placement pending"},
+			},
+			opts:   Options{PendingPlacementReason: "autopilot placing jobs"},
+			want:   "autopilot placing jobs",
 			kind:   KindWaiting,
 			source: SourcePlacement,
 		},
