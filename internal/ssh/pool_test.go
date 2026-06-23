@@ -207,6 +207,25 @@ func TestSessionPoolNew(t *testing.T) {
 	}
 }
 
+func TestHostPoolNewSessionHonorsShortDeadline(t *testing.T) {
+	cleanup := SetExecCommand(func(_ string, _ ...string) *exec.Cmd {
+		return exec.Command("bash", "-c", "sleep 10")
+	})
+	t.Cleanup(cleanup)
+
+	hp := &hostPool{host: "slow-host"}
+	started := time.Now()
+	_, err := hp.newSessionWithDeadline(time.Now().Add(80 * time.Millisecond))
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("newSessionWithDeadline took %s, want short deadline", elapsed)
+	}
+}
+
 // Verify WriteString to a closed stdin returns error
 func TestSessionWriteAfterClose(t *testing.T) {
 	sess, err := newLocalSession()

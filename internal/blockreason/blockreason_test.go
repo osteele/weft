@@ -95,6 +95,18 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			source: SourcePlacement,
 		},
 		{
+			name: "placement pending delayed autopilot is waiting",
+			job: &db.Job{
+				ID:               13,
+				Status:           db.StatusQueued,
+				PlacementReasons: []string{"placement pending"},
+			},
+			opts:   Options{PendingPlacementReason: "autopilot delayed 8m"},
+			want:   "autopilot delayed 8m",
+			kind:   KindWaiting,
+			source: SourcePlacement,
+		},
+		{
 			name: "inventory handoff is waiting",
 			job: &db.Job{
 				ID:               8,

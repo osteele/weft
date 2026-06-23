@@ -92,6 +92,7 @@ func ReasonKind(reason string) Kind {
 		cleaned == "autopilot placing jobs",
 		cleaned == "autopilot paused",
 		cleaned == "autopilot not running",
+		strings.HasPrefix(cleaned, "autopilot delayed "),
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),

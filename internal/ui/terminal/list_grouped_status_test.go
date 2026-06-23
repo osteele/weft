@@ -368,8 +368,11 @@ func TestBuildGroupedStatusRows_PlacementPendingSchedulerStates(t *testing.T) {
 	if out := render(groupedStatusRenderOptions{autopilotPaused: true}); !strings.Contains(out, "waiting: autopilot paused") {
 		t.Fatalf("paused autopilot should render paused wait, got:\n%s", out)
 	}
-	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_500}); !strings.Contains(out, "waiting: autopilot placing jobs") {
+	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_950}); !strings.Contains(out, "waiting: autopilot placing jobs") {
 		t.Fatalf("active autopilot should render placing wait, got:\n%s", out)
+	}
+	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_500}); !strings.Contains(out, "waiting: autopilot delayed 8m") {
+		t.Fatalf("long active autopilot pass should render delayed wait, got:\n%s", out)
 	}
 	if out := render(groupedStatusRenderOptions{autopilotActive: true, autopilotPassStartedAtUnix: 4_000}); !strings.Contains(out, "waiting: autopilot") {
 		t.Fatalf("pass started before job should render autopilot wait, got:\n%s", out)

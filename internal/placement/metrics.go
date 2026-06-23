@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/hostinfo"
@@ -12,20 +11,26 @@ import (
 	"github.com/osteele/weft/internal/queuerunner"
 )
 
+var collectMetricsFetchHostStatus = ops.TryFetchHostStatusCombined
+
 // CollectMetrics probes hosts in parallel via a single SSH round-trip per host,
 // collecting both liveness and live utilization metrics. A host that fails the
-// SSH call is omitted from the returned map (treated as unreachable).
+// SSH call is omitted from the returned map (treated as unreachable). Collection
+// is best-effort: callers such as autopilot use it on hot paths and must not
+// wait for a wedged SSH session or provider-side shell startup.
 func CollectMetrics(db *sql.DB, hosts []string, timeout time.Duration) map[string]*HostMetrics {
 	result := make(map[string]*HostMetrics, len(hosts))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+	type hostResult struct {
+		host    string
+		metrics *HostMetrics
+	}
+	results := make(chan hostResult, len(hosts))
 
 	for _, host := range hosts {
-		wg.Add(1)
 		go func(h string) {
-			defer wg.Done()
-			status, err := ops.FetchHostStatusCombined(db, h, queuerunner.StatusCommand(), timeout)
+			status, err := collectMetricsFetchHostStatus(db, h, queuerunner.StatusCommand(), timeout)
 			if err != nil {
+				results <- hostResult{host: h}
 				return // host unreachable
 			}
 
@@ -39,13 +44,34 @@ func CollectMetrics(db *sql.DB, hosts []string, timeout time.Duration) map[strin
 			// Record contention observation for future estimation
 			RecordContentionObs(db, h, m)
 
-			mu.Lock()
-			result[h] = m
-			mu.Unlock()
+			results <- hostResult{host: h, metrics: m}
 		}(host)
 	}
 
-	wg.Wait()
+	var deadline <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		deadline = timer.C
+		defer timer.Stop()
+	}
+	for range hosts {
+		if timeout <= 0 {
+			r := <-results
+			if r.metrics != nil {
+				result[r.host] = r.metrics
+			}
+			continue
+		}
+		select {
+		case r := <-results:
+			if r.metrics != nil {
+				result[r.host] = r.metrics
+			}
+		case <-deadline:
+			return result
+		}
+	}
 	return result
 }
 

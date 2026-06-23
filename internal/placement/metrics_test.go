@@ -1,9 +1,12 @@
 package placement
 
 import (
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuerunner"
 )
 
@@ -54,6 +57,41 @@ func TestHostMetricsFromHostInfo_Basic(t *testing.T) {
 	// Queue depth
 	if m.QueueDepth != 3 {
 		t.Errorf("QueueDepth = %d, want 3", m.QueueDepth)
+	}
+}
+
+func TestCollectMetricsReturnsPartialBeforeHungHost(t *testing.T) {
+	db := setupTestDB(t)
+
+	originalFetch := collectMetricsFetchHostStatus
+	t.Cleanup(func() {
+		collectMetricsFetchHostStatus = originalFetch
+	})
+
+	collectMetricsFetchHostStatus = func(_ *sql.DB, hostName string, _ string, _ time.Duration) (*ops.HostStatusResult, error) {
+		if hostName == "slow-host" {
+			time.Sleep(500 * time.Millisecond)
+			return &ops.HostStatusResult{
+				Host: &hostinfo.Host{Name: hostName, CPUs: 4, LoadAvg: "1.0", MemTotal: "8G", MemUsed: "2G"},
+			}, nil
+		}
+		return &ops.HostStatusResult{
+			Host: &hostinfo.Host{Name: hostName, CPUs: 4, LoadAvg: "1.0", MemTotal: "8G", MemUsed: "2G"},
+		}, nil
+	}
+
+	started := time.Now()
+	metrics := CollectMetrics(db, []string{"fast-host", "slow-host"}, 100*time.Millisecond)
+	elapsed := time.Since(started)
+
+	if elapsed >= 400*time.Millisecond {
+		t.Fatalf("CollectMetrics took %s, want it to return before slow host completes", elapsed)
+	}
+	if metrics["fast-host"] == nil {
+		t.Fatalf("expected fast-host metrics")
+	}
+	if metrics["slow-host"] != nil {
+		t.Fatalf("slow-host metrics should be omitted after timeout")
 	}
 }
 

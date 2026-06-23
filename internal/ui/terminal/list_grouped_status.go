@@ -66,6 +66,8 @@ type groupedStatusRenderOptions struct {
 	autopilotPassStartedAtUnix int64
 }
 
+const pendingPlacementDelayedAfter = 2 * time.Minute
+
 type groupedStatusLaunchingETA struct {
 	totalP50               time.Duration
 	totalSamples           int
@@ -849,6 +851,10 @@ func groupedStatusPendingPlacementReason(job *db.Job, opts groupedStatusRenderOp
 		return "autopilot not running"
 	case opts.autopilotActive && opts.autopilotPassStartedAtUnix > 0 &&
 		(job == nil || job.CreatedAt == 0 || opts.autopilotPassStartedAtUnix >= job.CreatedAt):
+		passStarted := time.Unix(opts.autopilotPassStartedAtUnix, 0)
+		if passAge := opts.now.Sub(passStarted); passAge >= pendingPlacementDelayedAfter {
+			return "autopilot delayed " + groupedStatusDurationText(passAge)
+		}
 		return "autopilot placing jobs"
 	default:
 		return blockreason.DefaultPendingPlacementReason

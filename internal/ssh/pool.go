@@ -260,12 +260,17 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 	if p.closed {
 		return "", "", fmt.Errorf("SSH connection unavailable")
 	}
+	deadline := timeoutDeadline(timeout)
 
 	// Acquire global semaphore first
 	if timeout > 0 {
+		remaining, ok := timeoutRemaining(deadline)
+		if !ok {
+			return "", "", fmt.Errorf("SSH connections busy, try again")
+		}
 		select {
 		case p.globalSem <- struct{}{}:
-		case <-time.After(timeout):
+		case <-time.After(remaining):
 			return "", "", fmt.Errorf("SSH connections busy, try again")
 		}
 	} else {
@@ -277,9 +282,13 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 
 	// Acquire per-host semaphore
 	if timeout > 0 {
+		remaining, ok := timeoutRemaining(deadline)
+		if !ok {
+			return "", "", fmt.Errorf("SSH connection to %s busy, try again", host)
+		}
 		select {
 		case hp.sem <- struct{}{}:
-		case <-time.After(timeout):
+		case <-time.After(remaining):
 			return "", "", fmt.Errorf("SSH connection to %s busy, try again", host)
 		}
 	} else {
@@ -287,7 +296,7 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 	}
 	defer func() { <-hp.sem }()
 
-	return p.executeWithSemaphore(hp, command, timeout)
+	return p.executeWithSemaphore(hp, command, deadline)
 }
 
 // TryExecute runs a command like Execute but returns ErrPoolBusy immediately
@@ -297,6 +306,7 @@ func (p *SessionPool) TryExecute(host, command string, timeout time.Duration) (s
 	if p.closed {
 		return "", "", fmt.Errorf("SSH connection unavailable")
 	}
+	deadline := timeoutDeadline(timeout)
 
 	// Non-blocking global semaphore acquire
 	select {
@@ -316,17 +326,23 @@ func (p *SessionPool) TryExecute(host, command string, timeout time.Duration) (s
 	}
 	defer func() { <-hp.sem }()
 
-	return p.executeWithSemaphore(hp, command, timeout)
+	return p.executeWithSemaphore(hp, command, deadline)
 }
 
 // executeWithSemaphore runs a command after the semaphore has been acquired.
-func (p *SessionPool) executeWithSemaphore(hp *hostPool, command string, timeout time.Duration) (string, string, error) {
-	sess, err := hp.acquire()
+func (p *SessionPool) executeWithSemaphore(hp *hostPool, command string, deadline time.Time) (string, string, error) {
+	sess, err := hp.acquireWithDeadline(deadline)
 	if err != nil {
 		return "", "", err
 	}
 
-	stdout, stderr, err := sess.execute(command, timeout)
+	commandTimeout, ok := timeoutRemaining(deadline)
+	if !ok {
+		sess.close()
+		hp.discard(sess)
+		return "", "", fmt.Errorf("command on %s before start: %w", sess.host, ErrCommandTimeout)
+	}
+	stdout, stderr, err := sess.execute(command, commandTimeout)
 	if err != nil {
 		var cmdErr *commandError
 		if errors.As(err, &cmdErr) {
@@ -340,6 +356,24 @@ func (p *SessionPool) executeWithSemaphore(hp *hostPool, command string, timeout
 
 	hp.release(sess)
 	return stdout, stderr, err
+}
+
+func timeoutDeadline(timeout time.Duration) time.Time {
+	if timeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(timeout)
+}
+
+func timeoutRemaining(deadline time.Time) (time.Duration, bool) {
+	if deadline.IsZero() {
+		return 0, true
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
 }
 
 // Close shuts down all sessions.
@@ -358,10 +392,21 @@ func (p *SessionPool) Close() {
 }
 
 func (hp *hostPool) acquire() (*Session, error) {
+	return hp.acquireWithDeadline(time.Time{})
+}
+
+func (hp *hostPool) acquireWithDeadline(deadline time.Time) (*Session, error) {
 	// Try to get an idle session
 	select {
 	case sess := <-hp.idle:
-		if sess.alive && sess.ping() {
+		pingTimeout := 2 * time.Second
+		if remaining, ok := timeoutRemaining(deadline); !ok {
+			sess.close()
+			return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
+		} else if remaining > 0 && remaining < pingTimeout {
+			pingTimeout = remaining
+		}
+		if sess.alive && sess.pingWithTimeout(pingTimeout) {
 			return sess, nil
 		}
 		sess.close()
@@ -370,7 +415,7 @@ func (hp *hostPool) acquire() (*Session, error) {
 	}
 
 	// Create a new session
-	return hp.newSession()
+	return hp.newSessionWithDeadline(deadline)
 }
 
 func (hp *hostPool) release(sess *Session) {
@@ -392,6 +437,10 @@ func (hp *hostPool) discard(_ *Session) {
 const sessionReadyMarker = "---RJ-READY---"
 
 func (hp *hostPool) newSession() (*Session, error) {
+	return hp.newSessionWithDeadline(time.Time{})
+}
+
+func (hp *hostPool) newSessionWithDeadline(deadline time.Time) (*Session, error) {
 	// Use "echo READY; exec bash -s" so the remote shell signals
 	// readiness before replacing itself with bash. This avoids writing
 	// to stdin before the SSH channel is established (SSH drops data
@@ -445,6 +494,14 @@ func (hp *hostPool) newSession() (*Session, error) {
 		}
 	}()
 
+	readyTimeout := defaultReadyTimeout
+	if remaining, ok := timeoutRemaining(deadline); !ok {
+		killAndWait(cmd)
+		return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
+	} else if remaining > 0 && remaining < readyTimeout {
+		readyTimeout = remaining
+	}
+
 	select {
 	case err := <-readyCh:
 		if err != nil {
@@ -460,7 +517,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 			}
 			return nil, err
 		}
-	case <-time.After(defaultReadyTimeout):
+	case <-time.After(readyTimeout):
 		killAndWait(cmd)
 		return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
 	}
