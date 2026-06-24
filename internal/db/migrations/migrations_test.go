@@ -84,3 +84,37 @@ func TestUpIsIdempotentOnPopulatedSchema(t *testing.T) {
 		t.Fatalf("Version = %d, want %d (Target)", got, want)
 	}
 }
+
+func TestUpRepairsCampaignAffinityColumnAfterAppliedV24(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := Up(ctx, db); err != nil {
+		t.Fatalf("initial Up: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE campaigns DROP COLUMN affinity_machines`); err != nil {
+		t.Fatalf("drop affinity_machines fixture: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id > 25`); err != nil {
+		t.Fatalf("rewind goose version: %v", err)
+	}
+
+	if err := Up(ctx, db); err != nil {
+		t.Fatalf("repair Up: %v", err)
+	}
+	exists, err := columnExists(ctx, db, "campaigns", "affinity_machines")
+	if err != nil {
+		t.Fatalf("inspect repaired column: %v", err)
+	}
+	if !exists {
+		t.Fatal("campaigns.affinity_machines was not restored")
+	}
+	if got, want := Version(ctx, db), Target(); got != want {
+		t.Fatalf("Version = %d, want %d (Target)", got, want)
+	}
+}

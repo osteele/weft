@@ -94,11 +94,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddCampaignMachineAntiAffinity},
 		&goose.GoFunc{RunDB: dropAddCampaignMachineAntiAffinity},
 	)
+	repairCampaignAffinityMachines := goose.NewGoMigration(
+		26,
+		&goose.GoFunc{RunDB: applyRepairCampaignAffinityMachinesColumn},
+		&goose.GoFunc{RunDB: dropRepairCampaignAffinityMachinesColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -241,6 +246,25 @@ func dropAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error {
 	} {
 		_, _ = db.ExecContext(ctx, stmt)
 	}
+	return nil
+}
+
+func applyRepairCampaignAffinityMachinesColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "campaigns", "affinity_machines")
+	if err != nil {
+		return fmt.Errorf("inspect campaigns.affinity_machines: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE campaigns ADD COLUMN affinity_machines TEXT`); err != nil {
+		return fmt.Errorf("add campaigns.affinity_machines: %w", err)
+	}
+	return nil
+}
+
+func dropRepairCampaignAffinityMachinesColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE campaigns DROP COLUMN affinity_machines`)
 	return nil
 }
 
@@ -677,7 +701,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
