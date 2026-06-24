@@ -48,6 +48,7 @@ type PlanOptions struct {
 	OpportunityCostWeight  float64
 	PreferReuse            bool
 	InitialClaimedMachines map[string]struct{}
+	MachineAffinity        map[string]struct{}
 }
 
 func defaultPlanOptions() PlanOptions {
@@ -136,6 +137,7 @@ type planEvaluator struct {
 	opportunityCostWeight  float64
 	preferReuse            bool
 	initialClaimedMachines map[string]struct{}
+	machineAffinity        map[string]struct{}
 }
 
 type reuseEstimateCacheEntry struct {
@@ -169,6 +171,7 @@ func newPlanEvaluator(
 		opportunityCostWeight:  options.OpportunityCostWeight,
 		preferReuse:            options.PreferReuse,
 		initialClaimedMachines: cloneStringSet(options.InitialClaimedMachines),
+		machineAffinity:        cloneStringSet(options.MachineAffinity),
 	}
 }
 
@@ -499,6 +502,7 @@ func buildProfilePlansFromSplitRawWithSession(
 	}
 
 	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival, options)
+	reusable = filterReusableByMachineAffinity(reusable, options.MachineAffinity)
 	reportPlanProgress(onProgress, "Estimating raw-offer runtimes", fmt.Sprintf("%d direct offer(s)", countRawOffers(splitRaw)), 0, 0)
 	splitEval := evaluator.evaluateRawOffers(splitRaw)
 
@@ -824,7 +828,7 @@ func (e *planEvaluator) evaluateRawOffers(raw []GroupRawOffers) rawOfferEvaluati
 }
 
 func (e *planEvaluator) selectOffers(eval rawOfferEvaluation, profile bidding.ScoreProfile) ([]GroupOffer, []offerRuntimePrediction) {
-	return rankGroupOffersFromPredictionsWithMachineExclusions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival, e.initialClaimedMachines)
+	return rankGroupOffersFromPredictionsWithMachineExclusions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival, e.initialClaimedMachines, e.machineAffinity)
 }
 
 func (e *planEvaluator) estimateSelectedOffers(groupOffers []GroupOffer, selected []offerRuntimePrediction) []CostEstimate {
@@ -1069,7 +1073,7 @@ func rankGroupOffersFromPredictions(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) ([]GroupOffer, []offerRuntimePrediction) {
-	return rankGroupOffersFromPredictionsWithMachineExclusions(raw, predicted, survivalModel, setupFactory, profile, minSurvival, nil)
+	return rankGroupOffersFromPredictionsWithMachineExclusions(raw, predicted, survivalModel, setupFactory, profile, minSurvival, nil, nil)
 }
 
 func rankGroupOffersFromPredictionsWithMachineExclusions(
@@ -1080,6 +1084,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 	initialClaimedMachines map[string]struct{},
+	machineAffinity map[string]struct{},
 ) ([]GroupOffer, []offerRuntimePrediction) {
 	results := make([]GroupOffer, len(raw))
 	selected := make([]offerRuntimePrediction, len(raw))
@@ -1103,7 +1108,12 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		availableOffers := filterOffersByClaim(r.Offers, claimedMachines, claimedOffers)
+		affinityOffers := filterOffersByMachineAffinity(r.Offers, machineAffinity)
+		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(machineAffinity) > 0 {
+			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
+			continue
+		}
+		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers)
 		if len(r.Offers) > 0 && len(availableOffers) == 0 && len(claimedMachines) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrDistinctMachinesExhausted}
 			continue
@@ -2509,6 +2519,38 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 			}
 		}
 		out = append(out, o)
+	}
+	return out
+}
+
+func filterOffersByMachineAffinity(offers []cloud.Offer, machineAffinity map[string]struct{}) []cloud.Offer {
+	if len(machineAffinity) == 0 {
+		return offers
+	}
+	out := offers[:0:0]
+	for _, o := range offers {
+		if key := offerMachineClaimKey(o); key != "" {
+			if _, allowed := machineAffinity[key]; allowed {
+				out = append(out, o)
+			}
+		}
+	}
+	return out
+}
+
+func filterReusableByMachineAffinity(instances []InstanceCapacity, machineAffinity map[string]struct{}) []InstanceCapacity {
+	if len(machineAffinity) == 0 {
+		return instances
+	}
+	out := instances[:0:0]
+	for _, inst := range instances {
+		if inst.Instance == nil {
+			continue
+		}
+		key := db.ProviderMachineKey(inst.Instance.Provider, inst.Instance.MachineID)
+		if _, allowed := machineAffinity[key]; allowed {
+			out = append(out, inst)
+		}
 	}
 	return out
 }

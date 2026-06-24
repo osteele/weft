@@ -21,6 +21,7 @@ type LaunchExecutionPlan struct {
 
 type LaunchExecutionPlanOptions struct {
 	InitialClaimedMachines map[string]struct{}
+	MachineAffinity        map[string]struct{}
 }
 
 func PrepareLaunchExecutionPlan(database *sql.DB, clients []cloud.Client, providerErr error, groups []InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, minReliability float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel) (LaunchExecutionPlan, error) {
@@ -57,7 +58,10 @@ func PrepareLaunchExecutionPlanWithProgressAndOptions(database *sql.DB, clients 
 		minReliability,
 		effectiveMinSurvival,
 		onProgress,
-		PlanOptions{InitialClaimedMachines: options.InitialClaimedMachines},
+		PlanOptions{
+			InitialClaimedMachines: options.InitialClaimedMachines,
+			MachineAffinity:        options.MachineAffinity,
+		},
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {
@@ -159,7 +163,10 @@ func PrepareNewInstanceLaunchPlanWithOptions(
 		minReliability,
 		effectiveMinSurvival,
 		onProgress,
-		PlanOptions{InitialClaimedMachines: options.InitialClaimedMachines},
+		PlanOptions{
+			InitialClaimedMachines: options.InitialClaimedMachines,
+			MachineAffinity:        options.MachineAffinity,
+		},
 	)
 	strategyPlan, ok := plans[profile.ID]
 	if !ok {

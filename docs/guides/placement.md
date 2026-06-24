@@ -136,7 +136,7 @@ local placement because it names a rental provider directly.
 For benchmark coverage runs, `weft start instance --distinct-machines` changes
 new-instance offer eligibility so selected jobs land on different Vast.ai
 physical machines. See [Distinct physical machines](instances.md#distinct-physical-machines)
-for launch syntax and `--avoid`.
+for launch syntax, `--avoid`, and `--affinity`.
 
 ## Reserved Tags
 

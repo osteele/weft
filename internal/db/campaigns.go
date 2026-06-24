@@ -26,6 +26,7 @@ type Campaign struct {
 	EstimatedCostCents int // sum of per-instance cost estimates at launch time
 	DistinctMachines   bool
 	AvoidMachines      []string
+	AffinityMachines   []string
 }
 
 // CreateCampaign inserts a new campaign batch record and returns its ID.
@@ -35,9 +36,13 @@ func CreateCampaign(db *sql.DB, c *Campaign) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	affinityMachinesJSON, err := encodeStringSliceForDB(c.AffinityMachines)
+	if err != nil {
+		return 0, err
+	}
 	result, err := db.Exec(
-		`INSERT INTO campaigns (status, created_at, estimated_cost_cents, distinct_machines, avoid_machines) VALUES (?, ?, ?, ?, ?)`,
-		c.Status, now, c.EstimatedCostCents, boolToInt(c.DistinctMachines), avoidMachinesJSON,
+		`INSERT INTO campaigns (status, created_at, estimated_cost_cents, distinct_machines, avoid_machines, affinity_machines) VALUES (?, ?, ?, ?, ?, ?)`,
+		c.Status, now, c.EstimatedCostCents, boolToInt(c.DistinctMachines), avoidMachinesJSON, affinityMachinesJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -135,7 +140,7 @@ type campaignScanner interface {
 
 func campaignSelectSQL() string {
 	return `SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0),
-		       COALESCE(distinct_machines, 0), COALESCE(avoid_machines, '')
+		       COALESCE(distinct_machines, 0), COALESCE(avoid_machines, ''), COALESCE(affinity_machines, '')
 		  FROM campaigns`
 }
 
@@ -144,7 +149,8 @@ func scanCampaign(row campaignScanner) (*Campaign, error) {
 	var endedAt sql.NullInt64
 	var distinct int
 	var avoidMachinesJSON string
-	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents, &distinct, &avoidMachinesJSON)
+	var affinityMachinesJSON string
+	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents, &distinct, &avoidMachinesJSON, &affinityMachinesJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +159,7 @@ func scanCampaign(row campaignScanner) (*Campaign, error) {
 	}
 	c.DistinctMachines = distinct != 0
 	c.AvoidMachines = decodeStringSliceFromDB(avoidMachinesJSON)
+	c.AffinityMachines = decodeStringSliceFromDB(affinityMachinesJSON)
 	return &c, nil
 }
 

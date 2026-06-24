@@ -165,6 +165,7 @@ weft start instance --min-survival 0    # Disable survival floor (allow all offe
 weft start instance --min-survival 0.6  # Stricter survival floor
 weft start instance --distinct-machines --jobs wj42,wj43
 weft start instance --distinct-machines --avoid wi123 --avoid wj456
+weft start instance --affinity wj789 --jobs wj790
 ```
 
 ### Distinct physical machines
@@ -176,6 +177,12 @@ per-offer `machine_id`, so RunPod is not supported for this mode.
 `--avoid` can be repeated or comma-separated. Each token may be a raw
 `machine_id`, an instance id such as `wi123`, or a job id such as `wj456`.
 Unresolvable avoid tokens produce warnings and are skipped.
+
+Use `--affinity` when a job should run on the same Vast.ai physical machine as
+another job, instance, or raw `machine_id`. It accepts the same token forms as
+`--avoid`; a job id resolves to that job's latest attempt. Unresolvable tokens
+produce warnings, and the launch fails if none resolve. Reusable rental
+instances and new offers are both restricted to the requested physical machine.
 
 ### Interruptible jobs
 

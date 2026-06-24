@@ -15,3 +15,7 @@ var ErrNoReplacementOffer = errors.New("no replacement offer found")
 // ErrDistinctMachinesExhausted is returned when coverage anti-affinity removes
 // every otherwise eligible offer.
 var ErrDistinctMachinesExhausted = errors.New("all distinct machines covered or in-flight")
+
+// ErrMachineAffinityUnsatisfied is returned when machine affinity removes every
+// otherwise eligible offer.
+var ErrMachineAffinityUnsatisfied = errors.New("no offers on requested machine")

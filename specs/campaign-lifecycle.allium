@@ -127,6 +127,12 @@ entity Campaign {
     -- resume, or extend a coverage campaign.
     avoid_machines: List<String>
 
+    -- Operator-supplied physical machines to require, resolved to provider
+    -- machine_ids from `--affinity` tokens (a raw machine_id, an instance id,
+    -- or a job id — see ResolveMachineAffinityTarget). Offer selection and
+    -- reusable-instance assignment are restricted to these machines.
+    affinity_machines: List<String>
+
     -- Relationships
     instances: Instance with campaign = this
 
@@ -900,7 +906,57 @@ rule ResolveAvoidTarget {
         -- and MUST be reported as a warning, not silently dropped, so the
         -- operator knows the exclusion had no effect.
         --
-        -- Resolved machine_ids are unioned into Campaign.avoid_machines.
+-- Resolved machine_ids are unioned into Campaign.avoid_machines.
+}
+
+-- A token passed to `weft ... --affinity <token>` identifying a physical
+-- machine that eligible placements must match. All three kinds resolve to a
+-- single provider machine_id, using the same target resolution rules as
+-- `--avoid`.
+value MachineAffinityTargetKind = machine_id | instance | job
+
+rule ResolveMachineAffinityTarget {
+    when: ResolveMachineAffinityTarget(token)
+
+    ensures:
+        token.kind == machine_id implies result == token.value
+    ensures:
+        token.kind == instance implies result == Instance(token.value).offer.machine_id
+    ensures:
+        token.kind == job implies
+            result == Job(token.value).latest_attempt.cloud_instance.offer.machine_id
+
+    @guidance
+        -- `--affinity` accepts a raw provider machine_id, an instance id
+        -- (wiNN), or a job id (wjNN); repeatable and/or comma-separated. An
+        -- instance resolves to its own offer.machine_id; a job resolves to
+        -- the machine_id of its LATEST attempt's launch (`--affinity wjNN`
+        -- means "run where wjNN most recently ran").
+        --
+        -- A token that never landed on a machine (job never started, or an
+        -- instance/job whose offer.machine_id is empty) resolves to nothing
+        -- and MUST be reported as a warning. If no affinity token resolves,
+        -- the launch fails before offer search because the constraint would
+        -- otherwise be silently ignored.
+        --
+        -- Resolved machine_ids are unioned into Campaign.affinity_machines.
+}
+
+rule MachineAffinityOfferFilter {
+    when: RankGroupOffers(raw_offers_per_group) for campaign
+    requires: campaign.affinity_machines not empty
+
+    ensures:
+        for each offer o selected for a group in campaign:
+            o.machine_id in campaign.affinity_machines
+
+    @guidance
+        -- Implementation: filter raw offers through an allow-list keyed by
+        -- provider/machine_id before scoring. Reusable rental instances are
+        -- filtered with the same key before reuse planning, so reuse cannot
+        -- satisfy the job on a different physical machine. Providers without
+        -- pre-launch machine_id support are rejected up front; v1 supports
+        -- Vast.ai.
 }
 
 -- The coverage exclusion that offer selection enforces for a distinct_machines

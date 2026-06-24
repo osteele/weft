@@ -75,8 +75,8 @@ func RunWatchLoop(database *sql.DB, cfg *config.Config) error {
 
 func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, jobIDFilter map[int64]bool, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (LaunchResult, error) {
 	clients, providerErr := buildCloudClients(cfg)
-	if opts.DistinctMachines && providerErr == nil {
-		clients, providerErr = campaign.DistinctMachineClients(clients)
+	if (opts.DistinctMachines || len(opts.AffinityMachines) > 0) && providerErr == nil {
+		clients, providerErr = campaign.MachineIDClients(clients, "machine-constrained launches")
 	}
 	if providerErr != nil {
 		return LaunchResult{Err: providerErr}, nil

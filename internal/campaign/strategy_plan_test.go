@@ -869,6 +869,7 @@ func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
 		bidding.StrategyCheap.Profile(),
 		0,
 		map[string]struct{}{"vastai/covered": {}},
+		nil,
 	)
 	if len(offers) != 1 || offers[0].Offer == nil {
 		t.Fatalf("expected ranked offer, got %#v", offers)
@@ -885,9 +886,54 @@ func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
 		bidding.StrategyCheap.Profile(),
 		0,
 		map[string]struct{}{"vastai/covered": {}, "vastai/fresh": {}},
+		nil,
 	)
 	if len(offers) != 1 || !errors.Is(offers[0].Err, ErrDistinctMachinesExhausted) {
 		t.Fatalf("expected distinct-machine exhaustion, got %#v", offers)
+	}
+}
+
+func TestRankGroupOffersForPlanning_MachineAffinity(t *testing.T) {
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			GPUMemGB: 10,
+			Jobs:     []*db.Job{{ID: 1, Project: "p", Command: "x"}},
+		},
+		Offers: []cloud.Offer{
+			{Provider: cloud.ProviderVastai, ProviderID: "cheap-offer", MachineID: "other", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.10, DLPerf: 10},
+			{Provider: cloud.ProviderVastai, ProviderID: "target-offer", MachineID: "target", GPUName: "RTX A4000", GPUMemGB: 16, CostPerHour: 0.20, DLPerf: 10},
+		},
+	}}
+	offers, _ := rankGroupOffersFromPredictionsWithMachineExclusions(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		nil,
+		map[string]struct{}{"vastai/target": {}},
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.MachineID != "target" {
+		t.Fatalf("selected machine = %q, want target", offers[0].Offer.MachineID)
+	}
+
+	offers, _ = rankGroupOffersFromPredictionsWithMachineExclusions(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		nil,
+		map[string]struct{}{"vastai/missing": {}},
+	)
+	if len(offers) != 1 || !errors.Is(offers[0].Err, ErrMachineAffinityUnsatisfied) {
+		t.Fatalf("expected machine-affinity exhaustion, got %#v", offers)
 	}
 }
 

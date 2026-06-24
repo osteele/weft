@@ -53,6 +53,7 @@ type LaunchOpts struct {
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
 	DistinctMachines    bool                      // exclude covered/in-flight/avoided physical machines within the campaign
 	AvoidMachines       []string                  // resolved provider machine IDs to exclude for distinct-machine campaigns
+	AffinityMachines    []string                  // resolved provider machine IDs that eligible offers must match
 	// MoveTargetClaim, if true, uses each job's open MoveIntent to create a
 	// hidden target attempt on this launch. The source stays authoritative
 	// until the target launch is accepted.
@@ -587,7 +588,7 @@ func validateDistinctMachineOffers(offers []cloud.Offer) error {
 	return nil
 }
 
-func DistinctMachineClients(clients []cloud.Client) ([]cloud.Client, error) {
+func MachineIDClients(clients []cloud.Client, feature string) ([]cloud.Client, error) {
 	filtered := make([]cloud.Client, 0, len(clients))
 	for _, client := range clients {
 		if client != nil && client.Provider() == cloud.ProviderVastai {
@@ -595,19 +596,30 @@ func DistinctMachineClients(clients []cloud.Client) ([]cloud.Client, error) {
 		}
 	}
 	if len(filtered) == 0 {
-		return nil, fmt.Errorf("distinct-machine launches require Vast.ai machine_id support; no Vast.ai provider is available")
+		if feature == "" {
+			feature = "machine-constrained launches"
+		}
+		return nil, fmt.Errorf("%s require Vast.ai machine_id support; no Vast.ai provider is available", feature)
 	}
 	return filtered, nil
 }
 
-func DistinctMachineAvoidanceKeys(avoidMachines []string) map[string]struct{} {
+func DistinctMachineClients(clients []cloud.Client) ([]cloud.Client, error) {
+	return MachineIDClients(clients, "distinct-machine launches")
+}
+
+func VastAIMachineKeys(machineIDs []string) map[string]struct{} {
 	out := map[string]struct{}{}
-	for _, machineID := range avoidMachines {
+	for _, machineID := range machineIDs {
 		if key := db.ProviderMachineKey(string(cloud.ProviderVastai), machineID); key != "" {
 			out[key] = struct{}{}
 		}
 	}
 	return out
+}
+
+func DistinctMachineAvoidanceKeys(avoidMachines []string) map[string]struct{} {
+	return VastAIMachineKeys(avoidMachines)
 }
 
 func distinctMachineExclusions(database *sql.DB, campaignID int64, avoidMachines []string) (map[string]struct{}, error) {
@@ -919,6 +931,7 @@ func launchCampaignWithStager(
 		EstimatedCostCents: estimatedCostCents,
 		DistinctMachines:   opts.DistinctMachines,
 		AvoidMachines:      opts.AvoidMachines,
+		AffinityMachines:   opts.AffinityMachines,
 	}
 	campaignID, err := db.CreateCampaign(database, campaignRec)
 	if err != nil {
@@ -1306,6 +1319,7 @@ func launchCampaignWithStager(
 					}
 				}
 			}
+			affinityMachines := VastAIMachineKeys(opts.AffinityMachines)
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
 				return searchAuthorizedReplacementOffer(gateCtx, excludeOfferKeys, func(exclude map[string]struct{}) GroupOffer {
 					return SearchBestOfferForGroupWithProfileAndMachineExclusions(
@@ -1316,6 +1330,7 @@ func launchCampaignWithStager(
 						bidding.ConstantSetup(setupOverheadHrs),
 						exclude,
 						coverageExclusions,
+						affinityMachines,
 						opts.ScoringProfile(),
 						minReliability,
 						opts.MinSurvival,

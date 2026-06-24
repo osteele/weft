@@ -2292,6 +2292,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 
 		planOptions := campaign.LaunchExecutionPlanOptions{
 			InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+			MachineAffinity:        campaign.VastAIMachineKeys(opts.AffinityMachines),
 		}
 		var prep launchExecutionPlan
 		var err error

@@ -1319,6 +1319,9 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 - `--grace-period DURATION`: Grace period after failure (default: `5m`)
 - `--strategy cheap|fast|fastest`: Offer selection strategy (default: `cheap`)
 - `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`; `0` disables)
+- `--distinct-machines`: Place selected jobs on different Vast.ai physical machines
+- `--avoid MACHINE|wiID|wjID`: Exclude a Vast.ai physical machine when using `--distinct-machines`; repeatable and comma-separated
+- `--affinity MACHINE|wiID|wjID`: Require placement on the same Vast.ai physical machine; repeatable and comma-separated
 - `--plain` / `--tui`: Force output mode
 
 **Examples:**
@@ -1330,6 +1333,7 @@ weft start instance --yes --watch   # Launch everything, then watch
 weft start instance --dry-run       # Preview without launching
 weft start instance --strategy fastest # Prefer fastest GPUs
 weft start instance --min-survival 0 # Disable survival floor
+weft start instance --affinity wj789 --jobs wj790 # Run where wj789 last ran
 ```
 
 A launch is recorded as a **campaign** — a batch row grouping the instances

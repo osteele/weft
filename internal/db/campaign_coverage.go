@@ -88,11 +88,23 @@ func scanProviderMachineKeys(rows *sql.Rows, out map[string]struct{}) error {
 // ResolveAvoidMachineIDs resolves --avoid tokens into provider machine IDs.
 // Unresolvable tokens return warnings and are omitted from the result.
 func ResolveAvoidMachineIDs(database *sql.DB, tokens []string) ([]string, []string, error) {
+	return ResolveMachineIDs(database, tokens, "--avoid")
+}
+
+// ResolveAffinityMachineIDs resolves --affinity tokens into provider machine IDs.
+// Unresolvable tokens return warnings and are omitted from the result.
+func ResolveAffinityMachineIDs(database *sql.DB, tokens []string) ([]string, []string, error) {
+	return ResolveMachineIDs(database, tokens, "--affinity")
+}
+
+// ResolveMachineIDs resolves raw machine IDs, instance IDs, or job IDs into
+// provider machine IDs. Unresolvable tokens return warnings and are omitted.
+func ResolveMachineIDs(database *sql.DB, tokens []string, flagName string) ([]string, []string, error) {
 	out := make([]string, 0, len(tokens))
 	warnings := []string{}
 	seen := map[string]struct{}{}
 	for _, token := range splitAvoidTokens(tokens) {
-		machineID, warning, err := resolveAvoidMachineID(database, token)
+		machineID, warning, err := resolveMachineID(database, token, flagName)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -125,21 +137,21 @@ func splitAvoidTokens(tokens []string) []string {
 	return out
 }
 
-func resolveAvoidMachineID(database *sql.DB, token string) (string, string, error) {
+func resolveMachineID(database *sql.DB, token string, flagName string) (string, string, error) {
 	lower := strings.ToLower(strings.TrimSpace(token))
 	switch {
 	case strings.HasPrefix(lower, "wi"):
 		id, err := parsePositivePrefixedID(lower, "wi")
 		if err != nil {
-			return "", fmt.Sprintf("could not resolve --avoid %q: invalid instance id", token), nil
+			return "", fmt.Sprintf("could not resolve %s %q: invalid instance id", flagName, token), nil
 		}
-		return resolveAvoidInstanceMachineID(database, token, id)
+		return resolveInstanceMachineID(database, token, id, flagName)
 	case strings.HasPrefix(lower, "wj"):
 		id, err := parsePositivePrefixedID(lower, "wj")
 		if err != nil {
-			return "", fmt.Sprintf("could not resolve --avoid %q: invalid job id", token), nil
+			return "", fmt.Sprintf("could not resolve %s %q: invalid job id", flagName, token), nil
 		}
-		return resolveAvoidJobMachineID(database, token, id)
+		return resolveJobMachineID(database, token, id, flagName)
 	default:
 		return strings.TrimSpace(token), "", nil
 	}
@@ -157,25 +169,25 @@ func parsePositivePrefixedID(token, prefix string) (int64, error) {
 	return id, nil
 }
 
-func resolveAvoidInstanceMachineID(database *sql.DB, token string, instanceID int64) (string, string, error) {
+func resolveInstanceMachineID(database *sql.DB, token string, instanceID int64, flagName string) (string, string, error) {
 	var machineID string
 	err := database.QueryRow(
 		`SELECT COALESCE(machine_id, '') FROM launches WHERE id = ?`,
 		instanceID,
 	).Scan(&machineID)
 	if err == sql.ErrNoRows {
-		return "", fmt.Sprintf("could not resolve --avoid %q: instance not found", token), nil
+		return "", fmt.Sprintf("could not resolve %s %q: instance not found", flagName, token), nil
 	}
 	if err != nil {
 		return "", "", err
 	}
 	if strings.TrimSpace(machineID) == "" {
-		return "", fmt.Sprintf("could not resolve --avoid %q: instance has no machine_id", token), nil
+		return "", fmt.Sprintf("could not resolve %s %q: instance has no machine_id", flagName, token), nil
 	}
 	return strings.TrimSpace(machineID), "", nil
 }
 
-func resolveAvoidJobMachineID(database *sql.DB, token string, jobID int64) (string, string, error) {
+func resolveJobMachineID(database *sql.DB, token string, jobID int64, flagName string) (string, string, error) {
 	var machineID string
 	err := database.QueryRow(`
 		SELECT COALESCE(l.machine_id, '')
@@ -187,13 +199,13 @@ func resolveAvoidJobMachineID(database *sql.DB, token string, jobID int64) (stri
 		jobID,
 	).Scan(&machineID)
 	if err == sql.ErrNoRows {
-		return "", fmt.Sprintf("could not resolve --avoid %q: job has no attempts", token), nil
+		return "", fmt.Sprintf("could not resolve %s %q: job has no attempts", flagName, token), nil
 	}
 	if err != nil {
 		return "", "", err
 	}
 	if strings.TrimSpace(machineID) == "" {
-		return "", fmt.Sprintf("could not resolve --avoid %q: latest job attempt has no machine_id", token), nil
+		return "", fmt.Sprintf("could not resolve %s %q: latest job attempt has no machine_id", flagName, token), nil
 	}
 	return strings.TrimSpace(machineID), "", nil
 }

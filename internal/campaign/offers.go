@@ -715,6 +715,7 @@ func SearchBestOfferForGroupWithProfile(
 		setupOverhead,
 		excludeOfferIDs,
 		nil,
+		nil,
 		profile,
 		minReliability,
 		minSurvival,
@@ -729,6 +730,7 @@ func SearchBestOfferForGroupWithProfileAndMachineExclusions(
 	setupOverhead bidding.OfferSetupFunc,
 	excludeOfferIDs map[string]struct{},
 	excludeMachineKeys map[string]struct{},
+	includeMachineKeys map[string]struct{},
 	profile bidding.ScoreProfile,
 	minReliability float64,
 	minSurvival float64,
@@ -748,6 +750,13 @@ func SearchBestOfferForGroupWithProfileAndMachineExclusions(
 			filtered = append(filtered, offer)
 		}
 		offers = filtered
+	}
+	if len(includeMachineKeys) > 0 {
+		beforeMachineFilter := len(offers)
+		offers = filterOffersByMachineAffinity(offers, includeMachineKeys)
+		if beforeMachineFilter > 0 && len(offers) == 0 {
+			return GroupOffer{Group: group, Err: ErrMachineAffinityUnsatisfied}
+		}
 	}
 	if len(excludeMachineKeys) > 0 {
 		beforeMachineFilter := len(offers)
@@ -1040,10 +1049,10 @@ func RankGroupOffersWithPredictor(raw []GroupRawOffers, predCfg *predictor.Confi
 }
 
 func RankGroupOffersWithProfile(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64) []GroupOffer {
-	return RankGroupOffersWithProfileAndMachineExclusions(raw, survivalModel, jobDurationHrs, setupFactory, profile, minSurvival, nil)
+	return RankGroupOffersWithProfileAndMachineExclusions(raw, survivalModel, jobDurationHrs, setupFactory, profile, minSurvival, nil, nil)
 }
 
-func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64, initialClaimedMachines map[string]struct{}) []GroupOffer {
+func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64, initialClaimedMachines map[string]struct{}, machineAffinity map[string]struct{}) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
 	// See rankGroupOffersFromPredictions for the per-pass claim rationale:
 	// excluding offers claimed by earlier groups in this same ranking pass
@@ -1060,7 +1069,12 @@ func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, surviv
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		availableOffers := filterOffersByClaim(r.Offers, claimedMachines, claimedOffers)
+		affinityOffers := filterOffersByMachineAffinity(r.Offers, machineAffinity)
+		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(machineAffinity) > 0 {
+			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
+			continue
+		}
+		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers)
 		if len(r.Offers) > 0 && len(availableOffers) == 0 && len(claimedMachines) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrDistinctMachinesExhausted}
 			continue

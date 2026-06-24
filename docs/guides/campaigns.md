@@ -24,7 +24,7 @@ so the campaign captures the full history of the original launch.
 For benchmark coverage campaigns that should avoid reusing the same Vast.ai
 physical machine, launch with `weft start instance --distinct-machines`. See
 [Distinct physical machines](instances.md#distinct-physical-machines) for
-syntax and `--avoid`.
+syntax, `--avoid`, and `--affinity`.
 
 ## Campaign-scoped commands
 

@@ -16,6 +16,7 @@ func TestCampaignFieldsRoundTrip(t *testing.T) {
 		EstimatedCostCents: 123,
 		DistinctMachines:   true,
 		AvoidMachines:      []string{"m-1", "m-2", "m-1", ""},
+		AffinityMachines:   []string{"m-3", "m-4", "m-3", ""},
 	})
 	if err != nil {
 		t.Fatalf("CreateCampaign: %v", err)
@@ -33,6 +34,9 @@ func TestCampaignFieldsRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got.AvoidMachines, []string{"m-1", "m-2"}) {
 		t.Fatalf("AvoidMachines = %#v", got.AvoidMachines)
 	}
+	if !reflect.DeepEqual(got.AffinityMachines, []string{"m-3", "m-4"}) {
+		t.Fatalf("AffinityMachines = %#v", got.AffinityMachines)
+	}
 
 	defaultID, err := CreateCampaign(database, &Campaign{Status: CampaignStatusLaunching})
 	if err != nil {
@@ -47,6 +51,9 @@ func TestCampaignFieldsRoundTrip(t *testing.T) {
 	}
 	if len(defaultCampaign.AvoidMachines) != 0 {
 		t.Fatalf("default AvoidMachines = %#v, want empty", defaultCampaign.AvoidMachines)
+	}
+	if len(defaultCampaign.AffinityMachines) != 0 {
+		t.Fatalf("default AffinityMachines = %#v, want empty", defaultCampaign.AffinityMachines)
 	}
 }
 
@@ -127,6 +134,14 @@ func TestResolveAvoidMachineIDs(t *testing.T) {
 	}
 	if !strings.Contains(warnings[0], "wj202") || !strings.Contains(warnings[1], "wi999999") {
 		t.Fatalf("warnings = %#v", warnings)
+	}
+
+	_, affinityWarnings, err := ResolveAffinityMachineIDs(database, []string{"wj202"})
+	if err != nil {
+		t.Fatalf("ResolveAffinityMachineIDs: %v", err)
+	}
+	if len(affinityWarnings) != 1 || !strings.Contains(affinityWarnings[0], "--affinity") {
+		t.Fatalf("affinity warnings = %#v", affinityWarnings)
 	}
 }
 

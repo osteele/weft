@@ -53,6 +53,7 @@ var (
 	instanceLaunchPlain             bool
 	instanceLaunchDistinctMachines  bool
 	instanceLaunchAvoid             []string
+	instanceLaunchAffinity          []string
 )
 
 func addInstanceLaunchFlags(cmd *cobra.Command) {
@@ -75,6 +76,7 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&instanceLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.Flags().BoolVar(&instanceLaunchDistinctMachines, "distinct-machines", false, "Launch on distinct Vast.ai physical machines")
 	cmd.Flags().StringArrayVar(&instanceLaunchAvoid, "avoid", nil, "Machine, instance, or job to avoid for --distinct-machines (repeatable, comma-separated)")
+	cmd.Flags().StringArrayVar(&instanceLaunchAffinity, "affinity", nil, "Machine, instance, or job whose Vast.ai physical machine must be used (repeatable, comma-separated)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
@@ -356,8 +358,8 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	if providerErr != nil {
 		clients = nil
 	}
-	if opts.DistinctMachines && providerErr == nil {
-		clients, providerErr = campaign.DistinctMachineClients(clients)
+	if (opts.DistinctMachines || len(opts.AffinityMachines) > 0) && providerErr == nil {
+		clients, providerErr = campaign.MachineIDClients(clients, "machine-constrained launches")
 	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
@@ -366,6 +368,7 @@ func runNonInteractiveLaunch(cmd *cobra.Command, database *sql.DB, cfg *config.C
 	reportPlanProgress := newPlanProgressPrinter(os.Stderr)
 	planOptions := campaign.LaunchExecutionPlanOptions{
 		InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+		MachineAffinity:        campaign.VastAIMachineKeys(opts.AffinityMachines),
 	}
 	var prep campaign.LaunchExecutionPlan
 	var err error
@@ -549,8 +552,8 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	if providerErr != nil {
 		clients = nil
 	}
-	if opts.DistinctMachines && providerErr == nil {
-		clients, providerErr = campaign.DistinctMachineClients(clients)
+	if (opts.DistinctMachines || len(opts.AffinityMachines) > 0) && providerErr == nil {
+		clients, providerErr = campaign.MachineIDClients(clients, "machine-constrained launches")
 	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
@@ -577,6 +580,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		reportPlanProgress,
 		campaign.PlanOptions{
 			InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
+			MachineAffinity:        campaign.VastAIMachineKeys(opts.AffinityMachines),
 		},
 	)
 	plan, ok := plans[opts.ScoringProfile().ID]
@@ -1000,18 +1004,50 @@ func applyDistinctMachineLaunchOptions(database *sql.DB, opts *campaign.LaunchOp
 	if len(instanceLaunchAvoid) > 0 && !opts.DistinctMachines {
 		return fmt.Errorf("--avoid requires --distinct-machines")
 	}
-	if !opts.DistinctMachines {
-		return nil
+	if opts.DistinctMachines {
+		avoidMachines, warnings, err := db.ResolveAvoidMachineIDs(database, instanceLaunchAvoid)
+		if err != nil {
+			return fmt.Errorf("resolve --avoid: %w", err)
+		}
+		for _, warning := range warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+		}
+		opts.AvoidMachines = avoidMachines
 	}
-	avoidMachines, warnings, err := db.ResolveAvoidMachineIDs(database, instanceLaunchAvoid)
-	if err != nil {
-		return fmt.Errorf("resolve --avoid: %w", err)
+	if len(instanceLaunchAffinity) > 0 {
+		affinityMachines, warnings, err := db.ResolveAffinityMachineIDs(database, instanceLaunchAffinity)
+		if err != nil {
+			return fmt.Errorf("resolve --affinity: %w", err)
+		}
+		for _, warning := range warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+		}
+		if len(affinityMachines) == 0 {
+			return fmt.Errorf("--affinity did not resolve to any machine_id")
+		}
+		opts.AffinityMachines = affinityMachines
 	}
-	for _, warning := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	if conflict := conflictingMachine(opts.AvoidMachines, opts.AffinityMachines); conflict != "" {
+		return fmt.Errorf("--affinity conflicts with --avoid for machine_id %s", conflict)
 	}
-	opts.AvoidMachines = avoidMachines
 	return nil
+}
+
+func conflictingMachine(avoidMachines, affinityMachines []string) string {
+	avoid := make(map[string]struct{}, len(avoidMachines))
+	for _, machineID := range avoidMachines {
+		machineID = strings.TrimSpace(machineID)
+		if machineID != "" {
+			avoid[machineID] = struct{}{}
+		}
+	}
+	for _, machineID := range affinityMachines {
+		machineID = strings.TrimSpace(machineID)
+		if _, ok := avoid[machineID]; ok {
+			return machineID
+		}
+	}
+	return ""
 }
 
 // executeReuseAssignments submits jobs to their assigned instances via R2.

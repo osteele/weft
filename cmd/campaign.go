@@ -265,6 +265,9 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  Distinct:   covered %d, in-flight %d, avoided %d\n", len(covered), len(inflight), len(c.AvoidMachines))
 	}
+	if len(c.AffinityMachines) > 0 {
+		fmt.Printf("  Affinity:   %d machine(s)\n", len(c.AffinityMachines))
+	}
 
 	instances, err := db.GetCampaignInstances(database, c.ID)
 	if err != nil {

@@ -218,6 +218,7 @@ func applyAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error 
 	}{
 		{"distinct_machines", `ALTER TABLE campaigns ADD COLUMN distinct_machines INTEGER NOT NULL DEFAULT 0`},
 		{"avoid_machines", `ALTER TABLE campaigns ADD COLUMN avoid_machines TEXT`},
+		{"affinity_machines", `ALTER TABLE campaigns ADD COLUMN affinity_machines TEXT`},
 	} {
 		exists, err := columnExists(ctx, db, "campaigns", col.name)
 		if err != nil {
@@ -234,6 +235,7 @@ func applyAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error 
 
 func dropAddCampaignMachineAntiAffinity(ctx context.Context, db *sql.DB) error {
 	for _, stmt := range []string{
+		`ALTER TABLE campaigns DROP COLUMN affinity_machines`,
 		`ALTER TABLE campaigns DROP COLUMN avoid_machines`,
 		`ALTER TABLE campaigns DROP COLUMN distinct_machines`,
 	} {
