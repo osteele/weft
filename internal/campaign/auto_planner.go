@@ -386,6 +386,7 @@ func SanitizeBlockedReason(reason string) string {
 	if last != "" && last != first && looksLikeExceptionLine(last) {
 		summary = first + " … " + last
 	}
+	summary = strings.ReplaceAll(summary, "provider returned success=false: provider rejected request", "provider rejected request")
 	const maxLen = 240
 	if len(summary) > maxLen {
 		summary = summary[:maxLen-1] + "…"

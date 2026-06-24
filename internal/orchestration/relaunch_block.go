@@ -507,7 +507,8 @@ func summarizeRunawayBlockedReason(detail string) string {
 	if detail == "" {
 		detail = "paused: repeated launch failures without progress"
 	}
-	return "new-instance retry blocked: " + detail
+	detail = strings.TrimSpace(strings.TrimPrefix(detail, "paused:"))
+	return "new-instance retry paused: " + detail
 }
 
 func RelaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[int64]int64) map[int64]string {

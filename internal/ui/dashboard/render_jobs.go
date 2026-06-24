@@ -904,6 +904,8 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		label := "Blocked"
 		if display.Kind == queueblock.KindWaiting {
 			label = "Waiting"
+		} else if display.Kind == queueblock.KindPaused {
+			label = "Paused"
 		}
 		b.WriteString(labelStyle.Render(label))
 		b.WriteString(valueStyle.Render(display.Reason))

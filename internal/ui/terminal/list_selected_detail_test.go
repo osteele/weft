@@ -185,6 +185,24 @@ func TestSelectedJobDetail_Unplaced(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_UnplacedPausedReasonIsNotBlocked(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	job := &db.Job{
+		ID:                 6,
+		Status:             db.StatusQueued,
+		CreatedAt:          now.Add(-10 * time.Minute).Unix(),
+		QueueBlockedReason: "paused: repeated infrastructure failures without progress",
+	}
+	lines := renderSelectedJobDetail(job, selectedJobContext{}, now)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "paused: repeated infrastructure failures without progress") {
+		t.Fatalf("missing paused reason in detail lines:\n%s", joined)
+	}
+	if strings.Contains(joined, "blocked: paused:") {
+		t.Fatalf("pause reason rendered as blocked:\n%s", joined)
+	}
+}
+
 func TestSelectedJobDetail_OpenMoveSuppressesUnplacedBlockedReason(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	memGB := 132

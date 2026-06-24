@@ -25,6 +25,7 @@ const (
 	KindNone    Kind = ""
 	KindBlocked Kind = "blocked"
 	KindWaiting Kind = "waiting"
+	KindPaused  Kind = "paused"
 )
 
 // ReasonPlacementPending is the persisted sentinel for an unplaced job awaiting
@@ -87,6 +88,8 @@ func Resolve(job *db.Job, opts Options) Result {
 func ReasonKind(reason string) Kind {
 	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
 	switch {
+	case isPausedReason(cleaned):
+		return KindPaused
 	case cleaned == ReasonPlacementPending,
 		cleaned == DefaultPendingPlacementReason,
 		cleaned == "autopilot placing jobs",
@@ -104,6 +107,24 @@ func ReasonKind(reason string) Kind {
 	default:
 		return KindBlocked
 	}
+}
+
+func DisplayReasonForKind(kind Kind, reason string) string {
+	reason = strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
+	if kind != KindPaused {
+		return reason
+	}
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry blocked:"))
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry paused:"))
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "paused:"))
+	return reason
+}
+
+func isPausedReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return strings.HasPrefix(reason, "paused:") ||
+		strings.HasPrefix(reason, "new-instance retry paused:") ||
+		strings.HasPrefix(reason, "new-instance retry blocked: paused:")
 }
 
 // Reasons returns all visible blocker reasons for a detail view.

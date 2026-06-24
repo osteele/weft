@@ -401,7 +401,7 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 			for _, job := range host.Jobs {
 				display := queueblock.Display(job, nil)
 				if !display.Blocked {
-					if display.Kind != queueblock.KindWaiting {
+					if display.Kind != queueblock.KindWaiting && display.Kind != queueblock.KindPaused {
 						continue
 					}
 				}
@@ -438,15 +438,19 @@ func formatUnplacedJobsSection(jobs []*db.Job) string {
 
 func countHostJobStates(jobs []*db.Job) (running, queued, waiting, blocked int) {
 	for _, job := range jobs {
-		switch queueblock.Display(job, nil).Status {
+		display := queueblock.Display(job, nil)
+		switch display.Kind {
 		case queueblock.KindBlocked:
 			blocked++
-		case queueblock.KindWaiting:
+		case queueblock.KindWaiting, queueblock.KindPaused:
 			waiting++
-		case db.StatusQueued:
-			queued++
-		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
-			running++
+		default:
+			switch job.EffectiveStatus() {
+			case db.StatusQueued:
+				queued++
+			case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+				running++
+			}
 		}
 	}
 	return running, queued, waiting, blocked

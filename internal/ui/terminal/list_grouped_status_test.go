@@ -1067,7 +1067,7 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBreakerPausedTimingForRunawayBre
 			Description:        "infra breaker",
 			QueuedAt:           4_000,
 			EndTime:            &end,
-			QueueBlockedReason: "new-instance retry blocked: paused: repeated infrastructure failures without progress",
+			QueueBlockedReason: "new-instance retry paused: repeated infrastructure failures without progress",
 		},
 	}
 
@@ -1075,6 +1075,12 @@ func TestRenderJobListGroupedStatusPlainAt_ShowsBreakerPausedTimingForRunawayBre
 	want := "-   wj53 — proj infra breaker — breaker paused 1m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
+	}
+	if !strings.Contains(out, "  paused: repeated infrastructure failures without progress") {
+		t.Fatalf("missing paused bucket header:\n%s", out)
+	}
+	if strings.Contains(out, "blocked: paused:") {
+		t.Fatalf("pause reason rendered as blocked:\n%s", out)
 	}
 }
 

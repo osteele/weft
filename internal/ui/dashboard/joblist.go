@@ -172,8 +172,15 @@ func formatJobStatus(job *db.Job) string {
 
 // formatActualStatus returns display string for the verified status
 func formatActualStatus(job *db.Job) string {
-	if display := queueblock.Display(job, nil); display.Blocked {
-		return "◌ blocked"
+	if display := queueblock.Display(job, nil); display.Kind != "" {
+		switch display.Kind {
+		case queueblock.KindBlocked:
+			return "◌ blocked"
+		case queueblock.KindPaused:
+			return "◌ paused"
+		case queueblock.KindWaiting:
+			return "◌ waiting"
+		}
 	}
 	switch job.EffectiveStatus() {
 	case db.StatusCompleted:

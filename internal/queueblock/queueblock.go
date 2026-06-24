@@ -20,6 +20,7 @@ type DisplayState struct {
 const (
 	KindBlocked = "blocked"
 	KindWaiting = "waiting"
+	KindPaused  = "paused"
 )
 
 // Lookup maps host -> job id -> queue block reason.
@@ -113,7 +114,7 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 		kind := ReasonKind(reason)
 		return DisplayState{
 			Status:  kind,
-			Reason:  reason,
+			Reason:  DisplayReason(kind, reason),
 			Blocked: kind == KindBlocked,
 			Kind:    kind,
 		}
@@ -127,6 +128,10 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 func ReasonKind(reason string) string {
 	cleaned := strings.TrimSpace(reason)
 	switch {
+	case strings.HasPrefix(cleaned, "paused:"),
+		strings.HasPrefix(cleaned, "new-instance retry paused:"),
+		strings.HasPrefix(cleaned, "new-instance retry blocked: paused:"):
+		return KindPaused
 	case strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),
 		strings.Contains(cleaned, "source sync deferred"),
@@ -135,6 +140,17 @@ func ReasonKind(reason string) string {
 	default:
 		return KindBlocked
 	}
+}
+
+func DisplayReason(kind string, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if kind != KindPaused {
+		return reason
+	}
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry blocked:"))
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry paused:"))
+	reason = strings.TrimSpace(strings.TrimPrefix(reason, "paused:"))
+	return reason
 }
 
 // isBlockable reports whether a job in this effective status can carry a

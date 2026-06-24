@@ -217,3 +217,18 @@ func TestReasonKindSourceSyncReasonsAreWaiting(t *testing.T) {
 		}
 	}
 }
+
+func TestReasonKindRunawayPausedReasonsArePaused(t *testing.T) {
+	for _, reason := range []string{
+		"paused: repeated infrastructure failures without progress",
+		"new-instance retry paused: repeated launch failures without progress",
+		"new-instance retry blocked: paused: repeated launch failures without progress",
+	} {
+		if got := ReasonKind(reason); got != KindPaused {
+			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindPaused)
+		}
+		if display := DisplayReasonForKind(KindPaused, reason); strings.HasPrefix(display, "paused:") {
+			t.Fatalf("DisplayReasonForKind(%q) = %q, should trim paused prefix", reason, display)
+		}
+	}
+}

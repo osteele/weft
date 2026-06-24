@@ -62,7 +62,7 @@ orphans and repeated infrastructure-side launch failures such as provider
 status loss, bootstrap timeouts, and stale agent heartbeats. While the
 breaker is tripped, any job in the affected scope reports
 
-    blocked: paused: repeated launch failures without progress
+    paused: repeated launch failures without progress
 
 Infrastructure-only trips may instead report `paused: repeated infrastructure
 failures without progress`. The focused diagnostic is:

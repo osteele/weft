@@ -78,6 +78,17 @@ func TestApplyGroupOffer_FullDetailPreservedForMultiLineError(t *testing.T) {
 	}
 }
 
+func TestSanitizeBlockedReason_CollapsesSuccessFalseProviderRejected(t *testing.T) {
+	raw := "provider returned success=false: provider rejected request (vastai create-instance) (contract 42398814)"
+
+	got := SanitizeBlockedReason(raw)
+	want := "provider rejected request (vastai create-instance) (contract 42398814)"
+
+	if got != want {
+		t.Fatalf("SanitizeBlockedReason() = %q, want %q", got, want)
+	}
+}
+
 // TestApplyGroupOffer_FingerprintFromProviderError verifies that when
 // offer.Err is a *cloud.ProviderError, applyGroupOffer extracts the
 // fingerprint into plan.BlockedReasonFingerprints. This is the substrate that

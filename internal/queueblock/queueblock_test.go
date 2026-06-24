@@ -43,6 +43,20 @@ func TestDisplay_SourceSyncFailureIsWaiting(t *testing.T) {
 	}
 }
 
+func TestDisplay_RunawayPauseIsPaused(t *testing.T) {
+	job := &db.Job{ID: 1, Status: db.StatusQueued, QueueBlockedReason: "new-instance retry paused: repeated infrastructure failures without progress"}
+	got := Display(job, nil)
+	if got.Blocked {
+		t.Fatalf("expected Blocked=false for paused retry breaker, got %#v", got)
+	}
+	if got.Status != "paused" || got.Kind != "paused" {
+		t.Fatalf("Display = %#v, want paused status/kind", got)
+	}
+	if got.Reason != "repeated infrastructure failures without progress" {
+		t.Fatalf("Reason = %q, want display reason without paused prefix", got.Reason)
+	}
+}
+
 func TestDisplay_RunningIsNotBlockable(t *testing.T) {
 	job := &db.Job{ID: 1, Status: db.StatusRunning, Host: "cool30", QueueBlockedReason: "ignored"}
 	got := Display(job, nil)

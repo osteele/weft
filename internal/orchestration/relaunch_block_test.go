@@ -258,7 +258,7 @@ func TestHydrateCloudQueuedRetryBlockedReasons_SurfacesRunawayAfterOrphanedMove(
 	}
 	HydrateCloudQueuedRetryBlockedReasons(database, []*db.Job{job})
 
-	want := "new-instance retry blocked: paused: repeated launch failures without progress"
+	want := "new-instance retry paused: repeated launch failures without progress"
 	if job.QueueBlockedReason != want {
 		t.Fatalf("QueueBlockedReason = %q, want %q", job.QueueBlockedReason, want)
 	}

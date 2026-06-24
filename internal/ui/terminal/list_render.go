@@ -345,8 +345,8 @@ func formatJobListStatus(job *db.Job) string {
 			status = "launching"
 		}
 	}
-	if display := queueblock.Display(job, nil); display.Blocked {
-		status = "blocked"
+	if display := queueblock.Display(job, nil); display.Kind != "" {
+		status = display.Kind
 	}
 	if job.DisplayMoveDim {
 		status += " non-auth"

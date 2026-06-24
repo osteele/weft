@@ -582,9 +582,31 @@ func appendUnplacedParts(parts []string, job *db.Job, cloudConfigured bool, supp
 	}
 	reasons := blockreason.Reasons(job, blockreason.Options{CloudConfigured: cloudConfigured})
 	if len(reasons) > 0 {
-		parts = append(parts, "blocked: "+strings.Join(reasons, "; "))
+		parts = append(parts, formatBlockReasonLabels(reasons))
 	}
 	return parts
+}
+
+func formatBlockReasonLabels(reasons []string) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	allBlocked := true
+	labels := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		kind := blockreason.ReasonKind(reason)
+		if kind == blockreason.KindNone {
+			kind = blockreason.KindBlocked
+		}
+		if kind != blockreason.KindBlocked {
+			allBlocked = false
+		}
+		labels = append(labels, string(kind)+": "+blockreason.DisplayReasonForKind(kind, reason))
+	}
+	if allBlocked {
+		return "blocked: " + strings.Join(reasons, "; ")
+	}
+	return strings.Join(labels, "; ")
 }
 
 func formatResourceRequest(job *db.Job) string {

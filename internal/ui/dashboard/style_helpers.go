@@ -22,8 +22,15 @@ func (m Model) formatStatus(job *db.Job) string {
 }
 
 func (m Model) formatStatusValue(job *db.Job, status string) string {
-	if display := queueblock.Display(job, nil); display.Blocked && status == db.StatusQueued {
-		return "… blocked"
+	if display := queueblock.Display(job, nil); display.Kind != "" && status == db.StatusQueued {
+		switch display.Kind {
+		case queueblock.KindBlocked:
+			return "… blocked"
+		case queueblock.KindPaused:
+			return "… paused"
+		case queueblock.KindWaiting:
+			return "… waiting"
+		}
 	}
 	switch status {
 	case db.StatusRunning:

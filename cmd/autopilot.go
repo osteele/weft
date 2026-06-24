@@ -119,7 +119,7 @@ project=<all>) so the autopilot stops blocking unplaced jobs after a
 no-progress spend trip.
 
 Use this when "weft jobs list" reports
-  blocked: paused: repeated launch failures without progress
+  paused: repeated launch failures without progress
 on jobs that aren't tied to a specific campaign. Per-campaign trips are
 cleared with "weft campaign safety resume --campaign <id>".`,
 	Args: cobra.NoArgs,

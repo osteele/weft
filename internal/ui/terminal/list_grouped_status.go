@@ -417,7 +417,7 @@ func appendBlockedGroupedJobRows(
 }
 
 func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) string {
-	reason := key.reason
+	reason := blockreason.DisplayReasonForKind(key.kind, key.reason)
 	text := fmt.Sprintf("  %s: %s", key.kind, reason)
 	if len(jobs) != 1 {
 		text += fmt.Sprintf(" (%d)", len(jobs))
@@ -1205,7 +1205,8 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAt
 		return "failed " + shortRelativeTime(now.Unix()-*job.EndTime)
 	}
 	if sectionKey == "unplaced" && job.EndTime != nil && *job.EndTime > 0 {
-		reason := strings.ToLower(strings.TrimSpace(queueblock.Display(job, nil).Reason))
+		display := queueblock.Display(job, nil)
+		reason := strings.ToLower(strings.TrimSpace(display.Reason))
 		if strings.Contains(reason, "retry budget exceeded") || strings.Contains(reason, "max attempts") {
 			return "retry rejected " + shortRelativeTime(now.Unix()-*job.EndTime)
 		}
@@ -1216,7 +1217,7 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAt
 		// implies a backoff timer is counting down — misleading when
 		// the pause is conditional on a successful auto-probe rather
 		// than a clock. See internal/campaign/relaunch.go § runaway.
-		if strings.Contains(reason, "paused: repeated") || strings.Contains(reason, "retry blocked") {
+		if display.Kind == queueblock.KindPaused || strings.Contains(reason, "retry paused") || strings.Contains(reason, "retry blocked") {
 			return "breaker paused " + shortRelativeTime(now.Unix()-*job.EndTime)
 		}
 		return "retry pending " + shortRelativeTime(now.Unix()-*job.EndTime)
