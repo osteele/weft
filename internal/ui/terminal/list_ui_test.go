@@ -1850,69 +1850,50 @@ func TestSelectGroupedRowsForViewport_ReopensSmallCollapsedRunningSection(t *tes
 	}
 }
 
-func TestAllocateSectionBudgets_Invariants(t *testing.T) {
-	secs := []sectionAlloc{
-		{total: 20, minVisible: 2},
-		{total: 3, minVisible: 2},
-		{total: 8, minVisible: 2},
+func TestSelectGroupedRowsForViewport_PreservesSelectedSectionBeforeOtherSections(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	blockedReason := "prepare R2 assets: upload agent to R2: upload agent binary: put object agents/linux-amd64: operation error S3: PutObject, context deadline exceeded"
+	jobs := []*db.Job{
+		{ID: 3392, Status: db.StatusQueued, Project: "progressive-weight-streaming", Description: "EXP-003 make-or-break", CreatedAt: 1, QueueBlockedReason: blockedReason},
+		{ID: 3393, Status: db.StatusQueued, Project: "progressive-weight-streaming", Description: "EXP-007b cue sweep cross-filter", CreatedAt: 1, QueueBlockedReason: blockedReason},
+		{ID: 3394, Status: db.StatusQueued, Project: "progressive-weight-streaming", Description: "EXP-007b cue sweep large-only", CreatedAt: 1, QueueBlockedReason: blockedReason},
+		{ID: 3395, Status: db.StatusQueued, Project: "llm-performance-models", Description: "prefill backfill: allenai/OLMoE", CreatedAt: 1, PlacementReasons: []string{"placement pending"}},
+		{ID: 3396, Status: db.StatusQueued, Project: "llm-performance-models", Description: "prefill backfill: Qwen", CreatedAt: 1, PlacementReasons: []string{"placement pending"}},
+		{ID: 3397, Status: db.StatusQueued, Project: "llm-performance-models", Description: "prefill backfill: deepseek", CreatedAt: 1, PlacementReasons: []string{"placement pending"}},
+		{ID: 3398, Status: db.StatusQueued, Project: "llm-performance-models", Description: "prefill backfill: granite", CreatedAt: 1, PlacementReasons: []string{"placement pending"}},
+		{ID: 3399, Status: db.StatusQueued, Project: "llm-performance-models", Description: "big sibling", CreatedAt: 1, PlacementReasons: []string{"placement pending"}},
+		{ID: 3385, Status: db.StatusQueued, Project: "llm-performance-models", Description: "MoE probe", CreatedAt: 1, EndTime: testInt64Ptr(9_900)},
 	}
-	for cursor := 0; cursor < len(secs); cursor++ {
-		for avail := 0; avail <= 35; avail++ {
-			got := allocateSectionBudgets(secs, cursor, avail)
-			sum := 0
-			for i, b := range got {
-				// The cursor section may show a single row to keep the cursor
-				// visible even when its minVisible is higher; other sections must
-				// be 0 or at least minVisible.
-				floor := secs[i].minVisible
-				if i == cursor {
-					floor = 1
-				}
-				if b != 0 && (b < floor || b > secs[i].total) {
-					t.Fatalf("cursor=%d avail=%d: section %d budget %d violates 0|[%d,%d]", cursor, avail, i, b, floor, secs[i].total)
-				}
-				sum += b
-			}
-			if sum > avail {
-				t.Fatalf("cursor=%d avail=%d: total %d exceeds available", cursor, avail, sum)
-			}
+	for i := 0; i < 12; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(3346 + i), Status: db.StatusCompleted, ExitCode: testIntPtr(0), Project: "llm-performance-models", Description: fmt.Sprintf("completed %d", i), EndTime: testInt64Ptr(2)})
+	}
+	for i := 0; i < 12; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(3308 + i), Status: db.StatusFailed, Project: "dependency-routing", Description: fmt.Sprintf("failed %d", i), EndTime: testInt64Ptr(2)})
+	}
+
+	rows := buildGroupedStatusRowsWithOptions(jobs, 120, groupedStatusRenderOptions{now: now})
+	cursorRowIdx := groupedRowIndexForJob(rows, 3395)
+	if cursorRowIdx < 0 {
+		t.Fatal("unplaced job wj3395 row not found")
+	}
+
+	lines := selectGroupedRowsForViewport(rows, 24, cursorRowIdx)
+	text := joinViewportText(lines)
+	for _, want := range []string{
+		"Unplaced (9):",
+		"blocked: prepare R2 assets",
+		"waiting: autopilot",
+		"wj3395",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("selected Unplaced section should keep local context; missing %q:\n%s", want, text)
 		}
 	}
-}
-
-// TestAllocateSectionBudgets_TrimsNearTallSection: a single tall adjacent section
-// is trimmed (kept partially visible) rather than collapsed.
-func TestAllocateSectionBudgets_TrimsNearTallSection(t *testing.T) {
-	secs := []sectionAlloc{
-		{total: 20, minVisible: 2}, // tall, adjacent to cursor
-		{total: 3, minVisible: 2},  // cursor section
-		{total: 8, minVisible: 2},
+	if strings.Contains(text, "Unplaced (9):\n...") {
+		t.Fatalf("selected section was abbreviated before other sections:\n%s", text)
 	}
-	got := allocateSectionBudgets(secs, 1, 10)
-	if got[1] < 2 {
-		t.Fatalf("cursor section below min: %v", got)
-	}
-	if got[0] == 0 {
-		t.Fatalf("adjacent tall section should be trimmed, not collapsed: %v", got)
-	}
-}
-
-// TestAllocateSectionBudgets_CollapsesFarSectionsFirst: distant small sections
-// collapse before nearer ones.
-func TestAllocateSectionBudgets_CollapsesFarSectionsFirst(t *testing.T) {
-	secs := []sectionAlloc{
-		{total: 5, minVisible: 2}, // distance 3 (farthest)
-		{total: 5, minVisible: 2}, // distance 2
-		{total: 5, minVisible: 2}, // distance 1
-		{total: 5, minVisible: 2}, // cursor
-		{total: 5, minVisible: 2}, // distance 1
-	}
-	got := allocateSectionBudgets(secs, 3, 8)
-	if got[3] < 2 {
-		t.Fatalf("cursor section below min: %v", got)
-	}
-	if got[0] != 0 {
-		t.Fatalf("farthest section should collapse first, got: %v", got)
+	if len(lines) > 24 {
+		t.Fatalf("viewport exceeded budget: %d > 24\n%s", len(lines), text)
 	}
 }
 

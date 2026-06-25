@@ -1290,6 +1290,30 @@ rule TUIPeriodicSync {
         --     "Section (N)" (without a colon), preserving section order and
         --     omitting blank separator lines between abbreviated sections.
         --
+        -- When a row is selected (cursor navigation), the abbreviation is
+        -- cursor-aware and obeys these guarantees, in priority order:
+        --   1. The selected row is always rendered: the viewport never
+        --      abbreviates away the row the cursor is on (the sole exception is
+        --      the degenerate case where the section headers alone already fill
+        --      the viewport, in which case headers win and the cursor row is
+        --      dropped — keyboard nav still cannot land on an unrendered row
+        --      because the selection is clamped to rendered rows).
+        --   2. The selected section is revealed before any other section: its
+        --      local context (e.g. the "blocked:"/"waiting:" subheaders the
+        --      cursor row sits under) is shown top-down before spare rows are
+        --      spent elsewhere. Other sections are secondary context.
+        --   3. Every remaining section earns a header-plus-minimum "foothold"
+        --      before any one section is extended past its minimum, nearest
+        --      first and smaller first among equidistant sections. A single large
+        --      neighbour must not consume all the spare rows while a small nearby
+        --      section stays collapsed.
+        --   4. Sections farther (by display-order distance) from the cursor
+        --      section collapse before nearer ones.
+        -- A selected section that runs off the top shows a leading "..." and a
+        -- window containing the cursor; otherwise it is anchored at the section
+        -- head. Implementation: selectGroupedRowsForViewport in
+        -- internal/ui/terminal/list_tui.go.
+        --
         -- Grouped status buckets (in display order):
         --   - Running:   job.status in {running, starting}.
         --   - Paused:    job.status = paused. Paused jobs are NOT counted as
