@@ -109,7 +109,7 @@ func (c *CloudClient) ShowUser() (*User, error) {
 	}
 	out, err := c.runner.runOutput(ctx, caps.path, "user")
 	if err != nil {
-		return nil, fmt.Errorf("runpodctl user: %w", err)
+		return nil, fmt.Errorf("read RunPod account: %w", err)
 	}
 	var user User
 	if err := json.Unmarshal(out, &user); err != nil {
@@ -624,7 +624,7 @@ func (c *CloudClient) fetchSSHCommand(ctx context.Context, podID string) (string
 	}
 	out, err := c.runner.runOutput(ctx, caps.path, "ssh", "info", podID)
 	if err != nil {
-		return "", fmt.Errorf("runpodctl ssh info %s: %w", podID, err)
+		return "", fmt.Errorf("fetch RunPod SSH command for pod %s: %w", podID, err)
 	}
 	return parseSSHInfoCommand(out)
 }

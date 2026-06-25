@@ -303,6 +303,44 @@ func TestShowUserParsesBalance(t *testing.T) {
 	}
 }
 
+func TestShowUserErrorDoesNotDuplicateUserPrefix(t *testing.T) {
+	runner := &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return "/usr/bin/runpodctl", nil },
+		runCombined: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			switch strings.Join(args, " ") {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "gpu --help":
+				return []byte("Available Commands:\n  list\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", strings.Join(args, " "))
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if strings.Join(args, " ") != "user" {
+				t.Fatalf("unexpected output command %q", strings.Join(args, " "))
+			}
+			return nil, errors.New("user: signal: killed")
+		},
+	}
+
+	_, err := newCloudClientForTests(runner).ShowUser()
+	if err == nil {
+		t.Fatal("ShowUser() err = nil, want error")
+	}
+	if strings.Contains(err.Error(), "user: user:") {
+		t.Fatalf("ShowUser() err = %q, should not duplicate user prefix", err.Error())
+	}
+}
+
 func TestPodFromMapCapturesMachineMetadata(t *testing.T) {
 	pod := podFromMap(map[string]any{
 		"id":           "pod-123",

@@ -1,10 +1,15 @@
 package runpod
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 func TestRunpodctlCommandEnvUsesExistingEnvKey(t *testing.T) {
@@ -47,6 +52,23 @@ Flags:
 	want := "Something went wrong. Please try again later or contact support."
 	if got != want {
 		t.Fatalf("cleanRunpodctlErrorDetail = %q, want %q", got, want)
+	}
+}
+
+func TestRunOutputTimeoutIsProviderCommandTimeout(t *testing.T) {
+	runner := newCLIRunner("runpodctl")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := runner.runOutput(ctx, "/bin/sh", "-c", "sleep 1")
+	if !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Fatalf("runOutput timeout err = %v, want ErrProviderCommandTimeout", err)
+	}
+	if strings.Contains(err.Error(), "signal: killed") {
+		t.Fatalf("runOutput timeout err = %v, should not expose signal: killed", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("runOutput timeout err = %v, want timeout detail", err)
 	}
 }
 

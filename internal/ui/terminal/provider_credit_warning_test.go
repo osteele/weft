@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
@@ -381,6 +382,35 @@ func TestFetchProviderCreditWarningSuppressesTransientVastaiCreditCheckFailure(t
 	got := fetchProviderCreditWarning()
 	if got != "" {
 		t.Fatalf("fetchProviderCreditWarning() = %q, want no warning for transient request failure", got)
+	}
+}
+
+func TestFetchProviderCreditWarningSuppressesRunpodCommandTimeout(t *testing.T) {
+	prevLoad := providerCreditWarningLoad
+	prevRunpodUser := runpodCreditWarningUser
+	prevVastUser := vastaiCreditWarningUser
+	providerCreditWarningLoad = func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Runpod.Enabled = config.Bool(true)
+		cfg.Vastai.Enabled = config.Bool(false)
+		return cfg, nil
+	}
+	runpodCreditWarningUser = func() (float64, error) {
+		return 0, errors.Join(cloud.ErrProviderCommandTimeout, errors.New("runpodctl user timed out"))
+	}
+	vastaiCreditWarningUser = func() (float64, error) {
+		t.Fatal("vastai user fetch should not run when disabled")
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		providerCreditWarningLoad = prevLoad
+		runpodCreditWarningUser = prevRunpodUser
+		vastaiCreditWarningUser = prevVastUser
+	})
+
+	got := fetchProviderCreditWarning()
+	if got != "" {
+		t.Fatalf("fetchProviderCreditWarning() = %q, want no warning for transient RunPod timeout", got)
 	}
 }
 

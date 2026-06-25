@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 type cliRunner struct {
@@ -40,6 +42,9 @@ func newCLIRunner(cliPath string) *cliRunner {
 			cmd.Env = runpodctlCommandEnv()
 			out, err := cmd.Output()
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, formatRunpodctlContextError(args, ctxErr)
+				}
 				if exitErr, ok := err.(*exec.ExitError); ok {
 					return nil, formatRunpodctlError(args, exitErr, exitErr.Stderr)
 				}
@@ -52,11 +57,33 @@ func newCLIRunner(cliPath string) *cliRunner {
 			cmd.Env = runpodctlCommandEnv()
 			out, err := cmd.CombinedOutput()
 			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return out, formatRunpodctlContextError(args, ctxErr)
+				}
 				return out, formatRunpodctlError(args, err, out)
 			}
 			return out, nil
 		},
 	}
+}
+
+func runpodctlErrorPrefix(args []string) string {
+	prefix := args
+	if len(prefix) > 3 {
+		prefix = args[:3]
+	}
+	if len(prefix) == 0 {
+		return "command"
+	}
+	return strings.Join(prefix, " ")
+}
+
+func formatRunpodctlContextError(args []string, err error) error {
+	prefix := runpodctlErrorPrefix(args)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: runpodctl %s timed out", cloud.ErrProviderCommandTimeout, prefix)
+	}
+	return fmt.Errorf("runpodctl %s canceled: %w", prefix, err)
 }
 
 // formatRunpodctlError builds a non-empty error message for a failed
@@ -65,15 +92,11 @@ func newCLIRunner(cliPath string) *cliRunner {
 // error string (typically "exit status N") so callers never see a message
 // with a trailing empty segment like "ssh info POD: ".
 func formatRunpodctlError(args []string, err error, stream []byte) error {
-	prefix := args
-	if len(prefix) > 3 {
-		prefix = args[:3]
-	}
 	detail := cleanRunpodctlErrorDetail(stream)
 	if detail == "" {
 		detail = err.Error()
 	}
-	return fmt.Errorf("%s: %s", strings.Join(prefix, " "), detail)
+	return fmt.Errorf("%s: %s", runpodctlErrorPrefix(args), detail)
 }
 
 func cleanRunpodctlErrorDetail(stream []byte) string {

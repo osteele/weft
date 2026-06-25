@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -482,6 +483,9 @@ func appendProviderCreditCheckWarning(warnings []string, provider cloud.Provider
 }
 
 func isTransientProviderCreditCheckError(err error) bool {
+	if errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		return true
+	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(msg, "request failed:") ||
 		strings.Contains(msg, "timed out") ||
