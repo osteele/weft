@@ -14,6 +14,7 @@ import (
 var (
 	runRateHeadroomExhaustedRE = regexp.MustCompile(`^run-rate headroom exhausted \([^)]*this group needs \$([0-9]+(?:\.[0-9]{1,2})?)/hr\)$`)
 	runRateNoSubsetRE          = regexp.MustCompile(`^run-rate target exceeded .*cheapest group \$([0-9]+(?:\.[0-9]{1,2})?)/hr\)$`)
+	runRateSingleJobRE         = regexp.MustCompile(`job needs \$([0-9]+(?:\.[0-9]{1,2})?)/hr`)
 )
 
 func RunRateHeadroom(database *sql.DB, targetCents int) (int, bool) {
@@ -70,7 +71,7 @@ func PruneStaleRunRateBlockReason(reason string, headroomCents int) (string, boo
 
 func ParseRunRateBlockedNeedCents(reason string) (int, bool) {
 	reason = strings.TrimSpace(reason)
-	for _, re := range []*regexp.Regexp{runRateHeadroomExhaustedRE, runRateNoSubsetRE} {
+	for _, re := range []*regexp.Regexp{runRateHeadroomExhaustedRE, runRateNoSubsetRE, runRateSingleJobRE} {
 		matches := re.FindStringSubmatch(reason)
 		if len(matches) != 2 {
 			continue
@@ -82,6 +83,29 @@ func ParseRunRateBlockedNeedCents(reason string) (int, bool) {
 		return int(value*100 + 0.5), true
 	}
 	return 0, false
+}
+
+func FormatRunRateTargetExceededReason(target, current, requested, projected, headroom, cheapest int, launchJobIDs []int64) string {
+	if len(launchJobIDs) == 1 {
+		return fmt.Sprintf(
+			"run-rate target exceeded: target %s/hr, current %s/hr + requested %s/hr = %s/hr (headroom %s/hr, job needs %s/hr)",
+			formatRateCents(target),
+			formatRateCents(current),
+			formatRateCents(requested),
+			formatRateCents(projected),
+			formatRateCents(headroom),
+			formatRateCents(cheapest),
+		)
+	}
+	return fmt.Sprintf(
+		"run-rate target exceeded (no subset fits): target %s/hr, current %s/hr + requested %s/hr = %s/hr (headroom %s/hr, cheapest group %s/hr)",
+		formatRateCents(target),
+		formatRateCents(current),
+		formatRateCents(requested),
+		formatRateCents(projected),
+		formatRateCents(headroom),
+		formatRateCents(cheapest),
+	)
 }
 
 func AutoPilotBlockSummary(reasons map[int64]string) string {
@@ -123,23 +147,23 @@ func AutoPilotBlockedReasonCount(reasons map[int64]string) int {
 	return count
 }
 
-func CheckRunRateProjection(database *sql.DB, targetCents, plannedCents int) (string, bool) {
-	if database == nil || targetCents <= 0 || plannedCents <= 0 {
+func CheckRunRateProjection(database *sql.DB, targetCents, requestedCents int) (string, bool) {
+	if database == nil || targetCents <= 0 || requestedCents <= 0 {
 		return "", false
 	}
 	currentRateCents, err := db.SumActiveLaunchCostPerHourCents(database)
 	if err != nil {
 		return "", false
 	}
-	projectedRate := currentRateCents + plannedCents
+	projectedRate := currentRateCents + requestedCents
 	if projectedRate <= targetCents {
 		return "", false
 	}
 	return fmt.Sprintf(
-		"auto-launch: run-rate target exceeded: target %s, current %s + planned %s = %s",
+		"auto-launch: run-rate target exceeded: target %s, current %s + requested %s = %s",
 		formatRunRateCents(targetCents),
 		formatRunRateCents(currentRateCents),
-		formatRunRateCents(plannedCents),
+		formatRunRateCents(requestedCents),
 		formatRunRateCents(projectedRate),
 	), true
 }

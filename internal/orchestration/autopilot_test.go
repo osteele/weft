@@ -787,7 +787,7 @@ func TestRunGroupedAutoPilotPass_NoSubsetFitsTriggersPreferReuseRetry(t *testing
 	}
 
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		t.Fatalf("autoPilotRelaunch should not be called when no subset fits and retry does not produce reuse")
+		t.Fatalf("autoPilotRelaunch should not be called when the run-rate gate rejects the only launch")
 		return nil, nil
 	}
 
@@ -801,8 +801,8 @@ func TestRunGroupedAutoPilotPass_NoSubsetFitsTriggersPreferReuseRetry(t *testing
 	if result == nil {
 		t.Fatal("result is nil")
 	}
-	if got := result.BlockedReasons[jobID]; !strings.Contains(got, "no subset fits") {
-		t.Fatalf("blocked reason = %q, want no-subset-fits marker", got)
+	if got := result.BlockedReasons[jobID]; strings.Contains(got, "no subset fits") || !strings.Contains(got, "requested $1.50/hr") || !strings.Contains(got, "job needs $1.50/hr") {
+		t.Fatalf("blocked reason = %q, want single-job requested amount without no-subset marker", got)
 	}
 }
 
@@ -972,7 +972,7 @@ func TestRunGroupedAutoPilotPass_RunRateNoneFitPersistsOverStaleReason(t *testin
 		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{}}, nil
 	}
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		t.Fatalf("autoPilotRelaunch should not run when no subset fits")
+		t.Fatalf("autoPilotRelaunch should not run when the run-rate gate rejects the only launch")
 		return nil, nil
 	}
 
@@ -980,8 +980,8 @@ func TestRunGroupedAutoPilotPass_RunRateNoneFitPersistsOverStaleReason(t *testin
 	if err != nil {
 		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
 	}
-	if got := result.BlockedReasons[jobID]; !strings.Contains(got, "no subset fits") {
-		t.Fatalf("blocked reason = %q, want no-subset-fits marker", got)
+	if got := result.BlockedReasons[jobID]; strings.Contains(got, "no subset fits") || !strings.Contains(got, "requested $1.50/hr") || !strings.Contains(got, "job needs $1.50/hr") {
+		t.Fatalf("blocked reason = %q, want single-job requested amount without no-subset marker", got)
 	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -991,8 +991,8 @@ func TestRunGroupedAutoPilotPass_RunRateNoneFitPersistsOverStaleReason(t *testin
 		t.Fatalf("placement reasons = %#v, want stale reason plus persisted run-rate reason", job.PlacementReasons)
 	}
 	latest := job.PlacementReasons[len(job.PlacementReasons)-1]
-	if !strings.Contains(latest, "run-rate target exceeded") || !strings.Contains(latest, "no subset fits") {
-		t.Fatalf("latest placement reason = %q, want persisted run-rate no-subset reason", latest)
+	if !strings.Contains(latest, "run-rate target exceeded") || !strings.Contains(latest, "requested $1.50/hr") || strings.Contains(latest, "no subset fits") {
+		t.Fatalf("latest placement reason = %q, want persisted single-job run-rate reason", latest)
 	}
 }
 

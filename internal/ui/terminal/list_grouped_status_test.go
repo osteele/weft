@@ -65,6 +65,35 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWrapsBlockedRunRateReason(t *testing.T) {
+	reason := "run-rate target exceeded: target $4.00/hr, current $0.69/hr + requested $4.57/hr = $5.26/hr (headroom $3.31/hr, job needs $4.57/hr)"
+	jobs := []*db.Job{{
+		ID:                 3362,
+		Status:             db.StatusQueued,
+		Host:               "",
+		Project:            "llm-performance-models",
+		Description:        "TP de-risk pilot: Qwen3-30B-A3B + opt",
+		QueueBlockedReason: reason,
+		CreatedAt:          1,
+	}}
+
+	out := stripANSI(renderJobListGroupedStatusPlainWithOptions(jobs, 80, groupedStatusRenderOptions{
+		now: time.Unix(10_000, 0),
+	}))
+
+	if !strings.Contains(out, "requested $4.57/hr") {
+		t.Fatalf("blocked reason did not show requested amount:\n%s", out)
+	}
+	if !strings.Contains(out, "job needs $4.57/hr") {
+		t.Fatalf("blocked reason did not show per-job amount:\n%s", out)
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if strings.Contains(line, "blocked:") && strings.Contains(line, "…") {
+			t.Fatalf("blocked header should wrap instead of clipping:\n%s", out)
+		}
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainNone(t *testing.T) {
 	out := renderJobListGroupedStatusPlain(nil, 0)
 	if out != "None\n" {

@@ -27,6 +27,7 @@ type groupedStatusRow struct {
 	text      string
 	isHeader  bool
 	isBlocked bool
+	wrap      bool
 	job       *db.Job
 	launch    *db.Launch
 	section   string
@@ -273,9 +274,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	}
 
 	if width > 0 {
-		for i := range rows {
-			rows[i].text = truncateDisplayWidth(rows[i].text, width)
-		}
+		rows = wrapAndTruncateGroupedStatusRows(rows, width)
 	}
 
 	return rows
@@ -382,6 +381,7 @@ func appendBlockedGroupedJobRows(
 		rows = append(rows, groupedStatusRow{
 			text:      fmt.Sprintf("  launch blocked %s: %s", scope, sharedLaunch),
 			isBlocked: true,
+			wrap:      true,
 			section:   section.key,
 		})
 	}
@@ -402,6 +402,7 @@ func appendBlockedGroupedJobRows(
 		rows = append(rows, groupedStatusRow{
 			text:      groupedStatusBlockedBucketHeader(key, jobs),
 			isBlocked: true,
+			wrap:      true,
 			section:   section.key,
 		})
 		for _, job := range jobs {
@@ -532,10 +533,65 @@ func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSec
 		rows = append(rows, groupedStatusRow{
 			text:      text,
 			isBlocked: true,
+			wrap:      true,
 			section:   sectionKey,
 		})
 	}
 	return rows
+}
+
+func wrapAndTruncateGroupedStatusRows(rows []groupedStatusRow, width int) []groupedStatusRow {
+	if width <= 0 {
+		return rows
+	}
+	out := make([]groupedStatusRow, 0, len(rows))
+	for _, row := range rows {
+		if !row.wrap {
+			row.text = truncateDisplayWidth(row.text, width)
+			out = append(out, row)
+			continue
+		}
+		lines := wrapGroupedStatusRowText(row.text, width)
+		if len(lines) == 0 {
+			row.text = ""
+			out = append(out, row)
+			continue
+		}
+		row.text = truncateDisplayWidth(lines[0], width)
+		out = append(out, row)
+		for _, line := range lines[1:] {
+			continuation := row
+			continuation.text = truncateDisplayWidth(line, width)
+			continuation.job = nil
+			continuation.launch = nil
+			continuation.expandToggle = ""
+			out = append(out, continuation)
+		}
+	}
+	return out
+}
+
+func wrapGroupedStatusRowText(text string, width int) []string {
+	if width <= 0 || lipgloss.Width(text) <= width {
+		return []string{text}
+	}
+	trimmed := strings.TrimLeft(text, " ")
+	indent := text[:len(text)-len(trimmed)]
+	continuationIndent := indent + "  "
+	available := width - lipgloss.Width(continuationIndent)
+	if available < 1 {
+		return []string{truncateDisplayWidth(text, width)}
+	}
+	wrapped := wrapDisplayWidth(trimmed, available)
+	lines := make([]string, 0, len(wrapped))
+	for i, line := range wrapped {
+		prefix := indent
+		if i > 0 {
+			prefix = continuationIndent
+		}
+		lines = append(lines, prefix+line)
+	}
+	return lines
 }
 
 // plural is the inline plural-helper twin of internal/blockreason.plural — TUI

@@ -422,14 +422,14 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 						}
 					}
 					if !reusePreferredFallback {
-						reason := fmt.Sprintf(
-							"run-rate target exceeded (no subset fits): target %s/hr, current %s/hr + planned %s/hr = %s/hr (headroom %s/hr, cheapest group %s/hr)",
-							formatRateCents(runRateTarget),
-							formatRateCents(currentRate),
-							formatRateCents(plan.LaunchRateCentsPerHour),
-							formatRateCents(projectedRate),
-							formatRateCents(headroom),
-							formatRateCents(cheapest),
+						reason := FormatRunRateTargetExceededReason(
+							runRateTarget,
+							currentRate,
+							plan.LaunchRateCentsPerHour,
+							projectedRate,
+							headroom,
+							cheapest,
+							plan.LaunchJobIDs,
 						)
 						for _, jobID := range plan.LaunchJobIDs {
 							blockedReasons[jobID] = reason

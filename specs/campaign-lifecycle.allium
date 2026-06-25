@@ -2967,9 +2967,10 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- the whole story, and their placement_blocked column is cleared.
         -- Built by placementFailureStructured.
         --
-        -- The run-rate (budget) gate verdict ("run-rate target exceeded (no
-        -- subset fits)" / "run-rate headroom exhausted") is itself an
-        -- authoritative launch blocker, so finalizeUnplacedBlockedReasons
+        -- The run-rate (budget) gate verdict ("run-rate target exceeded",
+        -- optionally with "(no subset fits)" when multiple launch jobs are
+        -- under consideration, or "run-rate headroom exhausted") is itself
+        -- an authoritative launch blocker, so finalizeUnplacedBlockedReasons
         -- reattaches a structured breakdown to it the same way: the budget
         -- string is the primary launch reason and the running instances are
         -- probed for secondary reuse rejections. The breakdown is attached
