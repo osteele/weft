@@ -115,6 +115,56 @@ func TestPathHasHomePrefix(t *testing.T) {
 	}
 }
 
+func TestRejectUnlockedTorchCloudRuntimeRejectsPyprojectRange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch>=2.5"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", nil, nil)
+	if err == nil {
+		t.Fatal("expected unlocked torch range to be rejected")
+	}
+	if got := err.Error(); !strings.Contains(got, "torch >=2.5") || !strings.Contains(got, "uv.lock is missing") {
+		t.Fatalf("error = %q, want torch range and missing lockfile", got)
+	}
+}
+
+func TestRejectUnlockedTorchCloudRuntimeAllowsPinnedHost(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch>=2.5"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnlockedTorchCloudRuntime(dir, "cool30", "", nil, nil); err != nil {
+		t.Fatalf("pinned host rejected: %v", err)
+	}
+}
+
+func TestRejectUnlockedTorchCloudRuntimeRequiresCUDAFloorForExactPyprojectPin(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch==2.6.0"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", nil, nil)
+	if err == nil {
+		t.Fatal("expected exact pyproject pin without CUDA variant to be rejected")
+	}
+	if !strings.Contains(err.Error(), "does not expose the CUDA wheel variant") {
+		t.Fatalf("error = %q, want CUDA wheel variant diagnosis", err.Error())
+	}
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "12.4", nil, nil); err != nil {
+		t.Fatalf("explicit CUDA floor rejected: %v", err)
+	}
+}
+
 func TestSubmitJobToCloudReuse_AckReceived(t *testing.T) {
 	prev := submitJobsToInstanceFunc
 	t.Cleanup(func() { submitJobsToInstanceFunc = prev })
@@ -659,11 +709,17 @@ func resetRunGlobals(t *testing.T) {
 	runAfter = 0
 	runAfterAny = 0
 	runGPU = ""
+	runGPUCount = 0
 	runGPUMem = 0
 	runGPUMemStrict = false
+	runInterconnect = ""
+	runCPUCores = 0
+	runCPUMem = 0
+	runCPUMemStrict = false
 	runDiskGB = 0
 	runRuntimeDiskGB = 0
 	runGPUClass = ""
+	runCUDADriverMin = ""
 	runProvider = ""
 	runInputs = nil
 	runOutputs = nil

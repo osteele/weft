@@ -485,6 +485,14 @@ config {
 -- zero. Required because auto-selected pytorch/* and nvidia/* base images
 -- bypass image-label fetching (shouldFetchImageRequirements skip-list); a
 -- non-zero driver floor from any other source is never overwritten.
+-- A pyproject.toml range such as torch>=2.5 is NOT a torch pin. For cloud
+-- auto-placement, submit must reject torch-using projects that have no
+-- uv.lock and no exact torch+CUDA floor source, because the resolver can pick
+-- a newer CUDA wheel on the rental than the lower bound implies. Users can
+-- submit after running uv lock, pinning torch exactly with a CUDA-specific
+-- [tool.uv] index or explicit cuda-driver-min, or targeting an explicit host.
+-- Implementation: cmd/run.go rejectUnlockedTorchCloudRuntime;
+-- internal/dataloc/torch_pin.go ScanPyprojectTorchRequirement.
 -- Vast.ai offers are filtered at search time with driver_version/cuda_vers
 -- predicates. Providers that do not expose driver or CUDA compatibility for
 -- search results (currently RunPod) are compatibility-unknown: they must lose

@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,7 +38,7 @@ func TestPreflightEnv_JobEnvOverridesParent(t *testing.T) {
 }
 
 func TestTorchPreflightCommandRequiresWorkingCUDA(t *testing.T) {
-	if strings.Contains(torchPreflightCommand, "torch.cuda.init() if torch.cuda.is_available() else None") {
+	if strings.Contains(torchPreflightPythonCode, "torch.cuda.init() if torch.cuda.is_available() else None") {
 		t.Fatal("preflight must not skip CUDA initialization when torch reports CUDA unavailable")
 	}
 	for _, want := range []string{
@@ -45,8 +47,31 @@ func TestTorchPreflightCommandRequiresWorkingCUDA(t *testing.T) {
 		"torch.zeros(1, device='cuda')",
 		"torch.cuda.synchronize()",
 	} {
-		if !strings.Contains(torchPreflightCommand, want) {
-			t.Fatalf("preflight command %q missing %q", torchPreflightCommand, want)
+		if !strings.Contains(torchPreflightPythonCode, want) {
+			t.Fatalf("preflight code %q missing %q", torchPreflightPythonCode, want)
 		}
+	}
+}
+
+func TestTorchPreflightCommandUsesUVRunWithLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := torchPreflightShellCommand(dir)
+	if !strings.HasPrefix(got, "uv run --no-sync python -c ") {
+		t.Fatalf("command = %q, want uv-managed python", got)
+	}
+}
+
+func TestTorchPreflightCommandFallsBackToPython3WithoutLock(t *testing.T) {
+	got := torchPreflightShellCommand(t.TempDir())
+	for _, want := range []string{"command -v python3", "python3 -c", "neither python nor python3"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command = %q, missing %q", got, want)
+		}
+	}
+	if strings.HasPrefix(got, "python -c ") {
+		t.Fatalf("command = %q, want interpreter fallback instead of bare python", got)
 	}
 }

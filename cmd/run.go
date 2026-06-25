@@ -811,7 +811,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// can't tell whether the rental's driver will satisfy the eventual
 	// `uv sync` (or an in-script `uv venv` that resolves torch on-instance).
 	// Most likely failure is `cuda_driver_too_old` 2-3 minutes into the run.
-	maybeWarnNoTorchPinForCloud(cmd, localDir, runHost, runCUDADriverMin)
+	if err := rejectUnlockedTorchCloudRuntime(localDir, host, runCUDADriverMin, runTags, scriptMeta); err != nil {
+		return err
+	}
+	maybeWarnNoTorchPinForCloud(cmd, localDir, host, runCUDADriverMin, scriptMeta)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
@@ -1965,11 +1968,11 @@ func pathHasHomePrefix(dir, home string) bool {
 // looks torch-using but the project lockfile has no torch pin from which
 // weft could derive a CUDA driver floor. Skipped when:
 //   - usage hints are disabled,
-//   - the user has already specified --cuda-driver-min,
+//   - the user has already specified a CUDA/driver floor,
 //   - --host targets an inventory host (driver floor is set there at boot),
 //   - the project has a torch pin (the auto-floor will fire).
-func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverMin string) {
-	if !usageHintsEnabled() || cudaDriverMin != "" || localDir == "" {
+func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta) {
+	if !usageHintsEnabled() || hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) || localDir == "" {
 		return
 	}
 	if host != "" {
@@ -1991,6 +1994,50 @@ func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverM
 			"resolves on the rental. Add `--cuda-driver-min 12.4` (or whatever your wheel needs) "+
 			"to gate placement on driver version. See docs/guides/cloud-instance-debugging.md "+
 			"§ \"Torch driver too old\".")
+}
+
+func rejectUnlockedTorchCloudRuntime(localDir, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta) error {
+	if host != "" || localDir == "" || dataloc.HasUVLock(localDir) || slices.Contains(tags, db.TagInventory) {
+		return nil
+	}
+	if !dataloc.ProjectUsesTorch(localDir) {
+		return nil
+	}
+	req := dataloc.ScanPyprojectTorchRequirement(localDir)
+	if req == nil || !req.Exact {
+		return fmt.Errorf("torch runtime is not locked for cloud placement: %s. Weft cannot derive reliable CUDA/driver floors from an unlocked torch range before choosing a rental. Run `uv lock`, use an exact torch dependency, or target an explicit --host",
+			describeTorchRequirement(req))
+	}
+	if hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) {
+		return nil
+	}
+	pin := dataloc.ScanTorchPin(localDir)
+	if pin != nil && pin.CudaVariant != "" {
+		return nil
+	}
+	return fmt.Errorf("torch runtime is not locked for cloud placement: pyproject.toml pins torch %s but does not expose the CUDA wheel variant. Run `uv lock`, add a CUDA-specific [tool.uv] index, pass --cuda-driver-min, or target an explicit --host",
+		req.Version)
+}
+
+func describeTorchRequirement(req *dataloc.TorchRequirement) string {
+	if req == nil {
+		return "project looks torch-using but pyproject.toml has no direct exact torch dependency and uv.lock is missing"
+	}
+	if req.Spec != "" {
+		return fmt.Sprintf("pyproject.toml declares torch %s and uv.lock is missing", req.Spec)
+	}
+	return "pyproject.toml declares torch without an exact version and uv.lock is missing"
+}
+
+func hasExplicitCUDAFloor(localDir, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta) bool {
+	if strings.TrimSpace(cudaDriverMin) != "" {
+		return true
+	}
+	minDriver, minCUDA := config.ProjectCloudRequirements(localDir)
+	if strings.TrimSpace(minDriver) != "" || strings.TrimSpace(minCUDA) != "" {
+		return true
+	}
+	return scriptMeta != nil && (strings.TrimSpace(scriptMeta.MinDriver) != "" || strings.TrimSpace(scriptMeta.MinCUDA) != "")
 }
 
 func maybeWarnHFOfflineEnv(inputs, envVars []string) {

@@ -544,6 +544,12 @@ Example: a project pinned to `torch==2.4.1+cu121` only ships kernels up to
 (`sm_12.0`) would be picked, the instance would launch, and the job would die
 on first kernel call. With the filter, the offer is rejected before launch.
 
+For cloud auto-placement, a pyproject range such as `torch>=2.5` is not enough
+for compatibility inference unless it has been resolved into `uv.lock`.
+Otherwise the rental can resolve a newer CUDA wheel than the lower bound
+suggests. Run `uv lock`, use an exact torch dependency plus a CUDA-specific
+`[tool.uv]` index or `cuda-driver-min`, or target an explicit `--host`.
+
 If you've upgraded to wheels that *do* include newer arches but `uv.lock` hasn't
 been refreshed, set `gpu-arch-max = "any"` for that script as a temporary
 escape hatch.

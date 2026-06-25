@@ -18,6 +18,16 @@ type TorchPin struct {
 	CudaVariant string // e.g. "cu121"; "" if unknown
 }
 
+// TorchRequirement describes the direct torch dependency declared in
+// pyproject.toml. It is intentionally separate from TorchPin: a range like
+// torch>=2.5 proves the project uses torch, but it is not a resolved runtime
+// pin and must not drive placement compatibility as if it were one.
+type TorchRequirement struct {
+	Spec    string
+	Version string
+	Exact   bool
+}
+
 // ScanTorchPin returns the torch pin for a project rooted at or above dir.
 // It prefers uv.lock when present — that is what gets installed — and falls
 // back to pyproject.toml. Returns nil if torch is not pinned.
@@ -105,6 +115,18 @@ func HasUVLock(dir string) bool {
 	}
 	_, err := os.Stat(filepath.Join(root, "uv.lock"))
 	return err == nil
+}
+
+// ScanPyprojectTorchRequirement returns the direct torch requirement from the
+// nearest pyproject.toml, if present. Unlike ScanTorchPin, it does not consider
+// uv.lock and it returns non-exact ranges so callers can reject unlocked cloud
+// submissions before they resolve a different CUDA stack on the rental.
+func ScanPyprojectTorchRequirement(dir string) *TorchRequirement {
+	root := ProjectRoot(dir)
+	if root == "" {
+		return nil
+	}
+	return scanPyprojectTorchRequirement(filepath.Join(root, "pyproject.toml"))
 }
 
 func scanFileForTorch(f *os.File) bool {
@@ -334,10 +356,10 @@ func scanUVLock(path string) *TorchPin {
 	return pin
 }
 
-// scanPyprojectTorchPin extracts a torch pin from pyproject.toml. It looks at
-// [project.dependencies] and [tool.uv] index URLs. The version returned is a
-// best-effort: an exact pin from "torch==X.Y.Z", or the lower bound of a
-// "torch>=X.Y" constraint.
+// scanPyprojectTorchPin extracts an exact torch pin from pyproject.toml. It
+// looks at [project.dependencies] and [tool.uv] index URLs. Non-exact ranges
+// such as "torch>=2.5" are deliberately not pins: an unlocked resolver can
+// choose a newer CUDA wheel than the lower bound implies.
 func scanPyprojectTorchPin(path string) *TorchPin {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -348,8 +370,8 @@ func scanPyprojectTorchPin(path string) *TorchPin {
 		return nil
 	}
 
-	version := torchVersionFromDeps(tree)
-	if version == "" {
+	req := torchRequirementFromDeps(tree)
+	if req == nil || !req.Exact || req.Version == "" {
 		return nil
 	}
 
@@ -359,10 +381,22 @@ func scanPyprojectTorchPin(path string) *TorchPin {
 			cuda = cudaVariantFromUvTree(ut)
 		}
 	}
-	return &TorchPin{Version: version, CudaVariant: cuda}
+	return &TorchPin{Version: req.Version, CudaVariant: cuda}
 }
 
-func torchVersionFromDeps(tree *toml.Tree) string {
+func scanPyprojectTorchRequirement(path string) *TorchRequirement {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	tree, err := toml.Load(string(data))
+	if err != nil {
+		return nil
+	}
+	return torchRequirementFromDeps(tree)
+}
+
+func torchRequirementFromDeps(tree *toml.Tree) *TorchRequirement {
 	candidates := [][]string{
 		{"project", "dependencies"},
 		{"dependency-groups", "dev"},
@@ -377,8 +411,8 @@ func torchVersionFromDeps(tree *toml.Tree) string {
 		case []interface{}:
 			for _, item := range deps {
 				if s, ok := item.(string); ok {
-					if version := extractTorchVersionString(s); version != "" {
-						return version
+					if req := parseTorchRequirementString(s); req != nil {
+						return req
 					}
 				}
 			}
@@ -386,14 +420,14 @@ func torchVersionFromDeps(tree *toml.Tree) string {
 			// poetry-style: { torch = "^2.4.1" }
 			if raw := deps.Get("torch"); raw != nil {
 				if s, ok := raw.(string); ok {
-					if version := extractTorchVersionString("torch " + s); version != "" {
-						return version
+					if req := parseTorchRequirementString("torch " + s); req != nil {
+						return req
 					}
 				}
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 var (
@@ -405,8 +439,16 @@ var (
 // both "torch==2.4.1" and the poetry/uv-style "torch ^2.4.1". The returned
 // string is the bare version (no operator, no local +cu suffix).
 func extractTorchVersionString(req string) string {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(req)), "torch") {
+	parsed := parseTorchRequirementString(req)
+	if parsed == nil {
 		return ""
+	}
+	return parsed.Version
+}
+
+func parseTorchRequirementString(req string) *TorchRequirement {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(req)), "torch") {
+		return nil
 	}
 	m := pep508TorchRe.FindStringSubmatch(req)
 	if m == nil {
@@ -415,12 +457,21 @@ func extractTorchVersionString(req string) string {
 		fields := strings.Fields(req)
 		if len(fields) >= 2 {
 			if v := versionTokenRe.FindString(fields[1]); v != "" {
-				return v
+				return &TorchRequirement{
+					Spec:    fields[1],
+					Version: v,
+					Exact:   !strings.HasPrefix(fields[1], "^") && !strings.HasPrefix(fields[1], "~"),
+				}
 			}
 		}
-		return ""
+		return &TorchRequirement{Spec: strings.TrimSpace(req)}
 	}
-	return versionTokenRe.FindString(m[1])
+	spec := strings.TrimSpace(m[1])
+	return &TorchRequirement{
+		Spec:    spec,
+		Version: versionTokenRe.FindString(spec),
+		Exact:   strings.HasPrefix(spec, "==") && !strings.HasPrefix(spec, "==="),
+	}
 }
 
 // cudaVariantFromUvTree returns the cuXXX tag implied by [tool.uv] settings,

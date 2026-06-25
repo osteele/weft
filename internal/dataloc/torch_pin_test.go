@@ -136,6 +136,30 @@ extra-index-url = ["https://download.pytorch.org/whl/cu121"]
 	}
 }
 
+func TestScanTorchPin_PyprojectRangeIsNotPin(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "pyproject.toml"), `
+[project]
+name = "demo"
+dependencies = [
+    "torch>=2.5",
+]
+`)
+	if pin := ScanTorchPin(dir); pin != nil {
+		t.Fatalf("ScanTorchPin returned %+v for unlocked range, want nil", pin)
+	}
+	req := ScanPyprojectTorchRequirement(dir)
+	if req == nil {
+		t.Fatal("ScanPyprojectTorchRequirement = nil, want range")
+	}
+	if req.Exact {
+		t.Fatalf("Exact = true for %q, want false", req.Spec)
+	}
+	if req.Version != "2.5" {
+		t.Fatalf("Version = %q, want 2.5", req.Version)
+	}
+}
+
 func TestScanTorchPin_NoTorch(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "pyproject.toml"), `

@@ -10,11 +10,13 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 )
 
-// torchPreflightCommand is the snippet we run before the user command on
+// torchPreflightPythonCode is the snippet we run before the user command on
 // GPU-using torch jobs. It requires CUDA to be available, initializes it, and
 // performs a tiny device allocation so driver/runtime mismatches fail before
 // the user script can silently fall back to CPU.
-const torchPreflightCommand = `python -c "import sys, torch; sys.exit('torch.cuda.is_available() is false') if not torch.cuda.is_available() else None; torch.cuda.init(); torch.zeros(1, device='cuda').sum().item(); torch.cuda.synchronize(); print('weft: torch preflight ok')"`
+const torchPreflightPythonCode = `import sys, torch; sys.exit('torch.cuda.is_available() is false') if not torch.cuda.is_available() else None; torch.cuda.init(); torch.zeros(1, device='cuda').sum().item(); torch.cuda.synchronize(); print('weft: torch preflight ok')`
+
+const torchPreflightCommand = `python -c "` + torchPreflightPythonCode + `"`
 
 // torchPreflightTimeout caps the preflight at a short wall-clock budget.
 // The check itself takes ~1-3s on a healthy host; we allow 30s so cold
@@ -40,7 +42,9 @@ func preflightEnv(envVars []string) []string {
 //
 // The preflight uses `uv run --no-sync` when uv.lock is present so the
 // project's resolved torch is exercised (not whatever happens to be on
-// the system PATH). Otherwise it falls back to bare `python`.
+// the system PATH). Otherwise it uses the image interpreter, accepting
+// either `python` or `python3` because several cloud base images ship only
+// the latter.
 func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, error) {
 	deadline := torchPreflightTimeout
 	if setupTimeout > 0 && setupTimeout < deadline {
@@ -49,14 +53,7 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
-	cmdStr := torchPreflightCommand
-	if dataloc.HasUVLock(workingDir) {
-		// `uv run` arranges the project's resolved interpreter without
-		// re-running setup. --no-sync is set explicitly here in case the
-		// preflight runs before uvRunEnvAdditions has appended UV_NO_SYNC=1
-		// to the job env; the two are redundant when both are present.
-		cmdStr = `uv run --no-sync ` + cmdStr
-	}
+	cmdStr := torchPreflightShellCommand(workingDir)
 	appendSetupLog(paths.Log, []byte("weft: torch preflight: "+cmdStr+"\n"))
 
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
@@ -85,4 +82,15 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 		ei.ExitCode = 1
 	}
 	return ei, fmt.Errorf("torch preflight failed (exit %d): %w", ei.ExitCode, runErr)
+}
+
+func torchPreflightShellCommand(workingDir string) string {
+	if dataloc.HasUVLock(workingDir) {
+		// `uv run` arranges the project's resolved interpreter without
+		// re-running setup. --no-sync is set explicitly here in case the
+		// preflight runs before uvRunEnvAdditions has appended UV_NO_SYNC=1
+		// to the job env; the two are redundant when both are present.
+		return `uv run --no-sync ` + torchPreflightCommand
+	}
+	return `if command -v python >/dev/null 2>&1; then python -c "` + torchPreflightPythonCode + `"; elif command -v python3 >/dev/null 2>&1; then python3 -c "` + torchPreflightPythonCode + `"; else echo "weft: torch preflight: neither python nor python3 found" >&2; exit 127; fi`
 }
