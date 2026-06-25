@@ -1,10 +1,15 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/spf13/cobra"
 )
 
@@ -80,7 +85,32 @@ func runPlace(cmd *cobra.Command, args []string) error {
 	// --project is already bound to instanceLaunchProject via the shared
 	// campaign-launch flag set, so no translation is needed here.
 
-	return runInstanceLaunch(cmd, nil)
+	return runPlaceWithAutopilotLease(cmd, func() error {
+		return runInstanceLaunch(cmd, nil)
+	})
+}
+
+func runPlaceWithAutopilotLease(cmd *cobra.Command, run func() error) (err error) {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database for placement lease: %w", err)
+	}
+	defer database.Close()
+
+	runner := orchestration.NewAutopilotRunnerWithOptions(database, "manual-place", orchestration.AutopilotRunnerOptions{
+		IgnorePaused: true,
+	})
+	if err := runner.TryAcquire(); err != nil {
+		if errors.Is(err, orchestration.ErrAutopilotBusy) {
+			return fmt.Errorf("autopilot is currently placing jobs; retry when it is idle")
+		}
+		return err
+	}
+	started := time.Now()
+	defer func() {
+		_ = runner.Release(time.Since(started), "manual place", err)
+	}()
+	return run()
 }
 
 func validatePlaceFilters(cmd *cobra.Command, args []string) error {

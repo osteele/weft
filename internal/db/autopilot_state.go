@@ -181,8 +181,16 @@ func ResumeAutopilot(database *sql.DB) (*AutopilotState, error) {
 //
 // A claim aged past staleAfter is reclaimed automatically.
 func TryClaimAutopilotPass(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity) (claimed, paused bool, existing *AutopilotState, err error) {
+	return TryClaimAutopilotPassWithOptions(database, pid, label, host, staleAfter, binary, AutopilotClaimOptions{})
+}
+
+type AutopilotClaimOptions struct {
+	IgnorePaused bool
+}
+
+func TryClaimAutopilotPassWithOptions(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity, opts AutopilotClaimOptions) (claimed, paused bool, existing *AutopilotState, err error) {
 	result, err := RetryOnDatabaseLockedValue(context.Background(), "claim autopilot pass", func() (autopilotClaimResult, error) {
-		claimed, paused, existing, err := tryClaimAutopilotPassOnce(database, pid, label, host, staleAfter, binary)
+		claimed, paused, existing, err := tryClaimAutopilotPassOnce(database, pid, label, host, staleAfter, binary, opts)
 		return autopilotClaimResult{claimed: claimed, paused: paused, existing: existing}, err
 	})
 	if err != nil {
@@ -197,7 +205,7 @@ type autopilotClaimResult struct {
 	existing *AutopilotState
 }
 
-func tryClaimAutopilotPassOnce(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity) (claimed, paused bool, existing *AutopilotState, err error) {
+func tryClaimAutopilotPassOnce(database *sql.DB, pid int, label, host string, staleAfter time.Duration, binary BinaryIdentity, opts AutopilotClaimOptions) (claimed, paused bool, existing *AutopilotState, err error) {
 	tx, err := database.BeginTx(context.Background(), nil)
 	if err != nil {
 		return false, false, nil, err
@@ -279,7 +287,7 @@ func tryClaimAutopilotPassOnce(database *sql.DB, pid int, label, host string, st
 	}
 
 	now := time.Now()
-	if pausedInt != 0 {
+	if pausedInt != 0 && !opts.IgnorePaused {
 		return false, true, buildExisting(), nil
 	}
 	if passStartedAt.Int64 != 0 {

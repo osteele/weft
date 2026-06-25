@@ -86,6 +86,29 @@ func TestAutopilotRunner_PausedReturnsErr(t *testing.T) {
 	}
 }
 
+func TestAutopilotRunner_IgnorePausedAllowsManualClaim(t *testing.T) {
+	database := openMigratedTestDB(t)
+	if _, err := db.PauseAutopilot(database, "tester", "test"); err != nil {
+		t.Fatalf("PauseAutopilot: %v", err)
+	}
+	r := NewAutopilotRunnerWithOptions(database, "manual-place", AutopilotRunnerOptions{
+		IgnorePaused: true,
+	})
+	if err := r.TryAcquire(); err != nil {
+		t.Fatalf("TryAcquire with IgnorePaused: %v", err)
+	}
+	if err := r.Release(time.Millisecond, "manual place", nil); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	paused, err := IsAutopilotPaused(database)
+	if err != nil {
+		t.Fatalf("IsAutopilotPaused: %v", err)
+	}
+	if !paused {
+		t.Fatal("manual claim must not clear sticky autopilot pause")
+	}
+}
+
 func TestAutopilotRunner_StaleBinaryEnforcedByDefault(t *testing.T) {
 	database := openMigratedTestDB(t)
 	oldEnsureCurrentBinary := ensureCurrentBinary

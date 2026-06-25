@@ -41,6 +41,10 @@ type AutopilotRunnerOptions struct {
 	// driving autopilot after `weft` is rebuilt while the TUI is open.
 	// Headless controllers should keep the default strict behavior.
 	AllowStaleBinary bool
+	// IgnorePaused claims the singleton pass slot even when the sticky
+	// autopilot pause flag is set. Use only for explicit manual actions that
+	// must avoid racing autopilot without toggling its paused state.
+	IgnorePaused bool
 }
 
 // AutopilotRunner claims the singleton autopilot pass slot, heartbeats while a
@@ -85,7 +89,15 @@ func (r *AutopilotRunner) TryAcquire() error {
 			return err
 		}
 	}
-	claimed, paused, _, err := db.TryClaimAutopilotPass(r.database, r.pid, r.label, r.host, AutopilotPassStaleAfter, processguard.CurrentBinaryIdentity())
+	claimed, paused, _, err := db.TryClaimAutopilotPassWithOptions(
+		r.database,
+		r.pid,
+		r.label,
+		r.host,
+		AutopilotPassStaleAfter,
+		processguard.CurrentBinaryIdentity(),
+		db.AutopilotClaimOptions{IgnorePaused: r.opts.IgnorePaused},
+	)
 	if err != nil {
 		return err
 	}
