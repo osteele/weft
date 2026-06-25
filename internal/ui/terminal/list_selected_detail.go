@@ -140,6 +140,9 @@ func selectedLaunchFailureDetail(launch *db.Launch) string {
 	if launch == nil {
 		return ""
 	}
+	if !launch.IsTerminal() {
+		return ""
+	}
 	reason := strings.TrimSpace(db.HumanizeTerminationReason(launch.TerminationReason))
 	detail := strings.TrimSpace(launch.TerminationDetail)
 	switch {
@@ -150,7 +153,7 @@ func selectedLaunchFailureDetail(launch *db.Launch) string {
 	case reason != "":
 		return reason
 	default:
-		return strings.TrimSpace(launch.Status)
+		return ""
 	}
 }
 

@@ -535,8 +535,9 @@ func (c *Launch) EffectiveProviderID() string {
 }
 
 // DisplayTerminationReason returns a human-readable termination description.
-// Prefers TerminationDetail (specific context), falls back to a humanized
-// version of TerminationReason, then to Status.
+// Prefers TerminationDetail (specific context), then falls back to a humanized
+// version of TerminationReason. Non-terminal status is not a termination
+// reason; callers that need status should render Status separately.
 func (c *Launch) DisplayTerminationReason() string {
 	if c.TerminationDetail != "" {
 		return c.TerminationDetail
@@ -544,7 +545,7 @@ func (c *Launch) DisplayTerminationReason() string {
 	if c.TerminationReason != "" {
 		return HumanizeTerminationReason(c.TerminationReason)
 	}
-	return c.Status
+	return ""
 }
 
 // HumanizeTerminationReason converts a snake_case termination reason enum

@@ -91,6 +91,38 @@ func TestSelectedJobDetail_RentalInstance(t *testing.T) {
 	}
 }
 
+func TestSelectedLaunchDetail_DoesNotRenderFailureForRunningStatus(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	lines := renderSelectedLaunchDetail(&db.Launch{
+		ID:                4092,
+		Status:            db.LaunchStatusRunning,
+		Provider:          "vastai",
+		TerminationDetail: "running",
+	}, 100, now)
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "Failure:") {
+		t.Fatalf("running launch rendered failure detail:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Instance: wi4092") || !strings.Contains(joined, "running") {
+		t.Fatalf("running launch header missing status context:\n%s", joined)
+	}
+}
+
+func TestSelectedLaunchDetail_RendersFailureForTerminalLaunch(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	lines := renderSelectedLaunchDetail(&db.Launch{
+		ID:                4093,
+		Status:            db.LaunchStatusFailed,
+		Provider:          "vastai",
+		TerminationReason: db.TerminationReasonInfraFailure,
+		TerminationDetail: "agent never reached ready",
+	}, 100, now)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Failure: infrastructure failure: agent never reached ready") {
+		t.Fatalf("failed launch did not render failure detail:\n%s", joined)
+	}
+}
+
 // TestSelectedJobDetail_RentalHostLineOmitsPhase pins a regression: the
 // launch "phase" (e.g. running:316) used to appear on the placement line of
 // the previous single-line design. The new Host line must NOT carry it;

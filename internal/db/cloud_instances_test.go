@@ -9,6 +9,24 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 )
 
+func TestLaunchDisplayTerminationReasonDoesNotFallBackToStatus(t *testing.T) {
+	launch := &Launch{Status: LaunchStatusRunning}
+	if got := launch.DisplayTerminationReason(); got != "" {
+		t.Fatalf("DisplayTerminationReason() = %q, want empty for non-terminal launch without termination data", got)
+	}
+}
+
+func TestLaunchDisplayTerminationReasonPrefersDetail(t *testing.T) {
+	launch := &Launch{
+		Status:            LaunchStatusFailed,
+		TerminationReason: TerminationReasonInfraFailure,
+		TerminationDetail: "agent never reached ready",
+	}
+	if got := launch.DisplayTerminationReason(); got != "agent never reached ready" {
+		t.Fatalf("DisplayTerminationReason() = %q, want termination detail", got)
+	}
+}
+
 func TestGetLaunchJobsIncludingAttempts(t *testing.T) {
 	database := setupTestDB(t)
 
