@@ -85,32 +85,42 @@ func ParseRunRateBlockedNeedCents(reason string) (int, bool) {
 }
 
 func AutoPilotBlockSummary(reasons map[int64]string) string {
+	summary, _ := AutoPilotBlockSummaryWithCount(reasons)
+	return summary
+}
+
+func AutoPilotBlockSummaryWithCount(reasons map[int64]string) (string, int) {
 	if len(reasons) == 0 {
-		return ""
+		return "", 0
 	}
 	unique := map[string]int{}
 	for _, reason := range reasons {
 		r := strings.TrimSpace(reason)
-		if r != "" {
+		if r != "" && blockreason.ReasonKind(r) == blockreason.KindBlocked {
 			unique[r]++
 		}
 	}
 	if len(unique) == 0 {
-		return ""
+		return "", 0
 	}
 	if len(unique) == 1 {
 		for reason, count := range unique {
 			if count == 1 {
-				return reason
+				return reason, count
 			}
-			return fmt.Sprintf("%s (%d jobs)", reason, count)
+			return fmt.Sprintf("%s (%d jobs)", reason, count), count
 		}
 	}
 	total := 0
 	for _, c := range unique {
 		total += c
 	}
-	return fmt.Sprintf("%d jobs blocked", total)
+	return fmt.Sprintf("%d jobs blocked", total), total
+}
+
+func AutoPilotBlockedReasonCount(reasons map[int64]string) int {
+	_, count := AutoPilotBlockSummaryWithCount(reasons)
+	return count
 }
 
 func CheckRunRateProjection(database *sql.DB, targetCents, plannedCents int) (string, bool) {

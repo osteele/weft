@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/app/dbwatch"
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
@@ -346,7 +347,7 @@ func classifyAutopilotPass(result *orchestration.GroupedAutoPilotResult, err err
 	if result.Placed > 0 || result.Launched > 0 || result.Rebalanced > 0 || result.OverloadMoved > 0 {
 		return outcomeProgress, orchestration.AutopilotCooldownProgress
 	}
-	if len(result.BlockedReasons) > 0 {
+	if orchestration.AutoPilotBlockedReasonCount(result.BlockedReasons) > 0 {
 		return outcomeBlocked, orchestration.AutopilotCooldownBlocked
 	}
 	return outcomeIdle, orchestration.AutopilotCooldownIdle
@@ -395,7 +396,7 @@ func emitPassEvent(ev autopilotRunPassEvent) {
 		fmt.Sprintf("launched=%d", ev.Launched),
 		fmt.Sprintf("rebalanced=%d", ev.Rebalanced),
 		fmt.Sprintf("overload_moved=%d", ev.OverloadMoved),
-		fmt.Sprintf("blocked=%d", len(ev.BlockedReasons)),
+		fmt.Sprintf("blocked=%d", orchestration.AutoPilotBlockedReasonCount(ev.BlockedReasons)),
 		fmt.Sprintf("dur=%s", time.Duration(ev.DurationMS)*time.Millisecond),
 	}
 	if ev.LaunchedClass != "" {
@@ -422,6 +423,9 @@ func emitPassEvent(ev autopilotRunPassEvent) {
 func anyBlockedReason(m map[int64]string) string {
 	for _, r := range m {
 		if s := strings.TrimSpace(r); s != "" {
+			if blockreason.ReasonKind(s) != blockreason.KindBlocked {
+				continue
+			}
 			return s
 		}
 	}

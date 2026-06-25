@@ -171,7 +171,7 @@ func summarizeAutoPilotResult(r *GroupedAutoPilotResult) string {
 		return ""
 	}
 	return fmt.Sprintf("placed=%d rebalanced=%d reuse_filled=%d launched=%d blocked=%d",
-		r.Placed, r.Rebalanced, r.ReuseFilled, r.Launched, len(r.BlockedReasons))
+		r.Placed, r.Rebalanced, r.ReuseFilled, r.Launched, AutoPilotBlockedReasonCount(r.BlockedReasons))
 }
 
 // IsAutopilotPaused is a single-column read for callers (e.g. watch_tui) that

@@ -767,6 +767,59 @@ func TestGroupedJobsWithAutoReasonsUsesPersistedPlacementReason(t *testing.T) {
 	}
 }
 
+func TestGroupedAutoPilotStatusTextCountsOnlyBlockedReasons(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 3342, Status: db.StatusQueued},
+		{ID: 3344, Status: db.StatusQueued},
+		{ID: 3345, Status: db.StatusQueued},
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		jobs:            jobs,
+		autoBlockReasons: map[int64]string{
+			3342: `job wj3342 declares input "checkpoint:role-enc/exp036-klm3-s42", which weft cannot resolve`,
+			3344: "autopilot placing jobs",
+			3345: "autopilot placing jobs",
+		},
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+
+	if !strings.Contains(line, "Auto-pilot: blocked") {
+		t.Fatalf("auto-pilot line = %q, want blocked for the real blocker", line)
+	}
+	if !strings.Contains(line, "(1 jobs)") {
+		t.Fatalf("auto-pilot line = %q, want filtered blocked count", line)
+	}
+	if strings.Contains(line, "3 jobs blocked") {
+		t.Fatalf("auto-pilot line = %q, must not count waiting jobs as blocked", line)
+	}
+}
+
+func TestGroupedAutoPilotStatusTextDoesNotBlockOnWaitOnlyReasons(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 3344, Status: db.StatusQueued},
+		{ID: 3345, Status: db.StatusQueued},
+	}
+	m := listTUIModel{
+		groupedByStatus: true,
+		jobs:            jobs,
+		autoBlockReasons: map[int64]string{
+			3344: "autopilot placing jobs",
+			3345: "placement pending",
+		},
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+
+	if strings.Contains(line, "blocked") {
+		t.Fatalf("auto-pilot line = %q, wait-only reasons must not render as blocked", line)
+	}
+	if !strings.Contains(line, "monitoring") {
+		t.Fatalf("auto-pilot line = %q, want monitoring fallback", line)
+	}
+}
+
 func TestGroupedJobsWithAutoReasonsHidesOnPremOnlyAutoReasonForRentalEligibleJob(t *testing.T) {
 	unplaced := &db.Job{
 		ID:     10,

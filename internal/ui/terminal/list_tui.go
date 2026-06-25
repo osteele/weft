@@ -959,14 +959,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.autoPersistentBlocked = ""
 		m.autoPersistentBlockedN = 0
-		if summary := orchestration.AutoPilotBlockSummary(msg.blockedReasons); summary != "" {
+		if summary, count := orchestration.AutoPilotBlockSummaryWithCount(msg.blockedReasons); summary != "" {
 			m.autoPersistentBlocked = summary
-			m.autoPersistentBlockedN = len(msg.blockedReasons)
+			m.autoPersistentBlockedN = count
 		}
 		if msg.placed > 0 || msg.rebalanced > 0 || msg.launched > 0 {
 			m.clearAutoPilotPersistentState()
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownProgress)
-		} else if len(msg.blockedReasons) > 0 {
+		} else if orchestration.AutoPilotBlockedReasonCount(msg.blockedReasons) > 0 {
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownBlocked)
 		} else {
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownIdle)
@@ -1753,9 +1753,9 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 	blockedSummary := strings.TrimSpace(m.autoPersistentBlocked)
 	blockedJobs := m.autoPersistentBlockedN
 	if blockedSummary == "" {
-		if summary := orchestration.AutoPilotBlockSummary(m.visibleUnplacedBlockedReasons()); summary != "" {
+		if summary, count := orchestration.AutoPilotBlockSummaryWithCount(m.visibleUnplacedBlockedReasons()); summary != "" {
 			blockedSummary = summary
-			blockedJobs = 0
+			blockedJobs = count
 		}
 	}
 	return autopilotStatusLine(autopilotDisplayInput{
@@ -3810,9 +3810,9 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	if changed {
 		m.autoPersistentBlocked = ""
 		m.autoPersistentBlockedN = 0
-		if summary := orchestration.AutoPilotBlockSummary(m.autoBlockReasons); summary != "" {
+		if summary, count := orchestration.AutoPilotBlockSummaryWithCount(m.autoBlockReasons); summary != "" {
 			m.autoPersistentBlocked = summary
-			m.autoPersistentBlockedN = len(m.autoBlockReasons)
+			m.autoPersistentBlockedN = count
 		}
 	}
 }

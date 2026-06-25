@@ -244,7 +244,7 @@ func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult,
 		placed = result.Placed
 		launched = result.Launched
 		rebalanced = result.Rebalanced
-		blocked = len(result.BlockedReasons)
+		blocked = orchestration.AutoPilotBlockedReasonCount(result.BlockedReasons)
 	}
 	parts := []string{
 		fmt.Sprintf("pass %d", pass),
