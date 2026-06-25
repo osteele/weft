@@ -218,6 +218,17 @@ func TestReasonKindSourceSyncReasonsAreWaiting(t *testing.T) {
 	}
 }
 
+func TestReasonKindRetryableOfferUnavailableIsWaiting(t *testing.T) {
+	for _, reason := range []string{
+		"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers",
+		"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers; could not reuse running instances: wi4094 RTX 4060 Ti 16GB: GPU memory insufficient: job=24GB instance=16GB",
+	} {
+		if got := ReasonKind(reason); got != KindWaiting {
+			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindWaiting)
+		}
+	}
+}
+
 func TestReasonKindRunawayPausedReasonsArePaused(t *testing.T) {
 	for _, reason := range []string{
 		"paused: repeated infrastructure failures without progress",

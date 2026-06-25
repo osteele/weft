@@ -96,6 +96,7 @@ func ReasonKind(reason string) Kind {
 		cleaned == "autopilot paused",
 		cleaned == "autopilot not running",
 		strings.HasPrefix(cleaned, "autopilot delayed "),
+		isRetryableOfferUnavailable(cleaned),
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),
@@ -107,6 +108,11 @@ func ReasonKind(reason string) Kind {
 	default:
 		return KindBlocked
 	}
+}
+
+func isRetryableOfferUnavailable(reason string) bool {
+	return strings.Contains(reason, "offer unavailable:") &&
+		strings.Contains(reason, "Weft will retry with fresh offers")
 }
 
 func DisplayReasonForKind(kind Kind, reason string) string {

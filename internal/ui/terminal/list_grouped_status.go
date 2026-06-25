@@ -378,9 +378,13 @@ func appendBlockedGroupedJobRows(
 		if sharedCount < len(section.jobs) {
 			scope = fmt.Sprintf("for %d of %d", sharedCount, len(section.jobs))
 		}
+		kind := blockreason.ReasonKind(sharedLaunch)
+		if kind == blockreason.KindNone {
+			kind = blockreason.KindBlocked
+		}
 		rows = append(rows, groupedStatusRow{
-			text:      fmt.Sprintf("  launch blocked %s: %s", scope, sharedLaunch),
-			isBlocked: true,
+			text:      fmt.Sprintf("  launch %s %s: %s", kind, scope, blockreason.DisplayReasonForKind(kind, sharedLaunch)),
+			isBlocked: kind == blockreason.KindBlocked,
 			wrap:      true,
 			section:   section.key,
 		})
@@ -639,7 +643,7 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 		if d == nil || !d.IsPlacementFailure() {
 			continue
 		}
-		l := strings.TrimSpace(d.Launch)
+		l := blockreason.DisplayReasonForKind(blockreason.KindBlocked, d.Launch)
 		if l == "" {
 			return "", 0
 		}

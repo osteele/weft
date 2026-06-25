@@ -596,6 +596,7 @@ func formatBlockReasonLabels(reasons []string) string {
 	}
 	allBlocked := true
 	labels := make([]string, 0, len(reasons))
+	displayReasons := make([]string, 0, len(reasons))
 	for _, reason := range reasons {
 		kind := blockreason.ReasonKind(reason)
 		if kind == blockreason.KindNone {
@@ -604,10 +605,12 @@ func formatBlockReasonLabels(reasons []string) string {
 		if kind != blockreason.KindBlocked {
 			allBlocked = false
 		}
-		labels = append(labels, string(kind)+": "+blockreason.DisplayReasonForKind(kind, reason))
+		displayReason := blockreason.DisplayReasonForKind(kind, reason)
+		displayReasons = append(displayReasons, displayReason)
+		labels = append(labels, string(kind)+": "+displayReason)
 	}
 	if allBlocked {
-		return "blocked: " + strings.Join(reasons, "; ")
+		return "blocked: " + strings.Join(displayReasons, "; ")
 	}
 	return strings.Join(labels, "; ")
 }

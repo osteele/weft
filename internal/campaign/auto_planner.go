@@ -387,6 +387,10 @@ func SanitizeBlockedReason(reason string) string {
 		summary = first + " … " + last
 	}
 	summary = strings.ReplaceAll(summary, "provider returned success=false: provider rejected request", "provider rejected request")
+	summary = strings.ReplaceAll(summary,
+		"There are no longer any instances available with the requested specifications. Please refresh and try again.",
+		"requested instance type is no longer available; Weft will retry with fresh offers")
+	summary = strings.TrimRight(summary, ".;")
 	const maxLen = 240
 	if len(summary) > maxLen {
 		summary = summary[:maxLen-1] + "…"

@@ -89,6 +89,23 @@ func TestSanitizeBlockedReason_CollapsesSuccessFalseProviderRejected(t *testing.
 	}
 }
 
+func TestSanitizeBlockedReason_RewritesProviderRefreshInstruction(t *testing.T) {
+	raw := "offer unavailable: pod create --gpu-id: There are no longer any instances available with the requested specifications. Please refresh and try again."
+
+	got := SanitizeBlockedReason(raw)
+	want := "offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers"
+
+	if got != want {
+		t.Fatalf("SanitizeBlockedReason() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "refresh") {
+		t.Fatalf("SanitizeBlockedReason() = %q, should not expose provider refresh instruction", got)
+	}
+	if strings.HasSuffix(got, ".") || strings.HasSuffix(got, ";") {
+		t.Fatalf("SanitizeBlockedReason() = %q, should not end with join punctuation", got)
+	}
+}
+
 // TestApplyGroupOffer_FingerprintFromProviderError verifies that when
 // offer.Err is a *cloud.ProviderError, applyGroupOffer extracts the
 // fingerprint into plan.BlockedReasonFingerprints. This is the substrate that

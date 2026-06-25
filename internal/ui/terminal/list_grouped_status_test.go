@@ -376,6 +376,33 @@ func TestRenderJobListGroupedStatusPlainAt_RendersPlacementPendingAsAutopilotWai
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainAt_RetryableOfferUnavailableIsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{
+			ID:          3392,
+			Status:      db.StatusQueued,
+			Project:     "progressive-weight-streaming",
+			Description: "EXP-003",
+			CreatedAt:   4_400,
+			PlacementReasons: []string{
+				"offer unavailable: pod create --gpu-id: There are no longer any instances available with the requested specifications. Please refresh and try again.; could not reuse running instances: wi4094 RTX 4060 Ti 16GB: GPU memory insufficient: job=24GB instance=16GB",
+			},
+		},
+	}
+
+	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
+	waitingWant := "  waiting: offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers; could not reuse running instances: wi4094 RTX 4060 Ti 16GB: GPU memory insufficient: job=24GB instance=16GB"
+	if !strings.Contains(out, waitingWant) {
+		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
+	}
+	for _, unwanted := range []string{"blocked: offer unavailable", "Please refresh", "again.;"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("unexpected %q in output:\n%s", unwanted, out)
+		}
+	}
+}
+
 func TestBuildGroupedStatusRows_PlacementPendingSchedulerStates(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	jobs := []*db.Job{
@@ -792,6 +819,32 @@ func TestBuildGroupedStatusRows_HoistsLaunchAndExpandsDisclosure(t *testing.T) {
 	// indented "reuse <instance>  ..." detail line should be absent.
 	if strings.Contains(out, "reuse wi1023  grace period") {
 		t.Fatalf("collapsed job disclosure detail leaked into output:\n%s", out)
+	}
+}
+
+func TestBuildGroupedStatusRows_HoistedRetryableOfferUnavailableIsWaiting(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	jobs := []*db.Job{
+		{ID: 2030, Status: db.StatusQueued, Project: "proj", Description: "a", QueuedAt: 4_000},
+		{ID: 2029, Status: db.StatusQueued, Project: "proj", Description: "b", QueuedAt: 4_000},
+	}
+	launchReason := "offer unavailable: pod create --gpu-id: There are no longer any instances available with the requested specifications. Please refresh and try again."
+	detail := map[int64]*blockreason.Structured{
+		2030: {Launch: launchReason},
+		2029: {Launch: launchReason},
+	}
+
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+	if !strings.Contains(out, "launch waiting for all: offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers") {
+		t.Fatalf("missing launch waiting hoist:\n%s", out)
+	}
+	for _, unwanted := range []string{"launch blocked for all", "Please refresh", "again.;"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("unexpected %q in output:\n%s", unwanted, out)
+		}
 	}
 }
 
