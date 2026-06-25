@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
@@ -99,6 +100,25 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		}
 		return x
 	}
+	if result := blockreason.Resolve(job, blockreason.Options{Compact: true}); result.Blocked {
+		x.State = string(result.Kind)
+		x.PrimaryReason = blockreason.DisplayReasonForKind(result.Kind, result.Reason)
+		x.Confidence = "high"
+		if result.Source == blockreason.SourcePlacement {
+			x.Evidence = append(x.Evidence, Evidence{Label: "placement", Value: result.Reason})
+			if s := blockreason.ForJob(job); s.IsPlacementFailure() {
+				for _, line := range s.DetailLines() {
+					x.Evidence = append(x.Evidence, Evidence{Label: "avenue", Value: line})
+				}
+			}
+		}
+		x.Options = append(x.Options, Option{Label: "wait", Detail: "let the placement condition clear"})
+		if job.TargetKind() != db.JobTargetUnplaced {
+			x.Options = append(x.Options, Option{Label: "replan", Detail: "return the job to the unplaced pool"})
+		}
+		x.SuggestedAction = "inspect blocker"
+		return x
+	}
 	if display.Kind != "" {
 		x.Options = append(x.Options, Option{Label: "wait", Detail: "let the current queue or placement condition clear"})
 		if job.TargetKind() != db.JobTargetUnplaced {
@@ -109,8 +129,8 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	}
 	switch job.EffectiveStatus() {
 	case db.StatusQueued:
-		x.PrimaryReason = "job is queued"
-		x.SuggestedAction = "wait"
+		x.PrimaryReason = queuedReason(job)
+		x.SuggestedAction = queuedSuggestedAction(job)
 	case db.StatusRunning:
 		x.PrimaryReason = "job is running"
 		x.SuggestedAction = "monitor progress"
@@ -122,6 +142,45 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.SuggestedAction = "none"
 	}
 	return x
+}
+
+func queuedReason(job *db.Job) string {
+	if job == nil {
+		return "job is queued"
+	}
+	switch job.TargetKind() {
+	case db.JobTargetUnplaced:
+		return "awaiting placement"
+	case db.JobTargetRentalInstance:
+		return "waiting for assigned instance to start the job"
+	case db.JobTargetInventoryHost:
+		if target := strings.TrimSpace(job.TargetDisplay()); target != "" {
+			return "waiting in queue on " + target
+		}
+		return "waiting in host queue"
+	case db.JobTargetExternal:
+		return "waiting for external executor"
+	default:
+		return "job is queued"
+	}
+}
+
+func queuedSuggestedAction(job *db.Job) string {
+	if job == nil {
+		return "wait"
+	}
+	switch job.TargetKind() {
+	case db.JobTargetUnplaced:
+		return "wait for placement"
+	case db.JobTargetRentalInstance:
+		return "wait for instance startup or inspect instance"
+	case db.JobTargetInventoryHost:
+		return "wait for queue slot"
+	case db.JobTargetExternal:
+		return "inspect external executor"
+	default:
+		return "wait"
+	}
 }
 
 func LatestInventoryDispatchBlock(database *sql.DB, job *db.Job, now time.Time) (DispatchBlock, bool) {

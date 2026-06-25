@@ -103,6 +103,56 @@ func TestForJobExplainsSourceProvenanceMismatchAsDispatchBlock(t *testing.T) {
 	}
 }
 
+func TestForJobExplainsUnplacedPlacementReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	reason := "planner: provider command timed out: vastai search offers timed out after 30s"
+	if err := db.SetJobPlacementReasons(database, jobID, []string{
+		"cloud instance 4087 failed (provider_timeout)",
+		reason,
+	}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	x := ForJob(database, job, time.Unix(20_000, 0))
+	if x.State != "blocked" {
+		t.Fatalf("State = %q, want blocked", x.State)
+	}
+	if x.PrimaryReason != reason {
+		t.Fatalf("PrimaryReason = %q, want %q", x.PrimaryReason, reason)
+	}
+	if x.SuggestedAction != "inspect blocker" {
+		t.Fatalf("SuggestedAction = %q, want inspect blocker", x.SuggestedAction)
+	}
+	if x.Confidence != "high" {
+		t.Fatalf("Confidence = %q, want high", x.Confidence)
+	}
+}
+
+func TestForJobExplainsQueuedRentalTarget(t *testing.T) {
+	launchID := int64(4092)
+	job := &db.Job{
+		ID:       3390,
+		Status:   db.StatusQueued,
+		LaunchID: &launchID,
+	}
+
+	x := ForJob(nil, job, time.Unix(20_000, 0))
+	if x.PrimaryReason != "waiting for assigned instance to start the job" {
+		t.Fatalf("PrimaryReason = %q", x.PrimaryReason)
+	}
+	if x.SuggestedAction != "wait for instance startup or inspect instance" {
+		t.Fatalf("SuggestedAction = %q", x.SuggestedAction)
+	}
+}
+
 func TestForJobAutoReplanUsesStartOfDispatchBlockStreak(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
