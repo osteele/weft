@@ -29,6 +29,7 @@ import (
 var (
 	syncFetchInstancePhase   = fetchInstancePhase
 	syncFetchBootstrapStage  = fetchBootstrapStage
+	syncFetchOnStartStage    = fetchOnStartStage
 	syncFetchHeartbeat       = fetchHeartbeat
 	syncFetchJobProgress     = fetchJobProgress
 	syncFetchTermIntent      = fetchTerminationIntentFromR2
@@ -61,6 +62,12 @@ type SyncedState struct {
 	// absence-conjunction contract and lab-notebook EXP-021 for context.
 	OnStartProbePresent bool
 	JobsUpdated         int // count of job status transitions (e.g. queued→running)
+	// OnStartStage and OnStartStageChangedAt mirror the OnStart shell's
+	// stage marker and its R2 last-modified time. Populated only in the
+	// pre-bootstrap.sh window (no job phase, no started job), the same window
+	// the bootstrap-stage fetch covers. See instance_check.go rules 4e/4f.
+	OnStartStage          string
+	OnStartStageChangedAt *time.Time
 }
 
 // SyncInstanceStateOpts configures optional behaviors for SyncInstanceState.
@@ -160,6 +167,11 @@ func SyncInstanceState(
 		go func() {
 			defer wave2.Done()
 			s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
+		}()
+		wave2.Add(1)
+		go func() {
+			defer wave2.Done()
+			s.OnStartStage, s.OnStartStageChangedAt = syncFetchOnStartStage(ctx, r2Client, instanceID)
 		}()
 	}
 	// In the dud-detection window we also fetch the heartbeat and OnStart
@@ -576,5 +588,7 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		PhaseChangedAt:        s.PhaseChangedAt,
 		BootstrapActivitySeen: s.BootstrapActivitySeen,
 		OnStartProbePresent:   s.OnStartProbePresent,
+		OnStartStage:          s.OnStartStage,
+		OnStartStageChangedAt: s.OnStartStageChangedAt,
 	}
 }

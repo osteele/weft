@@ -45,6 +45,17 @@ const (
 	// well below the adaptive bootstrap deadline (often 1h+) so dud
 	// rentals are reclaimed before they bleed budget.
 	dudVastTimeout = 8 * time.Minute
+
+	// onStartStallTimeout is how long the OnStart shell's stage marker may
+	// sit unchanged on an in-progress step (apt/uv/rclone install) before the
+	// chain is declared dead. OnStart install steps normally finish in 1–3
+	// min; a marker frozen well past that with no bootstrap.sh handoff is a
+	// hung apt mirror / failed install, not slow progress. This closes the
+	// gap between dud detection (no probe at all) and the bootstrap `failed:`
+	// marker (written only by bootstrap.sh, which never ran in this case),
+	// so a stalled OnStart chain is reaped in minutes instead of waiting the
+	// full adaptive bootstrap deadline. See instance_check.go rule 4f.
+	onStartStallTimeout = 10 * time.Minute
 )
 
 // Setup phase stall defaults (used when no survival data is available).
@@ -636,6 +647,37 @@ func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID in
 	return fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
 }
 
+// fetchOnStartStage reads the OnStart shell's stage marker and its R2
+// last-modified time. The marker is last-write-wins, so the modified time is
+// when the stage last advanced; a frozen value means the OnStart chain stalled.
+// Returns ("", nil) when the marker is absent or unreadable. The recover guard
+// matches fetchR2Marker: stub R2 clients in tests panic rather than error.
+func fetchOnStartStage(ctx context.Context, r2Client *r2.Client, instanceID int64) (stage string, changedAt *time.Time) {
+	if r2Client == nil {
+		return "", nil
+	}
+	defer func() {
+		if recover() != nil {
+			stage, changedAt = "", nil
+		}
+	}()
+	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	body, lastModified, err := r2Client.GetObjectWithMeta(ctx2, r2keys.InstanceOnStartStage(instanceID))
+	if err != nil {
+		return "", nil
+	}
+	stage = strings.TrimSpace(string(body))
+	// The marker body is "<stage> <RFC3339 timestamp>"; keep the stage token.
+	if i := strings.IndexByte(stage, ' '); i > 0 {
+		stage = stage[:i]
+	}
+	if lastModified.IsZero() {
+		return stage, nil
+	}
+	return stage, &lastModified
+}
+
 // fetchInstancePhase reads the instance phase marker from R2.
 func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
 	return fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
@@ -750,6 +792,24 @@ func HasActiveTerminationIntent(marker *instanceintent.Marker) bool {
 
 func truncateText(s string, maxLen int) string {
 	return util.Truncate(s, maxLen)
+}
+
+// onStartFailureStages are the OnStart shell's terminal install-failure
+// markers. They MUST stay in sync with the `*-failed` / `*-missing-exit`
+// stages written by DefaultOnStartCmd in internal/cloud/types.go. Observing
+// any of these as the current OnStart stage means a dependency install
+// definitively failed, so the instance can never reach bootstrap.
+var onStartFailureStages = map[string]bool{
+	"apt-failed":          true,
+	"uv-failed":           true,
+	"rclone-failed":       true,
+	"rclone-missing-exit": true,
+}
+
+// isOnStartFailureStage reports whether stage is a terminal OnStart failure
+// marker (rule 4e).
+func isOnStartFailureStage(stage string) bool {
+	return onStartFailureStages[strings.TrimSpace(stage)]
 }
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.

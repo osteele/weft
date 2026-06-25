@@ -1086,6 +1086,129 @@ func TestCheckInstance_DudProvider_QuietWhenBootstrapActivitySeen(t *testing.T) 
 	}
 }
 
+// TestCheckInstance_OnStartFailureMarker_Terminates: a terminal OnStart
+// install-failure marker (rule 4e) reaps the instance immediately rather than
+// waiting the adaptive bootstrap deadline.
+func TestCheckInstance_OnStartFailureMarker_Terminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	for _, stage := range []string{"apt-failed", "uv-failed", "rclone-failed", "rclone-missing-exit"} {
+		t.Run(stage, func(t *testing.T) {
+			r := NewReconciler()
+			action := r.CheckInstance(CheckInstanceParams{
+				CI: &db.Launch{
+					ID:                 1,
+					Status:             db.LaunchStatusRunning,
+					LaunchedAt:         &launchedAt,
+					ProviderInstanceID: "test-onstart-failed",
+				},
+				ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+				OnStartProbePresent: true,
+				OnStartStage:        stage,
+				Now:                 now,
+			})
+			if action.Kind != ActionBootstrapStalled {
+				t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q)", action.Kind, action.StallMessage)
+			}
+			if !strings.Contains(action.StallMessage, "OnStart failed at "+stage) {
+				t.Errorf("StallMessage = %q, want it to mention OnStart failure at %q", action.StallMessage, stage)
+			}
+			if !action.ResetJobs || !action.DestroyProvider {
+				t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+			}
+			if action.TerminationReason != db.TerminationReasonInfraFailure {
+				t.Errorf("TerminationReason = %q, want infra failure", action.TerminationReason)
+			}
+		})
+	}
+}
+
+// TestCheckInstance_OnStartStall_Terminates: an in-progress OnStart stage
+// frozen past onStartStallTimeout (rule 4f) — the wi4102 incident: the probe
+// landed, apt hung, bootstrap.sh never ran — is reaped without waiting the
+// full adaptive deadline.
+func TestCheckInstance_OnStartStall_Terminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	stageAt := now.Add(-onStartStallTimeout - time.Minute)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-hung",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &stageAt,
+		Now:                   now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "OnStart stalled at apt-installing") {
+		t.Errorf("StallMessage = %q, want it to mention the stalled OnStart stage", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+	}
+}
+
+// TestCheckInstance_OnStartStall_NotYetStalled: an in-progress stage that is
+// still advancing (changed recently) must not trip rule 4f.
+func TestCheckInstance_OnStartStall_NotYetStalled(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	stageAt := now.Add(-onStartStallTimeout / 2)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-progressing",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "rclone-installing",
+		OnStartStageChangedAt: &stageAt,
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired while the stage was still advancing: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_OnStartStall_QuietOnceBootstrapStarted: once bootstrap.sh
+// has written a stage, the bootstrap-deadline machinery (rules 5/5a) owns the
+// adjudication — the OnStart rules must stand down even if a stale OnStart
+// marker lingers.
+func TestCheckInstance_OnStartStall_QuietOnceBootstrapStarted(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	stageAt := now.Add(-onStartStallTimeout - time.Minute)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-handed-off",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &stageAt,
+		BootstrapStage:        "agent_installing",
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired after bootstrap.sh took over: %q", action.StallMessage)
+	}
+}
+
 func TestCheckInstance_HedgeCull_FiresWhenSiblingIsReady(t *testing.T) {
 	cohort := int64(42)
 	now := time.Now()

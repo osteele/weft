@@ -380,6 +380,16 @@ config {
     -- never; an 8-minute window covers cold-image pulls without false-
     -- killing slow-but-progressing launches.
     dud_vast_timeout: Duration = 8.minutes
+    -- OnStart chain stall. When the OnStart probe HAS landed (so the
+    -- container ran OnStart — dud_vast_timeout does not apply) but the
+    -- OnStart stage marker then freezes on an in-progress install step
+    -- (apt/uv/rclone) with no handoff to bootstrap.sh, the install hung.
+    -- OnStart install steps normally finish in 1-3 min; a marker unchanged
+    -- past this window is a hung mirror / failed install that will never
+    -- reach bootstrap. Catches the gap between dud detection (no probe) and
+    -- the bootstrap `failed:` marker (written only by bootstrap.sh). See
+    -- OnStartChainWatchdog.
+    onstart_stall_timeout: Duration = 10.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.
     idle_after_ready_timeout: Duration = 15.minutes
@@ -1747,6 +1757,64 @@ rule DudVastDetection {
         -- timeout is a sibling fixed threshold that should be moved
         -- onto the same survival framework, stratified by
         -- (provider, data_center). Tracked separately.
+}
+
+rule OnStartChainWatchdog {
+    when: instance: Instance.status in {running, launching}
+            and instance.agent_ready_at = null
+            and not HasStartedJob(instance)
+            and InstancePhase(instance) = ""
+            and BootstrapStage(instance) = ""
+            and OnStartStage(instance) != ""
+            and ( IsOnStartFailureStage(OnStartStage(instance))
+                  or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout )
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    @guidance
+        -- Closes the gap DudVastDetection deliberately leaves. Dud
+        -- detection fires only when NO OnStart probe landed — "the
+        -- container never started." But the OnStart shell can run far
+        -- enough to write its probe and then DIE during the apt/uv/rclone
+        -- install, before bootstrap.sh ever runs. In that window:
+        --   - DudVastDetection is suppressed (probe present is a sign of
+        --     life; the rule defers to "a downstream adjudicator"), and
+        --   - the bootstrap `failed:` marker (BootstrapStalled rule) never
+        --     appears, because that marker is written by bootstrap.sh,
+        --     which never started, and
+        --   - no job phase or heartbeat exists yet,
+        -- so the ONLY adjudicator left was the adaptive bootstrap deadline
+        -- (often 1h+). Incident wi4102 (2026-06-25): apt-get hung inside
+        -- the OnStart install loop; the instance billed ~95 min before the
+        -- deadline would have reaped it, blocking its job (wj3392) the
+        -- whole time.
+        --
+        -- The OnStart shell overwrites instance/<id>/onstart-stage at each
+        -- step (last-write-wins), so the marker's value is the last step
+        -- reached and its R2 last-modified time is when the step advanced.
+        -- Two sub-cases:
+        --   - IsOnStartFailureStage: the marker is a definitive failure
+        --     token (apt-failed, uv-failed, rclone-failed,
+        --     rclone-missing-exit) — terminate immediately. This set MUST
+        --     stay in sync with DefaultOnStartCmd in internal/cloud/types.go.
+        --   - Stall: an in-progress token (apt-installing, etc.) unchanged
+        --     for onstart_stall_timeout — the chain hung (e.g. an
+        --     unresponsive apt mirror) and will not recover.
+        --
+        -- Gated pre-bootstrap (BootstrapStage = ""), pre-ready, pre-job: once
+        -- bootstrap.sh writes a stage, or the agent reaches ready, or a job
+        -- phase appears, the bootstrap-deadline / idle-after-ready / heartbeat
+        -- watchdogs own the adjudication and OnStartStage is no longer fetched.
+        --
+        -- Reason is infra_failure (retryable): orphaned jobs reset to
+        -- unplaced and relaunch on a fresh offer, same as DudVastDetection.
+        --
+        -- Implementation: internal/campaign/instance_check.go §4e/4f
+        -- (ActionBootstrapStalled). SyncInstanceState fetches the OnStart
+        -- stage marker (body + R2 last-modified) in the same pre-job window
+        -- as the bootstrap stage, via internal/campaign/sync_state.go.
 }
 
 rule HeartbeatStaleAfterReady {

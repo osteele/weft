@@ -160,9 +160,18 @@ type CheckInstanceParams struct {
 	PauseTolerant  bool
 	InstancePhase  string // reconciled display/check phase
 	BootstrapStage string // from R2
-	HeartbeatAge   time.Duration
-	Heartbeat      *HeartbeatSample
-	Now            time.Time
+	// OnStartStage is the last value of the OnStart shell's stage marker
+	// (e.g. apt-installing, rclone-failed, onstart-deps-ready) — the step
+	// the provider's OnStart script reached before bootstrap.sh took over.
+	// Empty once bootstrap.sh starts (BootstrapStage takes over) or once a
+	// job phase is reported. OnStartStageChangedAt is the R2 last-modified
+	// time of that marker, i.e. when the stage last advanced; a frozen value
+	// means the OnStart chain stalled mid-install. Used by rules 4e/4f.
+	OnStartStage          string
+	OnStartStageChangedAt *time.Time
+	HeartbeatAge          time.Duration
+	Heartbeat             *HeartbeatSample
+	Now                   time.Time
 
 	// TerminationIntent from R2 or DB (pre-fetched by caller)
 	TerminationIntent *instanceintent.Marker
@@ -522,6 +531,52 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				DestroyProvider:   true,
 				ResetJobs:         true,
 				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+	}
+
+	// 4e/4f. OnStart chain failed or stalled. The OnStart probe landed (so
+	// rule 4d deferred to "a downstream adjudicator"), but the OnStart shell
+	// then failed or hung during the apt/uv/rclone install, before bootstrap.sh
+	// ran — so neither the bootstrap `failed:` marker (rule 5a) nor the
+	// bootstrap deadline's progress signal ever appears, and the instance would
+	// otherwise wait the full adaptive deadline (often 1h+). These two rules
+	// adjudicate that window using the OnStart stage marker the watchdog now
+	// carries. Gated pre-bootstrap (BootstrapStage empty), pre-ready, pre-job.
+	// See campaign-lifecycle.allium § OnStartChainWatchdog.
+	onStartActive := (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching) &&
+		ci.AgentReadyAtUnix == nil &&
+		!p.JobState.HasStartedJob &&
+		p.InstancePhase == "" &&
+		p.BootstrapStage == "" &&
+		p.OnStartStage != ""
+	if onStartActive {
+		// 4e. A definitive install failure marker — terminate now.
+		if isOnStartFailureStage(p.OnStartStage) {
+			return InstanceAction{
+				Kind:              ActionBootstrapStalled,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("OnStart failed at %s — terminating instance, jobs reset to queued", p.OnStartStage),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+		// 4f. An in-progress stage frozen past the stall timeout — the chain
+		// hung (e.g. an unresponsive apt mirror) and will not recover.
+		if p.OnStartStageChangedAt != nil {
+			stalled := p.Now.Sub(*p.OnStartStageChangedAt)
+			if stalled >= onStartStallTimeout {
+				return InstanceAction{
+					Kind:              ActionBootstrapStalled,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+					StallMessage:      fmt.Sprintf("OnStart stalled at %s for %s — terminating instance, jobs reset to queued", p.OnStartStage, stalled.Truncate(time.Second)),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
 			}
 		}
 	}
