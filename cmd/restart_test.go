@@ -710,6 +710,45 @@ func TestParseRestartOverrides_StrictKeepsExactMem(t *testing.T) {
 	}
 }
 
+func TestParseRestartOverrides_MinSurvivalZero(t *testing.T) {
+	restartGPU = ""
+	restartGPUClass = ""
+	restartGPUMem = 0
+
+	cmd := &cobra.Command{Use: "retry"}
+	addRestartFlags(cmd)
+	if err := cmd.Flags().Set("min-survival", "0"); err != nil {
+		t.Fatalf("set min-survival flag: %v", err)
+	}
+
+	overrides, err := parseRestartOverrides(cmd)
+	if err != nil {
+		t.Fatalf("parseRestartOverrides: %v", err)
+	}
+	if !overrides.HasMinSurvival {
+		t.Fatalf("HasMinSurvival = false, want true")
+	}
+	if overrides.MinSurvival != 0 {
+		t.Fatalf("MinSurvival = %v, want 0", overrides.MinSurvival)
+	}
+	if !overrides.HasAny {
+		t.Fatalf("HasAny = false, want true")
+	}
+}
+
+func TestParseRestartOverrides_RejectsInvalidMinSurvival(t *testing.T) {
+	cmd := &cobra.Command{Use: "retry"}
+	addRestartFlags(cmd)
+	if err := cmd.Flags().Set("min-survival", "1.5"); err != nil {
+		t.Fatalf("set min-survival flag: %v", err)
+	}
+
+	_, err := parseRestartOverrides(cmd)
+	if err == nil {
+		t.Fatal("parseRestartOverrides succeeded, want error")
+	}
+}
+
 func TestRestartQueuedJob_UpdatesGPUOverrides(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
@@ -1242,6 +1281,39 @@ print("train")
 	}
 	if job.GPUClass != "ampere+" {
 		t.Fatalf("GPUClass = %q, want ampere+ after later retry", job.GPUClass)
+	}
+}
+
+func TestRestartQueuedJob_PersistsMinSurvivalOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobPlacementReasons(database, jobID, []string{"skipped A10 offers below survival threshold"}); err != nil {
+		t.Fatalf("set placement reasons: %v", err)
+	}
+
+	if err := restartJob(database, jobID, restartOverrides{
+		HasAny:         true,
+		HasMinSurvival: true,
+		MinSurvival:    0,
+	}); err != nil {
+		t.Fatalf("restartJob with min-survival override failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.MinSurvival == nil {
+		t.Fatalf("CLI min-survival override missing: %+v", job.CLIResourceOverrides)
+	}
+	if *job.CLIResourceOverrides.MinSurvival != 0 {
+		t.Fatalf("MinSurvival = %v, want 0", *job.CLIResourceOverrides.MinSurvival)
+	}
+	if len(job.PlacementReasons) != 0 {
+		t.Fatalf("PlacementReasons = %v, want cleared stale reasons", job.PlacementReasons)
 	}
 }
 

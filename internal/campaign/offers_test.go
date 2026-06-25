@@ -828,6 +828,60 @@ func TestRankOffer_NoHardVRAMCeiling(t *testing.T) {
 	}
 }
 
+func TestRankOffer_UsesJobMinSurvivalOverride(t *testing.T) {
+	minSurvivalZero := 0.0
+	lowSurvivalOffer := cloud.Offer{
+		ProviderID:  "low",
+		Provider:    cloud.ProviderVastai,
+		GPUName:     "A100 PCIE",
+		GPUMemGB:    80,
+		CostPerHour: 0.10,
+		Reliability: 0.5,
+		MachineID:   "machine-low",
+	}
+	now := time.Now()
+	outcomes := make([]bidding.InstanceOutcome, 0, 40)
+	for range 40 {
+		outcomes = append(outcomes, bidding.InstanceOutcome{
+			Provider:          cloud.ProviderVastai,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			ResolvedGPUName:   "A100 PCIE",
+			GPUMemGB:          80,
+			CostPerHourCents:  10,
+			Reliability:       0.5,
+			MachineID:         "machine-low",
+			EndedAtUnix:       now.Unix(),
+		})
+	}
+	model := bidding.BuildSurvivalModelAt(outcomes, now)
+
+	overridden := InstanceGroup{
+		GPUClass: "A100",
+		Jobs: []*db.Job{{
+			ID: 1,
+			CLIResourceOverrides: &db.CLIResourceOverrides{
+				MinSurvival: &minSurvivalZero,
+			},
+		}},
+	}
+	got := rankOfferWithProfile(overridden, []cloud.Offer{lowSurvivalOffer}, model, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap.Profile(), 0.4)
+	if got.Offer == nil || got.Offer.ProviderID != "low" {
+		t.Fatalf("override min_survival=0 should allow low survival offer, got %+v", got.Offer)
+	}
+
+	mixed := InstanceGroup{
+		GPUClass: "A100",
+		Jobs: []*db.Job{
+			{ID: 1, CLIResourceOverrides: &db.CLIResourceOverrides{MinSurvival: &minSurvivalZero}},
+			{ID: 2},
+		},
+	}
+	got = rankOfferWithProfile(mixed, []cloud.Offer{lowSurvivalOffer}, model, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap.Profile(), 0.4)
+	if got.Offer != nil {
+		t.Fatalf("mixed group should keep default member survival floor, got %+v", got.Offer)
+	}
+}
+
 func TestSplitToParallel_UsesOnlyPerJobMinimumMemory(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",

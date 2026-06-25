@@ -488,6 +488,7 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
 	stats := OfferFilterStats{RawCount: len(offers)}
+	minSurvival = db.RequestedMinSurvivalForJobs(group.Jobs, minSurvival)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

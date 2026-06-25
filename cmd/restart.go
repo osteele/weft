@@ -45,6 +45,7 @@ var (
 	restartGPUMem        int
 	restartDiskGB        int
 	restartRuntimeDiskGB int
+	restartMinSurvival   float64
 	restartGPUMemStrict  bool
 	restartUnplaced      bool
 	restartFromScratch   bool
@@ -66,6 +67,8 @@ type restartOverrides struct {
 	DiskGB              *int
 	HasRuntimeDisk      bool
 	RuntimeDiskGB       *int
+	HasMinSurvival      bool
+	MinSurvival         float64
 }
 
 func init() {
@@ -127,6 +130,7 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().IntVar(&restartDiskGB, "disk", 0, "Rental instance disk floor override in GB (0 clears)")
 	command.Flags().IntVar(&restartRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom override in GB (0 clears)")
+	command.Flags().Float64Var(&restartMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
 	command.Flags().BoolVar(&restartFromScratch, "from-scratch", false, "Force a fresh attempt and ignore checkpoint/resume assumptions")
@@ -173,12 +177,14 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	hasProvider := cmd.Flags().Changed("provider")
 	hasDisk := cmd.Flags().Changed("disk")
 	hasRuntimeDisk := cmd.Flags().Changed("runtime-disk")
+	hasMinSurvival := cmd.Flags().Changed("min-survival")
 	out.HasGPUMem = hasGPUMem
 	out.HasGPUMemStrict = hasGPUMemStrict
 	out.GPUMemStrict = restartGPUMemStrict
 	out.HasProvider = hasProvider
 	out.HasDisk = hasDisk
 	out.HasRuntimeDisk = hasRuntimeDisk
+	out.HasMinSurvival = hasMinSurvival
 
 	if gpuValue != "" && gpuClassValue != "" {
 		return out, fmt.Errorf("--gpu and --gpu-class cannot be used together")
@@ -225,9 +231,15 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 		runtimeDisk := restartRuntimeDiskGB
 		out.RuntimeDiskGB = &runtimeDisk
 	}
+	if hasMinSurvival {
+		if restartMinSurvival < 0 || restartMinSurvival > 1 {
+			return out, fmt.Errorf("--min-survival must be between 0 and 1")
+		}
+		out.MinSurvival = restartMinSurvival
+	}
 	out.GPU = gpuValue
 	out.GPUClass = gpuClassValue
-	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider || hasDisk || hasRuntimeDisk
+	out.HasAny = out.GPU != "" || out.GPUClass != "" || hasGPUMem || hasGPUMemStrict || hasProvider || hasDisk || hasRuntimeDisk || hasMinSurvival
 	return out, nil
 }
 
@@ -348,6 +360,16 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 		}
 		if err := setJobDiskMetadata(database, job, buildDiskMetadata(diskGB, runtimeDiskGB)); err != nil {
 			return nil, fmt.Errorf("update disk metadata: %w", err)
+		}
+	}
+	if overrides.HasMinSurvival {
+		if err := setJobCLIMinSurvivalOverride(database, job, overrides.MinSurvival); err != nil {
+			return nil, fmt.Errorf("update min-survival override: %w", err)
+		}
+		if overrides.MinSurvival == 0 {
+			updates = append(updates, "min-survival: disabled")
+		} else {
+			updates = append(updates, fmt.Sprintf("min-survival: %.0f%%", overrides.MinSurvival*100))
 		}
 	}
 	return updates, nil

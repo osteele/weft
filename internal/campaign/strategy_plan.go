@@ -1513,6 +1513,7 @@ func rankOfferWithPredictedRuntime(
 ) (GroupOffer, bool) {
 	result := GroupOffer{Group: group}
 	stats := OfferFilterStats{RawCount: len(offers)}
+	minSurvival = db.RequestedMinSurvivalForJobs(group.Jobs, minSurvival)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result, true

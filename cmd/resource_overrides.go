@@ -45,6 +45,10 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		v := *source.RuntimeDiskGB
 		clone.RuntimeDiskGB = &v
 	}
+	if source.MinSurvival != nil {
+		v := *source.MinSurvival
+		clone.MinSurvival = &v
+	}
 	if source.CPUCores != nil {
 		v := *source.CPUCores
 		clone.CPUCores = &v
@@ -101,6 +105,13 @@ func setJobCLIDiskOverride(database *sql.DB, job *db.Job, diskGB *int) error {
 func setJobCLIRuntimeDiskOverride(database *sql.DB, job *db.Job, runtimeDiskGB *int) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.RuntimeDiskGB = cloneIntPtr(runtimeDiskGB)
+	})
+}
+
+func setJobCLIMinSurvivalOverride(database *sql.DB, job *db.Job, minSurvival float64) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		v := minSurvival
+		snap.MinSurvival = &v
 	})
 }
 

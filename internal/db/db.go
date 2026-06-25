@@ -348,19 +348,61 @@ func (j *Job) RequestedCPUMemGB() int {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
-	Host           string `json:"host,omitempty"`
-	GPU            string `json:"gpu,omitempty"`
-	GPUClass       string `json:"gpu_class,omitempty"`
-	GPUCount       *int   `json:"gpu_count,omitempty"`
-	GPUMemGB       *int   `json:"gpu_mem_gb,omitempty"`
-	GPUMemStrict   *bool  `json:"gpu_mem_strict,omitempty"`
-	Interconnect   string `json:"interconnect,omitempty"`
-	CPUCores       *int   `json:"cpu_cores,omitempty"`
-	CPUMemGB       *int   `json:"cpu_mem_gb,omitempty"`
-	CPUMemStrict   *bool  `json:"cpu_mem_strict,omitempty"`
-	DiskGB         *int   `json:"disk_gb,omitempty"`
-	RuntimeDiskGB  *int   `json:"runtime_disk_gb,omitempty"`
-	MinCUDAVersion string `json:"min_cuda_version,omitempty"`
+	Host           string   `json:"host,omitempty"`
+	GPU            string   `json:"gpu,omitempty"`
+	GPUClass       string   `json:"gpu_class,omitempty"`
+	GPUCount       *int     `json:"gpu_count,omitempty"`
+	GPUMemGB       *int     `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict   *bool    `json:"gpu_mem_strict,omitempty"`
+	Interconnect   string   `json:"interconnect,omitempty"`
+	CPUCores       *int     `json:"cpu_cores,omitempty"`
+	CPUMemGB       *int     `json:"cpu_mem_gb,omitempty"`
+	CPUMemStrict   *bool    `json:"cpu_mem_strict,omitempty"`
+	DiskGB         *int     `json:"disk_gb,omitempty"`
+	RuntimeDiskGB  *int     `json:"runtime_disk_gb,omitempty"`
+	MinSurvival    *float64 `json:"min_survival,omitempty"`
+	MinCUDAVersion string   `json:"min_cuda_version,omitempty"`
+}
+
+// RequestedMinSurvival returns the per-job cloud offer survival floor. A nil
+// override keeps the caller's default; explicit values, including 0, replace it.
+func (j *Job) RequestedMinSurvival(defaultFloor float64) float64 {
+	defaultFloor = clampProbability(defaultFloor)
+	if j == nil || j.CLIResourceOverrides == nil || j.CLIResourceOverrides.MinSurvival == nil {
+		return defaultFloor
+	}
+	return clampProbability(*j.CLIResourceOverrides.MinSurvival)
+}
+
+// RequestedMinSurvivalForJobs returns the floor that satisfies every job in a
+// grouped launch. Each job uses its explicit override or the supplied default,
+// and the group must satisfy the most restrictive member.
+func RequestedMinSurvivalForJobs(jobs []*Job, defaultFloor float64) float64 {
+	if len(jobs) == 0 {
+		return clampProbability(defaultFloor)
+	}
+	var floor float64
+	for i, job := range jobs {
+		effective := clampProbability(defaultFloor)
+		if job != nil {
+			effective = job.RequestedMinSurvival(defaultFloor)
+		}
+		if i == 0 || effective > floor {
+			floor = effective
+		}
+	}
+	return floor
+}
+
+func clampProbability(value float64) float64 {
+	switch {
+	case value < 0:
+		return 0
+	case value > 1:
+		return 1
+	default:
+		return value
+	}
 }
 
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
@@ -1420,7 +1462,7 @@ func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
-		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinCUDAVersion == ""
+		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil && o.MinCUDAVersion == ""
 }
 
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID
