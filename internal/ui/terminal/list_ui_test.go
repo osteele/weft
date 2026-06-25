@@ -1813,6 +1813,43 @@ func TestSelectGroupedRowsForViewport_DoesNotSpendEllipsisOnSingleHiddenRow(t *t
 	}
 }
 
+func TestSelectGroupedRowsForViewport_ReopensSmallCollapsedRunningSection(t *testing.T) {
+	launchID := int64(4092)
+	jobs := []*db.Job{
+		{ID: 3382, Status: db.StatusRunning, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "progressive-weight-streaming", Description: "running 1", StartTime: 1},
+		{ID: 3384, Status: db.StatusRunning, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "progressive-weight-streaming", Description: "running 2", StartTime: 1},
+		{ID: 3390, Status: db.StatusQueued, Host: db.LaunchHost(launchID), LaunchID: &launchID, Project: "llm-performance-models", Description: "agent starting", QueuedAt: 1},
+		{ID: 3385, Status: db.StatusQueued, Project: "llm-performance-models", Description: "MoE probe", CreatedAt: 1},
+		{ID: 3389, Status: db.StatusQueued, Project: "progressive-weight-streaming", Description: "retry pending", CreatedAt: 1},
+	}
+	for i := 0; i < 12; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(3400 + i), Status: db.StatusCompleted, ExitCode: testIntPtr(0), Project: "llm-performance-models", Description: fmt.Sprintf("completed %d", i), EndTime: testInt64Ptr(2)})
+	}
+	for i := 0; i < 13; i++ {
+		jobs = append(jobs, &db.Job{ID: int64(3500 + i), Status: db.StatusFailed, Project: "llm-performance-models", Description: fmt.Sprintf("failed %d", i), EndTime: testInt64Ptr(2)})
+	}
+
+	rows := buildGroupedStatusRowsWithOptions(jobs, 120, groupedStatusRenderOptions{
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		now:              time.Unix(10_000, 0),
+	})
+	cursorRowIdx := groupedRowIndexForJob(rows, 3385)
+	if cursorRowIdx < 0 {
+		t.Fatal("unplaced job wj3385 row not found")
+	}
+
+	lines := selectGroupedRowsForViewport(rows, 24, cursorRowIdx)
+	text := joinViewportText(lines)
+	for _, want := range []string{"Running (2):", "wj3382", "wj3384", "Unplaced (2):", "wj3385"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("viewport should keep small running section visible; missing %q:\n%s", want, text)
+		}
+	}
+	if len(lines) > 24 {
+		t.Fatalf("viewport exceeded budget: %d > 24\n%s", len(lines), text)
+	}
+}
+
 func TestAllocateSectionBudgets_Invariants(t *testing.T) {
 	secs := []sectionAlloc{
 		{total: 20, minVisible: 2},

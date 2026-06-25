@@ -4547,6 +4547,62 @@ func selectGroupedRowsForViewport(rows []groupedStatusRow, maxLines, cursorRowId
 		}
 		lines = render()
 	}
+	// The fit pass may collapse a small section and then leave room after a
+	// larger section is shortened. Reopen the closest small sections when doing
+	// so still fits, trading rows out of the largest non-selected section.
+	for {
+		candidate := -1
+		for i := range sections {
+			if i == cursorSection || !sections[i].summaryOnly || len(sections[i].rowIdxs) == 0 {
+				continue
+			}
+			if candidate < 0 {
+				candidate = i
+				continue
+			}
+			candidateDist := absDistance(candidate, cursorSection)
+			dist := absDistance(i, cursorSection)
+			if dist < candidateDist || (dist == candidateDist && len(sections[i].rowIdxs) < len(sections[candidate].rowIdxs)) {
+				candidate = i
+			}
+		}
+		if candidate < 0 {
+			break
+		}
+		snapshot := append([]sectionState(nil), sections...)
+		s := &sections[candidate]
+		total := len(s.rowIdxs)
+		s.summaryOnly = false
+		s.leadingEllipsis = false
+		s.windowStart = 0
+		s.shownRows = sectionMinVisible(total)
+		s.ellipsis = s.shownRows < total
+		normalizeSectionWindow(s)
+		next := render()
+		for len(next) > maxLines {
+			victim := -1
+			for i := range sections {
+				if i == cursorSection || i == candidate || sections[i].summaryOnly || len(sections[i].rowIdxs) == 0 || sections[i].shownRows <= 1 {
+					continue
+				}
+				if victim < 0 || sections[i].shownRows > sections[victim].shownRows {
+					victim = i
+				}
+			}
+			if victim < 0 {
+				break
+			}
+			v := &sections[victim]
+			v.shownRows--
+			v.ellipsis = v.shownRows < len(v.rowIdxs)
+			next = render()
+		}
+		if len(next) > maxLines {
+			copy(sections, snapshot)
+			break
+		}
+		lines = next
+	}
 	if len(lines) > maxLines {
 		lines = capViewportKeepingRow(lines, maxLines, cursorRowIdx)
 	}
