@@ -1013,8 +1013,14 @@ launch all unplaced jobs at once.
 ### Prerequisites
 
 ```
+# Vast.ai
 pip install vastai
 vastai set api-key YOUR_API_KEY
+
+# RunPod
+brew install runpodctl
+runpodctl doctor
+weft runpod setup
 ```
 
 ### Using `weft start instance`
@@ -1026,8 +1032,8 @@ vastai set api-key YOUR_API_KEY
 > [Coordinating with the autopilot](instances.md#coordinating-with-the-autopilot).
 
 `weft start instance` (also `weft start instances` and `weft instance
-launch`) groups unplaced jobs by GPU requirements, searches for Vast.ai
-offers in parallel, and launches instances concurrently:
+launch`) groups unplaced jobs by GPU requirements, searches enabled cloud
+providers in parallel, and launches instances concurrently:
 
 ```
 laptop$ weft start instance
@@ -1045,7 +1051,13 @@ laptop$ weft start instance --no-watch   # Launch and exit immediately
 laptop$ weft start instance --project X  # Only jobs from project X
 laptop$ weft start instance --jobs wj42,wj43  # Only these specific jobs
 laptop$ weft start instance --yes        # Non-interactive batch of everything unplaced
+laptop$ weft start instance --runpod-cloud-type secure  # RunPod secure cloud for this launch
 ```
+
+On a fresh config, Weft searches Vast.ai only. Enable RunPod with
+`weft runpod setup` or `weft provider enable runpod`. RunPod launches use
+community cloud by default; set `[runpod] cloud_type = "secure"` in
+`~/.config/weft/config.toml` to make secure cloud the default.
 
 To launch only jobs for the current directory's project:
 

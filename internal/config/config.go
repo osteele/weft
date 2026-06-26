@@ -379,6 +379,9 @@ type RunpodConfig struct {
 	// Enabled controls whether Runpod cloud GPU options are available.
 	// nil means automatic/default provider policy.
 	Enabled *bool `yaml:"enabled" toml:"enabled"`
+	// CloudType selects RunPod secure vs community cloud. Empty defaults to
+	// community to preserve Weft's existing provider behavior.
+	CloudType string `yaml:"cloud_type" toml:"cloud_type"`
 	// SpendingLimit is the maximum cost per job in dollars
 	SpendingLimit float64 `yaml:"spending_limit" toml:"spending_limit"`
 	// DefaultImage is the Docker image for cloud instances
@@ -746,7 +749,13 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 	case cloud.ProviderRunpod:
 		image := cloud.DefaultRunpodImage
 		templateID := ""
+		cloudType := cloud.DefaultRunpodCloudType
 		if c != nil {
+			var err error
+			cloudType, err = c.RunpodCloudType()
+			if err != nil {
+				return cloud.CreateOpts{}, err
+			}
 			configured := strings.TrimSpace(c.Runpod.DefaultImage)
 			if strings.HasPrefix(strings.ToLower(configured), "runpod/") {
 				image = configured
@@ -760,6 +769,7 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 			SSHIdentityFile:  sshIdentity,
 			SSHPublicKeyFile: sshPublicKey,
 			TemplateID:       templateID,
+			RunpodCloudType:  cloudType,
 		}, nil
 	case cloud.ProviderVastai:
 		image := ""
@@ -776,6 +786,15 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 		opts.SSHPublicKeyFile = sshPublicKey
 		return opts, nil
 	}
+}
+
+// RunpodCloudType returns the normalized RunPod cloud type for searches and
+// pod creation. Empty config defaults to community.
+func (c *Config) RunpodCloudType() (string, error) {
+	if c == nil {
+		return cloud.DefaultRunpodCloudType, nil
+	}
+	return cloud.NormalizeRunpodCloudType(c.Runpod.CloudType)
 }
 
 // ProviderEnabledSetting returns the raw tri-state provider setting.

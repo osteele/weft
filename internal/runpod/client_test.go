@@ -58,6 +58,7 @@ func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 		"pod create",
 		"--gpu-id NVIDIA A100 80GB PCIe",
 		"--gpu-count 4",
+		"--cloud-type COMMUNITY",
 		"--template-id tpl-bootstrap",
 		"--image runpod/pytorch:stable",
 		"--volume-in-gb 120",
@@ -67,6 +68,20 @@ func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
+	}
+}
+
+func TestBuildCreatePodArgs_SecureCloudType(t *testing.T) {
+	args, err := buildCreatePodArgs("NVIDIA L4", cloud.CreateOpts{
+		Image:           cloud.DefaultRunpodImage,
+		RunpodCloudType: cloud.RunpodCloudTypeSecure,
+	})
+	if err != nil {
+		t.Fatalf("buildCreatePodArgs: %v", err)
+	}
+	got := strings.Join(args, " ")
+	if !strings.Contains(got, "--cloud-type SECURE") {
+		t.Fatalf("args %q missing secure cloud type", got)
 	}
 }
 
@@ -189,6 +204,19 @@ func TestParseGPUTypeOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("secure cloud uses secure price and filters unsupported", func(t *testing.T) {
+		offers, err := parseGPUTypeOutput([]byte(input), cloud.OfferConstraints{RunpodCloudType: cloud.RunpodCloudTypeSecure})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(offers) != 2 {
+			t.Fatalf("expected 2 secure offers, got %d", len(offers))
+		}
+		if offers[0].CostPerHour != 0.74 {
+			t.Errorf("expected secure price 0.74, got %f", offers[0].CostPerHour)
+		}
+	})
+
 	t.Run("min memory filter", func(t *testing.T) {
 		offers, err := parseGPUTypeOutput([]byte(input), cloud.OfferConstraints{MinGPUMemGB: 24})
 		if err != nil {
@@ -217,21 +245,21 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 	prev := fetchGPUTypesFunc
 	t.Cleanup(func() { fetchGPUTypesFunc = prev })
 	calls := 0
-	fetchGPUTypesFunc = func(context.Context) ([]gqlGPUType, error) {
+	fetchGPUTypesFunc = func(_ context.Context, cloudType string) ([]gqlGPUType, error) {
 		calls++
+		if cloudType != cloud.RunpodCloudTypeCommunity {
+			t.Fatalf("cloudType = %q, want community", cloudType)
+		}
 		price := 0.44
 		stock := "High"
 		return []gqlGPUType{
 			{
-				ID:          "offer-4090",
-				DisplayName: "RTX 4090",
-				MemoryInGb:  24,
-				SecureCloud: true,
-				LowestPrice: &struct {
-					MinimumBidPrice      *float64 `json:"minimumBidPrice"`
-					UninterruptablePrice *float64 `json:"uninterruptablePrice"`
-					StockStatus          *string  `json:"stockStatus"`
-				}{
+				ID:             "offer-4090",
+				DisplayName:    "RTX 4090",
+				MemoryInGb:     24,
+				SecureCloud:    true,
+				CommunityCloud: true,
+				LowestPrice: &gqlLowestPrice{
 					UninterruptablePrice: &price,
 					StockStatus:          &stock,
 				},
@@ -251,6 +279,40 @@ func TestSearchOffersCachesCapabilities(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("fetchGPUTypes calls = %d, want 2", calls)
+	}
+}
+
+func TestSearchOffersUsesClientCloudType(t *testing.T) {
+	prev := fetchGPUTypesFunc
+	t.Cleanup(func() { fetchGPUTypesFunc = prev })
+	fetchGPUTypesFunc = func(_ context.Context, cloudType string) ([]gqlGPUType, error) {
+		if cloudType != cloud.RunpodCloudTypeSecure {
+			t.Fatalf("cloudType = %q, want secure", cloudType)
+		}
+		price := 0.74
+		stock := "High"
+		return []gqlGPUType{
+			{
+				ID:          "offer-4090",
+				DisplayName: "RTX 4090",
+				MemoryInGb:  24,
+				SecureCloud: true,
+				LowestPrice: &gqlLowestPrice{
+					UninterruptablePrice: &price,
+					StockStatus:          &stock,
+				},
+			},
+		}, nil
+	}
+
+	client := newCloudClientForTests(newCLIRunner("runpodctl"))
+	client.cloudType = cloud.RunpodCloudTypeSecure
+	offers, err := client.SearchOffers(cloud.OfferConstraints{})
+	if err != nil {
+		t.Fatalf("SearchOffers: %v", err)
+	}
+	if len(offers) != 1 || offers[0].CostPerHour != 0.74 {
+		t.Fatalf("offers = %+v, want secure-priced offer", offers)
 	}
 }
 

@@ -18,7 +18,12 @@ const graphqlEndpoint = "https://api.runpod.io/graphql"
 // gpuTypesQuery fetches all GPU types with pricing via the RunPod GraphQL API.
 // The REST-like `runpodctl gpu list` command does not include pricing, so we
 // must query GraphQL directly for offer construction.
-const gpuTypesQuery = `{
+func gpuTypesQuery(cloudType string) string {
+	secureCloud := "false"
+	if cloudType == "secure" {
+		secureCloud = "true"
+	}
+	return fmt.Sprintf(`{
   gpuTypes {
     id
     displayName
@@ -26,7 +31,7 @@ const gpuTypesQuery = `{
     secureCloud
     communityCloud
     maxGpuCount
-    lowestPrice(input: {gpuCount: 1}) {
+    lowestPrice(input: {gpuCount: 1, secureCloud: %s}) {
       minimumBidPrice
       uninterruptablePrice
       stockStatus
@@ -39,20 +44,23 @@ const gpuTypesQuery = `{
       stockStatus
     }
   }
-}`
+}`, secureCloud)
+}
 
 type gqlGPUType struct {
-	ID             string `json:"id"`
-	DisplayName    string `json:"displayName"`
-	MemoryInGb     int    `json:"memoryInGb"`
-	SecureCloud    bool   `json:"secureCloud"`
-	CommunityCloud bool   `json:"communityCloud"`
-	MaxGPUCount    int    `json:"maxGpuCount"`
-	LowestPrice    *struct {
-		MinimumBidPrice      *float64 `json:"minimumBidPrice"`
-		UninterruptablePrice *float64 `json:"uninterruptablePrice"`
-		StockStatus          *string  `json:"stockStatus"`
-	} `json:"lowestPrice"`
+	ID             string          `json:"id"`
+	DisplayName    string          `json:"displayName"`
+	MemoryInGb     int             `json:"memoryInGb"`
+	SecureCloud    bool            `json:"secureCloud"`
+	CommunityCloud bool            `json:"communityCloud"`
+	MaxGPUCount    int             `json:"maxGpuCount"`
+	LowestPrice    *gqlLowestPrice `json:"lowestPrice"`
+}
+
+type gqlLowestPrice struct {
+	MinimumBidPrice      *float64 `json:"minimumBidPrice"`
+	UninterruptablePrice *float64 `json:"uninterruptablePrice"`
+	StockStatus          *string  `json:"stockStatus"`
 }
 
 type gqlDataCenter struct {
@@ -101,13 +109,13 @@ func readAPIKey() (string, error) {
 // stale/aggregated; the `dataCenters.gpuAvailability` list is authoritative for
 // which GPU types can actually be rented right now. GPU types absent from all
 // datacenter availability lists are filtered out.
-func fetchGPUTypes(ctx context.Context) ([]gqlGPUType, error) {
+func fetchGPUTypes(ctx context.Context, cloudType string) ([]gqlGPUType, error) {
 	apiKey, err := readAPIKey()
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := json.Marshal(map[string]string{"query": gpuTypesQuery})
+	body, err := json.Marshal(map[string]string{"query": gpuTypesQuery(cloudType)})
 	if err != nil {
 		return nil, err
 	}

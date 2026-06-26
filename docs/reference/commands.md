@@ -29,6 +29,10 @@ For compatibility, when no provider has an explicit `enabled` setting, Weft
 searches Vast.ai and leaves RunPod inactive. Once any provider is explicitly
 enabled or disabled, Weft searches only providers with `enabled = true`.
 
+RunPod launches use community cloud by default. Set
+`[runpod] cloud_type = "secure"` in `~/.config/weft/config.toml`, or pass
+`weft start instance --runpod-cloud-type secure` for one launch.
+
 Examples:
 
 ```bash
@@ -1317,6 +1321,7 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 - `--max-spend USD`: Hard dollar cap for the launch
 - `--max-time DURATION`: Hard wall-clock cap
 - `--grace-period DURATION`: Grace period after failure (default: `5m`)
+- `--runpod-cloud-type community|secure`: Override RunPod cloud type for this launch. The default comes from `[runpod] cloud_type`, or `community` when unset.
 - `--strategy cheap|fast|fastest`: Offer selection strategy (default: `cheap`)
 - `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`; `0` disables)
 - `--distinct-machines`: Place selected jobs on different Vast.ai physical machines
@@ -1333,6 +1338,7 @@ weft start instance --yes --watch   # Launch everything, then watch
 weft start instance --dry-run       # Preview without launching
 weft start instance --strategy fastest # Prefer fastest GPUs
 weft start instance --min-survival 0 # Disable survival floor
+weft start instance --runpod-cloud-type secure # Request RunPod secure cloud
 weft start instance --affinity wj789 --jobs wj790 # Run where wj789 last ran
 ```
 

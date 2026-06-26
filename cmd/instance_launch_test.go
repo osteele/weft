@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remediation"
 )
@@ -52,6 +54,19 @@ func TestParseLaunchOpts(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+func TestApplyRunpodCloudTypeOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if err := applyRunpodCloudTypeOverride(cfg, "secure"); err != nil {
+		t.Fatalf("applyRunpodCloudTypeOverride: %v", err)
+	}
+	if cfg.Runpod.CloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("CloudType = %q, want secure", cfg.Runpod.CloudType)
+	}
+	if err := applyRunpodCloudTypeOverride(cfg, "private"); err == nil {
+		t.Fatal("applyRunpodCloudTypeOverride error = nil, want invalid cloud type error")
+	}
+}
 
 func TestParseLaunchJobIDFilter(t *testing.T) {
 	got, err := parseLaunchJobIDFilter("1570, 1571 ,1572")

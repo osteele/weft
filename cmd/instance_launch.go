@@ -49,6 +49,7 @@ var (
 	instanceLaunchMinSurvival       float64
 	instanceLaunchSkipWorkdirDelete bool
 	instanceLaunchProject           string
+	instanceLaunchRunpodCloudType   string
 	instanceLaunchTUI               bool
 	instanceLaunchPlain             bool
 	instanceLaunchDistinctMachines  bool
@@ -68,6 +69,7 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	cmd.Flags().StringVar(&instanceLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().StringVar(&instanceLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
+	cmd.Flags().StringVar(&instanceLaunchRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for this launch: community or secure (default from config)")
 	cmd.Flags().StringVar(&instanceLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize expected completion time), or 'fastest' (minimize happy-path runtime)")
 	cmd.Flags().Float64Var(&instanceLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
 	cmd.Flags().BoolVar(&instanceLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
@@ -98,6 +100,9 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if err := applyRunpodCloudTypeOverride(cfg, instanceLaunchRunpodCloudType); err != nil {
+		return err
 	}
 	agentdeploy.StartBackgroundPrewarm("linux", "amd64")
 
@@ -948,6 +953,18 @@ func shouldWatch() bool {
 		return true
 	}
 	return !instanceLaunchNoWatch
+}
+
+func applyRunpodCloudTypeOverride(cfg *config.Config, raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	cloudType, err := cloud.NormalizeRunpodCloudType(raw)
+	if err != nil {
+		return err
+	}
+	cfg.Runpod.CloudType = cloudType
+	return nil
 }
 
 func parseLaunchOpts() campaign.LaunchOpts {

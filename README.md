@@ -181,6 +181,9 @@ public_key_file = "~/.ssh/weft_cloud_ed25519.pub"
 
 [sync]
 exclude_dirs = ["data", "runs"]
+
+[runpod]
+# cloud_type = "secure" # default is "community"
 ```
 
 Use `.weft.toml` for project-level source excludes, output directories, cloud

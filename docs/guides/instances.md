@@ -63,6 +63,17 @@ readiness depends on the shared R2 bootstrap config under
 `weft runpod template print-bootstrap` to inspect the exact startup command
 that the managed template must run.
 
+RunPod cloud type defaults to `community` for Weft launches, regardless of the
+local `runpodctl` default. To request secure cloud pods by default, set:
+
+```toml
+[runpod]
+cloud_type = "secure"
+```
+
+Valid values are `community` and `secure`. For a single manual launch, use
+`weft start instance --runpod-cloud-type secure`.
+
 ## Coordinating with the autopilot
 
 If the autopilot is running, you usually do **not** need to launch instances
@@ -161,6 +172,7 @@ weft start instance --max-spend '$10'   # Budget limit per instance
 weft start instance --max-time 2h       # Time limit per instance
 weft start instance --yes               # Skip TUI, launch all groups
 weft start instance --jobs wj42,wj43    # Filter to specific job IDs
+weft start instance --runpod-cloud-type secure  # Use RunPod secure cloud for this launch
 weft start instance --min-survival 0    # Disable survival floor (allow all offers)
 weft start instance --min-survival 0.6  # Stricter survival floor
 weft start instance --distinct-machines --jobs wj42,wj43
@@ -622,6 +634,7 @@ max_runtime = "4h"
 
 [runpod]
 # enabled = true              # set by `weft runpod setup` or `weft provider enable runpod`
+# cloud_type = "secure"       # default is "community"; valid values: community, secure
 
 [campaign]
 reliability = 0.95             # provider-offer reliability floor (0 disables)

@@ -921,10 +921,10 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
 func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%s/%s/%s",
+	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%s/%s/%s/%s",
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
 		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
-		c.MinCPUCoresEffective, c.MinCUDAVersion, c.InstanceType, provider)
+		c.MinCPUCoresEffective, c.MinCUDAVersion, c.InstanceType, c.RunpodCloudType, provider)
 }
 
 type providerSearchResult struct {
@@ -945,6 +945,9 @@ func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
 	parts = append(parts, fmt.Sprintf("num_gpus=%d", numGPUs))
 	if c.InstanceType != "" {
 		parts = append(parts, "instance_type="+c.InstanceType)
+	}
+	if c.RunpodCloudType != "" {
+		parts = append(parts, "runpod_cloud_type="+c.RunpodCloudType)
 	}
 	if c.Interconnect != "" {
 		parts = append(parts, "interconnect="+c.Interconnect)

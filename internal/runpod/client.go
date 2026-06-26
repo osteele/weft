@@ -32,6 +32,7 @@ type CloudClient struct {
 	cliPath         string
 	runner          *cliRunner
 	runLocalCommand func(context.Context, string) ([]byte, error)
+	cloudType       string
 
 	capsMu sync.Mutex
 	caps   *cliCapabilities
@@ -45,10 +46,21 @@ const officialRunpodUbuntuTemplateID = "runpod-ubuntu-2204"
 
 // NewCloudClient creates a CloudClient that uses runpodctl from PATH.
 func NewCloudClient() *CloudClient {
+	return NewCloudClientWithCloudType(cloud.DefaultRunpodCloudType)
+}
+
+// NewCloudClientWithCloudType creates a CloudClient that searches and creates
+// RunPod pods in the requested cloud class.
+func NewCloudClientWithCloudType(cloudType string) *CloudClient {
+	normalized, err := cloud.NormalizeRunpodCloudType(cloudType)
+	if err != nil {
+		normalized = cloud.DefaultRunpodCloudType
+	}
 	cliPath := "runpodctl"
 	return &CloudClient{
-		cliPath: cliPath,
-		runner:  newCLIRunner(cliPath),
+		cliPath:   cliPath,
+		runner:    newCLIRunner(cliPath),
+		cloudType: normalized,
 		runLocalCommand: func(ctx context.Context, command string) ([]byte, error) {
 			cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 			return cmd.CombinedOutput()
@@ -58,8 +70,9 @@ func NewCloudClient() *CloudClient {
 
 func newCloudClientForTests(runner *cliRunner) *CloudClient {
 	return &CloudClient{
-		cliPath: runner.cliPath,
-		runner:  runner,
+		cliPath:   runner.cliPath,
+		runner:    runner,
+		cloudType: cloud.DefaultRunpodCloudType,
 		runLocalCommand: func(ctx context.Context, command string) ([]byte, error) {
 			cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
 			return cmd.CombinedOutput()
@@ -89,9 +102,15 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 
+	cloudType, err := c.resolveCloudType(constraints.RunpodCloudType)
+	if err != nil {
+		return nil, err
+	}
+	constraints.RunpodCloudType = cloudType
+
 	// runpodctl gpu list no longer returns pricing fields, so we fetch GPU
 	// types with pricing via the RunPod GraphQL API directly.
-	gpuTypes, err := fetchGPUTypesFunc(ctx)
+	gpuTypes, err := fetchGPUTypesFunc(ctx, cloudType)
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
@@ -140,6 +159,9 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 			return nil, fmt.Errorf("runpod ssh key: %w", err)
 		}
 	}
+	if opts.RunpodCloudType == "" {
+		opts.RunpodCloudType = c.cloudType
+	}
 	args, err := buildCreatePodArgs(offerID, opts)
 	if err != nil {
 		return nil, err
@@ -162,6 +184,16 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		Provider:   cloud.ProviderRunpod,
 		Status:     cloud.ProviderStatusCreating,
 	}, nil
+}
+
+func (c *CloudClient) resolveCloudType(override string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		return cloud.NormalizeRunpodCloudType(override)
+	}
+	if strings.TrimSpace(c.cloudType) != "" {
+		return cloud.NormalizeRunpodCloudType(c.cloudType)
+	}
+	return cloud.DefaultRunpodCloudType, nil
 }
 
 func ensureSSHKey(ctx context.Context, runner *cliRunner, cliPath, publicKeyFile string) error {
@@ -468,9 +500,14 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 	if gpuCount <= 0 {
 		gpuCount = 1
 	}
+	cloudType, err := cloud.NormalizeRunpodCloudType(opts.RunpodCloudType)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{"pod", "create",
 		"--gpu-id", offerID,
 		"--gpu-count", fmt.Sprintf("%d", gpuCount),
+		"--cloud-type", strings.ToUpper(cloudType),
 	}
 	switch {
 	case opts.TemplateID != "":
@@ -810,6 +847,10 @@ func parseGPUTypeOutput(data []byte, constraints cloud.OfferConstraints) ([]clou
 }
 
 func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstraints) []cloud.Offer {
+	cloudType, err := cloud.NormalizeRunpodCloudType(constraints.RunpodCloudType)
+	if err != nil {
+		return nil
+	}
 	var offers []cloud.Offer
 	var constraint placement.GPUConstraint
 	if constraints.GPUClass != "" {
@@ -820,6 +861,9 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 		numGPUs = 1
 	}
 	for _, gt := range gpuTypes {
+		if !runpodGPUTypeSupportsCloudType(gt.SecureCloud, gt.CommunityCloud, cloudType) {
+			continue
+		}
 		if constraints.MinGPUMemGB > 0 && gt.MemoryInGb < constraints.MinGPUMemGB {
 			continue
 		}
@@ -873,6 +917,10 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 }
 
 func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+	cloudType, err := cloud.NormalizeRunpodCloudType(constraints.RunpodCloudType)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := decodeJSONArray(data)
 	if err != nil {
 		return nil, fmt.Errorf("parse GPU offers: %w", err)
@@ -883,6 +931,9 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 		constraint = placement.ParseGPUConstraint(constraints.GPUClass)
 	}
 	for _, row := range rows {
+		if !runpodGPUTypeSupportsCloudType(firstBool(row, "secureCloud"), firstBool(row, "communityCloud"), cloudType) {
+			continue
+		}
 		memGB := firstInt(row, "memoryInGb", "gpuMemoryInGb", "gpuMemoryGb", "memory")
 		if constraints.MinGPUMemGB > 0 && memGB < constraints.MinGPUMemGB {
 			continue
@@ -902,7 +953,7 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 			continue
 		}
 
-		price := firstFloat(row, "communityPrice", "securePrice", "costPerHr", "price")
+		price := runpodSearchRowPrice(row, cloudType)
 		if price <= 0 {
 			price = firstFloat(row, "uninterruptablePrice")
 		}
@@ -928,6 +979,25 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 		})
 	}
 	return offers, nil
+}
+
+func runpodGPUTypeSupportsCloudType(secure, community bool, cloudType string) bool {
+	if !secure && !community {
+		return true
+	}
+	switch cloudType {
+	case cloud.RunpodCloudTypeSecure:
+		return secure
+	default:
+		return community
+	}
+}
+
+func runpodSearchRowPrice(row map[string]any, cloudType string) float64 {
+	if cloudType == cloud.RunpodCloudTypeSecure {
+		return firstFloat(row, "securePrice", "costPerHr", "price", "communityPrice")
+	}
+	return firstFloat(row, "communityPrice", "costPerHr", "price", "securePrice")
 }
 
 func parsePods(data []byte) ([]Pod, error) {

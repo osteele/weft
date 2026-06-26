@@ -21,6 +21,9 @@ func TestCloudCreateOpts_RunpodDefaults(t *testing.T) {
 	if !opts.SSHEnabled {
 		t.Fatal("SSHEnabled = false, want true")
 	}
+	if opts.RunpodCloudType != cloud.RunpodCloudTypeCommunity {
+		t.Fatalf("RunpodCloudType = %q, want %q", opts.RunpodCloudType, cloud.RunpodCloudTypeCommunity)
+	}
 }
 
 func TestCloudCreateOpts_RunpodIncludesBootstrapTemplate(t *testing.T) {
@@ -32,6 +35,26 @@ func TestCloudCreateOpts_RunpodIncludesBootstrapTemplate(t *testing.T) {
 	}
 	if opts.TemplateID != "tpl-bootstrap" {
 		t.Fatalf("TemplateID = %q, want tpl-bootstrap", opts.TemplateID)
+	}
+}
+
+func TestCloudCreateOpts_RunpodHonorsCloudType(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runpod.CloudType = "secure"
+	opts, err := cfg.CloudCreateOpts(cloud.ProviderRunpod)
+	if err != nil {
+		t.Fatalf("CloudCreateOpts: %v", err)
+	}
+	if opts.RunpodCloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("RunpodCloudType = %q, want secure", opts.RunpodCloudType)
+	}
+}
+
+func TestCloudCreateOpts_RunpodRejectsInvalidCloudType(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runpod.CloudType = "private"
+	if _, err := cfg.CloudCreateOpts(cloud.ProviderRunpod); err == nil {
+		t.Fatal("CloudCreateOpts error = nil, want invalid cloud type error")
 	}
 }
 

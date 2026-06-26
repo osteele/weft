@@ -143,6 +143,9 @@ account_id = "acct"
 access_key_id = "access"
 secret_access_key = "secret"
 bucket = "bucket"
+
+[runpod]
+cloud_type = "secure"
 `
 	if err := os.WriteFile(tomlPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -172,6 +175,13 @@ bucket = "bucket"
 	}
 	if cfg.Vastai.R2.AccountID != "acct" || cfg.Vastai.R2.AccessKeyID != "access" || cfg.Vastai.R2.SecretAccessKey != "secret" || cfg.Vastai.R2.Bucket != "bucket" {
 		t.Fatalf("vastai.r2 decoded incorrectly: %+v", cfg.Vastai.R2)
+	}
+	cloudType, err := cfg.RunpodCloudType()
+	if err != nil {
+		t.Fatalf("RunpodCloudType: %v", err)
+	}
+	if cloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("runpod.cloud_type = %q, want secure", cloudType)
 	}
 }
 

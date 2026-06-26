@@ -65,7 +65,11 @@ func Discover(cfg *config.Config) Discovery {
 			Provider: cloud.ProviderRunpod,
 			Attempt:  cfg != nil && cfg.ProviderEnabledForDiscovery(cloud.ProviderRunpod),
 			Load: func() (cloud.Client, error) {
-				rc := runpod.NewCloudClient()
+				cloudType, err := cfg.RunpodCloudType()
+				if err != nil {
+					return nil, err
+				}
+				rc := runpod.NewCloudClientWithCloudType(cloudType)
 				if err := rc.Available(); err != nil {
 					return nil, err
 				}

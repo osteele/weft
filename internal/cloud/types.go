@@ -3,6 +3,7 @@ package cloud
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,13 @@ const (
 
 	ProviderVastai Provider = "vastai"
 	ProviderRunpod Provider = "runpod"
+)
+
+// RunPod cloud-type selections.
+const (
+	RunpodCloudTypeCommunity = "community"
+	RunpodCloudTypeSecure    = "secure"
+	DefaultRunpodCloudType   = RunpodCloudTypeCommunity
 )
 
 // DisplayName returns the human-readable provider name for UI output
@@ -43,6 +51,22 @@ func (p Provider) ShortCode() string {
 		return "rp"
 	default:
 		return ""
+	}
+}
+
+// NormalizeRunpodCloudType parses user/config spellings for RunPod cloud
+// classes. Empty means the compiled default.
+func NormalizeRunpodCloudType(raw string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "":
+		return DefaultRunpodCloudType, nil
+	case RunpodCloudTypeCommunity, "community-cloud":
+		return RunpodCloudTypeCommunity, nil
+	case RunpodCloudTypeSecure, "secure-cloud":
+		return RunpodCloudTypeSecure, nil
+	default:
+		return "", fmt.Errorf("unknown RunPod cloud type %q (expected community or secure)", raw)
 	}
 }
 
@@ -133,6 +157,7 @@ type OfferConstraints struct {
 	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
 	MinHostRAMGB         int      // minimum host/system RAM in GB (0 = no floor)
 	InstanceType         string   // desired rental type ("on-demand" or "interruptible")
+	RunpodCloudType      string   // RunPod cloud type ("community" or "secure")
 }
 
 // DefaultExcludeGeos lists countries excluded by default from cloud offers.
@@ -155,6 +180,7 @@ type CreateOpts struct {
 	InstanceType     string            // desired rental type ("on-demand" or "interruptible"), when provider supports it
 	MaxBidPrice      float64           // max bid/price for interruptible rentals, when provider supports it
 	MinCUDAVersion   string            // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
+	RunpodCloudType  string            // RunPod cloud type ("community" or "secure")
 	RegistryAuth     *RegistryAuth     // credentials for pulling private images
 	RunpodRegistryID string            // resolved RunPod registry auth ID
 }

@@ -111,7 +111,7 @@ func TestCreateInstanceWrapsUnavailableOffer(t *testing.T) {
 			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
 		},
 		map[string]stubCLIResponse{
-			"pod create --gpu-id RTX4090 --gpu-count 1 --template-id tpl-bootstrap": {err: errors.New("pod create: gpu RTX4090 no longer exists")},
+			"pod create --gpu-id RTX4090 --gpu-count 1 --cloud-type COMMUNITY --template-id tpl-bootstrap": {err: errors.New("pod create: gpu RTX4090 no longer exists")},
 		},
 	)
 	client := newCloudClientForTests(runner)
