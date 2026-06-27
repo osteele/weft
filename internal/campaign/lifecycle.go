@@ -72,8 +72,9 @@ type LaunchOpts struct {
 	// planning pass, keyed by LaunchGroupSignature.
 	PlacementAlternatives map[string][]RankedOfferAlternative
 
-	distinctAcceptMu       *sync.Mutex
-	distinctAcceptedByMach map[string]int64
+	distinctAcceptMu         *sync.Mutex
+	distinctAcceptedByMach   map[string]int64
+	holdRunpodDriverBlockers bool
 }
 
 func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
@@ -604,6 +605,43 @@ func (e *distinctMachinePostCreateConflictError) Unwrap() error {
 	return cloud.ErrOfferUnavailable
 }
 
+const phaseDriverTooOld = "infra-failure:driver-too-old"
+
+type postCreateDriverCompatibilityError struct {
+	LaunchID      int64
+	Provider      cloud.Provider
+	ProviderID    string
+	MachineKey    string
+	RequiredMajor int
+	ActualMajor   int
+	ActualVersion string
+	KeepAlive     bool
+}
+
+func (e *postCreateDriverCompatibilityError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("RunPod pod driver %s (major %d) is below required major %d",
+		e.ActualVersion, e.ActualMajor, e.RequiredMajor)
+}
+
+func (e *postCreateDriverCompatibilityError) Unwrap() error {
+	return cloud.ErrOfferUnavailable
+}
+
+type postCreateDriverFailureReport struct {
+	TimestampUnix   int64  `json:"timestamp_unix"`
+	RequiredMajor   int    `json:"required_driver_major"`
+	ActualMajor     int    `json:"actual_driver_major"`
+	ActualVersion   string `json:"actual_driver_version"`
+	NvidiaSmiOutput string `json:"nvidia_smi_query_output,omitempty"`
+}
+
+type runpodDriverVersionProber interface {
+	ProbeDriverVersion(context.Context, string) (string, error)
+}
+
 func runpodObservedBootstrapPhase(phase string) string {
 	switch strings.TrimSpace(phase) {
 	case "waiting for SSH":
@@ -617,6 +655,98 @@ func runpodObservedBootstrapPhase(phase string) string {
 	default:
 		return ""
 	}
+}
+
+func runpodPostCreateDriverCompatibility(
+	ctx context.Context,
+	r2Client *r2.Client,
+	client cloud.Client,
+	instanceID int64,
+	providerInstID string,
+	machineID string,
+	requiredMajor int,
+	keepAlive bool,
+	progress cloud.ProgressFunc,
+) error {
+	if requiredMajor <= 0 || client == nil || client.Provider() != cloud.ProviderRunpod {
+		return nil
+	}
+	prober, ok := client.(runpodDriverVersionProber)
+	if !ok {
+		slog.Debug("runpod driver probe unsupported", "launch_id", instanceID)
+		return nil
+	}
+	if progress != nil {
+		progress("probing RunPod driver compatibility")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, runpodSSHBootstrapTimeout)
+	defer cancel()
+	out, err := prober.ProbeDriverVersion(probeCtx, providerInstID)
+	if err != nil {
+		slog.Warn("runpod driver probe failed; deferring to agent preflight",
+			"component", "launch", "launch_id", instanceID, "provider_id", providerInstID, "error", err)
+		return nil
+	}
+	version, major, ok := parseDriverMajor(out)
+	if !ok {
+		slog.Warn("runpod driver probe returned unparseable output; deferring to agent preflight",
+			"component", "launch", "launch_id", instanceID, "provider_id", providerInstID, "output", strings.TrimSpace(out))
+		return nil
+	}
+	if major >= requiredMajor {
+		if progress != nil {
+			progress(fmt.Sprintf("RunPod driver compatible: %s", version))
+		}
+		return nil
+	}
+
+	report := postCreateDriverFailureReport{
+		TimestampUnix:   time.Now().Unix(),
+		RequiredMajor:   requiredMajor,
+		ActualMajor:     major,
+		ActualVersion:   version,
+		NvidiaSmiOutput: out,
+	}
+	if r2Client != nil && r2Client.IsConfigured() {
+		if data, marshalErr := json.MarshalIndent(report, "", "  "); marshalErr == nil {
+			_ = r2Client.PutObject(ctx, r2keys.InstanceDriverFailure(instanceID), bytes.NewReader(data), "application/json")
+		}
+		_ = r2Client.PutObject(ctx, r2keys.InstancePhase(instanceID), strings.NewReader(phaseDriverTooOld), "text/plain")
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("RunPod driver rejected: %s < %d", version, requiredMajor))
+	}
+	return &postCreateDriverCompatibilityError{
+		LaunchID:      instanceID,
+		Provider:      client.Provider(),
+		ProviderID:    providerInstID,
+		MachineKey:    db.ProviderMachineKey(string(cloud.ProviderRunpod), machineID),
+		RequiredMajor: requiredMajor,
+		ActualMajor:   major,
+		ActualVersion: version,
+		KeepAlive:     keepAlive && strings.TrimSpace(providerInstID) != "",
+	}
+}
+
+var driverMajorPattern = regexp.MustCompile(`(\d+)(?:\.(\d+))?(?:\.(\d+))?`)
+
+func parseDriverMajor(out string) (version string, major int, ok bool) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		m := driverMajorPattern.FindString(line)
+		if m == "" {
+			continue
+		}
+		n, err := strconv.Atoi(strings.SplitN(m, ".", 2)[0])
+		if err != nil {
+			continue
+		}
+		return line, n, true
+	}
+	return "", 0, false
 }
 
 func recordRunpodObservedBootstrapPhase(database *sql.DB, campaignID *int64, launchID int64, phase string) {
@@ -1509,26 +1639,36 @@ func launchCampaignWithStager(
 				})
 			})
 
-			distinctReplans := retrypolicy.MaxGroupReplans()
-			if opts.DistinctMachines {
-				distinctReplans += retrypolicy.MaxCreateAttempts() - 1
+			maxReplans := retrypolicy.MaxGroupReplans()
+			if opts.DistinctMachines || (ofr.Provider == cloud.ProviderRunpod && group.MinDriverVersion > 0) {
+				maxReplans += retrypolicy.MaxCreateAttempts() - 1
 			}
-			var blockers []distinctMachineBlocker
+			var blockers []runpodHeldBlocker
 			cID, currentOffer, _, err := runGroupLaunchWithReplan(
 				ofr,
 				client,
-				distinctReplans,
+				maxReplans,
 				func(c cloud.Client, o cloud.Offer) (int64, error) {
+					launchOpts := opts
+					launchOpts.holdRunpodDriverBlockers = true
 					id, launchErr := LaunchInstance(
-						c, clients, database, &campaignID, group, o, opts, r2Cfg, createOpts,
+						c, clients, database, &campaignID, group, o, launchOpts, r2Cfg, createOpts,
 						groupAssets, replacementOffer, progress, instanceRegistered,
 					)
 					var conflictErr *distinctMachinePostCreateConflictError
 					if errors.As(launchErr, &conflictErr) && conflictErr.KeepAlive {
-						blockers = append(blockers, distinctMachineBlocker{
+						blockers = append(blockers, runpodHeldBlocker{
 							LaunchID:   conflictErr.LaunchID,
 							Provider:   conflictErr.Provider,
 							ProviderID: conflictErr.ProviderID,
+						})
+					}
+					var driverErr *postCreateDriverCompatibilityError
+					if errors.As(launchErr, &driverErr) && driverErr.KeepAlive {
+						blockers = append(blockers, runpodHeldBlocker{
+							LaunchID:   driverErr.LaunchID,
+							Provider:   driverErr.Provider,
+							ProviderID: driverErr.ProviderID,
 						})
 					}
 					return id, launchErr
@@ -1541,11 +1681,11 @@ func launchCampaignWithStager(
 				},
 				progress,
 			)
-			blockerDetail := "distinct-machine replacement accepted; releasing held RunPod pod"
+			blockerDetail := "replacement accepted; releasing held RunPod pod"
 			if err != nil {
-				blockerDetail = "distinct-machine launch failed; releasing held RunPod pod"
+				blockerDetail = "launch failed; releasing held RunPod pod"
 			}
-			destroyDistinctMachineBlockers(database, func(p cloud.Provider) cloud.Client {
+			destroyRunpodHeldBlockers(database, func(p cloud.Provider) cloud.Client {
 				return clientForProvider(clients, p)
 			}, blockers, blockerDetail)
 
@@ -1757,20 +1897,20 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 	return nil
 }
 
-type distinctMachineBlocker struct {
+type runpodHeldBlocker struct {
 	LaunchID   int64
 	Provider   cloud.Provider
 	ProviderID string
 }
 
-func destroyDistinctMachineBlockers(database *sql.DB, clientForProvider func(cloud.Provider) cloud.Client, blockers []distinctMachineBlocker, detail string) {
+func destroyRunpodHeldBlockers(database *sql.DB, clientForProvider func(cloud.Provider) cloud.Client, blockers []runpodHeldBlocker, detail string) {
 	for _, blocker := range blockers {
 		if blocker.LaunchID <= 0 || blocker.ProviderID == "" {
 			continue
 		}
 		client := clientForProvider(blocker.Provider)
 		if client == nil {
-			slog.Warn("distinct-machine blocker cleanup skipped: no provider client",
+			slog.Warn("runpod held-blocker cleanup skipped: no provider client",
 				"component", "launch",
 				"launch_id", blocker.LaunchID,
 				"provider", blocker.Provider,
@@ -1778,7 +1918,7 @@ func destroyDistinctMachineBlockers(database *sql.DB, clientForProvider func(clo
 			continue
 		}
 		if err := client.DestroyInstance(blocker.ProviderID); err != nil {
-			slog.Warn("distinct-machine blocker cleanup failed",
+			slog.Warn("runpod held-blocker cleanup failed",
 				"component", "launch",
 				"launch_id", blocker.LaunchID,
 				"provider", blocker.Provider,
@@ -1786,7 +1926,7 @@ func destroyDistinctMachineBlockers(database *sql.DB, clientForProvider func(clo
 				"error", err)
 			oplog.Log(oplog.OpLaunchDestroyFailed,
 				oplog.WithError(err),
-				oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=distinct_machine_blocker_cleanup",
+				oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=runpod_held_blocker_cleanup",
 					blocker.Provider, blocker.ProviderID, blocker.LaunchID),
 			)
 			continue
@@ -2520,6 +2660,34 @@ func LaunchInstance(
 		if opts.distinctAcceptMu != nil {
 			opts.distinctAcceptMu.Unlock()
 		}
+	}
+
+	if err := runpodPostCreateDriverCompatibility(
+		ctx,
+		r2Assets.Client,
+		client,
+		instanceID,
+		providerInstID,
+		observedMachineID,
+		group.MinDriverVersion,
+		opts.holdRunpodDriverBlockers,
+		emitProgress,
+	); err != nil {
+		var driverErr *postCreateDriverCompatibilityError
+		if errors.As(err, &driverErr) && driverErr.KeepAlive {
+			reason := err.Error()
+			_ = db.SetLaunchCordoned(database, instanceID, true, reason)
+			_, _ = db.SetLaunchLiveInstancePhase(database, instanceID, phaseDriverTooOld)
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance sampled incompatible RunPod driver before destination acceptance")
+			emitProgress(reason + "; holding pod and searching again")
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d provider=%s provider_instance_id=%s reason=driver_too_old detail=%s",
+				instanceID, client.Provider(), providerInstID, reason))
+			return instanceID, err
+		}
+		_, _ = db.SetLaunchLiveInstancePhase(database, instanceID, phaseDriverTooOld)
+		failLaunchInfra("driver compatibility rejected", err)
+		return instanceID, err
 	}
 
 	// Record data center if available

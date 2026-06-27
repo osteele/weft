@@ -581,7 +581,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		wg.Add(1)
 		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client, predecessorID int64, hasPredecessor bool) {
 			defer wg.Done()
-			createOpts, createOptsErr := resolveRelaunchCreateOpts(cfg, offer.Provider)
+			initialCreateOpts, createOptsErr := resolveRelaunchCreateOpts(cfg, offer.Provider)
 			if createOptsErr != nil {
 				mu.Lock()
 				defer mu.Unlock()
@@ -597,6 +597,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), createOptsErr))
 				recordGroupReasons(result, cfg.ResetJobs, group, reason)
 				return
+			}
+			createOptsForOffer := func(o cloud.Offer) (cloud.CreateOpts, error) {
+				if o.Provider == offer.Provider {
+					return initialCreateOpts, nil
+				}
+				return resolveRelaunchCreateOpts(cfg, o.Provider)
 			}
 			// Open placement intents for this group's jobs immediately before
 			// LaunchInstance, so the autopilot/UI sees them as Placing only
@@ -617,11 +623,60 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 					Detail:    runpodSSHWaitingPhase,
 				})
 			})
-			instanceID, err := LaunchInstance(
-				client, nil, cfg.Database, campaignID, group, offer,
-				cfg.LaunchOpts, cfg.R2Cfg, createOpts,
-				*r2Assets, nil, progress, nil,
+			replans := retrypolicy.MaxGroupReplans()
+			if cfg.LaunchOpts.DistinctMachines || (offer.Provider == cloud.ProviderRunpod && group.MinDriverVersion > 0) {
+				replans += retrypolicy.MaxCreateAttempts() - 1
+			}
+			var blockers []runpodHeldBlocker
+			instanceID, _, _, err := runGroupLaunchWithReplan(
+				offer,
+				client,
+				replans,
+				func(c cloud.Client, o cloud.Offer) (int64, error) {
+					createOpts, optsErr := createOptsForOffer(o)
+					if optsErr != nil {
+						return 0, optsErr
+					}
+					launchOpts := cfg.LaunchOpts
+					launchOpts.holdRunpodDriverBlockers = true
+					id, launchErr := LaunchInstance(
+						c, cfg.Clients, cfg.Database, campaignID, group, o,
+						launchOpts, cfg.R2Cfg, createOpts,
+						*r2Assets, nil, progress, nil,
+					)
+					var conflictErr *distinctMachinePostCreateConflictError
+					if errors.As(launchErr, &conflictErr) && conflictErr.KeepAlive {
+						blockers = append(blockers, runpodHeldBlocker{
+							LaunchID:   conflictErr.LaunchID,
+							Provider:   conflictErr.Provider,
+							ProviderID: conflictErr.ProviderID,
+						})
+					}
+					var driverErr *postCreateDriverCompatibilityError
+					if errors.As(launchErr, &driverErr) && driverErr.KeepAlive {
+						blockers = append(blockers, runpodHeldBlocker{
+							LaunchID:   driverErr.LaunchID,
+							Provider:   driverErr.Provider,
+							ProviderID: driverErr.ProviderID,
+						})
+					}
+					return id, launchErr
+				},
+				func() (*cloud.Offer, error) {
+					return relaunchFreshOffer(cfg, group, minReliability, strategy, r2Assets.Client)
+				},
+				func(p cloud.Provider) cloud.Client {
+					return clientForProvider(cfg.Clients, p)
+				},
+				progress,
 			)
+			blockerDetail := "replacement accepted; releasing held RunPod pod"
+			if err != nil {
+				blockerDetail = "launch failed; releasing held RunPod pod"
+			}
+			destroyRunpodHeldBlockers(cfg.Database, func(p cloud.Provider) cloud.Client {
+				return clientForProvider(cfg.Clients, p)
+			}, blockers, blockerDetail)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -796,6 +851,28 @@ func resolveRelaunchCreateOpts(cfg RelaunchConfig, provider cloud.Provider) (clo
 		createOpts.Image = cloud.DefaultImage
 	}
 	return createOpts, nil
+}
+
+func relaunchFreshOffer(cfg RelaunchConfig, group InstanceGroup, minReliability float64, strategy bidding.SelectionStrategy, r2Client *r2.Client) (*cloud.Offer, error) {
+	raw := FetchGroupRawOffers(cfg.Clients, []InstanceGroup{group}, minReliability)
+	applyDriverFailureExclusions(cfg.Database, r2Client, raw)
+	ranked := RankGroupOffersWithPredictor(raw, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, cfg.MinSurvival)
+	if len(ranked) == 0 {
+		return nil, ErrNoReplacementOffer
+	}
+	gOffer := ranked[0]
+	if gOffer.Err != nil {
+		return nil, gOffer.Err
+	}
+	if gOffer.Offer == nil {
+		constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group, minReliability))
+		detail := gOffer.FilterStats.NoOffersDetail(constraintStr)
+		if strings.TrimSpace(detail) == "" {
+			detail = ErrNoReplacementOffer.Error()
+		}
+		return nil, fmt.Errorf("%w: %s", ErrNoReplacementOffer, detail)
+	}
+	return gOffer.Offer, nil
 }
 
 func relaunchGroupingJobs(jobs []*db.Job) []*db.Job {

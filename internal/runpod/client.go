@@ -578,6 +578,26 @@ func (c *CloudClient) BootstrapFromR2(ctx context.Context, podID, bucket, bootst
 	return c.BootstrapFromR2WithProgress(ctx, podID, bucket, bootstrapKey, nil)
 }
 
+// ProbeDriverVersion waits for RunPod SSH readiness and queries the pod's
+// NVIDIA driver version before we spend time staging workloads onto it.
+func (c *CloudClient) ProbeDriverVersion(ctx context.Context, podID string) (string, error) {
+	if strings.TrimSpace(podID) == "" {
+		return "", fmt.Errorf("pod ID is required")
+	}
+	sshCmd, err := c.waitForSSHCommand(ctx, podID)
+	if err != nil {
+		return "", err
+	}
+	sshCmd = injectNonInteractiveSSHOptions(sshCmd)
+	remoteCmd := `nvidia-smi --query-gpu=driver_version --format=csv,noheader`
+	wrapped := fmt.Sprintf("%s %s", sshCmd, shellQuoteSingle(remoteCmd))
+	out, runErr := c.runLocalCommand(ctx, wrapped)
+	if runErr != nil {
+		return string(out), fmt.Errorf("probe driver over SSH for pod %s: %w: %s", podID, runErr, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 // BootstrapFromR2WithProgress is BootstrapFromR2 with phase callbacks for UIs
 // that need to distinguish SSH readiness from the remote bootstrap command.
 func (c *CloudClient) BootstrapFromR2WithProgress(ctx context.Context, podID, bucket, bootstrapKey string, progress cloud.ProgressFunc) error {

@@ -22,6 +22,18 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db.SetupTestDB(t)
 }
 
+type runpodDriverProbeMockClient struct {
+	*cloud.MockClient
+	probeOutput string
+	probeErr    error
+	probedPodID string
+}
+
+func (m *runpodDriverProbeMockClient) ProbeDriverVersion(_ context.Context, podID string) (string, error) {
+	m.probedPodID = podID
+	return m.probeOutput, m.probeErr
+}
+
 func TestRunPodSSHBootstrapTimeoutPrecedesLaunchingWatchdog(t *testing.T) {
 	if runpodSSHBootstrapTimeout >= launchingPhaseTimeout {
 		t.Fatalf("runpodSSHBootstrapTimeout = %s, must be below launchingPhaseTimeout = %s", runpodSSHBootstrapTimeout, launchingPhaseTimeout)
@@ -386,6 +398,217 @@ func TestLaunchInstanceRunpodDistinctMachineConflictHoldsBlocker(t *testing.T) {
 	}
 	if ci.EffectiveProviderID() != "pod-duplicate" || ci.MachineID != "machine-1" {
 		t.Fatalf("provider/machine = %q/%q, want pod-duplicate/machine-1", ci.EffectiveProviderID(), ci.MachineID)
+	}
+	resetJob, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if resetJob.LaunchID != nil {
+		t.Fatalf("job launch = %v, want nil after blocker rejection", *resetJob.LaunchID)
+	}
+}
+
+func TestLaunchInstanceRunpodDriverCompatibilityRejectsOldDriver(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	job := &db.Job{
+		ID:      104,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass:         "L4",
+		GPUMemGB:         24,
+		MinDriverVersion: 570,
+		Jobs:             []*db.Job{job},
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	var destroyed []string
+	client := &runpodDriverProbeMockClient{
+		MockClient: &cloud.MockClient{
+			ProviderVal: cloud.ProviderRunpod,
+			CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+				return &cloud.Instance{
+					ProviderID: "pod-old-driver",
+					Provider:   cloud.ProviderRunpod,
+					Status:     cloud.ProviderStatusRunning,
+					MachineID:  "machine-old",
+				}, nil
+			},
+			ShowInstanceFunc: func(instanceID string) (*cloud.Instance, error) {
+				return &cloud.Instance{
+					ProviderID: instanceID,
+					Provider:   cloud.ProviderRunpod,
+					Status:     cloud.ProviderStatusRunning,
+					MachineID:  "machine-old",
+				}, nil
+			},
+			DestroyInstanceFunc: func(instanceID string) error {
+				destroyed = append(destroyed, instanceID)
+				return nil
+			},
+		},
+		probeOutput: "550.127.05\n",
+	}
+
+	instanceID, err := LaunchInstance(
+		client, []cloud.Client{client}, database, nil, group,
+		cloud.Offer{ProviderID: "L4", Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L4", GPUMemGB: 24},
+		LaunchOpts{},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected driver compatibility error, got nil")
+	}
+	var driverErr *postCreateDriverCompatibilityError
+	if !errors.As(err, &driverErr) {
+		t.Fatalf("error = %v, want postCreateDriverCompatibilityError", err)
+	}
+	if driverErr.KeepAlive {
+		t.Fatal("KeepAlive = true, want false for direct launch rejection")
+	}
+	if !errors.Is(err, cloud.ErrOfferUnavailable) {
+		t.Fatalf("errors.Is(err, ErrOfferUnavailable) = false")
+	}
+	if client.probedPodID != "pod-old-driver" {
+		t.Fatalf("probedPodID = %q, want pod-old-driver", client.probedPodID)
+	}
+	if len(destroyed) != 1 || destroyed[0] != "pod-old-driver" {
+		t.Fatalf("destroyed = %#v, want pod-old-driver", destroyed)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("status = %q, want failed", ci.Status)
+	}
+	if ci.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Fatalf("termination reason = %q, want infra_failure", ci.TerminationReason)
+	}
+	if ci.EffectiveProviderID() != "pod-old-driver" || ci.MachineID != "machine-old" {
+		t.Fatalf("provider/machine = %q/%q, want pod-old-driver/machine-old", ci.EffectiveProviderID(), ci.MachineID)
+	}
+	state, err := db.GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if state == nil || state.InstancePhase != phaseDriverTooOld {
+		t.Fatalf("instance phase = %#v, want %q", state, phaseDriverTooOld)
+	}
+	resetJob, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if resetJob.LaunchID != nil {
+		t.Fatalf("job launch = %v, want nil after driver rejection", *resetJob.LaunchID)
+	}
+	attempts, err := db.GetLaunchAttempts(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetLaunchAttempts: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome != db.AttemptOutcomeOrphaned {
+		t.Fatalf("attempts = %#v, want one orphaned attempt", attempts)
+	}
+}
+
+func TestLaunchInstanceRunpodDriverCompatibilityHoldsBlockerForReplan(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	job := &db.Job{
+		ID:      105,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass:         "L4",
+		GPUMemGB:         24,
+		MinDriverVersion: 570,
+		Jobs:             []*db.Job{job},
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	var destroyed []string
+	client := &runpodDriverProbeMockClient{
+		MockClient: &cloud.MockClient{
+			ProviderVal: cloud.ProviderRunpod,
+			CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+				return &cloud.Instance{
+					ProviderID: "pod-old-driver",
+					Provider:   cloud.ProviderRunpod,
+					Status:     cloud.ProviderStatusRunning,
+					MachineID:  "machine-old",
+				}, nil
+			},
+			ShowInstanceFunc: func(instanceID string) (*cloud.Instance, error) {
+				return &cloud.Instance{
+					ProviderID: instanceID,
+					Provider:   cloud.ProviderRunpod,
+					Status:     cloud.ProviderStatusRunning,
+					MachineID:  "machine-old",
+				}, nil
+			},
+			DestroyInstanceFunc: func(instanceID string) error {
+				destroyed = append(destroyed, instanceID)
+				return nil
+			},
+		},
+		probeOutput: "550.127.05\n",
+	}
+
+	instanceID, err := LaunchInstance(
+		client, []cloud.Client{client}, database, nil, group,
+		cloud.Offer{ProviderID: "L4", Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L4", GPUMemGB: 24},
+		LaunchOpts{holdRunpodDriverBlockers: true},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected driver compatibility error, got nil")
+	}
+	var driverErr *postCreateDriverCompatibilityError
+	if !errors.As(err, &driverErr) {
+		t.Fatalf("error = %v, want postCreateDriverCompatibilityError", err)
+	}
+	if !driverErr.KeepAlive {
+		t.Fatal("KeepAlive = false, want true for replan-aware launch")
+	}
+	if len(destroyed) != 0 {
+		t.Fatalf("destroyed = %#v, want held blocker", destroyed)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if ci.Status != db.LaunchStatusLaunching {
+		t.Fatalf("status = %q, want launching held blocker", ci.Status)
+	}
+	if !ci.Cordoned || !strings.Contains(ci.CordonReason, "below required major 570") {
+		t.Fatalf("cordon = %v %q, want driver rejection reason", ci.Cordoned, ci.CordonReason)
 	}
 	resetJob, err := db.GetJobByID(database, job.ID)
 	if err != nil {

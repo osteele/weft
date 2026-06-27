@@ -747,6 +747,45 @@ func TestInjectNonInteractiveSSHOptions_ConfiguredIdentityReplacesRunpodIdentity
 	}
 }
 
+func TestProbeDriverVersion(t *testing.T) {
+	runner := newStubRunner(t,
+		map[string]stubCLIResponse{
+			"version":         {out: []byte("runpodctl 2.1.6")},
+			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
+			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
+			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
+		},
+		map[string]stubCLIResponse{
+			"ssh info pod-123": {out: []byte(`{"command":"ssh -i /tmp/RunPod-Key-Go -p 22000 root@1.2.3.4"}`)},
+		},
+	)
+	client := newCloudClientForTests(runner)
+
+	var gotCommand string
+	client.runLocalCommand = func(_ context.Context, command string) ([]byte, error) {
+		gotCommand = command
+		return []byte("550.127.05\n"), nil
+	}
+
+	got, err := client.ProbeDriverVersion(context.Background(), "pod-123")
+	if err != nil {
+		t.Fatalf("ProbeDriverVersion: %v", err)
+	}
+	if got != "550.127.05\n" {
+		t.Fatalf("driver output = %q, want 550.127.05", got)
+	}
+	for _, want := range []string{
+		"-o BatchMode=yes",
+		"-o StrictHostKeyChecking=no",
+		"nvidia-smi --query-gpu=driver_version --format=csv,noheader",
+	} {
+		if !strings.Contains(gotCommand, want) {
+			t.Fatalf("probe command %q missing %q", gotCommand, want)
+		}
+	}
+}
+
 func TestWaitForSSHCommand_RespectsContextDeadline(t *testing.T) {
 	const path = "/opt/homebrew/bin/runpodctl"
 	runner := &cliRunner{
