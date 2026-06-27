@@ -36,6 +36,7 @@ type ScriptMeta struct {
 	MinDriver       string            // Minimum NVIDIA driver version for the image (e.g., "535")
 	MinCUDA         string            // Minimum CUDA compatibility for the provider (e.g., "12.8")
 	ImagePullSecret string            // Registry config key for pulling private images
+	RunpodCloudType string            // RunPod cloud type override ("community" or "secure")
 	VastCapAdd      []string          // Vast.ai-only --cap-add values (e.g., ["SYS_ADMIN"])
 	UvArgs          []string          // Extra arguments to inject into `uv run` commands (e.g., ["--system"])
 	Env             map[string]string // Environment variables to set when running the job
@@ -59,7 +60,7 @@ func (m *ScriptMeta) isEmpty() bool {
 		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
-		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" &&
+		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" && m.RunpodCloudType == "" &&
 		len(m.VastCapAdd) == 0 && len(m.UvArgs) == 0 && len(m.Env) == 0 &&
 		m.PreInstall == "" && !m.Isolated && !m.Preemptible && m.HFOffline == nil
 }
@@ -123,6 +124,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			// `min-cuda` / `min_cuda` are accepted as legacy synonyms.
 			meta.MinCUDA = firstStringValue(wt, "cuda-driver-min", "cuda_driver_min", "min-cuda", "min_cuda")
 			meta.ImagePullSecret = firstStringValue(wt, "image-pull-secret", "image_pull_secret")
+			meta.RunpodCloudType = firstStringValue(wt, "runpod-cloud-type", "runpod_cloud_type")
 			meta.VastCapAdd = normalizeCaps(tomlStringSlice(wt, "vast-cap-add"))
 			meta.UvArgs = tomlStringSlice(wt, "uv-args")
 			meta.Env = tomlStringMap(wt, "env")

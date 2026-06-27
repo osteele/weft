@@ -97,6 +97,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--nvlink-required`: Alias for `--interconnect nvlink`
 - `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
+- `--provider vastai|runpod`: Restrict rental placement to one cloud provider
+- `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
 
 **Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
 specific model and `--gpu-mem` matches that model's actual capacity (A100
@@ -1786,6 +1788,9 @@ weft edit [flags] <job-id>
 - `--depends-on ID[,ID...]`: Require the listed jobs to succeed before running
 - `--depends-on-any ID[,ID...]`: Wait for the listed jobs to finish (success or failure)
 - `--clear-depends`: Remove all dependencies from the job
+- `--provider vastai|runpod`: Change the queued job's rental provider preference
+- `--runpod-cloud-type community|secure`: Set the queued job's RunPod cloud type; use `default`, `auto`, `none`, or `clear` to remove the per-job override
+- `--min-survival FRACTION`: Set the queued job's rental offer survival floor; `0` disables the floor for this job
 
 IDs can also be suffixed with `+` or `:any` to mark them as completion-based dependencies, e.g. `--depends-on 101+` or `--depends-on 101:any`.
 

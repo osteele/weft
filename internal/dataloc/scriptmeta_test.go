@@ -226,6 +226,15 @@ import torch
 			want: &ScriptMeta{MinCUDA: "12.8"},
 		},
 		{
+			name: "runpod cloud type",
+			content: `# /// script
+# [tool.weft]
+# runpod-cloud-type = "secure"
+# ///
+`,
+			want: &ScriptMeta{RunpodCloudType: "secure"},
+		},
+		{
 			name: "image with gpu-mem",
 			content: `# /// script
 # [tool.weft]

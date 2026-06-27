@@ -411,6 +411,17 @@ func TestMergeCompatibleGroups_PreservesIncompatible(t *testing.T) {
 	}
 }
 
+func TestMergeCompatibleGroups_DifferentRunpodCloudTypesStaySeparate(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "L4", Provider: "runpod", RunpodCloudType: cloud.RunpodCloudTypeSecure, GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "L4", Provider: "runpod", GPUMemGB: 20, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 groups (different RunPod cloud types), got %d", len(merged))
+	}
+}
+
 func TestMergeCompatibleGroups_TakesMemorySupremum(t *testing.T) {
 	// Groups in the same VRAM tier merge and take the supremum
 	groups := []InstanceGroup{
@@ -712,6 +723,34 @@ func TestGroupByAffinity_SeparatesMemoryTiers(t *testing.T) {
 	}
 	if group8GB == nil {
 		t.Fatal("expected the four 8GB jobs to be grouped together")
+	}
+}
+
+func TestGroupByAffinity_SeparatesRunpodCloudTypes(t *testing.T) {
+	jobs := []*db.Job{
+		{
+			ID: 1, Status: db.StatusQueued, GPUClass: "l4", GPUMemGB: intPtr(20), Tags: []string{"provider:runpod"},
+			CLIResourceOverrides: &db.CLIResourceOverrides{RunpodCloudType: cloud.RunpodCloudTypeSecure},
+		},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "l4", GPUMemGB: intPtr(20), Tags: []string{"provider:runpod"}},
+	}
+	groups := GroupByAffinity(jobs, nil)
+	if len(groups) != 2 {
+		t.Fatalf("len(groups) = %d, want 2", len(groups))
+	}
+	var secure, defaulted bool
+	for _, group := range groups {
+		switch group.RunpodCloudType {
+		case cloud.RunpodCloudTypeSecure:
+			secure = true
+		case "":
+			defaulted = true
+		default:
+			t.Fatalf("unexpected RunpodCloudType %q", group.RunpodCloudType)
+		}
+	}
+	if !secure || !defaulted {
+		t.Fatalf("secure=%v defaulted=%v, want both true", secure, defaulted)
 	}
 }
 

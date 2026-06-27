@@ -364,6 +364,20 @@ func TestOfferConstraintsForGroup_MultiGPUShape(t *testing.T) {
 	}
 }
 
+func TestOfferConstraintsForGroup_RunpodCloudType(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:        "L4",
+		Provider:        "runpod",
+		RunpodCloudType: cloud.RunpodCloudTypeSecure,
+		GPUMemGB:        20,
+		Jobs:            []*db.Job{{ID: 1, Tags: []string{"provider:runpod"}}},
+	}
+	c := offerConstraintsForGroup(group, 0.95)
+	if c.RunpodCloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("RunpodCloudType = %q, want secure", c.RunpodCloudType)
+	}
+}
+
 func TestScoreGrouping_CheapPrefersMerged(t *testing.T) {
 	// With survival < 1, merging saves retry overhead (fewer instances to fail).
 	// Merged: 1 group with 2 jobs, pays setup once per retry
@@ -1065,6 +1079,24 @@ func TestFilterOffersByProviderCompatibility_DropsUnknownWhenNoKnown(t *testing.
 	}
 	if len(got) != 0 {
 		t.Fatalf("filtered offers = %d, want 0 under required provider compatibility", len(got))
+	}
+}
+
+func TestFilterOffersByProviderCompatibility_KeepsUnknownForPinnedRunPodProbe(t *testing.T) {
+	group := InstanceGroup{Provider: "runpod", MinCUDAVersion: "12.8", MinDriverVersion: 570}
+	offers := []cloud.Offer{
+		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "L4", CostPerHour: 0.50},
+		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "L4", CostPerHour: 0.40},
+	}
+	got, filtered, unknown := filterOffersByProviderCompatibility(group, offers)
+	if filtered != 0 {
+		t.Fatalf("filtered = %d, want 0 for explicitly pinned RunPod probes", filtered)
+	}
+	if unknown != 2 {
+		t.Fatalf("unknown = %d, want 2", unknown)
+	}
+	if len(got) != 2 {
+		t.Fatalf("filtered offers = %d, want both RunPod offers kept", len(got))
 	}
 }
 

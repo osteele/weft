@@ -348,20 +348,30 @@ func (j *Job) RequestedCPUMemGB() int {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
-	Host           string   `json:"host,omitempty"`
-	GPU            string   `json:"gpu,omitempty"`
-	GPUClass       string   `json:"gpu_class,omitempty"`
-	GPUCount       *int     `json:"gpu_count,omitempty"`
-	GPUMemGB       *int     `json:"gpu_mem_gb,omitempty"`
-	GPUMemStrict   *bool    `json:"gpu_mem_strict,omitempty"`
-	Interconnect   string   `json:"interconnect,omitempty"`
-	CPUCores       *int     `json:"cpu_cores,omitempty"`
-	CPUMemGB       *int     `json:"cpu_mem_gb,omitempty"`
-	CPUMemStrict   *bool    `json:"cpu_mem_strict,omitempty"`
-	DiskGB         *int     `json:"disk_gb,omitempty"`
-	RuntimeDiskGB  *int     `json:"runtime_disk_gb,omitempty"`
-	MinSurvival    *float64 `json:"min_survival,omitempty"`
-	MinCUDAVersion string   `json:"min_cuda_version,omitempty"`
+	Host            string   `json:"host,omitempty"`
+	GPU             string   `json:"gpu,omitempty"`
+	GPUClass        string   `json:"gpu_class,omitempty"`
+	GPUCount        *int     `json:"gpu_count,omitempty"`
+	GPUMemGB        *int     `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict    *bool    `json:"gpu_mem_strict,omitempty"`
+	Interconnect    string   `json:"interconnect,omitempty"`
+	CPUCores        *int     `json:"cpu_cores,omitempty"`
+	CPUMemGB        *int     `json:"cpu_mem_gb,omitempty"`
+	CPUMemStrict    *bool    `json:"cpu_mem_strict,omitempty"`
+	DiskGB          *int     `json:"disk_gb,omitempty"`
+	RuntimeDiskGB   *int     `json:"runtime_disk_gb,omitempty"`
+	MinSurvival     *float64 `json:"min_survival,omitempty"`
+	MinCUDAVersion  string   `json:"min_cuda_version,omitempty"`
+	RunpodCloudType string   `json:"runpod_cloud_type,omitempty"`
+}
+
+// RequestedRunpodCloudType returns the per-job RunPod cloud class override.
+// Empty means the provider/config default should be used.
+func (j *Job) RequestedRunpodCloudType() string {
+	if j == nil || j.CLIResourceOverrides == nil {
+		return ""
+	}
+	return strings.TrimSpace(j.CLIResourceOverrides.RunpodCloudType)
 }
 
 // RequestedMinSurvival returns the per-job cloud offer survival floor. A nil
@@ -1462,7 +1472,8 @@ func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
-		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil && o.MinCUDAVersion == ""
+		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil &&
+		o.MinCUDAVersion == "" && o.RunpodCloudType == ""
 }
 
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID

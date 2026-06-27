@@ -108,6 +108,12 @@ func setJobCLIRuntimeDiskOverride(database *sql.DB, job *db.Job, runtimeDiskGB *
 	})
 }
 
+func setJobCLIRunpodCloudTypeOverride(database *sql.DB, job *db.Job, cloudType string) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.RunpodCloudType = cloudType
+	})
+}
+
 func setJobCLIMinSurvivalOverride(database *sql.DB, job *db.Job, minSurvival float64) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		v := minSurvival

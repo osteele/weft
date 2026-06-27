@@ -132,12 +132,13 @@ func TestDevicesByClass(t *testing.T) {
 		className string
 		wantCount int
 	}{
-		// Exact model (substring match on normalized full name)
+		// Exact model matching
 		{"A100", 2},
 		{"a100", 2},
-		{"2080", 1},
+		{"2080", 0}, // Normalized to rtx2080; does not match rtx2080ti
+		{"2080ti", 1},
 		{"3090", 1},
-		{"RTX", 2}, // Matches both 2080 and 3090
+		{"RTX", 0}, // Not a model, generation, or family constraint
 		{"H100", 0},
 		{"rtx-3090", 1},  // Normalized: hyphen stripped
 		{"RTX 3090", 1},  // Normalized: space stripped
@@ -160,6 +161,22 @@ func TestDevicesByClass(t *testing.T) {
 		if len(got) != tt.wantCount {
 			t.Errorf("DevicesByClass(%q) = %v (len %d), want len %d", tt.className, got, len(got), tt.wantCount)
 		}
+	}
+}
+
+func TestDevicesByClass_DoesNotFuzzyMatchExactCatalogModels(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA L40", TotalMemGB: 48},
+			{Index: "1", Name: "NVIDIA L40S", TotalMemGB: 48},
+		},
+	}
+
+	if got := inv.DevicesByClass("l4"); len(got) != 0 {
+		t.Errorf("DevicesByClass(\"l4\") = %v, want no L40/L40S substring match", got)
+	}
+	if got := inv.DevicesByClass("l40"); len(got) != 1 || got[0] != "0" {
+		t.Errorf("DevicesByClass(\"l40\") = %v, want only L40", got)
 	}
 }
 
@@ -798,9 +815,9 @@ func TestEnrichNamesFromHostSpec_MixedGPUs(t *testing.T) {
 	if len(a100s) != 2 {
 		t.Errorf("DevicesByClass(\"a100\") = %v, want 2", a100s)
 	}
-	ti2080s := inv.DevicesByClass("2080")
+	ti2080s := inv.DevicesByClass("2080ti")
 	if len(ti2080s) != 1 {
-		t.Errorf("DevicesByClass(\"2080\") = %v, want 1", ti2080s)
+		t.Errorf("DevicesByClass(\"2080ti\") = %v, want 1", ti2080s)
 	}
 }
 

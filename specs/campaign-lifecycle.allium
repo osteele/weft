@@ -1263,12 +1263,17 @@ rule BeginLaunching {
         -- Implementation: RunPod CLI adapter (internal/runpod/cli.go).
         --
         -- RunPod cloud type defaults to "community" to preserve existing
-        -- Weft behavior. `[runpod] cloud_type = "secure"` and
-        -- `weft start instance --runpod-cloud-type secure` request secure
-        -- cloud instead. Offer pricing/search and `runpodctl pod create`
-        -- MUST use the same cloud type (`secureCloud: true/false` in the
-        -- price query; `--cloud-type SECURE|COMMUNITY` at create time), so
-        -- dry-run cost estimates match the requested pod class.
+        -- Weft behavior. `[runpod] cloud_type = "secure"` changes the
+        -- default; `weft start instance --runpod-cloud-type secure` changes
+        -- one manual launch; and job-level intent from `weft run/edit
+        -- --runpod-cloud-type secure` or PEP 723 [tool.weft]
+        -- runpod-cloud-type changes only those jobs. Job-level intent MUST
+        -- stay attached to the group through image splitting/merging and
+        -- overrides the provider/config default for offer search and create.
+        -- Offer pricing/search and `runpodctl pod create` MUST use the same
+        -- cloud type (`secureCloud: true/false` in the price query;
+        -- `--cloud-type SECURE|COMMUNITY` at create time), so dry-run cost
+        -- estimates match the requested pod class.
         -- Implementation: internal/config/config.go CloudCreateOpts and
         -- internal/runpod/{graphql.go,client.go}.
         --

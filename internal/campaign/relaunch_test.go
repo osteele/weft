@@ -92,6 +92,65 @@ func TestRecordRelaunchAssetStageEvent(t *testing.T) {
 	}
 }
 
+func TestDriverFailureGPUNameSatisfiesGroup_DoesNotTreatL40AsL4(t *testing.T) {
+	group := InstanceGroup{GPUClass: "l4"}
+
+	if !driverFailureGPUNameSatisfiesGroup(group, "NVIDIA L4") {
+		t.Fatal("NVIDIA L4 should satisfy l4")
+	}
+	if driverFailureGPUNameSatisfiesGroup(group, "NVIDIA L40") {
+		t.Fatal("NVIDIA L40 should not satisfy l4")
+	}
+	if driverFailureGPUNameSatisfiesGroup(group, "NVIDIA L40S") {
+		t.Fatal("NVIDIA L40S should not satisfy l4")
+	}
+}
+
+func TestFilterOffersByDriverFailureExclusions(t *testing.T) {
+	exclusions := driverFailureExclusions{
+		machineKeys: map[string]struct{}{
+			db.ProviderMachineKey("runpod", "machine-old-driver"): {},
+		},
+		gpuDataCenters: map[string]struct{}{
+			driverFailureGPUDataCenterKey("runpod", "NVIDIA L4", "EU-RO-1"): {},
+		},
+		gpuNames: map[string]struct{}{
+			driverFailureGPUKey("runpod", "NVIDIA L40"): {},
+		},
+	}
+	offers := []cloud.Offer{
+		{Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L4", DataCenter: "EU-RO-2", MachineID: "ok"},
+		{Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L4", DataCenter: "EU-RO-2", MachineID: "machine-old-driver"},
+		{Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L4", DataCenter: "EU-RO-1", MachineID: "other"},
+		{Provider: cloud.ProviderRunpod, GPUName: "NVIDIA L40", DataCenter: "US-KS-2", MachineID: "different"},
+		{Provider: cloud.ProviderVastai, GPUName: "NVIDIA L40", DataCenter: "US-KS-2", MachineID: "different"},
+	}
+
+	filtered, summary := filterOffersByDriverFailureExclusions(offers, exclusions)
+
+	if summary.Removed != 3 {
+		t.Fatalf("Removed = %d, want 3", summary.Removed)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("filtered len = %d, want 2", len(filtered))
+	}
+	if filtered[0].Provider != cloud.ProviderRunpod || filtered[0].GPUName != "NVIDIA L4" || filtered[0].DataCenter != "EU-RO-2" {
+		t.Fatalf("unexpected first surviving offer: %+v", filtered[0])
+	}
+	if filtered[1].Provider != cloud.ProviderVastai || filtered[1].GPUName != "NVIDIA L40" {
+		t.Fatalf("unexpected second surviving offer: %+v", filtered[1])
+	}
+	wantReasons := []string{"prior incompatible gpu", "same gpu/datacenter", "same provider machine"}
+	if len(summary.Reasons) != len(wantReasons) {
+		t.Fatalf("Reasons = %#v, want %#v", summary.Reasons, wantReasons)
+	}
+	for i, want := range wantReasons {
+		if summary.Reasons[i] != want {
+			t.Fatalf("Reasons[%d] = %q, want %q", i, summary.Reasons[i], want)
+		}
+	}
+}
+
 func TestExceedsRetryBudget_FirstRetry(t *testing.T) {
 	budget := RetryBudget{
 		FirstTimeLimit: 45 * time.Minute,

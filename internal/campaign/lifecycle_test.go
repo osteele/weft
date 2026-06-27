@@ -48,6 +48,14 @@ func TestConfigureBootstrapCreateOpts_RunpodKeepsTemplate(t *testing.T) {
 	}
 }
 
+func TestApplyGroupCreateRequirements_RunpodCloudType(t *testing.T) {
+	opts := cloud.CreateOpts{}
+	applyGroupCreateRequirements(&opts, InstanceGroup{RunpodCloudType: cloud.RunpodCloudTypeSecure})
+	if opts.RunpodCloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("RunpodCloudType = %q, want secure", opts.RunpodCloudType)
+	}
+}
+
 func TestLaunchInstanceNilR2Client(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

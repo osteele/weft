@@ -372,27 +372,20 @@ func (c GPUConstraint) Subsumes(other GPUConstraint) bool {
 }
 
 // MatchesGPUFullName returns true if a full nvidia-smi GPU name (e.g.
-// "NVIDIA A100-PCIE-80GB") satisfies this constraint. For exact model mode
-// it uses substring matching on the normalized full name. For generation
-// modes it identifies the GPU model from the full name and applies generation
-// comparison.
+// "NVIDIA A100-PCIE-80GB") satisfies this constraint. For exact model mode it
+// identifies the catalog model in the full name before accepting short aliases;
+// this avoids collisions such as "l4" matching "L40" or "L40S". For
+// generation modes it identifies the GPU model from the full name and applies
+// generation comparison.
 func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 	normFull := normalizeGPUClass(fullName)
 
 	switch c.mode {
 	case constraintExactModel:
-		return strings.Contains(normFull, c.normalized)
+		return c.matchesExactFullName(normFull)
 
 	case constraintExactGen, constraintMinGen, constraintFamily:
-		// Identify the GPU model by finding which known class is a substring
-		// of the normalized full name. Use the longest match to avoid e.g.
-		// "a10" matching before "a100".
-		bestClass := ""
-		for _, class := range knownGPUClasses {
-			if strings.Contains(normFull, class) && len(class) > len(bestClass) {
-				bestClass = class
-			}
-		}
+		bestClass := bestKnownGPUClassInFullName(normFull)
 		if bestClass == "" {
 			// No known model found. For family constraints, check if the name
 			// starts with the family prefix (e.g., "nvidia" matches "nvidiageforce..."
@@ -405,4 +398,47 @@ func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 		return c.matchesGeneration(generationOf(bestClass))
 	}
 	return false
+}
+
+func (c GPUConstraint) matchesExactFullName(normFull string) bool {
+	if c.normalized == "" || normFull == "" {
+		return false
+	}
+	bestClass := bestKnownGPUClassInFullName(normFull)
+	if bestClass == "" {
+		return strings.Contains(normFull, c.normalized)
+	}
+	if c.normalized == bestClass {
+		return true
+	}
+	if strings.Contains(normFull, c.normalized) && len(c.normalized) > len(bestClass) {
+		return true
+	}
+	if strings.HasPrefix(bestClass, c.normalized) {
+		suffix := bestClass[len(c.normalized):]
+		return isKnownGPUVariantSuffix(suffix)
+	}
+	if strings.HasPrefix(bestClass, "rtx") && strings.TrimPrefix(bestClass, "rtx") == c.normalized {
+		return true
+	}
+	return false
+}
+
+func bestKnownGPUClassInFullName(normFull string) string {
+	bestClass := ""
+	for _, class := range knownGPUClasses {
+		if strings.Contains(normFull, class) && len(class) > len(bestClass) {
+			bestClass = class
+		}
+	}
+	return bestClass
+}
+
+func isKnownGPUVariantSuffix(s string) bool {
+	switch s {
+	case "pcie", "sxm", "sxm2", "sxm4", "nvl", "superchip":
+		return true
+	default:
+		return false
+	}
 }

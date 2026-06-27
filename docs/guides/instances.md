@@ -74,6 +74,17 @@ cloud_type = "secure"
 Valid values are `community` and `secure`. For a single manual launch, use
 `weft start instance --runpod-cloud-type secure`.
 
+For selected queued jobs, use job-level intent instead of changing the global
+default:
+
+```bash
+weft run --runpod-cloud-type secure 'uv run python bench.py'
+weft edit wj3423 --runpod-cloud-type secure
+```
+
+Job-level `--runpod-cloud-type secure` records that job as RunPod-bound and
+does not affect other RunPod jobs.
+
 ## Coordinating with the autopilot
 
 If the autopilot is running, you usually do **not** need to launch instances

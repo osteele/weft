@@ -508,6 +508,61 @@ func TestRunEditUpdatesGPUClassOverride(t *testing.T) {
 	}
 }
 
+func TestRunEditUpdatesMinSurvivalOverride(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("min-survival", "0"); err != nil {
+		t.Fatalf("set min-survival flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "min-survival: disabled") {
+		t.Fatalf("output missing min-survival update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.MinSurvival == nil {
+		t.Fatalf("CLI min-survival override missing: %+v", job.CLIResourceOverrides)
+	}
+	if *job.CLIResourceOverrides.MinSurvival != 0 {
+		t.Fatalf("MinSurvival = %v, want 0", *job.CLIResourceOverrides.MinSurvival)
+	}
+}
+
+func TestRunEditRejectsInvalidMinSurvival(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("min-survival", "1.5"); err != nil {
+		t.Fatalf("set min-survival flag: %v", err)
+	}
+
+	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
+	if err == nil || !strings.Contains(err.Error(), "--min-survival must be between 0 and 1") {
+		t.Fatalf("expected min-survival validation error, got %v", err)
+	}
+}
+
 func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -593,9 +648,13 @@ func resetEditState() {
 	editRetry = false
 	editGPUClass = ""
 	editGPUMem = 0
+	editMinSurvival = 0
 	editProvider = ""
+	editRunpodCloudType = ""
 	editInputs = nil
 	editClearInputs = false
+	editNeeds = nil
+	editClearNeeds = false
 }
 
 func newEditTestCommand() *cobra.Command {

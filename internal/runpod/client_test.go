@@ -241,6 +241,48 @@ func TestParseGPUTypeOutput(t *testing.T) {
 	})
 }
 
+func TestBuildOffersFromGraphQLExactL4DoesNotMatchL40(t *testing.T) {
+	price := 0.44
+	stock := "High"
+	gpuTypes := []gqlGPUType{
+		{
+			ID:             "NVIDIA L4",
+			DisplayName:    "NVIDIA L4",
+			MemoryInGb:     24,
+			CommunityCloud: true,
+			LowestPrice: &gqlLowestPrice{
+				UninterruptablePrice: &price,
+				StockStatus:          &stock,
+			},
+		},
+		{
+			ID:             "NVIDIA L40",
+			DisplayName:    "NVIDIA L40",
+			MemoryInGb:     48,
+			CommunityCloud: true,
+			LowestPrice: &gqlLowestPrice{
+				UninterruptablePrice: &price,
+				StockStatus:          &stock,
+			},
+		},
+		{
+			ID:             "NVIDIA L40S",
+			DisplayName:    "NVIDIA L40S",
+			MemoryInGb:     48,
+			CommunityCloud: true,
+			LowestPrice: &gqlLowestPrice{
+				UninterruptablePrice: &price,
+				StockStatus:          &stock,
+			},
+		},
+	}
+
+	offers := buildOffersFromGraphQL(gpuTypes, cloud.OfferConstraints{GPUClass: "l4", MinGPUMemGB: 20})
+	if len(offers) != 1 || offers[0].ProviderID != "NVIDIA L4" {
+		t.Fatalf("offers = %+v, want only NVIDIA L4", offers)
+	}
+}
+
 func TestSearchOffersCachesCapabilities(t *testing.T) {
 	prev := fetchGPUTypesFunc
 	t.Cleanup(func() { fetchGPUTypesFunc = prev })

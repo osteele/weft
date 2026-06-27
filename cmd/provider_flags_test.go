@@ -56,3 +56,54 @@ func TestWithProviderTag(t *testing.T) {
 		t.Fatalf("cleared tags = %v, want %v", tags, want)
 	}
 }
+
+func TestNormalizeRunpodCloudTypeFlag(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "secure", input: "secure", want: "secure"},
+		{name: "community cloud", input: "community-cloud", want: "community"},
+		{name: "clear", input: "clear", want: ""},
+		{name: "default", input: "default", want: ""},
+		{name: "unknown", input: "private", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeRunpodCloudTypeFlag(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("normalizeRunpodCloudTypeFlag(%q) expected error", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeRunpodCloudTypeFlag(%q): %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeRunpodCloudTypeFlag(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyRunpodCloudTypeProviderIntent(t *testing.T) {
+	tags, err := applyRunpodCloudTypeProviderIntent([]string{"benchmark"}, "", "secure")
+	if err != nil {
+		t.Fatalf("applyRunpodCloudTypeProviderIntent: %v", err)
+	}
+	want := []string{"benchmark", "provider:runpod"}
+	if !reflect.DeepEqual(tags, want) {
+		t.Fatalf("tags = %v, want %v", tags, want)
+	}
+
+	if _, err := applyRunpodCloudTypeProviderIntent([]string{"provider:vastai"}, "", "secure"); err == nil {
+		t.Fatal("expected provider conflict error")
+	}
+	if _, err := applyRunpodCloudTypeProviderIntent(nil, "cool30", "secure"); err == nil {
+		t.Fatal("expected inventory host conflict error")
+	}
+}

@@ -1618,8 +1618,9 @@ rule RetryReplaysSubmissionIntent {
     when: UserRequeue(job) or UserRetryUnplaced(job)
     requires: job.has_script_pep723_block
 
-    -- On retry, resource fields (gpu, gpu_class, gpu_mem) are recomputed
-    -- by re-reading the current PEP 723 [tool.weft] block and replaying
+    -- On retry, resource fields (gpu, gpu_class, gpu_mem, provider-specific
+    -- placement overrides such as runpod_cloud_type) are recomputed by
+    -- re-reading the current PEP 723 [tool.weft] block and replaying
     -- job.cli_overrides on top, using the same CLI > script > unset
     -- precedence as the initial `weft run` submission. Fields the script
     -- no longer declares AND the user did not pin via CLI are cleared.

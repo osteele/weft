@@ -206,11 +206,17 @@ func TestMatchesGPUFullName(t *testing.T) {
 		fullName   string
 		want       bool
 	}{
-		// Exact model — substring match on normalized full name
+		// Exact model
 		{"a100", "NVIDIA A100-PCIE-80GB", true},
 		{"a100", "NVIDIA GeForce RTX 3090", false},
 		{"rtx3090", "NVIDIA GeForce RTX 3090", true},
 		{"3090", "NVIDIA GeForce RTX 3090", true},
+		{"l4", "NVIDIA L4", true},
+		{"l4", "NVIDIA L40", false},
+		{"l4", "NVIDIA L40S", false},
+		{"l40", "NVIDIA L40S", false},
+		{"a100-sxm4-80gb", "NVIDIA A100-SXM4-80GB", true},
+		{"h100", "NVIDIA H100 NVL", true},
 
 		// Generation — identify model from full name
 		{"ampere", "NVIDIA A100-PCIE-80GB", true},

@@ -54,6 +54,7 @@ func normalizedGPUCount(n int) int {
 type InstanceGroup struct {
 	GPUClass         string   // Normalized GPU class (uppercase), e.g. "H100"
 	Provider         string   // Requested provider ("vastai" or "runpod"), empty = any
+	RunpodCloudType  string   // RunPod cloud type override ("community" or "secure"), empty = config/default
 	NumGPUs          int      // Exact number of GPUs requested on one host/rental (0/1 = one)
 	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
 	CPUCores         int      // Minimum effective CPU cores/vCPUs
@@ -191,6 +192,7 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 	var groups []InstanceGroup
 	for _, job := range jobs {
 		provider, _ := db.RequestedProvider(job.Tags)
+		runpodCloudType := job.RequestedRunpodCloudType()
 		mem := 0
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
@@ -202,6 +204,9 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 				continue
 			}
 			if !strings.EqualFold(groups[i].Provider, provider) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(groups[i].RunpodCloudType), runpodCloudType) {
 				continue
 			}
 			if vramTierOf(groups[i].GPUMemGB) != vramTierOf(mem) {
@@ -222,11 +227,12 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 
 		if !merged {
 			groups = append(groups, InstanceGroup{
-				GPUClass:    strings.ToUpper(job.GPUClass),
-				Provider:    provider,
-				GPUMemGB:    mem,
-				Preemptible: job.UsesPreemptiblePlacement(),
-				Jobs:        []*db.Job{job},
+				GPUClass:        strings.ToUpper(job.GPUClass),
+				Provider:        provider,
+				RunpodCloudType: runpodCloudType,
+				GPUMemGB:        mem,
+				Preemptible:     job.UsesPreemptiblePlacement(),
+				Jobs:            []*db.Job{job},
 			})
 		}
 	}
@@ -291,6 +297,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		jobInterconnect := strings.TrimSpace(info.job.RequestedInterconnect())
 		jobPreemptible := info.job.UsesPreemptiblePlacement()
 		jobProvider, _ := db.RequestedProvider(info.job.Tags)
+		jobRunpodCloudType := info.job.RequestedRunpodCloudType()
 
 		bestIdx := -1
 		var bestScore float64
@@ -300,6 +307,9 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 				continue
 			}
 			if !strings.EqualFold(g.group.Provider, jobProvider) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(g.group.RunpodCloudType), jobRunpodCloudType) {
 				continue
 			}
 			if normalizedGPUCount(g.group.NumGPUs) != normalizedGPUCount(jobGPUCount) {
@@ -349,15 +359,16 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 			groups = append(groups, groupState{
 				group: InstanceGroup{
-					GPUClass:     strings.ToUpper(jobGPU),
-					Provider:     jobProvider,
-					NumGPUs:      jobGPUCount,
-					GPUMemGB:     mem,
-					CPUCores:     jobCPUCores,
-					CPUMemGB:     jobCPUMem,
-					Interconnect: jobInterconnect,
-					Preemptible:  jobPreemptible,
-					Jobs:         []*db.Job{info.job},
+					GPUClass:        strings.ToUpper(jobGPU),
+					Provider:        jobProvider,
+					RunpodCloudType: jobRunpodCloudType,
+					NumGPUs:         jobGPUCount,
+					GPUMemGB:        mem,
+					CPUCores:        jobCPUCores,
+					CPUMemGB:        jobCPUMem,
+					Interconnect:    jobInterconnect,
+					Preemptible:     jobPreemptible,
+					Jobs:            []*db.Job{info.job},
 				},
 				hfUnion: hfUnion,
 			})
@@ -488,6 +499,9 @@ func sortGroups(groups []InstanceGroup) {
 		if groups[i].Provider != groups[j].Provider {
 			return groups[i].Provider < groups[j].Provider
 		}
+		if groups[i].RunpodCloudType != groups[j].RunpodCloudType {
+			return groups[i].RunpodCloudType < groups[j].RunpodCloudType
+		}
 		return groups[i].GPUClass < groups[j].GPUClass
 	})
 }
@@ -554,6 +568,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 				continue
 			}
 			if !strings.EqualFold(merged[i].Provider, g.Provider) {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(merged[i].RunpodCloudType), strings.TrimSpace(g.RunpodCloudType)) {
 				continue
 			}
 			if normalizedGPUCount(merged[i].NumGPUs) != normalizedGPUCount(g.NumGPUs) {

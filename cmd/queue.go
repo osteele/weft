@@ -226,7 +226,9 @@ var (
 	editRetry           bool
 	editGPUClass        string
 	editGPUMem          int
+	editMinSurvival     float64
 	editProvider        string
+	editRunpodCloudType string
 	editInputs          []string
 	editClearInputs     bool
 	editNeeds           []string
@@ -920,14 +922,16 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	tagsChanged := cmd.Flags().Changed("tag") || cmd.Flags().Changed("remove-tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
+	minSurvivalChanged := cmd.Flags().Changed("min-survival")
 	providerChanged := cmd.Flags().Changed("provider")
+	runpodCloudTypeChanged := cmd.Flags().Changed("runpod-cloud-type")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	needsChanged := cmd.Flags().Changed("needs") || editClearNeeds
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || providerChanged || inputsChanged || needsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || minSurvivalChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
 	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--provider/--input/--needs or dependency flags")
+		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--min-survival/--provider/--input/--needs or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
@@ -952,6 +956,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	if editRetry && cmd.Flags().Changed("status") {
 		return fmt.Errorf("%w: cannot combine --retry with --status", errFlagConflict)
+	}
+	if minSurvivalChanged && (editMinSurvival < 0 || editMinSurvival > 1) {
+		return fmt.Errorf("--min-survival must be between 0 and 1")
 	}
 
 	// Validate status flag if provided (--retry is equivalent to --status=queued)
@@ -1197,6 +1204,16 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, fmt.Sprintf("GPU memory: %d GB", *gpuMem))
 		}
 	}
+	if minSurvivalChanged {
+		if err := setJobCLIMinSurvivalOverride(database, job, editMinSurvival); err != nil {
+			return fmt.Errorf("update min-survival override: %w", err)
+		}
+		if editMinSurvival == 0 {
+			updates = append(updates, "min-survival: disabled")
+		} else {
+			updates = append(updates, fmt.Sprintf("min-survival: %.0f%%", editMinSurvival*100))
+		}
+	}
 	if providerChanged {
 		normalizedProvider, providerErr := normalizeProviderFlag(editProvider)
 		if providerErr != nil {
@@ -1217,6 +1234,30 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "provider: cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
+		}
+	}
+	if runpodCloudTypeChanged {
+		normalizedCloudType, cloudTypeErr := normalizeRunpodCloudTypeFlag(editRunpodCloudType)
+		if cloudTypeErr != nil {
+			return fmt.Errorf("--runpod-cloud-type: %w", cloudTypeErr)
+		}
+		if normalizedCloudType != "" {
+			newTags, providerErr := applyRunpodCloudTypeProviderIntent(job.Tags, job.Host, normalizedCloudType)
+			if providerErr != nil {
+				return providerErr
+			}
+			if err := db.SetJobTags(database, jobID, newTags); err != nil {
+				return fmt.Errorf("update provider tag: %w", err)
+			}
+			job.Tags = newTags
+		}
+		if err := setJobCLIRunpodCloudTypeOverride(database, job, normalizedCloudType); err != nil {
+			return fmt.Errorf("update RunPod cloud type override: %w", err)
+		}
+		if normalizedCloudType == "" {
+			updates = append(updates, "RunPod cloud type cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("RunPod cloud type: %s", normalizedCloudType))
 		}
 	}
 
@@ -1582,7 +1623,9 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	cmd.Flags().IntVar(&editGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (0 clears)")
+	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
+	cmd.Flags().StringVar(&editRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure (use default/auto/none/clear to clear)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
 	cmd.Flags().StringSliceVar(&editNeeds, "needs", nil, "Producer artifact dependency (e.g., output/foo.pt:wj1234), can be repeated; replaces existing --needs")

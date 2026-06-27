@@ -91,42 +91,43 @@ Examples:
 }
 
 var (
-	runHost          string
-	runDir           string
-	runDescription   string
-	runProject       string
-	runDraft         bool
-	runFollow        bool
-	runWait          bool
-	runNoWait        bool // explicit no-op flag for tooling compatibility
-	runKillJobID     int64
-	runFrom          int64
-	runEnvVars       []string
-	runTags          []string
-	runAfter         int64
-	runAfterAny      int64
-	runGPU           string
-	runGPUCount      int
-	runGPUMem        int
-	runGPUMemStrict  bool
-	runInterconnect  string
-	runCPUCores      int
-	runCPUMem        int
-	runCPUMemStrict  bool
-	runDiskGB        int
-	runRuntimeDiskGB int
-	runGPUClass      string
-	runCUDADriverMin string
-	runProvider      string
-	runInputs        []string
-	runOutputs       []string
-	runProduces      []string
-	runNeeds         []string
-	runDryRun        bool
-	runNoSync        bool
-	runHFToken       bool
-	runHFTokenFrom   string
-	runSecretVars    []string
+	runHost            string
+	runDir             string
+	runDescription     string
+	runProject         string
+	runDraft           bool
+	runFollow          bool
+	runWait            bool
+	runNoWait          bool // explicit no-op flag for tooling compatibility
+	runKillJobID       int64
+	runFrom            int64
+	runEnvVars         []string
+	runTags            []string
+	runAfter           int64
+	runAfterAny        int64
+	runGPU             string
+	runGPUCount        int
+	runGPUMem          int
+	runGPUMemStrict    bool
+	runInterconnect    string
+	runCPUCores        int
+	runCPUMem          int
+	runCPUMemStrict    bool
+	runDiskGB          int
+	runRuntimeDiskGB   int
+	runGPUClass        string
+	runCUDADriverMin   string
+	runProvider        string
+	runRunpodCloudType string
+	runInputs          []string
+	runOutputs         []string
+	runProduces        []string
+	runNeeds           []string
+	runDryRun          bool
+	runNoSync          bool
+	runHFToken         bool
+	runHFTokenFrom     string
+	runSecretVars      []string
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -430,6 +431,7 @@ func init() {
 	runCmd.Flags().StringVar(&runCUDADriverMin, "min-cuda", "", "Alias for --cuda-driver-min")
 	_ = runCmd.Flags().MarkHidden("min-cuda")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "Cloud provider for rental placement (vastai or runpod)")
+	runCmd.Flags().StringVar(&runRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
@@ -509,6 +511,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if provider, ok := db.RequestedProvider(fromJob.Tags); ok {
 				runProvider = provider
 			}
+		}
+		if !cmd.Flags().Changed("runpod-cloud-type") && runRunpodCloudType == "" {
+			runRunpodCloudType = fromJob.RequestedRunpodCloudType()
 		}
 		if runGPUMem == 0 && fromJob.GPUMemGB != nil {
 			runGPUMem = *fromJob.GPUMemGB
@@ -758,6 +763,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runTags = mergeDedup(runTags, []string{db.TagInterruptible})
 			applied = append(applied, "interruptible=true")
 		}
+		if !cmd.Flags().Changed("runpod-cloud-type") && runRunpodCloudType == "" && meta.RunpodCloudType != "" {
+			runRunpodCloudType = meta.RunpodCloudType
+			applied = append(applied, fmt.Sprintf("runpod-cloud-type=%s", meta.RunpodCloudType))
+		}
 		if meta.Image != "" {
 			applied = append(applied, fmt.Sprintf("image=%s", meta.Image))
 		}
@@ -904,6 +913,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		runTags, err = withProviderTag(runTags, runProvider)
 		if err != nil {
 			return fmt.Errorf("--provider: %w", err)
+		}
+	}
+	if cmd.Flags().Changed("runpod-cloud-type") || strings.TrimSpace(runRunpodCloudType) != "" {
+		normalizedCloudType, cloudTypeErr := normalizeRunpodCloudTypeFlag(runRunpodCloudType)
+		if cloudTypeErr != nil {
+			return fmt.Errorf("--runpod-cloud-type: %w", cloudTypeErr)
+		}
+		runRunpodCloudType = normalizedCloudType
+		if runRunpodCloudType != "" {
+			runTags, err = applyRunpodCloudTypeProviderIntent(runTags, host, runRunpodCloudType)
+			if err != nil {
+				return err
+			}
+			cliOverrides.RunpodCloudType = runRunpodCloudType
 		}
 	}
 

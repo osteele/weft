@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -399,12 +401,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			minReliability = *cfg.MinReliability
 		}
 	}
-	groupOffers := FetchGroupOffersWithPredictor(cfg.Clients, groups, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, minReliability, cfg.MinSurvival)
+	rawOffers := FetchGroupRawOffers(cfg.Clients, groups, minReliability)
+	driverExclusionSummaries := applyDriverFailureExclusions(cfg.Database, r2Client, rawOffers)
+	groupOffers := RankGroupOffersWithPredictor(rawOffers, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, cfg.MinSurvival)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup
 	var launchOffers []cloud.Offer
-	for _, gOffer := range groupOffers {
+	for i, gOffer := range groupOffers {
 		// Err must be checked before Offer == nil: a search error always leaves
 		// Offer nil, so the inverse order would mis-classify provider failures
 		// as "no offers" (with a misleading FilterStats-derived detail).
@@ -422,6 +426,9 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		if gOffer.Offer == nil {
 			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(gOffer.Group, minReliability))
 			detail := gOffer.FilterStats.NoOffersDetail(constraintStr)
+			if i < len(driverExclusionSummaries) {
+				detail = appendDriverFailureExclusionDetail(detail, driverExclusionSummaries[i])
+			}
 			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs), "detail", detail)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchSkippedNoOffers,
@@ -1562,6 +1569,246 @@ func mostRecentDiskFullGB(database *sql.DB, group InstanceGroup) int {
 		}
 	}
 	return 0
+}
+
+type driverFailureProbeReport struct {
+	RequiredMajor int    `json:"required_driver_major"`
+	ActualMajor   int    `json:"actual_driver_major"`
+	ActualVersion string `json:"actual_driver_version"`
+}
+
+type driverFailureExclusions struct {
+	machineKeys    map[string]struct{}
+	gpuDataCenters map[string]struct{}
+	gpuNames       map[string]struct{}
+}
+
+type driverFailureExclusionSummary struct {
+	Removed int
+	Reasons []string
+}
+
+func applyDriverFailureExclusions(database *sql.DB, r2Client *r2.Client, raw []GroupRawOffers) []driverFailureExclusionSummary {
+	summaries := make([]driverFailureExclusionSummary, len(raw))
+	if database == nil || r2Client == nil || len(raw) == 0 {
+		return summaries
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for i := range raw {
+		if raw[i].Err != nil || len(raw[i].Offers) == 0 {
+			continue
+		}
+		exclusions := driverFailureExclusionsForGroup(ctx, database, r2Client, raw[i].Group)
+		filtered, summary := filterOffersByDriverFailureExclusions(raw[i].Offers, exclusions)
+		if summary.Removed == 0 {
+			continue
+		}
+		slog.Info("filtered offers by prior driver failure",
+			"component", "relaunch",
+			"gpu_spec", raw[i].Group.GPUSpec(),
+			"filtered", summary.Removed,
+			"remaining", len(filtered),
+			"reason", strings.Join(summary.Reasons, "; "))
+		raw[i].Offers = filtered
+		summaries[i] = summary
+	}
+	return summaries
+}
+
+func driverFailureExclusionsForGroup(ctx context.Context, database *sql.DB, r2Client *r2.Client, group InstanceGroup) driverFailureExclusions {
+	out := driverFailureExclusions{
+		machineKeys:    map[string]struct{}{},
+		gpuDataCenters: map[string]struct{}{},
+		gpuNames:       map[string]struct{}{},
+	}
+	seenLaunches := map[int64]struct{}{}
+	for _, j := range group.Jobs {
+		attempts, err := db.GetLaunchAttempts(database, j.ID)
+		if err != nil {
+			continue
+		}
+		for i := len(attempts) - 1; i >= 0; i-- {
+			launchID := attempts[i].LaunchID
+			if _, seen := seenLaunches[launchID]; seen {
+				continue
+			}
+			seenLaunches[launchID] = struct{}{}
+			launch, err := db.GetLaunch(database, launchID)
+			if err != nil || launch == nil {
+				continue
+			}
+			report, ok := readDriverFailureProbeReport(ctx, r2Client, launchID)
+			if !ok || !driverFailureReportApplies(report, group) {
+				continue
+			}
+			gpuName := launchDriverFailureGPUName(launch)
+			if gpuName == "" {
+				continue
+			}
+			// RunPod search offers are GPU-type scoped; machine/datacenter
+			// avoidance for RunPod needs provider-specific handling.
+			if launch.Provider != string(cloud.ProviderRunpod) {
+				if key := db.ProviderMachineKey(launch.Provider, launch.MachineID); key != "" {
+					out.machineKeys[key] = struct{}{}
+				}
+				if launch.DataCenter != "" {
+					out.gpuDataCenters[driverFailureGPUDataCenterKey(launch.Provider, gpuName, launch.DataCenter)] = struct{}{}
+				}
+			}
+			if !driverFailureGPUNameSatisfiesGroup(group, gpuName) {
+				out.gpuNames[driverFailureGPUKey(launch.Provider, gpuName)] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+func readDriverFailureProbeReport(ctx context.Context, r2Client *r2.Client, launchID int64) (driverFailureProbeReport, bool) {
+	if r2Client == nil || launchID <= 0 {
+		return driverFailureProbeReport{}, false
+	}
+	data, err := r2Client.GetObject(ctx, r2keys.InstanceDriverFailure(launchID))
+	if err != nil {
+		return driverFailureProbeReport{}, false
+	}
+	var report driverFailureProbeReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return driverFailureProbeReport{}, false
+	}
+	return report, true
+}
+
+func driverFailureReportApplies(report driverFailureProbeReport, group InstanceGroup) bool {
+	if report.ActualMajor <= 0 {
+		return false
+	}
+	required := report.RequiredMajor
+	if group.MinDriverVersion > required {
+		required = group.MinDriverVersion
+	}
+	return required > 0 && report.ActualMajor < required
+}
+
+func launchDriverFailureGPUName(launch *db.Launch) string {
+	if launch == nil {
+		return ""
+	}
+	for _, candidate := range []string{launch.ResolvedGPUName, launch.GPUClass, launch.GPUSpec} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func filterOffersByDriverFailureExclusions(offers []cloud.Offer, exclusions driverFailureExclusions) ([]cloud.Offer, driverFailureExclusionSummary) {
+	if len(exclusions.machineKeys) == 0 && len(exclusions.gpuDataCenters) == 0 && len(exclusions.gpuNames) == 0 {
+		return offers, driverFailureExclusionSummary{}
+	}
+	out := offers[:0:0]
+	summary := driverFailureExclusionSummary{}
+	reasons := map[string]struct{}{}
+	for _, offer := range offers {
+		reason := driverFailureOfferExclusionReason(offer, exclusions)
+		if reason == "" {
+			out = append(out, offer)
+			continue
+		}
+		summary.Removed++
+		reasons[reason] = struct{}{}
+	}
+	if summary.Removed > 0 {
+		summary.Reasons = sortedDriverFailureReasons(reasons)
+	}
+	return out, summary
+}
+
+func driverFailureOfferExclusionReason(offer cloud.Offer, exclusions driverFailureExclusions) string {
+	if key := offerMachineClaimKey(offer); key != "" {
+		if _, blocked := exclusions.machineKeys[key]; blocked {
+			return "same provider machine"
+		}
+	}
+	if key := driverFailureGPUDataCenterKey(string(offer.Provider), offer.GPUName, offer.DataCenter); key != "" {
+		if _, blocked := exclusions.gpuDataCenters[key]; blocked {
+			return "same gpu/datacenter"
+		}
+	}
+	if key := driverFailureGPUKey(string(offer.Provider), offer.GPUName); key != "" {
+		if _, blocked := exclusions.gpuNames[key]; blocked {
+			return "prior incompatible gpu"
+		}
+	}
+	return ""
+}
+
+func driverFailureGPUNameSatisfiesGroup(group InstanceGroup, gpuName string) bool {
+	gpuName = strings.TrimSpace(gpuName)
+	if gpuName == "" || strings.TrimSpace(group.GPUClass) == "" {
+		return true
+	}
+	constraint := placement.ParseGPUConstraint(group.GPUClass)
+	return constraint.MatchesGPUFullName(gpuName) || constraint.MatchesGPU(driverFailureGPUClassKey(gpuName))
+}
+
+func driverFailureGPUDataCenterKey(provider, gpuName, dataCenter string) string {
+	provider = strings.TrimSpace(provider)
+	gpuKey := driverFailureGPUClassKey(gpuName)
+	dataCenter = strings.ToLower(strings.TrimSpace(dataCenter))
+	if provider == "" || gpuKey == "" || dataCenter == "" {
+		return ""
+	}
+	return provider + "/" + gpuKey + "/" + dataCenter
+}
+
+func driverFailureGPUKey(provider, gpuName string) string {
+	provider = strings.TrimSpace(provider)
+	gpuKey := driverFailureGPUClassKey(gpuName)
+	if provider == "" || gpuKey == "" {
+		return ""
+	}
+	return provider + "/" + gpuKey
+}
+
+func driverFailureGPUClassKey(gpuName string) string {
+	gpuName = strings.ToLower(strings.TrimSpace(gpuName))
+	var b strings.Builder
+	for _, r := range gpuName {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		}
+	}
+	key := b.String()
+	key = strings.TrimPrefix(key, "nvidiageforce")
+	key = strings.TrimPrefix(key, "nvidia")
+	return key
+}
+
+func sortedDriverFailureReasons(reasons map[string]struct{}) []string {
+	out := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		out = append(out, reason)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func appendDriverFailureExclusionDetail(detail string, summary driverFailureExclusionSummary) string {
+	if summary.Removed == 0 {
+		return detail
+	}
+	suffix := fmt.Sprintf("driver-failure retry exclusions removed %d offers", summary.Removed)
+	if len(summary.Reasons) > 0 {
+		suffix += " (" + strings.Join(summary.Reasons, ", ") + ")"
+	}
+	if strings.TrimSpace(detail) == "" {
+		return suffix
+	}
+	return detail + "; " + suffix
 }
 
 // countAttemptsForRelaunch returns the number of launch attempts for a job,

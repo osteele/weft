@@ -1656,6 +1656,9 @@ func applyGroupCreateRequirements(createOpts *cloud.CreateOpts, group InstanceGr
 	if group.MinCUDAVersion != "" {
 		createOpts.MinCUDAVersion = maxCUDAVersionString(createOpts.MinCUDAVersion, group.MinCUDAVersion)
 	}
+	if runpodCloudType := strings.TrimSpace(group.RunpodCloudType); runpodCloudType != "" {
+		createOpts.RunpodCloudType = runpodCloudType
+	}
 	if createOpts.RegistryAuth != nil || createOpts.Image == "" {
 		return
 	}

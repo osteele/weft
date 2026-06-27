@@ -302,6 +302,7 @@ Supported keys (all optional):
 | `min-driver` / `min_driver` | string or int | `.weft.toml [cloud] min_driver` |
 | `cuda-driver-min` (or legacy `min-cuda` / `min_cuda`) | string | `--cuda-driver-min` |
 | `image-pull-secret` / `image_pull_secret` | string | `.weft.toml [cloud] image_pull_secret` |
+| `runpod-cloud-type` / `runpod_cloud_type` | string (`community` or `secure`) | `--runpod-cloud-type` |
 | `vast-cap-add` | list of strings | Vast.ai `--cap-add` (cloud instance launch) |
 | `uv-args`   | list of strings  | *(injected into `uv run`)* |
 | `env`        | table of strings | `--env` (merged)           |
@@ -311,6 +312,10 @@ CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
+
+`runpod-cloud-type = "secure"` is a per-job RunPod placement override. It
+records the job as RunPod-bound and searches/creates RunPod secure-cloud pods
+for that job without changing the global RunPod default for other jobs.
 
 Malformed PEP 723 metadata is a submission error. Weft does not ignore a broken
 `[tool.weft]` table, because doing so would silently drop resource constraints,

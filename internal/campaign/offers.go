@@ -214,6 +214,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		MinCUDAVersion:   group.MinCUDAVersion,
 		NumGPUs:          normalizedGPUCount(group.NumGPUs),
 		Interconnect:     strings.TrimSpace(group.Interconnect),
+		RunpodCloudType:  strings.TrimSpace(group.RunpodCloudType),
 		// Legacy GPU memory upper metadata is intentionally not passed to search.
 		// Offer selection relies on cost/runtime scoring after the hard
 		// minimum compatibility filters.
@@ -317,28 +318,38 @@ func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
 	}
 }
 
+func groupAllowsUnknownProviderCompatibilityProbe(group InstanceGroup, offer cloud.Offer) bool {
+	return offer.Provider == cloud.ProviderRunpod &&
+		strings.EqualFold(strings.TrimSpace(group.Provider), string(cloud.ProviderRunpod))
+}
+
 func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int, int) {
 	if !groupRequiresProviderCompatibility(group) {
 		return offers, 0, 0
 	}
-	known := make([]cloud.Offer, 0, len(offers))
-	unknown := make([]cloud.Offer, 0)
-	incompatible := 0
+	compatible := make([]cloud.Offer, 0, len(offers))
+	filtered := 0
+	unknown := 0
 	for _, offer := range offers {
 		switch offerCompatibilityStatus(group, offer) {
 		case "incompatible":
-			incompatible++
+			filtered++
 		case "unknown":
-			unknown = append(unknown, offer)
+			unknown++
+			if groupAllowsUnknownProviderCompatibilityProbe(group, offer) {
+				compatible = append(compatible, offer)
+			} else {
+				filtered++
+			}
 		default:
-			known = append(known, offer)
+			compatible = append(compatible, offer)
 		}
 	}
 	// Fail closed when a group declares a CUDA/driver floor. RunPod currently
-	// does not expose driver_version / cuda_max_good at offer search, and
-	// falling back to unknown compatibility has caused runtime
-	// cuda_driver_too_old failures on otherwise cheap/fast offers.
-	return known, incompatible + len(unknown), len(unknown)
+	// does not expose driver_version / cuda_max_good at offer search; only jobs
+	// that explicitly pin provider:runpod are allowed to probe unknown hosts and
+	// rely on the agent's fast driver preflight.
+	return compatible, filtered, unknown
 }
 
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {
