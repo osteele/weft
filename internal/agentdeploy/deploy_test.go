@@ -111,6 +111,34 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 	}
 }
 
+func TestEnsureBuiltWithProgress_CacheHitReportsLocalCache(t *testing.T) {
+	version := "test-progress-cache-hit-" + t.Name()
+	path := CachePath(version, "linux", "amd64")
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("fake-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
+
+	var phases []string
+	got, err := EnsureBuiltWithProgress(version, "linux", "amd64", nil, func(phase string) {
+		phases = append(phases, phase)
+	})
+	if err != nil {
+		t.Fatalf("EnsureBuiltWithProgress: %v", err)
+	}
+	if got != path {
+		t.Errorf("got %s, want %s", got, path)
+	}
+	want := []string{"checking local agent cache", "using local agent cache"}
+	if strings.Join(phases, "|") != strings.Join(want, "|") {
+		t.Fatalf("phases = %v, want %v", phases, want)
+	}
+}
+
 func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	var captured struct {
 		version, goos, goarch, outputPath string

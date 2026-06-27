@@ -195,9 +195,39 @@ func (s *R2AssetStager) setStatus(status AssetStageStatus) {
 	s.statuses[status.Key] = status
 	reporter := s.reporter
 	s.statusMu.Unlock()
+	logAssetStageStatus(status)
 	if reporter != nil {
 		reporter(status)
 	}
+}
+
+func assetStageDetail(status AssetStageStatus) string {
+	parts := []string{
+		fmt.Sprintf("kind=%s", status.Kind),
+		fmt.Sprintf("phase=%s", status.Phase),
+	}
+	if status.Label != "" {
+		parts = append(parts, fmt.Sprintf("label=%s", status.Label))
+	}
+	if status.Key != "" && status.Key != status.Label {
+		parts = append(parts, fmt.Sprintf("key=%s", status.Key))
+	}
+	if status.Ready {
+		parts = append(parts, "ready=true")
+	}
+	return strings.Join(parts, " ")
+}
+
+func logAssetStageStatus(status AssetStageStatus) {
+	op := oplog.OpR2UploadSource
+	if status.Kind == AssetStageKindAgent {
+		op = oplog.OpR2UploadAgent
+	}
+	opts := []oplog.Option{oplog.WithDetail(assetStageDetail(status))}
+	if status.Err != nil {
+		opts = append(opts, oplog.WithError(status.Err))
+	}
+	oplog.Log(op, opts...)
 }
 
 // SnapshotStatuses returns a shallow copy of current asset statuses keyed by
@@ -481,7 +511,11 @@ func (s *R2AssetStager) AwaitAllPerDir() (*R2Assets, map[string]error, error) {
 // returning the pre-staged assets for use by LaunchInstance. This is
 // extracted from LaunchCampaign so that RelaunchOrphanedJobs can reuse it.
 func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, error) {
-	stager, err := StartR2AssetStaging(r2Cfg, groups)
+	return PrepareR2AssetsWithReporter(r2Cfg, groups, nil)
+}
+
+func PrepareR2AssetsWithReporter(r2Cfg cloud.R2Config, groups []InstanceGroup, reporter AssetStageReporter) (*R2Assets, error) {
+	stager, err := StartR2AssetStagingWithReporter(r2Cfg, groups, reporter)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +528,11 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 // upload errors. The outer error is reserved for failures that prevent any
 // launch (agent upload, stager init). See AwaitAllPerDir.
 func PrepareR2AssetsPerDir(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, map[string]error, error) {
-	stager, err := StartR2AssetStaging(r2Cfg, groups)
+	return PrepareR2AssetsPerDirWithReporter(r2Cfg, groups, nil)
+}
+
+func PrepareR2AssetsPerDirWithReporter(r2Cfg cloud.R2Config, groups []InstanceGroup, reporter AssetStageReporter) (*R2Assets, map[string]error, error) {
+	stager, err := StartR2AssetStagingWithReporter(r2Cfg, groups, reporter)
 	if err != nil {
 		return nil, nil, err
 	}

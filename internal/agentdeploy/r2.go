@@ -74,11 +74,12 @@ func EnsureAgentInR2WithProgress(ctx context.Context, r2Client *r2.Client, versi
 		return key, nil
 	}
 
-	localPath, err := EnsureBuilt(version, goos, goarch)
+	localPath, err := EnsureBuiltWithProgress(version, goos, goarch, output, onProgress)
 	if err != nil {
 		if fallbackKey, fbInfo, fbErr := latestAgentInR2(ctx, r2Client, goos, goarch); fbErr == nil {
 			fmt.Fprintf(output, "warning: build failed (%v); using stale cached agent %s (uploaded %s)\n",
 				err, fallbackKey, fbInfo.LastModified.Format(time.RFC3339))
+			onProgress("using stale cached agent")
 			onProgress("ready")
 			return fallbackKey, nil
 		}

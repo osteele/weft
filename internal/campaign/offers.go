@@ -78,6 +78,9 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		}
 		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
 	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
+		if s.UnknownCompatibility > 0 {
+			return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
+		}
 		return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered by provider CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
 	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
 		bounds := formatTorchArchBounds(s.TorchArchMinCap, s.TorchArchMaxCap)
@@ -331,17 +334,11 @@ func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Off
 			known = append(known, offer)
 		}
 	}
-	// Hard-exclude unknown-compatibility offers (currently: RunPod, which
-	// doesn't expose driver_version / cuda_max_good at offer search) whenever
-	// at least one known-compatible offer survives. Falling back to
-	// unknown-compat was costing us runtime cuda_driver_too_old failures on
-	// hosts that score well on price/runtime but happen to have an old driver.
-	// The unknown-compat penalty in compatibilityScorePenalty remains as a
-	// last-resort tiebreaker when ONLY unknowns are available.
-	if len(known) > 0 {
-		return known, incompatible, len(unknown)
-	}
-	return append(known, unknown...), incompatible, len(unknown)
+	// Fail closed when a group declares a CUDA/driver floor. RunPod currently
+	// does not expose driver_version / cuda_max_good at offer search, and
+	// falling back to unknown compatibility has caused runtime
+	// cuda_driver_too_old failures on otherwise cheap/fast offers.
+	return known, incompatible + len(unknown), len(unknown)
 }
 
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {

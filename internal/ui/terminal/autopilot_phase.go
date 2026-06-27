@@ -33,6 +33,11 @@ func autoPilotPhaseLabel(ev *db.LifecycleEvent) string {
 		return "scanning candidates"
 	case db.EventRelaunchDiskBump:
 		return "raising disk allowance"
+	case db.EventRelaunchAssetStage:
+		if ev.Detail != "" {
+			return "staging R2 assets: " + truncate(ev.Detail, 60)
+		}
+		return "staging R2 assets"
 	case db.EventRelaunchLaunchSuccess:
 		return "pod launched, bootstrapping"
 	case db.EventRelaunchRunpodSSHWaiting:

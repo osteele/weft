@@ -16,6 +16,7 @@ func TestAutoPilotPhaseLabel(t *testing.T) {
 		{"nil event", nil, ""},
 		{"eligible", &db.LifecycleEvent{EventKind: db.EventRelaunchEligible}, "scanning candidates"},
 		{"disk bump", &db.LifecycleEvent{EventKind: db.EventRelaunchDiskBump}, "raising disk allowance"},
+		{"asset stage", &db.LifecycleEvent{EventKind: db.EventRelaunchAssetStage, Detail: "agent checking cache"}, "staging R2 assets: agent checking cache"},
 		{"launch success", &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchSuccess}, "pod launched, bootstrapping"},
 		{"runpod ssh waiting", &db.LifecycleEvent{EventKind: db.EventRelaunchRunpodSSHWaiting}, "waiting for RunPod SSH readiness"},
 		{"launch failed without error text", &db.LifecycleEvent{EventKind: db.EventRelaunchLaunchFailed}, "launch failed"},

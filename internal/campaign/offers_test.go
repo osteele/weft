@@ -975,6 +975,7 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 offers passed VRAM but all filtered by CUDA compatibility"},
 		{"torch arch max", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
 		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
+		{"unknown provider compatibility", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 0, UnknownCompatibility: 5, ProviderCompatibilityFiltered: 5}, "12 offers found, 5 offers passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility"},
 		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
@@ -1037,9 +1038,9 @@ func TestFilterOffersByProviderCompatibility_DropsUnknownWhenKnownExists(t *test
 		{ProviderID: "va1", Provider: cloud.ProviderVastai, GPUName: "RTX A6000", CUDAVersion: 12.8, CostPerHour: 2.00},
 		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.40},
 	}
-	got, incompatible, unknown := filterOffersByProviderCompatibility(group, offers)
-	if incompatible != 0 {
-		t.Fatalf("incompatible = %d, want 0", incompatible)
+	got, filtered, unknown := filterOffersByProviderCompatibility(group, offers)
+	if filtered != 2 {
+		t.Fatalf("filtered = %d, want 2 unknown-compatible offers filtered", filtered)
 	}
 	if unknown != 2 {
 		t.Fatalf("unknown count = %d, want 2 (both RunPod offers dropped)", unknown)
@@ -1049,36 +1050,53 @@ func TestFilterOffersByProviderCompatibility_DropsUnknownWhenKnownExists(t *test
 	}
 }
 
-func TestFilterOffersByProviderCompatibility_KeepsUnknownWhenNoKnown(t *testing.T) {
+func TestFilterOffersByProviderCompatibility_DropsUnknownWhenNoKnown(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
 		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.50},
 		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.40},
 	}
-	got, _, unknown := filterOffersByProviderCompatibility(group, offers)
+	got, filtered, unknown := filterOffersByProviderCompatibility(group, offers)
+	if filtered != 2 {
+		t.Fatalf("filtered = %d, want 2 unknown-compatible offers filtered", filtered)
+	}
 	if unknown != 2 {
 		t.Fatalf("unknown = %d, want 2", unknown)
 	}
-	if len(got) != 2 {
-		t.Fatalf("filtered offers = %d, want 2 (fallback when no known-compatible alternative)", len(got))
+	if len(got) != 0 {
+		t.Fatalf("filtered offers = %d, want 0 under required provider compatibility", len(got))
 	}
 }
 
-func TestRankOffer_AllowsUnknownCompatibilityFallback(t *testing.T) {
+func TestFilterOffersByProviderCompatibility_KeepsUnknownWhenNotRequired(t *testing.T) {
+	group := InstanceGroup{}
+	offers := []cloud.Offer{
+		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.50},
+	}
+	got, filtered, unknown := filterOffersByProviderCompatibility(group, offers)
+	if filtered != 0 || unknown != 0 {
+		t.Fatalf("filtered=%d unknown=%d, want 0,0 when compatibility is not required", filtered, unknown)
+	}
+	if len(got) != 1 || got[0].ProviderID != "rp1" {
+		t.Fatalf("filtered offers = %+v, want original RunPod offer", got)
+	}
+}
+
+func TestRankOffer_FiltersUnknownCompatibilityFallback(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
 		{ProviderID: "unknown", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.01},
 	}
 
 	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
-	if got.Offer == nil {
-		t.Fatal("expected unknown-compatible fallback offer")
-	}
-	if got.Offer.ProviderID != "unknown" {
-		t.Fatalf("selected %q, want unknown fallback", got.Offer.ProviderID)
+	if got.Offer != nil {
+		t.Fatalf("selected %q, want no offer for unknown provider compatibility", got.Offer.ProviderID)
 	}
 	if got.FilterStats.UnknownCompatibility != 1 {
 		t.Fatalf("UnknownCompatibility = %d, want 1", got.FilterStats.UnknownCompatibility)
+	}
+	if got.FilterStats.ProviderCompatibilityFiltered != 1 {
+		t.Fatalf("ProviderCompatibilityFiltered = %d, want 1", got.FilterStats.ProviderCompatibilityFiltered)
 	}
 }
 

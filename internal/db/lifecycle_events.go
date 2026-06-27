@@ -63,10 +63,12 @@ const (
 
 	// Launch progress (provider-specific bootstrap phases that can otherwise
 	// look like an inert launching row).
+	EventLaunchAssetStage       = "launch.asset_stage"
 	EventLaunchRunpodSSHWaiting = "launch.runpod_ssh_waiting"
 
 	// Relaunch progress (same signal, scoped to the autopilot/relaunch status
 	// line which watches relaunch.* events).
+	EventRelaunchAssetStage       = "relaunch.asset_stage"
 	EventRelaunchRunpodSSHWaiting = "relaunch.runpod_ssh_waiting"
 
 	// Reconciliation actions (from ExecuteAction / reconcileStaleHeartbeat)

@@ -447,7 +447,13 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// recorded against the failing group's jobs and the surviving groups
 	// proceed. The outer error is reserved for fatal failures (agent
 	// upload, stager init) where no launch is possible.
-	r2Assets, perDirErr, err := PrepareR2AssetsPerDir(cfg.R2Cfg, launchGroups)
+	r2Assets, perDirErr, err := PrepareR2AssetsPerDirWithReporter(
+		cfg.R2Cfg,
+		launchGroups,
+		func(status AssetStageStatus) {
+			recordRelaunchAssetStageEvent(cfg.Database, launchGroups, status)
+		},
+	)
 	if err != nil {
 		return result, fmt.Errorf("prepare R2 assets: %w", err)
 	}
@@ -649,6 +655,53 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+func recordRelaunchAssetStageEvent(database *sql.DB, groups []InstanceGroup, status AssetStageStatus) {
+	if status.Phase == "" {
+		return
+	}
+	gpuSpec, jobCount := assetStageGroupSummary(groups)
+	event := &db.LifecycleEvent{
+		EventKind: db.EventRelaunchAssetStage,
+		GPUSpec:   gpuSpec,
+		JobCount:  jobCount,
+		Detail:    assetStageEventDetail(status),
+	}
+	if status.Err != nil {
+		event.ErrorText = status.Err.Error()
+	}
+	if err := db.InsertLifecycleEvent(database, event); err != nil {
+		slog.Debug("record relaunch asset stage event", "component", "relaunch", "phase", status.Phase, "error", err)
+	}
+}
+
+func assetStageGroupSummary(groups []InstanceGroup) (string, int) {
+	specs := make(map[string]struct{})
+	jobCount := 0
+	for _, group := range groups {
+		if spec := group.GPUSpec(); spec != "" {
+			specs[spec] = struct{}{}
+		}
+		jobCount += len(group.Jobs)
+	}
+	if len(specs) == 1 {
+		for spec := range specs {
+			return spec, jobCount
+		}
+	}
+	return "", jobCount
+}
+
+func assetStageEventDetail(status AssetStageStatus) string {
+	label := status.Label
+	if label == "" {
+		label = status.Key
+	}
+	if label == "" {
+		return fmt.Sprintf("%s %s", status.Kind, status.Phase)
+	}
+	return fmt.Sprintf("%s %s %s", status.Kind, label, status.Phase)
 }
 
 // launchHedgeProbes spawns probe instances for the primary's hedge

@@ -72,7 +72,9 @@ func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onP
 	}
 	path := CachePath(version, goos, goarch)
 
+	onProgress("checking local agent cache")
 	if _, err := os.Stat(path); err == nil {
+		onProgress("using local agent cache")
 		return path, nil
 	}
 
@@ -80,6 +82,7 @@ func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onP
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
+	onProgress("waiting for agent build lock")
 	releaseLock, err := acquireBuildLock(path)
 	if err != nil {
 		return "", fmt.Errorf("acquire build lock: %w", err)
@@ -88,9 +91,11 @@ func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onP
 
 	// Another process may have populated the cache while we waited for the lock.
 	if _, err := os.Stat(path); err == nil {
+		onProgress("using local agent cache")
 		return path, nil
 	}
 
+	onProgress("extracting bundled agent")
 	if err := extractFunc(version, goos, goarch, path); err != nil {
 		if errBuild := buildOnDemand(version, goos, goarch, path, output, onProgress); errBuild != nil {
 			if errors.Is(err, ErrAgentNotAvailable) {

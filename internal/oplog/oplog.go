@@ -72,6 +72,7 @@ const (
 	OpR2Copy   = "r2.copy" // rclone copy (bulk upload)
 
 	// Cloud source upload and job assignment
+	OpR2UploadAgent       = "r2.upload_agent"
 	OpR2UploadSource      = "r2.upload_source"
 	OpCloudSetJobInstance = "cloud.set_job_instance"
 

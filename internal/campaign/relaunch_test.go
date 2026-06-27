@@ -55,6 +55,43 @@ func TestRecordNotReplacedReason_PreservesParensInReasonText(t *testing.T) {
 	}
 }
 
+func TestRecordRelaunchAssetStageEvent(t *testing.T) {
+	database := db.SetupTestDB(t)
+	groups := []InstanceGroup{
+		{
+			GPUClass: "l4",
+			Jobs: []*db.Job{
+				{ID: 1, Command: "echo one"},
+				{ID: 2, Command: "echo two"},
+			},
+		},
+	}
+
+	recordRelaunchAssetStageEvent(database, groups, AssetStageStatus{
+		Key:   "agent",
+		Kind:  AssetStageKindAgent,
+		Label: "agent",
+		Phase: "checking local agent cache",
+	})
+
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{Kind: db.EventRelaunchAssetStage})
+	if err != nil {
+		t.Fatalf("ListLifecycleEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if events[0].GPUSpec != "l4" {
+		t.Fatalf("GPUSpec = %q, want l4", events[0].GPUSpec)
+	}
+	if events[0].JobCount != 2 {
+		t.Fatalf("JobCount = %d, want 2", events[0].JobCount)
+	}
+	if events[0].Detail != "agent agent checking local agent cache" {
+		t.Fatalf("Detail = %q", events[0].Detail)
+	}
+}
+
 func TestExceedsRetryBudget_FirstRetry(t *testing.T) {
 	budget := RetryBudget{
 		FirstTimeLimit: 45 * time.Minute,
