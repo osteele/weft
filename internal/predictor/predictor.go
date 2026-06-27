@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
@@ -248,6 +249,7 @@ var backgroundRetrains = struct {
 }{
 	states: make(map[string]*backgroundRetrainState),
 }
+var trainLockMu sync.Mutex
 
 type predictionCacheKey struct {
 	modelDir          string
@@ -731,6 +733,19 @@ func NeedsRetrain(cfg Config, currentJobCount int) bool {
 
 // Train shells out to job-estimator train with the configured DB paths.
 func Train(cfg Config) error {
+	return trainWithLock(cfg, nil)
+}
+
+func trainSchemaRebuild(cfg Config) error {
+	return trainWithLock(cfg, func() bool {
+		meta, err := ReadMeta(cfg)
+		return err == nil &&
+			meta.SchemaVersion == ExpectedModelSchemaVersion &&
+			!localModelSchemaStatus(cfg).Changed
+	})
+}
+
+func trainWithLock(cfg Config, skip func() bool) error {
 	if cfg.ProjectPath == "" {
 		return fmt.Errorf("predictor: project_path not configured")
 	}
@@ -742,25 +757,85 @@ func Train(cfg Config) error {
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return fmt.Errorf("predictor: create model dir parent: %w", err)
 	}
-	tempDir, err := os.MkdirTemp(parentDir, filepath.Base(modelDir)+".retrain-*")
+
+	return withTrainLock(cfg, func() error {
+		if skip != nil && skip() {
+			invalidateStatusCache(cfg)
+			return nil
+		}
+
+		tempDir, err := os.MkdirTemp(parentDir, filepath.Base(modelDir)+".retrain-*")
+		if err != nil {
+			return fmt.Errorf("predictor: create temp model dir: %w", err)
+		}
+		defer os.RemoveAll(tempDir)
+
+		if err := runTrainCLI(cfg, tempDir); err != nil {
+			return err
+		}
+
+		state := backgroundState(cfg)
+		state.useMu.Lock()
+		defer state.useMu.Unlock()
+		if err := swapModelDir(tempDir, modelDir); err != nil {
+			return err
+		}
+		clearPredictionCache()
+		invalidateStatusCache(cfg)
+		return nil
+	})
+}
+
+func withTrainLock(cfg Config, fn func() error) error {
+	trainLockMu.Lock()
+	defer trainLockMu.Unlock()
+
+	lock, err := acquireTrainLock(cfg)
 	if err != nil {
-		return fmt.Errorf("predictor: create temp model dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	if err := runTrainCLI(cfg, tempDir); err != nil {
 		return err
 	}
+	defer lock.Close()
+	return fn()
+}
 
-	state := backgroundState(cfg)
-	state.useMu.Lock()
-	defer state.useMu.Unlock()
-	if err := swapModelDir(tempDir, modelDir); err != nil {
-		return err
+type trainLock struct {
+	file *os.File
+}
+
+func acquireTrainLock(cfg Config) (*trainLock, error) {
+	modelDir := cfg.modelDir()
+	parentDir := filepath.Dir(modelDir)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return nil, fmt.Errorf("predictor: create model dir parent: %w", err)
 	}
-	clearPredictionCache()
-	invalidateStatusCache(cfg)
-	return nil
+	lockPath := trainLockPath(cfg)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("predictor: open train lock: %w", err)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("predictor: acquire train lock: %w", err)
+	}
+	return &trainLock{file: file}, nil
+}
+
+func (l *trainLock) Close() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	closeErr := l.file.Close()
+	l.file = nil
+	if unlockErr != nil {
+		return unlockErr
+	}
+	return closeErr
+}
+
+func trainLockPath(cfg Config) string {
+	modelDir := cfg.modelDir()
+	return filepath.Join(filepath.Dir(modelDir), "."+filepath.Base(modelDir)+".train.lock")
 }
 
 // Predict shells out to job-estimator predict and parses the JSON result.
@@ -931,7 +1006,7 @@ func rebuildSchemaMismatchSynchronously(cfg Config, reason string) error {
 		"model_dir", cfg.modelDir(),
 		"reason", reason,
 	)
-	err := Train(cfg)
+	err := trainSchemaRebuild(cfg)
 
 	state.statusMu.Lock()
 	state.running = false

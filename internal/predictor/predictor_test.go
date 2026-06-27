@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -493,6 +494,102 @@ func TestPredict_RebuildsSynchronouslyWhenSchemaChanges(t *testing.T) {
 	}
 	if retrainedMeta.SchemaVersion != ExpectedModelSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", retrainedMeta.SchemaVersion, ExpectedModelSchemaVersion)
+	}
+}
+
+func TestTrainSerializesConcurrentSubprocesses(t *testing.T) {
+	originalRunTrainCLI := runTrainCLI
+	t.Cleanup(func() {
+		runTrainCLI = originalRunTrainCLI
+	})
+
+	modelDir := t.TempDir()
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	runTrainCLI = func(_ Config, trainModelDir string) error {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			active--
+			mu.Unlock()
+		}()
+
+		time.Sleep(100 * time.Millisecond)
+		meta := Meta{
+			TrainedAt:     "2024-01-02T00:00:00Z",
+			JobCount:      50,
+			SchemaVersion: ExpectedModelSchemaVersion,
+		}
+		data, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(trainModelDir, "meta.json"), data, 0644); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir}
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			errs <- Train(cfg)
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("Train: %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxActive != 1 {
+		t.Fatalf("max concurrent train subprocesses = %d, want 1", maxActive)
+	}
+}
+
+func TestSchemaRebuildSkipsWhenLockedModelAlreadyCompatible(t *testing.T) {
+	originalRunTrainCLI := runTrainCLI
+	t.Cleanup(func() {
+		runTrainCLI = originalRunTrainCLI
+	})
+
+	modelDir := t.TempDir()
+	meta := Meta{
+		TrainedAt:     "2024-01-02T00:00:00Z",
+		JobCount:      50,
+		SchemaVersion: ExpectedModelSchemaVersion,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "meta.json"), data, 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	var trainCalls atomic.Int32
+	runTrainCLI = func(_ Config, _ string) error {
+		trainCalls.Add(1)
+		return nil
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir}
+	if err := trainSchemaRebuild(cfg); err != nil {
+		t.Fatalf("trainSchemaRebuild: %v", err)
+	}
+	if trainCalls.Load() != 0 {
+		t.Fatalf("train calls = %d, want 0", trainCalls.Load())
 	}
 }
 
