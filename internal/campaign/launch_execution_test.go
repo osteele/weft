@@ -128,6 +128,59 @@ func TestPrepareNewInstanceLaunchPlan_MergesCompatibleSplitGroupsWithDisjointHF(
 	}
 }
 
+func TestPrepareNewInstanceLaunchPlanDistinctMachinesSplitsJobs(t *testing.T) {
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(_ cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{Provider: cloud.ProviderVastai, ProviderID: "offer-a", MachineID: "machine-a", GPUName: "L4", GPUMemGB: 24, CostPerHour: 0.10, DLPerf: 40, Reliability: 0.99},
+				{Provider: cloud.ProviderVastai, ProviderID: "offer-b", MachineID: "machine-b", GPUName: "L4", GPUMemGB: 24, CostPerHour: 0.20, DLPerf: 40, Reliability: 0.99},
+			}, nil
+		},
+	}
+	groups := []InstanceGroup{{
+		GPUClass: "L4",
+		GPUMemGB: 24,
+		Jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, GPUClass: "l4", GPUMemGB: intPtr(24), Command: "python a.py"},
+			{ID: 2, Status: db.StatusQueued, GPUClass: "l4", GPUMemGB: intPtr(24), Command: "python b.py"},
+		},
+	}}
+
+	prep, err := PrepareNewInstanceLaunchPlanWithOptions(
+		nil,
+		[]cloud.Client{mockClient},
+		nil,
+		groups,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		0.95,
+		nil,
+		nil,
+		nil,
+		nil,
+		LaunchExecutionPlanOptions{DistinctMachines: true},
+	)
+	if err != nil {
+		t.Fatalf("PrepareNewInstanceLaunchPlanWithOptions: %v", err)
+	}
+	if len(prep.LaunchGroups) != 2 {
+		t.Fatalf("LaunchGroups = %d, want 2 one-job groups", len(prep.LaunchGroups))
+	}
+	for i, group := range prep.LaunchGroups {
+		if len(group.Jobs) != 1 {
+			t.Fatalf("LaunchGroups[%d] has %d jobs, want 1", i, len(group.Jobs))
+		}
+	}
+	if len(prep.Offers) != 2 {
+		t.Fatalf("Offers = %d, want 2", len(prep.Offers))
+	}
+	if prep.Offers[0].MachineID == "" || prep.Offers[0].MachineID == prep.Offers[1].MachineID {
+		t.Fatalf("offers should use distinct machines, got %#v", prep.Offers)
+	}
+}
+
 // TestPrepareNewInstanceLaunchPlan_SkipsReuseEvaluation guards the
 // `--to new` contract: even with a populated database whose reusable-
 // instance set covers the job's requirements, the function must not

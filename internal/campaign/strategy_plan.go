@@ -489,9 +489,20 @@ func buildProfilePlansFromSplitRawWithSession(
 	onProgress PlanProgressFunc,
 	options PlanOptions,
 ) map[string]StrategyPlan {
+	splitGroups, splitRaw, specs = shapeDistinctMachinePlan(splitGroups, splitRaw, specs, options)
 	plans := make(map[string]StrategyPlan, len(specs))
 	if len(splitGroups) == 0 {
 		return plans
+	}
+	if len(splitRaw) != len(splitGroups) {
+		if offerSession != nil {
+			splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
+		} else {
+			splitRaw = make([]GroupRawOffers, len(splitGroups))
+			for i, g := range splitGroups {
+				splitRaw[i] = GroupRawOffers{Group: g}
+			}
+		}
 	}
 
 	validSpecs := make([]ProfilePlanSpec, 0, len(specs))
@@ -543,6 +554,37 @@ func buildProfilePlansFromSplitRawWithSession(
 	wg.Wait()
 
 	return plans
+}
+
+func shapeDistinctMachinePlan(groups []InstanceGroup, raw []GroupRawOffers, specs []ProfilePlanSpec, options PlanOptions) ([]InstanceGroup, []GroupRawOffers, []ProfilePlanSpec) {
+	if !options.DistinctMachines {
+		return groups, raw, specs
+	}
+	if !allGroupsSingleJob(groups) {
+		groups = SplitToParallel(groups)
+		raw = nil
+	}
+	return groups, raw, forceSplitOnlyProfileSpecs(specs)
+}
+
+func allGroupsSingleJob(groups []InstanceGroup) bool {
+	for _, group := range groups {
+		if len(group.Jobs) > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+func forceSplitOnlyProfileSpecs(specs []ProfilePlanSpec) []ProfilePlanSpec {
+	if len(specs) == 0 {
+		return specs
+	}
+	out := slices.Clone(specs)
+	for i := range out {
+		out[i].CandidateMode = CandidatePlanModeSplitOnly
+	}
+	return out
 }
 
 func defaultProfilePlanSpecs(profiles []bidding.ScoreProfile) []ProfilePlanSpec {
