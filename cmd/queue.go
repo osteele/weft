@@ -332,9 +332,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Print recommendations for common patterns
-	printCommandRecommendations(command)
-
 	// Resolve working directory (automap from CWD if -C not specified)
 	workingDir, err := workdir.ResolveWorkingDir(queueDir_, cmd.ErrOrStderr())
 	if err != nil {
@@ -351,6 +348,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	localDir := workdir.ResolveLocal(workingDir)
+
+	// Print recommendations for common patterns
+	printCommandRecommendations(command, localDir)
+
 	outputDirs := config.ProjectOutputDirs(localDir)
 
 	projectInputs := config.ProjectInputs(localDir)

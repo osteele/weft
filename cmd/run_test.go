@@ -392,6 +392,84 @@ func TestHasEnvAssignment(t *testing.T) {
 	}
 }
 
+func TestCommandRecommendationsSuppressVLLMWhenPEP723RunsViaUVScriptShebang(t *testing.T) {
+	dir := t.TempDir()
+	scriptDir := filepath.Join(dir, "scripts")
+	if err := os.Mkdir(scriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	script := filepath.Join(scriptDir, "profile_inference_vllm.py")
+	content := `#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["vllm==0.19.1", "pynvml>=12.0"]
+# ///
+import vllm
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	got := commandRecommendations("scripts/profile_inference_vllm.py --models mistralai/Mixtral-8x7B-v0.1", dir)
+	if len(got) != 0 {
+		t.Fatalf("recommendations = %v, want none", got)
+	}
+}
+
+func TestCommandRecommendationsWarnVLLMWhenPEP723RunsThroughPython(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "profile_inference_vllm.py")
+	content := `#!/usr/bin/env python3
+# /// script
+# dependencies = ["vllm==0.19.1"]
+# ///
+import vllm
+`
+	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	got := commandRecommendations("uv run python profile_inference_vllm.py", dir)
+	if len(got) != 1 || !strings.Contains(got[0], "vLLM jobs should declare vllm") {
+		t.Fatalf("recommendations = %v, want vLLM runtime tip", got)
+	}
+}
+
+func TestCommandRecommendationsSuppressVLLMWhenPyprojectRunsViaUV(t *testing.T) {
+	dir := t.TempDir()
+	pyproject := `[project]
+name = "example"
+version = "0.0.0"
+dependencies = ["vllm==0.19.1"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(pyproject), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+
+	got := commandRecommendations("uv run python scripts/profile_inference_vllm.py", dir)
+	if len(got) != 0 {
+		t.Fatalf("recommendations = %v, want none", got)
+	}
+}
+
+func TestCommandRecommendationsSuppressSGLangWhenPEP723RunsViaUVScriptShebang(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "serve_sglang.py")
+	content := `#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["sglang==0.5.10.post1"]
+# ///
+import sglang
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	got := commandRecommendations("serve_sglang.py --model Qwen/Qwen2-7B", dir)
+	if len(got) != 0 {
+		t.Fatalf("recommendations = %v, want none", got)
+	}
+}
+
 func TestPersistDraftArtifactFields(t *testing.T) {
 	database := db.SetupTestDB(t)
 

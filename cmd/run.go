@@ -29,6 +29,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/workdir"
+	toml "github.com/pelletier/go-toml"
 	"github.com/spf13/cobra"
 )
 
@@ -804,8 +805,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	maybeWarnHFOfflineEnv(runInputs, runEnvVars)
-
 	// Warn when the job appears torch-using and cloud-bound but the lockfile
 	// has no torch pin to derive a driver floor from. Without a pin, weft
 	// can't tell whether the rental's driver will satisfy the eventual
@@ -817,7 +816,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	maybeWarnNoTorchPinForCloud(cmd, localDir, host, runCUDADriverMin, scriptMeta)
 
 	// Print recommendations for common patterns
-	printCommandRecommendations(command)
+	printCommandRecommendations(command, localDir)
 
 	// Validate flag combinations
 	if runFollow && runAfter > 0 {
@@ -2040,25 +2039,6 @@ func hasExplicitCUDAFloor(localDir, cudaDriverMin string, scriptMeta *dataloc.Sc
 	return scriptMeta != nil && (strings.TrimSpace(scriptMeta.MinDriver) != "" || strings.TrimSpace(scriptMeta.MinCUDA) != "")
 }
 
-func maybeWarnHFOfflineEnv(inputs, envVars []string) {
-	if !usageHintsEnabled() || !hasDeclaredHFInput(inputs) {
-		return
-	}
-	if hasEnvAssignment(envVars, "HF_HUB_OFFLINE") || hasEnvAssignment(envVars, "TRANSFORMERS_OFFLINE") || hasEnvAssignment(envVars, "HF_DATASETS_OFFLINE") {
-		return
-	}
-	fmt.Fprintln(os.Stderr, "\nTip: this job declares Hugging Face inputs. If the target host sets HF offline mode globally, add --env HF_HUB_OFFLINE=0 and --env TRANSFORMERS_OFFLINE=0.")
-}
-
-func hasDeclaredHFInput(inputs []string) bool {
-	for _, input := range inputs {
-		if strings.HasPrefix(input, "hf:") || strings.HasPrefix(input, "hf-dataset:") {
-			return true
-		}
-	}
-	return false
-}
-
 func hasEnvAssignment(envVars []string, key string) bool {
 	prefix := key + "="
 	for _, env := range envVars {
@@ -2071,10 +2051,22 @@ func hasEnvAssignment(envVars []string, key string) bool {
 
 // printCommandRecommendations checks for common command patterns and suggests
 // better alternatives using CLI flags. Returns true if any recommendations were printed.
-func printCommandRecommendations(command string) bool {
+func printCommandRecommendations(command, localDir string) bool {
 	if !usageHintsEnabled() {
 		return false
 	}
+	recommendations := commandRecommendations(command, localDir)
+	if len(recommendations) == 0 {
+		return false
+	}
+	fmt.Fprintln(os.Stderr)
+	for _, rec := range recommendations {
+		fmt.Fprintln(os.Stderr, rec)
+	}
+	return true
+}
+
+func commandRecommendations(command, localDir string) []string {
 	var recommendations []string
 
 	// Check for "VAR=value " prefix (environment variable)
@@ -2110,22 +2102,168 @@ func printCommandRecommendations(command string) bool {
 	}
 
 	lowerCommand := strings.ToLower(command)
-	if strings.Contains(lowerCommand, "sglang") {
+	if strings.Contains(lowerCommand, "sglang") && needsFrameworkRuntimeTip(command, localDir, "sglang") {
 		recommendations = append(recommendations,
 			"Tip: SGLang jobs should use the documented SGLang runtime path: PEP 723 or .weft.toml image metadata with ghcr.io/osteele/sglang-runtime:v0.5.10.post1. See docs/guides/workflow-guide.md#tooluv-index-settings.")
-	} else if strings.Contains(lowerCommand, "vllm") {
+	} else if needsFrameworkRuntimeTip(command, localDir, "vllm") {
 		recommendations = append(recommendations,
 			"Tip: vLLM jobs should declare vllm in PEP 723 or pyproject.toml and run through uv so weft can infer PyTorch CUDA image and disk headroom. See docs/guides/workflow-guide.md#script-metadata-pep-723.")
 	}
 
-	if len(recommendations) > 0 {
-		fmt.Fprintln(os.Stderr)
-		for _, rec := range recommendations {
-			fmt.Fprintln(os.Stderr, rec)
+	return recommendations
+}
+
+func needsFrameworkRuntimeTip(command, localDir, name string) bool {
+	if !strings.Contains(strings.ToLower(command), name) {
+		return false
+	}
+	if commandDeclaresPackageViaUVWith(command, name) || pyprojectDeclaresPackage(localDir, name) {
+		return !commandHasUVRun(command)
+	}
+	if scriptDeclaresPackage(localDir, command, name) {
+		return !commandUsesPEP723ScriptRunner(localDir, command)
+	}
+	return true
+}
+
+func commandDeclaresPackageViaUVWith(command, name string) bool {
+	for _, dep := range dataloc.ScanUVRunWith(command) {
+		if dep.Name == name {
+			return true
 		}
-		return true
 	}
 	return false
+}
+
+func scriptDeclaresPackage(localDir, command, name string) bool {
+	for _, dep := range dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(localDir, command)) {
+		if dep.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func pyprojectDeclaresPackage(localDir, name string) bool {
+	if localDir == "" {
+		return false
+	}
+	tree, err := toml.LoadFile(filepath.Join(localDir, "pyproject.toml"))
+	if err != nil {
+		return false
+	}
+	deps, ok := tree.Get("project.dependencies").([]interface{})
+	if !ok {
+		return false
+	}
+	for _, dep := range deps {
+		s, ok := dep.(string)
+		if !ok {
+			continue
+		}
+		for _, spec := range dataloc.ParseDepSpecs([]string{s}) {
+			if spec.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandHasUVRun(command string) bool {
+	tokens := strings.Fields(command)
+	for i := 0; i+1 < len(tokens); i++ {
+		if strings.Trim(tokens[i], `"'`) == "uv" && strings.Trim(tokens[i+1], `"'`) == "run" {
+			return true
+		}
+	}
+	return false
+}
+
+func commandUsesPEP723ScriptRunner(localDir, command string) bool {
+	if commandRunsScriptViaUV(command) {
+		return true
+	}
+	return bareExecScriptHasUVScriptShebang(localDir, command)
+}
+
+func commandRunsScriptViaUV(command string) bool {
+	tokens := strings.Fields(command)
+	for i := 0; i+1 < len(tokens); i++ {
+		if strings.Trim(tokens[i], `"'`) != "uv" || strings.Trim(tokens[i+1], `"'`) != "run" {
+			continue
+		}
+		for j := i + 2; j < len(tokens); j++ {
+			tok := strings.Trim(tokens[j], `"'`)
+			if tok == "--with" || tok == "--with-editable" || tok == "--with-requirements" {
+				j++
+				continue
+			}
+			if strings.HasPrefix(tok, "--with=") || strings.HasPrefix(tok, "--with-editable=") || strings.HasPrefix(tok, "--with-requirements=") {
+				continue
+			}
+			if strings.HasPrefix(tok, "-") {
+				continue
+			}
+			return strings.HasSuffix(tok, ".py")
+		}
+	}
+	return false
+}
+
+func bareExecScriptHasUVScriptShebang(localDir, command string) bool {
+	if localDir == "" {
+		return false
+	}
+	token := firstExecTokenForHint(command)
+	if token == "" || !strings.HasSuffix(token, ".py") {
+		return false
+	}
+	abs := token
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(localDir, token)
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return false
+	}
+	firstLine, _, _ := strings.Cut(string(content), "\n")
+	return strings.HasPrefix(firstLine, "#!") &&
+		strings.Contains(firstLine, "uv") &&
+		strings.Contains(firstLine, "run") &&
+		strings.Contains(firstLine, "--script")
+}
+
+func firstExecTokenForHint(command string) string {
+	for _, tok := range strings.Fields(command) {
+		tok = strings.Trim(tok, `"'`)
+		if strings.Contains(tok, "=") {
+			name, _, ok := strings.Cut(tok, "=")
+			if ok && isShellEnvName(name) {
+				continue
+			}
+		}
+		return tok
+	}
+	return ""
+}
+
+func isShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if i == 0 {
+			if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+				return false
+			}
+			continue
+		}
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // dropModelRefsShadowedByDatasetRefs removes any "hf:<id>" entry from inputs
