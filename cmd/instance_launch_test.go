@@ -69,25 +69,49 @@ func TestApplyRunpodCloudTypeOverride(t *testing.T) {
 }
 
 func TestParseLaunchJobIDFilter(t *testing.T) {
-	got, err := parseLaunchJobIDFilter("1570, 1571 ,1572")
-	if err != nil {
-		t.Fatalf("parseLaunchJobIDFilter: %v", err)
+	tests := []struct {
+		name string
+		spec string
+		want map[int64]bool
+	}{
+		{
+			name: "bare numeric IDs",
+			spec: "1570, 1571 ,1572",
+			want: map[int64]bool{1570: true, 1571: true, 1572: true},
+		},
+		{
+			name: "prefixed IDs",
+			spec: "wj1570,wj1571",
+			want: map[int64]bool{1570: true, 1571: true},
+		},
+		{
+			name: "ranges",
+			spec: "wj1570:wj1572,1574",
+			want: map[int64]bool{1570: true, 1571: true, 1572: true, 1574: true},
+		},
 	}
-	want := map[int64]bool{1570: true, 1571: true, 1572: true}
-	if len(got) != len(want) {
-		t.Fatalf("got %d ids, want %d", len(got), len(want))
-	}
-	for id := range want {
-		if !got[id] {
-			t.Errorf("missing id %d", id)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseLaunchJobIDFilter(tt.spec)
+			if err != nil {
+				t.Fatalf("parseLaunchJobIDFilter: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d ids, want %d", len(got), len(tt.want))
+			}
+			for id := range tt.want {
+				if !got[id] {
+					t.Errorf("missing id %d", id)
+				}
+			}
+		})
 	}
 
 	if got, err := parseLaunchJobIDFilter(""); err != nil || got != nil {
 		t.Errorf("empty input: got (%v, %v), want (nil, nil)", got, err)
 	}
 	if _, err := parseLaunchJobIDFilter("nonsense"); err == nil {
-		t.Error("expected error on non-numeric input")
+		t.Error("expected error on invalid input")
 	}
 }
 
@@ -129,6 +153,63 @@ func TestNoRentalLaunchNeededMessageReportsAssignedQueuedJobs(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 queued job is already assigned to a rental instance and not started yet.") {
 		t.Fatalf("missing assigned queued summary: %q", got)
+	}
+}
+
+func TestDistinctMachineLaunchReplansExplicitAssignedQueuedJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "runpod", GPUSpec: "A100"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	assignedID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), t.TempDir(), "echo assigned", "assigned", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU assigned: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, assignedID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	unplacedID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo unplaced", "unplaced", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU unplaced: %v", err)
+	}
+
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	jobIDFilter := map[int64]bool{assignedID: true, unplacedID: true}
+	assignedJobs, err := explicitDistinctAssignedJobs(database, jobIDFilter)
+	if err != nil {
+		t.Fatalf("explicitDistinctAssignedJobs: %v", err)
+	}
+	jobs = mergeJobsByID(jobs, assignedJobs)
+	gotIDs := make(map[int64]bool, len(jobs))
+	for _, job := range jobs {
+		gotIDs[job.ID] = true
+	}
+	for _, id := range []int64{assignedID, unplacedID} {
+		if !gotIDs[id] {
+			t.Fatalf("selected jobs missing %d: %#v", id, gotIDs)
+		}
+	}
+
+	jobs, relocated, err := unplaceDistinctMachineRentalAssignments(database, jobs)
+	if err != nil {
+		t.Fatalf("unplaceDistinctMachineRentalAssignments: %v", err)
+	}
+	if relocated != 1 {
+		t.Fatalf("relocated = %d, want 1", relocated)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("jobs after relocation = %d, want 2", len(jobs))
+	}
+	assigned, err := db.GetJobByID(database, assignedID)
+	if err != nil {
+		t.Fatalf("GetJobByID assigned: %v", err)
+	}
+	if assigned.TargetKind() != db.JobTargetUnplaced || assigned.Host != "" || assigned.LaunchID != nil {
+		t.Fatalf("assigned job target = (%s, host=%q, launch=%v), want unplaced", assigned.TargetKind(), assigned.Host, assigned.LaunchID)
 	}
 }
 

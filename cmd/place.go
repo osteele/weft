@@ -149,9 +149,8 @@ func resolvePlaceTargetJobIDs(args []string) ([]int64, error) {
 	return ParseJobIDs(args)
 }
 
-// joinJobIDs produces the comma-separated numeric form consumed by the
-// campaign-launch --jobs flag (strconv.ParseInt upstream). Sorts a copy so
-// callers' slices are not mutated.
+// joinJobIDs produces the comma-separated form passed to the instance-launch
+// --jobs flag. Sorts a copy so callers' slices are not mutated.
 func joinJobIDs(jobIDs []int64) string {
 	sorted := slices.Clone(jobIDs)
 	slices.Sort(sorted)

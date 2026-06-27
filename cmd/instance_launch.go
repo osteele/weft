@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -66,7 +66,7 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("watch", "no-watch")
 	cmd.Flags().BoolVar(&instanceLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
 	cmd.Flags().BoolVarP(&instanceLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
-	cmd.Flags().StringVar(&instanceLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
+	cmd.Flags().StringVar(&instanceLaunchJobs, "jobs", "", "Job IDs/ranges to include, comma-separated or repeated syntax (default: all unplaced jobs)")
 	cmd.Flags().StringVar(&instanceLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().StringVar(&instanceLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 	cmd.Flags().StringVar(&instanceLaunchRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for this launch: community or secure (default from config)")
@@ -121,14 +121,6 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 		reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 	}
 
-	reportStartupPhase("Loading unplaced jobs...")
-	jobs, err := db.ListUnplacedJobs(database)
-	if err != nil {
-		return fmt.Errorf("list unplaced jobs: %w", err)
-	}
-	jobs = filterRentalLaunchJobs(jobs)
-	jobs = filterLaunchJobsByDependencies(database, jobs, printDeferredJob)
-
 	// Filter by --jobs if specified. The filter is also retained on the
 	// launch model so the TUI's background reload paths (reconciliation,
 	// on-prem refresh) keep honoring it instead of widening to every
@@ -137,9 +129,38 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	reportStartupPhase("Loading unplaced jobs...")
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return fmt.Errorf("list unplaced jobs: %w", err)
+	}
+	jobs = filterRentalLaunchJobs(jobs)
+	if instanceLaunchDistinctMachines && len(jobIDFilter) > 0 {
+		var assignedJobs []*db.Job
+		assignedJobs, err = explicitDistinctAssignedJobs(database, jobIDFilter)
+		if err != nil {
+			return err
+		}
+		if len(assignedJobs) > 0 && launchInteractive && !instanceLaunchDryRun {
+			return fmt.Errorf("--distinct-machines selected %d queued job(s) already assigned to rental instances; rerun with --yes or --plain to re-plan them", len(assignedJobs))
+		}
+		jobs = mergeJobsByID(jobs, assignedJobs)
+	}
+	jobs = filterLaunchJobsByDependencies(database, jobs, printDeferredJob)
 	jobs = db.FilterJobsByIDSet(jobs, jobIDFilter)
 
 	jobs = filterLaunchJobsByProject(jobs)
+	if instanceLaunchDistinctMachines && len(jobIDFilter) > 0 && !launchInteractive && !instanceLaunchDryRun {
+		var relocated int
+		jobs, relocated, err = unplaceDistinctMachineRentalAssignments(database, jobs)
+		if err != nil {
+			return err
+		}
+		if relocated > 0 {
+			fmt.Fprintf(os.Stderr, "Re-planning %d queued rental-assigned job(s) for --distinct-machines.\n", relocated)
+		}
+	}
 
 	// Pre-filter on-prem placement synchronously only for non-interactive launch
 	// paths. The interactive TUI does this in the background so rental planning
@@ -231,6 +252,93 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 	return filtered
 }
 
+func explicitDistinctAssignedJobs(database *sql.DB, jobIDFilter map[int64]bool) ([]*db.Job, error) {
+	ids := sortedJobFilterIDs(jobIDFilter)
+	selectedByID, err := db.GetJobsByIDs(database, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load explicit jobs: %w", err)
+	}
+	selected := make([]*db.Job, 0, len(selectedByID))
+	for _, id := range ids {
+		job := selectedByID[id]
+		if isDistinctRelocationCandidate(job) {
+			selected = append(selected, job)
+		}
+	}
+	return selected, nil
+}
+
+func isDistinctRelocationCandidate(job *db.Job) bool {
+	return job != nil &&
+		job.EffectiveStatus() == db.StatusQueued &&
+		job.IsRentalJob() &&
+		!job.HasTag(db.TagInventory)
+}
+
+func mergeJobsByID(base, extra []*db.Job) []*db.Job {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[int64]struct{}, len(base)+len(extra))
+	merged := make([]*db.Job, 0, len(base)+len(extra))
+	for _, job := range base {
+		if job == nil {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		merged = append(merged, job)
+	}
+	for _, job := range extra {
+		if job == nil {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		merged = append(merged, job)
+	}
+	return merged
+}
+
+func sortedJobFilterIDs(jobIDFilter map[int64]bool) []int64 {
+	if len(jobIDFilter) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(jobIDFilter))
+	for id, selected := range jobIDFilter {
+		if selected {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func unplaceDistinctMachineRentalAssignments(database *sql.DB, jobs []*db.Job) ([]*db.Job, int, error) {
+	refreshed := make([]*db.Job, 0, len(jobs))
+	relocated := 0
+	for _, job := range jobs {
+		if !isDistinctRelocationCandidate(job) {
+			refreshed = append(refreshed, job)
+			continue
+		}
+		if _, err := ops.UnplaceQueuedJob(database, job, ops.ExecuteOptions{}); err != nil {
+			return nil, relocated, err
+		}
+		reloaded, err := db.GetJobByID(database, job.ID)
+		if err != nil {
+			return nil, relocated, fmt.Errorf("reload unplaced job %s: %w", ids.FormatJobID(job.ID), err)
+		}
+		refreshed = append(refreshed, reloaded)
+		relocated++
+	}
+	return refreshed, relocated, nil
+}
+
 // filterLaunchJobsByDependencies excludes jobs whose --after / --after-any
 // dependencies have not yet terminated successfully (or, for --after-any,
 // terminated at all). This makes --after act as a placement gate for
@@ -298,19 +406,19 @@ func printDeferredJob(job *db.Job, reason string) {
 	fmt.Printf("Job %s deferred: %s\n", ids.FormatJobID(job.ID), reason)
 }
 
-// parseLaunchJobIDFilter parses the comma-separated --jobs flag into a set of
-// job IDs. Returns nil for the empty string.
+// parseLaunchJobIDFilter parses the --jobs flag into a set of job IDs.
+// Returns nil for the empty string.
 func parseLaunchJobIDFilter(spec string) (map[int64]bool, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return nil, nil
 	}
-	out := make(map[int64]bool)
-	for _, idStr := range strings.Split(spec, ",") {
-		id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid job ID %q: %w", idStr, err)
-		}
+	jobIDs, err := ParseJobIDs([]string{spec})
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]bool, len(jobIDs))
+	for _, id := range jobIDs {
 		out[id] = true
 	}
 	return out, nil
