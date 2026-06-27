@@ -85,20 +85,26 @@ func scanProviderMachineKeys(rows *sql.Rows, out map[string]struct{}) error {
 	return nil
 }
 
-// ResolveAvoidMachineIDs resolves --avoid tokens into provider machine IDs.
+// ResolveAvoidMachineIDs resolves --avoid tokens into provider-qualified
+// machine refs. Raw machine ids are retained for Vast.ai back-compat; instance
+// and job tokens resolve to provider/machine_id when the launch provider is
+// known.
 // Unresolvable tokens return warnings and are omitted from the result.
 func ResolveAvoidMachineIDs(database *sql.DB, tokens []string) ([]string, []string, error) {
 	return ResolveMachineIDs(database, tokens, "--avoid")
 }
 
-// ResolveAffinityMachineIDs resolves --affinity tokens into provider machine IDs.
+// ResolveAffinityMachineIDs resolves --affinity tokens into provider-qualified
+// machine refs. Raw machine ids are retained for Vast.ai back-compat.
 // Unresolvable tokens return warnings and are omitted from the result.
 func ResolveAffinityMachineIDs(database *sql.DB, tokens []string) ([]string, []string, error) {
 	return ResolveMachineIDs(database, tokens, "--affinity")
 }
 
 // ResolveMachineIDs resolves raw machine IDs, instance IDs, or job IDs into
-// provider machine IDs. Unresolvable tokens return warnings and are omitted.
+// machine refs. Raw tokens are kept as provided; wi/wj tokens resolve to
+// provider/machine_id when possible so providers with overlapping machine-id
+// namespaces stay distinct.
 func ResolveMachineIDs(database *sql.DB, tokens []string, flagName string) ([]string, []string, error) {
 	out := make([]string, 0, len(tokens))
 	warnings := []string{}
@@ -170,11 +176,11 @@ func parsePositivePrefixedID(token, prefix string) (int64, error) {
 }
 
 func resolveInstanceMachineID(database *sql.DB, token string, instanceID int64, flagName string) (string, string, error) {
-	var machineID string
+	var provider, machineID string
 	err := database.QueryRow(
-		`SELECT COALESCE(machine_id, '') FROM launches WHERE id = ?`,
+		`SELECT COALESCE(provider, ''), COALESCE(machine_id, '') FROM launches WHERE id = ?`,
 		instanceID,
-	).Scan(&machineID)
+	).Scan(&provider, &machineID)
 	if err == sql.ErrNoRows {
 		return "", fmt.Sprintf("could not resolve %s %q: instance not found", flagName, token), nil
 	}
@@ -184,20 +190,20 @@ func resolveInstanceMachineID(database *sql.DB, token string, instanceID int64, 
 	if strings.TrimSpace(machineID) == "" {
 		return "", fmt.Sprintf("could not resolve %s %q: instance has no machine_id", flagName, token), nil
 	}
-	return strings.TrimSpace(machineID), "", nil
+	return formatMachineRef(provider, machineID), "", nil
 }
 
 func resolveJobMachineID(database *sql.DB, token string, jobID int64, flagName string) (string, string, error) {
-	var machineID string
+	var provider, machineID string
 	err := database.QueryRow(`
-		SELECT COALESCE(l.machine_id, '')
+		SELECT COALESCE(l.provider, ''), COALESCE(l.machine_id, '')
 		  FROM job_attempts ja
 		  LEFT JOIN launches l ON l.id = ja.launch_id
 		 WHERE ja.job_id = ?
 		 ORDER BY ja.attempt_number DESC, ja.id DESC
 		 LIMIT 1`,
 		jobID,
-	).Scan(&machineID)
+	).Scan(&provider, &machineID)
 	if err == sql.ErrNoRows {
 		return "", fmt.Sprintf("could not resolve %s %q: job has no attempts", flagName, token), nil
 	}
@@ -207,5 +213,14 @@ func resolveJobMachineID(database *sql.DB, token string, jobID int64, flagName s
 	if strings.TrimSpace(machineID) == "" {
 		return "", fmt.Sprintf("could not resolve %s %q: latest job attempt has no machine_id", flagName, token), nil
 	}
-	return strings.TrimSpace(machineID), "", nil
+	return formatMachineRef(provider, machineID), "", nil
+}
+
+func formatMachineRef(provider, machineID string) string {
+	provider = strings.TrimSpace(provider)
+	machineID = strings.TrimSpace(machineID)
+	if provider == "" {
+		return machineID
+	}
+	return provider + "/" + machineID
 }

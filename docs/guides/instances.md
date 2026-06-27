@@ -194,12 +194,22 @@ weft start instance --affinity wj789 --jobs wj790
 ### Distinct physical machines
 
 Use `--distinct-machines` for benchmark or coverage runs where selected jobs
-should land on different Vast.ai physical machines. Weft keys this on Vast.ai's
-per-offer `machine_id`, so RunPod is not supported for this mode.
+should land on different provider physical machines. Vast.ai exposes
+`machine_id` during offer search, so Weft filters covered, in-flight, and
+avoided machines before create. RunPod exposes `machine_id` only after pod
+create/readback, so Weft may briefly create a pod, reject it before bootstrap
+when it lands on a covered or avoided machine, hold it while sampling a
+replacement, then release it after a distinct replacement is accepted or the
+bounded retry budget is exhausted.
 
 `--avoid` can be repeated or comma-separated. Each token may be a raw
 `machine_id`, an instance id such as `wi123`, or a job id such as `wj456`.
-Unresolvable avoid tokens produce warnings and are skipped.
+Unresolvable avoid tokens produce warnings and are skipped. Instance and job
+tokens resolve to provider-qualified machine identities, so avoiding a RunPod
+job avoids that RunPod physical machine rather than a same-named Vast.ai
+machine. Raw unqualified machine ids are treated as Vast.ai ids for backwards
+compatibility; use `runpod/<machine_id>` when entering a RunPod machine id
+directly.
 
 Use `--affinity` when a job should run on the same Vast.ai physical machine as
 another job, instance, or raw `machine_id`. It accepts the same token forms as

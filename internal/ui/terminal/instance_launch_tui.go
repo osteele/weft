@@ -2291,6 +2291,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		sendCampaignPhase("launching worker instances")
 
 		planOptions := campaign.LaunchExecutionPlanOptions{
+			DistinctMachines:       opts.DistinctMachines,
 			InitialClaimedMachines: campaign.DistinctMachineAvoidanceKeys(opts.AvoidMachines),
 			MachineAffinity:        campaign.VastAIMachineKeys(opts.AffinityMachines),
 		}

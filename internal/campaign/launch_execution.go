@@ -20,6 +20,7 @@ type LaunchExecutionPlan struct {
 }
 
 type LaunchExecutionPlanOptions struct {
+	DistinctMachines       bool
 	InitialClaimedMachines map[string]struct{}
 	MachineAffinity        map[string]struct{}
 }
@@ -59,6 +60,7 @@ func PrepareLaunchExecutionPlanWithProgressAndOptions(database *sql.DB, clients 
 		effectiveMinSurvival,
 		onProgress,
 		PlanOptions{
+			DistinctMachines:       options.DistinctMachines,
 			InitialClaimedMachines: options.InitialClaimedMachines,
 			MachineAffinity:        options.MachineAffinity,
 		},
@@ -164,6 +166,7 @@ func PrepareNewInstanceLaunchPlanWithOptions(
 		effectiveMinSurvival,
 		onProgress,
 		PlanOptions{
+			DistinctMachines:       options.DistinctMachines,
 			InitialClaimedMachines: options.InitialClaimedMachines,
 			MachineAffinity:        options.MachineAffinity,
 		},

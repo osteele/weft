@@ -134,8 +134,8 @@ Use tags when you need to change the placement domain:
 local placement because it names a rental provider directly.
 
 For benchmark coverage runs, `weft start instance --distinct-machines` changes
-new-instance offer eligibility so selected jobs land on different Vast.ai
-physical machines. See [Distinct physical machines](instances.md#distinct-physical-machines)
+new-instance eligibility so selected jobs land on different provider physical
+machines. See [Distinct physical machines](instances.md#distinct-physical-machines)
 for launch syntax, `--avoid`, and `--affinity`.
 
 ## Reserved Tags

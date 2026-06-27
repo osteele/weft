@@ -107,6 +107,7 @@ func TestResolveAvoidMachineIDs(t *testing.T) {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
 	instanceID := createCoverageLaunch(t, database, campaignID, LaunchStatusCompleted, "vastai", "machine-from-instance")
+	runpodInstanceID := createCoverageLaunch(t, database, campaignID, LaunchStatusCompleted, "runpod", "runpod-machine")
 	firstJobLaunch := createCoverageLaunch(t, database, campaignID, LaunchStatusCompleted, "vastai", "old-job-machine")
 	latestJobLaunch := createCoverageLaunch(t, database, campaignID, LaunchStatusCompleted, "vastai", "latest-job-machine")
 
@@ -118,6 +119,7 @@ func TestResolveAvoidMachineIDs(t *testing.T) {
 
 	got, warnings, err := ResolveAvoidMachineIDs(database, []string{
 		"raw-machine,wi" + itoa(instanceID),
+		"wi" + itoa(runpodInstanceID),
 		"wj201",
 		"wj202",
 		"wi999999",
@@ -125,7 +127,7 @@ func TestResolveAvoidMachineIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAvoidMachineIDs: %v", err)
 	}
-	want := []string{"raw-machine", "machine-from-instance", "latest-job-machine"}
+	want := []string{"raw-machine", "vastai/machine-from-instance", "runpod/runpod-machine", "vastai/latest-job-machine"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved = %#v, want %#v", got, want)
 	}

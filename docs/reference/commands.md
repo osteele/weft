@@ -1326,8 +1326,8 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 - `--runpod-cloud-type community|secure`: Override RunPod cloud type for this launch. The default comes from `[runpod] cloud_type`, or `community` when unset.
 - `--strategy cheap|fast|fastest`: Offer selection strategy (default: `cheap`)
 - `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`; `0` disables)
-- `--distinct-machines`: Place selected jobs on different Vast.ai physical machines
-- `--avoid MACHINE|wiID|wjID`: Exclude a Vast.ai physical machine when using `--distinct-machines`; repeatable and comma-separated
+- `--distinct-machines`: Place selected jobs on different provider physical machines. Vast.ai is filtered before create; RunPod is checked after pod create/readback.
+- `--avoid MACHINE|wiID|wjID`: Exclude a physical machine when using `--distinct-machines`; repeatable and comma-separated. Raw unqualified machine ids are Vast.ai-compatible; `runpod/<machine_id>` and instance/job ids use provider-qualified machine ids.
 - `--affinity MACHINE|wiID|wjID`: Require placement on the same Vast.ai physical machine; repeatable and comma-separated
 - `--plain` / `--tui`: Force output mode
 

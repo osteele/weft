@@ -115,16 +115,19 @@ entity Campaign {
     -- selection (CoverageOfferExclusion) and infra-failure replacement
     -- (CoverageReplacementResearchesOffer) exclude already-covered and
     -- in-flight machines — but NOT failed or boot-failed machines, whose
-    -- hardware is left uncovered and therefore stays eligible. Requires a
-    -- provider that exposes per-offer machine_id; see
-    -- MachineAntiAffinityRequiresMachineID.
+    -- hardware is left uncovered and therefore stays eligible. Vast.ai
+    -- enforces this before provider create because offers expose machine_id;
+    -- RunPod enforces it after pod create/readback because offers expose only
+    -- GPU type before placement. See MachineAntiAffinityProviderSupport.
     distinct_machines: Boolean
 
-    -- Operator-supplied physical machines to avoid, resolved to provider
-    -- machine_ids from `--avoid` tokens (a raw machine_id, an instance id,
-    -- or a job id — see ResolveAvoidTarget). Unioned into the offer-exclusion
-    -- set alongside the derived covered/in-flight sets. Used to repair,
-    -- resume, or extend a coverage campaign.
+    -- Operator-supplied physical machines to avoid, resolved to machine refs
+    -- from `--avoid` tokens (a raw Vast.ai machine_id, an instance id, or a
+    -- job id — see ResolveAvoidTarget). Instance/job tokens resolve to
+    -- provider-qualified refs such as `runpod/<machine_id>`. Unioned into the
+    -- offer-exclusion set and RunPod post-create acceptance check alongside
+    -- the derived covered/in-flight sets. Used to repair, resume, or extend a
+    -- coverage campaign.
     avoid_machines: List<String>
 
     -- Operator-supplied physical machines to require, resolved to provider
@@ -897,7 +900,10 @@ rule OfferClaimInPassExclusion {
 -- operator-supplied avoid set.
 
 -- A token passed to `weft ... --avoid <token>` identifying a physical machine
--- to exclude. All three kinds resolve to a single provider machine_id.
+-- to exclude. Raw unqualified ids are treated as Vast.ai machine ids for
+-- backwards compatibility; provider-qualified raw ids such as
+-- `runpod/<machine_id>` and instance/job tokens resolve to provider-qualified
+-- machine refs so RunPod and Vast.ai machine-id namespaces cannot collide.
 value AvoidTargetKind = machine_id | instance | job
 
 rule ResolveAvoidTarget {
@@ -906,25 +912,31 @@ rule ResolveAvoidTarget {
     ensures:
         token.kind == machine_id implies result == token.value
     ensures:
-        token.kind == instance implies result == Instance(token.value).offer.machine_id
+        token.kind == instance implies
+            result == Instance(token.value).provider + "/" +
+                      Instance(token.value).offer.machine_id
     ensures:
         token.kind == job implies
-            result == Job(token.value).latest_attempt.cloud_instance.offer.machine_id
+            result == Job(token.value).latest_attempt.cloud_instance.provider + "/" +
+                      Job(token.value).latest_attempt.cloud_instance.offer.machine_id
 
     @guidance
         -- `--avoid` accepts a raw provider machine_id, an instance id (wiNN),
         -- or a job id (wjNN); repeatable and/or comma-separated. An instance
-        -- resolves to its own offer.machine_id; a job resolves to the
-        -- machine_id of its LATEST attempt's launch (deliberately the latest
-        -- attempt, distinct from the all-successful coverage set — `--avoid
-        -- wjNN` means "not where wjNN most recently ran").
+        -- resolves to provider/machine_id; a job resolves to provider/machine_id
+        -- of its LATEST attempt's launch (deliberately the latest attempt,
+        -- distinct from the all-successful coverage set — `--avoid wjNN`
+        -- means "not where wjNN most recently ran"). Raw unqualified ids
+        -- remain Vast.ai-compatible and are normalized to vastai/<machine_id>
+        -- inside campaign offer filtering. Provider-qualified raw refs such
+        -- as runpod/<machine_id> are preserved.
         --
         -- A token that never landed on a machine (job never started, or an
         -- instance/job whose offer.machine_id is empty) resolves to nothing
         -- and MUST be reported as a warning, not silently dropped, so the
         -- operator knows the exclusion had no effect.
         --
--- Resolved machine_ids are unioned into Campaign.avoid_machines.
+-- Resolved machine refs are unioned into Campaign.avoid_machines.
 }
 
 -- A token passed to `weft ... --affinity <token>` identifying a physical
@@ -977,9 +989,11 @@ rule MachineAffinityOfferFilter {
         -- Vast.ai.
 }
 
--- The coverage exclusion that offer selection enforces for a distinct_machines
--- campaign. Extends the per-pass claim by pre-seeding the claimed-machine set
--- with the campaign's covered, in-flight, and avoid machines BEFORE ranking.
+-- The coverage exclusion that offer selection enforces before create when a
+-- provider exposes per-offer machine_id. Extends the per-pass claim by
+-- pre-seeding the claimed-machine set with the campaign's covered, in-flight,
+-- and avoid machines BEFORE ranking. RunPod has no per-offer machine_id, so
+-- RunPod uses RunPodPostCreateMachineAcceptance instead.
 rule CoverageOfferExclusion {
     when: RankGroupOffers(raw_offers_per_group) for campaign
     requires: campaign.distinct_machines
@@ -998,10 +1012,33 @@ rule CoverageOfferExclusion {
         -- RankGroupOffersWithProfile. The covered + in-flight machine_ids
         -- come from the success+in-flight generalization of
         -- db.FailedMoveTargetMachineIDs scoped to the campaign; the avoid set
-        -- comes from ResolveAvoidTarget. No new offer-filter stage is needed —
-        -- the existing claim machinery already excludes claimed machines and
-        -- already has the RunPod empty-machine_id behavior described in
-        -- MachineAntiAffinityRequiresMachineID.
+        -- comes from ResolveAvoidTarget. No new offer-filter stage is needed
+        -- for Vast.ai — the existing claim machinery already excludes claimed
+        -- machines. For RunPod, the planner intentionally allows repeated GPU
+        -- type ProviderID selections in distinct-machine mode, then performs
+        -- acceptance after pod readback when machine_id is known.
+}
+
+rule RunPodPostCreateMachineAcceptance {
+    when: RunPod pod is created for campaign.distinct_machines
+
+    ensures:
+        if pod.machine_id in campaign.covered_instances.offer.machine_id
+           OR pod.machine_id in campaign.inflight_instances.offer.machine_id
+           OR pod.machine_id in campaign.avoid_machines:
+            pod is not bootstrapped with jobs
+            pod is cordoned and held while a replacement is sampled
+            pod is destroyed after replacement acceptance or retry exhaustion
+
+    @guidance
+        -- Implementation: LaunchInstance records provider_instance_id and
+        -- machine_id immediately after CreateInstance/ShowInstance. Under a
+        -- per-campaign mutex, runpodDistinctMachineConflict checks the
+        -- provider-qualified key runpod/<machine_id> against covered rows,
+        -- active accepted pods, and avoid_machines. A conflict returns a
+        -- retryable distinctMachinePostCreateConflictError that unwraps to
+        -- cloud.ErrOfferUnavailable, so existing create/replan retry caps
+        -- bound RunPod sampling.
 }
 
 -- The defining property: failures never exclude their machine.
@@ -1065,27 +1102,37 @@ rule CoverageExhaustion {
         -- operator can tell saturation apart from a market/constraint miss.
 }
 
--- Provider capability gate: coverage anti-affinity needs a real per-offer
--- physical machine id, which only some providers expose.
-invariant MachineAntiAffinityRequiresMachineID {
+-- Provider capability gate: coverage anti-affinity needs a real physical
+-- machine id. Providers may expose it before create (Vast.ai) or only after
+-- create/readback (RunPod).
+invariant MachineAntiAffinityProviderSupport {
     for campaign where campaign.distinct_machines:
-        campaign.instances.all(i => i.provider.name == "vastai")
+        campaign.instances.all(i => i.provider.name in {"vastai", "runpod"})
 
     @guidance
-        -- Only Vast.ai populates a per-offer machine_id at search time
-        -- (OfferSnapshot.machine_id), so only Vast.ai supports pre-launch
-        -- machine anti-affinity. RunPod offers carry NO machine identity:
-        -- offer search returns GPU TYPES, and ProviderID is the GPU-type id,
-        -- not a machine — the machine_id only exists after a pod is created.
+        -- Vast.ai populates per-offer machine_id at search time
+        -- (OfferSnapshot.machine_id), so offer selection excludes covered,
+        -- in-flight, and avoided machines before provider create.
+        --
+        -- RunPod offers carry NO machine identity: offer search returns GPU
+        -- TYPES, and ProviderID is the GPU-type id, not a machine — the
+        -- machine_id only exists after a pod is created/read back.
         -- (Implementation: internal/runpod/client.go buildOffersFromGraphQL
         -- sets ProviderID = gt.ID and never sets MachineID.)
         --
-        -- v1 policy: a distinct_machines launch/repair/resume targeting a
-        -- non-Vast.ai provider MUST fail loudly at request time, naming the
-        -- provider and the unsupported capability — it MUST NOT silently
-        -- downgrade to no anti-affinity (which would let the campaign quietly
-        -- re-cover machines). A best-effort post-create reject-and-relaunch
-        -- mode for RunPod is explicitly deferred.
+        -- For RunPod distinct-machine launches, Weft creates the pod, records
+        -- provider id and machine_id, then checks the machine against
+        -- campaign coverage, in-flight accepted pods, and avoid_machines
+        -- BEFORE uploading/running the job bootstrap. If the sampled machine
+        -- is covered/avoided/in-flight, Weft cordons and holds that pod while
+        -- sampling a replacement under the normal bounded retry budget, then
+        -- destroys the held blocker after a distinct replacement is accepted
+        -- or the group gives up. A RunPod pod that never reports machine_id is
+        -- destroyed immediately and treated as a retryable provider sample.
+        --
+        -- Providers other than Vast.ai and RunPod MUST fail loudly at request
+        -- time for distinct_machines rather than silently downgrading to no
+        -- anti-affinity.
 }
 
 rule GPUMemoryHardwareCeilingResolution {

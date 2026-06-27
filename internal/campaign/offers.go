@@ -1086,14 +1086,14 @@ func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, surviv
 			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
 			continue
 		}
-		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers)
+		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers, false)
 		if len(r.Offers) > 0 && len(availableOffers) == 0 && len(claimedMachines) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrDistinctMachinesExhausted}
 			continue
 		}
 		results[i] = rankOfferWithProfile(r.Group, availableOffers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
 		if results[i].Offer != nil {
-			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers)
+			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers, false)
 		}
 	}
 	return results

@@ -52,8 +52,8 @@ type LaunchOpts struct {
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
 	DistinctMachines    bool                      // exclude covered/in-flight/avoided physical machines within the campaign
-	AvoidMachines       []string                  // resolved provider machine IDs to exclude for distinct-machine campaigns
-	AffinityMachines    []string                  // resolved provider machine IDs that eligible offers must match
+	AvoidMachines       []string                  // resolved machine refs to exclude for distinct-machine campaigns
+	AffinityMachines    []string                  // resolved machine refs that eligible offers must match
 	// MoveTargetClaim, if true, uses each job's open MoveIntent to create a
 	// hidden target attempt on this launch. The source stays authoritative
 	// until the target launch is accepted.
@@ -71,6 +71,9 @@ type LaunchOpts struct {
 	// PlacementAlternatives carries ranked cloud-offer alternatives from the
 	// planning pass, keyed by LaunchGroupSignature.
 	PlacementAlternatives map[string][]RankedOfferAlternative
+
+	distinctAcceptMu       *sync.Mutex
+	distinctAcceptedByMach map[string]int64
 }
 
 func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
@@ -575,6 +578,32 @@ func isRetryableCreateError(err error) bool {
 		errors.Is(err, cloud.ErrProviderCommandTimeout)
 }
 
+type distinctMachinePostCreateConflictError struct {
+	LaunchID   int64
+	Provider   cloud.Provider
+	ProviderID string
+	MachineKey string
+	Reason     string
+	KeepAlive  bool
+}
+
+func (e *distinctMachinePostCreateConflictError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Reason != "" {
+		return e.Reason
+	}
+	if e.MachineKey != "" {
+		return fmt.Sprintf("sampled duplicate machine %s", e.MachineKey)
+	}
+	return "sampled machine has no provider identity"
+}
+
+func (e *distinctMachinePostCreateConflictError) Unwrap() error {
+	return cloud.ErrOfferUnavailable
+}
+
 func runpodObservedBootstrapPhase(phase string) string {
 	switch strings.TrimSpace(phase) {
 	case "waiting for SSH":
@@ -616,11 +645,16 @@ func recordRunpodObservedBootstrapPhase(database *sql.DB, campaignID *int64, lau
 
 func validateDistinctMachineOffers(offers []cloud.Offer) error {
 	for _, offer := range offers {
-		if offer.Provider != cloud.ProviderVastai {
-			return fmt.Errorf("distinct-machine launches require Vast.ai machine_id support; provider %q is unsupported", offer.Provider)
-		}
-		if strings.TrimSpace(offer.MachineID) == "" {
-			return fmt.Errorf("distinct-machine launches require provider machine_id; offer %s has none", offer.Key())
+		switch offer.Provider {
+		case cloud.ProviderVastai:
+			if strings.TrimSpace(offer.MachineID) == "" {
+				return fmt.Errorf("distinct-machine launches require provider machine_id; offer %s has none", offer.Key())
+			}
+		case cloud.ProviderRunpod:
+			// RunPod exposes machine_id only after pod creation; LaunchInstance
+			// performs a late acceptance check before bootstrapping the job.
+		default:
+			return fmt.Errorf("distinct-machine launches require provider machine identity support; provider %q is unsupported", offer.Provider)
 		}
 	}
 	return nil
@@ -643,21 +677,39 @@ func MachineIDClients(clients []cloud.Client, feature string) ([]cloud.Client, e
 }
 
 func DistinctMachineClients(clients []cloud.Client) ([]cloud.Client, error) {
-	return MachineIDClients(clients, "distinct-machine launches")
+	filtered := make([]cloud.Client, 0, len(clients))
+	for _, client := range clients {
+		if client == nil {
+			continue
+		}
+		switch client.Provider() {
+		case cloud.ProviderVastai, cloud.ProviderRunpod:
+			filtered = append(filtered, client)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("distinct-machine launches require Vast.ai or RunPod machine identity support; no supported provider is available")
+	}
+	return filtered, nil
 }
 
-func VastAIMachineKeys(machineIDs []string) map[string]struct{} {
+func MachineRefKeys(machineRefs []string) map[string]struct{} {
 	out := map[string]struct{}{}
-	for _, machineID := range machineIDs {
-		if key := db.ProviderMachineKey(string(cloud.ProviderVastai), machineID); key != "" {
+	for _, ref := range machineRefs {
+		provider, machineID := parseMachineRef(ref)
+		if key := db.ProviderMachineKey(provider, machineID); key != "" {
 			out[key] = struct{}{}
 		}
 	}
 	return out
 }
 
+func VastAIMachineKeys(machineIDs []string) map[string]struct{} {
+	return MachineRefKeys(machineIDs)
+}
+
 func DistinctMachineAvoidanceKeys(avoidMachines []string) map[string]struct{} {
-	return VastAIMachineKeys(avoidMachines)
+	return MachineRefKeys(avoidMachines)
 }
 
 func distinctMachineExclusions(database *sql.DB, campaignID int64, avoidMachines []string) (map[string]struct{}, error) {
@@ -680,6 +732,81 @@ func distinctMachineExclusions(database *sql.DB, campaignID int64, avoidMachines
 		out[key] = struct{}{}
 	}
 	return out, nil
+}
+
+func parseMachineRef(ref string) (string, string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", ""
+	}
+	provider, machineID, ok := strings.Cut(ref, "/")
+	if ok {
+		return strings.TrimSpace(provider), strings.TrimSpace(machineID)
+	}
+	return string(cloud.ProviderVastai), ref
+}
+
+func runpodDistinctMachineConflict(database *sql.DB, campaignID *int64, currentLaunchID int64, machineID string, avoidMachines []string, acceptedByMachine map[string]int64) (string, error) {
+	key := db.ProviderMachineKey(string(cloud.ProviderRunpod), machineID)
+	if key == "" {
+		return "RunPod pod did not report a machine_id for distinct-machine launch", nil
+	}
+	if _, avoided := DistinctMachineAvoidanceKeys(avoidMachines)[key]; avoided {
+		return fmt.Sprintf("RunPod pod sampled avoided machine %s", key), nil
+	}
+	if acceptedByMachine != nil {
+		if priorID, ok := acceptedByMachine[key]; ok && priorID != currentLaunchID {
+			return fmt.Sprintf("RunPod pod sampled machine %s already accepted by %s", key, ids.FormatInstanceID(priorID)), nil
+		}
+	}
+	if campaignID == nil || *campaignID <= 0 {
+		if acceptedByMachine != nil {
+			acceptedByMachine[key] = currentLaunchID
+		}
+		return "", nil
+	}
+	covered, err := db.CampaignCoveredMachineIDs(database, *campaignID)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := covered[key]; ok {
+		return fmt.Sprintf("RunPod pod sampled already-covered machine %s", key), nil
+	}
+	var priorID int64
+	err = database.QueryRow(`
+		SELECT id
+		  FROM launches
+		 WHERE campaign_id = ?
+		   AND id < ?
+		   AND COALESCE(provider, '') = ?
+		   AND COALESCE(machine_id, '') = ?
+		   AND status NOT IN (?, ?, ?)
+		 ORDER BY id
+		 LIMIT 1`,
+		*campaignID,
+		currentLaunchID,
+		string(cloud.ProviderRunpod),
+		strings.TrimSpace(machineID),
+		db.LaunchStatusCompleted,
+		db.LaunchStatusFailed,
+		db.LaunchStatusCancelled,
+	).Scan(&priorID)
+	if err == sql.ErrNoRows {
+		if acceptedByMachine != nil {
+			acceptedByMachine[key] = currentLaunchID
+		}
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if priorID > 0 {
+		return fmt.Sprintf("RunPod pod sampled machine %s already held by %s", key, ids.FormatInstanceID(priorID)), nil
+	}
+	if acceptedByMachine != nil {
+		acceptedByMachine[key] = currentLaunchID
+	}
+	return "", nil
 }
 
 var (
@@ -989,6 +1116,12 @@ func launchCampaignWithStager(
 			if key := offerMachineClaimKey(offer); key != "" {
 				selectedMachineKeys[key] = struct{}{}
 			}
+		}
+		if opts.distinctAcceptMu == nil {
+			opts.distinctAcceptMu = &sync.Mutex{}
+		}
+		if opts.distinctAcceptedByMach == nil {
+			opts.distinctAcceptedByMach = map[string]int64{}
 		}
 	}
 	appCfg, cfgErr := config.Load()
@@ -1376,15 +1509,29 @@ func launchCampaignWithStager(
 				})
 			})
 
+			distinctReplans := retrypolicy.MaxGroupReplans()
+			if opts.DistinctMachines {
+				distinctReplans += retrypolicy.MaxCreateAttempts() - 1
+			}
+			var blockers []distinctMachineBlocker
 			cID, currentOffer, _, err := runGroupLaunchWithReplan(
 				ofr,
 				client,
-				retrypolicy.MaxGroupReplans(),
+				distinctReplans,
 				func(c cloud.Client, o cloud.Offer) (int64, error) {
-					return LaunchInstance(
+					id, launchErr := LaunchInstance(
 						c, clients, database, &campaignID, group, o, opts, r2Cfg, createOpts,
 						groupAssets, replacementOffer, progress, instanceRegistered,
 					)
+					var conflictErr *distinctMachinePostCreateConflictError
+					if errors.As(launchErr, &conflictErr) && conflictErr.KeepAlive {
+						blockers = append(blockers, distinctMachineBlocker{
+							LaunchID:   conflictErr.LaunchID,
+							Provider:   conflictErr.Provider,
+							ProviderID: conflictErr.ProviderID,
+						})
+					}
+					return id, launchErr
 				},
 				func() (*cloud.Offer, error) {
 					return replacementOffer(map[string]struct{}{})
@@ -1394,6 +1541,13 @@ func launchCampaignWithStager(
 				},
 				progress,
 			)
+			blockerDetail := "distinct-machine replacement accepted; releasing held RunPod pod"
+			if err != nil {
+				blockerDetail = "distinct-machine launch failed; releasing held RunPod pod"
+			}
+			destroyDistinctMachineBlockers(database, func(p cloud.Provider) cloud.Client {
+				return clientForProvider(clients, p)
+			}, blockers, blockerDetail)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1601,6 +1755,44 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 		}
 	}
 	return nil
+}
+
+type distinctMachineBlocker struct {
+	LaunchID   int64
+	Provider   cloud.Provider
+	ProviderID string
+}
+
+func destroyDistinctMachineBlockers(database *sql.DB, clientForProvider func(cloud.Provider) cloud.Client, blockers []distinctMachineBlocker, detail string) {
+	for _, blocker := range blockers {
+		if blocker.LaunchID <= 0 || blocker.ProviderID == "" {
+			continue
+		}
+		client := clientForProvider(blocker.Provider)
+		if client == nil {
+			slog.Warn("distinct-machine blocker cleanup skipped: no provider client",
+				"component", "launch",
+				"launch_id", blocker.LaunchID,
+				"provider", blocker.Provider,
+				"provider_id", blocker.ProviderID)
+			continue
+		}
+		if err := client.DestroyInstance(blocker.ProviderID); err != nil {
+			slog.Warn("distinct-machine blocker cleanup failed",
+				"component", "launch",
+				"launch_id", blocker.LaunchID,
+				"provider", blocker.Provider,
+				"provider_id", blocker.ProviderID,
+				"error", err)
+			oplog.Log(oplog.OpLaunchDestroyFailed,
+				oplog.WithError(err),
+				oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=distinct_machine_blocker_cleanup",
+					blocker.Provider, blocker.ProviderID, blocker.LaunchID),
+			)
+			continue
+		}
+		_ = db.UpdateLaunchStatus(database, blocker.LaunchID, db.LaunchStatusCancelled, db.TerminationReasonCancelled, detail)
+	}
 }
 
 func supportsDonorStrategy(client cloud.Client) bool {
@@ -2207,6 +2399,16 @@ func LaunchInstance(
 	}
 
 	providerInstID := inst.ProviderID
+	// failLaunchInfra performs the shared post-create failure ritual: destroy
+	// the leaked provider instance, mark the launch failed with an
+	// infra_failure detail, orphan the claimed jobs, and log the failure.
+	failLaunchInfra := func(detail string, err error) {
+		destroyLeakedInstance(client, providerInstID, instanceID)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
+		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
+	}
 	oplog.Log(oplog.OpLaunchLaunchCreated, oplog.WithDetailf(
 		"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
 		instanceID,
@@ -2217,6 +2419,17 @@ func LaunchInstance(
 		inst.Status,
 	))
 
+	// Record provider instance ID before any late distinct-machine rejection so
+	// a held blocker pod remains visible and controllable while replacement
+	// sampling continues.
+	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
+		failLaunchInfra("provider ID recording failed", err)
+		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
+	}
+	if err := db.UpdateLaunchInstanceMetadata(database, instanceID, inst); err != nil {
+		slog.Debug("record provider instance metadata failed", "launch_id", instanceID, "error", err)
+	}
+	observedMachineID := strings.TrimSpace(inst.MachineID)
 	readback, readbackErr := client.ShowInstance(providerInstID)
 	if readbackErr != nil {
 		oplog.Log(oplog.OpLaunchLaunchReadback,
@@ -2232,6 +2445,9 @@ func LaunchInstance(
 	} else {
 		if err := db.UpdateLaunchInstanceMetadata(database, instanceID, readback); err != nil {
 			slog.Debug("record provider instance metadata failed", "launch_id", instanceID, "error", err)
+		}
+		if strings.TrimSpace(readback.MachineID) != "" {
+			observedMachineID = strings.TrimSpace(readback.MachineID)
 		}
 		oplog.Log(oplog.OpLaunchLaunchReadback, oplog.WithDetailf(
 			"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
@@ -2257,21 +2473,53 @@ func LaunchInstance(
 		}
 	}
 
-	// failLaunchInfra performs the shared post-create failure ritual: destroy
-	// the leaked provider instance, mark the launch failed with an
-	// infra_failure detail, orphan the claimed jobs, and log the failure.
-	failLaunchInfra := func(detail string, err error) {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
-		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
-		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
-	}
-
-	// Record provider instance ID
-	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
-		failLaunchInfra("provider ID recording failed", err)
-		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
+	if opts.DistinctMachines && client.Provider() == cloud.ProviderRunpod {
+		if opts.distinctAcceptMu != nil {
+			opts.distinctAcceptMu.Lock()
+		}
+		conflict, err := runpodDistinctMachineConflict(database, campaignID, instanceID, observedMachineID, opts.AvoidMachines, opts.distinctAcceptedByMach)
+		if err != nil {
+			if opts.distinctAcceptMu != nil {
+				opts.distinctAcceptMu.Unlock()
+			}
+			failLaunchInfra("distinct machine check failed", err)
+			return instanceID, fmt.Errorf("distinct machine check: %w", err)
+		}
+		if conflict != "" {
+			err := &distinctMachinePostCreateConflictError{
+				LaunchID:   instanceID,
+				Provider:   client.Provider(),
+				ProviderID: providerInstID,
+				MachineKey: db.ProviderMachineKey(string(cloud.ProviderRunpod), observedMachineID),
+				Reason:     conflict,
+				KeepAlive:  observedMachineID != "",
+			}
+			if err.KeepAlive {
+				_ = db.SetLaunchCordoned(database, instanceID, true, conflict)
+				resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance sampled non-distinct RunPod machine before destination acceptance")
+				emitProgress(conflict + "; holding pod and searching again")
+				oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+					"launch_id=%d provider=%s provider_instance_id=%s reason=distinct_machine_conflict detail=%s",
+					instanceID, client.Provider(), providerInstID, conflict))
+				if opts.distinctAcceptMu != nil {
+					opts.distinctAcceptMu.Unlock()
+				}
+				return instanceID, err
+			}
+			destroyLeakedInstance(client, providerInstID, instanceID)
+			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, conflict)
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance missing RunPod machine identity before destination acceptance")
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d provider=%s provider_instance_id=%s reason=missing_machine_id",
+				instanceID, client.Provider(), providerInstID))
+			if opts.distinctAcceptMu != nil {
+				opts.distinctAcceptMu.Unlock()
+			}
+			return instanceID, err
+		}
+		if opts.distinctAcceptMu != nil {
+			opts.distinctAcceptMu.Unlock()
+		}
 	}
 
 	// Record data center if available

@@ -47,6 +47,7 @@ type StrategyPlan struct {
 type PlanOptions struct {
 	OpportunityCostWeight  float64
 	PreferReuse            bool
+	DistinctMachines       bool
 	InitialClaimedMachines map[string]struct{}
 	MachineAffinity        map[string]struct{}
 }
@@ -136,6 +137,7 @@ type planEvaluator struct {
 
 	opportunityCostWeight  float64
 	preferReuse            bool
+	distinctMachines       bool
 	initialClaimedMachines map[string]struct{}
 	machineAffinity        map[string]struct{}
 }
@@ -170,6 +172,7 @@ func newPlanEvaluator(
 		reuseInputBytes:        make(map[string]int64),
 		opportunityCostWeight:  options.OpportunityCostWeight,
 		preferReuse:            options.PreferReuse,
+		distinctMachines:       options.DistinctMachines,
 		initialClaimedMachines: cloneStringSet(options.InitialClaimedMachines),
 		machineAffinity:        cloneStringSet(options.MachineAffinity),
 	}
@@ -828,7 +831,7 @@ func (e *planEvaluator) evaluateRawOffers(raw []GroupRawOffers) rawOfferEvaluati
 }
 
 func (e *planEvaluator) selectOffers(eval rawOfferEvaluation, profile bidding.ScoreProfile) ([]GroupOffer, []offerRuntimePrediction) {
-	return rankGroupOffersFromPredictionsWithMachineExclusions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival, e.initialClaimedMachines, e.machineAffinity)
+	return rankGroupOffersFromPredictionsWithMachineExclusions(eval.raw, eval.offerPredictions, e.survivalModel, e.setupFactory, profile, e.minSurvival, e.initialClaimedMachines, e.machineAffinity, e.distinctMachines)
 }
 
 func (e *planEvaluator) estimateSelectedOffers(groupOffers []GroupOffer, selected []offerRuntimePrediction) []CostEstimate {
@@ -1073,7 +1076,7 @@ func rankGroupOffersFromPredictions(
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) ([]GroupOffer, []offerRuntimePrediction) {
-	return rankGroupOffersFromPredictionsWithMachineExclusions(raw, predicted, survivalModel, setupFactory, profile, minSurvival, nil, nil)
+	return rankGroupOffersFromPredictionsWithMachineExclusions(raw, predicted, survivalModel, setupFactory, profile, minSurvival, nil, nil, false)
 }
 
 func rankGroupOffersFromPredictionsWithMachineExclusions(
@@ -1085,6 +1088,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 	minSurvival float64,
 	initialClaimedMachines map[string]struct{},
 	machineAffinity map[string]struct{},
+	distinctMachines bool,
 ) ([]GroupOffer, []offerRuntimePrediction) {
 	results := make([]GroupOffer, len(raw))
 	selected := make([]offerRuntimePrediction, len(raw))
@@ -1113,7 +1117,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
 			continue
 		}
-		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers)
+		availableOffers := filterOffersByClaim(affinityOffers, claimedMachines, claimedOffers, distinctMachines)
 		if len(r.Offers) > 0 && len(availableOffers) == 0 && len(claimedMachines) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrDistinctMachinesExhausted}
 			continue
@@ -1132,7 +1136,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 				results[i] = ranked
 				if ranked.Offer != nil {
 					selected[i] = offerPredictions[offerPredictionKey(*ranked.Offer)]
-					recordOfferClaim(*ranked.Offer, claimedMachines, claimedOffers)
+					recordOfferClaim(*ranked.Offer, claimedMachines, claimedOffers, distinctMachines)
 				}
 				continue
 			}
@@ -1150,7 +1154,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 		)
 		if results[i].Offer != nil {
 			selected[i] = neutral[offerPredictionKey(*results[i].Offer)]
-			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers)
+			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers, distinctMachines)
 		}
 	}
 	return results, selected
@@ -2503,7 +2507,7 @@ func makeDefaultNeutralDurations(jobCount int) []time.Duration {
 // the granularity vastai serializes create-instance on; ProviderID guards
 // against duplicate offer IDs on machines where machine_id is empty
 // (runpod, etc.). Empty maps short-circuit to the input slice.
-func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers map[string]struct{}) []cloud.Offer {
+func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers map[string]struct{}, distinctMachines bool) []cloud.Offer {
 	if len(claimedMachines) == 0 && len(claimedOffers) == 0 {
 		return offers
 	}
@@ -2514,7 +2518,7 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 				continue
 			}
 		}
-		if o.ProviderID != "" {
+		if shouldClaimOfferID(o, distinctMachines) {
 			if _, taken := claimedOffers[string(o.Provider)+"/"+o.ProviderID]; taken {
 				continue
 			}
@@ -2558,17 +2562,24 @@ func filterReusableByMachineAffinity(instances []InstanceCapacity, machineAffini
 
 // recordOfferClaim marks an offer as claimed for the remainder of the
 // ranking pass.
-func recordOfferClaim(o cloud.Offer, claimedMachines, claimedOffers map[string]struct{}) {
+func recordOfferClaim(o cloud.Offer, claimedMachines, claimedOffers map[string]struct{}, distinctMachines bool) {
 	if key := offerMachineClaimKey(o); key != "" {
 		claimedMachines[key] = struct{}{}
 	}
-	if o.ProviderID != "" {
+	if shouldClaimOfferID(o, distinctMachines) {
 		claimedOffers[string(o.Provider)+"/"+o.ProviderID] = struct{}{}
 	}
 }
 
 func offerMachineClaimKey(o cloud.Offer) string {
 	return db.ProviderMachineKey(string(o.Provider), o.MachineID)
+}
+
+func shouldClaimOfferID(o cloud.Offer, distinctMachines bool) bool {
+	if o.ProviderID == "" {
+		return false
+	}
+	return !(distinctMachines && o.Provider == cloud.ProviderRunpod && strings.TrimSpace(o.MachineID) == "")
 }
 
 func cloneStringSet(in map[string]struct{}) map[string]struct{} {

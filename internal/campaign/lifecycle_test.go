@@ -283,6 +283,119 @@ func TestLaunchInstanceCreateTimesOutMarksProviderTimeout(t *testing.T) {
 	}
 }
 
+func TestLaunchInstanceRunpodDistinctMachineConflictHoldsBlocker(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{
+		Status:           db.CampaignStatusLaunching,
+		DistinctMachines: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	priorID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusRunning,
+		Provider:   string(cloud.ProviderRunpod),
+		MachineID:  "machine-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch prior: %v", err)
+	}
+	if priorID == 0 {
+		t.Fatal("prior launch id = 0")
+	}
+
+	job := &db.Job{
+		ID:      103,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass: "L4",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{job},
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	var destroyed []string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			return &cloud.Instance{
+				ProviderID: "pod-duplicate",
+				Provider:   cloud.ProviderRunpod,
+				Status:     cloud.ProviderStatusRunning,
+				MachineID:  "machine-1",
+			}, nil
+		},
+		ShowInstanceFunc: func(instanceID string) (*cloud.Instance, error) {
+			return &cloud.Instance{
+				ProviderID: instanceID,
+				Provider:   cloud.ProviderRunpod,
+				Status:     cloud.ProviderStatusRunning,
+				MachineID:  "machine-1",
+			}, nil
+		},
+		DestroyInstanceFunc: func(instanceID string) error {
+			destroyed = append(destroyed, instanceID)
+			return nil
+		},
+	}
+
+	instanceID, err := LaunchInstance(
+		mockClient, []cloud.Client{mockClient}, database, &campaignID, group,
+		cloud.Offer{ProviderID: "L4", Provider: cloud.ProviderRunpod, GPUName: "L4", GPUMemGB: 24},
+		LaunchOpts{DistinctMachines: true},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected distinct-machine conflict error, got nil")
+	}
+	var conflictErr *distinctMachinePostCreateConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("error = %v, want distinctMachinePostCreateConflictError", err)
+	}
+	if !errors.Is(err, cloud.ErrOfferUnavailable) {
+		t.Fatalf("errors.Is(err, ErrOfferUnavailable) = false")
+	}
+	if len(destroyed) != 0 {
+		t.Fatalf("destroyed = %#v, want held blocker", destroyed)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if ci.Status != db.LaunchStatusLaunching {
+		t.Fatalf("status = %q, want launching held blocker", ci.Status)
+	}
+	if !ci.Cordoned || !strings.Contains(ci.CordonReason, "already held") {
+		t.Fatalf("cordon = %v %q, want duplicate-machine reason", ci.Cordoned, ci.CordonReason)
+	}
+	if ci.EffectiveProviderID() != "pod-duplicate" || ci.MachineID != "machine-1" {
+		t.Fatalf("provider/machine = %q/%q, want pod-duplicate/machine-1", ci.EffectiveProviderID(), ci.MachineID)
+	}
+	resetJob, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if resetJob.LaunchID != nil {
+		t.Fatalf("job launch = %v, want nil after blocker rejection", *resetJob.LaunchID)
+	}
+}
+
 func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

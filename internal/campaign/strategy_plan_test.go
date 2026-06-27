@@ -849,6 +849,48 @@ func TestRankGroupOffersForPlanning_NoMachineRaceAcrossGroups(t *testing.T) {
 	}
 }
 
+func TestRankGroupOffersForPlanning_DistinctRunpodAllowsGpuTypeResampling(t *testing.T) {
+	raw := []GroupRawOffers{
+		{
+			Group: InstanceGroup{
+				GPUClass: "L4",
+				GPUMemGB: 24,
+				Jobs:     []*db.Job{{ID: 1, Project: "p", Command: "x"}},
+			},
+			Offers: []cloud.Offer{
+				{Provider: cloud.ProviderRunpod, ProviderID: "gpu-l4", GPUName: "L4", GPUMemGB: 24, CostPerHour: 0.40, DLPerf: 10},
+			},
+		},
+		{
+			Group: InstanceGroup{
+				GPUClass: "L4",
+				GPUMemGB: 24,
+				Jobs:     []*db.Job{{ID: 2, Project: "p", Command: "x"}},
+			},
+			Offers: []cloud.Offer{
+				{Provider: cloud.ProviderRunpod, ProviderID: "gpu-l4", GPUName: "L4", GPUMemGB: 24, CostPerHour: 0.40, DLPerf: 10},
+			},
+		},
+	}
+	offers, _ := rankGroupOffersFromPredictionsWithMachineExclusions(
+		raw,
+		nil,
+		nil,
+		nil,
+		bidding.StrategyCheap.Profile(),
+		0,
+		nil,
+		nil,
+		true,
+	)
+	if len(offers) != 2 || offers[0].Offer == nil || offers[1].Offer == nil {
+		t.Fatalf("expected two RunPod GPU-type samples under distinct mode, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "gpu-l4" || offers[1].Offer.ProviderID != "gpu-l4" {
+		t.Fatalf("provider IDs = %q/%q, want repeated gpu-l4", offers[0].Offer.ProviderID, offers[1].Offer.ProviderID)
+	}
+}
+
 func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
 	raw := []GroupRawOffers{{
 		Group: InstanceGroup{
@@ -870,6 +912,7 @@ func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
 		0,
 		map[string]struct{}{"vastai/covered": {}},
 		nil,
+		false,
 	)
 	if len(offers) != 1 || offers[0].Offer == nil {
 		t.Fatalf("expected ranked offer, got %#v", offers)
@@ -887,6 +930,7 @@ func TestRankGroupOffersForPlanning_InitialMachineExclusion(t *testing.T) {
 		0,
 		map[string]struct{}{"vastai/covered": {}, "vastai/fresh": {}},
 		nil,
+		false,
 	)
 	if len(offers) != 1 || !errors.Is(offers[0].Err, ErrDistinctMachinesExhausted) {
 		t.Fatalf("expected distinct-machine exhaustion, got %#v", offers)
@@ -914,6 +958,7 @@ func TestRankGroupOffersForPlanning_MachineAffinity(t *testing.T) {
 		0,
 		nil,
 		map[string]struct{}{"vastai/target": {}},
+		false,
 	)
 	if len(offers) != 1 || offers[0].Offer == nil {
 		t.Fatalf("expected ranked offer, got %#v", offers)
@@ -931,6 +976,7 @@ func TestRankGroupOffersForPlanning_MachineAffinity(t *testing.T) {
 		0,
 		nil,
 		map[string]struct{}{"vastai/missing": {}},
+		false,
 	)
 	if len(offers) != 1 || !errors.Is(offers[0].Err, ErrMachineAffinityUnsatisfied) {
 		t.Fatalf("expected machine-affinity exhaustion, got %#v", offers)
