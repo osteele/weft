@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
@@ -560,6 +561,47 @@ func TestRunEditRejectsInvalidMinSurvival(t *testing.T) {
 	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
 	if err == nil || !strings.Contains(err.Error(), "--min-survival must be between 0 and 1") {
 		t.Fatalf("expected min-survival validation error, got %v", err)
+	}
+}
+
+func TestRunEditFailedJobSuggestsRetry(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	result, err := database.Exec(`INSERT INTO jobs (working_dir, command, description, tombstoned) VALUES (?, ?, ?, 0)`, "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("insert failed job: %v", err)
+	}
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get job id: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, status, queued_at, start_time, end_time, exit_code) VALUES (?, 1, ?, 1000, 1100, 1234, 1)`,
+		jobID, db.StatusFailed,
+	); err != nil {
+		t.Fatalf("insert failed attempt: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("gpu-class", "rtx_3090"); err != nil {
+		t.Fatalf("set gpu-class flag: %v", err)
+	}
+
+	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
+	if err == nil {
+		t.Fatal("expected failed-job edit error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"can only edit queued jobs",
+		"Solution:",
+		fmt.Sprintf("weft edit %s --retry", ids.FormatJobID(jobID)),
+		fmt.Sprintf("weft restart %s", ids.FormatJobID(jobID)),
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
 	}
 }
 

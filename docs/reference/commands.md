@@ -1803,6 +1803,7 @@ weft edit [flags] <job-id>
 - `--provider vastai|runpod`: Change the queued job's rental provider preference
 - `--runpod-cloud-type community|secure`: Set the queued job's RunPod cloud type; use `default`, `auto`, `none`, or `clear` to remove the per-job override
 - `--min-survival FRACTION`: Set the queued job's rental offer survival floor; `0` disables the floor for this job
+- `--retry`: Requeue a terminal job and apply the requested edits in the same command
 
 IDs can also be suffixed with `+` or `:any` to mark them as completion-based dependencies, e.g. `--depends-on 101+` or `--depends-on 101:any`.
 

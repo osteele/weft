@@ -996,7 +996,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", ids.FormatJobID(jobID), effectiveStatus)
 		}
 	} else if effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("job %s has status '%s', can only edit queued jobs", ids.FormatJobID(jobID), effectiveStatus)
+		return editNonQueuedJobError(jobID, effectiveStatus)
 	}
 
 	var updates []string
@@ -1483,6 +1483,15 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		ensureDaemonForWork(os.Stderr)
 	}
 	return nil
+}
+
+func editNonQueuedJobError(jobID int64, status string) error {
+	jobRef := ids.FormatJobID(jobID)
+	message := fmt.Sprintf("job %s has status '%s', can only edit queued jobs", jobRef, status)
+	if requeueableStatuses[status] {
+		message += fmt.Sprintf("\nSolution: use `weft edit %s --retry ...` to requeue and apply edits, or `weft restart %s ...` to retry with overrides.", jobRef, jobRef)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, []db.JobDependencyRef, error) {
