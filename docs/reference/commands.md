@@ -654,6 +654,8 @@ This command:
 - First checks the local database for terminated jobs
 - Only queries the remote host if the job is still running
 - Updates the database if status has changed
+- With no job IDs, reads cached database state by default; add `--sync` to
+  refresh all active on-prem hosts before printing the overview.
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
 
@@ -844,6 +846,8 @@ weft jobs list [flags]      # Alias
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
 - `--sync`: Sync job statuses from remote hosts before listing
+- `--no-sync`: Use cached database state; this is the default for one-shot
+  plain output and overrides `--sync`
 - `--tui`: Force the live interactive list
 - `--plain`: Force one-shot plain output
 - `--watch`: Deprecated compatibility alias for `--tui`
@@ -853,6 +857,9 @@ weft jobs list [flags]      # Alias
 `--format json` or `--format tsv` returns an error.
 When combined with `--unprocessed`, grouped views omit `canceled` jobs (which
 were already handled by the agent) but still include `killed` jobs.
+One-shot list output reads cached database state by default. Use `--sync` when
+you want the command itself to probe remote hosts and cloud state before
+returning; the interactive TUI refreshes live state in the background.
 
 **Examples:**
 ```bash

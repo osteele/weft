@@ -204,7 +204,7 @@ func TestRunStatusForceSyncIgnoresFreshDaemonSync(t *testing.T) {
 	}
 }
 
-func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) {
+func TestShowActiveJobsDefaultDoesNotSyncHosts(t *testing.T) {
 	stubEmptyQueueStatus(t)
 
 	database := db.SetupTestDB(t)
@@ -213,6 +213,40 @@ func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) 
 	}
 
 	restoreStatusFlags(t)
+	daemonLiveFunc = func() bool { return false }
+
+	originalSyncHosts := statusSyncHostsFunc
+	t.Cleanup(func() {
+		statusSyncHostsFunc = originalSyncHosts
+	})
+
+	calls := 0
+	statusSyncHostsFunc = func(_ *sql.DB, _ []string, _, _ time.Duration, _ bool) (bool, []string, []string) {
+		calls++
+		return true, nil, nil
+	}
+
+	captureStdout(t, func() {
+		if err := showActiveJobs(database); err != nil {
+			t.Fatalf("showActiveJobs: %v", err)
+		}
+	})
+
+	if calls != 0 {
+		t.Fatalf("default no-arg status sync calls = %d, want 0", calls)
+	}
+}
+
+func TestShowActiveJobsSyncUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
+	database := db.SetupTestDB(t)
+	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "active status", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusSync = true
 
 	originalSyncHosts := statusSyncHostsFunc
 	t.Cleanup(func() {
@@ -226,11 +260,11 @@ func TestShowActiveJobsUsesBoundedSyncWithoutStartingQueueRunners(t *testing.T) 
 		if strings.Join(hosts, ",") != "studio" {
 			t.Fatalf("synced hosts = %v, want [studio]", hosts)
 		}
-		if sshTimeout != DefaultSyncTimeout {
-			t.Fatalf("ssh timeout = %v, want %v", sshTimeout, DefaultSyncTimeout)
+		if sshTimeout != NormalSyncTimeout {
+			t.Fatalf("ssh timeout = %v, want %v", sshTimeout, NormalSyncTimeout)
 		}
-		if hostTimeout != FastSyncHostTimeout {
-			t.Fatalf("host timeout = %v, want %v", hostTimeout, FastSyncHostTimeout)
+		if hostTimeout != NormalSyncTimeout {
+			t.Fatalf("host timeout = %v, want %v", hostTimeout, NormalSyncTimeout)
 		}
 		gotStartQueueRunners = startQueueRunners
 		return true, nil, nil

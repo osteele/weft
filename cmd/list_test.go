@@ -390,6 +390,73 @@ func TestResolveListModePlainWinsForMachineFormat(t *testing.T) {
 	}
 }
 
+func TestRunListPlainDefaultDoesNotSync(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
+	database := db.SetupTestDB(t)
+	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "cached list", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreListFlags(t)
+	listAll = true
+	listLimit = 10
+
+	originalSync := syncListDataFunc
+	t.Cleanup(func() {
+		syncListDataFunc = originalSync
+	})
+	calls := 0
+	syncListDataFunc = func(_ *sql.DB) []string {
+		calls++
+		return nil
+	}
+
+	captureStdout(t, func() {
+		if err := runListPlain(database, nil); err != nil {
+			t.Fatalf("runListPlain: %v", err)
+		}
+	})
+
+	if calls != 0 {
+		t.Fatalf("default plain list sync calls = %d, want 0", calls)
+	}
+}
+
+func TestRunListPlainExplicitSyncRefreshes(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
+	database := db.SetupTestDB(t)
+	if _, err := db.RecordQueuedWithGPU(database, "studio", "/tmp", "echo hi", "synced list", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	restoreListFlags(t)
+	listAll = true
+	listLimit = 10
+	listSync = true
+
+	originalSync := syncListDataFunc
+	t.Cleanup(func() {
+		syncListDataFunc = originalSync
+	})
+	calls := 0
+	syncListDataFunc = func(_ *sql.DB) []string {
+		calls++
+		return nil
+	}
+
+	captureStdout(t, func() {
+		if err := runListPlain(database, nil); err != nil {
+			t.Fatalf("runListPlain: %v", err)
+		}
+	})
+
+	if calls != 1 {
+		t.Fatalf("explicit plain list sync calls = %d, want 1", calls)
+	}
+}
+
 func TestCollectJobsForListWithFiltersOverridesProject(t *testing.T) {
 	database := db.SetupTestDB(t)
 	alphaID, err := db.RecordQueued(database, "studio", "/tmp/alpha", "echo alpha", "")
@@ -562,6 +629,99 @@ func stubEmptyQueueStatus(t *testing.T) {
 		return "", "", nil
 	})
 	t.Cleanup(cleanupSSH)
+}
+
+func restoreListFlags(t *testing.T) {
+	t.Helper()
+
+	origRunning := listRunning
+	origCompleted := listCompleted
+	origQueued := listQueued
+	origDead := listDead
+	origFailed := listFailed
+	origStatus := listStatus
+	origHost := listHost
+	origSince := listSince
+	origMine := listMine
+	origActive := listActive
+	origAllHosts := listAllHosts
+	origSearch := listSearch
+	origLimit := listLimit
+	origSync := listSync
+	origNoSync := listNoSync
+	origAll := listAll
+	origTags := listTags
+	origExcludeTags := listExcludeTags
+	origProject := listProject
+	origProcessed := listProcessed
+	origUnprocessed := listUnprocessed
+	origRental := listRental
+	origInventory := listInventory
+	origCloud := listCloud
+	origFormat := listFormat
+	origNoTruncate := listNoTruncate
+	origColumns := listColumns
+	origGroupBy := listGroupBy
+
+	t.Cleanup(func() {
+		listRunning = origRunning
+		listCompleted = origCompleted
+		listQueued = origQueued
+		listDead = origDead
+		listFailed = origFailed
+		listStatus = origStatus
+		listHost = origHost
+		listSince = origSince
+		listMine = origMine
+		listActive = origActive
+		listAllHosts = origAllHosts
+		listSearch = origSearch
+		listLimit = origLimit
+		listSync = origSync
+		listNoSync = origNoSync
+		listAll = origAll
+		listTags = origTags
+		listExcludeTags = origExcludeTags
+		listProject = origProject
+		listProcessed = origProcessed
+		listUnprocessed = origUnprocessed
+		listRental = origRental
+		listInventory = origInventory
+		listCloud = origCloud
+		listFormat = origFormat
+		listNoTruncate = origNoTruncate
+		listColumns = origColumns
+		listGroupBy = origGroupBy
+	})
+
+	listRunning = false
+	listCompleted = false
+	listQueued = false
+	listDead = false
+	listFailed = false
+	listStatus = ""
+	listHost = ""
+	listSince = ""
+	listMine = false
+	listActive = false
+	listAllHosts = false
+	listSearch = ""
+	listLimit = 50
+	listSync = false
+	listNoSync = false
+	listAll = false
+	listTags = nil
+	listExcludeTags = nil
+	listProject = ""
+	listProcessed = false
+	listUnprocessed = false
+	listRental = false
+	listInventory = false
+	listCloud = false
+	listFormat = "table"
+	listNoTruncate = false
+	listColumns = nil
+	listGroupBy = ""
 }
 
 // recordFailedJob opens a fresh temp DB for the test, records a job, and

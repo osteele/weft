@@ -114,8 +114,8 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listCloud, "cloud", false, "Alias for --rental")
 	cmd.Flags().MarkHidden("cloud")
 	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
-	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
-	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
+	cmd.Flags().BoolVar(&listSync, "sync", false, "Refresh job statuses before listing")
+	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Use cached job statuses (default; overrides --sync)")
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
 	cmd.Flags().StringVar(&listFormat, "format", "table", `Output format: "table", "json", "tsv" (alias: "tab")`)
 	cmd.Flags().BoolVar(&listNoTruncate, "no-truncate", false, "Disable column truncation in table mode")
@@ -182,6 +182,10 @@ func runList(cmd *cobra.Command, args []string) error {
 }
 
 func runListPlain(database *sql.DB, args []string) error {
+	if !plainListShouldSync() {
+		return renderListPlain(database, args)
+	}
+
 	// Render the table from the DB as soon as the sync finishes or a short
 	// soft deadline elapses, whichever comes first. The process always
 	// blocks on the sync before returning so in-flight DB writes aren't
@@ -204,11 +208,7 @@ func runListPlain(database *sql.DB, args []string) error {
 	}
 	printWarnings(syncWarnings)
 
-	jobs, err := collectJobsForList(database, args)
-	if err != nil {
-		return err
-	}
-	if err := printJobs(database, jobs); err != nil {
+	if err := renderListPlain(database, args); err != nil {
 		return err
 	}
 
@@ -220,6 +220,18 @@ func runListPlain(database *sql.DB, args []string) error {
 		printWarnings(dropCloudTimeoutWarnings(late))
 	}
 	return nil
+}
+
+func plainListShouldSync() bool {
+	return listSync && !listNoSync
+}
+
+func renderListPlain(database *sql.DB, args []string) error {
+	jobs, err := collectJobsForList(database, args)
+	if err != nil {
+		return err
+	}
+	return printJobs(database, jobs)
 }
 
 func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
@@ -291,9 +303,11 @@ func dropCloudTimeoutWarnings(warnings []string) []string {
 
 func startListSyncAsync(database *sql.DB) <-chan []string {
 	ch := make(chan []string, 1)
-	go func() { ch <- syncListData(database) }()
+	go func() { ch <- syncListDataFunc(database) }()
 	return ch
 }
+
+var syncListDataFunc = syncListData
 
 func printWarnings(warnings []string) {
 	writeWarnings(os.Stderr, warnings)

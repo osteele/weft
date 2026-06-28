@@ -863,27 +863,17 @@ func showActiveJobs(database *sql.DB) error {
 		ssh.SetMinConnectTimeout(statusSSHTimeout)
 	}
 
-	// Sync first if not disabled
-	if !statusNoSync {
+	// No-arg status is a broad read-only overview. Use cached state by
+	// default so it does not fan out to every on-prem host; --sync requests
+	// an explicit live refresh.
+	if statusSync && !statusNoSync {
 		hosts, err := db.ListUniqueActiveHosts(database)
 		if err == nil && len(hosts) > 0 {
-			needsSync := statusSync || !daemonLiveFunc()
-			if !needsSync {
-				now := time.Now()
-				for _, host := range hosts {
-					if !syncTargetFresh(database, host, now) {
-						needsSync = true
-						break
-					}
-				}
-			}
-			if needsSync {
-				sshTimeout, hostTimeout := statusHostSyncBounds()
-				completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, false)
-				if !completed {
-					if note := buildStaleDataNote(database, unreachable, slow); note != "" {
-						fmt.Fprintln(os.Stderr, note)
-					}
+			sshTimeout, hostTimeout := statusHostSyncBounds()
+			completed, unreachable, slow := statusSyncHostsFunc(database, hosts, sshTimeout, hostTimeout, false)
+			if !completed {
+				if note := buildStaleDataNote(database, unreachable, slow); note != "" {
+					fmt.Fprintln(os.Stderr, note)
 				}
 			}
 		}
