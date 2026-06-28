@@ -97,6 +97,9 @@ func TestLoadInstanceOutcomes_IncludesPreCreationFailures(t *testing.T) {
 		if outcome.TerminationReason != jobdb.TerminationReasonProviderFailure {
 			t.Fatalf("outcome %d TerminationReason = %q, want %q", i, outcome.TerminationReason, jobdb.TerminationReasonProviderFailure)
 		}
+		if outcome.SurvivalClass != SurvivalTrainProviderFailure {
+			t.Fatalf("outcome %d SurvivalClass = %q, want %q", i, outcome.SurvivalClass, SurvivalTrainProviderFailure)
+		}
 	}
 
 	model := BuildSurvivalModel(outcomes)
@@ -157,6 +160,147 @@ func TestLoadInstanceOutcomes_ExcludesAccountCreditExhausted(t *testing.T) {
 	if outcomes[0].TerminationReason != jobdb.TerminationReasonProviderFailure {
 		t.Fatalf("outcome.TerminationReason = %q, want %q",
 			outcomes[0].TerminationReason, jobdb.TerminationReasonProviderFailure)
+	}
+}
+
+func TestLoadInstanceOutcomes_ClassifiesLegacyNonTrainableRunpodFailures(t *testing.T) {
+	database := jobdb.SetupTestDB(t)
+
+	create := func(name string, reason string, detail string, diskGB int) int64 {
+		t.Helper()
+		id, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+			Status:           jobdb.LaunchStatusLaunching,
+			Provider:         string(cloud.ProviderRunpod),
+			ResolvedGPUName:  "RTX 4090",
+			GPUMemGB:         24,
+			DiskGB:           diskGB,
+			CostPerHourCents: 34,
+			Reliability:      0.95,
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch(%s): %v", name, err)
+		}
+		if err := jobdb.UpdateLaunchStatus(database, id, jobdb.LaunchStatusFailed, reason, detail); err != nil {
+			t.Fatalf("UpdateLaunchStatus(%s): %v", name, err)
+		}
+		return id
+	}
+
+	create("old runpodctl flag", jobdb.TerminationReasonInfraFailure,
+		"instance creation failed: create pod: pod create --gpu-id: unknown flag: --min-cuda-version", 1037937)
+	create("manifest upload", jobdb.TerminationReasonInfraFailure,
+		"manifest upload failed: put object campaigns/4099/manifest.json: operation error S3: PutObject: EOF", 50)
+	create("impossible disk request", jobdb.TerminationReasonInfraFailure,
+		"instance creation failed: offer unavailable: pod create --gpu-id: There are no longer any instances available with enough disk space.", 265779)
+	create("setup stall", jobdb.TerminationReasonPhaseStall,
+		"setup phase stalled for 34h31m28s — terminating instance", 189)
+	create("stale offer", jobdb.TerminationReasonInfraFailure,
+		"instance creation failed: offer unavailable: pod create --gpu-id: This machine does not have the resources to deploy your pod. Please try a different machine", 163)
+
+	completedID, err := jobdb.CreateLaunch(database, &jobdb.Launch{
+		Status:           jobdb.LaunchStatusLaunching,
+		Provider:         string(cloud.ProviderRunpod),
+		ResolvedGPUName:  "RTX 4090",
+		GPUMemGB:         24,
+		DiskGB:           85,
+		CostPerHourCents: 34,
+		Reliability:      0.95,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(completed): %v", err)
+	}
+	if err := jobdb.UpdateLaunchStatus(database, completedID, jobdb.LaunchStatusCompleted, jobdb.TerminationReasonCompleted); err != nil {
+		t.Fatalf("UpdateLaunchStatus(completed): %v", err)
+	}
+
+	outcomes, err := LoadInstanceOutcomes(database)
+	if err != nil {
+		t.Fatalf("LoadInstanceOutcomes: %v", err)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("LoadInstanceOutcomes returned %d outcomes, want 2 trainable rows", len(outcomes))
+	}
+
+	classes := map[SurvivalTrainingClass]int{}
+	for _, outcome := range outcomes {
+		classes[outcome.SurvivalClass]++
+	}
+	if classes[SurvivalTrainProviderFailure] != 1 {
+		t.Fatalf("provider-failure training rows = %d, want 1", classes[SurvivalTrainProviderFailure])
+	}
+	if classes[SurvivalTrainSurvived] != 1 {
+		t.Fatalf("survived training rows = %d, want 1", classes[SurvivalTrainSurvived])
+	}
+}
+
+func TestClassifySurvivalTrainingOutcome(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason string
+		detail string
+		diskGB int
+		want   SurvivalTrainingClass
+	}{
+		{
+			name:   "completed",
+			reason: jobdb.TerminationReasonCompleted,
+			want:   SurvivalTrainSurvived,
+		},
+		{
+			name:   "provider stale offer",
+			reason: jobdb.TerminationReasonInfraFailure,
+			detail: "This machine does not have the resources to deploy your pod",
+			diskGB: 163,
+			want:   SurvivalTrainProviderFailure,
+		},
+		{
+			name:   "runpodctl bug",
+			reason: jobdb.TerminationReasonInfraFailure,
+			detail: "unknown flag: --min-cuda-version",
+			diskGB: 1037937,
+			want:   SurvivalTrainExcludedWeftBug,
+		},
+		{
+			name:   "manifest upload",
+			reason: jobdb.TerminationReasonInfraFailure,
+			detail: "manifest upload failed: put object campaigns/4099/manifest.json",
+			want:   SurvivalTrainExcludedLocalStaging,
+		},
+		{
+			name:   "impossible disk",
+			reason: jobdb.TerminationReasonInfraFailure,
+			detail: "There are no longer any instances available with enough disk space.",
+			diskGB: 265779,
+			want:   SurvivalTrainExcludedInvalidRequest,
+		},
+		{
+			name:   "normal disk stockout remains trainable",
+			reason: jobdb.TerminationReasonInfraFailure,
+			detail: "There are no longer any instances available with enough disk space.",
+			diskGB: 163,
+			want:   SurvivalTrainProviderFailure,
+		},
+		{
+			name:   "setup stall",
+			reason: jobdb.TerminationReasonPhaseStall,
+			detail: "setup phase stalled for 34h31m28s",
+			want:   SurvivalTrainExcludedSetup,
+		},
+		{
+			name:   "legacy credit detail",
+			reason: jobdb.TerminationReasonProviderFailure,
+			detail: "provider returned empty response while account credit was exhausted",
+			want:   SurvivalTrainExcludedAccountCredit,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifySurvivalTrainingOutcome(tt.reason, tt.detail, tt.diskGB)
+			if got != tt.want {
+				t.Fatalf("ClassifySurvivalTrainingOutcome() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

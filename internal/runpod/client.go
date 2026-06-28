@@ -931,6 +931,7 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 			GPUMemGB:    float64(gt.MemoryInGb),
 			CostPerHour: price,
 			Verified:    gt.SecureCloud,
+			StockStatus: *gt.LowestPrice.StockStatus,
 		})
 	}
 	return offers
@@ -996,6 +997,7 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 			Verified:    firstBool(row, "secureCloud", "verified"),
 			DataCenter:  firstString(row, "dataCenterId", "dataCenter"),
 			DiskSpaceGB: firstFloat(row, "diskGb", "diskSpaceGb"),
+			StockStatus: firstString(row, "stockStatus"),
 		})
 	}
 	return offers, nil

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -14,13 +15,93 @@ import (
 type InstanceOutcome struct {
 	Provider          cloud.Provider
 	TerminationReason string
+	TerminationDetail string
+	SurvivalClass     SurvivalTrainingClass
 	CostPerHourCents  int
 	ResolvedGPUName   string
 	GPUMemGB          int // per-GPU memory; partitions same-family SKUs (e.g. 4090 24GB vs 48GB)
+	DiskGB            int // requested container disk; used to identify legacy impossible-request bugs
 	Reliability       float64
 	MachineID         string
 	DataCenter        string // provider-reported region+country, e.g. "Sichuan, CN" or ", US" (region missing)
 	EndedAtUnix       int64  // 0 if unknown; used by the recency-decay weighting
+}
+
+// SurvivalTrainingClass is the structured interpretation of a launch outcome
+// for the provider/SKU survival model. It deliberately sits below
+// launches.termination_reason: old rows keep their raw reason/detail evidence,
+// while this classifier can evolve as we learn which legacy failures were
+// provider-attributable and which were Weft/setup/staging bugs.
+type SurvivalTrainingClass string
+
+const (
+	SurvivalTrainSurvived                SurvivalTrainingClass = "survived"
+	SurvivalTrainProviderFailure         SurvivalTrainingClass = "provider_failure"
+	SurvivalTrainExcludedUserCancelled   SurvivalTrainingClass = "excluded_user_cancelled"
+	SurvivalTrainExcludedAccountCredit   SurvivalTrainingClass = "excluded_account_credit"
+	SurvivalTrainExcludedWeftBug         SurvivalTrainingClass = "excluded_weft_bug"
+	SurvivalTrainExcludedProviderAPI     SurvivalTrainingClass = "excluded_provider_api"
+	SurvivalTrainExcludedLocalStaging    SurvivalTrainingClass = "excluded_local_staging"
+	SurvivalTrainExcludedSetup           SurvivalTrainingClass = "excluded_setup"
+	SurvivalTrainExcludedInvalidRequest  SurvivalTrainingClass = "excluded_invalid_request"
+	SurvivalTrainExcludedMissingEvidence SurvivalTrainingClass = "excluded_missing_evidence"
+)
+
+func (c SurvivalTrainingClass) Trainable() bool {
+	return c == SurvivalTrainSurvived || c == SurvivalTrainProviderFailure
+}
+
+func (c SurvivalTrainingClass) Survived() bool {
+	return c == SurvivalTrainSurvived
+}
+
+const impossibleRequestDiskGB = 2000
+
+// ClassifySurvivalTrainingOutcome maps a raw launch terminal reason/detail to
+// the structured training class used by the bidding survival model.
+func ClassifySurvivalTrainingOutcome(reason, detail string, diskGB int) SurvivalTrainingClass {
+	reason = strings.TrimSpace(reason)
+	detailLower := strings.ToLower(detail)
+
+	if isSurvived(reason) {
+		return SurvivalTrainSurvived
+	}
+	if jobdb.ClassifyCreditSignal(detail) == jobdb.CreditSignalStrong {
+		return SurvivalTrainExcludedAccountCredit
+	}
+
+	switch reason {
+	case "":
+		return SurvivalTrainExcludedMissingEvidence
+	case jobdb.TerminationReasonCancelled:
+		return SurvivalTrainExcludedUserCancelled
+	case jobdb.TerminationReasonAccountCreditExhausted:
+		return SurvivalTrainExcludedAccountCredit
+	case jobdb.TerminationReasonWeftBug:
+		return SurvivalTrainExcludedWeftBug
+	case jobdb.TerminationReasonProviderTimeout:
+		return SurvivalTrainExcludedProviderAPI
+	case jobdb.TerminationReasonPhaseStall:
+		return SurvivalTrainExcludedSetup
+	}
+
+	if strings.Contains(detailLower, "unknown flag: --min-cuda-version") {
+		return SurvivalTrainExcludedWeftBug
+	}
+	if strings.Contains(detailLower, "manifest upload failed") ||
+		strings.Contains(detailLower, "bootstrap upload failed") ||
+		strings.Contains(detailLower, "r2 source upload failed") {
+		return SurvivalTrainExcludedLocalStaging
+	}
+	if diskGB > impossibleRequestDiskGB && strings.Contains(detailLower, "disk") {
+		return SurvivalTrainExcludedInvalidRequest
+	}
+	if strings.Contains(detailLower, "artifact needs staging failed") ||
+		strings.Contains(detailLower, "cloud artifact staging failed") {
+		return SurvivalTrainExcludedLocalStaging
+	}
+
+	return SurvivalTrainProviderFailure
 }
 
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
@@ -28,46 +109,27 @@ type InstanceOutcome struct {
 // scoped per-provider (RunPod and Vast have different reliability baselines).
 //
 // Pre-creation failures are included when they are provider-offer signal.
-// Account/client failures are excluded because they would otherwise poison
-// provider/SKU/region priors without saying anything about machine survival.
+// Account/client/setup/staging failures are classified and excluded because
+// they would otherwise poison provider/SKU/region priors without saying
+// anything about machine survival.
 // Rows without machine attribution still contribute to provider/SKU buckets,
 // while geoAdjustment naturally skips their per-machine cache.
-//
-// Credit exhaustion is excluded two ways:
-//   - The structured `account_credit_exhausted` termination reason is the
-//     preferred signal. Operators apply it retroactively via
-//     `weft instance mark-credit-exhausted`; future CreateInstance-time
-//     wiring will write it directly (see docs/planning/ROADMAP.md
-//     § "Structured termination reasons for credit exhaustion").
-//   - The substring list on termination_detail remains as a
-//     backwards-compatibility net for legacy rows that still carry
-//     `provider_failure` plus a credit-error detail string. Keep these
-//     patterns in sync with the runtime classifier in
-//     internal/vastai/client.go isAccountCreditError until all legacy
-//     rows have been reclassified.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
-		SELECT provider, termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
+		SELECT provider, termination_reason, COALESCE(termination_detail, ''),
+		       cost_per_hour_cents, resolved_gpu_name, reliability,
 		       COALESCE(machine_id, ''), COALESCE(ended_at, 0), COALESCE(gpu_mem_gb, 0),
-		       COALESCE(data_center, '')
+		       COALESCE(data_center, ''), COALESCE(disk_gb, 0)
 		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
-		  AND termination_reason NOT IN (?, ?, ?)
 		  AND provider IS NOT NULL
 		  AND provider != ''
 		  AND resolved_gpu_name IS NOT NULL
 		  AND resolved_gpu_name != ''
-		  -- Credit-exhaustion phrase list — keep in sync with
-		  -- internal/vastai/client.go isAccountCreditError.
-		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%provider returned empty response%'
-		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient balance%'
-		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%insufficient credit%'
-		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account lacks credit%'
-		  AND lower(COALESCE(termination_detail, '')) NOT LIKE '%account credit%'
 		ORDER BY id
-	`, jobdb.TerminationReasonCancelled, jobdb.TerminationReasonWeftBug, jobdb.TerminationReasonAccountCreditExhausted)
+	`)
 	if err != nil {
 		return nil, err
 	}
@@ -79,8 +141,12 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		var provider string
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&provider, &o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix, &o.GPUMemGB, &o.DataCenter); err != nil {
+		if err := rows.Scan(&provider, &o.TerminationReason, &o.TerminationDetail, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID, &o.EndedAtUnix, &o.GPUMemGB, &o.DataCenter, &o.DiskGB); err != nil {
 			return nil, err
+		}
+		o.SurvivalClass = ClassifySurvivalTrainingOutcome(o.TerminationReason, o.TerminationDetail, o.DiskGB)
+		if !o.SurvivalClass.Trainable() {
+			continue
 		}
 		o.Provider = cloud.Provider(provider)
 		if costCents.Valid {
@@ -168,7 +234,14 @@ func BuildSurvivalModelAt(outcomes []InstanceOutcome, now time.Time) *SurvivalMo
 	healthCutoff := now.Add(-HealthWindow).Unix()
 
 	for _, o := range outcomes {
-		survived := isSurvived(o.TerminationReason)
+		survivalClass := o.SurvivalClass
+		if survivalClass == "" {
+			survivalClass = ClassifySurvivalTrainingOutcome(o.TerminationReason, o.TerminationDetail, o.DiskGB)
+		}
+		if !survivalClass.Trainable() {
+			continue
+		}
+		survived := survivalClass.Survived()
 		weight := outcomeWeight(o.EndedAtUnix, now)
 
 		// Recent counts use unweighted samples — the Beta priors handle

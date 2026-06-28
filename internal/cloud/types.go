@@ -97,6 +97,7 @@ type Offer struct {
 	UploadBandwidth   float64 // Mbps
 	Verified          bool
 	MachineID         string // provider-specific physical machine identifier
+	StockStatus       string // provider-reported stock label when only aggregate stock is exposed
 }
 
 // Key returns a provider-qualified identifier for the offer (e.g. "vastai:12345").

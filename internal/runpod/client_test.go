@@ -163,6 +163,7 @@ func TestParseGPUTypeOutput(t *testing.T) {
 			"communityCloud": true,
 			"securePrice": 0.74,
 			"communityPrice": 0.44,
+			"stockStatus": "Medium",
 			"maxGpuCount": 1
 		},
 		{
@@ -173,6 +174,7 @@ func TestParseGPUTypeOutput(t *testing.T) {
 			"communityCloud": true,
 			"securePrice": 1.99,
 			"communityPrice": 1.64,
+			"stockStatus": "High",
 			"maxGpuCount": 8
 		},
 		{
@@ -183,6 +185,7 @@ func TestParseGPUTypeOutput(t *testing.T) {
 			"communityCloud": true,
 			"securePrice": 0,
 			"communityPrice": 0.10,
+			"stockStatus": "Low",
 			"maxGpuCount": 1
 		}
 	]`
@@ -201,6 +204,9 @@ func TestParseGPUTypeOutput(t *testing.T) {
 		}
 		if offers[0].Provider != cloud.ProviderRunpod {
 			t.Errorf("expected runpod provider, got %v", offers[0].Provider)
+		}
+		if offers[0].StockStatus != "Medium" {
+			t.Errorf("expected stock status Medium, got %q", offers[0].StockStatus)
 		}
 	})
 
@@ -280,6 +286,9 @@ func TestBuildOffersFromGraphQLExactL4DoesNotMatchL40(t *testing.T) {
 	offers := buildOffersFromGraphQL(gpuTypes, cloud.OfferConstraints{GPUClass: "l4", MinGPUMemGB: 20})
 	if len(offers) != 1 || offers[0].ProviderID != "NVIDIA L4" {
 		t.Fatalf("offers = %+v, want only NVIDIA L4", offers)
+	}
+	if offers[0].StockStatus != "High" {
+		t.Fatalf("StockStatus = %q, want High", offers[0].StockStatus)
 	}
 }
 

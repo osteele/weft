@@ -102,8 +102,11 @@ duration, and endpoint provenance. Endpoints are grouped as:
 ### Cloud instance outcomes
 
 Campaign history records per-instance termination outcomes, price, resolved GPU
-name, and provider reliability. These are used to train the cloud survival
-model.
+name, provider reliability, and the raw termination detail. Weft classifies
+these records before training the cloud survival model so provider-attributable
+failures are not mixed with user cancellations, account-credit failures,
+Weft-side bugs, local R2 staging failures, setup stalls, or legacy impossible
+resource requests.
 
 ## Command-Level Runtime And Resource Prediction
 
@@ -368,6 +371,21 @@ Cheapest-per-hour is not always cheapest-to-completion. Spot-like cloud offers
 can fail or be reclaimed before the job finishes.
 
 Weft addresses this with a Beta-Binomial survival model.
+
+Before a launch outcome enters the model, Weft maps the raw
+`termination_reason` plus `termination_detail` into a structured
+survival-training class:
+
+- `survived`: the instance ran the workload, even if the job itself failed
+  (`completed`, `job_failure`, `disk_full`, or legacy `exited`).
+- `provider_failure`: trainable provider/machine/offer failures such as a
+  stale offer disappearing or a machine failing to bootstrap.
+- excluded classes: user cancellation, account credit exhaustion, Weft bugs,
+  provider API timeouts, local R2/source staging failures, setup-phase stalls,
+  and legacy impossible resource requests.
+
+The raw DB evidence is retained; the classifier is applied when building the
+training input so old rows can be reinterpreted as the classifier improves.
 
 ### Grouping
 

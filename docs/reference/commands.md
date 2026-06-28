@@ -10,6 +10,7 @@ Inspect and edit which cloud GPU providers are eligible for rental placement.
 
 ```bash
 weft provider list [--json]
+weft provider offers [GPU...] [--provider vastai|runpod] [--min-gpu-mem GB] [--min-survival FRACTION] [--need N]
 weft provider enable vastai|runpod
 weft provider disable vastai|runpod
 weft provider reset vastai|runpod
@@ -33,11 +34,22 @@ RunPod launches use community cloud by default. Set
 `[runpod] cloud_type = "secure"` in `~/.config/weft/config.toml`, or pass
 `weft start instance --runpod-cloud-type secure` for one launch.
 
+`weft provider offers` is a read-only capacity report. It searches live rental
+offers, joins them with Weft's survival model, and reports how many candidates
+clear a survival floor. Use `--need N` for host-distribution or anti-affinity
+runs that need N distinct machines. Vast.ai offers expose machine IDs, so Weft
+can count distinct machines directly. RunPod exposes GPU-type stock labels
+instead of physical machine counts, so RunPod rows may report `unknown` for
+multi-machine needs even when stock is present.
+
 Examples:
 
 ```bash
 # See current provider policy
 weft provider list
+
+# See which RunPod community GPU types can plausibly satisfy five 20GB jobs
+weft provider offers --provider runpod --runpod-cloud-type community --min-gpu-mem 20 --min-survival 0.4 --need 5 rtx_3090 rtx_4090 l40 l40s rtx_a6000
 
 # Use only RunPod, even if Vast.ai was previously enabled
 weft provider enable runpod
