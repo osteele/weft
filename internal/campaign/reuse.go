@@ -329,6 +329,10 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	inst := cap.Instance
 	constraints := placement.ConstraintsFromJob(job)
 
+	if ok, reason := matchJobRequiredImage(job, inst); !ok {
+		return false, reason
+	}
+
 	if job.HasTag(db.TagCPUIntensive) {
 		floor := computeCPUCoresFloor()
 		if inst.CPUCores <= 0 {
@@ -386,6 +390,50 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
+}
+
+func matchJobRequiredImage(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil {
+		return true, ""
+	}
+	required := jobRequiredReuseImage(job, inst.Provider)
+	if strings.TrimSpace(required) == "" {
+		return true, ""
+	}
+	actual := strings.TrimSpace(inst.DockerImage)
+	if ImagesCompatible(required, actual) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("image incompatible: job requires %s instance has %s",
+		formatResolvedImageForReuse(required, inst.Provider),
+		formatResolvedImageForReuse(actual, inst.Provider))
+}
+
+func jobRequiredReuseImage(job *db.Job, provider string) string {
+	if job == nil {
+		return ""
+	}
+	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	image, _, _ := ResolveJobImageSettings(localDir, job.Command)
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	if strings.EqualFold(provider, string(cloud.ProviderRunpod)) {
+		return normalizeRunpodGroupImage(image)
+	}
+	return image
+}
+
+func formatResolvedImageForReuse(image, provider string) string {
+	image = strings.TrimSpace(image)
+	if image != "" {
+		return image
+	}
+	if strings.EqualFold(provider, string(cloud.ProviderRunpod)) {
+		return cloud.DefaultRunpodImage
+	}
+	return cloud.DefaultImage
 }
 
 func matchPlacementCompatibility(constraints placement.Constraints, inst *db.Launch) (bool, string) {

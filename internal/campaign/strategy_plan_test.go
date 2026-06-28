@@ -548,6 +548,50 @@ func TestQuickReuseCompatible_RejectsInstanceBelowMinCUDA(t *testing.T) {
 	}
 }
 
+func TestQuickReuseCompatible_RejectsRequiredImageMismatch(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		Jobs: []*db.Job{{
+			ID:         3451,
+			WorkingDir: testSGLangProjectDir(t),
+			Command:    "python profile_inference_sglang.py",
+			GPUClass:   "nvidia",
+		}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              4231,
+			Status:          db.LaunchStatusRunning,
+			Provider:        string(cloud.ProviderVastai),
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 3090",
+			GPUMemGB:        24,
+			DockerImage:     "nvidia/cuda:12.8.2-devel-ubuntu22.04",
+		},
+		DiskFreeGB: 100,
+	}
+
+	if quickReuseCompatible(group, cap) {
+		t.Fatal("quickReuseCompatible accepted SGLang job on CUDA-devel instance")
+	}
+	ok, reason := MatchGroupToInstance(group, cap)
+	if ok {
+		t.Fatal("MatchGroupToInstance accepted SGLang job on CUDA-devel instance")
+	}
+	if !strings.Contains(reason, "image incompatible") {
+		t.Fatalf("reason = %q, want image incompatibility", reason)
+	}
+
+	cap.Instance.DockerImage = sglangRuntimeImage
+	if !quickReuseCompatible(group, cap) {
+		t.Fatal("quickReuseCompatible rejected matching SGLang runtime image")
+	}
+	ok, reason = MatchGroupToInstance(group, cap)
+	if !ok {
+		t.Fatalf("MatchGroupToInstance rejected matching SGLang runtime image: %s", reason)
+	}
+}
+
 func TestBuildProfilePlansFromSplitRaw_CachesSelectedOfferEstimatesAcrossProfiles(t *testing.T) {
 	originalResolve := resolvePredictBatch
 	originalCostPredict := estimateJobDurationsDetailedForCosts

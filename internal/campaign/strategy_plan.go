@@ -1859,6 +1859,11 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {
 		return false
 	}
+	for _, job := range group.Jobs {
+		if ok, _ := matchJobRequiredImage(job, inst); !ok {
+			return false
+		}
+	}
 	if !instanceMeetsMinCUDAVersion(inst, group.MinCUDAVersion) {
 		return false
 	}

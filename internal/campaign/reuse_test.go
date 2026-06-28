@@ -44,6 +44,15 @@ func testCUDAProjectDir(t *testing.T) string {
 	return dir
 }
 
+func testSGLangProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := testProjectDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "profile_inference_sglang.py"), []byte("import sglang as sgl\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestMatchPlacementCompatibility_EnforcesArchFloorWithoutGPURequest(t *testing.T) {
 	// A torch job that did not request a GPU still carries a MinComputeCap floor
 	// resolved from its torch wheel. Routing must enforce that floor rather than
@@ -125,6 +134,89 @@ func TestMatchJobToInstance_BroadNVIDIADoesNotReusePremiumAccelerator(t *testing
 	got, reason = MatchJobToInstance(&db.Job{GPUClass: "h100", GPUMemGB: &mem42}, cap)
 	if !got {
 		t.Fatalf("explicit H100 job should match H100 reuse: %s", reason)
+	}
+}
+
+func TestMatchJobToInstance_RejectsRequiredImageMismatch(t *testing.T) {
+	job := &db.Job{
+		ID:         3451,
+		WorkingDir: testSGLangProjectDir(t),
+		Command:    "python profile_inference_sglang.py",
+		GPUClass:   "nvidia",
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              4231,
+			Provider:        string(cloud.ProviderVastai),
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 3090",
+			GPUMemGB:        24,
+			DockerImage:     "nvidia/cuda:12.8.2-devel-ubuntu22.04",
+		},
+		DiskFreeGB: 100,
+	}
+
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("SGLang job matched CUDA-devel instance; reason=%q", reason)
+	}
+	if !strings.Contains(reason, "image incompatible") ||
+		!strings.Contains(reason, sglangRuntimeImage) ||
+		!strings.Contains(reason, "nvidia/cuda:12.8.2-devel-ubuntu22.04") {
+		t.Fatalf("reason = %q, want image mismatch with both images", reason)
+	}
+
+	cap.Instance.DockerImage = sglangRuntimeImage
+	got, reason = MatchJobToInstance(job, cap)
+	if !got {
+		t.Fatalf("SGLang job rejected from SGLang runtime image: %s", reason)
+	}
+}
+
+func TestPlanReuse_SkipsRequiredImageMismatch(t *testing.T) {
+	job := &db.Job{
+		ID:         3451,
+		Status:     db.StatusQueued,
+		WorkingDir: testSGLangProjectDir(t),
+		Command:    "python profile_inference_sglang.py",
+		GPUClass:   "nvidia",
+	}
+	instances := []InstanceCapacity{
+		{
+			Instance: &db.Launch{
+				ID:              4231,
+				Status:          db.LaunchStatusRunning,
+				Provider:        string(cloud.ProviderVastai),
+				GPUClass:        "NVIDIA",
+				ResolvedGPUName: "RTX 3090",
+				GPUMemGB:        24,
+				DockerImage:     "nvidia/cuda:12.8.2-devel-ubuntu22.04",
+			},
+			DiskFreeGB: 100,
+		},
+		{
+			Instance: &db.Launch{
+				ID:              4232,
+				Status:          db.LaunchStatusRunning,
+				Provider:        string(cloud.ProviderVastai),
+				GPUClass:        "NVIDIA",
+				ResolvedGPUName: "RTX 3090",
+				GPUMemGB:        24,
+				DockerImage:     sglangRuntimeImage,
+			},
+			DiskFreeGB: 100,
+		},
+	}
+
+	assignments, remaining := PlanReuse([]*db.Job{job}, instances)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining = %d, want assignment to compatible image", len(remaining))
+	}
+	if len(assignments) != 1 {
+		t.Fatalf("assignments = %d, want 1", len(assignments))
+	}
+	if assignments[0].Instance.Instance.ID != 4232 {
+		t.Fatalf("assigned instance = %d, want 4232", assignments[0].Instance.Instance.ID)
 	}
 }
 
