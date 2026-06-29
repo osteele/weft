@@ -387,9 +387,37 @@ func filterOffersByForwardCompatDriver(group InstanceGroup, offers []cloud.Offer
 
 func consumerNVIDIAGPU(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(n, "geforce") ||
-		strings.Contains(n, "gtx") ||
-		strings.Contains(n, "rtx")
+	if strings.Contains(n, "geforce") || strings.Contains(n, "gtx") {
+		return true
+	}
+	normalized := strings.NewReplacer("_", " ", "-", " ").Replace(n)
+	fields := strings.Fields(normalized)
+	for i, field := range fields {
+		if field == "rtx" && i+1 < len(fields) && isConsumerRTXNumber(fields[i+1]) {
+			return true
+		}
+		if strings.HasPrefix(field, "rtx") && isConsumerRTXNumber(strings.TrimPrefix(field, "rtx")) {
+			return true
+		}
+	}
+	return false
+}
+
+func isConsumerRTXNumber(s string) bool {
+	if len(s) != 4 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	switch s[:2] {
+	case "20", "30", "40", "50":
+		return true
+	default:
+		return false
+	}
 }
 
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {

@@ -1154,6 +1154,28 @@ func TestFilterOffersByForwardCompatDriver_KeepsOffersWhenCompatibilityNotRequir
 	}
 }
 
+func TestConsumerNVIDIAGPU(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"RTX 3090", true},
+		{"NVIDIA GeForce RTX 4090", true},
+		{"RTX_5090", true},
+		{"GTX 1080 Ti", true},
+		{"RTX A6000", false},
+		{"RTX 6000 Ada", false},
+		{"A100 PCIE", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := consumerNVIDIAGPU(tt.name); got != tt.want {
+				t.Fatalf("consumerNVIDIAGPU(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRankOffer_FiltersUnknownCompatibilityFallback(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
