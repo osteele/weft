@@ -256,8 +256,8 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// minutes loading weights. The remediator's existing pattern registry
 	// will classify the log on a hit; the gain here is wall-clock and a
 	// clearer phase attribution.
-	if len(gpuDevices) > 0 && dataloc.ProjectUsesTorch(expandedDir) {
-		ei, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, envVars, paths, cfg.SetupTimeout)
+	if len(gpuDevices) > 0 && dataloc.JobUsesTorch(expandedDir, command) {
+		ei, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, cfg.SetupTimeout)
 		if preflightErr != nil {
 			now := time.Now().Unix()
 			phases.SetupEnd = now

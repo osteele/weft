@@ -278,6 +278,32 @@ func TestMinRuntimeFloorForJob_LibraryFloorStaysExact(t *testing.T) {
 	}
 }
 
+func TestMinRuntimeFloorForJob_ScriptTorchRangeOverridesProjectLock(t *testing.T) {
+	dir := writeTestUVLockCu128Version(t, "2.6.0")
+	script := `# /// script
+# dependencies = ["torch>=2.2", "transformers>=4.44", "numpy>=1.26"]
+# ///
+import torch
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run train.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "13.0" {
+		t.Errorf("MinCUDAVersion = %q, want 13.0 for open script torch range", rf.Req.MinCUDAVersion)
+	}
+	if rf.Req.MinDriverVersion != 580 {
+		t.Errorf("MinDriverVersion = %d, want 580", rf.Req.MinDriverVersion)
+	}
+	if !strings.Contains(rf.CUDAOrigin, "script PEP 723 torch") {
+		t.Errorf("CUDAOrigin = %q, want script torch provenance", rf.CUDAOrigin)
+	}
+}
+
 // End-to-end regression for wb18: older cu128 pins should still admit hosts
 // shaped like cool30 (driver 525.x, CUDA 12.0) and cool100 (driver 550.x,
 // CUDA 12.4); a genuinely old CUDA-11 host is still rejected.

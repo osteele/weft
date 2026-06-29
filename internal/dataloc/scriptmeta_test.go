@@ -863,6 +863,61 @@ import vllm
 	assertStringSlice(t, "deps", got, want)
 }
 
+func TestScanScriptTorchRequirement(t *testing.T) {
+	dir := t.TempDir()
+	script := `# /// script
+# requires-python = ">=3.11"
+# dependencies = ["torch>=2.2", "transformers>=4.44"]
+# ///
+import torch
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+
+	req := ScanScriptTorchRequirement(dir, "uv run train.py")
+	if req == nil {
+		t.Fatal("ScanScriptTorchRequirement = nil, want torch requirement")
+	}
+	if req.Exact {
+		t.Fatalf("Exact = true for %q, want false", req.Spec)
+	}
+	if req.Version != "2.2" {
+		t.Fatalf("Version = %q, want 2.2", req.Version)
+	}
+	if !ScriptUsesTorch(dir, "uv run train.py") {
+		t.Fatal("ScriptUsesTorch = false, want true")
+	}
+	if got := ScriptTorchCUDAVersion(dir, "uv run train.py"); got != OpenEndedTorchCUDAFloor {
+		t.Fatalf("ScriptTorchCUDAVersion = %q, want %q", got, OpenEndedTorchCUDAFloor)
+	}
+}
+
+func TestScanScriptTorchPinUsesToolUV(t *testing.T) {
+	dir := t.TempDir()
+	script := `# /// script
+# dependencies = ["torch==2.4.1"]
+# [tool.uv]
+# extra-index-url = ["https://download.pytorch.org/whl/cu121"]
+# ///
+import torch
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+
+	pin := ScanScriptTorchPin(dir, "uv run train.py")
+	if pin == nil {
+		t.Fatal("ScanScriptTorchPin = nil, want pin")
+	}
+	if pin.Version != "2.4.1" || pin.CudaVariant != "cu121" {
+		t.Fatalf("pin = %+v, want version 2.4.1 cu121", pin)
+	}
+	if got := ScriptTorchCUDAVersion(dir, "uv run train.py"); got != "12.1" {
+		t.Fatalf("ScriptTorchCUDAVersion = %q, want 12.1", got)
+	}
+}
+
 func assertStringSlice(t *testing.T, name string, got, want []string) {
 	t.Helper()
 	if len(got) != len(want) {

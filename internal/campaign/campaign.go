@@ -920,7 +920,17 @@ func ResolveJobImageSettings(localDir, command string) (string, placement.Runtim
 	// is reliable; rental offers report cuda_max_good values that have
 	// produced real cuda_driver_too_old failures when filtered only to the
 	// family floor (see campaign_test.go's driver-floor regression).
-	if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
+	if scriptReq := dataloc.ScanScriptTorchRequirement(localDir, command); scriptReq != nil {
+		if scriptCUDA := dataloc.ScriptTorchCUDAVersion(localDir, command); scriptCUDA != "" {
+			origin := "script PEP 723 torch dependency"
+			if !scriptReq.Exact {
+				origin = "script PEP 723 torch open range"
+			}
+			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: scriptCUDA}, origin)
+			slog.Debug("auto-derived CUDA driver floor from script torch dependency",
+				"component", "campaign", "cuda_floor", scriptCUDA, "local_dir", localDir)
+		}
+	} else if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
 		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: torchCUDA}, "torch pin")
 		slog.Debug("auto-derived CUDA driver floor from torch pin",
 			"component", "campaign", "cuda_floor", torchCUDA, "local_dir", localDir)

@@ -1493,6 +1493,47 @@ version = "12.8.93"
 	}
 }
 
+func TestSplitGroupsByImage_InferMinCUDAFromScriptTorchRange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.4.5.8"
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	script := `# /// script
+# dependencies = ["torch>=2.2", "transformers>=4.44", "numpy>=1.26"]
+# ///
+import torch
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "NVIDIA",
+		Jobs: []*db.Job{{
+			ID:         3516,
+			WorkingDir: dir,
+			Command:    "uv run train.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion = %q, want 13.0 from script torch range", groups[0].MinCUDAVersion)
+	}
+	if groups[0].MinDriverVersion != 580 {
+		t.Fatalf("MinDriverVersion = %d, want 580", groups[0].MinDriverVersion)
+	}
+}
+
 func TestSplitGroupsByImage_InferMinCUDAFromUVRunWith(t *testing.T) {
 	// Models the wj2305/wj2349 failure: project lockfile pins torch+cu124
 	// (driver floor 550), but the submitted command uses

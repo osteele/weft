@@ -203,7 +203,7 @@ dependencies = ["torch>=2.5"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectUnlockedTorchCloudRuntime(dir, "", "", nil, nil)
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected unlocked torch range to be rejected")
 	}
@@ -220,7 +220,7 @@ dependencies = ["torch>=2.5"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "cool30", "", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "cool30", "", nil, nil); err != nil {
 		t.Fatalf("pinned host rejected: %v", err)
 	}
 }
@@ -233,15 +233,35 @@ dependencies = ["torch==2.6.0"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectUnlockedTorchCloudRuntime(dir, "", "", nil, nil)
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
 	if err == nil {
 		t.Fatal("expected exact pyproject pin without CUDA variant to be rejected")
 	}
 	if !strings.Contains(err.Error(), "does not expose the CUDA wheel variant") {
 		t.Fatalf("error = %q, want CUDA wheel variant diagnosis", err.Error())
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "", "12.4", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.4", nil, nil); err != nil {
 		t.Fatalf("explicit CUDA floor rejected: %v", err)
+	}
+}
+
+func TestRejectUnlockedTorchCloudRuntimeAllowsScriptTorchRange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch==2.6.0"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(`# /// script
+# dependencies = ["torch>=2.2", "transformers>=4.44"]
+# ///
+import torch
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnlockedTorchCloudRuntime(dir, "uv run train.py", "", "", nil, nil); err != nil {
+		t.Fatalf("script torch range should be handled by inferred floor: %v", err)
 	}
 }
 

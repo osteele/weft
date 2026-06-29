@@ -167,7 +167,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 	// explicitly request a GPU. A torch script will use CUDA whenever a GPU is
 	// present on the worker, so a GPU-agnostic job placed on an arch-incompatible
 	// card still hits "no kernel image" — the bounds must filter that worker out.
-	if c.NeedsGPU() || dataloc.ProjectUsesTorch(src.LocalDir) {
+	if c.NeedsGPU() || dataloc.JobUsesTorch(src.LocalDir, src.Command) {
 		maxCap := strings.TrimSpace(src.PersistedMaxComputeCap)
 		derivedMaxCap := ResolveJobMaxComputeCapForPersistence(src.LocalDir, src.Command)
 		switch {

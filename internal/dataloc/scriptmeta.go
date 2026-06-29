@@ -213,6 +213,65 @@ func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
 // declares no weft-specific settings.
 func ScanScriptDependencies(dir, command string) []string {
 	var out []string
+	for _, tree := range scanScriptPEP723Trees(dir, command) {
+		deps, ok := tree.Get("dependencies").([]interface{})
+		if !ok {
+			continue
+		}
+		for _, d := range deps {
+			if s, ok := d.(string); ok {
+				if t := strings.TrimSpace(s); t != "" {
+					out = append(out, t)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func ScanScriptTorchRequirement(dir, command string) *TorchRequirement {
+	for _, tree := range scanScriptPEP723Trees(dir, command) {
+		if req := scriptTorchRequirementFromTree(tree); req != nil {
+			return req
+		}
+	}
+	return nil
+}
+
+func ScanScriptTorchPin(dir, command string) *TorchPin {
+	for _, tree := range scanScriptPEP723Trees(dir, command) {
+		req := scriptTorchRequirementFromTree(tree)
+		if req == nil || !req.Exact || req.Version == "" {
+			continue
+		}
+		cuda := ""
+		if uvTree := tree.Get("tool.uv"); uvTree != nil {
+			if ut, ok := uvTree.(*toml.Tree); ok {
+				cuda = cudaVariantFromUvTree(ut)
+			}
+		}
+		if cuda == "" {
+			maj, min, ok := parseTorchMajMin(req.Version)
+			if ok {
+				cuda = defaultTorchCudaVariant(maj, min)
+			}
+		}
+		return &TorchPin{Version: req.Version, CudaVariant: cuda}
+	}
+	return nil
+}
+
+func ScriptUsesTorch(dir, command string) bool {
+	for _, dep := range ParseDepSpecs(ScanScriptDependencies(dir, command)) {
+		if torchFamilyDepName(dep.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func scanScriptPEP723Trees(dir, command string) []*toml.Tree {
+	var out []*toml.Tree
 	for _, script := range ExtractPythonScriptsInDir(dir, command) {
 		abs := resolveScriptPath(dir, command, script)
 		content, err := os.ReadFile(abs)
@@ -227,19 +286,26 @@ func ScanScriptDependencies(dir, command string) []string {
 		if err != nil {
 			continue
 		}
-		deps, ok := tree.Get("dependencies").([]interface{})
+		out = append(out, tree)
+	}
+	return out
+}
+
+func scriptTorchRequirementFromTree(tree *toml.Tree) *TorchRequirement {
+	deps, ok := tree.Get("dependencies").([]interface{})
+	if !ok {
+		return nil
+	}
+	for _, item := range deps {
+		s, ok := item.(string)
 		if !ok {
 			continue
 		}
-		for _, d := range deps {
-			if s, ok := d.(string); ok {
-				if t := strings.TrimSpace(s); t != "" {
-					out = append(out, t)
-				}
-			}
+		if req := parseTorchRequirementString(s); req != nil {
+			return req
 		}
 	}
-	return out
+	return nil
 }
 
 // readFirstPythonScript reads and returns the content of the first readable

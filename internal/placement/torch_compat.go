@@ -276,7 +276,9 @@ func (rf *RuntimeFloor) ApplyCLIOverride(minCUDA string) error {
 func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	var rf RuntimeFloor
 	var parseErr error
-	if pin := dataloc.ScanTorchPin(dir); pin != nil {
+	if scriptReq := dataloc.ScanScriptTorchRequirement(dir, command); scriptReq != nil {
+		mergeScriptTorchRuntimeFloor(&rf, scriptReq, dataloc.ScanScriptTorchPin(dir, command))
+	} else if pin := dataloc.ScanTorchPin(dir); pin != nil {
 		if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
 			major, _, _ := strings.Cut(family, ".")
 			origin := fmt.Sprintf("torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
@@ -309,6 +311,28 @@ func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
 	}
 	rf.FinalizeDriver()
 	return rf, parseErr
+}
+
+func mergeScriptTorchRuntimeFloor(rf *RuntimeFloor, req *dataloc.TorchRequirement, pin *dataloc.TorchPin) {
+	if req == nil {
+		return
+	}
+	if !req.Exact {
+		origin := fmt.Sprintf("script PEP 723 torch %s (open range)", strings.TrimSpace(req.Spec))
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: dataloc.OpenEndedTorchCUDAFloor}, origin)
+		return
+	}
+	if pin == nil {
+		return
+	}
+	if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
+		major, _, _ := strings.Cut(family, ".")
+		origin := fmt.Sprintf("script PEP 723 torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
+	}
+	if cuda, origin := torchOperationalCUDAFloor(pin); cuda != "" {
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, "script PEP 723 "+origin)
+	}
 }
 
 func torchOperationalCUDAFloor(pin *dataloc.TorchPin) (string, string) {

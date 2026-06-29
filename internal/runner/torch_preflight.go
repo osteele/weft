@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -45,7 +46,7 @@ func preflightEnv(envVars []string) []string {
 // the system PATH). Otherwise it uses the image interpreter, accepting
 // either `python` or `python3` because several cloud base images ship only
 // the latter.
-func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, error) {
+func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, error) {
 	deadline := torchPreflightTimeout
 	if setupTimeout > 0 && setupTimeout < deadline {
 		deadline = setupTimeout
@@ -53,7 +54,7 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
-	cmdStr := torchPreflightShellCommand(workingDir)
+	cmdStr := torchPreflightShellCommand(workingDir, jobCommand)
 	appendSetupLog(paths.Log, []byte("weft: torch preflight: "+cmdStr+"\n"))
 
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
@@ -84,7 +85,18 @@ func runTorchPreflight(jobID int64, workingDir string, envVars []string, paths J
 	return ei, fmt.Errorf("torch preflight failed (exit %d): %w", ei.ExitCode, runErr)
 }
 
-func torchPreflightShellCommand(workingDir string) string {
+func torchPreflightShellCommand(workingDir, jobCommand string) string {
+	if scriptDeps := torchPreflightScriptDeps(workingDir, jobCommand); len(scriptDeps) > 0 {
+		var b strings.Builder
+		b.WriteString("uv run --isolated")
+		for _, dep := range scriptDeps {
+			b.WriteString(" --with ")
+			b.WriteString(shellQuote(dep))
+		}
+		b.WriteString(" ")
+		b.WriteString(torchPreflightCommand)
+		return b.String()
+	}
 	if dataloc.HasUVLock(workingDir) {
 		// `uv run` arranges the project's resolved interpreter without
 		// re-running setup. --no-sync is set explicitly here in case the
@@ -93,4 +105,30 @@ func torchPreflightShellCommand(workingDir string) string {
 		return `uv run --no-sync ` + torchPreflightCommand
 	}
 	return `if command -v python >/dev/null 2>&1; then python -c "` + torchPreflightPythonCode + `"; elif command -v python3 >/dev/null 2>&1; then python3 -c "` + torchPreflightPythonCode + `"; else echo "weft: torch preflight: neither python nor python3 found" >&2; exit 127; fi`
+}
+
+func torchPreflightScriptDeps(workingDir, jobCommand string) []string {
+	deps := dataloc.ScanScriptDependencies(workingDir, jobCommand)
+	if len(deps) == 0 {
+		return nil
+	}
+	parsed := dataloc.ParseDepSpecs(deps)
+	if !dataloc.ScriptUsesTorch(workingDir, jobCommand) && dataloc.LibraryMinCUDAFromDeps(parsed) == "" {
+		return nil
+	}
+	out := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		dep = strings.TrimSpace(dep)
+		if dep != "" {
+			out = append(out, dep)
+		}
+	}
+	return out
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

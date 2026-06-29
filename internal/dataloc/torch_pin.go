@@ -28,6 +28,12 @@ type TorchRequirement struct {
 	Exact   bool
 }
 
+// OpenEndedTorchCUDAFloor is the conservative provider CUDA floor for
+// script-local torch ranges such as `torch>=2.2`. PEP 723 script environments
+// resolve on the worker independently of the project lockfile, so an open range
+// can pick the newest known torch CUDA stack.
+const OpenEndedTorchCUDAFloor = "13.0"
+
 // ScanTorchPin returns the torch pin for a project rooted at or above dir.
 // It prefers uv.lock when present — that is what gets installed — and falls
 // back to pyproject.toml. Returns nil if torch is not pinned.
@@ -105,6 +111,15 @@ func ProjectUsesTorch(dir string) bool {
 	return false
 }
 
+func JobUsesTorch(dir, command string) bool {
+	return ProjectUsesTorch(dir) || ScriptUsesTorch(dir, command)
+}
+
+func torchFamilyDepName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(n, "torch") || strings.Contains(n, "pytorch")
+}
+
 // HasUVLock reports whether the project containing dir has a uv.lock at
 // its root. Walks upward to match ScanTorchPin's semantics — calling
 // hasUVLock on a subdir of a uv-managed project should still return true.
@@ -127,6 +142,21 @@ func ScanPyprojectTorchRequirement(dir string) *TorchRequirement {
 		return nil
 	}
 	return scanPyprojectTorchRequirement(filepath.Join(root, "pyproject.toml"))
+}
+
+func ScriptTorchCUDAVersion(dir, command string) string {
+	req := ScanScriptTorchRequirement(dir, command)
+	if req == nil {
+		return ""
+	}
+	if !req.Exact {
+		return OpenEndedTorchCUDAFloor
+	}
+	pin := ScanScriptTorchPin(dir, command)
+	if pin == nil {
+		return ""
+	}
+	return CUDAVariantVersion(pin.CudaVariant)
 }
 
 func scanFileForTorch(f *os.File) bool {

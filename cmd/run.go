@@ -821,10 +821,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// can't tell whether the rental's driver will satisfy the eventual
 	// `uv sync` (or an in-script `uv venv` that resolves torch on-instance).
 	// Most likely failure is `cuda_driver_too_old` 2-3 minutes into the run.
-	if err := rejectUnlockedTorchCloudRuntime(localDir, host, runCUDADriverMin, runTags, scriptMeta); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(localDir, command, host, runCUDADriverMin, runTags, scriptMeta); err != nil {
 		return err
 	}
-	maybeWarnNoTorchPinForCloud(cmd, localDir, host, runCUDADriverMin, scriptMeta)
+	maybeWarnNoTorchPinForCloud(cmd, localDir, command, host, runCUDADriverMin, scriptMeta)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command, localDir)
@@ -2014,7 +2014,7 @@ func pathHasHomePrefix(dir, home string) bool {
 //   - the user has already specified a CUDA/driver floor,
 //   - --host targets an inventory host (driver floor is set there at boot),
 //   - the project has a torch pin (the auto-floor will fire).
-func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta) {
+func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, command, host, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta) {
 	if !usageHintsEnabled() || hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) || localDir == "" {
 		return
 	}
@@ -2028,6 +2028,11 @@ func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverM
 		// Auto-floor will fire; no warning needed.
 		return
 	}
+	if dataloc.ScanScriptTorchRequirement(localDir, command) != nil {
+		// PEP 723 script torch dependencies are handled independently of the
+		// project lock because uv resolves inline scripts in isolated envs.
+		return
+	}
 	if !dataloc.ProjectUsesTorch(localDir) {
 		return
 	}
@@ -2039,8 +2044,17 @@ func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, host, cudaDriverM
 			"§ \"Torch driver too old\".")
 }
 
-func rejectUnlockedTorchCloudRuntime(localDir, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta) error {
-	if host != "" || localDir == "" || dataloc.HasUVLock(localDir) || slices.Contains(tags, db.TagInventory) {
+func rejectUnlockedTorchCloudRuntime(localDir, command, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta) error {
+	if host != "" || localDir == "" || slices.Contains(tags, db.TagInventory) {
+		return nil
+	}
+	if hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) {
+		return nil
+	}
+	if dataloc.ScanScriptTorchRequirement(localDir, command) != nil {
+		return nil
+	}
+	if dataloc.HasUVLock(localDir) {
 		return nil
 	}
 	if !dataloc.ProjectUsesTorch(localDir) {
@@ -2050,9 +2064,6 @@ func rejectUnlockedTorchCloudRuntime(localDir, host, cudaDriverMin string, tags 
 	if req == nil || !req.Exact {
 		return fmt.Errorf("torch runtime is not locked for cloud placement: %s. Weft cannot derive reliable CUDA/driver floors from an unlocked torch range before choosing a rental. Run `uv lock`, use an exact torch dependency, or target an explicit --host",
 			describeTorchRequirement(req))
-	}
-	if hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) {
-		return nil
 	}
 	pin := dataloc.ScanTorchPin(localDir)
 	if pin != nil && pin.CudaVariant != "" {

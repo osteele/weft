@@ -58,14 +58,14 @@ func TestTorchPreflightCommandUsesUVRunWithLock(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := torchPreflightShellCommand(dir)
+	got := torchPreflightShellCommand(dir, "uv run train.py")
 	if !strings.HasPrefix(got, "uv run --no-sync python -c ") {
 		t.Fatalf("command = %q, want uv-managed python", got)
 	}
 }
 
 func TestTorchPreflightCommandFallsBackToPython3WithoutLock(t *testing.T) {
-	got := torchPreflightShellCommand(t.TempDir())
+	got := torchPreflightShellCommand(t.TempDir(), "python train.py")
 	for _, want := range []string{"command -v python3", "python3 -c", "neither python nor python3"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("command = %q, missing %q", got, want)
@@ -73,5 +73,31 @@ func TestTorchPreflightCommandFallsBackToPython3WithoutLock(t *testing.T) {
 	}
 	if strings.HasPrefix(got, "python -c ") {
 		t.Fatalf("command = %q, want interpreter fallback instead of bare python", got)
+	}
+}
+
+func TestTorchPreflightCommandUsesScriptDependencies(t *testing.T) {
+	dir := t.TempDir()
+	script := `# /// script
+# dependencies = ["torch>=2.2", "transformers>=4.44"]
+# ///
+import torch
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := torchPreflightShellCommand(dir, "uv run train.py")
+	for _, want := range []string{
+		"uv run --isolated",
+		"--with 'torch>=2.2'",
+		"--with 'transformers>=4.44'",
+		"python -c",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "--no-sync") {
+		t.Fatalf("command = %q, script preflight must not use project --no-sync", got)
 	}
 }
