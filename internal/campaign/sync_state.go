@@ -156,7 +156,8 @@ func SyncInstanceState(
 	// field of s; publication happens via wave2.Wait().
 	var wave2 sync.WaitGroup
 	phaseNonEmpty := s.InstancePhase != ""
-	if phaseNonEmpty {
+	phaseActive := isActiveInstancePhase(s.InstancePhase)
+	if phaseActive {
 		wave2.Add(1)
 		go func() {
 			defer wave2.Done()
@@ -575,11 +576,15 @@ func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage 
 // The caller is responsible for setting ProviderInst, ProviderErr, BootstrapSurvival,
 // and SetupSurvival on the returned params.
 func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState JobState, now time.Time) CheckInstanceParams {
+	instancePhase := s.InstancePhase
+	if !isActiveInstancePhase(instancePhase) {
+		instancePhase = ""
+	}
 	return CheckInstanceParams{
 		CI:                    ci,
 		R2Client:              r2Client,
 		JobState:              jobState,
-		InstancePhase:         s.InstancePhase,
+		InstancePhase:         instancePhase,
 		BootstrapStage:        s.BootstrapStage,
 		HeartbeatAge:          s.HeartbeatAge,
 		Heartbeat:             s.Heartbeat,

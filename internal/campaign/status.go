@@ -307,6 +307,25 @@ func ParsePhaseJobID(phase string) (string, int64, bool) {
 	return verb, jobID, true
 }
 
+func isActiveInstancePhase(phase string) bool {
+	phase = strings.TrimSpace(phase)
+	switch phase {
+	case PhaseGrace, PhaseDestroying, PhaseDiskFull:
+		return true
+	}
+
+	verb, _, ok := ParsePhaseJobID(phase)
+	if !ok {
+		return false
+	}
+	switch verb {
+	case PhaseSetup, PhaseGPUWarmup, PhaseRunning, PhaseFinalizing, PhaseUploading, PhaseUploadingResults, PhaseDiskFull:
+		return true
+	default:
+		return false
+	}
+}
+
 // displayPhase reconciles raw R2 phase data with DB job state for display and checks.
 // DB owns the coarse running state; R2 owns richer execution sub-states.
 func displayPhase(jobStatuses map[int64]string, jobs []*db.Job, r2Phase string) (phase string, verb string) {

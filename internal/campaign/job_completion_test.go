@@ -142,6 +142,48 @@ func TestFinalizeStuckJobsWithR2Check_NilR2Client(t *testing.T) {
 	}
 }
 
+func TestFinalizeStuckJobsWithR2Check_IgnoresQueuedAttemptOnCompletedLaunch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, 1); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	db.CreateAttempt(database, 1, "", &instanceID, db.StatusQueued)
+
+	origSync := reconcileCheckAndSyncJobComplete
+	t.Cleanup(func() { reconcileCheckAndSyncJobComplete = origSync })
+	reconcileCheckAndSyncJobComplete = func(_ context.Context, _ *r2.Client, _ *sql.DB, _ int64) bool {
+		t.Fatal("queued attempts must not be probed or finalized as stuck running jobs")
+		return false
+	}
+
+	repaired, err := FinalizeStuckJobsWithR2Check(database, &r2.Client{})
+	if err != nil {
+		t.Fatalf("FinalizeStuckJobsWithR2Check: %v", err)
+	}
+	if len(repaired) != 0 {
+		t.Fatalf("repaired = %v, want none for queued attempt", repaired)
+	}
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM job_attempts WHERE job_id = 1 ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil {
+		t.Fatalf("read attempt status: %v", err)
+	}
+	if status != string(db.StatusQueued) {
+		t.Fatalf("job status = %q, want %q", status, db.StatusQueued)
+	}
+}
+
 func TestSyncJobCompletionsFromR2_BackfillsTerminalLaunchAttempt(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

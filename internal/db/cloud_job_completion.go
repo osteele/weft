@@ -327,24 +327,24 @@ func RearmPoisonedCloudCompletions(database *sql.DB) (int64, error) {
 	return n, nil
 }
 
-// StuckJob represents a job with non-terminal status on a completed launch.
+// StuckJob represents an active job attempt on a completed launch.
 type StuckJob struct {
 	JobID     int64
 	AttemptID int64
 }
 
-// FindStuckJobsOnCompletedLaunches returns jobs with non-terminal status whose
-// launch has already completed. These jobs missed R2 result sync.
+// FindStuckJobsOnCompletedLaunches returns jobs with active execution status
+// whose launch has already completed. These jobs missed R2 result sync.
 func FindStuckJobsOnCompletedLaunches(database *sql.DB) ([]StuckJob, error) {
 	rows, err := database.Query(`
 		SELECT ja.job_id, ja.id
 		FROM job_attempts ja
 		JOIN launches l ON ja.launch_id = l.id
 		WHERE l.status = ?
-		AND ja.status NOT IN (?, ?, ?, ?, ?, ?)
+		AND ja.status IN (?, ?, ?)
 		AND ja.id = (SELECT MAX(ja2.id) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id)`,
 		LaunchStatusCompleted,
-		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		StatusStarting, StatusRunning, StatusPaused,
 	)
 	if err != nil {
 		return nil, err

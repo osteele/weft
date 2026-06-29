@@ -112,6 +112,31 @@ func TestInstancePhaseLabel(t *testing.T) {
 	}
 }
 
+func TestIsActiveInstancePhase(t *testing.T) {
+	tests := []struct {
+		phase string
+		want  bool
+	}{
+		{"setup:42", true},
+		{"gpu_warmup:42", true},
+		{"running:123", true},
+		{"finalizing:7", true},
+		{"uploading:7", true},
+		{"uploading-results:7", true},
+		{"disk-full:7", true},
+		{"grace", true},
+		{"destroying", true},
+		{"post_job_uploads_drained:3583", false},
+		{"ready_for_next_job", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		if got := isActiveInstancePhase(tt.phase); got != tt.want {
+			t.Errorf("isActiveInstancePhase(%q) = %v, want %v", tt.phase, got, tt.want)
+		}
+	}
+}
+
 func TestDisplayPhase_ReconcilesWithDBStatus(t *testing.T) {
 	tests := []struct {
 		name      string

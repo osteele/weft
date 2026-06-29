@@ -743,6 +743,85 @@ func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
 	}
 }
 
+func TestSyncInstanceState_DisplayOnlyPhaseDoesNotBlockBootstrapTimeout(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchBootstrapDeadline(database, instanceID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("set bootstrap deadline: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origOnStart := syncFetchOnStartStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchOnStartStage = origOnStart
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	bootstrapCalls := 0
+	progressCalls := 0
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return "post_job_uploads_drained:3583"
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		bootstrapCalls++
+		return ""
+	}
+	syncFetchOnStartStage = func(_ context.Context, _ *r2.Client, _ int64) (string, *time.Time) {
+		return "", nil
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		progressCalls++
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
+	if synced.InstancePhase != "post_job_uploads_drained:3583" {
+		t.Fatalf("InstancePhase = %q, want display-only phase preserved", synced.InstancePhase)
+	}
+	if bootstrapCalls == 0 {
+		t.Fatal("bootstrap stage was not fetched despite display-only phase")
+	}
+	if progressCalls != 0 {
+		t.Fatalf("job progress fetched %d time(s), want 0 for display-only phase", progressCalls)
+	}
+
+	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	if params.InstancePhase != "" {
+		t.Fatalf("CheckParams.InstancePhase = %q, want empty for watchdogs", params.InstancePhase)
+	}
+	action := NewReconciler().CheckInstance(params)
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d), message=%q", action.Kind, ActionBootstrapStalled, action.StallMessage)
+	}
+	if action.TerminationReason != db.TerminationReasonBootstrapTimeout {
+		t.Fatalf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonBootstrapTimeout)
+	}
+}
+
 func TestSyncInstanceState_PrefersFreshHeartbeatPhase(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
