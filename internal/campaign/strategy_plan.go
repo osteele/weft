@@ -311,6 +311,7 @@ func BuildProfilePlansWithProgressAndOptions(
 		offerSession = newOfferSearchSession(clients, minReliability)
 		splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
 	}
+	splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
 
 	return buildProfilePlansFromSplitRawWithSession(
 		database,
@@ -448,9 +449,11 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 	case len(clients) > 0:
 		offerSession = newOfferSearchSession(clients, minReliability)
 		if len(splitRaw) == len(splitGroups) {
+			splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
 			offerSession.SeedRawOffers(splitRaw)
 		} else {
 			splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
+			splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
 		}
 	case len(splitRaw) != len(splitGroups):
 		splitRaw = make([]GroupRawOffers, len(splitGroups))
@@ -458,6 +461,7 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 			splitRaw[i] = GroupRawOffers{Group: g}
 		}
 	}
+	splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
 
 	return buildProfilePlansFromSplitRawWithSession(
 		database,
@@ -700,7 +704,8 @@ func buildStrategyPlanForSplitRaw(
 			mergedGroups := MergeCompatibleGroups(remainingGroups)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
-				mergedEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedEval := evaluator.evaluateRawOffers(mergedRaw)
 				mergedResult := evaluateSingleCandidateForProfile(
 					evaluator,
 					groupingEvaluation{
@@ -729,7 +734,8 @@ func buildStrategyPlanForSplitRaw(
 			mergedGroups := MergeCompatibleGroups(remainingGroups)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
-				mergedEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedEval := evaluator.evaluateRawOffers(mergedRaw)
 				nonParallelCandidates = append(nonParallelCandidates, groupingEvaluation{
 					label:   "merged",
 					groups:  mergedGroups,
@@ -748,7 +754,8 @@ func buildStrategyPlanForSplitRaw(
 			parallelGroups := SplitToParallel(remainingGroups)
 			if len(parallelGroups) > 0 {
 				reportPlanProgressForLane(onProgress, "Fetching parallel candidate", progressLabel, "", 0, 0)
-				parallelEval := evaluator.evaluateRawOffers(fetchGroupRawOffersForPlanning(offerSession, parallelGroups))
+				parallelRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, parallelGroups))
+				parallelEval := evaluator.evaluateRawOffers(parallelRaw)
 				parallelResult := evaluateSingleCandidateForProfile(
 					evaluator,
 					groupingEvaluation{
@@ -930,7 +937,7 @@ func (e *planEvaluator) evaluateCandidateGroupings(candidates []GroupingCandidat
 			evaluations[idx] = groupingEvaluation{
 				label:             cand.Label,
 				groups:            cand.Groups,
-				rawEval:           e.evaluateRawOffers(cand.Raw),
+				rawEval:           e.evaluateRawOffers(applyImagePrestartFailureBlocks(e.database, cand.Raw)),
 				overlapSavedHours: assetOverlapSavedHours(cand.Groups),
 			}
 		}(idx, cand)

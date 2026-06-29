@@ -126,7 +126,7 @@ var failurePatternRules = []failurePatternRule{
 		patternID:  "sglang_setup",
 		category:   "environment",
 		message:    "SGLang runtime setup is incomplete",
-		solution:   "Use the documented SGLang path: a script PEP 723 block or .weft.toml image override with ghcr.io/osteele/sglang-runtime:v0.5.10.post1 plus the required CUDA/driver floors.",
+		solution:   "Use the documented SGLang path: a script PEP 723 block or .weft.toml image override with lmsysorg/sglang:v0.5.10.post1 plus the required CUDA/driver floors.",
 		confidence: 0.9,
 		re:         regexp.MustCompile(`(?im)(ModuleNotFoundError:\s*No module named ['"](sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)(?:[.'"][^'"]*)?['"]|ImportError:[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)|cannot import name[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma)|(?:error while loading shared libraries|cannot open shared object file)[^\n]*(sglang|sgl[-_]?kernel|flashinfer|outlines-core|libnuma))`),
 		details: func(match []string, logContent string) map[string]any {

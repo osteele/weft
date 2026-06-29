@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
@@ -83,6 +85,84 @@ func TestFastSubmitPendingReasonForRecentOnPrem(t *testing.T) {
 	}
 	if got := fastSubmitPendingReasonForRecentOnPrem(current, []string{db.TagInventory}, false, nil); got != "recent host state unavailable" {
 		t.Fatalf("inventory stale reason = %q", got)
+	}
+}
+
+func TestShouldValidateRentalJobImage(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   string
+		tags   []string
+		draft  bool
+		dryRun bool
+		want   bool
+	}{
+		{name: "auto rental", want: true},
+		{name: "launch host", host: db.LaunchHost(42), want: true},
+		{name: "inventory tag", tags: []string{db.TagInventory}, want: false},
+		{name: "on-prem host", host: "cool30", want: false},
+		{name: "draft", draft: true, want: false},
+		{name: "dry run", dryRun: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldValidateRentalJobImage(tt.host, tt.tags, tt.draft, tt.dryRun); got != tt.want {
+				t.Fatalf("shouldValidateRentalJobImage() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunRunValidatesRentalImageBeforeRecordingJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	resetRunGlobals(t)
+	t.Cleanup(func() {
+		validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+	})
+	runDir = dir
+	runDescription = "image probe failure"
+	runGPU = "nvidia>=24GB"
+
+	sentinel := errors.New("image denied")
+	called := false
+	validateRentalJobImageFunc = func(ctx context.Context, cfg *config.Config, localDir, command string) error {
+		called = true
+		if localDir != dir {
+			t.Fatalf("localDir = %q, want %q", localDir, dir)
+		}
+		if command != "python train.py" {
+			t.Fatalf("command = %q, want python train.py", command)
+		}
+		return sentinel
+	}
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := runRun(cmd, []string{"python train.py"})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("runRun error = %v, want sentinel\noutput:\n%s", err, out.String())
+	}
+	if !called {
+		t.Fatal("validateRentalJobImageFunc was not called")
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs len = %d, want 0 when image validation fails", len(jobs))
 	}
 }
 
@@ -799,6 +879,7 @@ func resetRunGlobals(t *testing.T) {
 	runGPUClass = ""
 	runCUDADriverMin = ""
 	runProvider = ""
+	runRunpodCloudType = ""
 	runInputs = nil
 	runOutputs = nil
 	runProduces = nil
@@ -808,4 +889,5 @@ func resetRunGlobals(t *testing.T) {
 	runHFToken = false
 	runHFTokenFrom = ""
 	runSecretVars = nil
+	validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 }

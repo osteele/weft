@@ -762,6 +762,80 @@ func ListRecentAbnormalFailedInstances(database *sql.DB, sinceUnix int64) ([]*La
 	return out, rows.Err()
 }
 
+// ImagePrestartFailureChain describes consecutive recent pre-start failures for
+// one Docker image. A later terminal row that reached OnStart/agent-ready or
+// ended for another reason breaks the chain.
+type ImagePrestartFailureChain struct {
+	Image       string
+	Count       int
+	LaunchIDs   []int64
+	LatestEnded int64
+}
+
+// RecentImagePrestartFailureChain returns a chain only when the most recent
+// threshold terminal launches for image are all pre-start infrastructure
+// failures. sinceUnix bounds the evidence window; pass 0 for no time bound.
+func RecentImagePrestartFailureChain(database *sql.DB, image string, threshold int, sinceUnix int64) (*ImagePrestartFailureChain, error) {
+	image = strings.TrimSpace(image)
+	if database == nil || image == "" || threshold <= 0 {
+		return nil, nil
+	}
+	rows, err := database.Query(
+		`SELECT id, status, COALESCE(termination_reason, ''), COALESCE(termination_detail, ''),
+		        COALESCE(agent_ready_at_unix, 0), COALESCE(first_onstart_probe_seen_unix, 0), COALESCE(ended_at, 0)
+		   FROM launches
+		  WHERE docker_image = ?
+		    AND ended_at IS NOT NULL
+		    AND (? = 0 OR ended_at >= ?)
+		  ORDER BY ended_at DESC, id DESC
+		  LIMIT ?`,
+		image, sinceUnix, sinceUnix, threshold,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	chain := &ImagePrestartFailureChain{Image: image}
+	for rows.Next() {
+		var id, agentReady, onStartSeen, endedAt int64
+		var status, reason, detail string
+		if err := rows.Scan(&id, &status, &reason, &detail, &agentReady, &onStartSeen, &endedAt); err != nil {
+			return nil, err
+		}
+		if !isImagePrestartFailure(status, reason, detail, agentReady, onStartSeen) {
+			return nil, nil
+		}
+		if chain.LatestEnded == 0 {
+			chain.LatestEnded = endedAt
+		}
+		chain.Count++
+		chain.LaunchIDs = append(chain.LaunchIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if chain.Count < threshold {
+		return nil, nil
+	}
+	return chain, nil
+}
+
+func isImagePrestartFailure(status, reason, detail string, agentReady, onStartSeen int64) bool {
+	if status != LaunchStatusFailed || reason != TerminationReasonInfraFailure {
+		return false
+	}
+	if agentReady != 0 || onStartSeen != 0 {
+		return false
+	}
+	detail = strings.ToLower(strings.TrimSpace(detail))
+	return detail == "" ||
+		strings.Contains(detail, "no agent activity") ||
+		strings.Contains(detail, "no provider progress") ||
+		strings.Contains(detail, "stuck in") ||
+		strings.Contains(detail, "launching phase exceeded")
+}
+
 // ListRunpodLaunchesMissingProviderMetadata returns RunPod launches whose
 // provider pod ID is known but machine/datacenter metadata has not been stored.
 func ListRunpodLaunchesMissingProviderMetadata(database *sql.DB) ([]*Launch, error) {

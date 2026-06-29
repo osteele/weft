@@ -990,6 +990,7 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		{"torch arch max", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
 		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
 		{"unknown provider compatibility", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 0, UnknownCompatibility: 5, ProviderCompatibilityFiltered: 5}, "12 offers found, 5 offers passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility"},
+		{"forward compat driver", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 5, ForwardCompatFiltered: 5, AfterForward: 0, ForwardCompatExampleGPU: "RTX 3090"}, "12 offers found, 5 offers passed provider compatibility but all filtered by Vast.ai datacenter forward-compat driver guard on consumer GPUs (e.g. RTX 3090)"},
 		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
@@ -1114,6 +1115,45 @@ func TestFilterOffersByProviderCompatibility_KeepsUnknownWhenNotRequired(t *test
 	}
 }
 
+func TestFilterOffersByForwardCompatDriver_DropsVastDatacenterConsumerGPU(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "13.0"}
+	offers := []cloud.Offer{
+		{ProviderID: "bad", Provider: cloud.ProviderVastai, GPUName: "RTX 3090", DatacenterDriver: true},
+		{ProviderID: "a100", Provider: cloud.ProviderVastai, GPUName: "A100 PCIE", DatacenterDriver: true},
+		{ProviderID: "consumer-local", Provider: cloud.ProviderVastai, GPUName: "RTX 3090", DatacenterDriver: false},
+		{ProviderID: "runpod", Provider: cloud.ProviderRunpod, GPUName: "RTX 3090", DatacenterDriver: true},
+	}
+	got, filtered, exampleGPU := filterOffersByForwardCompatDriver(group, offers)
+	if filtered != 1 {
+		t.Fatalf("filtered = %d, want 1", filtered)
+	}
+	if exampleGPU != "RTX 3090" {
+		t.Fatalf("exampleGPU = %q, want RTX 3090", exampleGPU)
+	}
+	if len(got) != 3 {
+		t.Fatalf("kept %d offers, want 3: %+v", len(got), got)
+	}
+	for _, offer := range got {
+		if offer.ProviderID == "bad" {
+			t.Fatalf("datacenter-driver RTX offer was not filtered: %+v", got)
+		}
+	}
+}
+
+func TestFilterOffersByForwardCompatDriver_KeepsOffersWhenCompatibilityNotRequired(t *testing.T) {
+	group := InstanceGroup{}
+	offers := []cloud.Offer{
+		{ProviderID: "bad", Provider: cloud.ProviderVastai, GPUName: "RTX 3090", DatacenterDriver: true},
+	}
+	got, filtered, exampleGPU := filterOffersByForwardCompatDriver(group, offers)
+	if filtered != 0 || exampleGPU != "" {
+		t.Fatalf("filtered=%d example=%q, want no filtering without provider compatibility requirement", filtered, exampleGPU)
+	}
+	if len(got) != 1 || got[0].ProviderID != "bad" {
+		t.Fatalf("kept offers = %+v, want original offer", got)
+	}
+}
+
 func TestRankOffer_FiltersUnknownCompatibilityFallback(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
@@ -1129,6 +1169,24 @@ func TestRankOffer_FiltersUnknownCompatibilityFallback(t *testing.T) {
 	}
 	if got.FilterStats.ProviderCompatibilityFiltered != 1 {
 		t.Fatalf("ProviderCompatibilityFiltered = %d, want 1", got.FilterStats.ProviderCompatibilityFiltered)
+	}
+}
+
+func TestRankOffer_FiltersForwardCompatDatacenterConsumerGPU(t *testing.T) {
+	group := InstanceGroup{MinCUDAVersion: "13.0"}
+	offers := []cloud.Offer{
+		{ProviderID: "bad", Provider: cloud.ProviderVastai, GPUName: "RTX 3090", GPUMemGB: 24, CUDAVersion: 13.0, DatacenterDriver: true, CostPerHour: 0.01},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer != nil {
+		t.Fatalf("selected forward-compat consumer offer: %#v", got.Offer)
+	}
+	if got.FilterStats.ForwardCompatFiltered != 1 || got.FilterStats.AfterForward != 0 {
+		t.Fatalf("forward filter stats = %+v, want one filtered and zero after", got.FilterStats)
+	}
+	if got.FilterStats.ForwardCompatExampleGPU != "RTX 3090" {
+		t.Fatalf("ForwardCompatExampleGPU = %q, want RTX 3090", got.FilterStats.ForwardCompatExampleGPU)
 	}
 }
 

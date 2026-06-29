@@ -90,8 +90,10 @@ agent-side torch CUDA preflight.
 ## Surface 2: image selection and requirement computation
 
 For cloud jobs, `campaign.ResolveJobImageSettings` resolves the image with
-precedence `.weft.toml [cloud] image` > script `[tool.weft] image` >
-auto-pytorch (matched to the project's torch CUDA pin) > default.
+precedence script `[tool.weft] image` > matching
+`.weft.toml [cloud.image-overrides]` entry > `.weft.toml [cloud] image` >
+framework aliases > auto-pytorch (matched to the project's torch CUDA pin) >
+default.
 `SplitGroupsByImage` then groups jobs per launch:
 
 - **Auto-selection**: torch projects without an explicit image get the
@@ -102,11 +104,17 @@ auto-pytorch (matched to the project's torch CUDA pin) > default.
   and the pin wins.
 - **Merging**: jobs with mutually compatible images share an instance via
   `imageSupremum` (base < runtime < devel; nvidia/cuda < pytorch/pytorch).
+- **Aliases**: legacy/private SGLang runtime names normalize to the public
+  `lmsysorg/sglang:v0.5.10.post1` image before grouping or probing.
 
 `campaign.ApplyImageMetadataRequirements` fetches the chosen image's OCI
 config (`imagereq.Resolve`), parses its `NVIDIA_REQUIRE_CUDA` label, and
 raises the group's driver/CUDA floors accordingly (raise-only merge, driver
 backfilled from CUDA). These floors then gate offer selection.
+
+Submit-time rental jobs also probe the resolved image manifest with configured
+registry credentials. Missing tags, unauthorized private registries, and other
+manifest/config fetch failures stop submission before a rental is launched.
 
 Because every supported image is Ubuntu 22.04-based, image selection also
 *silently normalizes the OS axis* for cloud jobs — an asymmetry discussed
@@ -118,8 +126,11 @@ under Known gaps.
 toolchain floor, GPU class, per-GPU memory, arch cap/floor, CUDA/driver floors
 — and produces prefixed rejection reasons that flow into `placement_reasons` /
 `placement_blocked`. The cloud path applies GPU bounds to offers
-(`campaign.filterOffersByTorchArch` plus driver/CUDA checks). Fail-open vs
-fail-closed semantics per bound, scoring, and observability are covered in
+(`campaign.filterOffersByTorchArch` plus driver/CUDA checks). When CUDA/driver
+floors are required, Vast.ai offers marked with the datacenter forward-compat
+driver stack are excluded on consumer NVIDIA GPUs because that combination has
+failed with CUDA forward-compat error 804. Fail-open vs fail-closed semantics
+per bound, scoring, and observability are covered in
 [placement.md](placement.md).
 
 Torch-derived GPU-runtime constraints apply **only to jobs that request a
@@ -149,10 +160,12 @@ Diagnoses are persisted as JSON on `job_status.error_diagnosis` /
 `job_attempts.error_diagnosis` and rendered by `weft info`, the TUI, and
 `weft explain`.
 
-Diagnosis is **advisory**: it produces prose for humans. No pattern emits a
-machine-readable constraint that feeds back into placement — a
+Diagnosis is **mostly advisory**: it produces prose for humans. A
 `cuda_driver_too_old` match does not taint the host or attach a floor to the
-job for its retry.
+job for its retry. One hard feedback path exists for images: several
+consecutive pre-start infrastructure failures for the same image block fresh
+rental placement for that image until a later launch reaches OnStart/agent
+readiness and breaks the chain.
 
 ## Known gaps
 
@@ -173,10 +186,10 @@ class/memory/caps, and per-axis persisted job columns. The remaining work is
 to persist resolved requirement sets and move cloud offer/reuse paths onto
 the same checker.
 
-**Diagnosis does not close the loop.** Runtime-discovered incompatibilities
+**Most diagnoses do not close the loop.** Runtime-discovered incompatibilities
 are not converted into host facts or job requirements, so a retry can be
-routed straight back to the incompatible host; the feedback loop is the
-human operator.
+routed straight back to the incompatible host; outside the image pre-start
+breaker, the feedback loop is the human operator.
 
 **Unmatched failures vanish.** When no pattern matches on the post-run path
 the `unknown` diagnosis is stored, but display-time backfill

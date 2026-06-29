@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 // stubCurl writes a fake `curl` into dir that mimics the subset of behavior
@@ -31,6 +33,32 @@ exit 0
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write stub curl: %v", err)
+	}
+}
+
+func TestCloudClientSearchOffersMapsDatacenterDriver(t *testing.T) {
+	client := NewCloudClient(&MockClient{
+		SearchOffersFunc: func(c OfferConstraints) ([]Offer, error) {
+			return []Offer{{
+				ID:               123,
+				GPUName:          "RTX 3090",
+				NumGPUs:          1,
+				GPUMemGB:         24,
+				CostPerHour:      0.45,
+				DatacenterDriver: true,
+			}}, nil
+		},
+	})
+
+	offers, err := client.SearchOffers(cloud.OfferConstraints{GPUClass: "RTX 3090"})
+	if err != nil {
+		t.Fatalf("SearchOffers: %v", err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offers len = %d, want 1", len(offers))
+	}
+	if !offers[0].DatacenterDriver {
+		t.Fatalf("DatacenterDriver = false, want true")
 	}
 }
 

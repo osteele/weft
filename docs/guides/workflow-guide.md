@@ -435,7 +435,7 @@ contains `sglang`, but declaring it in script metadata is more robust:
 # dependencies = ["sglang[srt]>=0.4", "pynvml>=12.0"]
 # [tool.weft]
 # gpu = "ampere+>=24GB"
-# image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+# image = "lmsysorg/sglang:v0.5.10.post1"
 # min-driver = "535"
 # min-cuda = "12.9"
 # ///
@@ -459,7 +459,7 @@ fetch the image config. You can also declare explicit floors:
 ```python
 # /// script
 # [tool.weft]
-# image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+# image = "ghcr.io/acme/custom-runtime:cuda129"
 # min-driver = "535"
 # cuda-driver-min = "12.9"
 # image-pull-secret = "ghcr.io"

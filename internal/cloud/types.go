@@ -88,6 +88,7 @@ type Offer struct {
 	Reliability       float64 // 0-1
 	DLPerf            float64 // deep learning perf score
 	DataCenter        string  // e.g., "US-East"
+	DatacenterDriver  bool    // provider reports a datacenter/forward-compat driver stack
 	CUDAVersion       float64 // max supported CUDA version
 	DiskSpaceGB       float64 // GB available
 	CPUCores          int     // effective CPU cores granted

@@ -148,6 +148,42 @@ func TestApplyGroupOffer_FingerprintFromFilterStats(t *testing.T) {
 	}
 }
 
+func TestApplyGroupOffer_FingerprintFromForwardCompatFilterStats(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{GPUClass: "RTX 3090", Jobs: []*db.Job{{ID: 913}}}
+	offer := GroupOffer{
+		FilterStats: OfferFilterStats{
+			RawCount:              3,
+			AfterVRAM:             3,
+			AfterCUDA:             3,
+			AfterProvider:         3,
+			ForwardCompatFiltered: 3,
+			AfterForward:          0,
+		},
+	}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	if got := plan.BlockedReasonFingerprints[913]; got != "vastai/search-offers/empty-result:forward-compat-driver" {
+		t.Fatalf("BlockedReasonFingerprints[913] = %q, want forward-compat class", got)
+	}
+}
+
+func TestApplyGroupOffer_FingerprintFromImagePrestartFailure(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 914}}}
+	offer := GroupOffer{Err: &ImagePrestartFailureError{Image: "lmsysorg/sglang:v0.5.10.post1", Count: 3, LaunchIDs: []int64{42}}}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	if got := plan.BlockedReasonFingerprints[914]; got != "image/prestart-failure:lmsysorg/sglang:v0.5.10.post1" {
+		t.Fatalf("BlockedReasonFingerprints[914] = %q, want image pre-start fingerprint", got)
+	}
+	if !strings.Contains(plan.BlockedReasons[914], "blocking fresh launches") {
+		t.Fatalf("BlockedReasons[914] = %q, want image block explanation", plan.BlockedReasons[914])
+	}
+}
+
 // TestApplyGroupOffer_NoFingerprintForPlainError verifies the no-fingerprint
 // fallback so today's per-message bucketing continues for unclassified errors.
 func TestApplyGroupOffer_NoFingerprintForPlainError(t *testing.T) {

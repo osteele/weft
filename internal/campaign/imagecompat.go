@@ -119,6 +119,24 @@ func defaultCUDAImageForVersion(cudaMajorMinor string) string {
 	}
 }
 
+// normalizeRentalImageAlias maps Weft's semantic/legacy runtime names to the
+// image we should actually provision on rental instances.
+func normalizeRentalImageAlias(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return ""
+	}
+	lower := strings.ToLower(image)
+	switch lower {
+	case "sglang", "sglang:0.5.10", "sglang:v0.5.10.post1", legacySGLangRuntimeImage:
+		return sglangRuntimeImage
+	}
+	if strings.HasPrefix(lower, "ghcr.io/osteele/sglang-runtime:") {
+		return sglangRuntimeImage
+	}
+	return image
+}
+
 func cudaVersionString(minCUDA float64) string {
 	if minCUDA <= 0 {
 		return ""
@@ -160,6 +178,8 @@ func imageSupremum(a, b string) (merged string, ok bool) {
 	if b == "" {
 		b = cloud.DefaultImage
 	}
+	a = normalizeRentalImageAlias(a)
+	b = normalizeRentalImageAlias(b)
 
 	// Exact match
 	if a == b {

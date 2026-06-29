@@ -141,6 +141,8 @@ const (
 	runAutoPlacementPollInterval = 100 * time.Millisecond
 )
 
+var validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+
 type cloudReuseSubmitOutcome int
 
 const (
@@ -1051,6 +1053,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// needs_classify.go does the actual routing at launch time).
 	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
 
+	if shouldValidateRentalJobImage(host, runTags, runDraft, runDryRun) {
+		endImageProbe := rec.Phase("submit", "validating container image")
+		ctx, cancel := context.WithTimeout(context.Background(), campaign.ImageProbeTimeout)
+		err := validateRentalJobImageFunc(ctx, cfg, localDir, command)
+		cancel()
+		endImageProbe()
+		if err != nil {
+			return err
+		}
+	}
+
 	// Build predictor closure if configured and used by this path.
 	var predict placement.JobPredictor
 	if predictorNeeded {
@@ -1623,6 +1636,14 @@ func evaluateRecentOnPremPlacement(database *sql.DB, constraints placement.Const
 	return &placement.PlacementPlan{Unplaced: true}, true, nil
 }
 
+func shouldValidateRentalJobImage(host string, tags []string, draft, dryRun bool) bool {
+	if draft || dryRun || db.HasInventoryTag(tags) {
+		return false
+	}
+	host = strings.TrimSpace(host)
+	return host == "" || db.IsLaunchHost(host)
+}
+
 func printAutoPlacementPending(w io.Writer, database *sql.DB, jobID int64, reason string) {
 	if placed := waitForAutoPlacement(database, jobID, runAutoPlacementWaitTimeout); placed != nil {
 		switch placed.TargetKind() {
@@ -2127,7 +2148,7 @@ func commandRecommendations(command, localDir string) []string {
 	lowerCommand := strings.ToLower(command)
 	if strings.Contains(lowerCommand, "sglang") && needsFrameworkRuntimeTip(command, localDir, "sglang") {
 		recommendations = append(recommendations,
-			"Tip: SGLang jobs should use the documented SGLang runtime path: PEP 723 or .weft.toml image metadata with ghcr.io/osteele/sglang-runtime:v0.5.10.post1. See docs/guides/workflow-guide.md#tooluv-index-settings.")
+			"Tip: SGLang jobs should use the documented SGLang runtime path: PEP 723 or .weft.toml image metadata with lmsysorg/sglang:v0.5.10.post1. See docs/guides/workflow-guide.md#tooluv-index-settings.")
 	} else if needsFrameworkRuntimeTip(command, localDir, "vllm") {
 		recommendations = append(recommendations,
 			"Tip: vLLM jobs should declare vllm in PEP 723 or pyproject.toml and run through uv so weft can infer PyTorch CUDA image and disk headroom. See docs/guides/workflow-guide.md#script-metadata-pep-723.")

@@ -21,6 +21,7 @@ type Offer struct {
 	CPUName           string  `json:"cpu_name"`
 	CPURAMMB          float64 `json:"cpu_ram"`       // total system RAM in MB
 	CUDAVersion       float64 `json:"cuda_max_good"` // max supported CUDA version
+	DatacenterDriver  bool    `json:"datacenter"`    // Vast.ai datacenter/forward-compat driver stack
 	DLPerf            float64 `json:"dlperf"`        // deep learning perf score
 	Geolocation       string  `json:"geolocation"`   // data center location
 	Verified          bool    `json:"verified"`

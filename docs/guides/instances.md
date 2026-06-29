@@ -740,7 +740,7 @@ registry credentials:
 
 ```toml
 [cloud]
-image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+image = "ghcr.io/acme/custom-runtime:cuda129"
 min_driver = "535"
 min_cuda = "12.9"
 image_pull_secret = "ghcr.io"

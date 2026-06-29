@@ -23,7 +23,12 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
-const sglangRuntimeImage = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+const (
+	sglangRuntimeImage       = "lmsysorg/sglang:v0.5.10.post1"
+	legacySGLangRuntimeImage = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+)
+
+var imageRequirementResolver = imagereq.Resolve
 
 // vramTiers lists standard GPU VRAM sizes in GB, used to determine whether two
 // jobs' memory requirements are in the same tier for grouping purposes.
@@ -106,7 +111,7 @@ func ApplyImageMetadataRequirements(cfg *config.Config, groups []InstanceGroup) 
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		req, err := imagereq.Resolve(ctx, image, auth)
+		req, err := imageRequirementResolver(ctx, image, auth)
 		cancel()
 		if err != nil {
 			slog.Warn("image requirement resolution failed", "component", "campaign", "image", image, "error", err)
@@ -901,6 +906,7 @@ func ResolveJobImageSettings(localDir, command string) (string, placement.Runtim
 			imagePullSecret = meta.ImagePullSecret
 		}
 	}
+	img = normalizeRentalImageAlias(img)
 
 	// PEP 723 top-level `dependencies = [...]` is read independently of
 	// [tool.weft]: a script may declare standard deps without configuring

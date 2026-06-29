@@ -164,6 +164,9 @@ func TestImageSupremum(t *testing.T) {
 
 		// Non-CUDA image — incompatible
 		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "ubuntu:22.04", "", false},
+
+		// Legacy private SGLang runtime aliases normalize to the public image.
+		{"ghcr.io/osteele/sglang-runtime:v0.5.10.post1", sglangRuntimeImage, sglangRuntimeImage, true},
 	}
 
 	for _, tt := range tests {

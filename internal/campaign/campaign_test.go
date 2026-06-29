@@ -1,14 +1,18 @@
 package campaign
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -1085,6 +1089,23 @@ func TestResolveJobImageSettings_ProjectImageBeatsSGLangInference(t *testing.T) 
 	}
 }
 
+func TestResolveJobImageSettings_SGLangLegacyImageAliasesToPublic(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "infer.py"), []byte(`# /// script
+# [tool.weft]
+# image = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+# ///
+print('ok')
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, _, _ := ResolveJobImageSettings(dir, "python infer.py")
+	if img != sglangRuntimeImage {
+		t.Fatalf("image = %q, want public SGLang runtime %q", img, sglangRuntimeImage)
+	}
+}
+
 func TestResolveJobImageSettings_SGLangPyprojectUsesRuntimeImage(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"sglang[srt]>=0.4\"]\n"), 0o644); err != nil {
@@ -1094,6 +1115,65 @@ func TestResolveJobImageSettings_SGLangPyprojectUsesRuntimeImage(t *testing.T) {
 	img, _, _ := ResolveJobImageSettings(dir, "python infer.py")
 	if img != sglangRuntimeImage {
 		t.Fatalf("image = %q, want %q", img, sglangRuntimeImage)
+	}
+}
+
+func TestValidateJobImageAvailability_ProbesResolvedImageWithAuth(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/acme/private:tag\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	t.Setenv("WEFT_TEST_REGISTRY_PASSWORD", "secret-token")
+	cfg := &config.Config{
+		Registry: map[string]config.RegistryConfig{
+			"ghcr.io": {
+				Username:    "osteele",
+				PasswordEnv: "WEFT_TEST_REGISTRY_PASSWORD",
+			},
+		},
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	called := false
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		called = true
+		if image != "ghcr.io/acme/private:tag" {
+			t.Fatalf("image = %q, want configured private image", image)
+		}
+		if auth == nil || auth.Host != "ghcr.io" || auth.Username != "osteele" || auth.Password != "secret-token" {
+			t.Fatalf("auth = %+v, want ghcr credentials", auth)
+		}
+		return cloud.ImageRequirements{}, nil
+	}
+
+	if err := ValidateJobImageAvailability(context.Background(), cfg, dir, "python train.py"); err != nil {
+		t.Fatalf("ValidateJobImageAvailability: %v", err)
+	}
+	if !called {
+		t.Fatal("imageRequirementResolver was not called")
+	}
+}
+
+func TestValidateJobImageAvailability_ReportsProbeFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/acme/private:tag\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	denied := errors.New("unauthorized")
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		return cloud.ImageRequirements{}, denied
+	}
+
+	err := ValidateJobImageAvailability(context.Background(), nil, dir, "python train.py")
+	if !errors.Is(err, denied) {
+		t.Fatalf("error = %v, want wrapped probe error", err)
+	}
+	if !strings.Contains(err.Error(), "is not pullable with configured auth") {
+		t.Fatalf("error = %q, want pullability context", err)
 	}
 }
 

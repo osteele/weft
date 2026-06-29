@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -296,6 +297,10 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 		if offer.Err != nil {
 			rawReason = offer.Err.Error()
 			fingerprint = cloud.FingerprintOf(offer.Err)
+			var imageErr *ImagePrestartFailureError
+			if errors.As(offer.Err, &imageErr) {
+				fingerprint = imageErr.Fingerprint()
+			}
 		} else {
 			constraintStr := FormatOfferConstraints(offerConstraintsForGroup(group, minReliability))
 			rawReason = offer.FilterStats.NoOffersDetail(constraintStr)
@@ -351,6 +356,8 @@ func filterStatsFingerprint(s OfferFilterStats) string {
 		return "vastai/search-offers/empty-result:cuda"
 	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
 		return "vastai/search-offers/empty-result:provider-driver"
+	case s.ForwardCompatFiltered > 0 && s.AfterForward == 0:
+		return "vastai/search-offers/empty-result:forward-compat-driver"
 	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
 		return "vastai/search-offers/empty-result:torch-arch"
 	case s.AfterSurvival == 0:

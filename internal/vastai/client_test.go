@@ -28,6 +28,7 @@ const searchOffersJSON = `[
     "inet_up": 200.0,
     "disk_space": 100.0,
     "cuda_max_good": 12.2,
+    "datacenter": true,
     "dlperf": 42.5,
     "verified": true
   },
@@ -95,6 +96,9 @@ func TestParseSearchOffers(t *testing.T) {
 	}
 	if rtx.CostPerHour != 0.45 {
 		t.Errorf("offer[0].CostPerHour = %f, want 0.45", rtx.CostPerHour)
+	}
+	if !rtx.DatacenterDriver {
+		t.Errorf("offer[0].DatacenterDriver = false, want true")
 	}
 
 	a100 := offers[1]

@@ -37,12 +37,15 @@ type OfferFilterStats struct {
 	AfterVRAM      int // remaining after VRAM requirement filter
 	AfterCUDA      int // remaining after CUDA compatibility filter
 	AfterProvider  int // remaining after provider CUDA/driver compatibility filter
+	AfterForward   int // remaining after Vast.ai forward-compat driver guard
 	AfterTorchArch int // remaining after torch arch compute-cap filter
 	AfterSurvival  int // remaining after survival probability filter
 	// UnknownCompatibility tracks offers whose provider did not report
 	// CUDA/driver compatibility even though the group requires a floor.
 	UnknownCompatibility          int
 	ProviderCompatibilityFiltered int
+	ForwardCompatFiltered         int
+	ForwardCompatExampleGPU       string
 	// CUDA filter diagnostics (set when CUDA filtering removed offers).
 	CUDAImage        string
 	CUDAImageVersion float64
@@ -66,6 +69,14 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		return "no offers from providers"
 	}
 	found := offerCount(s.RawCount) + " found"
+	passedProvider := s.AfterProvider
+	if passedProvider == 0 {
+		passedProvider = s.AfterCUDA
+	}
+	passedForward := s.AfterForward
+	if passedForward == 0 {
+		passedForward = passedProvider
+	}
 	switch {
 	case s.AfterVRAM == 0:
 		return fmt.Sprintf("%s, all filtered by VRAM requirement", found)
@@ -82,17 +93,19 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
 		}
 		return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered by provider CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
+	case s.ForwardCompatFiltered > 0 && s.AfterForward == 0:
+		if s.ForwardCompatExampleGPU != "" {
+			return fmt.Sprintf("%s, %s passed provider compatibility but all filtered by Vast.ai datacenter forward-compat driver guard on consumer GPUs (e.g. %s)", found, offerCount(passedProvider), s.ForwardCompatExampleGPU)
+		}
+		return fmt.Sprintf("%s, %s passed provider compatibility but all filtered by Vast.ai datacenter forward-compat driver guard on consumer GPUs", found, offerCount(passedProvider))
 	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
 		bounds := formatTorchArchBounds(s.TorchArchMinCap, s.TorchArchMaxCap)
 		if s.TorchArchExampleGPU != "" && s.TorchArchExampleCap != "" {
-			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s (e.g. %s sm_%s)", found, offerCount(s.AfterCUDA), bounds, s.TorchArchExampleGPU, s.TorchArchExampleCap)
+			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s (e.g. %s sm_%s)", found, offerCount(passedForward), bounds, s.TorchArchExampleGPU, s.TorchArchExampleCap)
 		}
-		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s", found, offerCount(s.AfterCUDA), bounds)
+		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s", found, offerCount(passedForward), bounds)
 	case s.AfterSurvival == 0:
-		passed := s.AfterProvider
-		if passed == 0 {
-			passed = s.AfterCUDA
-		}
+		passed := passedForward
 		if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
 			passed = s.AfterTorchArch
 		}
@@ -352,6 +365,33 @@ func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Off
 	return compatible, filtered, unknown
 }
 
+func filterOffersByForwardCompatDriver(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int, string) {
+	if !groupRequiresProviderCompatibility(group) {
+		return offers, 0, ""
+	}
+	compatible := make([]cloud.Offer, 0, len(offers))
+	filtered := 0
+	exampleGPU := ""
+	for _, offer := range offers {
+		if offer.Provider == cloud.ProviderVastai && offer.DatacenterDriver && consumerNVIDIAGPU(offer.GPUName) {
+			filtered++
+			if exampleGPU == "" {
+				exampleGPU = offer.GPUName
+			}
+			continue
+		}
+		compatible = append(compatible, offer)
+	}
+	return compatible, filtered, exampleGPU
+}
+
+func consumerNVIDIAGPU(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(n, "geforce") ||
+		strings.Contains(n, "gtx") ||
+		strings.Contains(n, "rtx")
+}
+
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {
 	if offerCompatibilityStatus(group, offer) == "unknown" {
 		return unknownCompatibilityPenalty
@@ -552,6 +592,18 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	stats.UnknownCompatibility = providerCompatUnknown
 	stats.ProviderCompatibilityFiltered = providerCompatFiltered
 	stats.AfterProvider = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	offers, forwardCompatFiltered, forwardCompatExampleGPU := filterOffersByForwardCompatDriver(group, offers)
+	if forwardCompatFiltered > 0 {
+		slog.Debug("filtered offers by Vast.ai datacenter forward-compat driver guard",
+			"filtered", forwardCompatFiltered, "remaining", len(offers), "example_gpu", forwardCompatExampleGPU)
+	}
+	stats.ForwardCompatFiltered = forwardCompatFiltered
+	stats.ForwardCompatExampleGPU = forwardCompatExampleGPU
+	stats.AfterForward = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

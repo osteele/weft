@@ -2832,6 +2832,91 @@ func TestListReclassifyEligibleLaunches_FiltersByWindowAndReason(t *testing.T) {
 	}
 }
 
+func TestRecentImagePrestartFailureChain_ReturnsConsecutiveFailures(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().Unix()
+	image := "lmsysorg/sglang:v0.5.10.post1"
+
+	first := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-30, 0, 0)
+	second := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "stuck in launching phase exceeded timeout", now-20, 0, 0)
+	third := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no provider progress", now-10, 0, 0)
+
+	chain, err := RecentImagePrestartFailureChain(database, image, 3, now-3600)
+	if err != nil {
+		t.Fatalf("RecentImagePrestartFailureChain: %v", err)
+	}
+	if chain == nil {
+		t.Fatal("chain is nil, want three-launch failure chain")
+	}
+	if chain.Count != 3 {
+		t.Fatalf("Count = %d, want 3", chain.Count)
+	}
+	wantIDs := []int64{third, second, first}
+	for i, want := range wantIDs {
+		if chain.LaunchIDs[i] != want {
+			t.Fatalf("LaunchIDs[%d] = %d, want %d (all IDs %v)", i, chain.LaunchIDs[i], want, chain.LaunchIDs)
+		}
+	}
+}
+
+func TestRecentImagePrestartFailureChain_BreaksOnStartedLaunch(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().Unix()
+	image := "lmsysorg/sglang:v0.5.10.post1"
+
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-30, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-20, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "agent reached ready before failure", now-10, now-15, 0)
+
+	chain, err := RecentImagePrestartFailureChain(database, image, 3, now-3600)
+	if err != nil {
+		t.Fatalf("RecentImagePrestartFailureChain: %v", err)
+	}
+	if chain != nil {
+		t.Fatalf("chain = %+v, want nil after a launch reached agent-ready", chain)
+	}
+}
+
+func TestRecentImagePrestartFailureChain_RespectsWindow(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().Unix()
+	image := "lmsysorg/sglang:v0.5.10.post1"
+
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-7200, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-20, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-10, 0, 0)
+
+	chain, err := RecentImagePrestartFailureChain(database, image, 3, now-3600)
+	if err != nil {
+		t.Fatalf("RecentImagePrestartFailureChain: %v", err)
+	}
+	if chain != nil {
+		t.Fatalf("chain = %+v, want nil with only two failures inside window", chain)
+	}
+}
+
+func insertImageLaunchFixture(t *testing.T, database *sql.DB, image, status, reason, detail string, endedAt, agentReadyAt, onStartSeenAt int64) int64 {
+	t.Helper()
+	id, err := CreateLaunch(database, &Launch{
+		Status:      LaunchStatusLaunching,
+		Provider:    "vastai",
+		DockerImage: image,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE launches
+		    SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ?,
+		        agent_ready_at_unix = ?, first_onstart_probe_seen_unix = ?
+		  WHERE id = ?`,
+		status, endedAt, reason, detail, agentReadyAt, onStartSeenAt, id,
+	); err != nil {
+		t.Fatalf("update launch fixture: %v", err)
+	}
+	return id
+}
+
 func TestIsReclassifyEligibleReason(t *testing.T) {
 	eligible := []string{
 		"",
