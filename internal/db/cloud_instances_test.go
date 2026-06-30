@@ -601,6 +601,29 @@ func TestCreateLaunch_RunpodCloudTypeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestJobIsTerminal(t *testing.T) {
+	database := setupTestDB(t)
+
+	if JobIsTerminal(database, 999999) {
+		t.Fatal("missing job reported terminal")
+	}
+
+	jobID, err := RecordQueued(database, "cool30", "/tmp/project", "python train.py", "terminal predicate")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if JobIsTerminal(database, jobID) {
+		t.Fatal("queued job reported terminal")
+	}
+
+	if err := RecordCompletionByID(database, jobID, 0, time.Now().Unix()); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+	if !JobIsTerminal(database, jobID) {
+		t.Fatal("completed job reported non-terminal")
+	}
+}
+
 func TestCreateLaunch_CPUMetadataRoundTrip(t *testing.T) {
 	database := setupTestDB(t)
 

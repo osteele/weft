@@ -151,6 +151,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	if exitCode != 0 {
 		cloudOutcome = db.AttemptOutcomeFailed
 	}
+	wasTerminal := db.JobIsTerminal(c.db, jobID)
 	_, err = c.db.Exec(
 		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL,
 		    cloud_outcome = CASE WHEN cloud_outcome IS NULL THEN ? ELSE cloud_outcome END
@@ -203,12 +204,14 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	}
 
 	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
-	if exitCode == 0 {
-		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
-		notify.JobTerminal(c.db, jobID, db.StatusCompleted, &exitCode)
-	} else {
-		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("vastai exit=%d reason=%s", exitCode, failureReason))
-		notify.JobTerminal(c.db, jobID, db.StatusFailed, &exitCode)
+	if !wasTerminal {
+		if exitCode == 0 {
+			oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
+			notify.JobTerminal(c.db, jobID, db.StatusCompleted, &exitCode)
+		} else {
+			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("vastai exit=%d reason=%s", exitCode, failureReason))
+			notify.JobTerminal(c.db, jobID, db.StatusFailed, &exitCode)
+		}
 	}
 }
 

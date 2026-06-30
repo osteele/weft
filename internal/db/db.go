@@ -278,6 +278,14 @@ func (j *Job) UsesPreemptiblePlacement() bool {
 	return j.HasTag(TagPreemptible)
 }
 
+// JobIsTerminal reports whether jobID currently resolves to a terminal
+// status. Lookup failures are treated as non-terminal so callers preserve
+// existing best-effort notification behavior.
+func JobIsTerminal(database *sql.DB, jobID int64) bool {
+	job, err := GetJobByID(database, jobID)
+	return err == nil && job != nil && IsTerminalStatus(job.Status)
+}
+
 // RequestedGPUCount returns the exact single-host GPU count requested for the
 // job. A zero or missing override means one GPU for GPU-shaped jobs.
 func (j *Job) RequestedGPUCount() int {

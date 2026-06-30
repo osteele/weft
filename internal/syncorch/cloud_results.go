@@ -644,6 +644,7 @@ func syncCompletedJobAtRun(
 		}
 	}
 
+	wasTerminal := db.JobIsTerminal(database, jobID)
 	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
 		slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
@@ -660,12 +661,14 @@ func syncCompletedJobAtRun(
 	if updatedInstanceID > 0 {
 		host = db.LaunchHost(updatedInstanceID)
 	}
-	if *exitCode == 0 {
-		oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
-		notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
-	} else {
-		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
-		notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
+	if !wasTerminal {
+		if *exitCode == 0 {
+			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
+			notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
+		} else {
+			oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
+			notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
+		}
 	}
 
 	if haveDownload {

@@ -184,6 +184,7 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 		}
 	}
 
+	wasTerminal := db.JobIsTerminal(database, jobID)
 	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
 		slog.Warn("failed to record completion for job",
@@ -200,12 +201,14 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 	if launchID > 0 {
 		host = db.LaunchHost(launchID)
 	}
-	if *exitCode == 0 {
-		oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
-		notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
-	} else {
-		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
-		notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
+	if !wasTerminal {
+		if *exitCode == 0 {
+			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
+			notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
+		} else {
+			oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
+			notify.JobTerminal(database, jobID, db.StatusFailed, exitCode)
+		}
 	}
 
 	// Don't clean up R2 markers here — leave them for the full sync pass
@@ -299,6 +302,7 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 		if manifest.CompletedAtUnix > 0 {
 			marker = time.Unix(manifest.CompletedAtUnix, 0)
 		}
+		wasTerminal := db.JobIsTerminal(database, summary.JobID)
 		// endTimeUnix == 0: leave last_synced_status NULL so the full sync
 		// pass can still backfill authoritative phase timings.
 		if _, err := db.RecordCloudJobCompletion(database, summary.JobID, 0, 0, 0, "", "", marker, runID); err != nil {
@@ -307,10 +311,12 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 				"job_id", summary.JobID, "error", err)
 			continue
 		}
-		oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
-			oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))
-		manifestExit := 0
-		notify.JobTerminal(database, summary.JobID, db.StatusCompleted, &manifestExit)
+		if !wasTerminal {
+			oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
+				oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))
+			manifestExit := 0
+			notify.JobTerminal(database, summary.JobID, db.StatusCompleted, &manifestExit)
+		}
 		slog.Debug("credited job completion from instance manifest",
 			"component", "reconcile", "instance", instanceID, "job_id", summary.JobID)
 	}

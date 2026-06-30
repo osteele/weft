@@ -78,10 +78,7 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 	// deliberately accepts re-records on already-terminal jobs (a status
 	// file is authoritative evidence), so success alone does not mean a NEW
 	// transition. Notify only when the job was previously non-terminal.
-	wasTerminal := false
-	if job, err := db.GetJobByID(database, jobID); err == nil && job != nil {
-		wasTerminal = db.IsTerminalStatus(job.Status)
-	}
+	wasTerminal := db.JobIsTerminal(database, jobID)
 	// Use status file mtime as end time (when job actually completed)
 	// Fall back to current time if mtime not available
 	endTime := mtime
