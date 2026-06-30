@@ -329,6 +329,15 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	inst := cap.Instance
 	constraints := placement.ConstraintsFromJob(job)
 
+	if ok, reason := matchProviderIntent(job, inst); !ok {
+		return false, reason
+	}
+	if ok, reason := matchInstanceTypeIntent(job, inst); !ok {
+		return false, reason
+	}
+	if ok, reason := matchRunpodCloudTypeIntent(job, inst); !ok {
+		return false, reason
+	}
 	if ok, reason := matchJobRequiredImage(job, inst); !ok {
 		return false, reason
 	}
@@ -390,6 +399,51 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
+}
+
+func matchProviderIntent(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil {
+		return true, ""
+	}
+	provider, ok := db.RequestedProvider(job.Tags)
+	if !ok || provider == "" {
+		return true, ""
+	}
+	if strings.EqualFold(strings.TrimSpace(inst.Provider), provider) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("provider mismatch: job=%s instance=%s", provider, strings.TrimSpace(inst.Provider))
+}
+
+func matchInstanceTypeIntent(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil {
+		return true, ""
+	}
+	if inst.InstanceType == cloud.InstanceTypeInterruptible && !job.UsesPreemptiblePlacement() {
+		return false, "instance is interruptible but job is not tagged interruptible"
+	}
+	return true, ""
+}
+
+func matchRunpodCloudTypeIntent(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil {
+		return true, ""
+	}
+	requested := strings.TrimSpace(job.RequestedRunpodCloudType())
+	if requested == "" {
+		return true, ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(inst.Provider), string(cloud.ProviderRunpod)) {
+		return false, fmt.Sprintf("RunPod cloud type %s requires a RunPod instance", requested)
+	}
+	actual := strings.TrimSpace(inst.RunpodCloudType)
+	if actual == "" {
+		return false, fmt.Sprintf("RunPod cloud type unknown: job=%s", requested)
+	}
+	if strings.EqualFold(actual, requested) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("RunPod cloud type mismatch: job=%s instance=%s", requested, actual)
 }
 
 func matchJobRequiredImage(job *db.Job, inst *db.Launch) (bool, string) {

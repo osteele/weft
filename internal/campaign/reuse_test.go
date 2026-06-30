@@ -137,6 +137,79 @@ func TestMatchJobToInstance_BroadNVIDIADoesNotReusePremiumAccelerator(t *testing
 	}
 }
 
+func TestMatchJobToInstance_RejectsNonInterruptibleJobOnInterruptibleInstance(t *testing.T) {
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			Provider:     string(cloud.ProviderVastai),
+			GPUClass:     "nvidia",
+			GPUMemGB:     24,
+			InstanceType: cloud.InstanceTypeInterruptible,
+		},
+		DiskFreeGB: 100,
+	}
+
+	got, reason := MatchJobToInstance(&db.Job{GPUClass: "nvidia"}, cap)
+	if got {
+		t.Fatalf("non-interruptible job matched interruptible instance; reason=%q", reason)
+	}
+	if !strings.Contains(reason, "not tagged interruptible") {
+		t.Fatalf("reason = %q, want interruptible tag mismatch", reason)
+	}
+
+	got, reason = MatchJobToInstance(&db.Job{GPUClass: "nvidia", Tags: []string{db.TagInterruptible}}, cap)
+	if !got {
+		t.Fatalf("interruptible job rejected from interruptible instance: %s", reason)
+	}
+
+	cap.Instance.InstanceType = cloud.InstanceTypeOnDemand
+	got, reason = MatchJobToInstance(&db.Job{GPUClass: "nvidia"}, cap)
+	if !got {
+		t.Fatalf("non-interruptible job rejected from on-demand instance: %s", reason)
+	}
+}
+
+func TestMatchJobToInstance_RejectsProviderAndRunpodCloudTypeMismatch(t *testing.T) {
+	job := &db.Job{
+		GPUClass: "nvidia",
+		Tags:     []string{"provider:runpod"},
+		CLIResourceOverrides: &db.CLIResourceOverrides{
+			RunpodCloudType: cloud.RunpodCloudTypeSecure,
+		},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			Provider:        string(cloud.ProviderRunpod),
+			RunpodCloudType: cloud.RunpodCloudTypeCommunity,
+			GPUClass:        "nvidia",
+			GPUMemGB:        24,
+		},
+		DiskFreeGB: 100,
+	}
+
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("secure RunPod job matched community RunPod instance; reason=%q", reason)
+	}
+	if !strings.Contains(reason, "RunPod cloud type mismatch") {
+		t.Fatalf("reason = %q, want RunPod cloud type mismatch", reason)
+	}
+
+	cap.Instance.RunpodCloudType = cloud.RunpodCloudTypeSecure
+	got, reason = MatchJobToInstance(job, cap)
+	if !got {
+		t.Fatalf("secure RunPod job rejected from secure RunPod instance: %s", reason)
+	}
+
+	cap.Instance.Provider = string(cloud.ProviderVastai)
+	got, reason = MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("RunPod-tagged job matched Vast.ai instance; reason=%q", reason)
+	}
+	if !strings.Contains(reason, "provider mismatch") {
+		t.Fatalf("reason = %q, want provider mismatch", reason)
+	}
+}
+
 func TestMatchJobToInstance_RejectsRequiredImageMismatch(t *testing.T) {
 	job := &db.Job{
 		ID:         3451,

@@ -580,6 +580,27 @@ func TestCreateLaunch_RentalTypeMetadata_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateLaunch_RunpodCloudTypeRoundTrip(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:          LaunchStatusPlanned,
+		Provider:        string(cloud.ProviderRunpod),
+		GPUSpec:         "L4",
+		RunpodCloudType: cloud.RunpodCloudTypeSecure,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	got, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if got.RunpodCloudType != cloud.RunpodCloudTypeSecure {
+		t.Fatalf("RunpodCloudType = %q, want secure", got.RunpodCloudType)
+	}
+}
+
 func TestCreateLaunch_CPUMetadataRoundTrip(t *testing.T) {
 	database := setupTestDB(t)
 

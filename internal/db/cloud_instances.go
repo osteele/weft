@@ -33,7 +33,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		results_verified, results_verify_detail,
 		machine_id, docker_image,
 		provider_running_at,
-		instance_type, max_bid_price_cents, on_demand_ref_cents,
+		instance_type, runpod_cloud_type, max_bid_price_cents, on_demand_ref_cents,
 		cordoned, cordon_reason, cordoned_at,
 		hedge_cohort_id, first_onstart_probe_seen_unix`
 
@@ -272,6 +272,7 @@ type Launch struct {
 	// Rental type and pricing metadata (for preemptible / interruptible
 	// instance analysis).
 	InstanceType     string // "on-demand" or "interruptible"; empty for pre-migration rows
+	RunpodCloudType  string // "community" or "secure"; empty for non-RunPod and pre-migration rows
 	MaxBidPriceCents *int   // Bid ceiling paid on interruptible offers; nil for on-demand
 	OnDemandRefCents *int   // Cheapest concurrent on-demand $/hr at launch, for the same GPU class; nil if not captured
 
@@ -597,6 +598,10 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 		if c.InstanceType != "" {
 			instanceType = c.InstanceType
 		}
+		var runpodCloudType any
+		if c.RunpodCloudType != "" {
+			runpodCloudType = c.RunpodCloudType
+		}
 		var maxBidPriceCents any
 		if c.MaxBidPriceCents != nil {
 			maxBidPriceCents = *c.MaxBidPriceCents
@@ -629,16 +634,16 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			 inet_down_mbps, inet_up_mbps, cuda_version,
 			 cpu_cores_effective, cpu_name, ram_gb,
 			 disk_gb, provisioned_inputs, machine_id, docker_image,
-			 instance_type, max_bid_price_cents, on_demand_ref_cents,
+			 instance_type, runpod_cloud_type, max_bid_price_cents, on_demand_ref_cents,
 			 grace_started_at, grace_deadline)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 			c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
 			c.CPUCores, c.CPUName, c.RAMGB,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
-			instanceType, maxBidPriceCents, onDemandRefCents,
+			instanceType, runpodCloudType, maxBidPriceCents, onDemandRefCents,
 			c.GraceStartedAt, c.GraceDeadline,
 		)
 		if err != nil {
@@ -2406,6 +2411,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var dockerImage sql.NullString
 	var providerRunningAt sql.NullInt64
 	var instanceType sql.NullString
+	var runpodCloudType sql.NullString
 	var maxBidPriceCents, onDemandRefCents sql.NullInt64
 	var cordoned sql.NullInt64
 	var cordonReason sql.NullString
@@ -2430,7 +2436,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&resultsVerified, &resultsVerifyDetail,
 		&machineID, &dockerImage,
 		&providerRunningAt,
-		&instanceType, &maxBidPriceCents, &onDemandRefCents,
+		&instanceType, &runpodCloudType, &maxBidPriceCents, &onDemandRefCents,
 		&cordoned, &cordonReason, &cordonedAt,
 		&hedgeCohortID, &firstOnStartProbeSeen,
 	)
@@ -2577,6 +2583,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if instanceType.Valid {
 		c.InstanceType = instanceType.String
+	}
+	if runpodCloudType.Valid {
+		c.RunpodCloudType = runpodCloudType.String
 	}
 	if maxBidPriceCents.Valid {
 		v := int(maxBidPriceCents.Int64)

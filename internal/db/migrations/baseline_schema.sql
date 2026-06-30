@@ -636,6 +636,7 @@ CREATE TABLE IF NOT EXISTS "launches" (
 		oplog_not_found INTEGER DEFAULT 0,
 		oplog_timeout INTEGER DEFAULT 0,
 		instance_type TEXT,
+		runpod_cloud_type TEXT,
 		max_bid_price_cents INTEGER,
 		on_demand_ref_cents INTEGER,
 		cordoned INTEGER DEFAULT 0,

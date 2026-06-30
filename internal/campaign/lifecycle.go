@@ -2130,6 +2130,13 @@ func LaunchInstance(
 	}
 
 	// Create cloud instance record with offer metadata
+	runpodCloudType := ""
+	if client.Provider() == cloud.ProviderRunpod {
+		runpodCloudType = strings.TrimSpace(createOpts.RunpodCloudType)
+		if runpodCloudType == "" {
+			runpodCloudType = cloud.DefaultRunpodCloudType
+		}
+	}
 	instance := &db.Launch{
 		CampaignID:        campaignID,
 		Status:            db.LaunchStatusPlanned,
@@ -2154,6 +2161,7 @@ func LaunchInstance(
 		ProvisionedInputs: group.AllInputs(),
 		MachineID:         offer.MachineID,
 		InstanceType:      cloud.InstanceTypeOnDemand,
+		RunpodCloudType:   runpodCloudType,
 	}
 	if group.HasPreemptibleJob() {
 		instance.InstanceType = cloud.InstanceTypeInterruptible

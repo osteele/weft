@@ -99,11 +99,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyRepairCampaignAffinityMachinesColumn},
 		&goose.GoFunc{RunDB: dropRepairCampaignAffinityMachinesColumn},
 	)
+	addLaunchRunpodCloudType := goose.NewGoMigration(
+		27,
+		&goose.GoFunc{RunDB: applyAddLaunchRunpodCloudTypeColumn},
+		&goose.GoFunc{RunDB: dropAddLaunchRunpodCloudTypeColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -213,6 +218,27 @@ func applyAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
 
 func dropAddResultsVerifyDetailColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN results_verify_detail`)
+	return nil
+}
+
+func applyAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launches", "runpod_cloud_type")
+	if err != nil {
+		return fmt.Errorf("inspect launches.runpod_cloud_type: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE launches ADD COLUMN runpod_cloud_type TEXT`,
+	); err != nil {
+		return fmt.Errorf("add launches.runpod_cloud_type: %w", err)
+	}
+	return nil
+}
+
+func dropAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN runpod_cloud_type`)
 	return nil
 }
 
@@ -701,7 +727,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
