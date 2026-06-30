@@ -8,11 +8,96 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/status"
 )
+
+func TestListCloudAttemptSyncCandidates_AttemptScoped(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	liveQueuedJobID, liveQueuedRunID := createPlacedCloudJob(t, database, db.LaunchStatusRunning)
+	terminalQueuedJobID, _ := createPlacedCloudJob(t, database, db.LaunchStatusFailed)
+	syncedCompletedJobID, syncedCompletedRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	incompleteCompletedJobID, incompleteCompletedRunID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+
+	setCloudAttemptTerminal(t, database, syncedCompletedRunID, db.StatusCompleted, true)
+	setCloudAttemptTerminal(t, database, incompleteCompletedRunID, db.StatusCompleted, false)
+
+	candidates, err := listCloudAttemptSyncCandidates(database)
+	if err != nil {
+		t.Fatalf("listCloudAttemptSyncCandidates: %v", err)
+	}
+	got := make(map[int64]cloudAttemptSyncCandidate, len(candidates))
+	for _, c := range candidates {
+		got[c.JobID] = c
+	}
+
+	if c, ok := got[liveQueuedJobID]; !ok {
+		t.Fatalf("live queued job %d missing from candidates: %+v", liveQueuedJobID, candidates)
+	} else if c.RunID != liveQueuedRunID {
+		t.Fatalf("live queued run_id = %d, want %d", c.RunID, liveQueuedRunID)
+	}
+	if _, ok := got[terminalQueuedJobID]; ok {
+		t.Fatalf("queued job on terminal launch %d included; candidates: %+v", terminalQueuedJobID, candidates)
+	}
+	if _, ok := got[syncedCompletedJobID]; ok {
+		t.Fatalf("fully synced terminal job %d included; candidates: %+v", syncedCompletedJobID, candidates)
+	}
+	if c, ok := got[incompleteCompletedJobID]; !ok {
+		t.Fatalf("incomplete terminal job %d missing from candidates: %+v", incompleteCompletedJobID, candidates)
+	} else if c.RunID != incompleteCompletedRunID {
+		t.Fatalf("incomplete terminal run_id = %d, want %d", c.RunID, incompleteCompletedRunID)
+	}
+}
+
+func createPlacedCloudJob(t *testing.T, database *sql.DB, finalLaunchStatus string) (int64, int64) {
+	t.Helper()
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if finalLaunchStatus != db.LaunchStatusRunning {
+		if err := db.UpdateLaunchStatus(database, launchID, finalLaunchStatus); err != nil {
+			t.Fatalf("UpdateLaunchStatus(%s): %v", finalLaunchStatus, err)
+		}
+	}
+	runID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	return jobID, runID
+}
+
+func setCloudAttemptTerminal(t *testing.T, database *sql.DB, runID int64, jobStatus string, completeMetadata bool) {
+	t.Helper()
+	now := time.Now().Unix()
+	var startTime any = int64(0)
+	var endTime any = now
+	var exitCode any = int64(0)
+	var lastSyncedStatus any
+	if completeMetadata {
+		startTime = now - 60
+		lastSyncedStatus = jobStatus
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, start_time = ?, end_time = ?, exit_code = ?, last_synced_status = ?
+		 WHERE id = ?`,
+		jobStatus, startTime, endTime, exitCode, lastSyncedStatus, runID,
+	); err != nil {
+		t.Fatalf("set terminal attempt: %v", err)
+	}
+}
 
 func TestImportCloudTimeseriesFileUsesExplicitRunID(t *testing.T) {
 	database := db.SetupTestDB(t)
