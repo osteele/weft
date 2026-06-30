@@ -807,6 +807,10 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 	}
 
 	reason := intent.TerminationReason
+	destroyProvider := !isProviderTerminalWithPolicy(inst, pauseTolerant)
+	if intent.EffectiveState() == instanceintent.StateSucceeded {
+		destroyProvider = false
+	}
 	switch intent.TerminalStatus {
 	case db.LaunchStatusCompleted:
 		if reason == "" {
@@ -816,7 +820,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: reason,
-			DestroyProvider:   !isProviderTerminalWithPolicy(inst, pauseTolerant),
+			DestroyProvider:   destroyProvider,
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
 		}
 	case db.LaunchStatusFailed:
@@ -827,7 +831,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: reason,
-			DestroyProvider:   !isProviderTerminalWithPolicy(inst, pauseTolerant),
+			DestroyProvider:   destroyProvider,
 			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeOrphaned,
 		}

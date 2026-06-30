@@ -578,7 +578,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	targets, err := db.ListExecutionTargets(database)
+	targets, err := db.ListExecutionTargetsCached(database)
 	if err != nil {
 		return fmt.Errorf("list execution targets: %w", err)
 	}
@@ -587,13 +587,13 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	launches, _ := db.ListLaunches(database)
-	launchByID := make(map[int64]*db.Launch, len(launches))
-	for _, launch := range launches {
-		if launch != nil {
-			launchByID[launch.ID] = launch
+	launchIDs := make([]int64, 0, len(targets))
+	for _, target := range targets {
+		if target != nil && target.LaunchID != nil {
+			launchIDs = append(launchIDs, *target.LaunchID)
 		}
 	}
+	launchByID, _ := db.GetLaunchesByIDs(database, launchIDs)
 	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -712,6 +712,35 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		providerInstID := ci.EffectiveProviderID()
+		var inst *cloud.Instance
+		client := cloudClientForDBInstance(ci.Provider)
+		useLive := shouldRefreshInstanceLiveState(database, ci, forceLive, noLive)
+		if providerInstID != "" {
+			if useLive {
+				inst, _ = client.ShowInstance(providerInstID)
+			}
+		}
+
+		// Agent version and live status
+		var liveUpdate *campaign.InstanceUpdate
+		if useLive {
+			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
+				watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
+				if update, ok := <-ch; ok {
+					liveUpdate = &update
+					if update.Launch != nil {
+						ci = update.Launch
+					}
+				}
+				watchCancel()
+				if refreshed, err := db.GetLaunch(database, id); err == nil && refreshed != nil {
+					ci = refreshed
+				}
+			}
+		}
+
 		statusLabel := campaign.DisplayInstanceStatus(ci)
 		fmt.Printf("Instance %s — %s — %s\n", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief(), statusLabel)
 		if ci.TerminationReason != "" {
@@ -737,15 +766,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Rental:   %s\n", line)
 		}
 
-		// Cloud instance info
-		providerInstID := ci.EffectiveProviderID()
-		var inst *cloud.Instance
-		client := cloudClientForDBInstance(ci.Provider)
-		useLive := shouldRefreshInstanceLiveState(database, ci, forceLive, noLive)
 		if providerInstID != "" {
-			if useLive {
-				inst, _ = client.ShowInstance(providerInstID)
-			}
 			if inst != nil && inst.Status != "" {
 				fmt.Printf("  Instance: %s (%s)\n", providerInstID, inst.Status)
 			} else {
@@ -759,18 +780,6 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
-		// Agent version and live status
-		var liveUpdate *campaign.InstanceUpdate
-		if useLive {
-			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
-				watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
-				ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
-				if update, ok := <-ch; ok {
-					liveUpdate = &update
-				}
-				watchCancel()
-			}
-		}
 		// Read agent version from DB-cached live state (persists after terminal)
 		if liveState, err := db.GetLaunchLiveState(database, ci.ID); err == nil && liveState != nil && liveState.AgentVersion != "" {
 			fmt.Printf("  Agent:    %s\n", liveState.AgentVersion)
@@ -916,6 +925,9 @@ func instanceStatusSyncMode(cmd *cobra.Command) (forceLive bool, noLive bool) {
 func shouldRefreshInstanceLiveState(database *sql.DB, ci *db.Launch, forceLive, noLive bool) bool {
 	if ci == nil || campaign.IsInstanceTerminal(ci.Status) || noLive {
 		return false
+	}
+	if ci.TerminationIntent != nil {
+		return true
 	}
 	if forceLive {
 		return true

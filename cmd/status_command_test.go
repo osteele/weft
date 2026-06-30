@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
@@ -392,6 +393,27 @@ func TestInstanceStatusSkipsLiveRefreshWhenDaemonCloudSyncIsFresh(t *testing.T) 
 
 	if !strings.Contains(out, "Instance: (provisioning") {
 		t.Fatalf("expected cached instance display without provider status, got:\n%s", out)
+	}
+}
+
+func TestShouldRefreshInstanceLiveStateIgnoresFreshDaemonSyncForTerminationIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+
+	restoreInstanceStatusFlags(t)
+	daemonLiveFunc = func() bool { return true }
+	launch := &db.Launch{
+		Status: db.LaunchStatusRunning,
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus: db.LaunchStatusFailed,
+			State:          instanceintent.StateSucceeded,
+		},
+	}
+
+	if !shouldRefreshInstanceLiveState(database, launch, false, false) {
+		t.Fatal("should refresh non-terminal launch with termination intent even when daemon cloud sync is fresh")
 	}
 }
 

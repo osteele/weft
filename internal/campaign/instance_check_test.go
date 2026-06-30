@@ -518,6 +518,38 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_TerminationIntentSucceededDoesNotDestroyProvider(t *testing.T) {
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus:         db.LaunchStatusFailed,
+			TerminationReason:      db.TerminationReasonJobFailure,
+			State:                  instanceintent.StateSucceeded,
+			DestroySucceededAtUnix: time.Now().Unix(),
+			DestroyStartedAtUnix:   time.Now().Add(-2 * time.Second).Unix(),
+			RequestedAtUnix:        time.Now().Add(-4 * time.Second).Unix(),
+			DestroyAttempts:        1,
+			LastAttemptAtUnix:      time.Now().Add(-1 * time.Second).Unix(),
+		},
+		Now: time.Now(),
+	})
+	if action.Kind != ActionTerminationIntent {
+		t.Fatalf("action.Kind = %d, want ActionTerminationIntent (%d)", action.Kind, ActionTerminationIntent)
+	}
+	if action.DestroyProvider {
+		t.Error("DestroyProvider should be false after the termination intent already recorded destroy success")
+	}
+	if !action.ResetJobs {
+		t.Error("ResetJobs should remain true for failed termination")
+	}
+}
+
 func TestCheckInstance_ProviderDead_WithHysteresis(t *testing.T) {
 	r := NewReconciler()
 	now := time.Now()

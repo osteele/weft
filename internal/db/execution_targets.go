@@ -449,6 +449,13 @@ func ListExecutionTargets(database *sql.DB) ([]*ExecutionTarget, error) {
 	if err := SyncExecutionTargets(database); err != nil {
 		return nil, err
 	}
+	return ListExecutionTargetsCached(database)
+}
+
+// ListExecutionTargetsCached reads execution target rows without first running
+// the backfill/occupancy refresh. Use this from display paths that must stay
+// responsive and can tolerate the already-maintained cached counters.
+func ListExecutionTargetsCached(database *sql.DB) ([]*ExecutionTarget, error) {
 	rows, err := database.Query(`SELECT ` + executionTargetSelectColumns + ` FROM execution_targets ORDER BY kind ASC, updated_at DESC, id DESC`)
 	if err != nil {
 		return nil, err
