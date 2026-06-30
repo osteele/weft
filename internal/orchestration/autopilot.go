@@ -715,6 +715,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}
 		}
 	}
+	recordAutoPilotLaunchDecisions(database, result.InstanceIDs)
 	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
 
 	return &GroupedAutoPilotResult{
@@ -1504,6 +1505,7 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 			JobID:     assignment.Job.ID,
 			LaunchID:  assignment.Instance.Instance.ID,
 		})
+		recordAutoPilotReuseDecision(database, assignment.Job, assignment.Instance, recordedReuse[assignment.Job.ID])
 		placed++
 	}
 	return placed

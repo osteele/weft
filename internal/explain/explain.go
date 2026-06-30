@@ -72,6 +72,7 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	if reason != "" {
 		x.Evidence = append(x.Evidence, Evidence{Label: "blocker", Value: reason})
 	}
+	appendPlacementEvidence(database, job, &x)
 	if block, ok := LatestInventoryDispatchBlock(database, job, now); ok {
 		x.Confidence = "high"
 		x.PrimaryReason = annotateDispatchBlock(block, now)
@@ -142,6 +143,52 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.SuggestedAction = "none"
 	}
 	return x
+}
+
+// appendPlacementEvidence adds a "placed" line explaining why a rental-instance
+// job is on its instance (reused vs launched, and whether it is queued behind
+// other jobs on a single-GPU box). The database read is skipped when database
+// is nil so TUI render paths that pass nil pay no cost.
+func appendPlacementEvidence(database *sql.DB, job *db.Job, x *Explanation) {
+	if database == nil || job == nil || job.TargetKind() != db.JobTargetRentalInstance {
+		return
+	}
+	decision, err := db.LatestPlacementDecisionForJob(database, job.ID)
+	if err != nil || decision == nil {
+		return
+	}
+	if summary := placementSummary(decision); summary != "" {
+		x.Evidence = append(x.Evidence, Evidence{Label: "placed", Value: summary})
+	}
+	if len(decision.Details.Rejected) > 0 {
+		x.Evidence = append(x.Evidence, Evidence{Label: "rejected", Value: strings.Join(decision.Details.Rejected, "; ")})
+	}
+}
+
+func placementSummary(decision *db.JobPlacementDecision) string {
+	det := decision.Details
+	head := det.Instance
+	if head == "" {
+		head = decision.SelectedTarget
+	}
+	switch {
+	case det.GPU != "" && det.CostPerHour != "":
+		head = fmt.Sprintf("%s (%s, %s)", head, det.GPU, det.CostPerHour)
+	case det.GPU != "":
+		head = fmt.Sprintf("%s (%s)", head, det.GPU)
+	}
+	verb := "placed on"
+	switch decision.SelectedKind {
+	case "reuse-instance":
+		verb = "reused"
+	case "launch-instance", "cloud-offer":
+		verb = "launched"
+	}
+	summary := strings.TrimSpace(verb + " " + head)
+	if det.Why != "" {
+		summary += " — " + det.Why
+	}
+	return summary
 }
 
 func queuedReason(job *db.Job) string {

@@ -153,6 +153,60 @@ func TestForJobExplainsQueuedRentalTarget(t *testing.T) {
 	}
 }
 
+func evidenceValue(x Explanation, label string) (string, bool) {
+	for _, ev := range x.Evidence {
+		if ev.Label == label {
+			return ev.Value, true
+		}
+	}
+	return "", false
+}
+
+func TestForJobShowsReusePlacement(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if _, err := db.RecordPlacementDecision(database, db.PlacementDecision{
+		JobID:          &jobID,
+		DecisionKind:   "acted",
+		Operation:      "autopilot_reuse",
+		SelectedKind:   "reuse-instance",
+		SelectedTarget: "wi4424",
+		Details: db.PlacementDecisionDetails{
+			Instance:        "wi4424",
+			GPU:             "NVIDIA 48GB",
+			ColocatedBehind: 1,
+			Why:             "reused running instance (queued behind 1 job(s) on its GPU)",
+		},
+	}, nil); err != nil {
+		t.Fatalf("RecordPlacementDecision: %v", err)
+	}
+
+	launchID := int64(4424)
+	job := &db.Job{ID: jobID, Status: db.StatusQueued, LaunchID: &launchID}
+	x := ForJob(database, job, time.Unix(20_000, 0))
+
+	placed, ok := evidenceValue(x, "placed")
+	if !ok {
+		t.Fatalf("expected a 'placed' evidence line, got %+v", x.Evidence)
+	}
+	if !strings.Contains(placed, "reused wi4424") || !strings.Contains(placed, "queued behind 1") {
+		t.Fatalf("placed evidence = %q", placed)
+	}
+}
+
+func TestForJobPlacementEvidenceSkippedWithoutDB(t *testing.T) {
+	launchID := int64(4424)
+	job := &db.Job{ID: 3390, Status: db.StatusQueued, LaunchID: &launchID}
+	// Nil database is the TUI render path; it must not query and must not panic.
+	x := ForJob(nil, job, time.Unix(20_000, 0))
+	if _, ok := evidenceValue(x, "placed"); ok {
+		t.Fatalf("placed evidence must not appear when database is nil: %+v", x.Evidence)
+	}
+}
+
 func TestForJobAutoReplanUsesStartOfDispatchBlockStreak(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")

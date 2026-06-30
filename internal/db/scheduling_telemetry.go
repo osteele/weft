@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"time"
@@ -23,6 +24,63 @@ type PlacementDecision struct {
 	SelectedScore          *float64
 	SampleCandidates       bool
 	Details                any
+}
+
+// PlacementDecisionDetails is the structured payload stored in
+// placement_decisions.details_json for autopilot reuse/launch decisions. It
+// records the human-observable "why here" so `weft job diagnose` and offline
+// analysis can explain placement without re-deriving it from live state.
+type PlacementDecisionDetails struct {
+	Instance        string   `json:"instance,omitempty"`         // display id, e.g. "wi4424"
+	GPU             string   `json:"gpu,omitempty"`              // e.g. "NVIDIA 48GB"
+	ColocatedBehind int      `json:"colocated_behind,omitempty"` // jobs already on the instance's GPU at decision time
+	CostPerHour     string   `json:"cost_per_hour,omitempty"`    // e.g. "$0.42/hr"
+	Why             string   `json:"why,omitempty"`              // human-readable rationale
+	Rejected        []string `json:"rejected,omitempty"`         // reuse candidates considered and rejected
+}
+
+// JobPlacementDecision is the latest acted placement decision for one job,
+// with the details payload decoded for display.
+type JobPlacementDecision struct {
+	Operation      string
+	SelectedKind   string
+	SelectedTarget string
+	CreatedAt      time.Time
+	Details        PlacementDecisionDetails
+}
+
+// LatestPlacementDecisionForJob returns the most recent acted placement
+// decision that actually selected a target for the job (the run-time stub
+// recorded at submission, which has no target, is skipped). Returns nil when
+// no such decision exists. Callers that pass a nil database get (nil, nil).
+func LatestPlacementDecisionForJob(database *sql.DB, jobID int64) (*JobPlacementDecision, error) {
+	if database == nil || jobID <= 0 {
+		return nil, nil
+	}
+	row := database.QueryRow(`
+		SELECT operation, selected_kind, selected_target, COALESCE(details_json, ''), created_at
+		FROM placement_decisions
+		WHERE job_id = ? AND decision_kind = 'acted' AND selected_target <> ''
+		ORDER BY id DESC
+		LIMIT 1`, jobID)
+	var (
+		decision    JobPlacementDecision
+		detailsJSON string
+		createdAt   int64
+	)
+	if err := row.Scan(&decision.Operation, &decision.SelectedKind, &decision.SelectedTarget, &detailsJSON, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	decision.CreatedAt = time.Unix(createdAt, 0)
+	if detailsJSON != "" {
+		if err := json.Unmarshal([]byte(detailsJSON), &decision.Details); err != nil {
+			return nil, fmt.Errorf("decode placement decision details: %w", err)
+		}
+	}
+	return &decision, nil
 }
 
 // PlacementCandidate is a ranked placement alternative attached to a decision.
