@@ -47,11 +47,24 @@ func initBootstrapTransitionsSchema(database *sql.DB) error {
 // TotalBootstrapPercentile returns a percentile over successful total bootstrap
 // durations, measured from launch creation to the first wrapper start.
 func TotalBootstrapPercentile(database *sql.DB, p float64) (time.Duration, int, error) {
-	if database == nil {
-		return 0, 0, nil
-	}
 	if p < 0 || p > 1 {
 		return 0, 0, fmt.Errorf("percentile must be between 0 and 1")
+	}
+	durations, err := TotalBootstrapDurations(database)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(durations) == 0 {
+		return 0, 0, nil
+	}
+	return bootstrapDurationPercentile(durations, p), len(durations), nil
+}
+
+// TotalBootstrapDurations returns sorted successful total bootstrap durations,
+// measured from launch creation to the first wrapper start.
+func TotalBootstrapDurations(database *sql.DB) (BootstrapDurations, error) {
+	if database == nil {
+		return nil, nil
 	}
 	rows, err := database.Query(`
 		WITH first_attempt AS (
@@ -70,37 +83,46 @@ func TotalBootstrapPercentile(database *sql.DB, p float64) (time.Duration, int, 
 		  AND (fa.wrapper_start - l.created_at) BETWEEN 1 AND ?
 	`, bootstrapSurvivalConfig.MaxTimeSecs)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	defer rows.Close()
 
-	var durations []int
+	var durations BootstrapDurations
 	for rows.Next() {
 		var secs int
 		if err := rows.Scan(&secs); err != nil {
-			return 0, 0, err
+			return nil, err
 		}
-		durations = append(durations, secs)
+		durations = append(durations, time.Duration(secs)*time.Second)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-	if len(durations) == 0 {
-		return 0, 0, nil
-	}
-	sort.Ints(durations)
-	idx := int(p * float64(len(durations)-1))
-	return time.Duration(durations[idx]) * time.Second, len(durations), nil
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	return durations, nil
 }
 
 // BootstrapStagePercentile returns a percentile over completed durations spent
 // in a bootstrap stage, plus sample count and the oldest sample timestamp.
 func BootstrapStagePercentile(database *sql.DB, stage string, p float64) (time.Duration, int, int64, error) {
-	if database == nil {
-		return 0, 0, 0, nil
-	}
 	if p < 0 || p > 1 {
 		return 0, 0, 0, fmt.Errorf("percentile must be between 0 and 1")
+	}
+	durations, oldest, err := BootstrapStageDurations(database, stage)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if len(durations) == 0 {
+		return 0, 0, 0, nil
+	}
+	return bootstrapDurationPercentile(durations, p), len(durations), oldest, nil
+}
+
+// BootstrapStageDurations returns sorted completed durations spent in a
+// bootstrap stage, plus the oldest stage-entry timestamp in the sample.
+func BootstrapStageDurations(database *sql.DB, stage string) (BootstrapDurations, int64, error) {
+	if database == nil {
+		return nil, 0, nil
 	}
 	rows, err := database.Query(`
 		WITH ordered AS (
@@ -122,32 +144,36 @@ func BootstrapStagePercentile(database *sql.DB, stage string, p float64) (time.D
 		  AND (next_entered_at - entered_at) BETWEEN 1 AND ?
 	`, stage, bootstrapSurvivalConfig.MaxTimeSecs)
 	if err != nil {
-		return 0, 0, 0, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var durations []int
+	var durations BootstrapDurations
 	oldest := int64(0)
 	for rows.Next() {
 		var enteredAt int64
 		var secs int
 		if err := rows.Scan(&enteredAt, &secs); err != nil {
-			return 0, 0, 0, err
+			return nil, 0, err
 		}
 		if oldest == 0 || enteredAt < oldest {
 			oldest = enteredAt
 		}
-		durations = append(durations, secs)
+		durations = append(durations, time.Duration(secs)*time.Second)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, err
+		return nil, 0, err
 	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	return durations, oldest, nil
+}
+
+func bootstrapDurationPercentile(durations BootstrapDurations, p float64) time.Duration {
 	if len(durations) == 0 {
-		return 0, 0, 0, nil
+		return 0
 	}
-	sort.Ints(durations)
 	idx := int(p * float64(len(durations)-1))
-	return time.Duration(durations[idx]) * time.Second, len(durations), oldest, nil
+	return durations[idx]
 }
 
 // LatestBootstrapStageEnteredAt returns the most recent time a launch entered
@@ -191,6 +217,15 @@ func HasBootstrapTransitions(database *sql.DB, launchID int64) (bool, error) {
 		return false, err
 	}
 	return exists != 0, nil
+}
+
+// Percentile returns a duration percentile from a sorted bootstrap duration
+// sample.
+func (d BootstrapDurations) Percentile(p float64) (time.Duration, bool) {
+	if len(d) == 0 || p < 0 || p > 1 {
+		return 0, false
+	}
+	return bootstrapDurationPercentile(d, p), true
 }
 
 // ConditionalMedian returns the estimated remaining bootstrap time given that

@@ -71,15 +71,17 @@ const pendingPlacementDelayedAfter = 2 * time.Minute
 
 type groupedStatusLaunchingETA struct {
 	totalP50               time.Duration
+	totalDurations         db.BootstrapDurations
 	totalSamples           int
 	stageByName            map[string]groupedStatusLaunchingStageETA
 	stageEnteredAtByLaunch map[int64]int64
 }
 
 type groupedStatusLaunchingStageETA struct {
-	p50     time.Duration
-	samples int
-	oldest  int64
+	p50       time.Duration
+	durations db.BootstrapDurations
+	samples   int
+	oldest    int64
 }
 
 // recentFailedInstances feeds the "Recent failed instances" section.
@@ -1173,7 +1175,9 @@ func groupedStatusLaunchingETAText(launch *db.Launch, live *db.LaunchLiveState, 
 	stageETA, stageEnteredAt := groupedStatusLaunchingStageETAForLaunch(launch, live, now, eta)
 	if stageETA.samples >= 5 && stageETA.p50 > 0 && stageEnteredAt > 0 && now.Sub(time.Unix(stageETA.oldest, 0)) >= db.BootstrapStageStatsMinSpan() {
 		elapsed := now.Sub(time.Unix(stageEnteredAt, 0))
-		return groupedStatusRemainingText(elapsed, stageETA.p50)
+		if text := groupedStatusRemainingText(elapsed, stageETA.p50, stageETA.durations); text != "" {
+			return text
+		}
 	}
 	if launch == nil || eta.totalSamples < 5 || eta.totalP50 <= 0 {
 		return ""
@@ -1186,7 +1190,7 @@ func groupedStatusLaunchingETAText(launch *db.Launch, live *db.LaunchLiveState, 
 		return ""
 	}
 	elapsed := now.Sub(time.Unix(origin, 0))
-	return groupedStatusRemainingText(elapsed, eta.totalP50)
+	return groupedStatusRemainingText(elapsed, eta.totalP50, eta.totalDurations)
 }
 
 func groupedStatusLaunchingStageETAForLaunch(launch *db.Launch, live *db.LaunchLiveState, now time.Time, eta groupedStatusLaunchingETA) (groupedStatusLaunchingStageETA, int64) {
@@ -1204,13 +1208,16 @@ func groupedStatusLaunchingStageETAForLaunch(launch *db.Launch, live *db.LaunchL
 	return eta.stageByName[stage], enteredAt
 }
 
-func groupedStatusRemainingText(elapsed time.Duration, p50 time.Duration) string {
+func groupedStatusRemainingText(elapsed time.Duration, p50 time.Duration, durations db.BootstrapDurations) string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
+	if remaining, ok := durations.ConditionalMedian(elapsed); ok {
+		return "~" + groupedStatusDurationText(remaining) + " remaining"
+	}
 	remaining := p50 - elapsed
-	if remaining < 0 {
-		remaining = 0
+	if remaining <= 0 {
+		return ""
 	}
 	return "~" + groupedStatusDurationText(remaining) + " remaining"
 }

@@ -117,6 +117,7 @@ type listTUIModel struct {
 	placementStatusByJob       map[int64]jobview.PlacementStatus
 	launchByID                 map[int64]*db.Launch
 	launchBootstrapP50         time.Duration
+	launchBootstrapDurations   db.BootstrapDurations
 	launchBootstrapSamples     int
 	launchStageETAByName       map[string]groupedStatusLaunchingStageETA
 	launchStageEnteredAtByID   map[int64]int64
@@ -262,6 +263,7 @@ type listJobsLoadedMsg struct {
 	placementStatusByJob     map[int64]jobview.PlacementStatus
 	launchByID               map[int64]*db.Launch
 	launchBootstrapP50       time.Duration
+	launchBootstrapDurations db.BootstrapDurations
 	launchBootstrapSamples   int
 	launchStageETAByName     map[string]groupedStatusLaunchingStageETA
 	launchStageEnteredAtByID map[int64]int64
@@ -732,6 +734,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.placementStatusByJob = msg.placementStatusByJob
 		m.launchByID = msg.launchByID
 		m.launchBootstrapP50 = msg.launchBootstrapP50
+		m.launchBootstrapDurations = msg.launchBootstrapDurations
 		m.launchBootstrapSamples = msg.launchBootstrapSamples
 		m.launchStageETAByName = msg.launchStageETAByName
 		m.launchStageEnteredAtByID = msg.launchStageEnteredAtByID
@@ -2924,6 +2927,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			launchSpinner:          m.launchSpinner.View(),
 			launchingETA: groupedStatusLaunchingETA{
 				totalP50:               m.launchBootstrapP50,
+				totalDurations:         m.launchBootstrapDurations,
 				totalSamples:           m.launchBootstrapSamples,
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,
@@ -3094,8 +3098,15 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		if launchErr != nil {
 			launchByID = map[int64]*db.Launch{}
 		}
-		bootstrapP50, bootstrapSamples, bootstrapErr := db.TotalBootstrapPercentile(database, 0.5)
+		bootstrapDurations, bootstrapErr := db.TotalBootstrapDurations(database)
+		bootstrapP50, bootstrapSamples := time.Duration(0), 0
 		if bootstrapErr != nil {
+			bootstrapDurations = nil
+		} else {
+			bootstrapSamples = len(bootstrapDurations)
+			bootstrapP50, _ = bootstrapDurations.Percentile(0.5)
+		}
+		if bootstrapP50 <= 0 {
 			bootstrapP50 = 0
 			bootstrapSamples = 0
 		}
@@ -3114,6 +3125,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			placementStatusByJob:     placementStatusByJob,
 			launchByID:               launchByID,
 			launchBootstrapP50:       bootstrapP50,
+			launchBootstrapDurations: bootstrapDurations,
 			launchBootstrapSamples:   bootstrapSamples,
 			launchStageETAByName:     stageETAByName,
 			launchStageEnteredAtByID: stageEnteredAtByID,
@@ -3194,12 +3206,14 @@ func loadLaunchingStageETA(database *sql.DB, jobs []*db.Job, launchLiveByID map[
 			continue
 		}
 		if _, ok := stageByName[stage]; !ok {
-			p50, samples, oldest, err := db.BootstrapStagePercentile(database, stage, 0.5)
+			durations, oldest, err := db.BootstrapStageDurations(database, stage)
 			if err == nil {
+				p50, _ := durations.Percentile(0.5)
 				stageByName[stage] = groupedStatusLaunchingStageETA{
-					p50:     p50,
-					samples: samples,
-					oldest:  oldest,
+					p50:       p50,
+					durations: durations,
+					samples:   len(durations),
+					oldest:    oldest,
 				}
 			}
 		}

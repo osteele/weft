@@ -39,6 +39,7 @@ func (m listTUIModel) exitSummaryAt(now time.Time, width int) string {
 			launchSpinner:          m.launchSpinner.View(),
 			launchingETA: groupedStatusLaunchingETA{
 				totalP50:               m.launchBootstrapP50,
+				totalDurations:         m.launchBootstrapDurations,
 				totalSamples:           m.launchBootstrapSamples,
 				stageByName:            m.launchStageETAByName,
 				stageEnteredAtByLaunch: m.launchStageEnteredAtByID,

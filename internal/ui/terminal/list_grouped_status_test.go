@@ -1455,7 +1455,7 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingGroupsMultiJobInstance(t *te
 	}
 }
 
-func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndZeroRemaining(t *testing.T) {
+func TestRenderJobListGroupedStatusPlainAt_LaunchingReadySuppressesZeroRemaining(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(2332)
 	jobs := []*db.Job{
@@ -1472,12 +1472,80 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingReadyUsesCheckAndZeroRemaini
 			totalSamples: 8,
 		},
 	})
-	want := "- ✓ wj1749 — proj ready job — agent ready · 16m ago · ~0s remaining"
+	want := "- ✓ wj1749 — proj ready job — agent ready · 16m ago"
 	if !strings.Contains(out, want) {
 		t.Fatalf("missing %q in output:\n%s", want, out)
 	}
+	if strings.Contains(out, "~0s remaining") {
+		t.Fatalf("did not expect zero remaining ETA:\n%s", out)
+	}
 	if strings.Contains(out, "overdue") {
 		t.Fatalf("expected p50 overrun to stay advisory, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingUsesConditionalTailAfterP50(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2339)
+	jobs := []*db.Job{
+		{ID: 1760, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "tail job"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID: map[int64]*db.LaunchLiveState{launchID: {
+			LaunchID:       launchID,
+			BootstrapStage: "post_job_uploads_drained:3714",
+		}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: now.Add(-12 * time.Minute).Unix()}},
+		now:              now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50: 10 * time.Minute,
+			totalDurations: db.BootstrapDurations{
+				10 * time.Minute,
+				15 * time.Minute,
+				22 * time.Minute,
+				24 * time.Minute,
+				30 * time.Minute,
+			},
+			totalSamples: 5,
+		},
+	})
+	if !strings.Contains(out, "~12m remaining") {
+		t.Fatalf("expected conditional-tail ETA after p50 overrun:\n%s", out)
+	}
+	if strings.Contains(out, "~0s remaining") {
+		t.Fatalf("did not expect zero remaining ETA:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingHidesETAWithoutTailEvidence(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	launchID := int64(2341)
+	jobs := []*db.Job{
+		{ID: 1761, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "long tail"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID: map[int64]*db.LaunchLiveState{launchID: {
+			LaunchID:       launchID,
+			BootstrapStage: "post_job_uploads_drained:3714",
+		}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: now.Add(-42 * time.Minute).Unix()}},
+		now:              now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50: 10 * time.Minute,
+			totalDurations: db.BootstrapDurations{
+				2 * time.Minute,
+				4 * time.Minute,
+				6 * time.Minute,
+				8 * time.Minute,
+				10 * time.Minute,
+			},
+			totalSamples: 5,
+		},
+	})
+	if strings.Contains(out, "remaining") {
+		t.Fatalf("expected no ETA without conditional tail evidence:\n%s", out)
 	}
 }
 
@@ -1656,6 +1724,46 @@ func TestRenderJobListGroupedStatusPlainAt_LaunchingPrefersMatureStageETA(t *tes
 	}
 	if strings.Contains(out, "overdue") {
 		t.Fatalf("used total-bootstrap ETA instead of mature stage ETA:\n%s", out)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainAt_LaunchingStageUsesConditionalTailAfterP50(t *testing.T) {
+	now := time.Unix(5_000_000, 0)
+	launchID := int64(2342)
+	jobs := []*db.Job{
+		{ID: 1762, Status: db.StatusQueued, LaunchID: &launchID, Project: "proj", Description: "stage tail"},
+	}
+	out := renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		launchLiveByID:   map[int64]*db.LaunchLiveState{launchID: {LaunchID: launchID, BootstrapStage: "deps_installing"}},
+		launchStatusByID: map[int64]string{launchID: db.LaunchStatusLaunching},
+		launchByID:       map[int64]*db.Launch{launchID: {ID: launchID, CreatedAt: now.Add(-9 * time.Minute).Unix()}},
+		now:              now,
+		launchingETA: groupedStatusLaunchingETA{
+			totalP50:     10 * time.Minute,
+			totalSamples: 8,
+			stageByName: map[string]groupedStatusLaunchingStageETA{
+				"deps_installing": {
+					p50: 2 * time.Minute,
+					durations: db.BootstrapDurations{
+						time.Minute,
+						2 * time.Minute,
+						5 * time.Minute,
+						8 * time.Minute,
+						9 * time.Minute,
+						10 * time.Minute,
+					},
+					samples: 6,
+					oldest:  now.Add(-15 * 24 * time.Hour).Unix(),
+				},
+			},
+			stageEnteredAtByLaunch: map[int64]int64{launchID: now.Add(-4 * time.Minute).Unix()},
+		},
+	})
+	if !strings.Contains(out, "~5m remaining") {
+		t.Fatalf("expected conditional stage-tail ETA after p50 overrun:\n%s", out)
+	}
+	if strings.Contains(out, "~0s remaining") {
+		t.Fatalf("did not expect zero remaining ETA:\n%s", out)
 	}
 }
 
