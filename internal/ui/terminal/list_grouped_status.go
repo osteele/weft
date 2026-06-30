@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -353,7 +354,13 @@ func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.L
 // blockedDetailStyle dims the per-avenue disclosure lines so they recede
 // beneath the job row they belong to.
 var blockedDetailStyle = lipgloss.NewStyle().Faint(true)
-var moveAttemptDimStyle = lipgloss.NewStyle().Faint(true)
+var moveAttemptDimStyle = tuiDimStyle.Faint(true)
+
+var sgrSequencePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripSGRSequences(s string) string {
+	return sgrSequencePattern.ReplaceAllString(s, "")
+}
 
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
 // jobs by their blocked or waiting reason. Each distinct reason becomes a
@@ -1002,6 +1009,7 @@ func appendGroupedStatusJobRow(
 		line = tuiFailedStyle.Render(line)
 	}
 	if job != nil && job.DisplayMoveDim {
+		line = stripSGRSequences(line)
 		line = moveAttemptDimStyle.Render(line)
 	}
 	return append(rows, groupedStatusRow{
@@ -1349,6 +1357,9 @@ func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launche
 func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, opts groupedStatusRenderOptions) string {
 	if job != nil && job.DisplayMoveDim {
 		return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, nil, opts.now)
+	}
+	if job != nil && strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
+		return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, map[int64]struct{}{job.ID: {}}, opts.now)
 	}
 	if opts.placementStatusByJob != nil && job != nil {
 		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {

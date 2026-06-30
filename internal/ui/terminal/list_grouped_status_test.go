@@ -1854,6 +1854,10 @@ func TestRenderJobListGroupedStatusPlainWithOptions_UsesPlacementStatusReadModel
 }
 
 func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
 	sourceLaunchID := int64(3656)
 	sourceAttemptID := int64(10)
 	targetAttemptID := int64(11)
@@ -1888,16 +1892,118 @@ func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *t
 		now: time.Unix(10_000, 0),
 	})
 	if !strings.Contains(out, "Running (1):") {
-		t.Fatalf("expected authoritative source running row, got:\n%s", out)
+		t.Fatalf("expected non-authoritative source running row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Queued (1):") {
-		t.Fatalf("expected non-authoritative target queued row, got:\n%s", out)
-	}
-	if !strings.Contains(out, "move pending wi3656 -> cool30") {
-		t.Fatalf("expected source move suffix, got:\n%s", out)
+	if !strings.Contains(out, "Placing (1):") {
+		t.Fatalf("expected authoritative target placing row, got:\n%s", out)
 	}
 	if !strings.Contains(out, "move target wi3656 -> cool30 (non-authoritative)") {
-		t.Fatalf("expected non-authoritative target suffix, got:\n%s", out)
+		t.Fatalf("expected non-authoritative source suffix, got:\n%s", out)
+	}
+	if !strings.Contains(out, "move pending wi3656 -> cool30") {
+		t.Fatalf("expected active target move suffix, got:\n%s", out)
+	}
+	var sourceLine, targetLine string
+	section := ""
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		plain := stripANSI(line)
+		switch {
+		case strings.HasPrefix(plain, "Running "):
+			section = "running"
+		case strings.HasPrefix(plain, "Placing "):
+			section = "placing"
+		case strings.Contains(plain, "wj2538"):
+			if section == "running" {
+				sourceLine = line
+			} else if section == "placing" {
+				targetLine = line
+			}
+		}
+	}
+	if sourceLine == "" || targetLine == "" {
+		t.Fatalf("expected source and target rows, got:\n%s", stripANSI(out))
+	}
+	if !isVisibleDimLine(sourceLine) {
+		t.Fatalf("expected source row to be dimmed, got %q", sourceLine)
+	}
+	if isVisibleDimLine(targetLine) {
+		t.Fatalf("expected active target row to remain full contrast, got %q", targetLine)
+	}
+}
+
+func TestRenderJobListGroupedStatusPlainWithOptions_DimsQueuedSourceMoveAttempt(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	sourceLaunchID := int64(4434)
+	targetLaunchID := int64(4449)
+	sourceAttemptID := int64(20)
+	targetAttemptID := int64(21)
+	job := &db.Job{
+		ID:          3702,
+		Status:      db.StatusQueued,
+		LaunchID:    &sourceLaunchID,
+		LatestRunID: &sourceAttemptID,
+		Project:     "role-encoding-injection",
+		Description: "Multi-seed job",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			3702: {
+				JobID:  3702,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1,
+					State:           db.MoveIntentStateOpen,
+					SourceAttemptID: &sourceAttemptID,
+					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi4434",
+					TargetLabel:     "wi4449",
+					Phase:           "waiting for destination acceptance",
+					AttemptsByID: map[int64]db.JobAttempt{
+						sourceAttemptID: {ID: sourceAttemptID, JobID: 3702, AttemptNumber: 1, LaunchID: &sourceLaunchID, Status: db.StatusQueued},
+						targetAttemptID: {ID: targetAttemptID, JobID: 3702, AttemptNumber: 2, LaunchID: &targetLaunchID, Status: db.StatusQueued},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	if !strings.Contains(out, "Queued (1):") {
+		t.Fatalf("expected pre-intent source row in Queued, got:\n%s", stripANSI(out))
+	}
+	if !strings.Contains(out, "Placing (1):") {
+		t.Fatalf("expected active target row in Placing, got:\n%s", stripANSI(out))
+	}
+	var sourceLine, targetLine string
+	section := ""
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		plain := stripANSI(line)
+		switch {
+		case strings.HasPrefix(plain, "Queued "):
+			section = "queued"
+		case strings.HasPrefix(plain, "Placing "):
+			section = "placing"
+		case strings.Contains(plain, "wj3702"):
+			if section == "queued" {
+				sourceLine = line
+			} else if section == "placing" {
+				targetLine = line
+			}
+		}
+	}
+	if sourceLine == "" || targetLine == "" {
+		t.Fatalf("expected queued source and placing target rows, got:\n%s", stripANSI(out))
+	}
+	if !isVisibleDimLine(sourceLine) {
+		t.Fatalf("expected queued source row to use visible dim styling, got %q", sourceLine)
+	}
+	if countSGRSequences(sourceLine) != 2 {
+		t.Fatalf("expected dimmed source row to have one row-level style and reset, got %q", sourceLine)
+	}
+	if isVisibleDimLine(targetLine) {
+		t.Fatalf("expected active target row to remain full contrast, got %q", targetLine)
 	}
 }
 
@@ -1948,11 +2054,13 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTru
 		switch {
 		case strings.HasPrefix(plain, "Queued "):
 			section = "queued"
+		case strings.HasPrefix(plain, "Unplaced "):
+			section = "fallback"
 		case strings.HasPrefix(plain, "Placing "):
 			section = "placing"
 		case strings.Contains(plain, "blocked: run-rate target exceeded"):
 			blockedLine = line
-		case section == "queued" && strings.Contains(plain, "wj2921"):
+		case (section == "queued" || section == "fallback") && strings.Contains(plain, "wj2921"):
 			fallbackLine = line
 		case section == "placing" && strings.Contains(plain, "wj2921"):
 			placingLine = line
@@ -1969,6 +2077,52 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTru
 	}
 	if placingLine != stripANSI(placingLine) {
 		t.Fatalf("expected active placing row to remain full contrast, got %q", placingLine)
+	}
+}
+
+func isVisibleDimLine(line string) bool {
+	hasFaint := false
+	hasForeground := false
+	rest := line
+	for {
+		start := strings.Index(rest, "\x1b[")
+		if start < 0 {
+			break
+		}
+		rest = rest[start+2:]
+		end := strings.IndexByte(rest, 'm')
+		if end < 0 {
+			break
+		}
+		params := strings.Split(rest[:end], ";")
+		for i := 0; i < len(params); i++ {
+			if params[i] == "2" {
+				hasFaint = true
+			}
+			if params[i] == "38" {
+				hasForeground = true
+			}
+		}
+		rest = rest[end+1:]
+	}
+	return hasFaint && hasForeground && line != stripANSI(line)
+}
+
+func countSGRSequences(line string) int {
+	count := 0
+	rest := line
+	for {
+		start := strings.Index(rest, "\x1b[")
+		if start < 0 {
+			return count
+		}
+		rest = rest[start+2:]
+		end := strings.IndexByte(rest, 'm')
+		if end < 0 {
+			return count
+		}
+		count++
+		rest = rest[end+1:]
 	}
 }
 
