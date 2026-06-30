@@ -1474,7 +1474,7 @@ func failureGroupLabel(o failureOutcome) string {
 	case failureReplacedRunning:
 		return "replaced/running"
 	case failureSeriesSucceeded:
-		return "succeeded"
+		return "recovered"
 	default:
 		return "dud"
 	}
@@ -1696,7 +1696,7 @@ type instanceHealthFooterView struct {
 
 // attentionOutcomes are the buckets that mean a recent failure left a job
 // unable to run: it failed, is still awaiting placement, or wasted an instance
-// that never carried a job. The complement (replaced/running, succeeded) needs
+// that never carried a job. The complement (replaced/running, recovered) needs
 // no attention.
 var attentionOutcomes = []failureOutcome{failureSeriesFailed, failureAwaitingPlacement, failureDud}
 
@@ -1843,7 +1843,7 @@ func appendRecentFailedInstanceRows(
 		return rows
 	}
 
-	// Attention buckets first, then the FYI buckets (succeeded, dud).
+	// Attention buckets first, then the FYI buckets (recovered, dud).
 	for _, o := range failureOutcomeOrder {
 		rows = appendGroup(rows, o)
 	}

@@ -1413,7 +1413,7 @@ func TestListTUIInstanceFailuresOverlayContent(t *testing.T) {
 				{ID: 92, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonProviderFailure, TerminationDetail: "transient", EndedAt: testInt64Ptr(now.Add(-6 * time.Minute).Unix())},
 				{ID: 93, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "no agent", EndedAt: testInt64Ptr(now.Add(-7 * time.Minute).Unix())},
 			},
-			// 91/92 succeeded, 93 is a dud.
+			// 91/92 recovered, 93 is a dud.
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
 				91: {JobID: 1, Status: db.StatusCompleted},
 				92: {JobID: 2, Status: db.StatusCompleted},
@@ -1423,12 +1423,12 @@ func TestListTUIInstanceFailuresOverlayContent(t *testing.T) {
 	m.rebuildGroupedRows()
 
 	// The one-line footer leads with the attention bucket (the dud); the
-	// recovered (succeeded) detail belongs in the overlay, not the footer.
+	// recovered detail belongs in the overlay, not the footer.
 	footer := stripANSI(m.View())
 	if !strings.Contains(footer, "Launch failures: 1 dud") || !strings.Contains(footer, "f:diagnose") {
 		t.Fatalf("footer should be a one-line dud token:\n%s", footer)
 	}
-	if strings.Contains(footer, "succeeded") {
+	if strings.Contains(footer, "recovered") {
 		t.Fatalf("recovered detail should not be in the footer:\n%s", footer)
 	}
 
@@ -1436,7 +1436,7 @@ func TestListTUIInstanceFailuresOverlayContent(t *testing.T) {
 	opened, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
 	m = opened.(listTUIModel)
 	overlay := stripANSI(m.View())
-	for _, want := range []string{"succeeded (2)", "dud (1)"} {
+	for _, want := range []string{"recovered (2)", "dud (1)"} {
 		if !strings.Contains(overlay, want) {
 			t.Fatalf("overlay should reveal %q:\n%s", want, overlay)
 		}

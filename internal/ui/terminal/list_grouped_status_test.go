@@ -1910,7 +1910,7 @@ func TestAppendRecentFailedInstanceRows_FiltersNormalTerminationsAndClassifies(t
 				EndedAt:           testInt64Ptr(9_700),
 			},
 		},
-		// 100 has no job outcome — a dud. 101's job completed — a succeeded
+		// 100 has no job outcome — a dud. 101's job completed — a recovered
 		// series. 102 is a normal job failure and is filtered out.
 		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
 			101: {JobID: 1, Status: db.StatusCompleted},
@@ -1920,8 +1920,8 @@ func TestAppendRecentFailedInstanceRows_FiltersNormalTerminationsAndClassifies(t
 	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
 	for _, want := range []string{
 		"Recent failed instances — last 8m (2):",
-		"1 succeeded · 1 dud — last 8m",
-		"succeeded (1) — 6m ago:",
+		"1 recovered · 1 dud — last 8m",
+		"recovered (1) — 6m ago:",
 		"dud (1) — 8m ago:",
 	} {
 		if !strings.Contains(out, want) {
@@ -2011,8 +2011,8 @@ func TestAppendRecentFailedInstanceRows_RendersAllBuckets(t *testing.T) {
 	out := failedInstanceRowText(appendRecentFailedInstanceRows(nil, failures, 0, 0, now))
 	for _, want := range []string{
 		"Recent failed instances",
-		"1 failed · 2 succeeded · 1 dud",
-		"failed (1)", "succeeded (2)", "dud (1)",
+		"1 failed · 2 recovered · 1 dud",
+		"failed (1)", "recovered (2)", "dud (1)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("plain section should render %q:\n%s", want, out)
@@ -2034,7 +2034,7 @@ func TestAppendRecentFailedInstanceRows_ChainTerminalOverridesJobStatus(t *testi
 		},
 		// Both jobs are currently queued, but the relaunch chain's terminal
 		// launch is authoritative: a live successor ⇒ replaced/running, a completed
-		// successor ⇒ succeeded.
+		// successor ⇒ recovered.
 		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
 			500: {JobID: 1, Status: db.StatusQueued},
 			501: {JobID: 2, Status: db.StatusQueued},
@@ -2046,7 +2046,7 @@ func TestAppendRecentFailedInstanceRows_ChainTerminalOverridesJobStatus(t *testi
 	}
 
 	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
-	for _, want := range []string{"replaced/running (1)", "succeeded (1)"} {
+	for _, want := range []string{"replaced/running (1)", "recovered (1)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}
@@ -2097,10 +2097,10 @@ func TestAppendRecentFailedInstanceRows_OutcomesClusterAndCost(t *testing.T) {
 	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
 	for _, want := range []string{
 		"Recent failed instances — last 8m (3):",
-		"1 awaiting placement · 1 succeeded · 1 dud — last 8m · $0.31 wasted",
+		"1 awaiting placement · 1 recovered · 1 dud — last 8m · $0.31 wasted",
 		"⚠ clustered failures — common factor: provider vastai",
 		"awaiting placement (1)",
-		"succeeded (1)",
+		"recovered (1)",
 		"dud (1)",
 	} {
 		if !strings.Contains(out, want) {
@@ -2141,7 +2141,7 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 			t.Fatalf("footer line should not render a warning icon:\n%s", out)
 		}
 		// The breakdown detail lives in the overlay, not the footer.
-		if strings.Contains(out, "succeeded") || strings.Contains(out, "[f]") {
+		if strings.Contains(out, "recovered") || strings.Contains(out, "[f]") {
 			t.Fatalf("footer line should not carry expansion detail:\n%s", out)
 		}
 	})
