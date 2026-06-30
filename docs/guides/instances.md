@@ -338,6 +338,13 @@ weft instance status <instance-id>      # Single instance details
 weft instance info <instance-id>        # Alias for status
 ```
 
+In `weft instance list`, the `GPU` column is the per-GPU spec, `GPUS` is the GPU
+count, and `JOBS` is how many jobs are assigned to the instance. An instance
+runs one GPU job per GPU at a time, so `GPUS 1` with `JOBS 3` means one job is
+running and two are waiting in that instance's queue. See
+[Why are my jobs on separate instances?](placement.md#why-are-my-jobs-on-separate-instances)
+for why the autopilot spreads jobs across instances rather than packing them.
+
 ### Cost reporting
 
 ```bash

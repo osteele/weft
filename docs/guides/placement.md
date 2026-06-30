@@ -227,6 +227,39 @@ auto_objective = "cost_first" # cost_first | balanced | time_first
 `cost_first` is the default. `balanced` gives cost and completion time similar
 weight, and `time_first` spends more readily to reduce completion time.
 
+## Why Are My Jobs on Separate Instances?
+
+A rental instance runs one GPU job per GPU at a time. Most rentals are
+single-GPU, so a job placed on a busy instance waits in that instance's queue
+and runs only after the current job finishes. To run queued jobs **at the same
+time**, the autopilot spreads them across separate instances — co-locating them
+on one instance would serialize them instead.
+
+So separate instances is the autopilot buying parallelism, not a misplacement.
+Packing still happens: when the autopilot does not launch a fresh instance per
+job, it stacks the extras into one instance's queue, and they run serially
+there.
+
+Two related surprises:
+
+- **The instances are different sizes (32 / 48 / 80 GB).** A job with a
+  `--gpu-mem` floor accepts any offer at or above that floor. Each instance is
+  provisioned independently against whichever provider offer was cheapest and
+  available on that pass, so a 24 GB-floor job can land on an 80 GB instance.
+  There is no normalization to a single GPU size.
+- **A stricter job stays on its own instance.** A job with a tighter memory
+  floor or a lower architecture cap (e.g. `gpu-arch-max`) will not share an
+  instance whose GPU it cannot use, even if a looser job could.
+
+To see the concurrency limit directly, read `weft instance list`: the `GPUS`
+column is the per-instance GPU count and `JOBS` is how many jobs are assigned.
+`GPUS 1` with `JOBS 3` means one job runs and two wait. For a single job, ask
+why it landed where it did:
+
+```bash
+weft job diagnose wj123   # the `placed:` line explains reuse vs. new launch
+```
+
 ## Ground Truth
 
 This guide is the operator view. The formal placement model lives in

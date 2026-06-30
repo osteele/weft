@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -596,7 +597,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "TARGET\tKIND\tSTATUS\tGPU\tJOBS\tCURRENT\tBACKING\tDEADLINE\tUPDATED\n")
+	fmt.Fprintf(w, "TARGET\tKIND\tSTATUS\tGPU\tGPUS\tJOBS\tCURRENT\tBACKING\tDEADLINE\tUPDATED\n")
 
 	now := time.Now()
 	for _, target := range targets {
@@ -636,8 +637,8 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		}
 		updated := time.Unix(target.UpdatedAt, 0).Format("01/02 15:04")
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			executionTargetDisplayID(target), target.Kind, statusStr, gpuSpec, jobs, current, backing, deadline, updated)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			executionTargetDisplayID(target), target.Kind, statusStr, gpuSpec, executionTargetGPUCount(target), jobs, current, backing, deadline, updated)
 	}
 	w.Flush()
 	return nil
@@ -667,10 +668,18 @@ func executionTargetGPU(target *db.ExecutionTarget) string {
 	if target.GPUMemGB > 0 {
 		label += fmt.Sprintf(" %dGB", target.GPUMemGB)
 	}
-	if target.NumGPUs > 1 {
-		label = fmt.Sprintf("%dx %s", target.NumGPUs, label)
-	}
 	return label
+}
+
+// executionTargetGPUCount renders the GPU count for the GPUS column. A
+// single-GPU instance runs one GPU job at a time, so this column makes the
+// per-instance concurrency limit explicit alongside the JOBS (queue depth)
+// column: "1 GPU, 3 jobs" means two are waiting.
+func executionTargetGPUCount(target *db.ExecutionTarget) string {
+	if target == nil || target.NumGPUs <= 0 {
+		return "—"
+	}
+	return strconv.Itoa(target.NumGPUs)
 }
 
 func runInstanceStatus(cmd *cobra.Command, args []string) error {
