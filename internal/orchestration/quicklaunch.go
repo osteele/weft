@@ -101,6 +101,7 @@ func RunQuickLaunch(
 	}
 
 	newInstanceID := relaunchResult.InstanceIDs[0]
+	recordLaunchDecisions(database, relaunchResult.InstanceIDs, "quicklaunch", "launched on demand")
 	emit(fmt.Sprintf("Instance %s created; rebalancing queued jobs...", ids.FormatInstanceID(newInstanceID)))
 	movedJobs, warning, err := rebalanceQueuedJobsToLaunchedInstance(ctx, database, cfg, newInstanceID, launchJobID, scoped)
 	if err != nil {

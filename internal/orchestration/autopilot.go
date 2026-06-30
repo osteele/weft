@@ -715,7 +715,7 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			}
 		}
 	}
-	recordAutoPilotLaunchDecisions(database, result.InstanceIDs)
+	recordLaunchDecisions(database, result.InstanceIDs, "autopilot_launch", "no reusable instance matched; launched a new instance")
 	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
 
 	return &GroupedAutoPilotResult{

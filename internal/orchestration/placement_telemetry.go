@@ -26,7 +26,7 @@ func recordAutoPilotReuseDecision(database *sql.DB, job *db.Job, inst campaign.I
 	if inst.RunningJobCount > 0 {
 		why = fmt.Sprintf("reused running instance (queued behind %d job(s) on its GPU)", inst.RunningJobCount)
 	}
-	recordAutoPilotPlacementDecision(database, job.ID, "autopilot_reuse", "reuse-instance", target,
+	recordPlacementDecisionRow(database, job.ID, "autopilot_reuse", "reuse-instance", target,
 		db.PlacementDecisionDetails{
 			Instance:        target,
 			GPU:             inst.Instance.DisplayGPUBrief(),
@@ -36,10 +36,11 @@ func recordAutoPilotReuseDecision(database *sql.DB, job *db.Job, inst campaign.I
 		})
 }
 
-// recordAutoPilotLaunchDecisions reads back each freshly launched instance and
-// records, per job placed on it, why a new instance was launched rather than
-// reusing a running one. Best-effort.
-func recordAutoPilotLaunchDecisions(database *sql.DB, instanceIDs []int64) {
+// recordLaunchDecisions reads back each freshly launched instance and records,
+// per job placed on it, that the job got a newly launched instance. operation
+// distinguishes the caller (autopilot_launch vs quicklaunch) and why is the
+// human-readable rationale. Best-effort.
+func recordLaunchDecisions(database *sql.DB, instanceIDs []int64, operation, why string) {
 	if database == nil {
 		return
 	}
@@ -60,18 +61,18 @@ func recordAutoPilotLaunchDecisions(database *sql.DB, instanceIDs []int64) {
 			Instance:    target,
 			GPU:         inst.DisplayGPUBrief(),
 			CostPerHour: formatRateCents(inst.CostPerHourCents) + "/hr",
-			Why:         "no reusable instance matched; launched a new instance",
+			Why:         why,
 		}
 		for _, job := range jobs {
 			if job == nil || job.ID <= 0 {
 				continue
 			}
-			recordAutoPilotPlacementDecision(database, job.ID, "autopilot_launch", "launch-instance", target, details)
+			recordPlacementDecisionRow(database, job.ID, operation, "launch-instance", target, details)
 		}
 	}
 }
 
-func recordAutoPilotPlacementDecision(database *sql.DB, jobID int64, operation, selectedKind, target string, details db.PlacementDecisionDetails) {
+func recordPlacementDecisionRow(database *sql.DB, jobID int64, operation, selectedKind, target string, details db.PlacementDecisionDetails) {
 	var attemptPtr *int64
 	if attemptID, err := db.GetLatestAttemptID(database, jobID); err == nil && attemptID > 0 {
 		attemptPtr = &attemptID

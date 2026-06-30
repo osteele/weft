@@ -56,7 +56,7 @@ func TestRecordAutoPilotReuseDecision(t *testing.T) {
 	}
 }
 
-func TestRecordAutoPilotLaunchDecisions(t *testing.T) {
+func TestRecordLaunchDecisions(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "exp", "A100")
 	if err != nil {
@@ -77,7 +77,9 @@ func TestRecordAutoPilotLaunchDecisions(t *testing.T) {
 		t.Fatalf("ClaimJobForLaunch: %v", err)
 	}
 
-	recordAutoPilotLaunchDecisions(database, []int64{instanceID})
+	// operation is parameterized so the quicklaunch (TUI) caller is
+	// distinguishable from the autopilot caller in the recorded decision.
+	recordLaunchDecisions(database, []int64{instanceID}, "quicklaunch", "launched on demand")
 
 	got, err := db.LatestPlacementDecisionForJob(database, jobID)
 	if err != nil {
@@ -86,13 +88,13 @@ func TestRecordAutoPilotLaunchDecisions(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected a launch decision, got nil")
 	}
-	if got.Operation != "autopilot_launch" || got.SelectedKind != "launch-instance" {
+	if got.Operation != "quicklaunch" || got.SelectedKind != "launch-instance" {
 		t.Fatalf("decision identity = %+v", got)
 	}
 	if got.Details.CostPerHour != "$1.20/hr" {
 		t.Fatalf("CostPerHour = %q, want $1.20/hr", got.Details.CostPerHour)
 	}
-	if got.Details.Why == "" {
-		t.Fatalf("expected a why rationale, got empty (details=%+v)", got.Details)
+	if got.Details.Why != "launched on demand" {
+		t.Fatalf("Why = %q, want \"launched on demand\"", got.Details.Why)
 	}
 }
