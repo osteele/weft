@@ -543,12 +543,23 @@ func estimateReuseJobDiskNeedGB(job *db.Job, cap InstanceCapacity, r2Client *r2.
 	inputGB := estimateInputsDisk(subtractInputs(job.Inputs, cap.ProvisionedInputs))
 	setupGB, setupReason := estimateReuseSetupDiskGB(job, cap, r2Client)
 	runtimeGB := EstimateRuntimeDiskGB(job)
+	scriptEnvGB := commandDepIncrementalEnvGB(job)
 	floorGB := jobDiskFloorGB(job)
 
+	reason := setupReason
+	if scriptEnvGB > 0 {
+		envReason := fmt.Sprintf("isolated script env estimate=%dGB", scriptEnvGB)
+		if reason == "" {
+			reason = envReason
+		} else {
+			reason += "; " + envReason
+		}
+	}
+
 	return reuseDiskNeed{
-		totalGB:     inputGB + setupGB + runtimeGB,
+		totalGB:     inputGB + setupGB + runtimeGB + scriptEnvGB,
 		diskFloorGB: floorGB,
-		reason:      setupReason,
+		reason:      reason,
 	}
 }
 

@@ -64,6 +64,14 @@ var failurePatternRules = []failurePatternRule{
 		re:         regexp.MustCompile(`(?is)(?:AutoTokenizer|AutoModel|transformers|tokenizer|model|vllm).{0,160}AttributeError:.*has no attribute|AttributeError:.*has no attribute.*(?:AutoTokenizer|AutoModel|transformers|tokenizer|model|vllm)`),
 	},
 	{
+		patternID:  "disk_full",
+		category:   "environment",
+		message:    "Disk full or quota exceeded",
+		solution:   "Retry with a larger --disk or --runtime-disk budget, reduce declared inputs/cache use, or use a rental with more free disk.",
+		confidence: 0.95,
+		re:         regexp.MustCompile(`(?is)No space left on device|disk quota exceeded|EDQUOT|ENOSPC`),
+	},
+	{
 		patternID:  "cuda_image_wheel_mismatch",
 		category:   "environment",
 		message:    "Selected CUDA image is older than the resolved Python CUDA wheels",
@@ -197,13 +205,6 @@ var failurePatternRules = []failurePatternRule{
 			}
 			return details
 		},
-	},
-	{
-		patternID:  "disk_full",
-		category:   "environment",
-		message:    "Disk full or quota exceeded",
-		confidence: 0.95,
-		re:         regexp.MustCompile(`(?is)No space left on device|disk quota exceeded|EDQUOT|ENOSPC`),
 	},
 	{
 		patternID:  "ssh_disconnect",

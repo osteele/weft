@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // BaseOverheadGB covers the default Docker image (~4GB on disk) and working space (~2GB).
@@ -231,11 +232,9 @@ var cudaPackages = []string{
 	"jax", "jaxlib", "tensorflow", "vllm", "sglang",
 }
 
-// heavyDepInstalledGB approximates the installed footprint (venv plus a share of
-// the uv cache) of large ML frameworks. Used to add disk headroom for deps
-// declared only on the job command — PEP-723 inline `dependencies` or
-// `uv run --with` — which never appear in uv.lock and so are invisible to the
-// manifest/lockfile-based env estimate.
+// heavyDepInstalledGB approximates the cold-start footprint (uv archive/cache
+// plus materialized env files) of large ML frameworks. Fresh rental sizing uses
+// this because neither the global uv cache nor the script environment exists yet.
 var heavyDepInstalledGB = map[string]int{
 	"torch":      8,
 	"vllm":       14, // vllm wheel + flashinfer/xformers on top of torch
@@ -243,6 +242,26 @@ var heavyDepInstalledGB = map[string]int{
 	"tensorflow": 6,
 	"jax":        3,
 	"jaxlib":     4,
+}
+
+// heavyDepIncrementalEnvGB approximates the additional disk a script-scoped uv
+// environment may consume on an already-running rental. The global uv cache may
+// have been seeded by prior jobs, but uv still materializes package files under
+// environments-v2; on provider filesystems this can be a clone/copy rather than
+// a free hardlink/reflink. Reuse admission charges this incremental amount
+// against current free disk.
+var heavyDepIncrementalEnvGB = map[string]int{
+	"torch":      8,
+	"vllm":       16,
+	"sglang":     16,
+	"tensorflow": 6,
+	"jax":        3,
+	"jaxlib":     4,
+}
+
+var heavyDepTransitiveDeps = map[string][]string{
+	"vllm":   {"torch"},
+	"sglang": {"torch"},
 }
 
 // canonicalDepName extracts the lowercase package name from a dependency spec
@@ -257,6 +276,42 @@ func canonicalDepName(spec string) string {
 	return s
 }
 
+func collectCommandHeavyDeps(job *db.Job) map[string]bool {
+	seen := map[string]bool{}
+	consider := func(raw string) {
+		name := canonicalDepName(raw)
+		if name == "" {
+			return
+		}
+		var visit func(string)
+		visit = func(dep string) {
+			dep = canonicalDepName(dep)
+			if dep == "" || seen[dep] {
+				return
+			}
+			if _, ok := heavyDepInstalledGB[dep]; !ok {
+				return
+			}
+			seen[dep] = true
+			for _, child := range heavyDepTransitiveDeps[dep] {
+				visit(child)
+			}
+		}
+		visit(name)
+	}
+	if job == nil {
+		return seen
+	}
+	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	for _, d := range dataloc.ScanScriptDependencies(localDir, job.Command) {
+		consider(d)
+	}
+	for _, d := range dataloc.ScanUVRunWith(job.Command) {
+		consider(d.Name)
+	}
+	return seen
+}
+
 // commandDepHeadroomGB returns extra disk headroom (GB) for heavy ML frameworks
 // declared on a job command via PEP-723 inline `dependencies` or `uv run --with`.
 // Such deps are not in uv.lock, so the manifest/lockfile env estimate misses
@@ -269,25 +324,25 @@ func canonicalDepName(spec string) string {
 func commandDepHeadroomGB(group InstanceGroup) int {
 	seen := map[string]bool{}
 	total := 0
-	consider := func(raw string) {
-		name := canonicalDepName(raw)
-		if name == "" || seen[name] {
-			return
-		}
-		if gb, ok := heavyDepInstalledGB[name]; ok {
-			seen[name] = true
-			total += gb
+	for _, job := range group.Jobs {
+		for dep := range collectCommandHeavyDeps(job) {
+			if seen[dep] {
+				continue
+			}
+			if gb, ok := heavyDepInstalledGB[dep]; ok {
+				seen[dep] = true
+				total += gb
+			}
 		}
 	}
-	for _, job := range group.Jobs {
-		if job == nil {
-			continue
-		}
-		for _, d := range dataloc.ScanScriptDependencies(job.WorkingDir, job.Command) {
-			consider(d)
-		}
-		for _, d := range dataloc.ScanUVRunWith(job.Command) {
-			consider(d.Name)
+	return total
+}
+
+func commandDepIncrementalEnvGB(job *db.Job) int {
+	total := 0
+	for dep := range collectCommandHeavyDeps(job) {
+		if gb, ok := heavyDepIncrementalEnvGB[dep]; ok {
+			total += gb
 		}
 	}
 	return total

@@ -371,6 +371,14 @@ AttributeError: 'LlamaTokenizerFast' object has no attribute 'tokenizer_config'`
 			wantPattern: "cuda_image_wheel_mismatch",
 		},
 		{
+			name: "disk full beats broad vllm cuda preflight",
+			log: `weft: torch preflight: uv run --isolated --with 'vllm==0.19.1' python -c "import torch; torch.cuda.init()"
+error: Failed to install: torch-2.10.0.whl
+  Caused by: Failed to clone /workspace/.cache/uv/archive-v0/torch/lib/libtorch_cuda_linalg.so
+  Caused by: No space left on device (os error 28)`,
+			wantPattern: "disk_full",
+		},
+		{
 			name: "cuda driver too old",
 			log: `RuntimeError: The NVIDIA driver on your system is too old (found version 12040).
 Please update your GPU driver by downloading and installing a new version from the URL: http://www.nvidia.com/Download/index.aspx`,

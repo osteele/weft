@@ -118,7 +118,8 @@ func TestCopyToWriter(t *testing.T) {
 }
 
 type fakeCloudArtifactStore struct {
-	objects map[string][]byte
+	objects              map[string][]byte
+	objectExistsOverride map[string]bool
 }
 
 func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byte, error) {
@@ -130,6 +131,11 @@ func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byt
 }
 
 func (s *fakeCloudArtifactStore) ObjectExists(_ context.Context, key string) (bool, error) {
+	if s.objectExistsOverride != nil {
+		if exists, ok := s.objectExistsOverride[key]; ok {
+			return exists, nil
+		}
+	}
 	_, ok := s.objects[key]
 	return ok, nil
 }
@@ -220,6 +226,32 @@ func TestDownloadSingleCloudFileToPath_ArtifactsPathFromConventionOutputs(t *tes
 
 	dest := filepath.Join(t.TempDir(), "summary.md")
 	if err := downloadSingleCloudFileToPath(&cobra.Command{}, store, job, runner.OutputFile{RelPath: "artifacts/summary.md"}, dest, false); err != nil {
+		t.Fatalf("downloadSingleCloudFileToPath: %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "summary\n" {
+		t.Fatalf("downloaded content = %q, want summary", data)
+	}
+}
+
+func TestDownloadSingleCloudFileToPath_UsesListedR2Key(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+	runID := int64(0)
+	key := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/summary.md"
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			key: []byte("summary\n"),
+		},
+		objectExistsOverride: map[string]bool{
+			key: false,
+		},
+	}
+
+	dest := filepath.Join(t.TempDir(), "summary.md")
+	if err := downloadSingleCloudFileToPath(&cobra.Command{}, store, job, runner.OutputFile{RelPath: "output/summary.md", SizeBytes: 8, R2Key: key}, dest, false); err != nil {
 		t.Fatalf("downloadSingleCloudFileToPath: %v", err)
 	}
 	data, err := os.ReadFile(dest)

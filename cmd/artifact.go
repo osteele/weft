@@ -697,9 +697,13 @@ type cloudOutputStore interface {
 // a stalled or interrupted transfer surfaces with its real cause (it must
 // never be reported as "not found" — see wb20).
 func downloadSingleCloudFileToPath(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, f runner.OutputFile, dest string, showProgress bool) error {
-	key, err := resolveCloudOutputKey(context.Background(), r2Client, job, f.RelPath)
-	if err != nil {
-		return err
+	key := f.R2Key
+	if key == "" {
+		var err error
+		key, err = resolveCloudOutputKey(context.Background(), r2Client, job, f.RelPath)
+		if err != nil {
+			return err
+		}
 	}
 	if dest == "-" {
 		if _, err := r2Client.DownloadObjectToWriterWithIdleTimeout(context.Background(), key, cmd.OutOrStdout(), artifactTimeout); err != nil {
@@ -2610,7 +2614,7 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 	result := make([]runner.OutputFile, 0)
 	seen := make(map[string]struct{})
 	var mu sync.Mutex
-	appendFile := func(relPath string, sizeBytes int64) {
+	appendFile := func(relPath string, sizeBytes int64, r2Key string) {
 		if relPath == "" {
 			return
 		}
@@ -2623,6 +2627,7 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 		result = append(result, runner.OutputFile{
 			RelPath:   relPath,
 			SizeBytes: sizeBytes,
+			R2Key:     r2Key,
 		})
 	}
 
@@ -2638,7 +2643,7 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 			cancel()
 			if err == nil {
 				for _, f := range files {
-					appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes)
+					appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes, f.Key)
 				}
 			}
 		}()
@@ -2653,7 +2658,7 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 			cancel()
 			if err == nil {
 				for _, f := range aFiles {
-					appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes)
+					appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes, f.Key)
 				}
 			}
 		}()

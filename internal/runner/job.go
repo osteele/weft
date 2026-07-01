@@ -504,6 +504,7 @@ func WritePhasesFile(paths JobPaths, phases PhaseTiming) error {
 type OutputFile struct {
 	RelPath   string `json:"rel_path"` // relative to workDir (e.g., "output/results.json")
 	SizeBytes int64  `json:"size_bytes"`
+	R2Key     string `json:"-"` // concrete cloud object key when discovered from R2
 }
 
 // Upload status constants used by OutputDirUpload, OutputUploadResult, and UploadSummary.

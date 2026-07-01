@@ -61,8 +61,9 @@ print("bench")
 		t.Fatalf("write script: %v", err)
 	}
 	group := InstanceGroup{Jobs: []*db.Job{{ID: 1, Command: "uv run bench.py", WorkingDir: dir}}}
-	if got := commandDepHeadroomGB(group); got != heavyDepInstalledGB["vllm"] {
-		t.Fatalf("commandDepHeadroomGB = %d, want %d", got, heavyDepInstalledGB["vllm"])
+	want := heavyDepInstalledGB["vllm"] + heavyDepInstalledGB["torch"]
+	if got := commandDepHeadroomGB(group); got != want {
+		t.Fatalf("commandDepHeadroomGB = %d, want %d", got, want)
 	}
 }
 

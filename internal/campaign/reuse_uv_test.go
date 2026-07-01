@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,39 @@ func TestMatchGroupToInstance_RejectsExplicitRuntimeDisk(t *testing.T) {
 	}
 	if reason != "disk insufficient: need=24GB free=23GB" {
 		t.Fatalf("reason = %q, want runtime disk rejection", reason)
+	}
+}
+
+func TestMatchGroupToInstance_RejectsIncrementalIsolatedScriptEnv(t *testing.T) {
+	workDir := t.TempDir()
+	script := `# /// script
+# dependencies = ["vllm==0.19.1", "numpy"]
+# ///
+print("bench")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "bench.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	job := &db.Job{
+		ID:         1,
+		WorkingDir: workDir,
+		Command:    "bench.py",
+	}
+	group := InstanceGroup{Jobs: []*db.Job{job}}
+	scriptEnvGB := commandDepIncrementalEnvGB(job)
+	freeGB := NonCUDAOverheadGB + scriptEnvGB - 1
+	cap := InstanceCapacity{
+		Instance:   &db.Launch{DiskGB: 100, GPUMemGB: 24},
+		DiskFreeGB: freeGB,
+	}
+
+	ok, reason := MatchGroupToInstance(group, cap)
+	if ok {
+		t.Fatal("MatchGroupToInstance unexpectedly accepted incremental isolated env need")
+	}
+	want := fmt.Sprintf("need=%dGB free=%dGB", NonCUDAOverheadGB+scriptEnvGB, freeGB)
+	if !strings.Contains(reason, want) || !strings.Contains(reason, "isolated script env estimate") {
+		t.Fatalf("reason = %q, want %q with isolated env detail", reason, want)
 	}
 }
 
