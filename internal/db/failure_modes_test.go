@@ -14,6 +14,8 @@ func TestClassifyFailureMode(t *testing.T) {
 		{name: "diagnosis pattern wins", diagnosis: `{"pattern":"gpu_oom"}`, want: "gpu_oom"},
 		{name: "module text", message: "ModuleNotFoundError: No module named transformers", want: "module_not_found"},
 		{name: "cuda fault text", message: "CUDA error: an illegal memory access was encountered", want: "cuda_fault"},
+		{name: "cuda hardware text", message: "torch.AcceleratorError: CUDA error: Invalid access of peer GPU memory over nvlink or a hardware error", want: "cuda_hardware_fault"},
+		{name: "cuda hardware reason", failureReason: FailureReasonInfraCUDAHardwareFault, want: "cuda_hardware_fault"},
 		{name: "exit 137", exitCode: 137, want: "oom"},
 		{name: "success empty", want: ""},
 	}

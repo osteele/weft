@@ -38,6 +38,14 @@ type failurePatternRule struct {
 
 var failurePatternRules = []failurePatternRule{
 	{
+		patternID:  "cuda_hardware_fault",
+		category:   "environment",
+		message:    "CUDA hardware or interconnect fault",
+		solution:   "Retry on a fresh instance; the failing rental likely has a bad GPU, NVLink/peer-memory path, or driver/device state.",
+		confidence: 0.95,
+		re:         regexp.MustCompile(`(?is)(?:peer GPU memory|NVLink|uncorrectable ECC|Xid)`),
+	},
+	{
 		patternID:  "cli_argument_drift",
 		category:   "environment",
 		message:    "CLI argument is not supported by the resolved tool version",
@@ -604,6 +612,13 @@ var envPatterns = []*pattern{
 		category:  "environment",
 		message:   "GPU out of memory",
 		enrich:    enrichGPUOOMDiagnosis,
+	},
+	{
+		re:             regexp.MustCompile(`(?is)(?:peer GPU memory|NVLink|uncorrectable ECC|Xid)`),
+		patternID:      "cuda_hardware_fault",
+		category:       "environment",
+		message:        "CUDA hardware or interconnect fault",
+		fatalAtRuntime: true,
 	},
 	{
 		re:             regexp.MustCompile(`RuntimeError: CUDA error`),

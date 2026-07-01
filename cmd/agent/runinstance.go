@@ -276,7 +276,7 @@ func runInstance(args []string) {
 	anyFailed = seqResult.AnyFailed
 
 	// Grace period or self-destruct
-	if anyFailed && gracePeriod > 0 {
+	if anyFailed && !seqResult.AnyInfraFailed && gracePeriod > 0 {
 		fmt.Printf("Jobs failed. Entering grace period (%s).\n", gracePeriod)
 		graceWaitLoop(graceWaitConfig{
 			InstanceID:          instanceID,
@@ -297,6 +297,9 @@ func runInstance(args []string) {
 }
 
 func terminalOutcomeForSequence(seqResult jobSequenceResult) (string, string) {
+	if seqResult.AnyInfraFailed {
+		return db.LaunchStatusFailed, db.TerminationReasonInfraFailure
+	}
 	if seqResult.AnyFailed {
 		return db.LaunchStatusFailed, db.TerminationReasonJobFailure
 	}

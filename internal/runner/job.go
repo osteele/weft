@@ -118,6 +118,9 @@ func DetectFailureReasonFromExitInfoAndLog(ei ExitInfo, logPath string) string {
 	if logTailMentionsCUDADriverTooOld(tail) {
 		return FailureReasonCUDADriverTooOld
 	}
+	if logTailMentionsCUDAHardwareFault(tail) {
+		return db.FailureReasonInfraCUDAHardwareFault
+	}
 	return DetectFailureReasonFromExitInfo(ei)
 }
 
@@ -161,6 +164,13 @@ func logTailMentionsCUDADriverTooOld(tail string) bool {
 		}
 	}
 	return false
+}
+
+func logTailMentionsCUDAHardwareFault(tail string) bool {
+	return strings.Contains(tail, "peer gpu memory") ||
+		strings.Contains(tail, "nvlink") ||
+		strings.Contains(tail, "uncorrectable ecc") ||
+		strings.Contains(tail, "xid")
 }
 
 // JobPaths holds all file paths for a job.

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestDetectFailureReason(t *testing.T) {
@@ -184,6 +186,17 @@ func TestDetectFailureReasonFromExitInfoAndLog_DriverWarningNotClassified(t *tes
 		if got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 1}, logPath); got != FailureReasonCUDADriverTooOld {
 			t.Fatalf("fatal driver error %q classified as %q, want %q", fatal, got, FailureReasonCUDADriverTooOld)
 		}
+	}
+}
+
+func TestDetectFailureReasonFromExitInfoAndLog_CUDAHardwareFault(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "job.log")
+	if err := os.WriteFile(logPath, []byte("torch.AcceleratorError: CUDA error: Invalid access of peer GPU memory over nvlink or a hardware error\n"), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	got := DetectFailureReasonFromExitInfoAndLog(ExitInfo{ExitCode: 1}, logPath)
+	if got != db.FailureReasonInfraCUDAHardwareFault {
+		t.Fatalf("DetectFailureReasonFromExitInfoAndLog() = %q, want %q", got, db.FailureReasonInfraCUDAHardwareFault)
 	}
 }
 

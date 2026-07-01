@@ -623,6 +623,7 @@ func (m *setupPrewarmManager) waitFor(job cloud.AgentJob) setupPrewarmResult {
 type jobSequenceResult struct {
 	FailedJobs         []int64
 	AnyFailed          bool
+	AnyInfraFailed     bool
 	AnyCanceled        bool
 	StartedJobCount    int
 	CompletionManifest *runner.InstanceCompletionManifest
@@ -863,6 +864,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// dropped. Without this, a runner-level start failure produces an
 		// instance whose status reads "exit 1" with nothing else.
 		ensureFailureArtifacts(cfg.LogDir, job.ID, ei, err)
+		if jobFailureReasonIsInfra(cfg.LogDir, job.ID) {
+			result.AnyInfraFailed = true
+		}
 
 		// Upload the opslog before writing .complete so a self-destruct that
 		// races the post-job work still leaves the agent's diagnostic trail
@@ -950,6 +954,11 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
 	bgm.CleanupWorkdirs()
 	return result
+}
+
+func jobFailureReasonIsInfra(logDir string, jobID int64) bool {
+	reason := runner.ReadFailureReasonFile(runner.NewJobPaths(logDir, jobID).FailureReason)
+	return reason == db.FailureReasonInfraCUDAHardwareFault
 }
 
 func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {

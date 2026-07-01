@@ -214,6 +214,11 @@ func TestDiagnoseFailedAttemptFromLog_PatternRegistry(t *testing.T) {
 			detail:  "cuda_error_code",
 		},
 		{
+			name:    "cuda hardware fault",
+			log:     "torch.AcceleratorError: CUDA error: Invalid access of peer GPU memory over nvlink or a hardware error",
+			pattern: "cuda_hardware_fault",
+		},
+		{
 			name:    "glibcxx version not found",
 			log:     "ImportError: /home/user/.julia/juliaup/julia-1.12/lib/libjulia-internal.so.1.12: version `GLIBCXX_3.4.30' not found",
 			pattern: "glibcxx_version_not_found",
@@ -327,6 +332,18 @@ Process finished with exit code 1`
 	}
 	if d.Pattern != "cuda_fatal" {
 		t.Errorf("expected cuda_fatal, got %s", d.Pattern)
+	}
+}
+
+func TestCheckFatalAtRuntime_CUDAHardwareFault(t *testing.T) {
+	log := `torch.AcceleratorError: CUDA error: Invalid access of peer GPU memory over nvlink or a hardware error`
+
+	d := CheckFatalAtRuntime(log)
+	if d == nil {
+		t.Fatal("expected fatal diagnosis for CUDA hardware fault")
+	}
+	if d.Pattern != "cuda_hardware_fault" {
+		t.Errorf("expected cuda_hardware_fault, got %s", d.Pattern)
 	}
 }
 

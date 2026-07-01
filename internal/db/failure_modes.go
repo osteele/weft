@@ -27,6 +27,10 @@ const (
 	// normalization treats this as retryable when the launch itself ends with
 	// an infrastructure-side termination reason.
 	FailureReasonInfraPrewarmDownloadFailed = "infra_prewarm_download_failed"
+
+	// FailureReasonInfraCUDAHardwareFault marks CUDA failures that indicate a
+	// bad rental GPU/interconnect rather than user code.
+	FailureReasonInfraCUDAHardwareFault = "infra_cuda_hardware_fault"
 )
 
 // PredictFailureModes estimates likely failure modes for a command on a host.
@@ -140,6 +144,8 @@ func ClassifyFailureMode(failureReason, diagnosis, message string, exitCode int)
 	}
 	text := strings.ToLower(strings.Join([]string{failureReason, diagnosis, message}, "\n"))
 	switch {
+	case strings.Contains(text, FailureReasonInfraCUDAHardwareFault) || cudaHardwareFaultText(text):
+		return "cuda_hardware_fault"
 	case strings.Contains(text, "cuda") && (strings.Contains(text, "out of memory") || strings.Contains(text, "oom")):
 		return "gpu_oom"
 	case strings.Contains(text, "out of memory") || strings.Contains(text, "oom killer") || failureReason == "oom":
@@ -159,6 +165,14 @@ func ClassifyFailureMode(failureReason, diagnosis, message string, exitCode int)
 	default:
 		return ""
 	}
+}
+
+func cudaHardwareFaultText(text string) bool {
+	text = strings.ToLower(text)
+	return strings.Contains(text, "peer gpu memory") ||
+		strings.Contains(text, "nvlink") ||
+		strings.Contains(text, "uncorrectable ecc") ||
+		strings.Contains(text, "xid")
 }
 
 func diagnosisPattern(diagnosis string) string {

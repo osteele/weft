@@ -286,7 +286,7 @@ Process 1887281 has 2.53 GiB in use.`
 func TestEnvPatterns_CUDAError(t *testing.T) {
 	log := `RuntimeError: CUDA error: device-side assert triggered`
 
-	d := envPatterns[1].Match(log)
+	d := envPatternByID(t, "cuda_error").Match(log)
 	if d == nil {
 		t.Fatal("expected match for CUDA error")
 	}
@@ -298,7 +298,7 @@ func TestEnvPatterns_CUDAError(t *testing.T) {
 func TestEnvPatterns_DiskFull_ENOSPC(t *testing.T) {
 	log := `write /tmp/output/model.bin: ENOSPC`
 
-	d := envPatterns[3].Match(log)
+	d := envPatternByID(t, "disk_full").Match(log)
 	if d == nil {
 		t.Fatal("expected match for ENOSPC")
 	}
@@ -313,13 +313,24 @@ func TestEnvPatterns_DiskFull_ENOSPC(t *testing.T) {
 func TestEnvPatterns_DiskFull_NoSpaceLeft(t *testing.T) {
 	log := `OSError: [Errno 28] No space left on device: '/tmp/model/config.json'`
 
-	d := envPatterns[3].Match(log)
+	d := envPatternByID(t, "disk_full").Match(log)
 	if d == nil {
 		t.Fatal("expected match for No space left on device")
 	}
 	if d.Pattern != "disk_full" {
 		t.Errorf("expected pattern disk_full, got %s", d.Pattern)
 	}
+}
+
+func envPatternByID(t *testing.T, id string) *pattern {
+	t.Helper()
+	for _, p := range envPatterns {
+		if p.patternID == id {
+			return p
+		}
+	}
+	t.Fatalf("env pattern %q not found", id)
+	return nil
 }
 
 func TestDiagnoseFailedAttempt_RuntimeGuidance(t *testing.T) {

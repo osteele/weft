@@ -29,6 +29,12 @@ func TestTerminalOutcomeForSequence(t *testing.T) {
 			wantReason: db.TerminationReasonJobFailure,
 		},
 		{
+			name:       "infra failed run",
+			result:     jobSequenceResult{StartedJobCount: 1, AnyFailed: true, AnyInfraFailed: true},
+			wantStatus: db.LaunchStatusFailed,
+			wantReason: db.TerminationReasonInfraFailure,
+		},
+		{
 			name:       "canceled before any job started",
 			result:     jobSequenceResult{AnyCanceled: true},
 			wantStatus: db.LaunchStatusCancelled,
