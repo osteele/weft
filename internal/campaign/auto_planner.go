@@ -397,12 +397,21 @@ func SanitizeBlockedReason(reason string) string {
 	summary = strings.ReplaceAll(summary,
 		"There are no longer any instances available with the requested specifications. Please refresh and try again.",
 		"requested instance type is no longer available; Weft will retry with fresh offers")
+	if isRetryableCreateProviderRejection(summary) && !strings.Contains(summary, "Weft will retry with fresh offers") {
+		summary += "; Weft will retry with fresh offers"
+	}
 	summary = strings.TrimRight(summary, ".;")
 	const maxLen = 240
 	if len(summary) > maxLen {
 		summary = summary[:maxLen-1] + "…"
 	}
 	return summary
+}
+
+func isRetryableCreateProviderRejection(reason string) bool {
+	reason = strings.ToLower(reason)
+	return strings.Contains(reason, "provider rejected request") &&
+		strings.Contains(reason, "create-instance")
 }
 
 func looksLikeExceptionLine(s string) bool {

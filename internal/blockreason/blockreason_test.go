@@ -222,10 +222,19 @@ func TestReasonKindRetryableOfferUnavailableIsWaiting(t *testing.T) {
 	for _, reason := range []string{
 		"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers",
 		"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers; could not reuse running instances: wi4094 RTX 4060 Ti 16GB: GPU memory insufficient: job=24GB instance=16GB",
+		"provider rejected request (vastai create-instance) (contract 43292019); Weft will retry with fresh offers",
+		"provider rejected request (vastai create-instance) (contract 43292019); Weft will retry with fresh offers; could not reuse running instances: wi4475 RTX 6000Ada 48GB: disk insufficient: need=51GB free=20GB",
 	} {
 		if got := ReasonKind(reason); got != KindWaiting {
 			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindWaiting)
 		}
+	}
+}
+
+func TestReasonKindProviderRejectedSearchOffersRemainsBlocked(t *testing.T) {
+	reason := "planner: search offers: provider rejected request: 400 invalid filter"
+	if got := ReasonKind(reason); got != KindBlocked {
+		t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindBlocked)
 	}
 }
 

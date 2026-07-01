@@ -82,7 +82,7 @@ func TestSanitizeBlockedReason_CollapsesSuccessFalseProviderRejected(t *testing.
 	raw := "provider returned success=false: provider rejected request (vastai create-instance) (contract 42398814)"
 
 	got := SanitizeBlockedReason(raw)
-	want := "provider rejected request (vastai create-instance) (contract 42398814)"
+	want := "provider rejected request (vastai create-instance) (contract 42398814); Weft will retry with fresh offers"
 
 	if got != want {
 		t.Fatalf("SanitizeBlockedReason() = %q, want %q", got, want)
