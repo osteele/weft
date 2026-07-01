@@ -139,6 +139,13 @@ type setupPrewarmResult struct {
 	setupRan bool
 	didWork  bool
 	err      error
+	// failureReason is the single-line, machine-readable reason persisted
+	// for this failed prewarm. Empty means use err.Error().
+	failureReason string
+	// infraFailure marks prewarm work owned by weft (HF input staging) that
+	// failed before the user command started and should terminate the rental
+	// as retryable infrastructure.
+	infraFailure bool
 	// exitInfo carries the underlying RunSetupCommand exit info when the
 	// prewarm failed. Specifically used downstream to distinguish setup-
 	// phase timeouts (exit 124) from generic prewarm failures — timeouts
@@ -152,6 +159,8 @@ type setupPrewarmResult struct {
 	// (corrupts the TUI footer line and the `Reason:` line of weft info).
 	logTail string
 }
+
+const hfPrewarmMaxAttempts = 3
 
 type setupPrewarm struct {
 	jobID   int64
@@ -387,15 +396,8 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	didWork := false
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
 		didWork = true
-		hfEnv := hfDownloadPrewarmEnv(env, job.Inputs)
-		if ei, err := runner.RunSetupCommand(hfDownloadScript(assets), job.ID, workDir, hfEnv, paths, pickSetupTimeout(cfg)); err != nil {
-			return setupPrewarmResult{
-				didWork:  true,
-				logPath:  paths.Log,
-				exitInfo: ei,
-				err:      fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err),
-				logTail:  prewarmLogTail(paths.Log),
-			}
+		if result := runHFDownloadPrewarm(job, cfg, workDir, env, assets, paths); !result.ok {
+			return result
 		}
 	}
 
@@ -433,6 +435,84 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		}
 	}
 	return setupPrewarmResult{ok: true, didWork: true, setupRan: true, logPath: paths.Log}
+}
+
+func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, baseEnv []string, assets []dataloc.DataAsset, paths runner.JobPaths) setupPrewarmResult {
+	script := hfDownloadScript(assets)
+	timeout := pickSetupTimeout(cfg)
+	disableXet := false
+	var last setupPrewarmResult
+	for attempt := 1; attempt <= hfPrewarmMaxAttempts; attempt++ {
+		env := hfDownloadPrewarmEnv(baseEnv, job.Inputs)
+		if disableXet {
+			env = append(env, "HF_HUB_DISABLE_XET=1")
+		}
+		appendPrewarmStatus(paths.Log, fmt.Sprintf("weft: HF prewarm attempt %d/%d%s\n",
+			attempt, hfPrewarmMaxAttempts, hfPrewarmXetSuffix(disableXet)))
+		ei, err := runner.RunSetupCommand(script, job.ID, workDir, env, paths, timeout)
+		if err == nil {
+			return setupPrewarmResult{ok: true, didWork: true, logPath: paths.Log}
+		}
+		last = setupPrewarmResult{
+			didWork:       true,
+			logPath:       paths.Log,
+			exitInfo:      ei,
+			err:           fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err),
+			failureReason: db.FailureReasonInfraPrewarmDownloadFailed,
+			infraFailure:  true,
+			logTail:       prewarmLogTail(paths.Log),
+		}
+		if attempt == hfPrewarmMaxAttempts {
+			break
+		}
+		if hfPrewarmLogHasXetWriterError(paths.Log) && !disableXet {
+			disableXet = true
+			appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after writer/reconstruction error\n")
+		}
+		time.Sleep(hfPrewarmBackoff(attempt))
+	}
+	return last
+}
+
+func hfPrewarmXetSuffix(disableXet bool) string {
+	if disableXet {
+		return " (HF_HUB_DISABLE_XET=1)"
+	}
+	return ""
+}
+
+func hfPrewarmBackoff(attempt int) time.Duration {
+	switch attempt {
+	case 1:
+		return 5 * time.Second
+	default:
+		return 20 * time.Second
+	}
+}
+
+func appendPrewarmStatus(path, line string) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(line)
+}
+
+func hfPrewarmLogHasXetWriterError(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return hfPrewarmTextHasXetWriterError(string(data))
+}
+
+func hfPrewarmTextHasXetWriterError(text string) bool {
+	text = strings.ToLower(text)
+	return strings.Contains(text, "xet") &&
+		(strings.Contains(text, "file reconstruction error") ||
+			strings.Contains(text, "internal writer error") ||
+			strings.Contains(text, "background writer channel closed"))
 }
 
 func prewarmLogTail(path string) string {
@@ -685,21 +765,20 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 			prewarmExitCode := recordPrewarmFailure(cfg, job, prewarm)
 
-			// Setup-phase timeout (exit 124) at this boundary almost always
-			// indicates infrastructure trouble (rental network throughput,
-			// HF/PyPI reachability) rather than user code. Mark the instance
-			// infra_failure and self-destruct so Weft's reconciler
-			// resets affected jobs to queued and the autopilot re-places them
-			// on a different rental. See specs/job-lifecycle.allium.
-			if prewarm.exitInfo.ExitCode == runner.ExitCodeSetupTimeout && cfg.SelfDestructCmd != "" {
-				slog.Warn("prewarm setup-timeout: terminating instance as infra_failure",
+			// Setup/HF prewarm failures at this boundary happen before the
+			// user command starts. Timeouts and declared-HF input staging
+			// failures are infrastructure-side: terminate the rental so the
+			// reconciler resets affected jobs to queued and autopilot places
+			// them on a fresh instance. See specs/job-lifecycle.allium.
+			if prewarmShouldTerminateAsInfra(prewarm) && cfg.SelfDestructCmd != "" {
+				slog.Warn("prewarm infrastructure failure: terminating instance as infra_failure",
 					"component", "agent",
 					"job_id", job.ID,
 					"instance_id", cfg.InstanceID,
 					"error", prewarm.err)
 				terminateInstanceWithReason(
 					cfg.R2Bucket, cfg.InstanceID, cfg.SelfDestructCmd,
-					fmt.Sprintf("prewarm_setup_timeout:%d", job.ID),
+					fmt.Sprintf("prewarm_infra_failure:%d", job.ID),
 					job.ID,
 					db.TerminationReasonInfraFailure,
 					prewarm.err.Error(),
@@ -898,7 +977,9 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 		appendPrewarmLogForFailure(paths.Log, prewarm.logPath)
 	}
 	reason := "prewarm_failed"
-	if prewarm.err != nil {
+	if prewarm.failureReason != "" {
+		reason = prewarm.failureReason
+	} else if prewarm.err != nil {
 		reason = prewarm.err.Error()
 	}
 	ei := prewarm.exitInfo
@@ -913,6 +994,10 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 	})
 	r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
 	return ei.ExitCode
+}
+
+func prewarmShouldTerminateAsInfra(prewarm setupPrewarmResult) bool {
+	return prewarm.infraFailure || prewarm.exitInfo.ExitCode == runner.ExitCodeSetupTimeout
 }
 
 // prewarmFailureExitCode preserves the underlying RunSetupCommand exit code

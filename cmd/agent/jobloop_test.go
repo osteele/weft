@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -151,6 +152,79 @@ func writeCompletionRecordForTest(t *testing.T, logDir string, jobID int64, rec 
 	data = append(data, '\n')
 	if err := os.WriteFile(paths.Completion, data, 0o644); err != nil {
 		t.Fatalf("write completion: %v", err)
+	}
+}
+
+func TestHFPrewarmTextHasXetWriterError(t *testing.T) {
+	trace := `RuntimeError: Data processing error: CAS service error : Reqwest Error: HTTP status client error (401 Unauthorized), domain: https://cas-server.xethub.hf.co
+RuntimeError: Task error: File reconstruction error: Internal Writer Error: Background writer channel closed`
+	if !hfPrewarmTextHasXetWriterError(trace) {
+		t.Fatal("hfPrewarmTextHasXetWriterError() = false for xet reconstruction writer error")
+	}
+	if hfPrewarmTextHasXetWriterError("File reconstruction error without CAS context") {
+		t.Fatal("hfPrewarmTextHasXetWriterError() = true without xet context")
+	}
+	if hfPrewarmTextHasXetWriterError("xet authentication failed before download") {
+		t.Fatal("hfPrewarmTextHasXetWriterError() = true without writer/reconstruction signal")
+	}
+}
+
+func TestPrewarmShouldTerminateAsInfra(t *testing.T) {
+	if !prewarmShouldTerminateAsInfra(setupPrewarmResult{infraFailure: true, exitInfo: runner.ExitInfo{ExitCode: 1}}) {
+		t.Fatal("infra prewarm failure should terminate as infrastructure")
+	}
+	if !prewarmShouldTerminateAsInfra(setupPrewarmResult{exitInfo: runner.ExitInfo{ExitCode: runner.ExitCodeSetupTimeout}}) {
+		t.Fatal("setup timeout should terminate as infrastructure")
+	}
+	if prewarmShouldTerminateAsInfra(setupPrewarmResult{exitInfo: runner.ExitInfo{ExitCode: 1}}) {
+		t.Fatal("generic setup exit 1 should not terminate as infrastructure")
+	}
+}
+
+func TestRecordPrewarmFailureWritesMachineReason(t *testing.T) {
+	logDir := t.TempDir()
+	prewarmLog := filepath.Join(t.TempDir(), "prewarm.log")
+	if err := os.WriteFile(prewarmLog, []byte("xet failure\n"), 0o644); err != nil {
+		t.Fatalf("write prewarm log: %v", err)
+	}
+	job := cloud.AgentJob{
+		ID:      42,
+		RunID:   7,
+		Dir:     "/tmp/project",
+		Command: "python train.py",
+	}
+	prewarm := setupPrewarmResult{
+		logPath:       prewarmLog,
+		exitInfo:      runner.ExitInfo{ExitCode: 1},
+		err:           errors.New("hf prewarm failed exit 1"),
+		failureReason: db.FailureReasonInfraPrewarmDownloadFailed,
+		infraFailure:  true,
+	}
+
+	exitCode := recordPrewarmFailure(jobSequenceConfig{LogDir: logDir}, job, prewarm)
+	if exitCode != 1 {
+		t.Fatalf("recordPrewarmFailure exit code = %d, want 1", exitCode)
+	}
+
+	paths := runner.NewJobPaths(logDir, job.ID)
+	reasonData, err := os.ReadFile(paths.FailureReason)
+	if err != nil {
+		t.Fatalf("read failure reason: %v", err)
+	}
+	if strings.TrimSpace(string(reasonData)) != db.FailureReasonInfraPrewarmDownloadFailed {
+		t.Fatalf("failure reason = %q, want %q", strings.TrimSpace(string(reasonData)), db.FailureReasonInfraPrewarmDownloadFailed)
+	}
+
+	var completion runner.CompletionRecord
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("read completion: %v", err)
+	}
+	if err := json.Unmarshal(data, &completion); err != nil {
+		t.Fatalf("unmarshal completion: %v", err)
+	}
+	if completion.FailureReason != db.FailureReasonInfraPrewarmDownloadFailed {
+		t.Fatalf("completion failure reason = %q, want %q", completion.FailureReason, db.FailureReasonInfraPrewarmDownloadFailed)
 	}
 }
 

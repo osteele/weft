@@ -21,6 +21,12 @@ type FailureModePrediction struct {
 const (
 	failureModePriorAlpha = 1.0
 	failureModePriorBeta  = 19.0
+
+	// FailureReasonInfraPrewarmDownloadFailed marks a weft-owned input staging
+	// failure that happened before the user command started. Launch
+	// normalization treats this as retryable when the launch itself ends with
+	// an infrastructure-side termination reason.
+	FailureReasonInfraPrewarmDownloadFailed = "infra_prewarm_download_failed"
 )
 
 // PredictFailureModes estimates likely failure modes for a command on a host.

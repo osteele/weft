@@ -2117,10 +2117,25 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	// the view hasn't yet surfaced 'canceled' (e.g., because the latest
 	// attempt is still open). See CancelSurvivesInstanceTermination in
 	// specs/job-lifecycle.allium.
+	retryPrewarmFailed := IsRetryableTermination(ci)
 	jobs, err := queryJobsTx(tx,
-		fmt.Sprintf(`SELECT %s FROM job_status js WHERE js.launch_id = ? AND js.status NOT IN (?, ?, ?, ?, ?, ?) AND js.tombstoned = 0 AND COALESCE((SELECT requested_status FROM jobs WHERE jobs.id = js.id), '') NOT IN (?, ?, ?) ORDER BY js.id ASC`, qualifiedJobSelectColumns("js")),
+		fmt.Sprintf(`SELECT %s
+			FROM job_status js
+			WHERE js.launch_id = ?
+			  AND (
+			    js.status NOT IN (?, ?, ?, ?, ?, ?)
+			    OR (
+			      ? = 1
+			      AND js.status = ?
+			      AND COALESCE(js.failure_reason, '') = ?
+			    )
+			  )
+			  AND js.tombstoned = 0
+			  AND COALESCE((SELECT requested_status FROM jobs WHERE jobs.id = js.id), '') NOT IN (?, ?, ?)
+			ORDER BY js.id ASC`, qualifiedJobSelectColumns("js")),
 		instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		boolInt(retryPrewarmFailed), StatusFailed, FailureReasonInfraPrewarmDownloadFailed,
 		StatusCanceled, StatusKilled, StatusDraft,
 	)
 	if err != nil {
@@ -2142,7 +2157,8 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	now := time.Now().Unix()
 	unplacedJobIDs := make([]int64, 0, len(jobIDs))
 	restoredJobIDs := make([]int64, 0)
-	for _, jobID := range jobIDs {
+	for _, job := range jobs {
+		jobID := job.ID
 		transition, err := handleMoveTargetFailedBeforeStartTx(tx, jobID, instanceID, now, outcome)
 		if err != nil {
 			tx.Rollback()
@@ -2155,6 +2171,12 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 		if err := closeAttemptsAndRequeueWithOutcome(tx, jobID, now, outcome); err != nil {
 			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
+		}
+		if retryPrewarmFailed && job.Status == StatusFailed && job.FailureReason == FailureReasonInfraPrewarmDownloadFailed {
+			if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
+				tx.Rollback()
+				return 0, fmt.Errorf("create retry attempt for prewarm-failed job %d: %w", jobID, err)
+			}
 		}
 		// Clear start_time on orphaned attempts so the retry budget doesn't
 		// charge infrastructure overhead (bootstrap/setup) against the job.

@@ -1853,6 +1853,97 @@ func TestNormalizeTerminalLaunchJobs_FailedInstanceOrphansRunningJobs(t *testing
 	}
 }
 
+func TestNormalizeTerminalLaunchJobs_RequeuesPrewarmFailedJobOnInfraFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraPrewarmDownloadFailed))
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 1", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch_id = %v, want nil after requeue", *job.LaunchID)
+	}
+
+	attempts, err := ListAttempts(database, 1)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("attempt count = %d, want 2: %#v", len(attempts), attempts)
+	}
+	if attempts[0].Status != StatusQueued || attempts[0].LaunchID != nil {
+		t.Fatalf("latest attempt = %+v, want queued unplaced retry", attempts[0])
+	}
+	if attempts[1].Status != StatusFailed || attempts[1].FailureReason != FailureReasonInfraPrewarmDownloadFailed {
+		t.Fatalf("prior attempt = %+v, want preserved prewarm failure", attempts[1])
+	}
+}
+
+func TestNormalizeTerminalLaunchJobs_DoesNotRequeuePrewarmFailedJobOnJobFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraPrewarmDownloadFailed))
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 0", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusFailed)
+	}
+}
+
 func TestNormalizeTerminalLaunchJobs_JobFailureClosesAttemptsAsFailed(t *testing.T) {
 	database := setupTestDB(t)
 
