@@ -111,6 +111,38 @@ func TestInstanceInfoCommandAliasExists(t *testing.T) {
 	}
 }
 
+func TestInstanceInfoStatusLabelShowsProviderTerminalState(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusRunning}
+	inst := &cloud.Instance{Status: cloud.ProviderStatusExited}
+	got := instanceInfoStatusLabel(ci, inst)
+	if got != "running (exited)" {
+		t.Fatalf("instanceInfoStatusLabel = %q, want running (exited)", got)
+	}
+}
+
+func TestInstanceInfoStatusLabelOmitsProviderStateForTerminalLaunch(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusFailed}
+	inst := &cloud.Instance{Status: cloud.ProviderStatusDestroyed}
+	got := instanceInfoStatusLabel(ci, inst)
+	if got != "terminated" {
+		t.Fatalf("instanceInfoStatusLabel = %q, want terminated", got)
+	}
+}
+
+func TestFormatRentalLineShowsRescueCap(t *testing.T) {
+	bid := 47
+	cap := 57
+	got := formatRentalLine(&db.Launch{
+		InstanceType:     cloud.InstanceTypeInterruptible,
+		MaxBidPriceCents: &bid,
+		OnDemandRefCents: &cap,
+	})
+	want := "interruptible · max bid $0.47/hr · rescue cap $0.57/hr"
+	if got != want {
+		t.Fatalf("formatRentalLine = %q, want %q", got, want)
+	}
+}
+
 func TestInstanceNewCommandExists(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"instance", "new", "--help"})
 	if err != nil {

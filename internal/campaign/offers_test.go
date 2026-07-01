@@ -1389,3 +1389,82 @@ func TestFilterOffersByTorchArch_UnknownGPUFailClosedOnMaxOnly(t *testing.T) {
 		t.Errorf("expected diagnostic example to be unknown GPU; got %q %q", exGPU, exCap)
 	}
 }
+
+func TestSnapshotOnDemandRefCentsUsesComparableGPUName(t *testing.T) {
+	group := InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 42}
+	chosen := cloud.Offer{
+		Provider:     cloud.ProviderVastai,
+		InstanceType: cloud.InstanceTypeInterruptible,
+		GPUName:      "RTX 5880Ada",
+		NumGPUs:      1,
+		GPUMemGB:     48,
+		CostPerHour:  0.469,
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(c cloud.OfferConstraints) ([]cloud.Offer, error) {
+			if c.InstanceType != cloud.InstanceTypeOnDemand {
+				t.Fatalf("InstanceType = %q, want on-demand", c.InstanceType)
+			}
+			return []cloud.Offer{
+				{Provider: cloud.ProviderVastai, InstanceType: cloud.InstanceTypeOnDemand, GPUName: "RTX 4090", NumGPUs: 1, GPUMemGB: 48, CostPerHour: 0.38},
+				{Provider: cloud.ProviderVastai, InstanceType: cloud.InstanceTypeOnDemand, GPUName: "RTX 5880 Ada", NumGPUs: 1, GPUMemGB: 48, CostPerHour: 0.57},
+				{Provider: cloud.ProviderVastai, InstanceType: cloud.InstanceTypeOnDemand, GPUName: "RTX 5880Ada", NumGPUs: 1, GPUMemGB: 48, CostPerHour: 0.61},
+			}, nil
+		},
+	}
+
+	got := snapshotOnDemandRefCents(client, group, chosen)
+	if got == nil || *got != 57 {
+		t.Fatalf("snapshotOnDemandRefCents = %v, want 57", got)
+	}
+}
+
+func TestSnapshotOnDemandRefCentsNeverBelowInitialBid(t *testing.T) {
+	group := InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 42}
+	chosen := cloud.Offer{
+		Provider:     cloud.ProviderVastai,
+		InstanceType: cloud.InstanceTypeInterruptible,
+		GPUName:      "RTX 5880Ada",
+		NumGPUs:      1,
+		GPUMemGB:     48,
+		CostPerHour:  0.469,
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{Provider: cloud.ProviderVastai, InstanceType: cloud.InstanceTypeOnDemand, GPUName: "RTX 5880Ada", NumGPUs: 1, GPUMemGB: 48, CostPerHour: 0.466},
+			}, nil
+		},
+	}
+
+	got := snapshotOnDemandRefCents(client, group, chosen)
+	if got == nil || *got != 47 {
+		t.Fatalf("snapshotOnDemandRefCents = %v, want 47", got)
+	}
+}
+
+func TestSnapshotOnDemandRefCentsIgnoresBroadClassWithoutComparableGPU(t *testing.T) {
+	group := InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 42}
+	chosen := cloud.Offer{
+		Provider:     cloud.ProviderVastai,
+		InstanceType: cloud.InstanceTypeInterruptible,
+		GPUName:      "RTX 5880Ada",
+		NumGPUs:      1,
+		GPUMemGB:     48,
+		CostPerHour:  0.469,
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{Provider: cloud.ProviderVastai, InstanceType: cloud.InstanceTypeOnDemand, GPUName: "RTX 4090", NumGPUs: 1, GPUMemGB: 48, CostPerHour: 0.38},
+			}, nil
+		},
+	}
+
+	if got := snapshotOnDemandRefCents(client, group, chosen); got != nil {
+		t.Fatalf("snapshotOnDemandRefCents = %d, want nil without comparable GPU", *got)
+	}
+}

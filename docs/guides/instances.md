@@ -239,12 +239,14 @@ Only jobs marked interruptible are eligible for interruptible offers. Weft
 keeps non-interruptible jobs on normal offers and does not mix the two on the
 same instance.
 
-**Price.** The initial bid is the offer's asking `cost/hr` (`max_bid = ask`).
-There is no separate user bid knob. If the provider later reports that an
-interruptible instance has been stopped/offline, Weft may raise the bid up to
-the recorded on-demand reference price for the same GPU class. The launch plan
-table annotates interruptible groups as `$X.YY/hr (int, bid $X.YY)` so the
-initial bid is visible in `--dry-run`.
+**Price.** The initial bid is the offer's asking `cost/hr` (`max_bid = ask`,
+rounded up to whole cents). There is no separate user bid knob. If the provider
+later reports that an interruptible instance has been stopped/offline, Weft may
+raise the bid up to the recorded on-demand reference price for a comparable
+offer with the same selected GPU model. The rescue cap is never recorded below
+the initial bid. The launch plan table annotates interruptible groups as
+`$X.YY/hr (int, bid $X.YY)` so the initial bid is visible in `--dry-run`;
+`weft instance info` shows both the current max bid and rescue cap when known.
 
 **Not compatible with `benchmark-isolation`.** The submission path rejects jobs that
 combine `benchmark-isolation` and `interruptible`: preemption pauses the container

@@ -741,7 +741,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		statusLabel := campaign.DisplayInstanceStatus(ci)
+		statusLabel := instanceInfoStatusLabel(ci, inst)
 		fmt.Printf("Instance %s — %s — %s\n", ids.FormatInstanceID(ci.ID), ci.DisplayGPUBrief(), statusLabel)
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.DisplayTerminationReason())
@@ -984,13 +984,33 @@ func formatRentalLine(ci *db.Launch) string {
 	switch ci.InstanceType {
 	case cloud.InstanceTypeInterruptible:
 		if ci.MaxBidPriceCents != nil {
+			if ci.OnDemandRefCents != nil {
+				return fmt.Sprintf("interruptible · max bid $%.2f/hr · rescue cap $%.2f/hr",
+					float64(*ci.MaxBidPriceCents)/100, float64(*ci.OnDemandRefCents)/100)
+			}
 			return fmt.Sprintf("interruptible · max bid $%.2f/hr", float64(*ci.MaxBidPriceCents)/100)
+		}
+		if ci.OnDemandRefCents != nil {
+			return fmt.Sprintf("interruptible · rescue cap $%.2f/hr", float64(*ci.OnDemandRefCents)/100)
 		}
 		return "interruptible"
 	case cloud.InstanceTypeOnDemand:
 		return "on-demand"
 	}
 	return ""
+}
+
+func instanceInfoStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
+	statusLabel := campaign.DisplayInstanceStatus(ci)
+	if ci == nil || inst == nil || inst.Status == "" || db.IsTerminalLaunchStatus(ci.Status) {
+		return statusLabel
+	}
+	switch inst.Status {
+	case cloud.ProviderStatusRunning, cloud.ProviderStatusLoading, cloud.ProviderStatusCreated, cloud.ProviderStatusCreating:
+		return statusLabel
+	default:
+		return fmt.Sprintf("%s (%s)", statusLabel, inst.Status)
+	}
 }
 
 func runInstanceTerminate(cmd *cobra.Command, args []string) error {

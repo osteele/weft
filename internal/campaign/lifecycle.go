@@ -2165,7 +2165,7 @@ func LaunchInstance(
 	}
 	if group.HasPreemptibleJob() {
 		instance.InstanceType = cloud.InstanceTypeInterruptible
-		bidCents := int(offer.CostPerHour * 100)
+		bidCents := priceCentsCeil(offer.CostPerHour)
 		instance.MaxBidPriceCents = &bidCents
 	}
 	instanceID, err := db.CreateLaunch(database, instance)

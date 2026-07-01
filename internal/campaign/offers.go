@@ -189,9 +189,15 @@ type RankedOfferAlternative struct {
 	Selected      bool
 }
 
-// snapshotOnDemandRefCents returns the cheapest on-demand $/hr (in cents) for
-// the same GPU class as the chosen offer, to record a counterfactual for
-// preemptible savings analysis. Best-effort: returns nil on any failure.
+// snapshotOnDemandRefCents returns the cheapest comparable on-demand $/hr (in
+// cents) for the chosen offer, to record a counterfactual for preemptible
+// savings analysis and a bounded bid-rescue ceiling. Comparable means the same
+// normalized provider GPU name as the selected offer, not merely the broad
+// placement class (e.g. "NVIDIA >=42GB"), because the broad class can contain
+// cheaper, slower GPUs that are not a useful rescue ceiling.
+//
+// Best-effort: returns nil on any failure or when no comparable on-demand offer
+// is visible.
 // Intended for async use off the launch path.
 func snapshotOnDemandRefCents(client cloud.Client, group InstanceGroup, chosen cloud.Offer) *int {
 	constraints := offerConstraintsForGroup(group, cloud.DefaultMinReliability)
@@ -206,6 +212,9 @@ func snapshotOnDemandRefCents(client cloud.Client, group InstanceGroup, chosen c
 		if o.CostPerHour <= 0 {
 			continue
 		}
+		if !comparableOnDemandOffer(group, chosen, o) {
+			continue
+		}
 		if cheapest == 0 || o.CostPerHour < cheapest {
 			cheapest = o.CostPerHour
 		}
@@ -213,8 +222,49 @@ func snapshotOnDemandRefCents(client cloud.Client, group InstanceGroup, chosen c
 	if cheapest == 0 {
 		return nil
 	}
-	cents := int(cheapest * 100)
+	cents := priceCentsCeil(cheapest)
+	initialBidCents := priceCentsCeil(chosen.CostPerHour)
+	if cents < initialBidCents {
+		cents = initialBidCents
+	}
 	return &cents
+}
+
+func comparableOnDemandOffer(group InstanceGroup, chosen cloud.Offer, offer cloud.Offer) bool {
+	if offer.InstanceType != "" && offer.InstanceType != cloud.InstanceTypeOnDemand {
+		return false
+	}
+	if chosen.NumGPUs > 0 && offer.NumGPUs > 0 && offer.NumGPUs != chosen.NumGPUs {
+		return false
+	}
+	if chosen.GPUMemGB > 0 && offer.GPUMemGB+0.01 < chosen.GPUMemGB {
+		return false
+	}
+	if selected := normalizePriceRefGPUName(chosen.GPUName); selected != "" {
+		return normalizePriceRefGPUName(offer.GPUName) == selected
+	}
+	if required := normalizePriceRefGPUName(group.GPUClass); required != "" && required != normalizePriceRefGPUName("nvidia") {
+		return normalizePriceRefGPUName(offer.GPUName) == required
+	}
+	return false
+}
+
+func normalizePriceRefGPUName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func priceCentsCeil(pricePerHour float64) int {
+	if pricePerHour <= 0 {
+		return 0
+	}
+	return int(math.Ceil(pricePerHour*100 - 1e-9))
 }
 
 func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud.OfferConstraints {
