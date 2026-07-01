@@ -375,6 +375,44 @@ func TestRunJobInfoSkipsQuickSyncWhenDaemonSyncIsFresh(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoSyncsActiveRentalJobDespiteFreshDaemonSync(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := createRentalQueuedJobWithInstance(t, database)
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	originalQuickSyncJobs := quickSyncJobsFunc
+	t.Cleanup(func() {
+		quickSyncJobsFunc = originalQuickSyncJobs
+	})
+
+	calls := 0
+	quickSyncJobsFunc = func(_ *sql.DB, jobs []*db.Job, _, _, _ time.Duration) targetedSyncOutcome {
+		calls++
+		if len(jobs) != 1 || jobs[0].ID != jobID {
+			t.Fatalf("quickSyncJobs jobs = %v, want job %d", jobs, jobID)
+		}
+		return targetedSyncOutcome{}
+	}
+
+	captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+
+	if calls != 1 {
+		t.Fatalf("quickSyncJobs calls = %d, want 1 for active rental job", calls)
+	}
+}
+
 func TestInstanceStatusSkipsLiveRefreshWhenDaemonCloudSyncIsFresh(t *testing.T) {
 	database := db.SetupTestDB(t)
 	instanceID, _ := createRentalQueuedJobWithInstance(t, database)

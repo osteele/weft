@@ -35,8 +35,14 @@ func liveSyncNeededForJobs(database *sql.DB, jobs []*db.Job, forceSync, noSync b
 		if job.HasInventoryHost() && !syncTargetFresh(database, job.Host, now) {
 			return true
 		}
-		if job.UsesRentalPlacement() && !syncTargetFresh(database, db.CloudSyncTargetName, now) {
-			return true
+		if job.UsesRentalPlacement() {
+			switch job.Status {
+			case db.StatusStarting, db.StatusRunning, db.StatusPaused:
+				return true
+			}
+			if !syncTargetFresh(database, db.CloudSyncTargetName, now) {
+				return true
+			}
 		}
 	}
 	return false
