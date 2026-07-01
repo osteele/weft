@@ -800,8 +800,12 @@ invariant PriceAuthorizationDoesNotTripCircuitBreaker {
 --
 -- For interruptible groups:
 --   * Offer search is restricted to provider interruptible offers.
---   * The bid price is the offer's asking `cost_per_hour` (max_bid = ask).
---     A separate bid knob is intentionally not exposed in this first pass.
+--   * The initial bid price is the offer's asking `cost_per_hour`
+--     (max_bid = ask). A separate user bid knob is not exposed.
+--   * If provider polling observes a stopped/offline interruptible instance
+--     and the launch recorded `on_demand_ref_cents`, weft may raise the bid
+--     up to that on-demand reference cap and records the new
+--     `max_bid_price_cents`.
 --   * Provider "stopped" transitions are not immediate failures (see
 --     ProviderInstancePaused) — for any rental, not just interruptible.
 --     pause_tolerant only affects the termination_reason chosen if
@@ -1976,18 +1980,24 @@ rule ProviderInstancePaused {
     -- Provider stopped the instance: per-instance preemption (outbid spot),
     -- manual stop, or account-wide credit pause. The launch flips to the
     -- non-terminal `paused` state and waits for the provider to resume it.
+    -- For interruptible launches, weft first attempts to raise the provider
+    -- bid up to the launch's recorded on-demand reference cap.
     -- Applies regardless of the pause_tolerant flag, so account-wide pauses
     -- are caught even on on-demand rentals.
     when: instance: Instance.provider_instance.status becomes stopped
     requires: instance.status in {launching, running, grace}
 
     ensures: instance.status = paused
+    ensures: instance.max_bid_price_cents <= instance.on_demand_ref_cents
+             if instance.instance_type = interruptible
+             and instance.on_demand_ref_cents != null
 
     @guidance
         -- Implementation: internal/campaign/instance_check.go §4a-pause
-        -- (ActionPause). No DestroyProvider, no ResetJobs — jobs stay
-        -- attached to the rental so they pick up where they left off when
-        -- the provider resumes.
+        -- (ActionPause) plus internal/campaign/reconcile.go
+        -- maybeRaiseInterruptibleBid. No DestroyProvider, no ResetJobs —
+        -- jobs stay attached to the rental so they pick up where they left
+        -- off when the provider resumes.
 }
 
 rule ProviderInstanceResumes {
@@ -2040,7 +2050,7 @@ rule PausedInstanceStale {
     -- Fail it so RelaunchAfterInfraFailure picks a fresh offer.
     when: instance: Instance.provider_instance.status = stopped
     requires: instance.status in {launching, running, paused, grace}
-    requires: (now - instance.created_at) > config.stale_pause_timeout
+    requires: (now - instance.last_provider_status_change_at) > config.stale_pause_timeout
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = preempted if instance.pause_tolerant else provider_failure

@@ -2,7 +2,11 @@
 // creating instances, and managing their lifecycle.
 package vastai
 
-import "github.com/osteele/weft/internal/cloud"
+import (
+	"encoding/json"
+
+	"github.com/osteele/weft/internal/cloud"
+)
 
 // Offer represents a Vast.ai GPU rental offer from search results.
 type Offer struct {
@@ -43,6 +47,13 @@ type Instance struct {
 	MachineID      int     `json:"machine_id"`
 	StatusMsg      string  `json:"status_msg"`
 	IntendedStatus string  `json:"intended_status"`
+}
+
+// BidUpdate records a successful bid-change response from Vast.ai.
+type BidUpdate struct {
+	Success bool            `json:"success"`
+	Error   json.RawMessage `json:"error"`
+	Msg     string          `json:"msg"`
 }
 
 // User represents Vast.ai account information.

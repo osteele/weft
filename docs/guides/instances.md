@@ -239,11 +239,12 @@ Only jobs marked interruptible are eligible for interruptible offers. Weft
 keeps non-interruptible jobs on normal offers and does not mix the two on the
 same instance.
 
-**Price.** The bid is the offer's asking `cost/hr` (`max_bid = ask`). There
-is no separate bid knob in this first pass — if you want a stricter ceiling,
-pick a cheaper offer via the usual GPU/memory filters. The launch plan table
-annotates interruptible groups as `$X.YY/hr (int, bid $X.YY)` so the chosen
-bid is visible in `--dry-run`.
+**Price.** The initial bid is the offer's asking `cost/hr` (`max_bid = ask`).
+There is no separate user bid knob. If the provider later reports that an
+interruptible instance has been stopped/offline, Weft may raise the bid up to
+the recorded on-demand reference price for the same GPU class. The launch plan
+table annotates interruptible groups as `$X.YY/hr (int, bid $X.YY)` so the
+initial bid is visible in `--dry-run`.
 
 **Not compatible with `benchmark-isolation`.** The submission path rejects jobs that
 combine `benchmark-isolation` and `interruptible`: preemption pauses the container
@@ -302,9 +303,10 @@ each market, plus the savings ratio. In practice median savings are roughly
 less-liquid ends of the market.
 
 **Policy.** Interruptible instances are *pause-tolerant*: when the provider
-marks them `stopped` (typically after losing a bid) weft leaves them in place
+marks them `stopped` or `offline` (typically after losing a bid) weft raises
+the bid within the recorded on-demand cap when possible, leaves them in place,
 and waits for the provider to resume them. If the pause lasts longer than
-~6 hours, weft gives up, fails the launch with
+~6 hours after the provider status transition, weft gives up, fails the launch with
 `termination_reason = preempted`, and the standard retry path relaunches the
 jobs on a fresh offer. Jobs that already completed are not re-run. The
 runaway breaker (see [Unattended runaway protection](#unattended-runaway-protection))

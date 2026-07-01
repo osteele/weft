@@ -430,8 +430,8 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// account/credit holds. Only pause statuses that can reasonably resume are
 	// reflected as LaunchStatusPaused.
 	if p.ProviderInst != nil && isRecoverablePausedProviderStatus(p.ProviderInst.Status, p.PauseTolerant) {
-		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
-			age := p.Now.Sub(*lifecycleStart)
+		if pauseStart := stalePreRunningAnchor(ci, p.LastProviderStatusChangeAt); pauseStart != nil {
+			age := p.Now.Sub(*pauseStart)
 			if age > stalePauseTimeout {
 				reason := db.TerminationReasonPreempted
 				outcome := db.AttemptOutcomePreempted

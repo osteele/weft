@@ -1072,6 +1072,30 @@ func TestDestroyInstancePassesYesFlag(t *testing.T) {
 	}
 }
 
+func TestChangeBidPassesPrice(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nprintf '{\"success\": true}\\n'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub}
+	if err := c.ChangeBid(12345, 0.20); err != nil {
+		t.Fatalf("ChangeBid: %v", err)
+	}
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	for _, want := range []string{"change\n", "bid\n", "12345\n", "--price\n", "0.2000\n"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("ChangeBid args missing %q; got:\n%s", want, got)
+		}
+	}
+}
+
 // Regression: when vastai reports "Instance N not found", treat destroy as
 // idempotent success. Otherwise the reconciler (instance_check.go) defers
 // terminal-status writes on every pass and a launch can wedge indefinitely.

@@ -14,6 +14,7 @@ type MockClient struct {
 	ListAllInstancesFunc     func() ([]Instance, error)
 	WaitReadyFunc            func(int, time.Duration) (*Instance, error)
 	DestroyInstanceFunc      func(int) error
+	ChangeBidFunc            func(int, float64) error
 	CopyBetweenInstancesFunc func(int, string, int, string) error
 	ShowUserFunc             func() (*User, error)
 }
@@ -72,6 +73,13 @@ func (m *MockClient) WaitReady(instanceID int, timeout time.Duration) (*Instance
 func (m *MockClient) DestroyInstance(instanceID int) error {
 	if m.DestroyInstanceFunc != nil {
 		return m.DestroyInstanceFunc(instanceID)
+	}
+	return nil
+}
+
+func (m *MockClient) ChangeBid(instanceID int, pricePerHour float64) error {
+	if m.ChangeBidFunc != nil {
+		return m.ChangeBidFunc(instanceID, pricePerHour)
 	}
 	return nil
 }

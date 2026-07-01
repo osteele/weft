@@ -140,6 +140,14 @@ func (c *CloudClient) DestroyInstance(instanceID string) error {
 	return c.inner.DestroyInstance(id)
 }
 
+func (c *CloudClient) ChangeBid(instanceID string, pricePerHour float64) error {
+	id, err := strconv.Atoi(instanceID)
+	if err != nil {
+		return fmt.Errorf("parse vastai instance ID %q: %w", instanceID, err)
+	}
+	return c.inner.ChangeBid(id, pricePerHour)
+}
+
 func (c *CloudClient) CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID, dstPath string) error {
 	srcID, err := strconv.Atoi(srcInstanceID)
 	if err != nil {

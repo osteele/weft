@@ -217,6 +217,12 @@ type Client interface {
 	SelfDestructCmd(providerInstanceID string) string
 }
 
+// BidClient is an optional extension for providers that can update the bid
+// ceiling on an existing interruptible instance.
+type BidClient interface {
+	ChangeBid(instanceID string, pricePerHour float64) error
+}
+
 // ProgressClient is an optional extension for providers that can surface
 // provider-side instance-creation milestones for logging/UI display.
 type ProgressClient interface {

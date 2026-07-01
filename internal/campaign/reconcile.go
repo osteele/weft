@@ -25,6 +25,7 @@ type ReconcileResult struct {
 	Reconciled          int     // total number of instances whose state changed
 	TerminatedInstances []int64 // DB IDs of instances that were moved to a terminal state
 	JobsUpdated         int     // count of job status transitions (e.g. queued→running)
+	BidsRaised          int     // interruptible bids raised after provider pause/outbid
 }
 
 // minDeadConfirmTime is how long an instance must continuously appear dead
@@ -192,7 +193,7 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 			if ctx.Err() != nil {
 				return
 			}
-			reconciled, terminated, jobsUpdated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
+			reconciled, terminated, jobsUpdated, bidRaised := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
 			mu.Lock()
 			if reconciled {
 				result.Reconciled++
@@ -201,6 +202,9 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 				}
 			}
 			result.JobsUpdated += jobsUpdated
+			if bidRaised {
+				result.BidsRaised++
+			}
 			mu.Unlock()
 		}(ci)
 	}
@@ -321,7 +325,7 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 // state changed, terminated means moved to a terminal state (failed/completed),
 // and jobsUpdated counts job status transitions (e.g. queued→running).
 // providerInstances is the batch-fetched map from batchFetchProviderInstances.
-func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool, int) {
+func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool, int, bool) {
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 
@@ -332,7 +336,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 			slog.Debug("ignoring grace transition while launch has active jobs", "component", "reconcile", "instance", ci.ID)
 		} else if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
 			syncJobCompletionsFromR2(database, r2Client, ci.ID)
-			return true, false, 0 // reconciled but not terminal (grace is not terminal)
+			return true, false, 0, false // reconciled but not terminal (grace is not terminal)
 		}
 	}
 
@@ -381,6 +385,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	if inst != nil {
 		r.recordProviderStatusTransition(database, ci.ID, inst.Status)
 	}
+	bidRaised := maybeRaiseInterruptibleBid(database, client, ci, inst)
 
 	jobState := ComputeJobState(jobs, attemptOutcomes)
 
@@ -466,17 +471,62 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				ProcessDiskFailureReport(r2Client, ci.ID, database)
 			}
 		}
-		return reconciled, terminated, synced.JobsUpdated
+		return reconciled, terminated, synced.JobsUpdated, bidRaised
 	}
 
 	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
 	if client != nil && !isProviderTerminal(inst) && ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
-			return true, terminated, synced.JobsUpdated
+			return true, terminated, synced.JobsUpdated, bidRaised
 		}
 	}
 
-	return false, false, synced.JobsUpdated
+	return bidRaised, false, synced.JobsUpdated, bidRaised
+}
+
+func maybeRaiseInterruptibleBid(database *sql.DB, client cloud.Client, ci *db.Launch, inst *cloud.Instance) bool {
+	if database == nil || client == nil || ci == nil || inst == nil {
+		return false
+	}
+	if ci.InstanceType != cloud.InstanceTypeInterruptible || ci.OnDemandRefCents == nil || *ci.OnDemandRefCents <= 0 {
+		return false
+	}
+	if !isPausedProviderStatus(inst.Status) {
+		return false
+	}
+	providerID := ci.EffectiveProviderID()
+	if providerID == "" {
+		return false
+	}
+	currentBidCents := ci.CostPerHourCents
+	if ci.MaxBidPriceCents != nil {
+		currentBidCents = *ci.MaxBidPriceCents
+	}
+	targetCents := *ci.OnDemandRefCents
+	if targetCents <= currentBidCents {
+		return false
+	}
+	bidder, ok := client.(cloud.BidClient)
+	if !ok {
+		return false
+	}
+	targetPrice := float64(targetCents) / 100.0
+	if err := bidder.ChangeBid(providerID, targetPrice); err != nil {
+		slog.Warn("failed to raise interruptible bid",
+			"component", "reconcile", "instance", ci.ID, "provider_instance", providerID,
+			"from_cents", currentBidCents, "to_cents", targetCents, "error", err)
+		return false
+	}
+	if err := db.UpdateLaunchMaxBidPriceCents(database, ci.ID, targetCents); err != nil {
+		slog.Warn("failed to record raised interruptible bid",
+			"component", "reconcile", "instance", ci.ID, "provider_instance", providerID,
+			"to_cents", targetCents, "error", err)
+		return false
+	}
+	slog.Info("raised interruptible bid after provider pause",
+		"component", "reconcile", "instance", ci.ID, "provider_instance", providerID,
+		"from_cents", currentBidCents, "to_cents", targetCents)
+	return true
 }
 
 func populateRunningPhaseTerminalJob(params *CheckInstanceParams, jobs []*db.Job, outcomes map[int64]string) {

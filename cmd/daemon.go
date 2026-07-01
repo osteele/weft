@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/daemonapi"
 	"github.com/osteele/weft/internal/daemoncontrol"
@@ -26,6 +27,8 @@ var (
 	daemonStatusJSON bool
 	daemonLogsFollow bool
 )
+
+const daemonInterruptiblePollInterval = 15 * time.Second
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
@@ -234,8 +237,30 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		outcome = outcomeBlocked
 		wait = orchestration.AutopilotCooldownBlocked
 	}
+	wait = capDaemonWaitForInterruptibles(database, wait)
 	emitDaemonPass(pass, started, syncResult, result, outcome, runErr, wait)
 	return wait, outcome
+}
+
+func capDaemonWaitForInterruptibles(database *sql.DB, wait time.Duration) time.Duration {
+	if database == nil || wait <= daemonInterruptiblePollInterval {
+		return wait
+	}
+	var count int
+	err := database.QueryRow(`
+		SELECT COUNT(*)
+		  FROM launches
+		 WHERE instance_type = ?
+		   AND status IN (?, ?, ?, ?)`,
+		cloud.InstanceTypeInterruptible,
+		db.LaunchStatusLaunching,
+		db.LaunchStatusRunning,
+		db.LaunchStatusPaused,
+		db.LaunchStatusGrace).Scan(&count)
+	if err != nil || count == 0 {
+		return wait
+	}
+	return daemonInterruptiblePollInterval
 }
 
 func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult, result *orchestration.GroupedAutoPilotResult, outcome autopilotOutcome, runErr error, wait time.Duration) {

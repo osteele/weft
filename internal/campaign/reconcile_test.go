@@ -430,6 +430,67 @@ func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	}
 }
 
+func TestReconcileLaunches_RaisesInterruptibleBidWhenProviderPaused(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	bid := 14
+	onDemand := 20
+	launchedAt := time.Now().Add(-2 * time.Hour).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUSpec:          "RTX_4090",
+		CostPerHourCents: bid,
+		InstanceType:     cloud.InstanceTypeInterruptible,
+		MaxBidPriceCents: &bid,
+		OnDemandRefCents: &onDemand,
+		CreatedAt:        launchedAt,
+		LaunchedAt:       &launchedAt,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var gotID string
+	var gotPrice float64
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{{ProviderID: "12345", Status: cloud.ProviderStatusStopped}}, nil
+		},
+		ChangeBidFunc: func(id string, price float64) error {
+			gotID = id
+			gotPrice = price
+			return nil
+		},
+	}
+
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.BidsRaised != 1 {
+		t.Fatalf("BidsRaised = %d, want 1", result.BidsRaised)
+	}
+	if gotID != "12345" || gotPrice != 0.20 {
+		t.Fatalf("ChangeBid(%q, %.2f), want (12345, 0.20)", gotID, gotPrice)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if ci.MaxBidPriceCents == nil || *ci.MaxBidPriceCents != onDemand {
+		t.Fatalf("MaxBidPriceCents = %v, want %d", ci.MaxBidPriceCents, onDemand)
+	}
+	if ci.Status != db.LaunchStatusPaused {
+		t.Fatalf("Status = %q, want %q", ci.Status, db.LaunchStatusPaused)
+	}
+}
+
 func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

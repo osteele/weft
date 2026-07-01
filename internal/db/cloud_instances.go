@@ -1271,6 +1271,13 @@ func UpdateLaunchOnDemandRefCents(db *sql.DB, id int64, cents int) error {
 	return err
 }
 
+// UpdateLaunchMaxBidPriceCents records the current interruptible bid ceiling
+// for a launch.
+func UpdateLaunchMaxBidPriceCents(db *sql.DB, id int64, cents int) error {
+	_, err := db.Exec(`UPDATE launches SET max_bid_price_cents = ? WHERE id = ?`, cents, id)
+	return err
+}
+
 // Reason codes for Launch.ResultsVerifyDetail, recorded when results_verified
 // is set false so the display can distinguish the two failure modes.
 const (

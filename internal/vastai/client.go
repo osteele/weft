@@ -57,6 +57,7 @@ type VastaiClient interface {
 	ListAllInstances() ([]Instance, error)
 	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
 	DestroyInstance(instanceID int) error
+	ChangeBid(instanceID int, pricePerHour float64) error
 	CopyBetweenInstances(srcInstanceID int, srcPath string, dstInstanceID int, dstPath string) error
 	ShowUser() (*User, error)
 }
@@ -587,6 +588,35 @@ func (c *Client) DestroyInstance(instanceID int) error {
 			return nil
 		}
 		return fmt.Errorf("destroy instance %d: %w", instanceID, err)
+	}
+	return nil
+}
+
+// ChangeBid updates the bid ceiling for an existing interruptible instance.
+func (c *Client) ChangeBid(instanceID int, pricePerHour float64) error {
+	if pricePerHour <= 0 {
+		return fmt.Errorf("change bid %d: price must be positive", instanceID)
+	}
+	out, err := c.run("change", "bid", strconv.Itoa(instanceID), "--price", strconv.FormatFloat(pricePerHour, 'f', 4, 64), "--raw")
+	if err != nil {
+		return fmt.Errorf("change bid %d: %w", instanceID, err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+	var resp BidUpdate
+	if err := json.Unmarshal(out, &resp); err != nil {
+		if msg := extractCLIError(out); msg != "" {
+			return fmt.Errorf("change bid %d: %s", instanceID, msg)
+		}
+		return fmt.Errorf("parse change bid response: %w (output: %s)", err, truncate(string(out), 200))
+	}
+	if !resp.Success {
+		reason := createResponseErrorReason(resp.Error, resp.Msg)
+		if reason == "" {
+			reason = "provider returned success=false"
+		}
+		return classify("change-bid", cloud.ErrProviderRejected, 0, reason)
 	}
 	return nil
 }

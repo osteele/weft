@@ -1606,6 +1606,29 @@ func TestCheckInstance_PauseTolerant_StalePause_Preempted(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_PauseTolerant_RecentPauseUsesStatusTransition(t *testing.T) {
+	r := NewReconciler()
+	now := time.Now()
+	launchedAt := now.Add(-7 * time.Hour).Unix()
+	lastChange := now.Add(-10 * time.Minute)
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+			CreatedAt:          launchedAt,
+			LaunchedAt:         &launchedAt,
+		},
+		ProviderInst:               &cloud.Instance{Status: cloud.ProviderStatusStopped},
+		PauseTolerant:              true,
+		LastProviderStatusChangeAt: &lastChange,
+		Now:                        now,
+	})
+	if action.Kind != ActionPause {
+		t.Fatalf("action.Kind = %d, want ActionPause (%d)", action.Kind, ActionPause)
+	}
+}
+
 func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 	// Provider allocated but intended_status is "stopped" while actual_status is "created".
 	// isProviderTerminal should detect this immediately via intended_status check.

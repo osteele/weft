@@ -13,6 +13,7 @@ type MockClient struct {
 	ListAllInstancesFunc           func() ([]Instance, error)
 	WaitReadyFunc                  func(string, time.Duration) (*Instance, error)
 	DestroyInstanceFunc            func(string) error
+	ChangeBidFunc                  func(string, float64) error
 	CopyBetweenInstancesFunc       func(string, string, string, string) error
 	SelfDestructCmdVal             string
 }
@@ -78,6 +79,13 @@ func (m *MockClient) WaitReady(instanceID string, timeout time.Duration) (*Insta
 func (m *MockClient) DestroyInstance(instanceID string) error {
 	if m.DestroyInstanceFunc != nil {
 		return m.DestroyInstanceFunc(instanceID)
+	}
+	return nil
+}
+
+func (m *MockClient) ChangeBid(instanceID string, pricePerHour float64) error {
+	if m.ChangeBidFunc != nil {
+		return m.ChangeBidFunc(instanceID, pricePerHour)
 	}
 	return nil
 }
