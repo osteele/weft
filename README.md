@@ -29,6 +29,9 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
 - Submits jobs locally first; daemon/autopilot placement and SSH dispatch keep
   submission responsive even when hosts are slow to probe.
 - Bursts to Vast.ai or RunPod when local machines are full.
+- Supports Vast.ai interruptible instances: outbid pauses are recoverable
+  same-instance stops, bids can be raised within an on-demand cap, and
+  R2-streamed outputs are restored if a job relaunches elsewhere.
 - Shows active jobs, queues, cloud instances, and hosts from terminal and web
   views.
 - Keeps source snapshots for cloud jobs so completed remote runs can be
@@ -148,6 +151,12 @@ When local hosts cannot run a job, Weft can search cloud GPU providers, upload a
 source snapshot to R2, start an instance, run the queued jobs, collect telemetry,
 and shut the instance down. Failed cloud jobs enter a grace period so they can
 be inspected or resubmitted before cleanup.
+
+Jobs tagged `interruptible` may run on Vast.ai interruptible offers. Weft treats
+provider outbids as pause/resume events when Vast retains the same instance disk,
+raises bids up to the recorded on-demand reference when possible, and restages
+previously uploaded `output/` files from R2 if the job has to relaunch on a new
+instance.
 
 Provider setup and operation are covered in
 [Cloud GPU Instances](docs/guides/instances.md). The command details live in

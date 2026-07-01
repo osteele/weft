@@ -984,8 +984,18 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			}
 			return err
 		}
+		var restagedOutputs bool
+		cloudNeeds, restagedOutputs, err = appendResumeCloudNeeds(opCtx, database, r2Client, job, cloudNeeds)
+		if err != nil {
+			rollbackErr := rollbackClaims()
+			if rollbackErr != nil {
+				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
+			}
+			return err
+		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter
+		agentJob.RestagedOutputs = restagedOutputs
 		payload.Jobs = append(payload.Jobs, agentJob)
 		payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
 			RemoteDir: remoteDir,

@@ -382,6 +382,9 @@ invariant ExternalJobsUseWeftBookkeeping {
 --                         docker stop on the same disk (Vast.ai
 --                         interruptible pause/resume). Absent on first
 --                         boot. Detected by an agent-written sentinel.
+--   WEFT_RESTAGED         "1" if Weft restored this job's previous
+--                         R2-streamed outputs into the workdir before
+--                         starting it on a fresh rental instance.
 -- The legacy RJ_* prefix is also set for backward compatibility.
 -- External-executor jobs such as SkyPilot jobs do not get these variables
 -- unless the external task definition explicitly injects them.

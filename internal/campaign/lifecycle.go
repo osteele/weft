@@ -2347,8 +2347,15 @@ func LaunchInstance(
 			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
 			return instanceID, err
 		}
+		var restagedOutputs bool
+		cloudNeeds, restagedOutputs, err = appendResumeCloudNeeds(ctx, database, r2Assets.Client, job, cloudNeeds)
+		if err != nil {
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
+			return instanceID, err
+		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter
+		agentJob.RestagedOutputs = restagedOutputs
 		agentJobs = append(agentJobs, agentJob)
 	}
 

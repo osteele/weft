@@ -148,6 +148,14 @@ contract AgentStagingContract {
         -- that exists by the time the agent begins that job. weft must
         -- not publish a manifest referencing objects it has not staged.
 
+    @invariant RelaunchOutputsRestagedBeforeStart
+        -- When a rental job attempt has predecessor_attempt_id and the
+        -- predecessor uploaded convention-based output/artifact files to
+        -- R2, the replacement attempt includes those files as CloudNeed
+        -- entries in its manifest. The agent copies them into the new
+        -- workdir before setup or command execution and sets
+        -- WEFT_RESTAGED=1 for the job process.
+
     @invariant DeclaredInputsEnumerated
         -- The manifest enumerates both the source tarball and every
         -- cross-instance input the job depends on. The agent trusts the

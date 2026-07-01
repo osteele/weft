@@ -1616,6 +1616,23 @@ The queue runner automatically loads environment files from the job's working di
 
 The job log will show "Loading .env" etc. when these files are found and sourced.
 
+**Weft-provided environment variables**:
+
+Weft also injects runtime context variables. All jobs get `WEFT_JOB_ID`. Rental
+jobs additionally get:
+
+| Var | Value |
+| --- | --- |
+| `WEFT_TARGET_KIND` | `rental` |
+| `WEFT_LAUNCH_ID` | Weft launch/instance id |
+| `WEFT_PROVIDER` | Cloud provider, such as `vastai` or `runpod` |
+| `WEFT_INSTANCE_TYPE` | `on-demand` or `interruptible` |
+| `WEFT_RESUMED` | `1` when the agent restarted on the same retained disk after a provider pause/resume |
+| `WEFT_RESTAGED` | `1` when Weft restored the job's previous R2-streamed outputs before starting it on a fresh instance |
+
+For interruptible rental behavior and checkpoint resume guidance, see
+[Cloud GPU Instances](../guides/instances.md#interruptible-instances).
+
 ### weft secret
 
 Store and manage local secret values used by job environment variables.

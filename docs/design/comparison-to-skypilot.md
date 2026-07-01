@@ -120,12 +120,12 @@ scoring algorithms that don't benefit from SkyPilot's provider integrations.
 | **Container image selection** | Auto-selects/upgrades/merges the cloud image from the project's `torch` CUDA pin + GPU-class constraint | No auto-selection from requirements; pinned-CUDA default images or explicit `image_id` |
 | **Compute substrate** | On-prem hosts + Vast.ai, RunPod (direct API) | 20+ clouds + Kubernetes + Slurm |
 | **Spot / interruptible request** | Opt-in (`interruptible` tag); on-demand by default | `--use-spot`; can mix spot + on-demand (`any_of`) |
-| **Interruption model** | Detects same-instance pause→resume (Vast.ai bidding) | Vanish-style preemption, relaunch elsewhere |
-| **Preemption recovery** | Auto-relaunch on retryable termination (survival-gated, runaway breaker); fresh instance, job restarts | Managed-jobs controller: `RECOVERING` state, cross-region/cloud relaunch; also recovers node crashes, GPU failures, NCCL timeouts |
+| **Interruption model** | Detects same-instance pause→resume (Vast.ai bidding), can raise the bid within an on-demand cap, and relaunches after stale pauses | Vanish-style spot/preemptible recovery; relaunch elsewhere |
+| **Preemption recovery** | Same-instance resume when Vast retains disk; cross-instance relaunch restores R2-streamed outputs before restart | Managed-jobs controller: `RECOVERING` state, cross-region/cloud relaunch; also recovers node crashes, GPU failures, NCCL timeouts |
 | **Reliability modeling** | Beta-Binomial survival model per provider/SKU/region | None (operational failover, no risk priors) |
 | **Failure-tolerant session** | Grace period (R2 control messages) keeps a failed instance alive for resubmit/extend/release | None (jobs are restarted, not held) |
 | **Durable storage** | External object store (R2); streams `output/` during run + drain-on-teardown | Cloud bucket mounts (`MOUNT`/`MOUNT_CACHED`) + K8s persistent volumes |
-| **Checkpoint resume** | Checkpoints survive (R2 + retained Vast disk) but **not auto-staged to the resumed job** | App-driven, scaffolded by stable `$SKYPILOT_TASK_ID` + persistent `/checkpoint` mount |
+| **Checkpoint resume** | Same-instance pause keeps local disk; cross-instance relaunch restages R2-streamed `output/` files before the job starts | App-driven, scaffolded by stable `$SKYPILOT_TASK_ID` + persistent `/checkpoint` mount |
 | **Idle autostop** | None (one-job-per-ephemeral-instance; teardown on completion + bounded drain) | `autostop: idle_minutes` for interactive clusters; managed jobs self-clean |
 | **Data pre-staging** | Donor/seed O(log N) fan-out (cloud) + host-to-host rsync (on-prem) | Per-instance download; `file_mounts` bucket mounts (7× faster mounting in v0.12) |
 | **Artifact lineage** | Typed inputs/outputs, manifest store, producer→consumer edges | Storage mounts + managed pipelines (sequential multi-task) |
@@ -189,13 +189,13 @@ model. Separately, the **grace period** (R2-based control messages) keeps a
 *failed* instance alive for a window so a job can be resubmitted, extended, or
 released. This differs from preemption recovery.
 
-Weft does not
-**transport a checkpointed `output/` directory to a resumption process**. On the same instance, the on-disk checkpoints survive the
-pause (Vast retains stopped-container disk), but weft doesn't hand them to the
-restarted job; resume-from-checkpoint is left to the application. On relaunch to a
-*different* machine, the local disk (and any Vast volume, which is machine-local)
-is gone; only what was streamed to R2 survives, and weft doesn't auto-stage that
-back as a checkpoint input to the new job.
+On the same instance, the on-disk checkpoints survive the pause because Vast
+retains stopped-container disk; the application still decides how to load the
+checkpoint when it starts again. On relaunch to a *different* machine, the local
+disk (and any Vast volume, which is machine-local) is gone; Weft restores the
+previous attempt's R2-streamed `output/` files into the new workdir before the
+job starts, so the same "load latest checkpoint from disk" logic can work after
+cross-instance recovery.
 
 ### Durable Storage and Checkpointing
 
@@ -207,12 +207,10 @@ offers no equivalent: volumes are local-only and non-portable, and instance disk
 dies with the instance. So weft supplies durability externally: it streams
 outputs/checkpoints written to `output/`/`outputs/` to R2 *during* the run
 (`internal/runner/single.go`) and flushes the remainder during a bounded drain on
-teardown. The result is comparable *durability* but a different *resume* contract:
-SkyPilot makes app-side resume automatic across recoveries; weft makes checkpoints
-durable but leaves the resume wiring (re-staging the last checkpoint into a new
-attempt) unbuilt. Closing that gap (staging an R2-streamed `output/` back as a
-`checkpoint:` input on relaunch) is the highest-value reliability improvement for
-weft on this substrate.
+teardown. The result is comparable *durability* but a different *resume*
+contract: SkyPilot exposes durable storage as a stable mount; Weft reconstructs
+the prior attempt's output tree from R2 when a fresh marketplace instance
+replaces a stopped one.
 
 ### Artifact Management and Data Pipeline
 

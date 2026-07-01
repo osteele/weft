@@ -78,6 +78,13 @@ func agentRentalEnv(cfg jobSequenceConfig) []string {
 	return env
 }
 
+func appendAgentJobEnv(env []string, job cloud.AgentJob) []string {
+	if job.RestagedOutputs {
+		env = append(env, "WEFT_RESTAGED=1")
+	}
+	return append(env, job.Env...)
+}
+
 func hasDeclaredHFInput(inputs []string) bool {
 	for _, input := range inputs {
 		if strings.HasPrefix(input, "hf:") || strings.HasPrefix(input, "hf-dataset:") {
@@ -375,7 +382,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	if dotenvVars, err := runner.LoadDotenvFiles(workDir); err == nil {
 		env = append(env, dotenvVars...)
 	}
-	env = append(env, job.Env...)
+	env = appendAgentJobEnv(env, job)
 
 	didWork := false
 	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
@@ -942,7 +949,7 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	gpuIdle, stdoutSilence := pickWatchdogTimeouts(cfg.CostPerHourCents)
 	setupTimeout := pickSetupTimeout(cfg)
 	env := agentRentalEnv(cfg)
-	env = append(env, job.Env...)
+	env = appendAgentJobEnv(env, job)
 	var gpuMem *int
 	if job.GPUMemGB > 0 {
 		v := job.GPUMemGB

@@ -278,14 +278,17 @@ account for pause time separately.
 | `WEFT_PROVIDER` | `vastai` / `runpod` (rental only) |
 | `WEFT_INSTANCE_TYPE` | `on-demand` / `interruptible` (rental only) |
 | `WEFT_RESUMED` | `1` if the agent's container has restarted on the same disk (typical Vast.ai pause/resume); unset on first boot |
+| `WEFT_RESTAGED` | `1` if Weft restored this job's previous R2-streamed outputs before starting it on a fresh instance |
 
 User-supplied secret env vars are resolved before the job is sent to the
 instance. Store `hf` with `weft secret set hf "$HF_TOKEN"` and use
 `--hf-token` or declare an `hf:` / `hf-dataset:` input to attach
 `HF_TOKEN=secret:hf` without writing the token into the job database.
 
-Use `WEFT_RESUMED` to fork checkpoint-loading vs cold-start logic in jobs
-that may run on interruptible instances.
+Jobs that may run on interruptible instances should normally load the latest
+checkpoint when it exists on disk. `WEFT_RESUMED=1` identifies a same-disk
+provider pause/resume; `WEFT_RESTAGED=1` identifies a fresh instance where Weft
+has restored the previous attempt's uploaded `output/` files from R2.
 
 To see how much interruptible currently saves vs on-demand for a given GPU
 class, run:

@@ -24,7 +24,10 @@ type AgentJob struct {
 	Inputs     []string        `json:"inputs,omitempty"`
 	CloudNeeds []CloudNeed     `json:"cloud_needs,omitempty"`
 	CloudAfter []CloudAfterRef `json:"cloud_after,omitempty"`
-	Env        []string        `json:"env,omitempty"`
+	// RestagedOutputs is true when Weft restored this job's previous attempt
+	// outputs from R2 before starting the command on a fresh instance.
+	RestagedOutputs bool     `json:"restaged_outputs,omitempty"`
+	Env             []string `json:"env,omitempty"`
 }
 
 // CloudNeed is a resolved cloud artifact dependency for an agent job.
