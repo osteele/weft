@@ -308,26 +308,27 @@ func normalizedPythonScripts(command string) []string {
 }
 
 type draftRunParams struct {
-	Config        *config.Config
-	Host          string
-	WorkingDir    string
-	Command       string
-	Description   string
-	ProjectName   string
-	EnvVars       []string
-	Tags          []string
-	GPU           string
-	GPUClass      string
-	GPUMemGB      *int
-	GPUMemMaxGB   *int
-	MaxComputeCap string
-	CLIOverrides  *db.CLIResourceOverrides
-	Inputs        []string
-	Outputs       []string
-	OutputDirs    []string
-	Produces      []string
-	Needs         []string
-	Disk          *db.JobDiskMetadata
+	Config           *config.Config
+	Host             string
+	WorkingDir       string
+	Command          string
+	Description      string
+	ProjectName      string
+	EnvVars          []string
+	Tags             []string
+	GPU              string
+	GPUClass         string
+	GPUMemGB         *int
+	GPUMemMaxGB      *int
+	MaxComputeCap    string
+	CLIOverrides     *db.CLIResourceOverrides
+	Inputs           []string
+	BestEffortInputs []string
+	Outputs          []string
+	OutputDirs       []string
+	Produces         []string
+	Needs            []string
+	Disk             *db.JobDiskMetadata
 }
 
 func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
@@ -377,9 +378,13 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 	if err := persistDraftArtifactFields(database, jobID, params.Inputs, params.Outputs, params.OutputDirs, params.Produces, params.Needs); err != nil {
 		return err
 	}
-	if params.Disk != nil {
-		if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Disk: params.Disk}); err != nil {
-			return fmt.Errorf("set disk metadata: %w", err)
+	if params.Disk != nil || len(params.BestEffortInputs) > 0 {
+		meta := &db.JobMetadata{Disk: params.Disk}
+		if len(params.BestEffortInputs) > 0 {
+			meta.BestEffortInputs = append([]string(nil), params.BestEffortInputs...)
+		}
+		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+			return fmt.Errorf("set job metadata: %w", err)
 		}
 	}
 
@@ -631,6 +636,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	projectInputs := config.ProjectInputs(localDir)
 	runInputs = mergeDedup(projectInputs, runInputs)
 	inputsBeforeAutoDetect := mergeDedup(projectInputs, originalRunInputs)
+	explicitInputs := append([]string(nil), inputsBeforeAutoDetect...)
 
 	// Auto-detect HF inputs from Python source and command string.
 	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
@@ -639,8 +645,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
 		runInputs = mergeDedup(runInputs, detected)
 	}
-	if newInputs := filterNew(runInputs, inputsBeforeAutoDetect); len(newInputs) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
+	autoDetectedInputs := filterNew(runInputs, inputsBeforeAutoDetect)
+	if len(autoDetectedInputs) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(autoDetectedInputs, ", "))
 	}
 
 	// Capture CLI intent for resource flags BEFORE script defaults are merged in.
@@ -751,6 +758,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
+			explicitInputs = mergeDedup(explicitInputs, meta.Inputs)
 			applied = append(applied, fmt.Sprintf("inputs=%v", meta.Inputs))
 		}
 		if len(meta.Outputs) > 0 {
@@ -789,7 +797,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			// the network. Declared inputs are pre-staged (and the staging gate
 			// blocks jobs whose declared inputs aren't available); the user
 			// asserts the job loads no undeclared HF assets at runtime.
-			runEnvVars = append(runEnvVars, hfOfflineEnvVars()...)
+			runEnvVars = append(runEnvVars, hfOfflineEnvVars(runInputs)...)
 			applied = append(applied, "hf-offline=true")
 		}
 		if len(applied) > 0 {
@@ -812,6 +820,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			"Warning: %s declared as hf: but resolves to an HF dataset; staging as hf-dataset:. Declare hf-dataset:<id> to silence this.\n",
 			strings.Join(corrected, ", "))
 	}
+	bestEffortInputs := bestEffortAutoDetectedInputs(runInputs, autoDetectedInputs, explicitInputs)
 	runEnvVars, err = applySecretEnv(runEnvVars, runInputs, runHFToken, runHFTokenFrom, runSecretVars)
 	if err != nil {
 		return err
@@ -999,7 +1008,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction")
 		endPredictor()
 		if err != nil {
-			return err
+			// Predictor is an optimization, never a gate: degrade to
+			// heuristic estimates rather than blocking submission
+			// (invariant PredictorNeverBlocksPlacement). Set
+			// predictor.enabled = false to silence.
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v; using heuristic estimates\n", err)
 		}
 	}
 
@@ -1134,23 +1147,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		params := ops.QueueJobParams{
-			Host:        host,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: runDescription,
-			Project:     projectName,
-			EnvVars:     runEnvVars,
-			Tags:        runTags,
-			GPUClass:    gpuClass,
-			GPUMemGB:    resolvedGPUMemGB,
-			GPUMemMaxGB: resolvedGPUMemMaxGB,
-			DepSpec:     encodeQueueDependencies(buildRunDependencies()),
-			Inputs:      runInputs,
-			Outputs:     runOutputs,
-			OutputDirs:  outputDirs,
-			Produces:    runProduces,
-			Needs:       resolvedNeeds,
-			Disk:        diskMeta,
+			Host:             host,
+			WorkingDir:       workingDir,
+			Command:          command,
+			Description:      runDescription,
+			Project:          projectName,
+			EnvVars:          runEnvVars,
+			Tags:             runTags,
+			GPUClass:         gpuClass,
+			GPUMemGB:         resolvedGPUMemGB,
+			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			DepSpec:          encodeQueueDependencies(buildRunDependencies()),
+			Inputs:           runInputs,
+			BestEffortInputs: bestEffortInputs,
+			Outputs:          runOutputs,
+			OutputDirs:       outputDirs,
+			Produces:         runProduces,
+			Needs:            resolvedNeeds,
+			Disk:             diskMeta,
 		}
 		endSubmit := rec.Phase("submit", "submitting via legacy relay")
 		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
@@ -1243,22 +1257,23 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		// Build queue params
 		params := ops.QueueJobParams{
-			Host:        host,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: runDescription,
-			Project:     projectName,
-			EnvVars:     runEnvVars,
-			Tags:        runTags,
-			GPUClass:    gpuClass,
-			GPUMemGB:    resolvedGPUMemGB,
-			GPUMemMaxGB: resolvedGPUMemMaxGB,
-			Inputs:      runInputs,
-			Outputs:     runOutputs,
-			OutputDirs:  outputDirs,
-			Produces:    runProduces,
-			Needs:       resolvedNeeds,
-			Disk:        diskMeta,
+			Host:             host,
+			WorkingDir:       workingDir,
+			Command:          command,
+			Description:      runDescription,
+			Project:          projectName,
+			EnvVars:          runEnvVars,
+			Tags:             runTags,
+			GPUClass:         gpuClass,
+			GPUMemGB:         resolvedGPUMemGB,
+			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			Inputs:           runInputs,
+			BestEffortInputs: bestEffortInputs,
+			Outputs:          runOutputs,
+			OutputDirs:       outputDirs,
+			Produces:         runProduces,
+			Needs:            resolvedNeeds,
+			Disk:             diskMeta,
 		}
 
 		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
@@ -1385,26 +1400,27 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if runDraft {
 		return recordDraftRunJob(cmd, database, draftRunParams{
-			Config:        cfg,
-			Host:          host,
-			WorkingDir:    workingDir,
-			Command:       command,
-			Description:   runDescription,
-			ProjectName:   projectName,
-			EnvVars:       runEnvVars,
-			Tags:          runTags,
-			GPU:           gpu,
-			GPUClass:      gpuClass,
-			GPUMemGB:      resolvedGPUMemGB,
-			GPUMemMaxGB:   resolvedGPUMemMaxGB,
-			MaxComputeCap: persistMaxComputeCap,
-			CLIOverrides:  cliOverrides,
-			Inputs:        runInputs,
-			Outputs:       runOutputs,
-			OutputDirs:    outputDirs,
-			Produces:      runProduces,
-			Needs:         resolvedNeeds,
-			Disk:          diskMeta,
+			Config:           cfg,
+			Host:             host,
+			WorkingDir:       workingDir,
+			Command:          command,
+			Description:      runDescription,
+			ProjectName:      projectName,
+			EnvVars:          runEnvVars,
+			Tags:             runTags,
+			GPU:              gpu,
+			GPUClass:         gpuClass,
+			GPUMemGB:         resolvedGPUMemGB,
+			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			MaxComputeCap:    persistMaxComputeCap,
+			CLIOverrides:     cliOverrides,
+			Inputs:           runInputs,
+			BestEffortInputs: bestEffortInputs,
+			Outputs:          runOutputs,
+			OutputDirs:       outputDirs,
+			Produces:         runProduces,
+			Needs:            resolvedNeeds,
+			Disk:             diskMeta,
 		})
 	}
 
@@ -1435,21 +1451,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if host == "" {
 		endSubmit := rec.Phase("submit", "recording unplaced job")
 		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: runDescription,
-			Project:     projectName,
-			EnvVars:     runEnvVars,
-			Tags:        runTags,
-			GPUClass:    gpuClass,
-			GPUMemGB:    resolvedGPUMemGB,
-			GPUMemMaxGB: resolvedGPUMemMaxGB,
-			Inputs:      runInputs,
-			Outputs:     runOutputs,
-			OutputDirs:  outputDirs,
-			Produces:    runProduces,
-			Needs:       resolvedNeeds,
-			Disk:        diskMeta,
+			WorkingDir:       workingDir,
+			Command:          command,
+			Description:      runDescription,
+			Project:          projectName,
+			EnvVars:          runEnvVars,
+			Tags:             runTags,
+			GPUClass:         gpuClass,
+			GPUMemGB:         resolvedGPUMemGB,
+			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			Inputs:           runInputs,
+			BestEffortInputs: bestEffortInputs,
+			Outputs:          runOutputs,
+			OutputDirs:       outputDirs,
+			Produces:         runProduces,
+			Needs:            resolvedNeeds,
+			Disk:             diskMeta,
 		})
 		endSubmit()
 		if err != nil {
@@ -1512,27 +1529,28 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		endSubmit := rec.Phase("submit", "queueing dependent job")
 		res, err := queueJob(database, queueJobOptions{
-			Host:         host,
-			WorkingDir:   workingDir,
-			Command:      command,
-			Description:  runDescription,
-			Project:      projectName,
-			EnvVars:      runEnvVars,
-			Tags:         runTags,
-			GPU:          gpu,
-			GPUClass:     gpuClass,
-			GPUMemGB:     resolvedGPUMemGB,
-			GPUMemMaxGB:  resolvedGPUMemMaxGB,
-			Dependencies: deps,
-			AutoStart:    true,
-			Inputs:       runInputs,
-			Outputs:      runOutputs,
-			OutputDirs:   outputDirs,
-			Produces:     runProduces,
-			Needs:        resolvedNeeds,
-			CloudAfter:   cloudAfter,
-			GPUMemStrict: true, // GPUMemGB is already resolved above; avoid re-applying headroom.
-			Disk:         diskMeta,
+			Host:             host,
+			WorkingDir:       workingDir,
+			Command:          command,
+			Description:      runDescription,
+			Project:          projectName,
+			EnvVars:          runEnvVars,
+			Tags:             runTags,
+			GPU:              gpu,
+			GPUClass:         gpuClass,
+			GPUMemGB:         resolvedGPUMemGB,
+			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			Dependencies:     deps,
+			AutoStart:        true,
+			Inputs:           runInputs,
+			BestEffortInputs: bestEffortInputs,
+			Outputs:          runOutputs,
+			OutputDirs:       outputDirs,
+			Produces:         runProduces,
+			Needs:            resolvedNeeds,
+			CloudAfter:       cloudAfter,
+			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
+			Disk:             diskMeta,
 		})
 		endSubmit()
 		if err != nil {
@@ -1645,6 +1663,10 @@ func shouldValidateRentalJobImage(host string, tags []string, draft, dryRun bool
 }
 
 func printAutoPlacementPending(w io.Writer, database *sql.DB, jobID int64, reason string) {
+	if runNoWait {
+		fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
+		return
+	}
 	if placed := waitForAutoPlacement(database, jobID, runAutoPlacementWaitTimeout); placed != nil {
 		switch placed.TargetKind() {
 		case db.JobTargetInventoryHost:
@@ -2324,14 +2346,16 @@ func isShellEnvName(name string) bool {
 // dropModelRefsShadowedByDatasetRefs removes any "hf:<id>" entry from inputs
 // when "hf-dataset:<id>" is also present, returning the filtered slice and
 // the dropped refs.
-// hfOfflineEnvVars returns the environment that pins a job to the local HF
-// cache (no network), used when a script opts in via [tool.weft] hf-offline.
-func hfOfflineEnvVars() []string {
-	return []string{
-		"HF_HUB_OFFLINE=1",
-		"TRANSFORMERS_OFFLINE=1",
-		"HF_DATASETS_OFFLINE=1",
+// hfOfflineEnvVars returns per-library offline environment for declared HF
+// model inputs. Avoid HF_HUB_OFFLINE: it also forces datasets offline, and
+// hf-dataset staging is not yet guaranteed to be load_dataset-offline-ready.
+func hfOfflineEnvVars(inputs []string) []string {
+	for _, input := range inputs {
+		if strings.HasPrefix(input, "hf:") {
+			return []string{"TRANSFORMERS_OFFLINE=1"}
+		}
 	}
+	return nil
 }
 
 func dropModelRefsShadowedByDatasetRefs(inputs []string) (filtered, removed []string) {
@@ -2398,6 +2422,27 @@ func filterNew(items, baseline []string) []string {
 		}
 	}
 	return out
+}
+
+func bestEffortAutoDetectedInputs(finalInputs, autoDetectedInputs, explicitInputs []string) []string {
+	if len(finalInputs) == 0 || len(autoDetectedInputs) == 0 {
+		return nil
+	}
+	autoDetected := make(map[string]bool, len(autoDetectedInputs))
+	for _, input := range autoDetectedInputs {
+		autoDetected[input] = true
+	}
+	explicit := make(map[string]bool, len(explicitInputs))
+	for _, input := range explicitInputs {
+		explicit[input] = true
+	}
+	bestEffort := make([]string, 0, len(autoDetectedInputs))
+	for _, input := range finalInputs {
+		if autoDetected[input] && !explicit[input] {
+			bestEffort = append(bestEffort, input)
+		}
+	}
+	return bestEffort
 }
 
 // intPtrOrNil returns a pointer to v if v > 0, or nil otherwise.

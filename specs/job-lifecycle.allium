@@ -407,11 +407,19 @@ value ExternalExecutor = skypilot
 -- Failure reasons detected by the runner from exit info and system probes.
 -- Dynamic values: "signal_<name>" for other signals, "exit_<N>" for
 -- unrecognized non-zero exit codes.
+-- infra_prewarm_download_failed: weft-owned input staging (HF prewarm)
+--   failed before the user command started — infrastructure-side, auto-
+--   retried when the launch ends with a retryable termination reason.
+-- infra_cuda_hardware_fault: runtime CUDA failure whose log signature
+--   indicates a bad rental GPU/interconnect (peer GPU memory, NVLink,
+--   uncorrectable ECC, Xid) rather than user code.
 value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
                     | cuda_driver_too_old
                     | setup_timeout
+                    | infra_prewarm_download_failed
+                    | infra_cuda_hardware_fault
 
 -- The in-flight "this job is being placed" signal lives on
 -- PlacementIntent (specs/job-move.allium § PlacementIntent), not in
@@ -940,12 +948,155 @@ rule SharedWorkdirUploadBarrierBeforeNextJob {
         -- at the top of each iteration after the benchmark barrier.
 }
 
+invariant Attribution {
+    -- Bytes stored or uploaded under job J's keys (R2 per-run prefixes,
+    -- local artifact cache rows, host_data job-output assets) were written
+    -- by job J. Working-directory sharing between jobs must not produce
+    -- cross-attribution.
+    for job in Jobs:
+        for artifact in StoredArtifacts(job):
+            artifact.written_by = job
+
+    @guidance
+        -- Enforced by three mechanisms:
+        --   (a) Attempt-window cutoff on discovery: convention-output
+        --       discovery attributes only files modified inside the
+        --       attempt's window — at or after start_time − 1s and, when
+        --       the attempt end is known, at or before end_time + 2m (see
+        --       OutputDiscoveryUsesAttemptStartCutoff below) — so neither
+        --       a prior job's leftovers nor a later sibling job's files in
+        --       a shared output dir are claimed.
+        --   (b) The shared-workdir upload barrier
+        --       (SharedWorkdirUploadBarrierBeforeNextJob), which prevents
+        --       the next job in the same directory from writing into an
+        --       output tree a prior job's upload walk is still reading.
+        --   (c) Remote corroboration for artifact sync: files found in the
+        --       SUBMITTER'S local working tree are never attributable to a
+        --       job — the local tree holds the user's own files and other
+        --       jobs' synced outputs. `weft artifact sync` registers only
+        --       files evidenced on the execution host: the runner's
+        --       completion-record output_files listing, or time-windowed
+        --       discovery run against the host's working directory. The
+        --       single exception is a job that executed on this machine
+        --       (host == local hostname), where the local tree IS the
+        --       runner's working tree (cmd/artifact.go syncJobOutputs,
+        --       isLocalJobHostFunc guard). Incident: 2026-07-02, jobs
+        --       wj3868–wj3873 had 182 submitter-local historical files
+        --       registered as their outputs by an unguarded local-discovery
+        --       fallback.
+        -- Design: docs/design/artifacts.md § Intended invariants (#3).
+}
+
+rule OutputDiscoveryUsesAttemptStartCutoff {
+    when: convention-output discovery runs for job's latest attempt
+    requires: job.working_dir may be shared with other jobs
+
+    let cutoff = job.latest_attempt.start_time - 1.second
+    let end_bound = job.latest_attempt.end_time + 2.minutes  -- when end_time is known
+
+    ensures: files with modification time < cutoff are not attributed to job
+    ensures: files written by the attempt itself are attributed even when
+             the filesystem rounds timestamps down (the 1s slack)
+    ensures: when the attempt's end time is known, files with modification
+             time > end_bound are not attributed to job (narrows the
+             cross-attribution window for sibling jobs sharing an output
+             directory; the 2m slack covers post-exit flushes and clock skew)
+    ensures: an attempt with no recorded start time gets NO discovery-based
+             attribution at all — a zero cutoff would match every file in the
+             tree. `weft artifact sync` skips discovery with a visible
+             warning; the runner's recovery paths record no output_files.
+             (Missing start_time on a completed attempt is itself a
+             completion-sync bug; see internal/ops/sync.go
+             BackfillStartTimeFromCompletionRecord.)
+
+    @guidance
+        -- Implementation: cmd/artifact.go outputSyncThreshold(job) computes
+        -- StartTime − 1s and outputSyncUpperBound(job, rec) computes
+        -- end_time + 2m; both feed discoverRemoteJobOutputFiles (host-side
+        -- find over SSH), discoverLocalJobOutputFiles (local-execution
+        -- case), and runner.FilterOutputFilesSince/Until. The runner applies
+        -- the same window in waitForJob's completion discovery and in
+        -- refreshRunningJobs' recovered-completion discovery
+        -- (discoverRecoveredOutputs, upper bound = status-file mtime + 2m).
+        -- Declared outputs are exempt from the cutoff only insofar as the
+        -- user explicitly named them; the convention-directory walk always
+        -- applies it.
+}
+
+rule CompletionRecordListsDiscoveredOutputs {
+    when: the on-prem runner closes a successful attempt (normal wait,
+          single-job run, or recovered completion after a runner restart)
+
+    ensures: the attempt's completion record (<id>.completion.json) carries
+             an output_files listing — paths, sizes — of convention-output
+             files discovered within the attempt's window
+    ensures: the listing records paths and sizes only, never file contents
+
+    @guidance
+        -- The completion record is the primary attribution evidence for
+        -- `weft artifact sync` on inventory hosts: when output_files is
+        -- present, sync fetches exactly those files and never guesses. When
+        -- it is absent (records written before this contract, or failed
+        -- attempts), sync falls back to remote time-window discovery on the
+        -- execution host — never to the submitter's local tree (invariant
+        -- Attribution).
+        -- Implementation: internal/runner/runner.go waitForJob and
+        -- discoverRecoveredOutputs; internal/runner/single.go RunSingleJob;
+        -- all call DiscoverJobOutputsSince and pass the result to
+        -- WriteCompletionRecord.
+}
+
+open question "Concurrent same-workdir cross-attribution on multi-GPU
+hosts: the shared-workdir upload barrier serializes only sequential jobs
+within one agent process, and the attempt-start cutoff cannot distinguish
+two jobs writing the same output subtree at the same time. Two jobs running
+concurrently in one working directory (e.g. on different GPUs of the same
+host) can still have each other's files uploaded under their keys. Options
+include per-job output subdirectories, per-GPU workdir clones, or an
+advisory lock on the convention output dirs; none is designed yet
+(docs/design/artifacts.md § Known divergences)."
+
 -- ==========================================================================
 -- Artifact retrieval (sync)
 -- ==========================================================================
 -- Retrieval commands read the local artifact cache or cloud output objects and
 -- materialize files for the user. Upload behavior is specified above; this
 -- section captures the user-visible download contract.
+
+-- The single resolution authority for artifact listing and retrieval. list,
+-- get, and cat all consume one materialized union of the artifact sources,
+-- with one identity matcher, so a row the user saw in a listing cannot
+-- resolve against a different store when they retrieve it. Historically the
+-- two sides used independent listings and matchers, producing four separate
+-- list/get mismatch reports (wb11, wb16, wb20, wb40).
+contract ArtifactResolution {
+    resolved_rows: (job: Job) -> List<ResolvedArtifact>
+    matches: (row: ResolvedArtifact, token: String) -> Boolean
+
+    @invariant OneMaterializedUnion
+        -- resolved_rows(job) is the union of the local artifact cache
+        -- (artifacts table), host_data job-output pointer records, and the
+        -- job's live per-run R2 listing, materialized once per invocation.
+        -- `artifact list` prints exactly these rows; `get`/`cat` retrieve
+        -- through them. Implementation: cmd/artifact.go
+        -- resolveJobArtifacts (rows), resolvedArtifact.matchesToken
+        -- (matcher), deliverArtifactToken (retrieval entry point).
+
+    @invariant RowsCarryRetrievalHandles
+        -- Every resolved row carries the handle for the bytes the listing
+        -- described: cache rows the stored local path, cloud rows the
+        -- listed R2 object key, host pointer rows the on-demand-sync
+        -- identity (job + relative path). Retrieval of a listed row never
+        -- re-derives identity through a different matcher or a second
+        -- independent store listing.
+
+    @invariant ListedRowsRetrievableOrLabeled
+        -- Every row `artifact list` prints is retrievable by `get`/`cat`
+        -- using the printed spelling, or the retrieval error explicitly
+        -- states what was checked and why the row is gone (e.g. bytes
+        -- overwritten on the host). Silence or a bare "not found" for a
+        -- listed row violates this contract.
+}
 
 config {
     artifact_get_parallel_default: Integer = 8
@@ -1028,9 +1179,12 @@ rule ArtifactListGetConsistency {
         -- with --r2-bucket upload to the same per-run prefixes as rentals,
         -- so the R2 fallback must not be gated on the job being a rental
         -- job (bug wb16: a cool-host job's declared output listed but was
-        -- not retrievable). Implementation: cmd/artifact.go
-        -- fetchArtifactForJobs / runArtifactCat / fetchAllArtifactsForJobs,
-        -- with syncArtifactOnDemand as the host rung. Design:
+        -- not retrievable). Both sides now consume the shared resolver of
+        -- contract ArtifactResolution: cmd/artifact.go resolveJobArtifacts
+        -- materializes the union once, and deliverArtifactToken (used by
+        -- fetchArtifactForJobs and runArtifactCat) retrieves through the
+        -- same rows and matcher, with syncArtifactOnDemand as the final
+        -- host rung for outputs no listing source has recorded. Design:
         -- docs/design/artifacts.md § Intended invariants.
 }
 
@@ -1072,19 +1226,32 @@ rule CompletedOutputsSurviveWorkdirReuse {
     requires: job declares outputs (--output local:, --produces, or
               [tool.weft] outputs)
 
+    ensures: each declared filesystem output is copied to
+             ~/.cache/weft/artifacts/<jobID>/<runID>/outputs/<relPath>
+             on the job's own host at completion time
+    ensures: the recorded host_data job-output asset points at the snapshot
+             path, not into the live working directory
     ensures: a later job reusing the same working directory cannot make the
              completed job's declared outputs unretrievable
 
     @guidance
-        -- PENDING IMPLEMENTATION (bug wb10; design:
-        -- docs/design/artifacts.md § Decision). Rentals and R2-enabled
-        -- inventory runners satisfy this today via per-run R2 upload plus
-        -- the SharedWorkdirUploadBarrierBeforeNextJob rule. Inventory hosts
-        -- without R2 currently record only a host_data pointer into the
-        -- shared working directory — the next job writing the same relative
-        -- path destroys the bytes. The decided fix is a completion-time
-        -- snapshot to ~/.cache/weft/artifacts/<jobID>/<run>/ on the host's
-        -- own disk (size-capped, GC'd), which needs no R2 credentials.
+        -- Implemented (bug wb10; design: docs/design/artifacts.md
+        -- § Decision). Rentals and R2-enabled inventory runners satisfy
+        -- this via per-run R2 upload plus the
+        -- SharedWorkdirUploadBarrierBeforeNextJob rule. Inventory hosts
+        -- without R2 get a completion-time host-local snapshot: when the
+        -- terminal transition is observed, internal/ops/artifacts.go
+        -- RecordJobOutputs enumerates the job's declared outputs — both
+        -- --output local:/asset refs (job.outputs) and --produces manifest
+        -- entries (job.produces, deduplicated against the outputs) — and
+        -- snapshotRemoteJobOutput cp's each into the per-run snapshot
+        -- directory over SSH before recording the host_data asset. The
+        -- snapshot needs no R2 credentials; on snapshot failure the asset
+        -- is NOT recorded with a mutable working-dir path (a pointer into
+        -- the shared dir would just re-open the wb10 race). Convention
+        -- outputs that are not declared remain pointer-only until a lazy
+        -- sync; the size cap / GC from the design's revised baseline is
+        -- not yet implemented.
 }
 
 -- ==========================================================================
@@ -1222,23 +1389,47 @@ rule DetectFailureReason {
         -- conditions. These system probes run on the remote host.
 }
 
--- Setup-phase timeouts on cloud rentals must be classified as infrastructure
--- failures, not terminal code failures. When a prewarm RunSetupCommand
--- exceeds setup_timeout (default 1h), the agent exit code is 124. The agent
--- must:
---   1. Preserve the 124 exit code through recordPrewarmFailure into the
---      R2 .complete marker (do not collapse to 1).
---   2. Mark the rental instance as TerminationReasonInfraFailure and
---      self-destruct, so Weft's reconciler resets affected jobs
---      to queued and the autopilot re-places them on a different rental.
--- Justification: a 1-hour HF/PyPI download timeout almost always signals
--- rental network throughput problems, not user error. Collapsing 124 to 1
--- and marking the job permanently failed strands the user on a stuck
--- rental instead of moving on to a healthy one.
--- Implementation: cmd/agent/jobloop.go runSetupPrewarm preserves
--- ExitInfo on setupPrewarmResult.exitInfo; recordPrewarmFailure uses
--- that exit code; the prewarm-failure branch terminates the instance
--- with TerminationReasonInfraFailure when exitInfo.ExitCode is 124.
+-- Infrastructure-vs-user failure classification funnels through a single
+-- classifier (db.ClassifyInfraFailure(phase, exit_code, log_tail)) rather
+-- than ad-hoc per-call-site decisions. A failure is infrastructure-side —
+-- the agent terminates the rental as TerminationReasonInfraFailure and
+-- self-destructs, so Weft's reconciler requeues affected jobs and the
+-- autopilot re-places them on a different rental — when any of these hold:
+--   * HF prewarm download failure: weft-owned input staging failed before
+--     the user command started, REGARDLESS of exit code (not just exit
+--     124). Recorded as failure_reason infra_prewarm_download_failed. The
+--     download itself already survived bounded retries with xet fallback
+--     (source-data-sync.allium § HFAssetsPrestagedOnCloud), so an
+--     exhausted prewarm signals rental network/Hub trouble, not user code.
+--   * Setup-phase timeout: a prewarm RunSetupCommand exceeded
+--     setup_timeout (default 1h on rentals); agent exit code 124. The 124
+--     exit code is preserved through recordPrewarmFailure into the R2
+--     .complete marker (never collapsed to 1) so downstream
+--     classification can still see it.
+--   * Runtime CUDA hardware fault: the job log tail carries a bad-GPU /
+--     interconnect signature (peer GPU memory, NVLink, uncorrectable ECC,
+--     Xid). Recorded as failure_reason infra_cuda_hardware_fault.
+--   * GPU-count preflight shortfall: the instance physically exposes
+--     fewer GPUs than the sequence's jobs request, detected before any
+--     billable setup/prewarm spend.
+-- Justification: these conditions indicate rental network, hardware, or
+-- provider-allocation problems, not user error. Marking the job
+-- permanently failed would strand the user on a bad rental instead of
+-- moving on to a healthy one. All other setup and runtime failures stay
+-- user-attributed. Auto-detected-only HF inputs are the exception inside
+-- the prewarm-download phase: they are staged best-effort, and final staging
+-- failure logs a warning but does not fail the job or terminate the rental.
+-- Inputs from --input, project config, or PEP-723 [tool.weft] inputs remain
+-- explicit and fatal; an input that is both explicit and auto-detected is
+-- explicit.
+-- Implementation: internal/db/failure_modes.go ClassifyInfraFailure is
+-- the single decision point; cmd/agent/jobloop.go runHFDownloadPrewarm
+-- (prewarm-download phase) and prewarmShouldTerminateAsInfra (setup
+-- phase), internal/runner/job.go DetectFailureReasonFromExitInfoAndLog
+-- (runtime phase), and cmd/agent/gpu_count_probe.go checkGPUCount
+-- (gpu-count-preflight phase) all classify through it. runSetupPrewarm
+-- preserves ExitInfo on setupPrewarmResult.exitInfo so exit 124 survives
+-- recordPrewarmFailure.
 
 -- Setup-phase subprocesses (uv sync, torch preflight, direnv resolution,
 -- pre-job disk probes, and similar helpers that run user tooling before
@@ -1617,6 +1808,59 @@ rule UserRetriesUnplaced {
         -- Implementation: cmd/restart.go
 }
 
+-- Infrastructure-classified failures retry WITHOUT user action. Every
+-- other retry rule in this section is user-initiated (UserRequeue,
+-- UserRetryUnplaced); this is the one system-initiated path, and it is
+-- deliberately narrow: it fires only when the launch itself terminated
+-- for a retryable, infrastructure-side reason, so user-code failures
+-- never auto-loop.
+rule AutoRequeueOnInfraFailure {
+    when: LaunchTerminalReconciled(launch)   -- reconciler observes the
+                                             -- launch reach terminal failed
+    requires: IsRetryableTermination(launch)
+              -- infra_failure, provider_failure, bootstrap_timeout,
+              -- phase_stall, preempted, provider_timeout, upload_stall,
+              -- account_credit_exhausted, unknown/empty — see
+              -- internal/db/cloud_instances.go IsRetryableTermination
+
+    -- Non-terminal jobs on the launch are reset to unplaced+queued by the
+    -- ordinary orphan handling regardless of retryability (that path
+    -- covers a job that was mid-run when its instance died). What this
+    -- rule adds: a job that already failed TERMINALLY with
+    -- failure_reason in InfraFailureReasons gets a fresh queued unplaced
+    -- attempt too, while the derived infra-failure attempt count remains
+    -- below db.AutoRequeueMaxInfraFailureAttempts (2). Without this, a
+    -- terminal attempt that synced before reset would stay parked as failed
+    -- even though the launch died for infrastructure reasons.
+    ensures:
+        for job in launch.jobs
+            where job.status = failed
+              and job.failure_reason in InfraFailureReasons
+              and CountInfraFailureAttempts(job) < AutoRequeueMaxInfraFailureAttempts
+              and job.requested_status not in {canceled, killed, draft}:
+            JobAttempt.created(job: job, status: queued, target: unplaced)
+            job.status = queued
+
+    @guidance
+        -- Implementation: internal/db/cloud_instances.go ResetLaunchJobs —
+        -- retryInfraFailed := IsRetryableTermination(ci) widens the reset
+        -- query to include failed jobs whose failure_reason is in
+        -- db.InfraFailureReasons() and whose historical infra-failure count
+        -- is below db.AutoRequeueMaxInfraFailureAttempts, then creates the
+        -- fresh queued attempt (createAttemptTx) for each. This keeps the
+        -- SQL WHERE clause aligned with IsInfraFailureReason, including
+        -- infra_prewarm_download_failed and infra_cuda_hardware_fault.
+        --
+        -- Interaction with user-initiated retry: UserRequeuesJob and
+        -- UserRetriesUnplaced remain available and unchanged. This rule
+        -- never fires for job-level terminations (job_failure, disk_full,
+        -- canceled, completed) — those jobs stay parked until the user
+        -- acts. Orphaned attempts have start_time cleared so
+        -- infrastructure overhead (bootstrap/setup) is not charged
+        -- against the retry budget; see also
+        -- RetryBudgetExcludesCanceledAttempts.
+}
+
 rule RetryReplaysSubmissionIntent {
     when: UserRequeue(job) or UserRetryUnplaced(job)
     requires: job.has_script_pep723_block
@@ -1888,6 +2132,11 @@ invariant GPUJobsAreExclusivePerDevice {
 -- live in internal/ui/terminal/*.go and are free to evolve colors,
 -- spacing, and navigation details; the guidance constrains the semantic
 -- content (columns, ordering, empty states, available keys).
+--
+-- Display convention: all job-time columns (start, end, queued-at) render
+-- a null/zero timestamp as util.EmptyCell for the surface (TUI or plain CLI),
+-- never as the Unix epoch. Shared helper: internal/util FormatUnixTimeOr
+-- (regression wb21).
 
 -- AttemptsView is a read-only drill-down reachable by pressing `a` on a
 -- selected job row from any TUI that lists jobs. It shows the full

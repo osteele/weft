@@ -162,6 +162,11 @@ type setupPrewarmResult struct {
 
 const hfPrewarmMaxAttempts = 3
 
+var (
+	runSetupCommand      = runner.RunSetupCommand
+	hfPrewarmBackoffFunc = hfPrewarmBackoff
+)
+
 type setupPrewarm struct {
 	jobID   int64
 	runID   int64
@@ -394,10 +399,17 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	env = appendAgentJobEnv(env, job)
 
 	didWork := false
-	if assets := hfInputAssets(job.Inputs); len(assets) > 0 {
+	explicitAssets, bestEffortAssets := splitHFInputAssets(job.Inputs, job.BestEffortInputs)
+	if len(explicitAssets) > 0 {
 		didWork = true
-		if result := runHFDownloadPrewarm(job, cfg, workDir, env, assets, paths); !result.ok {
+		if result := runHFDownloadPrewarm(job, cfg, workDir, env, explicitAssets, paths); !result.ok {
 			return result
+		}
+	}
+	if len(bestEffortAssets) > 0 {
+		didWork = true
+		if result := runHFDownloadPrewarm(job, cfg, workDir, env, bestEffortAssets, paths); !result.ok {
+			appendBestEffortHFPrewarmWarning(paths.Log, bestEffortAssets, result.err)
 		}
 	}
 
@@ -416,7 +428,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		}
 	}
 	didWork = true
-	ei, err := runner.RunSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
+	ei, err := runSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
 	if err != nil {
 		return setupPrewarmResult{
 			didWork:  true,
@@ -449,29 +461,39 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 		}
 		appendPrewarmStatus(paths.Log, fmt.Sprintf("weft: HF prewarm attempt %d/%d%s\n",
 			attempt, hfPrewarmMaxAttempts, hfPrewarmXetSuffix(disableXet)))
-		ei, err := runner.RunSetupCommand(script, job.ID, workDir, env, paths, timeout)
+		ei, err := runSetupCommand(script, job.ID, workDir, env, paths, timeout)
 		if err == nil {
 			return setupPrewarmResult{ok: true, didWork: true, logPath: paths.Log}
 		}
+		failureReason, infra := db.ClassifyInfraFailure(db.PhasePrewarmDownload, ei.ExitCode, "")
 		last = setupPrewarmResult{
 			didWork:       true,
 			logPath:       paths.Log,
 			exitInfo:      ei,
 			err:           fmt.Errorf("hf prewarm failed exit %d: %w", ei.ExitCode, err),
-			failureReason: db.FailureReasonInfraPrewarmDownloadFailed,
-			infraFailure:  true,
+			failureReason: failureReason,
+			infraFailure:  infra,
 			logTail:       prewarmLogTail(paths.Log),
 		}
 		if attempt == hfPrewarmMaxAttempts {
 			break
 		}
-		if hfPrewarmLogHasXetWriterError(paths.Log) && !disableXet {
+		if hfPrewarmLogHasXetError(paths.Log) && !disableXet {
 			disableXet = true
-			appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after writer/reconstruction error\n")
+			appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after xet transfer error\n")
 		}
-		time.Sleep(hfPrewarmBackoff(attempt))
+		time.Sleep(hfPrewarmBackoffFunc(attempt))
 	}
 	return last
+}
+
+func appendBestEffortHFPrewarmWarning(path string, assets []dataloc.DataAsset, err error) {
+	for _, asset := range assets {
+		appendPrewarmStatus(path, fmt.Sprintf("weft: auto-detected input %s failed to stage; continuing (best-effort)\n", asset.Ref()))
+	}
+	if err != nil {
+		appendPrewarmStatus(path, fmt.Sprintf("weft: best-effort HF prewarm error: %v\n", err))
+	}
 }
 
 func hfPrewarmXetSuffix(disableXet bool) string {
@@ -499,20 +521,31 @@ func appendPrewarmStatus(path, line string) {
 	_, _ = f.WriteString(line)
 }
 
-func hfPrewarmLogHasXetWriterError(path string) bool {
+func hfPrewarmLogHasXetError(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
-	return hfPrewarmTextHasXetWriterError(string(data))
+	return hfPrewarmTextHasXetError(string(data))
 }
 
-func hfPrewarmTextHasXetWriterError(text string) bool {
+func hfPrewarmTextHasXetError(text string) bool {
 	text = strings.ToLower(text)
-	return strings.Contains(text, "xet") &&
-		(strings.Contains(text, "file reconstruction error") ||
-			strings.Contains(text, "internal writer error") ||
-			strings.Contains(text, "background writer channel closed"))
+	if !strings.Contains(text, "xet") {
+		return false
+	}
+	// Writer/reconstruction failures (xet upload/rebuild path).
+	if strings.Contains(text, "file reconstruction error") ||
+		strings.Contains(text, "internal writer error") ||
+		strings.Contains(text, "background writer channel closed") {
+		return true
+	}
+	// Read/download failures: xet-migrated models whose xet-read-token endpoint
+	// 404s HF-side. Retrying with HF_HUB_DISABLE_XET=1 falls back to the classic
+	// HTTP transfer, which still works for these repos.
+	return strings.Contains(text, "xet-read-token") ||
+		strings.Contains(text, "xet_get") ||
+		strings.Contains(text, "new_file_download_group")
 }
 
 func prewarmLogTail(path string) string {
@@ -546,6 +579,21 @@ func hfInputAssets(inputs []string) []dataloc.DataAsset {
 		}
 	}
 	return assets
+}
+
+func splitHFInputAssets(inputs, bestEffortInputs []string) (explicit, bestEffort []dataloc.DataAsset) {
+	bestEffortSet := make(map[string]bool, len(bestEffortInputs))
+	for _, input := range bestEffortInputs {
+		bestEffortSet[input] = true
+	}
+	for _, asset := range hfInputAssets(inputs) {
+		if bestEffortSet[asset.Ref()] {
+			bestEffort = append(bestEffort, asset)
+			continue
+		}
+		explicit = append(explicit, asset)
+	}
+	return explicit, bestEffort
 }
 
 func hfDownloadScript(assets []dataloc.DataAsset) string {
@@ -634,6 +682,16 @@ type jobSequenceResult struct {
 // all background work must finish before a benchmark job starts.
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
 	jobs = orderJobsForSetupOverlap(jobs)
+
+	// GPU-shape preflight BEFORE any billable setup / HF prewarm work (wb41):
+	// if the provider allocated fewer GPUs than the sequence's multi-GPU jobs
+	// request, terminate now as infra_failure instead of discovering the
+	// shortfall at the runner's gpu_count_preflight after prewarm spend. The
+	// runner check remains as the final availability guard.
+	if checkGPUCount(cfg.R2Bucket, cfg.InstanceID, maxRequestedGPUCount(jobs), cfg.SelfDestructCmd) {
+		return jobSequenceResult{AnyFailed: true, AnyInfraFailed: true}
+	}
+
 	var result jobSequenceResult
 	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
 	setupPrewarms := newSetupPrewarmManager()
@@ -725,10 +783,24 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			// Mark job complete with failure even when command did not start.
 			ei := runner.ExitInfo{ExitCode: 1}
 			paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, ei.ExitCode, err.Error())
+			if failureReason == "" {
+				failureReason = "artifact_stage_failed"
+			}
 			_ = runner.WriteStatusFile(paths, ei)
+			_ = runner.WriteFailureReasonFile(paths, failureReason)
 			now := time.Now().Unix()
-			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", "artifact_stage_failed", now, now, nil)
+			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", failureReason, now, now, nil)
 			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+			if infra && cfg.SelfDestructCmd != "" {
+				terminateInstanceWithReason(
+					cfg.R2Bucket, cfg.InstanceID, cfg.SelfDestructCmd,
+					fmt.Sprintf("artifact_stage_infra_failure:%d", job.ID),
+					job.ID,
+					db.TerminationReasonInfraFailure,
+					err.Error(),
+				)
+			}
 			continue
 		}
 
@@ -958,7 +1030,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 func jobFailureReasonIsInfra(logDir string, jobID int64) bool {
 	reason := runner.ReadFailureReasonFile(runner.NewJobPaths(logDir, jobID).FailureReason)
-	return reason == db.FailureReasonInfraCUDAHardwareFault
+	return db.IsInfraFailureReason(reason)
 }
 
 func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
@@ -1006,7 +1078,11 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 }
 
 func prewarmShouldTerminateAsInfra(prewarm setupPrewarmResult) bool {
-	return prewarm.infraFailure || prewarm.exitInfo.ExitCode == runner.ExitCodeSetupTimeout
+	if prewarm.infraFailure {
+		return true
+	}
+	_, infra := db.ClassifyInfraFailure(db.PhaseSetup, prewarm.exitInfo.ExitCode, "")
+	return infra
 }
 
 // prewarmFailureExitCode preserves the underlying RunSetupCommand exit code

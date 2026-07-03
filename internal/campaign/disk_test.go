@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +66,22 @@ print("bench")
 	want := heavyDepInstalledGB["vllm"] + heavyDepInstalledGB["torch"]
 	if got := commandDepHeadroomGB(group); got != want {
 		t.Fatalf("commandDepHeadroomGB = %d, want %d", got, want)
+	}
+}
+
+func TestCommandDepHeadroomGB_LMCacheIncludesTorch(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{
+		{ID: 1, Command: "uv run --with lmcache bench.py"},
+	}}
+	want := heavyDepInstalledGB["lmcache"] + heavyDepInstalledGB["torch"]
+	if got := commandDepHeadroomGB(group); got != want {
+		t.Fatalf("commandDepHeadroomGB = %d, want %d (lmcache+torch)", got, want)
+	}
+	if got := commandDepIncrementalEnvGB(group.Jobs[0]); got != want {
+		t.Fatalf("commandDepIncrementalEnvGB = %d, want %d (lmcache+torch)", got, want)
+	}
+	if !slices.Contains(cudaPackages, "lmcache") {
+		t.Fatal("cudaPackages missing lmcache")
 	}
 }
 
@@ -404,6 +422,27 @@ func TestEstimateGroupDisk_UnresolvedInputsGetFallback(t *testing.T) {
 		t.Fatalf("disk = %d, want >= 54 (resolved + unresolved fallback); "+
 			"without the fix this would fall back to %d (overhead only, HF bytes dropped)",
 			disk, DefaultMinDiskGB)
+	}
+}
+
+func TestEstimateGroupDisk_CountsNamedAssetBytes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "trace-v1",
+		ContentHash: strings.Repeat("a", 64),
+		SizeBytes:   40_000_000_000,
+		ContentType: string(dataloc.ContentTypeDirectory),
+		TargetPath:  "data/trace-v1",
+	}); err != nil {
+		t.Fatalf("UpsertNamedAsset: %v", err)
+	}
+	group := InstanceGroup{Jobs: []*db.Job{{
+		ID:     1,
+		Inputs: []string{"asset:trace-v1"},
+	}}}
+	disk, _ := EstimateGroupDisk(group, database, nil)
+	if disk < 69 {
+		t.Fatalf("disk = %d, want >= 69 including named asset bytes", disk)
 	}
 }
 

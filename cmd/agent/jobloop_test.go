@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/runner"
@@ -155,17 +156,28 @@ func writeCompletionRecordForTest(t *testing.T, logDir string, jobID int64, rec 
 	}
 }
 
-func TestHFPrewarmTextHasXetWriterError(t *testing.T) {
-	trace := `RuntimeError: Data processing error: CAS service error : Reqwest Error: HTTP status client error (401 Unauthorized), domain: https://cas-server.xethub.hf.co
+func TestHFPrewarmTextHasXetError(t *testing.T) {
+	// Writer/reconstruction failure (xet upload/rebuild path).
+	writerTrace := `RuntimeError: Data processing error: CAS service error : Reqwest Error: HTTP status client error (401 Unauthorized), domain: https://cas-server.xethub.hf.co
 RuntimeError: Task error: File reconstruction error: Internal Writer Error: Background writer channel closed`
-	if !hfPrewarmTextHasXetWriterError(trace) {
-		t.Fatal("hfPrewarmTextHasXetWriterError() = false for xet reconstruction writer error")
+	if !hfPrewarmTextHasXetError(writerTrace) {
+		t.Fatal("hfPrewarmTextHasXetError() = false for xet reconstruction writer error")
 	}
-	if hfPrewarmTextHasXetWriterError("File reconstruction error without CAS context") {
-		t.Fatal("hfPrewarmTextHasXetWriterError() = true without xet context")
+	// Read-token 404 for an xet-migrated model (gpt2 / gpt2-xl): the failure
+	// mode that took down auto-detected and explicit gpt2 inputs.
+	readTokenTrace := `huggingface_hub.errors.ConnectionError: Network error: Request error: HTTP status client error (404 Not Found), domain: https://huggingface.co/api/models/gpt2/xet-read-token/607a30d783dfa663
+  File "huggingface_hub/file_download.py", line 500, in xet_get
+  File "huggingface_hub/file_download.py", line 480, in new_file_download_group`
+	if !hfPrewarmTextHasXetError(readTokenTrace) {
+		t.Fatal("hfPrewarmTextHasXetError() = false for xet-read-token 404 (migrated model)")
 	}
-	if hfPrewarmTextHasXetWriterError("xet authentication failed before download") {
-		t.Fatal("hfPrewarmTextHasXetWriterError() = true without writer/reconstruction signal")
+	// Reconstruction wording without any xet context: not our fallback case.
+	if hfPrewarmTextHasXetError("File reconstruction error without CAS context") {
+		t.Fatal("hfPrewarmTextHasXetError() = true without xet context")
+	}
+	// xet mentioned but no recognized transfer-failure signature.
+	if hfPrewarmTextHasXetError("xet authentication failed before download") {
+		t.Fatal("hfPrewarmTextHasXetError() = true without a recognized xet failure signature")
 	}
 }
 
@@ -566,6 +578,27 @@ func TestHFInputAssets(t *testing.T) {
 	}
 }
 
+func TestSplitHFInputAssets(t *testing.T) {
+	explicit, bestEffort := splitHFInputAssets(
+		[]string{"hf:org/explicit", "hf:org/auto", "hf-dataset:org/data", "local:data"},
+		[]string{"hf:org/auto"},
+	)
+	if got, want := assetRefs(explicit), []string{"hf:org/explicit", "hf-dataset:org/data"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit assets = %v, want %v", got, want)
+	}
+	if got, want := assetRefs(bestEffort), []string{"hf:org/auto"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("best-effort assets = %v, want %v", got, want)
+	}
+}
+
+func assetRefs(assets []dataloc.DataAsset) []string {
+	refs := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		refs = append(refs, asset.Ref())
+	}
+	return refs
+}
+
 func TestHFDownloadScriptDownloadsModelsAndDatasets(t *testing.T) {
 	script := hfDownloadScript(hfInputAssets([]string{
 		"hf:org/model",
@@ -582,6 +615,95 @@ func TestHFDownloadScriptDownloadsModelsAndDatasets(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestRunSetupPrewarmBestEffortHFFailureWarnsAndContinues(t *testing.T) {
+	restore := stubPrewarmRunner(t, func(script string, jobID int64, workDir string, env []string, paths runner.JobPaths, timeout time.Duration) (runner.ExitInfo, error) {
+		return runner.ExitInfo{ExitCode: 1}, errors.New("download failed")
+	})
+	defer restore()
+
+	result := runSetupPrewarm(cloud.AgentJob{
+		ID:               71,
+		RunID:            1,
+		Command:          "python train.py",
+		Inputs:           []string{"hf:org/auto"},
+		BestEffortInputs: []string{"hf:org/auto"},
+	}, jobSequenceConfig{}, t.TempDir(), false)
+
+	if !result.ok {
+		t.Fatalf("best-effort prewarm should continue, got result: %+v", result)
+	}
+	data, err := os.ReadFile(result.logPath)
+	if err != nil {
+		t.Fatalf("read prewarm log: %v", err)
+	}
+	if !strings.Contains(string(data), "weft: auto-detected input hf:org/auto failed to stage; continuing (best-effort)") {
+		t.Fatalf("missing best-effort warning:\n%s", string(data))
+	}
+}
+
+func TestRunSetupPrewarmExplicitHFFailureRemainsFatal(t *testing.T) {
+	restore := stubPrewarmRunner(t, func(script string, jobID int64, workDir string, env []string, paths runner.JobPaths, timeout time.Duration) (runner.ExitInfo, error) {
+		return runner.ExitInfo{ExitCode: 1}, errors.New("download failed")
+	})
+	defer restore()
+
+	result := runSetupPrewarm(cloud.AgentJob{
+		ID:      72,
+		RunID:   1,
+		Command: "python train.py",
+		Inputs:  []string{"hf:org/explicit"},
+	}, jobSequenceConfig{}, t.TempDir(), false)
+
+	if result.ok {
+		t.Fatal("explicit HF prewarm failure should be fatal")
+	}
+	if !result.infraFailure {
+		t.Fatalf("explicit HF prewarm failure should remain infra, got result: %+v", result)
+	}
+}
+
+func TestRunSetupPrewarmBestEffortKeepsXetFallback(t *testing.T) {
+	var envs [][]string
+	restore := stubPrewarmRunner(t, func(script string, jobID int64, workDir string, env []string, paths runner.JobPaths, timeout time.Duration) (runner.ExitInfo, error) {
+		envs = append(envs, append([]string(nil), env...))
+		if len(envs) == 1 {
+			appendPrewarmStatus(paths.Log, "xet-read-token failed in xet_get\n")
+		}
+		return runner.ExitInfo{ExitCode: 1}, errors.New("download failed")
+	})
+	defer restore()
+
+	result := runSetupPrewarm(cloud.AgentJob{
+		ID:               73,
+		RunID:            1,
+		Command:          "python train.py",
+		Inputs:           []string{"hf:org/auto"},
+		BestEffortInputs: []string{"hf:org/auto"},
+	}, jobSequenceConfig{}, t.TempDir(), false)
+
+	if !result.ok {
+		t.Fatalf("best-effort prewarm should continue, got result: %+v", result)
+	}
+	if len(envs) < 2 {
+		t.Fatalf("expected xet retry, got %d attempts", len(envs))
+	}
+	if !slices.Contains(envs[1], "HF_HUB_DISABLE_XET=1") {
+		t.Fatalf("second attempt env missing HF_HUB_DISABLE_XET=1: %v", envs[1])
+	}
+}
+
+func stubPrewarmRunner(t *testing.T, fn func(string, int64, string, []string, runner.JobPaths, time.Duration) (runner.ExitInfo, error)) func() {
+	t.Helper()
+	oldRunner := runSetupCommand
+	oldBackoff := hfPrewarmBackoffFunc
+	runSetupCommand = fn
+	hfPrewarmBackoffFunc = func(int) time.Duration { return 0 }
+	return func() {
+		runSetupCommand = oldRunner
+		hfPrewarmBackoffFunc = oldBackoff
 	}
 }
 

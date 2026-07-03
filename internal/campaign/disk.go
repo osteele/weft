@@ -229,7 +229,7 @@ var cudaPackages = []string{
 	"nvidia-cuda-runtime", "nvidia-cudnn", "nvidia-cufft",
 	"nvidia-curand", "nvidia-cusolver", "nvidia-cusparse",
 	"nvidia-nccl", "nvidia-nvjitlink", "nvidia-nvtx",
-	"jax", "jaxlib", "tensorflow", "vllm", "sglang",
+	"jax", "jaxlib", "tensorflow", "vllm", "sglang", "lmcache",
 }
 
 // heavyDepInstalledGB approximates the cold-start footprint (uv archive/cache
@@ -242,6 +242,7 @@ var heavyDepInstalledGB = map[string]int{
 	"tensorflow": 6,
 	"jax":        3,
 	"jaxlib":     4,
+	"lmcache":    4,
 }
 
 // heavyDepIncrementalEnvGB approximates the additional disk a script-scoped uv
@@ -257,11 +258,13 @@ var heavyDepIncrementalEnvGB = map[string]int{
 	"tensorflow": 6,
 	"jax":        3,
 	"jaxlib":     4,
+	"lmcache":    4,
 }
 
 var heavyDepTransitiveDeps = map[string][]string{
-	"vllm":   {"torch"},
-	"sglang": {"torch"},
+	"vllm":    {"torch"},
+	"sglang":  {"torch"},
+	"lmcache": {"torch"},
 }
 
 // canonicalDepName extracts the lowercase package name from a dependency spec

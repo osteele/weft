@@ -21,9 +21,12 @@ type AgentJob struct {
 	// Inputs are the declared input refs (e.g. "hf:Qwen/Qwen2.5-7B").
 	// Used by the agent to identify which HF cache entries belong to the
 	// current workload vs. stale assets from prior reuse.
-	Inputs     []string        `json:"inputs,omitempty"`
-	CloudNeeds []CloudNeed     `json:"cloud_needs,omitempty"`
-	CloudAfter []CloudAfterRef `json:"cloud_after,omitempty"`
+	Inputs []string `json:"inputs,omitempty"`
+	// BestEffortInputs are a subset of Inputs inferred only from source/command
+	// auto-detection. The agent stages them opportunistically.
+	BestEffortInputs []string        `json:"best_effort_inputs,omitempty"`
+	CloudNeeds       []CloudNeed     `json:"cloud_needs,omitempty"`
+	CloudAfter       []CloudAfterRef `json:"cloud_after,omitempty"`
 	// RestagedOutputs is true when Weft restored this job's previous attempt
 	// outputs from R2 before starting the command on a fresh instance.
 	RestagedOutputs bool     `json:"restaged_outputs,omitempty"`
@@ -33,9 +36,10 @@ type AgentJob struct {
 // CloudNeed is a resolved cloud artifact dependency for an agent job.
 // R2Key points to the exact object in R2 that should be copied to Path.
 type CloudNeed struct {
-	Spec  string `json:"spec,omitempty"`
-	Path  string `json:"path"`
-	R2Key string `json:"r2_key"`
+	Spec        string `json:"spec,omitempty"`
+	Path        string `json:"path"`
+	R2Key       string `json:"r2_key"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 // CloudAfterRef identifies a producer job whose success the consumer depends on,
