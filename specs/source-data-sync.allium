@@ -79,11 +79,16 @@ external entity HostAssetEntry {
 -- checkpoint / corpus:   named assets that exist as on-host paths.
 -- job_output:            produced by a previous weft job; resolved via
 --                        dataloc or R2 staging depending on venue.
+-- named_asset:           a content-addressed asset published via
+--                        `weft data publish` (asset: prefix). Bytes live in
+--                        R2 under assets/<content_hash> with a named_assets
+--                        row mapping name → key + target path; stageable
+--                        onto any host with R2 access.
 -- local_path:            a path inside (or beneath) the job's working_dir
 --                        that would otherwise be excluded; overlaid into
 --                        the source snapshot so it ships with the source.
 value InputKind = hf_model | hf_dataset | checkpoint | corpus
-                | job_output | local_path
+                | job_output | named_asset | local_path
 
 -- A declared input, parsed from the user's --input flag or [tool.weft]
 -- inputs list. Exactly one of asset or file_path is populated.
@@ -268,6 +273,16 @@ config {
     -- upload a source tarball and when verifying that a CloudNeed key is
     -- resolvable before publishing a manifest.
     r2_object_exists_timeout: Duration = 20.seconds
+
+    -- Cloud-agent HF prewarm retry policy. Each attempt runs the whole
+    -- download script under the setup timeout; transient Hub/network
+    -- failures get bounded retries with a short backoff rather than
+    -- failing the job on the first hiccup. See HFAssetsPrestagedOnCloud
+    -- for the xet→classic fallback between attempts.
+    -- Matches hfPrewarmMaxAttempts / hfPrewarmBackoff in cmd/agent/jobloop.go.
+    hf_prewarm_max_attempts: Integer = 3
+    hf_prewarm_backoff_after_first: Duration = 5.seconds
+    hf_prewarm_backoff_later: Duration = 20.seconds
 }
 
 -- ==========================================================================
@@ -745,7 +760,8 @@ rule ClassifyInputs {
     @guidance
         -- Implementation anchor:
         --   internal/dataloc/types.go  — ParseInputRef, ClassifyInputs
-        -- Prefixes: hf:, hf-dataset:, checkpoint:, corpus:, job-output:, local:
+        -- Prefixes: hf:, hf-dataset:, checkpoint:, corpus:, job-output:,
+        --           asset: (named_asset), local:
 }
 
 -- Declared file-path inputs that live outside working_dir (e.g.
@@ -834,18 +850,157 @@ rule DownloadHFAssetOnDemand {
                 LocalHFDownloadExpected(job: job, asset: input.asset)
 }
 
+-- corpus: inputs and checkpoints that are not confirmed in R2 are
+-- non-transportable: they name large on-host paths that weft never
+-- byte-transports between hosts (no donor rsync, no R2 round-trip). Instead
+-- they pin placement — a host is eligible for the job only if the dataloc
+-- inventory records that host as holding the asset. This is a hard
+-- eligibility filter, applied before scoring, not a soft locality preference.
+-- A job whose non-transportable input exists on no host at all is unplaceable
+-- and surfaces that reason.
+-- (This is the wb28 fix: previously such jobs were placed on an arbitrary
+-- host and failed at runtime with missing_file.)
+rule NonTransportableInputsPinPlacement {
+    when: PlacementEvaluated(job, host)
+
+    let pinned = job.inputs where
+        kind = corpus or
+        (kind = checkpoint and TransportState(input.asset) != r2_resident)
+
+    ensures:
+        for input in pinned:
+            if not AssetPresentOn(input.asset, host):
+                HostIneligible(
+                    host: host,
+                    job: job,
+                    reason: "missing " + input.asset.ref
+                            + " on this host; present on "
+                            + HoldersOf(input.asset)
+                )
+
+    @guidance
+        -- Implementation anchor:
+        --   internal/placement/placement.go — hard-filter call in scoreHost
+        --     (missingNonTransportableInputReason), the reason builder
+        --     missingNonTransportableInputReason, and the kind predicate
+        --     isNonTransportableInput (checkpoint | corpus).
+        -- Published checkpoints (host_data.content_hash with a matching
+        -- named_assets row) are not hard-pinned in on-prem scoring; the
+        -- holder host remains preferred through normal data-locality transfer
+        -- scoring.
+        -- The eligibility mechanics of placement live in
+        -- inventory-placement.allium; this rule pins down which input
+        -- kinds are placement constraints rather than staging work.
+}
+
+value TransportState = r2_resident | on_host_only | unknown
+
+rule R2ResidentCheckpointIsTransportable {
+    when: RentalPlacementEvaluated(job)
+
+    for input in job.inputs where input.kind = checkpoint:
+      let record = HostAssetRecordFor(input.asset)
+      let key = "assets/" + record.content_hash
+      let state = ProbeR2Object(key)
+
+      ensures:
+        if state = r2_resident:
+            RentalEligibleWithStaging(job, input.asset)
+            ManifestCloudNeedRecorded(
+                job: job,
+                spec: input.asset.ref,
+                path: TargetPathForPublishedCheckpoint(input.asset),
+                r2_key: key
+            )
+        if state = on_host_only:
+            RentalIneligible(job, reason: "checkpoint not confirmed in R2")
+        if state = unknown:
+            RentalIneligible(job, reason: "checkpoint R2 state unknown")
+
+    @guidance
+        -- Three-state discipline is required here. A successful R2 HEAD that
+        -- finds the object makes the checkpoint transportable; a successful
+        -- miss is confirmed on-host-only; any timeout, auth failure, or other
+        -- probe error is unknown. Unknown fails closed for rental placement
+        -- and must not be collapsed to either "not in R2" or "transportable".
+        -- Implementation anchors:
+        --   internal/campaign/checkpoint_transport.go
+        --   internal/campaign/cloud_provision_guard.go
+        --   internal/campaign/lifecycle.go and reuse.go append the CloudNeed
+        --   cmd/agent/cloud_needs.go extracts directory archives when
+        --     CloudNeed.content_type = directory.
+        -- Directory checkpoints are staged as deterministic tar.gz archives
+        -- keyed by the directory manifest digest described in
+        -- inventory-placement.allium DirectoryAssetDigest, then extracted at
+        -- the consumer target path.
+}
+
+rule RegisteredCheckpointPublishHostToR2 {
+    when: DataPublishRequested(source = checkpoint_ref)
+
+    let record = HostAssetRecordFor(checkpoint_ref)
+    let key = "assets/" + record.content_hash
+
+    ensures:
+        if ProbeR2Object(key) = r2_resident:
+            NamedAssetRecordUpserted(checkpoint_ref, key)
+        if ProbeR2Object(key) = on_host_only:
+            R2PutFromHost(
+                source_host: record.host,
+                source_path: record.path,
+                key: key,
+                content_type: record.content_type
+            )
+            NamedAssetRecordUpserted(checkpoint_ref, key)
+        if ProbeR2Object(key) = unknown:
+            PublishFails(reason: "R2 status unknown")
+
+    @guidance
+        -- A remote holder checkpoint must upload from the holder host
+        -- directly to R2. The controller may probe R2 and issue SSH commands,
+        -- but it must not SCP the checkpoint to the laptop and then upload
+        -- from the laptop. Directory checkpoints use the same deterministic
+        -- tar.gz stream as local publish: WriteDirectoryArchive over the
+        -- sorted manifest digest in inventory-placement.allium
+        -- DirectoryAssetDigest. Single files stream as application/octet-stream.
+        --
+        -- Credential scope: the ideal mechanism is a temporary credential
+        -- constrained to the content-addressed named-asset key prefix. The
+        -- current implementation has no Cloudflare token-minting API or
+        -- per-key credential broker, so it passes the configured R2 key
+        -- transiently to the one SSH invocation of `weft r2 put-content
+        -- --creds-stdin`, piped as a JSON blob on the process's stdin. It must
+        -- NOT place the credentials in the remote command's argv or environment
+        -- (both are readable via `ps` by any user on the holder host during the
+        -- upload window) and must not write them to a remote config file or
+        -- rclone profile. Operators who can provide a narrower R2 key should
+        -- configure that key as the Weft R2 credential.
+        --
+        -- A host-unreachable or SSH failure is unknown: publish must fail
+        -- clearly and leave the named-asset/checkpoint mapping unchanged unless
+        -- the upload was already confirmed in R2. The implementation must not
+        -- silently fall back to laptop-transit, because that reintroduces the
+        -- large-data failure mode this rule prevents.
+        --
+        -- Implementation anchors:
+        --   cmd/data.go runDataPublish / remotePublishSource
+        --   cmd/r2.go r2 put-content / r2 content-info
+        --   internal/dataloc/r2put.go R2PutFromHost
+        --   internal/campaign/checkpoint_transport.go PublishCheckpointToR2
+}
+
 -- ==========================================================================
 -- Rules: cloud data staging
 -- ==========================================================================
 
--- SPECIFIED-BUT-UNIMPLEMENTED (planned, not abandoned). The host->R2
--- staging path described by this rule does not yet exist: there is no
--- implementation of R2PutFromHost, so a cloud consumer that depends on an
--- on-prem-produced (or previously-completed) output it cannot co-locate
--- with currently fails with ErrArtifactMissing instead of having the
--- artifact staged into R2. This rule is the intended design for the
--- missing half; do not delete it. The companion on-prem path
--- (OnPremStagingFromR2, below) is the implemented direction.
+-- SPECIFIED-BUT-UNIMPLEMENTED for producer-output `--needs` staging. v2
+-- implements R2PutFromHost for data publish/checkpoint staging, but this
+-- producer-output resolution path is not yet wired to call it. A cloud
+-- consumer that depends on an on-prem-produced (or previously-completed)
+-- output it cannot co-locate with still fails with ErrArtifactMissing
+-- instead of having the artifact staged into R2. This rule is the intended
+-- design for that remaining use case; do not delete it. The companion
+-- on-prem path (OnPremStagingFromR2, below) is the implemented direction.
 --
 -- Producer job outputs that a consumer depends on via `--needs` and that
 -- are no longer reachable via same-instance co-location must be staged
@@ -875,8 +1030,9 @@ rule CloudDataStagingViaR2 {
         )
 
     @guidance
-        -- NOT YET IMPLEMENTED: no host->R2 staging (R2PutFromHost) exists.
-        -- Until it is built, cloud consumers of unco-located on-prem
+        -- NOT YET WIRED FOR PRODUCER OUTPUTS: R2PutFromHost exists for
+        -- data publish/checkpoint staging, but this `--needs` path does not
+        -- yet call it. Until it is wired, cloud consumers of unco-located on-prem
         -- artifacts fail with ErrArtifactMissing. The anchors below
         -- describe where the implementation is intended to live / partly
         -- lives for the consumer-side manifest plumbing:
@@ -930,6 +1086,46 @@ rule OnPremStagingFromR2 {
         -- simultaneous half-finished uploads that stomped each other.
 }
 
+-- Named assets extend OnPremStagingFromR2 to non-producer-job sources:
+-- the bytes were published via `weft data publish` rather than produced by
+-- a rental job, so there is no producer JobAttempt to resolve. The chain is:
+--   publish → named_assets row (name, content_hash, target_path)
+--   → `--input asset:NAME` mirrored into `--needs asset:NAME` at submission
+--   → needs resolution reads the named_assets row and yields the
+--     pre-computed R2 key assets/<content_hash>
+--   → the host-sync dispatcher stages the bytes onto the host at
+--     target_path and writes the satisfied marker before dispatch. Directory
+--     assets are stored as deterministic tar.gz archives and extracted into
+--     target_path.
+-- This is the wb29 fix: previously asset: inputs were neither staged nor
+-- blocking, so the command ran and failed with missing_file.
+rule OnPremNamedAssetStagingFromR2 {
+    when: OnPremDispatchTick(host)
+    requires: host.target_kind = inventory_host
+
+    for job in host.queued_jobs:
+      for need in job.needs where IsNamedAssetSpec(need):
+        let asset_row = NamedAssetByName(NameOf(need))
+
+        ensures:
+            ArtifactBytesPresentOnHost(host, job.working_dir / asset_row.target_path)
+            SatisfiedMarkerWritten(host, NameOf(need), asset_row.target_path,
+                                   exit_code: 0)
+
+    @guidance
+        -- Implementation anchor:
+        --   cmd/run.go                        — auto-mirror of --input
+        --                                       asset:NAME into --needs
+        --   internal/ops/host_sync.go         — parseAssetNeedSpec,
+        --     collectPendingNeeds (named-asset branch resolving
+        --     db.GetNamedAssetByName → pendingNeed.preResolvedR2Key =
+        --     r2keys.NamedAsset(content_hash)), stageArtifactNeedsForHost,
+        --     stageMissingNeeds
+        -- Shares the probe/lease/atomic-rename machinery of
+        -- OnPremStagingFromR2; the only difference is key resolution
+        -- (named_assets row instead of producer-attempt R2 lookup).
+}
+
 -- HF models and datasets declared on a cloud-bound job are staged by the
 -- cloud agent into the instance's HF cache before the job command starts.
 -- The staging step is per-job, so failures are attributed to the job
@@ -963,6 +1159,26 @@ rule HFAssetsPrestagedOnCloud {
         -- env such as HF_TOKEN, HF_HOME, and HTTPS_PROXY, but override
         -- HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE / HF_DATASETS_OFFLINE only
         -- for staging. The job command itself still receives the user env.
+        --
+        -- Retry semantics: the download runs up to
+        -- config.hf_prewarm_max_attempts times, each under the setup
+        -- timeout, backing off hf_prewarm_backoff_after_first after the
+        -- first failure and hf_prewarm_backoff_later thereafter. If the
+        -- prewarm log shows an xet writer/reconstruction error ("file
+        -- reconstruction error", "internal writer error", "background
+        -- writer channel closed"), subsequent attempts set
+        -- HF_HUB_DISABLE_XET=1 to fall back to the classic HTTP transfer
+        -- path. Exhausting all attempts is an infrastructure failure
+        -- (infra_prewarm_download_failed), not a user-code failure, for
+        -- explicit inputs declared through --input, project config, or
+        -- PEP-723 [tool.weft] inputs. HF refs contributed only by
+        -- source/command auto-detection are best-effort: after the same
+        -- retry/xet-disable sequence fails, the agent logs a warning and
+        -- starts the job. If the command truly needs that ref, user code
+        -- fails at runtime; a spurious argparse default must not block a
+        -- job with a different explicit model. Implementation:
+        -- cmd/agent/jobloop.go runHFDownloadPrewarm, hfPrewarmBackoff,
+        -- hfPrewarmTextHasXetWriterError.
 }
 
 rule CloudPrewarmRespectsJobOrder {
@@ -1103,6 +1319,81 @@ invariant DeclaredInputsCoverDownloads {
         -- but they surface as warnings in `weft job show` and feed into
         -- the divergence tooling so maintainers can update script
         -- metadata to declare the missing input.
+}
+
+-- On-prem stage-or-block: a validly-parsed declared input that cannot be
+-- staged or satisfied on the target host must BLOCK dispatch — the job is
+-- never appended to the runner queue, and a dispatch-failed event/reason
+-- is recorded — rather than letting the command run and fail with
+-- missing_file. This is the on-prem counterpart of the guiding principle
+-- and of AgentStagingContract on rentals, where the agent refuses to start
+-- a job whose declared inputs are not all resolvable. Historically each
+-- input scheme was retrofitted with fail-loud behaviour independently
+-- (bugs wb28, wb29); this invariant is the shared obligation any new
+-- input scheme must satisfy from day one.
+invariant DeclaredInputStagedOrDispatchBlocked {
+    -- job.inputs are parsed InputRefs: an unrecognised prefix already
+    -- aborted submission (see ClassifyInputs), so every declared input
+    -- reaching dispatch is validly parsed.
+    for job in jobs/Jobs where job.target_kind = inventory_host:
+        for input in job.inputs:
+            not InputSatisfiableOnHost(input, job.host)
+                implies (not exists RunnerQueueAppend{job: job}
+                         and exists DispatchFailureRecorded{job: job})
+
+    @guidance
+        -- Per-scheme enforcement points (internal/ops/host_sync.go unless
+        -- noted):
+        --   hf: / hf-dataset:   — ensureHFInputsAvailable builds and runs
+        --     the prestage plan; on failure recordFailure emits
+        --     EventQueueDispatchFailed("input staging failed") and the
+        --     dispatch loop `continue`s past the queue append.
+        --   asset: (named_asset) — mirrored into --needs at submission
+        --     (cmd/run.go); stageArtifactNeedsForHost stages from R2; a
+        --     stage failure puts the job in stageFailures and the dispatch
+        --     loop skips it before the queue append.
+        --   checkpoint: / corpus: — satisfied by construction: the
+        --     placement hard filter (NonTransportableInputsPinPlacement;
+        --     internal/placement/placement.go
+        --     missingNonTransportableInputReason) never places the job on
+        --     a host that lacks the path, so dispatch only ever sees
+        --     satisfiable inputs.
+        -- Host-unreachable is a deferral (EventQueueDispatchDeferred),
+        -- not a violation: the input may be satisfiable once the host is
+        -- back.
+}
+
+-- Disk estimation for cloud placement must account for every disk
+-- consumer weft itself knows about before launch or reuse admission:
+--   * declared HF inputs (deduplicated across the instance's jobs),
+--   * the project environment (uv sync footprint from the manifest or
+--     lockfile),
+--   * isolated PEP-723 script environments — heavy ML frameworks declared
+--     via inline `dependencies` or `uv run --with` materialize their own
+--     env under environments-v2, which on provider filesystems can be a
+--     wheel clone/copy rather than a free hardlink (the wb39 fix).
+-- Undercounting any of these risks disk-full termination mid-run on a
+-- correctly-declared job.
+invariant DiskEstimateCoversDeclaredFootprint {
+    for group in InstanceGroups:
+        EstimatedDiskGB(group) >=
+            DeclaredHFInputGB(group)
+            + ProjectEnvGB(group)
+            + IsolatedScriptEnvGB(group)
+
+    @guidance
+        -- Implementation anchor (internal/campaign/):
+        --   disk.go EstimateGroupDisk         — fresh-launch sizing
+        --   disk.go heavyDepIncrementalEnvGB,
+        --           commandDepIncrementalEnvGB — isolated PEP-723 env /
+        --     wheel-clone overhead per heavy framework (torch, vllm,
+        --     sglang, tensorflow, jax/jaxlib, lmcache)
+        --   reuse.go estimateReuseJobDiskNeedGB — reuse admission charges
+        --     the incremental script-env estimate against current free
+        --     disk (scriptEnvGB term).
+        -- Related: DeclaredInputsCoverDownloads keeps the declared-input
+        -- term honest; an undeclared download escapes this estimate
+        -- entirely.
 }
 
 -- ==========================================================================

@@ -61,6 +61,12 @@ func main() {
 		return
 	}
 
+	// Handle r2 subcommand (host-side checkpoint digest/upload for wb44 staging)
+	if len(os.Args) > 1 && os.Args[1] == "r2" {
+		runR2Command(os.Args[2:])
+		return
+	}
+
 	// Handle heartbeat-sidecar subcommand
 	if len(os.Args) > 1 && os.Args[1] == "heartbeat-sidecar" {
 		runHeartbeatSidecar(os.Args[2:])

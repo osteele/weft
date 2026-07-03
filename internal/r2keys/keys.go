@@ -123,6 +123,10 @@ func InstanceDriverFailure(instanceID int64) string {
 	return controlplane.InstanceDriverFailure(instanceID)
 }
 
+func InstanceGPUCountFailure(instanceID int64) string {
+	return controlplane.InstanceGPUCountFailure(instanceID)
+}
+
 func InstanceOnStartProbe(instanceID int64) string {
 	return controlplane.InstanceOnStartProbe(instanceID)
 }
