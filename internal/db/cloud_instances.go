@@ -833,11 +833,18 @@ func isImagePrestartFailure(status, reason, detail string, agentReady, onStartSe
 	if agentReady != 0 || onStartSeen != 0 {
 		return false
 	}
+	// Only count failures with positive evidence that the launch reached the
+	// container/agent-start phase and the IMAGE (or its embedded agent) failed
+	// to come up. Provider-side "never booted" failures — an instance stuck in
+	// the provider's loading/boot status, or a provider that made no progress —
+	// and unclassified (empty-detail) failures are NOT the image's fault: the
+	// container never ran, so the image was never exercised. Attributing a
+	// bad-host streak to the image blocks a healthy image for the whole window
+	// and wedges every job that uses it (absence-of-evidence: instance-never-
+	// booted and unknown are not evidence of an image fault). Blocking an image
+	// is a placement-suppressing action, so it must require positive evidence.
 	detail = strings.ToLower(strings.TrimSpace(detail))
-	return detail == "" ||
-		strings.Contains(detail, "no agent activity") ||
-		strings.Contains(detail, "no provider progress") ||
-		strings.Contains(detail, "stuck in") ||
+	return strings.Contains(detail, "no agent activity") ||
 		strings.Contains(detail, "launching phase exceeded")
 }
 

@@ -3067,8 +3067,8 @@ func TestRecentImagePrestartFailureChain_ReturnsConsecutiveFailures(t *testing.T
 	image := "lmsysorg/sglang:v0.5.10.post1"
 
 	first := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-30, 0, 0)
-	second := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "stuck in launching phase exceeded timeout", now-20, 0, 0)
-	third := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no provider progress", now-10, 0, 0)
+	second := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "launching phase exceeded its budget", now-20, 0, 0)
+	third := insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no agent activity observed", now-10, 0, 0)
 
 	chain, err := RecentImagePrestartFailureChain(database, image, 3, now-3600)
 	if err != nil {
@@ -3085,6 +3085,29 @@ func TestRecentImagePrestartFailureChain_ReturnsConsecutiveFailures(t *testing.T
 		if chain.LaunchIDs[i] != want {
 			t.Fatalf("LaunchIDs[%d] = %d, want %d (all IDs %v)", i, chain.LaunchIDs[i], want, chain.LaunchIDs)
 		}
+	}
+}
+
+// Provider-side "instance never booted" failures (stuck in the provider's
+// loading status, no provider progress, or unclassified/empty detail) must NOT
+// form an image prestart-failure chain: the container never ran, so the image
+// is not implicated. Regression for wj4004, where three consecutive Vast
+// stuck-in-loading instances blocked a healthy nvidia/cuda image for 24h.
+func TestRecentImagePrestartFailureChain_IgnoresProviderNeverBooted(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now().Unix()
+	image := "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "provider instance stuck in \"loading\" status for 5m34s", now-30, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "no provider progress", now-20, 0, 0)
+	insertImageLaunchFixture(t, database, image, LaunchStatusFailed, TerminationReasonInfraFailure, "", now-10, 0, 0)
+
+	chain, err := RecentImagePrestartFailureChain(database, image, 3, now-3600)
+	if err != nil {
+		t.Fatalf("RecentImagePrestartFailureChain: %v", err)
+	}
+	if chain != nil {
+		t.Fatalf("chain = %+v, want nil: provider-never-booted failures must not blame the image", chain)
 	}
 }
 
