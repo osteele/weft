@@ -31,8 +31,8 @@ func (e *ImagePrestartFailureError) Error() string {
 	if len(e.LaunchIDs) > 0 {
 		latest = fmt.Sprintf(" latest=wi%d", e.LaunchIDs[0])
 	}
-	return fmt.Sprintf("container image %s has %d consecutive pre-start rental failures%s; blocking fresh launches for this image until a successful/agent-started launch breaks the chain",
-		e.Image, e.Count, latest)
+	return fmt.Sprintf("container image %s has %d consecutive pre-start rental failures%s; blocking fresh launches for this image until a successful/agent-started launch breaks the chain or the recent-failure window (%s) elapses",
+		e.Image, e.Count, latest, imagePrestartFailureWindowLabel())
 }
 
 func (e *ImagePrestartFailureError) Fingerprint() string {
@@ -82,4 +82,11 @@ func imagePrestartFailureKey(image string) string {
 		return cloud.DefaultImage
 	}
 	return image
+}
+
+func imagePrestartFailureWindowLabel() string {
+	if imagePrestartFailureWindow%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int(imagePrestartFailureWindow/time.Hour))
+	}
+	return imagePrestartFailureWindow.String()
 }

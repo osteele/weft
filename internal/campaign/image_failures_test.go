@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,9 @@ func TestApplyImagePrestartFailureBlocks_BlocksImageAlias(t *testing.T) {
 	}
 	if imageErr.Image != sglangRuntimeImage {
 		t.Fatalf("Image = %q, want normalized public image %q", imageErr.Image, sglangRuntimeImage)
+	}
+	if got := imageErr.Error(); !strings.Contains(got, "recent-failure window (24h) elapses") {
+		t.Fatalf("Error() = %q, want recent-failure window expiry", got)
 	}
 	if len(got[0].Offers) != 0 {
 		t.Fatalf("Offers = %+v, want nil/empty after image block", got[0].Offers)
