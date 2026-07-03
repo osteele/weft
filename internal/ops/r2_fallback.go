@@ -55,19 +55,24 @@ func syncJobStatusFromR2(database *sql.DB, job *db.Job) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("parse R2 exit code for job %s: %w", ids.FormatJobID(job.ID), err)
 	}
 
-	// Try to read the completion record for end_time
-	var endTime int64
+	// Try to read the completion record for start/end times. Backfilling
+	// start_time here matters: this path can be the only one that ever
+	// records this completion (SSH stayed unavailable), and once the attempt
+	// closes with end_time set, a missing start_time is otherwise never
+	// recovered.
+	var startTime, endTime int64
 	completionKey := r2keys.JobResultsPrefix(job.ID) + fmt.Sprintf("%d.completion.json", job.ID)
 	if compData, compErr := r2Client.GetObject(ctx, completionKey); compErr == nil {
-		var rec struct {
-			EndTime int64 `json:"end_time"`
-		}
-		if json.Unmarshal(compData, &rec) == nil && rec.EndTime > 0 {
-			endTime = rec.EndTime
-		}
+		startTime, endTime = parseCompletionRecordTimes(compData)
 	}
 	if endTime == 0 {
 		endTime = time.Now().Unix()
+	}
+
+	if job.StartTime == 0 && startTime > 0 {
+		if dbErr := db.UpdateStartTime(database, job.ID, startTime); dbErr == nil {
+			job.StartTime = startTime
+		}
 	}
 
 	if err := RecordJobCompletion(database, job.ID, exitCode, endTime); err != nil {
@@ -75,4 +80,18 @@ func syncJobStatusFromR2(database *sql.DB, job *db.Job) (SyncResult, error) {
 	}
 
 	return SyncResult{Updated: true, HostContacted: false}, nil
+}
+
+// parseCompletionRecordTimes extracts start_time and end_time from a
+// runner completion record (<id>.completion.json). Missing or malformed
+// fields yield zeros.
+func parseCompletionRecordTimes(data []byte) (startTime, endTime int64) {
+	var rec struct {
+		StartTime int64 `json:"start_time"`
+		EndTime   int64 `json:"end_time"`
+	}
+	if json.Unmarshal(data, &rec) != nil {
+		return 0, 0
+	}
+	return rec.StartTime, rec.EndTime
 }

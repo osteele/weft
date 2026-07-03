@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
@@ -60,6 +61,7 @@ var autoPilotRebalanceQueuedRentalJobsToOnPrem = rebalanceQueuedRentalJobsToOnPr
 var autoPilotRebalanceQueuedJobsAcrossInstances = RebalanceQueuedJobsAcrossInstances
 var autoPilotFillReusableInstances = fillReusableInstances
 var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
+var autoPilotPublishCheckpointToR2 = campaign.PublishCheckpointToR2
 
 // autoReplanConfigEnabled reports whether the autopilot should run
 // AutoReplanStuckInventoryDispatch this pass. Wrapped in a var so tests
@@ -79,7 +81,198 @@ var autoReplanConfigEnabled = func() bool {
 // instance-create window (a few seconds typically, up to ~90s under load).
 const placementIntentProtectionWindow = 5 * time.Minute
 
+const autoPublishCheckpointCooldown = 10 * time.Minute
+
+var autoPublishCheckpointAttempts = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
+
 func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (out *GroupedAutoPilotResult, outErr error) {
+	return runGroupedAutoPilotPassWithOptions(ctx, database, scopedJobs, campaign.PlanOptions{})
+}
+
+func autoPublishMissingCheckpoints(ctx context.Context, database *sql.DB, cfg *config.Config, r2Client *r2.Client, jobs []*db.Job) (int, map[int64]string, error) {
+	reasons := make(map[int64]string)
+	if database == nil || cfg == nil || !cfg.AutoPublishCheckpointsEnabled() {
+		return 0, reasons, nil
+	}
+	if r2Client == nil {
+		for _, job := range jobs {
+			if jobNeedsCheckpoint(job) {
+				reasons[job.ID] = "checkpoint auto-publish deferred: R2 is not configured"
+			}
+		}
+		return 0, reasons, nil
+	}
+	maxBytes := cfg.AutoPublishCheckpointMaxBytes()
+	var published int
+	for _, job := range jobs {
+		if job == nil || job.HasTag(db.TagInventory) || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		for _, raw := range job.Inputs {
+			asset, ok := dataloc.ParseAssetRef(raw)
+			if !ok || asset.Kind != dataloc.AssetCheckpoint {
+				continue
+			}
+			entry, reason, ok := checkpointAutoPublishCandidate(database, asset, maxBytes)
+			if !ok {
+				if reason != "" {
+					reasons[job.ID] = reason
+				}
+				continue
+			}
+			attemptKey := fmt.Sprintf("%d:%s", job.ID, asset.Ref())
+			if !markAutoPublishAttempt(attemptKey, time.Now()) {
+				reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish deferred: recently attempted %s; waiting before retry", asset.Ref())
+				continue
+			}
+			result, err := autoPilotPublishCheckpointToR2(ctx, database, r2Client, cfg.Vastai.R2.ToCloudR2Config(), asset)
+			if err != nil {
+				if errors.Is(err, campaign.ErrCheckpointPublishDeferred) {
+					reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish deferred: %v", err)
+					continue
+				}
+				// A confirmed upload failure is recorded per-job and logged, but
+				// must not abort the pass: other jobs still get placed, and the
+				// cooldown-gated next pass retries this checkpoint.
+				reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish failed: %v", err)
+				oplog.Log("auto_pilot.checkpoint_auto_publish_error",
+					oplog.WithError(err),
+					oplog.WithDetailf("job=%s asset=%s host=%s", ids.FormatJobID(job.ID), asset.Ref(), entry.Host))
+				continue
+			}
+			if result.Uploaded {
+				published++
+			}
+		}
+	}
+	return published, reasons, nil
+}
+
+func jobNeedsCheckpoint(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	for _, raw := range job.Inputs {
+		asset, ok := dataloc.ParseAssetRef(raw)
+		if ok && asset.Kind == dataloc.AssetCheckpoint {
+			return true
+		}
+	}
+	return false
+}
+
+func checkpointAutoPublishCandidate(database *sql.DB, asset dataloc.DataAsset, maxBytes int64) (dataloc.HostDataEntry, string, bool) {
+	entries, err := dataloc.FindAssetHosts(database, asset)
+	if err != nil {
+		return dataloc.HostDataEntry{}, fmt.Sprintf("checkpoint auto-publish deferred: could not read inventory for %s: %v", asset.Ref(), err), false
+	}
+	if len(entries) == 0 {
+		return dataloc.HostDataEntry{}, fmt.Sprintf("checkpoint auto-publish deferred: %s is not registered", asset.Ref()), false
+	}
+	entry := entries[0]
+	for _, candidate := range entries[1:] {
+		if candidate.SizeBytes > entry.SizeBytes {
+			entry = candidate
+		}
+	}
+	if entry.ContentHash == "" || entry.SizeBytes <= 0 {
+		return entry, fmt.Sprintf("checkpoint auto-publish deferred: %s on %s lacks content hash/size; rerun `weft data add`", asset.Ref(), entry.Host), false
+	}
+	if entry.SizeBytes > maxBytes {
+		return entry, fmt.Sprintf("checkpoint auto-publish deferred: %s is %s, above autopilot cap %s",
+			asset.Ref(), formatBytesForAutopilot(entry.SizeBytes), formatBytesForAutopilot(maxBytes)), false
+	}
+	return entry, "", true
+}
+
+func markAutoPublishAttempt(key string, now time.Time) bool {
+	autoPublishCheckpointAttempts.Lock()
+	defer autoPublishCheckpointAttempts.Unlock()
+	last, ok := autoPublishCheckpointAttempts.last[key]
+	if ok && now.Sub(last) < autoPublishCheckpointCooldown {
+		return false
+	}
+	autoPublishCheckpointAttempts.last[key] = now
+	return true
+}
+
+func formatBytesForAutopilot(size int64) string {
+	if size <= 0 {
+		return "0B"
+	}
+	const unit = 1024
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	value := float64(size)
+	idx := 0
+	for idx+1 < len(units) && value >= unit {
+		value /= unit
+		idx++
+	}
+	if idx == 0 {
+		return fmt.Sprintf("%d%s", size, units[idx])
+	}
+	return fmt.Sprintf("%.1f%s", value, units[idx])
+}
+
+func removeCheckpointDeferredJobsFromPlan(plan *campaign.AutoPlacementPlan, reasons map[int64]string) {
+	if plan == nil || len(reasons) == 0 {
+		return
+	}
+	blocked := make(map[int64]struct{}, len(reasons))
+	for jobID, reason := range reasons {
+		if strings.TrimSpace(reason) != "" {
+			blocked[jobID] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return
+	}
+
+	launchIDs := plan.LaunchJobIDs[:0]
+	for _, jobID := range plan.LaunchJobIDs {
+		if _, ok := blocked[jobID]; ok {
+			continue
+		}
+		launchIDs = append(launchIDs, jobID)
+	}
+	plan.LaunchJobIDs = launchIDs
+
+	groups := plan.LaunchGroups[:0]
+	rate := 0
+	for _, group := range plan.LaunchGroups {
+		jobIDs := group.JobIDs[:0]
+		for _, jobID := range group.JobIDs {
+			if _, ok := blocked[jobID]; ok {
+				continue
+			}
+			jobIDs = append(jobIDs, jobID)
+		}
+		if len(jobIDs) == 0 {
+			continue
+		}
+		group.JobIDs = jobIDs
+		groups = append(groups, group)
+		rate += group.CostPerHourCents
+	}
+	plan.LaunchGroups = groups
+	plan.LaunchRateCentsPerHour = rate
+
+	reuse := plan.ReuseAssignments[:0]
+	for _, assignment := range plan.ReuseAssignments {
+		if assignment.Job != nil {
+			if _, ok := blocked[assignment.Job.ID]; ok {
+				continue
+			}
+		}
+		reuse = append(reuse, assignment)
+	}
+	plan.ReuseAssignments = reuse
+}
+
+func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, plannerOptions campaign.PlanOptions) (out *GroupedAutoPilotResult, outErr error) {
 	if database == nil {
 		return &GroupedAutoPilotResult{}, nil
 	}
@@ -265,6 +458,25 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			OverloadMoved: overloadMoved,
 		}, nil
 	}
+	r2Client, _ := BuildR2Client(cfg)
+	checkpointPublishReasons := map[int64]string{}
+	if cfg.AutoPublishCheckpointsEnabled() {
+		published, reasons, publishErr := autoPublishMissingCheckpoints(ctx, database, cfg, r2Client, unplaced)
+		for jobID, reason := range reasons {
+			checkpointPublishReasons[jobID] = reason
+		}
+		if publishErr != nil {
+			return &GroupedAutoPilotResult{
+				Placed:        prePlaced,
+				Launched:      moveRetryLaunches,
+				AutoReplanned: autoReplanned,
+				OverloadMoved: overloadMoved,
+			}, publishErr
+		}
+		if published > 0 {
+			oplog.Log("auto_pilot.checkpoint_auto_publish", oplog.WithDetailf("published=%d", published))
+		}
+	}
 	plannedCandidateIDs := make(map[int64]struct{}, len(unplaced))
 	for _, job := range unplaced {
 		if job != nil {
@@ -272,7 +484,6 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 	onPremDetails := logAutoPilotOnPremDiagnostics(database, unplaced)
-	r2Client, _ := BuildR2Client(cfg)
 
 	launches, err := db.ListRunningLaunches(database)
 	if err != nil {
@@ -294,7 +505,12 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		}
 	}
 
-	plan, err := autoPilotBuildPlan(database, cfg, unplaced, capacities)
+	var plan campaign.AutoPlacementPlan
+	if plannerOptions.CachedOffersOnly {
+		plan, err = autoPilotBuildPlanWithOptions(database, cfg, unplaced, capacities, plannerOptions)
+	} else {
+		plan, err = autoPilotBuildPlan(database, cfg, unplaced, capacities)
+	}
 	if err != nil {
 		oplog.Log("auto_pilot.planner_error",
 			oplog.WithError(err),
@@ -312,6 +528,14 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 		if strings.TrimSpace(reason) != "" {
 			blockedReasons[jobID] = reason
 		}
+	}
+	for jobID, reason := range checkpointPublishReasons {
+		if strings.TrimSpace(reason) != "" {
+			blockedReasons[jobID] = reason
+		}
+	}
+	if len(checkpointPublishReasons) > 0 {
+		removeCheckpointDeferredJobsFromPlan(&plan, checkpointPublishReasons)
 	}
 	// Lift the planner's per-job full-detail map (e.g. multi-line vastai
 	// stderr) into the structured form so the TUI disclosure expand view and
@@ -395,6 +619,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 					if cheapest > 0 && headroom < cheapest && len(capacities) > 0 {
 						retryOptions := campaign.AutoPlannerOptions(cfg)
 						retryOptions.PreferReuse = true
+						if plannerOptions.CachedOffersOnly {
+							retryOptions = mergeCachedOfferOptions(retryOptions, plannerOptions)
+						}
 						retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, unplaced, capacities, retryOptions)
 						if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
 							reusePreferredFallback = true
@@ -653,6 +880,9 @@ func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 			fallbackJobs := jobsByIDInOrder(remainingByID, rentalScope)
 			retryOptions := campaign.AutoPlannerOptions(cfg)
 			retryOptions.PreferReuse = true
+			if plannerOptions.CachedOffersOnly {
+				retryOptions = mergeCachedOfferOptions(retryOptions, plannerOptions)
+			}
 			retryPlan, retryErr := autoPilotBuildPlanWithOptions(database, cfg, fallbackJobs, capacities, retryOptions)
 			if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
 				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, reuseDiagnostics, blockedReasons, recordedReuse)

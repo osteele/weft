@@ -254,7 +254,7 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 		Status:        "ok",
 		StartedAtUnix: time.Now().Unix(),
 	}
-	summary.FileCount, summary.Bytes = measureUploadTree(logDir)
+	summary.FileCount, summary.Bytes, _ = measureUploadTree(logDir)
 
 	start := time.Now()
 	opts := drainOptionsFromConfig()

@@ -104,11 +104,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddLaunchRunpodCloudTypeColumn},
 		&goose.GoFunc{RunDB: dropAddLaunchRunpodCloudTypeColumn},
 	)
+	addCheckpointAssetMetadata := goose.NewGoMigration(
+		28,
+		&goose.GoFunc{RunDB: applyAddCheckpointAssetMetadataColumns},
+		&goose.GoFunc{RunDB: dropAddCheckpointAssetMetadataColumns},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -239,6 +244,38 @@ func applyAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error 
 
 func dropAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN runpod_cloud_type`)
+	return nil
+}
+
+func applyAddCheckpointAssetMetadataColumns(ctx context.Context, db *sql.DB) error {
+	cols := []struct {
+		table string
+		name  string
+		ddl   string
+	}{
+		{"host_data", "content_hash", `ALTER TABLE host_data ADD COLUMN content_hash TEXT DEFAULT ''`},
+		{"host_data", "content_type", `ALTER TABLE host_data ADD COLUMN content_type TEXT DEFAULT ''`},
+		{"named_assets", "content_type", `ALTER TABLE named_assets ADD COLUMN content_type TEXT NOT NULL DEFAULT 'file'`},
+	}
+	for _, col := range cols {
+		exists, err := columnExists(ctx, db, col.table, col.name)
+		if err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", col.table, col.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("add %s.%s: %w", col.table, col.name, err)
+		}
+	}
+	return nil
+}
+
+func dropAddCheckpointAssetMetadataColumns(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE named_assets DROP COLUMN content_type`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE host_data DROP COLUMN content_type`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE host_data DROP COLUMN content_hash`)
 	return nil
 }
 

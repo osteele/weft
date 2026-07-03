@@ -130,7 +130,7 @@ func SyncInstanceState(
 		wave1.Add(1)
 		go func() {
 			defer wave1.Done()
-			s.AgentVersion = fetchR2Marker(ctx, r2Client, r2keys.InstanceAgentVersion(instanceID))
+			s.AgentVersion, _, _ = fetchR2Marker(ctx, r2Client, r2keys.InstanceAgentVersion(instanceID))
 		}()
 	}
 	wave1.Wait()
@@ -573,8 +573,9 @@ func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage 
 }
 
 // CheckParams builds CheckInstanceParams from synced state and caller-provided context.
-// The caller is responsible for setting ProviderInst, ProviderErr, BootstrapSurvival,
-// and SetupSurvival on the returned params.
+// The caller is responsible for setting ProviderInst, ProviderErr,
+// ProviderStatusUnknownFor, BootstrapSurvival, and SetupSurvival on the
+// returned params.
 func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState JobState, now time.Time) CheckInstanceParams {
 	instancePhase := s.InstancePhase
 	if !isActiveInstancePhase(instancePhase) {

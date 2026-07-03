@@ -37,6 +37,18 @@ const createInstanceTimeout = 2 * time.Minute
 // createInstanceTimeout: under load this call can exceed the default 30s.
 const attachSSHTimeout = 2 * time.Minute
 
+// instancePollTimeout bounds `vastai show instances` (ShowInstance and
+// ListAllInstances). The call takes ~6s on a good network but routinely
+// exceeds 30s on slow/lossy networks; a 30s ceiling turned status polling
+// into a stream of timeouts, which the reconciler conflated with "instance
+// dead" and terminated healthy interruptible rentals.
+const instancePollTimeout = 90 * time.Second
+
+// offerSearchTimeout bounds `vastai search offers`. Search responses are
+// large and slow under load; 30s timeouts produced spurious "no offers for
+// group" incidents on slow networks.
+const offerSearchTimeout = 60 * time.Second
+
 const availabilityGracePeriod = 2 * time.Minute
 const userAPITimeout = 10 * time.Second
 
@@ -223,7 +235,7 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	// a doubled "search offers: search offers: …" headline in the TUI. The
 	// internal-only branches below (empty body, parse failures) add
 	// "search offers:" because c.run didn't supply context for those cases.
-	out, err := c.run(args...)
+	out, err := c.runWithTimeout(offerSearchTimeout, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +504,7 @@ func (c *Client) probeCreditBalance() (float64, error) {
 
 // ShowInstance fetches the current state of an instance.
 func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
-	out, err := c.run("show", "instances", "--raw")
+	out, err := c.runWithTimeout(instancePollTimeout, "show", "instances", "--raw")
 	if err != nil {
 		return nil, fmt.Errorf("show instances: %w", err)
 	}
@@ -515,7 +527,7 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 
 // ListAllInstances returns all instances from the user's Vast.ai account.
 func (c *Client) ListAllInstances() ([]Instance, error) {
-	out, err := c.run("show", "instances", "--raw")
+	out, err := c.runWithTimeout(instancePollTimeout, "show", "instances", "--raw")
 	if err != nil {
 		return nil, fmt.Errorf("show instances: %w", err)
 	}

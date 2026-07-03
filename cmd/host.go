@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -390,10 +391,7 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 }
 
 func formatHostJobStarted(startTime int64) string {
-	if startTime <= 0 {
-		return "-"
-	}
-	return time.Unix(startTime, 0).Format("01/02 15:04")
+	return util.FormatUnixTimeOr(startTime, "01/02 15:04", util.EmptyCellCLI)
 }
 
 func runHostLoad(cmd *cobra.Command, args []string) error {
@@ -534,44 +532,57 @@ func runHostData(cmd *cobra.Command, args []string) error {
 	}
 
 	if hostDataScan {
+		now := time.Now()
+
 		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
 		ctx, cancel := context.WithTimeout(context.Background(), hostDataScanTimeout)
 		defer cancel()
 		entries, err := dataloc.ScanHFCacheDetailedContext(ctx, host)
-		if err != nil {
+		switch {
+		case errors.Is(err, dataloc.ErrScanBaseDirUnavailable):
+			// The scan could not enumerate the HF cache base dir (missing or
+			// unreadable). An empty result here is "unknown", not "absent":
+			// skip the prune so existing rows for assets on a possibly
+			// unmounted volume survive.
+			fmt.Printf("HuggingFace cache directory unavailable on %s; skipping HF prune (existing rows preserved)\n", host)
+		case err != nil:
 			return fmt.Errorf("scan HF cache: %w", err)
-		}
-		now := time.Now()
-		for _, entry := range entries {
-			entry.LastSeen = now
-			if err := dataloc.RecordAsset(database, entry); err != nil {
-				return fmt.Errorf("record asset: %w", err)
+		default:
+			for _, entry := range entries {
+				entry.LastSeen = now
+				if err := dataloc.RecordAsset(database, entry); err != nil {
+					return fmt.Errorf("record asset: %w", err)
+				}
 			}
-		}
-		fmt.Printf("Found %d HF asset(s)\n", len(entries))
-		// The scan ran to completion (SSH or non-zero shell exit would have
-		// errored above), so any stale HF entries can be pruned safely.
-		if err := pruneStaleAssets(database, host, now, "HF",
-			dataloc.AssetHFModel, dataloc.AssetHFDataset); err != nil {
-			return err
+			fmt.Printf("Found %d HF asset(s)\n", len(entries))
+			// The scan positively enumerated the base dir, so any HF row it did
+			// not refresh names an asset the scan confirmed absent — prune safely.
+			if err := pruneStaleAssets(database, host, now, "HF",
+				dataloc.AssetHFModel, dataloc.AssetHFDataset); err != nil {
+				return err
+			}
 		}
 
 		fmt.Printf("Scanning corpus directory on %s...\n", host)
 		corpusEntries, err := dataloc.ScanCorpusDir(host)
-		if err != nil {
+		switch {
+		case errors.Is(err, dataloc.ErrScanBaseDirUnavailable):
+			fmt.Printf("Corpus directory unavailable on %s; skipping corpus prune (existing rows preserved)\n", host)
+		case err != nil:
 			return fmt.Errorf("scan corpus dir: %w", err)
-		}
-		for _, entry := range corpusEntries {
-			entry.LastSeen = now
-			if err := dataloc.RecordAsset(database, entry); err != nil {
-				return fmt.Errorf("record asset: %w", err)
+		default:
+			for _, entry := range corpusEntries {
+				entry.LastSeen = now
+				if err := dataloc.RecordAsset(database, entry); err != nil {
+					return fmt.Errorf("record asset: %w", err)
+				}
 			}
-		}
-		if len(corpusEntries) > 0 {
-			fmt.Printf("Found %d corpus asset(s)\n", len(corpusEntries))
-		}
-		if err := pruneStaleAssets(database, host, now, "corpus", dataloc.AssetCorpus); err != nil {
-			return err
+			if len(corpusEntries) > 0 {
+				fmt.Printf("Found %d corpus asset(s)\n", len(corpusEntries))
+			}
+			if err := pruneStaleAssets(database, host, now, "corpus", dataloc.AssetCorpus); err != nil {
+				return err
+			}
 		}
 	}
 

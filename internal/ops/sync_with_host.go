@@ -43,6 +43,11 @@ func SyncQueueRunnerJobWithProber(
 			if metaErr != nil {
 				return SyncResult{HostContacted: true}, metaErr
 			}
+			// Second evidence source: a failed/empty metadata read here is
+			// silent, and this may be the only tick that ever records this
+			// completion — without a start_time the attempt would keep
+			// end_time but NULL start_time forever (seen live: wj3871–73).
+			BackfillStartTimeFromCompletionRecord(database, job, timeout)
 			// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
 			endTime := completionInfo.EndTime
 			if metaEndTime > 0 {

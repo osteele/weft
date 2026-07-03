@@ -19,6 +19,36 @@ func TestBuildOutputFileSyncArgsUsesFilesFrom(t *testing.T) {
 	}
 }
 
+func TestBuildOutputFileSyncArgsStripsTildeRemoteDir(t *testing.T) {
+	// rsync does not shell-expand a leading "~/" after "host:"; it must be
+	// stripped so the path is home-relative rather than a literal "~" dir.
+	args := BuildOutputFileSyncArgs("cool30", "~/code/research/adjective-order", "/local/project")
+	src := args[len(args)-2]
+	if !strings.HasSuffix(src, ":code/research/adjective-order/") {
+		t.Fatalf("source = %q, want tilde stripped to home-relative path", src)
+	}
+	if strings.Contains(src, "~") {
+		t.Fatalf("source = %q still contains a literal tilde", src)
+	}
+}
+
+func TestRemoteRsyncPath(t *testing.T) {
+	cases := map[string]string{
+		"~/code/x":     "code/x",
+		"~/code/x/":    "code/x",
+		"~":            ".",
+		"/abs/path":    "/abs/path",
+		"/abs/path/":   "/abs/path",
+		"rel/path":     "rel/path",
+		"~notexpanded": "~notexpanded", // only "~/" and bare "~" are home refs
+	}
+	for in, want := range cases {
+		if got := remoteRsyncPath(in); got != want {
+			t.Errorf("remoteRsyncPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestCleanOutputFileListRejectsUnsafePaths(t *testing.T) {
 	got := cleanOutputFileList([]string{
 		" output/result.json ",

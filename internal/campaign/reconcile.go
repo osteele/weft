@@ -45,8 +45,9 @@ type Reconciler struct {
 	mu                 sync.Mutex
 	firstDeadAt        map[int64]time.Time // keyed by Launch.ID
 	probeFailures      map[int64]probeFailureState
-	lastProviderStatus map[int64]string // last observed provider status per instance
-	deadConfirmTime    time.Duration    // 0 uses minDeadConfirmTime
+	firstUnknownAt     map[int64]time.Time // when provider status polling first started failing, keyed by Launch.ID
+	lastProviderStatus map[int64]string    // last observed provider status per instance
+	deadConfirmTime    time.Duration       // 0 uses minDeadConfirmTime
 
 	// bootstrapTimeouts caches adaptive bootstrap thresholds per provider,
 	// recomputed at most once per survivalCacheTTL.
@@ -69,6 +70,7 @@ func NewReconciler() *Reconciler {
 	return &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
+		firstUnknownAt:     make(map[int64]time.Time),
 		lastProviderStatus: make(map[int64]string),
 	}
 }
@@ -149,6 +151,11 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 			delete(r.probeFailures, id)
 		}
 	}
+	for id := range r.firstUnknownAt {
+		if !activeIDs[id] {
+			delete(r.firstUnknownAt, id)
+		}
+	}
 	for id := range r.lastProviderStatus {
 		if !activeIDs[id] {
 			delete(r.lastProviderStatus, id)
@@ -221,6 +228,18 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 		mu.Lock()
 		result.Reconciled += len(stale.Actions)
 		result.JobsUpdated += stale.JobsUpdated
+		mu.Unlock()
+	}
+
+	// Supersede stale rebalance placement reasons on jobs that fell back to the
+	// unplaced queue, so `weft diagnose`/status no longer shows a failed
+	// instance→instance move as the block reason for a freely-placeable job.
+	if refreshed, err := db.RefreshStalePlacementReasons(database); err != nil {
+		slog.Warn("failed to refresh stale placement reasons", "component", "reconcile", "error", err)
+	} else if refreshed.JobsUpdated > 0 {
+		slog.Debug("refreshed stale placement reasons", "component", "reconcile", "jobs_updated", refreshed.JobsUpdated)
+		mu.Lock()
+		result.JobsUpdated += refreshed.JobsUpdated
 		mu.Unlock()
 	}
 
@@ -367,7 +386,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 			case showErr == nil && showInst != nil:
 				inst = showInst
 			case errors.Is(showErr, cloud.ErrInstanceNotFound):
-				providerErr = fmt.Errorf("provider instance %s not found", providerID)
+				providerErr = fmt.Errorf("provider instance %s: %w", providerID, cloud.ErrInstanceNotFound)
 			case showErr != nil:
 				// Transient ShowInstance failure. Keep providerErr non-nil so
 				// the dead-confirm path stays gated on hysteresis rather than
@@ -416,6 +435,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	params := synced.CheckParams(ci, r2Client, jobState, now)
 	params.ProviderInst = inst
 	params.ProviderErr = providerErr
+	params.ProviderStatusUnknownFor = r.noteProviderStatusPoll(ci.ID, inst == nil && providerErr != nil, now)
 	params.SetupSurvival = setupSurvival
 	params.PauseTolerant = hasPreemptibleJobs(jobs)
 	populateRunningPhaseTerminalJob(&params, jobs, attemptOutcomes)
@@ -722,6 +742,32 @@ const (
 	minProbeFailureWindow   = 2 * time.Minute
 )
 
+// noteProviderStatusPoll updates the provider-status-unknown tracking for a
+// launch and returns how long its provider status has been continuously
+// unknown. unknown means the most recent poll yielded no instance data and a
+// non-nil error (the CheckInstanceParams ProviderInst/ProviderErr contract).
+// Any pass where status is known — a poll that returned instance data, or no
+// poll at all — clears the tracking, so the returned duration measures an
+// unbroken stretch of status-less polls (mirrors the firstDeadAt /
+// probeFailures hysteresis maps).
+func (r *Reconciler) noteProviderStatusPoll(id int64, unknown bool, now time.Time) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !unknown {
+		delete(r.firstUnknownAt, id)
+		return 0
+	}
+	if r.firstUnknownAt == nil {
+		r.firstUnknownAt = make(map[int64]time.Time)
+	}
+	first, ok := r.firstUnknownAt[id]
+	if !ok {
+		r.firstUnknownAt[id] = now
+		return 0
+	}
+	return now.Sub(first)
+}
+
 func (r *Reconciler) clearProbeFailure(id int64) {
 	r.mu.Lock()
 	delete(r.probeFailures, id)
@@ -969,8 +1015,8 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bo
 	defer cancel()
 
 	key := r2keys.GraceStatus(ci.ID)
-	data := fetchR2Marker(ctx, r2Client, key)
-	if data == "" {
+	data, found, err := fetchR2Marker(ctx, r2Client, key)
+	if err != nil || !found || data == "" {
 		return false
 	}
 
@@ -1035,8 +1081,8 @@ func readR2CompletionManifest(r2Client *r2.Client, instanceID int64) *runner.Ins
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	data := fetchR2Marker(ctx, r2Client, r2keys.CampaignComplete(instanceID))
-	if data == "" {
+	data, found, err := fetchR2Marker(ctx, r2Client, r2keys.CampaignComplete(instanceID))
+	if err != nil || !found || data == "" {
 		return nil
 	}
 	m, err := runner.ParseCompletionMarker(data)
@@ -1057,8 +1103,8 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 		}
 	}()
 
-	data := fetchR2Marker(ctx, r2Client, r2keys.InstanceTerminationIntent(instanceID))
-	if data == "" {
+	data, found, fetchErr := fetchR2Marker(ctx, r2Client, r2keys.InstanceTerminationIntent(instanceID))
+	if fetchErr != nil || !found || data == "" {
 		return nil, nil
 	}
 

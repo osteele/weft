@@ -1273,6 +1273,34 @@ func TestMoveQueuedJobToUnplacedKeepsInventoryTag(t *testing.T) {
 	}
 }
 
+func TestMoveQueuedJobToUnplacedWithReason(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	reason := "re-placed from host-beta: source sync wedged (host filesystem unresponsive)"
+	if err := MoveQueuedJobToUnplacedWithReason(database, jobID, reason); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplacedWithReason: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Host != "" {
+		t.Errorf("Host = %q, want empty", job.Host)
+	}
+	if job.HasTag(TagRental) {
+		t.Errorf("neutral move must not promote an on-prem job to rental, got %v", job.Tags)
+	}
+	if got := strings.Join(job.PlacementReasons, "\n"); got != reason {
+		t.Errorf("PlacementReasons = %v, want %q", job.PlacementReasons, reason)
+	}
+}
+
 func TestHasTagHostConflict(t *testing.T) {
 	database := SetupTestDB(t)
 

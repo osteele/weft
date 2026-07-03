@@ -1699,8 +1699,8 @@ func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 }
 
 func TestCheckInstance_SetupStall_Terminate(t *testing.T) {
-	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-26 * time.Minute)
+	launchedAt := time.Now().Add(-50 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-46 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -1731,8 +1731,8 @@ func TestCheckInstance_SetupStall_Terminate(t *testing.T) {
 }
 
 func TestCheckInstance_SetupStall_Warn(t *testing.T) {
-	launchedAt := time.Now().Add(-20 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-16 * time.Minute)
+	launchedAt := time.Now().Add(-35 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-30 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -1756,6 +1756,32 @@ func TestCheckInstance_SetupStall_Warn(t *testing.T) {
 	}
 	if action.StallMessage == "" {
 		t.Error("StallMessage should be non-empty")
+	}
+}
+
+func TestCheckInstance_SetupStall_ToleratesLongQuietInstall(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-26 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "setup:459",
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind == ActionSetupStalled {
+		t.Fatal("26 minute setup phase should not be terminated by default")
 	}
 }
 
@@ -1813,7 +1839,7 @@ func TestCheckInstance_SetupStall_NonSetupPhase(t *testing.T) {
 }
 
 func TestCheckInstance_SetupStall_NilPhaseChangedAt_UsesLifecycleFallback(t *testing.T) {
-	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	launchedAt := time.Now().Add(-50 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -1864,7 +1890,7 @@ func TestCheckInstance_SetupStall_StaleR2SetupButDBRunning_DoesNotTerminate(t *t
 }
 
 func TestCheckInstance_SetupStall_QueuedJobNoPhaseChangedAt_Terminates(t *testing.T) {
-	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	launchedAt := time.Now().Add(-50 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -2328,5 +2354,161 @@ func TestBuildProviderDeadDetail_R2Refined(t *testing.T) {
 	got := buildProviderDeadDetail(nil, nil, db.TerminationReasonUnknown, db.TerminationReasonDiskFull, now)
 	if !strings.Contains(got, "R2 marker refined reason unknown→disk_full") {
 		t.Errorf("expected R2 refinement note, got: %s", got)
+	}
+}
+
+// --- Provider-status-unknown deferral for interruptible launches ---
+//
+// When status polling fails (ProviderInst nil, ProviderErr set), an
+// interruptible launch that has stopped heartbeating may simply be outbid
+// (offline, recoverable), not dead. The watchdogs must defer termination
+// until either a poll succeeds or the unknown window exceeds
+// stalePauseTimeout. See the wj3741 incident: 16 consecutive orphaned
+// attempts because "vastai show instances" timeouts were conflated with
+// instance death.
+
+func unknownStatusStaleHeartbeatParams(instanceType string, unknownFor time.Duration) CheckInstanceParams {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	agentReady := time.Now().Add(-25 * time.Minute).Unix()
+	return CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReady,
+			ProviderInstanceID: "test-123",
+			InstanceType:       instanceType,
+		},
+		ProviderErr:              fmt.Errorf("vastai show instances timed out after 30s"),
+		ProviderStatusUnknownFor: unknownFor,
+		InstancePhase:            "running:531",
+		HeartbeatAge:             heartbeatStaleThreshold + time.Minute,
+		JobState:                 JobState{HasStartedJob: true},
+		PauseTolerant:            true,
+		Now:                      time.Now(),
+	}
+}
+
+func TestCheckInstance_UnknownStatus_InterruptibleStaleHeartbeatDefers(t *testing.T) {
+	r := NewReconciler()
+	action := r.CheckInstance(unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, 5*time.Minute))
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %v, want ActionDisplayOnly (defer) — got message %q", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "provider status unknown") || !strings.Contains(action.StallMessage, "deferring termination") {
+		t.Errorf("StallMessage = %q, want it to explain the unknown-status deferral", action.StallMessage)
+	}
+}
+
+func TestCheckInstance_UnknownStatus_OnDemandStaleHeartbeatTerminates(t *testing.T) {
+	for _, instanceType := range []string{cloud.InstanceTypeOnDemand, ""} {
+		t.Run("type="+instanceType, func(t *testing.T) {
+			r := NewReconciler()
+			action := r.CheckInstance(unknownStatusStaleHeartbeatParams(instanceType, 5*time.Minute))
+			if action.Kind != ActionEmptyStatusTimeout {
+				t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — non-interruptible launches keep current behavior", action.Kind)
+			}
+			if !action.ResetJobs {
+				t.Error("expected ResetJobs to be true")
+			}
+		})
+	}
+}
+
+func TestCheckInstance_UnknownStatus_InterruptibleTerminatesPastBound(t *testing.T) {
+	r := NewReconciler()
+	action := r.CheckInstance(unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, stalePauseTimeout+time.Minute))
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — deferral is bounded by stalePauseTimeout", action.Kind)
+	}
+}
+
+// A definitive provider not-found is an answer, not a failed poll: the
+// deferral must not delay requeue of a genuinely destroyed interruptible
+// instance's jobs.
+func TestCheckInstance_NotFoundStatus_InterruptibleTerminates(t *testing.T) {
+	r := NewReconciler()
+	params := unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, 5*time.Minute)
+	params.ProviderErr = fmt.Errorf("provider instance test-123: %w", cloud.ErrInstanceNotFound)
+	action := r.CheckInstance(params)
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — not-found must not defer", action.Kind)
+	}
+}
+
+// TestCheckInstance_KnownPausedStatus_InterruptibleStillPauses verifies the
+// deferral does not disturb the existing pause-wait path: when the poll
+// SUCCEEDS and reports a recoverable paused status, rule 4a-pause still
+// marks the launch paused.
+func TestCheckInstance_KnownPausedStatus_InterruptibleStillPauses(t *testing.T) {
+	params := unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, 0)
+	params.ProviderErr = nil
+	params.ProviderInst = &cloud.Instance{Status: cloud.ProviderStatusOffline}
+	params.CI.CreatedAt = *params.CI.LaunchedAt
+	r := NewReconciler()
+	action := r.CheckInstance(params)
+	if action.Kind != ActionPause {
+		t.Fatalf("action.Kind = %v, want ActionPause — successful poll showing paused status keeps pause-wait behavior", action.Kind)
+	}
+}
+
+func TestCheckInstance_UnknownStatus_InterruptibleBootstrapTimeoutDefers(t *testing.T) {
+	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
+	expiredDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	params := CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                    1,
+			Status:                db.LaunchStatusRunning,
+			LaunchedAt:            &launchedAt,
+			BootstrapDeadlineUnix: &expiredDeadline,
+			ProviderInstanceID:    "test-123",
+			InstanceType:          cloud.InstanceTypeInterruptible,
+		},
+		ProviderErr:              fmt.Errorf("vastai show instances timed out after 30s"),
+		ProviderStatusUnknownFor: 5 * time.Minute,
+		OnStartProbePresent:      true,
+		JobState:                 JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:                      time.Now(),
+	}
+	r := NewReconciler()
+	action := r.CheckInstance(params)
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %v, want ActionDisplayOnly (defer) — got message %q", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "provider status unknown") {
+		t.Errorf("StallMessage = %q, want unknown-status deferral message", action.StallMessage)
+	}
+
+	// Same scenario with a non-interruptible launch terminates as today.
+	params.CI.InstanceType = cloud.InstanceTypeOnDemand
+	action = NewReconciler().CheckInstance(params)
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %v, want ActionBootstrapStalled for on-demand launch", action.Kind)
+	}
+}
+
+// TestReconcilerNoteProviderStatusPoll verifies the unknown-window tracking:
+// duration grows across consecutive failed polls and resets on any pass
+// where status is known.
+func TestReconcilerNoteProviderStatusPoll(t *testing.T) {
+	r := NewReconciler()
+	t0 := time.Unix(1_000_000, 0)
+
+	if d := r.noteProviderStatusPoll(1, true, t0); d != 0 {
+		t.Fatalf("first unknown pass duration = %s, want 0", d)
+	}
+	if d := r.noteProviderStatusPoll(1, true, t0.Add(3*time.Minute)); d != 3*time.Minute {
+		t.Fatalf("second unknown pass duration = %s, want 3m", d)
+	}
+	// Independent launches track independently.
+	if d := r.noteProviderStatusPoll(2, true, t0.Add(3*time.Minute)); d != 0 {
+		t.Fatalf("other launch duration = %s, want 0", d)
+	}
+	// A known-status pass clears the window.
+	if d := r.noteProviderStatusPoll(1, false, t0.Add(4*time.Minute)); d != 0 {
+		t.Fatalf("known-status pass duration = %s, want 0", d)
+	}
+	if d := r.noteProviderStatusPoll(1, true, t0.Add(5*time.Minute)); d != 0 {
+		t.Fatalf("post-reset unknown pass duration = %s, want 0 (fresh window)", d)
 	}
 }

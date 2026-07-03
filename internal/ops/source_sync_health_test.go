@@ -195,6 +195,73 @@ func TestMaybeHandleSourceSyncWedge_DrainsManualCordonButKeepsReason(t *testing.
 	}
 }
 
+// TestMaybeHandleSourceSyncWedge_DoesNotRentalTagAndRecordsWedgeReason verifies
+// the wedge drain returns an on-prem job to the unplaced pool WITHOUT promoting
+// it to rental (which would route it to a paid instance) and records the honest
+// wedge reason in placement_reasons rather than "manually moved to unplaced
+// queue". Regression for the 2026-07-02 VPN-flap incident.
+func TestMaybeHandleSourceSyncWedge_DoesNotRentalTagAndRecordsWedgeReason(t *testing.T) {
+	database := db.SetupTestDB(t)
+	host := "wedge-host"
+	jobID, err := db.RecordQueued(database, host, "/tmp", "echo hi", "on-prem job")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	mockSSHFunc(t, func(_, _ string) (string, string, int) { return "", "", 0 })
+
+	recordWedgeStreak(t, database, host, sourceSyncWedgeThreshold)
+	maybeHandleSourceSyncWedge(database, host, slog.Default())
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.HasInventoryHost() {
+		t.Fatalf("expected job drained off %s, still on host %q", host, job.Host)
+	}
+	if job.HasTag(db.TagRental) {
+		t.Fatalf("wedge-drained on-prem job must not be promoted to rental, tags=%v", job.Tags)
+	}
+	wantReason := "re-placed from " + host + ": source sync wedged (host filesystem unresponsive)"
+	if got := strings.Join(job.PlacementReasons, "\n"); got != wantReason {
+		t.Fatalf("placement reasons = %v, want %q", job.PlacementReasons, wantReason)
+	}
+}
+
+// TestMaybeHandleSourceSyncWedge_SuppressedWhenMultipleHostsWedged verifies the
+// observer-blindness guard: when several inventory hosts are timing out at once
+// (the signature of a local network outage), a wedge on one of them does NOT
+// cordon or drain it. Regression for treating correlated failures as host death.
+func TestMaybeHandleSourceSyncWedge_SuppressedWhenMultipleHostsWedged(t *testing.T) {
+	database := db.SetupTestDB(t)
+	hostA, hostB := "wedge-host-a", "wedge-host-b"
+	jobA, err := db.RecordQueued(database, hostA, "/tmp", "echo hi", "job a")
+	if err != nil {
+		t.Fatalf("record queued a: %v", err)
+	}
+	mockSSHFunc(t, func(_, _ string) (string, string, int) { return "", "", 0 })
+
+	// Both hosts cross the wedge threshold at once — the observer (this machine)
+	// is the likely culprit, not either host's filesystem.
+	recordWedgeStreak(t, database, hostA, sourceSyncWedgeThreshold)
+	recordWedgeStreak(t, database, hostB, sourceSyncWedgeThreshold)
+
+	maybeHandleSourceSyncWedge(database, hostA, slog.Default())
+
+	if cordoned, _, err := db.IsInventoryExecutionTargetCordoned(database, hostA); err != nil {
+		t.Fatalf("cordon lookup: %v", err)
+	} else if cordoned {
+		t.Fatal("host should not be auto-cordoned while multiple hosts are timing out simultaneously")
+	}
+	job, err := db.GetJobByID(database, jobA)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !job.HasInventoryHost() {
+		t.Fatalf("job should not be drained during a suspected local-network outage; host=%q", job.Host)
+	}
+}
+
 // TestAutoUncordonRecoveredSourceSyncHosts verifies the cooldown sweep lifts
 // only expired wedge auto-cordons, leaving manual and still-cooling cordons.
 func TestAutoUncordonRecoveredSourceSyncHosts(t *testing.T) {

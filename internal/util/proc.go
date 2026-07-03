@@ -1,6 +1,7 @@
 package util
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -21,7 +22,8 @@ func IsProcessAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	if proc.Signal(syscall.Signal(0)) != nil {
+	err = proc.Signal(syscall.Signal(0))
+	if err != nil && !errors.Is(err, syscall.EPERM) {
 		return false
 	}
 	return !processIsZombie(pid)

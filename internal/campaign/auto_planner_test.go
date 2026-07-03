@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -24,6 +25,25 @@ func TestApplyGroupOffer_LaunchableSkipsOnlyReusedJobs(t *testing.T) {
 
 	if len(plan.BlockedReasons) != 0 {
 		t.Fatalf("blocked reasons = %v, want none", plan.BlockedReasons)
+	}
+}
+
+func TestApplyGroupOffer_OfferFetchTimeoutIsUnknownNotNoOffers(t *testing.T) {
+	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 909}}}
+	offer := GroupOffer{Err: fmt.Errorf("%w: %w", ErrOfferSnapshotUnavailable, cloud.ErrProviderCommandTimeout)}
+
+	applyGroupOffer(&plan, group, offer, nil, 0.95)
+
+	reason := plan.BlockedReasons[909]
+	if !strings.Contains(reason, ErrOfferSnapshotUnavailable.Error()) {
+		t.Fatalf("blocked reason = %q, want offer fetch unavailable", reason)
+	}
+	if !strings.Contains(reason, cloud.ErrProviderCommandTimeout.Error()) {
+		t.Fatalf("blocked reason = %q, want timeout detail", reason)
+	}
+	if strings.Contains(reason, "no offers") {
+		t.Fatalf("blocked reason = %q, must not collapse timeout to no offers", reason)
 	}
 }
 

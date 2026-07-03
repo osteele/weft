@@ -1907,6 +1907,100 @@ func TestNormalizeTerminalLaunchJobs_RequeuesPrewarmFailedJobOnInfraFailure(t *t
 	}
 }
 
+func TestNormalizeTerminalLaunchJobs_RequeuesCUDAHardwareFaultOnInfraFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraCUDAHardwareFault))
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 1", n)
+	}
+
+	attempts, err := ListAttempts(database, 1)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("attempt count = %d, want 2: %#v", len(attempts), attempts)
+	}
+	if attempts[0].Status != StatusQueued || attempts[0].LaunchID != nil {
+		t.Fatalf("latest attempt = %+v, want queued unplaced retry", attempts[0])
+	}
+	if attempts[1].Status != StatusFailed || attempts[1].FailureReason != FailureReasonInfraCUDAHardwareFault {
+		t.Fatalf("prior attempt = %+v, want preserved CUDA hardware fault", attempts[1])
+	}
+}
+
+func TestNormalizeTerminalLaunchJobs_DoesNotAutoRequeueInfraFailureOverBudget(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraCUDAHardwareFault))
+	now := time.Now().Unix()
+	if _, err := database.Exec(`
+		INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, start_time, end_time, exit_code, failure_reason)
+		VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?)`,
+		1, instanceID, StatusFailed, now-20, now-10, now, 1, FailureReasonInfraCUDAHardwareFault); err != nil {
+		t.Fatalf("insert repeated infra attempt: %v", err)
+	}
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 0", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusFailed)
+	}
+	attempts, err := ListAttempts(database, 1)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != AutoRequeueMaxInfraFailureAttempts {
+		t.Fatalf("attempt count = %d, want %d", len(attempts), AutoRequeueMaxInfraFailureAttempts)
+	}
+}
+
 func TestNormalizeTerminalLaunchJobs_DoesNotRequeuePrewarmFailedJobOnJobFailure(t *testing.T) {
 	database := setupTestDB(t)
 
@@ -3107,5 +3201,149 @@ func TestClassifyCreditSignal(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("ClassifyCreditSignal(%q) = %v, want %v", tc.detail, got, tc.want)
 		}
+	}
+}
+
+// TestConsecutiveInterruptibleOrphans exercises the bid-loss chain counting:
+// walking backwards from the most recent attempt, count interruptible-launch
+// attempts that ended orphaned/preempted; superseded attempts are skipped;
+// anything else (success, on-demand launch, on-prem attempt, open attempt)
+// breaks the chain.
+func TestConsecutiveInterruptibleOrphans(t *testing.T) {
+	// attemptFixture describes one attempt, oldest first.
+	type attemptFixture struct {
+		instanceType string // "" = on-prem attempt (no launch)
+		outcome      string // "" = open attempt (no cloud_outcome)
+	}
+	cases := []struct {
+		name     string
+		attempts []attemptFixture
+		want     int
+	}{
+		{
+			name: "all interruptible orphans",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+			},
+			want: 3,
+		},
+		{
+			name: "preempted counts as a bid loss",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomePreempted},
+			},
+			want: 2,
+		},
+		{
+			name: "completed interruptible attempt breaks the chain",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeCompleted},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+			},
+			want: 2,
+		},
+		{
+			name: "on-demand orphan breaks the chain",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeOnDemand, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+			},
+			want: 1,
+		},
+		{
+			name: "superseded attempts are skipped without breaking",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeSuperseded},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+			},
+			want: 2,
+		},
+		{
+			name: "on-prem attempt breaks the chain",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{"", AttemptOutcomeFailed},
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+			},
+			want: 1,
+		},
+		{
+			name: "open attempt breaks the chain",
+			attempts: []attemptFixture{
+				{cloud.InstanceTypeInterruptible, AttemptOutcomeOrphaned},
+				{cloud.InstanceTypeInterruptible, ""},
+			},
+			want: 0,
+		},
+		{
+			name:     "no attempts",
+			attempts: nil,
+			want:     0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+			jobID := int64(9001)
+			if _, err := database.Exec(
+				`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'echo test', 0)`,
+				jobID,
+			); err != nil {
+				t.Fatalf("insert job: %v", err)
+			}
+			now := time.Now().Unix()
+			for i, a := range tc.attempts {
+				var launchID any
+				if a.instanceType != "" {
+					id, err := CreateLaunch(database, &Launch{
+						Status:       LaunchStatusFailed,
+						Provider:     "vastai",
+						InstanceType: a.instanceType,
+					})
+					if err != nil {
+						t.Fatalf("CreateLaunch: %v", err)
+					}
+					launchID = id
+				}
+				status := StatusQueued
+				var outcome, endTime, exitCode any
+				if a.outcome != "" {
+					outcome = a.outcome
+					endTime = now
+					switch a.outcome {
+					case AttemptOutcomeCompleted:
+						status = StatusCompleted
+						exitCode = 0
+					case AttemptOutcomeFailed:
+						status = StatusFailed
+					default:
+						status = StatusCanceled
+					}
+				}
+				if _, err := database.Exec(
+					`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, cloud_outcome, queued_at, end_time, exit_code)
+					 VALUES (?, ?, '', ?, ?, ?, ?, ?, ?)`,
+					jobID, i+1, launchID, status, outcome, now, endTime, exitCode,
+				); err != nil {
+					t.Fatalf("insert attempt %d: %v", i+1, err)
+				}
+			}
+
+			got, err := ConsecutiveInterruptibleOrphans(database, jobID)
+			if err != nil {
+				t.Fatalf("ConsecutiveInterruptibleOrphans: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("ConsecutiveInterruptibleOrphans = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

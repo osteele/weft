@@ -1186,3 +1186,25 @@ func TestResolveGPUMem_ClassMemCeiling(t *testing.T) {
 		}
 	})
 }
+
+func TestConfiguredHonorsEnabledToggle(t *testing.T) {
+	tru, fal := true, false
+	cases := []struct {
+		name string
+		cfg  Config
+		want bool
+	}{
+		{"path set, enabled nil", Config{ProjectPath: "/p"}, true},
+		{"path set, enabled true", Config{ProjectPath: "/p", Enabled: &tru}, true},
+		{"path set, enabled false", Config{ProjectPath: "/p", Enabled: &fal}, false},
+		{"no path", Config{}, false},
+		{"no path, enabled true", Config{Enabled: &tru}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.Configured(); got != tc.want {
+				t.Errorf("Configured() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -19,3 +19,7 @@ var ErrDistinctMachinesExhausted = errors.New("all distinct machines covered or 
 // ErrMachineAffinityUnsatisfied is returned when machine affinity removes every
 // otherwise eligible offer.
 var ErrMachineAffinityUnsatisfied = errors.New("no offers on requested machine")
+
+// ErrOfferSnapshotUnavailable is returned when planning is restricted to a
+// cached offer snapshot and no cached result exists for a requested group.
+var ErrOfferSnapshotUnavailable = errors.New("offer fetch unavailable")

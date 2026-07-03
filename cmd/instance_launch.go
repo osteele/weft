@@ -55,12 +55,14 @@ var (
 	instanceLaunchDistinctMachines  bool
 	instanceLaunchAvoid             []string
 	instanceLaunchAffinity          []string
+	instanceLaunchNoWait            bool
 )
 
 func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceLaunchMaxSpend, "max-spend", "", "Maximum spend per instance (e.g., '$5.00')")
 	cmd.Flags().StringVar(&instanceLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
 	cmd.Flags().BoolVar(&instanceLaunchDryRun, "dry-run", false, "Print plan table and exit without launching")
+	cmd.Flags().BoolVar(&instanceLaunchNoWait, "no-wait", false, "Return immediately if another placement pass owns the slot")
 	cmd.Flags().BoolVarP(&instanceLaunchWatch, "watch", "w", false, "Enter watch mode after launch (default in interactive terminals)")
 	cmd.Flags().BoolVar(&instanceLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
 	cmd.MarkFlagsMutuallyExclusive("watch", "no-watch")
@@ -82,6 +84,8 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
+
+var runInstanceLaunchFunc = runInstanceLaunch
 
 func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 	useTUI, err := resolveTUI(instanceLaunchTUI, instanceLaunchPlain)
@@ -109,7 +113,12 @@ func runInstanceLaunch(cmd *cobra.Command, args []string) error {
 	if !launchInteractive {
 		reportStartupPhase("Checking predictor status...")
 		if err := ensurePredictorUsableFunc(cmd, cfg, "instance planning"); err != nil {
-			return err
+			// The predictor is an optimization, never a gate: a broken,
+			// disabled, or timed-out estimator degrades to heuristic
+			// estimates rather than blocking placement (invariant
+			// PredictorNeverBlocksPlacement). Surface the diagnosis and
+			// proceed. Set predictor.enabled = false to silence it.
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v; using heuristic estimates\n", err)
 		}
 	}
 

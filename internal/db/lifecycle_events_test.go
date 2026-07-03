@@ -207,3 +207,48 @@ func TestInsertLifecycleEventDedup(t *testing.T) {
 		t.Errorf("rows = %d, want 3 (first, different-detail, past-window)", count)
 	}
 }
+
+func TestCountActiveSourceSyncTimeoutHosts(t *testing.T) {
+	database := SetupTestDB(t)
+	now := time.Now()
+
+	timeout := func(host string, at time.Time) {
+		if err := InsertLifecycleEvent(database, &LifecycleEvent{
+			EventKind: EventSourceSyncTimeout, Detail: host, OccurredAt: at.Unix(),
+		}); err != nil {
+			t.Fatalf("insert timeout: %v", err)
+		}
+	}
+	ok := func(host string, at time.Time) {
+		if err := InsertLifecycleEvent(database, &LifecycleEvent{
+			EventKind: EventSourceSyncOK, Detail: host, OccurredAt: at.Unix(),
+		}); err != nil {
+			t.Fatalf("insert ok: %v", err)
+		}
+	}
+
+	// host-a: active recent streak (2 timeouts, no OK since).
+	timeout("host-a", now.Add(-3*time.Minute))
+	timeout("host-a", now.Add(-1*time.Minute))
+	// host-b: active recent streak.
+	timeout("host-b", now.Add(-2*time.Minute))
+	// host-c: recovered (OK after its timeout) -> not active.
+	timeout("host-c", now.Add(-4*time.Minute))
+	ok("host-c", now.Add(-30*time.Second))
+	// host-d: only a stale timeout, outside the window -> not active.
+	timeout("host-d", now.Add(-30*time.Minute))
+
+	since := now.Add(-simultaneousWedgeWindowForTest)
+	active, err := CountActiveSourceSyncTimeoutHosts(database, since)
+	if err != nil {
+		t.Fatalf("CountActiveSourceSyncTimeoutHosts: %v", err)
+	}
+	if active != 2 {
+		t.Fatalf("active hosts = %d, want 2 (host-a, host-b)", active)
+	}
+}
+
+// simultaneousWedgeWindowForTest mirrors ops.simultaneousWedgeWindow; the ops
+// package owns the production constant, this keeps the db-level test self
+// contained without importing ops (which would be an import cycle).
+const simultaneousWedgeWindowForTest = 10 * time.Minute

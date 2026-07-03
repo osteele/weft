@@ -462,6 +462,9 @@ func (inv *GPUInventory) deviceMemCheck(state *State, device string, memRequired
 		if memRequiredMiB > freeMiB+driverOverheadMiB {
 			return 0, false
 		}
+	} else if inv.hasNvidiaSmi && memRequiredGB > 0 {
+		slog.Debug("GPU memory snapshot missing for device", "component", "gpu", "device", device)
+		return 0, false
 	}
 	return freeMiB, true
 }

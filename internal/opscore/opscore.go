@@ -61,6 +61,12 @@ func (m TimeoutMode) Duration() time.Duration {
 type ExecuteOptions struct {
 	Timeout time.Duration // SSH timeout (default 30s)
 	Verbose bool          // Print verbose output
+
+	// UnplaceReason, when non-empty, marks an unplace as a re-place/drain back
+	// to the on-prem pool: the operation records this reason and does NOT
+	// promote the job to rental. Empty preserves the default move-to-cloud
+	// behavior (promote to rental + "manually moved to unplaced queue").
+	UnplaceReason string
 }
 
 // DefaultOptions returns default execution options

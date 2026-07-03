@@ -68,6 +68,59 @@ func TestApplyGroupCreateRequirements_RunpodCloudType(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceWithReplacement_PreservesExplicitGPUCount(t *testing.T) {
+	var gotGPUCount int
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(_ string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			gotGPUCount = opts.GPUCount
+			return &cloud.Instance{ProviderID: "inst-1"}, nil
+		},
+	}
+
+	_, _, _, err := createInstanceWithReplacement(
+		client,
+		func(cloud.Provider) cloud.Client { return client },
+		InstanceGroup{NumGPUs: 2},
+		cloud.Offer{ProviderID: "offer-1", NumGPUs: 1},
+		cloud.CreateOpts{GPUCount: 2},
+		func(string) {},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("createInstanceWithReplacement: %v", err)
+	}
+	if gotGPUCount != 2 {
+		t.Fatalf("GPUCount = %d, want explicit group count 2", gotGPUCount)
+	}
+}
+
+func TestLaunchInstanceRejectsOfferBelowGroupGPUCount(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	client := &cloud.MockClient{ProviderVal: cloud.ProviderVastai}
+	_, err := LaunchInstance(
+		client, nil, database, nil,
+		InstanceGroup{GPUClass: "A100", GPUMemGB: 80, NumGPUs: 2},
+		cloud.Offer{ProviderID: "one-gpu", GPUName: "A100 SXM4", GPUMemGB: 80, NumGPUs: 1},
+		LaunchOpts{},
+		cloud.R2Config{Bucket: "test"},
+		cloud.CreateOpts{},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("LaunchInstance unexpectedly accepted one-GPU offer for two-GPU group")
+	}
+	if !strings.Contains(err.Error(), "offer GPU count insufficient: need=2 offer=1") {
+		t.Fatalf("error = %v, want GPU count insufficiency", err)
+	}
+}
+
 func TestLaunchInstanceNilR2Client(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

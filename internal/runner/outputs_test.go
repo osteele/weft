@@ -235,3 +235,39 @@ func TestDiscoverJobOutputsSinceFiltersStaleSharedOutputFiles(t *testing.T) {
 		t.Fatalf("path = %q, want output/fresh.csv", files[0].RelPath)
 	}
 }
+
+func TestFilterOutputFilesUntilDropsFilesNewerThanBound(t *testing.T) {
+	tmpDir := t.TempDir()
+	outDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	early := filepath.Join(outDir, "early.csv")
+	late := filepath.Join(outDir, "late.csv")
+	for _, p := range []string{early, late} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bound := time.Now()
+	if err := os.Chtimes(early, bound.Add(-time.Minute), bound.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(late, bound.Add(time.Minute), bound.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []OutputFile{
+		{RelPath: "output/early.csv", SizeBytes: 1},
+		{RelPath: "output/late.csv", SizeBytes: 1},
+	}
+	filtered := FilterOutputFilesUntil(tmpDir, files, bound)
+	if len(filtered) != 1 || filtered[0].RelPath != "output/early.csv" {
+		t.Fatalf("filtered = %+v, want only output/early.csv", filtered)
+	}
+
+	// A zero bound leaves the list unchanged.
+	if got := FilterOutputFilesUntil(tmpDir, files, time.Time{}); len(got) != 2 {
+		t.Fatalf("zero bound filtered = %+v, want unchanged", got)
+	}
+}

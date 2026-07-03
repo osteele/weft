@@ -1,13 +1,104 @@
 package cmd
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
 )
+
+func TestLogContentHasExitMarker(t *testing.T) {
+	if !logContentHasExitMarker("some output\n=== END exit=1 (crashed) Thu ===\n") {
+		t.Fatalf("expected exit marker to be detected")
+	}
+	if logContentHasExitMarker("still running\nProgress: 42%\n") {
+		t.Fatalf("did not expect an exit marker in running output")
+	}
+}
+
+func TestMaybeWarnStaleRunning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const jobID int64 = 4242
+	staleStart := time.Now().Unix() - int64(2*staleRunningExitHintAge.Seconds())
+	endLog := "output line\n=== END exit=1 (crashed) Thu Jul  3 ===\n"
+
+	runningWithExit := func() *db.Job {
+		// A placed host keeps EffectiveStatus() == running (an unplaced running
+		// job is reported as queued).
+		return &db.Job{ID: jobID, Host: "host-alpha", Status: db.StatusRunning, StartTime: staleStart}
+	}
+
+	t.Run("fires for stale running job whose log exited", func(t *testing.T) {
+		if err := logcache.Write(jobID, endLog); err != nil {
+			t.Fatalf("write cache: %v", err)
+		}
+		var buf bytes.Buffer
+		maybeWarnStaleRunning(&buf, runningWithExit())
+		if !strings.Contains(buf.String(), "log shows it exited") {
+			t.Fatalf("expected stale-running hint, got %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), ids.FormatJobID(jobID)) {
+			t.Fatalf("expected hint to reference the job id, got %q", buf.String())
+		}
+	})
+
+	t.Run("silent for recently running job", func(t *testing.T) {
+		if err := logcache.Write(jobID, endLog); err != nil {
+			t.Fatalf("write cache: %v", err)
+		}
+		job := runningWithExit()
+		job.StartTime = time.Now().Unix()
+		var buf bytes.Buffer
+		maybeWarnStaleRunning(&buf, job)
+		if buf.Len() != 0 {
+			t.Fatalf("expected no hint for a just-started job, got %q", buf.String())
+		}
+	})
+
+	t.Run("silent for terminal job", func(t *testing.T) {
+		if err := logcache.Write(jobID, endLog); err != nil {
+			t.Fatalf("write cache: %v", err)
+		}
+		job := runningWithExit()
+		job.Status = db.StatusCompleted
+		var buf bytes.Buffer
+		maybeWarnStaleRunning(&buf, job)
+		if buf.Len() != 0 {
+			t.Fatalf("expected no hint for a terminal job, got %q", buf.String())
+		}
+	})
+
+	t.Run("silent when log has no exit marker", func(t *testing.T) {
+		if err := logcache.Write(jobID, "still going\nProgress: 3/10\n"); err != nil {
+			t.Fatalf("write cache: %v", err)
+		}
+		var buf bytes.Buffer
+		maybeWarnStaleRunning(&buf, runningWithExit())
+		if buf.Len() != 0 {
+			t.Fatalf("expected no hint when log lacks an exit marker, got %q", buf.String())
+		}
+	})
+
+	t.Run("silent when cached log is a different attempt", func(t *testing.T) {
+		if err := logcache.WriteForRun(jobID, 5, endLog); err != nil {
+			t.Fatalf("write cache: %v", err)
+		}
+		job := runningWithExit()
+		otherRun := int64(6)
+		job.LatestRunID = &otherRun
+		var buf bytes.Buffer
+		maybeWarnStaleRunning(&buf, job)
+		if buf.Len() != 0 {
+			t.Fatalf("expected no hint when cache is from another attempt, got %q", buf.String())
+		}
+	})
+}
 
 func TestIsWaitTerminalStatus(t *testing.T) {
 	waitTerminal := []string{

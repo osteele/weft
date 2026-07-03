@@ -1011,7 +1011,7 @@ func createInstanceWithReplacement(
 			err  error
 		)
 		createAttemptOpts := createOpts
-		if currentOffer.NumGPUs > 0 {
+		if createAttemptOpts.GPUCount <= 0 && currentOffer.NumGPUs > 0 {
 			createAttemptOpts.GPUCount = currentOffer.NumGPUs
 		}
 		if createAttemptOpts.InstanceType == cloud.InstanceTypeInterruptible && createAttemptOpts.MaxBidPrice <= 0 {
@@ -2099,11 +2099,18 @@ func LaunchInstance(
 
 	// Reject before spending: a job declaring a checkpoint:/corpus: input has
 	// no provisioning path onto a rental and would fail inside the job.
-	if err := validateGroupCloudProvisionable(group); err != nil {
+	if err := validateGroupCloudProvisionable(context.Background(), group, database, r2Assets.Client); err != nil {
 		return 0, err
 	}
 
 	ctx := context.Background()
+	requiredGPUs := requiredGPUCountForGroup(group)
+	if requiredGPUs > 1 {
+		if err := validateOfferGPUCount(group, offer); err != nil {
+			return 0, err
+		}
+		createOpts.GPUCount = requiredGPUs
+	}
 
 	// The container's disk allocation is what the provider grants on create
 	// (createOpts.DiskGB), bumped up to the group's estimated need if larger.
@@ -2148,7 +2155,7 @@ func LaunchInstance(
 		MaxTimeSeconds:    opts.MaxTimeSeconds,
 		ResolvedGPUName:   offer.GPUName,
 		CostPerHourCents:  int(offer.CostPerHour * 100),
-		NumGPUs:           offer.NumGPUs,
+		NumGPUs:           maxInt(offer.NumGPUs, requiredGPUs),
 		DLPerf:            offer.DLPerf,
 		Reliability:       offer.Reliability,
 		InetDownMbps:      offer.DownloadBandwidth,
@@ -2347,6 +2354,12 @@ func LaunchInstance(
 			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
 			return instanceID, err
 		}
+		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
+		if err != nil {
+			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
+			return instanceID, err
+		}
+		cloudNeeds = append(cloudNeeds, checkpointNeeds...)
 		var restagedOutputs bool
 		cloudNeeds, restagedOutputs, err = appendResumeCloudNeeds(ctx, database, r2Assets.Client, job, cloudNeeds)
 		if err != nil {

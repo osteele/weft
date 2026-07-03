@@ -2,6 +2,137 @@ package db
 
 import "testing"
 
+func TestClassifyInfraFailure(t *testing.T) {
+	tests := []struct {
+		name       string
+		phase      FailurePhase
+		exitCode   int
+		logTail    string
+		wantReason string
+		wantInfra  bool
+	}{
+		{
+			name:       "prewarm download failure is infra regardless of exit code",
+			phase:      PhasePrewarmDownload,
+			exitCode:   1,
+			wantReason: FailureReasonInfraPrewarmDownloadFailed,
+			wantInfra:  true,
+		},
+		{
+			name:       "prewarm download timeout is infra",
+			phase:      PhasePrewarmDownload,
+			exitCode:   ExitCodeSetupTimeout,
+			wantReason: FailureReasonInfraPrewarmDownloadFailed,
+			wantInfra:  true,
+		},
+		{
+			name:       "cloud artifact staging is infra",
+			phase:      PhaseCloudArtifactStaging,
+			exitCode:   1,
+			logTail:    "r2 timeout",
+			wantReason: FailureReasonInfraCloudArtifactStageFailed,
+			wantInfra:  true,
+		},
+		{
+			name:      "gpu count shortfall is infra",
+			phase:     PhaseGPUCountPreflight,
+			wantInfra: true,
+		},
+		{
+			name:      "setup timeout exit 124 is infra without reason override",
+			phase:     PhaseSetup,
+			exitCode:  ExitCodeSetupTimeout,
+			wantInfra: true,
+		},
+		{
+			name:     "setup generic failure stays user-attributed",
+			phase:    PhaseSetup,
+			exitCode: 1,
+		},
+		{
+			name:       "runtime nvlink fault is infra",
+			phase:      PhaseRuntime,
+			exitCode:   1,
+			logTail:    "invalid access of peer gpu memory over nvlink",
+			wantReason: FailureReasonInfraCUDAHardwareFault,
+			wantInfra:  true,
+		},
+		{
+			name:       "runtime uncorrectable ecc fault is infra",
+			phase:      PhaseRuntime,
+			exitCode:   1,
+			logTail:    "cuda error: uncorrectable ecc error encountered",
+			wantReason: FailureReasonInfraCUDAHardwareFault,
+			wantInfra:  true,
+		},
+		{
+			name:       "runtime xid report is infra",
+			phase:      PhaseRuntime,
+			exitCode:   1,
+			logTail:    "nvrm: xid (pci:0000:81:00): 79, gpu has fallen off the bus",
+			wantReason: FailureReasonInfraCUDAHardwareFault,
+			wantInfra:  true,
+		},
+		{
+			name:     "runtime plain failure stays user-attributed",
+			phase:    PhaseRuntime,
+			exitCode: 1,
+			logTail:  "traceback (most recent call last): valueerror",
+		},
+		{
+			name:     "runtime setup-timeout exit code alone is not infra",
+			phase:    PhaseRuntime,
+			exitCode: ExitCodeSetupTimeout,
+		},
+		{
+			name:     "unknown phase stays user-attributed",
+			phase:    FailurePhase("bogus"),
+			exitCode: ExitCodeSetupTimeout,
+			logTail:  "nvlink",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, infra := ClassifyInfraFailure(tt.phase, tt.exitCode, tt.logTail)
+			if reason != tt.wantReason || infra != tt.wantInfra {
+				t.Fatalf("ClassifyInfraFailure(%q, %d, %q) = (%q, %v), want (%q, %v)",
+					tt.phase, tt.exitCode, tt.logTail, reason, infra, tt.wantReason, tt.wantInfra)
+			}
+		})
+	}
+}
+
+func TestIsInfraFailureReason(t *testing.T) {
+	for reason, want := range map[string]bool{
+		FailureReasonInfraPrewarmDownloadFailed:    true,
+		FailureReasonInfraCloudArtifactStageFailed: true,
+		FailureReasonInfraCUDAHardwareFault:        true,
+		"setup_timeout":                            false,
+		"error":                                    false,
+		"":                                         false,
+	} {
+		if got := IsInfraFailureReason(reason); got != want {
+			t.Errorf("IsInfraFailureReason(%q) = %v, want %v", reason, got, want)
+		}
+	}
+}
+
+func TestInfraFailureReasonsMatchesClassifier(t *testing.T) {
+	reasons := InfraFailureReasons()
+	if len(reasons) == 0 {
+		t.Fatal("InfraFailureReasons returned no reasons")
+	}
+	reasons[0] = "mutated"
+	if IsInfraFailureReason("mutated") {
+		t.Fatal("InfraFailureReasons returned mutable backing storage")
+	}
+	for _, reason := range InfraFailureReasons() {
+		if !IsInfraFailureReason(reason) {
+			t.Fatalf("InfraFailureReasons includes %q, but IsInfraFailureReason rejects it", reason)
+		}
+	}
+}
+
 func TestClassifyFailureMode(t *testing.T) {
 	tests := []struct {
 		name          string

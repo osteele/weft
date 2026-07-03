@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"database/sql"
+	"log/slog"
 	"sort"
 
 	"github.com/osteele/weft/internal/config"
@@ -9,6 +10,51 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 )
+
+// bidLossEscalationThreshold is the number of consecutive interruptible
+// launches a job may lose (orphaned or preempted attempts) before the next
+// launch for its group searches on-demand offers instead of placing another
+// bid. Motivated by the wj3741 incident: the job was orphaned 16 consecutive
+// times on bid instances that kept getting outbid, with no escape hatch.
+// Escalation is per-launch-attempt — a successful on-demand run breaks the
+// consecutive chain, so subsequent launches may bid again.
+const bidLossEscalationThreshold = 3
+
+// ApplyBidLossEscalation marks groups whose preemptible jobs have repeatedly
+// lost interruptible instances so the next offer search goes on-demand (see
+// bidLossEscalationThreshold and offerConstraintsForGroup). It only ever
+// reduces the interruptible opt-in; groups without preemptible jobs are
+// untouched, and on-demand is never converted to a bid.
+func ApplyBidLossEscalation(database *sql.DB, groups []InstanceGroup) {
+	if database == nil {
+		return
+	}
+	for i := range groups {
+		g := &groups[i]
+		if !g.HasPreemptibleJob() {
+			continue
+		}
+		for _, job := range g.Jobs {
+			if job == nil || !job.UsesPreemptiblePlacement() {
+				continue
+			}
+			n, err := db.ConsecutiveInterruptibleOrphans(database, job.ID)
+			if err != nil {
+				slog.Warn("bid-loss escalation check failed", "component", "campaign", "job", job.ID, "error", err)
+				continue
+			}
+			if n >= bidLossEscalationThreshold {
+				g.EscalateToOnDemand = true
+				slog.Info(
+					"bid-loss escalation: consecutive bid instances lost — searching on-demand",
+					"component", "campaign", "job", job.ID, "consecutive_losses", n,
+					"threshold", bidLossEscalationThreshold,
+				)
+				break
+			}
+		}
+	}
+}
 
 // PrepareGroups builds launch-ready instance groups from a list of jobs:
 // groups by GPU affinity, filters by GPU class, splits by Docker image,
@@ -22,6 +68,7 @@ func PrepareGroupsWithConfig(jobs []*db.Job, database *sql.DB, cfg *config.Confi
 	groups = FilterByGPUClass(groups, gpuFilter)
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
+	ApplyBidLossEscalation(database, groups)
 	var diskAnomalies []DiskTelemetryAnomaly
 	for i := range groups {
 		var anomalies []DiskTelemetryAnomaly

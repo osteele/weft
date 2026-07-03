@@ -612,6 +612,20 @@ func TestPersistDraftArtifactFields(t *testing.T) {
 	}
 }
 
+func TestHFOfflineEnvVarsModelOnly(t *testing.T) {
+	got := hfOfflineEnvVars([]string{"hf:gpt2"})
+	if !reflect.DeepEqual(got, []string{"TRANSFORMERS_OFFLINE=1"}) {
+		t.Fatalf("hfOfflineEnvVars = %v, want transformers-only offline", got)
+	}
+}
+
+func TestHFOfflineEnvVarsDatasetOnlyDoesNotForceDatasetsOffline(t *testing.T) {
+	got := hfOfflineEnvVars([]string{"hf-dataset:wikitext"})
+	if len(got) != 0 {
+		t.Fatalf("hfOfflineEnvVars = %v, want no blanket dataset offline env", got)
+	}
+}
+
 func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	database := db.SetupTestDB(t)
 	database.Close()
@@ -861,6 +875,45 @@ func TestEvaluateRecentOnPremPlacementSkipsRentalTaggedJobs(t *testing.T) {
 	}
 }
 
+func TestEvaluateRecentOnPremPlacementEnforcesGPUCount(t *testing.T) {
+	// wb41 regression on the fast-submit path: the fast-submit scorer must
+	// apply the same GPU-count eligibility guard as PlaceOnPrem. host-alpha
+	// holds 2x A100, so a 3x A100 job must stay unplaced instead of being
+	// dispatched and failing the runner preflight after prewarm spend.
+	database := db.SetupTestDB(t)
+	inventory.UseTestHosts(t)
+	now := time.Now().Unix()
+	for _, host := range []string{"host-alpha", "host-beta", "host-gamma"} {
+		_, err := database.Exec(`INSERT INTO host_contention_obs (host, gpu_pct, cpu_pct, queue_depth, gpu_jobs_queued, observed_at)
+			VALUES (?, ?, ?, ?, ?, ?)`, host, 5, 10, 0, 0, now)
+		if err != nil {
+			t.Fatalf("insert contention obs: %v", err)
+		}
+	}
+
+	plan, recent, err := evaluateRecentOnPremPlacement(database, placement.Constraints{GPUClass: "a100", NumGPUs: 3})
+	if err != nil {
+		t.Fatalf("evaluateRecentOnPremPlacement: %v", err)
+	}
+	if !recent {
+		t.Fatal("recent = false, want true")
+	}
+	if plan == nil || !plan.Unplaced {
+		t.Fatalf("plan = %#v, want unplaced for 3x a100", plan)
+	}
+
+	plan, recent, err = evaluateRecentOnPremPlacement(database, placement.Constraints{GPUClass: "a100", NumGPUs: 2})
+	if err != nil {
+		t.Fatalf("evaluateRecentOnPremPlacement: %v", err)
+	}
+	if !recent {
+		t.Fatal("recent = false, want true")
+	}
+	if plan == nil || plan.Fast == nil || plan.Fast.OnPrem == nil || plan.Fast.OnPrem.Host != "host-alpha" {
+		t.Fatalf("plan = %#v, want host-alpha for 2x a100", plan)
+	}
+}
+
 func newRunTestCommand() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("provider", "", "")
@@ -910,4 +963,27 @@ func resetRunGlobals(t *testing.T) {
 	runHFTokenFrom = ""
 	runSecretVars = nil
 	validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+}
+
+func TestBestEffortAutoDetectedInputsExcludesExplicitRefs(t *testing.T) {
+	got := bestEffortAutoDetectedInputs(
+		[]string{"hf:org/explicit", "hf:gpt2", "hf:org/auto"},
+		[]string{"hf:gpt2", "hf:org/auto"},
+		[]string{"hf:org/explicit", "hf:gpt2"},
+	)
+	want := []string{"hf:org/auto"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("bestEffortAutoDetectedInputs = %v, want %v", got, want)
+	}
+}
+
+func TestBestEffortAutoDetectedInputsIgnoresDroppedRefs(t *testing.T) {
+	got := bestEffortAutoDetectedInputs(
+		[]string{"hf:org/real"},
+		[]string{"hf:gpt2"},
+		[]string{"hf:org/real"},
+	)
+	if len(got) != 0 {
+		t.Fatalf("bestEffortAutoDetectedInputs = %v, want empty", got)
+	}
 }

@@ -3,6 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -85,32 +87,99 @@ func runPlace(cmd *cobra.Command, args []string) error {
 	// --project is already bound to instanceLaunchProject via the shared
 	// campaign-launch flag set, so no translation is needed here.
 
-	return runPlaceWithAutopilotLease(cmd, func() error {
-		return runInstanceLaunch(cmd, nil)
+	if instanceLaunchDryRun {
+		return runInstanceLaunchFunc(cmd, nil)
+	}
+	return runPlaceWithAutopilotLeaseWait(cmd, instanceLaunchNoWait, func() error {
+		return runInstanceLaunchFunc(cmd, nil)
 	})
 }
 
 func runPlaceWithAutopilotLease(cmd *cobra.Command, run func() error) (err error) {
+	return runPlacementWithAutopilotLease(cmd, "manual-place", "manual place", true, run)
+}
+
+func runPlaceWithAutopilotLeaseWait(cmd *cobra.Command, noWait bool, run func() error) (err error) {
+	return runPlacementWithAutopilotLease(cmd, "manual-place", "manual place", noWait, run)
+}
+
+func runInstanceLaunchWithManualLease(cmd *cobra.Command, args []string) error {
+	if instanceLaunchDryRun {
+		return runInstanceLaunchFunc(cmd, args)
+	}
+	return runPlacementWithAutopilotLease(cmd, "manual-launch", "manual launch", instanceLaunchNoWait, func() error {
+		return runInstanceLaunchFunc(cmd, args)
+	})
+}
+
+func runPlacementWithAutopilotLease(cmd *cobra.Command, label string, summary string, noWait bool, run func() error) (err error) {
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database for placement lease: %w", err)
 	}
 	defer database.Close()
 
-	runner := orchestration.NewAutopilotRunnerWithOptions(database, "manual-place", orchestration.AutopilotRunnerOptions{
+	runner := orchestration.NewAutopilotRunnerWithOptions(database, label, orchestration.AutopilotRunnerOptions{
 		IgnorePaused: true,
 	})
-	if err := runner.TryAcquire(); err != nil {
-		if errors.Is(err, orchestration.ErrAutopilotBusy) {
-			return fmt.Errorf("autopilot is currently placing jobs; retry when it is idle")
+	announced := false
+	for {
+		if err := runner.TryAcquire(); err != nil {
+			if errors.Is(err, orchestration.ErrAutopilotBusy) {
+				if noWait {
+					return fmt.Errorf("%s; try again when the placement slot is idle", formatPlacementBusyError(err))
+				}
+				if !announced {
+					fmt.Fprintln(commandErrOrStderr(cmd), formatPlacementBusyWaitMessage(err))
+					announced = true
+				}
+				time.Sleep(time.Second)
+				continue
+			}
+			return err
 		}
-		return err
+		break
 	}
 	started := time.Now()
 	defer func() {
-		_ = runner.Release(time.Since(started), "manual place", err)
+		_ = runner.Release(time.Since(started), summary, err)
 	}()
 	return run()
+}
+
+func commandErrOrStderr(cmd *cobra.Command) io.Writer {
+	if cmd == nil {
+		return os.Stderr
+	}
+	return cmd.ErrOrStderr()
+}
+
+func formatPlacementBusyWaitMessage(err error) string {
+	return formatPlacementBusyError(err) + ", waiting for the placement slot..."
+}
+
+func formatPlacementBusyError(err error) string {
+	var busy *orchestration.AutopilotBusyError
+	if errors.As(err, &busy) && busy != nil && busy.Existing != nil {
+		elapsed := ""
+		if !busy.Existing.PassStartedAt.IsZero() {
+			elapsed = fmt.Sprintf("started %s ago", time.Since(busy.Existing.PassStartedAt).Truncate(time.Second))
+		}
+		if elapsed != "" {
+			holder := strings.TrimSpace(busy.Existing.ActiveRunnerLabel)
+			if busy.Existing.ActiveRunnerHost != "" {
+				holder += " on " + busy.Existing.ActiveRunnerHost
+			}
+			if holder != "" {
+				return fmt.Sprintf("autopilot is placing (%s by %s)", elapsed, holder)
+			}
+			return fmt.Sprintf("autopilot is placing (%s)", elapsed)
+		}
+	}
+	if strings.TrimSpace(err.Error()) != "" {
+		return fmt.Sprintf("autopilot is placing (%s)", err)
+	}
+	return "autopilot is placing"
 }
 
 func validatePlaceFilters(cmd *cobra.Command, args []string) error {

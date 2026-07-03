@@ -179,6 +179,19 @@ type AutopilotConfig struct {
 	//
 	// See specs/campaign-lifecycle.allium § AutoReplanStuckInventoryDispatch.
 	AutoReplanStuckInventoryDispatch bool `yaml:"auto_replan_stuck_inventory_dispatch" toml:"auto_replan_stuck_inventory_dispatch"`
+
+	// AutoPublishCheckpoints enables autopilot staging of registered
+	// checkpoint inputs into R2 when doing so can make an otherwise blocked
+	// rental-eligible job placeable.
+	AutoPublishCheckpoints bool `yaml:"auto_publish_checkpoints" toml:"auto_publish_checkpoints"`
+
+	// AutoPublishCheckpointMaxGB caps the logical checkpoint size autopilot may
+	// move automatically. 0 uses the conservative default.
+	AutoPublishCheckpointMaxGB float64 `yaml:"auto_publish_checkpoint_max_gb" toml:"auto_publish_checkpoint_max_gb"`
+
+	// OfferSnapshotTTL controls how long successful provider offer snapshots
+	// can be reused between autopilot passes.
+	OfferSnapshotTTL string `yaml:"offer_snapshot_ttl" toml:"offer_snapshot_ttl"`
 }
 
 // AgentBuildConfig configures remote builders used to compile agent binaries.
@@ -700,6 +713,11 @@ type HostGPUConfig struct {
 
 // PredictorConfig holds configuration for the job-estimator integration.
 type PredictorConfig struct {
+	// Enabled turns the job-estimator integration on or off. When set to
+	// false, weft skips the estimator entirely and uses heuristic run-time
+	// estimates — the clean escape hatch when the estimator is broken or
+	// its model schema has drifted. Absent (nil) means enabled.
+	Enabled *bool `yaml:"enabled" toml:"enabled"`
 	// ProjectPath is the path to the job-estimator Python project checkout.
 	ProjectPath string `yaml:"project_path" toml:"project_path"`
 	// ModelDir overrides the default model directory (~/.cache/weft/models).
@@ -1023,6 +1041,32 @@ func (c *Config) AutoReplanStuckInventoryDispatchEnabled() bool {
 	return c.Autopilot.AutoReplanStuckInventoryDispatch
 }
 
+// AutoPublishCheckpointsEnabled reports whether autopilot may publish
+// registered checkpoints to R2 to unblock rental placement. Default false.
+func (c *Config) AutoPublishCheckpointsEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.Autopilot.AutoPublishCheckpoints
+}
+
+// AutoPublishCheckpointMaxBytes returns the largest checkpoint autopilot may
+// publish without explicit user action.
+func (c *Config) AutoPublishCheckpointMaxBytes() int64 {
+	if c == nil || c.Autopilot.AutoPublishCheckpointMaxGB <= 0 {
+		return defaultAutoPublishCheckpointMaxBytes
+	}
+	return int64(c.Autopilot.AutoPublishCheckpointMaxGB * 1024 * 1024 * 1024)
+}
+
+// AutopilotOfferSnapshotTTL returns the short in-memory cloud-offer cache TTL.
+func (c *Config) AutopilotOfferSnapshotTTL() time.Duration {
+	if c == nil {
+		return defaultAutopilotOfferSnapshotTTL
+	}
+	return parseDurationOrDefault(c.Autopilot.OfferSnapshotTTL, defaultAutopilotOfferSnapshotTTL)
+}
+
 // BugTracker returns the configured bug tracker backend. Empty configuration
 // defaults to GitHub.
 func (c *Config) BugTracker() (string, error) {
@@ -1308,21 +1352,23 @@ func (c *Config) CampaignReliability() float64 {
 }
 
 const (
-	defaultCampaignReliability   = 0.95
-	defaultPlacementAltSample    = 0.01
-	defaultPlacementAltTopK      = 10
-	defaultDonorABSample         = 0.05
-	defaultRetryFirstTimeLimit   = 45 * time.Minute
-	defaultRetryNextTimeLimit    = 45 * time.Minute
-	defaultRetryFirstCostUSD     = 1.00
-	defaultRetryNextCostUSD      = 0.25
-	defaultAutoRunawayWindow     = 24 * time.Hour
-	defaultAutoRunawayChain      = 3
-	defaultAutoRunawayOrphans    = 8
-	defaultAutoRunawayInfraFails = 5
-	defaultAutoRunawaySpendUSD   = 5.00
-	defaultAutoObjective         = "cost_first"
-	defaultOpportunityCostWeight = 1.0
+	defaultCampaignReliability           = 0.95
+	defaultAutopilotOfferSnapshotTTL     = 15 * time.Second
+	defaultAutoPublishCheckpointMaxBytes = int64(10 * 1024 * 1024 * 1024)
+	defaultPlacementAltSample            = 0.01
+	defaultPlacementAltTopK              = 10
+	defaultDonorABSample                 = 0.05
+	defaultRetryFirstTimeLimit           = 45 * time.Minute
+	defaultRetryNextTimeLimit            = 45 * time.Minute
+	defaultRetryFirstCostUSD             = 1.00
+	defaultRetryNextCostUSD              = 0.25
+	defaultAutoRunawayWindow             = 24 * time.Hour
+	defaultAutoRunawayChain              = 3
+	defaultAutoRunawayOrphans            = 8
+	defaultAutoRunawayInfraFails         = 5
+	defaultAutoRunawaySpendUSD           = 5.00
+	defaultAutoObjective                 = "cost_first"
+	defaultOpportunityCostWeight         = 1.0
 )
 
 // PlacementAlternativeSampleRate returns the fraction of decisions whose

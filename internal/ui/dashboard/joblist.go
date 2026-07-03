@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +11,7 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/util"
 )
 
 // JobItem wraps a db.Job for use in bubbles/list
@@ -89,10 +89,7 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	statusStr := formatJobStatus(job)
 
 	// Build time display
-	timeStr := "—"
-	if job.StartTime > 0 {
-		timeStr = time.Unix(job.StartTime, 0).Format("01/02 15:04")
-	}
+	timeStr := util.FormatUnixTimeOr(job.StartTime, "01/02 15:04", util.EmptyCellTUI)
 
 	// Build description/command display
 	display := job.EffectiveDescription()

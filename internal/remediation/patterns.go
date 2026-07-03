@@ -36,7 +36,43 @@ type failurePatternRule struct {
 	details    func([]string, string) map[string]any
 }
 
-var failurePatternRules = []failurePatternRule{
+// failurePatternRules is the ordered post-mortem classifier table consumed by
+// matchFailurePattern. Matching is first-match-wins, so precedence is the
+// concatenation order of the tiers below (see specs/diagnosis.allium).
+// Add new rules to the tier matching their specificity instead of appending
+// here; TestFailurePatternTiers pins the tier ordering and the
+// specific-before-generic contract.
+var failurePatternRules = concatRuleTiers(failurePatternTiers)
+
+// ruleTier names one precedence band of the assembled failurePatternRules.
+type ruleTier struct {
+	name  string
+	rules []failurePatternRule
+}
+
+// failurePatternTiers assembles the classifier in decreasing specificity.
+var failurePatternTiers = []ruleTier{
+	{name: "specific-cause", rules: specificCauseRules},
+	{name: "framework-setup", rules: frameworkSetupRules},
+	{name: "environment-signal", rules: environmentSignalRules},
+	{name: "runtime-library-mismatch", rules: runtimeLibraryMismatchRules},
+	{name: "generic", rules: genericRules},
+}
+
+func concatRuleTiers(tiers []ruleTier) []failurePatternRule {
+	var out []failurePatternRule
+	for _, t := range tiers {
+		out = append(out, t.rules...)
+	}
+	return out
+}
+
+// specificCauseRules diagnose a concrete root cause from a narrow signature
+// (hardware fault, disk full, version/driver mismatch, first-party sys.path
+// miss). They must precede the framework-setup and generic tiers: several of
+// the failures below also surface generic ImportError/timeout/subprocess
+// text that the later tiers would mislabel.
+var specificCauseRules = []failurePatternRule{
 	{
 		patternID:  "cuda_hardware_fault",
 		category:   "environment",
@@ -138,6 +174,14 @@ var failurePatternRules = []failurePatternRule{
 			return details
 		},
 	},
+}
+
+// frameworkSetupRules diagnose incomplete serving-framework runtimes
+// (missing framework module or shared library). They must precede the
+// generic module_not_found rule, and the first-party import rule in
+// specificCauseRules must precede them (wb27): a first-party ImportError
+// traceback can otherwise satisfy these regexes' generic ImportError arms.
+var frameworkSetupRules = []failurePatternRule{
 	{
 		patternID:  "sglang_setup",
 		category:   "environment",
@@ -160,6 +204,13 @@ var failurePatternRules = []failurePatternRule{
 			return map[string]any{"framework": "vllm"}
 		},
 	},
+}
+
+// environmentSignalRules classify broad runtime/environment signals
+// (preemption, OOM, CUDA runtime errors, connectivity, timeouts). Their
+// regexes are loose, so any narrower cause must be diagnosed by an earlier
+// tier before these get a chance to match.
+var environmentSignalRules = []failurePatternRule{
 	{
 		patternID:  "preempted",
 		category:   "environment",
@@ -178,6 +229,11 @@ var failurePatternRules = []failurePatternRule{
 		},
 	},
 	{
+		// gpu_oom is also defined in envPatterns. Same pattern ID and
+		// semantics, different matcher breadth and consumer: this entry is
+		// the post-mortem classifier (broader regex, also matches HIP OOM);
+		// the envPatterns entry serves the live-log runtime table. Both are
+		// enriched by enrichGPUOOMDiagnosis.
 		patternID:  "gpu_oom",
 		category:   "environment",
 		message:    "GPU out of memory",
@@ -246,6 +302,13 @@ var failurePatternRules = []failurePatternRule{
 			return details
 		},
 	},
+}
+
+// runtimeLibraryMismatchRules diagnose failures that surface as Python
+// import/loader errors but whose cause is an incoherent userland or CUDA
+// library stack. They must precede the generic module_not_found rule so the
+// mismatch is named instead of "missing module".
+var runtimeLibraryMismatchRules = []failurePatternRule{
 	{
 		patternID:  "glibcxx_version_not_found",
 		category:   "environment",
@@ -308,6 +371,12 @@ var failurePatternRules = []failurePatternRule{
 			return details
 		},
 	},
+}
+
+// genericRules are catch-alls that match wide classes of Python failures.
+// They must come last: every specific-cause, framework-setup, and
+// runtime-library-mismatch diagnosis would also satisfy one of these.
+var genericRules = []failurePatternRule{
 	{
 		patternID:  "module_not_found",
 		category:   "code",
@@ -607,6 +676,12 @@ var codePatterns = []*pattern{
 // Environment patterns: resource/runtime errors (not remediable)
 var envPatterns = []*pattern{
 	{
+		// Duplicate of the failurePatternRules gpu_oom entry (same pattern
+		// ID and semantics). This copy exists for the live-log runtime
+		// table; it is intentionally NOT fatalAtRuntime — an OOM'd job dies
+		// on its own, so CheckFatalAtRuntime must not kill it early. The
+		// post-mortem path classifies gpu_oom via failurePatternRules,
+		// whose regex is broader (also matches HIP OOM).
 		re:        regexp.MustCompile(`(?:CUDA out of memory|torch\.cuda\.OutOfMemoryError)`),
 		patternID: "gpu_oom",
 		category:  "environment",

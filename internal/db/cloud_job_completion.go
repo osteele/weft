@@ -1,12 +1,18 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
 
 	"github.com/osteele/weft/internal/status"
 )
+
+// recordCloudCompletionLockHook, when non-nil, is consulted at the start of each
+// completion write attempt. Tests set it to simulate transient SQLITE_BUSY so the
+// retry wrapper can be exercised end-to-end; it is nil in production.
+var recordCloudCompletionLockHook func() error
 
 // RecordCloudJobCompletion updates the job attempt in the DB with the given
 // exit code, times, and failure reason. Returns the cloud instance ID if the
@@ -28,7 +34,25 @@ import (
 // signal: the marker confirms the user's stop, so the attempt keeps its
 // user-intended killed/canceled status (with metadata backfilled) rather than
 // being recorded as failed.
+//
+// The write is retried on transient SQLITE_BUSY. Under multi-process contention
+// (concurrent agents, TUIs, and sync/reconcile passes all writing jobs.db) a
+// lock burst must not drop the completion — dropping it leaves a finished job
+// stuck in "running" and corrupts the DB, the system's source of truth. The
+// body is idempotent on re-entry: a partially-applied completion re-runs as a
+// same-status no-op (see checkTransition and the target-state UPDATEs below).
 func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (int64, error) {
+	return RetryOnDatabaseLockedValue(context.Background(), "record cloud job completion", func() (int64, error) {
+		if recordCloudCompletionLockHook != nil {
+			if err := recordCloudCompletionLockHook(); err != nil {
+				return 0, err
+			}
+		}
+		return recordCloudJobCompletion(database, jobID, exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
+	})
+}
+
+func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (int64, error) {
 	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {

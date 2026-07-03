@@ -807,6 +807,14 @@ rule SyncCloudInstanceState {
         let phase_job = job referenced by r2_state.phase
         if phase_job != null and phase_job.status = queued:
             ensures: phase_job.status = running
+            -- Reaching running satisfies any start-class intent the attempt
+            -- still carries. Without this clear, EffectiveStatus() keeps
+            -- reporting the stale intent (regression wb2). Stop-class
+            -- intents (canceled, killed) are preserved so they can still
+            -- propagate. See invariant StartIntentPendingClearedOnRunning.
+            if phase_job.latest_attempt.pending_status in
+               {queued, pending_placement, starting, running}:
+                ensures: phase_job.latest_attempt.pending_status = null
 
     -- Side effect: detect grace transition
     if r2_state.phase = grace and instance.status = running:
@@ -934,6 +942,15 @@ rule SyncActiveCloudAttemptsFromR2 {
         if job.status = queued and r2_started != null:
             ensures: job.status = running
             ensures: job.latest_attempt.start_time = r2_started.timestamp
+            -- Marking running from the .started marker satisfies any
+            -- start-class intent still on the attempt; leaving it set
+            -- makes EffectiveStatus() report the job as queued while the
+            -- raw attempt runs (regression wb2). Stop-class intents
+            -- (canceled, killed) are preserved. See invariant
+            -- StartIntentPendingClearedOnRunning.
+            if job.latest_attempt.pending_status in
+               {queued, pending_placement, starting, running}:
+                ensures: job.latest_attempt.pending_status = null
 
         let r2_complete = R2JobCompleteMarker(job, run_id)
         if r2_complete != null:
@@ -1706,6 +1723,32 @@ rule DBAsSharedBus {
         -- periodic tick as a backstop.
 }
 
+-- Principle: DB as source of truth (read-side discipline).
+--
+-- DBAsSharedBus above covers the multi-process sense (all processes share
+-- one DB). This principle covers the read-side sense: display and query
+-- layers must render stored job/instance status as written. They must NOT
+-- reinterpret stored status via heuristics — e.g. overriding a stored
+-- status because an R2 phase, provider observation, or timestamp "looks"
+-- inconsistent. When stored state is wrong, fix the writer (the sync rule,
+-- table-boundary trigger, or migration that produced it), not the reader:
+-- read-side overrides mask the writer bug, disagree across surfaces, and
+-- rot when the underlying invariant is later fixed.
+--
+-- The sanctioned read-side refinements are exactly:
+--   - Job.EffectiveStatus() (internal/db/db.go): prefers a non-terminal
+--     attempt's pending_status as the user-intent view, and downgrades
+--     impossible active states on unplaced jobs to queued. Never written
+--     back to the stored status.
+--   - display_status (job-lifecycle.allium § value DisplayStatus and the
+--     Attempt field annotated "Display/query only"): a derived view value
+--     that adds `orphaned`; never written back to the stored status.
+--   - R2 phase MAY refine the presentation of the instance's ACTIVE job
+--     (e.g. "setup", "finalizing") but must not override the stored
+--     status of any other job.
+-- New read-side refinements require the same treatment: a named, derived,
+-- display/query-only value — not an inline heuristic at a call site.
+
 -- ==========================================================================
 -- Opslog sync
 -- ==========================================================================
@@ -1762,6 +1805,48 @@ invariant SyncedStatusMatchesAfterSync {
         if job.latest_attempt.pending_status = null
         and job.latest_attempt.last_synced_status != null:
             job.status = job.latest_attempt.last_synced_status
+}
+
+invariant StartIntentPendingClearedOnRunning {
+    -- An attempt whose raw status is running must not retain a satisfied
+    -- start-class pending_status (queued, pending_placement, starting,
+    -- running). Start-class intents are satisfied the moment the raw
+    -- status reaches running and must be cleared atomically with that
+    -- write, whichever writer performs it (three-way merge, R2 .started
+    -- marker sync, R2 phase sync). Stop-class intents (canceled, killed)
+    -- are intentionally preserved so they can still propagate to the
+    -- remote.
+    --
+    -- The one legitimate exception is a FRESH start intent set on an
+    -- already-running attempt (e.g. a user requeue): pending_at is then
+    -- later than start_time and the intent must survive until
+    -- reconciliation handles it.
+    for attempt in JobAttempts:
+        if attempt.status = running
+        and attempt.pending_status in {queued, pending_placement, starting, running}:
+            attempt.pending_at > attempt.start_time
+
+    @guidance
+        -- Regression wb2: R2 .started marker sync wrote raw status=running
+        -- while the attempt still carried pending_status='queued'.
+        -- Job.EffectiveStatus() (internal/db/db.go) returns pending_status
+        -- whenever it is set and the raw status is non-terminal, so the
+        -- running job read back as queued everywhere.
+        --
+        -- Enforcement lives at the table boundary, not in each writer:
+        -- migration 00015_clear_satisfied_running_pending_status.sql
+        -- installs the triggers
+        --   job_attempts_clear_satisfied_pending_on_running_insert
+        --   job_attempts_clear_satisfied_pending_on_running_update
+        -- which null pending_status/pending_at whenever a row is inserted
+        -- as running or transitions to running while carrying a start-class
+        -- intent. The triggers fire only on status-column writes, which is
+        -- what preserves the fresh-requeue exception above: setting
+        -- pending_status alone on an already-running row does not trigger.
+        -- The rule-level clears in SyncActiveCloudAttemptsFromR2 and
+        -- SyncCloudInstanceState state the same semantics at the spec
+        -- level so a reimplementation without the SQLite triggers does not
+        -- reintroduce wb2.
 }
 
 invariant AutomaticCloudJobSyncIsAttemptScoped {

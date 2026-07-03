@@ -60,8 +60,8 @@ const (
 
 // Setup phase stall defaults (used when no survival data is available).
 const (
-	defaultSetupStallWarn      = 15 * time.Minute
-	defaultSetupStallTerminate = 25 * time.Minute
+	defaultSetupStallWarn      = 25 * time.Minute
+	defaultSetupStallTerminate = 45 * time.Minute
 )
 
 // Heartbeat staleness thresholds. The base value is the steady-state
@@ -409,6 +409,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		defer close(ch)
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
+		// lastProviderErr persists the most recent poll's transient failure
+		// across ticks (like cachedInstance), so CheckInstance keeps seeing
+		// "status unknown" between polls instead of a spurious nil error.
+		var lastProviderErr error
 		var lastProviderStatus string
 		var lastJobs []*db.Job
 		watchReconciler := NewReconciler()
@@ -475,11 +479,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// client is available (e.g. config has no client for this
 			// provider) — DB-only updates still flow.
 			providerInstID := ci.EffectiveProviderID()
-			var providerErr error
 			if client != nil && providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
 				inst, showErr := client.ShowInstance(providerInstID)
 				if showErr == nil {
 					cachedInstance = inst
+					lastProviderErr = nil
 					if inst.Status != lastProviderStatus {
 						_ = db.RecordProviderStatus(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
 						lastProviderStatus = inst.Status
@@ -489,8 +493,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					// CheckInstance sees nil (isProviderTerminal(nil) == true),
 					// matching the batch reconciler's behavior.
 					cachedInstance = nil
+					lastProviderErr = nil
 				} else {
-					providerErr = showErr
+					lastProviderErr = showErr
 				}
 				lastProviderPoll = time.Now()
 			}
@@ -510,7 +515,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			now := time.Now()
 			params := synced.CheckParams(ci, r2c, jobState, now)
 			params.ProviderInst = cachedInstance
-			params.ProviderErr = providerErr
+			params.ProviderErr = lastProviderErr
+			params.ProviderStatusUnknownFor = watchReconciler.noteProviderStatusPoll(ci.ID, cachedInstance == nil && lastProviderErr != nil, now)
 			params.PauseTolerant = hasPreemptibleJobs(jobs)
 			params.BootstrapSurvival = survival
 			resolveLastProviderStatusChange(database, &params, ci.ID)
@@ -590,8 +596,8 @@ func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string,
 	if !ok || verb != PhaseRunning {
 		return 0, -1, 0
 	}
-	pctStr := fetchR2Marker(ctx, r2c, jobAttemptProgressKey(jid, jobs))
-	if pctStr == "" {
+	pctStr, found, err := fetchR2Marker(ctx, r2c, jobAttemptProgressKey(jid, jobs))
+	if err != nil || !found || pctStr == "" {
 		return jid, -1, 0
 	}
 	// Parse "phase:pct" or "pct"
@@ -617,22 +623,25 @@ func jobAttemptProgressKey(jobID int64, jobs []*db.Job) string {
 }
 
 // fetchR2Marker reads a string marker from R2 with a 3-second timeout.
-func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value string) {
+func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value string, found bool, err error) {
 	if r2Client == nil {
-		return ""
+		return "", false, nil
 	}
 	defer func() {
-		if recover() != nil {
-			value = ""
+		if r := recover(); r != nil {
+			value, found, err = "", false, fmt.Errorf("fetch R2 marker %s: panic: %v", key, r)
 		}
 	}()
 	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	data, err := r2Client.GetObject(ctx2, key)
 	if err != nil {
-		return ""
+		if r2.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(string(data)), true, nil
 }
 
 // fetchHeartbeat reads the heartbeat JSON from R2 and returns the parsed sample
@@ -642,8 +651,8 @@ func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value 
 // collection, so it stays fresh even if nvidia-smi or another metric probe
 // hangs.
 func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
-	data := fetchR2Marker(ctx, r2Client, r2keys.InstanceHeartbeat(instanceID))
-	if data == "" {
+	data, found, err := fetchR2Marker(ctx, r2Client, r2keys.InstanceHeartbeat(instanceID))
+	if err != nil || !found || data == "" {
 		return nil, 0
 	}
 	var sample HeartbeatSample
@@ -651,7 +660,7 @@ func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) 
 		return nil, 0
 	}
 	age := time.Since(time.Unix(sample.Ts, 0))
-	if lastSeen := fetchR2Marker(ctx, r2Client, r2keys.InstanceLastSeen(instanceID)); lastSeen != "" {
+	if lastSeen, found, err := fetchR2Marker(ctx, r2Client, r2keys.InstanceLastSeen(instanceID)); err == nil && found && lastSeen != "" {
 		if ts, err := strconv.ParseInt(lastSeen, 10, 64); err == nil && ts > 0 {
 			if alt := time.Since(time.Unix(ts, 0)); alt < age {
 				age = alt
@@ -663,7 +672,8 @@ func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) 
 
 // fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
 func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	return fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
+	value, _, _ := fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
+	return value
 }
 
 // fetchOnStartStage reads the OnStart shell's stage marker and its R2
@@ -699,7 +709,8 @@ func fetchOnStartStage(ctx context.Context, r2Client *r2.Client, instanceID int6
 
 // fetchInstancePhase reads the instance phase marker from R2.
 func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	return fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
+	value, _, _ := fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
+	return value
 }
 
 func failureTerminationReasonFromPhase(phase, fallback string) string {
@@ -720,7 +731,7 @@ func failureTerminationReasonFromR2(ctx context.Context, r2Client *r2.Client, in
 	if reason := failureTerminationReasonFromPhase(phase, fallback); reason != fallback {
 		return reason
 	}
-	if data := fetchR2Marker(ctx, r2Client, r2keys.InstanceDiskFailure(instanceID)); data != "" {
+	if data, found, err := fetchR2Marker(ctx, r2Client, r2keys.InstanceDiskFailure(instanceID)); err == nil && found && data != "" {
 		return db.TerminationReasonDiskFull
 	}
 	return fallback

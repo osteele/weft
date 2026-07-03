@@ -50,9 +50,19 @@ func UnplaceQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Resul
 	); err != nil {
 		return Result{}, err
 	}
-	if err := db.MoveQueuedJobToUnplaced(database, job.ID); err != nil {
+	// Re-place/drain callers set UnplaceReason to return the job to the on-prem
+	// pool with an honest reason and without promoting it to rental (a host
+	// cordon keeps re-placement off the unhealthy host). The default path is the
+	// explicit move-to-cloud: promote to rental + "manually moved" reason.
+	var moveErr error
+	if opts.UnplaceReason != "" {
+		moveErr = db.MoveQueuedJobToUnplacedWithReason(database, job.ID, opts.UnplaceReason)
+	} else {
+		moveErr = db.MoveQueuedJobToUnplaced(database, job.ID)
+	}
+	if moveErr != nil {
 		_ = db.DeletePendingOperation(database, job.ID, db.OpRemoveQueued)
-		return Result{}, fmt.Errorf("move job %s to unplaced: %w", ids.FormatJobID(job.ID), err)
+		return Result{}, fmt.Errorf("move job %s to unplaced: %w", ids.FormatJobID(job.ID), moveErr)
 	}
 
 	timeout := queueOpTimeout(opts)

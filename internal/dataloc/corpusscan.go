@@ -13,10 +13,23 @@ const CorpusBaseDir = ".local/share/corpora"
 // discovered corpus assets. It looks for directories under
 // ~/.local/share/corpora/<collection>/<subset>/.
 func ScanCorpusDir(host string) ([]HostDataEntry, error) {
-	// List two-level subdirectories under the corpus base dir with sizes.
-	// GNU du -sb first, then BSD du -sk fallback, then plain ls.
-	cmd := fmt.Sprintf(`_corpus_dir="$HOME/%s"
-[ -d "$_corpus_dir" ] || exit 0
+	stdout, stderr, err := hostCommandRunner(context.Background(), host, corpusScanCommand())
+	if err != nil {
+		return nil, classifyScanError("scan corpus dir", host, stderr, err)
+	}
+	return parseCorpusScanOutput(stdout, host), nil
+}
+
+// corpusScanCommand builds the shell script that enumerates two-level corpus
+// subdirectories under the base dir with sizes (GNU du -sb, then BSD du -sk
+// fallback, then plain ls). A MISSING or unreadable base directory is reported
+// via the scan sentinel and a non-zero exit so the caller treats it as
+// "unknown" and skips pruning — an empty result must mean "the base dir is
+// present and holds no corpora", never "the base dir is unmounted".
+func corpusScanCommand() string {
+	return fmt.Sprintf(`_corpus_dir="$HOME/%s"
+if [ ! -d "$_corpus_dir" ]; then echo "%s $_corpus_dir" >&2; exit 3; fi
+if [ ! -r "$_corpus_dir" ] || [ ! -x "$_corpus_dir" ]; then echo "%s $_corpus_dir" >&2; exit 3; fi
 _dirs=()
 for _c in "$_corpus_dir"/*/; do
   [ -d "$_c" ] || continue
@@ -35,13 +48,7 @@ else
   else
     printf '%%s\n' "${_dirs[@]}"
   fi
-fi`, CorpusBaseDir)
-
-	stdout, _, err := hostCommandRunner(context.Background(), host, cmd)
-	if err != nil {
-		return nil, fmt.Errorf("scan corpus dir on %s: %w", host, err)
-	}
-	return parseCorpusScanOutput(stdout, host), nil
+fi`, CorpusBaseDir, scanBaseDirSentinel, scanBaseDirSentinel)
 }
 
 // parseCorpusScanOutput parses du or ls output into HostDataEntries for corpus assets.

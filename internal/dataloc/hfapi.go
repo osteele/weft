@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	weftdb "github.com/osteele/weft/internal/db"
 )
 
 // ErrHFAuthRequired is returned when the HF API requires authentication.
@@ -274,8 +276,22 @@ func ResolveInputSizes(inputs []string, localDB *sql.DB) (totalBytes int64, unre
 			}
 			unresolved = append(unresolved, input)
 			errs = append(errs, fmt.Errorf("%s: %w", input, resolveErr))
-		case AssetCorpus:
-			totalBytes += resolveAssetSizeFromDB(asset, localDB)
+		case AssetNamed:
+			size, resolveErr := resolveNamedAssetSize(asset.ID, localDB)
+			if resolveErr == nil {
+				totalBytes += size
+				continue
+			}
+			unresolved = append(unresolved, input)
+			errs = append(errs, fmt.Errorf("%s: %w", input, resolveErr))
+		case AssetCheckpoint, AssetCorpus:
+			size := resolveAssetSizeFromDB(asset, localDB)
+			if size > 0 {
+				totalBytes += size
+				continue
+			}
+			unresolved = append(unresolved, input)
+			errs = append(errs, fmt.Errorf("%s: asset size unknown", input))
 		}
 	}
 
@@ -283,6 +299,20 @@ func ResolveInputSizes(inputs []string, localDB *sql.DB) (totalBytes int64, unre
 		err = errors.Join(errs...)
 	}
 	return totalBytes, unresolved, err
+}
+
+func resolveNamedAssetSize(name string, localDB *sql.DB) (int64, error) {
+	if localDB == nil {
+		return 0, fmt.Errorf("named asset %q size unavailable without database", name)
+	}
+	asset, err := weftdb.GetNamedAssetByName(localDB, name)
+	if err != nil {
+		return 0, err
+	}
+	if asset.SizeBytes <= 0 {
+		return 0, fmt.Errorf("named asset %q size unknown", name)
+	}
+	return asset.SizeBytes, nil
 }
 
 // resolveAssetSizeFromDB looks up the size of an asset from the host_data table.

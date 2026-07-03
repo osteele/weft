@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -74,6 +75,51 @@ func TestStageCloudNeeds_NamedAssetWritesMarker(t *testing.T) {
 	}
 	if string(data) != "0\n" {
 		t.Fatalf("marker = %q, want 0", string(data))
+	}
+}
+
+func TestStageCloudNeeds_DirectoryAssetExtractsArchive(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "weights.bin"), []byte("weights"), 0o644); err != nil {
+		t.Fatalf("write weights: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(srcDir, "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "nested", "config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	needs := []cloud.CloudNeed{{
+		Spec:        "checkpoint:trace",
+		Path:        "checkpoints/trace",
+		R2Key:       "assets/hash",
+		ContentType: string(dataloc.ContentTypeDirectory),
+	}}
+
+	prev := copyCloudNeedFromR2Func
+	t.Cleanup(func() { copyCloudNeedFromR2Func = prev })
+	copyCloudNeedFromR2Func = func(_, _, targetPath string) error {
+		f, err := os.Create(targetPath)
+		if err != nil {
+			return err
+		}
+		err = dataloc.WriteDirectoryArchive(srcDir, f)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		return err
+	}
+
+	if err := stageCloudNeeds("bucket", 123, workDir, needs); err != nil {
+		t.Fatalf("stageCloudNeeds: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(workDir, "checkpoints", "trace", "nested", "config.json"))
+	if err != nil {
+		t.Fatalf("read extracted config: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Fatalf("config = %q", data)
 	}
 }
 

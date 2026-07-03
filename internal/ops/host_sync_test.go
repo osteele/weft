@@ -65,6 +65,94 @@ func TestIsJobInRunnerState_FinishedCountsAsPresent(t *testing.T) {
 	}
 }
 
+// TestShouldRedispatchSyncedJob guards the regression where a failed payload
+// probe re-dispatched jobs the runner had already finished. fetchRemoteJobPayloads
+// fails the entire batch on one malformed line; the old guard gated the whole
+// materialization check on payloadErr == nil, so a probe error re-ran every
+// synced job — including ones state.json positively shows as Finished. The
+// state-only branches (Finished/Running/Current) must NOT depend on the payload
+// probe; only the Pending branch may, and an unavailable probe there means
+// "unknown", so leave the entry in place.
+func TestShouldRedispatchSyncedJob(t *testing.T) {
+	runID := int64(7)
+	finishedJob := &db.Job{ID: 42, LatestRunID: &runID}
+	pendingJob := &db.Job{ID: 5, LatestRunID: &runID}
+	absentJob := &db.Job{ID: 99, LatestRunID: &runID}
+
+	state := &opsqueue.RunnerState{
+		Pending: []int64{5},
+		Finished: map[string]opsqueue.RunnerFinishedState{
+			"42": {ExitCode: 0, FinishedAt: 200},
+		},
+	}
+	probeErr := fmt.Errorf("parse remote job payload probe line")
+
+	cases := []struct {
+		name           string
+		job            *db.Job
+		state          *opsqueue.RunnerState
+		payloads       map[int64]remoteJobPayload
+		payloadErr     error
+		wantRedispatch bool
+	}{
+		{
+			name:           "finished job with payload probe error is NOT re-dispatched",
+			job:            finishedJob,
+			state:          state,
+			payloads:       nil,
+			payloadErr:     probeErr,
+			wantRedispatch: false,
+		},
+		{
+			name:           "pending job with payload probe error is left in place (unknown)",
+			job:            pendingJob,
+			state:          state,
+			payloads:       nil,
+			payloadErr:     probeErr,
+			wantRedispatch: false,
+		},
+		{
+			name:           "job absent from state is re-dispatched even without probe error",
+			job:            absentJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{},
+			payloadErr:     nil,
+			wantRedispatch: true,
+		},
+		{
+			name:           "pending job with confirmed-missing payload is re-dispatched",
+			job:            pendingJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{5: {}}, // exists=false: MISSING sentinel
+			payloadErr:     nil,
+			wantRedispatch: true,
+		},
+		{
+			name:           "pending job with matching payload is materialized",
+			job:            pendingJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{5: {exists: true, runID: 7}},
+			payloadErr:     nil,
+			wantRedispatch: false,
+		},
+		{
+			name:           "nil state (no state file) re-dispatches",
+			job:            finishedJob,
+			state:          nil,
+			payloads:       nil,
+			payloadErr:     probeErr,
+			wantRedispatch: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRedispatchSyncedJob(tc.job, tc.state, tc.payloads, tc.payloadErr); got != tc.wantRedispatch {
+				t.Errorf("shouldRedispatchSyncedJob = %v, want %v", got, tc.wantRedispatch)
+			}
+		})
+	}
+}
+
 // TestShouldPruneStalePending exercises the classifier that decides whether
 // a runner-pending entry should be cancelled via host_sync's reverse
 // reconcile. The classifier is the contract surface — fixing it wrong

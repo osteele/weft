@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -76,6 +78,49 @@ func TestApplyDrainSettingsLeavesDefaultsForZeros(t *testing.T) {
 	applyDrainSettings(cloud.DrainSettings{})
 	if drainStallTimeout != origStall {
 		t.Errorf("zero settings clobbered drainStallTimeout: was %v, now %v", origStall, drainStallTimeout)
+	}
+}
+
+func TestMeasureUploadTreeReportsRootWalkFailure(t *testing.T) {
+	files, bytes, ok := measureUploadTree(filepath.Join(t.TempDir(), "missing"))
+	if ok {
+		t.Fatal("missing root should report measurement failure")
+	}
+	if files != 0 || bytes != 0 {
+		t.Fatalf("files/bytes = %d/%d, want 0/0", files, bytes)
+	}
+}
+
+func TestMeasureUploadTreeCountsFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("abc"), 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("de"), 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	files, bytes, ok := measureUploadTree(dir)
+	if !ok {
+		t.Fatal("expected measurement success")
+	}
+	if files != 2 || bytes != 5 {
+		t.Fatalf("files/bytes = %d/%d, want 2/5", files, bytes)
+	}
+}
+
+func TestBytesForMaxDrain(t *testing.T) {
+	opts := r2upload.Options{
+		Baseline:        time.Minute,
+		MaxDrain:        15 * time.Minute,
+		FloorThroughput: 256 * 1024,
+	}
+	got := bytesForMaxDrain(opts)
+	want := int64((14 * time.Minute) / time.Second * 256 * 1024)
+	if got != want {
+		t.Fatalf("bytesForMaxDrain = %d, want %d", got, want)
 	}
 }
 

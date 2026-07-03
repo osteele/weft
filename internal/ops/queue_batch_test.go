@@ -258,6 +258,52 @@ func TestBatchSyncCompletedWithFailureReasonAlsoRecordsDispatchBlock(t *testing.
 	}
 }
 
+// TestBatchSyncCompletedBackfillsStartTimeFromCompletionRecord validates the
+// second evidence source for start_time: when a completion is recorded on a
+// tick where the metadata read yields nothing (the job was never observed
+// running and the meta file is unreadable), the completion record's
+// start_time is used, so the attempt does not close with end_time but NULL
+// start_time (live incident: wj3871–3873).
+func TestBatchSyncCompletedBackfillsStartTimeFromCompletionRecord(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "completed-unseen")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	if job.StartTime != 0 {
+		t.Fatalf("precondition: start_time = %d, want 0", job.StartTime)
+	}
+	jobByID := map[int64]*db.Job{jobID: job}
+	exit := 0
+	mock := mockQueueRemote{
+		metadata:         "",
+		completionRecord: `{"exit_code":0,"start_time":1700000001,"end_time":1700000011}`,
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	statuses := map[int64]queueBatchStatus{
+		jobID: {ExitCode: &exit, Mtime: 1700000011},
+	}
+	if _, err := applyBatchStatuses(database, []int64{jobID}, jobByID, statuses, time.Second); err != nil {
+		t.Fatalf("applyBatchStatuses: %v", err)
+	}
+
+	result, _ := db.GetJobByID(database, jobID)
+	if result.Status != db.StatusCompleted {
+		t.Fatalf("status = %s, want completed", result.Status)
+	}
+	if result.StartTime != 1700000001 {
+		t.Fatalf("start_time = %d, want 1700000001 (backfilled from completion record)", result.StartTime)
+	}
+}
+
 func TestBatchSyncCompletedIgnoresStaleRunID(t *testing.T) {
 	database := db.SetupTestDB(t)
 

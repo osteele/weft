@@ -41,6 +41,32 @@ var artifactCmd = &cobra.Command{
 
 Artifacts are declared by writing a manifest on the remote host and then
 synced into a durable local store for retrieval.`,
+	// Error on an unknown subcommand (e.g. `weft artifact lsst`) instead of
+	// silently printing this command's help, which reads like success.
+	RunE: runArtifactRoot,
+}
+
+// runArtifactRoot shows help for a bare `weft artifact` and rejects an unknown
+// subcommand token with an actionable error and a suggestion.
+func runArtifactRoot(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return unknownSubcommandError(cmd, args[0])
+}
+
+// unknownSubcommandError builds a usage-style error naming the bad subcommand
+// and, when cobra can find a near match, suggesting it.
+func unknownSubcommandError(parent *cobra.Command, name string) error {
+	msg := fmt.Sprintf("unknown subcommand %q for %q", name, parent.CommandPath())
+	if suggestions := parent.SuggestionsFor(name); len(suggestions) > 0 {
+		quoted := make([]string, len(suggestions))
+		for i, s := range suggestions {
+			quoted[i] = strconv.Quote(s)
+		}
+		msg += "; did you mean " + strings.Join(quoted, " or ") + "?"
+	}
+	return usageErrorf("%s", msg)
 }
 
 var artifactSyncCmd = &cobra.Command{
@@ -51,10 +77,11 @@ var artifactSyncCmd = &cobra.Command{
 }
 
 var artifactListCmd = &cobra.Command{
-	Use:   "list <job-id>...",
-	Short: "List cached artifacts for a job",
-	Args:  usageArgs(cobra.MinimumNArgs(1)),
-	RunE:  runArtifactList,
+	Use:     "list <job-id>...",
+	Aliases: []string{"ls"},
+	Short:   "List cached artifacts for a job",
+	Args:    usageArgs(cobra.MinimumNArgs(1)),
+	RunE:    runArtifactList,
 }
 
 var artifactGetCmd = &cobra.Command{
@@ -238,11 +265,15 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				// Try convention-based output sync instead
-				if outResult, syncErr := syncJobOutputsFunc(database, job); syncErr == nil {
+				outResult, syncErr := syncJobOutputsFunc(database, job)
+				if syncErr == nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
 					continue
 				}
-				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", ids.FormatJobID(jobID)))
+				// Surface the actual fallback failure rather than the misleading
+				// "manifest not found": the manifest is expected to be absent for
+				// on-prem jobs, so the fallback error is the informative one.
+				errorsList = append(errorsList, fmt.Sprintf("job %s: convention-based output sync failed: %v", ids.FormatJobID(jobID), syncErr))
 				continue
 			}
 			if hasFilesystemOutputDeclarations(job) {
@@ -342,11 +373,13 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Build R2 client once for cloud job listing (best-effort, nil if unconfigured)
+	// Build R2 client once for --sync (best-effort, nil if unconfigured);
+	// the resolver uses the same buildArtifactR2Client seam as get/cat.
 	var r2Client *r2.Client
 	if cfg, err := config.Load(); err == nil {
 		r2Client, _ = buildR2Client(cfg)
 	}
+	store := buildArtifactR2Client()
 
 	var errorsList []string
 	for i, jobID := range jobIDs {
@@ -367,6 +400,11 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// syncedThisRun records whether a host output sync actually completed
+		// during this invocation (via --sync or the on-prem auto-sync below).
+		// It gates the "no attributable outputs" conclusion: we only claim the
+		// run window is empty when discovery actually ran.
+		syncedThisRun := false
 		if artifactListSync {
 			if err := syncArtifactsForJob(database, job, r2Client, NormalSyncTimeout); err != nil {
 				if db.IsDatabaseReadOnly(err) || db.IsDatabaseLocked(err) {
@@ -375,52 +413,52 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 					errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 					continue
 				}
+			} else {
+				syncedThisRun = true
 			}
 		}
 
-		entries, err := db.ListArtifactsByJob(database, jobID)
+		resolution, err := resolveJobArtifacts(database, store, job)
 		if err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
 
-		// Also show job-output assets from host_data
-		outputAssets, _ := listJobOutputAssets(database, jobID)
-
-		// List R2 output files for any job kind — inventory runners started
-		// with --r2-bucket upload to the same per-run prefixes as rentals.
-		var cloudOutputFiles []runner.OutputFile
-		if r2Client != nil {
-			cloudOutputFiles = listCloudJobOutputFiles(r2Client, job)
-		}
 		if job.IsLaunchJob() {
 			warnOnFailedCloudOutputUpload(cmd, job.ID)
 		}
+		if resolution.r2ListErr != nil {
+			// The cloud listing failed: what we print may be missing cloud
+			// artifacts. Warn so an incomplete list is never mistaken for the
+			// full set.
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: job %s: R2 listing failed; cloud artifacts may be missing from this list: %v\n",
+				ids.FormatJobID(jobID), resolution.r2ListErr)
+		}
 
-		if len(entries) == 0 && len(outputAssets) == 0 && len(cloudOutputFiles) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
-			if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
+		if len(resolution.rows) == 0 {
+			switch {
+			case job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0:
+				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 				fmt.Fprintf(cmd.OutOrStdout(), "Job %s has not started yet; no artifacts are available.\n", ids.FormatJobID(job.ID))
 				for _, line := range queuedPlacementLines(database, job) {
 					fmt.Fprintf(cmd.OutOrStdout(), "%-12s %s\n", line.Label+":", line.Value)
 				}
-			} else if job.HasInventoryHost() {
+			case resolution.r2ListErr != nil:
+				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts found; R2 listing failed, so cloud artifacts could not be checked.")
+			case job.HasInventoryHost() && syncedThisRun:
+				// Discovery ran and found nothing — state the accurate
+				// conclusion instead of the misleading "run sync" hint.
+				writeNoAttributableOutputsHint(cmd, job)
+			case job.HasInventoryHost():
+				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 				writeInventoryArtifactHint(cmd, job)
+			default:
+				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 			}
 			continue
 		}
-		for _, entry := range entries {
-			name := entry.Name
-			if name == "" {
-				name = "-"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d\t%s\n", name, entry.Path, entry.SizeBytes, entry.SHA256)
-		}
-		for _, a := range outputAssets {
-			fmt.Fprintf(cmd.OutOrStdout(), "output\t%s\t%d\t%s\n", a.Path, a.SizeBytes, a.Host)
-		}
-		for _, f := range cloudOutputFiles {
-			fmt.Fprintf(cmd.OutOrStdout(), "output\t%s\t%d\tcloud\n", f.RelPath, f.SizeBytes)
+		for _, art := range resolution.rows {
+			fmt.Fprintln(cmd.OutOrStdout(), art.listLine())
 		}
 	}
 
@@ -519,55 +557,15 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 	}
 	defer database.Close()
 
-	r2Client := buildArtifactR2Client()
-
 	multiple := len(jobIDs) > 1
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
-				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-				continue
-			}
-			job, jobErr := db.GetJobByID(database, jobID)
-			if jobErr != nil || job == nil {
-				errorsList = append(errorsList, fmt.Sprintf("artifact %q not found for job %s", token, ids.FormatJobID(jobID)))
-				continue
-			}
-			synced, fbErr := artifactCacheMissFallback(job, token, r2Client, func() error {
-				return fetchCloudArtifactByToken(cmd, r2Client, job, token, multiple)
-			})
-			if fbErr != nil {
-				errorsList = append(errorsList, fbErr.Error())
-				continue
-			}
-			if synced == nil {
-				continue // delivered directly from R2
-			}
-			entry = synced
+		// A nil job (missing row or lookup error) still allows the cache
+		// fast path inside deliverArtifactToken.
+		job, _ := db.GetJobByID(database, jobID)
+		if err := deliverArtifactToken(cmd, database, jobID, job, token, multiple, false); err != nil {
+			errorsList = append(errorsList, err.Error())
 		}
-
-		localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
-		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-			continue
-		}
-		dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, multiple)
-		if err != nil {
-			return err
-		}
-		if dest == "-" {
-			if err := copyToWriter(localPath, cmd.OutOrStdout()); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-			}
-			continue
-		}
-		if err := copyFile(localPath, dest); err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-			continue
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	}
 
 	if len(errorsList) > 0 {
@@ -576,32 +574,282 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 	return nil
 }
 
-// artifactCacheMissFallback runs the cache-miss retrieval ladder shared by
-// `artifact get` and `artifact cat`: R2 (any job kind — inventory runners
-// with R2 upload to the same per-run prefixes), then an on-demand sync from
-// the job's host. fetchFromCloud performs the R2 rung; (nil, nil) means it
-// delivered the artifact directly. Otherwise the returned entry points at the
-// freshly synced local cache row. All errors are fully formatted with the job
-// ID, ready to surface as-is.
-func artifactCacheMissFallback(job *db.Job, token string, r2Client cloudOutputStore, fetchFromCloud func() error) (*db.Artifact, error) {
+// artifactSource identifies which store a resolved artifact row came from.
+type artifactSource string
+
+const (
+	artifactSourceCache artifactSource = "cache"
+	artifactSourceHost  artifactSource = "host"
+	artifactSourceCloud artifactSource = "cloud"
+)
+
+// resolvedArtifact is one row of the shared list/get/cat resolution: the
+// union of the local artifact cache, host_data job-output pointer records,
+// and the job's live R2 output listing, materialized once per invocation.
+// Every row carries the retrieval handle for exactly the bytes the listing
+// described, so `get`/`cat` of anything `list` printed cannot resolve
+// against a different store than the one that produced the row (the
+// list/get mismatch class: bugs wb11, wb16, wb20, wb40).
+type resolvedArtifact struct {
+	Name        string // manifest artifact name ("" for outputs)
+	DisplayPath string // the path `artifact list` prints for this row
+	RelPath     string // relative path used for matching and destinations
+	SizeBytes   int64
+	SHA256      string
+	Source      artifactSource
+
+	// Retrieval handles; exactly one is non-nil, matching Source.
+	cacheEntry *db.Artifact           // cache: bytes already in the local store
+	hostEntry  *dataloc.HostDataEntry // host: pointer record; requires syncArtifactOnDemand
+	cloudFile  *runner.OutputFile     // cloud: listed R2 object (R2Key set by the listing)
+}
+
+// resolveJobArtifacts materializes the union of the three artifact sources
+// for a job — the local cache (`artifacts` table), host_data job-output
+// pointer records, and the job's per-run R2 objects — in that order. It is
+// the single resolution authority: `artifact list` prints these rows, and
+// the `get`/`cat` paths retrieve through the same rows and the same
+// matcher (resolvedArtifact.matchesToken).
+//
+// Pass a nil r2Client to skip the live R2 listing. host_data rows are
+// best-effort: the pointer index is auxiliary and its absence (e.g. schema
+// not initialized) must not hide cached or cloud artifacts.
+// jobArtifactResolution is the outcome of resolveJobArtifacts: the union of
+// cache, host-pointer, and cloud rows, plus whether the live R2 listing failed.
+// A failed R2 listing is NOT fatal — cached and host rows still serve — but it
+// means the cloud set is incomplete, so downstream "not found" messaging must
+// read as "status unknown" and `get --all` must not report success (wb40).
+type jobArtifactResolution struct {
+	rows      []resolvedArtifact
+	r2ListErr error // non-nil when the live R2 listing was attempted and (partly) failed
+}
+
+func resolveJobArtifacts(database *sql.DB, r2Client cloudOutputStore, job *db.Job) (jobArtifactResolution, error) {
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		return jobArtifactResolution{}, err
+	}
+	resolved := make([]resolvedArtifact, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		resolved = append(resolved, resolvedArtifact{
+			Name:        entry.Name,
+			DisplayPath: entry.Path,
+			RelPath:     entry.Path,
+			SizeBytes:   entry.SizeBytes,
+			SHA256:      entry.SHA256,
+			Source:      artifactSourceCache,
+			cacheEntry:  &entry,
+		})
+	}
+
+	outputAssets, _ := listJobOutputAssets(database, job.ID)
+	assetPrefix := fmt.Sprintf("%d/", job.ID)
+	for i := range outputAssets {
+		asset := outputAssets[i]
+		resolved = append(resolved, resolvedArtifact{
+			DisplayPath: asset.Path,
+			RelPath:     strings.TrimPrefix(asset.Asset.ID, assetPrefix),
+			SizeBytes:   asset.SizeBytes,
+			Source:      artifactSourceHost,
+			hostEntry:   &asset,
+		})
+	}
+
+	// R2 output files exist for any job kind — inventory runners started
+	// with --r2-bucket upload to the same per-run prefixes as rentals.
+	var r2ListErr error
 	if r2Client != nil {
-		dlErr := fetchFromCloud()
-		if dlErr == nil {
-			return nil, nil
+		var files []runner.OutputFile
+		files, r2ListErr = listCloudJobOutputFiles(r2Client, job)
+		for _, f := range files {
+			file := f
+			resolved = append(resolved, resolvedArtifact{
+				DisplayPath: file.RelPath,
+				RelPath:     file.RelPath,
+				SizeBytes:   file.SizeBytes,
+				Source:      artifactSourceCloud,
+				cloudFile:   &file,
+			})
 		}
-		if !errors.Is(dlErr, r2resolve.ErrArtifactMissing) && !r2.IsNotFound(dlErr) {
-			return nil, fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), dlErr)
+	}
+	return jobArtifactResolution{rows: resolved, r2ListErr: r2ListErr}, nil
+}
+
+// matchesToken reports whether a user-supplied token names this row. This is
+// the one identity matcher shared by list-derived retrieval: it accepts the
+// manifest name, the exact printed path, a basename, or a path suffix, with
+// the "artifacts/" display prefix canonicalized on both sides — a superset
+// of the SQL matching db.FindArtifactByNameOrPath applies to cache rows.
+func (a resolvedArtifact) matchesToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	if a.Name != "" && a.Name == token {
+		return true
+	}
+	for _, path := range []string{a.RelPath, a.DisplayPath} {
+		if path != "" && cloudFileMatchesToken(path, token) {
+			return true
 		}
 	}
-	synced, syncErr := syncArtifactOnDemand(job, token)
-	if syncErr != nil {
-		return nil, fmt.Errorf("artifact %q not cached for job %s, and sync from %s failed: %w",
-			token, ids.FormatJobID(job.ID), job.Host, syncErr)
+	return false
+}
+
+// listLine renders the row exactly as `weft artifact list` prints each
+// source: cached rows as name/path/size/sha, host pointer rows and cloud
+// rows as outputs with their location.
+func (a resolvedArtifact) listLine() string {
+	switch a.Source {
+	case artifactSourceHost:
+		return fmt.Sprintf("output\t%s\t%d\t%s", a.DisplayPath, a.SizeBytes, a.hostEntry.Host)
+	case artifactSourceCloud:
+		return fmt.Sprintf("output\t%s\t%d\tcloud", a.DisplayPath, a.SizeBytes)
+	default:
+		name := a.Name
+		if name == "" {
+			name = "-"
+		}
+		return fmt.Sprintf("%s\t%s\t%d\t%s", name, a.DisplayPath, a.SizeBytes, a.SHA256)
 	}
-	if synced == nil {
-		return nil, errors.New(artifactNotFoundMessage(job, token, r2Client != nil))
+}
+
+// deliverResolvedArtifact writes one resolved row to the destination destFor
+// yields ("-" streams to stdout). The row's handle defines retrieval: cache
+// rows copy from the local store, cloud rows download the listed R2 object,
+// host rows run the on-demand sync and serve the freshly cached entry.
+func deliverResolvedArtifact(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, art resolvedArtifact, destFor func(string) (string, error)) error {
+	switch art.Source {
+	case artifactSourceCache:
+		return serveCachedArtifact(cmd, art.cacheEntry, destFor)
+	case artifactSourceCloud:
+		dest, err := destFor(art.cloudFile.RelPath)
+		if err != nil {
+			return err
+		}
+		if err := downloadSingleCloudFileToPath(cmd, r2Client, job, *art.cloudFile, dest, dest != "-"); err != nil {
+			return err
+		}
+		if dest != "-" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+		}
+		return nil
+	case artifactSourceHost:
+		synced, err := syncArtifactOnDemand(job, art.RelPath)
+		if err != nil {
+			return fmt.Errorf("sync from %s failed: %w", job.Host, err)
+		}
+		if synced == nil {
+			return fmt.Errorf("%q: %w", art.RelPath, r2resolve.ErrArtifactMissing)
+		}
+		return serveCachedArtifact(cmd, synced, destFor)
 	}
-	return synced, nil
+	return fmt.Errorf("resolved artifact %q has no retrieval handle", art.DisplayPath)
+}
+
+// serveCachedArtifact writes a cached artifact row to its destination and
+// reports the write on stdout (except when streaming).
+func serveCachedArtifact(cmd *cobra.Command, entry *db.Artifact, destFor func(string) (string, error)) error {
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		return err
+	}
+	dest, err := destFor(localPath)
+	if err != nil {
+		return err
+	}
+	if dest == "-" {
+		return copyToWriter(localPath, cmd.OutOrStdout())
+	}
+	if err := copyFile(localPath, dest); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+	return nil
+}
+
+// deliverArtifactToken retrieves the artifact named token for one job and
+// writes it to its destination (stream forces stdout, as `cat` does).
+//
+// Resolution order:
+//  1. The local artifact cache (db.FindArtifactByNameOrPath) — serving
+//     cached bytes must not depend on R2 reachability.
+//  2. The shared resolver (resolveJobArtifacts): the same materialized rows
+//     `artifact list` prints, matched with the same matcher, each carrying
+//     its own retrieval handle — so any spelling list printed resolves here
+//     identically.
+//  3. An on-demand sync from the job's inventory host, for outputs no
+//     listing source has recorded yet.
+//
+// A row that matches but whose transfer fails surfaces the transfer's real
+// cause; "not found" is reported only when every source misses (wb20).
+func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job *db.Job, token string, multiple, stream bool) error {
+	destFor := func(source string) (string, error) {
+		if stream {
+			return "-", nil
+		}
+		return resolveArtifactOutputPathForJob(source, artifactOutput, jobID, multiple)
+	}
+
+	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
+	if err == nil {
+		localPath, pathErr := artifacts.LocalPathFromStored(entry.StoredPath)
+		if pathErr != nil {
+			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), pathErr)
+		}
+		if _, statErr := os.Stat(localPath); statErr == nil {
+			if serveErr := serveCachedArtifact(cmd, entry, destFor); serveErr != nil {
+				return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), serveErr)
+			}
+			return nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), statErr)
+		}
+	}
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	if job == nil {
+		return fmt.Errorf("artifact %q not found for job %s", token, ids.FormatJobID(jobID))
+	}
+
+	r2Client := buildArtifactR2Client()
+	resolution, err := resolveJobArtifacts(database, r2Client, job)
+	if err != nil {
+		return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), err)
+	}
+	hostSyncRan := false
+	for _, art := range resolution.rows {
+		if !art.matchesToken(token) {
+			continue
+		}
+		if art.Source == artifactSourceHost {
+			hostSyncRan = true
+		}
+		deliverErr := deliverResolvedArtifact(cmd, r2Client, job, art, destFor)
+		if deliverErr == nil {
+			return nil
+		}
+		if errors.Is(deliverErr, r2resolve.ErrArtifactMissing) || r2.IsNotFound(deliverErr) {
+			continue // the listing row went stale; try the next match
+		}
+		return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), deliverErr)
+	}
+
+	if !hostSyncRan {
+		synced, syncErr := syncArtifactOnDemand(job, token)
+		if syncErr != nil {
+			return fmt.Errorf("artifact %q not cached for job %s, and sync from %s failed: %w",
+				token, ids.FormatJobID(job.ID), job.Host, syncErr)
+		}
+		if synced != nil {
+			if serveErr := serveCachedArtifact(cmd, synced, destFor); serveErr != nil {
+				return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), serveErr)
+			}
+			return nil
+		}
+	}
+	return errors.New(artifactNotFoundMessage(job, token, r2Client != nil, resolution.r2ListErr != nil))
 }
 
 // canonicalArtifactRelPath strips the ambiguous "artifacts/" display prefix:
@@ -626,54 +874,6 @@ func cloudFileMatchesToken(relPath, token string) bool {
 		return true
 	}
 	return strings.HasSuffix(relPath, "/"+token) || strings.HasSuffix(canonPath, "/"+canonToken)
-}
-
-// deliverCloudArtifactByToken searches R2 cloud outputs for a file matching
-// token (by path, basename, or suffix) and delivers it via download. A missing
-// object is returned as r2resolve.ErrArtifactMissing so callers can
-// distinguish "not in R2" from a failed transfer.
-func deliverCloudArtifactByToken(r2Client cloudOutputStore, job *db.Job, token string, download func(runner.OutputFile) error) error {
-	for _, f := range listCloudJobOutputFiles(r2Client, job) {
-		if !cloudFileMatchesToken(f.RelPath, token) {
-			continue
-		}
-		if err := download(f); err != nil {
-			if errors.Is(err, r2resolve.ErrArtifactMissing) || r2.IsNotFound(err) {
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-	return fmt.Errorf("%q: %w", token, r2resolve.ErrArtifactMissing)
-}
-
-func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, token string, multiple bool) error {
-	return deliverCloudArtifactByToken(r2Client, job, token, func(f runner.OutputFile) error {
-		return downloadSingleCloudFile(cmd, r2Client, job, f, multiple)
-	})
-}
-
-func streamCloudArtifactByToken(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, token string) error {
-	return deliverCloudArtifactByToken(r2Client, job, token, func(f runner.OutputFile) error {
-		return downloadSingleCloudFileToPath(cmd, r2Client, job, f, "-", false)
-	})
-}
-
-// downloadSingleCloudFile downloads one cloud output file to the output destination.
-func downloadSingleCloudFile(cmd *cobra.Command, r2Client cloudOutputStore, job *db.Job, f runner.OutputFile, multiple bool) error {
-	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
-	if err != nil {
-		return err
-	}
-
-	if err := downloadSingleCloudFileToPath(cmd, r2Client, job, f, dest, true); err != nil {
-		return err
-	}
-	if dest != "-" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
-	}
-	return nil
 }
 
 type cloudOutputDownloader interface {
@@ -826,7 +1026,13 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 			continue
 		}
 
-		cloudFiles := cloudFilesNotCached(r2Client, job, entries)
+		cloudFiles, cloudListErr := cloudFilesNotCached(r2Client, job, entries)
+		if cloudListErr != nil {
+			// R2 listing failed: the cloud file set is incomplete, so `get --all`
+			// must not silently omit R2-only files and exit 0. Record the error
+			// (which forces a non-zero exit) but still deliver what did resolve.
+			errorsList = append(errorsList, fmt.Sprintf("job %s: R2 listing failed, some cloud artifacts may be missing: %v", ids.FormatJobID(jobID), cloudListErr))
+		}
 
 		if len(entries)+len(cloudFiles) == 0 && job != nil && job.HasInventoryHost() {
 			// Nothing cached and nothing in R2: outputs may exist only on the
@@ -843,7 +1049,12 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 
 		totalArtifacts := len(entries) + len(cloudFiles)
 		if totalArtifacts == 0 {
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: no artifacts found\n", ids.FormatJobID(jobID))
+			if cloudListErr != nil {
+				// Already recorded in errorsList; don't claim a confident "none".
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s: R2 listing failed; artifact availability could not be confirmed\n", ids.FormatJobID(jobID))
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s: no artifacts found\n", ids.FormatJobID(jobID))
+			}
 			continue
 		}
 
@@ -886,22 +1097,23 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 // canonical path (the "artifacts/" display prefix stripped) is already in the
 // local cache — cached entries came from the same R2 objects, so a prefix
 // spelling difference is not a different artifact.
-func cloudFilesNotCached(r2Client cloudOutputStore, job *db.Job, entries []db.Artifact) []runner.OutputFile {
+func cloudFilesNotCached(r2Client cloudOutputStore, job *db.Job, entries []db.Artifact) ([]runner.OutputFile, error) {
 	if job == nil || r2Client == nil {
-		return nil
+		return nil, nil
 	}
 	seenPaths := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		seenPaths[canonicalArtifactRelPath(entry.Path)] = struct{}{}
 	}
+	files, listErr := listCloudJobOutputFiles(r2Client, job)
 	var cloudFiles []runner.OutputFile
-	for _, f := range listCloudJobOutputFiles(r2Client, job) {
+	for _, f := range files {
 		if _, ok := seenPaths[canonicalArtifactRelPath(f.RelPath)]; ok {
 			continue
 		}
 		cloudFiles = append(cloudFiles, f)
 	}
-	return cloudFiles
+	return cloudFiles, listErr
 }
 
 func runArtifactCat(cmd *cobra.Command, args []string) error {
@@ -922,33 +1134,10 @@ func runArtifactCat(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		job, jobErr := db.GetJobByID(database, jobID)
-		if jobErr != nil || job == nil {
-			return fmt.Errorf("artifact %q not found for job %s", token, ids.FormatJobID(jobID))
-		}
-		r2Client := buildArtifactR2Client()
-		synced, fbErr := artifactCacheMissFallback(job, token, r2Client, func() error {
-			return streamCloudArtifactByToken(cmd, r2Client, job, token)
-		})
-		if fbErr != nil {
-			return fbErr
-		}
-		if synced == nil {
-			return nil // streamed directly from R2
-		}
-		entry = synced
-	}
-
-	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
-	if err != nil {
-		return err
-	}
-	return copyToWriter(localPath, cmd.OutOrStdout())
+	// A nil job (missing row or lookup error) still allows the cache fast
+	// path inside deliverArtifactToken.
+	job, _ := db.GetJobByID(database, jobID)
+	return deliverArtifactToken(cmd, database, jobID, job, token, false, true)
 }
 
 func runArtifactAdd(cmd *cobra.Command, args []string) error {
@@ -1708,7 +1897,13 @@ func buildLocalPrunePlan(database *sql.DB, scopeRoot string, includeOutputs bool
 				}
 			}
 			if r2Client != nil && job.IsLaunchJob() {
-				for _, f := range listCloudJobOutputFiles(r2Client, job) {
+				// A list error is intentionally ignored here: this builds the
+				// set of files considered restorable from R2 before a local
+				// prune. On error the set only shrinks, so fewer local files are
+				// treated as safe to delete — the conservative, non-destructive
+				// direction. Never expand `restorable` on unknown R2 status.
+				files, _ := listCloudJobOutputFiles(r2Client, job)
+				for _, f := range files {
 					if rel, ok := normalizeLocalRelPath(f.RelPath); ok {
 						restorable[rel] = struct{}{}
 					}
@@ -1951,6 +2146,13 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 // syncJobOutputs rsyncs convention-based output directories from a remote host
 // to the local working dir. For cloud jobs, it downloads outputs from R2
 // instead. The result count is the number of files downloaded or copied.
+//
+// Attribution rule (spec: Attribution in specs/job-lifecycle.allium): files
+// are registered as a job's outputs only on remote evidence — the runner's
+// completion-record listing, or time-window discovery on the execution host.
+// Files found in the submitter's LOCAL working tree are never attributed to a
+// job (the local tree holds the user's own files and other jobs' synced
+// outputs), except when the job actually executed on this machine.
 func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error) {
 	if job.IsLaunchJob() {
 		return syncCloudJobOutputs(database, job)
@@ -1975,21 +2177,58 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return result, nil
 	}
 
-	outputFiles := completionOutputFilesFunc(job)
-	if len(outputFiles) > 0 {
-		totalMB := runner.TotalSizeMB(outputFiles)
-		if err := srcsync.SyncOutputFilesBack(job.Host, job.WorkingDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
-			return artifacts.SyncResult{}, err
+	rec := completionRecordFunc(job)
+
+	// Backfill start_time from the host-side completion record when the DB
+	// row lacks it. Missing start_time on a completed attempt is itself a bug
+	// in the completion sync path (a swallowed metadata read at the recording
+	// tick; see internal/ops/sync.go BackfillStartTimeFromCompletionRecord) —
+	// recover here so time-window attribution still works for rows closed
+	// before that fix.
+	if job.StartTime == 0 && rec != nil && rec.StartTime > 0 {
+		if err := db.UpdateStartTime(database, job.ID, rec.StartTime); err == nil {
+			job.StartTime = rec.StartTime
 		}
-		outputFiles = runner.FilterOutputFilesSince(localDir, outputFiles, outputSyncThreshold(job))
+	}
+
+	var outputFiles []runner.OutputFile
+	if rec != nil {
+		outputFiles = rec.OutputFiles
 	}
 	if len(outputFiles) == 0 {
-		var err error
-		outputFiles, err = discoverLocalJobOutputFiles(job, localDir)
+		// No runner-attributed file list: fall back to time-window discovery.
+		// Discovery needs the attempt's window; a zero start time would match
+		// everything in a shared output tree, so refuse rather than guess.
+		if job.StartTime == 0 {
+			syncOutputWarnf("warning: job %s has no recorded start time; cannot attribute outputs by time window — skipping output discovery\n", ids.FormatJobID(job.ID))
+			return artifacts.SyncResult{}, nil
+		}
+		lower := outputSyncThreshold(job)
+		upper := outputSyncUpperBound(job, rec)
+		if isLocalJobHostFunc(job.Host) {
+			// The job executed on this machine: the local working tree IS the
+			// runner's working tree, so time-window discovery here is
+			// first-party evidence, not a guess about the submitter's files.
+			files, err := discoverLocalJobOutputFiles(job, localDir, lower, upper)
+			if err != nil {
+				return artifacts.SyncResult{}, err
+			}
+			return storeLocalOutputFiles(database, job.ID, localDir, files)
+		}
+		discovered, err := discoverRemoteJobOutputFilesFunc(job, lower, upper)
 		if err != nil {
 			return artifacts.SyncResult{}, err
 		}
+		outputFiles = discovered
 	}
+	if len(outputFiles) == 0 {
+		return artifacts.SyncResult{}, nil
+	}
+	totalMB := runner.TotalSizeMB(outputFiles)
+	if err := syncOutputFilesBackFunc(job.Host, job.WorkingDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
+		return artifacts.SyncResult{}, err
+	}
+	outputFiles = runner.FilterOutputFilesSince(localDir, outputFiles, outputSyncThreshold(job))
 	return storeLocalOutputFiles(database, job.ID, localDir, outputFiles)
 }
 
@@ -2069,7 +2308,11 @@ func syncCloudJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, e
 		}
 		return result
 	}
-	for _, runID := range artifactRunIDCandidates(r2Client, job) {
+	// Discovery-list errors are non-fatal here: probe the recorded runs and
+	// download whatever prefixes do list. A missing superseded attempt only
+	// costs a re-sync, not a false "absent".
+	runIDCandidates, _ := artifactRunIDCandidates(r2Client, job)
+	for _, runID := range runIDCandidates {
 		if result := syncRun(runID); result.Added > 0 {
 			return result, nil
 		}
@@ -2084,7 +2327,13 @@ func syncCloudJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, e
 // objects: the recorded latest run, legacy run zero, then any runs/
 // subdirectories discovered in R2 (superseded attempts whose uploads
 // outlived latest_run_id).
-func artifactRunIDCandidates(lister cloudOutputLister, job *db.Job) []int64 {
+//
+// The returned error is non-nil when the R2 runs/ discovery listing failed: the
+// recorded run IDs are still returned (so probing proceeds), but the candidate
+// set may be missing superseded attempts. Callers that must not report a
+// confident "absent" propagate this; download/sync callers may ignore it and
+// proceed with the recorded runs.
+func artifactRunIDCandidates(lister cloudOutputLister, job *db.Job) ([]int64, error) {
 	runIDs := jobAttemptRunIDs(job)
 	tried := make(map[int64]struct{}, len(runIDs))
 	for _, id := range runIDs {
@@ -2094,7 +2343,7 @@ func artifactRunIDCandidates(lister cloudOutputLister, job *db.Job) []int64 {
 	discovered, err := r2resolve.ListRunIDsFunc(ctx, lister, job.ID)
 	cancel()
 	if err != nil {
-		return runIDs
+		return runIDs, fmt.Errorf("list R2 runs for job %d: %w", job.ID, err)
 	}
 	for _, id := range discovered {
 		if _, ok := tried[id]; ok {
@@ -2103,10 +2352,12 @@ func artifactRunIDCandidates(lister cloudOutputLister, job *db.Job) []int64 {
 		tried[id] = struct{}{}
 		runIDs = append(runIDs, id)
 	}
-	return runIDs
+	return runIDs, nil
 }
 
-func completionOutputFiles(job *db.Job) []runner.OutputFile {
+// fetchCompletionRecord reads the runner's completion record for a job from
+// its host. Returns nil when the record is missing or unreadable.
+func fetchCompletionRecord(job *db.Job) *runner.CompletionRecord {
 	completionPath := fmt.Sprintf("~/.cache/weft/logs/%d.completion.json", job.ID)
 	stdout, _, err := ssh.RunWithTimeout(job.Host, fmt.Sprintf("cat %s 2>/dev/null", completionPath), NormalSyncTimeout)
 	if err != nil {
@@ -2117,7 +2368,7 @@ func completionOutputFiles(job *db.Job) []runner.OutputFile {
 	if err := json.Unmarshal([]byte(stdout), &rec); err != nil {
 		return nil
 	}
-	return rec.OutputFiles
+	return &rec
 }
 
 func outputFilePaths(files []runner.OutputFile) []string {
@@ -2138,12 +2389,113 @@ func outputSyncThreshold(job *db.Job) time.Time {
 	return time.Unix(job.StartTime, 0).Add(-time.Second)
 }
 
-func discoverLocalJobOutputFiles(job *db.Job, localDir string) ([]runner.OutputFile, error) {
-	dirs := job.OutputDirs
-	if len(dirs) == 0 {
-		dirs = config.DefaultOutputDirs
+// outputSyncUpperBound returns the end-of-attempt cap for discovery-based
+// output attribution: end_time + 2m when the attempt end is known, zero
+// (unbounded) otherwise. The cap narrows the cross-attribution window for
+// sibling jobs sharing an output directory (spec:
+// OutputDiscoveryUsesAttemptStartCutoff in specs/job-lifecycle.allium).
+func outputSyncUpperBound(job *db.Job, rec *runner.CompletionRecord) time.Time {
+	var end int64
+	if rec != nil && rec.EndTime > 0 {
+		end = rec.EndTime
 	}
-	return runner.DiscoverJobOutputsSince(localDir, dirs, job.Outputs, outputSyncThreshold(job))
+	if end == 0 && job != nil && job.EndTime != nil && *job.EndTime > 0 {
+		end = *job.EndTime
+	}
+	if end == 0 {
+		return time.Time{}
+	}
+	return time.Unix(end, 0).Add(2 * time.Minute)
+}
+
+// jobOutputDiscoveryDirs returns the convention output directories for a job.
+func jobOutputDiscoveryDirs(job *db.Job) []string {
+	if len(job.OutputDirs) > 0 {
+		return job.OutputDirs
+	}
+	return config.DefaultOutputDirs
+}
+
+// discoverLocalJobOutputFiles time-window-discovers output files in the local
+// working tree. Only valid when the job executed on this machine — for remote
+// jobs the local tree holds the submitter's own files, which must never be
+// attributed to a job (spec: Attribution).
+func discoverLocalJobOutputFiles(job *db.Job, localDir string, lower, upper time.Time) ([]runner.OutputFile, error) {
+	files, err := runner.DiscoverJobOutputsSince(localDir, jobOutputDiscoveryDirs(job), job.Outputs, lower)
+	if err != nil {
+		return nil, err
+	}
+	return runner.FilterOutputFilesUntil(localDir, files, upper), nil
+}
+
+// maxRemoteOutputDiscoveryEntries bounds the remote find so a huge shared
+// output tree cannot stall the sync or flood the SSH channel.
+const maxRemoteOutputDiscoveryEntries = 20000
+
+// discoverRemoteJobOutputFiles lists files under the job's convention output
+// directories (and declared filesystem output refs) inside job.WorkingDir on
+// job.Host, keeping only files whose mtime falls inside [lower, upper]. Used
+// when the completion record lacks an output_files listing (jobs that
+// completed before the runner recorded outputs, or recovery paths). Mtimes
+// are compared as unix epochs, so host/submitter timezone skew is irrelevant.
+func discoverRemoteJobOutputFiles(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+	var roots []string
+	for _, dir := range jobOutputDiscoveryDirs(job) {
+		dir = strings.TrimSuffix(strings.TrimSpace(dir), "/")
+		if dir != "" {
+			roots = append(roots, dir)
+		}
+	}
+	for _, ref := range job.Outputs {
+		if path, ok := runner.FilesystemOutputRefPath(ref); ok {
+			if path = strings.TrimSuffix(path, "/"); path != "" {
+				roots = append(roots, path)
+			}
+		}
+	}
+	if len(roots) == 0 {
+		return nil, nil
+	}
+	quoted := make([]string, 0, len(roots))
+	for _, root := range roots {
+		quoted = append(quoted, "'"+strings.ReplaceAll(root, "'", `'\''`)+"'")
+	}
+	// stat -c is GNU coreutils, stat -f the BSD/macOS spelling (same dual
+	// form as internal/ops probes).
+	remoteCmd := fmt.Sprintf(
+		`cd %s 2>/dev/null || exit 0; for d in %s; do [ -e "$d" ] || continue; find "$d" -type f 2>/dev/null; done | head -n %d | while IFS= read -r f; do m=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null); s=$(stat -c %%s "$f" 2>/dev/null || stat -f %%z "$f" 2>/dev/null); [ -n "$m" ] && [ -n "$s" ] && printf '%%s|%%s|%%s\n' "$m" "$s" "$f"; done`,
+		job.WorkingDir, strings.Join(quoted, " "), maxRemoteOutputDiscoveryEntries)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, remoteCmd, NormalSyncTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("discover outputs on %s: %w", job.Host, err)
+	}
+
+	var files []runner.OutputFile
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		mtime, mErr := strconv.ParseInt(parts[0], 10, 64)
+		size, sErr := strconv.ParseInt(parts[1], 10, 64)
+		relPath := strings.TrimPrefix(strings.TrimSpace(parts[2]), "./")
+		if mErr != nil || sErr != nil || relPath == "" {
+			continue
+		}
+		at := time.Unix(mtime, 0)
+		if !lower.IsZero() && at.Before(lower) {
+			continue
+		}
+		if !upper.IsZero() && at.After(upper) {
+			continue
+		}
+		files = append(files, runner.OutputFile{RelPath: filepath.ToSlash(relPath), SizeBytes: size})
+	}
+	return files, nil
 }
 
 func storeLocalOutputFiles(database *sql.DB, jobID int64, localDir string, files []runner.OutputFile) (artifacts.SyncResult, error) {
@@ -2187,13 +2539,17 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 }
 
 var (
-	syncLocalJobArtifacts         = artifacts.SyncJob
-	syncCloudJobArtifactsFunc     = syncCloudJobArtifacts
-	completionOutputFilesFunc     = completionOutputFiles
-	syncJobOutputsFunc            = syncJobOutputs
-	syncArtifactsForJobFunc       = syncArtifactsForJob
-	storeRemoteJobOutputAssetFunc = artifacts.StoreRemoteArtifact
-	buildArtifactR2Client         = func() cloudOutputStore {
+	syncLocalJobArtifacts            = artifacts.SyncJob
+	syncCloudJobArtifactsFunc        = syncCloudJobArtifacts
+	completionRecordFunc             = fetchCompletionRecord
+	discoverRemoteJobOutputFilesFunc = discoverRemoteJobOutputFiles
+	isLocalJobHostFunc               = srcsync.IsLocalHost
+	syncOutputFilesBackFunc          = srcsync.SyncOutputFilesBack
+	syncJobOutputsFunc               = syncJobOutputs
+	syncArtifactsForJobFunc          = syncArtifactsForJob
+	storeRemoteJobOutputAssetFunc    = artifacts.StoreRemoteArtifact
+	syncOutputWarnf                  = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format, args...) }
+	buildArtifactR2Client            = func() cloudOutputStore {
 		cfg, err := config.Load()
 		if err != nil {
 			return nil
@@ -2237,17 +2593,31 @@ func syncArtifactOnDemand(job *db.Job, token string) (*db.Artifact, error) {
 }
 
 // artifactNotFoundMessage names everywhere the lookup checked so a missing
-// artifact reads as a conclusion, not a shrug.
-func artifactNotFoundMessage(job *db.Job, token string, r2Checked bool) string {
+// artifact reads as a conclusion, not a shrug. When r2ListFailed is true the
+// R2 listing was attempted but errored, so the artifact's absence from R2 is
+// unconfirmed — the message says "could not be located" and "status unknown"
+// rather than a definitive "not found" (wb40).
+func artifactNotFoundMessage(job *db.Job, token string, r2Checked, r2ListFailed bool) string {
 	checked := []string{"local cache"}
 	if r2Checked {
-		checked = append(checked, "R2")
+		if r2ListFailed {
+			checked = append(checked, "R2 (listing failed; status unknown)")
+		} else {
+			checked = append(checked, "R2")
+		}
 	}
 	if job != nil && job.HasInventoryHost() {
 		checked = append(checked, job.Host+" via artifact sync")
 	}
-	msg := fmt.Sprintf("artifact %q not found for job %s (checked %s)",
-		token, ids.FormatJobID(job.ID), strings.Join(checked, ", "))
+	verb := "not found"
+	if r2ListFailed {
+		verb = "could not be located"
+	}
+	msg := fmt.Sprintf("artifact %q %s for job %s (checked %s)",
+		token, verb, ids.FormatJobID(job.ID), strings.Join(checked, ", "))
+	if r2ListFailed {
+		msg += "; the R2 listing failed, so it may exist in R2 but could not be confirmed"
+	}
 	if job != nil && job.HasInventoryHost() {
 		msg += "; on-prem outputs are not uploaded to R2"
 		if locations := inventoryOutputLocations(job); len(locations) > 0 {
@@ -2263,6 +2633,19 @@ func writeInventoryArtifactHint(cmd *cobra.Command, job *db.Job) {
 		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations include %s.\n", strings.Join(locations, ", "))
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Run `weft artifact sync %s` to pull host outputs into the local artifact cache, or inspect the files over SSH.\n", ids.FormatJobID(job.ID))
+}
+
+// writeNoAttributableOutputsHint reports, accurately, that an on-prem job has no
+// outputs after `list` already ran the same host discovery that get/cat perform
+// on a cache miss. It deliberately omits the "run `weft artifact sync`" advice —
+// that sync just ran and found nothing — and instead states the conclusion and
+// where to look over SSH.
+func writeNoAttributableOutputsHint(cmd *cobra.Command, job *db.Job) {
+	fmt.Fprintf(cmd.OutOrStdout(), "No outputs attributable to job %s in its run window.\n", ids.FormatJobID(job.ID))
+	if locations := inventoryOutputLocations(job); len(locations) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations: %s.\n", strings.Join(locations, ", "))
+		fmt.Fprintln(cmd.OutOrStdout(), "If files exist there, inspect them over SSH; on-prem outputs are not uploaded to R2.")
+	}
 }
 
 func inventoryOutputLocations(job *db.Job) []string {
@@ -2384,7 +2767,8 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		err          error
 	)
 	foundManifest := false
-	for _, candidateRunID := range artifactRunIDCandidates(store, job) {
+	candidateRunIDs, _ := artifactRunIDCandidates(store, job)
+	for _, candidateRunID := range candidateRunIDs {
 		manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, candidateRunID)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		manifestData, err = store.GetObject(ctx, manifestKey)
@@ -2601,19 +2985,26 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 // both the outputs/ and artifacts/files/ prefixes. When the recorded runs
 // yield nothing, it falls back to runs discovered in R2 — a superseded or
 // canceled attempt's uploads outlive latest_run_id (see r2resolve.NeedR2Key).
-func listCloudJobOutputFiles(r2Client cloudOutputLister, job *db.Job) []runner.OutputFile {
-	result := listCloudOutputFilesForRuns(r2Client, job.ID, artifactRunIDCandidates(r2Client, job))
+//
+// A non-nil error means at least one R2 operation (runs/ discovery or a prefix
+// list) failed, so the returned file set may be incomplete — the caller must
+// treat this as "cloud status unknown", never "confirmed absent" (wb40). The
+// files that did list are still returned.
+func listCloudJobOutputFiles(r2Client cloudOutputLister, job *db.Job) ([]runner.OutputFile, error) {
+	runIDs, discErr := artifactRunIDCandidates(r2Client, job)
+	result, listErr := listCloudOutputFilesForRuns(r2Client, job.ID, runIDs)
 	result = dedupeArtifactSpellings(result)
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].RelPath < result[j].RelPath
 	})
-	return result
+	return result, errors.Join(discErr, listErr)
 }
 
-func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs []int64) []runner.OutputFile {
+func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs []int64) ([]runner.OutputFile, error) {
 	result := make([]runner.OutputFile, 0)
 	seen := make(map[string]struct{})
 	var mu sync.Mutex
+	var listErrs []error
 	appendFile := func(relPath string, sizeBytes int64, r2Key string) {
 		if relPath == "" {
 			return
@@ -2630,6 +3021,14 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 			R2Key:     r2Key,
 		})
 	}
+	recordErr := func(err error) {
+		if err == nil {
+			return
+		}
+		mu.Lock()
+		listErrs = append(listErrs, err)
+		mu.Unlock()
+	}
 
 	var wg sync.WaitGroup
 	for _, runID := range runIDs {
@@ -2641,10 +3040,12 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			files, err := r2Client.ListObjects(ctx, outputsPrefix)
 			cancel()
-			if err == nil {
-				for _, f := range files {
-					appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes, f.Key)
-				}
+			if err != nil {
+				recordErr(fmt.Errorf("list %s: %w", outputsPrefix, err))
+				return
+			}
+			for _, f := range files {
+				appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes, f.Key)
 			}
 		}()
 
@@ -2656,15 +3057,17 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			aFiles, err := r2Client.ListObjects(ctx, artifactsPrefix)
 			cancel()
-			if err == nil {
-				for _, f := range aFiles {
-					appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes, f.Key)
-				}
+			if err != nil {
+				recordErr(fmt.Errorf("list %s: %w", artifactsPrefix, err))
+				return
+			}
+			for _, f := range aFiles {
+				appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes, f.Key)
 			}
 		}()
 	}
 	wg.Wait()
-	return result
+	return result, errors.Join(listErrs...)
 }
 
 // dedupeArtifactSpellings collapses the dual upload of declared artifacts

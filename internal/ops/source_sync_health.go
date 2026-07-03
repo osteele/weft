@@ -42,6 +42,13 @@ const (
 	// Only auto-applied cordons are auto-lifted; a manual `weft instance
 	// cordon` (any other reason) is left untouched.
 	sourceSyncAutoCordonReason = "source sync wedged (auto)"
+
+	// simultaneousWedgeWindow bounds how recently another host's source-sync
+	// streak must have failed to count as a correlated failure. When this
+	// machine's own network drops, every host's dispatch times out within the
+	// same short window; a streak whose last timeout is older than this reflects
+	// an unrelated, already-resolved episode rather than the current outage.
+	simultaneousWedgeWindow = 10 * time.Minute
 )
 
 // recordSourceSyncTimeout extends a host's source-sync timeout streak.
@@ -108,6 +115,25 @@ func maybeHandleSourceSyncWedge(database *sql.DB, host string, syncLog *slog.Log
 		return
 	}
 
+	// Suspect the observer first. Cordon + drain is a destructive action, so an
+	// unknown cause is never sufficient (CLAUDE.md "Absence of Evidence").
+	// When several independent hosts are timing out at once, the most likely
+	// broken component is this machine's own network, not every host's
+	// filesystem — draining them all would strand healthy work on paid
+	// re-placements. If more than one inventory host has an active, recent
+	// source-sync timeout streak, skip; the host re-cordons on its next failed
+	// dispatch once the network recovers and streaks diverge.
+	if active, lookupErr := db.CountActiveSourceSyncTimeoutHosts(database, time.Now().Add(-simultaneousWedgeWindow)); lookupErr != nil {
+		// A local DB read failing is unrelated to network reachability and must
+		// not by itself block remediation of a genuinely wedged single host;
+		// the primary streak signal already crossed threshold. Log and proceed.
+		syncLog.Debug("source-sync wedge: correlated-failure lookup failed", "host", host, "error", lookupErr)
+	} else if active > 1 {
+		syncLog.Warn("multiple hosts unreachable simultaneously; suspecting local network, not host wedge", "host", host, "active_timeout_hosts", active)
+		oplog.Log("source_sync.wedge_suppressed", oplog.WithHost(host), oplog.WithDetailf("%d inventory hosts timing out simultaneously; suspecting local network", active))
+		return
+	}
+
 	cordoned, _, err := db.IsInventoryExecutionTargetCordoned(database, host)
 	if err != nil {
 		syncLog.Debug("source-sync wedge: cordon lookup failed", "host", host, "error", err)
@@ -145,11 +171,13 @@ func unplaceQueuedInventoryJobsOnHost(database *sql.DB, host string, syncLog *sl
 		if job.EffectiveStatus() != db.StatusQueued {
 			continue
 		}
-		if _, err := UnplaceQueuedJob(database, job, OptionsForMode(TimeoutFast)); err != nil {
+		reason := fmt.Sprintf("re-placed from %s: source sync wedged (host filesystem unresponsive)", host)
+		opts := OptionsForMode(TimeoutFast)
+		opts.UnplaceReason = reason
+		if _, err := UnplaceQueuedJob(database, job, opts); err != nil {
 			syncLog.Debug("source-sync wedge: unplace failed", "job_id", job.ID, "host", host, "error", err)
 			continue
 		}
-		reason := fmt.Sprintf("re-placed from %s: source sync wedged (host filesystem unresponsive)", host)
 		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 			EventKind: db.EventQueueDispatchAutoReplanned,
 			JobID:     job.ID,

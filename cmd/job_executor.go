@@ -93,28 +93,29 @@ type queueJobResult struct {
 
 // queueJobOptions controls adding a job to a remote queue.
 type queueJobOptions struct {
-	Host         string
-	WorkingDir   string
-	Command      string
-	Description  string
-	Project      string
-	EnvVars      []string
-	Tags         []string
-	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
-	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
-	GPUMemGB     *int   // GPU memory reservation in GB per device
-	GPUMemStrict bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
-	GPUMemMaxGB  *int   // Legacy GPU memory upper metadata; ignored by placement
-	Dependencies []queueDependency
-	AutoStart    bool
-	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
-	Outputs      []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
-	OutputDirs   []string // Convention-based output directories from .weft.toml
-	Produces     []string // Artifact specs this job produces
-	Needs        []string // Artifact specs this job needs
-	CloudAfter   []db.JobDependencyRef
-	CloudNeeds   []string
-	Disk         *db.JobDiskMetadata
+	Host             string
+	WorkingDir       string
+	Command          string
+	Description      string
+	Project          string
+	EnvVars          []string
+	Tags             []string
+	GPU              string // Explicit GPU setting (extracted from EnvVars or set directly)
+	GPUClass         string // GPU class name (e.g., "A100") — resolved to device at runtime
+	GPUMemGB         *int   // GPU memory reservation in GB per device
+	GPUMemStrict     bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
+	GPUMemMaxGB      *int   // Legacy GPU memory upper metadata; ignored by placement
+	Dependencies     []queueDependency
+	AutoStart        bool
+	Inputs           []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
+	BestEffortInputs []string
+	Outputs          []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
+	OutputDirs       []string // Convention-based output directories from .weft.toml
+	Produces         []string // Artifact specs this job produces
+	Needs            []string // Artifact specs this job needs
+	CloudAfter       []db.JobDependencyRef
+	CloudNeeds       []string
+	Disk             *db.JobDiskMetadata
 }
 
 type queueDependency struct {
@@ -214,25 +215,26 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	}
 
 	params := ops.QueueJobParams{
-		Host:        opts.Host,
-		WorkingDir:  opts.WorkingDir,
-		Command:     opts.Command,
-		Description: opts.Description,
-		Project:     opts.Project,
-		EnvVars:     opts.EnvVars,
-		Tags:        opts.Tags,
-		GPU:         gpu,
-		GPUClass:    opts.GPUClass,
-		GPUMemGB:    gpuMemGB,
-		GPUMemMaxGB: gpuMemMaxGB,
-		DepSpec:     encodeQueueDependencies(opts.Dependencies),
-		Inputs:      opts.Inputs,
-		Outputs:     opts.Outputs,
-		OutputDirs:  opts.OutputDirs,
-		Produces:    opts.Produces,
-		Needs:       opts.Needs,
-		Metadata:    buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
-		Disk:        opts.Disk,
+		Host:             opts.Host,
+		WorkingDir:       opts.WorkingDir,
+		Command:          opts.Command,
+		Description:      opts.Description,
+		Project:          opts.Project,
+		EnvVars:          opts.EnvVars,
+		Tags:             opts.Tags,
+		GPU:              gpu,
+		GPUClass:         opts.GPUClass,
+		GPUMemGB:         gpuMemGB,
+		GPUMemMaxGB:      gpuMemMaxGB,
+		DepSpec:          encodeQueueDependencies(opts.Dependencies),
+		Inputs:           opts.Inputs,
+		BestEffortInputs: opts.BestEffortInputs,
+		Outputs:          opts.Outputs,
+		OutputDirs:       opts.OutputDirs,
+		Produces:         opts.Produces,
+		Needs:            opts.Needs,
+		Metadata:         buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
+		Disk:             opts.Disk,
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)

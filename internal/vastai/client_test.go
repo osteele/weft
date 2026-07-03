@@ -437,6 +437,45 @@ func TestRunWithTimeoutHonorsPerCallTimeout(t *testing.T) {
 	}
 }
 
+// TestInstancePollAndOfferSearchTimeoutsExceedDefault pins the relationship
+// between the per-call timeouts for status polling / offer search and the
+// default cliTimeout. `vastai show instances` and `vastai search offers`
+// routinely exceed 30s on slow networks; regressing them back to the default
+// re-creates the "poll timeout conflated with instance dead" failure mode.
+func TestInstancePollAndOfferSearchTimeoutsExceedDefault(t *testing.T) {
+	t.Parallel()
+	if instancePollTimeout <= cliTimeout {
+		t.Errorf("instancePollTimeout = %s, want > default cliTimeout %s", instancePollTimeout, cliTimeout)
+	}
+	if offerSearchTimeout <= cliTimeout {
+		t.Errorf("offerSearchTimeout = %s, want > default cliTimeout %s", offerSearchTimeout, cliTimeout)
+	}
+}
+
+// TestInstancePollHonorsCLITimeoutOverride verifies the test/config override
+// precedence for the polling calls that now opt into instancePollTimeout /
+// offerSearchTimeout: a non-zero Client.CLITimeout must still win, and the
+// timeout must surface as ErrProviderCommandTimeout.
+func TestInstancePollHonorsCLITimeoutOverride(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	c := &Client{CLIPath: stub, CLITimeout: 10 * time.Millisecond}
+
+	if _, err := c.ShowInstance(12345); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Errorf("ShowInstance err = %v, want ErrProviderCommandTimeout (CLITimeout must take precedence)", err)
+	}
+	if _, err := c.ListAllInstances(); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Errorf("ListAllInstances err = %v, want ErrProviderCommandTimeout (CLITimeout must take precedence)", err)
+	}
+	if _, err := c.SearchOffers(OfferConstraints{}); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
+		t.Errorf("SearchOffers err = %v, want ErrProviderCommandTimeout (CLITimeout must take precedence)", err)
+	}
+}
+
 // TestSearchOffersSurfacesStderrErrorOnZeroExit covers the case where the
 // vastai CLI exits 0 with empty stdout but writes an API error payload to
 // stderr — observed with vastai 1.0.7's "driver_vers gte None" regression and

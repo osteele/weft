@@ -370,11 +370,14 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		if err != nil || !info.IsDir() {
 			continue
 		}
+		opts := drainOptionsFromConfig()
 		attempted++
-		fileCount, bytes := measureUploadTree(dirPath)
+		fileCount, bytes, measured := measureUploadTree(dirPath)
+		if !measured {
+			bytes = bytesForMaxDrain(opts)
+		}
 		start := time.Now()
 		retryCount := 0
-		opts := drainOptionsFromConfig()
 		opts.Source = dirPath + "/"
 		opts.DestRemote = "r2:" + bucket + "/" + r2keys.JobAttemptOutputDir(jobID, runID, dir)
 		opts.Command = "copy"
@@ -470,7 +473,11 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 		)
 		localRel := artifacts.LocalRelativePath(spec.Path)
 		if info.IsDir() {
-			fileCount, bytes = measureUploadTree(remotePath)
+			var measured bool
+			fileCount, bytes, measured = measureUploadTree(remotePath)
+			if !measured {
+				bytes = -1
+			}
 			src, dest, rcloneCmd = remotePath+"/", filesPrefix+localRel+"/", "copy"
 		} else {
 			fileCount, bytes = 1, info.Size()
@@ -510,6 +517,9 @@ func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID, runID in
 	if rcloneCmd == "copy" {
 		opts.Extra = []string{"--update"}
 	}
+	if sizeBytes < 0 {
+		sizeBytes = bytesForMaxDrain(opts)
+	}
 	opts.TotalBytes = sizeBytes
 	result := drainAndMarkWithRetry(context.Background(), bucket, drainTarget{
 		JobID: jobID, RunID: runID, Label: label,
@@ -537,9 +547,16 @@ func finalizeUploadResult(result *runner.OutputUploadResult, attempted, failed i
 	}
 }
 
-func measureUploadTree(root string) (files int, bytes int64) {
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+func measureUploadTree(root string) (files int, bytes int64, ok bool) {
+	ok = true
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, statErr := d.Info()
@@ -549,8 +566,30 @@ func measureUploadTree(root string) (files int, bytes int64) {
 		files++
 		bytes += info.Size()
 		return nil
-	})
-	return files, bytes
+	}); err != nil {
+		return 0, 0, false
+	}
+	return files, bytes, true
+}
+
+func bytesForMaxDrain(opts r2upload.Options) int64 {
+	if opts.MaxDrain <= 0 {
+		opts.MaxDrain = r2upload.DefaultMaxDrain
+	}
+	if opts.Baseline <= 0 {
+		opts.Baseline = r2upload.DefaultBaseline
+	}
+	if opts.FloorThroughput <= 0 {
+		opts.FloorThroughput = r2upload.DefaultFloorThroughput
+	}
+	if opts.MaxDrain <= opts.Baseline || opts.FloorThroughput <= 0 {
+		return 1 << 60
+	}
+	bytes := int64(opts.MaxDrain-opts.Baseline) * opts.FloorThroughput / int64(time.Second)
+	if bytes <= 0 {
+		return 1 << 60
+	}
+	return bytes
 }
 
 // promoteUVManifest reads uv-manifest.json from logDir and copies it to

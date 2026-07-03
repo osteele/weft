@@ -9,11 +9,12 @@ import (
 
 // JobMetadata stores optional derived or cached metadata for a job.
 type JobMetadata struct {
-	CPU          *JobCPUStats           `json:"cpu,omitempty"`
-	Resource     *ResourceUsage         `json:"resource,omitempty"`
-	Telemetry    *JobTelemetrySummary   `json:"telemetry,omitempty"`
-	Dependencies *JobDependencyMetadata `json:"dependencies,omitempty"`
-	Disk         *JobDiskMetadata       `json:"disk,omitempty"`
+	CPU              *JobCPUStats           `json:"cpu,omitempty"`
+	Resource         *ResourceUsage         `json:"resource,omitempty"`
+	Telemetry        *JobTelemetrySummary   `json:"telemetry,omitempty"`
+	Dependencies     *JobDependencyMetadata `json:"dependencies,omitempty"`
+	Disk             *JobDiskMetadata       `json:"disk,omitempty"`
+	BestEffortInputs []string               `json:"best_effort_inputs,omitempty"`
 }
 
 // JobDiskMetadata stores disk requirements for rental placement. DiskGB is a

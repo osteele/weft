@@ -175,6 +175,89 @@ func TestRecordJobOutputs_LocalOutput(t *testing.T) {
 	}
 }
 
+func TestRecordJobOutputs_ProducesSnapshot(t *testing.T) {
+	database := setupArtifactTestDB(t)
+	prev := snapshotRemoteJobOutputFunc
+	t.Cleanup(func() { snapshotRemoteJobOutputFunc = prev })
+	var snapshotted []string
+	snapshotRemoteJobOutputFunc = func(_ *sql.DB, job *db.Job, relPath string, _ time.Duration) (string, error) {
+		snapshotted = append(snapshotted, relPath)
+		return "~/.cache/weft/artifacts/48/3/outputs/" + relPath, nil
+	}
+
+	exitCode := 0
+	runID := int64(3)
+	job := &db.Job{
+		ID:          48,
+		Host:        "host-beta",
+		Status:      db.StatusCompleted,
+		ExitCode:    &exitCode,
+		Produces:    []string{"output/model.pt", "cache/reps:48"},
+		LatestRunID: &runID,
+	}
+
+	RecordJobOutputs(database, job)
+
+	if len(snapshotted) != 2 {
+		t.Fatalf("snapshotted = %v, want both produces paths", snapshotted)
+	}
+
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 recorded assets, got %d: %v", len(entries), entries)
+	}
+	byID := map[string]string{}
+	for _, e := range entries {
+		if e.Asset.Kind != dataloc.AssetJobOutput {
+			t.Fatalf("asset kind = %q, want job-output", e.Asset.Kind)
+		}
+		byID[e.Asset.ID] = e.Path
+	}
+	if byID["48/output/model.pt"] != "~/.cache/weft/artifacts/48/3/outputs/output/model.pt" {
+		t.Fatalf("model.pt path = %q, want snapshot path", byID["48/output/model.pt"])
+	}
+	if byID["48/cache/reps"] != "~/.cache/weft/artifacts/48/3/outputs/cache/reps" {
+		t.Fatalf("cache/reps path = %q, want versioned spec stripped to path", byID["48/cache/reps"])
+	}
+}
+
+func TestRecordJobOutputs_ProducesDeduplicatedAgainstLocalOutputs(t *testing.T) {
+	database := setupArtifactTestDB(t)
+	prev := snapshotRemoteJobOutputFunc
+	t.Cleanup(func() { snapshotRemoteJobOutputFunc = prev })
+	snapshotCalls := 0
+	snapshotRemoteJobOutputFunc = func(_ *sql.DB, _ *db.Job, relPath string, _ time.Duration) (string, error) {
+		snapshotCalls++
+		return "~/.cache/weft/artifacts/49/1/outputs/" + relPath, nil
+	}
+
+	exitCode := 0
+	job := &db.Job{
+		ID:       49,
+		Host:     "host-beta",
+		Status:   db.StatusCompleted,
+		ExitCode: &exitCode,
+		Outputs:  []string{"local:output/model.pt"},
+		Produces: []string{"output/model.pt"},
+	}
+
+	RecordJobOutputs(database, job)
+
+	if snapshotCalls != 1 {
+		t.Fatalf("snapshot calls = %d, want the duplicate path snapshotted once", snapshotCalls)
+	}
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 recorded asset, got %d: %v", len(entries), entries)
+	}
+}
+
 func TestRecordJobOutputs_LocalOutputSnapshotFailureSkipsMutablePath(t *testing.T) {
 	database := setupArtifactTestDB(t)
 	prev := snapshotRemoteJobOutputFunc

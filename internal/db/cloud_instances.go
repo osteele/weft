@@ -2117,7 +2117,24 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	// the view hasn't yet surfaced 'canceled' (e.g., because the latest
 	// attempt is still open). See CancelSurvivesInstanceTermination in
 	// specs/job-lifecycle.allium.
-	retryPrewarmFailed := IsRetryableTermination(ci)
+	retryInfraFailed := IsRetryableTermination(ci)
+	infraReasons := InfraFailureReasons()
+	infraReasonPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(infraReasons)), ",")
+	queryArgs := []any{
+		instanceID,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		boolInt(retryInfraFailed), StatusFailed,
+	}
+	for _, reason := range infraReasons {
+		queryArgs = append(queryArgs, reason)
+	}
+	for _, reason := range infraReasons {
+		queryArgs = append(queryArgs, reason)
+	}
+	queryArgs = append(queryArgs,
+		AutoRequeueMaxInfraFailureAttempts,
+		StatusCanceled, StatusKilled, StatusDraft,
+	)
 	jobs, err := queryJobsTx(tx,
 		fmt.Sprintf(`SELECT %s
 			FROM job_status js
@@ -2127,16 +2144,19 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			    OR (
 			      ? = 1
 			      AND js.status = ?
-			      AND COALESCE(js.failure_reason, '') = ?
+			      AND COALESCE(js.failure_reason, '') IN (`+infraReasonPlaceholders+`)
+			      AND (
+			        SELECT COUNT(*)
+			          FROM job_attempts ja
+			         WHERE ja.job_id = js.id
+			           AND COALESCE(ja.failure_reason, '') IN (`+infraReasonPlaceholders+`)
+			      ) < ?
 			    )
 			  )
 			  AND js.tombstoned = 0
 			  AND COALESCE((SELECT requested_status FROM jobs WHERE jobs.id = js.id), '') NOT IN (?, ?, ?)
 			ORDER BY js.id ASC`, qualifiedJobSelectColumns("js")),
-		instanceID,
-		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
-		boolInt(retryPrewarmFailed), StatusFailed, FailureReasonInfraPrewarmDownloadFailed,
-		StatusCanceled, StatusKilled, StatusDraft,
+		queryArgs...,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -2172,10 +2192,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
 		}
-		if retryPrewarmFailed && job.Status == StatusFailed && job.FailureReason == FailureReasonInfraPrewarmDownloadFailed {
+		if retryInfraFailed && job.Status == StatusFailed && IsInfraFailureReason(job.FailureReason) {
 			if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
 				tx.Rollback()
-				return 0, fmt.Errorf("create retry attempt for prewarm-failed job %d: %w", jobID, err)
+				return 0, fmt.Errorf("create retry attempt for infra-failed job %d: %w", jobID, err)
 			}
 		}
 		// Clear start_time on orphaned attempts so the retry budget doesn't
@@ -2913,6 +2933,50 @@ func CountLaunchAttemptsInCampaign(database *sql.DB, jobID int64, campaignID int
 		AttemptOutcomeOrphaned,
 	).Scan(&count)
 	return count, err
+}
+
+// ConsecutiveInterruptibleOrphans counts, from the job's most recent attempt
+// backwards, how many consecutive attempts ran on an interruptible launch and
+// ended orphaned or preempted — i.e. the instance was lost out from under the
+// job (outbid, watchdog-terminated, provider failure) rather than the job
+// itself failing. Counting stops at the first attempt that doesn't match
+// (any on-prem attempt, an on-demand launch, a completed/failed/canceled
+// outcome, or an attempt still open), so a single successful or on-demand run
+// naturally breaks the chain. Superseded attempts are bookkeeping rows, not
+// launch results, and are skipped without breaking the chain (mirroring
+// CountLaunchAttempts). Used by the bid-loss escalation in
+// internal/campaign: after enough consecutive losses the next launch for the
+// job's group searches on-demand offers instead of placing another bid.
+func ConsecutiveInterruptibleOrphans(database *sql.DB, jobID int64) (int, error) {
+	rows, err := database.Query(
+		`SELECT COALESCE(ja.cloud_outcome, ''), COALESCE(l.instance_type, '')
+		 FROM job_attempts ja
+		 LEFT JOIN launches l ON l.id = ja.launch_id
+		 WHERE ja.job_id = ?
+		 ORDER BY ja.attempt_number DESC, ja.id DESC`,
+		jobID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var outcome, instanceType string
+		if err := rows.Scan(&outcome, &instanceType); err != nil {
+			return 0, err
+		}
+		if outcome == AttemptOutcomeSuperseded {
+			continue
+		}
+		if instanceType != cloud.InstanceTypeInterruptible ||
+			(outcome != AttemptOutcomeOrphaned && outcome != AttemptOutcomePreempted) {
+			break
+		}
+		count++
+	}
+	return count, rows.Err()
 }
 
 // GetLaunchAttempts returns the cloud attempt history for a job, ordered by start time.

@@ -57,7 +57,7 @@ func (ei ExitInfo) SignalName() string {
 // Hang-watchdog exit codes and labels. See specs/job-lifecycle.allium
 // rules GPUIdleKillsJob and StdoutSilenceKillsJob.
 const (
-	ExitCodeSetupTimeout          = 124 // matches timeout(1) convention; see RunSetupCommand
+	ExitCodeSetupTimeout          = db.ExitCodeSetupTimeout // 124; matches timeout(1) convention; see RunSetupCommand
 	ExitCodeGPUIdleKill           = 125
 	ExitCodeStdoutSilenceKill     = 126
 	KillReasonGPUIdle             = "gpu-idle"
@@ -118,8 +118,8 @@ func DetectFailureReasonFromExitInfoAndLog(ei ExitInfo, logPath string) string {
 	if logTailMentionsCUDADriverTooOld(tail) {
 		return FailureReasonCUDADriverTooOld
 	}
-	if logTailMentionsCUDAHardwareFault(tail) {
-		return db.FailureReasonInfraCUDAHardwareFault
+	if reason, _ := db.ClassifyInfraFailure(db.PhaseRuntime, ei.ExitCode, tail); reason != "" {
+		return reason
 	}
 	return DetectFailureReasonFromExitInfo(ei)
 }
@@ -164,13 +164,6 @@ func logTailMentionsCUDADriverTooOld(tail string) bool {
 		}
 	}
 	return false
-}
-
-func logTailMentionsCUDAHardwareFault(tail string) bool {
-	return strings.Contains(tail, "peer gpu memory") ||
-		strings.Contains(tail, "nvlink") ||
-		strings.Contains(tail, "uncorrectable ecc") ||
-		strings.Contains(tail, "xid")
 }
 
 // JobPaths holds all file paths for a job.

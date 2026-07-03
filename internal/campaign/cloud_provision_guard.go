@@ -1,10 +1,13 @@
 package campaign
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // validateGroupCloudProvisionable rejects a cloud launch when a job in the
@@ -23,7 +26,7 @@ import (
 // hf:/hf-dataset: inputs download from the Hub; local file-path inputs ride the
 // source tarball; job-output: inputs are co-located or staged from R2 via the
 // --needs path, so none of those are rejected.
-func validateGroupCloudProvisionable(group InstanceGroup) error {
+func validateGroupCloudProvisionable(ctx context.Context, group InstanceGroup, database *sql.DB, client *r2.Client) error {
 	for _, job := range group.Jobs {
 		if job == nil {
 			continue
@@ -34,7 +37,28 @@ func validateGroupCloudProvisionable(group InstanceGroup) error {
 				continue
 			}
 			switch asset.Kind {
-			case dataloc.AssetCheckpoint, dataloc.AssetCorpus:
+			case dataloc.AssetCheckpoint:
+				info, err := resolveCheckpointTransport(ctx, database, client, asset)
+				if err != nil {
+					return fmt.Errorf(
+						"job %s declares input %q, but weft could not verify whether the checkpoint is staged in R2 for rental use: %w",
+						ids.FormatJobID(job.ID), raw, err)
+				}
+				if info.state == checkpointTransportR2Resident {
+					continue
+				}
+				if info.state == checkpointTransportUnknown {
+					return fmt.Errorf(
+						"job %s declares input %q, but weft could not verify whether the checkpoint is staged in R2 for rental use; rental placement fails closed while transportability is unknown",
+						ids.FormatJobID(job.ID), raw)
+				}
+				return fmt.Errorf(
+					"job %s declares input %q, which weft cannot provision onto a cloud rental instance: "+
+						"the checkpoint is registered on an inventory host but is not confirmed in R2. "+
+						"Run this job on a host that holds the asset (see `weft data where %s`), "+
+						"or run `weft data publish checkpoint:%s --name <name>` to stage it through the asset store",
+					ids.FormatJobID(job.ID), raw, raw, asset.ID)
+			case dataloc.AssetCorpus:
 				return fmt.Errorf(
 					"job %s declares input %q, which weft cannot provision onto a cloud rental instance: "+
 						"%s assets exist only on hosts where they were registered. "+

@@ -9,11 +9,13 @@ func TestCampaignManifest_RoundTrip(t *testing.T) {
 	m := CampaignManifest{
 		Jobs: []AgentJob{
 			{
-				ID:         42,
-				Command:    "python train.py",
-				OutputDirs: []string{"results/"},
-				Produces:   []string{"results/model.pt"},
-				Needs:      []string{"inputs/data.csv:41"},
+				ID:               42,
+				Command:          "python train.py",
+				OutputDirs:       []string{"results/"},
+				Produces:         []string{"results/model.pt"},
+				Needs:            []string{"inputs/data.csv:41"},
+				Inputs:           []string{"hf:org/explicit", "hf:org/auto"},
+				BestEffortInputs: []string{"hf:org/auto"},
 			},
 			{ID: 43, Command: "python eval.py", Dir: "/custom/dir"},
 		},
@@ -46,6 +48,9 @@ func TestCampaignManifest_RoundTrip(t *testing.T) {
 	}
 	if len(got.Jobs[0].Needs) != 1 || got.Jobs[0].Needs[0] != "inputs/data.csv:41" {
 		t.Errorf("unexpected needs: %v", got.Jobs[0].Needs)
+	}
+	if len(got.Jobs[0].BestEffortInputs) != 1 || got.Jobs[0].BestEffortInputs[0] != "hf:org/auto" {
+		t.Errorf("unexpected best-effort inputs: %v", got.Jobs[0].BestEffortInputs)
 	}
 	if got.SelfDestructCmd != `vastai destroy instance "123"` {
 		t.Errorf("unexpected self-destruct cmd: %s", got.SelfDestructCmd)

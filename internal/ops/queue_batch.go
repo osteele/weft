@@ -185,6 +185,11 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				if metaErr != nil {
 					return updated, metaErr
 				}
+				// Second evidence source: a failed/empty metadata read here is
+				// silent, and this may be the only tick that ever records this
+				// completion — without a start_time the attempt would keep
+				// end_time but NULL start_time forever (seen live: wj3871–73).
+				BackfillStartTimeFromCompletionRecord(database, job, timeout)
 				// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
 				endTime := status.Mtime
 				if metaEndTime > 0 {
@@ -202,7 +207,12 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 					recordPreflightDispatchBlock(database, job.ID, status.FailureReason)
 				}
 				CacheCompletedJobLog(job, timeout)
-				// Fetch resource usage data (best-effort)
+				// Fetch resource usage data (best-effort). This writes only
+				// telemetry/metadata (resource usage samples, phase timings) —
+				// not job status — so a dropped write on lock contention is
+				// harmless and is re-derived on the next sync pass. The
+				// authoritative completion write above (RecordJobCompletion)
+				// is the one that must not be lost.
 				if _, err := updateJobResourceUsage(database, job, timeout); err != nil {
 					slog.Warn("failed to update resource usage", "component", "sync", "job_id", job.ID, "error", err)
 				}

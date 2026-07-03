@@ -1,0 +1,253 @@
+-- allium: 3
+-- diagnosis.allium
+--
+-- Scope: Log-pattern failure diagnosis — the taxonomy of diagnosis pattern
+--        IDs produced by scanning a job's log output, and the precedence
+--        contract of the classifier that assigns them.
+--
+-- Includes:
+--   - The pattern taxonomy: every pattern ID, its category, and semantics
+--   - Classifier entry points and which rule table each consults
+--   - First-match-wins precedence and the tier ordering contract
+--   - ModuleNotFoundError attribution requirements (wb27)
+--
+-- Excludes:
+--   - FailureReason classification from exit signals / OOM-kill detection
+--     (see job-lifecycle.allium § value FailureReason — that enum is
+--     stored on the attempt; a DiagnosisPattern is derived from log text)
+--   - Auto-remediation and retry policy (what to DO with a diagnosis)
+--   - Rendering of diagnoses (see job-lifecycle.allium's diagnostic
+--     surfaces guidance: printJobLocalDiagnostics et al.)
+--
+-- Implementation: internal/remediation/patterns.go (rule tables),
+-- internal/remediation/diagnosis.go (entry points, ErrorDiagnosis).
+
+use "./job-lifecycle.allium" as jobs
+
+-- ==========================================================================
+-- Value types
+-- ==========================================================================
+
+-- Category of a diagnosis. Framework-setup patterns (sglang_setup,
+-- vllm_setup) are environment-category with a `framework` structured
+-- detail; there is no separate framework category value.
+value DiagnosisCategory = data | code | environment | unknown
+
+-- DiagnosisPattern enumerates every pattern ID the log classifier can emit.
+-- This mirrors how FailureReason is specified: renaming or removing a
+-- member is a breaking change for stored job_attempts.error_diagnosis
+-- records and for downstream consumers (retry policy, dashboards).
+value DiagnosisPattern =
+    -- data patterns (dataPatterns table; matched first, may be remediable)
+      pep723_console_script_missing -- environment: PEP 723 inline deps not
+                                    -- installed because the script was run
+                                    -- as `uv run python <script>`
+    | hf_gated_repo             -- data: HF gated repo, token lacks access
+                                -- approval (401/GatedRepoError); NOT
+                                -- auto-fetchable
+    | hf_network_cache_miss     -- data: HF fetch failed and local cache is
+                                -- missing; declare the model as an input
+    | hf_transient_network      -- data: HF fetch interrupted by a network
+                                -- reset; asset exists, retry-safe
+    | missing_hf_model          -- data: HF model absent from local hub
+                                -- cache (remediable by pre-staging)
+    | missing_hf_dataset        -- data: HF dataset absent from local hub
+                                -- cache (remediable by pre-staging)
+    | missing_file              -- data: file missing from working directory
+
+    -- specific-cause failure patterns (failurePatternRules tier 1)
+    | cuda_hardware_fault       -- environment: bad GPU / NVLink / ECC / Xid
+    | cli_argument_drift        -- environment: flag not supported by the
+                                -- resolved tool version
+    | python_attribute_version_mismatch -- environment: library version
+                                -- mismatch during model/tokenizer load
+    | disk_full                 -- environment: no space left / quota
+    | cuda_image_wheel_mismatch -- environment: image CUDA older than the
+                                -- resolved Python CUDA wheels
+    | cuda_driver_too_old       -- environment: NVIDIA driver too old for
+                                -- the selected CUDA runtime
+    | tempdir_unusable          -- environment: no writable TMPDIR
+    | python_first_party_import_path -- code: first-party package not on
+                                -- sys.path (invoked as `uv run python
+                                -- pkg/script.py`); see wb27
+
+    -- framework-setup failure patterns (tier 2)
+    | sglang_setup              -- environment: SGLang runtime incomplete
+    | vllm_setup                -- environment: vLLM runtime incomplete
+
+    -- environment-signal failure patterns (tier 3)
+    | preempted                 -- environment: cloud instance preempted
+    | gpu_oom                   -- environment: GPU out of memory
+    | cuda_error                -- environment: CUDA runtime error
+    | ssh_disconnect            -- environment: SSH connection lost
+    | timeout                   -- environment: execution timed out
+
+    -- runtime-library-mismatch failure patterns (tier 4)
+    | glibcxx_version_not_found -- environment: host libstdc++ too old
+    | glibc_version_not_found   -- environment: host glibc too old
+    | cuda_lib_symbol_mismatch  -- environment: torch stack and bundled
+                                -- NVIDIA libs from incompatible CUDA
+                                -- toolkits (undefined symbol on import)
+
+    -- generic failure patterns (tier 5, catch-alls)
+    | module_not_found          -- code: missing Python module or import
+    | assert_failure            -- code: AssertionError / RuntimeError
+    | subprocess_failure        -- code: subprocess exited non-zero
+
+    -- code patterns (codePatterns table; see EntryPointTables note on
+    -- reachability)
+    | missing_import            -- code: ModuleNotFoundError
+    | import_error              -- code: ImportError cannot import name
+    | attribute_error           -- code: AttributeError
+    | name_error                -- code: NameError
+    | syntax_error              -- code: SyntaxError
+
+    -- live-log runtime patterns (envPatterns table)
+    | cuda_fatal                -- environment: CUDA device unrecoverable;
+                                -- fatal at runtime (job killed immediately)
+
+    -- fallback
+    | unknown                   -- no pattern matched; evidence tail only
+
+-- gpu_oom, cuda_hardware_fault, cuda_error, disk_full, and
+-- cuda_driver_too_old appear in BOTH failurePatternRules (post-mortem
+-- classification) and envPatterns (live-log runtime scanning). Same
+-- pattern ID and semantics; the envPatterns matchers are narrower and the
+-- entries additionally carry the fatal-at-runtime flag consumed by
+-- CheckFatalAtRuntime. gpu_oom and disk_full are intentionally NOT fatal
+-- at runtime (the job dies on its own; killing early would lose its exit
+-- path), so their envPatterns entries exist for taxonomy completeness
+-- while post-mortem classification of those IDs comes from
+-- failurePatternRules.
+
+-- ==========================================================================
+-- Classifier entry points
+-- ==========================================================================
+
+-- Three entry points consult the rule tables in fixed table order:
+--
+--   DiagnoseFromLog(log)                 — dataPatterns, then
+--                                          failurePatternRules; returns
+--                                          null when nothing matches.
+--   DiagnoseFailedAttemptFromLog(log,by) — dataPatterns, then
+--                                          failurePatternRules; always
+--                                          returns a diagnosis, using
+--                                          pattern `unknown` as fallback.
+--   CheckFatalAtRuntime(log)             — envPatterns only, restricted to
+--                                          entries flagged fatal-at-runtime
+--                                          (cuda_hardware_fault, cuda_error,
+--                                          cuda_fatal, cuda_driver_too_old);
+--                                          used by the runner on live log
+--                                          tails to kill jobs whose GPU
+--                                          state is unrecoverable.
+--
+-- dataPatterns precede failurePatternRules deliberately: data-availability
+-- causes (gated repo, cache miss) also produce timeout/connection text
+-- that the looser failure rules would mislabel (regression: hf_gated_repo
+-- vs `timeout`, wj2321). The codePatterns table is not consulted by these
+-- entry points; its IDs (missing_import, import_error, attribute_error,
+-- name_error, syntax_error) remain reserved for stored historical
+-- diagnoses and direct pattern use.
+rule DiagnosisFirstMatchWins {
+    when: LogClassificationRequested(log, entry_point)
+
+    -- Matching is first-match-wins over an ordered rule list. The FIRST
+    -- rule (in table order, then rule order within the table) whose
+    -- matcher accepts the log produces the diagnosis; later rules are
+    -- never consulted. Rule order IS the precedence relation.
+    ensures: Diagnosis(log) = first matching rule in entry_point.tables
+
+    @guidance
+        -- Implementation: matchFailurePattern in
+        -- internal/remediation/patterns.go iterates failurePatternRules in
+        -- slice order and returns on the first match; DiagnoseFromLog /
+        -- DiagnoseFailedAttemptFromLog iterate dataPatterns first.
+        -- TestFailurePatternRules order tests and patterns_tiers_test.go
+        -- pin the ordering.
+}
+
+-- failurePatternRules is assembled from named tiers concatenated in
+-- decreasing specificity. The tier ordering is the normative precedence
+-- contract; individual rule order within a tier is an implementation
+-- detail except where noted.
+rule FailurePatternTierOrder {
+    when: FailurePatternTableAssembled()
+
+    ensures: failurePatternRules =
+        specific_cause_rules        -- concrete root causes with narrow
+                                    -- signatures (hardware fault, disk
+                                    -- full, driver/version mismatch,
+                                    -- first-party sys.path miss)
+        ++ framework_setup_rules    -- sglang_setup, vllm_setup
+        ++ environment_signal_rules -- preempted, gpu_oom, cuda_error,
+                                    -- ssh_disconnect, timeout
+        ++ runtime_library_mismatch_rules -- glibcxx/glibc/cuda_lib symbol
+                                    -- mismatches that surface as import
+                                    -- errors
+        ++ generic_rules            -- module_not_found, assert_failure,
+                                    -- subprocess_failure
+
+    @guidance
+        -- Implementation: failurePatternTiers / concatRuleTiers in
+        -- internal/remediation/patterns.go. patterns_tiers_test.go asserts
+        -- (1) the assembled slice preserves tier order, (2) every
+        -- non-generic rule precedes every generic rule, (3) the wb27
+        -- ordering (first-party import before framework-setup and
+        -- module_not_found).
+}
+
+-- ==========================================================================
+-- Precedence invariants
+-- ==========================================================================
+
+invariant SpecificCausePrecedesGeneric {
+    -- Specific-cause diagnoses MUST precede the generic module_not_found
+    -- rule (and the other generic catch-alls). In particular:
+    --   - python_first_party_import_path (first-party sys.path miss)
+    --   - cuda_lib_symbol_mismatch (CUDA lib undefined-symbol ImportError)
+    --   - glibcxx/glibc_version_not_found (userland too old)
+    --   - sglang_setup / vllm_setup (framework-setup)
+    -- all match log shapes that ALSO satisfy the generic import-failure
+    -- regex; ordering is the only thing that keeps them correctly labeled.
+    for rule in generic_rules:
+        for specific in specific_cause_rules ++ framework_setup_rules
+                        ++ runtime_library_mismatch_rules:
+            index_of(specific) < index_of(rule)
+}
+
+invariant ModuleNotFoundKeyedOnTracebackModule {
+    -- wb27: classification of a ModuleNotFoundError keys off the module
+    -- named in the FAILING TRACEBACK line, never off the script's declared
+    -- dependencies. A script that declares `--with vllm` but fails on
+    -- `No module named 'experiments'` is a first-party import-path
+    -- failure, not vllm_setup and not a generic module_not_found.
+    for log in FailedJobLogs where log.contains_module_not_found:
+        Diagnosis(log).attributed_module = log.traceback_missing_module
+
+    @guidance
+        -- First-party modules present in the synced source tree route to
+        -- invocation / PEP 723 guidance ("run `uv run pkg/script.py`, not
+        -- `uv run python pkg/script.py`"), NOT to "add a dependency"
+        -- advice — the module exists; only sys.path is wrong.
+        --
+        -- Implementation: firstPartyImportPathMatch in
+        -- internal/remediation/patterns.go requires ALL of:
+        --   1. a ModuleNotFoundError naming a bare top-level module,
+        --   2. a `cmd:` header line in the log,
+        --   3. a python-invoked script argument containing "/",
+        --   4. the script's top-level package equal to the missing module,
+        --   5. a `from <module>.<submodule> import ...` traceback line.
+        -- Regression tests: TestDiagnoseFromLog_FirstPartyImportPathBeats
+        -- VLLMSetup and ...ForPlainModuleNotFound in diagnosis_test.go.
+        --
+        -- KNOWN FRAGILITY (accepted, not yet fixed): probes 2-3 depend on
+        -- the agent/runner log header format. If the `cmd:` line is
+        -- renamed, or the invocation stops routing through an explicit
+        -- python token, the matcher returns no-match and the log SILENTLY
+        -- falls through to vllm_setup/sglang_setup (when a framework name
+        -- appears anywhere in the traceback) or generic module_not_found.
+        -- The misclassification is quiet — no error, just a wrong label
+        -- and wrong remediation advice. Changes to the log header format
+        -- must keep these probes in sync; a future hardening could match
+        -- on the traceback file path instead of the cmd: line.
+}

@@ -19,6 +19,8 @@ func InitSchema(db *sql.DB) error {
 		asset_id TEXT NOT NULL,
 		path TEXT DEFAULT '',
 		size_bytes INTEGER DEFAULT 0,
+		content_hash TEXT DEFAULT '',
+		content_type TEXT DEFAULT '',
 		last_seen INTEGER NOT NULL,
 		UNIQUE(host, asset_kind, asset_id)
 	);
@@ -48,22 +50,25 @@ func InitSchema(db *sql.DB) error {
 
 // RecordAsset upserts a host data entry, updating last_seen if it already exists.
 func RecordAsset(db *sql.DB, entry HostDataEntry) error {
+	contentType := string(entry.ContentType)
 	_, err := db.Exec(`
-		INSERT INTO host_data (host, asset_kind, asset_id, path, size_bytes, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO host_data (host, asset_kind, asset_id, path, size_bytes, content_hash, content_type, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(host, asset_kind, asset_id) DO UPDATE SET
 			path = excluded.path,
 			size_bytes = excluded.size_bytes,
+			content_hash = excluded.content_hash,
+			content_type = excluded.content_type,
 			last_seen = excluded.last_seen
 	`, entry.Host, string(entry.Asset.Kind), entry.Asset.ID,
-		entry.Path, entry.SizeBytes, entry.LastSeen.Unix())
+		entry.Path, entry.SizeBytes, entry.ContentHash, contentType, entry.LastSeen.Unix())
 	return err
 }
 
 // ListHostAssets returns all data assets known to exist on a host.
 func ListHostAssets(db *sql.DB, host string) ([]HostDataEntry, error) {
 	rows, err := db.Query(`
-		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		SELECT host, asset_kind, asset_id, path, size_bytes, content_hash, content_type, last_seen
 		FROM host_data WHERE host = ? ORDER BY asset_kind, asset_id
 	`, host)
 	if err != nil {
@@ -91,7 +96,7 @@ func HostAssetSnapshotHash(db *sql.DB, host string) (string, int, error) {
 // FindAssetHosts returns all hosts that have a given asset.
 func FindAssetHosts(db *sql.DB, asset DataAsset) ([]HostDataEntry, error) {
 	rows, err := db.Query(`
-		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		SELECT host, asset_kind, asset_id, path, size_bytes, content_hash, content_type, last_seen
 		FROM host_data WHERE asset_kind = ? AND asset_id = ?
 		ORDER BY last_seen DESC
 	`, string(asset.Kind), asset.ID)
@@ -125,7 +130,7 @@ func FindAssetsNotUsedSince(db *sql.DB, host string, cutoff time.Time) ([]HostDa
 	// whose inputs JSON array contains the matching asset ref.
 	// COALESCE(..., 0) treats "never used" as epoch 0, so it's always < cutoff.
 	query := `
-		SELECT hd.host, hd.asset_kind, hd.asset_id, hd.path, hd.size_bytes, hd.last_seen,
+		SELECT hd.host, hd.asset_kind, hd.asset_id, hd.path, hd.size_bytes, hd.content_hash, hd.content_type, hd.last_seen,
 		       COALESCE((
 		           SELECT MAX(j.start_time)
 		           FROM jobs j, json_each(j.inputs) je
@@ -155,10 +160,12 @@ func FindAssetsNotUsedSince(db *sql.DB, host string, cutoff time.Time) ([]HostDa
 		var e HostDataEntryWithUsage
 		var kind string
 		var lastSeen, lastUsedAt int64
-		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &lastSeen, &lastUsedAt); err != nil {
+		var contentType string
+		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &e.ContentHash, &contentType, &lastSeen, &lastUsedAt); err != nil {
 			return nil, err
 		}
 		e.Asset.Kind = AssetKind(kind)
+		e.ContentType = ContentType(contentType)
 		e.LastSeen = time.Unix(lastSeen, 0)
 		if lastUsedAt > 0 {
 			e.LastUsedAt = time.Unix(lastUsedAt, 0)
@@ -206,7 +213,7 @@ func RemoveStaleEntriesForKinds(db *sql.DB, host string, before time.Time, kinds
 // ListAllAssets returns all data assets across all hosts, ordered by kind and ID.
 func ListAllAssets(db *sql.DB) ([]HostDataEntry, error) {
 	rows, err := db.Query(`
-		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		SELECT host, asset_kind, asset_id, path, size_bytes, content_hash, content_type, last_seen
 		FROM host_data ORDER BY asset_kind, asset_id, host
 	`)
 	if err != nil {
@@ -221,11 +228,13 @@ func scanEntries(rows *sql.Rows) ([]HostDataEntry, error) {
 	for rows.Next() {
 		var e HostDataEntry
 		var kind string
+		var contentType string
 		var lastSeen int64
-		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &lastSeen); err != nil {
+		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &e.ContentHash, &contentType, &lastSeen); err != nil {
 			return nil, err
 		}
 		e.Asset.Kind = AssetKind(kind)
+		e.ContentType = ContentType(contentType)
 		e.LastSeen = time.Unix(lastSeen, 0)
 		entries = append(entries, e)
 	}

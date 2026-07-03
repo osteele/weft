@@ -343,6 +343,41 @@ auto_replan_stuck_inventory_dispatch = true
 	}
 }
 
+func TestAutoPublishCheckpointsDefaultsAndOverride(t *testing.T) {
+	var cfg Config
+	if cfg.AutoPublishCheckpointsEnabled() {
+		t.Fatal("auto-publish checkpoints should default off")
+	}
+	if got := cfg.AutoPublishCheckpointMaxBytes(); got != defaultAutoPublishCheckpointMaxBytes {
+		t.Fatalf("default max bytes = %d, want %d", got, defaultAutoPublishCheckpointMaxBytes)
+	}
+
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	content := `
+[autopilot]
+auto_publish_checkpoints = true
+auto_publish_checkpoint_max_gb = 1.5
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	loaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.AutoPublishCheckpointsEnabled() {
+		t.Fatal("auto_publish_checkpoints = true was not honored")
+	}
+	want := int64(1.5 * 1024 * 1024 * 1024)
+	if got := loaded.AutoPublishCheckpointMaxBytes(); got != want {
+		t.Fatalf("max bytes = %d, want %d", got, want)
+	}
+}
+
 func TestDataCacheEvictionDefaultsAndOverrides(t *testing.T) {
 	var cfg Config
 	if got := cfg.CacheEvictionPolicy(); got != CacheEvictionPolicyLRU {

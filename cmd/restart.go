@@ -3,12 +3,14 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"slices"
 	"strings"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -50,7 +52,13 @@ var (
 	restartUnplaced      bool
 	restartFromScratch   bool
 	restartCheckpointed  bool
+	restartWait          bool
+	restartNoWait        bool
 )
+
+// daemonStatusFunc probes the dispatch daemon's liveness/staleness. It is a
+// package var so tests can stub it without touching the real daemon.
+var daemonStatusFunc = daemoncontrol.CurrentStatus
 
 type restartOverrides struct {
 	GPU                 string
@@ -93,7 +101,9 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Sync non-terminal jobs before restarting to get latest cloud status
+	// Sync non-terminal jobs before restarting to get latest cloud status.
+	// This contacts hosts/providers and can take several seconds, so surface it
+	// rather than letting the CLI sit silent.
 	var jobsToSync []*db.Job
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
@@ -102,8 +112,9 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		}
 		jobsToSync = append(jobsToSync, job)
 	}
-	if len(jobsToSync) > 0 {
-		quickSyncJobs(database, jobsToSync, FastSyncTimeout, FastCloudSyncTimeout)
+	if syncCandidates := nonTerminalJobs(jobsToSync); len(syncCandidates) > 0 {
+		fmt.Fprintf(os.Stderr, "Refreshing status for %d job(s)…\n", len(syncCandidates))
+		quickSyncJobs(database, syncCandidates, FastSyncTimeout, FastCloudSyncTimeout)
 	}
 
 	var errors []string
@@ -119,8 +130,49 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("%d job(s) could not be restarted", len(errors))
 	}
-	ensureDaemonForWork(os.Stderr)
+	ensureDispatchAfterRestart(os.Stderr)
 	return nil
+}
+
+// nonTerminalJobs returns the subset of jobs that are not in a terminal status,
+// i.e. the ones a pre-restart status sync would actually contact a host or
+// provider for.
+func nonTerminalJobs(jobs []*db.Job) []*db.Job {
+	var out []*db.Job
+	for _, job := range jobs {
+		if job != nil && !db.IsTerminalStatus(job.Status) {
+			out = append(out, job)
+		}
+	}
+	return out
+}
+
+// ensureDispatchAfterRestart makes queued work dispatch after a restart without
+// silently blocking the CLI. Requeuing has already committed by the time this
+// runs, so this step only concerns the dispatch daemon:
+//
+//   - default (return-fast): a daemon that is already live keeps dispatching
+//     queued work, so this only starts a daemon when none is live. A live-but-
+//     stale daemon is left in place (it still dispatches) with a one-line hint;
+//     the slow restart-onto-current-binary is not performed inline.
+//   - --wait: performs the full ensure (which may restart a stale daemon onto
+//     the current binary) behind a visible line, so the wait is never silent.
+func ensureDispatchAfterRestart(w io.Writer) {
+	if restartWait {
+		fmt.Fprintln(w, "Ensuring dispatch daemon is current… (use --no-wait to skip)")
+		ensureDaemonForWork(w)
+		return
+	}
+	status, err := daemonStatusFunc(daemoncontrol.DefaultPaths())
+	if err == nil && status.Live {
+		if status.ActiveBinaryStale {
+			fmt.Fprintln(w, "note: dispatch daemon is running an older binary; queued work will still dispatch. Run `weft daemon restart` (or retry with --wait) to refresh it.")
+		}
+		return
+	}
+	// No live daemon: queued work will not dispatch until one starts.
+	fmt.Fprintln(w, "Starting dispatch daemon…")
+	ensureDaemonForWork(w)
 }
 
 func addRestartFlags(command *cobra.Command) {
@@ -135,7 +187,10 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
 	command.Flags().BoolVar(&restartFromScratch, "from-scratch", false, "Force a fresh attempt and ignore checkpoint/resume assumptions")
 	command.Flags().BoolVar(&restartCheckpointed, "checkpointed", false, "Retry expecting the command to resume from existing checkpoints")
+	command.Flags().BoolVar(&restartWait, "wait", false, "Block until the dispatch daemon is refreshed onto the current binary (shows progress)")
+	command.Flags().BoolVar(&restartNoWait, "no-wait", false, "Return immediately after requeuing without refreshing the dispatch daemon (default)")
 	command.MarkFlagsMutuallyExclusive("from-scratch", "checkpointed")
+	command.MarkFlagsMutuallyExclusive("wait", "no-wait")
 }
 
 func resolveRestartTargetJobIDs(database *sql.DB, args []string) ([]int64, error) {

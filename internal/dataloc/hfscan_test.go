@@ -1,12 +1,80 @@
 package dataloc
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestScanHFCacheDetailedContext_CarriesUnreadableEntry guards the regression
+// where an "unreadable"-but-present cached model was dropped from the entry set,
+// so its last_seen was never refreshed and the subsequent prune deleted the row —
+// forcing a future job to re-download a multi-GB model. An unreadable directory
+// is "unknown" (bytes on disk, permission blocked the scan), not "absent": it
+// must survive the prune. Confirmed-malformed entries (no-snapshots/nested) are
+// still dropped — the scan looked inside and determined they are not usable.
+func TestScanHFCacheDetailedContext_CarriesUnreadableEntry(t *testing.T) {
+	orig := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = orig })
+	hostCommandRunner = func(_ context.Context, _ string, _ string) (string, string, error) {
+		out := "1000\tok\t/home/u/.cache/huggingface/hub/models--org--good\n" +
+			"0\tunreadable\t/home/u/.cache/huggingface/hub/models--org--locked\n" +
+			"0\tno-snapshots\t/home/u/.cache/huggingface/hub/models--org--broken\n"
+		return out, "", nil
+	}
+	entries, err := ScanHFCacheDetailedContext(context.Background(), "host-x")
+	if err != nil {
+		t.Fatalf("ScanHFCacheDetailedContext: %v", err)
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Asset.ID] = true
+	}
+	if !got["org/good"] {
+		t.Errorf("readable model missing from entries")
+	}
+	if !got["org/locked"] {
+		t.Errorf("unreadable model was dropped; its row would be pruned and the model re-downloaded")
+	}
+	if got["org/broken"] {
+		t.Errorf("malformed (no-snapshots) model should be dropped so its stale row can be pruned")
+	}
+}
+
+// TestScanHFCacheDetailedContext_BaseDirUnavailableMapsToSentinelError verifies
+// the scan surfaces a distinguishable error (not empty success) when the HF cache
+// base directory is missing/unreadable, so callers skip pruning.
+func TestScanHFCacheDetailedContext_BaseDirUnavailableMapsToSentinelError(t *testing.T) {
+	orig := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = orig })
+	hostCommandRunner = func(_ context.Context, _ string, _ string) (string, string, error) {
+		return "", scanBaseDirSentinel + " /home/u/.cache/huggingface/hub", fmt.Errorf("exit status 3")
+	}
+	if _, err := ScanHFCacheDetailedContext(context.Background(), "host-x"); !errors.Is(err, ErrScanBaseDirUnavailable) {
+		t.Fatalf("err = %v, want ErrScanBaseDirUnavailable", err)
+	}
+}
+
+// TestHFCacheScanCommand_MissingBaseDirIsError checks the shell script itself:
+// a missing base dir must exit non-zero with the sentinel rather than exit 0 with
+// empty output (which would look like "no models present").
+func TestHFCacheScanCommand_MissingBaseDirIsError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	cmd := exec.Command("sh", "-c", hfCacheScanCommand())
+	cmd.Env = append(os.Environ(), "HF_HUB_CACHE="+missing)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit for missing HF cache base dir; output=%q", out)
+	}
+	if !strings.Contains(string(out), scanBaseDirSentinel) {
+		t.Fatalf("output = %q, want base-dir sentinel %q", out, scanBaseDirSentinel)
+	}
+}
 
 func TestParseHFDirName(t *testing.T) {
 	tests := []struct {

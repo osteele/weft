@@ -128,6 +128,7 @@ func BuildAutoPlacementPlanWithOptions(
 	groups := GroupByAffinity(jobs, nil)
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
+	ApplyBidLossEscalation(database, groups)
 	var diskAnomalies []DiskTelemetryAnomaly
 	for i := range groups {
 		var anomalies []DiskTelemetryAnomaly
@@ -151,7 +152,7 @@ func BuildAutoPlacementPlanWithOptions(
 		database,
 		clients,
 		groups,
-		nil,
+		options.RawOffers,
 		reusable,
 		predCfg,
 		overheadModel,

@@ -21,6 +21,10 @@ or blocked by a schema mismatch.`,
 }
 
 var ensurePredictorUsableFunc = ensurePredictorUsable
+var predictorEnsureReadyFunc = predictor.EnsureReady
+var predictorGetStatusFunc = predictor.GetStatus
+
+var predictorReadinessTimeout = 15 * time.Second
 
 func init() {
 	estimationCmd.AddCommand(estimationStatusCmd)
@@ -32,7 +36,9 @@ func ensurePredictorUsable(cmd *cobra.Command, cfg *config.Config, scope string)
 		return nil
 	}
 
-	if err := predictor.EnsureReady(pcfg); err != nil {
+	if err := runWithTimeout(predictorReadinessTimeout, func() error {
+		return predictorEnsureReadyFunc(pcfg)
+	}); err != nil {
 		var unavailable *predictor.UnavailableError
 		if errors.As(err, &unavailable) {
 			return fmt.Errorf("%s: %s", scope, formatPredictorBlocked(unavailable.Status))
@@ -40,7 +46,12 @@ func ensurePredictorUsable(cmd *cobra.Command, cfg *config.Config, scope string)
 		return fmt.Errorf("%s: predictor check failed: %w", scope, err)
 	}
 
-	status := predictor.GetStatus(pcfg)
+	status, err := valueWithTimeout(predictorReadinessTimeout, func() predictor.Status {
+		return predictorGetStatusFunc(pcfg)
+	})
+	if err != nil {
+		return fmt.Errorf("%s: predictor check failed: %w", scope, err)
+	}
 	if status.BackgroundRebuildRunning {
 		fmt.Fprintln(cmd.ErrOrStderr(), formatPredictorRefreshNotice(status))
 	}
@@ -60,10 +71,22 @@ func runEstimationStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	status := predictor.GetStatus(pcfg)
+	status, statusErr := valueWithTimeout(predictorReadinessTimeout, func() predictor.Status {
+		return predictorGetStatusFunc(pcfg)
+	})
+	if statusErr != nil {
+		status = predictor.Status{
+			Configured: true,
+			ModelDir:   pcfg.ModelDirPath(),
+		}
+	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "Predictor\t%s\n", predictorStateLabel(status))
 	fmt.Fprintf(w, "Model dir\t%s\n", status.ModelDir)
+	if statusErr != nil {
+		fmt.Fprintf(w, "Status check\t%s\n", statusErr)
+		return w.Flush()
+	}
 	if status.SchemaIncompatible {
 		fmt.Fprintf(w, "Schema\tincompatible\n")
 		fmt.Fprintf(w, "Reason\t%s\n", status.SchemaReason)
@@ -100,6 +123,33 @@ func runEstimationStatus(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(w, "Background rebuild\tidle\n")
 	}
 	return w.Flush()
+}
+
+func runWithTimeout(timeout time.Duration, fn func() error) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fn()
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("timed out after %s", timeout)
+	}
+}
+
+func valueWithTimeout[T any](timeout time.Duration, fn func() T) (T, error) {
+	resultCh := make(chan T, 1)
+	go func() {
+		resultCh <- fn()
+	}()
+	select {
+	case result := <-resultCh:
+		return result, nil
+	case <-time.After(timeout):
+		var zero T
+		return zero, fmt.Errorf("timed out after %s", timeout)
+	}
 }
 
 func predictorStateLabel(status predictor.Status) string {

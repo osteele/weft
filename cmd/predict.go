@@ -115,12 +115,14 @@ func runPredict(cmd *cobra.Command, args []string) error {
 }
 
 func buildPredictorConfig(cfg *config.Config) predictor.Config {
-	return predictor.BuildConfig(
+	pcfg := predictor.BuildConfig(
 		cfg.Predictor.ProjectPath,
 		cfg.Predictor.ModelDir,
 		cfg.Predictor.RetrainInterval,
 		cfg.Predictor.DBPaths,
 	)
+	pcfg.Enabled = cfg.Predictor.Enabled
+	return pcfg
 }
 
 func formatRuntimeSource(source string) string {

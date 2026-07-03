@@ -13,7 +13,9 @@ import (
 
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
@@ -25,6 +27,87 @@ import (
 type groupedAutoPilotPassTestOptions struct {
 	realFillReusableInstances bool
 	placeInventory            func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)
+}
+
+func TestGatedAutopilotFetchesOffersBeforeClaimingSlot(t *testing.T) {
+	database := db.SetupTestDB(t)
+	mem := 24
+	jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
+		WorkingDir: t.TempDir(),
+		Command:    "python train.py",
+		GPUClass:   "nvidia",
+		GPUMemGB:   &mem,
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob: %v", err)
+	}
+
+	originalClients := autoPilotBuildCloudClients
+	originalBuildPlan := autoPilotBuildPlanWithOptions
+	t.Cleanup(func() {
+		autoPilotBuildCloudClients = originalClients
+		autoPilotBuildPlanWithOptions = originalBuildPlan
+		autoPilotOfferSnapshotCache.Lock()
+		autoPilotOfferSnapshotCache.entries = make(map[string]autoPilotOfferSnapshotEntry)
+		autoPilotOfferSnapshotCache.Unlock()
+	})
+
+	searchStarted := make(chan struct{})
+	releaseSearch := make(chan struct{})
+	autoPilotBuildCloudClients = func(*config.Config) ([]cloud.Client, error) {
+		return []cloud.Client{&cloud.MockClient{
+			ProviderVal: cloud.ProviderVastai,
+			SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+				close(searchStarted)
+				<-releaseSearch
+				return []cloud.Offer{{
+					Provider:    cloud.ProviderVastai,
+					ProviderID:  "offer-1",
+					GPUName:     "RTX 4090",
+					GPUMemGB:    24,
+					CostPerHour: 1,
+				}}, nil
+			},
+		}}, nil
+	}
+	autoPilotBuildPlanWithOptions = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity, options campaign.PlanOptions) (campaign.AutoPlacementPlan, error) {
+		if !options.CachedOffersOnly {
+			t.Fatal("gated pass did not force cached-only offer planning")
+		}
+		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{jobID: "planner: test blocked"}}, nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunGroupedAutoPilotPassGatedWithOptions(context.Background(), database, nil, "slow-prefetch", AutopilotRunnerOptions{
+			AllowStaleBinary: true,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-searchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SearchOffers did not start")
+	}
+
+	second := NewAutopilotRunnerWithOptions(database, "second-acquirer", AutopilotRunnerOptions{AllowStaleBinary: true})
+	if err := second.TryAcquire(); err != nil {
+		t.Fatalf("second TryAcquire while offer fetch is blocked = %v, want success", err)
+	}
+	if err := second.Release(0, "second", nil); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	close(releaseSearch)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("gated pass error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("gated pass did not finish after offer search released")
+	}
 }
 
 type groupedAutoPilotPassTestOption func(*groupedAutoPilotPassTestOptions)
@@ -237,6 +320,238 @@ func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
 	if unplaceCalls != 1 {
 		t.Fatalf("enabled gate: unplaceCalls = %d, want 1", unplaceCalls)
 	}
+}
+
+func TestAutoPublishMissingCheckpointsFlagOnUnderThreshold(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
+	resetAutoPublishCheckpointAttempts(t)
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	calls := 0
+	autoPilotPublishCheckpointToR2 = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ cloud.R2Config, asset dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		calls++
+		if asset.Ref() != "checkpoint:trace" {
+			t.Fatalf("asset = %s", asset.Ref())
+		}
+		return campaign.CheckpointPublishResult{Uploaded: true}, nil
+	}
+
+	cfg := autoPublishCheckpointTestConfig(true, 1)
+	published, reasons, err := autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("autoPublishMissingCheckpoints: %v", err)
+	}
+	if published != 1 || calls != 1 {
+		t.Fatalf("published=%d calls=%d, want 1/1", published, calls)
+	}
+	if reason := reasons[job.ID]; reason != "" {
+		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
+func TestAutoPublishMissingCheckpointsRequiresFlagAndThreshold(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := recordQueuedCheckpointJob(t, database, "trace", 2*1024*1024*1024)
+	resetAutoPublishCheckpointAttempts(t)
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	calls := 0
+	autoPilotPublishCheckpointToR2 = func(context.Context, *sql.DB, *r2.Client, cloud.R2Config, dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		calls++
+		return campaign.CheckpointPublishResult{Uploaded: true}, nil
+	}
+
+	disabled := autoPublishCheckpointTestConfig(false, 1)
+	published, _, err := autoPublishMissingCheckpoints(context.Background(), database, disabled, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("disabled autoPublishMissingCheckpoints: %v", err)
+	}
+	if published != 0 || calls != 0 {
+		t.Fatalf("disabled published=%d calls=%d, want 0/0", published, calls)
+	}
+
+	enabledSmallCap := autoPublishCheckpointTestConfig(true, 1)
+	published, reasons, err := autoPublishMissingCheckpoints(context.Background(), database, enabledSmallCap, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("threshold autoPublishMissingCheckpoints: %v", err)
+	}
+	if published != 0 || calls != 0 {
+		t.Fatalf("over cap published=%d calls=%d, want 0/0", published, calls)
+	}
+	if reason := reasons[job.ID]; !strings.Contains(reason, "above autopilot cap") {
+		t.Fatalf("reason = %q, want cap reason", reason)
+	}
+}
+
+func TestAutoPublishMissingCheckpointsConfirmedFailureDoesNotAbortPass(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
+	resetAutoPublishCheckpointAttempts(t)
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	autoPilotPublishCheckpointToR2 = func(context.Context, *sql.DB, *r2.Client, cloud.R2Config, dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		return campaign.CheckpointPublishResult{}, fmt.Errorf("R2 PutObject: 500 internal error")
+	}
+
+	cfg := autoPublishCheckpointTestConfig(true, 1)
+	published, reasons, err := autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	// A confirmed (non-deferred) upload failure must be recorded per-job, not
+	// returned as a pass-aborting error.
+	if err != nil {
+		t.Fatalf("confirmed publish failure aborted the pass: %v", err)
+	}
+	if published != 0 {
+		t.Fatalf("published = %d, want 0", published)
+	}
+	if reason := reasons[job.ID]; !strings.Contains(reason, "auto-publish failed") {
+		t.Fatalf("reason = %q, want auto-publish failed", reason)
+	}
+}
+
+func TestAutoPublishMissingCheckpointsUnknownDefersWithoutFailingJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
+	resetAutoPublishCheckpointAttempts(t)
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	autoPilotPublishCheckpointToR2 = func(context.Context, *sql.DB, *r2.Client, cloud.R2Config, dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		return campaign.CheckpointPublishResult{}, fmt.Errorf("%w: confirm checkpoint checkpoint:trace on cool30: ssh timeout", campaign.ErrCheckpointPublishDeferred)
+	}
+
+	cfg := autoPublishCheckpointTestConfig(true, 1)
+	published, reasons, err := autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("unknown should defer, not return pass error: %v", err)
+	}
+	if published != 0 {
+		t.Fatalf("published = %d, want 0", published)
+	}
+	if reason := reasons[job.ID]; !strings.Contains(reason, "checkpoint auto-publish deferred") || !strings.Contains(reason, "ssh timeout") {
+		t.Fatalf("reason = %q, want deferred ssh timeout", reason)
+	}
+	refreshed, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if refreshed.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("status = %s, want queued", refreshed.EffectiveStatus())
+	}
+}
+
+func TestRunGroupedAutoPilotPassGatedPausedDoesNotAutoPublish(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := db.PauseAutopilot(database, "test", "manual"); err != nil {
+		t.Fatalf("PauseAutopilot: %v", err)
+	}
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	autoPilotPublishCheckpointToR2 = func(context.Context, *sql.DB, *r2.Client, cloud.R2Config, dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		t.Fatal("auto-publish should not run while autopilot is paused")
+		return campaign.CheckpointPublishResult{}, nil
+	}
+
+	_, err := RunGroupedAutoPilotPassGatedWithOptions(context.Background(), database, nil, "paused-test", AutopilotRunnerOptions{AllowStaleBinary: true})
+	if !errors.Is(err, ErrAutopilotPaused) {
+		t.Fatalf("err = %v, want ErrAutopilotPaused", err)
+	}
+}
+
+func TestRemoveCheckpointDeferredJobsFromPlan(t *testing.T) {
+	blockedJob := &db.Job{ID: 10}
+	keepJob := &db.Job{ID: 11}
+	plan := campaign.AutoPlacementPlan{
+		LaunchJobIDs: []int64{10, 11},
+		LaunchGroups: []campaign.LaunchGroup{{
+			JobIDs:           []int64{10, 11},
+			CostPerHourCents: 75,
+		}, {
+			JobIDs:           []int64{10},
+			CostPerHourCents: 25,
+		}},
+		LaunchRateCentsPerHour: 100,
+		ReuseAssignments: []campaign.ReuseAssignment{
+			{Job: blockedJob},
+			{Job: keepJob},
+		},
+	}
+
+	removeCheckpointDeferredJobsFromPlan(&plan, map[int64]string{10: "checkpoint auto-publish deferred: ssh timeout"})
+
+	if len(plan.LaunchJobIDs) != 1 || plan.LaunchJobIDs[0] != 11 {
+		t.Fatalf("LaunchJobIDs = %v, want [11]", plan.LaunchJobIDs)
+	}
+	if len(plan.LaunchGroups) != 1 || len(plan.LaunchGroups[0].JobIDs) != 1 || plan.LaunchGroups[0].JobIDs[0] != 11 {
+		t.Fatalf("LaunchGroups = %+v, want only job 11", plan.LaunchGroups)
+	}
+	if plan.LaunchRateCentsPerHour != 75 {
+		t.Fatalf("LaunchRateCentsPerHour = %d, want 75", plan.LaunchRateCentsPerHour)
+	}
+	if len(plan.ReuseAssignments) != 1 || plan.ReuseAssignments[0].Job.ID != 11 {
+		t.Fatalf("ReuseAssignments = %+v, want only job 11", plan.ReuseAssignments)
+	}
+}
+
+func recordQueuedCheckpointJob(t *testing.T, database *sql.DB, checkpointID string, sizeBytes int64) *db.Job {
+	t.Helper()
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "checkpoint job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobInputs(database, jobID, []string{"checkpoint:" + checkpointID}); err != nil {
+		t.Fatalf("SetJobInputs: %v", err)
+	}
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host:        "cool30",
+		Asset:       dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: checkpointID},
+		Path:        "/remote/checkpoints/" + checkpointID,
+		SizeBytes:   sizeBytes,
+		ContentHash: strings.Repeat("d", 64),
+		ContentType: dataloc.ContentTypeDirectory,
+		LastSeen:    time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	return job
+}
+
+func autoPublishCheckpointTestConfig(enabled bool, maxGB float64) *config.Config {
+	return &config.Config{
+		Autopilot: config.AutopilotConfig{
+			AutoPublishCheckpoints:     enabled,
+			AutoPublishCheckpointMaxGB: maxGB,
+		},
+		Vastai: config.VastaiConfig{
+			R2: config.R2Config{
+				AccountID:       "account",
+				AccessKeyID:     "key",
+				SecretAccessKey: "secret",
+				Bucket:          "bucket",
+			},
+		},
+	}
+}
+
+func resetAutoPublishCheckpointAttempts(t *testing.T) {
+	t.Helper()
+	autoPublishCheckpointAttempts.Lock()
+	old := autoPublishCheckpointAttempts.last
+	autoPublishCheckpointAttempts.last = make(map[string]time.Time)
+	autoPublishCheckpointAttempts.Unlock()
+	t.Cleanup(func() {
+		autoPublishCheckpointAttempts.Lock()
+		autoPublishCheckpointAttempts.last = old
+		autoPublishCheckpointAttempts.Unlock()
+	})
 }
 
 func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T) {

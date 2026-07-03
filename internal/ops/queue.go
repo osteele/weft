@@ -91,10 +91,13 @@ type QueueJobParams struct {
 	CPUAllotment *int
 	OutputDirs   []string // convention-based output directories from .weft.toml
 	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
-	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
-	Produces     []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
-	Needs        []string // Artifact specs this job needs (e.g., "output/model.pt:100")
-	Disk         *db.JobDiskMetadata
+	// BestEffortInputs are inputs that came only from source/command auto-detection.
+	// Failed cloud prewarm for these refs warns and continues.
+	BestEffortInputs []string
+	Outputs          []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
+	Produces         []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
+	Needs            []string // Artifact specs this job needs (e.g., "output/model.pt:100")
+	Disk             *db.JobDiskMetadata
 	// Metadata is persisted to job_attempts.job_metadata as part of the same
 	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
 	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
@@ -251,7 +254,7 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 			return 0, fmt.Errorf("record needs: %w", err)
 		}
 	}
-	metadata := mergeJobMetadata(params.Metadata, params.Disk)
+	metadata := mergeJobMetadata(params.Metadata, params.Disk, params.BestEffortInputs)
 	if metadata != nil {
 		if err := db.SetJobMetadata(database, jobID, metadata); err != nil {
 			if !explicitID {
@@ -264,8 +267,8 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 	return jobID, nil
 }
 
-func mergeJobMetadata(meta *db.JobMetadata, disk *db.JobDiskMetadata) *db.JobMetadata {
-	if meta == nil && disk == nil {
+func mergeJobMetadata(meta *db.JobMetadata, disk *db.JobDiskMetadata, bestEffortInputs []string) *db.JobMetadata {
+	if meta == nil && disk == nil && len(bestEffortInputs) == 0 {
 		return nil
 	}
 	if meta == nil {
@@ -273,6 +276,9 @@ func mergeJobMetadata(meta *db.JobMetadata, disk *db.JobDiskMetadata) *db.JobMet
 	}
 	if disk != nil {
 		meta.Disk = disk
+	}
+	if len(bestEffortInputs) > 0 {
+		meta.BestEffortInputs = append([]string(nil), bestEffortInputs...)
 	}
 	return meta
 }

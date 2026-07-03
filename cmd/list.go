@@ -19,12 +19,14 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list [jobs|campaigns|instances|hosts|queues|artifacts|projects] [flags]",
-	Short: "List jobs, campaigns, instances, hosts, queues, artifacts, or projects",
+	Use:     "list [jobs|campaigns|instances|hosts|queues|artifacts|projects] [flags]",
+	Aliases: []string{"ls"},
+	Short:   "List jobs, campaigns, instances, hosts, queues, artifacts, or projects",
 	Long: `List resources. Without a subcommand, lists jobs (same as "weft list jobs").
 
 Subcommands:
@@ -746,11 +748,7 @@ func showJob(database *sql.DB, id int64) error {
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
 	printExternalBindingSummary(database, job, "External:     ", "              ")
-	if job.StartTime > 0 {
-		fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
-	} else {
-		fmt.Printf("Start Time:   -\n")
-	}
+	fmt.Printf("Start Time:   %s\n", util.FormatUnixTimeOr(job.StartTime, "2006-01-02 15:04:05", util.EmptyCellCLI))
 	if job.EndTime != nil {
 		fmt.Printf("End Time:     %s\n", time.Unix(*job.EndTime, 0).Format("2006-01-02 15:04:05"))
 		if job.StartTime > 0 && *job.EndTime >= job.StartTime {

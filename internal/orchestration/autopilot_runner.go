@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/processguard"
 )
@@ -45,6 +47,33 @@ type AutopilotRunnerOptions struct {
 	// autopilot pause flag is set. Use only for explicit manual actions that
 	// must avoid racing autopilot without toggling its paused state.
 	IgnorePaused bool
+}
+
+type AutopilotBusyError struct {
+	Existing *db.AutopilotState
+}
+
+func (e *AutopilotBusyError) Error() string {
+	if e == nil || e.Existing == nil {
+		return ErrAutopilotBusy.Error()
+	}
+	label := e.Existing.ActiveRunnerLabel
+	if label == "" {
+		label = "another runner"
+	}
+	elapsed := ""
+	if !e.Existing.PassStartedAt.IsZero() {
+		elapsed = fmt.Sprintf(" for %s", time.Since(e.Existing.PassStartedAt).Truncate(time.Second))
+	}
+	host := ""
+	if e.Existing.ActiveRunnerHost != "" {
+		host = " on " + e.Existing.ActiveRunnerHost
+	}
+	return fmt.Sprintf("%s%s%s", label, host, elapsed)
+}
+
+func (e *AutopilotBusyError) Unwrap() error {
+	return ErrAutopilotBusy
 }
 
 // AutopilotRunner claims the singleton autopilot pass slot, heartbeats while a
@@ -89,7 +118,7 @@ func (r *AutopilotRunner) TryAcquire() error {
 			return err
 		}
 	}
-	claimed, paused, _, err := db.TryClaimAutopilotPassWithOptions(
+	claimed, paused, existing, err := db.TryClaimAutopilotPassWithOptions(
 		r.database,
 		r.pid,
 		r.label,
@@ -105,7 +134,7 @@ func (r *AutopilotRunner) TryAcquire() error {
 		return ErrAutopilotPaused
 	}
 	if !claimed {
-		return ErrAutopilotBusy
+		return &AutopilotBusyError{Existing: existing}
 	}
 
 	r.mu.Lock()
@@ -166,6 +195,11 @@ func RunGroupedAutoPilotPassGated(ctx context.Context, database *sql.DB, scopedJ
 }
 
 func RunGroupedAutoPilotPassGatedWithOptions(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string, opts AutopilotRunnerOptions) (result *GroupedAutoPilotResult, err error) {
+	cfg, cfgErr := config.Load()
+	var plannerOptions campaign.PlanOptions
+	if cfgErr == nil {
+		plannerOptions = buildAutoPilotCachedOfferOptions(database, cfg, scopedJobs)
+	}
 	runner := NewAutopilotRunnerWithOptions(database, label, opts)
 	if err := runner.TryAcquire(); err != nil {
 		return nil, err
@@ -174,7 +208,11 @@ func RunGroupedAutoPilotPassGatedWithOptions(ctx context.Context, database *sql.
 	defer func() {
 		_ = runner.Release(time.Since(started), summarizeAutoPilotResult(result), err)
 	}()
-	result, err = RunGroupedAutoPilotPass(ctx, database, scopedJobs)
+	if cfgErr != nil {
+		result, err = RunGroupedAutoPilotPass(ctx, database, scopedJobs)
+	} else {
+		result, err = runGroupedAutoPilotPassWithOptions(ctx, database, scopedJobs, plannerOptions)
+	}
 	return result, err
 }
 

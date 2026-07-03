@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -706,6 +707,121 @@ func TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter(t *testing.T) {
 	// Status file should have been written
 	if _, err := os.Stat(paths.Status); err != nil {
 		t.Fatalf("status file should exist after orphan detection: %v", err)
+	}
+}
+
+// TestRefreshRunningJobs_RecoveredCompletionDiscoversOutputs verifies that a
+// successful job recovered outside waitForJob (runner restart: the wrapper
+// wrote the status file, but no wait goroutine exists) still gets
+// convention-based output discovery in its completion record, bounded to
+// [start − 1s, status mtime + 2m] so stale files and later sibling jobs'
+// files are not attributed.
+func TestRefreshRunningJobs_RecoveredCompletionDiscoversOutputs(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(383)
+	jobIDStr := "383"
+	paths := NewJobPaths(r.logDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	workDir := t.TempDir()
+	outDir := filepath.Join(workDir, "output")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	now := time.Now()
+	inWindow := filepath.Join(outDir, "result.json")
+	if err := os.WriteFile(inWindow, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+	stale := filepath.Join(outDir, "stale.json")
+	if err := os.WriteFile(stale, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write stale output: %v", err)
+	}
+	if err := os.Chtimes(stale, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatalf("chtimes stale: %v", err)
+	}
+	late := filepath.Join(outDir, "late.json")
+	if err := os.WriteFile(late, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write late output: %v", err)
+	}
+	if err := os.Chtimes(late, now.Add(10*time.Minute), now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("chtimes late: %v", err)
+	}
+
+	// Wrapper captured a successful exit before the runner restarted.
+	if err := os.WriteFile(paths.Status, []byte("0\n"), 0644); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: now.Add(-time.Minute).Unix(),
+		DiskPath:  workDir,
+	})
+
+	r.refreshRunningJobs()
+
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("read completion record: %v", err)
+	}
+	var rec CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse completion record: %v", err)
+	}
+	if len(rec.OutputFiles) != 1 {
+		t.Fatalf("output_files = %+v, want exactly the in-window file", rec.OutputFiles)
+	}
+	if rec.OutputFiles[0].RelPath != "output/result.json" {
+		t.Fatalf("output file = %q, want output/result.json", rec.OutputFiles[0].RelPath)
+	}
+}
+
+// TestRefreshRunningJobs_RecoveredCompletionWithoutStartSkipsDiscovery
+// verifies that recovery without a recorded start time records no
+// output_files: with no attribution window, discovery would claim every file
+// in a shared output tree.
+func TestRefreshRunningJobs_RecoveredCompletionWithoutStartSkipsDiscovery(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(384)
+	jobIDStr := "384"
+	paths := NewJobPaths(r.logDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	workDir := t.TempDir()
+	outDir := filepath.Join(workDir, "output")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatalf("mkdir output dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "someone-elses.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write output: %v", err)
+	}
+	if err := os.WriteFile(paths.Status, []byte("0\n"), 0644); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: 0,
+		DiskPath:  workDir,
+	})
+
+	r.refreshRunningJobs()
+
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatalf("read completion record: %v", err)
+	}
+	var rec CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse completion record: %v", err)
+	}
+	if len(rec.OutputFiles) != 0 {
+		t.Fatalf("output_files = %+v, want none without a start time", rec.OutputFiles)
 	}
 }
 

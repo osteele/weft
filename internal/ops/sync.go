@@ -3,7 +3,9 @@ package ops
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +175,7 @@ type remoteQueue interface {
 	ProcessPaused(host string, jobID int64, timeout time.Duration) Option[bool]
 	QuickStatus(host string, jobID int64, timeout time.Duration) (quickStatus, error)
 	Metadata(host string, jobID int64, timeout time.Duration) (string, error)
+	CompletionRecord(host string, jobID int64, timeout time.Duration) (string, error)
 	Samples(host string, jobID int64, timeout time.Duration) (string, error)
 	Rusage(host string, jobID int64, timeout time.Duration) (string, error)
 }
@@ -570,6 +573,42 @@ func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Dur
 	return metadata, err
 }
 
+// BackfillStartTimeFromCompletionRecord recovers a completed attempt's
+// start_time from the host-side completion record when the metadata read did
+// not yield one.
+//
+// Completion recording is a one-shot event per attempt: UpdateTimesFromMetadata
+// swallows read failures (an unreachable or slow host is normal during sync),
+// so a single failed/empty metadata read at the tick that first observes
+// COMPLETED used to leave start_time NULL forever — the attempt closes
+// immediately after, and no later path revisited it. The completion record
+// (<id>.completion.json) carries the runner's authoritative start_time, so use
+// it as a second evidence source before recording completion. Best-effort:
+// read failures are non-fatal, mirroring the metadata path.
+func BackfillStartTimeFromCompletionRecord(database *sql.DB, job *db.Job, timeout time.Duration) {
+	if job == nil || job.StartTime != 0 {
+		return
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	content, err := queueRemoteClient.CompletionRecord(job.Host, job.ID, timeout)
+	if err != nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	var rec struct {
+		StartTime int64 `json:"start_time"`
+	}
+	if json.Unmarshal([]byte(content), &rec) != nil || rec.StartTime <= 0 {
+		return
+	}
+	if dbErr := db.UpdateStartTime(database, job.ID, rec.StartTime); dbErr != nil {
+		slog.Warn("failed to backfill start time from completion record", "component", "sync", "job_id", job.ID, "error", dbErr)
+		return
+	}
+	job.StartTime = rec.StartTime
+}
+
 // Probe functions for trinary logic
 
 // probeStatusFile checks if a job has a status file (completed)
@@ -841,6 +880,16 @@ func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duratio
 func (sshQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) (string, error) {
 	metadataPattern := session.MetadataFilePattern(jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return "", err
+	}
+	return stdout, nil
+}
+
+func (sshQueueRemote) CompletionRecord(host string, jobID int64, timeout time.Duration) (string, error) {
+	completionFile := session.SimpleCompletionFile(jobID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null", completionFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return "", err

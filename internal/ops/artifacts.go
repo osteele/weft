@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,14 +18,22 @@ import (
 
 var snapshotRemoteJobOutputFunc = snapshotRemoteJobOutput
 
-// RecordJobOutputs registers a completed job's declared outputs as data assets
-// on the host where the job ran. This makes outputs immediately visible for
-// transfer cost estimation and pre-staging of downstream jobs.
+// RecordJobOutputs registers a completed job's declared outputs — `--output`
+// refs (asset refs and `local:` paths) plus `--produces` manifest entries —
+// as data assets on the host where the job ran. Filesystem outputs are
+// snapshotted into the host's per-run artifact directory first, so the
+// recorded path stays valid after the working directory is reused; the
+// snapshot needs no R2 credentials. Recording also makes outputs immediately
+// visible for transfer cost estimation and pre-staging of downstream jobs.
 //
 // Only records outputs for successfully completed jobs (exit code 0).
-// Silently does nothing if the job has no outputs or didn't succeed.
+// Silently does nothing if the job declares no outputs or didn't succeed.
 func RecordJobOutputs(database *sql.DB, job *db.Job) {
-	if job == nil || len(job.Outputs) == 0 {
+	if job == nil {
+		return
+	}
+	records := declaredOutputRecords(job)
+	if len(records) == 0 {
 		return
 	}
 	// Only record on success
@@ -34,24 +43,20 @@ func RecordJobOutputs(database *sql.DB, job *db.Job) {
 
 	now := time.Now()
 	recorded := 0
-	for _, ref := range job.Outputs {
-		asset, outputPath, ok := parseRecordedOutputRef(job.ID, ref)
-		if !ok {
-			continue
-		}
-		recordPath := outputPath
-		if outputPath != "" {
-			snapshotPath, err := snapshotRemoteJobOutputFunc(database, job, outputPath, defaultSourceSyncTimeout)
+	for _, rec := range records {
+		recordPath := rec.path
+		if rec.path != "" {
+			snapshotPath, err := snapshotRemoteJobOutputFunc(database, job, rec.path, defaultSourceSyncTimeout)
 			if err != nil {
 				oplog.LogJob("job.record-outputs", job.ID, job.Host,
-					oplog.WithDetailf("output snapshot failed for %s: %v", outputPath, err))
+					oplog.WithDetailf("output snapshot failed for %s: %v", rec.path, err))
 				continue
 			}
 			recordPath = snapshotPath
 		}
 		entry := dataloc.HostDataEntry{
 			Host:     job.Host,
-			Asset:    asset,
+			Asset:    rec.asset,
 			Path:     recordPath,
 			LastSeen: now,
 		}
@@ -63,8 +68,65 @@ func RecordJobOutputs(database *sql.DB, job *db.Job) {
 
 	if recorded > 0 {
 		oplog.LogJob("job.record-outputs", job.ID, job.Host,
-			oplog.WithDetailf("%d/%d outputs recorded", recorded, len(job.Outputs)))
+			oplog.WithDetailf("%d/%d outputs recorded", recorded, len(records)))
 	}
+}
+
+// declaredOutputRecord pairs the data asset to record with the working-dir
+// relative path to snapshot ("" for non-filesystem asset refs).
+type declaredOutputRecord struct {
+	asset dataloc.DataAsset
+	path  string
+}
+
+// declaredOutputRecords enumerates a job's declared outputs: `--output`
+// refs and `--produces` manifest entries. Produces specs live on the job
+// record, so hosts without R2 can snapshot them at completion without
+// reading the remote manifest. Paths declared both ways are deduplicated.
+func declaredOutputRecords(job *db.Job) []declaredOutputRecord {
+	var records []declaredOutputRecord
+	seenPaths := make(map[string]struct{})
+	add := func(asset dataloc.DataAsset, path string) {
+		if path != "" {
+			if _, dup := seenPaths[path]; dup {
+				return
+			}
+			seenPaths[path] = struct{}{}
+		}
+		records = append(records, declaredOutputRecord{asset: asset, path: path})
+	}
+	for _, ref := range job.Outputs {
+		if asset, outputPath, ok := parseRecordedOutputRef(job.ID, ref); ok {
+			add(asset, outputPath)
+		}
+	}
+	for _, raw := range job.Produces {
+		if asset, outputPath, ok := parseProducedOutputRef(job.ID, raw); ok {
+			add(asset, outputPath)
+		}
+	}
+	return records
+}
+
+// parseProducedOutputRef maps a --produces spec ("output/model.pt" or
+// "output/model.pt:<version>") onto the same job-output asset form as a
+// `local:` declared output. The path/version split mirrors
+// runner.ParseProducesSpec, which ops cannot import (cycle via placement).
+func parseProducedOutputRef(jobID int64, raw string) (dataloc.DataAsset, string, bool) {
+	path := raw
+	if idx := strings.LastIndex(raw, ":"); idx >= 0 {
+		if _, err := strconv.ParseInt(raw[idx+1:], 10, 64); err == nil {
+			path = raw[:idx]
+		}
+	}
+	relPath := filepath.Clean(strings.TrimSpace(path))
+	if relPath == "" || relPath == "." {
+		return dataloc.DataAsset{}, "", false
+	}
+	return dataloc.DataAsset{
+		Kind: dataloc.AssetJobOutput,
+		ID:   fmt.Sprintf("%d/%s", jobID, relPath),
+	}, relPath, true
 }
 
 func snapshotRemoteJobOutput(database *sql.DB, job *db.Job, relPath string, timeout time.Duration) (string, error) {

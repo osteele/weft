@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/retry"
 	"github.com/osteele/weft/internal/runner"
@@ -43,12 +47,22 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging attempt: %s", label))
 
 		targetPath := filepath.Join(expandedWorkDir, filepath.FromSlash(strings.TrimPrefix(need.Path, "/")))
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		if err := prepareCloudNeedTarget(targetPath, need.ContentType); err != nil {
 			return fmt.Errorf("prepare local staging path for %q: %w", label, err)
 		}
-		if err := copyCloudNeedFromR2Func(bucket, need.R2Key, targetPath); err != nil {
+		copyTarget := targetPath
+		if need.ContentType == "directory" {
+			copyTarget = targetPath + ".weft-archive.tar.gz"
+			defer os.Remove(copyTarget)
+		}
+		if err := copyCloudNeedFromR2Func(bucket, need.R2Key, copyTarget); err != nil {
 			oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging fail: %s", label), oplog.WithError(err))
 			return fmt.Errorf("cloud artifact staging failed for %q: %w", label, err)
+		}
+		if need.ContentType == "directory" {
+			if err := extractCloudNeedArchive(copyTarget, targetPath); err != nil {
+				return fmt.Errorf("extract cloud directory asset %q: %w", label, err)
+			}
 		}
 		if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
 			return err
@@ -65,9 +79,84 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 	return nil
 }
 
+func prepareCloudNeedTarget(targetPath, contentType string) error {
+	if contentType == "directory" {
+		return os.MkdirAll(targetPath, 0o755)
+	}
+	return os.MkdirAll(filepath.Dir(targetPath), 0o755)
+}
+
+func extractCloudNeedArchive(archivePath, targetDir string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	cleanRoot, err := filepath.Abs(targetDir)
+	if err != nil {
+		return err
+	}
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		target, err := archiveMemberTarget(cleanRoot, header.Name)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(out, tr)
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+}
+
+func archiveMemberTarget(root, name string) (string, error) {
+	cleanName := filepath.Clean(filepath.FromSlash(name))
+	if cleanName == "." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanName) {
+		return "", fmt.Errorf("unsafe archive member path %q", name)
+	}
+	target := filepath.Join(root, cleanName)
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	if absTarget != root && !strings.HasPrefix(absTarget, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive member escapes target directory: %q", name)
+	}
+	return absTarget, nil
+}
+
 func writeCloudNeedSatisfiedMarker(jobID int64, spec string) error {
 	parsed, err := runner.ParseNeedsSpec(spec)
 	if err != nil {
+		if asset, ok := dataloc.ParseAssetRef(spec); ok && (asset.Kind == dataloc.AssetCheckpoint || asset.Kind == dataloc.AssetCorpus) {
+			return nil
+		}
 		return fmt.Errorf("parse cloud need marker %q: %w", spec, err)
 	}
 	homeDir, _ := os.UserHomeDir()

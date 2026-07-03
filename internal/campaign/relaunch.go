@@ -346,6 +346,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	groups := GroupByAffinity(relaunchGroupingJobs(eligible), nil)
 	groups = SplitGroupsByImage(cfg.Database, groups)
 	groups = ApplyImageMetadataRequirements(cfg.AppConfig, groups)
+	ApplyBidLossEscalation(cfg.Database, groups)
 	var r2Client *r2.Client
 	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
 		var err error

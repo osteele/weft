@@ -493,6 +493,41 @@ func HostSourceSyncTimeoutStreak(database *sql.DB, host string) (count int, last
 	return count, lastFailureAt, err
 }
 
+// CountActiveSourceSyncTimeoutHosts returns how many distinct hosts currently
+// have an unresolved source-sync timeout streak (their most recent source-sync
+// event is a timeout, not an OK) whose last timeout occurred at or after
+// `since`. When this machine's own network drops, every host's source rsync
+// times out within the same window, so a high count across independent hosts
+// points at the local observer rather than any one host's filesystem. Wedge
+// handling uses this to suspect itself before cordoning + draining a host.
+func CountActiveSourceSyncTimeoutHosts(database *sql.DB, since time.Time) (int, error) {
+	if database == nil {
+		return 0, nil
+	}
+	var count int
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT t.detail
+			FROM (
+				SELECT detail, MAX(id) AS max_id, MAX(occurred_at) AS last_at
+				FROM lifecycle_events
+				WHERE event_kind = ? AND detail != ''
+				GROUP BY detail
+			) t
+			LEFT JOIN (
+				SELECT detail, MAX(id) AS max_id
+				FROM lifecycle_events
+				WHERE event_kind = ? AND detail != ''
+				GROUP BY detail
+			) o ON o.detail = t.detail
+			WHERE t.max_id > COALESCE(o.max_id, 0)
+			  AND t.last_at >= ?
+		)`,
+		EventSourceSyncTimeout, EventSourceSyncOK, since.Unix(),
+	).Scan(&count)
+	return count, err
+}
+
 // CountLifecycleEventsByKind returns event counts grouped by kind, ordered by count descending.
 func CountLifecycleEventsByKind(database *sql.DB, filter LifecycleEventFilter) ([]LifecycleEventKindCount, error) {
 	var conditions []string

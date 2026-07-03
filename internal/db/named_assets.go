@@ -14,6 +14,7 @@ type NamedAsset struct {
 	Name        string
 	ContentHash string // sha256 hex
 	SizeBytes   int64
+	ContentType string
 	TargetPath  string // workspace-relative path at consumer-job staging time
 	SourceJobID *int64 // non-nil when minted from an existing job artifact
 	CreatedAt   time.Time
@@ -36,21 +37,25 @@ func UpsertNamedAsset(db *sql.DB, a NamedAsset) error {
 	if a.TargetPath == "" {
 		return fmt.Errorf("named asset %q: target_path is required", a.Name)
 	}
+	if a.ContentType == "" {
+		a.ContentType = "file"
+	}
 	now := time.Now().Unix()
 	created := a.CreatedAt.Unix()
 	if created == 0 {
 		created = now
 	}
 	_, err := db.Exec(`
-		INSERT INTO named_assets (name, content_hash, size_bytes, target_path, source_job_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO named_assets (name, content_hash, size_bytes, content_type, target_path, source_job_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			content_hash = excluded.content_hash,
 			size_bytes = excluded.size_bytes,
+			content_type = excluded.content_type,
 			target_path = excluded.target_path,
 			source_job_id = excluded.source_job_id,
 			updated_at = excluded.updated_at
-	`, a.Name, a.ContentHash, a.SizeBytes, a.TargetPath, a.SourceJobID, created, now)
+	`, a.Name, a.ContentHash, a.SizeBytes, a.ContentType, a.TargetPath, a.SourceJobID, created, now)
 	if err != nil {
 		return fmt.Errorf("upsert named asset %q: %w", a.Name, err)
 	}
@@ -67,9 +72,9 @@ func GetNamedAssetByName(db *sql.DB, name string) (*NamedAsset, error) {
 		sourceJobID sql.NullInt64
 	)
 	err := db.QueryRow(`
-		SELECT id, name, content_hash, size_bytes, target_path, source_job_id, created_at, updated_at
+		SELECT id, name, content_hash, size_bytes, content_type, target_path, source_job_id, created_at, updated_at
 		FROM named_assets WHERE name = ?
-	`, name).Scan(&a.ID, &a.Name, &a.ContentHash, &a.SizeBytes, &a.TargetPath, &sourceJobID, &createdAt, &updatedAt)
+	`, name).Scan(&a.ID, &a.Name, &a.ContentHash, &a.SizeBytes, &a.ContentType, &a.TargetPath, &sourceJobID, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNamedAssetNotFound
 	}
@@ -85,10 +90,26 @@ func GetNamedAssetByName(db *sql.DB, name string) (*NamedAsset, error) {
 	return &a, nil
 }
 
+// GetNamedAssetByContentHash returns one published name for contentHash, or
+// ErrNamedAssetNotFound if no name points at that content.
+func GetNamedAssetByContentHash(db *sql.DB, contentHash string) (*NamedAsset, error) {
+	var name string
+	err := db.QueryRow(`
+		SELECT name FROM named_assets WHERE content_hash = ? ORDER BY updated_at DESC, name LIMIT 1
+	`, contentHash).Scan(&name)
+	if err == sql.ErrNoRows {
+		return nil, ErrNamedAssetNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup named asset hash %q: %w", contentHash, err)
+	}
+	return GetNamedAssetByName(db, name)
+}
+
 // ListNamedAssets returns all named assets, ordered by name.
 func ListNamedAssets(db *sql.DB) ([]NamedAsset, error) {
 	rows, err := db.Query(`
-		SELECT id, name, content_hash, size_bytes, target_path, source_job_id, created_at, updated_at
+		SELECT id, name, content_hash, size_bytes, content_type, target_path, source_job_id, created_at, updated_at
 		FROM named_assets ORDER BY name
 	`)
 	if err != nil {
@@ -103,7 +124,7 @@ func ListNamedAssets(db *sql.DB) ([]NamedAsset, error) {
 			updatedAt   int64
 			sourceJobID sql.NullInt64
 		)
-		if err := rows.Scan(&a.ID, &a.Name, &a.ContentHash, &a.SizeBytes, &a.TargetPath, &sourceJobID, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.ContentHash, &a.SizeBytes, &a.ContentType, &a.TargetPath, &sourceJobID, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		if sourceJobID.Valid {

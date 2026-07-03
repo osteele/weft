@@ -68,6 +68,7 @@ type Job struct {
 	Tags                 []string
 	DepSpec              string   // Dependency specification (e.g., "42" or "42+" for after-any)
 	Inputs               []string // Data asset refs consumed by this job (e.g., "hf:meta-llama/Llama-3-8B")
+	BestEffortInputs     []string // Inputs staged best-effort because they were auto-detected only
 	ObservedInputs       []string // Data inputs discovered post-mortem (e.g., from disk-full HF cache scan)
 	Outputs              []string // Data asset refs produced by this job
 	OutputDirs           []string // Convention-based output directories from .weft.toml
@@ -1795,13 +1796,32 @@ func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launch
 	return tx.Commit()
 }
 
-// MoveQueuedJobToUnplaced clears a queued job's host assignment. Jobs that are
-// not inventory-only gain the rental placement tag so they remain eligible for
-// rental launch workflows. Unlike ResetJobToUnplaced, this does not archive a
-// run; it only clears queue placement metadata. If the visible queued placement
-// is a user requeue intent over a terminal latest attempt, it creates a fresh
-// unplaced attempt so job_status no longer exposes the terminal attempt's host.
+// MoveQueuedJobToUnplaced clears a queued job's host assignment and promotes it
+// for rental launch. This is the explicit move-to-cloud path: jobs that are not
+// inventory- or rental-tagged gain the rental placement tag so they remain
+// eligible for rental launch workflows, and the placement reason records the
+// manual move. Use MoveQueuedJobToUnplacedWithReason for re-place/drain flows
+// (e.g. the source-sync wedge drain) that return a job to the on-prem pool
+// without routing it to cloud. Unlike ResetJobToUnplaced, this does not archive
+// a run; it only clears queue placement metadata. If the visible queued
+// placement is a user requeue intent over a terminal latest attempt, it creates
+// a fresh unplaced attempt so job_status no longer exposes the terminal
+// attempt's host.
 func MoveQueuedJobToUnplaced(database *sql.DB, id int64) error {
+	return moveQueuedJobToUnplaced(database, id, "manually moved to unplaced queue", true)
+}
+
+// MoveQueuedJobToUnplacedWithReason clears a queued job's host assignment and
+// records the caller-supplied placement reason without promoting the job to
+// rental. Used by re-place/drain flows that return a job to the unplaced on-prem
+// pool; a host cordon — not a rental tag — keeps re-placement off the unhealthy
+// host. Aside from suppressing the rental promotion and using the given reason,
+// behavior matches MoveQueuedJobToUnplaced.
+func MoveQueuedJobToUnplacedWithReason(database *sql.DB, id int64, reason string) error {
+	return moveQueuedJobToUnplaced(database, id, reason, false)
+}
+
+func moveQueuedJobToUnplaced(database *sql.DB, id int64, reason string, promoteToRental bool) error {
 	job, err := GetJobByID(database, id)
 	if err != nil {
 		return err
@@ -1810,7 +1830,7 @@ func MoveQueuedJobToUnplaced(database *sql.DB, id int64) error {
 		return nil
 	}
 	tags := append([]string(nil), job.Tags...)
-	if !job.HasTag(TagInventory) && !job.HasTag(TagRental) {
+	if promoteToRental && !job.HasTag(TagInventory) && !job.HasTag(TagRental) {
 		tags = append(tags, TagRental)
 	}
 	tagValue, err := encodeTags(tags)
@@ -1843,7 +1863,7 @@ func MoveQueuedJobToUnplaced(database *sql.DB, id int64) error {
 		 SET tags = ?,
 		     placement_reasons = ?
 		 WHERE id = ?`,
-		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id,
+		tagValue, encodeStringSlice([]string{reason}), id,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -2648,10 +2668,18 @@ func MarkDead(db *sql.DB, host, sessionName string) error {
 	return UpdateAttemptDead(db, jobID)
 }
 
-// UpdateStartTime updates the start_time for a job (for jobs where start_time was initially null/0)
+// UpdateStartTime updates the start_time for a job (for jobs where start_time was initially null/0).
+//
+// Targets the latest attempt whether open or closed: completion sync can close
+// an attempt (end_time set) before any sync tick managed to read the host's
+// metadata, and the start time only becomes available from host-side evidence
+// afterwards. Restricting the backfill to open attempts made that gap
+// permanent — every later backfill silently no-oped, leaving completed
+// attempts with end_time but NULL start_time. The (start_time IS NULL OR 0)
+// guard keeps the write a pure backfill; it never overwrites a recorded start.
 func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
 	_, err := db.Exec(
-		`UPDATE job_attempts SET start_time = ? WHERE id = `+latestOpenAttemptSubquery+` AND (start_time IS NULL OR start_time = 0)`,
+		`UPDATE job_attempts SET start_time = ? WHERE id = `+latestAttemptSubquery+` AND (start_time IS NULL OR start_time = 0)`,
 		startTime, id,
 	)
 	return err
@@ -2931,6 +2959,9 @@ func (f *jobScanFields) populateJob(j *Job) {
 		j.PendingAt = &f.pendingAt.Int64
 	}
 	j.Metadata = decodeJobMetadata(f.jobMetadata)
+	if j.Metadata != nil && len(j.Metadata.BestEffortInputs) > 0 {
+		j.BestEffortInputs = append([]string(nil), j.Metadata.BestEffortInputs...)
+	}
 	if f.cost.Valid {
 		j.Cost = &f.cost.Float64
 	}

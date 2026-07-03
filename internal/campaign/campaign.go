@@ -83,7 +83,15 @@ type InstanceGroup struct {
 	// lower bound across the jobs in the group. Empty string means "no lower
 	// bound".
 	MinComputeCap string
-	Jobs          []*db.Job
+	// EscalateToOnDemand forces this launch attempt to search on-demand
+	// offers even though the group has preemptible jobs: set by
+	// ApplyBidLossEscalation when a job in the group has lost
+	// bidLossEscalationThreshold consecutive interruptible launches. It
+	// only suppresses the interruptible opt-in for this attempt — it never
+	// forces a bid, and no persistent state is kept (a successful on-demand
+	// run breaks the consecutive-loss chain).
+	EscalateToOnDemand bool
+	Jobs               []*db.Job
 }
 
 func cloneInstanceGroupWithJobs(g InstanceGroup, jobs []*db.Job) InstanceGroup {
@@ -91,6 +99,91 @@ func cloneInstanceGroupWithJobs(g InstanceGroup, jobs []*db.Job) InstanceGroup {
 	clone.Jobs = append([]*db.Job(nil), jobs...)
 	clone.VastCapAdd = append([]string(nil), g.VastCapAdd...)
 	return clone
+}
+
+type jobPlacementIntent struct {
+	GPUClass        string
+	Provider        string
+	RunpodCloudType string
+	NumGPUs         int
+	GPUMemGB        int
+	CPUCores        int
+	CPUMemGB        int
+	Interconnect    string
+	Preemptible     bool
+}
+
+func placementIntentForJob(job *db.Job) jobPlacementIntent {
+	if job == nil {
+		return jobPlacementIntent{NumGPUs: 1}
+	}
+	provider, _ := db.RequestedProvider(job.Tags)
+	mem := 0
+	if job.GPUMemGB != nil {
+		mem = *job.GPUMemGB
+	}
+	return jobPlacementIntent{
+		GPUClass:        strings.TrimSpace(job.GPUClass),
+		Provider:        provider,
+		RunpodCloudType: job.RequestedRunpodCloudType(),
+		NumGPUs:         job.RequestedGPUCount(),
+		GPUMemGB:        mem,
+		CPUCores:        job.RequestedCPUCores(),
+		CPUMemGB:        job.RequestedCPUMemGB(),
+		Interconnect:    strings.TrimSpace(job.RequestedInterconnect()),
+		Preemptible:     job.UsesPreemptiblePlacement(),
+	}
+}
+
+func (intent jobPlacementIntent) newGroup(job *db.Job) InstanceGroup {
+	return InstanceGroup{
+		GPUClass:        strings.ToUpper(intent.GPUClass),
+		Provider:        intent.Provider,
+		RunpodCloudType: intent.RunpodCloudType,
+		NumGPUs:         intent.NumGPUs,
+		GPUMemGB:        intent.GPUMemGB,
+		CPUCores:        intent.CPUCores,
+		CPUMemGB:        intent.CPUMemGB,
+		Interconnect:    intent.Interconnect,
+		Preemptible:     intent.Preemptible,
+		Jobs:            []*db.Job{job},
+	}
+}
+
+func (intent jobPlacementIntent) matchesGroup(g InstanceGroup) bool {
+	if g.Preemptible != intent.Preemptible {
+		return false
+	}
+	if !strings.EqualFold(g.Provider, intent.Provider) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(g.RunpodCloudType), intent.RunpodCloudType) {
+		return false
+	}
+	if normalizedGPUCount(g.NumGPUs) != normalizedGPUCount(intent.NumGPUs) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(g.Interconnect), intent.Interconnect) {
+		return false
+	}
+	if vramTierOf(g.GPUMemGB) != vramTierOf(intent.GPUMemGB) {
+		return false
+	}
+	return true
+}
+
+func mergePlacementIntent(g *InstanceGroup, intent jobPlacementIntent, job *db.Job, supremumGPUClass string) {
+	g.GPUClass = supremumGPUClass
+	g.Jobs = append(g.Jobs, job)
+	if intent.GPUMemGB > g.GPUMemGB {
+		g.GPUMemGB = intent.GPUMemGB
+	}
+	if intent.CPUCores > g.CPUCores {
+		g.CPUCores = intent.CPUCores
+	}
+	if intent.CPUMemGB > g.CPUMemGB {
+		g.CPUMemGB = intent.CPUMemGB
+	}
 }
 
 // ApplyImageMetadataRequirements augments groups with constraints declared by
@@ -196,49 +289,24 @@ func GroupByAffinity(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
 func groupConstrained(jobs []*db.Job) []InstanceGroup {
 	var groups []InstanceGroup
 	for _, job := range jobs {
-		provider, _ := db.RequestedProvider(job.Tags)
-		runpodCloudType := job.RequestedRunpodCloudType()
-		mem := 0
-		if job.GPUMemGB != nil {
-			mem = *job.GPUMemGB
-		}
+		intent := placementIntentForJob(job)
 
 		merged := false
 		for i := range groups {
-			if groups[i].Preemptible != job.UsesPreemptiblePlacement() {
-				continue
-			}
-			if !strings.EqualFold(groups[i].Provider, provider) {
-				continue
-			}
-			if !strings.EqualFold(strings.TrimSpace(groups[i].RunpodCloudType), runpodCloudType) {
-				continue
-			}
-			if vramTierOf(groups[i].GPUMemGB) != vramTierOf(mem) {
+			if !intent.matchesGroup(groups[i]) {
 				continue
 			}
 			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
 			if !ok {
 				continue
 			}
-			groups[i].GPUClass = supremum
-			groups[i].Jobs = append(groups[i].Jobs, job)
-			if mem > groups[i].GPUMemGB {
-				groups[i].GPUMemGB = mem
-			}
+			mergePlacementIntent(&groups[i], intent, job, supremum)
 			merged = true
 			break
 		}
 
 		if !merged {
-			groups = append(groups, InstanceGroup{
-				GPUClass:        strings.ToUpper(job.GPUClass),
-				Provider:        provider,
-				RunpodCloudType: runpodCloudType,
-				GPUMemGB:        mem,
-				Preemptible:     job.UsesPreemptiblePlacement(),
-				Jobs:            []*db.Job{job},
-			})
+			groups = append(groups, intent.newGroup(job))
 		}
 	}
 	return groups
@@ -290,47 +358,16 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 	var groups []groupState
 
 	for _, info := range infos {
-		mem := 0
-		if info.job.GPUMemGB != nil {
-			mem = *info.job.GPUMemGB
-		}
-
-		jobGPU := strings.TrimSpace(info.job.GPUClass)
-		jobGPUCount := info.job.RequestedGPUCount()
-		jobCPUCores := info.job.RequestedCPUCores()
-		jobCPUMem := info.job.RequestedCPUMemGB()
-		jobInterconnect := strings.TrimSpace(info.job.RequestedInterconnect())
-		jobPreemptible := info.job.UsesPreemptiblePlacement()
-		jobProvider, _ := db.RequestedProvider(info.job.Tags)
-		jobRunpodCloudType := info.job.RequestedRunpodCloudType()
+		intent := placementIntentForJob(info.job)
 
 		bestIdx := -1
 		var bestScore float64
-		jobTier := vramTierOf(mem)
 		for i, g := range groups {
-			if g.group.Preemptible != jobPreemptible {
-				continue
-			}
-			if !strings.EqualFold(g.group.Provider, jobProvider) {
-				continue
-			}
-			if !strings.EqualFold(strings.TrimSpace(g.group.RunpodCloudType), jobRunpodCloudType) {
-				continue
-			}
-			if normalizedGPUCount(g.group.NumGPUs) != normalizedGPUCount(jobGPUCount) {
-				continue
-			}
-			if !strings.EqualFold(strings.TrimSpace(g.group.Interconnect), jobInterconnect) {
+			if !intent.matchesGroup(g.group) {
 				continue
 			}
 			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
-			if _, gpuOK := gpuClassSupremum(g.group.GPUClass, jobGPU); !gpuOK {
-				continue
-			}
-			// Skip groups in a different VRAM tier to avoid over-provisioning.
-			// An 8GB job grouped with a 20GB job forces the whole group to ≥20GB,
-			// routing cheap jobs to expensive GPUs.
-			if vramTierOf(g.group.GPUMemGB) != jobTier {
+			if _, gpuOK := gpuClassSupremum(g.group.GPUClass, intent.GPUClass); !gpuOK {
 				continue
 			}
 			score := sharedInputScore(g.hfUnion, info.hfInputs, sizeFunc, refCountWeight)
@@ -342,18 +379,8 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 
 		if bestIdx >= 0 && bestScore > 0 {
 			g := &groups[bestIdx]
-			g.group.Jobs = append(g.group.Jobs, info.job)
-			supremum, _ := gpuClassSupremum(g.group.GPUClass, jobGPU)
-			g.group.GPUClass = supremum
-			if mem > g.group.GPUMemGB {
-				g.group.GPUMemGB = mem
-			}
-			if jobCPUCores > g.group.CPUCores {
-				g.group.CPUCores = jobCPUCores
-			}
-			if jobCPUMem > g.group.CPUMemGB {
-				g.group.CPUMemGB = jobCPUMem
-			}
+			supremum, _ := gpuClassSupremum(g.group.GPUClass, intent.GPUClass)
+			mergePlacementIntent(&g.group, intent, info.job, supremum)
 			for id := range info.hfInputs {
 				g.hfUnion[id] = struct{}{}
 			}
@@ -363,18 +390,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 				hfUnion[id] = struct{}{}
 			}
 			groups = append(groups, groupState{
-				group: InstanceGroup{
-					GPUClass:        strings.ToUpper(jobGPU),
-					Provider:        jobProvider,
-					RunpodCloudType: jobRunpodCloudType,
-					NumGPUs:         jobGPUCount,
-					GPUMemGB:        mem,
-					CPUCores:        jobCPUCores,
-					CPUMemGB:        jobCPUMem,
-					Interconnect:    jobInterconnect,
-					Preemptible:     jobPreemptible,
-					Jobs:            []*db.Job{info.job},
-				},
+				group:   intent.newGroup(info.job),
 				hfUnion: hfUnion,
 			})
 		}

@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -152,14 +153,24 @@ func (s JobState) TerminalLaunchStatus() (status string, reason string, ok bool)
 
 // CheckInstanceParams holds all the pre-fetched state needed to evaluate an instance.
 type CheckInstanceParams struct {
-	CI             *db.Launch
-	ProviderInst   *cloud.Instance
-	ProviderErr    error
-	R2Client       *r2.Client
-	JobState       JobState
-	PauseTolerant  bool
-	InstancePhase  string // reconciled display/check phase
-	BootstrapStage string // from R2
+	CI           *db.Launch
+	ProviderInst *cloud.Instance
+	ProviderErr  error
+	// ProviderStatusUnknownFor is how long provider status polling has been
+	// continuously failing for this launch — the unbroken stretch of passes
+	// where ProviderInst was nil with a non-nil ProviderErr, tracked by
+	// Reconciler.noteProviderStatusPoll. Zero on the first failing pass and
+	// whenever the most recent poll returned instance data. Only meaningful
+	// when ProviderInst == nil && ProviderErr != nil; consulted by the
+	// watchdog rules that defer terminating interruptible launches while
+	// provider status is unknown (a failed poll is not evidence of death —
+	// an outbid interruptible instance must be waited on, not destroyed).
+	ProviderStatusUnknownFor time.Duration
+	R2Client                 *r2.Client
+	JobState                 JobState
+	PauseTolerant            bool
+	InstancePhase            string // reconciled display/check phase
+	BootstrapStage           string // from R2
 	// OnStartStage is the last value of the OnStart shell's stage marker
 	// (e.g. apt-installing, rclone-failed, onstart-deps-ready) — the step
 	// the provider's OnStart script reached before bootstrap.sh took over.
@@ -222,6 +233,41 @@ type CheckInstanceParams struct {
 	RunningPhaseJobID            int64
 	RunningPhaseJobStatus        string
 	RunningPhaseJobTerminalSince *time.Time
+}
+
+// deferTerminationForUnknownStatus returns a display-only deferral action
+// when a watchdog termination must be held back: the launch is interruptible,
+// provider status is unknown (the most recent poll failed — ProviderInst nil
+// with a non-nil ProviderErr), and status has been unknown for less than
+// stalePauseTimeout. An outbid interruptible instance stops heartbeating and
+// making phase progress while it waits for resume or a bid raise; when
+// status polling is also failing (e.g. `vastai show instances` timing out on
+// a slow network) the watchdogs cannot distinguish "outbid, recoverable"
+// from "dead", so they defer instead of destroying a recoverable rental.
+// Past stalePauseTimeout — the same bound the pause-wait path uses — the
+// caller terminates as usual. Non-interruptible launches and passes where
+// the poll succeeded are never deferred. context describes the watchdog
+// condition that would have fired (e.g. "agent heartbeat stale for 5m").
+func deferTerminationForUnknownStatus(p CheckInstanceParams, context string) (InstanceAction, bool) {
+	if p.CI == nil || p.CI.InstanceType != cloud.InstanceTypeInterruptible {
+		return InstanceAction{}, false
+	}
+	if p.ProviderInst != nil || p.ProviderErr == nil {
+		return InstanceAction{}, false // provider status known (or never polled)
+	}
+	if errors.Is(p.ProviderErr, cloud.ErrInstanceNotFound) {
+		// A definitive not-found is an answer, not a failed poll: the provider
+		// says the instance no longer exists, so deferring only delays requeue
+		// of its jobs. The dead-confirm hysteresis still absorbs single blips.
+		return InstanceAction{}, false
+	}
+	if p.ProviderStatusUnknownFor >= stalePauseTimeout {
+		return InstanceAction{}, false
+	}
+	return InstanceAction{
+		Kind:         ActionDisplayOnly,
+		StallMessage: fmt.Sprintf("%s but provider status unknown (poll failing for %s) — deferring termination for interruptible instance", context, p.ProviderStatusUnknownFor.Truncate(time.Second)),
+	}, true
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -404,6 +450,12 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		// for on-demand placements it is provider-dead evidence and should not
 		// mask a stale heartbeat.
 		if p.ProviderInst == nil || !isRecoverablePausedProviderStatus(p.ProviderInst.Status, p.PauseTolerant) {
+			// An outbid interruptible instance also stops heartbeating; if
+			// status polling is failing, a nil ProviderInst here reflects the
+			// failed poll, not a dead instance — defer rather than destroy.
+			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("agent heartbeat stale for %s", p.HeartbeatAge.Truncate(time.Second))); ok {
+				return action
+			}
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
@@ -491,6 +543,9 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// infra_failure so the retry path applies. See spec LaunchingPhaseTimeout.
 	if ci.Status == db.LaunchStatusLaunching && ci.BootstrapOrigin() == nil {
 		if start := cloudInstanceLifecycleStart(ci); start != nil && p.Now.Sub(*start) >= launchingPhaseTimeout {
+			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("launching phase exceeded %s", launchingPhaseTimeout)); ok {
+				return action
+			}
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
@@ -636,6 +691,9 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 			}
 			if remaining <= 0 {
 				elapsed := termTimeout - remaining
+				if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("%s timeout after %s", stageLabel, elapsed.Truncate(time.Second))); ok {
+					return action
+				}
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -725,6 +783,9 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				phaseAge = p.Now.Sub(*p.PhaseChangedAt)
 			}
 			if phaseAge >= runningStaleTerminate {
+				if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("running phase stalled for %s with stale heartbeat", phaseAge.Truncate(time.Second))); ok {
+					return action
+				}
 				return InstanceAction{
 					Kind:              ActionRunningStalled,
 					TerminalStatus:    db.LaunchStatusFailed,

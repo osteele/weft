@@ -700,35 +700,37 @@ func SetAttemptLaunch(database *sql.DB, jobID int64, launchID int64) error {
 // to queued for jobs scoped to a launch once that launch has progressed beyond
 // initial placement and the latest attempt is not a completed non-orphaned run.
 func NormalizePendingPlacementForLaunch(database *sql.DB, launchID int64) (int64, error) {
-	result, err := database.Exec(`
-		UPDATE job_attempts
-		SET pending_status = ?, pending_at = COALESCE(pending_at, strftime('%s','now'))
-		WHERE id IN (
-			SELECT ja.id
-			FROM job_attempts ja
-			JOIN (
-				SELECT job_id, MAX(attempt_number) AS max_attempt
-				FROM job_attempts
-				GROUP BY job_id
-			) latest
-			  ON latest.job_id = ja.job_id AND latest.max_attempt = ja.attempt_number
-			JOIN launches l ON l.id = ja.launch_id
-			WHERE ja.launch_id = ?
-			  AND COALESCE(ja.pending_status, '') = ?
-			  AND l.status IN (?, ?, ?)
-			  AND NOT (
-			    COALESCE(ja.status, '') = ?
-			    AND COALESCE(ja.cloud_outcome, '') NOT IN (?, ?)
-			  )
-		)`,
-		StatusQueued, launchID, StatusPendingPlacement,
-		LaunchStatusRunning, LaunchStatusGrace, LaunchStatusCompleted,
-		StatusCompleted, AttemptOutcomeOrphaned, AttemptOutcomeCancelled,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	return RetryOnDatabaseLockedValue(context.Background(), "normalize pending placement for launch", func() (int64, error) {
+		result, err := database.Exec(`
+			UPDATE job_attempts
+			SET pending_status = ?, pending_at = COALESCE(pending_at, strftime('%s','now'))
+			WHERE id IN (
+				SELECT ja.id
+				FROM job_attempts ja
+				JOIN (
+					SELECT job_id, MAX(attempt_number) AS max_attempt
+					FROM job_attempts
+					GROUP BY job_id
+				) latest
+				  ON latest.job_id = ja.job_id AND latest.max_attempt = ja.attempt_number
+				JOIN launches l ON l.id = ja.launch_id
+				WHERE ja.launch_id = ?
+				  AND COALESCE(ja.pending_status, '') = ?
+				  AND l.status IN (?, ?, ?)
+				  AND NOT (
+				    COALESCE(ja.status, '') = ?
+				    AND COALESCE(ja.cloud_outcome, '') NOT IN (?, ?)
+				  )
+			)`,
+			StatusQueued, launchID, StatusPendingPlacement,
+			LaunchStatusRunning, LaunchStatusGrace, LaunchStatusCompleted,
+			StatusCompleted, AttemptOutcomeOrphaned, AttemptOutcomeCancelled,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return result.RowsAffected()
+	})
 }
 
 // NormalizeStalePendingPlacementNoLaunch converts stale pending_placement

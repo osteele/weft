@@ -2,11 +2,40 @@ package dataloc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 )
+
+// scanBaseDirSentinel is printed to stderr by the HF and corpus scan scripts
+// when their base directory is missing or unreadable. It lets the Go caller
+// distinguish "looked and the directory is genuinely empty" (exit 0, no output,
+// pruning stale rows is safe) from "could not look — the base directory is
+// absent or unmounted" (exit 3, this sentinel, pruning must be skipped). See
+// the "Absence of Evidence Is Not Evidence of Absence" rules in CLAUDE.md.
+const scanBaseDirSentinel = "WEFT_SCAN_BASE_UNAVAILABLE"
+
+// ErrScanBaseDirUnavailable indicates a host scan could not enumerate its base
+// directory because that directory was missing or unreadable. An empty result
+// paired with this error is "unknown", not "confirmed absent": callers MUST NOT
+// prune data-locality rows on this signal, since the assets may live on a
+// transiently unmounted or unreachable volume.
+var ErrScanBaseDirUnavailable = errors.New("scan base directory unavailable")
+
+// classifyScanError maps a scan command's (stderr, err) into either the
+// base-dir-unavailable sentinel error or the original error wrapped with
+// context. A nil err is returned unchanged.
+func classifyScanError(what, host, stderr string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(stderr, scanBaseDirSentinel) {
+		return fmt.Errorf("%s on %s: %w", what, host, ErrScanBaseDirUnavailable)
+	}
+	return fmt.Errorf("%s on %s: %w", what, host, err)
+}
 
 // ScanHFCache scans the HuggingFace cache on a remote host and returns
 // discovered models and datasets. It looks for directories matching the
@@ -44,27 +73,67 @@ func ScanHFCacheDetailedContext(ctx context.Context, host string) ([]HostDataEnt
 	}
 	entries := make([]HostDataEntry, 0, len(results))
 	for _, r := range results {
-		if r.Status != "ok" {
+		if hfScanPresenceOf(r.Status) == hfScanAbsent {
+			// Structurally invalid (doubly-nested cache or missing snapshots/):
+			// the scan looked inside and positively determined this is not a
+			// loadable HF asset. Drop it and let the pruner remove any stale row.
 			slog.Debug("skipping malformed HF cache entry",
 				"host", host, "asset", r.Asset.Ref(), "path", r.Path, "status", r.Status)
 			continue
 		}
+		// Present (ok/incomplete) or unreadable. "unreadable" means the entry
+		// directory exists but the weft user could not read it (ownership or
+		// permission) — the bytes are on disk, so this is "unknown", not
+		// "absent". Emit the entry so its last_seen is refreshed and the pruner
+		// spares the row; never delete a data-locality row (and force a multi-GB
+		// re-download) because a permission bit blocked the scan.
 		entries = append(entries, hostDataEntryFromScanResult(host, r))
 	}
 	return entries, nil
 }
 
+// hfScanPresence classifies an HF scan status into whether the enumerated cache
+// directory should be treated as present on the host.
+type hfScanPresence int
+
+const (
+	hfScanPresent    hfScanPresence = iota // valid, readable cache entry (ok / incomplete)
+	hfScanUnreadable                       // directory present but unreadable — unknown, not absent
+	hfScanAbsent                           // present but malformed (nested / no-snapshots) → not loadable
+)
+
+// hfScanPresence classifies a (possibly comma-joined) status string. "unreadable"
+// dominates: if the scan could not read the directory we never treat it as a
+// confirmed-malformed asset. Only "nested"/"no-snapshots" — cases where the scan
+// DID look inside and found the entry is not a usable HF asset — are absent.
+func hfScanPresenceOf(status string) hfScanPresence {
+	parts := strings.Split(status, ",")
+	for _, p := range parts {
+		if strings.TrimSpace(p) == "unreadable" {
+			return hfScanUnreadable
+		}
+	}
+	for _, p := range parts {
+		switch strings.TrimSpace(p) {
+		case "nested", "no-snapshots":
+			return hfScanAbsent
+		}
+	}
+	return hfScanPresent
+}
+
 func scanHFCacheResultsContext(ctx context.Context, host string) ([]hfScanResult, error) {
 	cmd := hfCacheScanCommand()
-	stdout, _, err := hostCommandRunner(ctx, host, cmd)
+	stdout, stderr, err := hostCommandRunner(ctx, host, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
+		return nil, classifyScanError("scan HF cache", host, stderr, err)
 	}
 	return parseHFCacheDetailedOutput(stdout), nil
 }
 
 func hfCacheScanCommand() string {
 	return ResolveHFCacheDirShellVar() + `
+if [ ! -d "$_hf_cache" ] || [ ! -r "$_hf_cache" ] || [ ! -x "$_hf_cache" ]; then echo "` + scanBaseDirSentinel + ` $_hf_cache" >&2; exit 3; fi
 _dirs=()
 for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
 [ ${#_dirs[@]} -eq 0 ] && exit 0

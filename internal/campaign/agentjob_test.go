@@ -11,16 +11,18 @@ import (
 func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	runID := int64(88)
 	job := &db.Job{
-		ID:          42,
-		Command:     "python train.py",
-		Tags:        []string{"benchmark-isolation", "nightly"},
-		GPUClass:    "a100",
-		Priority:    3,
-		OutputDirs:  []string{"results/"},
-		Produces:    []string{"results/model.pt"},
-		Needs:       []string{"inputs/data.csv:41"},
-		EnvVars:     []string{"UV_INDEX_URL=https://example.com/simple", "CUDA_HOME=/usr/local/cuda"},
-		LatestRunID: &runID,
+		ID:               42,
+		Command:          "python train.py",
+		Tags:             []string{"benchmark-isolation", "nightly"},
+		GPUClass:         "a100",
+		Priority:         3,
+		OutputDirs:       []string{"results/"},
+		Produces:         []string{"results/model.pt"},
+		Needs:            []string{"inputs/data.csv:41"},
+		Inputs:           []string{"hf:org/explicit", "hf:org/auto"},
+		BestEffortInputs: []string{"hf:org/auto"},
+		EnvVars:          []string{"UV_INDEX_URL=https://example.com/simple", "CUDA_HOME=/usr/local/cuda"},
+		LatestRunID:      &runID,
 	}
 
 	got := newAgentJob(job, cloud.ProjectRootDir+"/repo")
@@ -45,6 +47,12 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Needs, job.Needs) {
 		t.Fatalf("needs = %v, want %v", got.Needs, job.Needs)
+	}
+	if !reflect.DeepEqual(got.Inputs, job.Inputs) {
+		t.Fatalf("inputs = %v, want %v", got.Inputs, job.Inputs)
+	}
+	if !reflect.DeepEqual(got.BestEffortInputs, job.BestEffortInputs) {
+		t.Fatalf("best-effort inputs = %v, want %v", got.BestEffortInputs, job.BestEffortInputs)
 	}
 	if !reflect.DeepEqual(got.Env, job.EnvVars) {
 		t.Fatalf("env = %v, want %v", got.Env, job.EnvVars)

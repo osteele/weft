@@ -1047,7 +1047,8 @@ func (r *Runner) refreshRunningJobs() {
 					oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered)", exitCode))
 					slog.Warn("job failed (recovered)", "component", "runner", "job_id", jobID, "exit_code", exitCode)
 				}
-				WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, nil)
+				outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
+				WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 				WriteRusageFile(paths, rs)
 				r.state.RecordFinished(jobIDStr, exitCode, endTime)
 				r.state.RemoveRunning(jobIDStr)
@@ -1058,8 +1059,13 @@ func (r *Runner) refreshRunningJobs() {
 		}
 
 		// Check if process is stopped (state T) without .paused marker
-		pgid, hasPGID := ReadPIDFile(paths.PGID)
-		pid, hasPID := ReadPIDFile(paths.PID)
+		pgid, hasPGID, pgidErr := ReadPIDFileDetailed(paths.PGID)
+		pid, hasPID, pidErr := ReadPIDFileDetailed(paths.PID)
+		if pgidErr != nil || pidErr != nil {
+			oplog.LogJob("job.pidfile_unknown", jobID, "",
+				oplog.WithDetailf("pid_err=%v pgid_err=%v", pidErr, pgidErr))
+			continue
+		}
 
 		checkPID := 0
 		if hasPGID {
@@ -1161,7 +1167,8 @@ func (r *Runner) refreshRunningJobs() {
 				WriteFailureReasonFile(paths, failureReason)
 				oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("exit=%d (recovered after orphan check)", exitCode))
 			}
-			WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, nil)
+			outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
+			WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 			WriteRusageFile(paths, rs)
 			r.state.RecordFinished(jobIDStr, exitCode, endTime)
 			r.state.RemoveRunning(jobIDStr)
@@ -1187,6 +1194,53 @@ func (r *Runner) refreshRunningJobs() {
 	if changed {
 		r.saveState()
 	}
+}
+
+// discoverRecoveredOutputs discovers convention-based output files for a job
+// whose completion was recovered outside waitForJob (runner restart, wrapper
+// exit trap). It mirrors waitForJob's success-path discovery so the
+// completion record carries output_files, which `weft artifact sync` uses to
+// fetch results without guessing.
+//
+// Recovery can run long after the process actually exited, so the discovery
+// window is bounded on both sides: at attempt start − 1s (spec:
+// OutputDiscoveryUsesAttemptStartCutoff in specs/job-lifecycle.allium) and at
+// the status-file mtime + 2m (the wrapper writes the status file at process
+// exit), so files written later by sibling jobs sharing the output tree are
+// not attributed to this job. A job with no recorded start has no attribution
+// window and gets no discovery — matching everything would claim other jobs'
+// files.
+func (r *Runner) discoverRecoveredOutputs(jobID int64, exitCode int, rs RunningJobState, paths JobPaths) []OutputFile {
+	if exitCode != 0 || rs.StartedAt == 0 {
+		return nil
+	}
+	workDir := rs.DiskPath
+	var dirs, refs []string
+	if rj, err := ReadJobFile(r.queueDir, jobID); err == nil {
+		dirs = rj.OutputDirs
+		refs = rj.Outputs
+		if workDir == "" {
+			workDir = rj.Dir
+		}
+	}
+	if workDir == "" {
+		return nil
+	}
+	if len(dirs) == 0 {
+		dirs = config.DefaultOutputDirs
+	}
+	lower := time.Unix(rs.StartedAt, 0).Add(-time.Second)
+	discovered, err := DiscoverJobOutputsSince(workDir, dirs, refs, lower)
+	if err != nil || len(discovered) == 0 {
+		return nil
+	}
+	if info, statErr := os.Stat(paths.Status); statErr == nil {
+		discovered = FilterOutputFilesUntil(workDir, discovered, info.ModTime().Add(2*time.Minute))
+	}
+	if len(discovered) > 0 {
+		oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d (recovered)", len(discovered), TotalSizeMB(discovered)))
+	}
+	return discovered
 }
 
 func (r *Runner) sampleRunningJobs() {

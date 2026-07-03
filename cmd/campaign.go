@@ -25,7 +25,7 @@ var campaignLaunchCmd = &cobra.Command{
 	Aliases: []string{"run", "start"},
 	Short:   "Interactively select and launch cloud instances for unplaceable jobs",
 	Long:    instanceLaunchLong,
-	RunE:    runInstanceLaunch,
+	RunE:    runInstanceLaunchWithManualLease,
 }
 
 var campaignWatchCmd = &cobra.Command{

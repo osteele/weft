@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 // setupHFTestServer configures the package-level HF client and URL to use the
@@ -202,19 +204,28 @@ func TestResolveInputSizes(t *testing.T) {
 	inputs := []string{
 		"hf:meta-llama/Llama-3.1-8B",
 		"hf:meta-llama/Llama-3.1-8B", // duplicate, should only count once
-		"~/data/some-file",           // non-HF, ignored
-		"checkpoint:my-model",        // non-HF asset, ignored
+		"~/data/some-file",           // local path, ignored
+		"checkpoint:my-model",
+	}
+	database := db.SetupTestDB(t)
+	if err := RecordAsset(database, HostDataEntry{
+		Host:      "studio",
+		Asset:     DataAsset{Kind: AssetCheckpoint, ID: "my-model"},
+		SizeBytes: 2048,
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
 	}
 
-	total, unresolved, err := ResolveInputSizes(inputs, nil)
+	total, unresolved, err := ResolveInputSizes(inputs, database)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(unresolved) != 0 {
 		t.Errorf("unexpected unresolved refs: %v", unresolved)
 	}
-	if total != 32158192699 {
-		t.Errorf("got total %d, want 32158192699", total)
+	if total != 32158194747 {
+		t.Errorf("got total %d, want 32158194747", total)
 	}
 }
 

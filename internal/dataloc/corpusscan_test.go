@@ -1,6 +1,90 @@
 package dataloc
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestCorpusScanCommand_MissingBaseDirIsError guards the regression where a
+// transiently absent/unmounted corpus base dir produced exit 0 with empty output,
+// indistinguishable from "present but no corpora" — the caller then pruned every
+// corpus row, and because corpus inputs are non-transportable the affected jobs
+// became permanently unplaceable. A missing base dir must exit non-zero with the
+// sentinel so the caller skips the prune.
+func TestCorpusScanCommand_MissingBaseDirIsError(t *testing.T) {
+	home := t.TempDir() // no .local/share/corpora under it
+	cmd := exec.Command("sh", "-c", corpusScanCommand())
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("expected non-zero exit for missing corpus base dir; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), scanBaseDirSentinel) {
+		t.Fatalf("stderr = %q, want base-dir sentinel %q", stderr.String(), scanBaseDirSentinel)
+	}
+}
+
+// TestCorpusScanCommand_PresentButEmptyExitsZero confirms the safe case still
+// works: a present base dir with no corpora exits 0 with empty output, so the
+// caller may prune stale rows (the corpora are positively confirmed gone).
+func TestCorpusScanCommand_PresentButEmptyExitsZero(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, CorpusBaseDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", corpusScanCommand())
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("present-but-empty corpus dir should exit 0: %v (stderr=%q)", err, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("stdout = %q, want empty output for a present-but-empty corpus dir", stdout.String())
+	}
+}
+
+// TestScanCorpusDir_BaseDirUnavailableMapsToSentinelError verifies the sentinel
+// on stderr is mapped to ErrScanBaseDirUnavailable so callers can skip pruning.
+func TestScanCorpusDir_BaseDirUnavailableMapsToSentinelError(t *testing.T) {
+	orig := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = orig })
+	hostCommandRunner = func(_ context.Context, _ string, _ string) (string, string, error) {
+		return "", scanBaseDirSentinel + " /home/u/.local/share/corpora", fmt.Errorf("exit status 3")
+	}
+	if _, err := ScanCorpusDir("host-x"); !errors.Is(err, ErrScanBaseDirUnavailable) {
+		t.Fatalf("err = %v, want ErrScanBaseDirUnavailable", err)
+	}
+}
+
+// TestScanCorpusDir_GenericErrorNotMisclassified ensures an unrelated failure
+// (e.g. network) is NOT reported as base-dir-unavailable — that would let a
+// real connectivity failure masquerade as a clean signal.
+func TestScanCorpusDir_GenericErrorNotMisclassified(t *testing.T) {
+	orig := hostCommandRunner
+	t.Cleanup(func() { hostCommandRunner = orig })
+	netErr := fmt.Errorf("ssh: connect: connection refused")
+	hostCommandRunner = func(_ context.Context, _ string, _ string) (string, string, error) {
+		return "", "", netErr
+	}
+	_, err := ScanCorpusDir("host-x")
+	if errors.Is(err, ErrScanBaseDirUnavailable) {
+		t.Fatalf("generic error must not map to ErrScanBaseDirUnavailable: %v", err)
+	}
+	if !errors.Is(err, netErr) {
+		t.Fatalf("generic error should be preserved: %v", err)
+	}
+}
 
 func TestParseCorpusScanOutput(t *testing.T) {
 	tests := []struct {

@@ -76,6 +76,27 @@ func TestGroupByGPUSupremum(t *testing.T) {
 	}
 }
 
+func TestGroupByGPUSupremum_PinnedJobsPreserveGPUCount(t *testing.T) {
+	gpuCount := 2
+	jobs := []*db.Job{{
+		ID:       1,
+		Status:   db.StatusQueued,
+		GPUClass: "A100",
+		GPUMemGB: intPtr(80),
+		CLIResourceOverrides: &db.CLIResourceOverrides{
+			GPUCount: &gpuCount,
+		},
+	}}
+
+	groups := GroupByGPUSupremum(jobs)
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", groups[0].NumGPUs)
+	}
+}
+
 func TestGroupByGPUSupremum_FloatableGoToAffinityPath(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20)},

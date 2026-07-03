@@ -1,16 +1,110 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/spf13/cobra"
 )
+
+func TestEnsureDispatchAfterRestart(t *testing.T) {
+	origStatus := daemonStatusFunc
+	origEnsure := ensureDaemonStartedFunc
+	origWait := restartWait
+	t.Cleanup(func() {
+		daemonStatusFunc = origStatus
+		ensureDaemonStartedFunc = origEnsure
+		restartWait = origWait
+	})
+
+	ensureStub := func(called *bool) func(daemoncontrol.Paths, time.Duration) (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		return func(daemoncontrol.Paths, time.Duration) (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+			*called = true
+			return daemoncontrol.Status{Live: true}, daemoncontrol.EnsureNoop, nil
+		}
+	}
+
+	t.Run("default live daemon returns fast without ensuring", func(t *testing.T) {
+		restartWait = false
+		daemonStatusFunc = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+			return daemoncontrol.Status{Live: true}, nil
+		}
+		ensured := false
+		ensureDaemonStartedFunc = ensureStub(&ensured)
+		var buf bytes.Buffer
+		ensureDispatchAfterRestart(&buf)
+		if ensured {
+			t.Fatalf("did not expect a daemon ensure for a live daemon")
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("expected no output for a current live daemon, got %q", buf.String())
+		}
+	})
+
+	t.Run("default live stale daemon hints without blocking", func(t *testing.T) {
+		restartWait = false
+		daemonStatusFunc = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+			return daemoncontrol.Status{Live: true, ActiveBinaryStale: true}, nil
+		}
+		ensured := false
+		ensureDaemonStartedFunc = ensureStub(&ensured)
+		var buf bytes.Buffer
+		ensureDispatchAfterRestart(&buf)
+		if ensured {
+			t.Fatalf("did not expect a blocking daemon restart for a live stale daemon")
+		}
+		if !strings.Contains(buf.String(), "older binary") {
+			t.Fatalf("expected a stale-daemon hint, got %q", buf.String())
+		}
+	})
+
+	t.Run("default no live daemon starts one", func(t *testing.T) {
+		restartWait = false
+		daemonStatusFunc = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+			return daemoncontrol.Status{Live: false}, nil
+		}
+		ensured := false
+		ensureDaemonStartedFunc = ensureStub(&ensured)
+		var buf bytes.Buffer
+		ensureDispatchAfterRestart(&buf)
+		if !ensured {
+			t.Fatalf("expected a daemon start when none is live")
+		}
+		if !strings.Contains(buf.String(), "Starting dispatch daemon") {
+			t.Fatalf("expected a start message, got %q", buf.String())
+		}
+	})
+
+	t.Run("wait ensures behind a visible line", func(t *testing.T) {
+		restartWait = true
+		statusProbed := false
+		daemonStatusFunc = func(daemoncontrol.Paths) (daemoncontrol.Status, error) {
+			statusProbed = true
+			return daemoncontrol.Status{Live: true}, nil
+		}
+		ensured := false
+		ensureDaemonStartedFunc = ensureStub(&ensured)
+		var buf bytes.Buffer
+		ensureDispatchAfterRestart(&buf)
+		if !ensured {
+			t.Fatalf("expected a daemon ensure with --wait")
+		}
+		if statusProbed {
+			t.Fatalf("--wait should not consult the status probe")
+		}
+		if !strings.Contains(buf.String(), "Ensuring dispatch daemon is current") {
+			t.Fatalf("expected a visible ensure line, got %q", buf.String())
+		}
+	})
+}
 
 func TestRestartCommandAliases(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"retry"})

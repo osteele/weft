@@ -9,6 +9,55 @@ import (
 	"github.com/osteele/weft/internal/status"
 )
 
+// TestRecordCloudJobCompletion_RetriesTransientLock proves the completion write
+// is retried on SQLITE_BUSY rather than dropped. Before the retry wrapper was
+// added, a lock burst surfaced as an error the caller logged and abandoned,
+// leaving a finished job stuck in "running". The lock hook injects two transient
+// busy responses; the write must still land and drive the job terminal.
+func TestRecordCloudJobCompletion_RetriesTransientLock(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	busyLeft := 2
+	recordCloudCompletionLockHook = func() error {
+		if busyLeft > 0 {
+			busyLeft--
+			return busyErr()
+		}
+		return nil
+	}
+	t.Cleanup(func() { recordCloudCompletionLockHook = nil })
+
+	gotLaunch, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletion returned %v, want nil (transient lock must be retried, not dropped)", err)
+	}
+	if busyLeft != 0 {
+		t.Fatalf("busyLeft = %d, want 0 (retry loop should have consumed both busy responses)", busyLeft)
+	}
+	if gotLaunch != launchID {
+		t.Fatalf("launch id = %d, want %d", gotLaunch, launchID)
+	}
+	if !JobIsTerminal(database, jobID) {
+		t.Fatal("job not terminal after completion; a dropped completion would leave it running")
+	}
+}
+
 func TestNeedsCloudCompletionBackfill_TerminalIncomplete(t *testing.T) {
 	database := SetupTestDB(t)
 

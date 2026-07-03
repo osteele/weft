@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
@@ -51,7 +52,13 @@ func checkDriverVersion(r2Bucket string, instanceID int64, requiredMajor int, se
 		fmt.Fprintf(os.Stderr, "driver probe: cannot parse nvidia-smi output %q (skipping check)\n", out)
 		return false
 	}
-	if major >= requiredMajor {
+	// Driver-major link of the CUDA compatibility chain — same comparison
+	// semantics as the launch-time offer filter and instance-reuse checks
+	// (specs/campaign-lifecycle.allium contract CUDACompatibilityChain).
+	if compat.ValidateCUDAChain(compat.CUDAChain{
+		MinDriverMajor: requiredMajor,
+		DriverMajor:    major,
+	}) == nil {
 		fmt.Printf("driver probe: ok — required %d, actual %s\n", requiredMajor, version)
 		return false
 	}

@@ -26,9 +26,26 @@ func SyncOutputFilesBack(host, remoteDir, localDir string, files []string, total
 // BuildOutputFileSyncArgs constructs rsync arguments for pulling a file list
 // relative to remoteDir into localDir.
 func BuildOutputFileSyncArgs(host, remoteDir, localDir string) []string {
-	src := ssh.RsyncTarget(host) + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	src := ssh.RsyncTarget(host) + ":" + remoteRsyncPath(remoteDir) + "/"
 	dst := strings.TrimRight(localDir, "/") + "/"
 	return []string{"-az", "--files-from=-", "-e", ssh.BatchModeRsyncCommandForHost(host, rsyncConnectTimeout), src, dst}
+}
+
+// remoteRsyncPath normalizes a remote directory for use after "host:" in an
+// rsync target. rsync does not run the path through a login shell, so a
+// leading "~/" is taken literally (rsync resolves "host:relpath" relative to
+// the remote login home already). Strip the tilde prefix so "~/code/x"
+// becomes the home-relative "code/x" rather than a literal "~" directory.
+func remoteRsyncPath(remoteDir string) string {
+	remoteDir = strings.TrimRight(remoteDir, "/")
+	switch {
+	case remoteDir == "~":
+		return "."
+	case strings.HasPrefix(remoteDir, "~/"):
+		return strings.TrimPrefix(remoteDir, "~/")
+	default:
+		return remoteDir
+	}
 }
 
 func cleanOutputFileList(files []string) []string {

@@ -22,16 +22,113 @@ const (
 	failureModePriorAlpha = 1.0
 	failureModePriorBeta  = 19.0
 
+	// AutoRequeueMaxInfraFailureAttempts caps automatic retries for terminal
+	// infrastructure-classified job failures. Runtime CUDA faults may reflect
+	// user kernels that repeatedly trip bad hardware paths, so repeated
+	// failures stay failed for diagnosis instead of looping.
+	AutoRequeueMaxInfraFailureAttempts = 2
+
 	// FailureReasonInfraPrewarmDownloadFailed marks a weft-owned input staging
 	// failure that happened before the user command started. Launch
 	// normalization treats this as retryable when the launch itself ends with
 	// an infrastructure-side termination reason.
 	FailureReasonInfraPrewarmDownloadFailed = "infra_prewarm_download_failed"
 
+	// FailureReasonInfraCloudArtifactStageFailed marks a weft-owned artifact
+	// staging failure that happened before the user command started.
+	FailureReasonInfraCloudArtifactStageFailed = "infra_cloud_artifact_stage_failed"
+
 	// FailureReasonInfraCUDAHardwareFault marks CUDA failures that indicate a
 	// bad rental GPU/interconnect rather than user code.
 	FailureReasonInfraCUDAHardwareFault = "infra_cuda_hardware_fault"
+
+	// ExitCodeSetupTimeout is the setup-phase watchdog's exit code, matching
+	// timeout(1)'s convention. runner.ExitCodeSetupTimeout aliases this value.
+	ExitCodeSetupTimeout = 124
 )
+
+var infraFailureReasons = []string{
+	FailureReasonInfraPrewarmDownloadFailed,
+	FailureReasonInfraCloudArtifactStageFailed,
+	FailureReasonInfraCUDAHardwareFault,
+}
+
+// FailurePhase identifies where in an attempt's lifecycle a failure was
+// observed, for infrastructure-vs-user-code classification.
+type FailurePhase string
+
+const (
+	// PhasePrewarmDownload is weft-owned input staging — the agent's HF
+	// prewarm download script — which runs before the user command.
+	PhasePrewarmDownload FailurePhase = "prewarm_download"
+	// PhaseCloudArtifactStaging is weft-owned R2 artifact staging before the
+	// user command starts.
+	PhaseCloudArtifactStaging FailurePhase = "cloud_artifact_staging"
+	// PhaseGPUCountPreflight is the agent's pre-spend probe that the
+	// instance physically exposes the GPUs the job sequence requests.
+	PhaseGPUCountPreflight FailurePhase = "gpu_count_preflight"
+	// PhaseSetup is a detected setup command (uv sync, etc.) run by the
+	// agent's prewarm before the user command.
+	PhaseSetup FailurePhase = "setup"
+	// PhaseRuntime is the user command itself.
+	PhaseRuntime FailurePhase = "runtime"
+)
+
+// ClassifyInfraFailure is the single decision point for whether a failure is
+// infrastructure-side (retrying on a fresh instance is likely to succeed)
+// rather than attributable to user code. It returns the failure_reason to
+// record — empty means the caller keeps its own reason — and whether the
+// failure classifies as infrastructure. Agent setup-phase decisions
+// (cmd/agent/jobloop.go, cmd/agent/gpu_count_probe.go) and the runner's
+// runtime classification (internal/runner/job.go) all funnel through here.
+// See specs/job-lifecycle.allium § failure classification.
+func ClassifyInfraFailure(phase FailurePhase, exitCode int, logTail string) (reason string, infra bool) {
+	switch phase {
+	case PhasePrewarmDownload:
+		// Any failure of weft-owned HF input staging, regardless of exit
+		// code: the user command never started, so the fault cannot be
+		// user code. The download already survived bounded retries with
+		// xet fallback before reaching this classification.
+		return FailureReasonInfraPrewarmDownloadFailed, true
+	case PhaseCloudArtifactStaging:
+		// Artifact staging is weft-owned and happens before the user
+		// command starts, so a fetch/stage failure is infrastructure-side.
+		return FailureReasonInfraCloudArtifactStageFailed, true
+	case PhaseGPUCountPreflight:
+		// The provider allocated fewer GPUs than the offer advertised —
+		// nothing the user's code did.
+		return "", true
+	case PhaseSetup:
+		// Setup timeouts (exit 124) almost always mean rental network
+		// throughput, not user error. Other setup failures stay
+		// user-attributed.
+		return "", exitCode == ExitCodeSetupTimeout
+	case PhaseRuntime:
+		if CUDAHardwareFaultText(logTail) {
+			return FailureReasonInfraCUDAHardwareFault, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// IsInfraFailureReason reports whether a recorded failure_reason marks the
+// attempt as an infrastructure-side failure.
+func IsInfraFailureReason(reason string) bool {
+	for _, infraReason := range infraFailureReasons {
+		if reason == infraReason {
+			return true
+		}
+	}
+	return false
+}
+
+// InfraFailureReasons returns the failure_reason values that mark an attempt
+// as infrastructure-side. Callers that need SQL predicates should build them
+// from this list so query behavior stays aligned with IsInfraFailureReason.
+func InfraFailureReasons() []string {
+	return append([]string(nil), infraFailureReasons...)
+}
 
 // PredictFailureModes estimates likely failure modes for a command on a host.
 // It uses the most specific historical slice with enough observations, then
@@ -144,7 +241,7 @@ func ClassifyFailureMode(failureReason, diagnosis, message string, exitCode int)
 	}
 	text := strings.ToLower(strings.Join([]string{failureReason, diagnosis, message}, "\n"))
 	switch {
-	case strings.Contains(text, FailureReasonInfraCUDAHardwareFault) || cudaHardwareFaultText(text):
+	case strings.Contains(text, FailureReasonInfraCUDAHardwareFault) || CUDAHardwareFaultText(text):
 		return "cuda_hardware_fault"
 	case strings.Contains(text, "cuda") && (strings.Contains(text, "out of memory") || strings.Contains(text, "oom")):
 		return "gpu_oom"
@@ -167,7 +264,11 @@ func ClassifyFailureMode(failureReason, diagnosis, message string, exitCode int)
 	}
 }
 
-func cudaHardwareFaultText(text string) bool {
+// CUDAHardwareFaultText reports whether failure text carries the log
+// signature of a CUDA hardware fault (bad rental GPU/interconnect): peer
+// GPU memory errors, NVLink faults, uncorrectable ECC, or Xid reports.
+// Shared by ClassifyInfraFailure (runtime phase) and ClassifyFailureMode.
+func CUDAHardwareFaultText(text string) bool {
 	text = strings.ToLower(text)
 	return strings.Contains(text, "peer gpu memory") ||
 		strings.Contains(text, "nvlink") ||

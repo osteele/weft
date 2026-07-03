@@ -1106,6 +1106,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("Status:      %s%s\n", statusText, tombstone)
 		}
+		maybeWarnStaleRunning(os.Stdout, job)
 		printExternalBindingSummary(database, job, "External:    ", "             ")
 		printPlacementLines(queuedPlacementLines(database, job), 12)
 		if job.Priority > 0 {

@@ -669,6 +669,42 @@ func runIDsCompatible(want *int64, got int64) bool {
 	return want == nil || *want == 0 || got == 0 || *want == got
 }
 
+// shouldRedispatchSyncedJob decides whether a job whose last_synced_status is
+// already "queued" must be reset and re-appended to the remote queue.
+//
+// Re-dispatch is destructive after the archive-on-add change: re-adding a job
+// the runner already holds re-executes it (see isJobInRunnerState). It therefore
+// requires POSITIVE evidence that the runner no longer has the job, never mere
+// absence of evidence:
+//
+//   - state.json positively shows the job as Finished/Running/Current, or as
+//     Pending with a matching payload run_id → materialized, leave it.
+//   - The payload probe failed while state.json still lists the job as Pending →
+//     the pending entry's run_id is unknown, not stale. Unknown is not absence:
+//     leave it in place rather than re-running a job the runner still queues.
+//   - The job is absent from state.json entirely (or state itself is the
+//     no-state-file sentinel) → confirmed absent, re-dispatch.
+//
+// The payload probe is consulted ONLY for the Pending branch. A failed probe
+// must never veto the state-only Finished/Running/Current branches: doing so
+// re-dispatched completed jobs whenever a single malformed payload line failed
+// the whole batch probe (fetchRemoteJobPayloads returns an error for the entire
+// batch on one unparseable line).
+func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error) bool {
+	if job == nil {
+		return false
+	}
+	if queuedJobMaterializedInRunner(job, state, payloads) {
+		return false // runner positively holds it
+	}
+	if payloadErr != nil && state != nil && slices.Contains(state.Pending, job.ID) {
+		// Runner still lists the job pending but the payload run_id could not be
+		// read: absence of evidence, not evidence of absence — leave it.
+		return false
+	}
+	return true // confirmed absent from the runner's state
+}
+
 // ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
 // It fetches its own job list via ListUnsyncedQueuedJobs, resolves the backend
 // once per host, syncs sources (deduplicated by working directory), and appends
@@ -721,10 +757,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			syncLog.Debug("could not read runner job payloads", "host", host, "error", payloadErr)
 		}
 		for _, job := range syncedJobs {
-			if payloadErr == nil && queuedJobMaterializedInRunner(job, state, payloads) {
-				continue // runner has it — nothing to do
+			if !shouldRedispatchSyncedJob(job, state, payloads, payloadErr) {
+				continue // runner has it, or its pending run_id is unknown — leave it
 			}
-			// Runner doesn't know about this job. Reset so it gets re-dispatched below.
+			// Runner confirmed the job absent. Reset so it gets re-dispatched below.
 			syncLog.Debug("job missing from runner state, re-dispatching", "job_id", job.ID, "host", host)
 			if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
 				syncLog.Debug("failed to reset last_synced_status", "job_id", job.ID, "error", err)
@@ -1272,12 +1308,13 @@ func cloudDepsReady(database *sql.DB, job *db.Job) (bool, string, error) {
 }
 
 type pendingNeed struct {
-	spec       string
-	path       string
-	producerID int64
-	latestRun  *int64
-	markerName string
-	remotePath string
+	spec        string
+	path        string
+	producerID  int64
+	latestRun   *int64
+	markerName  string
+	remotePath  string
+	contentType string
 	// preResolvedR2Key is set for named-asset needs whose R2 key is known at
 	// parse time (assets/<content_hash>). When set, stageMissingNeeds skips
 	// r2resolve.NeedR2Key and uses this key directly.
@@ -1309,6 +1346,7 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 				path:             asset.TargetPath,
 				markerName:       filepath.Base(artifacts.NamedAssetSatisfiedFile("", name)),
 				remotePath:       strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(asset.TargetPath, "/"),
+				contentType:      asset.ContentType,
 				preResolvedR2Key: r2keys.NamedAsset(asset.ContentHash),
 			})
 			continue
@@ -1597,6 +1635,9 @@ func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state 
 				continue
 			}
 			localPath := filepath.Join(tmpDir, filepath.FromSlash(strings.TrimPrefix(n.path, "/")))
+			if n.contentType == "directory" {
+				localPath += ".tar.gz"
+			}
 			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 				releaseLease()
 				return fmt.Errorf("prepare local staging path for %q: %w", n.spec, err)
@@ -1617,6 +1658,16 @@ func stageMissingNeeds(database *sql.DB, job *db.Job, todo []pendingNeed, state 
 				return fmt.Errorf("copy %q to %s:%s: %w", n.spec, job.Host, stagingPath, err)
 			}
 			mvStaging = true
+		}
+		if n.contentType == "directory" {
+			if err := finalizeRemoteDirectoryNeed(job.Host, stagingPath, n.remotePath, n.markerName, timeout); err != nil {
+				releaseLease()
+				return fmt.Errorf("finalize %q: %w", n.spec, err)
+			}
+			releaseLease()
+			oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+				oplog.WithDetailf("artifact needs staging success: %s", n.spec))
+			continue
 		}
 		if err := finalizeRemoteNeed(job.Host, mvStaging, stagingPath, n.remotePath, n.markerName, timeout); err != nil {
 			releaseLease()
@@ -1642,6 +1693,21 @@ func finalizeRemoteNeed(host string, mvStaging bool, stagingPath, remotePath, ma
 	sb.WriteString(fmt.Sprintf("mkdir -p ~/.cache/weft/logs && printf '0\\n' > ~/.cache/weft/logs/%s", shellQuote(markerName)))
 	if _, stderr, err := ssh.RunWithTimeout(host, sb.String(), timeout); err != nil {
 		return fmt.Errorf("ssh finalize %s: %s: %w", markerName, stderr, err)
+	}
+	return nil
+}
+
+func finalizeRemoteDirectoryNeed(host string, stagingPath, remotePath, markerName string, timeout time.Duration) error {
+	cmd := fmt.Sprintf(
+		"mkdir -p -- %s ~/.cache/weft/logs && tar xzf %s -C %s && rm -f -- %s && printf '0\\n' > ~/.cache/weft/logs/%s",
+		shellQuote(remotePath),
+		shellQuote(stagingPath),
+		shellQuote(remotePath),
+		shellQuote(stagingPath),
+		shellQuote(markerName),
+	)
+	if _, stderr, err := ssh.RunWithTimeout(host, cmd, timeout); err != nil {
+		return fmt.Errorf("ssh finalize directory %s: %s: %w", markerName, stderr, err)
 	}
 	return nil
 }

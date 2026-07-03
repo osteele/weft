@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -180,7 +181,8 @@ func (p *Process) IsRunning() bool {
 
 // CheckPIDAlive checks if a process with the given PID exists.
 func CheckPIDAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // CheckProcessStopped checks if a process is in stopped state (T).
@@ -229,20 +231,30 @@ func reapZombie(pid int) {
 
 // ReadPIDFile reads a PID from a file.
 func ReadPIDFile(path string) (int, bool) {
+	pid, ok, _ := ReadPIDFileDetailed(path)
+	return pid, ok
+}
+
+// ReadPIDFileDetailed reads a PID from a file and distinguishes confirmed
+// absence from an unreadable or malformed PID file.
+func ReadPIDFileDetailed(path string) (int, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, false
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, err
 	}
 	// Take last line (some files have multiple lines)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	if len(lines) == 0 {
-		return 0, false
+		return 0, false, fmt.Errorf("empty PID file %s", path)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(lines[len(lines)-1]))
 	if err != nil || pid <= 0 {
-		return 0, false
+		return 0, false, fmt.Errorf("invalid PID file %s", path)
 	}
-	return pid, true
+	return pid, true, nil
 }
 
 // KillProcessGroup sends SIGTERM immediately followed by SIGKILL to a process

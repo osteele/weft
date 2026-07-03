@@ -684,6 +684,10 @@ func syncCompletedJobAtRun(
 		}
 
 		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
+			// Phase timings are best-effort telemetry (not job status): the
+			// authoritative completion was already recorded above, and these
+			// values are re-derived from R2 on a later sync pass, so a dropped
+			// write on lock contention is acceptable.
 			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
 				slog.Warn("failed to store phase timings", "component", "sync", "job_id", jobID, "error", err)
 			}

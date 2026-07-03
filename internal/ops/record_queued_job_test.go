@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,6 +44,32 @@ func TestRecordQueuedJob_Basic(t *testing.T) {
 	}
 	if len(job.Tags) != 1 || job.Tags[0] != "gpu" {
 		t.Errorf("expected tags=[gpu], got %v", job.Tags)
+	}
+}
+
+func TestRecordQueuedJob_PersistsBestEffortInputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := RecordQueuedJob(database, QueueJobParams{
+		Host:             "test-host",
+		WorkingDir:       "/tmp/project",
+		Command:          "python train.py",
+		Inputs:           []string{"hf:org/explicit", "hf:org/auto"},
+		BestEffortInputs: []string{"hf:org/auto"},
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got, want := job.BestEffortInputs, []string{"hf:org/auto"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("BestEffortInputs = %v, want %v", got, want)
+	}
+	if job.Metadata == nil || !reflect.DeepEqual(job.Metadata.BestEffortInputs, []string{"hf:org/auto"}) {
+		t.Fatalf("metadata best-effort inputs not persisted: %#v", job.Metadata)
 	}
 }
 

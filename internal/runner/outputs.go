@@ -155,6 +155,30 @@ func FilterOutputFilesSince(workDir string, files []OutputFile, threshold time.T
 	return filtered
 }
 
+// FilterOutputFilesUntil keeps output files whose mtime is at or before
+// threshold. A zero threshold leaves the list unchanged. Used as the
+// end-of-attempt bound on discovery so files written by later sibling jobs
+// in a shared output directory are not attributed to this job.
+func FilterOutputFilesUntil(workDir string, files []OutputFile, threshold time.Time) []OutputFile {
+	if threshold.IsZero() || workDir == "" || len(files) == 0 {
+		return files
+	}
+	workDir = ExpandTilde(workDir)
+	filtered := make([]OutputFile, 0, len(files))
+	for _, file := range files {
+		path := filepath.Join(workDir, filepath.FromSlash(file.RelPath))
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if info.ModTime().After(threshold) {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
+}
+
 func discoverOutputDir(workDir, dir string) ([]OutputFile, error) {
 	absDir := filepath.Join(workDir, dir)
 

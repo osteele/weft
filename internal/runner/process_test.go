@@ -81,6 +81,36 @@ func TestMergeEnvVars_EmptyOverlay(t *testing.T) {
 	}
 }
 
+func TestReadPIDFileDetailedDistinguishesMissingFromInvalid(t *testing.T) {
+	dir := t.TempDir()
+
+	if pid, ok, err := ReadPIDFileDetailed(filepath.Join(dir, "missing.pid")); err != nil || ok || pid != 0 {
+		t.Fatalf("missing pid = (%d, %v, %v), want confirmed absent", pid, ok, err)
+	}
+
+	invalid := filepath.Join(dir, "invalid.pid")
+	if err := os.WriteFile(invalid, []byte("not-a-pid\n"), 0o644); err != nil {
+		t.Fatalf("write invalid pid: %v", err)
+	}
+	if pid, ok, err := ReadPIDFileDetailed(invalid); err == nil || ok || pid != 0 {
+		t.Fatalf("invalid pid = (%d, %v, %v), want unknown error", pid, ok, err)
+	}
+}
+
+func TestReadPIDFileDetailedReadsLastPIDLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.pid")
+	if err := os.WriteFile(path, []byte("111\n222\n"), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	pid, ok, err := ReadPIDFileDetailed(path)
+	if err != nil {
+		t.Fatalf("ReadPIDFileDetailed: %v", err)
+	}
+	if !ok || pid != 222 {
+		t.Fatalf("pid = (%d, %v), want (222, true)", pid, ok)
+	}
+}
+
 func TestWrapCommandWithExitCapture(t *testing.T) {
 	wrapped := WrapCommandWithExitCapture("python train.py", "/tmp/test.status")
 	// Must contain the original command

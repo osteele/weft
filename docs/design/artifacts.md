@@ -47,13 +47,15 @@ the key to understanding the subsystem's failure modes.
 |---|---|---|---|
 | **Local artifact cache** | `~/.config/weft/artifacts/<jobID>/...` on the control machine + `artifacts` DB table (path, stored path, size, sha256, attempt id) | Bytes copied from a host or downloaded from R2 | Durable; survives workdir reuse |
 | **R2 per-run objects** | `jobs/<id>/runs/<run>/outputs/...` and `jobs/<id>/runs/<run>/artifacts/files/...` (+ `artifacts/manifest.json`) | Bytes uploaded by an agent during/after the run | Durable; keyed per run, immune to overwrite by later jobs |
-| **Pointer records** | `host_data` rows of kind `job-output`, asset id `<jobID>/<relPath>` (`internal/ops/artifacts.go RecordJobOutputs`) | Host + relative path only — no bytes, no size, no hash | **Not durable** — dereferences into the live working directory, which the next job may overwrite |
+| **Pointer records** | `host_data` rows of kind `job-output`, asset id `<jobID>/<relPath>` (`internal/ops/artifacts.go RecordJobOutputs`) | Host + path only — no bytes, no size, no hash | Declared-output pointers (including `--produces` entries) dereference into the immutable completion-time snapshot under `~/.cache/weft/artifacts/<jobID>/<run>/outputs/` on the host; pointers for **undeclared** convention outputs still dereference into the live working directory, which the next job may overwrite |
 | **Host-live files** | The job's working directory on the host | Whatever is currently on disk | None — shared mutable state across jobs in the same directory |
 
 Pointer records exist primarily for **placement** (data-locality scoring and
-pre-staging cost estimation), but `artifact list` also surfaces them as if
-they were retrievable artifacts. That dual use is the source of the
-list/get mismatch class of bugs (see "Divergences" below).
+pre-staging cost estimation), but `artifact list` also surfaces them as
+retrievable artifacts. That dual use was the source of the list/get
+mismatch class of bugs; it is now mediated by the shared resolver (see
+"Retrieval" below), which gives each pointer row an explicit retrieval
+handle (the on-demand host sync).
 
 ## Capture: how bytes become durable
 
@@ -68,14 +70,17 @@ of the current design:
   cloud rental            on-prem host,             on-prem host,
   (agent + R2)            runner has R2             no R2
         │                        │                         │
-  upload output/ +         same as cloud            write manifest +
-  manifest entries to      (uploadOutputDirs,       pointer record only;
-  per-run R2 keys;         manifest entries,        bytes stay in the
-  same-workdir barrier     workdir barrier)         shared working dir
-  before next job                │                         │
-        │                        │                   capture deferred to
-   durable per run          durable per run         a later lazy sync
-                                                    (rsync on demand)
+  upload output/ +         same as cloud            snapshot declared
+  manifest entries to      (uploadOutputDirs,       outputs + --produces
+  per-run R2 keys;         manifest entries,        entries to the host's
+  same-workdir barrier     workdir barrier)         per-run artifact dir;
+  before next job                │                  pointer records point
+        │                        │                  at the snapshot
+   durable per run          durable per run                │
+                                                    durable per run
+                                                    (host-local); undeclared
+                                                    convention outputs stay
+                                                    lazy-sync only
 ```
 
 - **Cloud rentals and R2-enabled on-prem runners** snapshot at completion:
@@ -87,43 +92,64 @@ of the current design:
   (`SharedWorkdirUploadBarrierBeforeNextJob`) prevents the next job in the
   same directory from starting while the prior job's upload walk is still
   running.
-- **On-prem runners without R2** perform no completion-time capture at all.
-  Completion writes the manifest, the completion record (with discovered
-  output file list), and a pointer record. Bytes are copied only when the
-  control machine later runs `weft artifact sync` (SSH manifest fetch + scp,
-  `internal/artifacts/sync.go`) or the convention-output rsync-back
-  (`cmd/artifact.go syncJobOutputs`).
+- **On-prem runners without R2** get a host-local completion-time snapshot
+  for declared outputs: when the terminal transition is observed,
+  `RecordJobOutputs` (`internal/ops/artifacts.go`) copies each `--output
+  local:` path and each `--produces` manifest entry to
+  `~/.cache/weft/artifacts/<jobID>/<run>/outputs/<relPath>` on the host over
+  SSH, then records the `host_data` pointer against the snapshot path. The
+  snapshot needs no R2 credentials; if the copy fails, no pointer into the
+  mutable working directory is recorded (that would just re-open the race).
+  Bytes reach the control machine only when it later runs `weft artifact
+  sync` (SSH manifest fetch + scp, `internal/artifacts/sync.go`) or the
+  convention-output rsync-back (`cmd/artifact.go syncJobOutputs`).
 
-Lazy capture is a race: the window between completion and the first sync is
-unbounded, and any later job using the same working directory and the same
-relative output path closes it destructively (bug wb10).
+**Undeclared** convention-directory outputs on no-R2 hosts remain lazily
+captured, and lazy capture is a race: the window between completion and the
+first sync is unbounded, and any later job using the same working directory
+and the same relative output path closes it destructively (the original
+wb10 defect, now closed for declared outputs and `--produces` entries).
 
 ## Retrieval: list, get, cat, sync
 
-`weft artifact list <job>` prints the union of three sources:
+### The shared resolver
 
-1. cached artifacts (`artifacts` table),
-2. pointer records (`host_data` job-output rows), and
-3. for launch (cloud) jobs only, a live listing of the job's per-run R2
-   prefixes.
+Listing and retrieval consume one resolution authority:
+`cmd/artifact.go resolveJobArtifacts` materializes the union of the three
+artifact sources — the local cache (`artifacts` table), `host_data`
+job-output pointer records, and a live listing of the job's per-run R2
+prefixes (any target kind — inventory runners with `--r2-bucket` upload to
+the same prefixes as rentals) — once per invocation. Each resolved row
+carries its own retrieval handle (cache rows the stored local path, cloud
+rows the listed R2 object key, host pointer rows the on-demand-sync
+identity), and one matcher (`resolvedArtifact.matchesToken`: name, exact
+path, basename, path suffix, with the `artifacts/` display prefix
+canonicalized) serves both sides. `weft artifact list` prints exactly these
+rows; `get`/`cat` (`deliverArtifactToken`) retrieve through the same rows,
+so a listed row cannot resolve against a different store than the one that
+produced it. Before this unification, list and get/cat re-listed R2
+independently with different matchers, which produced four separate
+list/get mismatch reports (wb11, wb16, wb20, wb40). The contract is
+`ArtifactResolution` in `specs/job-lifecycle.allium`.
 
 `weft artifact get` / `cat` resolve in this order:
 
 1. the local artifact cache (`db.FindArtifactByNameOrPath`, scoped to the
-   latest run first, then job-wide);
-2. the job's R2 per-run objects (any target kind — inventory runners with
-   `--r2-bucket` upload to the same prefixes as rentals), matched by exact
-   path, basename, or path suffix, downloaded with a per-transfer idle
+   latest run first, then job-wide) — the fast path; serving cached bytes
+   does not depend on R2 reachability;
+2. the shared resolver's rows, matched with the shared matcher; cloud rows
+   download the R2 object the listing named, with a per-transfer idle
    timeout (`--timeout`, default 2m of no progress) and a progress status
-   line for large files;
-3. for jobs on inventory hosts, an on-demand sync (`syncArtifactOnDemand`)
-   that runs the same manifest-fetch/rsync path as `weft artifact sync` and
-   then serves from the cache.
+   line for large files; host pointer rows trigger the on-demand sync
+   below and serve the freshly cached entry;
+3. for tokens no listing source has recorded, an on-demand sync
+   (`syncArtifactOnDemand`) that runs the same manifest-fetch/rsync path as
+   `weft artifact sync` and then serves from the cache. On no-R2 hosts this
+   reads the completion-time host snapshot for declared outputs (pointer
+   records dereference into it); only undeclared convention outputs still
+   read the live working directory and inherit the overwrite race.
 
-When every rung misses, the error names each source checked. The remaining
-gap relative to the target ladder is the host-local per-run snapshot
-(rung 3 currently reads the live working directory, so it inherits the
-wb10 overwrite race until completion-time snapshots land).
+When every rung misses, the error names each source checked.
 
 `weft artifact sync` (per job or sweep) fetches the host manifest over SSH
 and scp's each entry into the cache; if the manifest is missing it falls
@@ -139,10 +165,13 @@ probe each** — the last step is what finds artifacts uploaded by an attempt
 that was later superseded or canceled, where `latest_run_id` has moved past
 the run that actually produced the bytes.
 
-The `cmd/artifact.go` retrieval paths do not use this package; they
-reimplement resolution as `[latest_run_id, 0]` only (`jobAttemptRunIDs`),
-in four call sites. Artifacts from superseded runs are therefore invisible
-to `artifact list`/`get` even though staging would find them.
+The `cmd/artifact.go` retrieval paths delegate to this policy:
+`artifactRunIDCandidates` wraps the recorded `[latest_run_id, 0]` pair and
+appends runs discovered via `r2resolve.ListRunIDsFunc` (used by the shared
+resolver's R2 listing and by manifest sync), and `resolveCloudOutputKey`
+delegates key resolution to `r2resolve.NeedR2Key`. Superseded-run artifacts
+are therefore visible to `artifact list`/`get` exactly as they are to
+staging (`ArtifactRetrievalCoversAllRuns` in the spec).
 
 ## Staging: materializing `--needs` on the consumer's host
 
@@ -190,23 +219,25 @@ here so spec rules and tests can be derived from them.
 5. **Run completeness**: retrieval can find artifacts from any run that
    uploaded them, not only the latest recorded attempt.
 
-## Known divergences (as of 2026-06-11)
+## Known divergences (as of 2026-07-02)
 
 | Invariant | Divergence | Tracker |
 |---|---|---|
-| Per-job durability | No completion-time capture on no-R2 on-prem hosts; lazy sync races with workdir reuse. Fix decided below (host-local snapshot), not yet implemented | wb10 |
-| Attribution | The shared-workdir barrier serializes only sequential jobs within one agent process; concurrent same-workdir jobs (multi-GPU hosts) can still cross-attribute uploads | (spec guidance, wj2226 incident) |
+| Per-job durability | Undeclared convention-directory outputs on no-R2 hosts have no completion-time capture (declared outputs and `--produces` entries are snapshotted); the snapshot size cap / GC from the revised baseline is not implemented | wb10 (residual) |
+| Attribution | The shared-workdir barrier serializes only sequential jobs within one agent process; concurrent same-workdir jobs (multi-GPU hosts) can still cross-attribute uploads (recorded as an open question in `specs/job-lifecycle.allium`) | (spec `invariant Attribution`, wj2226 incident) |
 | — | Declared artifacts under `output/` upload twice (outputs prefix + artifact-files prefix). Listing and `get --all` now collapse the two spellings, but the agent still uploads the payload twice | wb20 (upload side) |
 
-Resolved 2026-06-11 (see the corresponding rules in
-`specs/job-lifecycle.allium`): retrievability (`get`/`cat`/`--all` now fall
-back to R2 for any job kind and to an on-demand host sync, and name every
-source checked on a miss — `ArtifactListGetConsistency`); error fidelity
-(transfer failures propagate their real cause instead of "not found", and
-large single-file downloads show progress —
-`ArtifactRetrievalErrorFidelity`); run completeness (retrieval delegates to
-`r2resolve`, finding superseded-run uploads —
-`ArtifactRetrievalCoversAllRuns`).
+Resolved (see the corresponding rules in `specs/job-lifecycle.allium`):
+retrievability (list and get/cat consume the shared resolver — contract
+`ArtifactResolution`, rule `ArtifactListGetConsistency`; `get`/`cat`/`--all`
+fall back to R2 for any job kind and to an on-demand host sync, and name
+every source checked on a miss); per-job durability for declared outputs
+(completion-time host-local snapshot —
+`CompletedOutputsSurviveWorkdirReuse`); error fidelity (transfer failures
+propagate their real cause instead of "not found", and large single-file
+downloads show progress — `ArtifactRetrievalErrorFidelity`); run
+completeness (retrieval delegates to `r2resolve`, finding superseded-run
+uploads — `ArtifactRetrievalCoversAllRuns`).
 
 ## Decision: must R2 remain optional for on-prem hosts?
 
@@ -248,32 +279,40 @@ on the host's own disk at completion — provides the same overwrite immunity
 using nothing but the filesystem the job already wrote to.
 
 **Decision: keep R2 optional, drop pointer-only capture.** R2-optionality
-stays, but it stops meaning "no capture". The revised baseline:
+stays, but it no longer means "no capture". The revised baseline:
 
-- **Capture (all hosts, no credentials needed)**: at successful completion,
-  the queue runner snapshots declared outputs and manifest entries to
-  `~/.cache/weft/artifacts/<jobID>/<run>/...` on the host, before the
-  working directory can be reused. Snapshots are subject to a size cap and
-  retention policy (configurable; oldest-first GC), since host cache disk
-  is finite. Convention-directory outputs above the cap are recorded as
-  pointer rows with an explicit `uncaptured` marker rather than silently.
+- **Capture (all hosts, no credentials needed)** — implemented for declared
+  outputs: at successful completion, `RecordJobOutputs` snapshots declared
+  outputs and `--produces` manifest entries to
+  `~/.cache/weft/artifacts/<jobID>/<run>/outputs/...` on the host (copied
+  over SSH when the control machine observes the terminal transition),
+  before the working directory is reused, and records the pointer against
+  the snapshot path. Still planned: a size cap and retention policy
+  (configurable; oldest-first GC), since host cache disk is finite, with
+  outputs above the cap recorded as pointer rows carrying an explicit
+  `uncaptured` marker rather than silently; and capture of undeclared
+  convention-directory outputs.
 - **Replication (R2-enabled hosts and rentals)**: the existing per-run R2
   upload continues unchanged, as a second, off-host copy. Rentals must
   still have R2 — their disks vanish at termination, so for them R2 *is*
   the snapshot.
-- **Retrieval ladder (control machine)**: local cache → R2 per-run objects
-  (any job kind, not just launch jobs) → host snapshot via SSH →
-  host-live path as a last resort, with a warning that the bytes may have
-  been overwritten. Every rung either succeeds, falls through, or reports
-  its real error.
-- **Staging ladder**: host-side R2 pull when the host has credentials;
-  host-to-host scp when producer and consumer are both on-prem and the
-  producer snapshot exists; control-machine relay (with lease renewal
-  during transfer and ranged resume) as the universal fallback.
+- **Retrieval ladder (control machine)** — implemented: local cache → R2
+  per-run objects (any job kind, not just launch jobs) → on-demand host
+  sync via SSH, which serves declared outputs from the host snapshot
+  (pointer records dereference into it) and undeclared convention outputs
+  from the host-live path. Every rung either succeeds, falls through, or
+  reports its real error, and a full miss names each source checked. Still
+  planned: an explicit bytes-may-have-been-overwritten warning when the
+  host-live rung is the one that answers.
+- **Staging ladder** (not yet implemented): host-side R2 pull when the host
+  has credentials; host-to-host scp when producer and consumer are both
+  on-prem and the producer snapshot exists; control-machine relay (with
+  lease renewal during transfer and ranged resume) as the universal
+  fallback.
 
 This keeps the property that a host needs only SSH access and a Go binary
-to participate, while making every capture path produce a durable per-run
-snapshot somewhere.
+to participate, while making every capture path for declared outputs
+produce a durable per-run snapshot somewhere.
 
 ## Component map
 
@@ -283,7 +322,8 @@ snapshot somewhere.
 | SSH manifest fetch + scp sync into cache | `internal/artifacts/sync.go` |
 | Artifact DB rows, name/path/suffix lookup | `internal/db/artifacts.go` |
 | CLI: sync/list/get/cat/add/prune-local | `cmd/artifact.go` |
-| Pointer records at completion | `internal/ops/artifacts.go` |
+| Shared list/get/cat resolver | `cmd/artifact.go` (`resolveJobArtifacts`, `deliverArtifactToken`) |
+| Completion-time snapshot + pointer records | `internal/ops/artifacts.go` (`RecordJobOutputs`, `snapshotRemoteJobOutput`) |
 | Cloud/inventory upload (outputs, manifest, barrier) | `cmd/agent/runinstance.go`, `cmd/agent/bgwork.go`, `cmd/agent/inventory_r2.go` |
 | Run-ID → R2 key resolution policy | `internal/r2resolve/resolve.go` |
 | R2 key layout | `internal/r2keys/` |

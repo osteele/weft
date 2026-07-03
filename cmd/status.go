@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
@@ -718,6 +719,59 @@ func syncStatusHostsWithBounds(database *sql.DB, hosts []string, sshTimeout, hos
 	return result.Completed, result.Unreachable, result.Slow
 }
 
+// staleRunningExitHintAge is how long a job must have been "running" before the
+// stale-running advisory fires. It gives a genuine completion write time to
+// land before we nudge the user, avoiding a false hint on a job that only just
+// exited.
+const staleRunningExitHintAge = 60 * time.Second
+
+// maybeWarnStaleRunning prints an advisory note — never a status override — when
+// the database shows a job running but its cached log tail already carries a
+// runner END/exit marker and the job has been "running" long enough that a
+// completion write should already have landed. The database stays the source of
+// truth (per the "Database as Source of Truth" convention); this line only
+// nudges the user to reconcile.
+func maybeWarnStaleRunning(w io.Writer, job *db.Job) {
+	if job == nil || job.EffectiveStatus() != db.StatusRunning {
+		return
+	}
+	if job.StartTime <= 0 || time.Now().Unix()-job.StartTime < int64(staleRunningExitHintAge.Seconds()) {
+		return
+	}
+	if !cachedLogShowsExitMarker(job) {
+		return
+	}
+	fmt.Fprintf(w, "note: this job's log shows it exited; run `weft sync %s` to reconcile.\n", ids.FormatJobID(job.ID))
+}
+
+// cachedLogShowsExitMarker reports whether the job's locally cached log tail
+// contains a runner END/exit marker for the job's current attempt. It reads
+// only the local log cache (no host/R2 round trip), so it is a cheap,
+// best-effort signal that stays silent when the log has not been fetched.
+func cachedLogShowsExitMarker(job *db.Job) bool {
+	if cachedRun, ok := logcache.RunID(job.ID); ok && job.LatestRunID != nil && *job.LatestRunID != cachedRun {
+		// The cache holds a different attempt's log; its END marker is not
+		// evidence about the current run.
+		return false
+	}
+	content, err := logcache.Read(job.ID)
+	if err != nil || content == "" {
+		return false
+	}
+	return logContentHasExitMarker(content)
+}
+
+// logContentHasExitMarker scans a log's tail for the runner footer written at
+// job end (e.g. "=== END exit=1 ...").
+func logContentHasExitMarker(content string) bool {
+	const tailBytes = 8192
+	tail := content
+	if len(tail) > tailBytes {
+		tail = tail[len(tail)-tailBytes:]
+	}
+	return strings.Contains(tail, "=== END exit=")
+}
+
 func isWaitTerminalStatus(status string) bool {
 	switch status {
 	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
@@ -819,6 +873,7 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 		duration := time.Now().Unix() - job.StartTime
 		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
 	}
+	maybeWarnStaleRunning(os.Stdout, job)
 	if effectiveStatus == db.StatusKilled {
 		fmt.Printf("Exit:     killed\n")
 	}

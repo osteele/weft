@@ -12,18 +12,19 @@ import (
 )
 
 type mockQueueRemote struct {
-	statusExitCode int
-	statusMtime    int64
-	statusOption   Option[bool]
-	statusRunID    int64
-	current        Option[bool]
-	inQueue        Option[bool]
-	process        Option[bool]
-	paused         Option[bool]
-	quickStatus    quickStatus
-	metadata       string
-	samples        string
-	rusage         string
+	statusExitCode   int
+	statusMtime      int64
+	statusOption     Option[bool]
+	statusRunID      int64
+	current          Option[bool]
+	inQueue          Option[bool]
+	process          Option[bool]
+	paused           Option[bool]
+	quickStatus      quickStatus
+	metadata         string
+	completionRecord string
+	samples          string
+	rusage           string
 }
 
 func (m mockQueueRemote) StatusFile(host string, jobID int64, expectedRunID *int64, timeout time.Duration) (int, int64, Option[bool]) {
@@ -55,6 +56,10 @@ func (m mockQueueRemote) QuickStatus(host string, jobID int64, timeout time.Dura
 
 func (m mockQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) (string, error) {
 	return m.metadata, nil
+}
+
+func (m mockQueueRemote) CompletionRecord(host string, jobID int64, timeout time.Duration) (string, error) {
+	return m.completionRecord, nil
 }
 
 func (m mockQueueRemote) Samples(host string, jobID int64, timeout time.Duration) (string, error) {
@@ -530,6 +535,73 @@ func TestUpdateTimesFromMetadataEmptyMetadata(t *testing.T) {
 	}
 	if job.StartTime != 0 {
 		t.Fatalf("expected start_time unchanged, got %d", job.StartTime)
+	}
+}
+
+// TestBackfillStartTimeFromCompletionRecordOnClosedAttempt validates the
+// unrecoverable-gap fix: an attempt closed with end_time but NULL start_time
+// (its recording tick's metadata read failed) can still be backfilled from
+// the host's completion record — including AFTER the attempt is closed, which
+// the previous open-attempt-only UpdateStartTime targeting silently no-oped.
+func TestBackfillStartTimeFromCompletionRecordOnClosedAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "closed backfill")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	// Close the attempt without ever recording a start time.
+	if err := db.RecordCompletionByID(database, jobID, 0, 1700000011); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	if job.StartTime != 0 {
+		t.Fatalf("precondition: start_time = %d, want 0", job.StartTime)
+	}
+
+	mock := mockQueueRemote{
+		completionRecord: `{"exit_code":0,"start_time":1700000001,"end_time":1700000011}`,
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	BackfillStartTimeFromCompletionRecord(database, job, time.Second)
+
+	if job.StartTime != 1700000001 {
+		t.Fatalf("job.StartTime = %d, want 1700000001", job.StartTime)
+	}
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.StartTime != 1700000001 {
+		t.Fatalf("DB start_time = %d, want 1700000001 (backfill must reach closed attempts)", updated.StartTime)
+	}
+}
+
+// TestBackfillStartTimeFromCompletionRecordNeverOverwrites confirms the
+// backfill is a pure recovery: a recorded start time is left alone.
+func TestBackfillStartTimeFromCompletionRecordNeverOverwrites(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "no overwrite")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.UpdateStartTime(database, jobID, 1699999999); err != nil {
+		t.Fatalf("UpdateStartTime: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	mock := mockQueueRemote{
+		completionRecord: `{"exit_code":0,"start_time":1700000001}`,
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	BackfillStartTimeFromCompletionRecord(database, job, time.Second)
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.StartTime != 1699999999 {
+		t.Fatalf("DB start_time = %d, want 1699999999 (unchanged)", updated.StartTime)
 	}
 }
 

@@ -4,6 +4,7 @@ package predictor
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -25,6 +27,10 @@ import (
 
 // Config controls how the predictor finds and invokes job-estimator.
 type Config struct {
+	// Enabled turns the estimator integration on/off. Nil means enabled;
+	// an explicit false makes Configured() report false so weft skips the
+	// estimator and uses heuristic estimates.
+	Enabled *bool `yaml:"enabled"`
 	// ProjectPath is the path to the job-estimator Python project checkout.
 	ProjectPath string `yaml:"project_path"`
 	// ModelDir is where trained models are stored.
@@ -236,6 +242,32 @@ var countTrainingRows = countTrainingRowsImpl
 var backgroundRetrainCheckInterval = time.Minute
 var predictorStatusCacheTTL = 5 * time.Second
 var predictorStatusFileCacheTTL = 5 * time.Minute
+
+// Bound the `uv run job-estimator ...` subprocesses so a slow or hung
+// estimator can never block the placement path (invariant
+// PredictorNeverBlocksPlacement in specs/inventory-placement.allium). On
+// timeout, status falls back to the on-disk meta read and prediction proceeds
+// without an estimate.
+var predictorStatusTimeout = 15 * time.Second
+var predictorPredictTimeout = 30 * time.Second
+
+// boundEstimatorCmd makes an estimator subprocess honor its context deadline.
+// `uv run` spawns a python grandchild (which may import torch for ~20s); a
+// plain CommandContext kills only uv, but the grandchild keeps the stdout pipe
+// open so Run/Output would block until it exits anyway. Setpgid + a
+// group-kill Cancel terminates the whole tree on timeout, and WaitDelay is the
+// backstop that closes the pipes and returns even if a process lingers.
+func boundEstimatorCmd(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
+}
+
 var nowFunc = time.Now
 var predictionCache = struct {
 	mu      sync.RWMutex
@@ -300,6 +332,9 @@ func emitPredictorProgress(fn func(string), message string) {
 
 // Configured returns true if the predictor has a project path set.
 func (c *Config) Configured() bool {
+	if c.Enabled != nil && !*c.Enabled {
+		return false
+	}
 	return c.ProjectPath != ""
 }
 
@@ -1220,12 +1255,20 @@ func runStatusCLIImpl(cfg Config) ([]byte, error) {
 		args = append(args, "--db", db)
 	}
 
-	cmd := exec.Command("uv", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), predictorStatusTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "uv", args...)
+	boundEstimatorCmd(cmd)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			// Bounded so a slow/hung estimator cannot wedge placement; the
+			// caller falls back to the on-disk meta read.
+			return nil, fmt.Errorf("predictor status timed out after %s", predictorStatusTimeout)
+		}
 		return nil, fmt.Errorf("predictor status: %w", err)
 	}
 	if stderr.Len() > 0 {
@@ -1295,9 +1338,15 @@ func runPredictCLIImpl(cfg Config, host, project, gpuClass, command string) ([]b
 		args = append(args, "--gpu-class", gpuClass)
 	}
 
-	cmd := exec.Command("uv", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), predictorPredictTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "uv", args...)
+	boundEstimatorCmd(cmd)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("predictor predict timed out after %s", predictorPredictTimeout)
+		}
 		return nil, fmt.Errorf("predictor predict: %w", err)
 	}
 	return out, nil
@@ -1349,10 +1398,16 @@ func runPredictBatchCLIImpl(cfg Config, jobs []BatchJob) ([]byte, error) {
 		"--model-dir", cfg.modelDir(),
 	}
 
-	cmd := exec.Command("uv", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), predictorPredictTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "uv", args...)
+	boundEstimatorCmd(cmd)
 	cmd.Stdin = bytes.NewReader(input)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("predictor predict-batch timed out after %s", predictorPredictTimeout)
+		}
 		return nil, fmt.Errorf("predictor predict-batch: %w", err)
 	}
 	return out, nil

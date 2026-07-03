@@ -120,6 +120,7 @@ func TestCopyToWriter(t *testing.T) {
 type fakeCloudArtifactStore struct {
 	objects              map[string][]byte
 	objectExistsOverride map[string]bool
+	listErr              error // when set, ListObjects returns this for every prefix
 }
 
 func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byte, error) {
@@ -149,6 +150,9 @@ func (s *fakeCloudArtifactStore) GetObjectReader(_ context.Context, key string) 
 }
 
 func (s *fakeCloudArtifactStore) ListObjects(_ context.Context, prefix string) ([]r2.ObjectInfo, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	var objects []r2.ObjectInfo
 	for key, data := range s.objects {
 		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
@@ -217,7 +221,10 @@ func setupLaunchArtifactJob(t *testing.T) *db.Job {
 
 func TestDownloadSingleCloudFileToPath_ArtifactsPathFromConventionOutputs(t *testing.T) {
 	job := setupLaunchArtifactJob(t)
-	runID := int64(0)
+	if job.LatestRunID == nil {
+		t.Fatal("job missing latest run id")
+	}
+	runID := *job.LatestRunID
 	store := &fakeCloudArtifactStore{
 		objects: map[string][]byte{
 			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "artifacts/summary.md": []byte("summary\n"),
@@ -239,7 +246,10 @@ func TestDownloadSingleCloudFileToPath_ArtifactsPathFromConventionOutputs(t *tes
 
 func TestDownloadSingleCloudFileToPath_UsesListedR2Key(t *testing.T) {
 	job := setupLaunchArtifactJob(t)
-	runID := int64(0)
+	if job.LatestRunID == nil {
+		t.Fatal("job missing latest run id")
+	}
+	runID := *job.LatestRunID
 	key := r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/summary.md"
 	store := &fakeCloudArtifactStore{
 		objects: map[string][]byte{
@@ -263,8 +273,8 @@ func TestDownloadSingleCloudFileToPath_UsesListedR2Key(t *testing.T) {
 	}
 }
 
-func TestFetchCloudArtifactByToken_BasenameMatchesArtifactsConventionOutput(t *testing.T) {
-	job := setupLaunchArtifactJob(t)
+func TestDeliverArtifactToken_BasenameMatchesArtifactsConventionOutput(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
 	runID := int64(0)
 	store := &fakeCloudArtifactStore{
 		objects: map[string][]byte{
@@ -272,15 +282,20 @@ func TestFetchCloudArtifactByToken_BasenameMatchesArtifactsConventionOutput(t *t
 		},
 	}
 
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
 	oldOutput := artifactOutput
 	artifactOutput = "-"
-	t.Cleanup(func() { artifactOutput = oldOutput })
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactOutput = oldOutput
+	})
 
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
-	if err := fetchCloudArtifactByToken(cmd, store, job, "summary.md", false); err != nil {
-		t.Fatalf("fetchCloudArtifactByToken: %v", err)
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "summary.md", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken: %v", err)
 	}
 	if got := out.String(); got != "summary\n" {
 		t.Fatalf("stdout = %q, want summary", got)
@@ -431,19 +446,24 @@ func (s *stallingCloudStore) DownloadObjectToFileWithIdleTimeout(context.Context
 	return 0, errors.New("download stalled: no progress for 2m0s")
 }
 
-func TestFetchCloudArtifactByToken_StallErrorIsNotReportedAsNotFound(t *testing.T) {
-	job := setupLaunchArtifactJob(t)
+func TestDeliverArtifactToken_StallErrorIsNotReportedAsNotFound(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
 	store := &stallingCloudStore{&fakeCloudArtifactStore{
 		objects: map[string][]byte{
 			r2keys.JobAttemptOutputsPrefix(job.ID, 0) + "output/representations/train.pkl": []byte("payload"),
 		},
 	}}
 
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
 	oldOutput := artifactOutput
 	artifactOutput = t.TempDir()
-	t.Cleanup(func() { artifactOutput = oldOutput })
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactOutput = oldOutput
+	})
 
-	err := fetchCloudArtifactByToken(&cobra.Command{}, store, job, "output/representations/train.pkl", false)
+	err := deliverArtifactToken(&cobra.Command{}, database, job.ID, job, "output/representations/train.pkl", false, false)
 	if err == nil {
 		t.Fatal("expected stall error")
 	}
@@ -455,7 +475,7 @@ func TestFetchCloudArtifactByToken_StallErrorIsNotReportedAsNotFound(t *testing.
 	}
 }
 
-func TestFetchCloudArtifactByToken_FindsSupersededRunArtifact(t *testing.T) {
+func TestDeliverArtifactToken_FindsSupersededRunArtifact(t *testing.T) {
 	database, job := setupLaunchArtifactJobWithDB(t)
 	instanceID := *job.LaunchID
 	if _, err := db.CreateAttempt(database, job.ID, "vastai:99999", &instanceID, db.StatusQueued); err != nil {
@@ -477,15 +497,20 @@ func TestFetchCloudArtifactByToken_FindsSupersededRunArtifact(t *testing.T) {
 		},
 	}
 
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
 	oldOutput := artifactOutput
 	artifactOutput = "-"
-	t.Cleanup(func() { artifactOutput = oldOutput })
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactOutput = oldOutput
+	})
 
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
-	if err := fetchCloudArtifactByToken(cmd, store, job, "output/result.json", false); err != nil {
-		t.Fatalf("fetchCloudArtifactByToken: %v", err)
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "output/result.json", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken: %v", err)
 	}
 	if got := out.String(); got != "superseded\n" {
 		t.Fatalf("stdout = %q, want superseded content", got)
@@ -599,6 +624,170 @@ func TestFetchArtifactForJobs_NotFoundNamesCheckedSources(t *testing.T) {
 	}
 }
 
+// TestArtifactListRowsAreRetrievableByCat is the list/get agreement
+// regression (bugs wb11, wb16, wb20, wb40): every row `artifact list`
+// prints must be retrievable by `artifact cat` using the exact path the
+// listing showed, because both sides now consume resolveJobArtifacts.
+func TestArtifactListRowsAreRetrievableByCat(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cachedSource := filepath.Join(t.TempDir(), "cached.txt")
+	if err := os.WriteFile(cachedSource, []byte("cached\n"), 0o644); err != nil {
+		t.Fatalf("write cached source: %v", err)
+	}
+	if err := artifacts.StoreLocalArtifact(database, job.ID, "output/cached.txt", cachedSource); err != nil {
+		t.Fatalf("StoreLocalArtifact: %v", err)
+	}
+	runID := int64(0)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/cloud.txt":            []byte("cloud\n"),
+			r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + "output/produced.bin":   []byte("produced\n"),
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "artifacts/literal-alias.txt": []byte("alias\n"),
+		},
+	}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	oldListSync := artifactListSync
+	artifactListSync = false
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactListSync = oldListSync
+	})
+
+	var listOut bytes.Buffer
+	listCmd := &cobra.Command{}
+	listCmd.SetOut(&listOut)
+	if err := runArtifactList(listCmd, []string{strconv.FormatInt(job.ID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(listOut.String()), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			t.Fatalf("unexpected list line %q", line)
+		}
+		paths = append(paths, fields[1])
+	}
+	if len(paths) != 4 {
+		t.Fatalf("list rows = %v, want cached + 3 cloud rows", paths)
+	}
+
+	for _, path := range paths {
+		var catOut bytes.Buffer
+		catCmd := &cobra.Command{}
+		catCmd.SetOut(&catOut)
+		if err := runArtifactCat(catCmd, []string{strconv.FormatInt(job.ID, 10), path}); err != nil {
+			t.Fatalf("runArtifactCat(%q): listed row not retrievable: %v", path, err)
+		}
+		if catOut.Len() == 0 {
+			t.Fatalf("runArtifactCat(%q): no content", path)
+		}
+	}
+}
+
+func TestArtifactCatFallsThroughWhenCachedFileMissing(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := database.Exec(
+		`INSERT INTO artifacts (job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+		job.ID, "result", "output/result.txt",
+		filepath.Join(strconv.FormatInt(job.ID, 10), "missing", "result.txt"),
+		6, "", time.Now().Unix(),
+	)
+	if err != nil {
+		t.Fatalf("insert stale artifact: %v", err)
+	}
+	store := &fakeCloudArtifactStore{}
+
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() { buildArtifactR2Client = oldBuild })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	err = runArtifactCat(cmd, []string{strconv.FormatInt(job.ID, 10), "output/result.txt"})
+	if err == nil {
+		t.Fatal("runArtifactCat succeeded unexpectedly")
+	}
+	if strings.Contains(err.Error(), "missing/result.txt") || strings.Contains(err.Error(), "no such file or directory") {
+		t.Fatalf("runArtifactCat returned stale local cache error: %v", err)
+	}
+}
+
+// TestArtifactListHostRowRetrievableByCat covers the host_data pointer
+// source of the shared resolver: a listed pointer row is retrieved through
+// the on-demand host sync the row's handle encodes.
+func TestArtifactListHostRowRetrievableByCat(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+	if err := dataloc.InitSchema(database); err != nil {
+		t.Fatalf("InitSchema: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp/project", "echo hi", "host pointer row")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host: "host-alpha",
+		Asset: dataloc.DataAsset{
+			Kind: dataloc.AssetJobOutput,
+			ID:   fmt.Sprintf("%d/output/result.json", jobID),
+		},
+		Path:      fmt.Sprintf("~/.cache/weft/artifacts/%d/1/outputs/output/result.json", jobID),
+		SizeBytes: 12,
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+
+	sourcePath := filepath.Join(t.TempDir(), "result.json")
+	if err := os.WriteFile(sourcePath, []byte("from host\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return nil }
+	oldSync := syncArtifactsForJobFunc
+	syncArtifactsForJobFunc = func(database *sql.DB, job *db.Job, _ *r2.Client, _ time.Duration) error {
+		return artifacts.StoreLocalArtifact(database, job.ID, "output/result.json", sourcePath)
+	}
+	oldListSync := artifactListSync
+	artifactListSync = false
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		syncArtifactsForJobFunc = oldSync
+		artifactListSync = oldListSync
+	})
+
+	var listOut bytes.Buffer
+	listCmd := &cobra.Command{}
+	listCmd.SetOut(&listOut)
+	if err := runArtifactList(listCmd, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+	line := strings.TrimSpace(listOut.String())
+	fields := strings.Split(line, "\t")
+	if len(fields) < 2 || fields[0] != "output" {
+		t.Fatalf("list output = %q, want a host pointer row", line)
+	}
+
+	var catOut bytes.Buffer
+	catCmd := &cobra.Command{}
+	catCmd.SetOut(&catOut)
+	if err := runArtifactCat(catCmd, []string{strconv.FormatInt(jobID, 10), fields[1]}); err != nil {
+		t.Fatalf("runArtifactCat(%q): listed host row not retrievable: %v", fields[1], err)
+	}
+	if got := catOut.String(); got != "from host\n" {
+		t.Fatalf("stdout = %q, want host content", got)
+	}
+}
+
 func TestListCloudJobOutputFiles_DedupesArtifactSpelling(t *testing.T) {
 	job := setupLaunchArtifactJob(t)
 	payload := []byte("same payload")
@@ -609,12 +798,40 @@ func TestListCloudJobOutputFiles_DedupesArtifactSpelling(t *testing.T) {
 		},
 	}
 
-	files := listCloudJobOutputFiles(store, job)
+	files, err := listCloudJobOutputFiles(store, job)
+	if err != nil {
+		t.Fatalf("listCloudJobOutputFiles: %v", err)
+	}
 	if len(files) != 1 {
 		t.Fatalf("files = %+v, want the dual upload collapsed to one row", files)
 	}
 	if files[0].RelPath != "output/train.pkl" {
 		t.Fatalf("RelPath = %q, want plain spelling preferred", files[0].RelPath)
+	}
+}
+
+// TestListCloudJobOutputFiles_SurfacesListError guards wb40: an R2 ListObjects
+// failure must surface as a non-nil error, distinct from a clean-empty listing.
+// Reporting the same empty result for both lets an unreachable R2 masquerade as
+// "no cloud artifacts".
+func TestListCloudJobOutputFiles_SurfacesListError(t *testing.T) {
+	job := setupLaunchArtifactJob(t)
+
+	// Clean-empty: no objects, no injected error → empty result, nil error.
+	empty := &fakeCloudArtifactStore{objects: map[string][]byte{}}
+	files, err := listCloudJobOutputFiles(empty, job)
+	if err != nil {
+		t.Fatalf("clean-empty listing should not error: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("clean-empty listing should be empty, got %+v", files)
+	}
+
+	// List failure: every ListObjects errors → empty result but a non-nil error.
+	failing := &fakeCloudArtifactStore{objects: map[string][]byte{}, listErr: fmt.Errorf("R2 timeout")}
+	files, err = listCloudJobOutputFiles(failing, job)
+	if err == nil {
+		t.Fatalf("R2 list failure should surface an error, got files=%+v", files)
 	}
 }
 
@@ -837,18 +1054,26 @@ func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *t
 	if err := db.SetJobOutputs(database, jobID, []string{"output/bayes_course/"}); err != nil {
 		t.Fatalf("SetJobOutputs: %v", err)
 	}
+	if err := db.UpdateStartTime(database, jobID, time.Now().Add(-time.Hour).Unix()); err != nil {
+		t.Fatalf("UpdateStartTime: %v", err)
+	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
-	prevCompletion := completionOutputFilesFunc
+	prevCompletion := completionRecordFunc
+	prevIsLocal := isLocalJobHostFunc
 	t.Cleanup(func() {
-		completionOutputFilesFunc = prevCompletion
+		completionRecordFunc = prevCompletion
+		isLocalJobHostFunc = prevIsLocal
 	})
-	completionOutputFilesFunc = func(*db.Job) []runner.OutputFile {
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
 		return nil
 	}
+	// Local discovery is only legitimate when the job executed on this
+	// machine (spec: Attribution).
+	isLocalJobHostFunc = func(string) bool { return true }
 
 	result, err := syncJobOutputs(database, job)
 	if err != nil {
@@ -867,6 +1092,265 @@ func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *t
 	}
 	if entries[0].Path != "output/bayes_course/exp_178.json" {
 		t.Fatalf("artifact path = %q", entries[0].Path)
+	}
+}
+
+// syncJobOutputsTestJob creates a queued inventory-host job whose working dir
+// resolves locally, returning the refreshed job row.
+func syncJobOutputsTestJob(t *testing.T, database *sql.DB, workDir string, startTime int64) *db.Job {
+	t.Helper()
+	jobID, err := db.RecordQueued(database, "studio", workDir, "python exp.py", "output sync")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if startTime != 0 {
+		if err := db.UpdateStartTime(database, jobID, startTime); err != nil {
+			t.Fatalf("UpdateStartTime: %v", err)
+		}
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	return job
+}
+
+// stubSyncJobOutputsRemote installs remote-behavior fakes for syncJobOutputs
+// tests: the job's host is treated as remote, and unset hooks fail the test
+// if reached.
+func stubSyncJobOutputsRemote(t *testing.T) {
+	t.Helper()
+	prevCompletion := completionRecordFunc
+	prevDiscover := discoverRemoteJobOutputFilesFunc
+	prevIsLocal := isLocalJobHostFunc
+	prevSyncBack := syncOutputFilesBackFunc
+	prevWarnf := syncOutputWarnf
+	t.Cleanup(func() {
+		completionRecordFunc = prevCompletion
+		discoverRemoteJobOutputFilesFunc = prevDiscover
+		isLocalJobHostFunc = prevIsLocal
+		syncOutputFilesBackFunc = prevSyncBack
+		syncOutputWarnf = prevWarnf
+	})
+	isLocalJobHostFunc = func(string) bool { return false }
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		t.Fatal("remote discovery must not run in this scenario")
+		return nil, nil
+	}
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		t.Fatal("SyncOutputFilesBack must not run in this scenario")
+		return nil
+	}
+	syncOutputWarnf = func(string, ...any) {}
+}
+
+// TestSyncJobOutputsSkipsDiscoveryWithoutStartTime: a job with no recorded
+// start time has no attribution window; discovery must be skipped with a
+// warning instead of matching every file in the tree (live incident:
+// wj3871–3873 each swept 182 submitter-local files).
+func TestSyncJobOutputsSkipsDiscoveryWithoutStartTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "output"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A submitter-local file that a zero-threshold discovery would have swept.
+	if err := os.WriteFile(filepath.Join(workDir, "output", "historic.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	job := syncJobOutputsTestJob(t, database, workDir, 0)
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	var warning string
+	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("Added = %d, want 0", result.Added)
+	}
+	if !strings.Contains(warning, "no recorded start time") {
+		t.Fatalf("warning = %q, want start-time skip notice", warning)
+	}
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("artifacts = %+v, want none", entries)
+	}
+}
+
+// TestSyncJobOutputsNeverRegistersSubmitterLocalFiles: files present in the
+// submitter's local working tree are not attributable to a remote job without
+// remote corroboration (spec: Attribution), even when they fall inside the
+// attempt's time window.
+func TestSyncJobOutputsNeverRegistersSubmitterLocalFiles(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "output"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "output", "local-only.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	// Remote discovery runs (there IS a window) but finds nothing on the host.
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		return nil, nil
+	}
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("Added = %d, want 0 — local files must not be attributed", result.Added)
+	}
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("artifacts = %+v, want none", entries)
+	}
+}
+
+// TestSyncJobOutputsSyncsCompletionRecordFiles: a completion record with an
+// output_files listing drives the existing rsync-back + store path.
+func TestSyncJobOutputsSyncsCompletionRecordFiles(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+		return &runner.CompletionRecord{
+			ExitCode:    0,
+			OutputFiles: []runner.OutputFile{{RelPath: "output/result.json", SizeBytes: 2}},
+		}
+	}
+	var syncedPaths []string
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		syncedPaths = files
+		path := filepath.Join(localDir, "output", "result.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("{}"), 0o644)
+	}
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+	if len(syncedPaths) != 1 || syncedPaths[0] != "output/result.json" {
+		t.Fatalf("synced paths = %v", syncedPaths)
+	}
+	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "output/result.json")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if entry.Path != "output/result.json" {
+		t.Fatalf("artifact path = %q", entry.Path)
+	}
+}
+
+// TestSyncJobOutputsRemoteDiscoveryFallback: when the completion record lacks
+// output_files, outputs are discovered on the execution host within
+// [start − 1s, end + 2m] and fetched through the existing sync path.
+func TestSyncJobOutputsRemoteDiscoveryFallback(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	start := time.Now().Add(-time.Hour).Unix()
+	end := start + 600
+	job := syncJobOutputsTestJob(t, database, workDir, start)
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+		return &runner.CompletionRecord{ExitCode: 0, StartTime: start, EndTime: end}
+	}
+	var gotLower, gotUpper time.Time
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		gotLower, gotUpper = lower, upper
+		return []runner.OutputFile{{RelPath: "output/found.json", SizeBytes: 2}}, nil
+	}
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		path := filepath.Join(localDir, "output", "found.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("{}"), 0o644)
+	}
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+	wantLower := time.Unix(start, 0).Add(-time.Second)
+	wantUpper := time.Unix(end, 0).Add(2 * time.Minute)
+	if !gotLower.Equal(wantLower) {
+		t.Fatalf("discovery lower bound = %v, want %v (start − 1s)", gotLower, wantLower)
+	}
+	if !gotUpper.Equal(wantUpper) {
+		t.Fatalf("discovery upper bound = %v, want %v (end + 2m)", gotUpper, wantUpper)
+	}
+	if _, err := db.FindArtifactByNameOrPath(database, job.ID, "output/found.json"); err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+}
+
+// TestSyncJobOutputsBackfillsStartTimeFromCompletionRecord: a completed
+// attempt missing start_time in the DB (a completion-sync bug, see
+// internal/ops/sync.go) is repaired from the host's completion record, which
+// also unblocks time-window discovery.
+func TestSyncJobOutputsBackfillsStartTimeFromCompletionRecord(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	start := time.Now().Add(-time.Hour).Unix()
+	job := syncJobOutputsTestJob(t, database, workDir, 0)
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+		return &runner.CompletionRecord{ExitCode: 0, StartTime: start}
+	}
+	discoverCalled := false
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		discoverCalled = true
+		return nil, nil
+	}
+
+	if _, err := syncJobOutputs(database, job); err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if !discoverCalled {
+		t.Fatal("expected discovery to run once start_time was backfilled")
+	}
+	updated, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if updated.StartTime != start {
+		t.Fatalf("DB start_time = %d, want %d (backfilled)", updated.StartTime, start)
 	}
 }
 
@@ -953,23 +1437,29 @@ func TestSyncArtifactsForJobFallsBackToDeclaredOutputFilesWhenManifestDirectoryS
 	if err := db.SetJobOutputs(database, jobID, []string{"local:output/artifact-smoke/"}); err != nil {
 		t.Fatalf("SetJobOutputs: %v", err)
 	}
+	if err := db.UpdateStartTime(database, jobID, time.Now().Add(-time.Hour).Unix()); err != nil {
+		t.Fatalf("UpdateStartTime: %v", err)
+	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
 	prevSync := syncLocalJobArtifacts
-	prevCompletion := completionOutputFilesFunc
+	prevCompletion := completionRecordFunc
+	prevIsLocal := isLocalJobHostFunc
 	t.Cleanup(func() {
 		syncLocalJobArtifacts = prevSync
-		completionOutputFilesFunc = prevCompletion
+		completionRecordFunc = prevCompletion
+		isLocalJobHostFunc = prevIsLocal
 	})
 	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
 		return artifacts.SyncResult{}, errors.New("scp: output/artifact-smoke/: not a regular file")
 	}
-	completionOutputFilesFunc = func(*db.Job) []runner.OutputFile {
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
 		return nil
 	}
+	isLocalJobHostFunc = func(string) bool { return true }
 
 	if err := syncArtifactsForJob(database, job, nil, time.Second); err != nil {
 		t.Fatalf("syncArtifactsForJob: %v", err)
@@ -1177,7 +1667,7 @@ func TestArtifactNotFoundMessageForOnPremNamesHostOutputLocations(t *testing.T) 
 		OutputDirs: []string{"output/"},
 	}
 
-	got := artifactNotFoundMessage(job, "metrics.json", true)
+	got := artifactNotFoundMessage(job, "metrics.json", true, false)
 	for _, want := range []string{
 		"checked local cache, R2, cool30 via artifact sync",
 		"on-prem outputs are not uploaded to R2",
@@ -1186,5 +1676,26 @@ func TestArtifactNotFoundMessageForOnPremNamesHostOutputLocations(t *testing.T) 
 		if !strings.Contains(got, want) {
 			t.Fatalf("message missing %q, got %q", want, got)
 		}
+	}
+}
+
+// TestArtifactNotFoundMessage_R2ListFailedIsUnknownNotAbsent guards wb40: when
+// the R2 listing failed, the not-found message must convey uncertainty ("status
+// unknown", "could not be located") rather than a confident "not found", so an
+// unreachable R2 is never reported as a confirmed absence.
+func TestArtifactNotFoundMessage_R2ListFailedIsUnknownNotAbsent(t *testing.T) {
+	job := &db.Job{ID: 7}
+
+	confident := artifactNotFoundMessage(job, "metrics.json", true, false)
+	if !strings.Contains(confident, "not found") || strings.Contains(confident, "status unknown") {
+		t.Fatalf("confident message should read as not-found: %q", confident)
+	}
+
+	unknown := artifactNotFoundMessage(job, "metrics.json", true, true)
+	if !strings.Contains(unknown, "status unknown") {
+		t.Fatalf("R2-list-failed message should say status unknown: %q", unknown)
+	}
+	if !strings.Contains(unknown, "could not be located") {
+		t.Fatalf("R2-list-failed message should avoid a confident 'not found': %q", unknown)
 	}
 }

@@ -666,6 +666,25 @@ func TestPickBestGPUForClass_EmptyInventory(t *testing.T) {
 	}
 }
 
+func TestPickBestGPUForClass_BlocksWhenExpectedMemorySnapshotMissing(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA GeForce RTX 3090", TotalMemGB: 24},
+		},
+		DeviceMemSnapshot: map[string]DeviceMemInfo{},
+		hasNvidiaSmi:      true,
+	}
+	state := NewState()
+
+	_, reason, ok := inv.PickBestGPUForClassWithReason(state, "nvidia", 24)
+	if ok {
+		t.Fatal("expected missing live VRAM telemetry to block memory-constrained placement")
+	}
+	if !strings.Contains(reason, "24GB") {
+		t.Fatalf("reason = %q, want memory blocker for 24GB request", reason)
+	}
+}
+
 func TestPickLeastLoadedGPU_SelectsMostFreeMemory(t *testing.T) {
 	inv := &GPUInventory{
 		Devices: []GPUInfo{

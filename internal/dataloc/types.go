@@ -23,6 +23,14 @@ const (
 	AssetNamed AssetKind = "named-asset"
 )
 
+// ContentType describes how asset bytes are materialized in R2.
+type ContentType string
+
+const (
+	ContentTypeFile      ContentType = "file"
+	ContentTypeDirectory ContentType = "directory"
+)
+
 // DataAsset represents a data asset that exists on one or more hosts.
 type DataAsset struct {
 	Kind AssetKind // e.g., "hf-model", "hf-dataset", "checkpoint"
@@ -146,9 +154,11 @@ func (a DataAsset) String() string { return a.Ref() }
 
 // HostDataEntry records that a specific asset exists on a specific host.
 type HostDataEntry struct {
-	Host      string
-	Asset     DataAsset
-	Path      string    // Filesystem path on the host (may be empty for HF cache)
-	SizeBytes int64     // Size in bytes (0 if unknown), excluding *.incomplete files
-	LastSeen  time.Time // When this entry was last confirmed
+	Host        string
+	Asset       DataAsset
+	Path        string      // Filesystem path on the host (may be empty for HF cache)
+	SizeBytes   int64       // Size in bytes (0 if unknown), excluding *.incomplete files
+	ContentHash string      // SHA256 hex for registered checkpoints/assets; empty if unknown
+	ContentType ContentType // file or directory when ContentHash is set
+	LastSeen    time.Time   // When this entry was last confirmed
 }
