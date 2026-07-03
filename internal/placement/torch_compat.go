@@ -96,19 +96,6 @@ func ArchNameToMaxCap(name string) string {
 	return ""
 }
 
-// hostHasGPUWithinCap returns true if any GPU on the host has a known compute
-// capability at or below maxCap, or has an unknown cap (which we accept on
-// the assumption the bound cannot be proven violated).
-func hostHasGPUWithinCap(host inventory.HostSpec, maxCap string) bool {
-	for _, gpu := range host.GPUs {
-		gpuCap := ComputeCapForGPU(gpu.Class)
-		if gpuCap == "" || CompareComputeCap(gpuCap, maxCap) <= 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // MaxComputeCapForJob resolves the GPU compute-capability upper bound for a
 // job whose source lives in dir. Resolution order:
 //

@@ -11,12 +11,14 @@ func PredictorConfigFromApp(cfg *config.Config) predictor.Config {
 	if cfg == nil {
 		return predictor.Config{}
 	}
-	return predictor.BuildConfig(
+	pcfg := predictor.BuildConfig(
 		cfg.Predictor.ProjectPath,
 		cfg.Predictor.ModelDir,
 		cfg.Predictor.RetrainInterval,
 		cfg.Predictor.DBPaths,
 	)
+	pcfg.Enabled = cfg.Predictor.Enabled
+	return pcfg
 }
 
 // BuildJobPredictorFromConfig creates a JobPredictor from the app config and constraints.

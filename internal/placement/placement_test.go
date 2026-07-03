@@ -33,6 +33,22 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err := transferbw.InitSchema(db); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS named_assets (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		content_hash TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		content_type TEXT NOT NULL DEFAULT 'file',
+		target_path TEXT NOT NULL,
+		source_job_id INTEGER,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_named_assets_hash ON named_assets(content_hash)`); err != nil {
+		t.Fatal(err)
+	}
 	// Create contention observations table so ContentionFactor can query it
 	// (without this, it falls back to DefaultContentionFactor for all hosts).
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS host_contention_obs (
@@ -367,6 +383,51 @@ func TestScoreHosts_CheckpointInputPinsToHolderEvenWithZeroSize(t *testing.T) {
 		if !hasReasonContaining(score.Reasons, "missing checkpoint:trace on this host; present on host-beta") {
 			t.Fatalf("%s missing reason = %v", host, score.Reasons)
 		}
+	}
+}
+
+func TestScoreHosts_PublishedCheckpointIsLocalityPreferenceNotHardPin(t *testing.T) {
+	db := setupTestDB(t)
+	hash := strings.Repeat("c", 64)
+	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
+		Host:        "host-beta",
+		Asset:       dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "trace"},
+		Path:        "data/mooncake",
+		SizeBytes:   1_000_000_000,
+		ContentHash: hash,
+		ContentType: dataloc.ContentTypeDirectory,
+		LastSeen:    time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbpkg.UpsertNamedAsset(db, dbpkg.NamedAsset{
+		Name:        "trace",
+		ContentHash: hash,
+		SizeBytes:   1_000_000_000,
+		ContentType: string(dataloc.ContentTypeDirectory),
+		TargetPath:  "data/mooncake",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scores := scoreTestHosts(db, Constraints{
+		Inputs: []string{"checkpoint:trace"},
+		Tags:   []string{dbpkg.TagCPUIntensive},
+	})
+
+	holder := findScore(scores, "host-beta")
+	if !holder.Eligible {
+		t.Fatalf("holder should be eligible, reasons: %v", holder.Reasons)
+	}
+	other := findScore(scores, "host-alpha")
+	if !other.Eligible {
+		t.Fatalf("non-holder should be eligible for published checkpoint, reasons: %v", other.Reasons)
+	}
+	if holder.TransferEst.Mean != 0 {
+		t.Fatalf("holder transfer = %v, want zero", holder.TransferEst.Mean)
+	}
+	if other.TransferEst.Mean == 0 {
+		t.Fatalf("non-holder should carry transfer estimate for staged checkpoint")
 	}
 }
 
@@ -2162,8 +2223,11 @@ func TestTimeBasedScoring_ReasonIncludesEstimate(t *testing.T) {
 }
 
 func TestScoreHosts_MaxComputeCap_Hopper(t *testing.T) {
-	// Bound at sm_9.0: host-alpha (A100=8.0, 2080Ti=7.5) eligible;
-	// host-beta (3090=8.6) eligible (8.6 < 9.0); host-gamma (Apple) eligible (unknown cap).
+	// Bound at sm_9.0 with no GPU request: host-alpha (A100=8.0, 2080Ti=7.5)
+	// eligible; host-beta (3090=8.6) eligible (8.6 < 9.0); host-gamma (M2 Max)
+	// eligible because the job requests no GPU — a torch arch cap alone routes a
+	// GPU-agnostic job onto CPU, so the non-CUDA host stays eligible. (With a GPU
+	// request the unknown cap fails closed; see TestScoreHosts_MaxComputeCap_Ampere.)
 	db := setupTestDB(t)
 	scores := scoreTestHosts(db, Constraints{MaxComputeCap: "9.0"})
 	for _, s := range scores {
@@ -2174,8 +2238,11 @@ func TestScoreHosts_MaxComputeCap_Hopper(t *testing.T) {
 }
 
 func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
-	// Bound at sm_8.0: host-alpha eligible (A100=8.0 and 2080Ti=7.5 both <= 8.0);
-	// host-beta NOT eligible (3090 = 8.6 > 8.0); host-gamma eligible (unknown cap).
+	// Bound at sm_8.0 with a GPU request (GPUMemGB): host-alpha eligible
+	// (A100=8.0 and 2080Ti=7.5 both <= 8.0); host-beta NOT eligible (3090 = 8.6
+	// > 8.0); host-gamma (M2 Max, no CUDA cap) NOT eligible — MaxComputeCap
+	// fails closed on unknown caps, symmetric with the MinComputeCap floor and
+	// the cloud-offer filter (wb42 / wj2365).
 	db := setupTestDB(t)
 	scores := scoreTestHosts(db, Constraints{GPUMemGB: 1, MaxComputeCap: "8.0"})
 	var alpha, beta, gamma *Score
@@ -2195,8 +2262,8 @@ func TestScoreHosts_MaxComputeCap_Ampere(t *testing.T) {
 	if beta == nil || beta.Eligible {
 		t.Errorf("host-beta should NOT be eligible at cap 8.0 (3090 sm_8.6)")
 	}
-	if gamma == nil || !gamma.Eligible {
-		t.Errorf("host-gamma should be eligible (unknown cap)")
+	if gamma == nil || gamma.Eligible {
+		t.Errorf("host-gamma (unknown cap) should NOT be eligible at cap 8.0 (fail closed)")
 	}
 }
 
@@ -2452,6 +2519,91 @@ func TestConstraintsFromJob_ObservedGLIBCXXDiagnosisFloor(t *testing.T) {
 	constraints := ConstraintsFromJob(job)
 	if constraints.MinGLIBCXXVersion != "3.4.30" {
 		t.Fatalf("MinGLIBCXXVersion = %q, want observed 3.4.30", constraints.MinGLIBCXXVersion)
+	}
+}
+
+func TestCheckHostGPUConstraints_GPUCount(t *testing.T) {
+	// wb31/wb41 regression: a --gpus N job is eligible only on hosts that
+	// physically hold at least N devices matching the per-device constraints.
+	// Previously the check passed as soon as ONE device matched, and the
+	// shortfall was only discovered by the runner's gpu_count_preflight after
+	// setup/prewarm spend.
+	host := inventory.HostSpec{
+		Name: "mixed-gpu-host",
+		GPUs: []inventory.GPUSpec{
+			{Name: "A100 80GB PCIe", Class: "a100", Memory: "80GB", Indices: []int{0, 1}},
+			{Name: "RTX 2080 Ti", Class: "rtx2080ti", Memory: "11GB", Indices: []int{2, 3}},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		c          Constraints
+		wantOK     bool
+		wantReason string
+	}{
+		{
+			name:       "two matching a100s",
+			c:          Constraints{GPUClass: "a100", NumGPUs: 2},
+			wantOK:     true,
+			wantReason: "has 2 matching GPUs (need 2)",
+		},
+		{
+			name:       "three a100s requested but only two present",
+			c:          Constraints{GPUClass: "a100", NumGPUs: 3},
+			wantOK:     false,
+			wantReason: "gpu count: 2 matching GPU(s) < requested 3",
+		},
+		{
+			name:   "count without class counts every device",
+			c:      Constraints{NumGPUs: 4},
+			wantOK: true,
+		},
+		{
+			name:       "memory filter restricts the countable devices",
+			c:          Constraints{GPUMemGB: 40, NumGPUs: 3},
+			wantOK:     false,
+			wantReason: "gpu count: 2 matching GPU(s) < requested 3",
+		},
+		{
+			name:   "single-GPU request unaffected",
+			c:      Constraints{GPUClass: "a100"},
+			wantOK: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, reasons := CheckHostGPUConstraints(host, tt.c)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v (reasons: %v)", ok, tt.wantOK, reasons)
+			}
+			if tt.wantReason != "" {
+				if got := strings.Join(reasons, "; "); !strings.Contains(got, tt.wantReason) {
+					t.Fatalf("reasons = %v, want substring %q", reasons, tt.wantReason)
+				}
+			}
+		})
+	}
+}
+
+func TestScoreHosts_GPUCountEligibility(t *testing.T) {
+	// End-to-end through the scorer used by placement AND the fast-submit
+	// path (cmd/run.go evaluateRecentOnPremPlacement): host-alpha holds
+	// 2x A100, so a 2xA100 job is eligible there but a 3xA100 job is not.
+	db := setupTestDB(t)
+
+	scores := scoreTestHosts(db, Constraints{GPUClass: "a100", NumGPUs: 2})
+	for _, s := range scores {
+		if s.Host == "host-alpha" && !s.Eligible {
+			t.Fatalf("host-alpha should be eligible for 2x a100: %v", s.Reasons)
+		}
+	}
+
+	scores = scoreTestHosts(db, Constraints{GPUClass: "a100", NumGPUs: 3})
+	for _, s := range scores {
+		if s.Eligible {
+			t.Fatalf("host %s should be ineligible for 3x a100: %v", s.Host, s.Reasons)
+		}
 	}
 }
 

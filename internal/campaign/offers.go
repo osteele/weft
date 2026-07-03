@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/placement"
@@ -35,6 +36,7 @@ func parseCUDAVersionFloat(s string) float64 {
 type OfferFilterStats struct {
 	RawCount       int // offers returned by provider search
 	AfterVRAM      int // remaining after VRAM requirement filter
+	AfterGPUCount  int // remaining after GPU count requirement filter
 	AfterCUDA      int // remaining after CUDA compatibility filter
 	AfterProvider  int // remaining after provider CUDA/driver compatibility filter
 	AfterForward   int // remaining after Vast.ai forward-compat driver guard
@@ -43,6 +45,7 @@ type OfferFilterStats struct {
 	// UnknownCompatibility tracks offers whose provider did not report
 	// CUDA/driver compatibility even though the group requires a floor.
 	UnknownCompatibility          int
+	GPUCountFiltered              int
 	ProviderCompatibilityFiltered int
 	ForwardCompatFiltered         int
 	ForwardCompatExampleGPU       string
@@ -80,6 +83,8 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	switch {
 	case s.AfterVRAM == 0:
 		return fmt.Sprintf("%s, all filtered by VRAM requirement", found)
+	case s.GPUCountFiltered > 0 && s.AfterGPUCount == 0:
+		return fmt.Sprintf("%s, %s passed VRAM but all filtered by GPU count requirement", found, offerCount(s.AfterVRAM))
 	case s.AfterCUDA == 0:
 		if s.CUDAMinRequired > 0 && s.CUDAImageVersion > 0 {
 			if s.CUDAExampleGPU != "" && s.CUDAImage != "" {
@@ -275,7 +280,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		MinReliability:   minReliability,
 		MinDriverVersion: group.MinDriverVersion,
 		MinCUDAVersion:   group.MinCUDAVersion,
-		NumGPUs:          normalizedGPUCount(group.NumGPUs),
+		NumGPUs:          requiredGPUCountForGroup(group),
 		Interconnect:     strings.TrimSpace(group.Interconnect),
 		RunpodCloudType:  strings.TrimSpace(group.RunpodCloudType),
 		// Legacy GPU memory upper metadata is intentionally not passed to search.
@@ -289,7 +294,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		c.MinCPUCoresEffective = group.CPUCores
 	}
 	c.MinHostRAMGB = group.CPUMemGB
-	if group.HasPreemptibleJob() {
+	if group.HasPreemptibleJob() && !group.EscalateToOnDemand {
 		c.InstanceType = cloud.InstanceTypeInterruptible
 	}
 	return c
@@ -359,9 +364,20 @@ func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
 	if !groupRequiresProviderCompatibility(group) {
 		return "not_required"
 	}
-	if minCUDA := strings.TrimSpace(group.MinCUDAVersion); minCUDA != "" && offer.CUDAVersion > 0 {
-		min, err := strconv.ParseFloat(minCUDA, 64)
-		if err == nil && offer.CUDAVersion+0.0001 < min {
+	// Evaluate the CUDA compatibility chain links this site has values for
+	// (specs/campaign-lifecycle.allium contract CUDACompatibilityChain):
+	// the group's merged CUDA floor and image toolkit against the offer's
+	// driver-supported CUDA (cuda_max_good). Offers that don't report a
+	// CUDA version fall through to the known/unknown provider handling.
+	if offer.CUDAVersion > 0 {
+		chain := compat.CUDAChain{
+			CUDAFloor:  strings.TrimSpace(group.MinCUDAVersion),
+			DriverCUDA: strconv.FormatFloat(offer.CUDAVersion, 'f', -1, 64),
+		}
+		if imageCUDA, _, ok := parseCUDAImage(group.Image); ok {
+			chain.ImageToolkit = imageCUDA
+		}
+		if compat.ValidateCUDAChain(chain) != nil {
 			return "incompatible"
 		}
 	}
@@ -489,40 +505,16 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 	compatible := make([]cloud.Offer, 0, len(offers))
 	filtered := 0
 	exampleGPU, exampleCap := "", ""
+	constraints := placement.Constraints{MinComputeCap: minCap, MaxComputeCap: maxCap}
 	for _, o := range offers {
-		gpuCap := placement.ComputeCapForGPU(o.GPUName)
-		if gpuCap == "" {
-			// Fail closed for unknown GPUs whenever any bound is set. The
-			// catalog gets updated lazily, so "unknown to weft" is in
-			// practice biased toward newer-than-the-catalog-knows, not
-			// older — wj2365 on 2026-06-02 landed on an RTX PRO 4500
-			// Blackwell (sm_12.0) under a torch-2.6 sm_9.0 cap because the
-			// provider's terse "RTX PRO 4500" GPUName missed the
-			// generation-name fallback and the maxCap-only branch failed
-			// open. Same direction as the older EXP-179 wj2240 minCap
-			// regression (GTX 1080 Tis below torch 2.10's sm_75 floor),
-			// just from the other side. Both are safer routed off the
-			// unknown card.
+		if !placement.EvaluateEligibility(constraints, TargetSpecFromOffer(o)).Eligible {
 			filtered++
 			if exampleGPU == "" {
 				exampleGPU = o.GPUName
-				exampleCap = "unknown"
-			}
-			continue
-		}
-		if maxCap != "" && placement.CompareComputeCap(gpuCap, maxCap) > 0 {
-			filtered++
-			if exampleGPU == "" {
-				exampleGPU = o.GPUName
-				exampleCap = gpuCap
-			}
-			continue
-		}
-		if minCap != "" && placement.CompareComputeCap(gpuCap, minCap) < 0 {
-			filtered++
-			if exampleGPU == "" {
-				exampleGPU = o.GPUName
-				exampleCap = gpuCap
+				exampleCap = placement.ComputeCapForGPU(o.GPUName)
+				if exampleCap == "" {
+					exampleCap = "unknown"
+				}
 			}
 			continue
 		}
@@ -544,13 +536,50 @@ func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 		return offers, 0
 	}
 
-	const eps = 0.01
-	minMem := float64(group.GPUMemGB)
-
+	constraints := placement.Constraints{GPUMemGB: group.GPUMemGB}
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		if minMem > 0 && o.GPUMemGB+eps < minMem {
+		if !placement.EvaluateEligibility(constraints, TargetSpecFromOffer(o)).Eligible {
+			removed++
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	return filtered, removed
+}
+
+func requiredGPUCountForGroup(group InstanceGroup) int {
+	return normalizedGPUCount(group.NumGPUs)
+}
+
+func offerHasInsufficientGPUCount(group InstanceGroup, offer cloud.Offer) (required, actual int, insufficient bool) {
+	required = requiredGPUCountForGroup(group)
+	actual = offer.NumGPUs
+	return required, actual, required > 1 && actual > 0 && actual < required
+}
+
+func validateOfferGPUCount(group InstanceGroup, offer cloud.Offer) error {
+	required, actual, insufficient := offerHasInsufficientGPUCount(group, offer)
+	if !insufficient {
+		return nil
+	}
+	return fmt.Errorf("offer GPU count insufficient: need=%d offer=%d", required, actual)
+}
+
+func filterOffersByGPUCount(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
+	if len(offers) == 0 {
+		return offers, 0
+	}
+	required := requiredGPUCountForGroup(group)
+	if required <= 1 {
+		return offers, 0
+	}
+	filtered := make([]cloud.Offer, 0, len(offers))
+	removed := 0
+	constraints := placement.Constraints{NumGPUs: required}
+	for _, o := range offers {
+		if o.NumGPUs > 0 && !placement.EvaluateEligibility(constraints, TargetSpecFromOffer(o)).Eligible {
 			removed++
 			continue
 		}
@@ -626,6 +655,18 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		offers = vramFiltered
 	}
 	stats.AfterVRAM = len(offers)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	if countFiltered, removed := filterOffersByGPUCount(offers, group); removed > 0 {
+		slog.Debug("filtered offers by GPU count requirement",
+			"required", requiredGPUCountForGroup(group),
+			"filtered", removed, "remaining", len(countFiltered))
+		stats.GPUCountFiltered = removed
+		offers = countFiltered
+	}
+	stats.AfterGPUCount = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result
@@ -939,15 +980,21 @@ type offerSearchFuture struct {
 type offerSearchSession struct {
 	clients        []cloud.Client
 	minReliability float64
+	allowNetwork   bool
 
 	mu      sync.Mutex
 	results map[string]*offerSearchFuture
 }
 
 func newOfferSearchSession(clients []cloud.Client, minReliability float64) *offerSearchSession {
+	return newOfferSearchSessionWithOptions(clients, minReliability, true)
+}
+
+func newOfferSearchSessionWithOptions(clients []cloud.Client, minReliability float64, allowNetwork bool) *offerSearchSession {
 	return &offerSearchSession{
 		clients:        clients,
 		minReliability: minReliability,
+		allowNetwork:   allowNetwork,
 		results:        make(map[string]*offerSearchFuture),
 	}
 }
@@ -980,7 +1027,7 @@ func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []Group
 	if len(groups) == 0 {
 		return nil
 	}
-	if len(s.clients) == 0 {
+	if len(s.clients) == 0 && s.allowNetwork {
 		results := make([]GroupRawOffers, len(groups))
 		for i, group := range groups {
 			results[i] = GroupRawOffers{Group: group}
@@ -1019,6 +1066,12 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 	future := &offerSearchFuture{done: make(chan struct{})}
 	s.results[key] = future
 	s.mu.Unlock()
+
+	if !s.allowNetwork {
+		future.result.err = ErrOfferSnapshotUnavailable
+		close(future.done)
+		return future
+	}
 
 	go func() {
 		constraintsText := formatProviderSearchConstraints(constraints)
@@ -1063,6 +1116,12 @@ func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
 		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
 		c.MinCPUCoresEffective, c.MinCUDAVersion, c.InstanceType, c.RunpodCloudType, provider)
+}
+
+// GroupRawOfferCacheKey returns the search-cache key for a planning group.
+func GroupRawOfferCacheKey(group InstanceGroup, minReliability float64) string {
+	provider := cloud.Provider(strings.TrimSpace(group.Provider))
+	return constraintKey(offerConstraintsForGroup(group, minReliability), provider)
 }
 
 type providerSearchResult struct {
@@ -1405,6 +1464,7 @@ func BuildReuseCandidate(jobs []*db.Job, instances []InstanceCapacity) *Grouping
 		inst := a.cap.Instance
 		group := InstanceGroup{
 			GPUClass: inst.GPUClass,
+			NumGPUs:  inst.NumGPUs,
 			GPUMemGB: inst.GPUMemGB,
 			DiskGB:   inst.DiskGB,
 			Jobs:     a.jobs,
@@ -1414,6 +1474,7 @@ func BuildReuseCandidate(jobs []*db.Job, instances []InstanceCapacity) *Grouping
 			ProviderID:  inst.ProviderInstanceID,
 			Provider:    cloud.Provider(inst.Provider),
 			GPUName:     inst.ResolvedGPUName,
+			NumGPUs:     inst.NumGPUs,
 			GPUMemGB:    float64(inst.GPUMemGB),
 			CostPerHour: 0, // already paying for it
 			DLPerf:      inst.DLPerf,

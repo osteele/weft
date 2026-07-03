@@ -38,6 +38,11 @@ var (
 // instance for reuse. Instances with less time are auto-extended.
 const MinGraceRemaining = 5 * time.Minute
 
+// MaxReuseQueueDepth caps jobs time-multiplexed onto one sequential rental.
+// A running cloud agent executes one job at a time, so extra assignments wait
+// behind the active job instead of consuming GPUs concurrently.
+const MaxReuseQueueDepth = 2
+
 // InstanceCapacity describes a reusable cloud instance and its available resources.
 type InstanceCapacity struct {
 	Instance          *db.Launch
@@ -341,6 +346,10 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if ok, reason := matchJobRequiredImage(job, inst); !ok {
 		return false, reason
 	}
+	maxQueueDepth := effectiveMaxReuseQueueDepth(inst)
+	if cap.RunningJobCount >= maxQueueDepth {
+		return false, fmt.Sprintf("reuse queue full: depth=%d max=%d", cap.RunningJobCount, maxQueueDepth)
+	}
 
 	if job.HasTag(db.TagCPUIntensive) {
 		floor := computeCPUCoresFloor()
@@ -352,9 +361,8 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		}
 	}
 
-	// GPU class check (normalized aliases + Vast class mapping semantics)
-	if !gpuClassCompatible(constraints.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
-		return false, fmt.Sprintf("GPU class mismatch: job=%s instance=%s", constraints.GPUClass, inst.GPUClass)
+	if ok, reason := matchInstanceTargetEligibility(placement.Constraints{GPUClass: constraints.GPUClass}, inst, 0); !ok {
+		return false, reason
 	}
 	if broadNVIDIAConstraint(constraints.GPUClass) && premiumAcceleratorClass(inst.GPUClass, inst.ResolvedGPUName) {
 		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", constraints.GPUClass, inst.DisplayGPUBrief())
@@ -371,10 +379,11 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if constraints.GPUMemGB > 0 {
 		jobMemGB = vastai.IntendedMemGB(constraints.GPUClass, constraints.GPUMemGB)
 	}
-	if jobMemGB > 0 && jobMemGB > inst.GPUMemGB {
-		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)
+	reuseConstraints := constraints
+	if jobMemGB > 0 {
+		reuseConstraints.GPUMemGB = jobMemGB
 	}
-	if ok, reason := matchPlacementCompatibility(constraints, inst); !ok {
+	if ok, reason := matchInstanceTargetEligibility(reuseConstraints, inst, placementIntentForJob(job).NumGPUs); !ok {
 		return false, reason
 	}
 
@@ -399,6 +408,13 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
+}
+
+func effectiveMaxReuseQueueDepth(inst *db.Launch) int {
+	if inst == nil || inst.NumGPUs <= 1 {
+		return MaxReuseQueueDepth
+	}
+	return MaxReuseQueueDepth * inst.NumGPUs
 }
 
 func matchProviderIntent(job *db.Job, inst *db.Launch) (bool, string) {
@@ -494,29 +510,67 @@ func matchPlacementCompatibility(constraints placement.Constraints, inst *db.Lau
 	if inst == nil {
 		return true, ""
 	}
-	// A job without an explicit GPU request can still carry arch/CUDA bounds when
-	// it is a torch project (see placement.ResolveConstraints). Those bounds must
-	// be enforced at routing too, or the job lands on an arch-incompatible worker.
 	if !constraints.HasGPURuntimeBounds() {
 		return true, ""
 	}
-	if !instanceMeetsMinCUDAVersion(inst, constraints.MinCUDAVersion) {
-		if inst.CUDAVersion <= 0 {
-			return false, fmt.Sprintf("CUDA compatibility unknown: need>=%s", constraints.MinCUDAVersion)
+	return matchInstanceTargetEligibility(constraints, inst, constraints.NumGPUs)
+}
+
+func matchInstanceTargetEligibility(constraints placement.Constraints, inst *db.Launch, requestedGPUs int) (bool, string) {
+	if inst == nil {
+		return true, ""
+	}
+	evalConstraints := constraints
+	// Reuse records do not currently persist NVIDIA driver major. Provider and
+	// image-specific driver checks stay in the cloud-offer/provider filters.
+	evalConstraints.MinDriverVersion = 0
+	evalConstraints.VersionRequirements = nil
+	if evalConstraints.NumGPUs > 1 && inst.NumGPUs <= 0 {
+		evalConstraints.NumGPUs = 1
+	}
+	verdict := placement.EvaluateEligibility(evalConstraints, TargetSpecFromCloudInstance(*inst))
+	if verdict.Eligible {
+		return true, ""
+	}
+	return false, instanceEligibilityReason(verdict, constraints, inst, requestedGPUs)
+}
+
+func instanceEligibilityReason(verdict placement.Verdict, constraints placement.Constraints, inst *db.Launch, requestedGPUs int) string {
+	if len(verdict.Reasons) == 0 {
+		return "placement compatibility mismatch"
+	}
+	reason := verdict.Reasons[0]
+	switch reason.Kind {
+	case placement.ReasonGPUClass:
+		return fmt.Sprintf("GPU class mismatch: job=%s instance=%s", constraints.GPUClass, inst.GPUClass)
+	case placement.ReasonGPUCount:
+		if requestedGPUs <= 0 {
+			requestedGPUs = constraints.NumGPUs
 		}
-		return false, fmt.Sprintf("CUDA compatibility insufficient: need>=%s instance=%.1f", constraints.MinCUDAVersion, inst.CUDAVersion)
-	}
-	gpuCap := instanceComputeCap(inst)
-	if constraints.MaxComputeCap != "" && gpuCap != "" && placement.CompareComputeCap(gpuCap, constraints.MaxComputeCap) > 0 {
-		return false, fmt.Sprintf("compute capability too new: job<=%s instance=%s", constraints.MaxComputeCap, gpuCap)
-	}
-	if constraints.MinComputeCap != "" && (gpuCap == "" || placement.CompareComputeCap(gpuCap, constraints.MinComputeCap) < 0) {
+		return fmt.Sprintf("GPU count insufficient: job=%d instance=%d", requestedGPUs, inst.NumGPUs)
+	case placement.ReasonGPUMemory:
+		return fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", constraints.GPUMemGB, inst.GPUMemGB)
+	case placement.ReasonComputeCapMax:
+		gpuCap := instanceComputeCap(inst)
 		if gpuCap == "" {
-			return false, fmt.Sprintf("compute capability unknown: need>=%s", constraints.MinComputeCap)
+			return fmt.Sprintf("compute capability unknown; excluded under max cap %s", constraints.MaxComputeCap)
 		}
-		return false, fmt.Sprintf("compute capability too old: job>=%s instance=%s", constraints.MinComputeCap, gpuCap)
+		return fmt.Sprintf("compute capability too new: job<=%s instance=%s", constraints.MaxComputeCap, gpuCap)
+	case placement.ReasonComputeCapMin:
+		gpuCap := instanceComputeCap(inst)
+		if gpuCap == "" {
+			return fmt.Sprintf("compute capability unknown: need>=%s", constraints.MinComputeCap)
+		}
+		return fmt.Sprintf("compute capability too old: job>=%s instance=%s", constraints.MinComputeCap, gpuCap)
+	case placement.ReasonCompatibility, placement.ReasonCUDAChain:
+		if constraints.MinCUDAVersion != "" {
+			if inst.CUDAVersion <= 0 {
+				return fmt.Sprintf("CUDA compatibility unknown: need>=%s", constraints.MinCUDAVersion)
+			}
+			return fmt.Sprintf("CUDA compatibility insufficient: need>=%s instance=%.1f", constraints.MinCUDAVersion, inst.CUDAVersion)
+		}
 	}
-	return true, ""
+	return reason.Message
 }
 
 func instanceComputeCap(inst *db.Launch) string {
@@ -995,6 +1049,15 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			}
 			return err
 		}
+		checkpointNeeds, err := resolveTransportableCheckpointNeeds(opCtx, database, r2Client, job)
+		if err != nil {
+			rollbackErr := rollbackClaims()
+			if rollbackErr != nil {
+				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
+			}
+			return err
+		}
+		cloudNeeds = append(cloudNeeds, checkpointNeeds...)
 		var restagedOutputs bool
 		cloudNeeds, restagedOutputs, err = appendResumeCloudNeeds(opCtx, database, r2Client, job, cloudNeeds)
 		if err != nil {

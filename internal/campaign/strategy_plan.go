@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +49,8 @@ type PlanOptions struct {
 	DistinctMachines       bool
 	InitialClaimedMachines map[string]struct{}
 	MachineAffinity        map[string]struct{}
+	RawOffers              []GroupRawOffers
+	CachedOffersOnly       bool
 }
 
 func defaultPlanOptions() PlanOptions {
@@ -446,8 +447,8 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 ) map[string]StrategyPlan {
 	var offerSession *offerSearchSession
 	switch {
-	case len(clients) > 0:
-		offerSession = newOfferSearchSession(clients, minReliability)
+	case len(clients) > 0 || options.CachedOffersOnly:
+		offerSession = newOfferSearchSessionWithOptions(clients, minReliability, !options.CachedOffersOnly)
 		if len(splitRaw) == len(splitGroups) {
 			splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
 			offerSession.SeedRawOffers(splitRaw)
@@ -1860,19 +1861,17 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if cap.GraceRemaining > 0 && cap.GraceRemaining < MinGraceRemaining {
 		return false
 	}
-	if !gpuClassCompatible(group.GPUClass, inst.GPUClass, inst.ResolvedGPUName) {
-		return false
+	constraints := placementConstraintsFromGroup(group)
+	if constraints.GPUMemGB > 0 && inst.GPUMemGB <= 0 {
+		constraints.GPUMemGB = 0
 	}
-	if group.GPUMemGB > 0 && inst.GPUMemGB > 0 && group.GPUMemGB > inst.GPUMemGB {
+	if ok, _ := matchInstanceTargetEligibility(constraints, inst, group.NumGPUs); !ok {
 		return false
 	}
 	for _, job := range group.Jobs {
 		if ok, _ := matchJobRequiredImage(job, inst); !ok {
 			return false
 		}
-	}
-	if !instanceMeetsMinCUDAVersion(inst, group.MinCUDAVersion) {
-		return false
 	}
 	if group.HasComputeIntensiveJob() {
 		floor := computeCPUCoresFloor()
@@ -1883,19 +1882,20 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	return true
 }
 
-func instanceMeetsMinCUDAVersion(inst *db.Launch, minCUDA string) bool {
-	minCUDA = strings.TrimSpace(minCUDA)
-	if minCUDA == "" {
-		return true
+func placementConstraintsFromGroup(group InstanceGroup) placement.Constraints {
+	return placement.Constraints{
+		GPUClass:         group.GPUClass,
+		Provider:         group.Provider,
+		NumGPUs:          group.NumGPUs,
+		GPUMemGB:         group.GPUMemGB,
+		CPUCores:         group.CPUCores,
+		CPUMemGB:         group.CPUMemGB,
+		Interconnect:     group.Interconnect,
+		MaxComputeCap:    group.MaxComputeCap,
+		MinComputeCap:    group.MinComputeCap,
+		MinCUDAVersion:   group.MinCUDAVersion,
+		MinDriverVersion: group.MinDriverVersion,
 	}
-	if inst == nil || inst.CUDAVersion <= 0 {
-		return false
-	}
-	min, err := strconv.ParseFloat(minCUDA, 64)
-	if err != nil {
-		return false
-	}
-	return inst.CUDAVersion >= min
 }
 
 func reuseHeuristicScore(group InstanceGroup, groupInputs []string, cap InstanceCapacity, preferReuse bool) float64 {

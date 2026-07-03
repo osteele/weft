@@ -391,6 +391,59 @@ func TestMinRuntimeFloor_Torch291Cu128RejectsCool30(t *testing.T) {
 	}
 }
 
+// TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU documents the
+// shared placement rule: max-cap constraints require a known device cap at or
+// below the bound. Unknown caps fail closed for inventory hosts and cloud
+// targets alike.
+func TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
+	c := Constraints{GPUClass: "nvidia", MaxComputeCap: "9.0"}
+
+	unknown := inventory.HostSpec{
+		Name:                "unknown-cap-host",
+		NVIDIADriverVersion: "570.86.15",
+		CUDAVersion:         "12.8",
+		GPUs:                []inventory.GPUSpec{{Name: "NVIDIA Mystery Accelerator Z9", Memory: "24GB"}},
+	}
+	ok, reasons := CheckHostGPUConstraints(unknown, c)
+	if ok {
+		t.Fatalf("uncatalogued GPU accepted under sm_9.0 cap; want fail-closed rejection")
+	}
+	if joined := strings.Join(reasons, "; "); !strings.Contains(joined, "compute capability unknown") {
+		t.Fatalf("reason %q should flag the unknown compute capability", joined)
+	}
+
+	// A catalogued sm_9.0 card sits exactly at the cap and must be accepted.
+	atCap := inventory.HostSpec{
+		Name:                "h100-host",
+		NVIDIADriverVersion: "550.120",
+		CUDAVersion:         "12.4",
+		GPUs:                []inventory.GPUSpec{{Name: "H100 NVL", Class: "nvidia", Memory: "80GB"}},
+	}
+	if ok, reasons := CheckHostGPUConstraints(atCap, c); !ok {
+		t.Errorf("sm_9.0 GPU rejected under sm_9.0 cap; want acceptance: %v", reasons)
+	}
+
+	// A catalogued Blackwell sm_12.0 card is genuinely too new: rejected, but
+	// with the too-new reason rather than the unknown-cap reason.
+	tooNew := inventory.HostSpec{
+		Name:                "blackwell-host",
+		NVIDIADriverVersion: "570.86.15",
+		CUDAVersion:         "12.8",
+		GPUs:                []inventory.GPUSpec{{Name: "RTX 5090", Class: "nvidia", Memory: "32GB"}},
+	}
+	ok, reasons = CheckHostGPUConstraints(tooNew, c)
+	if ok {
+		t.Fatalf("sm_12.0 GPU accepted under sm_9.0 cap; want rejection")
+	}
+	joined := strings.Join(reasons, "; ")
+	if strings.Contains(joined, "compute capability unknown") {
+		t.Errorf("reason %q wrongly flags unknown cap for a catalogued too-new GPU", joined)
+	}
+	if !strings.Contains(joined, "9.0") {
+		t.Errorf("reason %q should reference the sm_9.0 arch cap", joined)
+	}
+}
+
 func writeScriptWithCUDADriverMin(t *testing.T, dir, value string) string {
 	t.Helper()
 	script := fmt.Sprintf(`# /// script

@@ -77,6 +77,41 @@ func TestMatchPlacementCompatibility_EnforcesArchFloorWithoutGPURequest(t *testi
 	}
 }
 
+// TestMatchPlacementCompatibility_MaxCapFailsClosedOnUnknownInstance is the
+// reuse-path half of the wb42 / wj2365 fix: an existing instance whose GPU
+// compute capability weft cannot name must not be reused under a MaxComputeCap
+// arch cap. An un-nameable card biases newer-than-the-catalog-knows, so reusing
+// it risks the same runtime sm_120 kernel crash as fresh placement. Symmetric
+// with the MinComputeCap floor enforced in the same function.
+func TestMatchPlacementCompatibility_MaxCapFailsClosedOnUnknownInstance(t *testing.T) {
+	cap := placement.Constraints{MaxComputeCap: "9.0"}
+	if !cap.HasGPURuntimeBounds() {
+		t.Fatal("precondition: a MaxComputeCap must count as a GPU runtime bound")
+	}
+
+	ok, reason := matchPlacementCompatibility(cap, &db.Launch{ResolvedGPUName: "Mystery Accelerator Z9"})
+	if ok {
+		t.Fatalf("uncatalogued instance reused under sm_9.0 cap; want rejection (reason=%q)", reason)
+	}
+	if !strings.Contains(reason, "compute capability unknown") {
+		t.Errorf("reason %q should flag the unknown compute capability", reason)
+	}
+
+	// A catalogued sm_9.0 instance is reusable.
+	if ok, reason := matchPlacementCompatibility(cap, &db.Launch{ResolvedGPUName: "H100 NVL"}); !ok {
+		t.Fatalf("sm_9.0 instance rejected under sm_9.0 cap; want reuse (reason=%q)", reason)
+	}
+
+	// A catalogued Blackwell sm_12.0 instance is genuinely too new.
+	ok, reason = matchPlacementCompatibility(cap, &db.Launch{ResolvedGPUName: "RTX 5090"})
+	if ok {
+		t.Fatalf("sm_12.0 instance reused under sm_9.0 cap; want rejection (reason=%q)", reason)
+	}
+	if strings.Contains(reason, "unknown") {
+		t.Errorf("reason %q wrongly flags unknown cap for a catalogued too-new GPU", reason)
+	}
+}
+
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -290,6 +325,29 @@ func TestPlanReuse_SkipsRequiredImageMismatch(t *testing.T) {
 	}
 	if assignments[0].Instance.Instance.ID != 4232 {
 		t.Fatalf("assigned instance = %d, want 4232", assignments[0].Instance.Instance.ID)
+	}
+}
+
+func TestMatchJobToInstance_RejectsFullReuseQueue(t *testing.T) {
+	mem := 24
+	job := &db.Job{GPUClass: "nvidia", GPUMemGB: &mem}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			Status:          db.LaunchStatusRunning,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 4090",
+			GPUMemGB:        24,
+			NumGPUs:         1,
+		},
+		RunningJobCount: MaxReuseQueueDepth,
+	}
+
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatal("MatchJobToInstance() = true, want false for full reuse queue")
+	}
+	if !strings.Contains(reason, "reuse queue full") {
+		t.Fatalf("reason = %q, want reuse queue full", reason)
 	}
 }
 

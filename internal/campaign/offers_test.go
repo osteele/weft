@@ -842,6 +842,27 @@ func TestRankOffer_NoHardVRAMCeiling(t *testing.T) {
 	}
 }
 
+func TestRankOffer_FiltersInsufficientGPUCount(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "A100",
+		GPUMemGB: 80,
+		NumGPUs:  2,
+		Jobs:     []*db.Job{{ID: 1}},
+	}
+	offers := []cloud.Offer{
+		{ProviderID: "one-gpu", GPUName: "A100 SXM4", GPUMemGB: 80, NumGPUs: 1, CostPerHour: 0.10},
+		{ProviderID: "two-gpu", GPUName: "A100 SXM4", GPUMemGB: 80, NumGPUs: 2, CostPerHour: 0.20},
+	}
+
+	got := rankOfferWithProfile(group, offers, nil, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap.Profile(), 0)
+	if got.Offer == nil {
+		t.Fatal("expected an offer, got nil")
+	}
+	if got.Offer.ProviderID != "two-gpu" {
+		t.Fatalf("picked offer %q, want two-gpu", got.Offer.ProviderID)
+	}
+}
+
 func TestRankOffer_UsesJobMinSurvivalOverride(t *testing.T) {
 	minSurvivalZero := 0.0
 	lowSurvivalOffer := cloud.Offer{
@@ -1098,6 +1119,56 @@ func TestFilterOffersByProviderCompatibility_KeepsUnknownForPinnedRunPodProbe(t 
 	}
 	if len(got) != 2 {
 		t.Fatalf("filtered offers = %d, want both RunPod offers kept", len(got))
+	}
+}
+
+func TestOfferCompatibilityStatus_CUDAChain(t *testing.T) {
+	// The offer filter funnels through compat.ValidateCUDAChain: the group's
+	// merged CUDA floor and image toolkit are checked against the offer's
+	// driver-supported CUDA with one shared semantics.
+	tests := []struct {
+		name  string
+		group InstanceGroup
+		offer cloud.Offer
+		want  string
+	}{
+		{
+			name:  "driver below floor is incompatible (wb32/wb36 class)",
+			group: InstanceGroup{MinCUDAVersion: "12.8"},
+			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.0},
+			want:  "incompatible",
+		},
+		{
+			name:  "driver at floor is known compatible",
+			group: InstanceGroup{MinCUDAVersion: "12.8"},
+			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
+			want:  "known",
+		},
+		{
+			name: "image toolkit below floor is not by itself incompatible (wb30 class)",
+			group: InstanceGroup{
+				MinCUDAVersion: "12.5",
+				Image:          "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+			},
+			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
+			want:  "known",
+		},
+		{
+			name: "cross-major image toolkit above driver CUDA is incompatible",
+			group: InstanceGroup{
+				MinDriverVersion: 525,
+				Image:            "nvidia/cuda:13.0.0-devel-ubuntu22.04",
+			},
+			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
+			want:  "incompatible",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := offerCompatibilityStatus(tt.group, tt.offer); got != tt.want {
+				t.Fatalf("offerCompatibilityStatus = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1466,5 +1537,43 @@ func TestSnapshotOnDemandRefCentsIgnoresBroadClassWithoutComparableGPU(t *testin
 
 	if got := snapshotOnDemandRefCents(client, group, chosen); got != nil {
 		t.Fatalf("snapshotOnDemandRefCents = %d, want nil without comparable GPU", *got)
+	}
+}
+
+func TestOfferConstraintsForGroup_PreemptibleOptsIntoInterruptible(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{{ID: 1, Tags: []string{db.TagInterruptible}}},
+	}
+	c := offerConstraintsForGroup(group, 0.95)
+	if c.InstanceType != cloud.InstanceTypeInterruptible {
+		t.Errorf("InstanceType = %q, want %q", c.InstanceType, cloud.InstanceTypeInterruptible)
+	}
+}
+
+// TestOfferConstraintsForGroup_BidLossEscalationForcesOnDemand verifies the
+// bid-loss escalation gate: a group flagged EscalateToOnDemand searches
+// on-demand offers even though it has preemptible jobs. The escalation only
+// suppresses the interruptible opt-in — it never sets an instance type on
+// groups without preemptible jobs.
+func TestOfferConstraintsForGroup_BidLossEscalationForcesOnDemand(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:           "RTX_4090",
+		GPUMemGB:           24,
+		EscalateToOnDemand: true,
+		Jobs:               []*db.Job{{ID: 1, Tags: []string{db.TagInterruptible}}},
+	}
+	c := offerConstraintsForGroup(group, 0.95)
+	if c.InstanceType == cloud.InstanceTypeInterruptible {
+		t.Errorf("InstanceType = %q, want escalated group not to opt into interruptible", c.InstanceType)
+	}
+
+	// A non-preemptible group with the flag set (shouldn't happen, but must
+	// stay harmless) still gets no instance type.
+	group.Jobs = []*db.Job{{ID: 1}}
+	c = offerConstraintsForGroup(group, 0.95)
+	if c.InstanceType != "" {
+		t.Errorf("InstanceType = %q, want empty for non-preemptible group", c.InstanceType)
 	}
 }

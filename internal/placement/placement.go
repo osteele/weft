@@ -102,6 +102,12 @@ type Constraints struct {
 	// compatibility floors. Legacy scalar fields above remain synchronized as
 	// compatibility shadows during the migration.
 	VersionRequirements []compat.Requirement
+
+	// SelfJobID identifies the persisted job these constraints were resolved
+	// from (0 = not job-derived). Free-GPU accounting skips this job's own
+	// reservation so re-scoring a host the job is already targeted at does
+	// not count the job against itself.
+	SelfJobID int64
 }
 
 // ConstraintSource is the normalized input to placement constraint
@@ -124,6 +130,7 @@ type ConstraintSource struct {
 	PersistedMaxComputeCap string
 	CLIOverrides           *db.CLIResourceOverrides
 	ErrorDiagnosis         string
+	SelfJobID              int64
 }
 
 // ResolvedConstraints is the result of resolving a ConstraintSource.
@@ -155,6 +162,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		Project:              src.Project,
 		Tags:                 src.Tags,
 		PreferredInstanceIDs: src.PreferredInstanceIDs,
+		SelfJobID:            src.SelfJobID,
 	}
 	if c.Provider == "" {
 		if provider, ok := db.RequestedProvider(src.Tags); ok {
@@ -225,6 +233,7 @@ func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
 		PersistedMaxComputeCap: j.MaxComputeCap,
 		CLIOverrides:           j.CLIResourceOverrides,
 		ErrorDiagnosis:         j.ErrorDiagnosis,
+		SelfJobID:              j.ID,
 	}
 	if j.GPUMemGB != nil {
 		src.GPUMemGB = *j.GPUMemGB
@@ -751,36 +760,9 @@ func ShouldSpillToRental(onPrem, rental estimate.Estimate, tags []string) bool {
 func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
-	if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
-		s.Eligible = false
-		if reason != "" {
-			s.Reasons = append(s.Reasons, "target cordoned: "+reason)
-		} else {
-			s.Reasons = append(s.Reasons, "target cordoned")
-		}
-		return s
-	}
-
-	// Hard constraint: opt-in-only hosts are skipped by auto-placement.
-	// They remain usable via an explicit --host, which bypasses the scorer.
-	if cfg != nil && cfg.HostOptInOnly(host.Name) {
-		s.Eligible = false
-		s.Reasons = append(s.Reasons, "host is opt-in only (specify with --host)")
-		return s
-	}
-
 	busyPenalty := 0.0
 	load := AssessHostLoad(database, host.Name, metrics, DefaultHostLoadOptions())
-	switch load.State {
-	case HostLoadOverloaded:
-		s.Eligible = false
-		if load.Reason != "" {
-			s.Reasons = append(s.Reasons, "host overloaded: "+load.Reason)
-		} else {
-			s.Reasons = append(s.Reasons, "host overloaded")
-		}
-		return s
-	case HostLoadBusy:
+	if load.State == HostLoadBusy {
 		busyPenalty = 2.0
 		if load.Reason != "" {
 			s.Reasons = append(s.Reasons, "host busy: "+load.Reason)
@@ -792,13 +774,39 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	var gc GPUConstraint
 	if c.HasGPURuntimeBounds() {
 		gc = ParseGPUConstraint(c.GPUClass)
-		eligible, reasons := CheckHostGPUConstraints(host, c)
-		if !eligible {
+		target := TargetSpecFromHostSpec(host, nil, activeGPUReservations(database, host.Name))
+		if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
+			target.Cordoned = true
+			target.CordonReason = reason
+		}
+		target.OptInOnly = cfg != nil && cfg.HostOptInOnly(host.Name)
+		target.LoadKnown = true
+		target.LoadState = load.State
+		target.LoadReason = load.Reason
+		verdict := EvaluateEligibility(c, target)
+		if !verdict.Eligible {
 			s.Eligible = false
-			s.Reasons = append(s.Reasons, reasons...)
+			s.Reasons = append(s.Reasons, verdict.Messages()...)
 			return s
 		}
-		s.Reasons = append(s.Reasons, reasons...)
+		s.Reasons = append(s.Reasons, hostGPUPassReasons(host, c)...)
+		s.Reasons = append(s.Reasons, freeGPUCapacityPassReason(target, c)...)
+	} else {
+		target := TargetSpecFromHostSpec(host, nil, nil)
+		if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
+			target.Cordoned = true
+			target.CordonReason = reason
+		}
+		target.OptInOnly = cfg != nil && cfg.HostOptInOnly(host.Name)
+		target.LoadKnown = true
+		target.LoadState = load.State
+		target.LoadReason = load.Reason
+		verdict := EvaluateEligibility(c, target)
+		if !verdict.Eligible {
+			s.Eligible = false
+			s.Reasons = append(s.Reasons, verdict.Messages()...)
+			return s
+		}
 	}
 
 	// Hard constraint: declared host/system-RAM floor (--cpu-mem). Applies to
@@ -995,6 +1003,9 @@ func missingNonTransportableInputReason(database *sql.DB, host string, inputs []
 		if len(entries) == 0 {
 			return fmt.Sprintf("missing %s: no host has this non-transportable input", asset.Ref())
 		}
+		if asset.Kind == dataloc.AssetCheckpoint && checkpointHasPublishedContent(database, entries) {
+			continue
+		}
 		holders := make([]string, 0, len(entries))
 		isLocal := false
 		for _, e := range entries {
@@ -1013,6 +1024,18 @@ func missingNonTransportableInputReason(database *sql.DB, host string, inputs []
 	return ""
 }
 
+func checkpointHasPublishedContent(database *sql.DB, entries []dataloc.HostDataEntry) bool {
+	for _, entry := range entries {
+		if entry.ContentHash == "" {
+			continue
+		}
+		if _, err := db.GetNamedAssetByContentHash(database, entry.ContentHash); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func isNonTransportableInput(kind dataloc.AssetKind) bool {
 	return kind == dataloc.AssetCheckpoint || kind == dataloc.AssetCorpus
 }
@@ -1026,87 +1049,82 @@ func isNonTransportableInput(kind dataloc.AssetKind) bool {
 // class, memory floor, and compute-capability range; a CPU-only or non-CUDA GPU
 // host is eligible for an arch-only torch job, which runs without CUDA there.
 func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
-	reqs := c.VersionRequirements
-	if len(reqs) == 0 {
-		reqs = versionRequirementsFromConstraints(c)
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if !verdict.Eligible {
+		return false, verdict.Messages()
 	}
-	if violations := compat.Check(reqs, hostCompatibilityFacts(host)); len(violations) > 0 {
-		return false, []string{compat.FormatViolation(violations[0])}
-	}
-	if !c.HasGPURuntimeBounds() {
-		return true, nil
-	}
-	if !c.NeedsGPU() && !hostHasCUDACapableGPU(host) {
-		// Torch-derived CUDA bounds protect GPU-agnostic jobs from landing on
-		// incompatible CUDA workers. On CPU-only or non-CUDA GPU hosts (for
-		// example Apple/MPS), those CUDA bounds do not apply.
-		return true, nil
-	}
-	if len(host.GPUs) == 0 {
-		// A job with an explicit GPU request needs a GPU host. A torch job that
-		// only carries arch/CUDA bounds (no GPU request) runs on CPU here, so a
-		// GPU-less host is eligible — the bounds only constrain GPU workers.
-		if !c.NeedsGPU() {
-			return true, nil
-		}
-		return false, []string{"no GPUs"}
-	}
+	return true, hostGPUPassReasons(host, c)
+}
 
+// activeGPUReservations derives the reservation slice consumed by
+// EvaluateEligibility. If active-job state cannot be read, placement degrades
+// to the historical "all matching GPUs free" approximation.
+func activeGPUReservations(database *sql.DB, host string) []GPUReservation {
+	if database == nil {
+		return nil
+	}
+	active, err := db.ListActiveJobs(database, host)
+	if err != nil {
+		// Planning approximation only: an unreadable active-job view (e.g. a
+		// partial schema in read-only tooling) degrades to "all matching
+		// devices free" rather than blocking placement.
+		slog.Debug("free-GPU accounting unavailable; assuming all matching GPUs free",
+			"component", "placement", "host", host, "error", err)
+		return nil
+	}
+	return GPUReservationsForJobs(active)
+}
+
+func freeGPUCapacityPassReason(target TargetSpec, c Constraints) []string {
+	if !c.NeedsGPU() || !target.ReservationsKnown {
+		return nil
+	}
+	free, matching, reserved := freeMatchingDeviceCount(target, c)
+	if reserved == 0 {
+		return nil
+	}
+	required := c.NumGPUs
+	if required < 1 {
+		required = 1
+	}
+	if free >= required {
+		return []string{fmt.Sprintf("%d of %d matching GPU(s) free", free, matching)}
+	}
+	return nil
+}
+
+func hostGPUPassReasons(host inventory.HostSpec, c Constraints) []string {
+	if !c.HasGPURuntimeBounds() || (!c.NeedsGPU() && !hostHasCUDACapableGPU(host)) || len(host.GPUs) == 0 {
+		return nil
+	}
 	gc := ParseGPUConstraint(c.GPUClass)
-	classMatched := c.GPUClass == ""
-	memMatched := c.GPUMemGB <= 0
-	capMatched := c.MaxComputeCap == ""
-	minCapMatched := c.MinComputeCap == ""
-	for _, gpu := range host.GPUs {
-		if c.GPUClass != "" && (gc.MatchesGPU(gpu.Class) || gc.MatchesGPUFullName(gpu.Name)) {
-			classMatched = true
-		}
-		memGB := inventory.ParseMemGB(gpu.Memory)
-		if c.GPUMemGB > 0 && memGB >= c.GPUMemGB {
-			memMatched = true
-		}
-		gpuCap := ComputeCapForGPU(gpu.Class)
-		if gpuCap == "" {
-			gpuCap = ComputeCapForGPU(gpu.Name)
-		}
-		if c.MaxComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MaxComputeCap) <= 0) {
-			capMatched = true
-		}
-		// MinComputeCap fails closed on unknown GPUs (gpuCap == ""): if weft
-		// can't name the cap of the host's GPU, we cannot prove it satisfies
-		// the torch-derived lower bound. Symmetric with the cloud-offer
-		// filter (campaign.filterOffersByTorchArch).
-		if c.MinComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MinComputeCap) >= 0 {
-			minCapMatched = true
-		}
-
-		if gpuMatchesConstraints(gpu, gc, c, memGB, gpuCap) {
-			reasons := []string{fmt.Sprintf("has %s GPU", displayGPUName(gpu))}
-			if c.GPUMemGB > 0 {
-				reasons = append(reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
-			}
-			return true, reasons
-		}
+	required := c.NumGPUs
+	if required < 1 {
+		required = 1
 	}
-
-	switch {
-	case c.GPUClass != "" && !classMatched:
-		return false, []string{fmt.Sprintf("no %s GPU", c.GPUClass)}
-	case c.GPUMemGB > 0 && !memMatched:
-		return false, []string{fmt.Sprintf("no GPU with >=%dGB", c.GPUMemGB)}
-	case c.MaxComputeCap != "" && !capMatched:
-		return false, []string{fmt.Sprintf("arch cap: no GPU with compute cap <= %s", c.MaxComputeCap)}
-	case c.MinComputeCap != "" && !minCapMatched:
-		return false, []string{fmt.Sprintf("arch floor: no GPU with compute cap >= %s", c.MinComputeCap)}
-	case c.GPUClass != "" && c.GPUMemGB > 0:
-		return false, []string{fmt.Sprintf("no %s GPU with >=%dGB", c.GPUClass, c.GPUMemGB)}
-	case c.GPUClass != "" && c.MaxComputeCap != "":
-		return false, []string{fmt.Sprintf("arch cap: no %s GPU with compute cap <= %s", c.GPUClass, c.MaxComputeCap)}
-	case c.GPUMemGB > 0 && c.MaxComputeCap != "":
-		return false, []string{fmt.Sprintf("arch cap: no GPU with >=%dGB and compute cap <= %s", c.GPUMemGB, c.MaxComputeCap)}
-	default:
-		return false, []string{"no GPU matching constraints"}
+	matchingDevices := 0
+	var firstMatch *inventory.GPUSpec
+	for i, gpu := range host.GPUs {
+		device := TargetDeviceFromGPU(gpu.Class, gpu.Name, inventory.ParseMemGB(gpu.Memory), gpuDeviceCount(gpu), gpu.Indices)
+		if !deviceSatisfiesPerDeviceConstraints(device, gc, c, false) {
+			continue
+		}
+		if firstMatch == nil {
+			firstMatch = &host.GPUs[i]
+		}
+		matchingDevices += gpuDeviceCount(gpu)
 	}
+	if firstMatch == nil || matchingDevices < required {
+		return nil
+	}
+	reasons := []string{fmt.Sprintf("has %s GPU", displayGPUName(*firstMatch))}
+	if c.GPUMemGB > 0 {
+		reasons = append(reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
+	}
+	if required > 1 {
+		reasons = append(reasons, fmt.Sprintf("has %d matching GPUs (need %d)", matchingDevices, required))
+	}
+	return reasons
 }
 
 func hostHasCUDACapableGPU(host inventory.HostSpec) bool {
@@ -1140,22 +1158,15 @@ func hostCompatibilityFacts(host inventory.HostSpec) compat.FactSet {
 	return facts
 }
 
-func gpuMatchesConstraints(gpu inventory.GPUSpec, gc GPUConstraint, c Constraints, memGB int, gpuCap string) bool {
-	if c.GPUClass != "" && !(gc.MatchesGPU(gpu.Class) || gc.MatchesGPUFullName(gpu.Name)) {
-		return false
+// gpuDeviceCount returns the number of physical devices a GPUSpec covers.
+// A hand-edited host YAML may omit indices; a listed spec is at least one
+// device (discovery always records indices, so this floor only matters for
+// manual records).
+func gpuDeviceCount(gpu inventory.GPUSpec) int {
+	if n := len(gpu.Indices); n > 0 {
+		return n
 	}
-	if c.GPUMemGB > 0 && memGB < c.GPUMemGB {
-		return false
-	}
-	if c.MaxComputeCap != "" && gpuCap != "" && CompareComputeCap(gpuCap, c.MaxComputeCap) > 0 {
-		return false
-	}
-	// Fail closed on unknown gpuCap when MinComputeCap is set — same
-	// rationale as the eligibility check above.
-	if c.MinComputeCap != "" && (gpuCap == "" || CompareComputeCap(gpuCap, c.MinComputeCap) < 0) {
-		return false
-	}
-	return true
+	return 1
 }
 
 func displayGPUName(gpu inventory.GPUSpec) string {

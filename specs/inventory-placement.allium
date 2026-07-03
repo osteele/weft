@@ -244,6 +244,13 @@ invariant FirstMatchWinsOnHost {
 -- how those flags resolve into a placement query.
 value Constraints {
     gpu_class: String?          -- raw constraint string (pre-parse)
+    num_gpus: Integer?          -- exact number of GPUs requested on one
+                                -- host/rental instance; null/0/1 all mean
+                                -- one device. Sources: the --gpus CLI flag
+                                -- and PEP 723 [tool.weft] gpus (synonyms:
+                                -- gpu-count, gpu_count). Persisted on
+                                -- CLIResourceOverrides.gpu_count and read
+                                -- back through Job.RequestedGPUCount().
     gpu_mem_gb: Integer?        -- min GPU memory per device. The
                                 -- --gpu-mem-strict flag is NOT a placement
                                 -- constraint: strictness is resolved into
@@ -294,6 +301,13 @@ value Constraints {
     inputs: List<String>        -- asset refs (see Data locality below)
     tags: Set<Tag>              -- rental/inventory/benchmark_isolation/compute_intensive
     preferred_instance_ids: List<Integer>   -- soft hint for instance reuse
+    self_job: jobs/Job?         -- the persisted job these constraints were
+                                -- resolved from (null for submit-time
+                                -- constraints). Free-capacity accounting
+                                -- (clause 3b) excludes this job's own
+                                -- reservation so re-scoring a host the job
+                                -- is already targeted at does not count the
+                                -- job against itself.
 }
 
 rule BuildConstraintsFromJob {
@@ -302,6 +316,7 @@ rule BuildConstraintsFromJob {
     let tags = job.tags
     let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
     let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
+        or job.requested_gpu_count > 1
     -- A torch project will use CUDA whenever a CUDA-capable GPU is present on
     -- the worker, so a job placed there must respect the wheel's arch range
     -- even if it never declared a GPU. Without this, a GPU-agnostic torch job
@@ -315,6 +330,7 @@ rule BuildConstraintsFromJob {
     -- non-torch CPU-only job carries none of them.
     ensures: Constraints.built(
         gpu_class: job.gpu_class,
+        num_gpus: job.requested_gpu_count,
         gpu_mem_gb: job.gpu_mem_gb,
         max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
         min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
@@ -322,7 +338,8 @@ rule BuildConstraintsFromJob {
         min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
         provider: provider,
         inputs: job.inputs,
-        tags: tags
+        tags: tags,
+        self_job: job
     )
 
     @guidance
@@ -343,47 +360,79 @@ rule BuildConstraintsFromJob {
 -- =========================================================================
 
 rule EvaluateEligibility {
-    when: EligibilityEvaluated(host: Host, c: Constraints, metrics: HostMetrics)
+    when: EligibilityEvaluated(target: TargetSpec, c: Constraints, metrics: HostMetrics)
 
-    -- A host is eligible iff every hard constraint passes. Failing hosts
+    -- A target is eligible iff every hard constraint passes. Failing targets
     -- still return a Score with placement_reasons explaining why they
     -- were rejected; those reasons surface in the TUI and `weft run`
     -- error output.
 
     -- 0a. Cordoned targets take no new auto-placed work. (weft instance
     --     cordon / host-level cordon; explicit --host bypasses the scorer.)
-    requires: not host.cordoned
+    requires: not target.cordoned
 
     -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
     --     with a scoring penalty. Implementation: placement.AssessHostLoad —
     --     rejection reasons "host overloaded: <detail>".
-    requires: AssessHostLoad(host, metrics).state != overloaded
+    requires: target.load.state != overloaded
 
     -- 1. Opt-in exclusion. Hosts marked opt-in-only in config are
     --    eligible only for jobs that explicitly name them.
-    requires: not host.opt_in_only or c.names(host)
+    requires: not target.opt_in_only or target.explicitly_named
 
     -- 2. GPU class match.
     if c.gpu_class != null:
         let gc = ParseGPUConstraint(c.gpu_class)
-        requires: host.gpus.any(g => MatchGPU(gc, g))
+        requires: target.devices.any(g => MatchGPU(gc, g))
 
     -- 3. GPU memory.
     if c.gpu_mem_gb != null:
-        requires: host.gpus.any(g => g.memory_gb >= c.gpu_mem_gb)
+        requires: target.devices.any(g => g.memory_gb >= c.gpu_mem_gb)
+
+    -- 3a. GPU count. The host must physically hold at least the requested
+    --     number of devices that INDIVIDUALLY satisfy the per-device
+    --     constraints — class (#2), per-device memory (#3), and the
+    --     compute-capability range (#4/#5). The per-device checks above are
+    --     existential ("some device matches"); this clause is the cardinal
+    --     form ("enough devices match"). One matching device on a host is
+    --     not sufficient for a num_gpus > 1 job: dispatching anyway is only
+    --     caught by the runner's gpu_count_preflight AFTER setup/prewarm
+    --     spend (wb31, wb41).
+    if c.num_gpus != null and c.num_gpus > 1:
+        requires: target.devices
+            .filter(g => satisfies_per_device_constraints(g, c))
+            .sum(g => g.count) >= c.num_gpus
+
+    -- 3b. Free GPU capacity. Beyond physically holding enough matching
+    --     devices (3a's capacity check), the host must have enough matching
+    --     devices NOT currently reserved by active attempts already targeted
+    --     at it (availability). Without this clause, auto-placement can route
+    --     a GPU job to a host whose matching devices are all busy — where it
+    --     queues behind, or trips, the runner's live GPU gate — instead of
+    --     routing to a host with free devices. Reservations are derived from
+    --     job state (see ActiveReservation below); when no reservation data
+    --     exists, free capacity equals total matching capacity, so this
+    --     clause is a no-op on hosts without active jobs.
+    if c.gpu_class != null or c.gpu_mem_gb != null
+       or (c.num_gpus != null and c.num_gpus > 1):
+        let reservations = ActiveReservations(target)
+            .filter(r => r.job != c.self_job)   -- never count a job against itself
+        requires: FreeMatchingDeviceCount(target, c, reservations)
+            >= max(c.num_gpus, 1)
 
     -- 4. CUDA compute-capability upper bound (torch wheel compatibility).
-    --    Applies to CUDA-capable hosts. Eligible if at least one CUDA GPU on
-    --    the host has a known cap at or below the bound. GPUs with unknown
-    --    caps pass — we cannot prove they violate. Non-CUDA GPU hosts do not
-    --    need to satisfy this CUDA bound for jobs that did not request a GPU.
+    --    Applies to CUDA-capable targets. Eligible only if at least one CUDA
+    --    GPU on the target has a KNOWN cap at or below the bound. GPUs with
+    --    unknown caps do not satisfy the bound: an all-unknown-cap target is
+    --    ineligible. Non-CUDA GPU hosts do not need to satisfy this CUDA bound
+    --    for jobs that did not request a GPU.
     --    The bound is inferred from the project's pinned torch version + CUDA
     --    wheel variant unless the user overrides it with [tool.weft]
     --    gpu-arch-max.
     if c.max_compute_cap != null:
-        requires: host.gpus.any(g =>
-            ComputeCapForGPU(g.class) == null
-            or ComputeCapForGPU(g.class) <= c.max_compute_cap)
+        requires: target.devices.any(g =>
+            ComputeCapForGPU(g.class) != null
+            and ComputeCapForGPU(g.class) <= c.max_compute_cap)
 
     -- 5. CUDA compute-capability lower bound (torch wheel compatibility).
     --    Applies to CUDA-capable hosts. Eligible if at least one CUDA GPU on
@@ -399,11 +448,13 @@ rule EvaluateEligibility {
     --    recognize and dispatched the job onto them despite a torch-derived
     --    sm_75 floor. The cloud-offer filter
     --    (campaign.filterOffersByTorchArch) implements the same fail-closed
-    --    rule. weft's GPU catalog must include Pascal and Maxwell so this
-    --    rejection is grounded in actual cap data wherever Vast.ai can
-    --    offer those cards.
+    --    rule. Cloud offer and rental targets encode their stricter
+    --    unknown-upper-bound policy in TargetSpec and are still evaluated by
+    --    the same EvaluateEligibility predicate. weft's GPU catalog must
+    --    include Pascal and Maxwell so this rejection is grounded in actual
+    --    cap data wherever Vast.ai can offer those cards.
     if c.min_compute_cap != null:
-        requires: host.gpus.any(g =>
+        requires: target.devices.any(g =>
             ComputeCapForGPU(g.class) != null
             and ComputeCapForGPU(g.class) >= c.min_compute_cap)
 
@@ -421,16 +472,16 @@ rule EvaluateEligibility {
     --     user-pinned image tag reports an older CUDA toolkit than a bundled
     --     Python wheel dependency floor.
     if c.min_driver_version != null:
-        requires: host.nvidia_driver_major != null
-            and host.nvidia_driver_major >= c.min_driver_version
+        requires: target.nvidia_driver_major != null
+            and target.nvidia_driver_major >= c.min_driver_version
 
     -- 5b. CUDA-compatibility floor. host.cuda_version is the MAX CUDA
     --     compatibility reported by the host's NVIDIA driver (nvidia-smi
     --     header), not an installed toolkit version. Fail-closed when
     --     unrecorded, same rationale as 5a.
     if c.min_cuda_version != null:
-        requires: host.cuda_version != null
-            and host.cuda_version >= c.min_cuda_version
+        requires: target.cuda_version != null
+            and target.cuda_version >= c.min_cuda_version
 
     -- 6. Benchmark jobs must land on an idle host.
     if benchmark_isolation in c.tags:
@@ -439,37 +490,157 @@ rule EvaluateEligibility {
     ensures: EligibilityResult(host, eligible: true)
 
     @guidance
+        -- Implementation target: placement.EvaluateEligibility over
+        -- placement.TargetSpec. TargetSpec is the normalization boundary
+        -- between source-specific inventory and the single hard-constraint
+        -- predicate: inventory.HostSpec, cloud offers, and running cloud
+        -- instances all become target.devices plus target-level facts
+        -- (cordon, opt-in-only, load, reservations/free capacity, provider,
+        -- CUDA/driver facts) before matching.
+        --
+        -- GPU-class authority: ParseGPUConstraint + MatchGPU is canonical.
+        -- Source-specific fuzzy strings are not allowed to become separate
+        -- predicates. Cloud offer names from Vast.ai / provider-neutral
+        -- offers are normalized into structured TargetDevice class/name/
+        -- generation/family/capability fields, with provider aliases (for
+        -- example RTX 4080 -> RTX 4080S and Tesla/RTX marketing prefixes)
+        -- recorded as device aliases during TargetSpecFromOffer /
+        -- TargetSpecFromCloudInstance construction. After that point,
+        -- EvaluateEligibility uses the same structured matcher for on-prem
+        -- hosts, offers, and reusable rentals. This deliberately eliminates
+        -- the historical fork in internal/campaign/gpu_class_match.go while
+        -- preserving cloud behavior by moving fuzzy provider compatibility
+        -- into normalization instead of retaining a second matching path.
+        --
         -- Reasons for rejection are surfaced as human-readable strings
         -- collected on the Score.placement_reasons list, prefixed with the
         -- constraint kind so users can tell WHICH constraint rejected the
         -- host. Examples:
         --   "has RTX 3090 GPU"           (pass)
+        --   "has 2 matching GPUs (need 2)" (pass on count, num_gpus > 1)
         --   "no GPU with >=24GB"         (fail on memory)
         --   "no GPU matching ampere+"    (fail on class)
+        --   "gpu count: 1 matching GPU(s) < requested 2" (fail on count)
+        --   "1 of 2 matching GPU(s) free"  (pass on free capacity, with reservations)
+        --   "gpu availability: 0 of 2 matching GPU(s) free (2 reserved by
+        --    active jobs), need 1" (fail on free capacity)
         --   "arch cap: no GPU with compute cap <= 9.0" (fail on torch arch ceiling)
         --   "arch floor: no GPU with compute cap >= 7.5" (fail on torch arch floor)
         --   "driver floor: NVIDIA driver 550.120 < required >=570" (fail on driver floor)
         --   "CUDA floor: host CUDA 12.0 < required 12.8" (fail on CUDA-compat floor)
         --   "not idle (2 jobs running)"  (fail on benchmark idleness)
         -- Implementation: placement.scoreHost, applyResourceHardConstraints.
-        -- Defense-in-depth note: CheckHostGPUConstraints also passes ANY
-        -- constraint set with no GPU request, unconditionally. Per this
-        -- spec's BuildConstraintsFromJob gating that state is unreachable
-        -- (caps/floors are only populated for GPU jobs); the code-level
-        -- bypass exists to neutralize legacy persisted constraints reaching
-        -- the checker through exported callers.
+        -- Defense-in-depth note: CheckHostGPUConstraints is a compatibility
+        -- wrapper over EvaluateEligibility.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /
         -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
         -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
-        -- MinComputeCapForJob apply them. Cloud-offer arch filtering:
-        -- campaign.filterOffersByTorchArch — fail-closed-on-unknown for
-        -- BOTH bounds (stricter than the on-prem asymmetry above). The
-        -- difference reflects where unknown-to-weft GPUs come from: on a
-        -- cloud provider's catalog the appearance of an unrecognized GPU
-        -- model almost always means a newer card weft hasn't catalogued
-        -- yet (wj2365 / RTX PRO 4500 Blackwell on 2026-06-02), so fail-open
-        -- on the upper bound silently dispatched a torch-2.6 (sm_9.0) job
-        -- onto sm_12.0 silicon.
+        -- MinComputeCapForJob apply them. Cloud-offer arch filtering calls
+        -- EvaluateEligibility(TargetSpecFromOffer). All target specs fail
+        -- closed on max-cap unknowns. This matters for provider catalogs and
+        -- on-prem inventory alike: an unrecognized GPU model may be newer
+        -- than the torch wheel supports (wj2365 / RTX PRO 4500 Blackwell on
+        -- 2026-06-02), so fail-open on the upper bound can silently dispatch
+        -- a torch-2.6 (sm_9.0) job onto sm_12.0 silicon.
+}
+
+-- =========================================================================
+-- GPU reservations (free-capacity accounting)
+-- =========================================================================
+
+-- An ActiveReservation is DERIVED from job state — there is no lease table
+-- and no explicit acquire/release protocol. Every active (non-terminal)
+-- attempt targeted at an inventory host reserves GPUs on it: the concrete
+-- assigned device list once the runner has reported it, or the requested
+-- device count while the job is still queued/starting (or when an older
+-- agent never reported devices). Deriving reservations from job rows makes
+-- them crash-safe by construction: a crashed CLI or daemon cannot leak a
+-- reservation, because the reservation IS the active attempt.
+value ActiveReservation {
+    job: jobs/Job               -- the reserving job (active, inventory-targeted)
+    host: Host
+    devices: List<Integer>?     -- concrete assigned CUDA device indices;
+                                -- null until the runner reports them
+    count: Integer              -- requested device count; consulted only
+                                -- while devices is null
+    gpu_class: String?          -- the reserving job's own class constraint
+    gpu_mem_gb: Integer?        -- the reserving job's per-device memory floor
+
+    @guidance
+        -- Implementation: placement.GPUReservationForJob derives the
+        -- reservation from a db.Job row; placement.FreeGPUCapacity folds a
+        -- host's active jobs (db.ListActiveJobs: running, starting, paused,
+        -- queued on the inventory target) into free/matching/reserved
+        -- counts for a constraint set.
+}
+
+-- A reservation begins the moment an attempt is targeted at a host (queued),
+-- initially by requested count. When the runner assigns concrete devices and
+-- status sync lands them on the job row, the SAME reservation becomes
+-- device-shaped — a job is never counted through both count and devices, so
+-- a queued reservation converts to a running one without double-counting.
+rule ReservedOnAssignment {
+    when: AttemptTargetedAtHost(attempt, host)
+    requires: attempt.job.constraints.requests_gpu or attempt.job.gpu_device != null
+
+    ensures: exists(r: ActiveReservation { job = attempt.job, host = host })
+    ensures: r.devices = null and r.count = attempt.job.requested_gpu_count
+             while attempt.job.gpu_device = null
+    ensures: r.devices = attempt.job.gpu_device
+             once the runner-reported device list is synced
+
+    @guidance
+        -- Device persistence path (no new column): the runner writes
+        -- "gpu_devices=<indices>" to the job's meta file
+        -- (internal/runner/runner.go startJob) and records them in its
+        -- state.json; status sync reads the meta file
+        -- (ops.applyGPUDevicesFromMetadata in internal/ops/sync_with_host.go,
+        -- batch path in internal/ops/queue_batch.go) and persists them to
+        -- jobs.metadata Resource.GPUDevices, read back via
+        -- db.Job.GPUDevice(). CPU-only jobs (no class, no gpu-mem floor,
+        -- count <= 1, no explicit device) hold no reservation — mirroring
+        -- the runner's gate, which starts them unconditionally.
+}
+
+-- Release is derived, not an action: a reservation ends exactly when its
+-- attempt reaches a terminal status (completed, failed, dead, killed,
+-- canceled). There is no cleanup path that can be missed — a crash that
+-- kills a job releases its GPUs as soon as sync records the terminal state.
+rule ReleasedOnTerminal {
+    when: attempt.status becomes terminal
+
+    ensures: not exists(r: ActiveReservation { job = attempt.job })
+}
+
+-- Placement must not over-subscribe a concurrent-execution target's
+-- matching devices. This is a PLANNING invariant: the free-capacity clause
+-- (EvaluateEligibility 3b) keeps the sum of reservations within the
+-- matching device count at placement time. The runner's live GPU gate
+-- (occupancy, VRAM headroom, compute-process utilization >= 50% on
+-- inventory hosts) remains the ENFORCEMENT point at dispatch time and is
+-- ground truth — it also covers foreign (non-weft) GPU load, which
+-- reservations cannot see. The two compose: reservations account for
+-- weft-known jobs before dispatch; AssessHostLoad's utilization signals and
+-- the runner's gate cover everything else.
+invariant NoOversubscription {
+    for host in Hosts where host.executes_concurrently:
+        for pool in MatchingDevicePools(host):
+            sum(r.reserved_in(pool) for r in ActiveReservations(host)) <= pool.size
+
+    @guidance
+        -- Scope: on-prem concurrent-execution (queue-runner) targets only.
+        -- Cloud/rental and sequential targets are governed by the
+        -- reuse queue-depth cap (campaign/reuse.go) and are NOT subject
+        -- to this accounting.
+        --
+        -- Degradation ladder (behavior-safe by construction):
+        --   devices known    -> subtract exactly those indices from the
+        --                       pools they belong to;
+        --   devices unknown  -> subtract requested count from pools the
+        --                       reserving job's own request overlaps;
+        --   no data at all   -> free = total matching capacity (legacy rows,
+        --                       hosts without active jobs: nothing regresses).
+        -- Regression tests: internal/placement/gpu_free_test.go.
 }
 
 -- =========================================================================
@@ -605,6 +776,44 @@ rule PlaceWithFallback {
         -- unknown CPU metadata is treated as ineligible.
 }
 
+-- `weft run`'s fast-submit path scores on-prem hosts from recent DB metrics
+-- (no SSH probing) so an interactive submission can print a placement
+-- immediately. It is an OPTIMIZATION of PlaceOnPrem, not a second placement
+-- authority: it MUST apply every guard PlaceOnPrem applies. In particular:
+--   * The rental/provider skip: constraints tagged `rental` or carrying a
+--     provider MUST come back unplaced without scoring any on-prem host.
+--     Omitting this guard let a --tag rental job run on an on-prem host
+--     (wb33).
+    --   * Host eligibility: candidates are scored with the SAME scorer as
+    --     PlaceOnPrem (EvaluateEligibility / scoreHost), so every hard
+--     constraint — including the GPU count clause 3a — applies identically.
+rule FastSubmitOnPremReuse {
+    when: FastSubmitEvaluated(c: Constraints)
+
+    if rental in c.tags or c.provider != null:
+        ensures: PlacementResult.unplaced(reasons: [])
+
+    -- Fall back to the normal (probing) placement path when recent metrics
+    -- are unavailable; never place from stale host state.
+    if not recent_metrics_available(Hosts):
+        ensures: fast_submit_declined = true
+
+    else:
+        let scores = Hosts.map(h => ScoreHost(h, c, recent_metrics_of(h)))
+        ensures: PlacementResult.from(first eligible score) or
+                 PlacementResult.unplaced
+
+    @guidance
+        -- Implementation: cmd/run.go evaluateRecentOnPremPlacement, which
+        -- funnels through placement.ScoreHostsWithPredictor and therefore
+        -- shares scoreHost / EvaluateEligibility with PlaceOnPrem.
+        -- The rental/provider short-circuit mirrors
+        -- placement.placeOnPremWithMetrics (db.HasRentalTag ||
+        -- constraints.Provider != ""). Regression tests:
+        -- cmd/run_test.go TestEvaluateRecentOnPremPlacementSkipsRentalTaggedJobs,
+        -- TestEvaluateRecentOnPremPlacementEnforcesGPUCount.
+}
+
 -- =========================================================================
 -- Data locality
 -- =========================================================================
@@ -618,6 +827,8 @@ value DataAsset {
     kind: AssetKind
     id: String
 }
+
+value AssetContentType = file | directory
 
 rule ParseAssetRef {
     when: ParseRequested(raw: String)
@@ -650,6 +861,8 @@ entity HostAssetRecord {
     asset: DataAsset
     path: String                -- filesystem path on the host
     size_bytes: Integer
+    content_hash: String?       -- sha256 hex for registered checkpoints
+    content_type: AssetContentType?
     last_seen: Timestamp
 
     -- Uniqueness: (host, asset.kind, asset.id) is unique per host.
@@ -658,14 +871,35 @@ entity HostAssetRecord {
 }
 
 rule RecordAsset {
-    when: AssetObserved(host, asset, path, size_bytes)
+    when: AssetObserved(host, asset, path, size_bytes, content_hash?, content_type?)
     ensures: HostAssetRecord.upserted(
         host: host,
         asset: asset,
         path: path,
         size_bytes: size_bytes,
+        content_hash: content_hash,
+        content_type: content_type,
         last_seen: now
     )
+}
+
+rule DirectoryAssetDigest {
+    when: DirectoryCheckpointRegistered(path)
+
+    ensures:
+        size_bytes = Sum(file.size_bytes for file in RecursiveRegularFiles(path))
+        content_hash = Sha256(StableManifest(path))
+        content_type = directory
+
+    @guidance
+        -- Directory checkpoint hashes are not tarball hashes. The stable
+        -- manifest is sorted by slash-separated relative path; each line is
+        -- "<relative-path>\t<size-bytes>\t<file-sha256>\n". This makes the
+        -- logical checkpoint identity independent of filesystem traversal
+        -- order and archive gzip timestamps. The R2 object used for staging
+        -- is a deterministic tar.gz archive keyed by this manifest digest.
+        -- Implementation: internal/dataloc/content.go DigestPath and
+        -- WriteDirectoryArchive; cmd/data.go runDataAdd/runDataPublish.
 }
 
 rule ScanHFCache {
@@ -915,6 +1149,49 @@ invariant PlacementReasonsExplainUnplaced {
     -- explanation is a UX regression.
     for result in PlacementResults where result.target = null:
         result.reasons.length > 0
+}
+
+invariant PredictorNeverBlocksPlacement {
+    -- The run-time predictor (estimate_run_time, line 672) is an
+    -- out-of-process `uv run job-estimator` call. It is an optimization,
+    -- never a dependency: a slow, hung, or timed-out estimator is treated
+    -- as unavailable and placement falls back to the heuristic estimate.
+    -- Every estimator subprocess is bounded by a timeout so it can never
+    -- wedge the placement-critical path; readiness checks (predictor
+    -- status) fall back to the on-disk model metadata on timeout. A
+    -- placement pass that blocks waiting on the estimator is a bug —
+    -- history: an estimator that imported torch on `status` (a ~20s call)
+    -- with no weft-side timeout wedged all cloud placement fleet-wide.
+    for pass in PlacementPasses:
+        pass.blocks_on_predictor = false
+}
+
+invariant TargetSatisfiesRequestedGPUCount {
+    -- Any ExecutionTarget selected for a job must expose at least the
+    -- job's requested GPU count. This covers BOTH target kinds:
+    --   * inventory_host — EvaluateEligibility clause 3a
+    --     (placement.scoreHost / CheckHostGPUConstraints wrapper), applied by every on-prem
+    --     scorer including the fast-submit path (see FastSubmitOnPremReuse).
+    --   * rental_instance — cloud offer selection
+    --     (campaign.filterOffersByGPUCount / validateOfferGPUCount) and
+    --     instance-reuse routing (campaign/reuse.go via EvaluateEligibility).
+    -- Defense in depth, not placement: the agent's bootstrap GPU-shape
+    -- probe (cmd/agent checkGPUCount, before setup/prewarm spend) and the
+    -- runner's gpu_count_preflight (before the user command) verify the
+    -- target actually delivers the devices the inventory/offer promised.
+    for job in Jobs where job.constraints.num_gpus != null:
+        for target in job.selected_targets:
+            target.num_gpus >= max(job.constraints.num_gpus, 1)
+
+    @guidance
+        -- This invariant is about the target's PHYSICAL device count, not
+        -- about co-scheduling. For on-prem hosts, co-scheduling is now
+        -- covered by the derived reservation model (ActiveReservation /
+        -- NoOversubscription and EvaluateEligibility clause 3b): two
+        -- num_gpus=2 jobs are no longer auto-placed onto one 2-GPU host at
+        -- the same time, because the first job's reservation leaves too few
+        -- free devices for the second. Rental instances remain governed by
+        -- the reuse queue-depth cap instead (wb41 note).
 }
 
 -- =========================================================================

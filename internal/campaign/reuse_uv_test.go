@@ -85,6 +85,37 @@ func TestMatchGroupToInstance_RejectsGroupRequiringVastCapAdd(t *testing.T) {
 	}
 }
 
+func TestMatchGroupToInstance_RejectsInsufficientGPUCount(t *testing.T) {
+	gpuCount := 2
+	group := InstanceGroup{
+		GPUClass: "a100",
+		NumGPUs:  2,
+		Jobs: []*db.Job{{
+			ID:                   1,
+			GPUClass:             "a100",
+			CLIResourceOverrides: &db.CLIResourceOverrides{GPUCount: &gpuCount},
+		}},
+	}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass:        "a100",
+			ResolvedGPUName: "A100 SXM4",
+			GPUMemGB:        80,
+			NumGPUs:         1,
+			DiskGB:          120,
+		},
+		DiskFreeGB: 80,
+	}
+
+	ok, reason := MatchGroupToInstance(group, cap)
+	if ok {
+		t.Fatal("MatchGroupToInstance unexpectedly accepted 2-GPU job on 1-GPU instance")
+	}
+	if reason != "GPU count insufficient: job=2 instance=1" {
+		t.Fatalf("reason = %q, want GPU count insufficiency", reason)
+	}
+}
+
 func TestMatchGroupToInstance_RejectsCUDASetupOnCUDAOnlyImage(t *testing.T) {
 	localDir := writeReuseProject(t, `"torch"`)
 	group := InstanceGroup{

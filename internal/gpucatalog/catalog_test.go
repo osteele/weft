@@ -43,3 +43,32 @@ func TestProblemModelsClassifyConsistently(t *testing.T) {
 		}
 	}
 }
+
+// TestBlackwellComputeCaps covers the wb42 / wj2365 cards, including the
+// "Blackwell"-suffixed provider name variants that Vast.ai reports (the terse
+// "RTX PRO 4500" GPUName in the incident missed the generation-name fallback).
+// It also pins the fail-closed contract callers depend on: an uncatalogued name
+// resolves to "" so placement/reuse/offer filters reject it under an arch cap
+// rather than admitting a too-new card.
+func TestBlackwellComputeCaps(t *testing.T) {
+	for _, name := range []string{
+		"RTX PRO 6000 Blackwell",
+		"RTX PRO 5000 Blackwell",
+		"RTX PRO 4500 Blackwell",
+		"RTX PRO 6000",
+		"RTX PRO 5000",
+		"RTX PRO 4500",
+		"RTX 5090",
+		"RTX 5080",
+	} {
+		if got := ComputeCapForGPU(name); got != "12.0" {
+			t.Errorf("ComputeCapForGPU(%q) = %q, want %q", name, got, "12.0")
+		}
+	}
+
+	for _, name := range []string{"Mystery Accelerator Z9", "Totally Unknown GPU X"} {
+		if got := ComputeCapForGPU(name); got != "" {
+			t.Errorf("ComputeCapForGPU(%q) = %q, want \"\" (unknown must fail closed at callers)", name, got)
+		}
+	}
+}

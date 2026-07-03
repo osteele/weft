@@ -37,9 +37,10 @@ func ResolveSpecs(ctx context.Context, database *sql.DB, client *r2.Client, spec
 				return nil, fmt.Errorf("resolve %q: %w", spec, err)
 			}
 			resolved = append(resolved, cloud.CloudNeed{
-				Spec:  spec,
-				Path:  asset.TargetPath,
-				R2Key: r2keys.NamedAsset(asset.ContentHash),
+				Spec:        spec,
+				Path:        asset.TargetPath,
+				R2Key:       r2keys.NamedAsset(asset.ContentHash),
+				ContentType: asset.ContentType,
 			})
 			continue
 		}
