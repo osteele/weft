@@ -412,6 +412,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	inventoryAwaiting, inventoryPlaced := autoPilotPlaceInventory(database, cfg, inventoryAwaiting)
 	inventoryAwaitingReasons = persistInventoryAwaitingReasons(database, inventoryAwaiting)
 	if len(unplaced) == 0 {
+		persistBlockedReasonsForUnplaced(database, inventoryAwaitingReasons, nil)
 		rebalanceResult, rebErr := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
 			Operation:  "auto_pilot.rebalance",
@@ -437,6 +438,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	prePlaced += inventoryPlaced
 	if len(unplaced) == 0 {
+		persistBlockedReasonsForUnplaced(database, inventoryAwaitingReasons, nil)
 		rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 			Apply:      true,
 			Operation:  "auto_pilot.rebalance",
@@ -1103,7 +1105,7 @@ func addAutoPilotBlockedReason(blockedReasons map[int64]string, jobID int64, rea
 }
 
 func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64]string, structuredBlocked map[int64]*blockreason.Structured) {
-	if database == nil || len(blockedReasons) == 0 {
+	if database == nil {
 		return
 	}
 	jobs, err := db.ListUnplacedJobs(database)
@@ -1126,6 +1128,19 @@ func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64
 		// blocker has no entry in structuredBlocked; Marshal of a nil
 		// reason is the empty string, which clears any stale value.
 		_ = db.SetJobPlacementBlocked(database, jobID, structuredBlocked[jobID].Marshal())
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, blocked := blockedReasons[job.ID]; blocked {
+			continue
+		}
+		if strings.TrimSpace(job.PlacementBlockedJSON) == "" {
+			continue
+		}
+		// Provider-side or aged-out blockers must not linger after this pass.
+		_ = db.SetJobPlacementBlocked(database, job.ID, "")
 	}
 }
 

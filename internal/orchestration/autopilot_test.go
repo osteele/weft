@@ -2405,6 +2405,72 @@ func TestFinalizeUnplacedBlockedReasons_DropsReuseOnlyNonCandidate(t *testing.T)
 	}
 }
 
+func TestPersistBlockedReasonsForUnplacedClearsStaleUnassertedBlock(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	clearedJobID, err := db.RecordQueued(database, "", t.TempDir(), "python stale.py", "stale")
+	if err != nil {
+		t.Fatalf("RecordQueued cleared job: %v", err)
+	}
+	blockedJobID, err := db.RecordQueued(database, "", t.TempDir(), "python blocked.py", "blocked")
+	if err != nil {
+		t.Fatalf("RecordQueued blocked job: %v", err)
+	}
+	stale := (&blockreason.Structured{Summary: "old image block", Launch: "old image block"}).Marshal()
+	if err := db.SetJobPlacementBlocked(database, clearedJobID, stale); err != nil {
+		t.Fatalf("SetJobPlacementBlocked cleared job: %v", err)
+	}
+	if err := db.SetJobPlacementBlocked(database, blockedJobID, stale); err != nil {
+		t.Fatalf("SetJobPlacementBlocked blocked job: %v", err)
+	}
+
+	fresh := &blockreason.Structured{
+		Summary: "fresh provider block",
+		Launch:  "fresh provider block",
+	}
+	persistBlockedReasonsForUnplaced(database,
+		map[int64]string{blockedJobID: "fresh provider block"},
+		map[int64]*blockreason.Structured{blockedJobID: fresh})
+
+	cleared, err := db.GetJobByID(database, clearedJobID)
+	if err != nil {
+		t.Fatalf("GetJobByID cleared job: %v", err)
+	}
+	if cleared.PlacementBlockedJSON != "" {
+		t.Fatalf("cleared job placement_blocked = %q, want empty", cleared.PlacementBlockedJSON)
+	}
+	blocked, err := db.GetJobByID(database, blockedJobID)
+	if err != nil {
+		t.Fatalf("GetJobByID blocked job: %v", err)
+	}
+	if blocked.PlacementBlockedJSON != fresh.Marshal() {
+		t.Fatalf("blocked job placement_blocked = %q, want %q", blocked.PlacementBlockedJSON, fresh.Marshal())
+	}
+}
+
+func TestPersistBlockedReasonsForUnplacedClearsWhenNothingBlocked(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python stale.py", "stale")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	stale := (&blockreason.Structured{Summary: "old image block", Launch: "old image block"}).Marshal()
+	if err := db.SetJobPlacementBlocked(database, jobID, stale); err != nil {
+		t.Fatalf("SetJobPlacementBlocked: %v", err)
+	}
+
+	persistBlockedReasonsForUnplaced(database, map[int64]string{}, nil)
+
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if refreshed.PlacementBlockedJSON != "" {
+		t.Fatalf("placement_blocked = %q, want empty", refreshed.PlacementBlockedJSON)
+	}
+}
+
 // A job the run-rate gate blocked from launching, whose running instances also
 // genuinely refuse it, must persist BOTH operative reasons: the budget verdict
 // as the launch blocker and the per-instance reuse rejections. Before this, the
