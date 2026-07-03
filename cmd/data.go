@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -148,7 +147,9 @@ var (
 	dataPublishBuildR2Client = func(cfg *config.Config) (dataPublishR2Client, error) {
 		return buildR2Client(cfg)
 	}
-	dataPublishCopyFrom = ssh.CopyFromWithRetry
+	dataPublishCopyFrom       = ssh.CopyFromWithRetry
+	dataPublishDigestFromHost = dataloc.DigestPathOnHost
+	dataPublishPutFromHost    = dataloc.R2PutFromHost
 )
 
 func init() {
@@ -339,6 +340,10 @@ func runDataRequests(_ *cobra.Command, _ []string) error {
 
 func runDataAdd(_ *cobra.Command, args []string) error {
 	path := filepath.Clean(runner.ExpandTilde(args[0]))
+	content, err := dataloc.DigestPath(path)
+	if err != nil {
+		return fmt.Errorf("digest %s: %w", path, err)
+	}
 
 	host := dataAddHost
 	if host == "" {
@@ -356,10 +361,13 @@ func runDataAdd(_ *cobra.Command, args []string) error {
 
 	asset := dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: name}
 	entry := dataloc.HostDataEntry{
-		Host:     host,
-		Asset:    asset,
-		Path:     workdir.ToTildeRelative(path),
-		LastSeen: time.Now().UTC().Truncate(time.Second),
+		Host:        host,
+		Asset:       asset,
+		Path:        workdir.ToTildeRelative(path),
+		SizeBytes:   content.SizeBytes,
+		ContentHash: content.Hash,
+		ContentType: content.ContentType,
+		LastSeen:    time.Now().UTC().Truncate(time.Second),
 	}
 
 	database, err := db.Open()
@@ -647,6 +655,14 @@ func formatBytes(size int64) string {
 }
 
 func runDataPublish(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		ctx = cmd.Context()
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	name := strings.TrimSpace(dataPublishName)
 	if name == "" {
 		return fmt.Errorf("--name is required")
@@ -655,7 +671,7 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--name %q: must not contain whitespace or slashes", name)
 	}
 
-	source, err := resolvePublishSource(args[0])
+	source, err := resolvePublishSource(ctx, args[0])
 	if err != nil {
 		return err
 	}
@@ -664,18 +680,21 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 		defer source.Cleanup()
 	}
 
-	info, err := os.Stat(srcPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", srcPath, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("publish %s: directories are not supported in v1 (publish a single file)", srcPath)
+	content := source.Content
+	if content.Hash == "" {
+		content, err = dataloc.DigestPath(srcPath)
+		if err != nil {
+			return fmt.Errorf("digest %s: %w", srcPath, err)
+		}
 	}
 
 	targetPath := strings.TrimSpace(dataPublishTargetPath)
 	if targetPath == "" {
 		if source.Remote {
 			return fmt.Errorf("remote publish requires --target-path")
+		}
+		if srcPath == "" {
+			return fmt.Errorf("checkpoint publish without a local source path requires --target-path")
 		}
 		targetPath = derivePublishTargetPath(srcPath)
 	}
@@ -696,19 +715,7 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("R2 is not configured; named assets require R2 to stage onto consumer hosts")
 	}
 
-	sumHex, size, err := sha256File(srcPath)
-	if err != nil {
-		return fmt.Errorf("hash %s: %w", srcPath, err)
-	}
-	key := r2keys.NamedAsset(sumHex)
-
-	ctx := context.Background()
-	if cmd != nil && cmd.Context() != nil {
-		ctx = cmd.Context()
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	key := r2keys.NamedAsset(content.Hash)
 
 	// Skip the upload if the content is already in R2 (content-addressed).
 	exists, err := r2Client.ObjectExists(ctx, key)
@@ -716,8 +723,22 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("probe R2 for existing %s: %w", key, err)
 	}
 	if !exists {
-		if err := uploadFileToR2(ctx, r2Client, srcPath, key); err != nil {
-			return fmt.Errorf("upload %s to R2: %w", srcPath, err)
+		switch {
+		case source.RemoteHost != "":
+			if err := dataPublishPutFromHost(ctx, source.RemoteHost, dataloc.R2PutFromHostRequest{
+				Path:        source.RemotePath,
+				Key:         key,
+				ContentType: content.ContentType,
+				R2:          cfg.Vastai.R2.ToCloudR2Config(),
+			}); err != nil {
+				return fmt.Errorf("upload %s:%s to R2: %w", source.RemoteHost, source.RemotePath, err)
+			}
+		case srcPath != "":
+			if err := uploadContentToR2(ctx, r2Client, srcPath, content.ContentType, key); err != nil {
+				return fmt.Errorf("upload %s to R2: %w", srcPath, err)
+			}
+		default:
+			return fmt.Errorf("registered checkpoint:%s has content hash %s, but %s is not in R2 and no source path is available to upload", source.AssetID, content.Hash, key)
 		}
 	}
 
@@ -728,8 +749,9 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 	if err := db.UpsertNamedAsset(database, db.NamedAsset{
 		Name:        name,
-		ContentHash: sumHex,
-		SizeBytes:   size,
+		ContentHash: content.Hash,
+		SizeBytes:   content.SizeBytes,
+		ContentType: string(content.ContentType),
 		TargetPath:  targetPath,
 	}); err != nil {
 		return err
@@ -744,29 +766,101 @@ func runDataPublish(cmd *cobra.Command, args []string) error {
 		out = cmd.OutOrStdout()
 	}
 	fmt.Fprintf(out, "Published asset:%s — %s, %s (target path %s)\n",
-		name, action, formatBytes(size), targetPath)
+		name, action, formatBytes(content.SizeBytes), targetPath)
 	fmt.Fprintf(out, "Consumers: weft run --input asset:%s ...\n", name)
 	return nil
 }
 
 type publishSource struct {
-	LocalPath string
-	Remote    bool
-	Cleanup   func()
+	LocalPath  string
+	Remote     bool
+	RemoteHost string
+	RemotePath string
+	Cleanup    func()
+	Content    dataloc.ContentInfo
+	AssetID    string
 }
 
-func resolvePublishSource(raw string) (publishSource, error) {
+func resolvePublishSource(ctx context.Context, raw string) (publishSource, error) {
 	flagHost := strings.TrimSpace(dataPublishHost)
+	if asset, ok := dataloc.ParseAssetRef(raw); ok && asset.Kind == dataloc.AssetCheckpoint {
+		if flagHost != "" {
+			return publishSource{}, fmt.Errorf("cannot combine --host with checkpoint asset source")
+		}
+		return resolveCheckpointPublishSource(asset)
+	}
 	if host, path, ok := parseRemotePublishArg(raw); ok {
 		if flagHost != "" {
 			return publishSource{}, fmt.Errorf("cannot combine --host with host:path source")
 		}
-		return copyRemotePublishSource(host, path)
+		return remotePublishSource(ctx, host, path)
 	}
 	if flagHost != "" {
-		return copyRemotePublishSource(flagHost, raw)
+		return remotePublishSource(ctx, flagHost, raw)
 	}
 	return publishSource{LocalPath: filepath.Clean(runner.ExpandTilde(raw))}, nil
+}
+
+func resolveCheckpointPublishSource(asset dataloc.DataAsset) (publishSource, error) {
+	database, err := db.OpenForReading()
+	if err != nil {
+		return publishSource{}, fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+	entries, err := dataloc.FindAssetHosts(database, asset)
+	if err != nil {
+		return publishSource{}, fmt.Errorf("find checkpoint hosts: %w", err)
+	}
+	if len(entries) == 0 {
+		return publishSource{}, fmt.Errorf("%s is not registered; run `weft data add` first", asset.Ref())
+	}
+	for _, entry := range entries {
+		source := publishSourceFromCheckpointEntry(asset, entry)
+		if source.LocalPath != "" {
+			return source, nil
+		}
+	}
+	entry := entries[0]
+	if entry.ContentHash == "" || entry.SizeBytes <= 0 {
+		return publishSource{}, fmt.Errorf("%s is registered on %s but lacks content hash/size; rerun `weft data add %s --name %s`", asset.Ref(), entry.Host, entry.Path, asset.ID)
+	}
+	if entry.ContentType == "" {
+		entry.ContentType = dataloc.ContentTypeDirectory
+	}
+	return publishSource{
+		Remote:     true,
+		RemoteHost: entry.Host,
+		RemotePath: entry.Path,
+		Content: dataloc.ContentInfo{
+			Hash:        entry.ContentHash,
+			SizeBytes:   entry.SizeBytes,
+			ContentType: entry.ContentType,
+		},
+		AssetID: asset.ID,
+	}, nil
+}
+
+func publishSourceFromCheckpointEntry(asset dataloc.DataAsset, entry dataloc.HostDataEntry) publishSource {
+	path := filepath.Clean(runner.ExpandTilde(entry.Path))
+	if entry.Path == "" {
+		return publishSource{}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return publishSource{}
+	}
+	contentType := entry.ContentType
+	if contentType == "" {
+		contentType = dataloc.ContentTypeDirectory
+	}
+	return publishSource{
+		LocalPath: path,
+		Content: dataloc.ContentInfo{
+			Hash:        entry.ContentHash,
+			SizeBytes:   entry.SizeBytes,
+			ContentType: contentType,
+		},
+		AssetID: asset.ID,
+	}
 }
 
 func parseRemotePublishArg(raw string) (host, path string, ok bool) {
@@ -780,7 +874,7 @@ func parseRemotePublishArg(raw string) (host, path string, ok bool) {
 	return before, after, true
 }
 
-func copyRemotePublishSource(host, remotePath string) (publishSource, error) {
+func remotePublishSource(ctx context.Context, host, remotePath string) (publishSource, error) {
 	host = strings.TrimSpace(host)
 	remotePath = strings.TrimSpace(remotePath)
 	if host == "" {
@@ -789,42 +883,43 @@ func copyRemotePublishSource(host, remotePath string) (publishSource, error) {
 	if remotePath == "" {
 		return publishSource{}, fmt.Errorf("remote path is required")
 	}
-	tmp, err := os.CreateTemp("", "weft-data-publish-*")
+	content, err := dataPublishDigestFromHost(ctx, host, remotePath)
 	if err != nil {
-		return publishSource{}, fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return publishSource{}, fmt.Errorf("close temp file: %w", err)
-	}
-	if err := dataPublishCopyFrom(remotePath, host, tmpPath); err != nil {
-		os.Remove(tmpPath)
-		return publishSource{}, fmt.Errorf("copy %s:%s: %w", host, remotePath, err)
+		return publishSource{}, fmt.Errorf("digest %s:%s: %w", host, remotePath, err)
 	}
 	return publishSource{
-		LocalPath: tmpPath,
-		Remote:    true,
-		Cleanup: func() {
-			if err := os.Remove(tmpPath); err != nil {
-				slog.Warn("remove temp publish file", "path", tmpPath, "error", err)
-			}
-		},
+		Remote:     true,
+		RemoteHost: host,
+		RemotePath: remotePath,
+		Content:    content,
 	}, nil
 }
 
-func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
+func uploadContentToR2(ctx context.Context, client dataPublishR2Client, path string, contentType dataloc.ContentType, key string) error {
+	if contentType == dataloc.ContentTypeDirectory {
+		tmp, err := os.CreateTemp("", "weft-data-publish-*.tar.gz")
+		if err != nil {
+			return fmt.Errorf("create archive temp file: %w", err)
+		}
+		tmpPath := tmp.Name()
+		defer func() {
+			os.Remove(tmpPath)
+		}()
+		if err := dataloc.WriteDirectoryArchive(path, tmp); err != nil {
+			tmp.Close()
+			return fmt.Errorf("archive directory: %w", err)
+		}
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			tmp.Close()
+			return err
+		}
+		err = client.PutObject(ctx, key, tmp, "application/gzip")
+		if closeErr := tmp.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+		return err
 	}
-	defer f.Close()
-	h := sha256.New()
-	size, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), size, nil
+	return uploadFileToR2(ctx, client, path, key)
 }
 
 func uploadFileToR2(ctx context.Context, client dataPublishR2Client, path, key string) error {

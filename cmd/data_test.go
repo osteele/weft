@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +44,16 @@ func setupDataPublishTest(t *testing.T, r2Client dataPublishR2Client) {
 	oldHost := dataPublishHost
 	oldBuildR2 := dataPublishBuildR2Client
 	oldCopyFrom := dataPublishCopyFrom
+	oldDigestFromHost := dataPublishDigestFromHost
+	oldPutFromHost := dataPublishPutFromHost
 	t.Cleanup(func() {
 		dataPublishName = oldName
 		dataPublishTargetPath = oldTargetPath
 		dataPublishHost = oldHost
 		dataPublishBuildR2Client = oldBuildR2
 		dataPublishCopyFrom = oldCopyFrom
+		dataPublishDigestFromHost = oldDigestFromHost
+		dataPublishPutFromHost = oldPutFromHost
 	})
 	dataPublishName = ""
 	dataPublishTargetPath = ""
@@ -184,6 +189,10 @@ func TestParseDataAssetArgAcceptsCheckpoint(t *testing.T) {
 
 func TestRunDataAddRegistersCheckpoint(t *testing.T) {
 	database := db.SetupTestDB(t)
+	path := filepath.Join(t.TempDir(), "checkpoint.bin")
+	if err := os.WriteFile(path, []byte("checkpoint bytes"), 0o644); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
 
 	dataAddHost = "studio"
 	dataAddName = "test-checkpoint"
@@ -193,7 +202,7 @@ func TestRunDataAddRegistersCheckpoint(t *testing.T) {
 	})
 
 	out := captureStdout(t, func() {
-		if err := runDataAdd(nil, []string{"/tmp/test-data"}); err != nil {
+		if err := runDataAdd(nil, []string{path}); err != nil {
 			t.Fatalf("runDataAdd: %v", err)
 		}
 	})
@@ -214,8 +223,59 @@ func TestRunDataAddRegistersCheckpoint(t *testing.T) {
 	if entries[0].Host != "studio" {
 		t.Fatalf("host = %s, want studio", entries[0].Host)
 	}
-	if entries[0].Path != "/tmp/test-data" {
-		t.Fatalf("path = %s, want /tmp/test-data", entries[0].Path)
+	if entries[0].Path != path {
+		t.Fatalf("path = %s, want %s", entries[0].Path, path)
+	}
+	if entries[0].SizeBytes != int64(len("checkpoint bytes")) {
+		t.Fatalf("size = %d", entries[0].SizeBytes)
+	}
+	if entries[0].ContentHash == "" {
+		t.Fatalf("content hash was not recorded")
+	}
+	if entries[0].ContentType != dataloc.ContentTypeFile {
+		t.Fatalf("content type = %q, want file", entries[0].ContentType)
+	}
+}
+
+func TestRunDataAddRegistersDirectoryCheckpointDigestAndSize(t *testing.T) {
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "b.bin"), []byte("bbb"), 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nested", "a.bin"), []byte("aaaa"), 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+
+	dataAddHost = "studio"
+	dataAddName = "dir-checkpoint"
+	t.Cleanup(func() {
+		dataAddHost = ""
+		dataAddName = ""
+	})
+
+	if err := runDataAdd(nil, []string{dir}); err != nil {
+		t.Fatalf("runDataAdd: %v", err)
+	}
+
+	entries, err := dataloc.FindAssetHosts(database, dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "dir-checkpoint"})
+	if err != nil {
+		t.Fatalf("FindAssetHosts: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].SizeBytes != 7 {
+		t.Fatalf("size = %d, want 7", entries[0].SizeBytes)
+	}
+	if entries[0].ContentHash == "" {
+		t.Fatalf("content hash was not recorded")
+	}
+	if entries[0].ContentType != dataloc.ContentTypeDirectory {
+		t.Fatalf("content type = %q, want directory", entries[0].ContentType)
 	}
 }
 
@@ -256,14 +316,34 @@ func TestRunDataPublishRemoteHostFlag(t *testing.T) {
 	dataPublishName = "remote-trace"
 	dataPublishHost = "cool30"
 	dataPublishTargetPath = "data/mooncake/toolagent_trace.jsonl"
-	dataPublishCopyFrom = func(remotePath, host, localPath string) error {
+	content := dataloc.ContentInfo{
+		Hash:        strings.Repeat("a", 64),
+		SizeBytes:   int64(len("trace data")),
+		ContentType: dataloc.ContentTypeFile,
+	}
+	dataPublishDigestFromHost = func(_ context.Context, host, remotePath string) (dataloc.ContentInfo, error) {
 		if host != "cool30" {
-			return fmt.Errorf("host = %s, want cool30", host)
+			return dataloc.ContentInfo{}, fmt.Errorf("host = %s, want cool30", host)
 		}
 		if remotePath != "/remote/toolagent_trace.jsonl" {
-			return fmt.Errorf("remotePath = %s", remotePath)
+			return dataloc.ContentInfo{}, fmt.Errorf("remotePath = %s", remotePath)
 		}
-		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+		return content, nil
+	}
+	putCalls := 0
+	dataPublishPutFromHost = func(_ context.Context, host string, req dataloc.R2PutFromHostRequest) error {
+		putCalls++
+		if host != "cool30" || req.Path != "/remote/toolagent_trace.jsonl" {
+			return fmt.Errorf("put = %s:%s", host, req.Path)
+		}
+		if req.Key != "assets/"+content.Hash {
+			return fmt.Errorf("key = %s", req.Key)
+		}
+		r2Client.objects[req.Key] = []byte("uploaded remotely")
+		return nil
+	}
+	dataPublishCopyFrom = func(_, _, _ string) error {
+		return fmt.Errorf("copy-from-host path must not be used")
 	}
 
 	out := captureStdout(t, func() {
@@ -274,8 +354,8 @@ func TestRunDataPublishRemoteHostFlag(t *testing.T) {
 	if !strings.Contains(out, "Published asset:remote-trace") {
 		t.Fatalf("output missing publish line: %q", out)
 	}
-	if len(r2Client.objects) != 1 {
-		t.Fatalf("uploaded objects = %d, want 1", len(r2Client.objects))
+	if putCalls != 1 {
+		t.Fatalf("putCalls = %d, want 1", putCalls)
 	}
 
 	database, err := db.Open()
@@ -301,18 +381,156 @@ func TestRunDataPublishRemoteSCPStyle(t *testing.T) {
 
 	dataPublishName = "remote-trace"
 	dataPublishTargetPath = "data/mooncake/toolagent_trace.jsonl"
-	dataPublishCopyFrom = func(remotePath, host, localPath string) error {
+	dataPublishDigestFromHost = func(_ context.Context, host, remotePath string) (dataloc.ContentInfo, error) {
 		if host != "cool30" || remotePath != "/remote/toolagent_trace.jsonl" {
-			return fmt.Errorf("copy = %s:%s", host, remotePath)
+			return dataloc.ContentInfo{}, fmt.Errorf("digest = %s:%s", host, remotePath)
 		}
-		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+		return dataloc.ContentInfo{Hash: strings.Repeat("b", 64), SizeBytes: int64(len("trace data")), ContentType: dataloc.ContentTypeFile}, nil
+	}
+	putCalls := 0
+	dataPublishPutFromHost = func(_ context.Context, host string, req dataloc.R2PutFromHostRequest) error {
+		putCalls++
+		if host != "cool30" || req.Path != "/remote/toolagent_trace.jsonl" {
+			return fmt.Errorf("put = %s:%s", host, req.Path)
+		}
+		r2Client.objects[req.Key] = []byte("uploaded remotely")
+		return nil
+	}
+	dataPublishCopyFrom = func(_, _, _ string) error {
+		return fmt.Errorf("copy-from-host path must not be used")
 	}
 
 	if err := runDataPublish(nil, []string{"cool30:/remote/toolagent_trace.jsonl"}); err != nil {
 		t.Fatalf("runDataPublish: %v", err)
 	}
+	if putCalls != 1 {
+		t.Fatalf("putCalls = %d, want 1", putCalls)
+	}
+}
+
+func TestRunDataPublishRemoteSkipsUploadWhenContentAlreadyInR2(t *testing.T) {
+	hash := strings.Repeat("e", 64)
+	r2Client := &fakeDataPublishR2{objects: map[string][]byte{"assets/" + hash: []byte("already there")}}
+	setupDataPublishTest(t, r2Client)
+
+	dataPublishName = "remote-trace"
+	dataPublishTargetPath = "data/mooncake/toolagent_trace.jsonl"
+	dataPublishDigestFromHost = func(_ context.Context, host, remotePath string) (dataloc.ContentInfo, error) {
+		if host != "cool30" || remotePath != "/remote/toolagent_trace.jsonl" {
+			return dataloc.ContentInfo{}, fmt.Errorf("digest = %s:%s", host, remotePath)
+		}
+		return dataloc.ContentInfo{Hash: hash, SizeBytes: int64(len("trace data")), ContentType: dataloc.ContentTypeFile}, nil
+	}
+	dataPublishPutFromHost = func(context.Context, string, dataloc.R2PutFromHostRequest) error {
+		t.Fatal("remote put should not run when object already exists")
+		return nil
+	}
+	dataPublishCopyFrom = func(_, _, _ string) error {
+		return fmt.Errorf("copy-from-host path must not be used")
+	}
+
+	if err := runDataPublish(nil, []string{"cool30:/remote/toolagent_trace.jsonl"}); err != nil {
+		t.Fatalf("runDataPublish: %v", err)
+	}
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	asset, err := db.GetNamedAssetByName(database, "remote-trace")
+	if err != nil {
+		t.Fatalf("GetNamedAssetByName: %v", err)
+	}
+	if asset.ContentHash != hash {
+		t.Fatalf("hash = %s, want %s", asset.ContentHash, hash)
+	}
+}
+
+func TestRunDataPublishDirectoryUploadsArchiveAndRecordsDirectoryAsset(t *testing.T) {
+	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
+	setupDataPublishTest(t, r2Client)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatalf("write one: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "two.txt"), []byte("two2"), 0o644); err != nil {
+		t.Fatalf("write two: %v", err)
+	}
+	dataPublishName = "dir-asset"
+	dataPublishTargetPath = "data/checkpoint"
+
+	if err := runDataPublish(nil, []string{dir}); err != nil {
+		t.Fatalf("runDataPublish: %v", err)
+	}
 	if len(r2Client.objects) != 1 {
 		t.Fatalf("uploaded objects = %d, want 1", len(r2Client.objects))
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	asset, err := db.GetNamedAssetByName(database, "dir-asset")
+	if err != nil {
+		t.Fatalf("GetNamedAssetByName: %v", err)
+	}
+	if asset.SizeBytes != 7 {
+		t.Fatalf("size = %d, want 7", asset.SizeBytes)
+	}
+	if asset.ContentType != string(dataloc.ContentTypeDirectory) {
+		t.Fatalf("content type = %q, want directory", asset.ContentType)
+	}
+}
+
+func TestRunDataPublishCheckpointPromotesRegisteredDirectory(t *testing.T) {
+	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
+	setupDataPublishTest(t, r2Client)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "weights.bin"), []byte("weights"), 0o644); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	content, err := dataloc.DigestPath(dir)
+	if err != nil {
+		t.Fatalf("DigestPath: %v", err)
+	}
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host:        "studio",
+		Asset:       dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "ckpt-v1"},
+		Path:        dir,
+		SizeBytes:   content.SizeBytes,
+		ContentHash: content.Hash,
+		ContentType: content.ContentType,
+		LastSeen:    time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+
+	dataPublishName = "ckpt-v1"
+	dataPublishTargetPath = "checkpoints/ckpt-v1"
+	if err := runDataPublish(nil, []string{"checkpoint:ckpt-v1"}); err != nil {
+		t.Fatalf("runDataPublish: %v", err)
+	}
+
+	asset, err := db.GetNamedAssetByName(database, "ckpt-v1")
+	if err != nil {
+		t.Fatalf("GetNamedAssetByName: %v", err)
+	}
+	if asset.ContentHash != content.Hash {
+		t.Fatalf("hash = %s, want %s", asset.ContentHash, content.Hash)
+	}
+	if asset.SizeBytes != content.SizeBytes {
+		t.Fatalf("size = %d, want %d", asset.SizeBytes, content.SizeBytes)
+	}
+	if asset.ContentType != string(dataloc.ContentTypeDirectory) {
+		t.Fatalf("content type = %q, want directory", asset.ContentType)
 	}
 }
 
@@ -332,8 +550,8 @@ func TestRunDataPublishRemoteRequiresTargetPath(t *testing.T) {
 	setupDataPublishTest(t, &fakeDataPublishR2{objects: make(map[string][]byte)})
 	dataPublishName = "remote-trace"
 	dataPublishHost = "cool30"
-	dataPublishCopyFrom = func(_, _, localPath string) error {
-		return os.WriteFile(localPath, []byte("trace data"), 0o644)
+	dataPublishDigestFromHost = func(context.Context, string, string) (dataloc.ContentInfo, error) {
+		return dataloc.ContentInfo{Hash: strings.Repeat("c", 64), SizeBytes: int64(len("trace data")), ContentType: dataloc.ContentTypeFile}, nil
 	}
 
 	err := runDataPublish(nil, []string{"/remote/file"})

@@ -525,6 +525,83 @@ config {
 -- tiebreaker for the fallback path when no known-compatible offer exists.
 -- Implementation: internal/campaign/offers.go filterOffersByProviderCompatibility.
 
+-- The floor-merge and back-fill prose above resolves WHERE the requirements
+-- come from. This contract states the single end-to-end constraint that
+-- every enforcement point checks for a placed job, so the chain cannot
+-- silently break at one link while the others pass (wb23 asked for exactly
+-- this reconciliation; wb30/wb32/wb35/wb36 were independent breakages of
+-- individual links).
+contract CUDACompatibilityChain {
+    cuda_floor: (job: Job) -> String?        -- merged CUDA floor: torch wheel /
+                                             -- library dependency floors, fetched
+                                             -- image-label requirements
+                                             -- (NVIDIA_REQUIRE_CUDA), and explicit
+                                             -- cuda-driver-min overrides
+    min_driver_major: (job: Job) -> Integer? -- driver-major form of the floor
+                                             -- (explicit or back-filled from
+                                             -- cuda_floor via the toolkit table)
+    image_toolkit: (job: Job) -> String?     -- CUDA toolkit version of the
+                                             -- resolved Docker image tag
+    driver_cuda: (target) -> String?         -- max CUDA the target's NVIDIA driver
+                                             -- reports (nvidia-smi header on-prem,
+                                             -- cuda_max_good on cloud offers,
+                                             -- recorded CUDAVersion on reusable
+                                             -- instances)
+    driver_major: (target) -> Integer?       -- target's NVIDIA driver major
+
+    @invariant FloorWithinDriverCUDA
+        -- cuda_floor(job) <= driver_cuda(target) for the target a job is
+        -- placed on. Violation is the wb32/wb36 failure class: torch loads,
+        -- reports "NVIDIA driver too old", and silently falls back to CPU.
+
+    @invariant FloorWithinDriverMajor
+        -- min_driver_major(job) <= driver_major(target). Integer form of
+        -- the same floor, used where only the driver major is observable
+        -- (agent bootstrap probe; manifest.RequiredDriverMajor).
+
+    @invariant ImageToolkitWithinDriverMajor
+        -- major(image_toolkit(job)) <= major(driver_cuda(target)). A
+        -- cross-major image (CUDA 13 image on a driver whose max CUDA is
+        -- 12.x) cannot run. WITHIN one major the image toolkit is
+        -- deliberately NOT compared against the driver or the floor: CUDA
+        -- minor-version compatibility lets a newer same-major toolkit run
+        -- on older drivers, and wheels bundle their CUDA user-space
+        -- libraries, so an image tag below the dependency floor is not
+        -- proof the job cannot run. Asserting image_toolkit >= cuda_floor
+        -- was the wb30 over-strictness (a pinned CUDA 12.4 image rejected
+        -- under a 12.5 floor that the driver satisfied).
+
+    @invariant OneComparatorAtEveryEnforcementPoint
+        -- Every enforcement point evaluates its links of this chain through
+        -- compat.ValidateCUDAChain (internal/compat/cudachain.go) — one
+        -- comparison function, one semantics — rather than ad hoc pairwise
+        -- version compares. Enforcement points:
+        --   1. Submit/launch-time floor resolution + cloud offer filtering:
+        --      campaign.ResolveJobImageSettings / SplitGroupsByImage build
+        --      cuda_floor; campaign.offerCompatibilityStatus validates it
+        --      (plus image_toolkit) against each offer's cuda_max_good.
+        --   2. Instance reuse: campaign.instanceMeetsMinCUDAVersion
+        --      validates cuda_floor against the instance's recorded CUDA
+        --      (fail-closed when unrecorded).
+        --   3. On-prem host eligibility: inventory-placement.allium
+        --      EvaluateEligibility clauses 5a/5b (compat.Check on the same
+        --      CUDA/driver axes with the same comparator; fail-closed on
+        --      unrecorded host facts).
+        --   4. Agent bootstrap driver probe: cmd/agent checkDriverVersion
+        --      validates min_driver_major against the probed driver major
+        --      before accepting any job (prose below).
+        --   5. Torch CUDA preflight: behavioral enforcement — it asserts
+        --      the chain end-to-end by actually initializing CUDA on the
+        --      assigned device before the user command (prose below). It
+        --      compares no versions; it is the ground-truth check the
+        --      version links approximate.
+        -- Missing-value policy stays site-specific by design: on-prem
+        -- placement and instance reuse fail closed on unrecorded facts,
+        -- offer filtering routes unknown-compat providers through its
+        -- fallback, and the agent probes fail open when nvidia-smi is
+        -- unavailable (CPU instances).
+}
+
 -- Defense in depth: the agent runs a driver probe at instance bootstrap,
 -- after the disk-cap check and before accepting any job. It queries
 -- nvidia-smi --query-gpu=driver_version, parses the major version, and
@@ -1225,6 +1302,48 @@ rule FreshRentalDiskEstimate {
         -- Implementation: internal/campaign/disk.go EstimateGroupDisk.
 }
 
+rule BidLossEscalation {
+    -- After enough consecutive lost bid instances for a job, the next launch
+    -- for its group searches on-demand offers instead of placing another bid.
+    when: SearchOffersForGroup(group)
+            and exists job in group.jobs:
+                job.preemptible
+                and ConsecutiveInterruptibleOrphans(job) >= config.bid_loss_escalation_threshold
+
+    ensures: group.escalate_to_on_demand = true
+    ensures: OfferConstraints(group).instance_type != interruptible
+
+    @guidance
+        -- ConsecutiveInterruptibleOrphans counts, from the job's most recent
+        -- attempt backwards, attempts whose launch was interruptible and
+        -- whose outcome was orphaned or preempted — the instance was lost
+        -- out from under the job rather than the job itself failing.
+        -- Counting stops at the first attempt that doesn't match, so a
+        -- successful (or on-demand) run breaks the chain; superseded
+        -- attempts are bookkeeping rows and are skipped without breaking it.
+        --
+        -- config.bid_loss_escalation_threshold = 3
+        -- (bidLossEscalationThreshold in internal/campaign/prepare.go).
+        --
+        -- Escalation is per-launch-attempt with no persistent state: it
+        -- only suppresses the interruptible opt-in for the next launch —
+        -- it never forces a bid, and a completed on-demand run naturally
+        -- resets the count so later launches may bid again. Groups without
+        -- preemptible jobs are never touched.
+        --
+        -- Motivating incident: wj3741 was orphaned 16 consecutive times on
+        -- bid instances that kept getting outbid (compounded by status-poll
+        -- timeouts — see ProviderStatusUnknownDefersTermination); without
+        -- an escape hatch the job re-bid into the same losing market
+        -- indefinitely.
+        --
+        -- Implementation: db.ConsecutiveInterruptibleOrphans,
+        -- ApplyBidLossEscalation in internal/campaign/prepare.go (applied at
+        -- every group-build site: PrepareGroups, the auto-relaunch planner,
+        -- and BuildAutoPlacementPlan), and the interruptible opt-in gate in
+        -- offerConstraintsForGroup (internal/campaign/offers.go).
+}
+
 rule LaunchInstance {
     when: LaunchInstance(campaign, jobs, gpu_spec, options)
 
@@ -1451,6 +1570,47 @@ rule DiskCapProbe {
         -- bug. Implementation: cmd/agent disk-cap probe;
         -- internal/cloud/manifest.go CampaignManifest.RequestedDiskGB
         -- and AgentJob.Inputs are the manifest fields consumed here.
+}
+
+rule GPUShapePreflightBeforeSpend {
+    when: AgentJobSequenceStarts(instance, jobs)
+
+    -- GPU shape (device count + basic visibility) MUST be verified before
+    -- any billable setup or HF-prewarm work runs on the instance. Placement
+    -- filters offers by GPU count and the runner re-checks availability
+    -- just before the user command, but a provider that allocated fewer
+    -- devices than the offer advertised was previously only discovered
+    -- AFTER the prewarm spend: wb41's 2xA100 jobs completed a full HF
+    -- prewarm before gpu_count_preflight failed with one visible A100.
+
+    let required = max(job.gpu_count for job in jobs, default 0)
+
+    if required > 1 and nvidia_smi_enumerable(instance):
+        requires: visible_gpu_count(instance) >= required
+    if required > 1 and visible_gpu_count(instance) < required:
+        ensures: R2GPUCountFailureUploaded(instance)
+            -- written to R2 at instance/<id>/gpu-count-failure.json,
+            -- carrying requested_gpus, visible_gpus, and the raw
+            -- nvidia-smi query output
+        ensures: instance.termination_reason = infra_failure
+        ensures: AgentSelfDestructs(instance)
+            -- before any setup/prewarm begins, so the reconciler requeues
+            -- the jobs onto a correctly shaped instance with no wasted
+            -- setup spend
+
+    @guidance
+        -- Implementation: cmd/agent/gpu_count_probe.go checkGPUCount,
+        -- called at the top of runJobSequence (cmd/agent/jobloop.go)
+        -- before the setup-prewarm manager can start any work; phase
+        -- string "infra-failure:gpu-count-insufficient". Covers both the
+        -- manifest path and jobs migrated onto hedge probes. Fail-open
+        -- when nvidia-smi is unavailable or unparseable, mirroring the
+        -- bootstrap driver probe — failing closed on broken probe tooling
+        -- would strand CPU-only instances. Single-GPU jobs (gpu_count
+        -- 0/1) never trip it. The runner's gpu_count_preflight
+        -- (internal/runner runner.go / single.go) remains the final
+        -- AVAILABILITY guard before the user command: this rule checks
+        -- physical shape, not concurrent free devices.
 }
 
 -- ==========================================================================
@@ -1932,6 +2092,54 @@ rule HeartbeatStaleAfterReady {
         --
         -- Implementation: internal/campaign/instance_check.go §4a
         -- (ActionEmptyStatusTimeout).
+}
+
+rule ProviderStatusUnknownDefersTermination {
+    -- Provider status unknown ≠ dead for interruptible instances: when
+    -- status polling itself is failing, a watchdog cannot distinguish
+    -- "outbid, recoverable" from "dead" and must defer termination.
+    when: WatchdogWouldTerminate(instance)   -- heartbeat-stale, running-phase
+                                             -- stall, bootstrap/launching timeout
+            and instance.instance_type = interruptible
+            and ProviderStatusUnknown(instance)
+            and ProviderStatusUnknownFor(instance) < config.stale_pause_timeout
+
+    ensures: instance.status not in {failed, completed, cancelled}
+    ensures: no provider destroy is issued
+
+    @guidance
+        -- ProviderStatusUnknown means the most recent provider poll for
+        -- this launch yielded no instance data and a non-nil error (e.g.
+        -- `vastai show instances` timing out on a slow network). It is
+        -- distinct from a poll that succeeded and reported a non-running
+        -- status (handled by ProviderInstancePaused / ProviderInstanceDied)
+        -- and from "never polled".
+        --
+        -- An outbid interruptible instance stops heartbeating and making
+        -- phase progress while it waits for resume or a bid raise. When
+        -- status polls are also failing, the stale-heartbeat, running-stall,
+        -- and bootstrap/launching timeout watchdogs would otherwise
+        -- terminate it — conflating a network problem with instance death.
+        -- Motivating incident: wj3741 was orphaned 16 consecutive times
+        -- while the daemon logged 129 consecutive "vastai show instances
+        -- timed out" errors and provider_status_transitions recording
+        -- stopped entirely.
+        --
+        -- The deferral is bounded by config.stale_pause_timeout (the same
+        -- bound the pause-wait path uses): once provider status has been
+        -- continuously unknown that long, the watchdogs terminate as usual.
+        -- The unknown window is tracked per launch across reconcile passes
+        -- and resets on any poll that returns instance data.
+        --
+        -- Non-interruptible launches are never deferred, and nothing
+        -- changes when polls succeed. Provider-dead detection
+        -- (ProviderInstanceDied) remains gated on a successful poll.
+        --
+        -- Implementation: deferTerminationForUnknownStatus and
+        -- CheckInstanceParams.ProviderStatusUnknownFor in
+        -- internal/campaign/instance_check.go;
+        -- Reconciler.noteProviderStatusPoll in
+        -- internal/campaign/reconcile.go.
 }
 
 rule HeartbeatStale {
@@ -2623,6 +2831,65 @@ rule AutoReplanStuckInventoryDispatch {
         -- AutopilotIgnoresMovingJobs invariant.
 }
 
+rule AutoPublishCheckpointForRentalPlacement {
+    when: AutoPilotTick(_)
+    requires: config.auto_publish_checkpoints = true
+    requires: not autopilot_state.paused
+
+    for job in Jobs:
+      requires: job.status = queued
+      requires: job.target_kind = unplaced
+      requires: RentalEligible(job)
+
+      for input in job.inputs where input.kind = checkpoint:
+        let record = HostAssetRecordFor(input.asset)
+        requires: record.content_hash != null
+        requires: record.size_bytes > 0
+
+        let key = "assets/" + record.content_hash
+        let r2_state = ProbeR2Object(key)
+        let holder_state = ProbeHolderPath(record.host, record.path)
+
+        ensures:
+          if r2_state = on_host_only and holder_state = confirmed_present:
+              R2PutFromHost(
+                  source_host: record.host,
+                  source_path: record.path,
+                  key: key,
+                  content_type: record.content_type
+              )
+          if r2_state = unknown or holder_state = unknown:
+              DeferAutoPublish(job, reason: "checkpoint publish status unknown")
+          if record.size_bytes > config.auto_publish_checkpoint_max_bytes:
+              DeferAutoPublish(job, reason: "checkpoint above autopilot cap")
+
+    @guidance
+        -- Opt-in by design. Publishing a checkpoint can move many GiB from an
+        -- inventory host to paid object storage without direct user action, so
+        -- the policy is disabled by default and additionally capped by
+        -- `[autopilot] auto_publish_checkpoint_max_gb`.
+        --
+        -- Three-state discipline is mandatory. A failed R2 HEAD, SSH timeout,
+        -- unreachable holder host, missing path, digest mismatch, or missing
+        -- content metadata is not a confirmed absence and must not fail the job
+        -- or mark the checkpoint published. The autopilot records a bounded
+        -- deferred reason and tries again only after its retry cooldown. A
+        -- confirmed upload failure (the holder was reachable and the host-side
+        -- upload started, then failed) is recorded as a per-job reason and
+        -- logged, but must NOT abort the pass: the remaining unplaced jobs are
+        -- still processed, and the cooldown-gated next pass retries. A single
+        -- bad upload never blocks placement of every other queued job.
+        --
+        -- The holder confirmation recomputes the same DigestPath metadata on
+        -- the holder host before upload. This prevents stale host_data from
+        -- causing autopilot to publish a different checkpoint under the old
+        -- content hash.
+        --
+        -- Implementation: internal/orchestration/autopilot.go
+        -- autoPublishMissingCheckpoints and
+        -- internal/campaign/checkpoint_transport.go PublishCheckpointToR2.
+}
+
 config {
     inventory_dispatch_auto_replan_after: Duration = 10.minutes
 
@@ -2631,6 +2898,13 @@ config {
     -- unplaces) without explicit user consent. TOML key:
     -- [autopilot] auto_replan_stuck_inventory_dispatch.
     auto_replan_stuck_inventory_dispatch: Boolean = false
+
+    -- Gate for AutoPublishCheckpointForRentalPlacement. Off by default.
+    -- TOML keys:
+    -- [autopilot] auto_publish_checkpoints
+    -- [autopilot] auto_publish_checkpoint_max_gb
+    auto_publish_checkpoints: Boolean = false
+    auto_publish_checkpoint_max_bytes: Bytes = 10.GiB
 }
 
 -- ==========================================================================
@@ -2992,6 +3266,24 @@ rule InstanceReuseDiskCheck {
         -- shared rental terminate with disk_full. Implementation:
         -- internal/campaign/reuse.go MatchJobToInstance and
         -- estimateReuseJobDiskNeedGB.
+}
+
+rule InstanceReuseQueueDepthBounded {
+    when: MatchJobToInstance(job, instance)
+
+    ensures:
+        instance.running_job_count + PlannedReuseAssignments(instance)
+            < MaxReuseQueueDepth * max(1, instance.num_gpus)
+
+    @guidance
+        -- Cloud agents run the assigned sequence on one rental, so extra
+        -- reuse assignments wait behind active work. The matcher caps that
+        -- wait using internal/campaign.MaxReuseQueueDepth (2) scaled by GPU
+        -- count so one-GPU rentals do not accumulate long queues while
+        -- multi-GPU rebalance/drain planning keeps its existing slot model.
+        -- PlanReuse increments InstanceCapacity.RunningJobCount after each
+        -- planned assignment, so the same predicate covers already-running
+        -- jobs and assignments made earlier in the current plan.
 }
 
 rule AutoPilotRunRateSubset {
@@ -3543,14 +3835,63 @@ rule AutoPilotPassRespectsSingletonGate {
         -- auto-place / auto-launch fan out across multiple commands).
 }
 
+invariant AutoPilotProviderOfferSearchRunsOutsideSingleton {
+    -- Slow provider offer searches are not part of the DB-backed placement
+    -- critical section. The singleton protects the fast DB placement decision
+    -- and launch-intent mutation, not a remote provider round trip.
+    invariant_holds:
+        AutoPilotTick(_)
+            implies SearchOffersForGroup(_) happens_before ClaimAutopilotPassSlot(_, _)
+                    or UsesCachedOfferSnapshot(_)
+
+    @guidance
+        -- Vast.ai / provider SearchOffers can take tens of seconds during
+        -- network trouble. Holding the singleton during that call blocks
+        -- foreground placement and status/preview operations behind network
+        -- I/O that does not mutate local state. Autopilot therefore builds a
+        -- short-lived in-memory raw-offer snapshot before TryAcquire and
+        -- enters the claimed pass with cached-offer-only planner options.
+        -- If the planner later needs a group missing from the snapshot, that
+        -- miss is an unknown offer-fetch state, not permission to call the
+        -- provider under the slot.
+        --
+        -- Implementation: internal/orchestration/autoplanner.go
+        -- fetchAutoPilotOfferSnapshot; internal/campaign/offers.go
+        -- offerSearchSession CachedOffersOnly / ErrOfferSnapshotUnavailable.
+}
+
+invariant OfferFetchFailureIsUnknownNotEmpty {
+    -- A provider timeout or transport/API error means Weft could not observe
+    -- the market. It is not evidence that the market has zero compatible
+    -- offers.
+    invariant_holds:
+        SearchOffersForGroup(group) returns error
+            implies OfferAvailability(group) = unknown
+                and not OfferAvailability(group) = confirmed_empty
+                and not BlockedReason(group.jobs, "no offers")
+
+    @guidance
+        -- On an offer-fetch error, autopilot may reuse a last-good snapshot
+        -- for the same normalized constraints. Without a last-good snapshot
+        -- it skips new cloud launch for that group this pass and records an
+        -- "offer fetch unavailable" reason. It must not conclude rentals are
+        -- unavailable, mark a terminal/destructive outcome, or overwrite the
+        -- job with a no-offers diagnosis.
+        --
+        -- Confirmed empty remains a distinct state: a successful provider
+        -- search that returns zero offers can still produce a no-offers
+        -- blocked reason with normal filter diagnostics.
+}
+
 invariant PausedAutopilotTakesNoActions {
     -- While paused, no process may issue auto-placements, auto-launches,
-    -- or automatic relaunches of orphaned jobs.
+    -- automatic relaunches of orphaned jobs, or automatic data publication.
     invariant_holds:
         autopilot_state.paused implies
             not AutoPlacementApplied(_)
             and not AutoLaunchInstanceFromUnplaced(_, _)
             and not RelaunchOrphanedJobsAutomatically(_)
+            and not R2PutFromHost(_, _, _)
 
     @guidance
         -- Manual user-driven launches and `weft instance submit` are
