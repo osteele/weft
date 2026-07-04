@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -84,6 +85,26 @@ func TestFetchGroupOffersMock(t *testing.T) {
 	// H100 should have no offers
 	if results[2].Offer != nil {
 		t.Errorf("group 2: expected no offer, got %v", results[2].Offer)
+	}
+}
+
+func TestOfferSearchSessionCachedOnlyMissPreservesSnapshotError(t *testing.T) {
+	session := newOfferSearchSessionWithOptions(nil, 0.95, false)
+	snapshotErr := fmt.Errorf("%w: no cloud providers available: vastai: vastai CLI not found in PATH", ErrOfferSnapshotUnavailable)
+	session.SeedRawOffers([]GroupRawOffers{{
+		Group: InstanceGroup{GPUClass: "nvidia", GPUMemGB: 24},
+		Err:   snapshotErr,
+	}})
+
+	raw := session.fetchGroupRawOffers([]InstanceGroup{{GPUClass: "nvidia", GPUMemGB: 48}})
+	if len(raw) != 1 {
+		t.Fatalf("got %d raw result(s), want 1", len(raw))
+	}
+	if !errors.Is(raw[0].Err, ErrOfferSnapshotUnavailable) {
+		t.Fatalf("error = %v, want ErrOfferSnapshotUnavailable", raw[0].Err)
+	}
+	if !strings.Contains(raw[0].Err.Error(), "vastai CLI not found in PATH") {
+		t.Fatalf("error = %v, want provider discovery detail", raw[0].Err)
 	}
 }
 

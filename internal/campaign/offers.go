@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -981,6 +982,7 @@ type offerSearchSession struct {
 	clients        []cloud.Client
 	minReliability float64
 	allowNetwork   bool
+	cacheMissErr   error
 
 	mu      sync.Mutex
 	results map[string]*offerSearchFuture
@@ -995,6 +997,7 @@ func newOfferSearchSessionWithOptions(clients []cloud.Client, minReliability flo
 		clients:        clients,
 		minReliability: minReliability,
 		allowNetwork:   allowNetwork,
+		cacheMissErr:   ErrOfferSnapshotUnavailable,
 		results:        make(map[string]*offerSearchFuture),
 	}
 }
@@ -1018,6 +1021,9 @@ func (s *offerSearchSession) SeedRawOffers(raw []GroupRawOffers) {
 		s.mu.Lock()
 		if _, ok := s.results[key]; !ok {
 			s.results[key] = future
+		}
+		if groupRaw.Err != nil && errors.Is(groupRaw.Err, ErrOfferSnapshotUnavailable) {
+			s.cacheMissErr = groupRaw.Err
 		}
 		s.mu.Unlock()
 	}
@@ -1068,7 +1074,7 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 	s.mu.Unlock()
 
 	if !s.allowNetwork {
-		future.result.err = ErrOfferSnapshotUnavailable
+		future.result.err = s.cacheMissErr
 		close(future.done)
 		return future
 	}
@@ -1112,10 +1118,11 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
 func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%s/%s/%s/%s",
+	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%d/%s/%s/%s/%s",
 		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
 		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
-		c.MinCPUCoresEffective, c.MinCUDAVersion, c.InstanceType, c.RunpodCloudType, provider)
+		c.MinCPUCoresEffective, c.MinDriverVersion, c.MinCUDAVersion,
+		c.InstanceType, c.RunpodCloudType, provider)
 }
 
 // GroupRawOfferCacheKey returns the search-cache key for a planning group.

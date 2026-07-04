@@ -82,6 +82,12 @@ func IsInstalled(paths Paths) bool {
 }
 
 func Install(paths Paths) error {
+	installed := IsInstalled(paths)
+	if installed {
+		if err := Unload(paths); err != nil {
+			return err
+		}
+	}
 	binary, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
@@ -95,6 +101,10 @@ func Install(paths Paths) error {
 	if err := os.MkdirAll(filepath.Dir(paths.PlistFile), 0o755); err != nil {
 		return err
 	}
+	return writeLaunchdPlist(paths, binary)
+}
+
+func writeLaunchdPlist(paths Paths, binary string) error {
 	home, _ := os.UserHomeDir()
 	f, err := os.Create(paths.PlistFile)
 	if err != nil {

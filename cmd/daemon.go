@@ -427,14 +427,15 @@ func daemonProcessState(status daemoncontrol.Status) string {
 
 func runDaemonInstall(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
-	if daemoncontrol.IsInstalled(paths) {
-		fmt.Printf("Already installed at %s\n", paths.PlistFile)
-		return nil
-	}
+	installed := daemoncontrol.IsInstalled(paths)
 	if err := daemoncontrol.Install(paths); err != nil {
 		return err
 	}
-	fmt.Println("Installed daemon launchd service")
+	if installed {
+		fmt.Println("Updated daemon launchd service")
+	} else {
+		fmt.Println("Installed daemon launchd service")
+	}
 	fmt.Printf("plist: %s\n", paths.PlistFile)
 	return nil
 }

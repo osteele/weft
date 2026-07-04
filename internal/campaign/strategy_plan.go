@@ -449,9 +449,9 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 	switch {
 	case len(clients) > 0 || options.CachedOffersOnly:
 		offerSession = newOfferSearchSessionWithOptions(clients, minReliability, !options.CachedOffersOnly)
+		offerSession.SeedRawOffers(splitRaw)
 		if len(splitRaw) == len(splitGroups) {
 			splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)
-			offerSession.SeedRawOffers(splitRaw)
 		} else {
 			splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
 			splitRaw = applyImagePrestartFailureBlocks(database, splitRaw)

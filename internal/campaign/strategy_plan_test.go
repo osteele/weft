@@ -187,6 +187,63 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 	}
 }
 
+func TestBuildProfilePlansFromSplitRawCachedOnlySeedsSnapshotBeforeSubsetFetch(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "NVIDIA",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+	}
+	extraGroup := InstanceGroup{
+		GPUClass: "NVIDIA",
+		GPUMemGB: 48,
+		Jobs:     []*db.Job{{ID: 2, Command: "python other.py"}},
+	}
+	raw := []GroupRawOffers{
+		{
+			Group: group,
+			Offers: []cloud.Offer{
+				{ProviderID: "cached-split", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.40},
+			},
+		},
+		{
+			Group: extraGroup,
+			Offers: []cloud.Offer{
+				{ProviderID: "cached-extra", GPUName: "A6000", GPUMemGB: 48, CostPerHour: 0.80},
+			},
+		},
+	}
+
+	plans := BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
+		nil,
+		nil,
+		[]InstanceGroup{group},
+		raw,
+		nil,
+		nil,
+		nil,
+		nil,
+		[]ProfilePlanSpec{{
+			Profile:       bidding.StrategyFast.Profile(),
+			CandidateMode: CandidatePlanModeSplitOnly,
+		}},
+		0.95,
+		0,
+		nil,
+		PlanOptions{CachedOffersOnly: true, RawOffers: raw},
+	)
+
+	plan, ok := plans[bidding.StrategyFast.Profile().ID]
+	if !ok {
+		t.Fatalf("expected fast plan, got %#v", plans)
+	}
+	if len(plan.DisplayOffers) != 1 {
+		t.Fatalf("display offers = %d, want 1", len(plan.DisplayOffers))
+	}
+	if got := plan.DisplayOffers[0]; got.Err != nil || got.Offer == nil || got.Offer.ProviderID != "cached-split" {
+		t.Fatalf("display offer = %#v, want cached split offer", got)
+	}
+}
+
 func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParallelWhenLaunchable(t *testing.T) {
 	originalFetchRaw := fetchGroupRawOffersForPlanning
 	t.Cleanup(func() {
