@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
+	"github.com/osteele/weft/internal/ops"
 )
 
 func TestWatchJobsEmitsInitialAndTerminalSnapshots(t *testing.T) {
@@ -354,6 +355,50 @@ func insertWatchTestProjectJob(t *testing.T, database *sql.DB, id int64, project
 		`INSERT INTO job_attempts (job_id, attempt_number, status, queued_at) VALUES (?, 1, ?, ?)`,
 		id, status, time.Now().Unix()); err != nil {
 		t.Fatalf("insert attempt: %v", err)
+	}
+}
+
+func TestSubmitJobRecordsThroughDaemon(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server, err := StartServer(ctx, database, socketPath)
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	defer server.Close()
+
+	jobID, err := DialSubmitJob(ctx, server.socketPath, ops.QueueJobParams{
+		WorkingDir:  "/tmp/project",
+		Command:     "echo hi",
+		Description: "daemon submit",
+		Tags:        []string{"EXP-350"},
+		Inputs:      []string{"hf:meta-llama/Llama-3.1-8B"},
+	})
+	if err != nil {
+		t.Fatalf("DialSubmitJob: %v", err)
+	}
+	if jobID <= 0 {
+		t.Fatalf("jobID = %d, want positive", jobID)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil {
+		t.Fatal("submitted job missing")
+	}
+	if job.Command != "echo hi" || job.Description != "daemon submit" {
+		t.Fatalf("job = %+v", job)
+	}
+	if got := job.Inputs; len(got) != 1 || got[0] != "hf:meta-llama/Llama-3.1-8B" {
+		t.Fatalf("inputs = %v", got)
+	}
+	if got := job.Tags; len(got) != 1 || got[0] != "EXP-350" {
+		t.Fatalf("tags = %v", got)
 	}
 }
 

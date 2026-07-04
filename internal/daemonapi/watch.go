@@ -14,6 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/watchevents"
 )
 
@@ -22,11 +23,13 @@ const (
 	RequestSubscribe  = "subscribe"
 	RequestDaemonInfo = "daemon_info"
 	RequestShutdown   = "shutdown"
+	RequestSubmitJob  = "submit_job"
 
 	EventSnapshot             = "snapshot"
 	EventDone                 = "done"
 	EventError                = "error"
 	EventDaemonInfo           = "daemon_info"
+	EventJobSubmitted         = "job_submitted"
 	EventSubscriptionReady    = "subscription_ready"
 	EventSubscriptionSnapshot = "subscription_snapshot"
 
@@ -42,6 +45,11 @@ type Request struct {
 	ClientPID      int                  `json:"client_pid,omitempty"`
 	Command        string               `json:"command,omitempty"`
 	Subscribe      *SubscriptionRequest `json:"subscribe,omitempty"`
+	SubmitJob      *SubmitJobRequest    `json:"submit_job,omitempty"`
+}
+
+type SubmitJobRequest struct {
+	Params ops.QueueJobParams `json:"params"`
 }
 
 type SubscriptionRequest struct {
@@ -73,7 +81,12 @@ type Event struct {
 	Snapshot       *watchevents.SnapshotEvent `json:"snapshot,omitempty"`
 	Activity       *ActivityPayload           `json:"activity,omitempty"`
 	Daemon         *DaemonInfo                `json:"daemon,omitempty"`
+	SubmittedJob   *SubmitJobResult           `json:"submitted_job,omitempty"`
 	Error          string                     `json:"error,omitempty"`
+}
+
+type SubmitJobResult struct {
+	JobID int64 `json:"job_id"`
 }
 
 type ActivityPayload struct {
@@ -90,6 +103,7 @@ type Server struct {
 	listener   net.Listener
 	socketPath string
 	closeOnce  sync.Once
+	writeMu    sync.Mutex
 	info       DaemonInfo
 	shutdown   func()
 }
@@ -201,6 +215,8 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 		if s.shutdown != nil {
 			go s.shutdown()
 		}
+	case RequestSubmitJob:
+		s.submitJob(ctx, database, encoder, req)
 	case RequestSubscribe:
 		subscribe(ctx, database, encoder, req)
 	case RequestWatchJobs:
@@ -208,6 +224,24 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	default:
 		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("unsupported request type %q", req.Type)})
 	}
+}
+
+func (s *Server) submitJob(_ context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
+	if req.SubmitJob == nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: "submit_job requires payload"})
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	jobID, err := ops.RecordQueuedJob(database, req.SubmitJob.Params)
+	if err != nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
+		return
+	}
+	_ = encoder.Encode(Event{
+		Type:         EventJobSubmitted,
+		SubmittedJob: &SubmitJobResult{JobID: jobID},
+	})
 }
 
 func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request) {

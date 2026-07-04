@@ -16,10 +16,61 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/spf13/cobra"
 )
+
+func TestRecordQueuedJobSingleWriterUsesDaemonWhenAvailable(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	orig := submitQueuedJobViaDaemonFunc
+	t.Cleanup(func() { submitQueuedJobViaDaemonFunc = orig })
+	submitQueuedJobViaDaemonFunc = func(params ops.QueueJobParams) (int64, bool, error) {
+		if params.Command != "echo daemon" {
+			t.Fatalf("daemon params command = %q", params.Command)
+		}
+		return 4242, true, nil
+	}
+
+	jobID, err := recordQueuedJobSingleWriter(database, ops.QueueJobParams{
+		WorkingDir: "/tmp/project",
+		Command:    "echo daemon",
+	})
+	if err != nil {
+		t.Fatalf("recordQueuedJobSingleWriter: %v", err)
+	}
+	if jobID != 4242 {
+		t.Fatalf("jobID = %d, want daemon result", jobID)
+	}
+}
+
+func TestRecordQueuedJobSingleWriterFallsBackWithoutDaemon(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	orig := submitQueuedJobViaDaemonFunc
+	t.Cleanup(func() { submitQueuedJobViaDaemonFunc = orig })
+	submitQueuedJobViaDaemonFunc = func(ops.QueueJobParams) (int64, bool, error) {
+		return 0, false, nil
+	}
+
+	jobID, err := recordQueuedJobSingleWriter(database, ops.QueueJobParams{
+		WorkingDir:  "/tmp/project",
+		Command:     "echo fallback",
+		Description: "fallback",
+	})
+	if err != nil {
+		t.Fatalf("recordQueuedJobSingleWriter: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.Command != "echo fallback" {
+		t.Fatalf("job = %+v", job)
+	}
+}
 
 func TestParseCdPrefix(t *testing.T) {
 	tests := []struct {

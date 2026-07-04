@@ -19,6 +19,8 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/daemonapi"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -448,6 +450,33 @@ func init() {
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
 	runCmd.Flags().BoolVar(&runNoSync, "no-sync", false, "Skip source sync before submission")
 	addJobAddFlagAliases(runCmd)
+}
+
+var submitQueuedJobViaDaemonFunc = submitQueuedJobViaDaemon
+
+func recordQueuedJobSingleWriter(database *sql.DB, params ops.QueueJobParams) (int64, error) {
+	if jobID, used, err := submitQueuedJobViaDaemonFunc(params); used {
+		return jobID, err
+	}
+	return ops.RecordQueuedJob(database, params)
+}
+
+func submitQueuedJobViaDaemon(params ops.QueueJobParams) (int64, bool, error) {
+	paths := daemoncontrol.DefaultPaths()
+	status, err := daemoncontrol.CurrentStatus(paths)
+	if err != nil || !status.Live {
+		return 0, false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	jobID, err := daemonapi.DialSubmitJob(ctx, paths.SocketFile, params)
+	if err == nil {
+		return jobID, true, nil
+	}
+	if strings.Contains(err.Error(), "unsupported request type") {
+		return 0, false, nil
+	}
+	return 0, true, err
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -1296,7 +1325,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		endSubmit := rec.Phase("submit", "submitting job")
-		jobID, err := ops.RecordQueuedJob(database, params)
+		jobID, err := recordQueuedJobSingleWriter(database, params)
 		endSubmit()
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
@@ -1449,8 +1478,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Unplaced jobs: record locally and prompt for cloud launch
 	if host == "" {
-		endSubmit := rec.Phase("submit", "recording unplaced job")
-		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
+		params := ops.QueueJobParams{
 			WorkingDir:       workingDir,
 			Command:          command,
 			Description:      runDescription,
@@ -1467,7 +1495,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
-		})
+		}
+		endSubmit := rec.Phase("submit", "recording unplaced job")
+		jobID, err := recordQueuedJobSingleWriter(database, params)
 		endSubmit()
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)

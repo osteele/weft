@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/osteele/weft/internal/ops"
 )
 
 type Watcher struct {
@@ -122,6 +124,26 @@ func DialShutdown(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("daemon shutdown: unexpected response %q", event.Type)
 	}
 	return nil
+}
+
+func DialSubmitJob(ctx context.Context, socketPath string, params ops.QueueJobParams) (int64, error) {
+	event, err := roundTrip(ctx, socketPath, Request{
+		Type:      RequestSubmitJob,
+		ClientPID: os.Getpid(),
+		SubmitJob: &SubmitJobRequest{
+			Params: params,
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	if event.Type == EventError {
+		return 0, fmt.Errorf("submit job: %s", event.Error)
+	}
+	if event.Type != EventJobSubmitted || event.SubmittedJob == nil {
+		return 0, fmt.Errorf("submit job: unexpected response %q", event.Type)
+	}
+	return event.SubmittedJob.JobID, nil
 }
 
 func roundTrip(ctx context.Context, socketPath string, req Request) (Event, error) {
