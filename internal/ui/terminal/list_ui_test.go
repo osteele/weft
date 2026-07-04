@@ -470,6 +470,37 @@ func TestListTUIReplaceAutoBlockOverlayDropsAbsentReasons(t *testing.T) {
 	}
 }
 
+func TestListTUIAutoPilotPassStartKeepsExistingBlockReasons(t *testing.T) {
+	now := time.Now()
+	m := listTUIModel{
+		groupedByStatus:   true,
+		width:             120,
+		autoInProgress:    true,
+		autoPassStartedAt: now,
+		autoBlockReasons: map[int64]string{
+			4059: "planner: offer fetch unavailable",
+		},
+		jobs: []*db.Job{
+			{ID: 4059, Status: db.StatusQueued, Project: "p", Description: "blocked", CreatedAt: now.Add(-time.Minute).Unix()},
+			{ID: 4060, Status: db.StatusQueued, Project: "p", Description: "newer", CreatedAt: now.Add(time.Second).Unix()},
+		},
+	}
+
+	m.rebuildGroupedRows()
+	var text strings.Builder
+	for _, row := range m.groupedRows {
+		text.WriteString(stripANSI(row.text))
+		text.WriteString("\n")
+	}
+	out := text.String()
+	if !strings.Contains(out, "blocked: planner: offer fetch unavailable") {
+		t.Fatalf("existing blocked reason disappeared during active pass:\n%s", out)
+	}
+	if !strings.Contains(out, "wj4060") {
+		t.Fatalf("newer unplaced job disappeared during active pass:\n%s", out)
+	}
+}
+
 func TestListTUIPendingPlacementIgnoresCompletedLocalPass(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	m := listTUIModel{
