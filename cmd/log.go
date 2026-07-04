@@ -711,7 +711,7 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 
 	fetched, err := fetchCloudLogFromR2(ctx, r2Client, job.ID, runID, logFrom, logTo, logLines)
 	if err != nil {
-		return err
+		return contextualizeCloudLogFetchError(job, err)
 	}
 
 	// Cache for terminal jobs
@@ -730,6 +730,24 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 	output := filterLogContent(fetched.Content, fetched.From, fetched.To, fetched.Lines, logGrep)
 	fmt.Print(processCarriageReturns(output))
 	return nil
+}
+
+func contextualizeCloudLogFetchError(job *db.Job, err error) error {
+	if job == nil || err == nil {
+		return err
+	}
+	if !strings.Contains(err.Error(), "log not found in R2") {
+		return err
+	}
+	if status.IsTerminal(job.Status) {
+		return err
+	}
+	statusLabel := strings.TrimSpace(job.Status)
+	if statusLabel == "" {
+		statusLabel = job.EffectiveStatus()
+	}
+	return fmt.Errorf("log not found in R2 for job %s; job status is %s, so the log may not have been uploaded yet. Try `weft log %s --follow` for a live SSH log, or retry after the next live-log upload",
+		ids.FormatJobID(job.ID), statusLabel, ids.FormatJobID(job.ID))
 }
 
 type fetchedCloudLog struct {

@@ -102,7 +102,11 @@ cat ~/.cache/weft/logs/<job_id>.log      # stdout/stderr
 cat ~/.cache/weft/logs/<job_id>.log.meta # metadata (exit code, timing)
 ```
 
-If no log file exists for a job, the instance died before the job started.
+If no local log file exists for a job, first check the job state with
+`weft status <job-id>` and retry `weft log <job-id>` after a sync. For a running
+cloud job, missing local/R2 logs can mean the live log has not uploaded yet. For
+a terminal job, absence of a log is evidence that the instance may have died
+before the job started or before log upload completed.
 
 ### 4. Check the Vast.ai provider
 

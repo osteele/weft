@@ -1616,6 +1616,55 @@ func TestRunArtifactListQueuedNotStartedShowsPlacementContext(t *testing.T) {
 	}
 }
 
+func TestRunArtifactListRunningLaunchJobExplainsPendingUpload(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp/project", "echo hi", "artifact list", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+
+	prevListSync := artifactListSync
+	t.Cleanup(func() {
+		artifactListSync = prevListSync
+	})
+	artifactListSync = false
+	store := &fakeCloudArtifactStore{objects: map[string][]byte{}}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+	})
+
+	outBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+
+	if err := runArtifactList(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactList: %v", err)
+	}
+
+	out := outBuf.String()
+	for _, want := range []string{
+		"No cached artifacts.",
+		"status is running",
+		"artifacts may not have been uploaded yet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunArtifactListOnPremEmptyShowsHostOutputHint(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordJobStarting(database, "cool30", "/mnt/project", "echo hi", "artifact list")

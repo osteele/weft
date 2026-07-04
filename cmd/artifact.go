@@ -452,6 +452,8 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 			case job.HasInventoryHost():
 				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 				writeInventoryArtifactHint(cmd, job)
+			case job.IsLaunchJob() && !db.IsTerminalStatus(job.Status):
+				writeNoCloudArtifactsYetHint(cmd, job)
 			default:
 				fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 			}
@@ -2633,6 +2635,16 @@ func writeInventoryArtifactHint(cmd *cobra.Command, job *db.Job) {
 		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations include %s.\n", strings.Join(locations, ", "))
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Run `weft artifact sync %s` to pull host outputs into the local artifact cache, or inspect the files over SSH.\n", ids.FormatJobID(job.ID))
+}
+
+func writeNoCloudArtifactsYetHint(cmd *cobra.Command, job *db.Job) {
+	statusLabel := strings.TrimSpace(job.Status)
+	if statusLabel == "" {
+		statusLabel = job.EffectiveStatus()
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Job %s status is %s; artifacts may not have been uploaded yet. Retry after the job writes outputs or finishes.\n",
+		ids.FormatJobID(job.ID), statusLabel)
 }
 
 // writeNoAttributableOutputsHint reports, accurately, that an on-prem job has no

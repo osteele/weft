@@ -62,6 +62,33 @@ func TestRunLogForJob_QueuedPlacedJobHasNoLogsYet(t *testing.T) {
 	}
 }
 
+func TestContextualizeCloudLogFetchErrorRunningJob(t *testing.T) {
+	job := &db.Job{ID: 4035, Status: db.StatusRunning}
+	err := contextualizeCloudLogFetchError(job, errors.New("log not found in R2 for job wj4035 (the job may not have produced output, or the instance was terminated before log upload)"))
+	if err == nil {
+		t.Fatal("err = nil, want contextual error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "job status is running") {
+		t.Fatalf("error = %q, want running status context", msg)
+	}
+	if !strings.Contains(msg, "--follow") {
+		t.Fatalf("error = %q, want live follow hint", msg)
+	}
+	if strings.Contains(msg, "may not have produced output") || strings.Contains(msg, "terminated before log upload") {
+		t.Fatalf("error = %q, should not include terminal-job guesses for running job", msg)
+	}
+}
+
+func TestContextualizeCloudLogFetchErrorTerminalJobKeepsDiagnosis(t *testing.T) {
+	original := errors.New("log not found in R2 for job wj4035 (the job may not have produced output, or the instance was terminated before log upload)")
+	job := &db.Job{ID: 4035, Status: db.StatusCompleted}
+	err := contextualizeCloudLogFetchError(job, original)
+	if err != original {
+		t.Fatalf("err = %v, want original terminal diagnosis", err)
+	}
+}
+
 func TestReadOpsEntriesIncludesSyncedInstanceLogs(t *testing.T) {
 	resetLogModeState()
 	defer resetLogModeState()
