@@ -100,6 +100,26 @@ func TestAcquireLockRejectsSecondHolder(t *testing.T) {
 	}
 }
 
+func TestLaunchdEnvironmentPathIncludesProviderCLIDirs(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/opt/homebrew/bin")
+
+	got := launchdEnvironmentPath("/Users/tester")
+	for _, want := range []string{
+		"/Users/tester/.local/bin",
+		"/Users/tester/bin",
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+	} {
+		if !pathListContains(got, want) {
+			t.Fatalf("PATH %q missing %q", got, want)
+		}
+	}
+	if countPathListEntry(got, "/opt/homebrew/bin") != 1 {
+		t.Fatalf("PATH %q should contain /opt/homebrew/bin once", got)
+	}
+}
+
 func TestEnsureCurrentRepairsPIDFileFromLiveSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := shortTestSocketPath(t)
@@ -154,6 +174,20 @@ func TestEnsureCurrentRepairsPIDFileFromLiveSocket(t *testing.T) {
 	if metadata == nil || metadata.PID != os.Getpid() || metadata.Version != "test-version" {
 		t.Fatalf("metadata = %+v, want repaired daemon metadata", metadata)
 	}
+}
+
+func pathListContains(pathList, want string) bool {
+	return countPathListEntry(pathList, want) > 0
+}
+
+func countPathListEntry(pathList, want string) int {
+	count := 0
+	for _, entry := range filepath.SplitList(pathList) {
+		if entry == want {
+			count++
+		}
+	}
+	return count
 }
 
 func TestEnsureSocketAvailableRejectsLiveWeftSocket(t *testing.T) {

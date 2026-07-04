@@ -21,6 +21,11 @@ var plistTemplate = template.Must(template.New("daemon-plist").Parse(`<?xml vers
 		<string>daemon</string>
 		<string>run</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>{{.Path}}</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -36,8 +41,39 @@ var plistTemplate = template.Must(template.New("daemon-plist").Parse(`<?xml vers
 type plistData struct {
 	Label     string
 	Binary    string
+	Path      string
 	StdoutLog string
 	StderrLog string
+}
+
+func launchdEnvironmentPath(home string) string {
+	parts := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	for _, dir := range []string{
+		filepath.Join(home, ".local", "bin"),
+		filepath.Join(home, "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	} {
+		parts = append(parts, dir)
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, dir := range parts {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		out = append(out, dir)
+	}
+	return strings.Join(out, string(os.PathListSeparator))
 }
 
 func IsInstalled(paths Paths) bool {
@@ -59,6 +95,7 @@ func Install(paths Paths) error {
 	if err := os.MkdirAll(filepath.Dir(paths.PlistFile), 0o755); err != nil {
 		return err
 	}
+	home, _ := os.UserHomeDir()
 	f, err := os.Create(paths.PlistFile)
 	if err != nil {
 		return err
@@ -66,6 +103,7 @@ func Install(paths Paths) error {
 	if err := plistTemplate.Execute(f, plistData{
 		Label:     Label,
 		Binary:    binary,
+		Path:      launchdEnvironmentPath(home),
 		StdoutLog: paths.StdoutLog,
 		StderrLog: paths.StderrLog,
 	}); err != nil {
