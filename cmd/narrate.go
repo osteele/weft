@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +24,6 @@ import (
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/slack"
-	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
 )
@@ -427,7 +425,7 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 	if err := delta.ResolveRemovedJobs(r.database); err != nil {
 		return fmt.Errorf("resolve removed jobs: %w", err)
 	}
-	if err := r.addRecentTerminalJobs(&delta, r.session.Prev()); err != nil {
+	if err := delta.AddRecentTerminalJobs(r.database, r.session.Prev(), r.opts.Project); err != nil {
 		return fmt.Errorf("resolve recent terminal jobs: %w", err)
 	}
 	if err := delta.ResolveRemovedInstances(r.database); err != nil {
@@ -550,56 +548,6 @@ func narrateLifecycleEvent(event db.LifecycleEvent) bool {
 	}
 }
 
-func (r *narrateRunner) addRecentTerminalJobs(delta *narrate.Delta, prev *narrate.Snapshot) error {
-	if delta == nil || prev == nil || prev.Time.IsZero() {
-		return nil
-	}
-	jobs, err := db.ListRecentTerminalJobs(r.database, prev.Time.Unix())
-	if err != nil {
-		return err
-	}
-	if r.opts.Project != "" {
-		jobs = db.FilterJobsByProject(jobs, r.opts.Project)
-	}
-	jobs = db.FilterJobsByTags(jobs, nil, "unprocessed")
-	seen := make(map[int64]struct{}, len(delta.JobFinished)+len(delta.JobChanged))
-	for _, job := range delta.JobFinished {
-		seen[job.ID] = struct{}{}
-	}
-	for _, change := range delta.JobChanged {
-		seen[change.After.ID] = struct{}{}
-	}
-	for _, job := range jobs {
-		if job == nil {
-			continue
-		}
-		if _, ok := prev.Jobs[job.ID]; ok {
-			continue
-		}
-		if _, ok := seen[job.ID]; ok {
-			continue
-		}
-		delta.JobFinished = append(delta.JobFinished, narrate.JobView{
-			ID:                 job.ID,
-			Status:             job.Status,
-			Host:               job.Host,
-			Project:            job.Project,
-			Command:            job.Command,
-			ExitCode:           job.ExitCode,
-			StartTime:          job.StartTime,
-			EndTime:            job.EndTime,
-			LaunchID:           job.LaunchID,
-			Tags:               append([]string(nil), job.Tags...),
-			PlacementReasons:   append([]string(nil), job.PlacementReasons...),
-			QueueBlockedReason: job.QueueBlockedReason,
-			FailureReason:      job.FailureReason,
-			ErrorMessage:       job.ErrorMessage,
-		})
-		seen[job.ID] = struct{}{}
-	}
-	return nil
-}
-
 func (r *narrateRunner) maybePostSlack(statusLine narrate.StatusLine, narration string, statusChanged bool) {
 	if !r.slackEnabled {
 		return
@@ -646,42 +594,5 @@ func formatNarrateSlackMessage(statusLine narrate.StatusLine, narration string, 
 // killed / canceled). Optionally scoped to a project. Bounded to the last
 // 14 days so the inbox doesn't drag in ancient history.
 func loadUnprocessedCounts(database *sql.DB, project string) (narrate.UnprocessedCounts, error) {
-	const maxAgeDays = 14
-	jobs, err := db.ListJobsWithMaxAge(database, "", "", 0, maxAgeDays, nil, "unprocessed")
-	if err != nil {
-		return narrate.UnprocessedCounts{}, err
-	}
-	if project != "" {
-		jobs = db.FilterJobsByProject(jobs, project)
-	}
-	var counts narrate.UnprocessedCounts
-	completedProjects := map[string]struct{}{}
-	failedProjects := map[string]struct{}{}
-	for _, j := range jobs {
-		if isFailedJob(j) {
-			counts.Failed++
-			if p := strings.TrimSpace(j.Project); p != "" {
-				failedProjects[p] = struct{}{}
-			}
-			continue
-		}
-		if j.EffectiveStatus() == status.Completed {
-			counts.Completed++
-			if p := strings.TrimSpace(j.Project); p != "" {
-				completedProjects[p] = struct{}{}
-			}
-		}
-	}
-	counts.CompletedProjects = sortedMapKeys(completedProjects)
-	counts.FailedProjects = sortedMapKeys(failedProjects)
-	return counts, nil
-}
-
-func sortedMapKeys(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for key := range m {
-		out = append(out, key)
-	}
-	sort.Strings(out)
-	return out
+	return narrate.LoadUnprocessedCounts(database, project)
 }

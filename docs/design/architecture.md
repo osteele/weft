@@ -54,6 +54,11 @@ kicks off sync, and returns structured results. See
 [CLI, TUI, and Core Responsibilities](facade-core.md) for details on the
 responsibilities split.
 
+Live monitoring is moving behind a daemon subscription boundary. The local
+daemon exposes a versioned Unix-socket subscription API for repeated reads and
+watch fanout, while CLI JSON/JSONL remains the stable external scripting
+surface. See [Daemon Subscription API](daemon-subscription-api.md).
+
 ## Job States
 
 Every job lives in the local SQLite database and transitions through a finite

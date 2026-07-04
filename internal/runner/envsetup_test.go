@@ -212,6 +212,7 @@ func TestShouldSkipSetup(t *testing.T) {
 }
 
 func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) {
+	skipSlowInShort(t)
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -244,6 +245,7 @@ func TestPrepareUVSyncEnvironment_UsesSystemPythonForTorchProject(t *testing.T) 
 }
 
 func TestPrepareUVSyncEnvironment_ExcludesCUDARuntimePackages(t *testing.T) {
+	skipSlowInShort(t)
 	pythonPath, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -363,6 +365,7 @@ func setSystemPython(t *testing.T) string {
 }
 
 func TestEnsureSystemSitePackagesVenv_RebuildsWhenSystemSitePackagesFalse(t *testing.T) {
+	skipSlowInShort(t)
 	pythonPath := setSystemPython(t)
 	dir := t.TempDir()
 	venvDir := filepath.Join(dir, ".venv")
@@ -397,6 +400,7 @@ func TestEnsureSystemSitePackagesVenv_RebuildsWhenSystemSitePackagesFalse(t *tes
 }
 
 func TestEnsureSystemSitePackagesVenv_RebuildsWhenHomeMismatches(t *testing.T) {
+	skipSlowInShort(t)
 	pythonPath := setSystemPython(t)
 	dir := t.TempDir()
 	venvDir := filepath.Join(dir, ".venv")

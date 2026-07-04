@@ -10,10 +10,18 @@ import (
 	"github.com/osteele/weft/internal/opsqueue"
 )
 
+func skipSlowInShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("slow test; run without -short")
+	}
+}
+
 // TestStdoutSilenceKillsHangingJob reproduces the wj1134 hang: a job prints
 // "Loading data..." once then sleeps forever. With a short silence timeout
 // the watchdog should kill it and report exit code 126.
 func TestStdoutSilenceKillsHangingJob(t *testing.T) {
+	skipSlowInShort(t)
 	logDir := t.TempDir()
 
 	start := time.Now()
@@ -54,6 +62,7 @@ func TestStdoutSilenceKillsHangingJob(t *testing.T) {
 // idle. The job prints every 100ms (so silence doesn't fire) and sleeps.
 // Expect exit 125 with reason gpu-idle.
 func TestGPUIdleKillsHangingGPUJob(t *testing.T) {
+	skipSlowInShort(t)
 	logDir := t.TempDir()
 
 	start := time.Now()
@@ -97,6 +106,7 @@ func TestGPUIdleKillsHangingGPUJob(t *testing.T) {
 // TestStdoutActivityResetsSilenceTimer: a job that prints every 300ms for
 // 2 seconds then exits must not be killed by a 1s silence timeout.
 func TestStdoutActivityResetsSilenceTimer(t *testing.T) {
+	skipSlowInShort(t)
 	logDir := t.TempDir()
 
 	cfg := SingleJobConfig{
@@ -123,6 +133,7 @@ func TestStdoutActivityResetsSilenceTimer(t *testing.T) {
 // by the stdout-silence watchdog. This is the wj2131-style case in reverse:
 // "I'm producing files, just not chatty on stdout."
 func TestOutputFileActivityResetsSilenceTimer(t *testing.T) {
+	skipSlowInShort(t)
 	workDir := t.TempDir()
 	logDir := t.TempDir()
 	if err := os.MkdirAll(workDir+"/outputs", 0o755); err != nil {
@@ -160,6 +171,7 @@ func TestOutputFileActivityResetsSilenceTimer(t *testing.T) {
 // killed by the watchdog. This is the case that should have fired on
 // wi3165 (and didn't), so we lock the invariant in with a regression test.
 func TestSilentJobWithNoOutputFilesIsKilled(t *testing.T) {
+	skipSlowInShort(t)
 	workDir := t.TempDir()
 	logDir := t.TempDir()
 	if err := os.MkdirAll(workDir+"/outputs", 0o755); err != nil {
@@ -198,6 +210,7 @@ func TestSilentJobWithNoOutputFilesIsKilled(t *testing.T) {
 // TestGPUActivityResetsIdleTimer: a probe that flips true every few ticks
 // should keep the GPU watchdog armed without killing.
 func TestGPUActivityResetsIdleTimer(t *testing.T) {
+	skipSlowInShort(t)
 	logDir := t.TempDir()
 
 	var calls atomic.Int32

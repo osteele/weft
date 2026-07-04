@@ -707,7 +707,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 	if setupCmd == direnvSetupCommand {
-		resolvedEnv, ei, err := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
+		resolvedEnv, ei, err := resolveDirenvEnv(expandedDir, envVars, paths.Log)
 		if err != nil {
 			WriteStatusFile(paths, ei)
 			r.finishFailedSetup(jobID, paths, ei, startTime)

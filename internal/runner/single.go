@@ -131,7 +131,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		}
 	}
 	if setupCmd == direnvSetupCommand {
-		resolvedEnv, ei, resolveErr := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
+		resolvedEnv, ei, resolveErr := resolveDirenvEnv(expandedDir, envVars, paths.Log)
 		if resolveErr != nil {
 			now := time.Now().Unix()
 			phases.SetupEnd = now

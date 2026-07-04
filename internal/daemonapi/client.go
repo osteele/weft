@@ -14,6 +14,12 @@ type Watcher struct {
 	decoder *json.Decoder
 }
 
+type Subscription struct {
+	conn    net.Conn
+	decoder *json.Decoder
+	Ready   Event
+}
+
 func DialWatchJobs(ctx context.Context, socketPath string, jobIDs []int64, timeout time.Duration) (*Watcher, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
@@ -36,6 +42,58 @@ func DialWatchJobs(ctx context.Context, socketPath string, jobIDs []int64, timeo
 		return nil, fmt.Errorf("send watch request: %w", err)
 	}
 	return &Watcher{conn: conn, decoder: json.NewDecoder(conn)}, nil
+}
+
+func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionRequest) (*Subscription, error) {
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	req := Request{
+		Type:      RequestSubscribe,
+		ClientPID: os.Getpid(),
+		Subscribe: &sub,
+	}
+	enc := json.NewEncoder(conn)
+	if err := enc.Encode(req); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send subscribe request: %w", err)
+	}
+	decoder := json.NewDecoder(conn)
+	var ready Event
+	if err := decoder.Decode(&ready); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read subscribe ready: %w", err)
+	}
+	if ready.Type == EventError {
+		conn.Close()
+		return nil, fmt.Errorf("subscribe %s: %s", sub.Resource, ready.Error)
+	}
+	if ready.Type != EventSubscriptionReady {
+		conn.Close()
+		return nil, fmt.Errorf("subscribe %s: unexpected response %q", sub.Resource, ready.Type)
+	}
+	return &Subscription{conn: conn, decoder: decoder, Ready: ready}, nil
+}
+
+func DialSubscribeJobStatus(ctx context.Context, socketPath string, jobIDs []int64, timeout time.Duration) (*Subscription, error) {
+	sub := SubscriptionRequest{
+		Resource: ResourceJobStatus,
+		JobIDs:   append([]int64(nil), jobIDs...),
+	}
+	if timeout > 0 {
+		sub.TimeoutSeconds = int64(timeout.Round(time.Second) / time.Second)
+		if sub.TimeoutSeconds == 0 {
+			sub.TimeoutSeconds = 1
+		}
+	}
+	return DialSubscribe(ctx, socketPath, sub)
+}
+
+func DialSubscribeActivity(ctx context.Context, socketPath string, sub SubscriptionRequest) (*Subscription, error) {
+	sub.Resource = ResourceActivity
+	return DialSubscribe(ctx, socketPath, sub)
 }
 
 func DialDaemonInfo(ctx context.Context, socketPath string) (DaemonInfo, error) {
@@ -96,4 +154,16 @@ func (w *Watcher) Next() (Event, error) {
 
 func (w *Watcher) Close() error {
 	return w.conn.Close()
+}
+
+func (s *Subscription) Next() (Event, error) {
+	var event Event
+	if err := s.decoder.Decode(&event); err != nil {
+		return Event{}, err
+	}
+	return event, nil
+}
+
+func (s *Subscription) Close() error {
+	return s.conn.Close()
 }

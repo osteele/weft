@@ -67,9 +67,10 @@ This increment gives visibility before changing the transport.
 
 ## Second Increment
 
-1. Add the daemon socket and a small subscription protocol. Implemented for job
-   status watches in `internal/daemonapi`; the daemon listens on
-   `~/.cache/weft/daemon.sock`.
+1. Add the daemon socket and a small subscription protocol. Implemented for
+   `job_status` and `project_watch` subscriptions in `internal/daemonapi`; the
+   daemon listens on `~/.cache/weft/daemon.sock`. The wire contract is
+   documented in [Daemon Subscription API](../design/daemon-subscription-api.md).
 2. Move `weft status --wait` to subscribe through the daemon when it is
    available, falling back to direct internal polling only when the daemon cannot
    be started or the socket cannot be reached. The fallback remains inside Weft
@@ -83,8 +84,9 @@ This increment gives visibility before changing the transport.
 - Coalesce same-resource subscriptions inside the daemon so multiple clients
   share one refresh path instead of one server-side loop per connection.
 - Add subscriber diagnostics (`weft daemon clients` or `weft debug watchers`).
-- Move plain job/system watch, log follow, and TUI refreshes onto the daemon
-  subscription API.
+- Move plain job/system watch, log follow, instance watch, and TUI refreshes
+  onto the daemon subscription API.
+- Add an authenticated HTTP/WebSocket bridge for non-local clients such as iOS.
 
 ## Operational Requirements
 

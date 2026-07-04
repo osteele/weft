@@ -35,6 +35,20 @@ func testProjectDir(t *testing.T) string {
 	return dir
 }
 
+func writeSparseTestFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create sparse file %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close sparse file %s: %v", path, err)
+	}
+	if err := os.Truncate(path, size); err != nil {
+		t.Fatalf("truncate sparse file %s: %v", path, err)
+	}
+}
+
 func testCUDAProjectDir(t *testing.T) string {
 	t.Helper()
 	dir := testProjectDir(t)
@@ -1758,11 +1772,8 @@ func TestSubmitJobsToInstanceValidatesSourceBeforeClaiming(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	dir := t.TempDir()
-	data := make([]byte, weftsync.MaxSourceTarballBytes/4+1)
 	for i := range 5 {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), weftsync.MaxSourceTarballBytes/4+1)
 	}
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{

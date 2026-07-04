@@ -507,6 +507,8 @@ func ResolveDirenvEnv(workingDir string, envVars []string, logPath string) ([]st
 	return resolved, ExitInfo{}, nil
 }
 
+var resolveDirenvEnv = ResolveDirenvEnv
+
 func parseNullSeparatedEnv(data []byte) []string {
 	parts := bytes.Split(data, []byte{0})
 	env := make([]string, 0, len(parts))

@@ -15,62 +15,62 @@ import (
 
 // Snapshot is a point-in-time view of the bits of weft state we narrate.
 type Snapshot struct {
-	Time      time.Time
-	Jobs      map[int64]JobView
-	Instances map[int64]InstanceView
-	Autopilot AutopilotView
+	Time      time.Time              `json:"time"`
+	Jobs      map[int64]JobView      `json:"jobs"`
+	Instances map[int64]InstanceView `json:"instances"`
+	Autopilot AutopilotView          `json:"autopilot"`
 }
 
 // JobView holds the fields a narrator cares about. We deliberately drop
 // columns that don't affect transitions to keep prompts small.
 type JobView struct {
-	ID                 int64
-	Status             string
-	Host               string
-	Project            string
-	Command            string
-	ExitCode           *int
-	StartTime          int64
-	EndTime            *int64
-	LaunchID           *int64
-	Tags               []string
-	PlacementBucket    string
-	PlacementAt        int64
-	PlacementReasons   []string // why this job is currently unplaced (if any)
-	QueueBlockedReason string   // transient queue-gate reason
-	Explanation        string   // normalized current-state explanation
-	SuggestedAction    string   // wait/replan/retry/etc. when known
-	FailureReason      string   // normalized failure reason (e.g. "timeout", "oom")
-	ErrorMessage       string
-	ProgressPct        int // 0-100, -1 if unavailable
-	ProgressPhase      int // 1-based phase number, 0 if unknown/single-phase
+	ID                 int64    `json:"id"`
+	Status             string   `json:"status"`
+	Host               string   `json:"host,omitempty"`
+	Project            string   `json:"project,omitempty"`
+	Command            string   `json:"command,omitempty"`
+	ExitCode           *int     `json:"exit_code,omitempty"`
+	StartTime          int64    `json:"start_time,omitempty"`
+	EndTime            *int64   `json:"end_time,omitempty"`
+	LaunchID           *int64   `json:"instance_id,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	PlacementBucket    string   `json:"placement_bucket,omitempty"`
+	PlacementAt        int64    `json:"placement_at,omitempty"`
+	PlacementReasons   []string `json:"placement_reasons,omitempty"`    // why this job is currently unplaced (if any)
+	QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"` // transient queue-gate reason
+	Explanation        string   `json:"explanation,omitempty"`          // normalized current-state explanation
+	SuggestedAction    string   `json:"suggested_action,omitempty"`     // wait/replan/retry/etc. when known
+	FailureReason      string   `json:"failure_reason,omitempty"`       // normalized failure reason (e.g. "timeout", "oom")
+	ErrorMessage       string   `json:"error_message,omitempty"`
+	ProgressPct        int      `json:"progress_pct,omitempty"`   // 0-100, -1 if unavailable
+	ProgressPhase      int      `json:"progress_phase,omitempty"` // 1-based phase number, 0 if unknown/single-phase
 }
 
 // InstanceView is the trimmed Launch.
 type InstanceView struct {
-	ID                int64
-	CampaignID        *int64
-	Status            string
-	Provider          string
-	GPUSpec           string
-	NumGPUs           int
-	CostPerHourCents  int
-	CreatedAt         int64
-	LaunchedAt        *int64
-	EndedAt           *int64
-	GraceDeadline     *int64
-	TerminationReason string
-	TerminationDetail string
-	Cordoned          bool
+	ID                int64  `json:"id"`
+	CampaignID        *int64 `json:"campaign_id,omitempty"`
+	Status            string `json:"status"`
+	Provider          string `json:"provider,omitempty"`
+	GPUSpec           string `json:"gpu_spec,omitempty"`
+	NumGPUs           int    `json:"num_gpus,omitempty"`
+	CostPerHourCents  int    `json:"cost_per_hour_cents,omitempty"`
+	CreatedAt         int64  `json:"created_at,omitempty"`
+	LaunchedAt        *int64 `json:"launched_at,omitempty"`
+	EndedAt           *int64 `json:"ended_at,omitempty"`
+	GraceDeadline     *int64 `json:"grace_deadline,omitempty"`
+	TerminationReason string `json:"termination_reason,omitempty"`
+	TerminationDetail string `json:"termination_detail,omitempty"`
+	Cordoned          bool   `json:"cordoned,omitempty"`
 }
 
 type AutopilotView struct {
-	State          string // "never", "idle", "running", "stale", "paused"
-	Paused         bool
-	PausedReason   string
-	PassAgeSeconds int64
-	LastSummary    string
-	LastError      string
+	State          string `json:"state"` // "never", "idle", "running", "stale", "paused"
+	Paused         bool   `json:"paused,omitempty"`
+	PausedReason   string `json:"paused_reason,omitempty"`
+	PassAgeSeconds int64  `json:"pass_age_seconds,omitempty"`
+	LastSummary    string `json:"last_summary,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
 }
 
 // SnapshotOptions narrows the snapshot to a project.
@@ -227,26 +227,26 @@ func truncateCommand(cmd string) string {
 
 // Delta describes transitions between two snapshots.
 type Delta struct {
-	JobAdded       []JobView
-	JobChanged     []JobChange
-	JobRemoved     []int64   // raw IDs of jobs no longer in the active set
-	JobFinished    []JobView // resolved terminal jobs (status, project, exit code populated)
-	InstAdded      []InstanceView
-	InstChanged    []InstanceChange
-	InstRemoved    []int64        // raw IDs of instances no longer in the active set
-	InstTerminated []InstanceView // resolved terminal instances (TerminationReason/Detail populated)
-	AutopilotOld   AutopilotView
-	AutopilotNew   AutopilotView
+	JobAdded       []JobView        `json:"job_added,omitempty"`
+	JobChanged     []JobChange      `json:"job_changed,omitempty"`
+	JobRemoved     []int64          `json:"job_removed,omitempty"`  // raw IDs of jobs no longer in the active set
+	JobFinished    []JobView        `json:"job_finished,omitempty"` // resolved terminal jobs (status, project, exit code populated)
+	InstAdded      []InstanceView   `json:"instance_added,omitempty"`
+	InstChanged    []InstanceChange `json:"instance_changed,omitempty"`
+	InstRemoved    []int64          `json:"instance_removed,omitempty"`    // raw IDs of instances no longer in the active set
+	InstTerminated []InstanceView   `json:"instance_terminated,omitempty"` // resolved terminal instances (TerminationReason/Detail populated)
+	AutopilotOld   AutopilotView    `json:"autopilot_old"`
+	AutopilotNew   AutopilotView    `json:"autopilot_new"`
 }
 
 type JobChange struct {
-	Before JobView
-	After  JobView
+	Before JobView `json:"before"`
+	After  JobView `json:"after"`
 }
 
 type InstanceChange struct {
-	Before InstanceView
-	After  InstanceView
+	Before InstanceView `json:"before"`
+	After  InstanceView `json:"after"`
 }
 
 // Empty reports whether the delta has nothing worth narrating.
@@ -304,6 +304,45 @@ func (d *Delta) ResolveRemovedJobs(database *sql.DB) error {
 		}
 	}
 	d.JobRemoved = nil
+	return nil
+}
+
+// AddRecentTerminalJobs adds terminal jobs that appeared since prev.Time but
+// were not present in either snapshot. This catches short-lived jobs that start
+// and finish between activity ticks.
+func (d *Delta) AddRecentTerminalJobs(database *sql.DB, prev *Snapshot, project string) error {
+	if d == nil || prev == nil || prev.Time.IsZero() {
+		return nil
+	}
+	jobs, err := db.ListRecentTerminalJobs(database, prev.Time.Unix())
+	if err != nil {
+		return err
+	}
+	if project != "" {
+		jobs = db.FilterJobsByProject(jobs, project)
+	}
+	jobs = db.FilterJobsByTags(jobs, nil, "unprocessed")
+	seen := make(map[int64]struct{}, len(d.JobFinished)+len(d.JobChanged))
+	for _, job := range d.JobFinished {
+		seen[job.ID] = struct{}{}
+	}
+	for _, change := range d.JobChanged {
+		seen[change.After.ID] = struct{}{}
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := prev.Jobs[job.ID]; ok {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		d.JobFinished = append(d.JobFinished, jobToView(database, job, nil, jobview.PlacementStatus{}))
+		seen[job.ID] = struct{}{}
+	}
+	sortDelta(d)
 	return nil
 }
 

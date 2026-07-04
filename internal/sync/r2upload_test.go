@@ -9,6 +9,20 @@ import (
 	"testing"
 )
 
+func writeSparseTestFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create sparse file %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close sparse file %s: %v", path, err)
+	}
+	if err := os.Truncate(path, size); err != nil {
+		t.Fatalf("truncate sparse file %s: %v", path, err)
+	}
+}
+
 func TestStageSourceDirWithLocalInputs_OverridesGitignore(t *testing.T) {
 	localDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(localDir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
@@ -240,11 +254,8 @@ func TestUploadSource_OverlayOverflowAdvice(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("outputs/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	data := make([]byte, MaxSourceTarballBytes/4+1)
 	for i := range 5 {
-		if err := os.WriteFile(filepath.Join(big, fmt.Sprintf("part%d.pkl", i)), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeSparseTestFile(t, filepath.Join(big, fmt.Sprintf("part%d.pkl", i)), MaxSourceTarballBytes/4+1)
 	}
 
 	stagedDir, overlayInputs, cleanup, err := stageSourceDirWithLocalInputs(dir, []string{"local:outputs/representations"})
@@ -278,11 +289,8 @@ func TestUploadSource_OverlayOverflowAdvice(t *testing.T) {
 // A plain (non-overlay) overflow keeps the exclude advice.
 func TestCreateSourceTarball_PlainOverflowAdvice(t *testing.T) {
 	dir := t.TempDir()
-	data := make([]byte, MaxSourceTarballBytes/4+1)
 	for i := range 5 {
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), MaxSourceTarballBytes/4+1)
 	}
 	_, _, err := CreateSourceTarball(dir)
 	if err == nil {

@@ -304,18 +304,14 @@ func TestNarrateAddsTerminalJobsCompletedBetweenTicks(t *testing.T) {
 		t.Fatalf("close attempt: %v", err)
 	}
 
-	r := &narrateRunner{
-		database: database,
-		opts:     narrate.SnapshotOptions{},
-	}
 	delta := narrate.Delta{}
 	prev := &narrate.Snapshot{
 		Time:      prevTime,
 		Jobs:      map[int64]narrate.JobView{},
 		Instances: map[int64]narrate.InstanceView{},
 	}
-	if err := r.addRecentTerminalJobs(&delta, prev); err != nil {
-		t.Fatalf("addRecentTerminalJobs: %v", err)
+	if err := delta.AddRecentTerminalJobs(database, prev, ""); err != nil {
+		t.Fatalf("AddRecentTerminalJobs: %v", err)
 	}
 	if len(delta.JobFinished) != 1 {
 		t.Fatalf("JobFinished len = %d, want 1: %#v", len(delta.JobFinished), delta.JobFinished)

@@ -466,7 +466,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	if _, _, err := ensureDaemonStartedFunc(paths, 2*time.Second); err != nil {
 		return false, nil
 	}
-	watcher, err := dialDaemonWatchJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
+	watcher, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
 	if err != nil {
 		return false, nil
 	}
@@ -500,8 +500,11 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 		}
 		received = true
 		switch event.Type {
-		case daemonapi.EventSnapshot, daemonapi.EventDone:
-			for _, snapshot := range event.Jobs {
+		case daemonapi.EventSubscriptionSnapshot, daemonapi.EventDone:
+			if event.Snapshot == nil {
+				continue
+			}
+			for _, snapshot := range event.Snapshot.Jobs {
 				if _, ok := pending[snapshot.ID]; !ok {
 					continue
 				}
@@ -533,11 +536,11 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	return true, nil
 }
 
-func dialDaemonWatchJobs(ctx context.Context, socketPath string, order []int64, timeout time.Duration, wait time.Duration) (*daemonapi.Watcher, error) {
+func dialDaemonSubscribeJobs(ctx context.Context, socketPath string, order []int64, timeout time.Duration, wait time.Duration) (*daemonapi.Subscription, error) {
 	deadline := time.Now().Add(wait)
 	var lastErr error
 	for {
-		watcher, err := daemonapi.DialWatchJobs(ctx, socketPath, order, timeout)
+		watcher, err := daemonapi.DialSubscribeJobStatus(ctx, socketPath, order, timeout)
 		if err == nil {
 			return watcher, nil
 		}

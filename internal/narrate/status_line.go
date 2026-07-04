@@ -1,6 +1,7 @@
 package narrate
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,8 +10,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/status"
-	"github.com/osteele/weft/internal/ui/dashboard"
 )
 
 // StatusLine is the deterministic per-entry header. It carries counts that
@@ -18,32 +19,128 @@ import (
 // project mix, and the unprocessed-results inbox — and is computed
 // directly from the snapshot, with no model call or token spend.
 type StatusLine struct {
-	Now                  time.Time
-	RunningJobs          int
-	QueuedJobs           int
-	StartingJobs         int
-	PendingPlacement     int
-	ActiveInstances      int
-	GraceInstances       int
-	LaunchingInst        int
-	RunRateUSDPerHour    float64
-	BudgetUSDPerHour     float64  // 0 = no configured target
-	Projects             []string // sorted, deduped names of projects with active jobs
-	AutopilotState       string
-	UnprocessedCompleted int // unprocessed jobs in terminal "completed" state
-	UnprocessedFailed    int // unprocessed jobs in failed/dead/killed/canceled
-	CompletedProjects    []string
-	FailedProjects       []string
+	Now                  time.Time `json:"now"`
+	RunningJobs          int       `json:"running_jobs"`
+	QueuedJobs           int       `json:"queued_jobs"`
+	StartingJobs         int       `json:"starting_jobs"`
+	PendingPlacement     int       `json:"pending_placement"`
+	ActiveInstances      int       `json:"active_instances"`
+	GraceInstances       int       `json:"grace_instances"`
+	LaunchingInst        int       `json:"launching_instances"`
+	RunRateUSDPerHour    float64   `json:"run_rate_usd_per_hour"`
+	BudgetUSDPerHour     float64   `json:"budget_usd_per_hour"` // 0 = no configured target
+	Projects             []string  `json:"projects"`            // sorted, deduped names of projects with active jobs
+	AutopilotState       string    `json:"autopilot_state"`
+	UnprocessedCompleted int       `json:"unprocessed_completed"` // unprocessed jobs in terminal "completed" state
+	UnprocessedFailed    int       `json:"unprocessed_failed"`    // unprocessed jobs in failed/dead/killed/canceled
+	CompletedProjects    []string  `json:"completed_projects,omitempty"`
+	FailedProjects       []string  `json:"failed_projects,omitempty"`
 }
 
 // UnprocessedCounts collects unprocessed terminal-job counts for the
 // status line. Caller may compute these from any source; narrate.go
 // queries the DB.
 type UnprocessedCounts struct {
-	Completed         int
-	Failed            int
-	CompletedProjects []string
-	FailedProjects    []string
+	Completed         int      `json:"completed"`
+	Failed            int      `json:"failed"`
+	CompletedProjects []string `json:"completed_projects,omitempty"`
+	FailedProjects    []string `json:"failed_projects,omitempty"`
+}
+
+// LoadUnprocessedCounts queries terminal jobs in the unprocessed inbox and
+// splits the count into successes versus failures. Optionally scoped to a
+// project. Bounded to the last 14 days so old terminal jobs do not dominate
+// status surfaces.
+func LoadUnprocessedCounts(database *sql.DB, project string) (UnprocessedCounts, error) {
+	jobs, err := loadUnprocessedJobs(database, project)
+	if err != nil {
+		return UnprocessedCounts{}, err
+	}
+	var counts UnprocessedCounts
+	completedProjects := map[string]struct{}{}
+	failedProjects := map[string]struct{}{}
+	for _, j := range jobs {
+		if !isUnprocessedTerminalJob(j) {
+			continue
+		}
+		if isFailedJob(j) {
+			counts.Failed++
+			if p := strings.TrimSpace(j.Project); p != "" {
+				failedProjects[p] = struct{}{}
+			}
+			continue
+		}
+		if j.EffectiveStatus() == status.Completed {
+			counts.Completed++
+			if p := strings.TrimSpace(j.Project); p != "" {
+				completedProjects[p] = struct{}{}
+			}
+		}
+	}
+	counts.CompletedProjects = sortedStringKeys(completedProjects)
+	counts.FailedProjects = sortedStringKeys(failedProjects)
+	return counts, nil
+}
+
+// LoadUnprocessedJobViews returns the bounded unprocessed terminal-job inbox as
+// narrate job views, using the same project scope and age window as
+// LoadUnprocessedCounts.
+func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error) {
+	jobs, err := loadUnprocessedJobs(database, project)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]JobView, 0, len(jobs))
+	for _, job := range jobs {
+		if !isUnprocessedTerminalJob(job) {
+			continue
+		}
+		views = append(views, jobToView(database, job, nil, jobview.PlacementStatus{}))
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
+	return views, nil
+}
+
+func loadUnprocessedJobs(database *sql.DB, project string) ([]*db.Job, error) {
+	const maxAgeDays = 14
+	jobs, err := db.ListJobsWithMaxAge(database, "", "", 0, maxAgeDays, nil, "unprocessed")
+	if err != nil {
+		return nil, err
+	}
+	if project != "" {
+		jobs = db.FilterJobsByProject(jobs, project)
+	}
+	return jobs, nil
+}
+
+func isFailedJob(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	switch job.EffectiveStatus() {
+	case db.StatusFailed, db.StatusDead:
+		return true
+	case db.StatusCompleted:
+		return job.ExitCode != nil && *job.ExitCode != 0
+	default:
+		return false
+	}
+}
+
+func isUnprocessedTerminalJob(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	return isFailedJob(job) || job.EffectiveStatus() == status.Completed
+}
+
+func sortedStringKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 var (
@@ -200,7 +297,7 @@ func renderProjectsInline(projects []string, budget int, styles map[string]strin
 	for cap := 20; cap >= minInlineProjectWidth; cap -= 2 {
 		parts := make([]string, 0, len(projects))
 		for _, project := range projects {
-			parts = append(parts, styleProjectName(project, dashboard.AbbreviateProject(project, cap), styles))
+			parts = append(parts, styleProjectName(project, abbreviateProject(project, cap), styles))
 		}
 		joined := strings.Join(parts, " ")
 		if displayWidth(joined) <= budget {
@@ -224,7 +321,7 @@ func renderProjectLines(projects []string, width int, styles map[string]string) 
 	for _, project := range projects {
 		label := project
 		if displayWidth(label) > width {
-			label = fitDisplayWidth(dashboard.AbbreviateProject(label, width), width)
+			label = fitDisplayWidth(abbreviateProject(label, width), width)
 		}
 		part := styleProjectName(project, label, styles)
 		partWidth := displayWidth(part)
@@ -439,4 +536,129 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func abbreviateProject(name string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if len(name) <= maxWidth {
+		return name
+	}
+	parts := strings.Split(name, "-")
+	if len(parts) == 1 {
+		return truncateWithEllipsis(name, maxWidth)
+	}
+	segments := append([]string(nil), parts...)
+	for joinedProjectLen(segments) > maxWidth {
+		maxIdx := longestProjectSegmentIndex(segments)
+		if len(segments[maxIdx]) <= 1 {
+			break
+		}
+		next := abbreviateProjectSegment(parts[maxIdx], len(segments[maxIdx])-1)
+		if next == "" || next == segments[maxIdx] {
+			next = segments[maxIdx][:len(segments[maxIdx])-1]
+		}
+		segments[maxIdx] = next
+	}
+	candidate := strings.Join(segments, "-")
+	if len(candidate) <= maxWidth {
+		return candidate
+	}
+	initials := initialString(parts)
+	if len(initials) <= maxWidth {
+		return initials
+	}
+	return truncateWithEllipsis(initials, maxWidth)
+}
+
+var projectSegmentAbbreviations = map[string][]string{
+	"attention":   {"attent", "attn"},
+	"encoder":     {"enc"},
+	"injection":   {"inject", "inj"},
+	"performance": {"perf", "per"},
+	"probes":      {"prob"},
+	"structural":  {"struct"},
+	"structure":   {"struct"},
+	"structures":  {"struct"},
+}
+
+func abbreviateProjectSegment(segment string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	if len(segment) <= maxLen {
+		return segment
+	}
+	lower := strings.ToLower(segment)
+	if candidates, ok := projectSegmentAbbreviations[lower]; ok {
+		for _, candidate := range candidates {
+			if len(candidate) <= maxLen {
+				return candidate
+			}
+		}
+	}
+	if strings.HasSuffix(lower, "tion") && maxLen >= 5 {
+		stem := trimTrailingVowel(segment[:len(segment)-len("ion")])
+		if len(stem) <= maxLen {
+			return stem
+		}
+	}
+	return trimTrailingVowel(segment[:maxLen])
+}
+
+func trimTrailingVowel(s string) string {
+	if len(s) <= 3 {
+		return s
+	}
+	switch s[len(s)-1] {
+	case 'a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U':
+		return s[:len(s)-1]
+	default:
+		return s
+	}
+}
+
+func longestProjectSegmentIndex(segments []string) int {
+	maxIdx := 0
+	for i := 1; i < len(segments); i++ {
+		if len(segments[i]) >= len(segments[maxIdx]) {
+			maxIdx = i
+		}
+	}
+	return maxIdx
+}
+
+func joinedProjectLen(segments []string) int {
+	if len(segments) == 0 {
+		return 0
+	}
+	total := len(segments) - 1
+	for _, segment := range segments {
+		total += len(segment)
+	}
+	return total
+}
+
+func initialString(parts []string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if len(p) > 0 {
+			b.WriteByte(p[0])
+		}
+	}
+	return b.String()
+}
+
+func truncateWithEllipsis(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if len(s) <= maxWidth {
+		return s
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
+	return s[:maxWidth-1] + "…"
 }
