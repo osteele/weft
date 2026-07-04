@@ -495,6 +495,7 @@ type blockedScopeView struct {
 	AgeSeconds int64    `json:"age_seconds"`
 	Chain      int      `json:"chain"`
 	Orphaned   int      `json:"orphaned"`
+	InfraFails int      `json:"infra_failures"`
 	SpendCents int      `json:"spend_cents"`
 	Window     string   `json:"window"`
 	Jobs       []string `json:"jobs,omitempty"`
@@ -530,6 +531,7 @@ func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
 			AgeSeconds: int64(time.Since(info.TrippedAt).Seconds()),
 			Chain:      info.Chain,
 			Orphaned:   info.Orphaned,
+			InfraFails: info.InfraFails,
 			SpendCents: info.SpendCents,
 			Window:     info.Window.String(),
 			Jobs:       jobLabels,
@@ -549,8 +551,8 @@ func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
 			age := time.Duration(v.AgeSeconds) * time.Second
 			fmt.Printf("%s\n", v.Scope)
 			fmt.Printf("  tripped %s ago (%s)\n", age.Truncate(time.Second), v.TrippedAt)
-			fmt.Printf("  metrics: chain=%d orphaned=%d spend=$%.2f window=%s\n",
-				v.Chain, v.Orphaned, float64(v.SpendCents)/100.0, v.Window)
+			fmt.Printf("  metrics: chain=%d orphaned=%d infra_failures=%d spend=$%.2f window=%s\n",
+				v.Chain, v.Orphaned, v.InfraFails, float64(v.SpendCents)/100.0, v.Window)
 			if len(v.Jobs) > 0 {
 				fmt.Printf("  jobs (%d): %s\n", len(v.Jobs), strings.Join(v.Jobs, ", "))
 			} else {

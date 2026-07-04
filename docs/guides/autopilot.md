@@ -77,7 +77,7 @@ threshold caused the trip:
 ```
 global (project=<all>)
   tripped 7h40m33s ago (2026-05-02T02:16:09+08:00)
-  metrics: chain=2 orphaned=8 spend=$0.41 window=24h0m0s
+  metrics: chain=2 orphaned=8 infra_failures=0 spend=$0.41 window=24h0m0s
   jobs (11): wj1238, wj1241, wj1656, wj1657, wj1662, wj1663, wj1664, wj1677, wj1678, wj1679, wj1680
 
 Reset with: weft autopilot budget reset
@@ -90,6 +90,7 @@ Reading the trip metrics:
 | ---------- | -------------------------------------------------------------- |
 | `chain=N`  | Longest run of trailing-orphaned attempts in the window        |
 | `orphaned=M` | Total orphaned attempts in the window                        |
+| `infra_failures=K` | Distinct failed instance launches with infrastructure-side reasons |
 | `spend=$X` | Dollars spent without any job completion in the window         |
 | `window=…` | Policy window over which the metrics were computed             |
 
@@ -97,15 +98,18 @@ The metric whose threshold fired tells you the failure pattern. A high
 `chain` with low `spend` is a tight loop of fast failures — usually a single
 bad worker or a thin offer pool. A high `spend` with low `chain` is a
 slow-burn issue: instances are coming up cleanly but never producing work,
-e.g. user code stuck in a download loop. A very large `orphaned` is a wider
-fleet symptom — provider outage, or a SKU-level survival problem.
+e.g. user code stuck in a download loop. A high `infra_failures` count means
+multiple rentals failed for infrastructure-side reasons such as provider
+loss, bootstrap failure, or stale agent heartbeat; one failed rental only
+counts once even if several jobs were queued on it. A very large `orphaned`
+is a wider job-attempt symptom.
 
 `weft info wj<N>` also surfaces the trip directly inline:
 
 ```
 Status:      queued
 Blocked by:  runaway-breaker (global (project=<all>)), tripped 7h43m ago
-             chain=2 orphaned=8 spend=$0.41 window=24h0m0s
+             chain=2 orphaned=8 infra_failures=0 spend=$0.41 window=24h0m0s
              reset: weft autopilot blocked --unblock
 ```
 
@@ -119,7 +123,7 @@ weft autopilot blocked --json
 ```
 
 returns `{"scopes": [{scope, campaign_id, project, tripped_at,
-age_seconds, chain, orphaned, spend_cents, window, jobs}, …]}`.
+age_seconds, chain, orphaned, infra_failures, spend_cents, window, jobs}, …]}`.
 
 ## Resetting the breaker
 

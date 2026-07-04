@@ -52,6 +52,41 @@ func seedOrphanedLaunchesWithReason(t *testing.T, database *sql.DB, jobID int64,
 	}
 }
 
+func seedInfraFailedLaunchWithJobs(t *testing.T, database *sql.DB, jobIDs []int64, campaignID *int64, reason string) int64 {
+	t.Helper()
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: campaignID,
+		Status:     db.LaunchStatusPlanned,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusLaunching); err != nil {
+		t.Fatalf("launch to launching: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusRunning); err != nil {
+		t.Fatalf("launch to running: %v", err)
+	}
+	for _, jobID := range jobIDs {
+		if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+			t.Fatalf("SetJobLaunchID(%d): %v", jobID, err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET cloud_outcome = ?, end_time = ?
+			 WHERE job_id = ? AND launch_id = ? AND end_time IS NULL`,
+			db.AttemptOutcomeOrphaned, time.Now().Unix(), jobID, launchID,
+		); err != nil {
+			t.Fatalf("mark orphaned(%d): %v", jobID, err)
+		}
+	}
+	if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusFailed, reason); err != nil {
+		t.Fatalf("fail launch: %v", err)
+	}
+	return launchID
+}
+
 func TestSpec_RunawayBreakerTrips_OnOrphanChurnWithNoProgress(t *testing.T) {
 	// Spec: breaker trips when zero completions AND orphan count >= limit.
 	database := db.SetupTestDB(t)
@@ -697,6 +732,71 @@ func TestSpec_RunawayBreakerTrips_OnInfraFailureChurn(t *testing.T) {
 	}
 	if reason != "paused: repeated infrastructure failures without progress" {
 		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestSpec_RunawayBreakerCountsInfraFailurePerLaunch(t *testing.T) {
+	// A single failed rental can carry many queued jobs. The infrastructure
+	// weather guard counts failed launches, not affected job attempts, so one
+	// bootstrap failure for nine jobs must not look like nine independent
+	// provider failures.
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	var jobIDs []int64
+	var jobs []*db.Job
+	for i := 0; i < 9; i++ {
+		jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU[%d]: %v", i, err)
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+	seedInfraFailedLaunchWithJobs(t, database, jobIDs, &campaignID, db.TerminationReasonBootstrapTimeout)
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("GetJobByID(%d): %v", jobID, err)
+		}
+		jobs = append(jobs, job)
+	}
+
+	since := time.Now().Add(-time.Hour).Unix()
+	metrics, err := queryRunawayMetrics(database, campaignID, jobIDs, since, time.Now().Unix())
+	if err != nil {
+		t.Fatalf("queryRunawayMetrics: %v", err)
+	}
+	if metrics.InfraFailureCount != 1 {
+		t.Fatalf("InfraFailureCount = %d, want 1", metrics.InfraFailureCount)
+	}
+	providers, err := failingProvidersInWindow(database, jobIDs, since)
+	if err != nil {
+		t.Fatalf("failingProvidersInWindow: %v", err)
+	}
+	if providers["vastai"] != 1 {
+		t.Fatalf("providers[vastai] = %d, want 1", providers["vastai"])
+	}
+
+	cfg := RelaunchConfig{
+		Database: database,
+		RunawayPolicy: &RunawayPolicy{
+			Enabled:                  true,
+			Window:                   24 * time.Hour,
+			ChainNoProgressLimit:     100,
+			OrphanChurnLimit:         100,
+			InfraFailureLimit:        5,
+			SpendNoProgressLimitCent: 1_000_000,
+		},
+	}
+	tripped, reason, err := evaluateRunawayBreaker(database, cfg, jobs, time.Now())
+	if err != nil {
+		t.Fatalf("evaluateRunawayBreaker: %v", err)
+	}
+	if tripped {
+		t.Fatalf("breaker should not trip on one failed launch; reason=%q", reason)
 	}
 }
 

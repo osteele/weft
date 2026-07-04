@@ -2456,12 +2456,15 @@ rule RunawayBreakerTrips {
     -- 2. At least one of:
     --    - Max trailing orphaned chain >= chain_no_progress_limit
     --    - Total orphaned attempts >= orphan_churn_limit
+    --    - Distinct infrastructure-failed launches >= infra_failure_limit
     --    - Total spend >= spend_no_progress_limit_cents
     --
     -- Orphan and chain tallies EXCLUDE attempts whose launch ended for an
     -- infrastructure-side reason (provider_failure, infra_failure,
-    -- bootstrap_timeout, phase_stall, preempted) — Vast.ai flakiness alone
-    -- must not trip the breaker. Spend is NOT filtered (infra failures
+    -- bootstrap_timeout, phase_stall, preempted). These infra-side failures
+    -- are counted separately by DISTINCT launch, not by affected job attempt:
+    -- one failed rental carrying nine queued jobs contributes one
+    -- infrastructure-weather sample. Spend is NOT filtered (infra failures
     -- still cost money) and remains the cost backstop. An infra-side orphan
     -- in the middle of a chain is neutral: it doesn't extend the chain but
     -- doesn't break it either, so two real orphans bracketing infra noise
@@ -2477,11 +2480,13 @@ rule RunawayBreakerTrips {
     let completions = count completed jobs in scope after accounting_window
     let chain = max trailing non-infra orphaned attempt chain in scope after accounting_window
     let orphans = count non-infra orphaned attempts in scope after accounting_window
+    let infra_failures = count distinct infra-failed launches in scope after accounting_window
     let spend = sum actual_spend_cents in scope after accounting_window
 
     if completions = 0
        and (chain >= config.runaway_chain_no_progress_limit
             or orphans >= config.runaway_orphan_churn_limit
+            or infra_failures >= config.runaway_infra_failure_limit
             or spend >= config.runaway_spend_no_progress_limit_cents):
         ensures: RunawayBreakerTripped(scope)
         ensures: RelaunchBlocked(instance)

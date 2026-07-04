@@ -1362,10 +1362,11 @@ type runawayMetrics struct {
 	FailingProviders map[string]int
 }
 
-// failingProvidersInWindow returns the per-provider count of orphan +
-// infra-failure attempts in the window. Exposed publicly so trip-time
-// detail recording and post-trip provider-bypass logic share the same
-// query.
+// failingProvidersInWindow returns the per-provider count of distinct launches
+// that produced orphaned or failed attempts in the window. Exposed publicly so
+// trip-time detail recording and post-trip provider-bypass logic share the same
+// query. Counting launches keeps one bad rental carrying many queued jobs from
+// looking like many independent provider failures.
 func failingProvidersInWindow(database *sql.DB, jobIDs []int64, since int64) (map[string]int, error) {
 	if len(jobIDs) == 0 {
 		return nil, nil
@@ -1378,7 +1379,7 @@ func failingProvidersInWindow(database *sql.DB, jobIDs []int64, since int64) (ma
 	}
 	args = append(args, since)
 	rows, err := database.Query(fmt.Sprintf(`
-		SELECT COALESCE(l.provider, '') AS prov, COUNT(*)
+		SELECT COALESCE(l.provider, '') AS prov, COUNT(DISTINCT ja.launch_id)
 		  FROM job_attempts ja
 		  JOIN launches l ON l.id = ja.launch_id
 		 WHERE ja.launch_id IS NOT NULL
@@ -1524,8 +1525,8 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 	// Completed counts every cloud_outcome=completed attempt; orphaned counts
 	// only orphans whose launch wasn't an infrastructure-side failure
 	// (provider/infra/bootstrap-timeout/phase-stall/preempted). Infra failures
-	// are counted separately so provider/bootstrap loops can trip their own
-	// guard without being treated as job-code failures.
+	// count distinct failed launches rather than job attempts, so one bad rental
+	// carrying many queued jobs contributes one infrastructure-weather sample.
 	countArgs := append([]any{db.AttemptOutcomeCompleted, db.AttemptOutcomeOrphaned}, infraArgs...)
 	countArgs = append(countArgs, db.AttemptOutcomeOrphaned)
 	countArgs = append(countArgs, infraArgs...)
@@ -1539,10 +1540,10 @@ func queryRunawayMetrics(database *sql.DB, campaignID int64, jobIDs []int64, sin
 				WHEN ja.cloud_outcome = ?
 				 AND COALESCE(l.termination_reason, '') NOT IN (%s)
 				THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE
+			COALESCE(COUNT(DISTINCT CASE
 				WHEN ja.cloud_outcome = ?
 				 AND COALESCE(l.termination_reason, '') IN (%s)
-				THEN 1 ELSE 0 END), 0)
+				THEN ja.launch_id END), 0)
 		FROM job_attempts ja
 		JOIN launches l ON l.id = ja.launch_id
 		WHERE ja.launch_id IS NOT NULL

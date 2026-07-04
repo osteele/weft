@@ -383,6 +383,10 @@ trips when it detects no-progress churn (for example repeated orphaned
 retries with no completed jobs), even when failures happen after long
 runtimes.
 
+Infrastructure-side failures use a separate threshold. That threshold counts
+distinct failed instance launches, not affected jobs, so one failed rental
+with several queued jobs contributes one failure sample.
+
 Default thresholds:
 
 - `auto_runaway_window = "24h"`
