@@ -514,16 +514,16 @@ func TestListTUIPendingPlacementIgnoresCompletedLocalPass(t *testing.T) {
 	}
 }
 
-func TestListTUIPendingPlacementIgnoresStaleAutopilotPass(t *testing.T) {
+func TestListTUIPendingPlacementIgnoresInactiveAutopilotPass(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	m := listTUIModel{
-		autopilotActive:        true,
+		autopilotActive:        false,
 		autopilotPassStartedAt: now.Add(-orchestration.AutopilotPassStaleAfter - time.Second),
 	}
 
 	active, startedAt := m.pendingPlacementPassState(now)
 	if active || !startedAt.IsZero() {
-		t.Fatalf("pending pass state = %v/%v, want inactive for stale DB pass", active, startedAt)
+		t.Fatalf("pending pass state = %v/%v, want inactive when singleton state is inactive", active, startedAt)
 	}
 }
 
@@ -890,6 +890,29 @@ func TestGroupedAutoPilotStatusTextCountsOnlyBlockedReasons(t *testing.T) {
 	}
 	if strings.Contains(line, "3 jobs blocked") {
 		t.Fatalf("auto-pilot line = %q, must not count waiting jobs as blocked", line)
+	}
+}
+
+func TestGroupedAutoPilotStatusTextActiveDaemonPassBeatsBlockedSummary(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus:        true,
+		autopilotActive:        true,
+		autopilotPassStartedAt: time.Now().Add(-2 * time.Minute),
+		autoPersistentBlocked:  "no cloud providers available",
+		autoPersistentBlockedN: 2,
+		jobs: []*db.Job{
+			{ID: 4062, Status: db.StatusQueued},
+			{ID: 4063, Status: db.StatusQueued},
+		},
+	}
+
+	line := m.groupedAutoPilotStatusText(0)
+
+	if !strings.Contains(line, "Auto-pilot: evaluating") {
+		t.Fatalf("auto-pilot line = %q, want active daemon pass to render evaluating", line)
+	}
+	if strings.Contains(line, "Auto-pilot: blocked") {
+		t.Fatalf("auto-pilot line = %q, stale blocked summary must not beat active pass", line)
 	}
 }
 

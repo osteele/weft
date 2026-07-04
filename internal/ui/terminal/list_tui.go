@@ -1730,6 +1730,7 @@ func (m listTUIModel) countAutoPilotActionableQueuedJobs() int {
 }
 
 func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
+	autopilotActive, autopilotPassStartedAt := m.pendingPlacementPassState(time.Now())
 	// The list TUI has two blocked-reason sources: the persistent summary
 	// from the last pass, and reasons hydrated onto the visible unplaced
 	// jobs. Prefer the former (it carries a job count); fall back to the
@@ -1748,9 +1749,9 @@ func (m listTUIModel) groupedAutoPilotStatusText(visibleRunning int) string {
 		pausedReason:    m.autopilotPausedReason,
 		syncing:         m.syncInProgress(),
 		syncHosts:       m.pendingHostList(),
-		inFlight:        m.autoInProgress,
+		inFlight:        autopilotActive,
 		passPhase:       m.autoPassPhase,
-		passStartedAt:   m.autoPassStartedAt,
+		passStartedAt:   autopilotPassStartedAt,
 		persistentError: m.autoPersistentError,
 		blockedSummary:  blockedSummary,
 		blockedJobs:     blockedJobs,
@@ -3928,9 +3929,6 @@ func (m listTUIModel) pendingPlacementPassState(now time.Time) (bool, time.Time)
 		return true, m.autoPassStartedAt
 	}
 	if !m.autopilotActive || m.autopilotPassStartedAt.IsZero() {
-		return false, time.Time{}
-	}
-	if now.Sub(m.autopilotPassStartedAt) > orchestration.AutopilotPassStaleAfter {
 		return false, time.Time{}
 	}
 	return true, m.autopilotPassStartedAt
