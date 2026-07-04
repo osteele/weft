@@ -238,3 +238,65 @@ func TestParseJobIDsForJobCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestJobIDFlagsAcceptPrefixedIDs(t *testing.T) {
+	tests := []struct {
+		name    string
+		flagSet func(string) error
+		reset   func()
+		wantRaw *string
+	}{
+		{
+			name:    "run from",
+			flagSet: runCmd.Flags().Lookup("from").Value.Set,
+			reset:   func() { runFromRaw = "" },
+			wantRaw: &runFromRaw,
+		},
+		{
+			name:    "run after",
+			flagSet: runCmd.Flags().Lookup("after").Value.Set,
+			reset:   func() { runAfterRaw = "" },
+			wantRaw: &runAfterRaw,
+		},
+		{
+			name:    "queue add after",
+			flagSet: queueAddCmd.Flags().Lookup("after").Value.Set,
+			reset:   func() { queueAfterRaw = "" },
+			wantRaw: &queueAfterRaw,
+		},
+		{
+			name:    "list show",
+			flagSet: listCmd.Flags().Lookup("show").Value.Set,
+			reset:   func() { listShowRaw = "" },
+			wantRaw: &listShowRaw,
+		},
+		{
+			name:    "log ops job",
+			flagSet: logCmd.Flags().Lookup("job").Value.Set,
+			reset:   func() { logOpsJobRaw = "" },
+			wantRaw: &logOpsJobRaw,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Cleanup(tt.reset)
+			if err := tt.flagSet("wj4034"); err != nil {
+				t.Fatalf("set flag to prefixed job ID: %v", err)
+			}
+			if *tt.wantRaw != "wj4034" {
+				t.Fatalf("raw flag value = %q, want wj4034", *tt.wantRaw)
+			}
+		})
+	}
+}
+
+func TestParseOptionalJobIDFlagAcceptsPrefixedID(t *testing.T) {
+	got, err := parseOptionalJobIDFlag("from", "wj4034")
+	if err != nil {
+		t.Fatalf("parseOptionalJobIDFlag: %v", err)
+	}
+	if got != 4034 {
+		t.Fatalf("parseOptionalJobIDFlag = %d, want 4034", got)
+	}
+}

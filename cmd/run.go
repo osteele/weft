@@ -52,12 +52,12 @@ Examples:
   weft run --gpu-class a100 --gpu-mem 60 'python ...'  # Separate flags still work
   weft run --host cool30 'python train.py'              # Explicit host
   weft run -m "Training" --host cool30 'python train.py'
-  weft run --after 42 'python eval.py'                  # Run after job 42
+  weft run --after wj42 'python eval.py'                # Run after job wj42
   weft run --wait --host cool30 'python train.py'       # Queue and wait for completion
   weft run -f --host cool30 'python train.py'           # Queue and follow log output`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode: no positional args needed (host is looked up from the job)
-		if runKillJobID > 0 {
+		if strings.TrimSpace(runKillJobIDRaw) != "" {
 			return nil
 		}
 		// An explicit `--` separator means every following token forms the
@@ -65,7 +65,7 @@ Examples:
 		// from --host in that form, so any positional count is acceptable.
 		dashed := cmd.ArgsLenAtDash() >= 0
 		// --from mode: 0 args (copies from source job) or a command override.
-		if runFrom > 0 {
+		if strings.TrimSpace(runFromRaw) != "" {
 			if len(args) > 1 && !dashed {
 				return fmt.Errorf("--from accepts at most one positional argument (command override)")
 			}
@@ -102,11 +102,15 @@ var (
 	runWait            bool
 	runNoWait          bool // explicit no-op flag for tooling compatibility
 	runKillJobID       int64
+	runKillJobIDRaw    string
 	runFrom            int64
+	runFromRaw         string
 	runEnvVars         []string
 	runTags            []string
 	runAfter           int64
+	runAfterRaw        string
 	runAfterAny        int64
+	runAfterAnyRaw     string
 	runGPU             string
 	runGPUCount        int
 	runGPUMem          int
@@ -415,14 +419,14 @@ func init() {
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
-	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
-	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
+	runCmd.Flags().StringVar(&runKillJobIDRaw, "kill", "", "Kill a job by ID (synonym for 'weft kill')")
+	runCmd.Flags().StringVar(&runFromRaw, "from", "", "Copy settings from existing job ID before running")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	addSecretEnvFlags(runCmd, &runHFToken, &runHFTokenFrom, &runSecretVars)
 	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark-isolation' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
-	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
-	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
-	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
+	runCmd.Flags().StringVar(&runAfterRaw, "after", "", "Start job after another job succeeds (implies --queue)")
+	runCmd.Flags().StringVar(&runAfterRaw, "depends-on", "", "Alias for --after; start job after another job succeeds (implies --queue)")
+	runCmd.Flags().StringVar(&runAfterAnyRaw, "after-any", "", "Start job after another job completes, success or failure (implies --queue)")
 	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
 	runCmd.Flags().IntVar(&runGPUCount, "gpus", 0, "Exact number of GPUs to expose on one host or rental instance")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
@@ -479,7 +483,28 @@ func submitQueuedJobViaDaemon(params ops.QueueJobParams) (int64, bool, error) {
 	return 0, true, err
 }
 
+func parseRunJobIDFlags() error {
+	var err error
+	if runKillJobID, err = parseOptionalJobIDFlag("kill", runKillJobIDRaw); err != nil {
+		return err
+	}
+	if runFrom, err = parseOptionalJobIDFlag("from", runFromRaw); err != nil {
+		return err
+	}
+	if runAfter, err = parseOptionalJobIDFlag("after", runAfterRaw); err != nil {
+		return err
+	}
+	if runAfterAny, err = parseOptionalJobIDFlag("after-any", runAfterAnyRaw); err != nil {
+		return err
+	}
+	return nil
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
+	if err := parseRunJobIDFlags(); err != nil {
+		return err
+	}
+
 	// Handle --kill mode
 	if runKillJobID > 0 {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("kill"), oplog.WithJobID(runKillJobID))

@@ -67,6 +67,7 @@ var (
 	listSearch      string
 	listLimit       int
 	listShow        int64
+	listShowRaw     string
 	listCleanup     int
 	listSync        bool
 	listNoSync      bool
@@ -128,7 +129,7 @@ func addListQueryFlags(cmd *cobra.Command) {
 // Used by both listCmd and jobListCmd to share the same flag definitions.
 func addListFlags(cmd *cobra.Command) {
 	addListQueryFlags(cmd)
-	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
+	cmd.Flags().StringVar(&listShowRaw, "show", "", "Show detailed info for a specific job ID")
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain one-shot output")
@@ -144,6 +145,10 @@ func init() {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
+	var err error
+	if listShow, err = parseOptionalJobIDFlag("show", listShowRaw); err != nil {
+		return err
+	}
 	if err := validateListGroupingOptions(); err != nil {
 		return err
 	}

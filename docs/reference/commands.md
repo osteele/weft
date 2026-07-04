@@ -203,10 +203,10 @@ weft run --tag rental --gpu a100 'python train.py'
 weft run --tag inventory --gpu a100 'python train.py'
 
 # Run job after another succeeds
-weft run --after 42 deepthought 'python eval.py'
+weft run --after wj42 deepthought 'python eval.py'
 
 # Run cleanup job after another completes (success or failure)
-weft run --after-any 42 deepthought 'python cleanup.py'
+weft run --after-any wj42 deepthought 'python cleanup.py'
 
 # Artifact-based dependencies (file-path deps instead of job-ID deps)
 # Job 100: training — declares it will produce a checkpoint
@@ -227,7 +227,7 @@ weft run --tag rental --gpu nvidia \
 
 weft run --gpu nvidia \
   --needs output/model.pt:1046 \
-  --after 1046 \
+  --after wj1046 \
   -m "Eval" 'python eval.py'
 # Downstream job waits until 1046 completes and artifact upload is available,
 # then stages output/model.pt from cloud artifact storage before execution.
@@ -1131,7 +1131,7 @@ weft log wj42 --to 100             # First 100 lines
 weft log wj42 --grep error         # Lines containing "error"
 weft log wj42 -f --grep epoch      # Follow, filter for "epoch"
 weft log wj42 --full               # Entire log (explicit)
-weft log --ops --job 42          # Operations for a job
+weft log --ops --job wj42        # Operations for a job
 weft log --ops --host vastai:17  # Operations for a rental instance
 weft log --events --kind relaunch
 ```
@@ -1542,10 +1542,10 @@ weft run --from <job-id> [<host>] [<command>]
 Copies command, working directory, and description from an existing job. You can override any of these:
 
 ```bash
-weft run --from 42                    # Rerun job 42 with same settings
-weft run --from 42 atlas            # Rerun on different host
-weft run --from 42 --timeout 4h       # Rerun with longer timeout
-weft run --from 42 atlas "python train.py --epochs 200"  # Override everything
+weft run --from wj42                    # Rerun job wj42 with same settings
+weft run --from wj42 atlas              # Rerun on different host
+weft run --from wj42 --timeout 4h       # Rerun with longer timeout
+weft run --from wj42 atlas "python train.py --epochs 200"  # Override everything
 ```
 
 **Timeout (`--timeout`)**:
@@ -1557,7 +1557,7 @@ Automatically kills the job after the specified duration (e.g., "2h", "30m", "1h
 
 ```bash
 weft run --timeout 2h titan "python train.py"
-weft run --timeout 30m --from 42      # Retry with timeout
+weft run --timeout 30m --from wj42    # Retry with timeout
 ```
 
 **Environment variables (`-e, --env`)**:
@@ -1799,8 +1799,8 @@ the `d` key in the TUI) once you decide they should be eligible to run.
 weft queue add titan 'python train.py --epochs 100'
 weft queue add -d "Training run 1" titan 'python train.py'
 weft queue add -e CUDA_VISIBLE_DEVICES=0 titan 'python train.py'
-weft queue add --after 42 titan 'python eval.py'       # Run after job 42 succeeds
-weft queue add --after-any 42 titan 'python cleanup.py' # Run after job 42 completes (success or failure)
+weft queue add --after wj42 titan 'python eval.py'       # Run after job wj42 succeeds
+weft queue add --after-any wj42 titan 'python cleanup.py' # Run after job wj42 completes (success or failure)
 ```
 
 #### weft edit
@@ -1955,17 +1955,17 @@ You can create job chains where one job runs after another completes:
 # Start the queue runner
 weft queue start titan
 
-# Job 42: Training
+# Job wj42: Training
 weft queue add -d "Training" titan "python train.py"
 
-# Job 43: Evaluate after training succeeds (waits for job 42)
-weft queue add --after 42 -d "Evaluation" titan "python eval.py"
+# Job wj43: Evaluate after training succeeds (waits for job wj42)
+weft queue add --after wj42 -d "Evaluation" titan "python eval.py"
 
-# Job 44: Generate report after evaluation (waits for job 43)
-weft queue add --after 43 -d "Report" titan "python report.py"
+# Job wj44: Generate report after evaluation (waits for job wj43)
+weft queue add --after wj43 -d "Report" titan "python report.py"
 
-# Job 45: Cleanup runs regardless of whether job 42 succeeded or failed
-weft queue add --after-any 42 -d "Cleanup" titan "python cleanup.py"
+# Job wj45: Cleanup runs regardless of whether job wj42 succeeded or failed
+weft queue add --after-any wj42 -d "Cleanup" titan "python cleanup.py"
 
 # Disconnect laptop - jobs run in sequence on the remote host
 ```

@@ -53,7 +53,7 @@ Examples:
 
 Operations Log (forensic debugging):
   weft log --ops                    # Show recent operations
-  weft log --ops --job 1384         # Filter by job ID
+  weft log --ops --job wj1384       # Filter by job ID
   weft log --ops --host cool30      # Filter by host
   weft log --ops --op job.start     # Filter by operation type
   weft log --ops --since 1h         # Operations in last hour
@@ -89,6 +89,7 @@ var (
 	// Operations log flags
 	logOps       bool
 	logOpsJob    int64
+	logOpsJobRaw string
 	logOpsHost   string
 	logOpsOp     string
 	logOpsSince  string
@@ -122,7 +123,7 @@ func addLogFlags(cmd *cobra.Command) {
 
 	// Operations log flags
 	cmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
-	cmd.Flags().Int64Var(&logOpsJob, "job", 0, "Filter operations by job ID (requires --ops)")
+	cmd.Flags().StringVar(&logOpsJobRaw, "job", "", "Filter operations by job ID (requires --ops)")
 	cmd.Flags().StringVar(&logOpsHost, "host", "", "Filter operations by host (requires --ops)")
 	cmd.Flags().StringVar(&logOpsOp, "op", "", "Filter by operation type (requires --ops)")
 	cmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations/events since cutoff (YYYY-MM-DD, RFC3339, or duration like \"1h\"/\"24h ago\")")
@@ -1171,6 +1172,11 @@ func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
 
 // runOpsLog displays the operations log with optional filtering
 func runOpsLog(cmd *cobra.Command) error {
+	var err error
+	if logOpsJob, err = parseOptionalJobIDFlag("job", logOpsJobRaw); err != nil {
+		return err
+	}
+
 	if !logNoSync {
 		if err := syncOpsLogSources(); err != nil && logSync {
 			return err

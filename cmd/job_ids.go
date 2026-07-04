@@ -150,3 +150,15 @@ func ParseJobIDsForJobCommand(args []string) ([]int64, error) {
 	}
 	return ParseJobIDs(args)
 }
+
+func parseOptionalJobIDFlag(name, raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := ids.ParseJobID(raw)
+	if err != nil || id <= 0 {
+		return 0, usageErrorf("invalid --%s job ID %q: expected a numeric or wj-prefixed ID", name, raw)
+	}
+	return id, nil
+}

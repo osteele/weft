@@ -154,6 +154,7 @@ func resetLogModeState() {
 	logAttempt = 0
 	logOps = false
 	logOpsJob = 0
+	logOpsJobRaw = ""
 	logOpsHost = ""
 	logOpsOp = ""
 	logOpsSince = ""

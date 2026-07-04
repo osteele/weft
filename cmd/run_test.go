@@ -985,11 +985,15 @@ func resetRunGlobals(t *testing.T) {
 	runWait = false
 	runNoWait = false
 	runKillJobID = 0
+	runKillJobIDRaw = ""
 	runFrom = 0
+	runFromRaw = ""
 	runEnvVars = nil
 	runTags = nil
 	runAfter = 0
+	runAfterRaw = ""
 	runAfterAny = 0
+	runAfterAnyRaw = ""
 	runGPU = ""
 	runGPUCount = 0
 	runGPUMem = 0

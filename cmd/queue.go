@@ -62,7 +62,7 @@ Examples:
   weft queue add --host cool30 'python train.py --epochs 100'
   weft queue add -m "Training run 1" cool30 'python train.py'
   weft queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
-  weft queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes`,
+  weft queue add --after wj42 cool30 'python eval.py'  # Run after job wj42 completes`,
 	Args: usageArgs(cobra.RangeArgs(1, 2)),
 	RunE: runQueueAdd,
 }
@@ -205,7 +205,9 @@ var (
 	queueRuntimeDiskGB  int
 	queueTags           []string
 	queueAfter          int64
+	queueAfterRaw       string
 	queueAfterAny       int64
+	queueAfterAnyRaw    string
 	queueNoStart        bool
 	queueDraft          bool
 	queueWait           bool
@@ -302,9 +304,9 @@ func init() {
 	queueAddCmd.Flags().IntVar(&queueDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	queueAddCmd.Flags().IntVar(&queueRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark-isolation' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
-	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
-	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
-	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
+	queueAddCmd.Flags().StringVar(&queueAfterRaw, "after", "", "Start job after another job succeeds (job ID)")
+	queueAddCmd.Flags().StringVar(&queueAfterRaw, "depends-on", "", "Alias for --after; start job after another job succeeds (job ID)")
+	queueAddCmd.Flags().StringVar(&queueAfterAnyRaw, "after-any", "", "Start job after another job completes, success or failure (job ID)")
 	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
 	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
 	queueAddCmd.Flags().BoolVar(&queueWait, "wait", false, "Wait for job to complete before returning")
@@ -369,6 +371,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	queueEnvVars, err = applySecretEnv(queueEnvVars, queueInputs, queueHFToken, queueHFTokenFrom, queueSecretVars)
 	if err != nil {
+		return err
+	}
+	if queueAfter, err = parseOptionalJobIDFlag("after", queueAfterRaw); err != nil {
+		return err
+	}
+	if queueAfterAny, err = parseOptionalJobIDFlag("after-any", queueAfterAnyRaw); err != nil {
 		return err
 	}
 
