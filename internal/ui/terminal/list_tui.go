@@ -911,28 +911,8 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the result rather than acting on it.
 			return m, nil
 		}
-		// Merge rather than replace: jobs temporarily absent from
-		// msg.blockedReasons (because they just got a launch_id and
-		// left the unplaced candidate list) keep their last known reason
-		// until pruneAutoBlockReasons drops them once the job actually
-		// starts running or reaches a terminal state.
-		if len(msg.blockedReasons) > 0 {
-			if m.autoBlockReasons == nil {
-				m.autoBlockReasons = make(map[int64]string, len(msg.blockedReasons))
-			}
-			for jobID, reason := range msg.blockedReasons {
-				m.autoBlockReasons[jobID] = reason
-			}
-		}
-		if len(msg.structuredBlocked) > 0 {
-			if m.autoBlockDetail == nil {
-				m.autoBlockDetail = make(map[int64]*blockreason.Structured, len(msg.structuredBlocked))
-			}
-			for jobID, detail := range msg.structuredBlocked {
-				m.autoBlockDetail[jobID] = detail
-			}
-		}
 		if msg.err != nil {
+			m.replaceAutoBlockOverlay(nil, nil)
 			m.lastAutoPilotErrorRaw = msg.err.Error()
 			m.showAutoPilotErrorDetails = false
 			m.autoPersistentError = orchestration.SummarizeAutoPilotError(msg.err)
@@ -960,6 +940,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
 			return m, nil
 		}
+		m.replaceAutoBlockOverlay(msg.blockedReasons, msg.structuredBlocked)
 		m.autoPersistentBlocked = ""
 		m.autoPersistentBlockedN = 0
 		if summary, count := orchestration.AutoPilotBlockSummaryWithCount(msg.blockedReasons); summary != "" {
@@ -2914,6 +2895,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 	}
 	if m.isStatusGroupedView() {
 		groupedJobs := m.groupedJobsWithAutoReasons()
+		autopilotActive, autopilotPassStartedAt := m.pendingPlacementPassState(time.Now())
 		m.groupedRows = buildGroupedStatusRowsWithOptions(groupedJobs, m.width, groupedStatusRenderOptions{
 			launchLiveByID:         m.launchLiveByID,
 			launchStatusByID:       m.launchStatusByID,
@@ -2937,8 +2919,8 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			interactive:                true,
 			daemonStopped:              m.placementDaemonStopped,
 			autopilotPaused:            m.autopilotPaused,
-			autopilotActive:            m.autoInProgress || m.autopilotActive,
-			autopilotPassStartedAtUnix: m.pendingPlacementPassStartedAtUnix(),
+			autopilotActive:            autopilotActive,
+			autopilotPassStartedAtUnix: unixIfNonZero(autopilotPassStartedAt),
 		})
 	} else {
 		m.groupedRows = buildListGroupedRows(m.jobs, m.effectiveGroupMode(), m.width, m.layout)
@@ -3831,6 +3813,29 @@ func (m *listTUIModel) pruneAutoBlockReasons() {
 	}
 }
 
+func (m *listTUIModel) replaceAutoBlockOverlay(blockedReasons map[int64]string, structuredBlocked map[int64]*blockreason.Structured) {
+	if len(blockedReasons) == 0 {
+		m.autoBlockReasons = nil
+	} else {
+		m.autoBlockReasons = make(map[int64]string, len(blockedReasons))
+		for jobID, reason := range blockedReasons {
+			if strings.TrimSpace(reason) != "" {
+				m.autoBlockReasons[jobID] = reason
+			}
+		}
+	}
+	if len(structuredBlocked) == 0 {
+		m.autoBlockDetail = nil
+	} else {
+		m.autoBlockDetail = make(map[int64]*blockreason.Structured, len(structuredBlocked))
+		for jobID, detail := range structuredBlocked {
+			if detail != nil {
+				m.autoBlockDetail[jobID] = detail
+			}
+		}
+	}
+}
+
 func (m listTUIModel) currentRunRateHeadroomCents() (int, bool) {
 	return orchestration.RunRateHeadroom(m.database, m.autoRunRateTargetCents)
 }
@@ -3904,22 +3909,38 @@ func (m listTUIModel) visibleUnplacedBlockedReasonsForJobs(jobs []*db.Job) map[i
 }
 
 func (m listTUIModel) pendingPlacementReasonForJob(job *db.Job) string {
+	active, passStartedAt := m.pendingPlacementPassState(time.Now())
 	return groupedStatusPendingPlacementReason(job, groupedStatusRenderOptions{
 		daemonStopped:              m.placementDaemonStopped,
 		autopilotPaused:            m.autopilotPaused,
-		autopilotActive:            m.autoInProgress || m.autopilotActive,
-		autopilotPassStartedAtUnix: m.pendingPlacementPassStartedAtUnix(),
+		autopilotActive:            active,
+		autopilotPassStartedAtUnix: unixIfNonZero(passStartedAt),
 	})
 }
 
 func (m listTUIModel) pendingPlacementPassStartedAtUnix() int64 {
-	if !m.autoPassStartedAt.IsZero() {
-		return m.autoPassStartedAt.Unix()
+	_, startedAt := m.pendingPlacementPassState(time.Now())
+	return unixIfNonZero(startedAt)
+}
+
+func (m listTUIModel) pendingPlacementPassState(now time.Time) (bool, time.Time) {
+	if m.autoInProgress && !m.autoPassStartedAt.IsZero() {
+		return true, m.autoPassStartedAt
 	}
-	if !m.autopilotPassStartedAt.IsZero() {
-		return m.autopilotPassStartedAt.Unix()
+	if !m.autopilotActive || m.autopilotPassStartedAt.IsZero() {
+		return false, time.Time{}
 	}
-	return 0
+	if now.Sub(m.autopilotPassStartedAt) > orchestration.AutopilotPassStaleAfter {
+		return false, time.Time{}
+	}
+	return true, m.autopilotPassStartedAt
+}
+
+func unixIfNonZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }
 
 func jobWithDisplayPlacementReasons(job *db.Job, headroomCents int, hasRunRateHeadroom bool) *db.Job {

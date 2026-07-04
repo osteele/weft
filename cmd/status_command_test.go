@@ -375,7 +375,7 @@ func TestRunJobInfoSkipsQuickSyncWhenDaemonSyncIsFresh(t *testing.T) {
 	}
 }
 
-func TestRunJobInfoSyncsActiveRentalJobDespiteFreshDaemonSync(t *testing.T) {
+func TestRunJobInfoUsesCachedActiveRentalJobByDefault(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, _ := createRentalQueuedJobWithInstance(t, database)
 	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
@@ -386,6 +386,42 @@ func TestRunJobInfoSyncsActiveRentalJobDespiteFreshDaemonSync(t *testing.T) {
 	}
 
 	restoreJobInfoFlags(t)
+	daemonLiveFunc = func() bool { return true }
+
+	originalQuickSyncJobs := quickSyncJobsFunc
+	t.Cleanup(func() {
+		quickSyncJobsFunc = originalQuickSyncJobs
+	})
+
+	calls := 0
+	quickSyncJobsFunc = func(_ *sql.DB, _ []*db.Job, _, _, _ time.Duration) targetedSyncOutcome {
+		calls++
+		return targetedSyncOutcome{}
+	}
+
+	captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+
+	if calls != 0 {
+		t.Fatalf("quickSyncJobs calls = %d, want 0 for default cached job info", calls)
+	}
+}
+
+func TestRunJobInfoSyncsActiveRentalJobWithSync(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := createRentalQueuedJobWithInstance(t, database)
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	if err := db.RecordCloudSync(database, time.Now()); err != nil {
+		t.Fatalf("RecordCloudSync: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoSync = true
 	daemonLiveFunc = func() bool { return true }
 
 	originalQuickSyncJobs := quickSyncJobsFunc
@@ -409,7 +445,7 @@ func TestRunJobInfoSyncsActiveRentalJobDespiteFreshDaemonSync(t *testing.T) {
 	})
 
 	if calls != 1 {
-		t.Fatalf("quickSyncJobs calls = %d, want 1 for active rental job", calls)
+		t.Fatalf("quickSyncJobs calls = %d, want 1 with --sync", calls)
 	}
 }
 
@@ -434,7 +470,7 @@ func TestInstanceStatusSkipsLiveRefreshWhenDaemonCloudSyncIsFresh(t *testing.T) 
 	}
 }
 
-func TestShouldRefreshInstanceLiveStateIgnoresFreshDaemonSyncForTerminationIntent(t *testing.T) {
+func TestShouldRefreshInstanceLiveStateDefaultIgnoresTerminationIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 	if err := db.RecordCloudSync(database, time.Now()); err != nil {
 		t.Fatalf("RecordCloudSync: %v", err)
@@ -450,8 +486,11 @@ func TestShouldRefreshInstanceLiveStateIgnoresFreshDaemonSyncForTerminationInten
 		},
 	}
 
-	if !shouldRefreshInstanceLiveState(database, launch, false, false) {
-		t.Fatal("should refresh non-terminal launch with termination intent even when daemon cloud sync is fresh")
+	if shouldRefreshInstanceLiveState(database, launch, false, false) {
+		t.Fatal("default instance status/info should not live-refresh for termination intent")
+	}
+	if !shouldRefreshInstanceLiveState(database, launch, true, false) {
+		t.Fatal("--sync should live-refresh a non-terminal launch with termination intent")
 	}
 }
 
@@ -474,7 +513,7 @@ func TestInstanceStatusNoSyncSkipsLiveRefresh(t *testing.T) {
 	}
 }
 
-func TestShouldRefreshInstanceLiveStateUsesDaemonCloudFreshness(t *testing.T) {
+func TestShouldRefreshInstanceLiveStateIgnoresDaemonCloudFreshnessByDefault(t *testing.T) {
 	database := db.SetupTestDB(t)
 	launch := &db.Launch{Status: db.LaunchStatusRunning}
 	if _, err := database.Exec(`DELETE FROM host_syncs WHERE name = ?`, db.CloudSyncTargetName); err != nil {
@@ -490,14 +529,14 @@ func TestShouldRefreshInstanceLiveStateUsesDaemonCloudFreshness(t *testing.T) {
 	restoreInstanceStatusFlags(t)
 	daemonLiveFunc = func() bool { return true }
 
-	if !shouldRefreshInstanceLiveState(database, launch, false, false) {
-		t.Fatal("missing cloud sync should require live refresh")
+	if shouldRefreshInstanceLiveState(database, launch, false, false) {
+		t.Fatal("missing cloud sync should not trigger default live refresh")
 	}
 	if err := db.RecordCloudSync(database, time.Now()); err != nil {
 		t.Fatalf("RecordCloudSync: %v", err)
 	}
 	if shouldRefreshInstanceLiveState(database, launch, false, false) {
-		t.Fatal("fresh daemon cloud sync should skip live refresh")
+		t.Fatal("fresh daemon cloud sync should still use cached default")
 	}
 	if !shouldRefreshInstanceLiveState(database, launch, true, false) {
 		t.Fatal("--sync should force live refresh")

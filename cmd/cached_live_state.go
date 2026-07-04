@@ -21,31 +21,7 @@ func liveSyncNeededForJobs(database *sql.DB, jobs []*db.Job, forceSync, noSync b
 	if noSync {
 		return false
 	}
-	if forceSync {
-		return true
-	}
-	if !daemonLiveFunc() {
-		return true
-	}
-	now := time.Now()
-	for _, job := range jobs {
-		if job == nil || db.IsTerminalStatus(job.Status) {
-			continue
-		}
-		if job.HasInventoryHost() && !syncTargetFresh(database, job.Host, now) {
-			return true
-		}
-		if job.UsesRentalPlacement() {
-			switch job.Status {
-			case db.StatusStarting, db.StatusRunning, db.StatusPaused:
-				return true
-			}
-			if !syncTargetFresh(database, db.CloudSyncTargetName, now) {
-				return true
-			}
-		}
-	}
-	return false
+	return forceSync
 }
 
 func syncTargetFresh(database *sql.DB, target string, now time.Time) bool {

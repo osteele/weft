@@ -129,6 +129,34 @@ func TestInstanceInfoStatusLabelOmitsProviderStateForTerminalLaunch(t *testing.T
 	}
 }
 
+func TestShouldRefreshInstanceLiveStateDefaultIsCached(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", ProviderInstanceID: "123"}
+	if shouldRefreshInstanceLiveState(nil, ci, false, false) {
+		t.Fatal("default instance status/info should use cached DB state")
+	}
+}
+
+func TestShouldRefreshInstanceLiveStateSyncIsExplicit(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", ProviderInstanceID: "123"}
+	if !shouldRefreshInstanceLiveState(nil, ci, true, false) {
+		t.Fatal("--sync should request live provider/R2 refresh")
+	}
+}
+
+func TestShouldRefreshInstanceLiveStateNoSyncWins(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", ProviderInstanceID: "123"}
+	if shouldRefreshInstanceLiveState(nil, ci, true, true) {
+		t.Fatal("--no-sync should suppress live provider/R2 refresh")
+	}
+}
+
+func TestShouldRefreshInstanceLiveStateTerminalIsCached(t *testing.T) {
+	ci := &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "123"}
+	if shouldRefreshInstanceLiveState(nil, ci, true, false) {
+		t.Fatal("terminal instance info should not live-refresh")
+	}
+}
+
 func TestFormatRentalLineShowsRescueCap(t *testing.T) {
 	bid := 47
 	cap := 57

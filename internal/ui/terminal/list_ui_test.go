@@ -444,6 +444,72 @@ func TestListTUIPruneAutoBlockReasonsDropsOpenMoveIntentUnplacedJob(t *testing.T
 	}
 }
 
+func TestListTUIReplaceAutoBlockOverlayDropsAbsentReasons(t *testing.T) {
+	m := listTUIModel{
+		autoBlockReasons: map[int64]string{
+			4059: "planner: offer fetch unavailable",
+			4060: "autopilot placing jobs",
+		},
+		autoBlockDetail: map[int64]*blockreason.Structured{
+			4059: {Summary: "planner: offer fetch unavailable"},
+		},
+	}
+
+	m.replaceAutoBlockOverlay(map[int64]string{
+		4060: "planner: no compatible offers",
+	}, nil)
+
+	if _, ok := m.autoBlockReasons[4059]; ok {
+		t.Fatalf("stale reason for wj4059 survived replacement: %v", m.autoBlockReasons)
+	}
+	if got := m.autoBlockReasons[4060]; got != "planner: no compatible offers" {
+		t.Fatalf("reason for wj4060 = %q", got)
+	}
+	if len(m.autoBlockDetail) != 0 {
+		t.Fatalf("autoBlockDetail = %#v, want cleared", m.autoBlockDetail)
+	}
+}
+
+func TestListTUIPendingPlacementIgnoresCompletedLocalPass(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	m := listTUIModel{
+		autoInProgress:    false,
+		autoPassStartedAt: now.Add(-5 * time.Second),
+	}
+
+	active, startedAt := m.pendingPlacementPassState(now)
+	if active || !startedAt.IsZero() {
+		t.Fatalf("pending pass state = %v/%v, want inactive after local pass completed", active, startedAt)
+	}
+}
+
+func TestListTUIPendingPlacementIgnoresStaleAutopilotPass(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	m := listTUIModel{
+		autopilotActive:        true,
+		autopilotPassStartedAt: now.Add(-orchestration.AutopilotPassStaleAfter - time.Second),
+	}
+
+	active, startedAt := m.pendingPlacementPassState(now)
+	if active || !startedAt.IsZero() {
+		t.Fatalf("pending pass state = %v/%v, want inactive for stale DB pass", active, startedAt)
+	}
+}
+
+func TestListTUIPendingPlacementUsesActiveLocalPass(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	startedAt := now.Add(-5 * time.Second)
+	m := listTUIModel{
+		autoInProgress:    true,
+		autoPassStartedAt: startedAt,
+	}
+
+	active, gotStartedAt := m.pendingPlacementPassState(now)
+	if !active || !gotStartedAt.Equal(startedAt) {
+		t.Fatalf("pending pass state = %v/%v, want active at %v", active, gotStartedAt, startedAt)
+	}
+}
+
 func TestListTUIPruneAutoBlockReasonsKeepsCloudAssignedQueued(t *testing.T) {
 	launchID := int64(42)
 	m := listTUIModel{
@@ -2159,44 +2225,41 @@ func TestListTUIRunawayResetClearsCachedBlockedRows(t *testing.T) {
 	}
 }
 
-func TestListTUIAutoPilotFailureRebuildsGroupedRowsWithBlockReasons(t *testing.T) {
+func TestListTUIAutoPilotFailureClearsStaleBlockReasons(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 10, Description: "test job", Tags: []string{"rental"}, Status: db.StatusQueued},
 	}
 	m := listTUIModel{
-		groupedByStatus: true,
-		autoInProgress:  true,
-		database:        &sql.DB{},
-		jobs:            jobs,
-		width:           120,
-		height:          40,
+		groupedByStatus:     true,
+		autoInProgress:      true,
+		database:            &sql.DB{},
+		jobs:                jobs,
+		width:               120,
+		height:              40,
+		autoBlockReasons:    map[int64]string{10: "stale provider block"},
+		autoPersistentError: "",
 	}
 	m.rebuildGroupedRows()
 
-	// Simulate auto-pilot error with partial block reasons.
-	reasons := map[int64]string{10: "no cloud providers available"}
+	// A failed pass is not an authoritative placement result. It should report
+	// the pass error without preserving stale per-job blockers or applying
+	// partial blockers from the failed result.
 	next, _ := m.Update(listAutoPilotDoneMsg{
 		err:            errors.New("no cloud providers available"),
-		blockedReasons: reasons,
+		blockedReasons: map[int64]string{10: "partial failure detail"},
 	})
 	got := next.(listTUIModel)
 
-	if got.autoBlockReasons == nil {
-		t.Fatal("autoBlockReasons should be set even on error")
+	if len(got.autoBlockReasons) != 0 {
+		t.Fatalf("autoBlockReasons = %v, want cleared on pass error", got.autoBlockReasons)
 	}
-	if got.autoBlockReasons[10] != "no cloud providers available" {
-		t.Fatalf("autoBlockReasons[10] = %q, want block reason", got.autoBlockReasons[10])
+	if got.autoPersistentError == "" {
+		t.Fatal("autoPersistentError should report the pass failure")
 	}
-	// Grouped rows should have been rebuilt to include the block reason.
-	found := false
 	for _, row := range got.groupedRows {
 		if strings.Contains(row.text, "blocked:") {
-			found = true
-			break
+			t.Fatalf("stale blocked row survived pass error:\n%s", row.text)
 		}
-	}
-	if !found {
-		t.Fatal("expected grouped rows to contain a blocked reason row after auto-pilot error")
 	}
 }
 

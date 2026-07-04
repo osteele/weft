@@ -926,16 +926,7 @@ func shouldRefreshInstanceLiveState(database *sql.DB, ci *db.Launch, forceLive, 
 	if ci == nil || campaign.IsInstanceTerminal(ci.Status) || noLive {
 		return false
 	}
-	if ci.TerminationIntent != nil {
-		return true
-	}
-	if forceLive {
-		return true
-	}
-	if !daemonLiveFunc() {
-		return true
-	}
-	return !syncTargetFresh(database, db.CloudSyncTargetName, time.Now())
+	return forceLive
 }
 
 func printInventoryTargetStatus(database *sql.DB, host string) (bool, error) {
