@@ -300,6 +300,12 @@ func AllowCompletedMarkerFallback(currentStatus string, launchID sql.NullInt64, 
 	if db.IsTerminalStatus(currentStatus) && needsBackfill {
 		return true
 	}
+	if launchID.Valid {
+		switch currentStatus {
+		case db.StatusStarting, db.StatusRunning, db.StatusPaused:
+			return true
+		}
+	}
 	return false
 }
 
@@ -404,6 +410,74 @@ func syncCurrentCloudJobResults(ctx context.Context, database *sql.DB, r2Client 
 	}
 	wg.Wait()
 	return updated, updatedInstanceIDs
+}
+
+// SyncTargetedCloudJobResults checks R2 completion markers for a small set of
+// user-requested jobs. It intentionally does not contact cloud providers or
+// acquire the global cloud reconcile lease; display commands use it to ingest
+// already-uploaded completions even while a broader cloud sync is busy.
+func SyncTargetedCloudJobResults(parent context.Context, cfg *config.Config, database *sql.DB, jobIDs []int64, verbose bool) int {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if cfg == nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
+		return 0
+	}
+	r2Client, err := r2.New(R2Config(cfg))
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: R2 client: %v\n", err)
+		}
+		return 0
+	}
+	return SyncTargetedCloudJobResultsWithClient(parent, database, r2Client, jobIDs, verbose)
+}
+
+// SyncTargetedCloudJobResultsWithClient is the testable core of
+// SyncTargetedCloudJobResults.
+func SyncTargetedCloudJobResultsWithClient(ctx context.Context, database *sql.DB, r2Client *r2.Client, jobIDs []int64, verbose bool) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if database == nil || r2Client == nil || len(jobIDs) == 0 {
+		return 0
+	}
+	seen := make(map[int64]struct{}, len(jobIDs))
+	updated := 0
+	updatedInstanceIDs := make(map[int64]struct{})
+	for _, jobID := range jobIDs {
+		if jobID <= 0 {
+			continue
+		}
+		if _, ok := seen[jobID]; ok {
+			continue
+		}
+		seen[jobID] = struct{}{}
+		if ctx.Err() != nil {
+			break
+		}
+		markers, err := r2Client.ListJobMarkers(ctx, r2keys.JobPrefix(jobID)+"/")
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: cloud job %s marker scan failed: %v\n", ids.FormatJobID(jobID), err)
+			}
+			continue
+		}
+		if !markers.HasUnprocessedComplete(jobID) {
+			continue
+		}
+		result := syncOneCompletedJobMarker(ctx, database, r2Client, markers, jobID, strconv.FormatInt(jobID, 10), verbose)
+		if result.completed {
+			updated++
+			if result.updatedInstanceID > 0 {
+				updatedInstanceIDs[result.updatedInstanceID] = struct{}{}
+			}
+		}
+	}
+	for instanceID := range updatedInstanceIDs {
+		updateInstanceTerminationReason(database, instanceID)
+	}
+	return updated
 }
 
 func listCloudAttemptSyncCandidates(database *sql.DB) ([]cloudAttemptSyncCandidate, error) {

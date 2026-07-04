@@ -253,6 +253,43 @@ func TestSyncJobCompletionsFromR2_BackfillsTerminalLaunchAttempt(t *testing.T) {
 	}
 }
 
+func TestNonTerminalCompletionFallbackAllowedUsesLivePhase(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	const jobID = int64(1881)
+	if nonTerminalCompletionFallbackAllowed(database, db.StatusRunning, sql.NullInt64{Int64: launchID, Valid: true}, jobID) {
+		t.Fatal("fallback without live phase = true, want false")
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:      launchID,
+		InstancePhase: "running:1881",
+		UpdatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState running same job: %v", err)
+	}
+	if nonTerminalCompletionFallbackAllowed(database, db.StatusRunning, sql.NullInt64{Int64: launchID, Valid: true}, jobID) {
+		t.Fatal("fallback should be false while live phase is running the same job")
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID:      launchID,
+		InstancePhase: "running:1884",
+		UpdatedAt:     time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("UpsertLaunchLiveState running other job: %v", err)
+	}
+	if !nonTerminalCompletionFallbackAllowed(database, db.StatusRunning, sql.NullInt64{Int64: launchID, Valid: true}, jobID) {
+		t.Fatal("fallback should be true when live phase is running a different job")
+	}
+	if nonTerminalCompletionFallbackAllowed(database, db.StatusQueued, sql.NullInt64{Int64: launchID, Valid: true}, jobID) {
+		t.Fatal("queued job fallback = true, want false")
+	}
+}
+
 type fakeMarkerWriter struct {
 	keys []string
 }

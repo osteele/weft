@@ -47,13 +47,14 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	// Look up current status and run ID
 	var currentStatus string
 	var latestRunID sql.NullInt64
+	var launchID sql.NullInt64
 	if err := database.QueryRow(
-		"SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0",
+		"SELECT status, latest_run_id, launch_id FROM job_status WHERE id = ? AND tombstoned = 0",
 		jobID,
-	).Scan(&currentStatus, &latestRunID); err != nil {
+	).Scan(&currentStatus, &latestRunID, &launchID); err != nil {
 		return false
 	}
-	terminalBackfill := false
+	allowAnyRunFallback := false
 	if db.IsTerminalStatus(currentStatus) {
 		needsBackfill, err := db.NeedsCloudCompletionBackfill(database, jobID)
 		if err != nil {
@@ -66,16 +67,18 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 				"component", "reconcile", "job_id", jobID, "reason", "terminal_complete_skip")
 			return false
 		}
-		terminalBackfill = true
+		allowAnyRunFallback = true
 		slog.Debug("attempting completion backfill for terminal job",
 			"component", "reconcile", "job_id", jobID, "reason", "terminal_incomplete_backfill")
+	} else if nonTerminalCompletionFallbackAllowed(database, currentStatus, launchID, jobID) {
+		allowAnyRunFallback = true
 	}
 
 	runID := int64(0)
 	if latestRunID.Valid {
 		runID = latestRunID.Int64
 	}
-	return checkAndSyncJobCompleteRun(ctx, r2c, database, jobID, runID, terminalBackfill)
+	return checkAndSyncJobCompleteRun(ctx, r2c, database, jobID, runID, allowAnyRunFallback)
 }
 
 func CheckAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID, runID int64) bool {
@@ -106,6 +109,26 @@ func MarkRejectedCompletionProcessed(ctx context.Context, w ProcessedMarkerWrite
 	}
 	_ = w.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 	return true
+}
+
+func nonTerminalCompletionFallbackAllowed(database *sql.DB, currentStatus string, launchID sql.NullInt64, jobID int64) bool {
+	if !launchID.Valid {
+		return false
+	}
+	switch currentStatus {
+	case db.StatusStarting, db.StatusRunning, db.StatusPaused:
+	default:
+		return false
+	}
+	var phase string
+	if err := database.QueryRow(
+		`SELECT instance_phase FROM launch_live_state WHERE launch_id = ?`,
+		launchID.Int64,
+	).Scan(&phase); err != nil {
+		return false
+	}
+	verb, phaseJobID, ok := ParsePhaseJobID(phase)
+	return !(ok && verb == PhaseRunning && phaseJobID == jobID)
 }
 
 func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID, runID int64, allowAnyRunFallback bool) bool {

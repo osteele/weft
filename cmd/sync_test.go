@@ -129,6 +129,63 @@ func TestTargetedSyncJobsPendingUsesReconcile(t *testing.T) {
 	}
 }
 
+func TestTargetedSyncJobsRunsTargetedCloudCompletionBeforeRentalSync(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "rental", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	origTargeted := syncTargetedCloudCompletionsFunc
+	origRental := syncRentalJobsStatusFunc
+	t.Cleanup(func() {
+		syncTargetedCloudCompletionsFunc = origTargeted
+		syncRentalJobsStatusFunc = origRental
+	})
+
+	var events []string
+	syncTargetedCloudCompletionsFunc = func(_ *sql.DB, ids []int64, timeout time.Duration) int {
+		events = append(events, "targeted")
+		if timeout != 7*time.Second {
+			t.Fatalf("targeted timeout = %v, want 7s", timeout)
+		}
+		if len(ids) != 1 || ids[0] != jobID {
+			t.Fatalf("targeted ids = %v, want [%d]", ids, jobID)
+		}
+		return 1
+	}
+	syncRentalJobsStatusFunc = func(_ *sql.DB, timeout time.Duration) bool {
+		events = append(events, "rental")
+		if timeout != 7*time.Second {
+			t.Fatalf("rental timeout = %v, want 7s", timeout)
+		}
+		return true
+	}
+
+	outcome := targetedSyncJobs(database, []*db.Job{job}, 5*time.Second, time.Second, 7*time.Second)
+
+	if !outcome.completed() {
+		t.Fatalf("outcome = %+v, want completed", outcome)
+	}
+	if strings.Join(events, ",") != "targeted,rental" {
+		t.Fatalf("events = %v, want targeted before rental", events)
+	}
+}
+
 func TestTargetedStaleDataNoteDistinguishesDeadlineAndError(t *testing.T) {
 	database := db.SetupTestDB(t)
 	now := time.Now()
@@ -584,8 +641,14 @@ func TestAllowCompletedMarkerFallback_AllowsTerminalBackfill(t *testing.T) {
 	if allowCompletedMarkerFallback(db.StatusCompleted, launchID, false) {
 		t.Fatal("allowCompletedMarkerFallback(completed, launched, needsBackfill=false) = true, want false")
 	}
-	if allowCompletedMarkerFallback(db.StatusRunning, launchID, true) {
-		t.Fatal("allowCompletedMarkerFallback(running, launched, true) = true, want false (non-terminal)")
+	if !allowCompletedMarkerFallback(db.StatusRunning, launchID, false) {
+		t.Fatal("allowCompletedMarkerFallback(running, launched, false) = false, want true for guarded non-terminal cloud fallback")
+	}
+	if !allowCompletedMarkerFallback(db.StatusStarting, launchID, false) {
+		t.Fatal("allowCompletedMarkerFallback(starting, launched, false) = false, want true for guarded non-terminal cloud fallback")
+	}
+	if allowCompletedMarkerFallback(db.StatusQueued, launchID, false) {
+		t.Fatal("allowCompletedMarkerFallback(queued, launched, false) = true, want false for relaunched queued job")
 	}
 }
 

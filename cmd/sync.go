@@ -473,6 +473,8 @@ func backfillHFDownloadObservations(database *sql.DB) {
 	syncorch.BackfillHFDownloadObservations(database)
 }
 
+var syncTargetedCloudCompletionsFunc = syncTargetedCloudCompletions
+
 func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database *sql.DB, instanceIDs map[int64]struct{}, verbose bool) error {
 	return syncorch.SyncCloudInstanceOpslogs(ctx, r2Client, database, instanceIDs, verbose)
 }
@@ -534,6 +536,7 @@ func targetedSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout,
 		hostTimeout = FastSyncHostTimeout
 	}
 	needsRentalSync := false
+	var rentalJobIDs []int64
 
 	for _, job := range jobs {
 		if job == nil || status.IsTerminal(job.Status) {
@@ -541,6 +544,7 @@ func targetedSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout,
 		}
 		if job.IsRentalJob() {
 			needsRentalSync = true
+			rentalJobIDs = append(rentalJobIDs, job.ID)
 			continue
 		}
 		if !job.HasInventoryHost() {
@@ -575,11 +579,29 @@ func targetedSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout,
 	}
 
 	if needsRentalSync {
+		syncTargetedCloudCompletionsFunc(database, rentalJobIDs, cloudTimeout)
 		if syncRentalJobsStatusFunc(database, cloudTimeout) {
 			outcome.refreshed++
 		}
 	}
 	return outcome
+}
+
+func syncTargetedCloudCompletions(database *sql.DB, jobIDs []int64, timeout time.Duration) int {
+	if len(jobIDs) == 0 {
+		return 0
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return 0
+	}
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	return syncorch.SyncTargetedCloudJobResults(ctx, cfg, database, jobIDs, false)
 }
 
 func summarizeSyncError(err error) string {
