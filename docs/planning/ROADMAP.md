@@ -89,6 +89,24 @@ A long-lived predictor daemon would eliminate the cold-start entirely:
 This would take submission latency from seconds to milliseconds on the predictor
 path, at the cost of managing another long-lived process.
 
+## Daemon write serialization
+
+The daemon API now accepts typed local mutation requests so commands such as
+`weft run`, `weft mark-processed`, and `weft tag` can route quick DB writes
+through the running daemon with direct-DB fallback when no daemon is available.
+This centralizes CLI write entrypoints, but daemon-internal background work
+still writes through the shared `*sql.DB` directly.
+
+Next step: add a daemon-wide write executor and route autopilot/sync/reconcile
+DB mutations through it, so socket mutations and background passes share one
+in-process writer queue. Keep operation boundaries typed: simple metadata
+changes can remain small mutations, while controls such as restart, replan,
+kill, draft, and queue reordering need orchestration-level mutations that
+include their remote queue/R2/SSH side effects.
+
+This should reduce local SQLite writer contention without requiring every
+CLI command to grow its own daemon fallback path.
+
 ## On-Prem Derived Status Model
 
 Extend the derived-status approach used by cloud jobs to on-prem jobs so status

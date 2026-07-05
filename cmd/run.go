@@ -19,11 +19,10 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
-	"github.com/osteele/weft/internal/daemonapi"
-	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -456,31 +455,10 @@ func init() {
 	addJobAddFlagAliases(runCmd)
 }
 
-var submitQueuedJobViaDaemonFunc = submitQueuedJobViaDaemon
+var recordQueuedJobMutationFunc = localmutate.RecordQueuedJob
 
 func recordQueuedJobSingleWriter(database *sql.DB, params ops.QueueJobParams) (int64, error) {
-	if jobID, used, err := submitQueuedJobViaDaemonFunc(params); used {
-		return jobID, err
-	}
-	return ops.RecordQueuedJob(database, params)
-}
-
-func submitQueuedJobViaDaemon(params ops.QueueJobParams) (int64, bool, error) {
-	paths := daemoncontrol.DefaultPaths()
-	status, err := daemoncontrol.CurrentStatus(paths)
-	if err != nil || !status.Live {
-		return 0, false, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	jobID, err := daemonapi.DialSubmitJob(ctx, paths.SocketFile, params)
-	if err == nil {
-		return jobID, true, nil
-	}
-	if strings.Contains(err.Error(), "unsupported request type") {
-		return 0, false, nil
-	}
-	return 0, true, err
+	return recordQueuedJobMutationFunc(context.Background(), database, params)
 }
 
 func parseRunJobIDFlags() error {

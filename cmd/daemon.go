@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/daemonapi"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
@@ -146,6 +147,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	watchServer, err := daemonapi.StartServerWithOptions(ctx, database, paths.SocketFile, daemonapi.ServerOptions{
 		Info:     daemonInfo(pid, Version),
 		Shutdown: stop,
+		Mutate:   localmutate.Handler,
 	})
 	if err != nil {
 		return fmt.Errorf("start daemon watch socket: %w", err)

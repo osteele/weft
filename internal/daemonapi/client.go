@@ -146,6 +146,37 @@ func DialSubmitJob(ctx context.Context, socketPath string, params ops.QueueJobPa
 	return event.SubmittedJob.JobID, nil
 }
 
+func DialMutation(ctx context.Context, socketPath, op string, payload any, result any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode mutation %s: %w", op, err)
+	}
+	event, err := roundTrip(ctx, socketPath, Request{
+		Type:      RequestMutate,
+		ClientPID: os.Getpid(),
+		Mutation: &MutationRequest{
+			Op:      op,
+			Payload: data,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if event.Type == EventError {
+		return fmt.Errorf("mutation %s: %s", op, event.Error)
+	}
+	if event.Type != EventMutationResult || event.Mutation == nil {
+		return fmt.Errorf("mutation %s: unexpected response %q", op, event.Type)
+	}
+	if result == nil || len(event.Mutation.Payload) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(event.Mutation.Payload, result); err != nil {
+		return fmt.Errorf("decode mutation %s result: %w", op, err)
+	}
+	return nil
+}
+
 func roundTrip(ctx context.Context, socketPath string, req Request) (Event, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)

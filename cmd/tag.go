@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
@@ -65,6 +68,8 @@ func init() {
 	tagCmd.AddCommand(tagRemoveCmd)
 }
 
+var setJobTagMutationFunc = localmutate.SetJobTag
+
 func runTagAdd(cmd *cobra.Command, args []string) error {
 	jobIDs, err := ParseJobIDsForJobCommand(args[:len(args)-1])
 	if err != nil {
@@ -81,7 +86,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		if err := db.AddJobTag(database, jobID, tag); err != nil {
+		if err := setJobTagSingleWriter(database, jobID, tag, true); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
@@ -123,7 +128,7 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		if err := db.RemoveJobTag(database, jobID, tag); err != nil {
+		if err := setJobTagSingleWriter(database, jobID, tag, false); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
@@ -134,4 +139,8 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
+}
+
+func setJobTagSingleWriter(database *sql.DB, jobID int64, tag string, present bool) error {
+	return setJobTagMutationFunc(context.Background(), database, jobID, tag, present)
 }

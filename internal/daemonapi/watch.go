@@ -24,12 +24,14 @@ const (
 	RequestDaemonInfo = "daemon_info"
 	RequestShutdown   = "shutdown"
 	RequestSubmitJob  = "submit_job"
+	RequestMutate     = "mutate"
 
 	EventSnapshot             = "snapshot"
 	EventDone                 = "done"
 	EventError                = "error"
 	EventDaemonInfo           = "daemon_info"
 	EventJobSubmitted         = "job_submitted"
+	EventMutationResult       = "mutation_result"
 	EventSubscriptionReady    = "subscription_ready"
 	EventSubscriptionSnapshot = "subscription_snapshot"
 
@@ -46,10 +48,16 @@ type Request struct {
 	Command        string               `json:"command,omitempty"`
 	Subscribe      *SubscriptionRequest `json:"subscribe,omitempty"`
 	SubmitJob      *SubmitJobRequest    `json:"submit_job,omitempty"`
+	Mutation       *MutationRequest     `json:"mutation,omitempty"`
 }
 
 type SubmitJobRequest struct {
 	Params ops.QueueJobParams `json:"params"`
+}
+
+type MutationRequest struct {
+	Op      string          `json:"op"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type SubscriptionRequest struct {
@@ -82,11 +90,16 @@ type Event struct {
 	Activity       *ActivityPayload           `json:"activity,omitempty"`
 	Daemon         *DaemonInfo                `json:"daemon,omitempty"`
 	SubmittedJob   *SubmitJobResult           `json:"submitted_job,omitempty"`
+	Mutation       *MutationResult            `json:"mutation,omitempty"`
 	Error          string                     `json:"error,omitempty"`
 }
 
 type SubmitJobResult struct {
 	JobID int64 `json:"job_id"`
+}
+
+type MutationResult struct {
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 type ActivityPayload struct {
@@ -106,6 +119,7 @@ type Server struct {
 	writeMu    sync.Mutex
 	info       DaemonInfo
 	shutdown   func()
+	mutate     MutationHandler
 }
 
 type DaemonInfo struct {
@@ -119,7 +133,10 @@ type DaemonInfo struct {
 type ServerOptions struct {
 	Info     DaemonInfo
 	Shutdown func()
+	Mutate   MutationHandler
 }
+
+type MutationHandler func(context.Context, *sql.DB, MutationRequest) (json.RawMessage, error)
 
 func StartServer(ctx context.Context, database *sql.DB, socketPath string) (*Server, error) {
 	return StartServerWithOptions(ctx, database, socketPath, ServerOptions{})
@@ -146,6 +163,7 @@ func StartServerWithOptions(ctx context.Context, database *sql.DB, socketPath st
 		socketPath: socketPath,
 		info:       opts.Info,
 		shutdown:   opts.Shutdown,
+		mutate:     opts.Mutate,
 	}
 	go s.acceptLoop(ctx, database)
 	go func() {
@@ -217,6 +235,8 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 		}
 	case RequestSubmitJob:
 		s.submitJob(ctx, database, encoder, req)
+	case RequestMutate:
+		s.mutateRequest(ctx, database, encoder, req)
 	case RequestSubscribe:
 		subscribe(ctx, database, encoder, req)
 	case RequestWatchJobs:
@@ -224,6 +244,32 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	default:
 		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("unsupported request type %q", req.Type)})
 	}
+}
+
+func (s *Server) mutateRequest(ctx context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
+	if req.Mutation == nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: "mutate requires payload"})
+		return
+	}
+	if req.Mutation.Op == "" {
+		_ = encoder.Encode(Event{Type: EventError, Error: "mutate requires op"})
+		return
+	}
+	if s.mutate == nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: "mutation API unavailable"})
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	payload, err := s.mutate(ctx, database, *req.Mutation)
+	if err != nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
+		return
+	}
+	_ = encoder.Encode(Event{
+		Type:     EventMutationResult,
+		Mutation: &MutationResult{Payload: payload},
+	})
 }
 
 func (s *Server) submitJob(_ context.Context, database *sql.DB, encoder *json.Encoder, req Request) {

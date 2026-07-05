@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/localmutate"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +41,8 @@ func runMarkUnprocessed(_ *cobra.Command, args []string) error {
 	return setProcessedTag(args, false)
 }
 
+var setProcessedTagMutationFunc = localmutate.SetProcessedTag
+
 func setProcessedTag(args []string, processed bool) error {
 	jobIDs, err := ParseJobIDsForJobCommand(args)
 	if err != nil {
@@ -50,16 +55,14 @@ func setProcessedTag(args []string, processed bool) error {
 	}
 	defer database.Close()
 
-	tagFn := db.AddJobTag
 	verb := "processed"
 	if !processed {
-		tagFn = db.RemoveJobTag
 		verb = "unprocessed"
 	}
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		if err := tagFn(database, jobID, db.ProcessedTag); err != nil {
+		if err := setProcessedTagSingleWriter(database, jobID, processed); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
 		}
@@ -70,4 +73,8 @@ func setProcessedTag(args []string, processed bool) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
+}
+
+func setProcessedTagSingleWriter(database *sql.DB, jobID int64, processed bool) error {
+	return setProcessedTagMutationFunc(context.Background(), database, jobID, processed)
 }

@@ -25,13 +25,13 @@ import (
 func TestRecordQueuedJobSingleWriterUsesDaemonWhenAvailable(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	orig := submitQueuedJobViaDaemonFunc
-	t.Cleanup(func() { submitQueuedJobViaDaemonFunc = orig })
-	submitQueuedJobViaDaemonFunc = func(params ops.QueueJobParams) (int64, bool, error) {
+	orig := recordQueuedJobMutationFunc
+	t.Cleanup(func() { recordQueuedJobMutationFunc = orig })
+	recordQueuedJobMutationFunc = func(_ context.Context, _ *sql.DB, params ops.QueueJobParams) (int64, error) {
 		if params.Command != "echo daemon" {
 			t.Fatalf("daemon params command = %q", params.Command)
 		}
-		return 4242, true, nil
+		return 4242, nil
 	}
 
 	jobID, err := recordQueuedJobSingleWriter(database, ops.QueueJobParams{
@@ -49,10 +49,10 @@ func TestRecordQueuedJobSingleWriterUsesDaemonWhenAvailable(t *testing.T) {
 func TestRecordQueuedJobSingleWriterFallsBackWithoutDaemon(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	orig := submitQueuedJobViaDaemonFunc
-	t.Cleanup(func() { submitQueuedJobViaDaemonFunc = orig })
-	submitQueuedJobViaDaemonFunc = func(ops.QueueJobParams) (int64, bool, error) {
-		return 0, false, nil
+	orig := recordQueuedJobMutationFunc
+	t.Cleanup(func() { recordQueuedJobMutationFunc = orig })
+	recordQueuedJobMutationFunc = func(_ context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+		return ops.RecordQueuedJob(database, params)
 	}
 
 	jobID, err := recordQueuedJobSingleWriter(database, ops.QueueJobParams{
