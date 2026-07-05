@@ -40,7 +40,7 @@ func Handler(ctx context.Context, database *sql.DB, req daemonapi.MutationReques
 		if err := json.Unmarshal(req.Payload, &params); err != nil {
 			return nil, fmt.Errorf("decode %s payload: %w", req.Op, err)
 		}
-		jobID, err := ops.RecordQueuedJob(database, params)
+		jobID, err := ops.RecordQueuedJobContext(ctx, database, params)
 		if err != nil {
 			return nil, err
 		}
@@ -63,12 +63,25 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 	var result daemonapi.SubmitJobResult
 	used, err := tryDaemonMutation(ctx, OpSubmitJob, params, &result)
 	if used {
+		if err != nil {
+			if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
+				return jobID, nil
+			}
+		}
 		return result.JobID, err
 	}
 	if jobID, used, err := tryLegacyDaemonSubmit(ctx, params); used {
 		return jobID, err
 	}
 	return ops.RecordQueuedJob(database, params)
+}
+
+func findSubmittedJobByToken(database *sql.DB, token string) (int64, bool) {
+	jobID, ok, err := db.FindJobIDBySubmitToken(database, token)
+	if err != nil {
+		return 0, false
+	}
+	return jobID, ok
 }
 
 func SetProcessedTag(ctx context.Context, database *sql.DB, jobID int64, processed bool) error {

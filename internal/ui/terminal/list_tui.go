@@ -177,6 +177,12 @@ type groupedViewLayout struct {
 	vastCreditWarningActionable bool
 }
 
+type groupedSelectionKey struct {
+	kind string
+	id   int64
+	name string
+}
+
 var listRestartDaemonFunc = restartDaemonForListTUI
 var listOpenURLFunc = openURLForListTUI
 
@@ -1885,6 +1891,31 @@ func (m listTUIModel) selectedGroupedRow() int {
 	return m.groupedSelectableRows[m.cursor]
 }
 
+func (m listTUIModel) selectedGroupedSelectionKey() groupedSelectionKey {
+	rowIdx := m.selectedGroupedRow()
+	if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+		return groupedSelectionKey{}
+	}
+	return groupedRowSelectionKey(m.groupedRows[rowIdx])
+}
+
+func groupedRowSelectionKey(row groupedStatusRow) groupedSelectionKey {
+	if row.job != nil {
+		return groupedSelectionKey{kind: "job", id: row.job.ID}
+	}
+	if row.launch != nil {
+		return groupedSelectionKey{kind: "launch", id: row.launch.ID}
+	}
+	if row.expandToggle != "" {
+		return groupedSelectionKey{kind: "expand", name: row.expandToggle}
+	}
+	return groupedSelectionKey{}
+}
+
+func (k groupedSelectionKey) empty() bool {
+	return k.kind == "" && k.id == 0 && k.name == ""
+}
+
 // currentSelectedJob returns the job under the cursor in either grouped or
 // ungrouped view, or nil if no row is selected.
 func (m listTUIModel) currentSelectedJob() *db.Job {
@@ -2902,6 +2933,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		m.groupedSelectableRows = nil
 		return
 	}
+	selected := m.selectedGroupedSelectionKey()
 	if m.isStatusGroupedView() {
 		groupedJobs := m.groupedJobsWithAutoReasons()
 		autopilotActive, autopilotPassStartedAt := m.pendingPlacementPassState(time.Now())
@@ -2940,7 +2972,24 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
 		}
 	}
+	if !selected.empty() && m.restoreGroupedSelection(selected) {
+		return
+	}
 	m.clampGroupedCursor()
+}
+
+func (m *listTUIModel) restoreGroupedSelection(selected groupedSelectionKey) bool {
+	for cursorIdx, rowIdx := range m.groupedSelectableRows {
+		if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		if groupedRowSelectionKey(m.groupedRows[rowIdx]) == selected {
+			m.cursor = cursorIdx
+			m.clampGroupedCursor()
+			return true
+		}
+	}
+	return false
 }
 
 func (m listTUIModel) hasActiveLaunchingSpinner() bool {

@@ -26,6 +26,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1463,7 +1464,7 @@ func decodeCLIResourceOverrides(value sql.NullString) *CLIResourceOverrides {
 
 // SetJobCLIResourceOverrides updates the stored CLI-submission overrides.
 // nil or a struct with no fields set clears the column.
-func SetJobCLIResourceOverrides(db *sql.DB, jobID int64, snap *CLIResourceOverrides) error {
+func SetJobCLIResourceOverrides(db dbExecer, jobID int64, snap *CLIResourceOverrides) error {
 	var value interface{}
 	if snap != nil && !snap.IsEmpty() {
 		data, err := json.Marshal(snap)
@@ -2201,13 +2202,40 @@ func SetJobGPUMemMaxGB(db dbExecer, jobID int64, gpuMemMaxGB *int) error {
 // SetJobMaxComputeCap stores the resolved CUDA compute-capability cap. The
 // empty string clears the column (NULL = unresolved); "any" marks the job as
 // explicitly unbounded; numeric strings ("9.0", "12.0") record the cap.
-func SetJobMaxComputeCap(db *sql.DB, jobID int64, cap string) error {
+func SetJobMaxComputeCap(db dbExecer, jobID int64, cap string) error {
 	var v interface{}
 	if cap != "" {
 		v = cap
 	}
 	_, err := db.Exec(`UPDATE jobs SET max_compute_cap = ? WHERE id = ?`, v, jobID)
 	return err
+}
+
+// SetJobSubmitToken stores the client-generated submit idempotency token.
+func SetJobSubmitToken(db dbExecer, jobID int64, token string) error {
+	var v interface{}
+	if strings.TrimSpace(token) != "" {
+		v = strings.TrimSpace(token)
+	}
+	_, err := db.Exec(`UPDATE jobs SET submit_token = ? WHERE id = ?`, v, jobID)
+	return err
+}
+
+// FindJobIDBySubmitToken returns the job created for a submit token, if any.
+func FindJobIDBySubmitToken(db dbExecer, token string) (int64, bool, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return 0, false, nil
+	}
+	var jobID int64
+	err := db.QueryRow(`SELECT id FROM jobs WHERE submit_token = ? LIMIT 1`, token).Scan(&jobID)
+	if err == nil {
+		return jobID, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return 0, false, err
 }
 
 // SetJobEnvVars updates the stored environment variables for a job.

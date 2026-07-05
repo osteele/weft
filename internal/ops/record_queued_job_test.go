@@ -73,6 +73,75 @@ func TestRecordQueuedJob_PersistsBestEffortInputs(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJob_PersistsSubmitMetadataAtomically(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	gpuMem := 24
+	overrides := &db.CLIResourceOverrides{
+		GPUClass: "ampere+",
+		GPUMemGB: &gpuMem,
+	}
+	jobID, err := RecordQueuedJob(database, QueueJobParams{
+		WorkingDir:    "/tmp/project",
+		Command:       "python train.py",
+		Description:   "metadata-rich submit",
+		CLIOverrides:  overrides,
+		MaxComputeCap: "12.0",
+		SubmitToken:   "submit-token-1",
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CLIResourceOverrides == nil || job.CLIResourceOverrides.GPUClass != "ampere+" {
+		t.Fatalf("CLI overrides = %#v, want gpu class", job.CLIResourceOverrides)
+	}
+	if job.MaxComputeCap != "12.0" {
+		t.Fatalf("MaxComputeCap = %q, want 12.0", job.MaxComputeCap)
+	}
+	gotID, ok, err := db.FindJobIDBySubmitToken(database, "submit-token-1")
+	if err != nil {
+		t.Fatalf("FindJobIDBySubmitToken: %v", err)
+	}
+	if !ok || gotID != jobID {
+		t.Fatalf("submit token lookup = %d,%v; want %d,true", gotID, ok, jobID)
+	}
+}
+
+func TestRecordQueuedJob_SubmitTokenReturnsExistingJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	params := QueueJobParams{
+		WorkingDir:  "/tmp/project",
+		Command:     "python first.py",
+		Description: "first",
+		SubmitToken: "submit-token-2",
+	}
+	firstID, err := RecordQueuedJob(database, params)
+	if err != nil {
+		t.Fatalf("first RecordQueuedJob: %v", err)
+	}
+	params.Command = "python duplicate.py"
+	secondID, err := RecordQueuedJob(database, params)
+	if err != nil {
+		t.Fatalf("second RecordQueuedJob: %v", err)
+	}
+	if secondID != firstID {
+		t.Fatalf("duplicate submit token returned job %d, want %d", secondID, firstID)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM jobs WHERE submit_token = ?`, params.SubmitToken).Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("jobs with submit token = %d, want 1", count)
+	}
+}
+
 func TestRecordQueuedJob_RollsBackPartialRecordOnLateError(t *testing.T) {
 	database := db.SetupTestDB(t)
 

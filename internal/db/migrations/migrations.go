@@ -109,11 +109,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddCheckpointAssetMetadataColumns},
 		&goose.GoFunc{RunDB: dropAddCheckpointAssetMetadataColumns},
 	)
+	addJobSubmitToken := goose.NewGoMigration(
+		30,
+		&goose.GoFunc{RunDB: applyAddJobSubmitToken},
+		&goose.GoFunc{RunDB: dropAddJobSubmitToken},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -276,6 +281,28 @@ func dropAddCheckpointAssetMetadataColumns(ctx context.Context, db *sql.DB) erro
 	_, _ = db.ExecContext(ctx, `ALTER TABLE named_assets DROP COLUMN content_type`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE host_data DROP COLUMN content_type`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE host_data DROP COLUMN content_hash`)
+	return nil
+}
+
+func applyAddJobSubmitToken(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "jobs", "submit_token")
+	if err != nil {
+		return fmt.Errorf("inspect jobs.submit_token: %w", err)
+	}
+	if !exists {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN submit_token TEXT`); err != nil {
+			return fmt.Errorf("add jobs.submit_token: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_submit_token ON jobs(submit_token) WHERE submit_token IS NOT NULL AND submit_token != ''`); err != nil {
+		return fmt.Errorf("create jobs submit_token index: %w", err)
+	}
+	return nil
+}
+
+func dropAddJobSubmitToken(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_jobs_submit_token`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN submit_token`)
 	return nil
 }
 
@@ -764,7 +791,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

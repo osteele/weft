@@ -2474,6 +2474,34 @@ func TestListTUIGroupedSelectionSkipsHeaders(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedRebuildPreservesSelectedJob(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Description: "queued 1"},
+			{ID: 102, Status: db.StatusQueued, Description: "queued 2"},
+		},
+	}
+	m.rebuildGroupedRows()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(listTUIModel)
+	if job := m.selectedGroupedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("selected job before rebuild = %+v, want ID 102", job)
+	}
+
+	m.jobs = []*db.Job{
+		{ID: 100, Status: db.StatusRunning, Description: "new running row"},
+		{ID: 101, Status: db.StatusQueued, Description: "queued 1"},
+		{ID: 102, Status: db.StatusQueued, Description: "queued 2"},
+	}
+	m.rebuildGroupedRows()
+	if job := m.selectedGroupedJob(); job == nil || job.ID != 102 {
+		t.Fatalf("selected job after rebuild = %+v, want ID 102", job)
+	}
+}
+
 func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,

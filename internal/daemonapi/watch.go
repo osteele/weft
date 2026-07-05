@@ -116,7 +116,7 @@ type Server struct {
 	listener   net.Listener
 	socketPath string
 	closeOnce  sync.Once
-	writeMu    sync.Mutex
+	writeLock  chan struct{}
 	info       DaemonInfo
 	shutdown   func()
 	mutate     MutationHandler
@@ -161,6 +161,7 @@ func StartServerWithOptions(ctx context.Context, database *sql.DB, socketPath st
 	s := &Server{
 		listener:   listener,
 		socketPath: socketPath,
+		writeLock:  make(chan struct{}, 1),
 		info:       opts.Info,
 		shutdown:   opts.Shutdown,
 		mutate:     opts.Mutate,
@@ -217,6 +218,8 @@ func (s *Server) acceptLoop(ctx context.Context, database *sql.DB) {
 
 func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn) {
 	defer conn.Close()
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
 	var req Request
 	decoder := json.NewDecoder(conn)
 	encoder := json.NewEncoder(conn)
@@ -224,6 +227,7 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
 		return
 	}
+	go cancelOnConnClose(conn, cancelReq)
 	switch req.Type {
 	case RequestDaemonInfo:
 		info := s.info
@@ -234,15 +238,36 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 			go s.shutdown()
 		}
 	case RequestSubmitJob:
-		s.submitJob(ctx, database, encoder, req)
+		s.submitJob(reqCtx, database, encoder, req)
 	case RequestMutate:
-		s.mutateRequest(ctx, database, encoder, req)
+		s.mutateRequest(reqCtx, database, encoder, req)
 	case RequestSubscribe:
 		subscribe(ctx, database, encoder, req)
 	case RequestWatchJobs:
 		watchJobs(ctx, database, encoder, req)
 	default:
 		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("unsupported request type %q", req.Type)})
+	}
+}
+
+func cancelOnConnClose(conn net.Conn, cancel context.CancelFunc) {
+	var b [1]byte
+	if _, err := conn.Read(b[:]); err != nil {
+		cancel()
+		return
+	}
+	cancel()
+}
+
+func (s *Server) acquireWriteLock(ctx context.Context) (func(), error) {
+	if s.writeLock == nil {
+		s.writeLock = make(chan struct{}, 1)
+	}
+	select {
+	case s.writeLock <- struct{}{}:
+		return func() { <-s.writeLock }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -259,8 +284,12 @@ func (s *Server) mutateRequest(ctx context.Context, database *sql.DB, encoder *j
 		_ = encoder.Encode(Event{Type: EventError, Error: "mutation API unavailable"})
 		return
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	release, err := s.acquireWriteLock(ctx)
+	if err != nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("mutation canceled before writer lock: %v", err)})
+		return
+	}
+	defer release()
 	payload, err := s.mutate(ctx, database, *req.Mutation)
 	if err != nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
@@ -272,14 +301,18 @@ func (s *Server) mutateRequest(ctx context.Context, database *sql.DB, encoder *j
 	})
 }
 
-func (s *Server) submitJob(_ context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
+func (s *Server) submitJob(ctx context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
 	if req.SubmitJob == nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: "submit_job requires payload"})
 		return
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	jobID, err := ops.RecordQueuedJob(database, req.SubmitJob.Params)
+	release, err := s.acquireWriteLock(ctx)
+	if err != nil {
+		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("submit job canceled before writer lock: %v", err)})
+		return
+	}
+	defer release()
+	jobID, err := ops.RecordQueuedJobContext(ctx, database, req.SubmitJob.Params)
 	if err != nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
 		return

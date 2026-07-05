@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
@@ -736,6 +737,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			cliOverrides.MinCUDAVersion = canonical
 		}
 	}
+	submitToken := "run-" + uuid.NewString()
 
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
 	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)
@@ -1147,39 +1149,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	relayCfg, relayClient, err := loadCoordinatorRelay()
-	if err != nil {
-		return err
-	}
-	if relayEnabled(relayCfg, relayClient) && !runDraft {
-		if runWait || runFollow {
-			return fmt.Errorf("--wait and --follow are not supported when legacy relay mode is active")
-		}
-		if runAfter > 0 || runAfterAny > 0 {
-			depID := runAfter
-			if depID == 0 {
-				depID = runAfterAny
-			}
-			depJob, err := db.GetJobByID(database, depID)
-			if err != nil {
-				return fmt.Errorf("get dependency job %s: %w", ids.FormatJobID(depID), err)
-			}
-			if depJob == nil {
-				return fmt.Errorf("dependency job %s not found", ids.FormatJobID(depID))
-			}
-			if host == "" {
-				host = depJob.Host
-			}
-			if depJob.Host != host {
-				return fmt.Errorf("dependency job %s runs on host %s; relay submission must target the same host %s", ids.FormatJobID(depID), depJob.Host, host)
-			}
-		}
-		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
-			return err
-		}
-
-		params := ops.QueueJobParams{
-			Host:             host,
+	buildRunQueueParams := func(targetHost string) ops.QueueJobParams {
+		return ops.QueueJobParams{
+			Host:             targetHost,
 			WorkingDir:       workingDir,
 			Command:          command,
 			Description:      runDescription,
@@ -1189,7 +1161,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUClass:         gpuClass,
 			GPUMemGB:         resolvedGPUMemGB,
 			GPUMemMaxGB:      resolvedGPUMemMaxGB,
-			DepSpec:          encodeQueueDependencies(buildRunDependencies()),
 			Inputs:           runInputs,
 			BestEffortInputs: bestEffortInputs,
 			Outputs:          runOutputs,
@@ -1197,32 +1168,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
+			CLIOverrides:     cliOverrides,
+			MaxComputeCap:    persistMaxComputeCap,
+			SubmitToken:      submitToken,
 		}
-		endSubmit := rec.Phase("submit", "submitting via legacy relay")
-		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
-		endSubmit()
-		if err != nil {
-			return err
-		}
-		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
-			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		w := cmd.OutOrStdout()
-		if ack != nil && ack.Host != "" {
-			fmt.Fprintf(w, "Job #%d submitted via legacy relay and queued on %s\n", jobID, ack.Host)
-		} else {
-			fmt.Fprintf(w, "Job #%d submitted via legacy relay\n", jobID)
-		}
-		if ack != nil && ack.Message != "" {
-			fmt.Fprintf(w, "  %s\n", ack.Message)
-		}
-		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
-		fmt.Fprintf(w, "  Command: %s\n", command)
-		if runDescription != "" {
-			fmt.Fprintf(w, "  Description: %s\n", runDescription)
-		}
-		ensureDaemonForWork(os.Stderr)
-		return nil
 	}
 
 	// Route through local placement for non-draft, non-dependency submissions.
@@ -1287,26 +1236,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Build queue params
-		params := ops.QueueJobParams{
-			Host:             host,
-			WorkingDir:       workingDir,
-			Command:          command,
-			Description:      runDescription,
-			Project:          projectName,
-			EnvVars:          runEnvVars,
-			Tags:             runTags,
-			GPUClass:         gpuClass,
-			GPUMemGB:         resolvedGPUMemGB,
-			GPUMemMaxGB:      resolvedGPUMemMaxGB,
-			Inputs:           runInputs,
-			BestEffortInputs: bestEffortInputs,
-			Outputs:          runOutputs,
-			OutputDirs:       outputDirs,
-			Produces:         runProduces,
-			Needs:            resolvedNeeds,
-			Disk:             diskMeta,
-		}
+		params := buildRunQueueParams(host)
 
 		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
 			return err
@@ -1332,12 +1262,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		endSubmit()
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
-		}
-		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
-			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
-			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
 		}
 		recordRunPlacementTelemetry(database, cfg, jobID, "run", "fast", placementPlan, placementResult, predict)
 
@@ -1428,7 +1352,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Below: --draft or dependency modes only
+	// Below: draft or dependency modes only.
 
 	if runDraft {
 		return recordDraftRunJob(cmd, database, draftRunParams{
@@ -1456,7 +1380,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Placement for non-scheduler paths (--draft, --after)
+	// Placement for dependency modes (--after, --after-any).
 	var placementResult *placement.PlacementResult
 	if host == "" {
 		endPlacement := rec.Phase("placement", "evaluating placement")
@@ -1481,35 +1405,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Unplaced jobs: record locally and prompt for cloud launch
 	if host == "" {
-		params := ops.QueueJobParams{
-			WorkingDir:       workingDir,
-			Command:          command,
-			Description:      runDescription,
-			Project:          projectName,
-			EnvVars:          runEnvVars,
-			Tags:             runTags,
-			GPUClass:         gpuClass,
-			GPUMemGB:         resolvedGPUMemGB,
-			GPUMemMaxGB:      resolvedGPUMemMaxGB,
-			Inputs:           runInputs,
-			BestEffortInputs: bestEffortInputs,
-			Outputs:          runOutputs,
-			OutputDirs:       outputDirs,
-			Produces:         runProduces,
-			Needs:            resolvedNeeds,
-			Disk:             diskMeta,
-		}
+		params := buildRunQueueParams("")
 		endSubmit := rec.Phase("submit", "recording unplaced job")
 		jobID, err := recordQueuedJobSingleWriter(database, params)
 		endSubmit()
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
-		}
-		if err := db.SetJobCLIResourceOverrides(database, jobID, cliOverrides); err != nil {
-			slog.Warn("failed to save cli overrides", "error", err)
-		}
-		if err := db.SetJobMaxComputeCap(database, jobID, persistMaxComputeCap); err != nil {
-			slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
 		}
 		recordRunPlacementTelemetry(database, cfg, jobID, "run", "cheap", nil, placementResult, predict)
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {

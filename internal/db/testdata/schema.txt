@@ -397,6 +397,8 @@ table jobs
   col 31 job_metadata TEXT notnull=0 default=<none> pk=0
   col 32 placement_blocked TEXT notnull=0 default=<none> pk=0
   col 33 price_authorized_up_to_cents INTEGER notnull=0 default=<none> pk=0
+  col 34 submit_token TEXT notnull=0 default=<none> pk=0
+  unique-index (submit_token) origin=c partial=1
 table launch_live_state
   col 0 launch_id INTEGER notnull=0 default=<none> pk=1
   col 1 instance_phase TEXT notnull=0 default=<none> pk=0

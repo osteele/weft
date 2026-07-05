@@ -99,6 +99,9 @@ type QueueJobParams struct {
 	Produces         []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs            []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 	Disk             *db.JobDiskMetadata
+	CLIOverrides     *db.CLIResourceOverrides
+	MaxComputeCap    string
+	SubmitToken      string
 	// Metadata is persisted to job_attempts.job_metadata as part of the same
 	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
 	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
@@ -111,16 +114,25 @@ type QueueJobParams struct {
 // This is DB-only — no SSH or remote operations are performed.
 // The job will be pushed to the remote host by SyncHost on the next sync cycle.
 func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
-	return recordQueuedJob(database, 0, params, false)
+	return RecordQueuedJobContext(context.Background(), database, params)
+}
+
+// RecordQueuedJobContext records a job like RecordQueuedJob, but honors ctx
+// while waiting for the SQLite writer lock.
+func RecordQueuedJobContext(ctx context.Context, database *sql.DB, params QueueJobParams) (int64, error) {
+	return recordQueuedJob(ctx, database, 0, params, false)
 }
 
 // MirrorQueuedJobWithID records or updates a queued job using an explicit ID.
 func MirrorQueuedJobWithID(database *sql.DB, jobID int64, params QueueJobParams) error {
-	_, err := recordQueuedJob(database, jobID, params, true)
+	_, err := recordQueuedJob(context.Background(), database, jobID, params, true)
 	return err
 }
 
-func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID bool) (int64, error) {
+func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID bool) (int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(params.Host) == "" && strings.TrimSpace(params.WorkingDir) == "" {
 		return 0, fmt.Errorf("cloud jobs require a local working directory; run from a configured automap directory or pass --dir")
 	}
@@ -148,9 +160,10 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 		return 0, fmt.Errorf("resolve project: %w", err)
 	}
 	metadata := mergeJobMetadata(params.Metadata, params.Disk, params.BestEffortInputs)
+	submitToken := strings.TrimSpace(params.SubmitToken)
 
-	return db.RetryOnDatabaseLockedValue(context.Background(), "record queued job", func() (int64, error) {
-		tx, err := database.BeginTx(context.Background(), nil)
+	return db.RetryOnDatabaseLockedValue(ctx, "record queued job", func() (int64, error) {
+		tx, err := database.BeginTx(ctx, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -161,7 +174,7 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 			}
 		}()
 
-		jobID, err := recordQueuedJobTx(tx, explicitJobID, params, explicitID, gpu, gpuMemGB, project, metadata)
+		jobID, err := recordQueuedJobTx(tx, explicitJobID, params, explicitID, gpu, gpuMemGB, project, metadata, submitToken)
 		if err != nil {
 			return 0, err
 		}
@@ -173,7 +186,15 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 	})
 }
 
-func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata) (int64, error) {
+func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata, submitToken string) (int64, error) {
+	if submitToken != "" {
+		if jobID, ok, err := db.FindJobIDBySubmitToken(tx, submitToken); err != nil {
+			return 0, fmt.Errorf("lookup submit token: %w", err)
+		} else if ok {
+			return jobID, nil
+		}
+	}
+
 	// Record job with queued status
 	var jobID int64
 	if explicitID {
@@ -222,6 +243,21 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	if params.GPUClass != "" {
 		if err := db.SetJobGPUClass(tx, jobID, params.GPUClass); err != nil {
 			return 0, fmt.Errorf("record GPU class: %w", err)
+		}
+	}
+	if params.CLIOverrides != nil {
+		if err := db.SetJobCLIResourceOverrides(tx, jobID, params.CLIOverrides); err != nil {
+			return 0, fmt.Errorf("record CLI resource overrides: %w", err)
+		}
+	}
+	if params.MaxComputeCap != "" {
+		if err := db.SetJobMaxComputeCap(tx, jobID, params.MaxComputeCap); err != nil {
+			return 0, fmt.Errorf("record max compute cap: %w", err)
+		}
+	}
+	if submitToken != "" {
+		if err := db.SetJobSubmitToken(tx, jobID, submitToken); err != nil {
+			return 0, fmt.Errorf("record submit token: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {
