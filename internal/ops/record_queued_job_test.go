@@ -73,6 +73,46 @@ func TestRecordQueuedJob_PersistsBestEffortInputs(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJob_RollsBackPartialRecordOnLateError(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	if _, err := database.Exec(`
+		CREATE TEMP TRIGGER fail_dep_spec_update
+		BEFORE UPDATE OF dep_spec ON jobs
+		BEGIN
+			SELECT RAISE(FAIL, 'forced dep_spec failure');
+		END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	gpuMemGB := 30
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		Host:        "test-host",
+		WorkingDir:  "/tmp/project",
+		Command:     "python replay.py",
+		Description: "metadata-rich submit",
+		Tags:        []string{"benchmark", "EXP-358"},
+		GPUClass:    "ampere+",
+		GPUMemGB:    &gpuMemGB,
+		Inputs:      []string{"hf:Qwen/Qwen2.5-7B"},
+		DepSpec:     "123",
+	})
+	if err == nil {
+		t.Fatal("expected forced dep_spec failure")
+	}
+	if !strings.Contains(err.Error(), "forced dep_spec failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM jobs WHERE command = ?`, "python replay.py").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("partial job row survived failed submit; count=%d", count)
+	}
+}
+
 func TestRecordQueuedJob_CloudRequiresWorkingDir(t *testing.T) {
 	database := db.SetupTestDB(t)
 

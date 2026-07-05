@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -142,124 +143,114 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 		gpuMemGB = &defaultMem
 	}
 
-	// Record job with queued status
-	var jobID int64
-	if explicitID {
-		jobID = explicitJobID
-		if err := db.RecordQueuedWithGPUAndID(database, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu); err != nil {
-			return 0, fmt.Errorf("record job: %w", err)
-		}
-	} else {
-		var err error
-		jobID, err = db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
-		if err != nil {
-			return 0, fmt.Errorf("record job: %w", err)
-		}
-	}
-	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
-		if !explicitID {
-			db.DeleteJob(database, jobID)
-		}
-		return 0, fmt.Errorf("record env vars: %w", err)
-	}
-	if len(params.Tags) > 0 {
-		if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
-			return 0, fmt.Errorf("record tags: %w", err)
-		}
-	}
-	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
-		return 0, fmt.Errorf("record dependencies: %w", err)
-	}
 	project, err := db.NormalizeProjectName(params.Project, params.WorkingDir, params.Command)
 	if err != nil {
 		return 0, fmt.Errorf("resolve project: %w", err)
 	}
+	metadata := mergeJobMetadata(params.Metadata, params.Disk, params.BestEffortInputs)
+
+	return db.RetryOnDatabaseLockedValue(context.Background(), "record queued job", func() (int64, error) {
+		tx, err := database.BeginTx(context.Background(), nil)
+		if err != nil {
+			return 0, err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_ = tx.Rollback()
+			}
+		}()
+
+		jobID, err := recordQueuedJobTx(tx, explicitJobID, params, explicitID, gpu, gpuMemGB, project, metadata)
+		if err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		committed = true
+		return jobID, nil
+	})
+}
+
+func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata) (int64, error) {
+	// Record job with queued status
+	var jobID int64
+	if explicitID {
+		jobID = explicitJobID
+		if err := db.RecordQueuedWithGPUAndIDTx(tx, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu); err != nil {
+			return 0, fmt.Errorf("record job: %w", err)
+		}
+	} else {
+		var err error
+		jobID, err = db.RecordQueuedWithGPUTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
+		if err != nil {
+			return 0, fmt.Errorf("record job: %w", err)
+		}
+	}
+	if err := db.SetJobEnvVars(tx, jobID, params.EnvVars); err != nil {
+		return 0, fmt.Errorf("record env vars: %w", err)
+	}
+	if len(params.Tags) > 0 {
+		if err := db.SetJobTags(tx, jobID, params.Tags); err != nil {
+			return 0, fmt.Errorf("record tags: %w", err)
+		}
+	}
+	if err := db.SetJobDepSpec(tx, jobID, params.DepSpec); err != nil {
+		return 0, fmt.Errorf("record dependencies: %w", err)
+	}
 	if project != "" {
-		if err := db.SetJobProject(database, jobID, project); err != nil {
+		if err := db.SetJobProject(tx, jobID, project); err != nil {
 			return 0, fmt.Errorf("record project: %w", err)
 		}
 	}
 	if params.CPUAllotment != nil {
-		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobCPUAllotment(tx, jobID, params.CPUAllotment); err != nil {
 			return 0, fmt.Errorf("record CPU allotment: %w", err)
 		}
 	}
 	if gpuMemGB != nil {
-		if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobGPUMemGB(tx, jobID, gpuMemGB); err != nil {
 			return 0, fmt.Errorf("record GPU memory: %w", err)
 		}
 	}
 	if params.GPUMemMaxGB != nil {
-		if err := db.SetJobGPUMemMaxGB(database, jobID, params.GPUMemMaxGB); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobGPUMemMaxGB(tx, jobID, params.GPUMemMaxGB); err != nil {
 			return 0, fmt.Errorf("record legacy GPU memory upper metadata: %w", err)
 		}
 	}
 	if params.GPUClass != "" {
-		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobGPUClass(tx, jobID, params.GPUClass); err != nil {
 			return 0, fmt.Errorf("record GPU class: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {
-		if err := db.SetJobInputs(database, jobID, params.Inputs); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobInputs(tx, jobID, params.Inputs); err != nil {
 			return 0, fmt.Errorf("record inputs: %w", err)
 		}
 	}
 	if len(params.Outputs) > 0 {
-		if err := db.SetJobOutputs(database, jobID, params.Outputs); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobOutputs(tx, jobID, params.Outputs); err != nil {
 			return 0, fmt.Errorf("record outputs: %w", err)
 		}
 	}
 	if len(params.OutputDirs) > 0 {
-		if err := db.SetJobOutputDirs(database, jobID, params.OutputDirs); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobOutputDirs(tx, jobID, params.OutputDirs); err != nil {
 			return 0, fmt.Errorf("record output dirs: %w", err)
 		}
 	}
 	if len(params.Produces) > 0 {
-		if err := db.SetJobProduces(database, jobID, params.Produces); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobProduces(tx, jobID, params.Produces); err != nil {
 			return 0, fmt.Errorf("record produces: %w", err)
 		}
 	}
 	if len(params.Needs) > 0 {
-		if err := db.SetJobNeeds(database, jobID, params.Needs); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobNeeds(tx, jobID, params.Needs); err != nil {
 			return 0, fmt.Errorf("record needs: %w", err)
 		}
 	}
-	metadata := mergeJobMetadata(params.Metadata, params.Disk, params.BestEffortInputs)
 	if metadata != nil {
-		if err := db.SetJobMetadata(database, jobID, metadata); err != nil {
-			if !explicitID {
-				db.DeleteJob(database, jobID)
-			}
+		if err := db.SetJobMetadata(tx, jobID, metadata); err != nil {
 			return 0, fmt.Errorf("record job metadata: %w", err)
 		}
 	}

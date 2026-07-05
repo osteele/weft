@@ -2018,13 +2018,24 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu
 	return recordQueuedWithGPU(db, 0, host, workingDir, command, description, gpu, false)
 }
 
+// RecordQueuedWithGPUTx records a queued job with GPU specification inside tx.
+func RecordQueuedWithGPUTx(tx *sql.Tx, host, workingDir, command, description, gpu string) (int64, error) {
+	return recordQueuedWithGPU(tx, 0, host, workingDir, command, description, gpu, false)
+}
+
 // RecordQueuedWithGPUAndID records a queued job using an explicit ID.
 func RecordQueuedWithGPUAndID(db *sql.DB, id int64, host, workingDir, command, description, gpu string) error {
 	_, err := recordQueuedWithGPU(db, id, host, workingDir, command, description, gpu, true)
 	return err
 }
 
-func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
+// RecordQueuedWithGPUAndIDTx records a queued job using an explicit ID inside tx.
+func RecordQueuedWithGPUAndIDTx(tx *sql.Tx, id int64, host, workingDir, command, description, gpu string) error {
+	_, err := recordQueuedWithGPU(tx, id, host, workingDir, command, description, gpu, true)
+	return err
+}
+
+func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
@@ -2136,7 +2147,7 @@ func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
 }
 
 // SetJobGPUClass updates the GPU class field for a job
-func SetJobGPUClass(db *sql.DB, jobID int64, gpuClass string) error {
+func SetJobGPUClass(db dbExecer, jobID int64, gpuClass string) error {
 	_, err := db.Exec(`UPDATE jobs SET gpu_class = ? WHERE id = ?`, gpuClass, jobID)
 	return err
 }
@@ -2163,7 +2174,7 @@ func SetJobRemoteState(db *sql.DB, jobID int64, remoteState, failureReason strin
 }
 
 // setJobNullableInt updates a nullable integer column on the jobs table.
-func setJobNullableInt(db *sql.DB, jobID int64, column string, value *int) error {
+func setJobNullableInt(db dbExecer, jobID int64, column string, value *int) error {
 	var v interface{}
 	if value != nil {
 		v = *value
@@ -2173,17 +2184,17 @@ func setJobNullableInt(db *sql.DB, jobID int64, column string, value *int) error
 }
 
 // SetJobCPUAllotment updates the CPU allotment percent for a job (nil clears it).
-func SetJobCPUAllotment(db *sql.DB, jobID int64, allotment *int) error {
+func SetJobCPUAllotment(db dbExecer, jobID int64, allotment *int) error {
 	return setJobNullableInt(db, jobID, "cpu_allotment", allotment)
 }
 
 // SetJobGPUMemGB updates the GPU memory reservation in GB per device (nil clears it).
-func SetJobGPUMemGB(db *sql.DB, jobID int64, gpuMemGB *int) error {
+func SetJobGPUMemGB(db dbExecer, jobID int64, gpuMemGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_gb", gpuMemGB)
 }
 
 // SetJobGPUMemMaxGB updates legacy GPU memory upper metadata in GB (nil clears it).
-func SetJobGPUMemMaxGB(db *sql.DB, jobID int64, gpuMemMaxGB *int) error {
+func SetJobGPUMemMaxGB(db dbExecer, jobID int64, gpuMemMaxGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_max_gb", gpuMemMaxGB)
 }
 
@@ -2201,7 +2212,7 @@ func SetJobMaxComputeCap(db *sql.DB, jobID int64, cap string) error {
 
 // SetJobEnvVars updates the stored environment variables for a job.
 // The values are stored as a JSON array; passing nil or an empty slice clears the field.
-func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
+func SetJobEnvVars(db dbExecer, jobID int64, envVars []string) error {
 	var value interface{}
 	if len(envVars) > 0 {
 		data, err := json.Marshal(envVars)
@@ -2216,7 +2227,7 @@ func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
 
 // SetJobTags updates the stored tags for a job.
 // The values are stored as a JSON array; passing nil or an empty slice clears the field.
-func SetJobTags(db *sql.DB, jobID int64, tags []string) error {
+func SetJobTags(db dbExecer, jobID int64, tags []string) error {
 	value, err := encodeTags(tags)
 	if err != nil {
 		return err
@@ -2233,7 +2244,7 @@ func SetJobTags(db *sql.DB, jobID int64, tags []string) error {
 // gets an attempt, later SetJobMetadata calls (telemetry, resource usage)
 // read-modify-write the full struct and carry the submission metadata onto
 // the attempt row.
-func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
+func SetJobMetadata(db dbExecer, jobID int64, meta *JobMetadata) error {
 	value, err := encodeJobMetadata(meta)
 	if err != nil {
 		return err
@@ -2315,7 +2326,7 @@ func RemoveJobTag(db *sql.DB, jobID int64, tag string) error {
 
 // SetJobDepSpec stores the dependency specification for a job (e.g., "42" or "42:any").
 // Passing an empty string clears the dependency field.
-func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
+func SetJobDepSpec(db dbExecer, jobID int64, depSpec string) error {
 	if depSpec == "" {
 		_, err := db.Exec(`UPDATE jobs SET dep_spec = NULL WHERE id = ?`, jobID)
 		return err
@@ -2325,7 +2336,7 @@ func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
 }
 
 // SetJobInputs sets the data asset inputs for a job (stored as JSON array).
-func SetJobInputs(db *sql.DB, jobID int64, inputs []string) error {
+func SetJobInputs(db dbExecer, jobID int64, inputs []string) error {
 	return setJobStringSlice(db, jobID, "inputs", inputs)
 }
 
@@ -2337,26 +2348,26 @@ func SetJobObservedInputs(db *sql.DB, jobID int64, inputs []string) error {
 }
 
 // SetJobOutputs sets the data asset outputs for a job (stored as JSON array).
-func SetJobOutputs(db *sql.DB, jobID int64, outputs []string) error {
+func SetJobOutputs(db dbExecer, jobID int64, outputs []string) error {
 	return setJobStringSlice(db, jobID, "outputs", outputs)
 }
 
 // SetJobOutputDirs sets the convention-based output directories for a job (stored as JSON array).
-func SetJobOutputDirs(db *sql.DB, jobID int64, dirs []string) error {
+func SetJobOutputDirs(db dbExecer, jobID int64, dirs []string) error {
 	return setJobStringSlice(db, jobID, "output_dirs", dirs)
 }
 
 // SetJobProduces sets the artifact specs this job produces (stored as JSON array).
-func SetJobProduces(db *sql.DB, jobID int64, produces []string) error {
+func SetJobProduces(db dbExecer, jobID int64, produces []string) error {
 	return setJobStringSlice(db, jobID, "produces", produces)
 }
 
 // SetJobNeeds sets the artifact specs this job needs (stored as JSON array).
-func SetJobNeeds(db *sql.DB, jobID int64, needs []string) error {
+func SetJobNeeds(db dbExecer, jobID int64, needs []string) error {
 	return setJobStringSlice(db, jobID, "needs", needs)
 }
 
-func setJobStringSlice(db *sql.DB, jobID int64, column string, values []string) error {
+func setJobStringSlice(db dbExecer, jobID int64, column string, values []string) error {
 	var arg any
 	if len(values) > 0 {
 		data, err := json.Marshal(values)
@@ -2397,7 +2408,7 @@ func NormalizeProjectName(project, workingDir, command string) (string, error) {
 }
 
 // SetJobProject sets the project name for a job.
-func SetJobProject(db *sql.DB, jobID int64, project string) error {
+func SetJobProject(db dbExecer, jobID int64, project string) error {
 	var workingDir, command string
 	if err := db.QueryRow(`SELECT working_dir, command FROM jobs WHERE id = ?`, jobID).Scan(&workingDir, &command); err != nil {
 		return err
