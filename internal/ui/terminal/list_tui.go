@@ -378,6 +378,14 @@ func renderSelectedRow(row string, width int) string {
 	return listTUISelectedStyle.Render(plain)
 }
 
+func renderSelectedGroupedRow(row string, job *db.Job, width int) string {
+	selected := renderSelectedRow(row, width)
+	if job != nil && job.DisplayMoveDim {
+		return moveAttemptDimStyle.Render(selected)
+	}
+	return selected
+}
+
 var (
 	listTUIFooterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	listTUIPromptStyle = lipgloss.NewStyle().Reverse(true).Bold(true)
@@ -1429,7 +1437,7 @@ func (m listTUIModel) groupedView() string {
 
 	layout := m.buildGroupedViewLayout(rows, groupedJobs)
 	selectedRow := m.selectedGroupedRow()
-	mateJobs, matesActive := hostMatesForGroupedView(m.selectedGroupedJob(), m.jobs)
+	mateRows, matesActive := hostMatesForGroupedRows(m.groupedRows, selectedRow)
 	rowWidth := m.width
 	bodyLinesWritten := 0
 	if len(rows) == 0 {
@@ -1443,7 +1451,7 @@ func (m listTUIModel) groupedView() string {
 	for _, row := range layout.visibleRows {
 		line := truncateDisplayWidth(row.text, rowWidth)
 		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
-			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateJobs[rj.ID] {
+			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateRows[row.rowIdx] {
 				line = applyHostMateMarkerForJob(line, rj)
 			}
 		}
@@ -1451,7 +1459,7 @@ func (m listTUIModel) groupedView() string {
 			if matesActive {
 				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
 			}
-			line = renderSelectedRow(line, m.width)
+			line = renderSelectedGroupedRow(line, m.groupedRows[row.rowIdx].job, m.width)
 		}
 		b.WriteString(line)
 		b.WriteString("\n")

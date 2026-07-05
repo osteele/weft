@@ -93,6 +93,47 @@ func hostMatesForGroupedView(selected *db.Job, jobs []*db.Job) (mates map[int64]
 	return mates, true
 }
 
+// hostMatesForGroupedRows returns grouped row indices that share a host with
+// the selected row. Grouped status views can render multiple rows for one
+// logical job during a pending move, so row identity must include the display
+// attempt and dim state rather than only the job ID.
+func hostMatesForGroupedRows(rows []groupedStatusRow, selectedRow int) (mates map[int]bool, ok bool) {
+	if selectedRow < 0 || selectedRow >= len(rows) {
+		return nil, false
+	}
+	selected := rows[selectedRow].job
+	key := hostMateKey(selected)
+	if key == "" {
+		return nil, false
+	}
+	mates = make(map[int]bool, 4)
+	for i, row := range rows {
+		if i == selectedRow || row.job == nil || row.isHeader || row.isBlocked {
+			continue
+		}
+		if sameGroupedDisplayRow(row.job, selected) {
+			continue
+		}
+		if hostMateKey(row.job) == key {
+			mates[i] = true
+		}
+	}
+	if len(mates) == 0 {
+		return nil, false
+	}
+	return mates, true
+}
+
+func sameGroupedDisplayRow(a, b *db.Job) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.ID == b.ID &&
+		a.DisplayAttemptID == b.DisplayAttemptID &&
+		a.DisplayMoveDim == b.DisplayMoveDim &&
+		hostMateKey(a) == hostMateKey(b)
+}
+
 // applyHostMateMarker overlays the marker on the first display cell of line,
 // preserving the line's overall visual width so columns stay aligned with
 // rows that aren't host-mates. If line is empty, just the styled marker is

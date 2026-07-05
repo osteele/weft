@@ -2080,6 +2080,23 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTru
 	}
 }
 
+func TestRenderSelectedGroupedRowPreservesMoveDim(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	line := moveAttemptDimStyle.Render("- wj4111 — move target wi4817 -> wi4821")
+	got := renderSelectedGroupedRow(line, &db.Job{ID: 4111, DisplayMoveDim: true}, 80)
+	if !isVisibleDimLine(got) {
+		t.Fatalf("selected non-authoritative move row lost dim styling: %q", got)
+	}
+
+	active := renderSelectedGroupedRow("- wj4111 — move pending wi4817 -> wi4821", &db.Job{ID: 4111}, 80)
+	if isVisibleDimLine(active) {
+		t.Fatalf("selected active move row should not be dimmed: %q", active)
+	}
+}
+
 func isVisibleDimLine(line string) bool {
 	hasFaint := false
 	hasForeground := false

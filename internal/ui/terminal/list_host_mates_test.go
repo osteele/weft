@@ -134,6 +134,34 @@ func TestHostMatesForGroupedView(t *testing.T) {
 	}
 }
 
+func TestHostMatesForGroupedRowsDistinguishesMoveAttempts(t *testing.T) {
+	sourceLaunchID := int64(4817)
+	targetLaunchID := int64(4821)
+	sourceAttemptID := int64(101)
+	targetAttemptID := int64(102)
+	rows := []groupedStatusRow{
+		{isHeader: true, text: "Queued (1):"},
+		{job: &db.Job{ID: 4108, LaunchID: &sourceLaunchID, DisplayAttemptID: sourceAttemptID, DisplayMoveDim: true}},
+		{isHeader: true, text: "Placing (2):"},
+		{job: &db.Job{ID: 4108, LaunchID: &targetLaunchID, DisplayAttemptID: targetAttemptID}},
+		{job: &db.Job{ID: 4109, LaunchID: &targetLaunchID, DisplayAttemptID: 103}},
+	}
+
+	mates, ok := hostMatesForGroupedRows(rows, 3)
+	if !ok {
+		t.Fatalf("expected target launch mates")
+	}
+	if mates[1] {
+		t.Fatalf("source row for same logical job should not be marked as target mate: %v", mates)
+	}
+	if mates[3] {
+		t.Fatalf("selected display row should not mark itself: %v", mates)
+	}
+	if !mates[4] {
+		t.Fatalf("expected other row on target launch to be marked: %v", mates)
+	}
+}
+
 func TestApplyHostMateMarkerPreservesWidth(t *testing.T) {
 	cases := []string{
 		"- ▲ wj1586 - markov-attention",
