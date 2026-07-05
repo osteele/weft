@@ -2,10 +2,15 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/osteele/weft/internal/config"
 )
 
@@ -25,7 +30,42 @@ func ValidateJobImageAvailability(ctx context.Context, cfg *config.Config, local
 		return fmt.Errorf("container image %s registry auth: %w", image, err)
 	}
 	if _, err := imageRequirementResolver(ctx, image, auth); err != nil {
+		if imageProbeFailureIsTransient(err) {
+			slog.Warn("container image availability probe failed; allowing submission",
+				"component", "campaign",
+				"image", image,
+				"error", err)
+			return nil
+		}
 		return fmt.Errorf("container image %s is not pullable with configured auth: %w", image, err)
 	}
 	return nil
+}
+
+func imageProbeFailureIsTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var registryErr *transport.Error
+	if errors.As(err, &registryErr) {
+		if registryErr.Temporary() {
+			return true
+		}
+		return registryErr.StatusCode == http.StatusTooManyRequests ||
+			registryErr.StatusCode == http.StatusRequestTimeout ||
+			registryErr.StatusCode >= http.StatusInternalServerError
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
 }

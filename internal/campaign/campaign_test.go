@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -1176,7 +1178,7 @@ func TestValidateJobImageAvailability_ProbesResolvedImageWithAuth(t *testing.T) 
 	}
 }
 
-func TestValidateJobImageAvailability_ReportsProbeFailure(t *testing.T) {
+func TestValidateJobImageAvailability_ReportsConfirmedProbeFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/acme/private:tag\"\n"), 0o644); err != nil {
 		t.Fatalf("write .weft.toml: %v", err)
@@ -1192,6 +1194,62 @@ func TestValidateJobImageAvailability_ReportsProbeFailure(t *testing.T) {
 	err := ValidateJobImageAvailability(context.Background(), nil, dir, "python train.py")
 	if !errors.Is(err, denied) {
 		t.Fatalf("error = %v, want wrapped probe error", err)
+	}
+	if !strings.Contains(err.Error(), "is not pullable with configured auth") {
+		t.Fatalf("error = %q, want pullability context", err)
+	}
+}
+
+func TestValidateJobImageAvailability_AllowsProbeTimeout(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"nvidia/cuda:12.8.1-devel-ubuntu24.04\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		return cloud.ImageRequirements{}, fmt.Errorf("fetch image config for %s: %w", image, context.DeadlineExceeded)
+	}
+
+	if err := ValidateJobImageAvailability(context.Background(), nil, dir, "python train.py"); err != nil {
+		t.Fatalf("ValidateJobImageAvailability returned transient timeout: %v", err)
+	}
+}
+
+func TestValidateJobImageAvailability_AllowsTemporaryRegistryFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"nvidia/cuda:12.8.1-devel-ubuntu24.04\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		return cloud.ImageRequirements{}, fmt.Errorf("fetch image config for %s: %w", image, &transport.Error{StatusCode: http.StatusTooManyRequests})
+	}
+
+	if err := ValidateJobImageAvailability(context.Background(), nil, dir, "python train.py"); err != nil {
+		t.Fatalf("ValidateJobImageAvailability returned temporary registry error: %v", err)
+	}
+}
+
+func TestValidateJobImageAvailability_BlocksConfirmedNotFound(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/acme/missing:tag\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	notFound := &transport.Error{StatusCode: http.StatusNotFound}
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		return cloud.ImageRequirements{}, fmt.Errorf("fetch image config for %s: %w", image, notFound)
+	}
+
+	err := ValidateJobImageAvailability(context.Background(), nil, dir, "python train.py")
+	if !errors.Is(err, notFound) {
+		t.Fatalf("error = %v, want wrapped not found", err)
 	}
 	if !strings.Contains(err.Error(), "is not pullable with configured auth") {
 		t.Fatalf("error = %q, want pullability context", err)
