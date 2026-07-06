@@ -149,6 +149,69 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	}
 }
 
+func TestOpen_ReportsMigrationProgressBeforeBackup(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	cleanup := SetDBPath(dbFile)
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	preparePreviousMigrationVersionForTest(t, database)
+	database.Close()
+
+	var events []MigrationProgressEvent
+	restoreReporter := SetMigrationProgressReporter(func(event MigrationProgressEvent) {
+		events = append(events, event)
+	})
+	defer restoreReporter()
+
+	database, err = Open()
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer database.Close()
+
+	if len(events) < 4 {
+		t.Fatalf("migration progress events = %#v, want at least start/backup_start/backup_done/done", events)
+	}
+	wantPhases := []string{"migration_start", "backup_start", "backup_done", "migration_done"}
+	for i, phase := range wantPhases {
+		if events[i].Phase != phase {
+			t.Fatalf("event %d phase = %q, want %q; events=%#v", i, events[i].Phase, phase, events)
+		}
+	}
+	if events[0].FromVersion != int(migrations.Target()-1) || events[0].ToVersion != int(migrations.Target()) {
+		t.Fatalf("migration start versions = %d -> %d, want %d -> %d", events[0].FromVersion, events[0].ToVersion, migrations.Target()-1, migrations.Target())
+	}
+	if events[2].Path == "" {
+		t.Fatalf("backup_done path is empty: %#v", events[2])
+	}
+}
+
+func TestOpen_DoesNotReportMigrationProgressForFreshDB(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	cleanup := SetDBPath(dbFile)
+	defer cleanup()
+
+	var events []MigrationProgressEvent
+	restoreReporter := SetMigrationProgressReporter(func(event MigrationProgressEvent) {
+		events = append(events, event)
+	})
+	defer restoreReporter()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer database.Close()
+
+	if len(events) != 0 {
+		t.Fatalf("fresh DB migration progress events = %#v, want none", events)
+	}
+}
+
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 	t.Helper()
 	if migrations.Target() != 30 {

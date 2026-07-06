@@ -61,11 +61,12 @@ func backupBeforeMigration(database *sql.DB, fromVersion int) {
 	dir := SnapshotDir()
 	ts := time.Now().UTC().Format("20060102-150405")
 	dest := filepath.Join(dir, fmt.Sprintf("%sv%d-%s.db", migrationBackupPrefix, fromVersion, ts))
+	reportMigrationProgress(MigrationProgressEvent{Phase: "backup_start", FromVersion: fromVersion, Path: dest})
 	if err := Snapshot(database, dest); err != nil {
-		slog.Warn("pre-migration backup failed; continuing with migration", "error", err, "dest", dest)
+		reportMigrationProgress(MigrationProgressEvent{Phase: "backup_failed", FromVersion: fromVersion, Path: dest, Error: err.Error()})
 		return
 	}
-	slog.Info("pre-migration backup written", "path", dest)
+	reportMigrationProgress(MigrationProgressEvent{Phase: "backup_done", FromVersion: fromVersion, Path: dest})
 	if err := pruneOldBackups(dir, migrationBackupPrefix, MigrationBackupRetention); err != nil {
 		slog.Warn("prune old migration backups failed", "error", err)
 	}

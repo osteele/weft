@@ -975,12 +975,19 @@ func initSchema(db *sql.DB) (bool, error) {
 
 	// Snapshot a database that already holds data before migrating, so a bad
 	// migration can be rolled back. A freshly created file has nothing to lose.
-	if databaseHasSchema(db) {
-		backupBeforeMigration(db, int(migrations.Version(ctx, db)))
+	hasSchema := databaseHasSchema(db)
+	fromVersion := int(migrations.Version(ctx, db))
+	toVersion := int(migrations.Target())
+	if hasSchema {
+		reportMigrationProgress(MigrationProgressEvent{Phase: "migration_start", FromVersion: fromVersion, ToVersion: toVersion})
+		backupBeforeMigration(db, fromVersion)
 	}
 
 	if err := migrations.Up(ctx, db); err != nil {
 		return false, err
+	}
+	if hasSchema {
+		reportMigrationProgress(MigrationProgressEvent{Phase: "migration_done", FromVersion: fromVersion, ToVersion: toVersion})
 	}
 	return true, nil
 }

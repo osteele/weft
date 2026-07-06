@@ -53,6 +53,20 @@ func Execute() error {
 	os.Args = rewriteRootArgs(os.Args, cfg)
 
 	logging.Setup(os.Stderr, "text")
+	db.SetMigrationProgressReporter(func(event db.MigrationProgressEvent) {
+		switch event.Phase {
+		case "migration_start":
+			fmt.Fprintf(os.Stderr, "Updating Weft database schema from v%d to v%d. This can take a minute for large databases.\n", event.FromVersion, event.ToVersion)
+		case "backup_start":
+			fmt.Fprintf(os.Stderr, "Creating pre-migration database backup...\n")
+		case "backup_done":
+			fmt.Fprintf(os.Stderr, "Database backup written to %s\n", event.Path)
+		case "backup_failed":
+			fmt.Fprintf(os.Stderr, "Database backup failed; continuing with schema update: %s\n", event.Error)
+		case "migration_done":
+			fmt.Fprintf(os.Stderr, "Database schema update complete.\n")
+		}
+	})
 	// Pre-scan os.Args for --verbose, because cobra hasn't parsed flags yet
 	// and PersistentPreRun wouldn't run for commands that error before RunE.
 	for _, a := range os.Args[1:] {
