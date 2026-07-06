@@ -994,6 +994,49 @@ func TestBuildGroupedStatusRows_HoistScopedWhenSubsetSharesBlocker(t *testing.T)
 	}
 }
 
+func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	mkJob := func(id int64, reason string) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "desc",
+			QueuedAt:           4_000,
+			QueueBlockedReason: reason,
+		}
+	}
+	jobs := []*db.Job{
+		mkJob(4154, "1 offer found, 1 offer passed filters but none met survival threshold"),
+		mkJob(4152, "planner: no offers from providers for gpu=A40"),
+		mkJob(4166, "planner: no offers from providers for gpu=RTX-2080-TI"),
+	}
+	detail := map[int64]*blockreason.Structured{
+		4152: {Launch: "planner: no offers from providers for gpu=A40", Fingerprint: "vastai/search-offers/empty-result:no-offers"},
+		4166: {Launch: "planner: no offers from providers for gpu=RTX-2080-TI", Fingerprint: "vastai/search-offers/empty-result:no-offers"},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+
+	hoist := "launch blocked for 2 of 3: vastai/search-offers/empty-result:no-offers"
+	otherBucket := "blocked: 1 offer found, 1 offer passed filters but none met survival threshold"
+	job4152 := "▸ -   wj4152"
+	job4166 := "▸ -   wj4166"
+	job4154 := "-   wj4154"
+	for _, want := range []string{hoist, otherBucket, job4152, job4166, job4154} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q:\n%s", want, out)
+		}
+	}
+	if !(strings.Index(out, hoist) < strings.Index(out, job4152) &&
+		strings.Index(out, job4166) < strings.Index(out, otherBucket) &&
+		strings.Index(out, otherBucket) < strings.Index(out, job4154)) {
+		t.Fatalf("hoisted jobs should render before unrelated blocker bucket:\n%s", out)
+	}
+}
+
 // TestCommonLaunchBlocker_ThreeJobsDifferentLaunchesNoFingerprints is a
 // regression for a subtle bug introduced when commonLaunchBlocker grew
 // fingerprint support: with ≥3 placement-failure jobs that disagree on

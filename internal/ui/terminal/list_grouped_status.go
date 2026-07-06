@@ -409,6 +409,12 @@ func appendBlockedGroupedJobRows(
 	}
 	for _, key := range order {
 		if key.reason == "" {
+			if sharedLaunch != "" {
+				for _, job := range buckets[key] {
+					rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
+					rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
+				}
+			}
 			continue
 		}
 		jobs := buckets[key]
@@ -423,9 +429,11 @@ func appendBlockedGroupedJobRows(
 			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
-	for _, job := range buckets[blockedReasonBucketKey{}] {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
-		rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
+	if sharedLaunch == "" {
+		for _, job := range buckets[blockedReasonBucketKey{}] {
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
+			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
+		}
 	}
 	return rows
 }

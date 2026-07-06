@@ -385,6 +385,45 @@ func TestFetchProviderCreditWarningSuppressesTransientVastaiCreditCheckFailure(t
 	}
 }
 
+func TestFetchProviderCreditWarningSuppressesVastaiRateLimit(t *testing.T) {
+	prevLoad := providerCreditWarningLoad
+	prevRunpodUser := runpodCreditWarningUser
+	prevVastUser := vastaiCreditWarningUser
+	providerCreditWarningLoad = func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Vastai.Enabled = config.Bool(true)
+		cfg.Runpod.Enabled = config.Bool(false)
+		return cfg, nil
+	}
+	vastaiCreditWarningUser = func() (float64, error) {
+		return 0, errors.New("show user: HTTP 429: 429 Too Many Requests\n\nThe action could not be performed because there were too many requests")
+	}
+	runpodCreditWarningUser = func() (float64, error) {
+		t.Fatal("runpod user fetch should not run when disabled")
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		providerCreditWarningLoad = prevLoad
+		runpodCreditWarningUser = prevRunpodUser
+		vastaiCreditWarningUser = prevVastUser
+	})
+
+	got := fetchProviderCreditWarning()
+	if got != "" {
+		t.Fatalf("fetchProviderCreditWarning() = %q, want no warning for provider rate limit", got)
+	}
+}
+
+func TestProviderCreditCheckWarningCollapsesMultilineErrors(t *testing.T) {
+	warnings := appendProviderCreditCheckWarning(nil, cloud.ProviderVastai, errors.New("show user: schema error\n\nprovider detail"))
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one warning", warnings)
+	}
+	if strings.Contains(warnings[0], "\n") || !strings.Contains(warnings[0], "schema error provider detail") {
+		t.Fatalf("warning was not collapsed to one line: %q", warnings[0])
+	}
+}
+
 func TestFetchProviderCreditWarningSuppressesRunpodCommandTimeout(t *testing.T) {
 	prevLoad := providerCreditWarningLoad
 	prevRunpodUser := runpodCreditWarningUser

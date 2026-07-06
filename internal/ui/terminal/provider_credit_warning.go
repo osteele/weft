@@ -475,11 +475,15 @@ func appendProviderCreditCheckWarning(warnings []string, provider cloud.Provider
 	if name == "" {
 		name = string(provider)
 	}
-	detail := truncate(strings.TrimSpace(err.Error()), 120)
+	detail := truncate(oneLineProviderError(err.Error()), 120)
 	if detail == "" {
 		detail = "unknown error"
 	}
 	return append(warnings, fmt.Sprintf("WARNING: %s credit check failed (%s)", name, detail))
+}
+
+func oneLineProviderError(msg string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(msg)), " ")
 }
 
 func isTransientProviderCreditCheckError(err error) bool {
@@ -487,7 +491,9 @@ func isTransientProviderCreditCheckError(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(msg, "request failed:") ||
+	return strings.Contains(msg, "http 429") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "request failed:") ||
 		strings.Contains(msg, "timed out") ||
 		strings.Contains(msg, "deadline exceeded") ||
 		strings.Contains(msg, "temporary failure") ||
