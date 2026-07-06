@@ -29,6 +29,7 @@ type CloudSyncOptions struct {
 	Clients     []any
 	R2Client    any
 	SyncResults bool
+	SkipOpslogs bool
 
 	LeaseScope string
 	LeaseOwner string
@@ -157,7 +158,11 @@ func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts C
 func syncCloudWithClients(ctx context.Context, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, opts CloudSyncOptions, cfg *config.Config) CloudSyncResult {
 	syncResults := func(context.Context) int { return 0 }
 	if opts.SyncResults {
-		syncResults = func(ctx context.Context) int { return SyncCloudJobResults(ctx, cfg, database, opts.Verbose) }
+		syncResults = func(ctx context.Context) int {
+			return SyncCloudJobResultsWithOptions(ctx, cfg, database, opts.Verbose, CloudJobResultsOptions{
+				SyncOpslogs: !opts.SkipOpslogs,
+			})
+		}
 	}
 	result := cloudsync.SyncState(ctx, database, reconciler, clients, r2Client, syncResults)
 	if opts.Verbose && result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {

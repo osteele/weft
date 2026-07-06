@@ -3739,11 +3739,13 @@ func MarkOpslogTimeout(database *sql.DB, launchID int64) error {
 }
 
 // ListLaunchIDsNeedingOpslogSync returns IDs of launches that need opslog sync.
-// Includes running/grace launches and recently-terminal launches, excluding those
-// confirmed not-found or timed-out (checked at least 10 minutes after termination).
+// Includes running/grace launches and recently-terminal launches, excluding only
+// those confirmed not-found at least 10 minutes after termination. Timeout means
+// "couldn't look"; keep it retryable with a short backoff from the last attempt.
 func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]int64, error) {
 	cutoff := time.Now().Add(-since).Unix()
 	const safetyBuffer = 600 // 10 minutes
+	const timeoutBackoff = 600
 	rows, err := database.Query(`
 		SELECT id FROM launches
 		WHERE provider_instance_id != ''
@@ -3751,19 +3753,24 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 			-- Running/paused/grace instances always need sync
 			status IN (?, ?, ?)
 			OR (
-				-- Recently terminal instances, excluding known-not-found or timed-out
+				-- Recently terminal instances, excluding confirmed not-found.
 				status IN (?, ?, ?)
 				AND ended_at >= ?
 				AND NOT (
-					(oplog_not_found = 1 OR oplog_timeout = 1)
+					oplog_not_found = 1
 					AND oplog_synced_at >= IFNULL(ended_at, 0) + ?
+				)
+				AND NOT (
+					oplog_timeout = 1
+					AND IFNULL(ended_at, 0) + ? <= ?
+					AND oplog_synced_at >= ?
 				)
 			)
 		)
 		ORDER BY id`,
 		LaunchStatusRunning, LaunchStatusPaused, LaunchStatusGrace,
 		LaunchStatusFailed, LaunchStatusCompleted, LaunchStatusCancelled,
-		cutoff, safetyBuffer)
+		cutoff, safetyBuffer, safetyBuffer, time.Now().Unix(), time.Now().Unix()-timeoutBackoff)
 	if err != nil {
 		return nil, err
 	}

@@ -2691,7 +2691,7 @@ func createTerminalLaunch(t *testing.T, database *sql.DB, endedSecondsAgo int64)
 	return id
 }
 
-func TestListLaunchIDsNeedingOpslogSync_ExcludesTimedOut(t *testing.T) {
+func TestListLaunchIDsNeedingOpslogSync_RetriesTimedOutAfterBackoff(t *testing.T) {
 	database := setupTestDB(t)
 
 	// Create a terminal launch that ended 1 hour ago
@@ -2711,13 +2711,17 @@ func TestListLaunchIDsNeedingOpslogSync_ExcludesTimedOut(t *testing.T) {
 		t.Fatalf("MarkOpslogTimeout: %v", err)
 	}
 
-	// Should now be excluded
+	if _, err := database.Exec(`UPDATE launches SET oplog_synced_at = ? WHERE id = ?`, nowUnix()-601, id); err != nil {
+		t.Fatalf("age timeout marker: %v", err)
+	}
+
+	// Timeout means "couldn't look"; after backoff it should be retried.
 	ids, err = ListLaunchIDsNeedingOpslogSync(database, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("ListLaunchIDsNeedingOpslogSync: %v", err)
 	}
-	if containsID(ids, id) {
-		t.Fatal("timed-out launch should be excluded from opslog sync")
+	if !containsID(ids, id) {
+		t.Fatal("timed-out launch should be retried after backoff")
 	}
 }
 
@@ -2739,6 +2743,23 @@ func TestListLaunchIDsNeedingOpslogSync_TimedOutRecentStillIncluded(t *testing.T
 	}
 	if !containsID(ids, id) {
 		t.Fatal("recently-timed-out launch should still be included (within safety buffer)")
+	}
+}
+
+func TestListLaunchIDsNeedingOpslogSync_ExcludesConfirmedNotFound(t *testing.T) {
+	database := setupTestDB(t)
+	id := createTerminalLaunch(t, database, 3600)
+
+	if err := MarkOpslogNotFound(database, id); err != nil {
+		t.Fatalf("MarkOpslogNotFound: %v", err)
+	}
+
+	ids, err := ListLaunchIDsNeedingOpslogSync(database, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("ListLaunchIDsNeedingOpslogSync: %v", err)
+	}
+	if containsID(ids, id) {
+		t.Fatal("confirmed not-found launch should be excluded from opslog sync")
 	}
 }
 

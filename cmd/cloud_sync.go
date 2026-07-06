@@ -49,6 +49,7 @@ func syncCloudStateWithTimeoutAndResults(ctx context.Context, cfg *config.Config
 		Reconciler:  reconciler,
 		SyncResults: syncResults,
 		Timeout:     timeout,
+		SkipOpslogs: timeout > 0 && timeout <= FastCloudSyncTimeout,
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}, res.Completed
 }
@@ -84,6 +85,7 @@ func syncCloudStateWithClientsTimeout(cfg *config.Config, database *sql.DB, reco
 		R2Client:    r2Client,
 		SyncResults: true,
 		Timeout:     timeout,
+		SkipOpslogs: timeout > 0 && timeout <= FastCloudSyncTimeout,
 	})
 	return cloudSyncResult{Updated: res.Updated, ReconcileResult: res.ReconcileResult, Warnings: res.Warnings}, res.Completed
 }

@@ -38,11 +38,19 @@ const (
 	syncJobMarkerParallel = 10
 )
 
+type CloudJobResultsOptions struct {
+	SyncOpslogs bool
+}
+
 // SyncCloudJobResults checks current cloud job attempts for R2 result markers.
 // This covers both legacy Vast.ai-backend jobs and campaign-launched
 // queue-runner jobs. Historical or orphaned marker recovery belongs to
 // SyncCloudJobResultsRepair, not the routine sync path.
 func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *sql.DB, verbose bool) int {
+	return SyncCloudJobResultsWithOptions(parent, cfg, database, verbose, CloudJobResultsOptions{SyncOpslogs: true})
+}
+
+func SyncCloudJobResultsWithOptions(parent context.Context, cfg *config.Config, database *sql.DB, verbose bool, opts CloudJobResultsOptions) int {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -83,13 +91,15 @@ func SyncCloudJobResults(parent context.Context, cfg *config.Config, database *s
 		updatedInstanceIDs[instanceID] = struct{}{}
 	}
 
-	// Use a fresh context for opslog sync — the shared ctx may be nearly
-	// expired after job-marker and timeseries syncing consumed most of its budget.
-	// Still derived from parent so caller cancellation propagates.
-	opslogCtx, opslogCancel := context.WithTimeout(parent, opslogSyncTimeout)
-	defer opslogCancel()
-	if err := SyncCloudInstanceOpslogs(opslogCtx, r2Client, database, nil, verbose); err != nil && verbose {
-		fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
+	if opts.SyncOpslogs {
+		// Use a fresh context for opslog sync — the shared ctx may be nearly
+		// expired after job-marker and timeseries syncing consumed most of its budget.
+		// Still derived from parent so caller cancellation propagates.
+		opslogCtx, opslogCancel := context.WithTimeout(parent, opslogSyncTimeout)
+		defer opslogCancel()
+		if err := SyncCloudInstanceOpslogs(opslogCtx, r2Client, database, nil, verbose); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: instance ops log sync failed: %v\n", err)
+		}
 	}
 
 	for instanceID := range updatedInstanceIDs {
@@ -1015,6 +1025,12 @@ func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *
 }
 
 func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database *sql.DB, instanceIDs map[int64]struct{}, verbose bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	if r2Client == nil || database == nil {
 		return nil
 	}
@@ -1051,8 +1067,13 @@ func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 	var mu sync.Mutex
 	var timeoutIDs, errorIDs []int64
 
+dispatch:
 	for _, instanceID := range ids {
-		sem <- struct{}{}
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
 		go func(id int64) {
 			defer func() { <-sem; wg.Done() }()
@@ -1064,8 +1085,11 @@ func SyncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 			case opslogNotFound:
 				_ = db.MarkOpslogNotFound(database, id)
 			case opslogError:
+				if ctx.Err() != nil {
+					return
+				}
 				mu.Lock()
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				if errors.Is(err, context.DeadlineExceeded) {
 					_ = db.MarkOpslogTimeout(database, id)
 					timeoutIDs = append(timeoutIDs, id)
 				} else {
