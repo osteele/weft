@@ -202,11 +202,15 @@ func daemonInfo(pid int, version string) daemonapi.DaemonInfo {
 	return info
 }
 
+func daemonPrePassHostTimeout() time.Duration {
+	return FastSyncHostTimeout
+}
+
 func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) (time.Duration, autopilotOutcome) {
 	started := time.Now()
 	syncResult := syncorch.SyncAll(database, cfg, syncorch.SyncOptions{
 		SSHTimeout:        FastSyncTimeout,
-		HostTimeout:       NormalSyncHostTimeout,
+		HostTimeout:       daemonPrePassHostTimeout(),
 		CloudMode:         syncorch.CloudBounded,
 		CloudTimeout:      NormalCloudSyncTimeout,
 		StartQueueRunner:  true,

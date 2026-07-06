@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/syncorch"
 )
 
 func setupDaemonTestDB(t *testing.T) *sql.DB {
@@ -50,5 +51,14 @@ func TestCapDaemonWaitForInterruptibles(t *testing.T) {
 
 	if got := capDaemonWaitForInterruptibles(database, longWait); got != daemonInterruptiblePollInterval {
 		t.Fatalf("wait with interruptible = %s, want %s", got, daemonInterruptiblePollInterval)
+	}
+}
+
+func TestDaemonPrePassSyncUsesFastHostTimeout(t *testing.T) {
+	if got := daemonPrePassHostTimeout(); got != FastSyncHostTimeout {
+		t.Fatalf("daemonPrePassHostTimeout() = %s, want %s", got, FastSyncHostTimeout)
+	}
+	if daemonPrePassHostTimeout() >= syncorch.NormalHostTimeout {
+		t.Fatalf("daemon pre-pass host timeout = %s, must not block autopilot behind full host sync", daemonPrePassHostTimeout())
 	}
 }
