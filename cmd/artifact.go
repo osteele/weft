@@ -2643,7 +2643,7 @@ func writeNoCloudArtifactsYetHint(cmd *cobra.Command, job *db.Job) {
 		statusLabel = job.EffectiveStatus()
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
-	fmt.Fprintf(cmd.OutOrStdout(), "Job %s status is %s; artifacts may not have been uploaded yet. Retry after the job writes outputs or finishes.\n",
+	fmt.Fprintf(cmd.OutOrStdout(), "Job %s status is %s; artifacts are not available yet. This is normal before the job writes outputs or finishes.\n",
 		ids.FormatJobID(job.ID), statusLabel)
 }
 

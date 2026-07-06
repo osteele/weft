@@ -1657,7 +1657,7 @@ func TestRunArtifactListRunningLaunchJobExplainsPendingUpload(t *testing.T) {
 	for _, want := range []string{
 		"No cached artifacts.",
 		"status is running",
-		"artifacts may not have been uploaded yet",
+		"artifacts are not available yet",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)

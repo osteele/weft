@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -69,14 +70,46 @@ func TestContextualizeCloudLogFetchErrorRunningJob(t *testing.T) {
 		t.Fatal("err = nil, want contextual error")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "job status is running") {
+	if !strings.Contains(msg, "status: running") {
 		t.Fatalf("error = %q, want running status context", msg)
 	}
 	if !strings.Contains(msg, "--follow") {
 		t.Fatalf("error = %q, want live follow hint", msg)
 	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "SSH") || strings.Contains(msg, "uploaded") {
+		t.Fatalf("error = %q, should not expose log transport details", msg)
+	}
 	if strings.Contains(msg, "may not have produced output") || strings.Contains(msg, "terminated before log upload") {
 		t.Fatalf("error = %q, should not include terminal-job guesses for running job", msg)
+	}
+}
+
+func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	origFetch := fetchAndDisplayLogFromR2Func
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, _ int64) error {
+		return &cloudLogUnavailableError{jobID: 4035, status: db.StatusRunning}
+	}
+	t.Cleanup(func() {
+		fetchAndDisplayLogFromR2Func = origFetch
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{Use: "log"}
+	cmd.SetOut(&out)
+	job := &db.Job{ID: 4035, Status: db.StatusRunning}
+	if err := runLogForCloudJob(cmd, nil, job); err != nil {
+		t.Fatalf("runLogForCloudJob: %v", err)
+	}
+
+	msg := out.String()
+	if !strings.Contains(msg, "Log is not available yet for job wj4035") {
+		t.Fatalf("output = %q, want availability notice", msg)
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "SSH") || strings.Contains(msg, "uploaded") {
+		t.Fatalf("output = %q, should not expose log transport details", msg)
 	}
 }
 

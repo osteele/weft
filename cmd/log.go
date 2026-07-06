@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -491,11 +492,21 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 		if err == nil {
 			return runLogViaCloudSSH(cmd, database, job, inst)
 		}
-		fmt.Fprintf(os.Stderr, "Warning: could not resolve cloud instance SSH (%v); showing current R2 log\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not open the live log stream (%v); showing the latest log snapshot.\n", err)
 	}
 
-	// Default: fetch from R2 (works for both running and completed jobs).
-	return runLogFromR2(cmd, database, job)
+	// Default: fetch the latest log snapshot (works for both running
+	// and completed jobs). A running job may not have a snapshot yet; report
+	// that as normal command output instead of a fatal error.
+	if err := runLogFromR2(cmd, database, job); err != nil {
+		var unavailable *cloudLogUnavailableError
+		if errors.As(err, &unavailable) && !status.IsTerminal(job.Status) {
+			fmt.Fprintln(cmd.OutOrStdout(), unavailable.Message())
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // resolveLaunchSSH looks up the cloud instance for a job and returns its SSH details.
@@ -556,7 +567,7 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 	if err != nil {
 		// Log file may not exist if the job already finished and the
 		// agent cleaned the log directory. Fall back to R2.
-		fmt.Fprintf(os.Stderr, "Warning: SSH log read failed (%v); trying R2\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: live log read failed (%v); trying the latest log snapshot.\n", err)
 		return runLogFromR2(cmd, database, job)
 	}
 
@@ -677,7 +688,7 @@ func runArchivedLogForAttempt(target *db.JobAttempt, seq int) error {
 // runLogFromR2 fetches log output from R2 for a cloud-based job.
 func runLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	if logFollow {
-		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
+		fmt.Fprintf(os.Stderr, "Follow mode is not available for this log snapshot; showing the current snapshot.\n")
 	}
 
 	return fetchAndDisplayLogFromR2Func(cmd, job, cloudLogRunID(job))
@@ -747,8 +758,22 @@ func contextualizeCloudLogFetchError(job *db.Job, err error) error {
 	if statusLabel == "" {
 		statusLabel = job.EffectiveStatus()
 	}
-	return fmt.Errorf("log not found in R2 for job %s; job status is %s, so the log may not have been uploaded yet. Try `weft log %s --follow` for a live SSH log, or retry after the next live-log upload",
-		ids.FormatJobID(job.ID), statusLabel, ids.FormatJobID(job.ID))
+	return &cloudLogUnavailableError{jobID: job.ID, status: statusLabel}
+}
+
+type cloudLogUnavailableError struct {
+	jobID  int64
+	status string
+}
+
+func (e *cloudLogUnavailableError) Error() string {
+	return e.Message()
+}
+
+func (e *cloudLogUnavailableError) Message() string {
+	jobID := ids.FormatJobID(e.jobID)
+	return fmt.Sprintf("Log is not available yet for job %s (status: %s). This is normal shortly after a cloud job starts. Use `weft log %s --follow` for live output, or retry shortly.",
+		jobID, e.status, jobID)
 }
 
 type fetchedCloudLog struct {
@@ -1166,7 +1191,7 @@ func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
 	if err := fetchAndDisplayLogFromR2(cmd, job, 0); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log from R2 for job %s.\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log snapshot for job %s.\n", ids.FormatJobID(job.ID))
 	return nil
 }
 
