@@ -60,6 +60,96 @@ func TestExecutionTargetsBackfillInventoryAndRental(t *testing.T) {
 	}
 }
 
+func TestRefreshExecutionTargetOccupancyAggregatesOncePerTarget(t *testing.T) {
+	database := SetupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	runningID, err := RecordQueued(database, "", "/tmp/project", "echo running", "running")
+	if err != nil {
+		t.Fatalf("RecordQueued running: %v", err)
+	}
+	if err := SetJobLaunchID(database, runningID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID running: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, runningID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedID, err := RecordQueued(database, "", "/tmp/project", "echo queued", "queued")
+	if err != nil {
+		t.Fatalf("RecordQueued queued: %v", err)
+	}
+	if err := SetJobLaunchID(database, queuedID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID queued: %v", err)
+	}
+
+	if err := SyncExecutionTargets(database); err != nil {
+		t.Fatalf("SyncExecutionTargets: %v", err)
+	}
+
+	var currentJobID sql.NullInt64
+	var queueDepth int
+	if err := database.QueryRow(`
+		SELECT current_job_id, queue_depth
+		  FROM execution_targets
+		 WHERE kind = 'rental_instance'
+		   AND launch_id = ?`, launchID).Scan(&currentJobID, &queueDepth); err != nil {
+		t.Fatalf("query target occupancy: %v", err)
+	}
+	if !currentJobID.Valid || currentJobID.Int64 != runningID {
+		t.Fatalf("current_job_id = %v, want %d", currentJobID, runningID)
+	}
+	if queueDepth != 1 {
+		t.Fatalf("queue_depth = %d, want 1", queueDepth)
+	}
+}
+
+func TestRefreshExecutionTargetOccupancyClearsTerminatedTargets(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "", "/tmp/project", "echo stale", "stale")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SyncExecutionTargets(database); err != nil {
+		t.Fatalf("SyncExecutionTargets: %v", err)
+	}
+	if _, err := database.Exec(`
+		UPDATE execution_targets
+		   SET current_job_id = ?,
+		       queue_depth = 7
+		 WHERE kind = 'rental_instance'
+		   AND launch_id = ?`, jobID, launchID); err != nil {
+		t.Fatalf("seed stale occupancy: %v", err)
+	}
+
+	if err := refreshExecutionTargetOccupancy(database); err != nil {
+		t.Fatalf("refreshExecutionTargetOccupancy: %v", err)
+	}
+
+	var currentJobID sql.NullInt64
+	var queueDepth int
+	if err := database.QueryRow(`
+		SELECT current_job_id, queue_depth
+		  FROM execution_targets
+		 WHERE kind = 'rental_instance'
+		   AND launch_id = ?`, launchID).Scan(&currentJobID, &queueDepth); err != nil {
+		t.Fatalf("query target occupancy: %v", err)
+	}
+	if currentJobID.Valid {
+		t.Fatalf("current_job_id = %d, want NULL", currentJobID.Int64)
+	}
+	if queueDepth != 0 {
+		t.Fatalf("queue_depth = %d, want 0", queueDepth)
+	}
+}
+
 func TestJobStatusUsesExecutionTargetWhenPlacementShadowsAreMissing(t *testing.T) {
 	database := SetupTestDB(t)
 

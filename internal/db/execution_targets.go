@@ -270,24 +270,41 @@ func refreshExecutionTargetOccupancy(database *sql.DB) error {
 	if ok, err := relationExists(database, "job_status"); err != nil || !ok {
 		return err
 	}
+	if _, err := database.Exec(`
+		UPDATE execution_targets
+		   SET current_job_id = NULL,
+		       queue_depth = 0
+		 WHERE status = 'terminated'
+		   AND (current_job_id IS NOT NULL OR queue_depth != 0)`); err != nil {
+		return err
+	}
 	_, err := database.Exec(`
+		WITH agg AS MATERIALIZED (
+			SELECT js.effective_target_kind AS kind,
+			       js.host AS host,
+			       js.launch_id AS launch_id,
+			       MIN(CASE WHEN js.status = 'running' THEN js.id END) AS running_job_id,
+			       SUM(CASE WHEN js.status IN ('queued', 'pending_placement') THEN 1 ELSE 0 END) AS queue_depth
+			  FROM job_status js
+			 WHERE js.status IN ('running', 'queued', 'pending_placement')
+			 GROUP BY js.effective_target_kind, js.host, js.launch_id
+		)
 		UPDATE execution_targets
 		   SET current_job_id = (
-		           SELECT MIN(js.id)
-		             FROM job_status js
-		            WHERE js.effective_target_kind = execution_targets.kind
-		              AND ((execution_targets.kind = 'inventory_host' AND js.host = execution_targets.host)
-		                   OR (execution_targets.kind = 'rental_instance' AND js.launch_id = execution_targets.launch_id))
-		              AND js.status = 'running'
+		           SELECT MIN(a.running_job_id)
+		             FROM agg a
+		            WHERE a.kind = execution_targets.kind
+		              AND ((execution_targets.kind = 'inventory_host' AND a.host = execution_targets.host)
+		                   OR (execution_targets.kind = 'rental_instance' AND a.launch_id = execution_targets.launch_id))
 		       ),
-		       queue_depth = (
-		           SELECT COUNT(*)
-		             FROM job_status js
-		            WHERE js.effective_target_kind = execution_targets.kind
-		              AND ((execution_targets.kind = 'inventory_host' AND js.host = execution_targets.host)
-		                   OR (execution_targets.kind = 'rental_instance' AND js.launch_id = execution_targets.launch_id))
-		              AND js.status IN ('queued', 'pending_placement')
-		       )`)
+		       queue_depth = COALESCE((
+		           SELECT SUM(a.queue_depth)
+		             FROM agg a
+		            WHERE a.kind = execution_targets.kind
+		              AND ((execution_targets.kind = 'inventory_host' AND a.host = execution_targets.host)
+		                   OR (execution_targets.kind = 'rental_instance' AND a.launch_id = execution_targets.launch_id))
+		       ), 0)
+		 WHERE status != 'terminated'`)
 	return err
 }
 
