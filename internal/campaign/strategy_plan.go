@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 )
@@ -93,6 +94,21 @@ const (
 	CandidatePlanModeMergedPreferred
 	CandidatePlanModeParallelPreferred
 )
+
+func candidatePlanModeLabel(mode CandidatePlanMode) string {
+	switch mode {
+	case CandidatePlanModeFull:
+		return "full"
+	case CandidatePlanModeSplitOnly:
+		return "split_only"
+	case CandidatePlanModeMergedPreferred:
+		return "merged_preferred"
+	case CandidatePlanModeParallelPreferred:
+		return "parallel_preferred"
+	default:
+		return fmt.Sprintf("unknown(%d)", mode)
+	}
+}
 
 // ProfilePlanSpec pairs a score profile with the candidate search mode to use
 // when constructing that profile's launch plan.
@@ -494,11 +510,13 @@ func buildProfilePlansFromSplitRawWithSession(
 	onProgress PlanProgressFunc,
 	options PlanOptions,
 ) map[string]StrategyPlan {
+	totalStart := time.Now()
 	splitGroups, splitRaw, specs = shapeDistinctMachinePlan(splitGroups, splitRaw, specs, options)
 	plans := make(map[string]StrategyPlan, len(specs))
 	if len(splitGroups) == 0 {
 		return plans
 	}
+	rawFetchStart := time.Now()
 	if len(splitRaw) != len(splitGroups) {
 		if offerSession != nil {
 			splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
@@ -509,6 +527,7 @@ func buildProfilePlansFromSplitRawWithSession(
 			}
 		}
 	}
+	rawFetchDur := time.Since(rawFetchStart)
 
 	validSpecs := make([]ProfilePlanSpec, 0, len(specs))
 	for _, spec := range specs {
@@ -523,13 +542,16 @@ func buildProfilePlansFromSplitRawWithSession(
 	evaluator := newPlanEvaluator(database, predCfg, overheadModel, survivalModel, minSurvival, options)
 	reusable = filterReusableByMachineAffinity(reusable, options.MachineAffinity)
 	reportPlanProgress(onProgress, "Estimating raw-offer runtimes", fmt.Sprintf("%d direct offer(s)", countRawOffers(splitRaw)), 0, 0)
+	rawEvalStart := time.Now()
 	splitEval := evaluator.evaluateRawOffers(splitRaw)
+	rawEvalDur := time.Since(rawEvalStart)
 
 	workerLimit := planProfileWorkerLimit(len(validSpecs))
 	sem := make(chan struct{}, workerLimit)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	profileStart := time.Now()
 	for idx, spec := range validSpecs {
 		wg.Add(1)
 		go func(idx int, spec ProfilePlanSpec) {
@@ -557,6 +579,19 @@ func buildProfilePlansFromSplitRawWithSession(
 		}(idx, spec)
 	}
 	wg.Wait()
+	profileDur := time.Since(profileStart)
+	oplog.Log("campaign.planner.timing",
+		oplog.WithDetailf(
+			"groups=%d raw_offers=%d reusable=%d profiles=%d raw_fetch=%s raw_eval=%s profiles_wall=%s total=%s",
+			len(splitGroups),
+			countRawOffers(splitRaw),
+			len(reusable),
+			len(validSpecs),
+			rawFetchDur.Truncate(time.Millisecond),
+			rawEvalDur.Truncate(time.Millisecond),
+			profileDur.Truncate(time.Millisecond),
+			time.Since(totalStart).Truncate(time.Millisecond),
+		))
 
 	return plans
 }
@@ -626,6 +661,7 @@ func buildStrategyPlanForSplitRaw(
 	onProgress PlanProgressFunc,
 	progressLabel string,
 ) StrategyPlan {
+	totalStart := time.Now()
 	plan := StrategyPlan{
 		Profile:          profile,
 		DisplayOffers:    make([]GroupOffer, len(splitGroups)),
@@ -637,11 +673,16 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	reportPlanProgressForLane(onProgress, "Ranking direct-offer groups", progressLabel, "", 0, 0)
+	directSelectStart := time.Now()
 	splitOffers, splitPredictions := evaluator.selectOffers(splitEval, profile)
+	directSelectDur := time.Since(directSelectStart)
 	reportPlanProgressForLane(onProgress, "Estimating direct-offer costs", progressLabel, "", 0, 0)
+	directEstimateStart := time.Now()
 	splitEstimates := evaluator.estimateSelectedOffers(splitOffers, splitPredictions)
+	directEstimateDur := time.Since(directEstimateStart)
 
 	reportPlanProgressForLane(onProgress, "Checking reusable instances", progressLabel, "", 0, 0)
+	reuseStart := time.Now()
 	reuseDecisions := chooseReuseGroups(
 		splitGroups,
 		splitEstimates,
@@ -653,6 +694,17 @@ func buildStrategyPlanForSplitRaw(
 		onProgress,
 		progressLabel,
 	)
+	reuseDur := time.Since(reuseStart)
+	var mergedFetchDur time.Duration
+	var mergedEvalDur time.Duration
+	var mergedScoreDur time.Duration
+	var parallelFetchDur time.Duration
+	var parallelEvalDur time.Duration
+	var parallelScoreDur time.Duration
+	var candidateFetchDur time.Duration
+	var candidateEvalDur time.Duration
+	var candidateSelectDur time.Duration
+	var splitCandidateDur time.Duration
 
 	reused := make(map[int]reuseGroupDecision, len(reuseDecisions))
 	for _, decision := range reuseDecisions {
@@ -677,12 +729,39 @@ func buildStrategyPlanForSplitRaw(
 		remainingGroups = append(remainingGroups, group)
 		remainingIdx = append(remainingIdx, idx)
 	}
+	logProfileTiming := func() {
+		oplog.Log("campaign.planner.profile_timing",
+			oplog.WithDetailf(
+				"profile=%s mode=%s groups=%d remaining=%d reuse=%d direct_select=%s direct_estimate=%s reuse_eval=%s split_score=%s merged_fetch=%s merged_eval=%s merged_score=%s parallel_fetch=%s parallel_eval=%s parallel_score=%s candidate_fetch=%s candidate_eval=%s candidate_select=%s total=%s",
+				profile.ID,
+				candidatePlanModeLabel(candidateMode),
+				len(splitGroups),
+				len(remainingGroups),
+				len(reuseDecisions),
+				directSelectDur.Truncate(time.Millisecond),
+				directEstimateDur.Truncate(time.Millisecond),
+				reuseDur.Truncate(time.Millisecond),
+				splitCandidateDur.Truncate(time.Millisecond),
+				mergedFetchDur.Truncate(time.Millisecond),
+				mergedEvalDur.Truncate(time.Millisecond),
+				mergedScoreDur.Truncate(time.Millisecond),
+				parallelFetchDur.Truncate(time.Millisecond),
+				parallelEvalDur.Truncate(time.Millisecond),
+				parallelScoreDur.Truncate(time.Millisecond),
+				candidateFetchDur.Truncate(time.Millisecond),
+				candidateEvalDur.Truncate(time.Millisecond),
+				candidateSelectDur.Truncate(time.Millisecond),
+				time.Since(totalStart).Truncate(time.Millisecond),
+			))
+	}
 
 	if len(remainingGroups) == 0 {
+		logProfileTiming()
 		return plan
 	}
 
 	remainingSplitEval := subsetRawOfferEvaluation(splitEval, remainingIdx)
+	splitCandidateStart := time.Now()
 	splitResult := evaluateSingleCandidateForProfile(
 		evaluator,
 		groupingEvaluation{
@@ -694,6 +773,7 @@ func buildStrategyPlanForSplitRaw(
 		onProgress,
 		progressLabel,
 	)
+	splitCandidateDur = time.Since(splitCandidateStart)
 
 	var result CandidateResult
 	switch candidateMode {
@@ -705,8 +785,13 @@ func buildStrategyPlanForSplitRaw(
 			mergedGroups := MergeCompatibleGroups(remainingGroups)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
+				mergedFetchStart := time.Now()
 				mergedRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedFetchDur += time.Since(mergedFetchStart)
+				mergedEvalStart := time.Now()
 				mergedEval := evaluator.evaluateRawOffers(mergedRaw)
+				mergedEvalDur += time.Since(mergedEvalStart)
+				mergedScoreStart := time.Now()
 				mergedResult := evaluateSingleCandidateForProfile(
 					evaluator,
 					groupingEvaluation{
@@ -718,6 +803,7 @@ func buildStrategyPlanForSplitRaw(
 					onProgress,
 					progressLabel,
 				)
+				mergedScoreDur += time.Since(mergedScoreStart)
 				if candidateResultHasOffers(mergedResult) {
 					result = mergedResult
 				}
@@ -735,8 +821,12 @@ func buildStrategyPlanForSplitRaw(
 			mergedGroups := MergeCompatibleGroups(remainingGroups)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
+				mergedFetchStart := time.Now()
 				mergedRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, mergedGroups))
+				mergedFetchDur += time.Since(mergedFetchStart)
+				mergedEvalStart := time.Now()
 				mergedEval := evaluator.evaluateRawOffers(mergedRaw)
+				mergedEvalDur += time.Since(mergedEvalStart)
 				nonParallelCandidates = append(nonParallelCandidates, groupingEvaluation{
 					label:   "merged",
 					groups:  mergedGroups,
@@ -744,6 +834,7 @@ func buildStrategyPlanForSplitRaw(
 				})
 			}
 		}
+		candidateSelectStart := time.Now()
 		result = bestCandidateForProfileEvaluations(
 			evaluator,
 			nonParallelCandidates,
@@ -751,12 +842,18 @@ func buildStrategyPlanForSplitRaw(
 			onProgress,
 			progressLabel,
 		)
+		candidateSelectDur += time.Since(candidateSelectStart)
 		if offerSession != nil {
 			parallelGroups := SplitToParallel(remainingGroups)
 			if len(parallelGroups) > 0 {
 				reportPlanProgressForLane(onProgress, "Fetching parallel candidate", progressLabel, "", 0, 0)
+				parallelFetchStart := time.Now()
 				parallelRaw := applyImagePrestartFailureBlocks(evaluator.database, fetchGroupRawOffersForPlanning(offerSession, parallelGroups))
+				parallelFetchDur += time.Since(parallelFetchStart)
+				parallelEvalStart := time.Now()
 				parallelEval := evaluator.evaluateRawOffers(parallelRaw)
+				parallelEvalDur += time.Since(parallelEvalStart)
+				parallelScoreStart := time.Now()
 				parallelResult := evaluateSingleCandidateForProfile(
 					evaluator,
 					groupingEvaluation{
@@ -768,6 +865,7 @@ func buildStrategyPlanForSplitRaw(
 					onProgress,
 					progressLabel,
 				)
+				parallelScoreDur += time.Since(parallelScoreStart)
 				if candidateResultHasOffers(parallelResult) {
 					result = parallelResult
 				}
@@ -779,16 +877,24 @@ func buildStrategyPlanForSplitRaw(
 			break
 		}
 		reportPlanProgressForLane(onProgress, "Fetching merged and parallel candidates", progressLabel, "", 0, 0)
+		candidateFetchStart := time.Now()
 		candidates := fetchCandidateGroupingsForPlanning(offerSession, remainingGroups)
+		candidateFetchDur += time.Since(candidateFetchStart)
+		candidateEvalStart := time.Now()
+		evaluations := evaluator.evaluateCandidateGroupings(candidates)
+		candidateEvalDur += time.Since(candidateEvalStart)
+		candidateSelectStart := time.Now()
 		result = bestCandidateForProfileEvaluations(
 			evaluator,
-			evaluator.evaluateCandidateGroupings(candidates),
+			evaluations,
 			profile,
 			onProgress,
 			progressLabel,
 		)
+		candidateSelectDur += time.Since(candidateSelectStart)
 	}
 	if len(result.Groups) == 0 {
+		logProfileTiming()
 		return plan
 	}
 	plan.NewCandidate = &result
@@ -805,6 +911,7 @@ func buildStrategyPlanForSplitRaw(
 		}
 	}
 
+	logProfileTiming()
 	return plan
 }
 
