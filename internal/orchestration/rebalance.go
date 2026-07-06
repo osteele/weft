@@ -32,6 +32,7 @@ var estimateRebalanceDurationsDetailed = estimate.EstimateJobDurationsDetailedWi
 // submitRebalanceMoveAsyncFn is the package seam used by tests to observe or
 // replace the goroutine launched after a rebalance MoveIntent is opened.
 var submitRebalanceMoveAsyncFn = submitRebalanceMoveAsync
+var submitJobsToInstanceForMoveFn = campaign.SubmitJobsToInstanceForMove
 
 type QueueRebalanceOptions struct {
 	Apply bool
@@ -1040,14 +1041,15 @@ func applyRebalanceMove(_ context.Context, database *sql.DB, r2Client *r2.Client
 
 // submitRebalanceMoveAsync uses a fresh 10-minute context (matching
 // submitJobsToInstanceImpl) so the work survives the TUI command handler
-// returning. SubmitJobsToInstanceForMove performs the target-accepted
-// transition; the final ResolveMoveIntent is retained for parity with the
-// user-initiated move path and is normally a no-op.
+// returning. SubmitJobsToInstanceForMove confirms grace-state targets
+// synchronously; running targets use no-ack submission and must leave the move
+// intent open for reconcilePendingMoveTargetRequestAcks to confirm and stop the
+// source.
 func submitRebalanceMoveAsync(database *sql.DB, r2Client *r2.Client, job *db.Job, intent *db.MoveIntent, move QueueRebalanceMove) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		err := campaign.SubmitJobsToInstanceForMove(ctx, database, r2Client, move.ToInstanceID, []*db.Job{job})
+		err := submitJobsToInstanceForMoveFn(ctx, database, r2Client, move.ToInstanceID, []*db.Job{job})
 		if err != nil {
 			slog.Warn("rebalance: submit-for-move failed",
 				"component", "rebalance",
@@ -1065,13 +1067,6 @@ func submitRebalanceMoveAsync(database *sql.DB, r2Client *r2.Client, job *db.Job
 					"component", "rebalance", "intent_id", intent.ID, "error", rerr)
 			}
 			return
-		}
-		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateConfirmed,
-			fmt.Sprintf("rebalanced to %s", ids.FormatInstanceID(move.ToInstanceID))); err != nil {
-			// DB triggers may have already resolved the intent — that's the
-			// expected case. Log only at debug.
-			slog.Debug("rebalance: resolve move intent confirmed",
-				"component", "rebalance", "intent_id", intent.ID, "error", err)
 		}
 	}()
 }

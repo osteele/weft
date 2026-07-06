@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuerunner"
@@ -1413,6 +1414,14 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if ack != nil && ack.Message != "" {
 			fmt.Printf("  relay: %s\n", ack.Message)
 		}
+		detail := "edit"
+		if wasRequeued {
+			detail = "edit retry"
+		}
+		if len(updates) > 0 {
+			detail += ": " + strings.Join(updates, "; ")
+		}
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetail(detail), oplog.WithJobID(jobID))
 		if wasRequeued {
 			ensureDaemonForWork(os.Stderr)
 		}
@@ -1487,6 +1496,17 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {
 		reportQueueChangeSyncFailure(job.Host, syncErr)
 	}
+	detail := "edit"
+	if wasRequeued {
+		detail = "edit retry"
+	}
+	if deferredUpdate {
+		detail += " deferred"
+	}
+	if len(updates) > 0 {
+		detail += ": " + strings.Join(updates, "; ")
+	}
+	oplog.Log(oplog.OpCLICommand, oplog.WithDetail(detail), oplog.WithJobID(jobID))
 	if wasRequeued {
 		ensureDaemonForWork(os.Stderr)
 	}

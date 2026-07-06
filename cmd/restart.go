@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/workdir"
@@ -119,6 +120,7 @@ func runRestart(cmd *cobra.Command, args []string) error {
 
 	var errors []string
 	for _, jobID := range jobIDs {
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("restart"), oplog.WithJobID(jobID))
 		if err := restartJob(database, jobID, overrides); err != nil {
 			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 		}

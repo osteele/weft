@@ -67,6 +67,24 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			}
 		}
 	}
+
+	var cloudInstanceID sql.NullInt64
+	if runID > 0 {
+		var abandonedAt sql.NullInt64
+		err := database.QueryRow(
+			`SELECT launch_id, abandoned_at FROM job_attempts WHERE id = ? AND job_id = ?`,
+			runID, jobID,
+		).Scan(&cloudInstanceID, &abandonedAt)
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if abandonedAt.Valid {
+			return 0, nil
+		}
+	}
 	if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
 		return 0, err
 	}
@@ -102,33 +120,33 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		lastSyncedStatusArg = nil
 	}
 
-	var cloudInstanceID sql.NullInt64
-	if runID > 0 {
-		err := database.QueryRow(
-			`SELECT launch_id FROM job_attempts WHERE id = ? AND job_id = ?`,
-			runID, jobID,
-		).Scan(&cloudInstanceID)
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		if err != nil {
+	if runID == 0 {
+		if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
 			return 0, err
 		}
-	} else if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
-		return 0, err
 	}
 
-	// Cloud completion is authoritative — update the latest attempt regardless
-	// of whether it is open or closed. This handles the case where
-	// cleanupStaleAttempts already closed the original attempt and created a
-	// new one.
+	if runID == 0 && !cloudInstanceID.Valid {
+		if err := database.QueryRow(
+			`SELECT launch_id FROM authoritative_job_attempts
+			 WHERE job_id = ?
+			 ORDER BY attempt_number DESC
+			 LIMIT 1`,
+			jobID,
+		).Scan(&cloudInstanceID); err != nil && err != sql.ErrNoRows {
+			return 0, err
+		}
+	}
+	// Cloud completion is authoritative for the live owner attempt. Abandoned
+	// move attempts are audit rows and must not be revived by late source or
+	// destination completion metadata.
 	if runID > 0 {
 		if _, err := database.Exec(
 			`UPDATE job_attempts
 			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
 			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 			     cloud_outcome = ?
-			 WHERE id = ? AND job_id = ?`,
+			 WHERE id = ? AND job_id = ? AND abandoned_at IS NULL`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, runID, jobID,
 		); err != nil {
 			return 0, err
@@ -139,7 +157,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
 			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 			     cloud_outcome = ?
-			 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+			 WHERE id = (SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
 		); err != nil {
 			return 0, err
@@ -159,6 +177,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			       SELECT attempt_number FROM job_attempts WHERE id = ? AND job_id = ?
 			   )
 			   AND end_time IS NULL
+			   AND abandoned_at IS NULL
 			   AND status IN (?, ?, ?)`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome,
 			jobID, cloudInstanceID.Int64, runID, jobID,
@@ -181,6 +200,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			       SELECT attempt_number FROM job_attempts WHERE id = ? AND job_id = ?
 			   )
 			   AND end_time IS NULL
+			   AND abandoned_at IS NULL
 			   AND status IN (?, ?, ?)`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, AttemptOutcomeSuperseded,
 			jobID, runID, runID, jobID,
@@ -202,7 +222,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 					UPDATE job_attempts
 					SET launch_id = ?,
 					    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
-					WHERE id = ? AND job_id = ? AND launch_id IS NULL`,
+					WHERE id = ? AND job_id = ? AND launch_id IS NULL AND abandoned_at IS NULL`,
 					inferredID, host, runID, jobID,
 				); err != nil {
 					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
@@ -212,8 +232,9 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 					UPDATE job_attempts
 					SET launch_id = ?,
 					    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
-					WHERE id = `+latestAttemptSubquery+`
-					  AND launch_id IS NULL`,
+					WHERE id = `+latestAuthoritativeAttemptSubquery+`
+					  AND launch_id IS NULL
+					  AND abandoned_at IS NULL`,
 					inferredID, host, jobID,
 				); err != nil {
 					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)

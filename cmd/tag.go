@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/localmutate"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
@@ -86,6 +87,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetailf("tag add %s", displayTag), oplog.WithJobID(jobID))
 		if err := setJobTagSingleWriter(database, jobID, tag, true); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue
@@ -128,6 +130,7 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetailf("tag remove %s", displayTag), oplog.WithJobID(jobID))
 		if err := setJobTagSingleWriter(database, jobID, tag, false); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue

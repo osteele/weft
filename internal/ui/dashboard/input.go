@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
@@ -178,6 +179,28 @@ func (m Model) editJob() tea.Cmd {
 			depSpec = job.DepSpec
 		}
 		depSpecChanged := depSpec != job.DepSpec
+		var updates []string
+		if descriptionChanged {
+			updates = append(updates, "description")
+		}
+		if workingDirChanged {
+			updates = append(updates, "directory")
+		}
+		if commandChanged {
+			updates = append(updates, "command")
+		}
+		if envChanged {
+			updates = append(updates, "env")
+		}
+		if gpuChanged {
+			updates = append(updates, "gpu")
+		}
+		if cpuChanged {
+			updates = append(updates, "cpu")
+		}
+		if depSpecChanged {
+			updates = append(updates, "dependencies")
+		}
 		if envChanged {
 			if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update env vars: %w", err)}
@@ -234,6 +257,7 @@ func (m Model) editJob() tea.Cmd {
 				if _, err := m.relayUpdateJob(job, payload); err != nil {
 					return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
 				}
+				logTUIEditAudit(job, updates, false)
 				return jobEditedMsg{jobID: jobID, host: job.Host}
 			}
 		}
@@ -243,11 +267,27 @@ func (m Model) editJob() tea.Cmd {
 			if err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
 			}
+			logTUIEditAudit(job, updates, result.Deferred)
 			return jobEditedMsg{jobID: jobID, host: job.Host, deferred: result.Deferred}
 		}
 
+		logTUIEditAudit(job, updates, false)
 		return jobEditedMsg{jobID: jobID, host: job.Host}
 	}
+}
+
+func logTUIEditAudit(job *db.Job, updates []string, deferred bool) {
+	if job == nil {
+		return
+	}
+	detail := "action=edit"
+	if deferred {
+		detail += " deferred"
+	}
+	if len(updates) > 0 {
+		detail += " fields=" + strings.Join(updates, ",")
+	}
+	oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail(detail))
 }
 
 type queueEntryData struct {

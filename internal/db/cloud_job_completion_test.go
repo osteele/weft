@@ -348,6 +348,172 @@ func TestRecordCloudJobCompletion_UsesRunIDInsteadOfLatestAttempt(t *testing.T) 
 	}
 }
 
+func TestRecordCloudJobCompletion_IgnoresAbandonedMoveTargetAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	sourceLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, sourceLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	sourceRunID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID source: %v", err)
+	}
+	targetLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	src := sourceLaunchID
+	dst := targetLaunchID
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          jobID,
+		SourceLaunchID: &src,
+		TargetKind:     MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetRunID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &targetLaunchID, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := AbandonMoveLoser(database, intent.ID, targetRunID, AttemptAbandonedMoveSourceWon); err != nil {
+		t.Fatalf("AbandonMoveLoser: %v", err)
+	}
+
+	gotLaunch, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, targetRunID)
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletion abandoned target: %v", err)
+	}
+	if gotLaunch != 0 {
+		t.Fatalf("abandoned completion launch id = %d, want 0", gotLaunch)
+	}
+
+	var targetStatus string
+	var targetExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, exit_code FROM job_attempts WHERE id = ?`,
+		targetRunID,
+	).Scan(&targetStatus, &targetExit); err != nil {
+		t.Fatalf("query target attempt: %v", err)
+	}
+	if targetStatus != StatusQueued || targetExit.Valid {
+		t.Fatalf("target attempt = status %q exit %v, want queued/NULL after ignored completion", targetStatus, targetExit)
+	}
+
+	gotLaunch, err = RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletion authoritative: %v", err)
+	}
+	if gotLaunch != sourceLaunchID {
+		t.Fatalf("authoritative completion launch id = %d, want source launch %d", gotLaunch, sourceLaunchID)
+	}
+
+	var sourceStatus string
+	var sourceExit sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT status, exit_code FROM job_attempts WHERE id = ?`,
+		sourceRunID,
+	).Scan(&sourceStatus, &sourceExit); err != nil {
+		t.Fatalf("query source attempt: %v", err)
+	}
+	if sourceStatus != StatusCompleted || !sourceExit.Valid || sourceExit.Int64 != 0 {
+		t.Fatalf("source attempt = status %q exit %v, want completed/0", sourceStatus, sourceExit)
+	}
+	if err := database.QueryRow(
+		`SELECT status, exit_code FROM job_attempts WHERE id = ?`,
+		targetRunID,
+	).Scan(&targetStatus, &targetExit); err != nil {
+		t.Fatalf("query target attempt after authoritative completion: %v", err)
+	}
+	if targetStatus != StatusQueued || targetExit.Valid {
+		t.Fatalf("target attempt after authoritative completion = status %q exit %v, want queued/NULL", targetStatus, targetExit)
+	}
+}
+
+func TestRepairOrphanedCompletedAttemptsSkipsAbandonedAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	sourceLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	inferredLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch inferred: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU job: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, sourceLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID job: %v", err)
+	}
+	peerJobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo peer", "peer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU peer: %v", err)
+	}
+	if err := SetJobLaunchID(database, peerJobID, sourceLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID peer: %v", err)
+	}
+	if _, err := CreateAttempt(database, peerJobID, "", &inferredLaunchID, StatusCompleted); err != nil {
+		t.Fatalf("CreateAttempt peer inferred: %v", err)
+	}
+
+	orphanAttemptID, err := CreateAttempt(database, jobID, "", nil, StatusCompleted)
+	if err != nil {
+		t.Fatalf("CreateAttempt abandoned orphan: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET host = '', launch_id = NULL, abandoned_at = ?, abandoned_reason = ?
+		 WHERE id = ?`,
+		time.Now().Unix(), AttemptAbandonedMoveSourceWon, orphanAttemptID,
+	); err != nil {
+		t.Fatalf("seed abandoned orphan: %v", err)
+	}
+
+	if err := repairOrphanedCompletedAttempts(database); err != nil {
+		t.Fatalf("repairOrphanedCompletedAttempts: %v", err)
+	}
+
+	var launchID sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT launch_id FROM job_attempts WHERE id = ?`,
+		orphanAttemptID,
+	).Scan(&launchID); err != nil {
+		t.Fatalf("query orphan attempt: %v", err)
+	}
+	if launchID.Valid {
+		t.Fatalf("abandoned orphan launch_id = %d, want NULL", launchID.Int64)
+	}
+}
+
 func TestRecordCloudJobCompletion_FinalizesLaterSameLaunchOpenAttempt(t *testing.T) {
 	database := SetupTestDB(t)
 

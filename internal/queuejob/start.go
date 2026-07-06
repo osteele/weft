@@ -42,18 +42,28 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if freshJob.EffectiveStatus() != db.StatusQueued {
 		return false, fmt.Errorf("job %s is %s, not queued", ids.FormatJobID(job.ID), freshJob.EffectiveStatus())
 	}
+	if freshJob.TargetKind() == db.JobTargetRentalInstance {
+		target := freshJob.TargetDisplay()
+		if target == "" || target == "(unplaced)" {
+			target = "a rental instance"
+		}
+		return false, fmt.Errorf("job %s is assigned to %s; start-now only supports inventory-host queue jobs", ids.FormatJobID(job.ID), target)
+	}
+	if strings.TrimSpace(freshJob.Host) == "" {
+		return false, fmt.Errorf("job %s has no inventory host; start-now only supports inventory-host queue jobs", ids.FormatJobID(job.ID))
+	}
 
-	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting job immediately"))
+	oplog.LogJob(oplog.OpJobStart, freshJob.ID, freshJob.Host, oplog.WithDetail("starting job immediately"))
 
-	cancelCmd := opsqueue.NewCancelCommand(job.ID)
-	if err := opsqueue.AppendCommand(job.Host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: sshTimeout}); err != nil {
+	cancelCmd := opsqueue.NewCancelCommand(freshJob.ID)
+	if err := opsqueue.AppendCommand(freshJob.Host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: sshTimeout}); err != nil {
 		var qaErr *opsqueue.QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
-			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("cancel failed, deferring start"))
+			oplog.LogJob(oplog.OpDeferred, freshJob.ID, freshJob.Host, oplog.WithDetail("cancel failed, deferring start"))
 			return markStartPending(database, freshJob, false)
 		}
 		if ssh.IsConnectionError(err.Error()) {
-			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("cancel failed, deferring start"))
+			oplog.LogJob(oplog.OpDeferred, freshJob.ID, freshJob.Host, oplog.WithDetail("cancel failed, deferring start"))
 			return markStartPending(database, freshJob, false)
 		}
 		return false, err

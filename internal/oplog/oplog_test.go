@@ -71,6 +71,48 @@ func TestFileLogger(t *testing.T) {
 	}
 }
 
+func TestCLICommandIncludesAuditContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.log")
+	oldArgs := os.Args
+	os.Args = []string{"weft", "tag", "add", "wj42", "processed"}
+	t.Cleanup(func() { os.Args = oldArgs })
+	t.Setenv("CODEX_SESSION_ID", "session-123")
+
+	logger, err := newFileLogger(path, DefaultMaxSize)
+	if err != nil {
+		t.Fatalf("newFileLogger failed: %v", err)
+	}
+	logger.Log(OpCLICommand, WithJobID(42), WithDetail("tag add processed"))
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	entries, err := ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	audit := entries[0].Audit
+	if audit == nil {
+		t.Fatal("audit missing")
+	}
+	if audit.Source != "cli" {
+		t.Fatalf("audit source = %q, want cli", audit.Source)
+	}
+	if strings.Join(audit.Argv, " ") != "weft tag add wj42 processed" {
+		t.Fatalf("audit argv = %#v", audit.Argv)
+	}
+	if audit.Agent != "codex" || audit.SessionEnv != "CODEX_SESSION_ID" || audit.SessionID != "session-123" {
+		t.Fatalf("audit agent fields = %+v", audit)
+	}
+	if audit.CWD == "" {
+		t.Fatal("audit cwd is empty")
+	}
+}
+
 func TestReadEntriesSkipsMalformedLinesAndStopsAtEOF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")

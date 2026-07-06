@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,6 +100,18 @@ type Entry struct {
 	Detail    string    `json:"detail,omitempty"`
 	Error     string    `json:"err,omitempty"`
 	Duration  int64     `json:"dur_ms,omitempty"` // milliseconds
+	Audit     *Audit    `json:"audit,omitempty"`
+}
+
+// Audit records local operator context for user-initiated mutations.
+type Audit struct {
+	Source     string   `json:"source,omitempty"` // cli, tui, daemon, agent
+	CWD        string   `json:"cwd,omitempty"`
+	Argv       []string `json:"argv,omitempty"`
+	Agent      string   `json:"agent,omitempty"`
+	AgentEnv   string   `json:"agent_env,omitempty"`
+	SessionEnv string   `json:"session_env,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
 }
 
 // Logger is the interface for operation logging.
@@ -161,6 +174,65 @@ func WithJobID(jobID int64) Option {
 	return func(e *Entry) {
 		e.JobID = jobID
 	}
+}
+
+// WithAudit records explicit audit context on an operation.
+func WithAudit(a Audit) Option {
+	return func(e *Entry) {
+		e.Audit = &a
+	}
+}
+
+// WithAuditSource captures the current process context for a command source.
+func WithAuditSource(source string) Option {
+	return WithAudit(CaptureAudit(source))
+}
+
+// CaptureAudit collects non-secret local process context for forensic audit
+// entries. It intentionally records only a small allowlist of agent/session
+// environment variables.
+func CaptureAudit(source string) Audit {
+	wd, _ := os.Getwd()
+	a := Audit{
+		Source: source,
+		CWD:    wd,
+		Argv:   append([]string(nil), os.Args...),
+	}
+	if agent, envName, sessionEnv, sessionID := detectCodingAgent(); agent != "" {
+		a.Agent = agent
+		a.AgentEnv = envName
+		a.SessionEnv = sessionEnv
+		a.SessionID = sessionID
+	}
+	return a
+}
+
+func detectCodingAgent() (agent, agentEnv, sessionEnv, sessionID string) {
+	for _, candidate := range []struct {
+		env   string
+		agent string
+	}{
+		{"CODEX_CI", "codex"},
+		{"CODEX_SANDBOX", "codex"},
+		{"CODEX_SESSION_ID", "codex"},
+		{"CLAUDECODE", "claude-code"},
+		{"CLAUDE_CODE", "claude-code"},
+		{"CLAUDE_SESSION_ID", "claude-code"},
+	} {
+		if v := strings.TrimSpace(os.Getenv(candidate.env)); v != "" {
+			agent = candidate.agent
+			agentEnv = candidate.env
+			break
+		}
+	}
+	for _, envName := range []string{"CODEX_SESSION_ID", "CLAUDE_SESSION_ID", "CLAUDECODE_SESSION_ID", "WEFT_AGENT_SESSION"} {
+		if v := strings.TrimSpace(os.Getenv(envName)); v != "" {
+			sessionEnv = envName
+			sessionID = v
+			break
+		}
+	}
+	return agent, agentEnv, sessionEnv, sessionID
 }
 
 // fileLogger writes entries to a JSONL file.
@@ -307,6 +379,7 @@ func (l *fileLogger) Log(op string, opts ...Option) {
 	for _, opt := range opts {
 		opt(&entry)
 	}
+	enrichAudit(&entry)
 	l.write(&entry)
 }
 
@@ -320,7 +393,22 @@ func (l *fileLogger) LogJob(op string, jobID int64, host string, opts ...Option)
 	for _, opt := range opts {
 		opt(&entry)
 	}
+	enrichAudit(&entry)
 	l.write(&entry)
+}
+
+func enrichAudit(entry *Entry) {
+	if entry.Audit != nil {
+		return
+	}
+	switch entry.Operation {
+	case OpCLICommand:
+		audit := CaptureAudit("cli")
+		entry.Audit = &audit
+	case OpTUIAction:
+		audit := CaptureAudit("tui")
+		entry.Audit = &audit
+	}
 }
 
 func (l *fileLogger) write(entry *Entry) {

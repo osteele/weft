@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/localmutate"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/cobra"
 )
 
@@ -62,6 +63,7 @@ func setProcessedTag(args []string, processed bool) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("mark-"+verb), oplog.WithJobID(jobID))
 		if err := setProcessedTagSingleWriter(database, jobID, processed); err != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue

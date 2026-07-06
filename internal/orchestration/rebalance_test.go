@@ -412,6 +412,58 @@ func TestRebalanceQueuedJobsAcrossInstances_ApplyOpensMoveIntent(t *testing.T) {
 	}
 }
 
+func TestSubmitRebalanceMoveAsyncLeavesSuccessfulIntentOpen(t *testing.T) {
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	jobID := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	src := srcID
+	dst := dstID
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		SourceLaunchID: &src,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	done := make(chan struct{})
+	origSubmit := submitJobsToInstanceForMoveFn
+	submitJobsToInstanceForMoveFn = func(context.Context, *sql.DB, *r2.Client, int64, []*db.Job) error {
+		close(done)
+		return nil
+	}
+	t.Cleanup(func() {
+		submitJobsToInstanceForMoveFn = origSubmit
+	})
+
+	submitRebalanceMoveAsync(database, &r2.Client{}, job, intent, QueueRebalanceMove{
+		JobID:          jobID,
+		FromInstanceID: srcID,
+		ToInstanceID:   dstID,
+	})
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("submitRebalanceMoveAsync did not call submit")
+	}
+
+	got, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != db.MoveIntentStateOpen {
+		t.Fatalf("move intent state = %q, want open until target ack reconciliation", got.State)
+	}
+}
+
 func TestRebalanceQueuedJobsAcrossInstances_ApplySkipsJobWithOpenIntent(t *testing.T) {
 	withDefaultRebalanceDurations(t)
 	captured := captureRebalanceSubmits(t)

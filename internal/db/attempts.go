@@ -179,6 +179,7 @@ func repairOrphanedCompletedAttempts(database *sql.DB) error {
 		WHERE status IN (?, ?)
 		  AND (host = '' OR host IS NULL)
 		  AND launch_id IS NULL
+		  AND abandoned_at IS NULL
 		  AND id = (SELECT MAX(ja3.id) FROM job_attempts ja3 WHERE ja3.job_id = job_attempts.job_id)`,
 		StatusCompleted, StatusFailed,
 	)
@@ -204,7 +205,9 @@ func repairOrphanedCompletedAttempts(database *sql.DB) error {
 		}
 		host := LaunchHost(launchID)
 		database.Exec(
-			`UPDATE job_attempts SET launch_id = ?, host = ? WHERE id = ? AND launch_id IS NULL`,
+			`UPDATE job_attempts
+			 SET launch_id = ?, host = ?
+			 WHERE id = ? AND launch_id IS NULL AND abandoned_at IS NULL`,
 			launchID, host, o.attemptID,
 		)
 	}
@@ -246,6 +249,7 @@ const inferSiblingLaunchSQL = `
 	  AND UPPER(l_sibling.gpu_class) = UPPER(l_prior.gpu_class)
 	WHERE ja_prior.job_id = ?
 	  AND ja_prior.launch_id IS NOT NULL
+	  AND ja_prior.abandoned_at IS NULL
 	ORDER BY ja_sibling.launch_id DESC LIMIT 1`
 
 func hasJobPhaseTimingsTable(db *sql.DB) bool {

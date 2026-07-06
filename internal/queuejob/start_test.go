@@ -2,9 +2,11 @@ package queuejob
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
 )
 
 // mockExecCommand returns a mock exec.Cmd that fails immediately with a connection error.
@@ -44,5 +46,39 @@ func TestStartNowWithNilJob(t *testing.T) {
 	_, err := StartNow(database, nil)
 	if err == nil {
 		t.Error("Expected error when job is nil")
+	}
+}
+
+func TestStartNowRejectsRentalInstanceJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "rental job")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	started, err := StartNow(database, job)
+	if err == nil {
+		t.Fatal("StartNow accepted a rental-instance job, want clear rejection")
+	}
+	if started {
+		t.Fatal("started = true, want false")
+	}
+	if !strings.Contains(err.Error(), ids.FormatInstanceID(launchID)) ||
+		!strings.Contains(err.Error(), "start-now only supports inventory-host queue jobs") {
+		t.Fatalf("error = %q, want rental target and inventory-host guidance", err.Error())
 	}
 }
