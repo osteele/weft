@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -855,8 +854,8 @@ func TestBuildGroupedStatusRows_HoistedRetryableOfferUnavailableIsWaiting(t *tes
 // offers …" buckets because the per-group filter prefix differs. With the
 // fingerprint plumbing in place those four launch strings still differ, but
 // they share Structured.Fingerprint — and the renderer must (a) emit one
-// "⚠ <fingerprint> — N jobs" rollup row and (b) collapse the bucket key to
-// that single fingerprint instead of four cosmetic prefixes.
+// user-facing rollup row without exposing the raw fingerprint and (b) collapse
+// the bucket key to that shared cause instead of four cosmetic prefixes.
 func TestBuildGroupedStatusRows_FingerprintRollsUpDistinctLaunchStrings(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	fingerprint := "vastai/search-offers/400/bad-field:driver_vers"
@@ -898,16 +897,19 @@ func TestBuildGroupedStatusRows_FingerprintRollsUpDistinctLaunchStrings(t *testi
 		blockedDetail: detail,
 	}))
 
-	// One rollup row, naming the fingerprint and the count.
-	rollupLine := fmt.Sprintf("⚠ %s — 4 jobs", fingerprint)
-	if c := strings.Count(out, rollupLine); c != 1 {
-		t.Fatalf("expected one rollup row %q, got %d:\n%s", rollupLine, c, out)
-	}
-	// Section header carries the fingerprint (since the launch strings
-	// disagree, commonLaunchBlocker falls back to the shared fingerprint).
-	hoist := fmt.Sprintf("launch blocked for all: %s", fingerprint)
+	// One hoist row, naming the user-facing cause without a duplicate incident row.
+	hoist := "launch blocked for all: provider rejected the offer-search filter field driver_vers"
 	if c := strings.Count(out, hoist); c != 1 {
-		t.Fatalf("expected one hoist line %q, got %d:\n%s", hoist, c, out)
+		t.Fatalf("expected one hoist row %q, got %d:\n%s", hoist, c, out)
+	}
+	if strings.Contains(out, "incident:") {
+		t.Fatalf("incident rollup should not duplicate a section hoist:\n%s", out)
+	}
+	if strings.Contains(out, "⚠") {
+		t.Fatalf("shared failure should not render a warning icon:\n%s", out)
+	}
+	if strings.Contains(out, fingerprint) {
+		t.Fatalf("raw fingerprint leaked into user-facing output:\n%s", out)
 	}
 	// The cosmetic per-prefix buckets must not appear as their own subheaders.
 	for _, leak := range []string{
@@ -950,8 +952,11 @@ func TestBuildGroupedStatusRows_SingleJobFingerprintDoesNotRollUp(t *testing.T) 
 		now:           now,
 		blockedDetail: detail,
 	}))
-	if strings.Contains(out, "⚠ ") {
+	if strings.Contains(out, "incident:") {
 		t.Fatalf("incident rollup must not fire for a single job:\n%s", out)
+	}
+	if strings.Contains(out, "⚠ ") {
+		t.Fatalf("single job fingerprint should not render a warning icon:\n%s", out)
 	}
 }
 
@@ -994,6 +999,43 @@ func TestBuildGroupedStatusRows_HoistScopedWhenSubsetSharesBlocker(t *testing.T)
 	}
 }
 
+func TestBuildGroupedStatusRows_SharedNoOffersFingerprintRendersOnceHuman(t *testing.T) {
+	now := time.Unix(5_000, 0)
+	mkJob := func(id int64, reason string) *db.Job {
+		return &db.Job{
+			ID:                 id,
+			Status:             db.StatusQueued,
+			Project:            "proj",
+			Description:        "desc",
+			QueuedAt:           4_000,
+			QueueBlockedReason: reason,
+		}
+	}
+	fingerprint := "vastai/search-offers/empty-result:no-offers"
+	jobs := []*db.Job{
+		mkJob(4152, "planner: no offers from providers for gpu=A40"),
+		mkJob(4154, "1 offer found, 1 offer passed filters but none met survival threshold"),
+	}
+	detail := map[int64]*blockreason.Structured{
+		4152: {Launch: "planner: no offers from providers for gpu=A40 vram>=20GB disk>=186GB", Fingerprint: fingerprint},
+		4154: {Launch: "planner: no offers from providers for gpu=RTX-4080-SUPER vram>=20GB disk>=186GB", Fingerprint: fingerprint},
+	}
+	out := groupedRowsText(buildGroupedStatusRowsWithOptions(jobs, 0, groupedStatusRenderOptions{
+		now:           now,
+		blockedDetail: detail,
+	}))
+
+	hoist := "launch blocked for all: no matching rental offers from providers"
+	if c := strings.Count(out, hoist); c != 1 {
+		t.Fatalf("expected exactly one human-facing hoist %q, got %d:\n%s", hoist, c, out)
+	}
+	for _, unwanted := range []string{"⚠", "incident:", fingerprint} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("unexpected %q in output:\n%s", unwanted, out)
+		}
+	}
+}
+
 func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	mkJob := func(id int64, reason string) *db.Job {
@@ -1020,7 +1062,7 @@ func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *test
 		blockedDetail: detail,
 	}))
 
-	hoist := "launch blocked for 2 of 3: vastai/search-offers/empty-result:no-offers"
+	hoist := "launch blocked for 2 of 3: no matching rental offers from providers"
 	otherBucket := "blocked: 1 offer found, 1 offer passed filters but none met survival threshold"
 	job4152 := "▸ -   wj4152"
 	job4166 := "▸ -   wj4166"
@@ -1034,6 +1076,9 @@ func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *test
 		strings.Index(out, job4166) < strings.Index(out, otherBucket) &&
 		strings.Index(out, otherBucket) < strings.Index(out, job4154)) {
 		t.Fatalf("hoisted jobs should render before unrelated blocker bucket:\n%s", out)
+	}
+	if strings.Contains(out, "vastai/search-offers/empty-result:no-offers") {
+		t.Fatalf("raw fingerprint leaked into user-facing output:\n%s", out)
 	}
 }
 

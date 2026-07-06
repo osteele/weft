@@ -380,8 +380,10 @@ func appendBlockedGroupedJobRows(
 	opts groupedStatusRenderOptions,
 	now time.Time,
 ) []groupedStatusRow {
-	rows = appendActiveIncidentsRows(rows, section, opts.blockedDetail, section.key)
 	sharedLaunch, sharedCount := commonLaunchBlocker(section.jobs, opts.blockedDetail)
+	if sharedLaunch == "" {
+		rows = appendActiveIncidentsRows(rows, section, opts.blockedDetail, section.key)
+	}
 	if sharedLaunch != "" {
 		scope := "for all"
 		if sharedCount < len(section.jobs) {
@@ -535,21 +537,20 @@ func collectActiveIncidents(jobs []*db.Job, detail map[int64]*blockreason.Struct
 }
 
 // appendActiveIncidentsRows emits one rollup row per active incident
-// (fingerprint shared by ≥2 jobs in the section). The rollup precedes the
-// "launch blocked for all" hoist and the per-bucket subheaders, so a user
-// scanning the section sees the systemic failures first. Each row reads
-// "  ⚠ vastai/search-offers/400/bad-field:driver_vers — N jobs: <message>".
-// Per-job rows still appear under their normal buckets — the rollup is
-// additive and doesn't replace anything.
+// (fingerprint shared by ≥2 jobs in the section). Per-job rows still appear
+// under their normal buckets — the rollup is additive and doesn't replace
+// anything. When a section-wide launch hoist is present, callers skip these
+// rows so the same group of jobs is not reported twice.
 func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSection, detail map[int64]*blockreason.Structured, sectionKey string) []groupedStatusRow {
 	incidents := collectActiveIncidents(section.jobs, detail)
 	if len(incidents) == 0 {
 		return rows
 	}
 	for _, inc := range incidents {
-		text := fmt.Sprintf("  ⚠ %s — %s", inc.fingerprint, plural(inc.count, "job", "jobs"))
-		if sample := strings.TrimSpace(inc.sample); sample != "" {
-			text += ": " + sample
+		reason := incidentDisplayReason(inc.fingerprint, inc.sample)
+		text := fmt.Sprintf("  incident: %s — %s", reason, plural(inc.count, "job", "jobs"))
+		if detail := incidentDetail(inc.fingerprint, inc.sample, reason); detail != "" {
+			text += ": " + detail
 		}
 		rows = append(rows, groupedStatusRow{
 			text:      text,
@@ -624,6 +625,57 @@ func plural(n int, singular, pluralForm string) string {
 	return fmt.Sprintf("%d %s", n, pluralForm)
 }
 
+func incidentDisplayReason(fingerprint, sample string) string {
+	fingerprint = strings.TrimSpace(fingerprint)
+	sample = blockreason.DisplayReasonForKind(blockreason.KindBlocked, sample)
+	switch {
+	case strings.HasSuffix(fingerprint, "/empty-result:no-offers"):
+		return "no matching rental offers from providers"
+	case strings.HasSuffix(fingerprint, "/empty-result:vram"):
+		return "rental offers found, but none had enough GPU memory"
+	case strings.HasSuffix(fingerprint, "/empty-result:cuda"):
+		return "rental offers found, but none satisfied the CUDA requirement"
+	case strings.HasSuffix(fingerprint, "/empty-result:provider-driver"):
+		return "rental offers found, but none satisfied the provider driver requirement"
+	case strings.HasSuffix(fingerprint, "/empty-result:forward-compat-driver"):
+		return "rental offers found, but none satisfied the forward-compatible driver requirement"
+	case strings.HasSuffix(fingerprint, "/empty-result:torch-arch"):
+		return "rental offers found, but none matched the Torch architecture constraint"
+	case strings.HasSuffix(fingerprint, "/empty-result:survival"):
+		return "rental offers found, but none met the survival threshold"
+	case strings.Contains(fingerprint, "/400/bad-field:"):
+		field := fingerprint[strings.LastIndex(fingerprint, ":")+1:]
+		if strings.TrimSpace(field) != "" {
+			return "provider rejected the offer-search filter field " + field
+		}
+		return "provider rejected the offer-search filter"
+	case strings.HasSuffix(fingerprint, "/cli/timeout"):
+		return "provider offer search timed out"
+	case strings.HasSuffix(fingerprint, "/account-credit-exhausted"):
+		return "provider account credit exhausted"
+	case sample != "":
+		return sample
+	case fingerprint != "":
+		return "provider offer-search failure"
+	default:
+		return "placement failure"
+	}
+}
+
+func incidentDetail(fingerprint, sample, display string) string {
+	sample = blockreason.DisplayReasonForKind(blockreason.KindBlocked, sample)
+	if sample == "" || sample == display {
+		return ""
+	}
+	// Known empty-result classes are already summarized by the display text.
+	// Repeating one job's full constraints here can make a multi-job incident
+	// look narrower than it is.
+	if strings.Contains(fingerprint, "/empty-result:") {
+		return ""
+	}
+	return sample
+}
+
 // commonLaunchBlocker returns the launch-side blocker shared by the
 // placement-failure jobs in the section, along with the number of section
 // jobs covered by that blocker. Returns ("", 0) when fewer than two
@@ -692,7 +744,7 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 		return launch, covered
 	}
 	if useFingerprint && fingerprint != "" {
-		return fingerprint, covered
+		return incidentDisplayReason(fingerprint, launch), covered
 	}
 	return "", 0
 }
@@ -728,11 +780,20 @@ func blockedBucketKey(job *db.Job, sectionKey string, opts groupedStatusRenderOp
 				return blockedReasonBucketKey{kind: blockreason.KindBlocked, reason: d.ReuseHeadline()}
 			}
 			if fp := strings.TrimSpace(d.Fingerprint); fp != "" {
-				return blockedReasonBucketKey{kind: blockreason.KindBlocked, reason: fp}
+				return blockedReasonBucketKey{kind: blockreason.KindBlocked, reason: incidentDisplayReason(fp, firstNonEmptyString(d.Launch, d.Summary))}
 			}
 		}
 	}
 	return groupedStatusBlockedReason(job, sectionKey, opts)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // appendBlockedDisclosureRows marks an expandable blocked job row with a
