@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
@@ -52,6 +53,31 @@ func TestEstimateCosts_NilOffer(t *testing.T) {
 	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, nil)
 	if estimates[0].TotalCost != 0 {
 		t.Errorf("nil offer should have 0 cost, got %f", estimates[0].TotalCost)
+	}
+}
+
+func TestEstimateCostsCountsNamedAssetBytes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "trace-v1",
+		ContentHash: strings.Repeat("a", 64),
+		SizeBytes:   40_000_000_000,
+		ContentType: string(dataloc.ContentTypeDirectory),
+		TargetPath:  "data/trace-v1",
+	}); err != nil {
+		t.Fatalf("UpsertNamedAsset: %v", err)
+	}
+	groupOffers := []GroupOffer{{
+		Group: InstanceGroup{Jobs: []*db.Job{{
+			ID:     1,
+			Inputs: []string{"asset:trace-v1"},
+		}}},
+		Offer: &cloud.Offer{GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 1.50, DownloadBandwidth: 1000},
+	}}
+
+	estimates := EstimateCosts(database, groupOffers, nil, nil, nil, nil, nil)
+	if got := estimates[0].DownloadBytes; got < 40_000_000_000 {
+		t.Fatalf("DownloadBytes = %d, want named asset bytes counted", got)
 	}
 }
 

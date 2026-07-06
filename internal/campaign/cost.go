@@ -170,7 +170,7 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 		startup := estimate.EstimateStartupWithModel(string(go_.Offer.Provider), overheadModel, ctx)
 		sshSetup := estimate.EstimateSSHSetup(overheadModel, ctx)
 
-		downloadBytes, _, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil)
+		downloadBytes, _, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), database)
 		if err != nil {
 			slog.Warn("some input sizes could not be resolved", "component", "cost", "error", err)
 		}
@@ -301,7 +301,7 @@ func OfferSetupOverheadFactory(database *sql.DB, overheadModel *estimate.Overhea
 		if cached, ok := downloadBytesCache.Load(key); ok {
 			downloadBytes = cached.(int64)
 		} else {
-			totalBytes, _, err := dataloc.ResolveInputSizes(group.AllInputs(), nil)
+			totalBytes, _, err := dataloc.ResolveInputSizes(group.AllInputs(), database)
 			if err != nil {
 				slog.Warn("some input sizes could not be resolved for setup estimate", "component", "cost", "error", err)
 			}

@@ -864,7 +864,7 @@ func TestGroupedJobsWithAutoReasonsUsesPersistedPlacementReason(t *testing.T) {
 	}
 }
 
-func TestGroupedAutoPilotStatusTextCountsOnlyBlockedReasons(t *testing.T) {
+func TestGroupedAutoPilotStatusTextDoesNotGlobalBlockMixedQueue(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 3342, Status: db.StatusQueued},
 		{ID: 3344, Status: db.StatusQueued},
@@ -882,11 +882,11 @@ func TestGroupedAutoPilotStatusTextCountsOnlyBlockedReasons(t *testing.T) {
 
 	line := m.groupedAutoPilotStatusText(0)
 
-	if !strings.Contains(line, "Auto-pilot: blocked") {
-		t.Fatalf("auto-pilot line = %q, want blocked for the real blocker", line)
+	if strings.Contains(line, "Auto-pilot: blocked") {
+		t.Fatalf("auto-pilot line = %q, mixed wait/block queue must keep monitoring", line)
 	}
-	if !strings.Contains(line, "(1 jobs)") {
-		t.Fatalf("auto-pilot line = %q, want filtered blocked count", line)
+	if !strings.Contains(line, "Auto-pilot: monitoring") {
+		t.Fatalf("auto-pilot line = %q, want monitoring for mixed wait/block queue", line)
 	}
 	if strings.Contains(line, "3 jobs blocked") {
 		t.Fatalf("auto-pilot line = %q, must not count waiting jobs as blocked", line)

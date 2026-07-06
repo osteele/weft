@@ -39,12 +39,28 @@ func TestAutopilotStatusLineBlockedUsesBlockedWording(t *testing.T) {
 	line := autopilotStatusLine(autopilotDisplayInput{
 		blockedSummary: "no offers from providers",
 		blockedJobs:    2,
+		unplaced:       2,
 	})
 	if !strings.Contains(line, "Auto-pilot: blocked — no offers from providers (2 jobs)") {
 		t.Fatalf("status line = %q, want blocked wording with count", line)
 	}
 	if strings.Contains(line, "paused") {
 		t.Fatalf("status line = %q, blocked state must not say paused", line)
+	}
+}
+
+func TestAutopilotStatusLineMixedBlockedAndWaitingKeepsMonitoring(t *testing.T) {
+	line := autopilotStatusLine(autopilotDisplayInput{
+		blockedSummary: "2 jobs blocked",
+		blockedJobs:    2,
+		unplaced:       6,
+		running:        2,
+	})
+	if strings.Contains(line, "Auto-pilot: blocked") {
+		t.Fatalf("status line = %q, want mixed blocked/waiting jobs to keep monitoring", line)
+	}
+	if !strings.Contains(line, "Auto-pilot: monitoring") || !strings.Contains(line, "6 unplaced") {
+		t.Fatalf("status line = %q, want monitoring with unplaced count", line)
 	}
 }
 

@@ -91,10 +91,12 @@ func autopilotStatusLine(in autopilotDisplayInput) string {
 		return "Auto-pilot: failed — " + err
 	}
 	if summary := strings.TrimSpace(in.blockedSummary); summary != "" {
-		if in.blockedJobs > 0 {
+		if in.blockedJobs > 0 && (in.unplaced <= 0 || in.blockedJobs >= in.unplaced) {
 			return fmt.Sprintf("Auto-pilot: blocked — %s (%d jobs)", summary, in.blockedJobs)
 		}
-		return "Auto-pilot: blocked — " + summary
+		if in.blockedJobs <= 0 {
+			return "Auto-pilot: blocked — " + summary
+		}
 	}
 	if !in.nextPassAt.IsZero() && time.Now().Before(in.nextPassAt) {
 		return formatAutoPilotNextPass(in.nextPassAt, in.unplaced)
