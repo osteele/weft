@@ -1125,8 +1125,15 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("             reset: weft autopilot blocked --unblock\n")
 			}
 		}
-		if x := explain.ForJob(database, job, time.Now()); x.SuggestedAction != "" && x.SuggestedAction != "none" {
+		x := explain.ForJob(database, job, time.Now())
+		if explanationHasHighConfidenceBlocker(x) {
+			fmt.Printf("Blocker:     %s\n", explanationBlockerSummary(x))
+		}
+		if x.SuggestedAction != "" && x.SuggestedAction != "none" {
 			fmt.Printf("Explain:     %s\n", x.SuggestedAction)
+		}
+		if explanationHasHighConfidenceBlocker(x) {
+			printDiagnoseJobHint("Diagnose", 12, job.ID)
 		}
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())

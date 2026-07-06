@@ -652,12 +652,31 @@ func TestRunJobInfoShowsStructuredPlacementBreakdown(t *testing.T) {
 	})
 	for _, want := range []string{
 		"Reason:      " + flat,
+		fmt.Sprintf("Queue reason: blocked: %s - see weft diagnose job %s", flat, ids.FormatJobID(jobID)),
 		"new instance  no rental headroom",
 		"reuse wi1023  disk insufficient: need=42GB free=12GB",
 		"reuse wi1044  GPU class mismatch: job=ampere instance=ada",
+		fmt.Sprintf("Diagnose:    weft diagnose job %s", ids.FormatJobID(jobID)),
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
+		}
+	}
+
+	restoreStatusFlags(t)
+	statusNoSync = true
+
+	statusOut := captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+	for _, want := range []string{
+		fmt.Sprintf("Queue reason: blocked: %s - see weft diagnose job %s", flat, ids.FormatJobID(jobID)),
+		fmt.Sprintf("Diagnose: weft diagnose job %s", ids.FormatJobID(jobID)),
+	} {
+		if !strings.Contains(statusOut, want) {
+			t.Fatalf("missing %q in status output:\n%s", want, statusOut)
 		}
 	}
 }
@@ -688,6 +707,9 @@ func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 	if !strings.Contains(out, "Reason:   "+reason) {
 		t.Fatalf("missing blocked reason, got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Diagnose: weft diagnose job %s", ids.FormatJobID(jobID))) {
+		t.Fatalf("missing diagnose hint, got:\n%s", out)
 	}
 }
 
@@ -757,6 +779,9 @@ func TestRunJobInfoShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 	if !strings.Contains(out, "Reason:      "+reason) {
 		t.Fatalf("missing blocked reason, got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Diagnose:    weft diagnose job %s", ids.FormatJobID(jobID))) {
+		t.Fatalf("missing diagnose hint, got:\n%s", out)
 	}
 }
 

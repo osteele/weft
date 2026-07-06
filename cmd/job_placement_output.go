@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -57,6 +58,10 @@ func queueReasonSummary(database *sql.DB, job *db.Job) string {
 	case db.JobTargetExternal:
 		return "waiting for external executor status"
 	case db.JobTargetUnplaced:
+		if result := blockreason.Resolve(job, blockreason.Options{Compact: true}); result.Blocked {
+			reason := blockreason.DisplayReasonForKind(result.Kind, result.Reason)
+			return fmt.Sprintf("%s: %s - see weft diagnose job %s", result.Kind, reason, ids.FormatJobID(job.ID))
+		}
 		return "awaiting assignment"
 	case db.JobTargetInventoryHost:
 		if job.LastSyncedStatus != db.StatusQueued {

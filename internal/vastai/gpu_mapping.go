@@ -26,10 +26,13 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 		return nil, nil // no filter needed, all Vast.ai offers are NVIDIA
 	}
 
-	// Alias compatibility: treat "rtx-4080" as matching both 4080 and 4080S
-	// because Vast supply often labels equivalent Ada stock as 4080S.
+	// Alias compatibility: Vast supply uses both 4080S and 4080 SUPER
+	// spellings, while users may request either the base or super class.
 	if !minMode && norm == "rtx4080" {
-		return []string{"RTX 4080", "RTX 4080S"}, nil
+		return []string{"RTX 4080", "RTX 4080S", "RTX 4080 SUPER"}, nil
+	}
+	if !minMode && norm == "rtx4080super" {
+		return []string{"RTX 4080S", "RTX 4080 SUPER"}, nil
 	}
 	if !minMode && norm == "t4" {
 		// Vast.ai labels the T4 as "Tesla T4"; the bare "T4" the user types

@@ -142,6 +142,7 @@ func TestMatchJobToInstance_GPUClass(t *testing.T) {
 		{"a6000 alias matches RTX_A6000", "a6000", "RTX_A6000", "", true},
 		{"rtx-5090 alias matches RTX_5090", "rtx-5090", "RTX_5090", "", true},
 		{"rtx-4080 alias matches RTX 4080S resolved", "rtx-4080", "RTX_4080S", "RTX 4080S", true},
+		{"rtx-4080-super alias matches RTX 4080S resolved", "rtx-4080-super", "RTX_4080S", "RTX 4080S", true},
 		{"volta matches Tesla V100 resolved", "volta", "nvidia", "Tesla V100", true},
 	}
 

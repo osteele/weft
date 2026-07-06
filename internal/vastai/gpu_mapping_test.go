@@ -93,7 +93,12 @@ func TestResolveGPUFilter(t *testing.T) {
 		{
 			name:      "rtx-4080 alias includes 4080 and 4080S",
 			gpuClass:  "rtx-4080",
-			wantNames: []string{"RTX 4080", "RTX 4080S"},
+			wantNames: []string{"RTX 4080", "RTX 4080S", "RTX 4080 SUPER"},
+		},
+		{
+			name:      "rtx-4080-super alias uses Vast.ai super spellings",
+			gpuClass:  "rtx-4080-super",
+			wantNames: []string{"RTX 4080S", "RTX 4080 SUPER"},
 		},
 		{
 			name:      "short alias 2080ti",
@@ -302,6 +307,9 @@ func TestGPUClassMatchesOfferName(t *testing.T) {
 	}{
 		{name: "empty class matches all", gpuClass: "", gpuName: "RTX 4090", want: true},
 		{name: "rtx-4080 matches 4080s", gpuClass: "rtx-4080", gpuName: "RTX 4080S", want: true},
+		{name: "rtx-4080-super matches 4080s", gpuClass: "rtx-4080-super", gpuName: "RTX 4080S", want: true},
+		{name: "rtx-4080-super matches 4080 super", gpuClass: "rtx-4080-super", gpuName: "RTX 4080 SUPER", want: true},
+		{name: "rtx-4080-super rejects base 4080", gpuClass: "rtx-4080-super", gpuName: "RTX 4080", want: false},
 		{name: "a6000 matches RTX A6000", gpuClass: "a6000", gpuName: "RTX A6000", want: true},
 		{name: "rtx-5090 matches RTX 5090", gpuClass: "rtx-5090", gpuName: "RTX 5090", want: true},
 		{name: "v100 matches Tesla V100", gpuClass: "v100", gpuName: "Tesla V100", want: true},

@@ -24,6 +24,8 @@ func TestTargetSpecFromOfferPreservesCloudGPUClassCompatibility(t *testing.T) {
 		{name: "a6000 rtx alias", requested: "a6000", gpuName: "RTX A6000"},
 		{name: "gh200 grace hopper alias", requested: "gh200", gpuName: "Grace Hopper"},
 		{name: "rtx4080 admits super variant", requested: "rtx-4080", gpuName: "RTX 4080S"},
+		{name: "rtx4080 super admits short provider spelling", requested: "rtx-4080-super", gpuName: "RTX 4080S"},
+		{name: "rtx4080 super admits long provider spelling", requested: "rtx-4080-super", gpuName: "RTX 4080 SUPER"},
 		{name: "unknown vastai still satisfies broad nvidia", requested: "nvidia", gpuName: "Future Accelerator Z9"},
 	}
 

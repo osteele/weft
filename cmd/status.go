@@ -863,6 +863,9 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Status:   %s\n", effectiveStatus)
 	}
 	printPlacementLines(queuedPlacementLines(database, job), 10)
+	if explanationHasHighConfidenceBlocker(x) && x.PrimaryReason != display.Reason {
+		fmt.Printf("Blocker:  %s\n", explanationBlockerSummary(x))
+	}
 	if x.SuggestedAction != "" && x.SuggestedAction != "none" {
 		fmt.Printf("Explain:  %s\n", x.SuggestedAction)
 	}
@@ -901,6 +904,9 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 
 	printJobLocalDiagnostics(database, job)
 
+	if explanationHasHighConfidenceBlocker(x) {
+		printDiagnoseJobHint("Diagnose", 9, job.ID)
+	}
 	fmt.Printf("Details:  weft info %s  # Show directory, command, env vars\n", ids.FormatJobID(job.ID))
 
 	// Print usage hints

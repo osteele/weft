@@ -115,6 +115,7 @@ var Entries = []Entry{
 	{"RTX 4090", GenAdaLovelace, "8.9"},
 	{"RTX 4080", GenAdaLovelace, "8.9"},
 	{"RTX 4080S", GenAdaLovelace, "8.9"},
+	{"RTX 4080 SUPER", GenAdaLovelace, "8.9"},
 	{"RTX 4070 Ti", GenAdaLovelace, "8.9"},
 	{"RTX 4070", GenAdaLovelace, "8.9"},
 	{"RTX 4070S Ti", GenAdaLovelace, "8.9"},
