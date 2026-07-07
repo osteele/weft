@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func TestRunLogForJob_QueuedPlacedJobHasNoLogsYet(t *testing.T) {
 
 func TestContextualizeCloudLogFetchErrorRunningJob(t *testing.T) {
 	job := &db.Job{ID: 4035, Status: db.StatusRunning}
-	err := contextualizeCloudLogFetchError(job, errors.New("log not found in R2 for job wj4035 (the job may not have produced output, or the instance was terminated before log upload)"))
+	err := contextualizeCloudLogFetchError(nil, job, errors.New("log not found in R2 for job wj4035 (the job may not have produced output, or the instance was terminated before log upload)"))
 	if err == nil {
 		t.Fatal("err = nil, want contextual error")
 	}
@@ -89,7 +90,7 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 	defer resetLogModeState()
 
 	origFetch := fetchAndDisplayLogFromR2Func
-	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, _ int64) error {
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *sql.DB, _ *db.Job, _ int64) error {
 		return &cloudLogSnapshotError{jobID: 4035, status: db.StatusRunning, kind: cloudLogSnapshotMissing}
 	}
 	t.Cleanup(func() {
@@ -118,9 +119,9 @@ func TestRunLogForCloudJobSnapshotLookupFailureRunningJobPrintsNotice(t *testing
 	defer resetLogModeState()
 
 	origFetch := fetchAndDisplayLogFromR2Func
-	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, _ int64) error {
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *sql.DB, _ *db.Job, _ int64) error {
 		err := errors.New("check log in R2 (key jobs/4213/runs/36531/results/4213.log): head object jobs/4213/runs/36531/results/4213.log: timeout")
-		return contextualizeCloudLogFetchError(&db.Job{ID: 4213, Status: db.StatusRunning}, err)
+		return contextualizeCloudLogFetchError(nil, &db.Job{ID: 4213, Status: db.StatusRunning}, err)
 	}
 	t.Cleanup(func() {
 		fetchAndDisplayLogFromR2Func = origFetch
@@ -149,7 +150,7 @@ func TestRunLogForCloudJobSnapshotLookupFailureRunningJobPrintsNotice(t *testing
 func TestContextualizeCloudLogFetchErrorTerminalLookupFailureHidesStorageDetails(t *testing.T) {
 	job := &db.Job{ID: 4213, Status: db.StatusCompleted}
 	original := errors.New("check log in R2 (key jobs/4213/runs/36531/results/4213.log): head object jobs/4213/runs/36531/results/4213.log: timeout")
-	err := contextualizeCloudLogFetchError(job, original)
+	err := contextualizeCloudLogFetchError(nil, job, original)
 	if err == nil {
 		t.Fatal("err = nil, want contextual error")
 	}
@@ -165,12 +166,56 @@ func TestContextualizeCloudLogFetchErrorTerminalLookupFailureHidesStorageDetails
 	}
 }
 
-func TestContextualizeCloudLogFetchErrorTerminalJobKeepsDiagnosis(t *testing.T) {
+func TestContextualizeCloudLogFetchErrorTerminalJobHidesStorageDetails(t *testing.T) {
 	original := errors.New("log not found in R2 for job wj4035 (the job may not have produced output, or the instance was terminated before log upload)")
 	job := &db.Job{ID: 4035, Status: db.StatusCompleted}
-	err := contextualizeCloudLogFetchError(job, original)
-	if err != original {
-		t.Fatalf("err = %v, want original terminal diagnosis", err)
+	err := contextualizeCloudLogFetchError(nil, job, original)
+	if err == nil {
+		t.Fatal("err = nil, want contextual error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "may not have produced output") || strings.Contains(msg, "terminated before log upload") {
+		t.Fatalf("error = %q, should not expose storage details or ambiguous guesses", msg)
+	}
+	if !strings.Contains(msg, "Archived log is not available for job wj4035") {
+		t.Fatalf("error = %q, want archived log message", msg)
+	}
+	if !errors.Is(err, original) {
+		t.Fatalf("errors.Is(contextual, original) = false")
+	}
+}
+
+func TestContextualizeCloudLogFetchErrorKilledRentalExplainsInstanceEnded(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "provider instance stuck in loading status"); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusKilled); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	job := &db.Job{ID: jobID, Status: db.StatusKilled}
+	original := errors.New("log not found in R2 for job wj1 (the job may not have produced output, or the instance was terminated before log upload)")
+	got := contextualizeCloudLogFetchError(database, job, original)
+	msg := got.Error()
+	if !strings.Contains(msg, "rental wi") || !strings.Contains(msg, "ended before Weft recorded a log snapshot") {
+		t.Fatalf("error = %q, want instance-ended explanation", msg)
+	}
+	if !strings.Contains(msg, "infra_failure") || !strings.Contains(msg, "provider instance stuck in loading status") {
+		t.Fatalf("error = %q, want launch termination detail", msg)
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "may not have produced output") || strings.Contains(msg, "terminated before log upload") {
+		t.Fatalf("error = %q, should not expose storage details or ambiguous guesses", msg)
 	}
 }
 
@@ -367,7 +412,7 @@ func TestRunLogFromR2UsesOnlyLatestAttempt(t *testing.T) {
 	orig := fetchAndDisplayLogFromR2Func
 	defer func() { fetchAndDisplayLogFromR2Func = orig }()
 	var gotRunIDs []int64
-	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, runID int64) error {
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *sql.DB, _ *db.Job, runID int64) error {
 		gotRunIDs = append(gotRunIDs, runID)
 		return errors.New("latest attempt has no log")
 	}

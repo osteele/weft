@@ -344,7 +344,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 	if !exists {
 		// Try R2 fallback before giving up
-		if r2Err := tryLogFromR2(cmd, job); r2Err == nil {
+		if r2Err := tryLogFromR2(cmd, database, job); r2Err == nil {
 			return nil
 		}
 		return fmt.Errorf("log file not found for job %s on %s", ids.FormatJobID(jobID), job.Host)
@@ -393,7 +393,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 				return nil
 			}
 			// Try R2 fallback for inventory hosts
-			if r2Err := tryLogFromR2(cmd, job); r2Err == nil {
+			if r2Err := tryLogFromR2(cmd, database, job); r2Err == nil {
 				return nil
 			}
 		}
@@ -608,7 +608,7 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 	target := &attempts[idx]
 
 	if target.LaunchID != nil {
-		if err := fetchAndDisplayLogFromR2(cmd, job, target.ID); err != nil {
+		if err := fetchAndDisplayLogFromR2WithDatabase(cmd, database, job, target.ID); err != nil {
 			return true, fmt.Errorf("fetch log for attempt #%d: %w", attemptNum, err)
 		}
 		return true, nil
@@ -691,10 +691,10 @@ func runLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 		fmt.Fprintf(os.Stderr, "Follow mode is not available for this log snapshot; showing the current snapshot.\n")
 	}
 
-	return fetchAndDisplayLogFromR2Func(cmd, job, cloudLogRunID(job))
+	return fetchAndDisplayLogFromR2Func(cmd, database, job, cloudLogRunID(job))
 }
 
-var fetchAndDisplayLogFromR2Func = fetchAndDisplayLogFromR2
+var fetchAndDisplayLogFromR2Func = fetchAndDisplayLogFromR2WithDatabase
 
 func cloudLogRunID(job *db.Job) int64 {
 	if job != nil && job.LatestRunID != nil {
@@ -705,6 +705,10 @@ func cloudLogRunID(job *db.Job) int64 {
 
 // fetchAndDisplayLogFromR2 fetches a log from R2 with the given runID, displays it, and caches if terminal.
 func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) error {
+	return fetchAndDisplayLogFromR2WithDatabase(cmd, nil, job, runID)
+}
+
+func fetchAndDisplayLogFromR2WithDatabase(cmd *cobra.Command, database *sql.DB, job *db.Job, runID int64) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -723,7 +727,7 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 
 	fetched, err := fetchCloudLogFromR2(ctx, r2Client, job.ID, runID, logFrom, logTo, logLines)
 	if err != nil {
-		return contextualizeCloudLogFetchError(job, err)
+		return contextualizeCloudLogFetchError(database, job, err)
 	}
 
 	// Cache for terminal jobs
@@ -744,7 +748,7 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 	return nil
 }
 
-func contextualizeCloudLogFetchError(job *db.Job, err error) error {
+func contextualizeCloudLogFetchError(database *sql.DB, job *db.Job, err error) error {
 	if job == nil || err == nil {
 		return err
 	}
@@ -753,9 +757,15 @@ func contextualizeCloudLogFetchError(job *db.Job, err error) error {
 		statusLabel = job.EffectiveStatus()
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "log not found in R2") {
+	if isCloudLogSnapshotMissingError(msg) {
 		if status.IsTerminal(job.Status) {
-			return err
+			return &cloudLogSnapshotError{
+				jobID:  job.ID,
+				status: statusLabel,
+				kind:   cloudLogSnapshotMissing,
+				launch: latestCloudLogLaunch(database, job),
+				err:    err,
+			}
 		}
 		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotMissing, err: err}
 	}
@@ -776,12 +786,16 @@ type cloudLogSnapshotError struct {
 	jobID  int64
 	status string
 	kind   cloudLogSnapshotErrorKind
+	launch *db.Launch
 	err    error
 }
 
 func (e *cloudLogSnapshotError) Error() string {
 	if e.kind == cloudLogSnapshotLookupFailed {
 		return fmt.Sprintf("Could not read log snapshot for job %s (status: %s). Retry shortly.", ids.FormatJobID(e.jobID), e.status)
+	}
+	if status.IsTerminal(e.status) {
+		return e.TerminalMessage()
 	}
 	return e.RunningMessage()
 }
@@ -800,8 +814,89 @@ func (e *cloudLogSnapshotError) RunningMessage() string {
 		jobID, e.status, jobID)
 }
 
+func (e *cloudLogSnapshotError) TerminalMessage() string {
+	jobID := ids.FormatJobID(e.jobID)
+	prefix := fmt.Sprintf("Archived log is not available for job %s (status: %s).", jobID, e.status)
+	if e.launch == nil {
+		return prefix + " Weft did not record a log snapshot for this attempt."
+	}
+	instanceID := ids.FormatInstanceID(e.launch.ID)
+	reason := strings.TrimSpace(e.launch.TerminationReason)
+	detail := strings.TrimSpace(e.launch.TerminationDetail)
+	if launchEndedBeforeLogArchive(e.launch, e.status) {
+		suffix := fmt.Sprintf(" The rental %s ended before Weft recorded a log snapshot", instanceID)
+		if reason != "" {
+			suffix += fmt.Sprintf(" (%s)", reason)
+		}
+		if detail != "" {
+			suffix += ": " + detail
+		}
+		return prefix + suffix + "."
+	}
+	suffix := fmt.Sprintf(" The job finished on rental %s, but Weft did not record a log snapshot", instanceID)
+	if reason != "" && reason != db.TerminationReasonCompleted && reason != db.TerminationReasonJobFailure {
+		suffix += fmt.Sprintf(" (%s)", reason)
+	}
+	return prefix + suffix + "."
+}
+
+func launchEndedBeforeLogArchive(launch *db.Launch, jobStatus string) bool {
+	if launch == nil {
+		return false
+	}
+	if jobStatus == db.StatusKilled || jobStatus == db.StatusCanceled || jobStatus == db.StatusDead {
+		return true
+	}
+	switch launch.TerminationReason {
+	case db.TerminationReasonProviderFailure,
+		db.TerminationReasonInfraFailure,
+		db.TerminationReasonBootstrapTimeout,
+		db.TerminationReasonPhaseStall,
+		db.TerminationReasonPreempted,
+		db.TerminationReasonProviderTimeout,
+		db.TerminationReasonCancelled,
+		db.TerminationReasonUnknown:
+		return true
+	}
+	return launch.Status == db.LaunchStatusFailed && launch.TerminationReason != db.TerminationReasonJobFailure
+}
+
+func latestCloudLogLaunch(database *sql.DB, job *db.Job) *db.Launch {
+	if database == nil || job == nil {
+		return nil
+	}
+	if job.LaunchID != nil {
+		if launch, err := db.GetLaunch(database, *job.LaunchID); err == nil {
+			return launch
+		}
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return nil
+	}
+	for _, attempt := range attempts {
+		if attempt.LaunchID == nil {
+			continue
+		}
+		launch, err := db.GetLaunch(database, *attempt.LaunchID)
+		if err == nil {
+			return launch
+		}
+	}
+	return nil
+}
+
+func isCloudLogSnapshotMissingError(msg string) bool {
+	return strings.Contains(msg, "archived log not found") ||
+		strings.Contains(msg, "log not found in R2") ||
+		strings.Contains(msg, "log not in R2")
+}
+
 func isCloudLogSnapshotLookupError(msg string) bool {
-	return strings.Contains(msg, "check log in R2") ||
+	return strings.Contains(msg, "check archived log snapshot") ||
+		strings.Contains(msg, "fetch archived log snapshot") ||
+		strings.Contains(msg, "fetch live log snapshot chunk") ||
+		strings.Contains(msg, "check log in R2") ||
 		strings.Contains(msg, "fetch log from R2") ||
 		strings.Contains(msg, "fetch live log chunk from R2")
 }
@@ -834,12 +929,12 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	for _, keys := range candidates {
 		exists, err := r2Client.ObjectExists(ctx, keys.finalKey)
 		if err != nil {
-			return nil, fmt.Errorf("check log in R2 (key %s): %w", keys.finalKey, err)
+			return nil, fmt.Errorf("check archived log snapshot: %w", err)
 		}
 		if exists {
 			data, err := r2Client.GetObject(ctx, keys.finalKey)
 			if err != nil {
-				return nil, fmt.Errorf("fetch log from R2 (key %s): %w", keys.finalKey, err)
+				return nil, fmt.Errorf("fetch archived log snapshot: %w", err)
 			}
 			return &fetchedCloudLog{
 				Content: string(data),
@@ -868,7 +963,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		for _, part := range parts {
 			data, err := r2Client.GetObject(ctx, part.Key)
 			if err != nil {
-				return nil, fmt.Errorf("fetch live log chunk from R2 (key %s): %w", part.Key, err)
+				return nil, fmt.Errorf("fetch live log snapshot chunk: %w", err)
 			}
 			b.Write(data)
 		}
@@ -888,11 +983,11 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	// / error) instead of the boilerplate "may not have produced output"
 	// guess.
 	if marker, ok := fetchUploadFailureMarker(ctx, r2Client, jobID, runID); ok {
-		return nil, fmt.Errorf("log not in R2 for job %s — upload truncated: %s (%s, %d/%d bytes in %.0fs)",
+		return nil, fmt.Errorf("archived log not found for job %s: upload truncated: %s (%s, %d/%d bytes in %.0fs)",
 			ids.FormatJobID(jobID), marker.Cause(), marker.Reason,
 			marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds)
 	}
-	return nil, fmt.Errorf("log not found in R2 for job %s (the job may not have produced output, or the instance was terminated before log upload)", ids.FormatJobID(jobID))
+	return nil, fmt.Errorf("archived log not found for job %s", ids.FormatJobID(jobID))
 }
 
 // fetchUploadFailureMarker reads jobs/<id>/runs/<run>/upload-failure.json,
@@ -1216,9 +1311,9 @@ func printPostLogDiagnostics(job *db.Job) {
 
 // tryLogFromR2 attempts to fetch a log from R2 for an inventory host job.
 // Returns nil on success (output already printed), error if R2 fetch fails.
-func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
+func tryLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	// Inventory hosts use runID=0
-	if err := fetchAndDisplayLogFromR2(cmd, job, 0); err != nil {
+	if err := fetchAndDisplayLogFromR2Func(cmd, database, job, 0); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log snapshot for job %s.\n", ids.FormatJobID(job.ID))
