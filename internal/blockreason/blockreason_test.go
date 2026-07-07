@@ -43,6 +43,17 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			source: SourceAutoPilot,
 		},
 		{
+			name: "offer fetch unavailable is retrying unknown market",
+			job: &db.Job{
+				ID:     13,
+				Status: db.StatusQueued,
+			},
+			opts:   Options{AutoPilotReason: "planner: offer fetch unavailable", Compact: true},
+			want:   "planner: provider offer fetch unavailable (market unknown; Weft will retry)",
+			kind:   KindWaiting,
+			source: SourceAutoPilot,
+		},
+		{
 			name: "reuse-only autopilot diagnostic hidden",
 			job: &db.Job{
 				ID:     10,

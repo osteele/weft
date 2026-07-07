@@ -43,6 +43,22 @@ func TestDisplay_SourceSyncFailureIsWaiting(t *testing.T) {
 	}
 }
 
+func TestDisplay_OfferFetchUnavailableIsWaiting(t *testing.T) {
+	job := &db.Job{ID: 1, Status: db.StatusQueued, QueueBlockedReason: "planner: offer fetch unavailable"}
+	got := Display(job, nil)
+	if got.Blocked {
+		t.Fatalf("expected Blocked=false for retryable offer fetch, got %#v", got)
+	}
+	if got.Status != "waiting" || got.Kind != "waiting" {
+		t.Fatalf("Display = %#v, want waiting status/kind", got)
+	}
+	for _, want := range []string{"planner: provider offer fetch unavailable", "market unknown", "Weft will retry"} {
+		if !strings.Contains(got.Reason, want) {
+			t.Fatalf("Reason = %q, want %q", got.Reason, want)
+		}
+	}
+}
+
 func TestDisplay_RunawayPauseIsPaused(t *testing.T) {
 	job := &db.Job{ID: 1, Status: db.StatusQueued, QueueBlockedReason: "new-instance retry paused: repeated infrastructure failures without progress"}
 	got := Display(job, nil)

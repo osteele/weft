@@ -39,11 +39,23 @@ func TestApplyGroupOffer_OfferFetchTimeoutIsUnknownNotNoOffers(t *testing.T) {
 	if !strings.Contains(reason, ErrOfferSnapshotUnavailable.Error()) {
 		t.Fatalf("blocked reason = %q, want offer fetch unavailable", reason)
 	}
+	if !strings.Contains(reason, "market unknown") || !strings.Contains(reason, "Weft will retry") {
+		t.Fatalf("blocked reason = %q, want retrying unknown-market detail", reason)
+	}
 	if !strings.Contains(reason, cloud.ErrProviderCommandTimeout.Error()) {
 		t.Fatalf("blocked reason = %q, want timeout detail", reason)
 	}
 	if strings.Contains(reason, "no offers") {
 		t.Fatalf("blocked reason = %q, must not collapse timeout to no offers", reason)
+	}
+}
+
+func TestSanitizeBlockedReasonClarifiesBareOfferFetchUnavailable(t *testing.T) {
+	got := SanitizeBlockedReason(ErrOfferSnapshotUnavailable.Error())
+	for _, want := range []string{"provider offer fetch unavailable", "market unknown", "Weft will retry"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SanitizeBlockedReason() = %q, want %q", got, want)
+		}
 	}
 }
 

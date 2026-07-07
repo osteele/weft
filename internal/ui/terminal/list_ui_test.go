@@ -493,7 +493,7 @@ func TestListTUIAutoPilotPassStartKeepsExistingBlockReasons(t *testing.T) {
 		text.WriteString("\n")
 	}
 	out := text.String()
-	if !strings.Contains(out, "blocked: planner: offer fetch unavailable") {
+	if !strings.Contains(out, "waiting: planner: provider offer fetch unavailable (market unknown; Weft will retry)") {
 		t.Fatalf("existing blocked reason disappeared during active pass:\n%s", out)
 	}
 	if !strings.Contains(out, "wj4060") {
