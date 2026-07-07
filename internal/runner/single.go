@@ -120,10 +120,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		dotenvVars, _ := LoadDotenvFiles(expandedDir)
 		envVars = append(envVars, dotenvVars...)
 	}
+	scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
 
 	setupCmd := DetectSetupCommand(expandedDir)
 	if setupCmd == "uv sync" {
-		scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
 		if ShouldSkipSetup(setupCmd, scriptMeta) {
 			slog.Info("skipping uv sync: script metadata declares isolated = true",
 				"component", "runner", "job_id", cfg.JobID)
@@ -256,7 +256,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// minutes loading weights. The remediator's existing pattern registry
 	// will classify the log on a hit; the gain here is wall-clock and a
 	// clearer phase attribution.
-	if len(gpuDevices) > 0 && dataloc.JobUsesTorch(expandedDir, command) {
+	if len(gpuDevices) > 0 && shouldRunTorchPreflight(expandedDir, command, scriptMeta) {
 		ei, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, cfg.SetupTimeout)
 		if preflightErr != nil {
 			now := time.Now().Unix()

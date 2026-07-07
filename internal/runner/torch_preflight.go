@@ -107,6 +107,16 @@ func torchPreflightShellCommand(workingDir, jobCommand string) string {
 	return `if command -v python >/dev/null 2>&1; then python -c "` + torchPreflightPythonCode + `"; elif command -v python3 >/dev/null 2>&1; then python3 -c "` + torchPreflightPythonCode + `"; else echo "weft: torch preflight: neither python nor python3 found" >&2; exit 127; fi`
 }
 
+func shouldRunTorchPreflight(workingDir, jobCommand string, scriptMeta *dataloc.ScriptMeta) bool {
+	if len(torchPreflightScriptDeps(workingDir, jobCommand)) > 0 {
+		return true
+	}
+	if scriptMeta != nil && (scriptMeta.Isolated || strings.TrimSpace(scriptMeta.Image) != "") {
+		return false
+	}
+	return dataloc.JobUsesTorch(workingDir, jobCommand)
+}
+
 func torchPreflightScriptDeps(workingDir, jobCommand string) []string {
 	deps := dataloc.ScanScriptDependencies(workingDir, jobCommand)
 	if len(deps) == 0 {

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/dataloc"
 )
 
 // TestPreflightEnv_InheritsHomeFromOsEnviron is a regression test for the
@@ -99,5 +101,74 @@ import torch
 	}
 	if strings.Contains(got, "--no-sync") {
 		t.Fatalf("command = %q, script preflight must not use project --no-sync", got)
+	}
+}
+
+func TestShouldRunTorchPreflightSkipsProjectTorchForScriptImage(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pyproject.toml"), `[project]
+dependencies = ["torch==2.6.0"]
+`)
+	writeFile(t, filepath.Join(dir, "profile_sglang.py"), `# /// script
+# [tool.weft]
+# image = "lmsysorg/sglang:dev-cu13"
+# gpu-arch-max = "any"
+# ///
+print("sglang runtime owns torch")
+`)
+
+	meta, err := dataloc.ScanScriptMeta(dir, "uv run profile_sglang.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldRunTorchPreflight(dir, "uv run profile_sglang.py", meta) {
+		t.Fatal("shouldRunTorchPreflight = true, want false for script image runtime")
+	}
+}
+
+func TestShouldRunTorchPreflightSkipsProjectTorchForIsolatedScript(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pyproject.toml"), `[project]
+dependencies = ["torch==2.6.0"]
+`)
+	writeFile(t, filepath.Join(dir, "train.py"), `# /// script
+# [tool.weft]
+# isolated = true
+# ///
+print("isolated runtime")
+`)
+
+	meta, err := dataloc.ScanScriptMeta(dir, "uv run train.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldRunTorchPreflight(dir, "uv run train.py", meta) {
+		t.Fatal("shouldRunTorchPreflight = true, want false for isolated script runtime")
+	}
+}
+
+func TestShouldRunTorchPreflightRunsForScriptTorchDependencies(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "train.py"), `# /// script
+# dependencies = ["torch>=2.2"]
+# [tool.weft]
+# image = "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+# ///
+import torch
+`)
+
+	meta, err := dataloc.ScanScriptMeta(dir, "uv run train.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldRunTorchPreflight(dir, "uv run train.py", meta) {
+		t.Fatal("shouldRunTorchPreflight = false, want true for script torch dependencies")
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
