@@ -29,9 +29,14 @@ than ad hoc SSH scripts, without adopting a heavyweight HPC scheduler.
 - Submits jobs locally first; daemon/autopilot placement and SSH dispatch keep
   submission responsive even when hosts are slow to probe.
 - Bursts to Vast.ai or RunPod when local machines are full.
+- Keeps cloud job control in Weft's own job ledger instead of adding a separate
+  managed-jobs controller layer.
 - Supports Vast.ai interruptible instances: outbid pauses are recoverable
   same-instance stops, bids can be raised within an on-demand cap, and
   R2-streamed outputs are restored if a job relaunches elsewhere.
+- Treats project outputs as first-class artifacts: write under `output/` or
+  `outputs/`, or declare extra outputs, then list and retrieve them with
+  `weft artifact`.
 - Shows active jobs, queues, cloud instances, and hosts from terminal and web
   views.
 - Keeps source snapshots for cloud jobs so completed remote runs can be
@@ -152,11 +157,23 @@ source snapshot to R2, start an instance, run the queued jobs, collect telemetry
 and shut the instance down. Failed cloud jobs enter a grace period so they can
 be inspected or resubmitted before cleanup.
 
+This native path is intentionally lighter than delegating normal experiments to
+an external managed-job controller. Weft owns placement, source sync, execution
+state, logs, artifact discovery, and teardown records in one local job ledger,
+so there is no separate AWS/controller credential path to set up and no
+controller log stream to chase before you reach worker setup or user-code logs.
+Use `weft info <job-id>` and `weft instance audit <job-id>` for lifecycle and
+cleanup evidence.
+
 Jobs tagged `interruptible` may run on Vast.ai interruptible offers. Weft treats
 provider outbids as pause/resume events when Vast retains the same instance disk,
 raises bids up to the recorded on-demand reference when possible, and restages
 previously uploaded `output/` files from R2 if the job has to relaunch on a new
 instance.
+
+For result files, the intended path is to write into `output/` or `outputs/`
+and use `weft artifact list|get|sync`. That avoids log-embedded tarballs or
+manual file-copy conventions for ordinary smoke tests and experiment outputs.
 
 Provider setup and operation are covered in
 [Cloud GPU Instances](docs/guides/instances.md). The command details live in

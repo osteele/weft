@@ -1066,6 +1066,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		// Show full job details
 		fmt.Printf("Job ID:      %s\n", ids.FormatJobID(job.ID))
 		fmt.Printf("Host:        %s\n", job.TargetDisplay())
+		printJobLifecycleProof(database, job)
 		// Show status with waiting info. Tombstoned annotation comes
 		// inline so the operator notices it before reading further —
 		// otherwise a tombstoned job looks identical to an active queued
@@ -1299,6 +1300,108 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
+}
+
+func printJobLifecycleProof(database *sql.DB, job *db.Job) {
+	if job == nil {
+		return
+	}
+	targetKind := string(job.TargetKind())
+	if launchID := jobLifecycleLaunchID(database, job); launchID != nil {
+		launch, err := db.GetLaunch(database, *launchID)
+		if err != nil || launch == nil {
+			fmt.Printf("Lifecycle:   target_kind=%s instance_id=%s\n", targetKind, ids.FormatInstanceID(*launchID))
+			return
+		}
+		fmt.Printf("Lifecycle:   target_kind=%s provider=%s instance_id=%s provider_instance_id=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
+			lifecycleTargetKind(job, launch),
+			lifecycleValue(launch.Provider),
+			ids.FormatInstanceID(launch.ID),
+			lifecycleValue(launch.EffectiveProviderID()),
+			lifecycleTeardownPolicy(launch),
+			lifecycleUnixValue(lifecycleTeardownStartedAt(launch)),
+			lifecycleUnixValue(lifecycleTeardownCompletedAt(launch)),
+		)
+		return
+	}
+	fmt.Printf("Lifecycle:   target_kind=%s\n", targetKind)
+}
+
+func jobLifecycleLaunchID(database *sql.DB, job *db.Job) *int64 {
+	if job == nil {
+		return nil
+	}
+	if job.LaunchID != nil {
+		return job.LaunchID
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return nil
+	}
+	for _, attempt := range attempts {
+		if attempt.LaunchID != nil {
+			return attempt.LaunchID
+		}
+	}
+	return nil
+}
+
+func lifecycleTargetKind(job *db.Job, launch *db.Launch) string {
+	if launch != nil {
+		return "rental"
+	}
+	if job == nil {
+		return "unknown"
+	}
+	return string(job.TargetKind())
+}
+
+func lifecycleValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func lifecycleTeardownPolicy(launch *db.Launch) string {
+	if launch == nil {
+		return "unknown"
+	}
+	if launch.GracePeriodSeconds > 0 {
+		return "grace_period:" + db.FormatDuration(int64(launch.GracePeriodSeconds))
+	}
+	return "destroy_on_terminal"
+}
+
+func lifecycleTeardownStartedAt(launch *db.Launch) *int64 {
+	if launch == nil {
+		return nil
+	}
+	if launch.TerminationIntent != nil && launch.TerminationIntent.DestroyStartedAtUnix > 0 {
+		return &launch.TerminationIntent.DestroyStartedAtUnix
+	}
+	if launch.TerminationRequestedAt != nil && *launch.TerminationRequestedAt > 0 {
+		return launch.TerminationRequestedAt
+	}
+	return nil
+}
+
+func lifecycleTeardownCompletedAt(launch *db.Launch) *int64 {
+	if launch == nil {
+		return nil
+	}
+	if launch.TerminationIntent != nil && launch.TerminationIntent.DestroySucceededAtUnix > 0 {
+		return &launch.TerminationIntent.DestroySucceededAtUnix
+	}
+	return nil
+}
+
+func lifecycleUnixValue(ts *int64) string {
+	if ts == nil || *ts == 0 {
+		return "unknown"
+	}
+	return formatUnixTime(*ts)
 }
 
 func formatUnixTime(t int64) string {

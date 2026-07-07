@@ -569,6 +569,70 @@ func TestRunJobInfoFormatsJobIDWithPrefix(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoShowsRentalLifecycleProof(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	started := now - 20
+	done := now - 10
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, launchID, "vast-123"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	if err := db.UpdateLaunchTerminationIntent(database, launchID, &instanceintent.Marker{
+		State:                  instanceintent.StateSucceeded,
+		RequestedAtUnix:        now - 30,
+		DestroyStartedAtUnix:   started,
+		DestroySucceededAtUnix: done,
+	}); err != nil {
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(launchID), "/tmp", "echo hi", "lifecycle", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	exitCode := 0
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, now); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Lifecycle:",
+		"target_kind=rental",
+		"provider=vastai",
+		"instance_id=" + ids.FormatInstanceID(launchID),
+		"provider_instance_id=vast-123",
+		"teardown_policy=destroy_on_terminal",
+		"teardown_started_at=" + formatUnixTime(started),
+		"teardown_completed_at=" + formatUnixTime(done),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("info output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunJobInfoUnplacedQueuedStatusIsDisambiguated(t *testing.T) {
 	stubEmptyQueueStatus(t)
 

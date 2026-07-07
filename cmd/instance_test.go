@@ -8,8 +8,11 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/retrypolicy"
+	"github.com/spf13/cobra"
 )
 
 func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
@@ -69,6 +72,78 @@ func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 	}
 	if outcomes[jobID] != db.AttemptOutcomeFailed {
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeFailed)
+	}
+}
+
+func TestRunInstanceAuditReportsRemainingProviderResource(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	now := time.Now().Unix()
+	started := now - 30
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "vast-123"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	if err := db.UpdateLaunchTerminationIntent(database, instanceID, &instanceintent.Marker{
+		State:                instanceintent.StateDestroying,
+		RequestedAtUnix:      now - 40,
+		DestroyStartedAtUnix: started,
+	}); err != nil {
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo test", "audit", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	exitCode := 0
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, now); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+
+	origObserve := instanceAuditObserveProvider
+	instanceAuditObserveProvider = func(launch *db.Launch) instanceAuditProviderObservation {
+		if launch.ID != instanceID {
+			t.Fatalf("observed launch %d, want %d", launch.ID, instanceID)
+		}
+		return instanceAuditProviderObservation{status: cloud.ProviderStatusRunning}
+	}
+	t.Cleanup(func() {
+		instanceAuditObserveProvider = origObserve
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{Use: "audit"}
+	cmd.SetOut(&out)
+	if err := runInstanceAudit(cmd, []string{ids.FormatJobID(jobID)}); err != nil {
+		t.Fatalf("runInstanceAudit: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"Job " + ids.FormatJobID(jobID) + " cleanup audit",
+		"Instance " + ids.FormatInstanceID(instanceID),
+		"provider=vastai",
+		"provider_instance_id=vast-123",
+		"provider_status=running",
+		"resource=remaining",
+		"teardown_started_at=" + formatUnixTime(started),
+		"Summary: 1 instance(s), 1 remaining, 0 unknown",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("audit output missing %q:\n%s", want, got)
+		}
 	}
 }
 

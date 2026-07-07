@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/sshaudit"
+	jobstatus "github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
@@ -57,6 +59,16 @@ var instanceInfoCmd = &cobra.Command{
 	Short: "Show execution target or cloud instance status",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runInstanceStatus,
+}
+
+var instanceAuditCmd = &cobra.Command{
+	Use:   "audit <job-id>",
+	Short: "Audit rental cleanup state for a job",
+	Long: `Audit the rental instances associated with a job and report whether
+provider resources still appear to exist. This is read-only and never deletes
+instances; use 'weft cleanup --provider ... --force' for cleanup.`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runInstanceAudit,
 }
 
 var instanceTerminateCmd = &cobra.Command{
@@ -186,6 +198,7 @@ func init() {
 	instanceCmd.AddCommand(instanceListCmd)
 	instanceCmd.AddCommand(instanceStatusCmd)
 	instanceCmd.AddCommand(instanceInfoCmd)
+	instanceCmd.AddCommand(instanceAuditCmd)
 	instanceCmd.AddCommand(instanceTerminateCmd)
 	instanceCmd.AddCommand(instanceSSHCmd)
 	instanceCmd.AddCommand(instanceSubmitCmd)
@@ -211,6 +224,152 @@ func init() {
 	configureWatchFlags(instanceWatchCmd)
 	addInstanceLaunchFlags(instanceLaunchCmd)
 	addInstanceNewFlags(instanceNewCmd)
+}
+
+type instanceAuditProviderObservation struct {
+	status string
+	err    error
+}
+
+var instanceAuditObserveProvider = func(launch *db.Launch) instanceAuditProviderObservation {
+	if launch == nil || strings.TrimSpace(launch.EffectiveProviderID()) == "" {
+		return instanceAuditProviderObservation{status: "not_recorded"}
+	}
+	client := cloudClientForDBInstance(launch.Provider)
+	if client == nil {
+		return instanceAuditProviderObservation{err: fmt.Errorf("no client for provider %q", launch.Provider)}
+	}
+	inst, err := client.ShowInstance(launch.EffectiveProviderID())
+	if errors.Is(err, cloud.ErrInstanceNotFound) {
+		return instanceAuditProviderObservation{status: "not_found"}
+	}
+	if err != nil {
+		return instanceAuditProviderObservation{err: err}
+	}
+	if inst == nil {
+		return instanceAuditProviderObservation{status: "unknown"}
+	}
+	return instanceAuditProviderObservation{status: inst.Status}
+}
+
+func runInstanceAudit(cmd *cobra.Command, args []string) error {
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+	if len(jobIDs) != 1 {
+		return usageErrorf("instance audit expects exactly one job ID")
+	}
+
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobIDs[0])
+	if err != nil {
+		return fmt.Errorf("get job %s: %w", ids.FormatJobID(jobIDs[0]), err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %s not found", ids.FormatJobID(jobIDs[0]))
+	}
+
+	launches, err := jobAuditLaunches(database, job)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Job %s cleanup audit\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", job.EffectiveStatus())
+	if !jobstatus.IsTerminal(job.EffectiveStatus()) {
+		fmt.Fprintln(cmd.OutOrStdout(), "Note: job is not terminal; resources may still be expected.")
+	}
+	if len(launches) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "Rental resources: none recorded")
+		return nil
+	}
+
+	remaining := 0
+	unknown := 0
+	for _, launch := range launches {
+		obs := instanceAuditObserveProvider(launch)
+		state := auditResourceState(obs)
+		switch state {
+		case "remaining":
+			remaining++
+		case "unknown":
+			unknown++
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Instance %s: provider=%s provider_instance_id=%s db_status=%s provider_status=%s resource=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
+			ids.FormatInstanceID(launch.ID),
+			lifecycleValue(launch.Provider),
+			lifecycleValue(launch.EffectiveProviderID()),
+			lifecycleValue(launch.Status),
+			auditProviderStatusLabel(obs),
+			state,
+			lifecycleTeardownPolicy(launch),
+			lifecycleUnixValue(lifecycleTeardownStartedAt(launch)),
+			lifecycleUnixValue(lifecycleTeardownCompletedAt(launch)),
+		)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Summary: %d instance(s), %d remaining, %d unknown\n", len(launches), remaining, unknown)
+	return nil
+}
+
+func jobAuditLaunches(database *sql.DB, job *db.Job) ([]*db.Launch, error) {
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list attempts for %s: %w", ids.FormatJobID(job.ID), err)
+	}
+	seen := map[int64]struct{}{}
+	if job.LaunchID != nil {
+		seen[*job.LaunchID] = struct{}{}
+	}
+	for _, attempt := range attempts {
+		if attempt.LaunchID != nil {
+			seen[*attempt.LaunchID] = struct{}{}
+		}
+	}
+	launches := make([]*db.Launch, 0, len(seen))
+	for launchID := range seen {
+		launch, err := db.GetLaunch(database, launchID)
+		if err != nil {
+			return nil, fmt.Errorf("get instance %s: %w", ids.FormatInstanceID(launchID), err)
+		}
+		if launch != nil {
+			launches = append(launches, launch)
+		}
+	}
+	slices.SortFunc(launches, func(a, b *db.Launch) int {
+		switch {
+		case a.ID < b.ID:
+			return -1
+		case a.ID > b.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return launches, nil
+}
+
+func auditProviderStatusLabel(obs instanceAuditProviderObservation) string {
+	if obs.err != nil {
+		return "unknown"
+	}
+	return lifecycleValue(obs.status)
+}
+
+func auditResourceState(obs instanceAuditProviderObservation) string {
+	if obs.err != nil || obs.status == "" || obs.status == "unknown" {
+		return "unknown"
+	}
+	switch obs.status {
+	case "not_found", cloud.ProviderStatusDestroyed, cloud.ProviderStatusDead:
+		return "gone"
+	default:
+		return "remaining"
+	}
 }
 
 func addInstanceNewFlags(cmd *cobra.Command) {

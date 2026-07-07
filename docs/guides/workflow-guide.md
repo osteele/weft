@@ -260,6 +260,13 @@ laptop$ weft run atlas \
 Weft handles the cross-host rsync automatically. You declare what the
 job needs and what it produces; Weft figures out the rest.
 
+Jobs also auto-track files written under project-local `output/` or `outputs/`.
+Use repeated `--output` flags, or `[tool.weft].outputs` in script metadata, for
+additional output files or directories outside those conventional paths. For an
+exact versioned artifact edge between jobs, use `--produces PATH` on the
+producer and `--needs PATH:JOB_ID` on the consumer instead of embedding tarballs
+or large payloads in logs.
+
 ### Script metadata
 
 Instead of passing `--gpu`, `--gpu-mem`, `--input`, etc. on every invocation,
@@ -1116,6 +1123,10 @@ rsync, `uv sync`, job execution, output collection, and teardown.
 If the job has `--gpu-class` or `--gpu-mem` constraints, the cloud search
 respects them — only matching offers appear.
 
+For provider-specific testing, add `--provider vastai` or `--provider runpod`
+when submitting the job. Leave the provider unset for normal automatic provider
+selection.
+
 ## Exclusive jobs for GPU-hungry workloads
 
 Some jobs need exclusive access to all GPU memory. Tag them `exclusive` so the
@@ -1194,6 +1205,33 @@ SkyPilot jobs are external-executor jobs, not Weft rental instances. Weft does
 not create `wi...` instance rows for them, run the Weft cloud agent, collect R2
 outputs, apply grace periods, or report direct rental costs unless a future
 adapter imports those signals explicitly.
+
+That external controller layer changes the cost and debugging model. SkyPilot
+managed jobs may need to start or restart an AWS controller, sync the workdir to
+controller storage such as S3, install cloud/provider dependencies on the
+controller, provision the worker, and then run worker setup before the user
+command begins. Those steps can add small controller/storage costs and create
+more places to fail before Weft-relevant setup such as `uv sync` or model
+startup. Failures may also require checking both controller logs and worker
+logs, and the managed-job path depends on controller/AWS credentials in
+addition to the target cloud provider credentials.
+
+Artifact retrieval is also less integrated for this repository. SkyPilot can
+sync a workdir and expose logs, but arbitrary result files are not tied into
+Weft's `output/` / `outputs/` discovery, job metadata, and `weft artifact`
+commands. Printing a small base64 tarball into logs can work for a smoke test,
+but it is a workaround. For Weft-owned jobs, write files under `output/` or
+`outputs/`, or declare extra outputs explicitly, then list and retrieve them
+through `weft artifact`.
+
+For Weft-owned rentals, submit with `weft run --tag rental ...` and launch via
+`weft start instance`, `weft instance new`, or the autopilot. That path records
+the rental as a `wi...` instance and exposes lifecycle evidence through
+`weft info <job-id>` plus a read-only cleanup check through
+`weft instance audit <job-id>`. Weft does not currently have a `weft run
+--managed` or `--rental-isolated` flag that guarantees one dedicated rental
+lifecycle per single job; `weft instance new --jobs ...` is the explicit command
+when you want one new rental seeded with a chosen job set.
 
 ### Chaining jobs after rental runs
 

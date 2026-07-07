@@ -99,7 +99,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--after-any ID`: Start job after another job completes, success or failure. Same gating behavior as `--after` for rentals
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
-- `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
+- `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`, or project output directories). Recorded on successful completion for downstream jobs; repeat it for extra files or directories outside the conventional `output/` and `outputs/` directories
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `gh200`, `ampere+`)
 - `--gpus N`: Require exactly N GPUs on one host or rental instance
@@ -109,7 +109,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--nvlink-required`: Alias for `--interconnect nvlink`
 - `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
-- `--provider vastai|runpod`: Restrict rental placement to one cloud provider
+- `--provider vastai|runpod`: Restrict rental placement to one cloud provider. Use this for provider-specific testing; omit it for normal automatic provider selection.
 - `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
 
 **Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
@@ -127,7 +127,7 @@ recognised at filter time and rolled back automatically — no manual
 `weft restart` is required.
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
 - `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
-- `--dry-run`: Show placement scores without submitting the job
+- `--dry-run`: Show placement scores without submitting the job. For rental offer cost, survival, and memory-headroom previews, use `weft start instance --dry-run` or `weft instance new --dry-run` after the job is queued.
 - `--no-sync`: Skip source sync before submission
 - `--wait`: Wait for the job to complete before returning
 
@@ -416,6 +416,13 @@ selection, cluster lifecycle, retries, and raw task execution. Weft does not
 create rental instance rows, run its cloud agent, collect R2 outputs, or report
 direct rental costs for these jobs.
 
+For Weft-owned rentals, queue jobs with `weft run --tag rental ...` and launch
+them with `weft start instance`, `weft instance new`, or the autopilot. Weft
+records the rental lifecycle in `wi...` instance rows and reports it through
+`weft info` and `weft instance audit`; it does not currently expose a
+`weft run --managed` flag that guarantees a dedicated one-rental lifecycle per
+single job.
+
 **Common flags:**
 - `--project NAME`: associate the mirrored job with a Weft project
 - `--cwd DIR`: working directory/source mount recorded for the job
@@ -658,6 +665,21 @@ This command:
   refresh all active on-prem hosts before printing the overview.
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
+
+### weft info / weft job info
+
+Show detailed job metadata by ID.
+
+```bash
+weft info <job-id>...
+weft job info <job-id>...
+```
+
+`weft info` includes the selected target and a `Lifecycle:` line. For
+rental-backed jobs, that line reports the lifecycle evidence Weft has recorded:
+`target_kind=rental`, provider, `wi...` instance ID, provider instance ID,
+teardown policy, and teardown start/completion timestamps. Use
+`weft instance audit <job-id>` when you also need a live provider cleanup check.
 
 ### weft bug
 
@@ -1375,12 +1397,19 @@ Per-instance commands.
 weft instance watch [instance-id]                       # Watch active instances (or one)
 weft instance list                                      # List instances
 weft instance status <instance-id>                      # Single instance details
+weft instance audit <job-id>                            # Read-only cleanup audit for a job
 weft instance cost                                      # Rate, duration, and actual cost per instance
 weft instance ssh <instance-id>                         # SSH in
 weft instance terminate <instance-id>                   # Destroy a single instance
 weft instance cordon <instance-id> [--reason "..."]    # Stop new jobs from landing here
 weft instance uncordon <instance-id>                    # Clear the cordon flag
 ```
+
+`weft instance audit <job-id>` reports the rental rows associated with a job,
+their provider IDs, cached teardown timestamps, live provider lookup status, and
+a `remaining` / `gone` / `unknown` resource summary. It is read-only; use
+`weft cleanup --provider ... --force` or `weft instance terminate ...` for
+actual cleanup.
 
 Cordoning lets the current job finish without the autopilot routing new
 work to the instance — useful when an instance has a stale agent or you
@@ -1658,10 +1687,13 @@ weft run -e HF_TOKEN=secret:hf "python train.py"
 
 ### weft cleanup
 
-Clean up finished sessions and old log files.
+Clean up finished sessions and old log files on inventory hosts, or audit/delete
+terminal rental provider resources.
 
 ```bash
-weft cleanup <host> [flags]
+weft cleanup [host] [flags]
+weft cleanup --provider runpod --dry-run
+weft cleanup --provider runpod --force
 ```
 
 **Flags:**
@@ -1669,6 +1701,8 @@ weft cleanup <host> [flags]
 - `--logs`: Remove archived log files only
 - `--older-than N`: Only clean items older than N days (default: 7)
 - `--dry-run`: Preview without actually deleting
+- `--provider vastai|runpod`: Restrict cloud cleanup to a provider
+- `--force`: Delete matching terminal cloud provider instances
 
 **Examples:**
 ```bash
@@ -1676,7 +1710,11 @@ weft cleanup deepthought                    # Clean both
 weft cleanup deepthought --sessions         # Only finished sessions
 weft cleanup deepthought --logs --older-than 3  # Logs > 3 days old
 weft cleanup deepthought --dry-run          # Preview only
+weft cleanup --provider runpod --dry-run    # Preview terminal RunPod pods that still exist
+weft cleanup --provider runpod --force      # Delete terminal RunPod pods that still exist
 ```
+
+For a per-job read-only cleanup check, use `weft instance audit <job-id>`.
 
 ### weft kill
 
