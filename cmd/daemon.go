@@ -144,10 +144,12 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	writeExecutor := daemonapi.NewWriteExecutor(ctx, database)
 	watchServer, err := daemonapi.StartServerWithOptions(ctx, database, paths.SocketFile, daemonapi.ServerOptions{
 		Info:     daemonInfo(pid, Version),
 		Shutdown: stop,
 		Mutate:   localmutate.Handler,
+		Writer:   writeExecutor,
 	})
 	if err != nil {
 		return fmt.Errorf("start daemon watch socket: %w", err)

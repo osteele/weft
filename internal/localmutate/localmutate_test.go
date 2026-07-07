@@ -96,6 +96,46 @@ func TestRecordQueuedJobUsesMutationBeforeLegacySubmit(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJobFallsBackWhenDaemonMutationIsSlow(t *testing.T) {
+	database := db.SetupTestDB(t)
+	withTestDaemon(t, "/tmp/weft-slow-submit.sock")
+
+	oldDialMutation := dialMutationFunc
+	dialMutationFunc = func(ctx context.Context, socketPath string, op string, payload any, result any) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() {
+		dialMutationFunc = oldDialMutation
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	jobID, err := RecordQueuedJob(ctx, database, ops.QueueJobParams{
+		WorkingDir:  "/tmp/project",
+		Command:     "echo fallback after slow socket",
+		Description: "fallback after slow socket",
+		SubmitToken: "slow-submit-token",
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.Command != "echo fallback after slow socket" {
+		t.Fatalf("job = %+v", job)
+	}
+	gotID, ok, err := db.FindJobIDBySubmitToken(database, "slow-submit-token")
+	if err != nil {
+		t.Fatalf("FindJobIDBySubmitToken: %v", err)
+	}
+	if !ok || gotID != jobID {
+		t.Fatalf("submit token lookup = %d,%v; want %d,true", gotID, ok, jobID)
+	}
+}
+
 func TestRecordQueuedJobFallsBackWithoutDaemon(t *testing.T) {
 	database := db.SetupTestDB(t)
 	withNoDaemon(t)

@@ -116,10 +116,10 @@ type Server struct {
 	listener   net.Listener
 	socketPath string
 	closeOnce  sync.Once
-	writeLock  chan struct{}
 	info       DaemonInfo
 	shutdown   func()
 	mutate     MutationHandler
+	writer     *WriteExecutor
 }
 
 type DaemonInfo struct {
@@ -134,6 +134,7 @@ type ServerOptions struct {
 	Info     DaemonInfo
 	Shutdown func()
 	Mutate   MutationHandler
+	Writer   *WriteExecutor
 }
 
 type MutationHandler func(context.Context, *sql.DB, MutationRequest) (json.RawMessage, error)
@@ -161,10 +162,13 @@ func StartServerWithOptions(ctx context.Context, database *sql.DB, socketPath st
 	s := &Server{
 		listener:   listener,
 		socketPath: socketPath,
-		writeLock:  make(chan struct{}, 1),
 		info:       opts.Info,
 		shutdown:   opts.Shutdown,
 		mutate:     opts.Mutate,
+		writer:     opts.Writer,
+	}
+	if s.writer == nil {
+		s.writer = NewWriteExecutor(ctx, database)
 	}
 	go s.acceptLoop(ctx, database)
 	go func() {
@@ -259,18 +263,6 @@ func cancelOnConnClose(conn net.Conn, cancel context.CancelFunc) {
 	cancel()
 }
 
-func (s *Server) acquireWriteLock(ctx context.Context) (func(), error) {
-	if s.writeLock == nil {
-		s.writeLock = make(chan struct{}, 1)
-	}
-	select {
-	case s.writeLock <- struct{}{}:
-		return func() { <-s.writeLock }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
 func (s *Server) mutateRequest(ctx context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
 	if req.Mutation == nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: "mutate requires payload"})
@@ -284,17 +276,14 @@ func (s *Server) mutateRequest(ctx context.Context, database *sql.DB, encoder *j
 		_ = encoder.Encode(Event{Type: EventError, Error: "mutation API unavailable"})
 		return
 	}
-	release, err := s.acquireWriteLock(ctx)
-	if err != nil {
-		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("mutation canceled before writer lock: %v", err)})
-		return
-	}
-	defer release()
-	payload, err := s.mutate(ctx, database, *req.Mutation)
+	result, err := s.writer.Execute(ctx, func(ctx context.Context, database *sql.DB) (any, error) {
+		return s.mutate(ctx, database, *req.Mutation)
+	})
 	if err != nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
 		return
 	}
+	payload, _ := result.(json.RawMessage)
 	_ = encoder.Encode(Event{
 		Type:     EventMutationResult,
 		Mutation: &MutationResult{Payload: payload},
@@ -306,17 +295,14 @@ func (s *Server) submitJob(ctx context.Context, database *sql.DB, encoder *json.
 		_ = encoder.Encode(Event{Type: EventError, Error: "submit_job requires payload"})
 		return
 	}
-	release, err := s.acquireWriteLock(ctx)
-	if err != nil {
-		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("submit job canceled before writer lock: %v", err)})
-		return
-	}
-	defer release()
-	jobID, err := ops.RecordQueuedJobContext(ctx, database, req.SubmitJob.Params)
+	result, err := s.writer.Execute(ctx, func(ctx context.Context, database *sql.DB) (any, error) {
+		return ops.RecordQueuedJobContext(ctx, database, req.SubmitJob.Params)
+	})
 	if err != nil {
 		_ = encoder.Encode(Event{Type: EventError, Error: err.Error()})
 		return
 	}
+	jobID, _ := result.(int64)
 	_ = encoder.Encode(Event{
 		Type:         EventJobSubmitted,
 		SubmittedJob: &SubmitJobResult{JobID: jobID},

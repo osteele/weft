@@ -3,6 +3,7 @@ package daemonapi
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -336,6 +337,73 @@ func TestDaemonInfoAndShutdown(t *testing.T) {
 	case <-shutdown:
 	case <-time.After(time.Second):
 		t.Fatal("shutdown callback was not called")
+	}
+}
+
+func TestMutationsRunThroughSingleWriterExecutor(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{}, 1)
+	calls := 0
+	server, err := StartServerWithOptions(ctx, database, socketPath, ServerOptions{
+		Mutate: func(ctx context.Context, database *sql.DB, req MutationRequest) (json.RawMessage, error) {
+			calls++
+			if calls == 1 {
+				close(firstEntered)
+				select {
+				case <-releaseFirst:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return nil, nil
+			}
+			secondEntered <- struct{}{}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartServerWithOptions: %v", err)
+	}
+	defer server.Close()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- DialMutation(ctx, socketPath, "first", map[string]string{"x": "1"}, nil)
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first mutation did not enter handler")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- DialMutation(ctx, socketPath, "second", map[string]string{"x": "2"}, nil)
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second mutation entered before first completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first mutation: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second mutation: %v", err)
+	}
+	select {
+	case <-secondEntered:
+	default:
+		t.Fatal("second mutation did not enter after first completed")
 	}
 }
 

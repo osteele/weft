@@ -18,6 +18,7 @@ const (
 	OpSubmitJob       = "submit_job"
 	OpSetJobTag       = "set_job_tag"
 	defaultRPCTimeout = 60 * time.Second
+	submitRPCTimeout  = 2 * time.Second
 )
 
 type SetJobTagRequest struct {
@@ -61,11 +62,18 @@ func Handler(ctx context.Context, database *sql.DB, req daemonapi.MutationReques
 
 func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
 	var result daemonapi.SubmitJobResult
-	used, err := tryDaemonMutation(ctx, OpSubmitJob, params, &result)
+	used, err := tryDaemonMutationWithTimeout(ctx, OpSubmitJob, params, &result, submitRPCTimeout)
 	if used {
 		if err != nil {
 			if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
 				return jobID, nil
+			}
+			if strings.TrimSpace(params.SubmitToken) != "" {
+				jobID, directErr := ops.RecordQueuedJob(database, params)
+				if directErr == nil {
+					return jobID, nil
+				}
+				return 0, fmt.Errorf("submit via daemon failed: %w; direct fallback failed: %v", err, directErr)
 			}
 		}
 		return result.JobID, err
@@ -105,12 +113,16 @@ func setJobTagDirect(database *sql.DB, jobID int64, tag string, present bool) er
 }
 
 func tryDaemonMutation(ctx context.Context, op string, payload any, result any) (bool, error) {
+	return tryDaemonMutationWithTimeout(ctx, op, payload, result, defaultRPCTimeout)
+}
+
+func tryDaemonMutationWithTimeout(ctx context.Context, op string, payload any, result any, timeout time.Duration) (bool, error) {
 	paths := daemonPathsFunc()
 	status, err := daemonStatusFunc(paths)
 	if err != nil || !status.Live {
 		return false, nil
 	}
-	callCtx, cancel := withDefaultTimeout(ctx)
+	callCtx, cancel := withTimeout(ctx, timeout)
 	defer cancel()
 	err = dialMutationFunc(callCtx, paths.SocketFile, op, payload, result)
 	if err == nil {
@@ -150,11 +162,15 @@ func daemonMutationUnsupported(err error) bool {
 }
 
 func withDefaultTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return withTimeout(ctx, defaultRPCTimeout)
+}
+
+func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if _, ok := ctx.Deadline(); ok {
 		return context.WithCancel(ctx)
 	}
-	return context.WithTimeout(ctx, defaultRPCTimeout)
+	return context.WithTimeout(ctx, timeout)
 }
