@@ -167,6 +167,7 @@ func TestImageSupremum(t *testing.T) {
 
 		// Legacy private SGLang runtime aliases normalize to the public image.
 		{"ghcr.io/osteele/sglang-runtime:v0.5.10.post1", sglangRuntimeImage, sglangRuntimeImage, true},
+		{"sglang:dev-cu13", sglangDevCU13RuntimeImage, sglangDevCU13RuntimeImage, true},
 	}
 
 	for _, tt := range tests {

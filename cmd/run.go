@@ -2115,7 +2115,7 @@ func commandRecommendations(command, localDir string) []string {
 	lowerCommand := strings.ToLower(command)
 	if strings.Contains(lowerCommand, "sglang") && needsFrameworkRuntimeTip(command, localDir, "sglang") {
 		recommendations = append(recommendations,
-			"Tip: SGLang jobs should use the documented SGLang runtime path: PEP 723 or .weft.toml image metadata with lmsysorg/sglang:v0.5.10.post1. See docs/guides/workflow-guide.md#tooluv-index-settings.")
+			"Tip: SGLang jobs should use the documented SGLang runtime path: PEP 723 or .weft.toml image metadata with lmsysorg/sglang:v0.5.10.post1, or lmsysorg/sglang:dev-cu13 for FP4 KV runs. See docs/guides/workflow-guide.md#tooluv-index-settings.")
 	} else if needsFrameworkRuntimeTip(command, localDir, "vllm") {
 		recommendations = append(recommendations,
 			"Tip: vLLM jobs should declare vllm in PEP 723 or pyproject.toml and run through uv so weft can infer PyTorch CUDA image and disk headroom. See docs/guides/workflow-guide.md#script-metadata-pep-723.")

@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	sglangRuntimeImage       = "lmsysorg/sglang:v0.5.10.post1"
-	legacySGLangRuntimeImage = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+	sglangRuntimeImage        = "lmsysorg/sglang:v0.5.10.post1"
+	sglangDevCU13RuntimeImage = "lmsysorg/sglang:dev-cu13"
+	legacySGLangRuntimeImage  = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
 )
 
 var imageRequirementResolver = imagereq.Resolve
@@ -761,7 +762,7 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				}
 			}
 			if img == "" && jobUsesFramework(localDir, job.Command, "sglang") {
-				img = sglangRuntimeImage
+				img = sglangRuntimeImageForJob(localDir, job.Command)
 			}
 
 			// Auto-upgrade CUDA images when the GPU constraint requires a newer
@@ -907,7 +908,7 @@ func ResolveJobImageSettings(localDir, command string) (string, placement.Runtim
 		img = override
 	}
 	if img == "" && jobUsesFramework(localDir, command, "sglang") {
-		img = sglangRuntimeImage
+		img = sglangRuntimeImageForJob(localDir, command)
 	}
 	imagePullSecret := projectCloud.ImagePullSecret
 
@@ -964,6 +965,9 @@ func ResolveJobImageSettings(localDir, command string) (string, placement.Runtim
 		slog.Debug("auto-derived CUDA driver floor from inline library deps",
 			"component", "campaign", "cuda_floor", libCUDA, "local_dir", localDir)
 	}
+	if img == sglangDevCU13RuntimeImage {
+		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: "13.0"}, "SGLang dev-cu13 runtime image")
+	}
 	// Explicit requirements replace the inferred floor and may lower or
 	// clear it ("any") — the user's escape hatch when the inferred floor is
 	// wrong for their stack. Script metadata outranks project config.
@@ -1001,6 +1005,32 @@ func jobUsesFramework(localDir, command, framework string) bool {
 			if fileContains(script, framework) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func sglangRuntimeImageForJob(localDir, command string) string {
+	if jobUsesSGLangFP4KV(localDir, command) {
+		return sglangDevCU13RuntimeImage
+	}
+	return sglangRuntimeImage
+}
+
+func jobUsesSGLangFP4KV(localDir, command string) bool {
+	lowerCommand := strings.ToLower(command)
+	if strings.Contains(lowerCommand, "fp4_e2m1") || strings.Contains(lowerCommand, "kv_cache_dtype=fp4") {
+		return true
+	}
+	if localDir == "" {
+		return false
+	}
+	for _, script := range dataloc.ExtractPythonScriptsInDir(localDir, command) {
+		if !filepath.IsAbs(script) {
+			script = filepath.Join(localDir, script)
+		}
+		if fileContains(script, "fp4_e2m1") || fileContains(script, "kv_cache_dtype=\"fp4") || fileContains(script, "kv_cache_dtype='fp4") {
+			return true
 		}
 	}
 	return false

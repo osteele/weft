@@ -1097,6 +1097,49 @@ func TestResolveJobImageSettings_SGLangCommandUsesRuntimeImage(t *testing.T) {
 	}
 }
 
+func TestResolveJobImageSettings_SGLangFP4UsesDevCU13RuntimeImage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "profile_inference_sglang.py"), []byte(`
+import sglang as sgl
+
+def main():
+    launch_server(kv_cache_dtype="fp4_e2m1")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, floor, _ := ResolveJobImageSettings(dir, "python profile_inference_sglang.py")
+	if img != sglangDevCU13RuntimeImage {
+		t.Fatalf("image = %q, want %q", img, sglangDevCU13RuntimeImage)
+	}
+	if floor.Req.MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion = %q, want 13.0", floor.Req.MinCUDAVersion)
+	}
+	if floor.Req.MinDriverVersion != 580 {
+		t.Fatalf("MinDriverVersion = %d, want 580", floor.Req.MinDriverVersion)
+	}
+}
+
+func TestResolveJobImageSettings_SGLangDevCU13Alias(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "infer.py"), []byte(`# /// script
+# [tool.weft]
+# image = "sglang:dev-cu13"
+# ///
+print('ok')
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	img, floor, _ := ResolveJobImageSettings(dir, "python infer.py")
+	if img != sglangDevCU13RuntimeImage {
+		t.Fatalf("image = %q, want %q", img, sglangDevCU13RuntimeImage)
+	}
+	if floor.Req.MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion = %q, want 13.0", floor.Req.MinCUDAVersion)
+	}
+}
+
 func TestResolveJobImageSettings_ProjectImageBeatsSGLangInference(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/example/custom-sglang:latest\"\n"), 0o644); err != nil {

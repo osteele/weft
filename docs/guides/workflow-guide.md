@@ -448,6 +448,16 @@ contains `sglang`, but declaring it in script metadata is more robust:
 # ///
 ```
 
+For FP4 KV cache jobs (`kv_cache_dtype=fp4_e2m1`), Weft selects the current
+SGLang CUDA 13 development runtime automatically when it sees the FP4 setting
+in the command or referenced script. You can also request it explicitly:
+
+```toml
+[tool.weft]
+image = "sglang:dev-cu13"  # resolves to lmsysorg/sglang:dev-cu13
+min-cuda = "13.0"
+```
+
 If a vLLM or SGLang job fails with a missing framework package, missing
 `libnuma`, or missing `flashinfer`, `weft status` and `weft info` include the
 diagnosis and the runtime path to use on retry.
