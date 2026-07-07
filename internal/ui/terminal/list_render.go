@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
@@ -396,17 +397,5 @@ func truncateDisplayWidth(value string, width int) string {
 	if lipgloss.Width(value) <= width {
 		return value
 	}
-	if width == 1 {
-		return "…"
-	}
-
-	var b strings.Builder
-	for _, r := range value {
-		next := b.String() + string(r)
-		if lipgloss.Width(next)+1 > width {
-			break
-		}
-		b.WriteRune(r)
-	}
-	return b.String() + "…"
+	return ansi.Truncate(value, width, "…")
 }

@@ -2095,6 +2095,61 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsQueuedSourceMoveAttempt(
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveWithoutSourceAttemptDoesNotDimLaunchingTarget(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	targetLaunchID := int64(4923)
+	targetAttemptID := int64(31)
+	job := &db.Job{
+		ID:          4270,
+		Status:      db.StatusQueued,
+		LaunchID:    &targetLaunchID,
+		LatestRunID: &targetAttemptID,
+		Project:     "llm-scheduler-baselines",
+		Description: "SCORPIO integration",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		launchStatusByID: map[int64]string{targetLaunchID: db.LaunchStatusLaunching},
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			4270: {
+				JobID:  4270,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1,
+					State:           db.MoveIntentStateOpen,
+					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi4919",
+					TargetLabel:     "wi4923",
+					Phase:           "waiting for destination acceptance",
+					AttemptsByID: map[int64]db.JobAttempt{
+						targetAttemptID: {
+							ID:            targetAttemptID,
+							JobID:         4270,
+							AttemptNumber: 2,
+							LaunchID:      &targetLaunchID,
+							Status:        db.StatusQueued,
+						},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	if strings.Contains(out, "Launching (") {
+		t.Fatalf("did not expect missing source attempt to create a dim launching source row:\n%s", stripANSI(out))
+	}
+	if !strings.Contains(out, "Placing (1):") {
+		t.Fatalf("expected active target row in Placing, got:\n%s", stripANSI(out))
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if strings.Contains(stripANSI(line), "wj4270") && isVisibleDimLine(line) {
+			t.Fatalf("expected active target row to remain full contrast, got %q", line)
+		}
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTruncation(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)

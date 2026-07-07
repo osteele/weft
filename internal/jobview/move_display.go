@@ -90,7 +90,10 @@ func ExpandJobsForOpenMoves(jobs []*db.Job, placementStatusByJob map[int64]Place
 			out = append(out, job)
 			continue
 		}
-		source := cloneJobForMoveDisplay(job, move, move.SourceAttemptID, true)
+		var source *db.Job
+		if move.SourceAttemptID != nil || job.LaunchID == nil {
+			source = cloneJobForMoveDisplay(job, move, move.SourceAttemptID, true)
+		}
 		if source != nil && source.DisplayMoveDim {
 			out = append(out, source)
 		}

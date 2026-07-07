@@ -9,6 +9,19 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+func TestTruncateDisplayWidthPreservesANSIReset(t *testing.T) {
+	got := truncateDisplayWidth("\x1b[2mthis line is faint and long\x1b[0m", 12)
+	if !strings.Contains(got, "\x1b[2m") {
+		t.Fatalf("truncated line lost faint style: %q", got)
+	}
+	if !strings.Contains(got, "\x1b[0m") {
+		t.Fatalf("truncated styled line must reset terminal attributes: %q", got)
+	}
+	if strings.Contains(got[strings.LastIndex(got, "\x1b[0m")+len("\x1b[0m"):], "\x1b[2m") {
+		t.Fatalf("truncated line reapplies faint after reset: %q", got)
+	}
+}
+
 func TestPrintJobsJSON(t *testing.T) {
 	jobs := []*db.Job{
 		{
