@@ -90,7 +90,7 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 
 	origFetch := fetchAndDisplayLogFromR2Func
 	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, _ int64) error {
-		return &cloudLogUnavailableError{jobID: 4035, status: db.StatusRunning}
+		return &cloudLogSnapshotError{jobID: 4035, status: db.StatusRunning, kind: cloudLogSnapshotMissing}
 	}
 	t.Cleanup(func() {
 		fetchAndDisplayLogFromR2Func = origFetch
@@ -110,6 +110,58 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 	}
 	if strings.Contains(msg, "R2") || strings.Contains(msg, "SSH") || strings.Contains(msg, "uploaded") {
 		t.Fatalf("output = %q, should not expose log transport details", msg)
+	}
+}
+
+func TestRunLogForCloudJobSnapshotLookupFailureRunningJobPrintsNotice(t *testing.T) {
+	resetLogModeState()
+	defer resetLogModeState()
+
+	origFetch := fetchAndDisplayLogFromR2Func
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *db.Job, _ int64) error {
+		err := errors.New("check log in R2 (key jobs/4213/runs/36531/results/4213.log): head object jobs/4213/runs/36531/results/4213.log: timeout")
+		return contextualizeCloudLogFetchError(&db.Job{ID: 4213, Status: db.StatusRunning}, err)
+	}
+	t.Cleanup(func() {
+		fetchAndDisplayLogFromR2Func = origFetch
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{Use: "log"}
+	cmd.SetOut(&out)
+	job := &db.Job{ID: 4213, Status: db.StatusRunning}
+	if err := runLogForCloudJob(cmd, nil, job); err != nil {
+		t.Fatalf("runLogForCloudJob: %v", err)
+	}
+
+	msg := out.String()
+	if !strings.Contains(msg, "Could not read the current log snapshot for job wj4213") {
+		t.Fatalf("output = %q, want snapshot lookup notice", msg)
+	}
+	if !strings.Contains(msg, "--follow") {
+		t.Fatalf("output = %q, want live follow hint", msg)
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "jobs/4213") || strings.Contains(msg, "head object") {
+		t.Fatalf("output = %q, should not expose storage details", msg)
+	}
+}
+
+func TestContextualizeCloudLogFetchErrorTerminalLookupFailureHidesStorageDetails(t *testing.T) {
+	job := &db.Job{ID: 4213, Status: db.StatusCompleted}
+	original := errors.New("check log in R2 (key jobs/4213/runs/36531/results/4213.log): head object jobs/4213/runs/36531/results/4213.log: timeout")
+	err := contextualizeCloudLogFetchError(job, original)
+	if err == nil {
+		t.Fatal("err = nil, want contextual error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Could not read log snapshot for job wj4213") {
+		t.Fatalf("error = %q, want sanitized snapshot error", msg)
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "jobs/4213") || strings.Contains(msg, "head object") {
+		t.Fatalf("error = %q, should not expose storage details", msg)
+	}
+	if !errors.Is(err, original) {
+		t.Fatalf("errors.Is(contextual, original) = false")
 	}
 }
 

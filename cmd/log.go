@@ -499,9 +499,9 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 	// and completed jobs). A running job may not have a snapshot yet; report
 	// that as normal command output instead of a fatal error.
 	if err := runLogFromR2(cmd, database, job); err != nil {
-		var unavailable *cloudLogUnavailableError
-		if errors.As(err, &unavailable) && !status.IsTerminal(job.Status) {
-			fmt.Fprintln(cmd.OutOrStdout(), unavailable.Message())
+		var snapshotErr *cloudLogSnapshotError
+		if errors.As(err, &snapshotErr) && !status.IsTerminal(job.Status) {
+			fmt.Fprintln(cmd.OutOrStdout(), snapshotErr.RunningMessage())
 			return nil
 		}
 		return err
@@ -748,32 +748,62 @@ func contextualizeCloudLogFetchError(job *db.Job, err error) error {
 	if job == nil || err == nil {
 		return err
 	}
-	if !strings.Contains(err.Error(), "log not found in R2") {
-		return err
-	}
-	if status.IsTerminal(job.Status) {
-		return err
-	}
 	statusLabel := strings.TrimSpace(job.Status)
 	if statusLabel == "" {
 		statusLabel = job.EffectiveStatus()
 	}
-	return &cloudLogUnavailableError{jobID: job.ID, status: statusLabel}
+	msg := err.Error()
+	if strings.Contains(msg, "log not found in R2") {
+		if status.IsTerminal(job.Status) {
+			return err
+		}
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotMissing, err: err}
+	}
+	if isCloudLogSnapshotLookupError(msg) {
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotLookupFailed, err: err}
+	}
+	return err
 }
 
-type cloudLogUnavailableError struct {
+type cloudLogSnapshotErrorKind int
+
+const (
+	cloudLogSnapshotMissing cloudLogSnapshotErrorKind = iota
+	cloudLogSnapshotLookupFailed
+)
+
+type cloudLogSnapshotError struct {
 	jobID  int64
 	status string
+	kind   cloudLogSnapshotErrorKind
+	err    error
 }
 
-func (e *cloudLogUnavailableError) Error() string {
-	return e.Message()
+func (e *cloudLogSnapshotError) Error() string {
+	if e.kind == cloudLogSnapshotLookupFailed {
+		return fmt.Sprintf("Could not read log snapshot for job %s (status: %s). Retry shortly.", ids.FormatJobID(e.jobID), e.status)
+	}
+	return e.RunningMessage()
 }
 
-func (e *cloudLogUnavailableError) Message() string {
+func (e *cloudLogSnapshotError) Unwrap() error {
+	return e.err
+}
+
+func (e *cloudLogSnapshotError) RunningMessage() string {
 	jobID := ids.FormatJobID(e.jobID)
+	if e.kind == cloudLogSnapshotLookupFailed {
+		return fmt.Sprintf("Could not read the current log snapshot for job %s (status: %s). Use `weft log %s --follow` for live output, or retry shortly.",
+			jobID, e.status, jobID)
+	}
 	return fmt.Sprintf("Log is not available yet for job %s (status: %s). This is normal shortly after a cloud job starts. Use `weft log %s --follow` for live output, or retry shortly.",
 		jobID, e.status, jobID)
+}
+
+func isCloudLogSnapshotLookupError(msg string) bool {
+	return strings.Contains(msg, "check log in R2") ||
+		strings.Contains(msg, "fetch log from R2") ||
+		strings.Contains(msg, "fetch live log chunk from R2")
 }
 
 type fetchedCloudLog struct {
