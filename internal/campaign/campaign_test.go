@@ -1221,6 +1221,36 @@ func TestValidateJobImageAvailability_ProbesResolvedImageWithAuth(t *testing.T) 
 	}
 }
 
+func TestValidateJobImageAvailability_NormalizesSGLangDevCU13Alias(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "infer.py"), []byte(`# /// script
+# [tool.weft]
+# image = "sglang:dev-cu13"
+# ///
+print('ok')
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	prev := imageRequirementResolver
+	t.Cleanup(func() { imageRequirementResolver = prev })
+	called := false
+	imageRequirementResolver = func(ctx context.Context, image string, auth *cloud.RegistryAuth) (cloud.ImageRequirements, error) {
+		called = true
+		if image != sglangDevCU13RuntimeImage {
+			t.Fatalf("image = %q, want normalized image %q", image, sglangDevCU13RuntimeImage)
+		}
+		return cloud.ImageRequirements{}, nil
+	}
+
+	if err := ValidateJobImageAvailability(context.Background(), nil, dir, "python infer.py"); err != nil {
+		t.Fatalf("ValidateJobImageAvailability: %v", err)
+	}
+	if !called {
+		t.Fatal("imageRequirementResolver was not called")
+	}
+}
+
 func TestValidateJobImageAvailability_ReportsConfirmedProbeFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nimage = \"ghcr.io/acme/private:tag\"\n"), 0o644); err != nil {

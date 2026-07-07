@@ -21,6 +21,7 @@ const ImageProbeTimeout = 20 * time.Second
 // throttling before a provider starts burning rental attempts on pull failures.
 func ValidateJobImageAvailability(ctx context.Context, cfg *config.Config, localDir, command string) error {
 	image, _, pullSecret := ResolveJobImageSettings(localDir, command)
+	image = normalizeRentalImageAlias(image)
 	image = strings.TrimSpace(image)
 	if image == "" {
 		return nil
