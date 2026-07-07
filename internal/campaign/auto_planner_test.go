@@ -48,6 +48,13 @@ func TestApplyGroupOffer_OfferFetchTimeoutIsUnknownNotNoOffers(t *testing.T) {
 	if strings.Contains(reason, "no offers") {
 		t.Fatalf("blocked reason = %q, must not collapse timeout to no offers", reason)
 	}
+	detail := plan.BlockedReasonDetails[909]
+	if !strings.Contains(detail, cloud.ErrProviderCommandTimeout.Error()) {
+		t.Fatalf("BlockedReasonDetails[909] = %q, want timeout detail", detail)
+	}
+	if strings.Contains(detail, "market unknown") {
+		t.Fatalf("BlockedReasonDetails[909] = %q, want underlying cause without display suffix", detail)
+	}
 }
 
 func TestSanitizeBlockedReasonClarifiesBareOfferFetchUnavailable(t *testing.T) {

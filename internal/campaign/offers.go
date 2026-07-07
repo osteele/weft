@@ -1074,7 +1074,8 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 	s.mu.Unlock()
 
 	if !s.allowNetwork {
-		future.result.err = s.cacheMissErr
+		constraintsText := formatProviderSearchConstraints(constraints)
+		future.result.err = fmt.Errorf("%w: cached offer snapshot missing for %s", ErrOfferSnapshotUnavailable, constraintsText)
 		close(future.done)
 		return future
 	}

@@ -88,7 +88,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 	}
 }
 
-func TestOfferSearchSessionCachedOnlyMissPreservesSnapshotError(t *testing.T) {
+func TestOfferSearchSessionCachedOnlyMissNamesMissingSnapshotConstraints(t *testing.T) {
 	session := newOfferSearchSessionWithOptions(nil, 0.95, false)
 	snapshotErr := fmt.Errorf("%w: no cloud providers available: vastai: vastai CLI not found in PATH", ErrOfferSnapshotUnavailable)
 	session.SeedRawOffers([]GroupRawOffers{{
@@ -103,8 +103,11 @@ func TestOfferSearchSessionCachedOnlyMissPreservesSnapshotError(t *testing.T) {
 	if !errors.Is(raw[0].Err, ErrOfferSnapshotUnavailable) {
 		t.Fatalf("error = %v, want ErrOfferSnapshotUnavailable", raw[0].Err)
 	}
-	if !strings.Contains(raw[0].Err.Error(), "vastai CLI not found in PATH") {
-		t.Fatalf("error = %v, want provider discovery detail", raw[0].Err)
+	if !strings.Contains(raw[0].Err.Error(), "cached offer snapshot missing") || !strings.Contains(raw[0].Err.Error(), "vram>=48GB") {
+		t.Fatalf("error = %v, want missing snapshot constraints", raw[0].Err)
+	}
+	if strings.Contains(raw[0].Err.Error(), "vastai CLI not found in PATH") {
+		t.Fatalf("error = %v, should not attach unrelated snapshot error to derived group miss", raw[0].Err)
 	}
 }
 

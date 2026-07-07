@@ -315,9 +315,15 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 	full := strings.TrimSpace(rawReason)
 	// Whether the full text actually adds information beyond the compact form
 	// (it does when SanitizeBlockedReason collapsed multiple lines or hit the
-	// 240-char cap). If they're identical there's nothing new to persist.
+	// 240-char cap). Offer-fetch failures are intentionally preserved even
+	// when single-line: the compact line tells users the market is unknown,
+	// while the detail carries the concrete provider/cache cause.
 	detailAddsInfo := full != "" && full != compact &&
-		(strings.ContainsRune(full, '\n') || len(full) > len(compact))
+		(strings.ContainsRune(full, '\n') || len(full) > len(compact) || errors.Is(offer.Err, ErrOfferSnapshotUnavailable))
+	detail := full
+	if errors.Is(offer.Err, ErrOfferSnapshotUnavailable) {
+		detail = offerFetchUnavailableDetail(full)
+	}
 	for _, job := range group.Jobs {
 		if job == nil {
 			continue
@@ -331,7 +337,7 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 				if plan.BlockedReasonDetails == nil {
 					plan.BlockedReasonDetails = map[int64]string{}
 				}
-				plan.BlockedReasonDetails[job.ID] = full
+				plan.BlockedReasonDetails[job.ID] = detail
 			}
 			if fingerprint != "" {
 				if plan.BlockedReasonFingerprints == nil {
@@ -341,6 +347,18 @@ func applyGroupOffer(plan *AutoPlacementPlan, group InstanceGroup, offer GroupOf
 			}
 		}
 	}
+}
+
+func offerFetchUnavailableDetail(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	const prefix = "offer fetch unavailable"
+	if detail, ok := strings.CutPrefix(reason, prefix+":"); ok {
+		return strings.TrimSpace(detail)
+	}
+	return reason
 }
 
 // filterStatsFingerprint maps the OfferFilterStats post-filter outcome to a
