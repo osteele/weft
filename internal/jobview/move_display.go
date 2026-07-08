@@ -100,6 +100,10 @@ func ExpandJobsForOpenMoves(jobs []*db.Job, placementStatusByJob map[int64]Place
 		target := cloneJobForMoveDisplay(job, move, move.TargetAttemptID, false)
 		if target != nil {
 			out = append(out, target)
+			continue
+		}
+		if source == nil {
+			out = append(out, job)
 		}
 	}
 	return out
@@ -121,13 +125,28 @@ func cloneJobForMoveDisplay(job *db.Job, move *MoveDisplay, attemptID *int64, di
 	if !ok {
 		return &clone
 	}
-	if dim && isTerminalAttempt(attempt) {
-		return nil
-	}
 	clone.DisplayAttemptID = attempt.ID
 	clone.DisplayAttemptNumber = attempt.AttemptNumber
 	clone.Host = attempt.Host
 	clone.LaunchID = attempt.LaunchID
+	if dim && isInternalCloudClosure(attempt) {
+		clone.Status = db.StatusQueued
+		clone.StartTime = 0
+		clone.EndTime = nil
+		clone.ExitCode = nil
+		clone.ErrorMessage = ""
+		clone.FailureReason = ""
+		return &clone
+	}
+	if isTerminalAttempt(attempt) && !dim {
+		clone.Status = db.StatusQueued
+		clone.StartTime = 0
+		clone.EndTime = nil
+		clone.ExitCode = nil
+		clone.ErrorMessage = ""
+		clone.FailureReason = ""
+		return &clone
+	}
 	if attempt.Status != "" {
 		clone.Status = attempt.Status
 	}
@@ -156,6 +175,15 @@ func isTerminalAttempt(attempt db.JobAttempt) bool {
 		return true
 	}
 	return db.IsTerminalStatus(attempt.Status)
+}
+
+func isInternalCloudClosure(attempt db.JobAttempt) bool {
+	switch attempt.CloudOutcome {
+	case db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled, db.AttemptOutcomeSuperseded, db.AttemptOutcomePreempted:
+		return true
+	default:
+		return false
+	}
 }
 
 func moveEndpointLabel(attemptID, launchID *int64, fallbackHost string, attempts map[int64]db.JobAttempt) string {

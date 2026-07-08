@@ -167,3 +167,79 @@ func TestPlacementStatusForJobs_QueuedOnceLaunchAgentEverReady(t *testing.T) {
 		t.Fatalf("bucket = %q, want %q (ever-ready launch should not bucket queued jobs as launching)", ps.Bucket, BucketQueued)
 	}
 }
+
+func TestExpandJobsForOpenMovesShowsTerminalMoveAttemptsAsMoveRows(t *testing.T) {
+	sourceLaunchID := int64(5001)
+	targetLaunchID := int64(5003)
+	sourceAttemptID := int64(36855)
+	targetAttemptID := int64(36857)
+	job := &db.Job{
+		ID:          4333,
+		Status:      db.StatusQueued,
+		Project:     "adjective-order",
+		Description: "rental duplicate",
+	}
+
+	got := ExpandJobsForOpenMoves([]*db.Job{job}, map[int64]PlacementStatus{
+		4333: {
+			JobID: 4333,
+			Move: &MoveDisplay{
+				IntentID:        531,
+				State:           db.MoveIntentStateOpen,
+				SourceAttemptID: &sourceAttemptID,
+				TargetAttemptID: &targetAttemptID,
+				SourceLabel:     "wi5001",
+				TargetLabel:     "wi5003",
+				AttemptsByID: map[int64]db.JobAttempt{
+					sourceAttemptID: {
+						ID:            sourceAttemptID,
+						JobID:         4333,
+						AttemptNumber: 2,
+						LaunchID:      &sourceLaunchID,
+						Status:        db.StatusCanceled,
+						EndTime:       int64Ptr(9_000),
+						CloudOutcome:  db.AttemptOutcomeOrphaned,
+					},
+					targetAttemptID: {
+						ID:            targetAttemptID,
+						JobID:         4333,
+						AttemptNumber: 3,
+						LaunchID:      &targetLaunchID,
+						Status:        db.StatusCanceled,
+						EndTime:       int64Ptr(9_000),
+					},
+				},
+			},
+		},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("expanded jobs = %d, want source and target move rows: %+v", len(got), got)
+	}
+	source, target := got[0], got[1]
+	if !source.DisplayMoveDim {
+		t.Fatalf("source row should be dimmed: %+v", source)
+	}
+	if source.Status != db.StatusQueued {
+		t.Fatalf("source status = %q, want queued display status for infra-closed source", source.Status)
+	}
+	if source.EndTime != nil || source.ExitCode != nil || source.FailureReason != "" {
+		t.Fatalf("source row should not expose internal closure as user-terminal status: %+v", source)
+	}
+	if target.DisplayMoveDim {
+		t.Fatalf("target row should be active/full contrast: %+v", target)
+	}
+	if target.Status != db.StatusQueued {
+		t.Fatalf("target status = %q, want queued display status while move remains open", target.Status)
+	}
+	if target.LaunchID == nil || *target.LaunchID != targetLaunchID {
+		t.Fatalf("target launch = %v, want %d", target.LaunchID, targetLaunchID)
+	}
+	if target.EndTime != nil || target.ExitCode != nil || target.FailureReason != "" {
+		t.Fatalf("target row should not expose terminal attempt outcome while move remains open: %+v", target)
+	}
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}

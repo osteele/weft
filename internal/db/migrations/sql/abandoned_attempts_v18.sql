@@ -72,6 +72,7 @@ SELECT
 			CASE
 				WHEN la.start_time IS NOT NULL THEN
 					CASE
+						WHEN la.status = 'starting' THEN 'starting'
 						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
 						ELSE 'running'
 					END

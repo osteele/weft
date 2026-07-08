@@ -37,7 +37,7 @@ value SyncSource = ssh_sync | slurm_sync | r2_completion | r2_phase
                  | queue_runner | placement
 
 -- Agent execution phase reported via R2. Format: "verb:jobID" or bare verb.
-value AgentPhase = setup | running | finalizing | uploading
+value AgentPhase = setup | gpu_warmup | running | finalizing | uploading
                  | uploading_results | disk_full | grace | destroying
 
 -- Bootstrap progress stage reported during instance startup.
@@ -802,10 +802,23 @@ rule SyncCloudInstanceState {
     -- Persist to live state table
     ensures: InstanceLiveState updated for instance
 
-    -- Side effect: mark queued jobs as running if R2 phase says they are
+    -- Side effect: mark queued jobs as active if R2 phase says they are
+    -- in job-attributed setup or execution.
     if r2_state.phase != null:
         let phase_job = job referenced by r2_state.phase
-        if phase_job != null and phase_job.status = queued:
+        if phase_job != null
+        and phase_job.status in {queued, pending_placement}
+        and r2_state.phase.verb in {setup, gpu_warmup}:
+            ensures: phase_job.status = starting
+            -- Setup work has begun on the instance, but the user command has
+            -- not necessarily reached its running phase. Displays should show
+            -- this as active setup/starting, never as queued.
+            if phase_job.latest_attempt.pending_status in
+               {queued, pending_placement, starting, running}:
+                ensures: phase_job.latest_attempt.pending_status = null
+        if phase_job != null
+        and phase_job.status in {queued, pending_placement, starting}
+        and r2_state.phase.verb in {running, finalizing, uploading, uploading-results}:
             ensures: phase_job.status = running
             -- Reaching running satisfies any start-class intent the attempt
             -- still carries. Without this clear, EffectiveStatus() keeps
@@ -1058,6 +1071,10 @@ rule AgentReportsPhase {
         -- Format: "verb:jobID" (e.g., "setup:123", "running:123")
         -- Or bare verb for non-job phases: "grace", "destroying"
         -- Phase sequence per job: setup → running → finalizing → uploading
+        -- Grace/reuse source extraction for a single accepted job is job
+        -- setup and must also write the attributed setup phase, not only a
+        -- bare bootstrap/source phase. The target job remains visible as
+        -- active setup while the instance prepares its source tree.
         -- During running, agent may also perform periodic output/artifact
         -- uploads without changing the phase verb.
 }

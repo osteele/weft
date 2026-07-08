@@ -693,6 +693,19 @@ func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 	return err
 }
 
+// UpdateAttemptStarting marks the latest open attempt as starting with a start
+// time. This is the cloud-observed setup counterpart to UpdateAttemptRunning.
+func UpdateAttemptStarting(execer dbExecer, jobID int64) error {
+	now := time.Now().Unix()
+	_, err := execer.Exec(`
+		UPDATE job_attempts
+		SET status = ?, last_synced_status = ?, start_time = COALESCE(start_time, ?)
+		WHERE id = `+latestOpenAttemptSubquery,
+		StatusStarting, StatusStarting, now, jobID,
+	)
+	return err
+}
+
 // SetAttemptLaunch associates the latest open attempt for a job with a launch.
 // This re-links an orphaned job (whose attempt was reset without a launch_id)
 // back to the launch that is actually running it, as observed from R2 phase.

@@ -158,7 +158,10 @@ printf 'ok' > "$dir/source-applied.txt"
 	}
 	graceR2Delete = func(_ string, _ string) error { return nil }
 
-	jobs, err := drainGraceJobRequests("test-bucket", instanceID, nil)
+	var phases []string
+	jobs, err := drainGraceJobRequests("test-bucket", instanceID, func(phase string) {
+		phases = append(phases, phase)
+	})
 	if err != nil {
 		t.Fatalf("drainGraceJobRequests: %v", err)
 	}
@@ -176,6 +179,14 @@ printf 'ok' > "$dir/source-applied.txt"
 		if !ack.Accepted {
 			t.Fatalf("ack = %+v, want accepted", ack)
 		}
+	}
+	for i, phase := range phases {
+		if phase != "setup:99" {
+			t.Fatalf("phase[%d] = %q, want setup:99 in %v", i, phase, phases)
+		}
+	}
+	if len(phases) == 0 {
+		t.Fatal("phases is empty, want setup attribution")
 	}
 }
 

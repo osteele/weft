@@ -45,7 +45,7 @@ func drainGraceJobRequests(bucket string, instanceID int64, onPhase func(string)
 			_ = graceR2Delete(bucket, req.Key)
 			continue
 		}
-		if err := applySourceUpdates(bucket, payload.Sources, onPhase); err != nil {
+		if err := applySourceUpdates(bucket, payload.Sources, singleJobID(payload.Jobs), onPhase); err != nil {
 			ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandJobs, false, fmt.Sprintf("failed to apply sources: %v", err))
 			_ = graceR2Delete(bucket, req.Key)
 			continue
@@ -57,12 +57,12 @@ func drainGraceJobRequests(bucket string, instanceID int64, onPhase func(string)
 	return jobs, nil
 }
 
-func applySourceUpdates(bucket string, updates []controlplane.SourceUpdate, onPhase func(string)) error {
+func applySourceUpdates(bucket string, updates []controlplane.SourceUpdate, jobID int64, onPhase func(string)) error {
 	if len(updates) == 0 {
 		return nil
 	}
 	if onPhase != nil {
-		onPhase(fmt.Sprintf("sources_extracting:0/%d", len(updates)))
+		onPhase(sourceUpdatePhase(jobID, fmt.Sprintf("sources_extracting:0/%d", len(updates))))
 	}
 	for i, upd := range updates {
 		if strings.TrimSpace(upd.RemoteDir) == "" || strings.TrimSpace(upd.R2Key) == "" {
@@ -72,13 +72,27 @@ func applySourceUpdates(bucket string, updates []controlplane.SourceUpdate, onPh
 			return fmt.Errorf("apply source update %d (%s): %w", i+1, upd.RemoteDir, err)
 		}
 		if onPhase != nil {
-			onPhase(fmt.Sprintf("sources_extracting:%d/%d", i+1, len(updates)))
+			onPhase(sourceUpdatePhase(jobID, fmt.Sprintf("sources_extracting:%d/%d", i+1, len(updates))))
 		}
 	}
 	if onPhase != nil {
-		onPhase("sources_extracted")
+		onPhase(sourceUpdatePhase(jobID, "sources_extracted"))
 	}
 	return nil
+}
+
+func singleJobID(jobs []cloud.AgentJob) int64 {
+	if len(jobs) != 1 {
+		return 0
+	}
+	return jobs[0].ID
+}
+
+func sourceUpdatePhase(jobID int64, fallback string) string {
+	if jobID > 0 {
+		return fmt.Sprintf("setup:%d", jobID)
+	}
+	return fallback
 }
 
 func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {

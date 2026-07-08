@@ -2165,6 +2165,72 @@ func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveWithoutSourceAttempt
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillShowsPlacingMove(t *testing.T) {
+	sourceLaunchID := int64(5001)
+	targetLaunchID := int64(5003)
+	sourceAttemptID := int64(36855)
+	targetAttemptID := int64(36857)
+	job := &db.Job{
+		ID:          4333,
+		Status:      db.StatusQueued,
+		Project:     "adjective-order",
+		Description: "EXP-059 rental duplicate",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			4333: {
+				JobID:  4333,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        531,
+					State:           db.MoveIntentStateOpen,
+					SourceAttemptID: &sourceAttemptID,
+					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi5001",
+					TargetLabel:     "wi5003",
+					AttemptsByID: map[int64]db.JobAttempt{
+						sourceAttemptID: {
+							ID:            sourceAttemptID,
+							JobID:         4333,
+							AttemptNumber: 2,
+							LaunchID:      &sourceLaunchID,
+							Status:        db.StatusCanceled,
+							EndTime:       testInt64Ptr(9_000),
+							CloudOutcome:  db.AttemptOutcomeOrphaned,
+						},
+						targetAttemptID: {
+							ID:            targetAttemptID,
+							JobID:         4333,
+							AttemptNumber: 3,
+							LaunchID:      &targetLaunchID,
+							Status:        db.StatusCanceled,
+							EndTime:       testInt64Ptr(9_000),
+						},
+					},
+				},
+			},
+		},
+		launchStatusByID: map[int64]string{
+			sourceLaunchID: db.LaunchStatusFailed,
+			targetLaunchID: db.LaunchStatusRunning,
+		},
+		now: time.Unix(10_000, 0),
+	})
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Unplaced (1):") {
+		t.Fatalf("expected dim infra-closed source row in Unplaced, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Placing (1):") {
+		t.Fatalf("expected active target row in Placing, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "Killed/Canceled (") {
+		t.Fatalf("infra-closed move rows should not appear under Killed/Canceled, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "move pending wi5001 -> wi5003") {
+		t.Fatalf("expected active target move suffix, got:\n%s", plain)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTruncation(t *testing.T) {
 	oldProfile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)

@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -740,6 +741,87 @@ func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
 				t.Fatalf("RawInstancePhase = %q, want %q", synced.RawInstancePhase, tt.wantRawPhase)
 			}
 		})
+	}
+}
+
+func TestSyncInstanceState_SetupPhaseMarksQueuedJobStarting(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "setup job")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	origGrace := syncCheckR2GraceStatus
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+		syncCheckR2GraceStatus = origGrace
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return fmt.Sprintf("setup:%d", jobID)
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) { return nil, 0 }
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	if synced.JobsUpdated != 1 {
+		t.Fatalf("JobsUpdated = %d, want 1", synced.JobsUpdated)
+	}
+	if synced.InstancePhase != fmt.Sprintf("setup:%d", jobID) {
+		t.Fatalf("InstancePhase = %q, want setup phase", synced.InstancePhase)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusStarting {
+		t.Fatalf("job.Status = %q, want %q", job.Status, db.StatusStarting)
+	}
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return fmt.Sprintf("running:%d", jobID)
+	}
+	ci, _ = db.GetLaunch(database, instanceID)
+	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, []*db.Job{job}, JobState{}, SyncInstanceStateOpts{})
+	if synced.JobsUpdated != 1 {
+		t.Fatalf("running JobsUpdated = %d, want 1", synced.JobsUpdated)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after running: %v", err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("job.Status after running = %q, want %q", job.Status, db.StatusRunning)
 	}
 }
 

@@ -1623,6 +1623,31 @@ func MarkQueuedJobRunning(database *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
+// MarkQueuedJobStarting transitions a queued job to starting without
+// overwriting an existing start_time. Called from sync when R2 reports a
+// job-attributed setup phase before the user command has begun.
+func MarkQueuedJobStarting(database *sql.DB, id int64) error {
+	warnOpenTransition(database, id, StatusStarting, false, status.SourceR2Phase)
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := UpdateAttemptStarting(tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		UPDATE job_attempts
+		SET pending_status = NULL, pending_at = NULL
+		WHERE id = `+latestOpenAttemptSubquery+`
+		  AND pending_status IN (?, ?, ?, ?)`,
+		id, StatusQueued, StatusPendingPlacement, StatusRunning, StatusStarting,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedByID(db *sql.DB, id int64) error {

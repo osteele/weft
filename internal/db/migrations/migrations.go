@@ -114,11 +114,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddJobSubmitToken},
 		&goose.GoFunc{RunDB: dropAddJobSubmitToken},
 	)
+	repairCloudStartingJobStatus := goose.NewGoMigration(
+		31,
+		&goose.GoFunc{RunDB: applyRepairCloudStartingJobStatus},
+		&goose.GoFunc{RunDB: dropRepairCloudStartingJobStatus},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -757,6 +762,14 @@ func recreateAuthoritativeJobStatusView(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func applyRepairCloudStartingJobStatus(ctx context.Context, db *sql.DB) error {
+	return recreateAuthoritativeJobStatusView(ctx, db)
+}
+
+func dropRepairCloudStartingJobStatus(context.Context, *sql.DB) error {
+	return nil
+}
+
 func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
 	var exists int
 	err := db.QueryRowContext(ctx,
@@ -791,7 +804,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

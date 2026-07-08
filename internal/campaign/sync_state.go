@@ -241,11 +241,12 @@ func SyncInstanceState(
 	}
 
 	if phaseNonEmpty {
-		// Mark queued jobs as running if the R2 phase says they are,
-		// and re-associate orphaned jobs with this launch.
+		// Mark queued jobs as active if the R2 phase says they are in
+		// setup or execution, and re-associate orphaned jobs with this
+		// launch.
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
 			switch verb {
-			case PhaseSetup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+			case PhaseSetup, PhaseGPUWarmup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
 				adoptObservedMoveTarget(ctx, database, r2Client, instanceID, phaseJobID)
 				j := findJobInSlice(jobs, phaseJobID)
 				if j == nil {
@@ -256,7 +257,15 @@ func SyncInstanceState(
 					}
 				}
 				if j != nil {
-					if j.Status == db.StatusQueued {
+					if verb == PhaseSetup || verb == PhaseGPUWarmup {
+						if j.Status == db.StatusQueued || j.Status == db.StatusPendingPlacement {
+							if err := db.MarkQueuedJobStarting(database, phaseJobID); err != nil {
+								slog.Warn("failed to mark job starting from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
+							} else {
+								s.JobsUpdated++
+							}
+						}
+					} else if j.Status == db.StatusQueued || j.Status == db.StatusPendingPlacement || j.Status == db.StatusStarting {
 						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
 							slog.Warn("failed to mark job running from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
 						} else {

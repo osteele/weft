@@ -789,6 +789,22 @@ invariant ResolvedMoveLoserHasStopWork {
 -- status-sync.allium: TUI views that display "moving..." status SHOULD
 --   read from MoveIntent.state, not infer move-in-progress from
 --   pending_placement (which is also used by initial placement).
+-- jobview/status-sync.allium: Open move display is deliberately separate
+--   from job_status authority. While MoveIntent.state = open, grouped status
+--   views SHOULD render both positions when they are known:
+--     * source_attempt as a dim, non-authoritative context row
+--     * target_attempt / target_launch / target_host as the full-contrast
+--       active move row
+--   The target row remains visible even though OpenMoveTargetAttemptHidden
+--   excludes it from job_status authority. Its bucket is driven by the open
+--   move intent ("Placing" while destination acceptance is pending), not by
+--   a terminal status copied from a hidden attempt row.
+--
+--   Likewise, a source attempt that was closed by infrastructure cleanup
+--   (cloud_outcome in {orphaned, canceled, superseded, preempted}) MUST NOT
+--   be shown as the logical job being Killed/Canceled. It may be shown as a
+--   dim source-context row, but its display status must be normalized so
+--   terminal buckets remain reserved for user-visible logical job outcomes.
 
 -- ==========================================================================
 -- Future work

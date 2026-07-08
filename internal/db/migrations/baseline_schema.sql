@@ -958,11 +958,12 @@ CREATE VIEW IF NOT EXISTS job_status AS
 				-- Cloud jobs: derive active/not-yet-started state from instance lifecycle
 				WHEN COALESCE(et.launch_id, la.launch_id) IS NOT NULL THEN
 					CASE
-						WHEN la.start_time IS NOT NULL THEN
-							CASE
-								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
-								ELSE 'running'
-							END
+				WHEN la.start_time IS NOT NULL THEN
+					CASE
+						WHEN la.status = 'starting' THEN 'starting'
+						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+						ELSE 'running'
+					END
 						-- Placed but not yet started
 						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
 						ELSE 'queued'
