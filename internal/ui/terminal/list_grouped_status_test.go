@@ -113,6 +113,21 @@ func TestGroupedStatusPlacementMarkerInterruptibleRental(t *testing.T) {
 	}
 }
 
+func TestGroupedStatusPlacementMarkerInventoryStylesOnlyGlyph(t *testing.T) {
+	glyph, jobID := groupedStatusPlacementMarker(&db.Job{
+		ID:     4331,
+		Host:   "cool30",
+		Status: db.StatusCompleted,
+	})
+
+	if stripANSI(glyph) != "⌂" {
+		t.Fatalf("glyph = %q, want inventory home marker", glyph)
+	}
+	if jobID != "wj4331" {
+		t.Fatalf("job id = %q, want unstyled wj4331", jobID)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainAt_ShowsProgressAndTiming(t *testing.T) {
 	now := time.Unix(5_000, 0)
 	launchID := int64(99)

@@ -1477,7 +1477,7 @@ func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 		return "!", id
 	}
 	if job.UsesInventoryPlacement() {
-		return onPremGlyphHost, onPremPlacementStyle.Render(id)
+		return onPremGlyphHost, id
 	}
 	if job.UsesRentalPlacement() && job.UsesPreemptiblePlacement() {
 		return interruptibleGlyphCloud, interruptibleRentalStyle.Render(id)

@@ -511,7 +511,7 @@ func TestPruneMoveIntents(t *testing.T) {
 			JobID:          100,
 			TargetKind:     MoveTargetNew,
 			TargetLaunchID: &target,
-			MaxAttempts:    1,
+			MaxAttempts:    5,
 		})
 		if err != nil {
 			t.Fatalf("CreateMoveIntent: %v", err)

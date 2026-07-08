@@ -546,14 +546,13 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
  		   AND created_at < ?
  		   AND (
  		         target_launch_id IS NULL
- 		         OR NOT EXISTS (
- 		              SELECT 1
- 		                FROM launches l
- 		               WHERE l.id = move_intents.target_launch_id
- 		                 AND l.status NOT IN ('failed','canceled','completed')
+		         OR NOT EXISTS (
+		              SELECT 1
+		                FROM launches l
+		               WHERE l.id = move_intents.target_launch_id
+		                 AND l.status NOT IN ('failed','canceled','completed')
 		            )
 		       )
-		   AND attempt_count >= max_attempts
 		RETURNING id, job_id, created_at`
 	rows, err := database.Query(query, now, MoveIntentResolutionStale, cutoff)
 	if err != nil {
