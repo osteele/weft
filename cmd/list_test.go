@@ -791,6 +791,38 @@ func TestShowJob_SurfacesStoredDiagnosis(t *testing.T) {
 	}
 }
 
+func TestShowJob_ShowsDeclaredInputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/proj", "uv run eval.py", "input visibility", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	inputs := []string{"hf:Qwen/Qwen2.5-0.5B", "hf:EleutherAI/pythia-160m"}
+	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
+		t.Fatalf("SetJobInputs: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		BestEffortInputs: []string{"hf:EleutherAI/pythia-160m"},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := showJob(database, jobID); err != nil {
+			t.Fatalf("showJob: %v", err)
+		}
+	})
+
+	for _, want := range []string{
+		"Inputs:       hf:Qwen/Qwen2.5-0.5B, hf:EleutherAI/pythia-160m",
+		"Best Effort:  hf:EleutherAI/pythia-160m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("showJob output missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 // TestShowJob_LogCacheFallback covers the EXP-179 regression: a job whose
 // remediation pipeline never ran (benchmark / processed / no-retry) leaves
 // error_diagnosis empty, so the diagnostic must come from a live scan of

@@ -751,6 +751,12 @@ func showJob(database *sql.DB, id int64) error {
 	if tags := job.DisplayTags(); len(tags) > 0 {
 		fmt.Printf("Tags:         %s\n", strings.Join(tags, ", "))
 	}
+	if len(job.Inputs) > 0 {
+		fmt.Printf("Inputs:       %s\n", strings.Join(job.Inputs, ", "))
+	}
+	if len(job.BestEffortInputs) > 0 {
+		fmt.Printf("Best Effort:  %s\n", strings.Join(job.BestEffortInputs, ", "))
+	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
 	printExternalBindingSummary(database, job, "External:     ", "              ")
 	fmt.Printf("Start Time:   %s\n", util.FormatUnixTimeOr(job.StartTime, "2006-01-02 15:04:05", util.EmptyCellCLI))
