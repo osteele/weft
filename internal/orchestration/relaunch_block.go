@@ -148,7 +148,7 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 			}
 			s := state[jobID]
 			if s == nil {
-				if okAt := latestOK[jobID]; okAt > 0 && okAt >= occurredAt {
+				if okAt := latestOK[jobID]; okAt > 0 && okAt >= occurredAt && !dispatchFailurePersistsAfterOK(detail) {
 					continue
 				}
 				state[jobID] = &reasonState{detail: detail, occurredAt: occurredAt, retryCount: 1}
@@ -170,6 +170,10 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 		reasons[jobID] = annotateBlockedReason(displayDispatchBlockedDetail(s.detail), s.occurredAt, s.retryCount, now)
 	}
 	return reasons
+}
+
+func dispatchFailurePersistsAfterOK(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), "r2_isolated_source_fetch_failed:")
 }
 
 func displayDispatchBlockedDetail(detail string) string {

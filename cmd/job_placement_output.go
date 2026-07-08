@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/queueblock"
 )
 
 type jobPlacementLine struct {
@@ -64,6 +65,9 @@ func queueReasonSummary(database *sql.DB, job *db.Job) string {
 		}
 		return "awaiting assignment"
 	case db.JobTargetInventoryHost:
+		if reason := queueBlockedReasonSummary(job); reason != "" {
+			return reason
+		}
 		if job.LastSyncedStatus != db.StatusQueued {
 			status, err := daemoncontrol.CurrentStatus(daemoncontrol.DefaultPaths())
 			if err != nil {
@@ -84,6 +88,17 @@ func queueReasonSummary(database *sql.DB, job *db.Job) string {
 	default:
 		return ""
 	}
+}
+
+func queueBlockedReasonSummary(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	display := queueblock.Display(job, nil)
+	if display.Kind != "" && display.Reason != "" {
+		return display.Kind + ": " + display.Reason
+	}
+	return ""
 }
 
 func runningJobAhead(database *sql.DB, job *db.Job) *db.Job {

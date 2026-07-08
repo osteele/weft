@@ -931,6 +931,30 @@ func TestRunStatusQueuedRentalShowsPlacementAndQueueReason(t *testing.T) {
 	}
 }
 
+func TestQueuedPlacementLinesPreferQueueBlockedReason(t *testing.T) {
+	job := &db.Job{
+		ID:                 4330,
+		Status:             db.StatusQueued,
+		Host:               "cool30",
+		QueueBlockedReason: `r2_isolated_source_fetch_failed: download tarball: exec: "rclone": executable file not found in $PATH`,
+	}
+
+	lines := queuedPlacementLines(nil, job)
+	var reason string
+	for _, line := range lines {
+		if line.Label == "Queue reason" {
+			reason = line.Value
+			break
+		}
+	}
+	if !strings.Contains(reason, "r2_isolated_source_fetch_failed") {
+		t.Fatalf("Queue reason = %q, want R2 isolated source failure", reason)
+	}
+	if strings.Contains(reason, "waiting for assigned target") {
+		t.Fatalf("Queue reason = %q, should not fall back to generic assigned-target wait", reason)
+	}
+}
+
 func TestRunJobInfoQueuedUnplacedShowsPlacement(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "unplaced", "")

@@ -255,6 +255,7 @@ func latestDispatchBlock(database *sql.DB, jobID int64, floor int64, now time.Ti
 
 	var block DispatchBlock
 	closed := false
+	var latestOK int64
 	for rows.Next() {
 		var occurredAt int64
 		var kind string
@@ -266,13 +267,22 @@ func latestDispatchBlock(database *sql.DB, jobID int64, floor int64, now time.Ti
 			continue
 		}
 		if kind == db.EventQueueDispatchOK {
-			return DispatchBlock{}, false
+			if latestOK == 0 || occurredAt > latestOK {
+				latestOK = occurredAt
+			}
+			if block.Detail != "" {
+				closed = true
+			}
+			continue
 		}
 		if closed {
 			continue
 		}
 		detail = strings.TrimSpace(detail)
 		if detail == "" {
+			continue
+		}
+		if latestOK > 0 && latestOK >= occurredAt && !dispatchFailurePersistsAfterOK(detail) {
 			continue
 		}
 		if block.Detail == "" {
@@ -296,6 +306,10 @@ func latestDispatchBlock(database *sql.DB, jobID int64, floor int64, now time.Ti
 		return DispatchBlock{}, false
 	}
 	return block, true
+}
+
+func dispatchFailurePersistsAfterOK(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), "r2_isolated_source_fetch_failed:")
 }
 
 func SummaryLine(x Explanation) string {

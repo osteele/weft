@@ -271,3 +271,42 @@ func TestLatestInventoryDispatchBlockClearedByOK(t *testing.T) {
 		t.Fatal("LatestInventoryDispatchBlock ok = true, want false after dispatch ok")
 	}
 }
+
+func TestLatestInventoryDispatchBlockR2PreflightFailureSurvivesOK(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	now := time.Unix(20_000, 0)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-1*time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	detail := `r2_isolated_source_fetch_failed: download tarball: exec: "rclone": executable file not found in $PATH`
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: now.Add(-10 * time.Minute).Unix(),
+		EventKind:  db.EventQueueDispatchFailed,
+		JobID:      jobID,
+		Detail:     detail,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent failed: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: now.Add(-5 * time.Minute).Unix(),
+		EventKind:  db.EventQueueDispatchOK,
+		JobID:      jobID,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent ok: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	block, ok := LatestInventoryDispatchBlock(database, job, now)
+	if !ok {
+		t.Fatal("LatestInventoryDispatchBlock ok = false, want R2 preflight blocker despite dispatch ok")
+	}
+	if block.Detail != detail {
+		t.Fatalf("block.Detail = %q, want %q", block.Detail, detail)
+	}
+}

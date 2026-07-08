@@ -473,6 +473,41 @@ func TestHydrateInventoryDispatchBlockedReasons_OKClearsPriorFailure(t *testing.
 	}
 }
 
+func TestHydrateInventoryDispatchBlockedReasons_R2PreflightFailureSurvivesOK(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	now := time.Now().Unix()
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventQueueDispatchFailed,
+		JobID:      jobID,
+		OccurredAt: now + 60,
+		Detail:     `r2_isolated_source_fetch_failed: download tarball: exec: "rclone": executable file not found in $PATH`,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent failed: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind:  db.EventQueueDispatchOK,
+		JobID:      jobID,
+		OccurredAt: now + 120,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent ok: %v", err)
+	}
+
+	jobs, err := db.ListQueued(database, "cool30")
+	if err != nil {
+		t.Fatalf("ListQueued: %v", err)
+	}
+	HydrateInventoryDispatchBlockedReasons(database, jobs)
+
+	if !strings.Contains(jobs[0].QueueBlockedReason, "r2_isolated_source_fetch_failed") {
+		t.Fatalf("QueueBlockedReason = %q, want R2 preflight failure despite later dispatch.ok", jobs[0].QueueBlockedReason)
+	}
+}
+
 func TestHydrateInventoryDispatchBlockedReasons_FailureAfterOKReappears(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "A100")
