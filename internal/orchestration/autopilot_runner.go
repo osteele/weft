@@ -195,11 +195,6 @@ func RunGroupedAutoPilotPassGated(ctx context.Context, database *sql.DB, scopedJ
 }
 
 func RunGroupedAutoPilotPassGatedWithOptions(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string, opts AutopilotRunnerOptions) (result *GroupedAutoPilotResult, err error) {
-	cfg, cfgErr := config.Load()
-	var plannerOptions campaign.PlanOptions
-	if cfgErr == nil {
-		plannerOptions = buildAutoPilotCachedOfferOptions(database, cfg, scopedJobs)
-	}
 	runner := NewAutopilotRunnerWithOptions(database, label, opts)
 	if err := runner.TryAcquire(); err != nil {
 		return nil, err
@@ -208,6 +203,12 @@ func RunGroupedAutoPilotPassGatedWithOptions(ctx context.Context, database *sql.
 	defer func() {
 		_ = runner.Release(time.Since(started), summarizeAutoPilotResult(result), err)
 	}()
+
+	cfg, cfgErr := config.Load()
+	var plannerOptions campaign.PlanOptions
+	if cfgErr == nil {
+		plannerOptions = buildAutoPilotCachedOfferOptions(database, cfg, scopedJobs)
+	}
 	if cfgErr != nil {
 		result, err = RunGroupedAutoPilotPass(ctx, database, scopedJobs)
 	} else {

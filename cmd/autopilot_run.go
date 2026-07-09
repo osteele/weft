@@ -281,8 +281,19 @@ func waitForAutopilotInvalidation(ctx context.Context, changeSource *dbwatch.Sou
 	}
 	var pending *autopilotWakeSnapshot
 	var debounceDeadline time.Time
+	var timerDeadline time.Time
+	if timerRunsPass && wait > 0 {
+		timerDeadline = time.Now().Add(wait)
+	}
 	for {
 		nextWait := wait
+		if !timerDeadline.IsZero() {
+			untilTimer := time.Until(timerDeadline)
+			if untilTimer <= 0 {
+				return baseline, autopilotWakeTimer
+			}
+			nextWait = untilTimer
+		}
 		if pending != nil {
 			untilDebounce := time.Until(debounceDeadline)
 			if untilDebounce <= 0 {

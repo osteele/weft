@@ -31,6 +31,11 @@ var (
 
 const daemonInterruptiblePollInterval = 15 * time.Second
 
+var (
+	daemonSyncAll          = syncorch.SyncAll
+	daemonPrePassSyncGrace = 5 * time.Second
+)
+
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Run and control the sync + autopilot daemon",
@@ -210,19 +215,6 @@ func daemonPrePassHostTimeout() time.Duration {
 
 func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) (time.Duration, autopilotOutcome) {
 	started := time.Now()
-	syncResult := syncorch.SyncAll(database, cfg, syncorch.SyncOptions{
-		SSHTimeout:        FastSyncTimeout,
-		HostTimeout:       daemonPrePassHostTimeout(),
-		CloudMode:         syncorch.CloudBounded,
-		CloudTimeout:      NormalCloudSyncTimeout,
-		StartQueueRunner:  true,
-		EnsureQueueRunner: ensureQueueRunnerStarted,
-		Verbose:           verbose,
-	})
-	for _, warning := range syncResult.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
-	}
-
 	var (
 		result *orchestration.GroupedAutoPilotResult
 		runErr error
@@ -234,6 +226,22 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		} else {
 			result, runErr = orchestration.RunGroupedAutoPilotPassGated(ctx, database, nil, fmt.Sprintf("daemon/%d", os.Getpid()))
 		}
+	}
+
+	// Keep sync out of the critical path for claiming autopilot. Cloud/R2 sync can
+	// time out or contend on the DB; new jobs should not sit in "waiting:
+	// autopilot" while the daemon is refreshing auxiliary state.
+	syncResult := runDaemonPrePassSync(ctx, database, cfg, syncorch.SyncOptions{
+		SSHTimeout:        FastSyncTimeout,
+		HostTimeout:       daemonPrePassHostTimeout(),
+		CloudMode:         syncorch.CloudBounded,
+		CloudTimeout:      NormalCloudSyncTimeout,
+		StartQueueRunner:  true,
+		EnsureQueueRunner: ensureQueueRunnerStarted,
+		Verbose:           verbose,
+	})
+	for _, warning := range syncResult.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
 
 	outcome, wait := classifyAutopilotPass(result, runErr, autopilotRunPausedWait)
@@ -248,6 +256,49 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 	wait = capDaemonWaitForInterruptibles(database, wait)
 	emitDaemonPass(pass, started, syncResult, result, outcome, runErr, wait)
 	return wait, outcome
+}
+
+func runDaemonPrePassSync(ctx context.Context, database *sql.DB, cfg *config.Config, opts syncorch.SyncOptions) syncorch.SyncResult {
+	done := make(chan syncorch.SyncResult, 1)
+	go func() {
+		done <- daemonSyncAll(database, cfg, opts)
+	}()
+
+	budget := daemonPrePassSyncBudget(opts)
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+
+	select {
+	case result := <-done:
+		return result
+	case <-ctx.Done():
+		return syncorch.SyncResult{
+			Warnings:     []string{"daemon pre-pass sync canceled; continuing shutdown"},
+			AllCompleted: false,
+		}
+	case <-timer.C:
+		return syncorch.SyncResult{
+			Warnings:     []string{fmt.Sprintf("daemon pre-pass sync exceeded %s; continuing to autopilot", budget.Truncate(time.Second))},
+			AllCompleted: false,
+		}
+	}
+}
+
+func daemonPrePassSyncBudget(opts syncorch.SyncOptions) time.Duration {
+	budget := opts.HostTimeout
+	if budget <= 0 {
+		budget = daemonPrePassHostTimeout()
+	}
+	if opts.CloudMode != syncorch.CloudDisabled {
+		cloudTimeout := opts.CloudTimeout
+		if cloudTimeout > budget {
+			budget = cloudTimeout
+		}
+	}
+	if budget <= 0 {
+		budget = daemonPrePassHostTimeout()
+	}
+	return budget + daemonPrePassSyncGrace
 }
 
 func capDaemonWaitForInterruptibles(database *sql.DB, wait time.Duration) time.Duration {

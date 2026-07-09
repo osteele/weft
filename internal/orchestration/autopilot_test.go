@@ -43,7 +43,7 @@ func writeSparseTestFile(t *testing.T, path string, size int64) {
 	}
 }
 
-func TestGatedAutopilotFetchesOffersBeforeClaimingSlot(t *testing.T) {
+func TestGatedAutopilotClaimsSlotBeforeFetchingOffers(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mem := 24
 	jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
@@ -106,11 +106,8 @@ func TestGatedAutopilotFetchesOffersBeforeClaimingSlot(t *testing.T) {
 	}
 
 	second := NewAutopilotRunnerWithOptions(database, "second-acquirer", AutopilotRunnerOptions{AllowStaleBinary: true})
-	if err := second.TryAcquire(); err != nil {
-		t.Fatalf("second TryAcquire while offer fetch is blocked = %v, want success", err)
-	}
-	if err := second.Release(0, "second", nil); err != nil {
-		t.Fatalf("second release: %v", err)
+	if err := second.TryAcquire(); !errors.Is(err, ErrAutopilotBusy) {
+		t.Fatalf("second TryAcquire while offer fetch is blocked = %v, want ErrAutopilotBusy", err)
 	}
 	close(releaseSearch)
 
