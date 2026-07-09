@@ -406,16 +406,12 @@ func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
 	}
 }
 
-func groupAllowsUnknownProviderCompatibilityProbe(group InstanceGroup, offer cloud.Offer) bool {
-	return offer.Provider == cloud.ProviderRunpod &&
-		strings.EqualFold(strings.TrimSpace(group.Provider), string(cloud.ProviderRunpod))
-}
-
 func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int, int) {
 	if !groupRequiresProviderCompatibility(group) {
 		return offers, 0, 0
 	}
-	compatible := make([]cloud.Offer, 0, len(offers))
+	knownCompatible := make([]cloud.Offer, 0, len(offers))
+	unknownCompatible := make([]cloud.Offer, 0, len(offers))
 	filtered := 0
 	unknown := 0
 	for _, offer := range offers {
@@ -424,20 +420,19 @@ func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Off
 			filtered++
 		case "unknown":
 			unknown++
-			if groupAllowsUnknownProviderCompatibilityProbe(group, offer) {
-				compatible = append(compatible, offer)
-			} else {
-				filtered++
-			}
+			unknownCompatible = append(unknownCompatible, offer)
 		default:
-			compatible = append(compatible, offer)
+			knownCompatible = append(knownCompatible, offer)
 		}
 	}
-	// Fail closed when a group declares a CUDA/driver floor. RunPod currently
-	// does not expose driver_version / cuda_max_good at offer search; only jobs
-	// that explicitly pin provider:runpod are allowed to probe unknown hosts and
-	// rely on the agent's fast driver preflight.
-	return compatible, filtered, unknown
+	if len(knownCompatible) > 0 {
+		return knownCompatible, filtered + len(unknownCompatible), unknown
+	}
+	// Unknown-compatible providers (currently RunPod) do not expose
+	// driver_version / cuda_max_good at offer search. If there is no
+	// known-compatible offer, keep them as a high-penalty fallback and rely on
+	// the launch-time driver probe to reject incompatible hosts quickly.
+	return unknownCompatible, filtered, unknown
 }
 
 func filterOffersByForwardCompatDriver(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int, string) {

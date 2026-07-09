@@ -88,7 +88,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 	}
 }
 
-func TestNoOffersDetail_IncludesPartialProviderSearchErrors(t *testing.T) {
+func TestRankOffer_UsesUnknownFallbackWhenKnownProviderSearchErrors(t *testing.T) {
 	vastErr := errors.New("vastai search timed out")
 	vast := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
@@ -121,16 +121,15 @@ func TestNoOffersDetail_IncludesPartialProviderSearchErrors(t *testing.T) {
 	if len(ranked) != 1 {
 		t.Fatalf("got %d ranked results, want 1", len(ranked))
 	}
-	if ranked[0].Offer != nil {
-		t.Fatalf("selected offer = %+v, want none because unpinned RunPod compatibility is unknown", ranked[0].Offer)
+	if ranked[0].Offer == nil || ranked[0].Offer.ProviderID != "rp1" {
+		t.Fatalf("selected offer = %+v, want RunPod unknown-compatible fallback", ranked[0].Offer)
 	}
-	detail := ranked[0].FilterStats.NoOffersDetail("")
-	if !strings.Contains(detail, "provider did not report required CUDA/driver compatibility") {
-		t.Fatalf("detail = %q, want unknown compatibility reason", detail)
+	if ranked[0].FilterStats.UnknownCompatibility != 1 {
+		t.Fatalf("UnknownCompatibility = %d, want 1", ranked[0].FilterStats.UnknownCompatibility)
 	}
-	if !strings.Contains(detail, "known-compatible provider search also had errors") ||
-		!strings.Contains(detail, "vastai: "+vastErr.Error()) {
-		t.Fatalf("detail = %q, want partial Vast.ai search error", detail)
+	if len(ranked[0].FilterStats.ProviderErrors) != 1 ||
+		!strings.Contains(ranked[0].FilterStats.ProviderErrors[0], "vastai: "+vastErr.Error()) {
+		t.Fatalf("ProviderErrors = %#v, want partial Vast.ai search error", ranked[0].FilterStats.ProviderErrors)
 	}
 }
 
@@ -1156,21 +1155,21 @@ func TestFilterOffersByProviderCompatibility_DropsUnknownWhenKnownExists(t *test
 	}
 }
 
-func TestFilterOffersByProviderCompatibility_DropsUnknownWhenNoKnown(t *testing.T) {
+func TestFilterOffersByProviderCompatibility_KeepsUnknownWhenNoKnown(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
 		{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.50},
 		{ProviderID: "rp2", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.40},
 	}
 	got, filtered, unknown := filterOffersByProviderCompatibility(group, offers)
-	if filtered != 2 {
-		t.Fatalf("filtered = %d, want 2 unknown-compatible offers filtered", filtered)
+	if filtered != 0 {
+		t.Fatalf("filtered = %d, want 0 when unknown offers are the only fallback", filtered)
 	}
 	if unknown != 2 {
 		t.Fatalf("unknown = %d, want 2", unknown)
 	}
-	if len(got) != 0 {
-		t.Fatalf("filtered offers = %d, want 0 under required provider compatibility", len(got))
+	if len(got) != 2 {
+		t.Fatalf("filtered offers = %d, want both unknown-compatible fallback offers", len(got))
 	}
 }
 
@@ -1317,21 +1316,21 @@ func TestConsumerNVIDIAGPU(t *testing.T) {
 	}
 }
 
-func TestRankOffer_FiltersUnknownCompatibilityFallback(t *testing.T) {
+func TestRankOffer_UsesUnknownCompatibilityFallback(t *testing.T) {
 	group := InstanceGroup{MinCUDAVersion: "12.8"}
 	offers := []cloud.Offer{
 		{ProviderID: "unknown", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", CostPerHour: 0.01},
 	}
 
 	got := rankOfferWithProfile(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyCheap.Profile(), 0)
-	if got.Offer != nil {
-		t.Fatalf("selected %q, want no offer for unknown provider compatibility", got.Offer.ProviderID)
+	if got.Offer == nil || got.Offer.ProviderID != "unknown" {
+		t.Fatalf("selected %+v, want unknown-compatible fallback offer", got.Offer)
 	}
 	if got.FilterStats.UnknownCompatibility != 1 {
 		t.Fatalf("UnknownCompatibility = %d, want 1", got.FilterStats.UnknownCompatibility)
 	}
-	if got.FilterStats.ProviderCompatibilityFiltered != 1 {
-		t.Fatalf("ProviderCompatibilityFiltered = %d, want 1", got.FilterStats.ProviderCompatibilityFiltered)
+	if got.FilterStats.ProviderCompatibilityFiltered != 0 {
+		t.Fatalf("ProviderCompatibilityFiltered = %d, want 0 for fallback offer", got.FilterStats.ProviderCompatibilityFiltered)
 	}
 }
 

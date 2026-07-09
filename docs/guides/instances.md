@@ -772,10 +772,10 @@ that do not publish this metadata, or when you want a stricter floor.
 On Vast.ai, `min_driver` becomes a `driver_version>=...` offer filter and
 `min_cuda` becomes a `cuda_vers>=...` offer filter. Providers that do not
 expose CUDA/driver compatibility in searchable offer metadata are treated as
-unknown and are not used for unpinned jobs with a CUDA/driver floor. Pin that
-provider explicitly, for example with `--provider runpod`, to let Weft probe
-compatibility after launch. Configured registry credentials are translated into
-provider-specific auth records.
+unknown: they lose to any known-compatible offer, but may still be used when no
+known-compatible offer is available. Weft then probes compatibility after
+launch and rejects incompatible hosts before running the job. Configured
+registry credentials are translated into provider-specific auth records.
 
 Private registry credentials live in `~/.config/weft/config.toml`:
 
