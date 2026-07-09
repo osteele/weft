@@ -88,6 +88,52 @@ func TestFetchGroupOffersMock(t *testing.T) {
 	}
 }
 
+func TestNoOffersDetail_IncludesPartialProviderSearchErrors(t *testing.T) {
+	vastErr := errors.New("vastai search timed out")
+	vast := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return nil, vastErr
+		},
+	}
+	runpod := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "rp1", Provider: cloud.ProviderRunpod, GPUName: "RTX A6000", GPUMemGB: 48, CostPerHour: 0.45},
+			}, nil
+		},
+	}
+	group := InstanceGroup{
+		GPUClass:       "ampere+",
+		GPUMemGB:       26,
+		MinCUDAVersion: "12.5",
+	}
+
+	raw := FetchGroupRawOffers([]cloud.Client{vast, runpod}, []InstanceGroup{group}, 0.85)
+	if len(raw) != 1 {
+		t.Fatalf("got %d raw results, want 1", len(raw))
+	}
+	if raw[0].Err != nil {
+		t.Fatalf("raw error = %v, want nil because RunPod search succeeded", raw[0].Err)
+	}
+	ranked := RankGroupOffersWithProfile(raw, nil, 1, nil, bidding.StrategyCheap.Profile(), 0)
+	if len(ranked) != 1 {
+		t.Fatalf("got %d ranked results, want 1", len(ranked))
+	}
+	if ranked[0].Offer != nil {
+		t.Fatalf("selected offer = %+v, want none because unpinned RunPod compatibility is unknown", ranked[0].Offer)
+	}
+	detail := ranked[0].FilterStats.NoOffersDetail("")
+	if !strings.Contains(detail, "provider did not report required CUDA/driver compatibility") {
+		t.Fatalf("detail = %q, want unknown compatibility reason", detail)
+	}
+	if !strings.Contains(detail, "known-compatible provider search also had errors") ||
+		!strings.Contains(detail, "vastai: "+vastErr.Error()) {
+		t.Fatalf("detail = %q, want partial Vast.ai search error", detail)
+	}
+}
+
 func TestOfferSearchSessionCachedOnlyMissNamesMissingSnapshotConstraints(t *testing.T) {
 	session := newOfferSearchSessionWithOptions(nil, 0.95, false)
 	snapshotErr := fmt.Errorf("%w: no cloud providers available: vastai: vastai CLI not found in PATH", ErrOfferSnapshotUnavailable)

@@ -60,6 +60,10 @@ type OfferFilterStats struct {
 	TorchArchMaxCap     string
 	TorchArchExampleCap string
 	TorchArchExampleGPU string
+	// ProviderErrors records providers whose search failed while another
+	// provider returned offers. These errors are important context when the
+	// surviving offers are later filtered out.
+	ProviderErrors []string
 }
 
 // NoOffersDetail returns a human-readable explanation of why no offers survived
@@ -96,7 +100,11 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
 	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
 		if s.UnknownCompatibility > 0 {
-			return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
+			detail := fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
+			if len(s.ProviderErrors) > 0 {
+				detail += "; known-compatible provider search also had errors: " + strings.Join(s.ProviderErrors, "; ")
+			}
+			return detail
 		}
 		return fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered by provider CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
 	case s.ForwardCompatFiltered > 0 && s.AfterForward == 0:
@@ -961,14 +969,16 @@ func SearchBestOfferForGroupWithProfileAndMachineExclusions(
 
 // GroupRawOffers pairs an instance group with all available cloud offers (unranked).
 type GroupRawOffers struct {
-	Group  InstanceGroup
-	Offers []cloud.Offer
-	Err    error
+	Group          InstanceGroup
+	Offers         []cloud.Offer
+	Err            error
+	ProviderErrors []string
 }
 
 type offerSearchResult struct {
-	offers []cloud.Offer
-	err    error
+	offers         []cloud.Offer
+	err            error
+	providerErrors []string
 }
 
 type offerSearchFuture struct {
@@ -1058,7 +1068,7 @@ func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []Group
 	results := make([]GroupRawOffers, len(groups))
 	for i, group := range groups {
 		result := futures[keys[i]].result
-		results[i] = GroupRawOffers{Group: group, Offers: result.offers, Err: result.err}
+		results[i] = GroupRawOffers{Group: group, Offers: result.offers, Err: result.err, ProviderErrors: result.providerErrors}
 	}
 	return results
 }
@@ -1088,6 +1098,7 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 		offers, err, diagnostics := searchAllProvidersWithDiagnostics(s.clients, constraints, provider)
 		future.result.offers = offers
 		future.result.err = err
+		future.result.providerErrors = summarizeProviderSearchErrors(diagnostics)
 
 		totalOffers := 0
 		successProviders := 0
@@ -1136,6 +1147,24 @@ type providerSearchResult struct {
 	provider cloud.Provider
 	offers   []cloud.Offer
 	err      error
+}
+
+func summarizeProviderSearchErrors(results []providerSearchResult) []string {
+	if len(results) == 0 {
+		return nil
+	}
+	summaries := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.err == nil {
+			continue
+		}
+		provider := strings.TrimSpace(string(result.provider))
+		if provider == "" {
+			provider = "unknown provider"
+		}
+		summaries = append(summaries, provider+": "+result.err.Error())
+	}
+	return summaries
 }
 
 func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
@@ -1289,11 +1318,19 @@ func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, surviv
 			continue
 		}
 		results[i] = rankOfferWithProfile(r.Group, availableOffers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
+		attachProviderErrors(&results[i], r.ProviderErrors)
 		if results[i].Offer != nil {
 			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers, false)
 		}
 	}
 	return results
+}
+
+func attachProviderErrors(offer *GroupOffer, providerErrors []string) {
+	if offer == nil || len(providerErrors) == 0 {
+		return
+	}
+	offer.FilterStats.ProviderErrors = append([]string(nil), providerErrors...)
 }
 
 // MedianDLPerfFromRawOffers computes the median DLPerf across all raw offers.

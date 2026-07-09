@@ -1291,6 +1291,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 				offerPredictions,
 			); ok {
 				results[i] = ranked
+				attachProviderErrors(&results[i], r.ProviderErrors)
 				if ranked.Offer != nil {
 					selected[i] = offerPredictions[offerPredictionKey(*ranked.Offer)]
 					recordOfferClaim(*ranked.Offer, claimedMachines, claimedOffers, distinctMachines)
@@ -1309,6 +1310,7 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 			minSurvival,
 			neutral,
 		)
+		attachProviderErrors(&results[i], r.ProviderErrors)
 		if results[i].Offer != nil {
 			selected[i] = neutral[offerPredictionKey(*results[i].Offer)]
 			recordOfferClaim(*results[i].Offer, claimedMachines, claimedOffers, distinctMachines)

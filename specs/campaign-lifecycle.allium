@@ -508,10 +508,9 @@ config {
 -- internal/dataloc/torch_pin.go ScanPyprojectTorchRequirement.
 -- Vast.ai offers are filtered at search time with driver_version/cuda_vers
 -- predicates. Providers that do not expose driver or CUDA compatibility for
--- search results (currently RunPod) are compatibility-unknown: they must lose
--- to any known-compatible offer, but may still be selected if no
--- known-compatible offer exists. This fallback is intentionally scored as
--- very risky, not treated as proven compatibility.
+-- search results (currently RunPod) are compatibility-unknown and are not used
+-- for unpinned jobs with a CUDA/driver floor. Jobs that explicitly pin such a
+-- provider may probe compatibility after launch.
 -- Implementation: internal/campaign/campaign.go ResolveJobImageSettings
 -- (sources 1, 2, 4, 5 + back-fill) and SplitGroupsByImage (source 3);
 -- internal/dataloc/library_cuda.go (source 5 lookup table);
@@ -520,9 +519,10 @@ config {
 
 -- Unknown-compatibility offers (providers that do not expose driver_version
 -- or cuda_max_good at offer search, currently RunPod) are hard-excluded from
--- the candidate set whenever at least one known-compatible offer survives.
--- The 10^9 score penalty in compatibilityScorePenalty remains as a
--- tiebreaker for the fallback path when no known-compatible offer exists.
+-- the unpinned candidate set. The 10^9 score penalty in
+-- compatibilityScorePenalty remains as a tiebreaker for explicitly pinned
+-- provider probes that intentionally accept unknown offer-search
+-- compatibility.
 -- Implementation: internal/campaign/offers.go filterOffersByProviderCompatibility.
 
 -- The floor-merge and back-fill prose above resolves WHERE the requirements
