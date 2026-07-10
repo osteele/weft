@@ -943,27 +943,33 @@ func showActiveJobs(database *sql.DB) error {
 		}
 	}
 
-	// Get running jobs
-	running, err := db.ListAllRunning(database)
+	// The running and starting queries select by stored status, but a job's
+	// display section is its EffectiveStatus — an unplaced "running" job is
+	// really queued. Assign each candidate once, by that single value, so a job
+	// cannot be selected under one status and then printed under another.
+	runningView, err := db.ListAllRunning(database)
 	if err != nil {
 		return fmt.Errorf("list running jobs: %w", err)
 	}
-
-	// Get starting jobs
-	starting, err := db.ListJobs(database, db.StatusStarting, "", 50, nil, "")
+	startingView, err := db.ListJobs(database, db.StatusStarting, "", 50, nil, "")
 	if err != nil {
 		return fmt.Errorf("list starting jobs: %w", err)
 	}
-
-	// Get queued jobs
 	queued, err := db.ListJobs(database, db.StatusQueued, "", 50, nil, "")
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}
-	queued = append(queued, jobsWithEffectiveStatus(running, db.StatusQueued)...)
-	queued = append(queued, jobsWithEffectiveStatus(starting, db.StatusQueued)...)
-	running = jobsWithEffectiveStatus(running, db.StatusRunning)
-	starting = jobsWithEffectiveStatus(starting, db.StatusStarting)
+	var running, starting []*db.Job
+	for _, job := range append(append([]*db.Job(nil), runningView...), startingView...) {
+		switch job.EffectiveStatus() {
+		case db.StatusStarting:
+			starting = append(starting, job)
+		case db.StatusRunning:
+			running = append(running, job)
+		default:
+			queued = append(queued, job)
+		}
+	}
 
 	// Get recent failed jobs
 	failed, err := db.ListRecentFailed(database, 10)
