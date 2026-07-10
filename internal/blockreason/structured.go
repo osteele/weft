@@ -114,7 +114,7 @@ func (s *Structured) ReuseHeadline() string {
 	if len(s.Reuse) == 1 {
 		return "reuse: " + first
 	}
-	return "reuse: " + first + " + " + plural(len(s.Reuse)-1, "more instance", "more instances")
+	return "reuse: " + first + " + " + Plural(len(s.Reuse)-1, "more instance", "more instances")
 }
 
 // DetailLines returns the expanded per-avenue breakdown for an in-place TUI
@@ -216,7 +216,10 @@ func Parse(encoded string) *Structured {
 	return &s
 }
 
-func plural(n int, singular, pluralForm string) string {
+// Plural renders a count with its noun ("1 job", "3 jobs"). It is the shared
+// helper for blocker/incident humanization; display code uses it rather than
+// keeping its own copy.
+func Plural(n int, singular, pluralForm string) string {
 	if n == 1 {
 		return "1 " + singular
 	}

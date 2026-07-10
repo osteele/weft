@@ -566,7 +566,7 @@ func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSec
 	}
 	for _, inc := range incidents {
 		reason := incidentDisplayReason(inc.fingerprint, inc.sample)
-		text := fmt.Sprintf("  incident: %s — %s", reason, plural(inc.count, "job", "jobs"))
+		text := fmt.Sprintf("  incident: %s — %s", reason, blockreason.Plural(inc.count, "job", "jobs"))
 		if detail := incidentDetail(inc.fingerprint, inc.sample, reason); detail != "" {
 			text += ": " + detail
 		}
@@ -632,15 +632,6 @@ func wrapGroupedStatusRowText(text string, width int) []string {
 		lines = append(lines, prefix+line)
 	}
 	return lines
-}
-
-// plural is the inline plural-helper twin of internal/blockreason.plural — TUI
-// rendering shouldn't reach into another package for a one-liner.
-func plural(n int, singular, pluralForm string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	return fmt.Sprintf("%d %s", n, pluralForm)
 }
 
 func incidentDisplayReason(fingerprint, sample string) string {
