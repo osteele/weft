@@ -1,0 +1,22 @@
+Running (1):
+[2;38;5;243m-   wj501 — alpha  — ETA ~1h51 (49m–4h) — started 33m ago — move target wi6201 -> wi6202 (non-a…[0m
+
+Placing (1):
+-   wj501 — alpha open move source and target  — placing 25m ago — move pending wi6201 -> wi6202
+
+Launching (1):
+-   wj503 — beta  launching setup                                     — deps installing · 4m ago
+
+Unplaced (1):
+  waiting: planner: provider offer fetch unavailable: cached offer snapshot missing; market
+    unknown; Weft will retry
+  -   wj502 — alpha blocked rental offer                                       — created 30m ago
+
+Completed (1):
+- ⌂ wj504 — beta  finished cleanly                             — completed 8m ago — completed ok
+
+Failed (1):
+- ⌂ wj505 — gamma finished with nonzero exit               — failed 15m ago — completed (exit 2)
+
+Killed/Canceled (1):
+-   wj506 — gamma operator canceled                                  — placed 20m ago — canceled
