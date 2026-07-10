@@ -217,6 +217,49 @@ func TestRunRunValidatesRentalImageBeforeRecordingJob(t *testing.T) {
 	}
 }
 
+func TestRunRunPersistsAfterForUnplacedRentalJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	resetRunGlobals(t)
+	t.Cleanup(func() {
+		validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+	})
+	runDir = dir
+	runTags = []string{db.TagRental}
+	runAfterRaw = "123"
+	runGPUClass = "a40"
+	validateRentalJobImageFunc = func(context.Context, *config.Config, string, string) error {
+		return nil
+	}
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runRun(cmd, []string{"python train.py"}); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(jobs))
+	}
+	if jobs[0].DepSpec != "123" {
+		t.Fatalf("DepSpec = %q, want 123", jobs[0].DepSpec)
+	}
+}
+
 func TestPathHasHomePrefix(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

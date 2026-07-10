@@ -1161,6 +1161,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUClass:         gpuClass,
 			GPUMemGB:         resolvedGPUMemGB,
 			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			DepSpec:          encodeQueueDependencies(buildRunDependencies()),
 			Inputs:           runInputs,
 			BestEffortInputs: bestEffortInputs,
 			Outputs:          runOutputs,
