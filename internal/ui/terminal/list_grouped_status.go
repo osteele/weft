@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +27,7 @@ type groupedStatusRow struct {
 	text      string
 	isHeader  bool
 	isBlocked bool
+	style     groupedStatusRowStyle
 	wrap      bool
 	job       *db.Job
 	launch    *db.Launch
@@ -36,6 +36,28 @@ type groupedStatusRow struct {
 	// in-place disclosure. The value identifies what it toggles (e.g.
 	// failedInstancesSectionKey).
 	expandToggle string
+}
+
+type groupedStatusRowStyle string
+
+const (
+	groupedStatusRowStyleNone       groupedStatusRowStyle = ""
+	groupedStatusRowStyleBlocked    groupedStatusRowStyle = "blocked"
+	groupedStatusRowStyleMoveDim    groupedStatusRowStyle = "move_dim"
+	groupedStatusRowStyleDisclosure groupedStatusRowStyle = "disclosure"
+)
+
+func (r groupedStatusRow) renderText() string {
+	switch r.style {
+	case groupedStatusRowStyleBlocked:
+		return tuiFailedStyle.Render(r.text)
+	case groupedStatusRowStyleMoveDim:
+		return moveAttemptDimStyle.Render(r.text)
+	case groupedStatusRowStyleDisclosure:
+		return blockedDetailStyle.Render(r.text)
+	default:
+		return r.text
+	}
 }
 
 type groupedStatusRenderOptions struct {
@@ -122,7 +144,7 @@ func renderJobListGroupedStatusPlainWithOptions(jobs []*db.Job, width int, opts 
 	}
 	lines := make([]string, 0, len(rows))
 	for _, row := range rows {
-		lines = append(lines, row.text)
+		lines = append(lines, row.renderText())
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -134,7 +156,7 @@ func renderJobListGroupedStatusPlainAt(jobs []*db.Job, width int, launchLiveByID
 	}
 	lines := make([]string, 0, len(rows))
 	for _, row := range rows {
-		lines = append(lines, row.text)
+		lines = append(lines, row.renderText())
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -356,12 +378,6 @@ func computeLaunchesWithActiveJob(jobs []*db.Job, launchLiveByID map[int64]*db.L
 var blockedDetailStyle = lipgloss.NewStyle().Faint(true)
 var moveAttemptDimStyle = tuiDimStyle.Faint(true)
 
-var sgrSequencePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-
-func stripSGRSequences(s string) string {
-	return sgrSequencePattern.ReplaceAllString(s, "")
-}
-
 // appendBlockedGroupedJobRows renders an Unplaced/Queued section, grouping
 // jobs by their blocked or waiting reason. Each distinct reason becomes a
 // subheader ("  blocked: <reason> (N)" or "  waiting: <reason> (N)") followed
@@ -420,9 +436,11 @@ func appendBlockedGroupedJobRows(
 			continue
 		}
 		jobs := buckets[key]
+		header, headerStyle := groupedStatusBlockedBucketHeader(key, jobs)
 		rows = append(rows, groupedStatusRow{
-			text:      groupedStatusBlockedBucketHeader(key, jobs),
+			text:      header,
 			isBlocked: true,
+			style:     headerStyle,
 			wrap:      true,
 			section:   section.key,
 		})
@@ -440,21 +458,21 @@ func appendBlockedGroupedJobRows(
 	return rows
 }
 
-func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) string {
+func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job) (string, groupedStatusRowStyle) {
 	reason := blockreason.DisplayReasonForKind(key.kind, key.reason)
 	text := fmt.Sprintf("  %s: %s", key.kind, reason)
 	if len(jobs) != 1 {
 		text += fmt.Sprintf(" (%d)", len(jobs))
 	}
 	if len(jobs) == 0 {
-		return text
+		return text, groupedStatusRowStyleNone
 	}
 	for _, job := range jobs {
 		if job == nil || !job.DisplayMoveDim {
-			return text
+			return text, groupedStatusRowStyleNone
 		}
 	}
-	return moveAttemptDimStyle.Render(text)
+	return text, groupedStatusRowStyleMoveDim
 }
 
 // activeIncidentSummary describes one fingerprint affecting ≥2 jobs in the
@@ -839,7 +857,8 @@ func appendBlockedDisclosureRows(
 				prefix = continuation
 			}
 			rows = append(rows, groupedStatusRow{
-				text:    blockedDetailStyle.Render(prefix + w),
+				text:    prefix + w,
+				style:   groupedStatusRowStyleDisclosure,
 				section: sectionKey,
 			})
 		}
@@ -1074,15 +1093,16 @@ func appendGroupedStatusJobRow(
 			line += strings.Repeat(" ", padding) + suffix
 		}
 	}
+	style := groupedStatusRowStyleNone
 	if job != nil && job.TargetKind() == db.JobTargetInventoryHost && overloadedHostsByName[strings.TrimSpace(job.Host)] {
-		line = tuiFailedStyle.Render(line)
+		style = groupedStatusRowStyleBlocked
 	}
 	if job != nil && job.DisplayMoveDim {
-		line = stripSGRSequences(line)
-		line = moveAttemptDimStyle.Render(line)
+		style = groupedStatusRowStyleMoveDim
 	}
 	return append(rows, groupedStatusRow{
 		text:    line,
+		style:   style,
 		job:     job,
 		section: section.key,
 	})

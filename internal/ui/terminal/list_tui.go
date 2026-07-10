@@ -1456,6 +1456,10 @@ func (m listTUIModel) groupedView() string {
 	}
 	for _, row := range layout.visibleRows {
 		line := truncateDisplayWidth(row.text, rowWidth)
+		var sourceRow *groupedStatusRow
+		if row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
+			sourceRow = &m.groupedRows[row.rowIdx]
+		}
 		if matesActive && row.rowIdx >= 0 && row.rowIdx < len(m.groupedRows) {
 			if rj := m.groupedRows[row.rowIdx].job; rj != nil && mateRows[row.rowIdx] {
 				line = applyHostMateMarkerForJob(line, rj)
@@ -1466,6 +1470,10 @@ func (m listTUIModel) groupedView() string {
 				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
 			}
 			line = renderSelectedGroupedRow(line, m.groupedRows[row.rowIdx].job, m.width)
+		} else if sourceRow != nil {
+			styled := *sourceRow
+			styled.text = line
+			line = styled.renderText()
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
