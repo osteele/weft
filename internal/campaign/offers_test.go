@@ -1069,6 +1069,28 @@ func TestNoOffersDetail_IncludesConstraints(t *testing.T) {
 	}
 }
 
+func TestNoOffersDetail_ProviderErrorsMeanUnknownMarket(t *testing.T) {
+	stats := OfferFilterStats{
+		RawCount:       0,
+		ProviderErrors: []string{"vastai: command timed out", "runpod: temporary API failure"},
+	}
+	got := stats.NoOffersDetail("gpu=A40")
+	for _, want := range []string{
+		"provider offer fetch unavailable",
+		"vastai: command timed out",
+		"runpod: temporary API failure",
+		"market unknown",
+		"Weft will retry",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("NoOffersDetail = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "no offers") {
+		t.Fatalf("NoOffersDetail = %q, must not render provider errors as no offers", got)
+	}
+}
+
 func TestNoOffersDetail_FilterStages(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1076,7 +1098,9 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		want string
 	}{
 		{"vram", OfferFilterStats{RawCount: 12}, "12 offers found, all filtered by VRAM requirement"},
-		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 offers passed VRAM but all filtered by CUDA compatibility"},
+		{"host ram", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterGPUCount: 8, HostRAMFiltered: 8, AfterHostRAM: 0}, "12 offers found, 8 offers passed VRAM/GPU count but all filtered by host RAM requirement"},
+		{"interconnect", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterGPUCount: 8, AfterHostRAM: 6, InterconnectFiltered: 6, AfterInterconnect: 0, InterconnectRequired: "nvlink"}, "12 offers found, 6 offers passed host RAM but all filtered by interconnect requirement (nvlink)"},
+		{"cuda", OfferFilterStats{RawCount: 12, AfterVRAM: 8}, "12 offers found, 8 offers passed interconnect/topology filters but all filtered by CUDA compatibility"},
 		{"torch arch max", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMaxCap: "sm_89"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
 		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
 		{"unknown provider compatibility", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 0, UnknownCompatibility: 5, ProviderCompatibilityFiltered: 5}, "12 offers found, 5 offers passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility"},
@@ -1084,7 +1108,7 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
-		{"singular cuda", OfferFilterStats{RawCount: 1, AfterVRAM: 1}, "1 offer found, 1 offer passed VRAM but all filtered by CUDA compatibility"},
+		{"singular cuda", OfferFilterStats{RawCount: 1, AfterVRAM: 1}, "1 offer found, 1 offer passed interconnect/topology filters but all filtered by CUDA compatibility"},
 		{"singular torch arch", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, TorchArchMaxCap: "sm_89"}, "1 offer found, 1 offer passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
 		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1}, "1 offer found, 1 offer passed filters but none met survival threshold"},
 		{"singular defensive fallback", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, AfterSurvival: 1}, "1 offer found, none met all criteria"},
@@ -1199,19 +1223,19 @@ func TestOfferCompatibilityStatus_CUDAChain(t *testing.T) {
 		name  string
 		group InstanceGroup
 		offer cloud.Offer
-		want  string
+		want  CompatibilityStatus
 	}{
 		{
 			name:  "driver below floor is incompatible (wb32/wb36 class)",
 			group: InstanceGroup{MinCUDAVersion: "12.8"},
 			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.0},
-			want:  "incompatible",
+			want:  CompatibilityIncompatible,
 		},
 		{
 			name:  "driver at floor is known compatible",
 			group: InstanceGroup{MinCUDAVersion: "12.8"},
 			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
-			want:  "known",
+			want:  CompatibilityKnown,
 		},
 		{
 			name: "image toolkit below floor is not by itself incompatible (wb30 class)",
@@ -1220,7 +1244,7 @@ func TestOfferCompatibilityStatus_CUDAChain(t *testing.T) {
 				Image:          "nvidia/cuda:12.4.1-devel-ubuntu22.04",
 			},
 			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
-			want:  "known",
+			want:  CompatibilityKnown,
 		},
 		{
 			name: "cross-major image toolkit above driver CUDA is incompatible",
@@ -1229,7 +1253,7 @@ func TestOfferCompatibilityStatus_CUDAChain(t *testing.T) {
 				Image:            "nvidia/cuda:13.0.0-devel-ubuntu22.04",
 			},
 			offer: cloud.Offer{Provider: cloud.ProviderVastai, CUDAVersion: 12.8},
-			want:  "incompatible",
+			want:  CompatibilityIncompatible,
 		},
 	}
 	for _, tt := range tests {

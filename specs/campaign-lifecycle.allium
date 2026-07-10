@@ -3886,6 +3886,14 @@ invariant OfferFetchFailureIsUnknownNotEmpty {
         -- Confirmed empty remains a distinct state: a successful provider
         -- search that returns zero offers can still produce a no-offers
         -- blocked reason with normal filter diagnostics.
+        --
+        -- Display/reporting corollary: if offer diagnostics carry provider
+        -- errors with zero observed offers, render the blocker as provider
+        -- offer fetch unavailable / market unknown / retrying, not as "no
+        -- offers from providers". OfferFilterStats must also report every
+        -- local filter stage that can empty a nonzero offer set, including
+        -- host RAM and interconnect/topology filters, so the empty-market
+        -- diagnosis is not reused for local post-filter failures.
 }
 
 invariant PausedAutopilotTakesNoActions {

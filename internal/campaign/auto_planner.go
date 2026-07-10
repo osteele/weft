@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/bidding"
+	"github.com/osteele/weft/internal/blockkind"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -419,43 +420,13 @@ func SanitizeBlockedReason(reason string) string {
 	if isRetryableCreateProviderRejection(summary) && !strings.Contains(summary, "Weft will retry with fresh offers") {
 		summary += "; Weft will retry with fresh offers"
 	}
-	summary = normalizeOfferFetchUnavailable(summary)
+	summary = blockkind.NormalizeOfferFetchUnavailable(summary)
 	summary = strings.TrimRight(summary, ".;")
 	const maxLen = 240
 	if len(summary) > maxLen {
 		summary = summary[:maxLen-1] + "…"
 	}
 	return summary
-}
-
-func normalizeOfferFetchUnavailable(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" || strings.Contains(reason, "market unknown") {
-		return reason
-	}
-	const prefix = "offer fetch unavailable"
-	const plannerPrefix = "planner: " + prefix
-	if reason == prefix {
-		return "provider offer fetch unavailable (market unknown; Weft will retry)"
-	}
-	if reason == plannerPrefix {
-		return "planner: provider offer fetch unavailable (market unknown; Weft will retry)"
-	}
-	if detail, ok := strings.CutPrefix(reason, prefix+":"); ok {
-		detail = strings.TrimSpace(detail)
-		if detail == "" {
-			return "provider offer fetch unavailable (market unknown; Weft will retry)"
-		}
-		return "provider offer fetch unavailable: " + detail + "; market unknown; Weft will retry"
-	}
-	if detail, ok := strings.CutPrefix(reason, plannerPrefix+":"); ok {
-		detail = strings.TrimSpace(detail)
-		if detail == "" {
-			return "planner: provider offer fetch unavailable (market unknown; Weft will retry)"
-		}
-		return "planner: provider offer fetch unavailable: " + detail + "; market unknown; Weft will retry"
-	}
-	return reason
 }
 
 func isRetryableCreateProviderRejection(reason string) bool {

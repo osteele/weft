@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/blockkind"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/queuerunner"
@@ -126,67 +127,20 @@ func Display(job *db.Job, lookup Lookup) DisplayState {
 }
 
 func ReasonKind(reason string) string {
-	cleaned := strings.TrimSpace(displayOfferFetchUnavailable(reason))
-	switch {
-	case strings.HasPrefix(cleaned, "paused:"),
-		strings.HasPrefix(cleaned, "new-instance retry paused:"),
-		strings.HasPrefix(cleaned, "new-instance retry blocked: paused:"):
+	switch blockkind.ReasonKind(reason) {
+	case blockkind.KindPaused:
 		return KindPaused
-	case strings.Contains(cleaned, "source sync already in flight"),
-		strings.Contains(cleaned, "source sync backing off"),
-		strings.Contains(cleaned, "source sync deferred"),
-		strings.Contains(cleaned, "source sync failed"),
-		isOfferFetchUnavailable(cleaned):
+	case blockkind.KindWaiting:
 		return KindWaiting
+	case blockkind.KindNone:
+		return ""
 	default:
 		return KindBlocked
 	}
 }
 
 func DisplayReason(kind string, reason string) string {
-	reason = strings.TrimSpace(displayOfferFetchUnavailable(reason))
-	if kind != KindPaused {
-		return reason
-	}
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry blocked:"))
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry paused:"))
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "paused:"))
-	return reason
-}
-
-func isOfferFetchUnavailable(reason string) bool {
-	return strings.Contains(reason, "offer fetch unavailable") &&
-		strings.Contains(reason, "market unknown") &&
-		strings.Contains(reason, "Weft will retry")
-}
-
-func displayOfferFetchUnavailable(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" || strings.Contains(reason, "market unknown") {
-		return reason
-	}
-	const prefix = "offer fetch unavailable"
-	if reason == prefix {
-		return "provider offer fetch unavailable (market unknown; Weft will retry)"
-	}
-	if detail, ok := strings.CutPrefix(reason, prefix+":"); ok {
-		detail = strings.TrimSpace(detail)
-		if detail == "" {
-			return "provider offer fetch unavailable (market unknown; Weft will retry)"
-		}
-		return "provider offer fetch unavailable: " + detail + "; market unknown; Weft will retry"
-	}
-	if detail, ok := strings.CutPrefix(reason, "planner: "+prefix+":"); ok {
-		detail = strings.TrimSpace(detail)
-		if detail == "" {
-			return "planner: provider offer fetch unavailable (market unknown; Weft will retry)"
-		}
-		return "planner: provider offer fetch unavailable: " + detail + "; market unknown; Weft will retry"
-	}
-	if reason == "planner: "+prefix {
-		return "planner: provider offer fetch unavailable (market unknown; Weft will retry)"
-	}
-	return reason
+	return blockkind.DisplayReasonForKind(blockkind.Kind(kind), reason)
 }
 
 // isBlockable reports whether a job in this effective status can carry a

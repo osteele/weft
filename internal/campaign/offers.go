@@ -31,22 +31,28 @@ func parseCUDAVersionFloat(s string) float64 {
 }
 
 // OfferFilterStats tracks how many offers survived each filtering stage.
-// Fields are evaluated in order: VRAM → CUDA → TorchArch → Survival. A zero
-// value means either "all filtered out at this stage" or "stage not reached"
-// (because an earlier stage already eliminated everything).
+// Fields are evaluated in order: VRAM → GPU count → host RAM → interconnect →
+// CUDA → TorchArch → Survival. A zero value means either "all filtered out at
+// this stage" or "stage not reached" (because an earlier stage already
+// eliminated everything).
 type OfferFilterStats struct {
-	RawCount       int // offers returned by provider search
-	AfterVRAM      int // remaining after VRAM requirement filter
-	AfterGPUCount  int // remaining after GPU count requirement filter
-	AfterCUDA      int // remaining after CUDA compatibility filter
-	AfterProvider  int // remaining after provider CUDA/driver compatibility filter
-	AfterForward   int // remaining after Vast.ai forward-compat driver guard
-	AfterTorchArch int // remaining after torch arch compute-cap filter
-	AfterSurvival  int // remaining after survival probability filter
+	RawCount          int // offers returned by provider search
+	AfterVRAM         int // remaining after VRAM requirement filter
+	AfterGPUCount     int // remaining after GPU count requirement filter
+	AfterHostRAM      int // remaining after host/system RAM requirement filter
+	AfterInterconnect int // remaining after interconnect topology requirement filter
+	AfterCUDA         int // remaining after CUDA compatibility filter
+	AfterProvider     int // remaining after provider CUDA/driver compatibility filter
+	AfterForward      int // remaining after Vast.ai forward-compat driver guard
+	AfterTorchArch    int // remaining after torch arch compute-cap filter
+	AfterSurvival     int // remaining after survival probability filter
 	// UnknownCompatibility tracks offers whose provider did not report
 	// CUDA/driver compatibility even though the group requires a floor.
 	UnknownCompatibility          int
 	GPUCountFiltered              int
+	HostRAMFiltered               int
+	InterconnectFiltered          int
+	InterconnectRequired          string
 	ProviderCompatibilityFiltered int
 	ForwardCompatFiltered         int
 	ForwardCompatExampleGPU       string
@@ -71,12 +77,31 @@ type OfferFilterStats struct {
 // branch so the caller can see which search predicates yielded nothing.
 func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	if s.RawCount == 0 {
+		if len(s.ProviderErrors) > 0 {
+			detail := strings.Join(s.ProviderErrors, "; ")
+			if detail != "" {
+				return "provider offer fetch unavailable: " + detail + "; market unknown; Weft will retry"
+			}
+			return "provider offer fetch unavailable (market unknown; Weft will retry)"
+		}
 		if constraints != "" {
 			return fmt.Sprintf("no offers from providers for %s", constraints)
 		}
 		return "no offers from providers"
 	}
 	found := offerCount(s.RawCount) + " found"
+	passedGPUCount := s.AfterGPUCount
+	if passedGPUCount == 0 {
+		passedGPUCount = s.AfterVRAM
+	}
+	passedHostRAM := s.AfterHostRAM
+	if passedHostRAM == 0 {
+		passedHostRAM = passedGPUCount
+	}
+	passedInterconnect := s.AfterInterconnect
+	if passedInterconnect == 0 {
+		passedInterconnect = passedHostRAM
+	}
 	passedProvider := s.AfterProvider
 	if passedProvider == 0 {
 		passedProvider = s.AfterCUDA
@@ -90,14 +115,21 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		return fmt.Sprintf("%s, all filtered by VRAM requirement", found)
 	case s.GPUCountFiltered > 0 && s.AfterGPUCount == 0:
 		return fmt.Sprintf("%s, %s passed VRAM but all filtered by GPU count requirement", found, offerCount(s.AfterVRAM))
+	case s.HostRAMFiltered > 0 && s.AfterHostRAM == 0:
+		return fmt.Sprintf("%s, %s passed VRAM/GPU count but all filtered by host RAM requirement", found, offerCount(passedGPUCount))
+	case s.InterconnectFiltered > 0 && s.AfterInterconnect == 0:
+		if s.InterconnectRequired != "" {
+			return fmt.Sprintf("%s, %s passed host RAM but all filtered by interconnect requirement (%s)", found, offerCount(passedHostRAM), s.InterconnectRequired)
+		}
+		return fmt.Sprintf("%s, %s passed host RAM but all filtered by interconnect requirement", found, offerCount(passedHostRAM))
 	case s.AfterCUDA == 0:
 		if s.CUDAMinRequired > 0 && s.CUDAImageVersion > 0 {
 			if s.CUDAExampleGPU != "" && s.CUDAImage != "" {
-				return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image=%s CUDA %.1f; requires >=%.1f, e.g. %s)", found, offerCount(s.AfterVRAM), s.CUDAImage, s.CUDAImageVersion, s.CUDAMinRequired, s.CUDAExampleGPU)
+				return fmt.Sprintf("%s, %s passed interconnect/topology filters but all filtered by CUDA compatibility (image=%s CUDA %.1f; requires >=%.1f, e.g. %s)", found, offerCount(passedInterconnect), s.CUDAImage, s.CUDAImageVersion, s.CUDAMinRequired, s.CUDAExampleGPU)
 			}
-			return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", found, offerCount(s.AfterVRAM), s.CUDAImageVersion, s.CUDAMinRequired)
+			return fmt.Sprintf("%s, %s passed interconnect/topology filters but all filtered by CUDA compatibility (image CUDA %.1f; requires >=%.1f)", found, offerCount(passedInterconnect), s.CUDAImageVersion, s.CUDAMinRequired)
 		}
-		return fmt.Sprintf("%s, %s passed VRAM but all filtered by CUDA compatibility", found, offerCount(s.AfterVRAM))
+		return fmt.Sprintf("%s, %s passed interconnect/topology filters but all filtered by CUDA compatibility", found, offerCount(passedInterconnect))
 	case s.ProviderCompatibilityFiltered > 0 && s.AfterProvider == 0:
 		if s.UnknownCompatibility > 0 {
 			detail := fmt.Sprintf("%s, %s passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility", found, offerCount(s.AfterCUDA))
@@ -199,7 +231,7 @@ type RankedOfferAlternative struct {
 	CompletionHrs float64
 	Cost          float64
 	Survival      float64
-	Compatibility string
+	Compatibility CompatibilityStatus
 	Selected      bool
 }
 
@@ -365,13 +397,24 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 
 const unknownCompatibilityPenalty = 1_000_000_000
 
+// CompatibilityStatus is the three-state offer compatibility result plus the
+// explicit no-requirement case.
+type CompatibilityStatus string
+
+const (
+	CompatibilityKnown        CompatibilityStatus = "known"
+	CompatibilityUnknown      CompatibilityStatus = "unknown"
+	CompatibilityIncompatible CompatibilityStatus = "incompatible"
+	CompatibilityNotRequired  CompatibilityStatus = "not_required"
+)
+
 func groupRequiresProviderCompatibility(group InstanceGroup) bool {
 	return strings.TrimSpace(group.MinCUDAVersion) != "" || group.MinDriverVersion > 0
 }
 
-func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
+func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) CompatibilityStatus {
 	if !groupRequiresProviderCompatibility(group) {
-		return "not_required"
+		return CompatibilityNotRequired
 	}
 	// Evaluate the CUDA compatibility chain links this site has values for
 	// (specs/campaign-lifecycle.allium contract CUDACompatibilityChain):
@@ -387,7 +430,7 @@ func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
 			chain.ImageToolkit = imageCUDA
 		}
 		if compat.ValidateCUDAChain(chain) != nil {
-			return "incompatible"
+			return CompatibilityIncompatible
 		}
 	}
 	switch offer.Provider {
@@ -395,14 +438,14 @@ func offerCompatibilityStatus(group InstanceGroup, offer cloud.Offer) string {
 		// Vast.ai search applies driver_version/cuda_vers predicates before
 		// returning offers, so a returned offer is known compatible even though
 		// the provider-neutral Offer does not carry driver_version.
-		return "known"
+		return CompatibilityKnown
 	case cloud.ProviderRunpod:
-		return "unknown"
+		return CompatibilityUnknown
 	default:
 		if offer.CUDAVersion > 0 && strings.TrimSpace(group.MinCUDAVersion) != "" {
-			return "known"
+			return CompatibilityKnown
 		}
-		return "unknown"
+		return CompatibilityUnknown
 	}
 }
 
@@ -416,9 +459,9 @@ func filterOffersByProviderCompatibility(group InstanceGroup, offers []cloud.Off
 	unknown := 0
 	for _, offer := range offers {
 		switch offerCompatibilityStatus(group, offer) {
-		case "incompatible":
+		case CompatibilityIncompatible:
 			filtered++
-		case "unknown":
+		case CompatibilityUnknown:
 			unknown++
 			unknownCompatible = append(unknownCompatible, offer)
 		default:
@@ -491,7 +534,7 @@ func isConsumerRTXNumber(s string) bool {
 }
 
 func compatibilityScorePenalty(group InstanceGroup, offer cloud.Offer) float64 {
-	if offerCompatibilityStatus(group, offer) == "unknown" {
+	if offerCompatibilityStatus(group, offer) == CompatibilityUnknown {
 		return unknownCompatibilityPenalty
 	}
 	return 0
@@ -679,8 +722,10 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		slog.Debug("filtered offers by host RAM requirement",
 			"required_min_gb", group.CPUMemGB,
 			"filtered", removed, "remaining", len(ramFiltered))
+		stats.HostRAMFiltered = removed
 		offers = ramFiltered
 	}
+	stats.AfterHostRAM = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result
@@ -689,8 +734,11 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		slog.Debug("filtered offers by interconnect requirement",
 			"interconnect", group.Interconnect,
 			"filtered", removed, "remaining", len(topoFiltered))
+		stats.InterconnectFiltered = removed
+		stats.InterconnectRequired = strings.TrimSpace(group.Interconnect)
 		offers = topoFiltered
 	}
+	stats.AfterInterconnect = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

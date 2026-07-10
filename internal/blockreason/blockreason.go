@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/osteele/weft/internal/blockkind"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 )
@@ -86,65 +87,21 @@ func Resolve(job *db.Job, opts Options) Result {
 
 // ReasonKind classifies a visible reason for compact UI labels.
 func ReasonKind(reason string) Kind {
-	cleaned := strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
-	switch {
-	case isPausedReason(cleaned):
+	switch blockkind.ReasonKind(campaign.SanitizeBlockedReason(reason)) {
+	case blockkind.KindPaused:
 		return KindPaused
-	case cleaned == ReasonPlacementPending,
-		cleaned == DefaultPendingPlacementReason,
-		cleaned == "autopilot placing jobs",
-		cleaned == "autopilot paused",
-		cleaned == "autopilot not running",
-		strings.HasPrefix(cleaned, "autopilot delayed "),
-		isOfferFetchUnavailable(cleaned),
-		isRetryableOfferUnavailable(cleaned),
-		isRetryableCreateProviderRejection(cleaned),
-		cleaned == "inventory-tagged: waiting for on-prem host",
-		strings.Contains(cleaned, "source sync already in flight"),
-		strings.Contains(cleaned, "source sync backing off"),
-		strings.Contains(cleaned, "source sync deferred"),
-		strings.Contains(cleaned, "source sync failed"):
+	case blockkind.KindWaiting:
 		return KindWaiting
-	case cleaned == "":
+	case blockkind.KindNone:
 		return KindNone
 	default:
 		return KindBlocked
 	}
 }
 
-func isRetryableOfferUnavailable(reason string) bool {
-	return strings.Contains(reason, "offer unavailable:") &&
-		strings.Contains(reason, "Weft will retry with fresh offers")
-}
-
-func isOfferFetchUnavailable(reason string) bool {
-	return strings.Contains(reason, "offer fetch unavailable") &&
-		strings.Contains(reason, "market unknown") &&
-		strings.Contains(reason, "Weft will retry")
-}
-
-func isRetryableCreateProviderRejection(reason string) bool {
-	return strings.Contains(reason, "provider rejected request") &&
-		strings.Contains(reason, "create-instance") &&
-		strings.Contains(reason, "Weft will retry with fresh offers")
-}
-
 func DisplayReasonForKind(kind Kind, reason string) string {
 	reason = strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
-	if kind != KindPaused {
-		return reason
-	}
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry blocked:"))
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "new-instance retry paused:"))
-	reason = strings.TrimSpace(strings.TrimPrefix(reason, "paused:"))
-	return reason
-}
-
-func isPausedReason(reason string) bool {
-	reason = strings.TrimSpace(reason)
-	return strings.HasPrefix(reason, "paused:") ||
-		strings.HasPrefix(reason, "new-instance retry paused:") ||
-		strings.HasPrefix(reason, "new-instance retry blocked: paused:")
+	return blockkind.DisplayReasonForKind(blockkind.Kind(kind), reason)
 }
 
 // Reasons returns all visible blocker reasons for a detail view.
