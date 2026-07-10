@@ -18,6 +18,11 @@ func TestCurrentJobStatusViewCopiesMatchMaterializedView(t *testing.T) {
 		nth  int
 	}{
 		{
+			name: "canonical current source",
+			path: filepath.Join("migrations", "sql", "current_authoritative_views.sql"),
+			nth:  1,
+		},
+		{
 			name: "baseline schema copy",
 			path: filepath.Join("migrations", "baseline_schema.sql"),
 			nth:  1,
@@ -46,14 +51,7 @@ func TestCurrentJobStatusViewCopiesMatchMaterializedView(t *testing.T) {
 func TestCurrentAuthoritativeAttemptsViewMatchesRepairDefinition(t *testing.T) {
 	db := SetupTestDB(t)
 	materialized := normalizedViewSQL(t, db, "authoritative_job_attempts")
-	want := normalizeViewSQL(`CREATE VIEW authoritative_job_attempts AS
-		 SELECT ja.* FROM job_attempts ja
-		  WHERE ja.abandoned_at IS NULL
-		    AND NOT EXISTS (
-		        SELECT 1 FROM move_intents mi
-		         WHERE mi.state = 'open'
-		           AND mi.id = ja.move_intent_id
-		    )`)
+	want := normalizedViewSource(t, filepath.Join("migrations", "sql", "current_authoritative_views.sql"), "authoritative_job_attempts", 1)
 	if materialized != want {
 		t.Fatalf("authoritative_job_attempts differs from repair definition.\n\nwant:\n%s\n\ngot:\n%s\n\ndiff:\n%s",
 			want, materialized, diffLines(want, materialized))

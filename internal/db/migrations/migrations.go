@@ -732,28 +732,14 @@ END;
 `
 
 func recreateAuthoritativeJobStatusView(ctx context.Context, db *sql.DB) error {
-	sqlBytes, err := fs.ReadFile(sqlMigrations, "sql/abandoned_attempts_v18.sql")
+	sqlBytes, err := fs.ReadFile(sqlMigrations, "sql/current_authoritative_views.sql")
 	if err != nil {
-		return fmt.Errorf("read abandoned-attempt migration SQL: %w", err)
+		return fmt.Errorf("read current authoritative view SQL: %w", err)
 	}
-	const marker = "CREATE VIEW job_status AS"
-	jobStatusStart := strings.Index(string(sqlBytes), marker)
-	if jobStatusStart < 0 {
-		return fmt.Errorf("job_status view marker not found")
-	}
-	viewSQL := string(sqlBytes)[jobStatusStart:]
 	for _, stmt := range []string{
 		`DROP VIEW IF EXISTS job_status`,
 		`DROP VIEW IF EXISTS authoritative_job_attempts`,
-		`CREATE VIEW authoritative_job_attempts AS
-		 SELECT ja.* FROM job_attempts ja
-		  WHERE ja.abandoned_at IS NULL
-		    AND NOT EXISTS (
-		        SELECT 1 FROM move_intents mi
-		         WHERE mi.state = 'open'
-		           AND mi.id = ja.move_intent_id
-		    )`,
-		viewSQL,
+		string(sqlBytes),
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return err
