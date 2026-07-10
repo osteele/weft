@@ -279,6 +279,8 @@ func AttachExternalBinding(database *sql.DB, jobID, attemptID int64, obs Externa
 
 func MarkExternalSubmissionFailed(database *sql.DB, jobID int64, message string) error {
 	now := time.Now().Unix()
+	// Unfiltered: a submission can fail after its attempt was already closed,
+	// so the write must be able to land on a terminal attempt.
 	_, err := database.Exec(`
 		UPDATE job_attempts
 		   SET status = ?, end_time = COALESCE(end_time, ?),

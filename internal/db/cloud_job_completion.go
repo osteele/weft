@@ -264,10 +264,12 @@ func NeedsCloudCompletionBackfill(database *sql.DB, jobID int64) (bool, error) {
 		lastSyncedStatus sql.NullString
 		launchID         sql.NullInt64
 	)
+	// Reads the physical latest attempt (backfill recovery inspects whichever
+	// attempt sync last force-closed, including a hidden move-target one).
 	err := database.QueryRow(
 		`SELECT status, exit_code, start_time, end_time, last_synced_status, launch_id
 		 FROM job_attempts
-		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+		 WHERE id = `+latestAttemptSubquery,
 		jobID,
 	).Scan(&status, &exitCode, &startTime, &endTime, &lastSyncedStatus, &launchID)
 	if err == sql.ErrNoRows {

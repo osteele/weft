@@ -22,6 +22,20 @@
 -- the latest non-abandoned attempt from job-lifecycle.allium. Abandoned move
 -- overlap attempts are retained for audit but do not drive sync-derived job
 -- status, info, artifacts, or telemetry.
+--
+-- Physical attempt selection: a helper that mutates or reads "the latest
+-- attempt" for a job must pick one of three sanctioned scopes and never
+-- inline its own ORDER BY attempt_number selector (enforced by
+-- TestNoInlineAttemptSelector):
+--   - open: the currently-open, structurally-tracked attempt, hiding
+--     open-move-target attempts until their MoveIntent confirms. The default
+--     for writes that only make sense on a live attempt.
+--   - authoritative: the latest non-abandoned attempt (open or terminal) —
+--     `job.latest_attempt` above. For writes that own the job's outcome and
+--     must reach a closed attempt without touching an abandoned move-loser.
+--   - physical-latest: includes abandoned and hidden attempts; used only
+--     where a call site must not apply the open/authoritative filters, and
+--     each such use documents why.
 
 use "./job-lifecycle.allium" as jobs
 use "./campaign-lifecycle.allium" as cloud

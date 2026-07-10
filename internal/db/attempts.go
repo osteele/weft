@@ -261,7 +261,24 @@ func hasJobPhaseTimingsTable(db *sql.DB) bool {
 // --- Attempt helper functions ---
 //
 // SQLite doesn't support UPDATE ... ORDER BY ... LIMIT without SQLITE_ENABLE_UPDATE_DELETE_LIMIT.
-// All UPDATE helpers use a subquery: WHERE id = (SELECT id ... ORDER BY ... LIMIT 1).
+// Selecting "the attempt to write" is a per-call-site decision with exactly
+// three sanctioned answers, in order of increasing visibility. Every
+// attempt-mutating helper WHERE id = (subquery ... LIMIT 1) must use one of
+// these named constants rather than inlining its own selector — the
+// TestNoInlineAttemptSelector guard enforces this so a future edit cannot
+// quietly add a fourth, undocumented rule. The choice:
+//
+//   - latestOpenAttemptSubquery: the currently-open, structurally-tracked
+//     attempt. The default for mutations that only make sense on a live
+//     attempt (status/session/cost/telemetry). Hides open-move-target
+//     attempts until their MoveIntent confirms.
+//   - latestAuthoritativeAttemptSubquery: the latest non-abandoned attempt,
+//     open or terminal. For writes that own the job's outcome and must reach
+//     a closed attempt without ever touching an abandoned move-loser.
+//   - latestAttemptSubquery: the physical latest, including abandoned and
+//     hidden (open-move-target) attempts. Prefer the open or authoritative
+//     selectors; reach for this only where a call site must not apply their
+//     filters, and say why at the call site.
 
 // latestOpenAttemptSubquery returns a SQL subquery that selects the
 // authoritative structurally tracked open attempt for the given job_id
@@ -275,7 +292,10 @@ WHERE joa.job_id = ? AND mi.id IS NULL
 ORDER BY joa.attempt_id DESC
 LIMIT 1)`
 
-// latestAttemptSubquery returns a SQL subquery for the latest attempt (open or closed).
+// latestAttemptSubquery returns a SQL subquery for the physical latest attempt,
+// including abandoned and hidden (open-move-target) attempts. Prefer
+// latestOpenAttemptSubquery or latestAuthoritativeAttemptSubquery; use this
+// only when a write/read must reach an attempt those two exclude.
 const latestAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
 
 // latestAuthoritativeAttemptSubquery returns the latest attempt that still
@@ -846,7 +866,9 @@ func SetAttemptPendingStatus(db *sql.DB, jobID int64, status string) error {
 	})
 }
 
-// ClearAttemptPendingStatus clears pending_status on the latest attempt (open or closed).
+// ClearAttemptPendingStatus clears pending_status on the latest attempt.
+// Unfiltered because it pairs with SetAttemptPendingStatus, which can stamp a
+// terminal attempt (retry intent on a failed job).
 func ClearAttemptPendingStatus(db *sql.DB, jobID int64) error {
 	_, err := db.Exec(`
 		UPDATE job_attempts SET pending_status = NULL, pending_at = NULL
@@ -900,7 +922,9 @@ func SetAttemptSessionName(execer dbExecer, jobID int64, sessionName string) err
 	return err
 }
 
-// SetAttemptErrorDiagnosis updates error diagnosis on the latest attempt (open or not).
+// SetAttemptErrorDiagnosis updates error diagnosis on the latest attempt.
+// Unfiltered because a diagnosis is usually recorded after the attempt has
+// already closed terminally.
 func SetAttemptErrorDiagnosis(db *sql.DB, jobID int64, diagnosis string) error {
 	_, err := db.Exec(`
 		UPDATE job_attempts SET error_diagnosis = ?
