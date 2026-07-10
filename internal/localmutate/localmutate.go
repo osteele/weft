@@ -28,10 +28,11 @@ type SetJobTagRequest struct {
 }
 
 var (
-	daemonPathsFunc  = daemoncontrol.DefaultPaths
-	daemonStatusFunc = daemoncontrol.CurrentStatus
-	dialMutationFunc = daemonapi.DialMutation
-	dialSubmitFunc   = daemonapi.DialSubmitJob
+	daemonPathsFunc           = daemoncontrol.DefaultPaths
+	daemonStatusFunc          = daemoncontrol.CurrentStatus
+	dialMutationFunc          = daemonapi.DialMutation
+	dialSubmitFunc            = daemonapi.DialSubmitJob
+	recordQueuedJobDirectFunc = ops.RecordQueuedJob
 )
 
 func Handler(ctx context.Context, database *sql.DB, req daemonapi.MutationRequest) (json.RawMessage, error) {
@@ -69,8 +70,11 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 				return jobID, nil
 			}
 			if strings.TrimSpace(params.SubmitToken) != "" {
-				jobID, directErr := ops.RecordQueuedJob(database, params)
+				jobID, directErr := recordQueuedJobDirectFunc(database, params)
 				if directErr == nil {
+					return jobID, nil
+				}
+				if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
 					return jobID, nil
 				}
 				return 0, fmt.Errorf("submit via daemon failed: %w; direct fallback failed: %v", err, directErr)
