@@ -1,6 +1,8 @@
 package jobview
 
 import (
+	"strings"
+
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 )
@@ -65,6 +67,34 @@ func LaunchesEverReady(launchByID map[int64]*db.Launch) map[int64]bool {
 		}
 	}
 	return out
+}
+
+// DisplayBucket returns the section bucket for a possibly move-expanded display
+// row. It is the single place that decides how a row lands in a grouped list,
+// so display code never re-derives buckets of its own:
+//   - a dim source move row keeps its own authoritative status;
+//   - a move target row is "placing" while the move stays open;
+//   - any other row trusts the bucket precomputed in PlacementStatus, falling
+//     back to a fresh classification only when none was computed.
+//
+// The caller sets input.HasOpenPlacingIntent for the fallback case; the move
+// rows override it because their role, not a placing intent, fixes the bucket.
+func DisplayBucket(job *db.Job, input ClassifyInput, placementStatusByJob map[int64]PlacementStatus) Bucket {
+	if job == nil {
+		return ""
+	}
+	if job.DisplayMoveDim {
+		input.HasOpenPlacingIntent = false
+		return ClassifyBucket(job, input)
+	}
+	if strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
+		input.HasOpenPlacingIntent = true
+		return ClassifyBucket(job, input)
+	}
+	if ps, ok := placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
+		return ps.Bucket
+	}
+	return ClassifyBucket(job, input)
 }
 
 func ClassifyBucket(job *db.Job, input ClassifyInput) Bucket {

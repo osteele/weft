@@ -1433,29 +1433,18 @@ func groupedStatusETASuffix(job *db.Job, sectionKey string, launchLiveByID map[i
 	return "ETA " + remaining.FormatWithBounds()
 }
 
-func groupedStatusBucket(job *db.Job, launchStatusByID map[int64]string, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, placingJobIDs map[int64]struct{}, now time.Time) string {
-	_, placing := placingJobIDs[job.ID]
-	return string(jobview.ClassifyBucket(job, jobview.ClassifyInput{
-		LaunchStatusByID:     launchStatusByID,
+func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, opts groupedStatusRenderOptions) string {
+	if job == nil {
+		return ""
+	}
+	_, placing := opts.placingJobIDs[job.ID]
+	input := jobview.ClassifyInput{
+		LaunchStatusByID:     opts.launchStatusByID,
 		LaunchesWithActive:   launchesWithActiveJob,
 		LaunchEverReady:      launchesEverReady,
 		HasOpenPlacingIntent: placing,
-	}))
-}
-
-func groupedStatusBucketWithOptions(job *db.Job, launchesWithActiveJob map[int64]bool, launchesEverReady map[int64]bool, opts groupedStatusRenderOptions) string {
-	if job != nil && job.DisplayMoveDim {
-		return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, nil, opts.now)
 	}
-	if job != nil && strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
-		return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, map[int64]struct{}{job.ID: {}}, opts.now)
-	}
-	if opts.placementStatusByJob != nil && job != nil {
-		if ps, ok := opts.placementStatusByJob[job.ID]; ok && ps.Bucket != "" {
-			return string(ps.Bucket)
-		}
-	}
-	return groupedStatusBucket(job, opts.launchStatusByID, launchesWithActiveJob, launchesEverReady, opts.placingJobIDs, opts.now)
+	return string(jobview.DisplayBucket(job, input, opts.placementStatusByJob))
 }
 
 // groupedStatusJobParts returns the project name and description separately.
@@ -1509,7 +1498,7 @@ func groupedStatusPlacementMarker(job *db.Job) (glyph, jobID string) {
 func countVisibleRunningJobs(jobs []*db.Job) int {
 	n := 0
 	for _, job := range jobs {
-		if job != nil && groupedStatusBucket(job, nil, nil, nil, nil, time.Now()) == "running" {
+		if job != nil && jobview.ClassifyBucket(job, jobview.ClassifyInput{}) == jobview.BucketRunning {
 			n++
 		}
 	}
@@ -1531,13 +1520,6 @@ func groupedStatusOutcomeSuffix(job *db.Job, sectionTitle string) string {
 	default:
 		return ""
 	}
-}
-
-func launchStatusForJob(job *db.Job, launchStatusByID map[int64]string) string {
-	if job == nil || job.LaunchID == nil || launchStatusByID == nil {
-		return ""
-	}
-	return strings.TrimSpace(launchStatusByID[*job.LaunchID])
 }
 
 // Failures whose successor is alive render dim so they recede without
