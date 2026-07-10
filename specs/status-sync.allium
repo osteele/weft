@@ -36,6 +36,23 @@
 --   - physical-latest: includes abandoned and hidden attempts; used only
 --     where a call site must not apply the open/authoritative filters, and
 --     each such use documents why.
+--
+-- Single derived-status source: the job_status SQL view derives the job's
+-- status once, from the authoritative attempt, in the view body stored at
+-- internal/db/migrations/sql/current_authoritative_views.sql (every migration
+-- recreates the view from that one text; TestCurrentJobStatusViewCopies…
+-- guards the historical copies against drift).
+--
+-- Job.EffectiveStatus() is a thin overlay on the view's status column, not a
+-- second derivation. It differs from job_status.status in exactly two
+-- documented ways, both pinned by TestStatusDerivation…:
+--   - pending overlay: a non-terminal job takes its pending_status (the
+--     desired next state) if one is set; a terminal status always wins.
+--   - unplaced-active collapse: a job with no host cannot be running,
+--     starting, or paused, so those collapse to queued.
+-- List views apply one further, spec-intended difference during an open move:
+-- the row is split into a source-authoritative dim row and a target row (see
+-- job-move.allium), so a single job_status row can render as two.
 
 use "./job-lifecycle.allium" as jobs
 use "./campaign-lifecycle.allium" as cloud
