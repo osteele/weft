@@ -29,7 +29,10 @@ var (
 	daemonLogsFollow bool
 )
 
-const daemonInterruptiblePollInterval = 15 * time.Second
+const (
+	daemonInterruptiblePollInterval = 15 * time.Second
+	daemonStopTimeout               = 30 * time.Second
+)
 
 var (
 	daemonSyncAll          = syncorch.SyncAll
@@ -375,14 +378,24 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 
 func runDaemonStop(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
+	before, _ := daemoncontrol.CurrentStatus(paths)
 	if daemoncontrol.IsInstalled(paths) {
 		if err := daemoncontrol.Unload(paths); err != nil {
 			return err
 		}
 	}
-	pid, hadProcess, err := daemoncontrol.StopPID(paths, 5*time.Second)
+	pid, hadProcess, err := daemoncontrol.StopPID(paths, daemonStopTimeout)
 	if err != nil {
 		return err
+	}
+	if pid == 0 && before.PID > 0 && !daemoncontrol.ProcessLive(before.PID) {
+		pid = before.PID
+		hadProcess = before.Live
+	}
+	if pid > 0 {
+		if err := releaseDaemonAutopilotClaim(pid, "daemon stopped"); err != nil {
+			return err
+		}
 	}
 	switch {
 	case pid == 0:
@@ -487,8 +500,14 @@ func daemonProcessState(status daemoncontrol.Status) string {
 func runDaemonInstall(cmd *cobra.Command, args []string) error {
 	paths := daemoncontrol.DefaultPaths()
 	installed := daemoncontrol.IsInstalled(paths)
-	if err := daemoncontrol.Install(paths); err != nil {
+	transition, err := daemoncontrol.InstallTransition(paths, daemonStopTimeout)
+	if err != nil {
 		return err
+	}
+	if transition.OldPID > 0 {
+		if err := releaseDaemonAutopilotClaim(transition.OldPID, "daemon service updated"); err != nil {
+			return err
+		}
 	}
 	if installed {
 		fmt.Println("Updated daemon launchd service")
@@ -496,6 +515,18 @@ func runDaemonInstall(cmd *cobra.Command, args []string) error {
 		fmt.Println("Installed daemon launchd service")
 	}
 	fmt.Printf("plist: %s\n", paths.PlistFile)
+	return nil
+}
+
+func releaseDaemonAutopilotClaim(pid int, summary string) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+	if err := db.ReleaseAutopilotPass(database, pid, 0, summary, context.Canceled); err != nil {
+		return fmt.Errorf("release daemon autopilot claim: %w", err)
+	}
 	return nil
 }
 

@@ -98,7 +98,7 @@ install:
     start_agent_prewarm "install"
     go install .
     if [ -f "${HOME}/Library/LaunchAgents/com.osteele.weft.daemon.plist" ]; then
-        echo "Updating installed daemon service..."
+        echo "Updating daemon service and transitioning to installed binary..."
         weft daemon install
     fi
     WEFT_DOCS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/weft/docs"

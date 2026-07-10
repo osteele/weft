@@ -96,3 +96,54 @@ func TestRunDaemonPrePassSyncTimesOut(t *testing.T) {
 		t.Fatalf("Warnings = %#v, want pre-pass timeout warning", result.Warnings)
 	}
 }
+
+func TestReleaseDaemonAutopilotClaimClearsStoppedDaemonPID(t *testing.T) {
+	database := setupDaemonTestDB(t)
+	const daemonPID = 4242
+	claimed, paused, existing, err := db.TryClaimAutopilotPass(database, daemonPID, "daemon/4242", "host", time.Minute, db.BinaryIdentity{})
+	if err != nil {
+		t.Fatalf("TryClaimAutopilotPass: %v", err)
+	}
+	if !claimed || paused || existing != nil {
+		t.Fatalf("claim = %v paused = %v existing = %+v, want fresh claim", claimed, paused, existing)
+	}
+
+	if err := releaseDaemonAutopilotClaim(daemonPID, "daemon stopped"); err != nil {
+		t.Fatalf("releaseDaemonAutopilotClaim: %v", err)
+	}
+
+	state, err := db.LoadAutopilotState(database)
+	if err != nil {
+		t.Fatalf("LoadAutopilotState: %v", err)
+	}
+	if state.ActiveRunnerPID != 0 || !state.PassStartedAt.IsZero() || !state.LastHeartbeat.IsZero() {
+		t.Fatalf("active autopilot state = %+v, want cleared", state)
+	}
+	if state.LastPassSummary != "daemon stopped" {
+		t.Fatalf("last pass summary = %q, want daemon stopped", state.LastPassSummary)
+	}
+}
+
+func TestReleaseDaemonAutopilotClaimDoesNotClearOtherPID(t *testing.T) {
+	database := setupDaemonTestDB(t)
+	const daemonPID = 4242
+	claimed, _, _, err := db.TryClaimAutopilotPass(database, daemonPID, "daemon/4242", "host", time.Minute, db.BinaryIdentity{})
+	if err != nil {
+		t.Fatalf("TryClaimAutopilotPass: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected fresh autopilot claim")
+	}
+
+	if err := releaseDaemonAutopilotClaim(9999, "daemon stopped"); err != nil {
+		t.Fatalf("releaseDaemonAutopilotClaim: %v", err)
+	}
+
+	state, err := db.LoadAutopilotState(database)
+	if err != nil {
+		t.Fatalf("LoadAutopilotState: %v", err)
+	}
+	if state.ActiveRunnerPID != daemonPID {
+		t.Fatalf("active runner pid = %d, want %d", state.ActiveRunnerPID, daemonPID)
+	}
+}

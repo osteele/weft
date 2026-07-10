@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 )
 
 var plistTemplate = template.Must(template.New("daemon-plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -82,26 +83,44 @@ func IsInstalled(paths Paths) bool {
 }
 
 func Install(paths Paths) error {
+	_, err := InstallTransition(paths, 5*time.Second)
+	return err
+}
+
+func InstallTransition(paths Paths, stopTimeout time.Duration) (TransitionResult, error) {
+	var result TransitionResult
 	installed := IsInstalled(paths)
+	result.WasInstalled = installed
 	if installed {
+		before, _ := CurrentStatus(paths)
 		if err := Unload(paths); err != nil {
-			return err
+			return result, err
 		}
+		pid, hadProcess, err := StopPID(paths, stopTimeout)
+		if err != nil {
+			return result, err
+		}
+		if pid == 0 && before.PID > 0 && !daemonProcessLive(before.PID) {
+			pid = before.PID
+			hadProcess = before.Live
+		}
+		result.OldPID = pid
+		result.HadProcess = hadProcess
 	}
 	binary, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("find executable: %w", err)
+		return result, fmt.Errorf("find executable: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
 		binary = resolved
 	}
 	if err := os.MkdirAll(filepath.Dir(paths.PIDFile), 0o755); err != nil {
-		return err
+		return result, err
 	}
 	if err := os.MkdirAll(filepath.Dir(paths.PlistFile), 0o755); err != nil {
-		return err
+		return result, err
 	}
-	return writeLaunchdPlist(paths, binary)
+	return result, writeLaunchdPlist(paths, binary)
 }
 
 func writeLaunchdPlist(paths Paths, binary string) error {

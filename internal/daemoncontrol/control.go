@@ -57,6 +57,12 @@ const (
 	EnsureRestarted EnsureAction = "restarted"
 )
 
+type TransitionResult struct {
+	WasInstalled bool
+	OldPID       int
+	HadProcess   bool
+}
+
 func DefaultPaths() Paths {
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".cache", "weft")
@@ -419,6 +425,10 @@ func daemonProcessLive(pid int) bool {
 		return false
 	}
 	return !processIsZombie(pid)
+}
+
+func ProcessLive(pid int) bool {
+	return daemonProcessLive(pid)
 }
 
 func processIsZombie(pid int) bool {
