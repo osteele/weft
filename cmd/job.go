@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -1664,7 +1665,7 @@ func formatMemoryKB(kb int64) string {
 // rejects hosts in placement (the arch cap above rarely does), so weft info
 // must show it.
 func driverFloorLine(job *db.Job) string {
-	rf := placement.RuntimeFloorForJob(job)
+	rf := cloudRuntimeFloorForJobInfo(job)
 	driver, cuda := rf.Req.MinDriverVersion, rf.Req.MinCUDAVersion
 	if driver <= 0 && cuda == "" {
 		return ""
@@ -1679,4 +1680,16 @@ func driverFloorLine(job *db.Job) string {
 		return strings.TrimSpace(fmt.Sprintf(">=%d %s", driver, detail))
 	}
 	return detail
+}
+
+func cloudRuntimeFloorForJobInfo(job *db.Job) placement.RuntimeFloor {
+	if job == nil {
+		return placement.RuntimeFloor{}
+	}
+	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	_, rf, _ := campaign.ResolveJobImageSettings(localDir, job.EffectiveCommand())
+	if job.CLIResourceOverrides != nil {
+		_ = rf.ApplyCLIOverride(job.CLIResourceOverrides.MinCUDAVersion)
+	}
+	return rf
 }

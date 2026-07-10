@@ -145,8 +145,23 @@ func TestDriverFloorLine_TorchPinProvenance(t *testing.T) {
 	if !strings.Contains(line, ">=570") {
 		t.Errorf("driverFloorLine = %q, want driver >=570 (operational floor)", line)
 	}
-	if !strings.Contains(line, "CUDA >=12.8") || !strings.Contains(line, "torch 2.9.1+cu128 operational floor") {
-		t.Errorf("driverFloorLine = %q, want operational CUDA floor with torch provenance", line)
+	if !strings.Contains(line, "CUDA >=12.8") || !strings.Contains(line, "torch pin") {
+		t.Errorf("driverFloorLine = %q, want cloud CUDA floor with torch provenance", line)
+	}
+}
+
+func TestDriverFloorLine_UsesCloudExactTorchCUDAFloor(t *testing.T) {
+	dir := t.TempDir()
+	dataloc.WriteTestTorchPin(t, dir, "2.6.0", "cu124")
+	mem := 20
+	job := &db.Job{WorkingDir: dir, Command: "uv run train.py", GPUMemGB: &mem}
+
+	line := driverFloorLine(job)
+	if !strings.Contains(line, ">=550") {
+		t.Errorf("driverFloorLine = %q, want cloud driver >=550", line)
+	}
+	if !strings.Contains(line, "CUDA >=12.4") {
+		t.Errorf("driverFloorLine = %q, want exact cloud CUDA floor 12.4", line)
 	}
 }
 
