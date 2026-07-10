@@ -896,7 +896,7 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			SELECT ja.*,
 			       ROW_NUMBER() OVER (PARTITION BY ja.job_id
 			                          ORDER BY ja.attempt_number DESC) AS rn
-			FROM job_attempts ja
+			FROM authoritative_job_attempts ja
 		)
 		SELECT
 			j.id,
