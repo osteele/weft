@@ -2956,7 +2956,7 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 	}
 
 	if len(childKeys) == 0 {
-		return 0, "", fmt.Errorf("artifact object %s not found", r2Key)
+		return 0, "", fmt.Errorf("%w: artifact object %s not found", r2resolve.ErrArtifactMissing, r2Key)
 	}
 
 	if err := os.MkdirAll(localPath, 0o755); err != nil {

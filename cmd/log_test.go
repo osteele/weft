@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
@@ -17,6 +20,29 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+type fakeCloudLogObjectStore struct {
+	exists map[string]bool
+	data   map[string][]byte
+	errs   map[string]error
+}
+
+func (f fakeCloudLogObjectStore) ObjectExists(_ context.Context, key string) (bool, error) {
+	if err := f.errs["exists:"+key]; err != nil {
+		return false, err
+	}
+	return f.exists[key], nil
+}
+
+func (f fakeCloudLogObjectStore) GetObject(_ context.Context, key string) ([]byte, error) {
+	if err := f.errs["get:"+key]; err != nil {
+		return nil, err
+	}
+	if data, ok := f.data[key]; ok {
+		return data, nil
+	}
+	return nil, &types.NoSuchKey{}
+}
 
 func TestJobLogCmdRegistersSameFlagsAsLogCmd(t *testing.T) {
 	logCmd.Flags().VisitAll(func(flag *pflag.Flag) {
@@ -144,6 +170,42 @@ func TestRunLogForCloudJobSnapshotLookupFailureRunningJobPrintsNotice(t *testing
 	}
 	if strings.Contains(msg, "R2") || strings.Contains(msg, "jobs/4213") || strings.Contains(msg, "head object") {
 		t.Fatalf("output = %q, should not expose storage details", msg)
+	}
+}
+
+func TestFetchCloudLogFromR2_ManifestTransientErrorIsUnknown(t *testing.T) {
+	errTimeout := errors.New("temporary R2 timeout")
+	manifestKey := cloudlog.ManifestKeyForRun(4213, 36531)
+	store := fakeCloudLogObjectStore{
+		errs: map[string]error{
+			"get:" + manifestKey: errTimeout,
+		},
+	}
+
+	_, err := fetchCloudLogFromR2(context.Background(), store, 4213, 36531, 0, 0, 0)
+	if err == nil {
+		t.Fatal("err = nil, want transient lookup error")
+	}
+	var availabilityErr *cloudLogAvailabilityError
+	if !errors.As(err, &availabilityErr) {
+		t.Fatalf("err = %T %v, want cloudLogAvailabilityError", err, err)
+	}
+	if availabilityErr.state != cloudLogAvailabilityUnknown {
+		t.Fatalf("availability state = %v, want unknown", availabilityErr.state)
+	}
+	if !errors.Is(err, errTimeout) {
+		t.Fatalf("errors.Is(err, errTimeout) = false")
+	}
+
+	msg := contextualizeCloudLogFetchError(nil, &db.Job{ID: 4213, Status: db.StatusRunning}, err).Error()
+	if !strings.Contains(msg, "Could not read log snapshot for job wj4213") {
+		t.Fatalf("message = %q, want lookup-failed wording", msg)
+	}
+	if strings.Contains(msg, "Log is not available yet") {
+		t.Fatalf("message = %q, should not report unknown as missing", msg)
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "manifest") {
+		t.Fatalf("message = %q, should not expose storage details", msg)
 	}
 }
 

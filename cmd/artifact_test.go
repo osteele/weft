@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/spf13/cobra"
 )
@@ -947,6 +948,18 @@ func TestSyncArtifactsForJob_UsesCloudSyncForLaunchJobs(t *testing.T) {
 	}
 	if localCalled {
 		t.Fatal("did not expect local sync path")
+	}
+}
+
+func TestDownloadCloudArtifact_MissingObjectWrapsSentinel(t *testing.T) {
+	store := &fakeCloudArtifactStore{objects: map[string][]byte{}}
+
+	_, _, err := downloadCloudArtifact(store, "jobs/42/runs/7/files/", "output/missing.json", filepath.Join(t.TempDir(), "missing.json"), time.Second)
+	if err == nil {
+		t.Fatal("err = nil, want missing artifact error")
+	}
+	if !errors.Is(err, r2resolve.ErrArtifactMissing) {
+		t.Fatalf("errors.Is(err, ErrArtifactMissing) = false; err=%v", err)
 	}
 }
 

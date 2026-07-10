@@ -711,15 +711,15 @@ func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) erro
 func fetchAndDisplayLogFromR2WithDatabase(cmd *cobra.Command, database *sql.DB, job *db.Job, runID int64) error {
 	cfg, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return contextualizeCloudLogFetchError(database, job, fmt.Errorf("load log snapshot configuration: %w", err))
 	}
 
 	r2Client, err := buildR2Client(cfg)
 	if err != nil {
-		return fmt.Errorf("create R2 client: %w", err)
+		return contextualizeCloudLogFetchError(database, job, fmt.Errorf("create log snapshot client: %w", err))
 	}
 	if r2Client == nil {
-		return fmt.Errorf("R2 not configured")
+		return contextualizeCloudLogFetchError(database, job, fmt.Errorf("log snapshot storage not configured"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -756,7 +756,27 @@ func contextualizeCloudLogFetchError(database *sql.DB, job *db.Job, err error) e
 	if statusLabel == "" {
 		statusLabel = job.EffectiveStatus()
 	}
+	var availabilityErr *cloudLogAvailabilityError
+	if errors.As(err, &availabilityErr) {
+		kind := cloudLogSnapshotLookupFailed
+		if availabilityErr.state == cloudLogAvailabilityAbsent {
+			kind = cloudLogSnapshotMissing
+		}
+		if status.IsTerminal(job.Status) {
+			return &cloudLogSnapshotError{
+				jobID:  job.ID,
+				status: statusLabel,
+				kind:   kind,
+				launch: latestCloudLogLaunch(database, job),
+				err:    err,
+			}
+		}
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: kind, err: err}
+	}
 	msg := err.Error()
+	if isCloudLogSnapshotLookupError(msg) {
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotLookupFailed, err: err}
+	}
 	if isCloudLogSnapshotMissingError(msg) {
 		if status.IsTerminal(job.Status) {
 			return &cloudLogSnapshotError{
@@ -769,10 +789,45 @@ func contextualizeCloudLogFetchError(database *sql.DB, job *db.Job, err error) e
 		}
 		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotMissing, err: err}
 	}
-	if isCloudLogSnapshotLookupError(msg) {
-		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotLookupFailed, err: err}
-	}
 	return err
+}
+
+type cloudLogAvailabilityState int
+
+const (
+	cloudLogAvailabilityAbsent cloudLogAvailabilityState = iota
+	cloudLogAvailabilityUnknown
+)
+
+type cloudLogAvailabilityError struct {
+	state cloudLogAvailabilityState
+	op    string
+	jobID int64
+	err   error
+}
+
+func (e *cloudLogAvailabilityError) Error() string {
+	if e == nil {
+		return ""
+	}
+	jobID := ids.FormatJobID(e.jobID)
+	if e.state == cloudLogAvailabilityAbsent {
+		if e.err == nil {
+			return fmt.Sprintf("archived log not found for job %s", jobID)
+		}
+		return fmt.Sprintf("archived log not found for job %s: %v", jobID, e.err)
+	}
+	if e.err == nil {
+		return fmt.Sprintf("%s for job %s", e.op, jobID)
+	}
+	return fmt.Sprintf("%s for job %s: %v", e.op, jobID, e.err)
+}
+
+func (e *cloudLogAvailabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 type cloudLogSnapshotErrorKind int
@@ -909,7 +964,12 @@ type fetchedCloudLog struct {
 	Lines   int
 }
 
-func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID int64, from, to, lines int) (*fetchedCloudLog, error) {
+type cloudLogObjectStore interface {
+	ObjectExists(context.Context, string) (bool, error)
+	GetObject(context.Context, string) ([]byte, error)
+}
+
+func fetchCloudLogFromR2(ctx context.Context, r2Client cloudLogObjectStore, jobID, runID int64, from, to, lines int) (*fetchedCloudLog, error) {
 	candidateRunIDs := []int64{runID}
 	if runID != 0 {
 		candidateRunIDs = append(candidateRunIDs, 0)
@@ -929,12 +989,12 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	for _, keys := range candidates {
 		exists, err := r2Client.ObjectExists(ctx, keys.finalKey)
 		if err != nil {
-			return nil, fmt.Errorf("check archived log snapshot: %w", err)
+			return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityUnknown, op: "check archived log snapshot", jobID: jobID, err: err}
 		}
 		if exists {
 			data, err := r2Client.GetObject(ctx, keys.finalKey)
 			if err != nil {
-				return nil, fmt.Errorf("fetch archived log snapshot: %w", err)
+				return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityUnknown, op: "fetch archived log snapshot", jobID: jobID, err: err}
 			}
 			return &fetchedCloudLog{
 				Content: string(data),
@@ -947,12 +1007,15 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 
 		manifestData, err := r2Client.GetObject(ctx, keys.manifestKey)
 		if err != nil {
-			continue
+			if r2.IsNotFound(err) {
+				continue
+			}
+			return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityUnknown, op: "fetch live log manifest", jobID: jobID, err: err}
 		}
 
 		var manifest cloudlog.Manifest
 		if err := json.Unmarshal(manifestData, &manifest); err != nil {
-			return nil, fmt.Errorf("parse live log manifest for job %s: %w", ids.FormatJobID(jobID), err)
+			return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityUnknown, op: "parse live log manifest", jobID: jobID, err: err}
 		}
 		parts := cloudlog.SelectParts(manifest, from, to, lines)
 		if len(parts) == 0 {
@@ -963,7 +1026,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		for _, part := range parts {
 			data, err := r2Client.GetObject(ctx, part.Key)
 			if err != nil {
-				return nil, fmt.Errorf("fetch live log snapshot chunk: %w", err)
+				return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityUnknown, op: "fetch live log snapshot chunk", jobID: jobID, err: err}
 			}
 			b.Write(data)
 		}
@@ -983,18 +1046,23 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	// / error) instead of the boilerplate "may not have produced output"
 	// guess.
 	if marker, ok := fetchUploadFailureMarker(ctx, r2Client, jobID, runID); ok {
-		return nil, fmt.Errorf("archived log not found for job %s: upload truncated: %s (%s, %d/%d bytes in %.0fs)",
-			ids.FormatJobID(jobID), marker.Cause(), marker.Reason,
-			marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds)
+		return nil, &cloudLogAvailabilityError{
+			state: cloudLogAvailabilityAbsent,
+			op:    "archived log lookup",
+			jobID: jobID,
+			err: fmt.Errorf("upload truncated: %s (%s, %d/%d bytes in %.0fs)",
+				marker.Cause(), marker.Reason,
+				marker.BytesUploaded, marker.BytesTotal, marker.ElapsedSeconds),
+		}
 	}
-	return nil, fmt.Errorf("archived log not found for job %s", ids.FormatJobID(jobID))
+	return nil, &cloudLogAvailabilityError{state: cloudLogAvailabilityAbsent, op: "archived log lookup", jobID: jobID}
 }
 
 // fetchUploadFailureMarker reads jobs/<id>/runs/<run>/upload-failure.json,
 // falling back to the run_id=0 key, and returns the decoded marker. ok ==
 // false when no marker exists (or it can't be decoded — degraded markers
 // should not block log fetch errors).
-func fetchUploadFailureMarker(ctx context.Context, r2Client *r2.Client, jobID, runID int64) (r2upload.FailureMarker, bool) {
+func fetchUploadFailureMarker(ctx context.Context, r2Client cloudLogObjectStore, jobID, runID int64) (r2upload.FailureMarker, bool) {
 	ids := []int64{runID}
 	if runID != 0 {
 		ids = append(ids, 0)

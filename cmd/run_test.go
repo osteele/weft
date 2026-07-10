@@ -170,9 +170,14 @@ func TestRunRunValidatesRentalImageBeforeRecordingJob(t *testing.T) {
 
 	dir := t.TempDir()
 	resetRunGlobals(t)
+	origRecord := recordQueuedJobMutationFunc
 	t.Cleanup(func() {
+		recordQueuedJobMutationFunc = origRecord
 		validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 	})
+	recordQueuedJobMutationFunc = func(_ context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+		return ops.RecordQueuedJob(database, params)
+	}
 	runDir = dir
 	runDescription = "image probe failure"
 	runGPU = "nvidia>=24GB"
@@ -223,9 +228,14 @@ func TestRunRunPersistsAfterForUnplacedRentalJob(t *testing.T) {
 
 	dir := t.TempDir()
 	resetRunGlobals(t)
+	origRecord := recordQueuedJobMutationFunc
 	t.Cleanup(func() {
+		recordQueuedJobMutationFunc = origRecord
 		validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 	})
+	recordQueuedJobMutationFunc = func(_ context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+		return ops.RecordQueuedJob(database, params)
+	}
 	runDir = dir
 	runTags = []string{db.TagRental}
 	runAfterRaw = "123"
