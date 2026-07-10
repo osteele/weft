@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/placement"
 )
 
 // cudaVariantRank orders NVIDIA CUDA image variants by capability.
@@ -122,21 +123,7 @@ func defaultCUDAImageForVersion(cudaMajorMinor string) string {
 // normalizeRentalImageAlias maps Weft's semantic/legacy runtime names to the
 // image we should actually provision on rental instances.
 func normalizeRentalImageAlias(image string) string {
-	image = strings.TrimSpace(image)
-	if image == "" {
-		return ""
-	}
-	lower := strings.ToLower(image)
-	switch lower {
-	case "sglang", "sglang:0.5.10", "sglang:v0.5.10.post1", legacySGLangRuntimeImage:
-		return sglangRuntimeImage
-	case "sglang:dev-cu13", "sglang:fp4", "sglang:fp4-e2m1":
-		return sglangDevCU13RuntimeImage
-	}
-	if strings.HasPrefix(lower, "ghcr.io/osteele/sglang-runtime:") {
-		return sglangRuntimeImage
-	}
-	return image
+	return placement.NormalizeRuntimeImageAlias(image)
 }
 
 func cudaVersionString(minCUDA float64) string {

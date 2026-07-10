@@ -236,6 +236,60 @@ func TestMinRuntimeFloorForJob_TorchPinUsesFamilyFloor(t *testing.T) {
 	}
 }
 
+func TestResolveEffectiveRuntime_ExactAndFamilyModesShareRuntimeFacts(t *testing.T) {
+	dir := writeTestUVLockCu128Version(t, "2.6.0")
+	if err := os.WriteFile(filepath.Join(dir, "serve.py"), []byte(`
+import sglang as sgl
+
+def main():
+    launch_server(kv_cache_dtype="fp4_e2m1")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	exact, err := ResolveEffectiveRuntime(dir, "python serve.py", EffectiveRuntimeOptions{FloorMode: RuntimeFloorExact})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveRuntime exact: %v", err)
+	}
+	family, err := ResolveEffectiveRuntime(dir, "python serve.py", EffectiveRuntimeOptions{FloorMode: RuntimeFloorFamily})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveRuntime family: %v", err)
+	}
+
+	if exact.Image != SGLangDevCU13RuntimeImage || family.Image != SGLangDevCU13RuntimeImage {
+		t.Fatalf("image exact=%q family=%q, want %q", exact.Image, family.Image, SGLangDevCU13RuntimeImage)
+	}
+	if exact.Floor.Req.MinCUDAVersion != "13.0" || family.Floor.Req.MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion exact=%q family=%q, want 13.0 from runtime image", exact.Floor.Req.MinCUDAVersion, family.Floor.Req.MinCUDAVersion)
+	}
+	if exact.Floor.Req.MinDriverVersion != 580 || family.Floor.Req.MinDriverVersion != 580 {
+		t.Fatalf("MinDriverVersion exact=%d family=%d, want 580", exact.Floor.Req.MinDriverVersion, family.Floor.Req.MinDriverVersion)
+	}
+}
+
+func TestMinRuntimeFloorForJob_SGLangDevCU13AliasAddsOnPremFloor(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "infer.py"), []byte(`# /// script
+# [tool.weft]
+# image = "sglang:dev-cu13"
+# ///
+print("ok")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	rf, err := MinRuntimeFloorForJob(dir, "uv run infer.py")
+	if err != nil {
+		t.Fatalf("MinRuntimeFloorForJob: %v", err)
+	}
+	if rf.Req.MinCUDAVersion != "13.0" {
+		t.Fatalf("MinCUDAVersion = %q, want 13.0", rf.Req.MinCUDAVersion)
+	}
+	if rf.Req.MinDriverVersion != 580 {
+		t.Fatalf("MinDriverVersion = %d, want 580", rf.Req.MinDriverVersion)
+	}
+}
+
 // Regression for wb32: torch 2.9.x cu128 is known to fail on cool30's
 // 525/CUDA-12.0 driver, so placement needs an operational floor above the
 // theoretical CUDA-family floor.

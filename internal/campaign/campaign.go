@@ -5,9 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
-	"os"
-	"path"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -24,9 +21,9 @@ import (
 )
 
 const (
-	sglangRuntimeImage        = "lmsysorg/sglang:v0.5.10.post1"
-	sglangDevCU13RuntimeImage = "lmsysorg/sglang:dev-cu13"
-	legacySGLangRuntimeImage  = "ghcr.io/osteele/sglang-runtime:v0.5.10.post1"
+	sglangRuntimeImage        = placement.SGLangRuntimeImage
+	sglangDevCU13RuntimeImage = placement.SGLangDevCU13RuntimeImage
+	legacySGLangRuntimeImage  = placement.LegacySGLangRuntimeImage
 )
 
 var imageRequirementResolver = imagereq.Resolve
@@ -761,8 +758,8 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 					img = fallbackTorchImage
 				}
 			}
-			if img == "" && jobUsesFramework(localDir, job.Command, "sglang") {
-				img = sglangRuntimeImageForJob(localDir, job.Command)
+			if img == "" && placement.JobUsesFramework(localDir, job.Command, "sglang") {
+				img = placement.SGLangRuntimeImageForJob(localDir, job.Command)
 			}
 
 			// Auto-upgrade CUDA images when the GPU constraint requires a newer
@@ -894,196 +891,11 @@ func ValidateCUDADriverMinOverride(cliMinCUDA string) error {
 // runtime floor (with CUDA-origin provenance and explicit-driver tracking)
 // from project config and PEP 723 metadata.
 func ResolveJobImageSettings(localDir, command string) (string, placement.RuntimeFloor, string) {
-	var projectCloud config.ProjectCloudConfig
-	var projectDir string
-	if cfg, path, err := config.LoadProjectConfigWithPath(localDir); err != nil {
-		slog.Warn("error loading project config for image resolution", "component", "campaign", "dir", localDir, "error", err)
-	} else if cfg != nil {
-		projectCloud = cfg.Cloud
-		projectDir = filepath.Dir(path)
-	}
-
-	img := strings.TrimSpace(projectCloud.Image)
-	if override := resolveProjectImageOverride(projectCloud.ImageOverrides, projectDir, localDir, command); override != "" {
-		img = override
-	}
-	if img == "" && jobUsesFramework(localDir, command, "sglang") {
-		img = sglangRuntimeImageForJob(localDir, command)
-	}
-	imagePullSecret := projectCloud.ImagePullSecret
-
-	meta, metaErr := dataloc.ScanScriptMeta(localDir, command)
-	if metaErr != nil {
-		slog.Warn("script metadata error in image resolution", "component", "campaign", "error", metaErr)
-	} else if meta != nil {
-		if meta.Image != "" {
-			img = meta.Image
-		}
-		if imagePullSecret == "" {
-			imagePullSecret = meta.ImagePullSecret
-		}
-	}
-	img = normalizeRentalImageAlias(img)
-
-	// PEP 723 top-level `dependencies = [...]` is read independently of
-	// [tool.weft]: a script may declare standard deps without configuring
-	// weft, and we still want those deps to drive CUDA-floor inference.
-	scriptDeps := dataloc.ScanScriptDependencies(localDir, command)
-	var rf placement.RuntimeFloor
-	// Cloud offers keep the torch pin's EXACT CUDA floor, deliberately
-	// stricter than the on-prem family floor used by
-	// placement.MinRuntimeFloorForJob. On-prem hosts are known machines
-	// where minor-version compatibility (cu12x wheel on any R525+ driver)
-	// is reliable; rental offers report cuda_max_good values that have
-	// produced real cuda_driver_too_old failures when filtered only to the
-	// family floor (see campaign_test.go's driver-floor regression).
-	if scriptReq := dataloc.ScanScriptTorchRequirement(localDir, command); scriptReq != nil {
-		if scriptCUDA := dataloc.ScriptTorchCUDAVersion(localDir, command); scriptCUDA != "" {
-			origin := "script PEP 723 torch dependency"
-			if !scriptReq.Exact {
-				origin = "script PEP 723 torch open range"
-			}
-			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: scriptCUDA}, origin)
-			slog.Debug("auto-derived CUDA driver floor from script torch dependency",
-				"component", "campaign", "cuda_floor", scriptCUDA, "local_dir", localDir)
-		}
-	} else if torchCUDA := dataloc.TorchMinCUDAVersion(localDir); torchCUDA != "" {
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: torchCUDA}, "torch pin")
-		slog.Debug("auto-derived CUDA driver floor from torch pin",
-			"component", "campaign", "cuda_floor", torchCUDA, "local_dir", localDir)
-	}
-	// Inline deps that the project's uv.lock doesn't see: `uv run --with X`
-	// and PEP 723 `dependencies = [...]`. vLLM 0.17+ is the motivating case —
-	// it bundles flash-attention 4, which needs CUDA 12.8 / driver 570
-	// regardless of the torch wheel in the project lockfile (the lockfile
-	// may pin torch+cu124, but `--with "vllm>=0.17"` resolves a fresh stack
-	// on the rental that overrides it).
-	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
-	deps = append(deps, dataloc.ParseDepSpecs(scriptDeps)...)
-	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, "library dependency CUDA floor")
-		slog.Debug("auto-derived CUDA driver floor from inline library deps",
-			"component", "campaign", "cuda_floor", libCUDA, "local_dir", localDir)
-	}
-	if img == sglangDevCU13RuntimeImage {
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: "13.0"}, "SGLang dev-cu13 runtime image")
-	}
-	// Explicit requirements replace the inferred floor and may lower or
-	// clear it ("any") — the user's escape hatch when the inferred floor is
-	// wrong for their stack. Script metadata outranks project config.
-	if err := rf.ApplyExplicit(projectCloud.MinDriver, projectCloud.MinCUDA, ".weft.toml [cloud]"); err != nil {
-		slog.Warn("project cloud image requirement error", "component", "campaign", "error", err)
-	}
-	if meta != nil {
-		if err := rf.ApplyExplicit(meta.MinDriver, meta.MinCUDA, "script [tool.weft]"); err != nil {
-			slog.Warn("script image requirement error", "component", "campaign", "error", err)
-		}
-	}
-	// Derive the driver floor from the CUDA floor (explicit min-driver wins).
-	// Auto-selected pytorch/nvidia base images bypass label fetching
-	// (shouldFetchImageRequirements), so a project pinned at e.g. torch+cu128
-	// would otherwise emit `cuda>=12.8` without the matching `driver>=570`,
-	// and Vast can return offers whose advertised cuda_max_good clears the
-	// CUDA gate while driver_version is too old for the wheel at runtime.
-	rf.FinalizeDriver()
-	return img, rf, imagePullSecret
-}
-
-func jobUsesFramework(localDir, command, framework string) bool {
-	framework = strings.ToLower(framework)
-	if strings.Contains(strings.ToLower(command), framework) {
-		return true
-	}
-	if localDir != "" {
-		if fileContains(filepath.Join(localDir, "pyproject.toml"), framework) {
-			return true
-		}
-		for _, script := range dataloc.ExtractPythonScriptsInDir(localDir, command) {
-			if !filepath.IsAbs(script) {
-				script = filepath.Join(localDir, script)
-			}
-			if fileContains(script, framework) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func sglangRuntimeImageForJob(localDir, command string) string {
-	if jobUsesSGLangFP4KV(localDir, command) {
-		return sglangDevCU13RuntimeImage
-	}
-	return sglangRuntimeImage
-}
-
-func jobUsesSGLangFP4KV(localDir, command string) bool {
-	lowerCommand := strings.ToLower(command)
-	if strings.Contains(lowerCommand, "fp4_e2m1") || strings.Contains(lowerCommand, "kv_cache_dtype=fp4") {
-		return true
-	}
-	if localDir == "" {
-		return false
-	}
-	for _, script := range dataloc.ExtractPythonScriptsInDir(localDir, command) {
-		if !filepath.IsAbs(script) {
-			script = filepath.Join(localDir, script)
-		}
-		if fileContains(script, "fp4_e2m1") || fileContains(script, "kv_cache_dtype=\"fp4") || fileContains(script, "kv_cache_dtype='fp4") {
-			return true
-		}
-	}
-	return false
-}
-
-func fileContains(path, needle string) bool {
-	data, err := os.ReadFile(path)
+	runtime, err := placement.ResolveEffectiveRuntime(localDir, command, placement.EffectiveRuntimeOptions{FloorMode: placement.RuntimeFloorExact})
 	if err != nil {
-		return false
+		slog.Warn("runtime requirement error", "component", "campaign", "error", err)
 	}
-	return strings.Contains(strings.ToLower(string(data)), needle)
-}
-
-func resolveProjectImageOverride(overrides map[string]string, projectDir, localDir, command string) string {
-	if len(overrides) == 0 || projectDir == "" {
-		return ""
-	}
-	scripts := dataloc.ExtractPythonScriptsInDir(localDir, command)
-	if len(scripts) == 0 {
-		return ""
-	}
-
-	script := scripts[0]
-	if !filepath.IsAbs(script) {
-		script = filepath.Join(localDir, script)
-	}
-	rel, err := filepath.Rel(projectDir, script)
-	if err != nil || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
-		return ""
-	}
-	rel = filepath.ToSlash(filepath.Clean(rel))
-
-	var bestPattern, bestImage string
-	for pattern, image := range overrides {
-		image = strings.TrimSpace(image)
-		if image == "" {
-			continue
-		}
-		normalizedPattern := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(pattern)), "./")
-		matched, err := path.Match(normalizedPattern, rel)
-		if err != nil {
-			slog.Warn("invalid cloud image override pattern", "component", "campaign", "pattern", pattern, "error", err)
-			continue
-		}
-		if !matched {
-			continue
-		}
-		if bestPattern == "" || len(normalizedPattern) > len(bestPattern) || (len(normalizedPattern) == len(bestPattern) && normalizedPattern < bestPattern) {
-			bestPattern = normalizedPattern
-			bestImage = image
-		}
-	}
-	return bestImage
+	return runtime.Image, runtime.Floor, runtime.ImagePullSecret
 }
 
 func maxInt(a, b int) int {

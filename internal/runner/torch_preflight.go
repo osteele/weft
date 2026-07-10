@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/placement"
 )
 
 // torchPreflightPythonCode is the snippet we run before the user command on
@@ -111,7 +112,11 @@ func shouldRunTorchPreflight(workingDir, jobCommand string, scriptMeta *dataloc.
 	if len(torchPreflightScriptDeps(workingDir, jobCommand)) > 0 {
 		return true
 	}
-	if scriptMeta != nil && (scriptMeta.Isolated || strings.TrimSpace(scriptMeta.Image) != "") {
+	if scriptMeta != nil && scriptMeta.Isolated {
+		return false
+	}
+	runtime, _ := placement.ResolveEffectiveRuntime(workingDir, jobCommand, placement.EffectiveRuntimeOptions{FloorMode: placement.RuntimeFloorFamily})
+	if placement.RuntimeImageOwnsTorch(runtime.Image) {
 		return false
 	}
 	return dataloc.JobUsesTorch(workingDir, jobCommand)

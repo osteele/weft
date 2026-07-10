@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/placement"
 )
 
 const (
@@ -77,7 +78,7 @@ func applyImagePrestartFailureBlocks(database *sql.DB, raw []GroupRawOffers) []G
 }
 
 func imagePrestartFailureKey(image string) string {
-	image = normalizeRentalImageAlias(image)
+	image = placement.NormalizeRuntimeImageAlias(image)
 	if strings.TrimSpace(image) == "" {
 		return cloud.DefaultImage
 	}

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/imagereq"
@@ -261,43 +260,8 @@ func (rf *RuntimeFloor) ApplyCLIOverride(minCUDA string) error {
 // The returned error reports unparseable explicit requirements (script
 // metadata or .weft.toml); the floor still reflects the sources that parsed.
 func MinRuntimeFloorForJob(dir, command string) (RuntimeFloor, error) {
-	var rf RuntimeFloor
-	var parseErr error
-	if scriptReq := dataloc.ScanScriptTorchRequirement(dir, command); scriptReq != nil {
-		mergeScriptTorchRuntimeFloor(&rf, scriptReq, dataloc.ScanScriptTorchPin(dir, command))
-	} else if pin := dataloc.ScanTorchPin(dir); pin != nil {
-		if family := dataloc.CUDAFamilyFloor(pin.CudaVariant); family != "" {
-			major, _, _ := strings.Cut(family, ".")
-			origin := fmt.Sprintf("torch %s+%s (CUDA %s.x family)", pin.Version, pin.CudaVariant, major)
-			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: family}, origin)
-		}
-		if cuda, origin := torchOperationalCUDAFloor(pin); cuda != "" {
-			rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, origin)
-		}
-	}
-	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
-	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
-	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
-		const origin = "library dependency CUDA floor"
-		before := rf.Req.MinCUDAVersion
-		rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: libCUDA}, origin)
-		if rf.Req.MinCUDAVersion == before && rf.Req.MinCUDAVersion == libCUDA {
-			rf.CUDAOrigin = origin
-			rf.InferredCUDAOrigin = origin
-		}
-	}
-	if minDriver, minCUDA := config.ProjectCloudRequirements(dir); minDriver != "" || minCUDA != "" {
-		if err := rf.ApplyExplicit(minDriver, minCUDA, ".weft.toml [cloud]"); err != nil {
-			parseErr = err
-		}
-	}
-	if meta, err := dataloc.ScanScriptMeta(dir, command); err == nil && meta != nil && (meta.MinDriver != "" || meta.MinCUDA != "") {
-		if err := rf.ApplyExplicit(meta.MinDriver, meta.MinCUDA, "script [tool.weft]"); err != nil {
-			parseErr = err
-		}
-	}
-	rf.FinalizeDriver()
-	return rf, parseErr
+	runtime, err := ResolveEffectiveRuntime(dir, command, EffectiveRuntimeOptions{FloorMode: RuntimeFloorFamily})
+	return runtime.Floor, err
 }
 
 func mergeScriptTorchRuntimeFloor(rf *RuntimeFloor, req *dataloc.TorchRequirement, pin *dataloc.TorchPin) {

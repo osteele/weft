@@ -126,6 +126,26 @@ print("sglang runtime owns torch")
 	}
 }
 
+func TestShouldRunTorchPreflightSkipsProjectTorchForProjectRuntimeImage(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "pyproject.toml"), `[project]
+dependencies = ["torch==2.6.0"]
+`)
+	writeFile(t, filepath.Join(dir, ".weft.toml"), `[cloud]
+image = "sglang:dev-cu13"
+`)
+	writeFile(t, filepath.Join(dir, "profile_sglang.py"), `print("sglang runtime owns torch")
+`)
+
+	meta, err := dataloc.ScanScriptMeta(dir, "uv run profile_sglang.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldRunTorchPreflight(dir, "uv run profile_sglang.py", meta) {
+		t.Fatal("shouldRunTorchPreflight = true, want false for project runtime image")
+	}
+}
+
 func TestShouldRunTorchPreflightSkipsProjectTorchForIsolatedScript(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "pyproject.toml"), `[project]
