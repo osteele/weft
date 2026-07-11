@@ -1242,6 +1242,34 @@ rule ReconcilePass {
     ensures: OrphanSweepCompleted()
 }
 
+-- The terminal-launch job repair must converge: one pass resolves every
+-- candidate it selects, so the next pass selects none of them again.
+rule OrphanedCloudJobsResetConverges {
+    when: OrphanedCloudJobsReset()
+
+    -- Candidate set: jobs whose derived status is non-terminal while their
+    -- launch is failed or canceled. After the pass, each candidate is either
+    -- requeued and detached from the launch (retryable launch failure) or
+    -- terminal (non-retryable, e.g. weft_bug).
+    ensures: TerminalLaunchCandidatesResolved()
+
+    @guidance
+        -- A repair's write side must change every selected row's membership
+        -- in the candidate set. The candidate predicate reads the derived
+        -- job_status view, which reports 'orphaned' for a CLOSED latest
+        -- attempt without a decisive record (no exit code, non-terminal
+        -- attempt status, no detaching cloud_outcome) whenever its launch is
+        -- failed/canceled. The repair therefore stamps the launch disposition
+        -- onto that attempt even though it is already closed:
+        -- retryable → cloud_outcome 'orphaned'/'canceled' (detaches, view
+        -- derives queued once requested_status is queued); non-retryable →
+        -- attempt status/cloud_outcome 'failed' (terminal). Implemented in
+        -- closeAttemptsAndRequeueWithOutcome and CloseLaunchAttempts.
+        -- Regression class: wj889-shaped jobs were re-selected by every
+        -- autopilot pass for weeks because the repair updated only OPEN
+        -- attempts while the candidate predicate matched closed ones.
+}
+
 -- Heal stale pending_placement intents once a launch is past bootstrap.
 rule NormalizePendingPlacementAfterLaunchProgress {
     when: InstanceReconciled(instance)

@@ -2143,6 +2143,104 @@ func TestResetJobsOnTerminalLaunches_SkipsCompletedInstances(t *testing.T) {
 	}
 }
 
+// TestResetJobsOnTerminalLaunches_ConvergesOnClosedAttempts reproduces the
+// non-convergent repair loop: a job whose latest attempt is already closed
+// without a decisive record (no exit code, non-terminal status, stale
+// cloud_outcome) derives 'orphaned' while its launch is failed, and a repair
+// that only updates open attempts never changes anything — the job is
+// re-selected by every subsequent repair pass. After one repair pass the job
+// must converge (requeued or terminal) and a second pass must find nothing.
+func TestResetJobsOnTerminalLaunches_ConvergesOnClosedAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Job 1 (wj889 shape): retryable infra failure, attempt closed as 'dead'
+	// with a stale cloud_outcome that neither detaches nor decides.
+	infraLaunch, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(infra): %v", err)
+	}
+	if err := UpdateLaunchStatus(database, infraLaunch, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(infra): %v", err)
+	}
+	insertTestJob(t, database, 1, "echo test", "/tmp", StatusDead, withLaunch(infraLaunch))
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET cloud_outcome = ? WHERE job_id = 1`, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("stamp stale cloud_outcome: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE jobs SET requested_status = ? WHERE id = 1`, StatusQueued); err != nil {
+		t.Fatalf("set requested_status: %v", err)
+	}
+
+	// Job 2 (wj1788 shape): non-retryable launch failure (weft_bug), attempt
+	// closed as 'canceled' with a garbage cloud_outcome, no requested_status.
+	bugLaunch, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(bug): %v", err)
+	}
+	if err := UpdateLaunchStatus(database, bugLaunch, LaunchStatusFailed, TerminationReasonWeftBug); err != nil {
+		t.Fatalf("UpdateLaunchStatus(bug): %v", err)
+	}
+	insertTestJob(t, database, 2, "echo test", "/tmp", StatusCanceled, withLaunch(bugLaunch))
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET cloud_outcome = ?, start_time = NULL WHERE job_id = 2`, AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("stamp garbage cloud_outcome: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE jobs SET requested_status = NULL WHERE id = 2`); err != nil {
+		t.Fatalf("clear requested_status: %v", err)
+	}
+
+	// Both jobs must derive non-terminal 'orphaned' before the repair.
+	for _, id := range []int64{1, 2} {
+		job, err := GetJobByID(database, id)
+		if err != nil {
+			t.Fatalf("GetJobByID(%d): %v", id, err)
+		}
+		if job.Status != "orphaned" {
+			t.Fatalf("pre-repair job %d status = %q, want %q", id, job.Status, "orphaned")
+		}
+	}
+
+	if _, err := ResetJobsOnTerminalLaunches(database); err != nil {
+		t.Fatalf("ResetJobsOnTerminalLaunches: %v", err)
+	}
+
+	// Retryable infra failure → requeued.
+	job1, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID(1): %v", err)
+	}
+	if job1.Status != StatusQueued {
+		t.Fatalf("post-repair job 1 status = %q, want %q", job1.Status, StatusQueued)
+	}
+	// Non-retryable weft_bug → terminal failed.
+	job2, err := GetJobByID(database, 2)
+	if err != nil {
+		t.Fatalf("GetJobByID(2): %v", err)
+	}
+	if job2.Status != StatusFailed {
+		t.Fatalf("post-repair job 2 status = %q, want %q", job2.Status, StatusFailed)
+	}
+
+	// Convergence: a second repair pass must find no candidates.
+	resetMap, err := ResetJobsOnTerminalLaunches(database)
+	if err != nil {
+		t.Fatalf("ResetJobsOnTerminalLaunches (second pass): %v", err)
+	}
+	if len(resetMap) != 0 {
+		t.Fatalf("second repair pass reset %d jobs, want 0 (repair did not converge)", len(resetMap))
+	}
+}
+
 func TestResetJobsOnTerminalLaunches_JobFailureDoesNotMarkForRelaunch(t *testing.T) {
 	database := setupTestDB(t)
 

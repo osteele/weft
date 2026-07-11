@@ -892,12 +892,6 @@ CREATE TRIGGER IF NOT EXISTS launches_clear_pending_placement_on_terminal
 			   AND pending_status = 'pending_placement';
 		END;
 CREATE VIEW IF NOT EXISTS job_status AS
-		WITH latest_attempt AS (
-			SELECT ja.*,
-			       ROW_NUMBER() OVER (PARTITION BY ja.job_id
-			                          ORDER BY ja.attempt_number DESC) AS rn
-			FROM authoritative_job_attempts ja
-		)
 		SELECT
 			j.id,
 			CASE WHEN COALESCE(la.backend, j.backend) = 'skypilot' THEN ''
@@ -1036,7 +1030,24 @@ CREATE VIEW IF NOT EXISTS job_status AS
 				ELSE 'unplaced'
 			END AS effective_target_kind
 		FROM jobs j
-		LEFT JOIN latest_attempt la ON la.job_id = j.id AND la.rn = 1
+		-- Latest authoritative attempt per job, resolved by an index probe on
+		-- idx_job_attempts_authoritative (job_id, attempt_number DESC) instead of a
+		-- window function over every attempt row. A ROW_NUMBER() CTE here forces
+		-- SQLite to materialize the whole attempt history for ANY query against this
+		-- view (including single-job lookups), so every probe cost O(total attempts)
+		-- and joins multiplied that per outer row.
+		LEFT JOIN job_attempts la ON la.id = (
+			SELECT ja.id FROM job_attempts ja
+			WHERE ja.job_id = j.id
+			  AND ja.abandoned_at IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM move_intents mi
+			       WHERE mi.state = 'open'
+			         AND mi.id = ja.move_intent_id
+			  )
+			ORDER BY ja.attempt_number DESC, ja.id DESC
+			LIMIT 1
+		)
 		LEFT JOIN execution_targets et ON et.id = la.target_id
 		LEFT JOIN launches l ON l.id = COALESCE(et.launch_id, la.launch_id)
 ;

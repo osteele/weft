@@ -119,11 +119,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyRepairCloudStartingJobStatus},
 		&goose.GoFunc{RunDB: dropRepairCloudStartingJobStatus},
 	)
+	optimizeJobStatusLatestAttempt := goose.NewGoMigration(
+		32,
+		&goose.GoFunc{RunDB: applyOptimizeJobStatusLatestAttempt},
+		&goose.GoFunc{RunDB: dropOptimizeJobStatusLatestAttempt},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -756,6 +761,21 @@ func dropRepairCloudStartingJobStatus(context.Context, *sql.DB) error {
 	return nil
 }
 
+// applyOptimizeJobStatusLatestAttempt recreates job_status with the
+// latest-attempt lookup rewritten from a ROW_NUMBER() window CTE to an
+// index-probed scalar subquery (idx_job_attempts_authoritative). The window
+// form forced SQLite to materialize the full attempt history for every query
+// against the view, so single-job lookups cost O(total attempts) and joins
+// against the view multiplied that per outer row (autopilot passes spent
+// minutes in ResetJobsOnTerminalLaunches candidate discovery alone).
+func applyOptimizeJobStatusLatestAttempt(ctx context.Context, db *sql.DB) error {
+	return recreateAuthoritativeJobStatusView(ctx, db)
+}
+
+func dropOptimizeJobStatusLatestAttempt(context.Context, *sql.DB) error {
+	return nil
+}
+
 func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
 	var exists int
 	err := db.QueryRowContext(ctx,
@@ -790,7 +810,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

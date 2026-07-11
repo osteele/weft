@@ -85,6 +85,25 @@ func closeAttemptsAndRequeueWithOutcome(db dbExecer, jobID int64, now int64, clo
 		StatusCanceled, now, cloudOutcome, jobID); err != nil {
 		return err
 	}
+	// Convergence: when the requeue outcome detaches the job from its launch
+	// ('orphaned'/'canceled'), also restamp the latest authoritative attempt
+	// if it is already closed without a decisive record. The job_status view
+	// derives 'orphaned' from such attempts whenever their launch is
+	// failed/canceled, so a repair that only touches open attempts leaves the
+	// job permanently non-terminal and re-selected by every subsequent repair
+	// pass (jobs wj889/wj890 sat in that loop for weeks).
+	if cloudOutcome == AttemptOutcomeOrphaned || cloudOutcome == AttemptOutcomeCancelled {
+		if _, err := db.Exec(
+			`UPDATE job_attempts
+			    SET cloud_outcome = ?
+			  WHERE id = `+latestAuthoritativeAttemptSubquery+`
+			    AND `+attemptClosedWithoutDecisiveRecord,
+			cloudOutcome, jobID,
+			StatusCompleted, StatusFailed,
+			AttemptOutcomeOrphaned, AttemptOutcomeCancelled); err != nil {
+			return err
+		}
+	}
 	_, err := db.Exec(
 		`UPDATE jobs SET requested_status = ? WHERE id = ? AND COALESCE(requested_status, '') != ?`,
 		StatusQueued, jobID, StatusCanceled)
@@ -302,6 +321,26 @@ const latestAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? ORD
 // owns the logical job. Abandoned attempts are retained for forensics but do
 // not drive job_status, info, artifacts, or telemetry by default.
 const latestAuthoritativeAttemptSubquery = `(SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
+
+// latestAuthoritativeAttemptCorrelatedSubquery is the correlated form of
+// latestAuthoritativeAttemptSubquery for set-based UPDATEs on job_attempts,
+// where the job id comes from the row under update rather than a bound
+// parameter.
+const latestAuthoritativeAttemptCorrelatedSubquery = `(SELECT aja.id FROM authoritative_job_attempts aja
+WHERE aja.job_id = job_attempts.job_id
+ORDER BY aja.attempt_number DESC
+LIMIT 1)`
+
+// attemptClosedWithoutDecisiveRecord matches attempts that are closed
+// (end_time set) yet record no decision: no exit code, non-terminal status,
+// and no detaching cloud_outcome. The job_status view derives 'orphaned' from
+// such attempts while their launch is failed/canceled, so convergence repairs
+// stamp a disposition onto exactly this set. Bind args: StatusCompleted,
+// StatusFailed, AttemptOutcomeOrphaned, AttemptOutcomeCancelled.
+const attemptClosedWithoutDecisiveRecord = `(end_time IS NOT NULL AND end_time != 0
+AND exit_code IS NULL
+AND status NOT IN (?, ?)
+AND COALESCE(cloud_outcome, '') NOT IN (?, ?))`
 
 const (
 	AttemptAbandonedMoveSourceWon              = "move_source_won"

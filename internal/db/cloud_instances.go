@@ -2770,11 +2770,30 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 		attemptStatus = StatusFailed
 	}
 	now := time.Now().Unix()
-	_, err := database.Exec(
+	if _, err := database.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?), pending_status = NULL
 		 WHERE launch_id = ? AND (end_time IS NULL OR end_time = 0)`,
 		attemptStatus, outcome, now, instanceID,
+	); err != nil {
+		return err
+	}
+	// Convergence: an attempt that was already closed without a decisive
+	// record (no exit code, non-terminal status, no detaching cloud_outcome)
+	// still derives 'orphaned' in job_status while its launch is
+	// failed/canceled, so a close that only touches open attempts leaves the
+	// job permanently non-terminal and re-selected by every repair pass.
+	// Stamp the launch's disposition onto such attempts when they are still
+	// the job's latest authoritative attempt.
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, cloud_outcome = ?, pending_status = NULL
+		 WHERE launch_id = ?
+		   AND `+attemptClosedWithoutDecisiveRecord+`
+		   AND id = `+latestAuthoritativeAttemptCorrelatedSubquery,
+		attemptStatus, outcome, instanceID,
+		StatusCompleted, StatusFailed,
+		AttemptOutcomeOrphaned, AttemptOutcomeCancelled,
 	)
 	return err
 }
@@ -3339,12 +3358,41 @@ func terminalLaunchJobDisposition(ci *Launch) (reset bool, outcome string) {
 // scope relaunch to only the actually-orphaned jobs and track which instance
 // each job came from.
 func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
-	// Find non-terminal jobs on failed/cancelled instances.
+	// Load the terminal launches first (a small, indexed scan), then find
+	// their non-terminal jobs in one pass over job_status. Joining the view
+	// on its computed launch_id column (`launches JOIN job_status ON
+	// js.launch_id = ci.id`) defeats every index, so SQLite re-evaluated the
+	// whole view per launch row — minutes per call on a loaded database.
+	terminalLaunches := map[int64]*Launch{}
+	launchRows, err := database.Query(
+		`SELECT id, status, COALESCE(termination_reason, '') FROM launches WHERE status IN (?, ?)`,
+		LaunchStatusFailed, LaunchStatusCancelled,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for launchRows.Next() {
+		var id int64
+		var status, terminationReason string
+		if err := launchRows.Scan(&id, &status, &terminationReason); err != nil {
+			launchRows.Close()
+			return nil, err
+		}
+		terminalLaunches[id] = &Launch{ID: id, Status: status, TerminationReason: terminationReason}
+	}
+	if err := launchRows.Err(); err != nil {
+		launchRows.Close()
+		return nil, err
+	}
+	launchRows.Close()
+	if len(terminalLaunches) == 0 {
+		return map[int64]int64{}, nil
+	}
+
 	rows, err := database.Query(`
-		SELECT js.id, ci.id, ci.status, COALESCE(ci.termination_reason, '')
-		FROM launches ci
-		JOIN job_status js ON js.launch_id = ci.id
-		WHERE ci.status IN (?, ?)
+		SELECT js.id, js.launch_id
+		FROM job_status js
+		WHERE js.launch_id IN (SELECT id FROM launches WHERE status IN (?, ?))
 		AND js.status NOT IN (?, ?, ?, ?, ?, ?)
 		AND js.tombstoned = 0`,
 		LaunchStatusFailed, LaunchStatusCancelled,
@@ -3360,14 +3408,14 @@ func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
 	instanceSet := make(map[int64]bool)
 	for rows.Next() {
 		var jobID, instanceID int64
-		var launchStatus, terminationReason string
-		if err := rows.Scan(&jobID, &instanceID, &launchStatus, &terminationReason); err != nil {
+		if err := rows.Scan(&jobID, &instanceID); err != nil {
 			return nil, err
 		}
-		if reset, _ := terminalLaunchJobDisposition(&Launch{
-			Status:            launchStatus,
-			TerminationReason: terminationReason,
-		}); reset {
+		launch, ok := terminalLaunches[instanceID]
+		if !ok {
+			continue
+		}
+		if reset, _ := terminalLaunchJobDisposition(launch); reset {
 			resetMap[jobID] = instanceID
 		}
 		instanceSet[instanceID] = true
