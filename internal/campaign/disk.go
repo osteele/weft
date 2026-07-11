@@ -440,7 +440,7 @@ func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, []
 			continue
 		}
 		seenSigs[sig] = true
-		peakBytes, anomalies, found, err := estimateHistoricalPeakDiskBytes(localDB, job.Project, sig)
+		peakBytes, anomalies, found, err := estimateHistoricalPeakDiskBytes(localDB, job.Project, job.Command, sig)
 		// Always merge anomalies, even when the row is unusable for
 		// estimation — bad telemetry is still a thing to surface.
 		allAnomalies = append(allAnomalies, anomalies...)
@@ -461,7 +461,7 @@ func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, []
 	return empiricalRequiredDiskGB(groupPeakBytes), allAnomalies, true
 }
 
-func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string) (int64, []DiskTelemetryAnomaly, bool, error) {
+func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, command, targetSig string) (int64, []DiskTelemetryAnomaly, bool, error) {
 	rows, err := localDB.Query(
 		`SELECT j.id,
 		        j.command,
@@ -473,7 +473,7 @@ func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string)
 		     SELECT job_id,
 		            MAX(peak_disk_used_bytes) AS peak_used_bytes
 		       FROM job_timeseries_summaries
-		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ?)
+		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ? AND command = ?)
 		      GROUP BY job_id
 		     UNION ALL
 		     SELECT job_id,
@@ -485,12 +485,13 @@ func estimateHistoricalPeakDiskBytes(localDB *sql.DB, project, targetSig string)
 		              END
 		            ) AS peak_used_bytes
 		       FROM job_timeseries
-		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ?)
+		      WHERE job_id IN (SELECT id FROM jobs WHERE project = ? AND command = ?)
 		        AND job_id NOT IN (SELECT job_id FROM job_timeseries_summaries)
 		      GROUP BY job_id
 		   ) ts ON ts.job_id = j.id
-		  WHERE j.project = ?`,
-		project, project, project,
+		  WHERE j.project = ?
+		    AND j.command = ?`,
+		project, command, project, command, project, command,
 	)
 	if err != nil {
 		return 0, nil, false, err
