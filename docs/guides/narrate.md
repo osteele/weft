@@ -4,6 +4,9 @@
 transitions and streams a human-readable LLM-generated commentary to
 stdout.
 
+For the full map of Weft features that call Anthropic/OpenRouter or invoke
+`claude -p`, see [LLM and Claude Integrations](llm-integrations.md).
+
 It is for *situational awareness during active campaigns*, like a
 colleague dictating what's happening over your shoulder. It is **not**
 authoritative status — `weft instance watch`, `weft job watch`, and

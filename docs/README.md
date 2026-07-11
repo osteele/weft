@@ -12,6 +12,7 @@ detail quickly.
 - [Placement](guides/placement.md) for automatic host selection, reserved placement tags, and score reasons
 - [Autopilot](guides/autopilot.md) for inspecting and unblocking the auto-placement / auto-launch engine
 - [Activity Narration](guides/narrate.md) for `weft narrate` — LLM-streamed commentary on job and instance transitions
+- [LLM and Claude Integrations](guides/llm-integrations.md) for which features call Anthropic/OpenRouter or `claude -p`
 - [Claude Code Channels](guides/claude-code-channels.md) for sending Weft job events into Claude Code sessions
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting

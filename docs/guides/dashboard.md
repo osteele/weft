@@ -115,6 +115,11 @@ Anthropic (both narration and recap compaction). Each row records:
 OpenRouter calls are not recorded yet; rows will appear there once that path
 is wired through the same `OnUsage` callback.
 
+This tab does not count local Claude Code CLI usage from TUI AI assist,
+automatic remediation coding agents, or Slack log summaries. See
+[LLM and Claude Integrations](llm-integrations.md) for the feature-by-feature
+call map.
+
 Anthropic pricing lives in `internal/llmusage/pricing.go`. Update that table
 when Anthropic publishes new prices; only new calls are affected — historical
 rows keep the cost they were recorded with.
