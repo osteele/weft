@@ -39,7 +39,7 @@ func FormatMoveExitSummaryAt(database *sql.DB, result orchestration.BulkResult, 
 
 // writeMoveResultHeader renders the success / shortfall summary lines.
 //
-// Full success: a single "Moved: w… -> N new instances" line, matching the
+// Full success: a single "Moved: w… → N new instances" line, matching the
 // pre-shortfall output.
 //
 // Shortfall: a "Placed M of N distinct instances" header followed by indented
@@ -56,7 +56,7 @@ func writeMoveResultHeader(b *strings.Builder, width int, result orchestration.B
 	if unplacedCount == 0 {
 		// Full success — keep today's output verbatim so the common case
 		// stays familiar.
-		writeSummaryLine(b, width, fmt.Sprintf("Moved: %s -> %s",
+		writeSummaryLine(b, width, fmt.Sprintf("Moved: %s → %s",
 			formatJobIDList(result.PlacedJobIDs),
 			pluralize(len(result.InstanceIDs), "new instance", "new instances")))
 		return

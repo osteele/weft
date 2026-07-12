@@ -115,6 +115,7 @@ type listTUIModel struct {
 	placingJobIDs              map[int64]struct{}
 	placementQueuedAtByJob     map[int64]int64
 	placementStatusByJob       map[int64]jobview.PlacementStatus
+	attemptOutcomeByJob        map[int64]db.AttemptOutcomeEvent
 	launchByID                 map[int64]*db.Launch
 	launchBootstrapP50         time.Duration
 	launchBootstrapDurations   db.BootstrapDurations
@@ -267,6 +268,7 @@ type listJobsLoadedMsg struct {
 	placingJobIDs            map[int64]struct{}
 	placementQueuedAtByJob   map[int64]int64
 	placementStatusByJob     map[int64]jobview.PlacementStatus
+	attemptOutcomeByJob      map[int64]db.AttemptOutcomeEvent
 	launchByID               map[int64]*db.Launch
 	launchBootstrapP50       time.Duration
 	launchBootstrapDurations db.BootstrapDurations
@@ -746,6 +748,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.placingJobIDs = msg.placingJobIDs
 		m.placementQueuedAtByJob = msg.placementQueuedAtByJob
 		m.placementStatusByJob = msg.placementStatusByJob
+		m.attemptOutcomeByJob = msg.attemptOutcomeByJob
 		m.launchByID = msg.launchByID
 		m.launchBootstrapP50 = msg.launchBootstrapP50
 		m.launchBootstrapDurations = msg.launchBootstrapDurations
@@ -2951,6 +2954,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			placingJobIDs:          m.placingJobIDs,
 			placementQueuedAtByJob: m.placementQueuedAtByJob,
 			placementStatusByJob:   m.placementStatusByJob,
+			attemptOutcomeByJob:    m.attemptOutcomeByJob,
 			overloadedHostsByName:  m.overloadedHostsByName,
 			failedInstances:        m.recentFailedInstances,
 			launchByID:             m.launchByID,
@@ -3133,6 +3137,10 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			placementStatusByJob = map[int64]jobview.PlacementStatus{}
 		}
 		displayJobs := jobview.ExpandJobsForOpenMoves(jobs, placementStatusByJob)
+		attemptOutcomeByJob, outcomeErr := db.LatestAttemptOutcomeEvents(database, jobIDsForOutcomeEvents(jobs))
+		if outcomeErr != nil {
+			attemptOutcomeByJob = map[int64]db.AttemptOutcomeEvent{}
+		}
 		launchIDs := collectLaunchIDsForList(displayJobs, placementStatusByJob)
 		launchLiveByID, liveErr := db.GetLaunchLiveStates(database, launchIDs)
 		if liveErr != nil {
@@ -3171,6 +3179,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			placingJobIDs:            placingJobIDs,
 			placementQueuedAtByJob:   placementQueuedAtByJob,
 			placementStatusByJob:     placementStatusByJob,
+			attemptOutcomeByJob:      attemptOutcomeByJob,
 			launchByID:               launchByID,
 			launchBootstrapP50:       bootstrapP50,
 			launchBootstrapDurations: bootstrapDurations,
@@ -3203,6 +3212,22 @@ func autopilotPlacementWaitState(database *sql.DB) (paused bool, pausedReason st
 }
 
 const recentFailedInstanceWindow = 24 * time.Hour
+
+func jobIDsForOutcomeEvents(jobs []*db.Job) []int64 {
+	ids := make([]int64, 0, len(jobs))
+	seen := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.ID <= 0 {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		ids = append(ids, job.ID)
+	}
+	return ids
+}
 
 func collectLaunchIDsForList(jobs []*db.Job, placementStatusByJob map[int64]jobview.PlacementStatus) []int64 {
 	seen := make(map[int64]struct{}, len(jobs))

@@ -797,9 +797,15 @@ invariant ResolvedMoveLoserHasStopWork {
 --   condition for showing the move. In particular:
 --     * the source endpoint is a dim, non-authoritative context row driven by
 --       MoveIntent.source_launch_id / source_attempt_id / source label data.
---       If the current logical job row has been reset to queued/pending with
---       no target, the source context still belongs in Queued, not Unplaced;
---       it is move context, not auto-placement work.
+--       If the source launch is still live (running, launching, paused,
+--       grace, or otherwise not failed/canceled), the source context remains
+--       visible in its real bucket; for a queued source, that means a dim row
+--       in Queued. If the current logical job row has been reset to
+--       queued/pending with no target, the source context still belongs in
+--       Queued, not Unplaced; it is move context, not auto-placement work.
+--       If the source launch has failed or been canceled, the source context
+--       row is suppressed and the open move is represented only by the active
+--       target row.
 --     * the target endpoint is the full-contrast active move row driven by
 --       MoveIntent.target_attempt_id / target_launch_id / target_host /
 --       target_kind. Its bucket is driven by the open move intent ("Placing"

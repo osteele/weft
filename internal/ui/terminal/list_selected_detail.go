@@ -75,12 +75,12 @@ func renderMoveFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 		if strings.TrimSpace(job.DisplayMovePhase) != "" {
 			state = strings.TrimSpace(job.DisplayMovePhase)
 		}
-		return fmt.Sprintf("Move: %s -> %s · %s", strings.TrimSpace(job.DisplayMoveSource), strings.TrimSpace(job.DisplayMoveTarget), state)
+		return fmt.Sprintf("Move: %s · %s", jobview.FormatMovePath(job.DisplayMoveSource, job.DisplayMoveTarget), state)
 	}
 	if move == nil {
 		return ""
 	}
-	parts := []string{fmt.Sprintf("Move: %s -> %s", strings.TrimSpace(move.SourceLabel), strings.TrimSpace(move.TargetLabel))}
+	parts := []string{"Move: " + jobview.FormatMovePath(move.SourceLabel, move.TargetLabel)}
 	if strings.TrimSpace(move.Phase) != "" {
 		parts = append(parts, strings.TrimSpace(move.Phase))
 	}

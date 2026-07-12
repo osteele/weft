@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/queueblock"
 )
 
@@ -307,7 +308,7 @@ func formatJobListHost(job *db.Job) string {
 		if job.DisplayMoveDim {
 			return strings.TrimSpace(job.DisplayMoveTarget)
 		}
-		return strings.TrimSpace(job.DisplayMoveSource) + " -> " + strings.TrimSpace(job.DisplayMoveTarget)
+		return jobview.FormatMovePath(job.DisplayMoveSource, job.DisplayMoveTarget)
 	}
 	if job.TargetKind() == db.JobTargetRentalInstance && job.LaunchID != nil {
 		return formatRentalInstanceLabel(job)

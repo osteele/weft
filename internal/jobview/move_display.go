@@ -13,17 +13,22 @@ import (
 const recentMoveIntentWindow = 15 * time.Minute
 
 type MoveDisplay struct {
-	IntentID        int64
-	State           db.MoveIntentState
-	SourceAttemptID *int64
-	TargetAttemptID *int64
-	SourceLabel     string
-	TargetLabel     string
-	Phase           string
-	CreatedAt       int64
-	ResolvedAt      *int64
-	Resolution      string
-	AttemptsByID    map[int64]db.JobAttempt
+	IntentID         int64
+	State            db.MoveIntentState
+	SourceAttemptID  *int64
+	TargetAttemptID  *int64
+	SourceLabel      string
+	TargetLabel      string
+	Phase            string
+	CreatedAt        int64
+	ResolvedAt       *int64
+	Resolution       string
+	AttemptsByID     map[int64]db.JobAttempt
+	SourceLaunchDead bool
+}
+
+func FormatMovePath(source, target string) string {
+	return strings.TrimSpace(source) + " → " + strings.TrimSpace(target)
 }
 
 func moveDisplayForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (map[int64]*MoveDisplay, error) {
@@ -57,18 +62,29 @@ func moveDisplayForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (map[in
 		for _, attempt := range attempts {
 			byID[attempt.ID] = attempt
 		}
+		sourceLaunchID := intent.SourceLaunchID
+		if sourceLaunchID == nil && intent.SourceAttemptID != nil {
+			if attempt, ok := byID[*intent.SourceAttemptID]; ok {
+				sourceLaunchID = attempt.LaunchID
+			}
+		}
+		sourceLaunchDead, err := moveSourceLaunchDead(database, sourceLaunchID)
+		if err != nil {
+			return nil, err
+		}
 		display := &MoveDisplay{
-			IntentID:        intent.ID,
-			State:           intent.State,
-			SourceAttemptID: intent.SourceAttemptID,
-			TargetAttemptID: intent.TargetAttemptID,
-			SourceLabel:     moveEndpointLabel(intent.SourceAttemptID, intent.SourceLaunchID, "", byID),
-			TargetLabel:     moveTargetLabel(intent, byID),
-			Phase:           moveIntentPhase(intent),
-			CreatedAt:       intent.CreatedAt,
-			ResolvedAt:      intent.ResolvedAt,
-			Resolution:      strings.TrimSpace(intent.Resolution),
-			AttemptsByID:    byID,
+			IntentID:         intent.ID,
+			State:            intent.State,
+			SourceAttemptID:  intent.SourceAttemptID,
+			TargetAttemptID:  intent.TargetAttemptID,
+			SourceLabel:      moveEndpointLabel(intent.SourceAttemptID, intent.SourceLaunchID, "", byID),
+			TargetLabel:      moveTargetLabel(intent, byID),
+			Phase:            moveIntentPhase(intent),
+			CreatedAt:        intent.CreatedAt,
+			ResolvedAt:       intent.ResolvedAt,
+			Resolution:       strings.TrimSpace(intent.Resolution),
+			AttemptsByID:     byID,
+			SourceLaunchDead: sourceLaunchDead,
 		}
 		out[job.ID] = display
 	}
@@ -91,7 +107,7 @@ func ExpandJobsForOpenMoves(jobs []*db.Job, placementStatusByJob map[int64]Place
 			continue
 		}
 		var source *db.Job
-		if move.SourceAttemptID != nil || job.LaunchID == nil {
+		if moveSourceDisplayable(move) && (move.SourceAttemptID != nil || job.LaunchID == nil) {
 			source = cloneJobForMoveDisplay(job, move, move.SourceAttemptID, true)
 		}
 		if source != nil && source.DisplayMoveDim {
@@ -107,6 +123,29 @@ func ExpandJobsForOpenMoves(jobs []*db.Job, placementStatusByJob map[int64]Place
 		}
 	}
 	return out
+}
+
+func moveSourceDisplayable(move *MoveDisplay) bool {
+	if move == nil {
+		return false
+	}
+	return !move.SourceLaunchDead
+}
+
+func moveSourceLaunchDead(database *sql.DB, launchID *int64) (bool, error) {
+	if database == nil || launchID == nil || *launchID <= 0 {
+		return false, nil
+	}
+	statusByID, err := db.GetLaunchStatuses(database, []int64{*launchID})
+	if err != nil {
+		return false, err
+	}
+	switch statusByID[*launchID] {
+	case db.LaunchStatusFailed, db.LaunchStatusCancelled:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func cloneJobForMoveDisplay(job *db.Job, move *MoveDisplay, attemptID *int64, dim bool) *db.Job {

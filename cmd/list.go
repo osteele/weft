@@ -821,7 +821,7 @@ func printJobMoveSummary(database *sql.DB, job *db.Job) {
 	if move == nil {
 		return
 	}
-	parts := []string{fmt.Sprintf("%s -> %s", strings.TrimSpace(move.SourceLabel), strings.TrimSpace(move.TargetLabel))}
+	parts := []string{jobview.FormatMovePath(move.SourceLabel, move.TargetLabel)}
 	if strings.TrimSpace(move.Phase) != "" {
 		parts = append(parts, strings.TrimSpace(move.Phase))
 	}

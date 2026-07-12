@@ -1,8 +1,8 @@
 Running (1):
--   wj501 — alpha  — ETA ~1h51 (49m–4h) — started 33m ago — move source wi6201 -> wi6202 (non-a…
+-   wj501 — alpha  — ETA ~1h51 (49m–4h) — started 33m ago — move source wi6201 → wi6202 (non-au…
 
 Placing (1):
--   wj501 — alpha open move source and target  — placing 25m ago — move pending wi6201 -> wi6202
+-   wj501 — alpha open move source and target   — placing 25m ago — move pending wi6201 → wi6202
 
 Launching (1):
 -   wj503 — beta  launching setup                                     — deps installing · 4m ago

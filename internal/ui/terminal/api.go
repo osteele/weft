@@ -232,12 +232,14 @@ func RenderJobListGroupedStatusPlainWithFailedInstances(
 ) string {
 	failures := loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now())
 	launchByID, _ := db.GetLaunchesByIDs(database, groupedStatusLaunchIDs(jobs))
+	attemptOutcomeByJob, _ := db.LatestAttemptOutcomeEvents(database, jobIDsForOutcomeEvents(jobs))
 	return renderJobListGroupedStatusPlainWithOptions(jobs, width, groupedStatusRenderOptions{
-		launchLiveByID:   launchLiveByID,
-		launchStatusByID: launchStatusByID,
-		failedInstances:  failures,
-		launchByID:       launchByID,
-		now:              time.Now(),
+		launchLiveByID:      launchLiveByID,
+		launchStatusByID:    launchStatusByID,
+		attemptOutcomeByJob: attemptOutcomeByJob,
+		failedInstances:     failures,
+		launchByID:          launchByID,
+		now:                 time.Now(),
 	})
 }
 
@@ -251,10 +253,12 @@ func RenderJobListGroupedStatusPlainWithOptions(
 ) string {
 	failures := loadRecentFailedInstances(database, recentFailedInstanceWindow, time.Now())
 	launchByID, _ := db.GetLaunchesByIDs(database, groupedStatusLaunchIDs(jobs))
+	attemptOutcomeByJob, _ := db.LatestAttemptOutcomeEvents(database, jobIDsForOutcomeEvents(jobs))
 	return renderJobListGroupedStatusPlainWithOptions(jobs, width, groupedStatusRenderOptions{
 		launchLiveByID:       launchLiveByID,
 		launchStatusByID:     launchStatusByID,
 		placementStatusByJob: placementStatusByJob,
+		attemptOutcomeByJob:  attemptOutcomeByJob,
 		failedInstances:      failures,
 		launchByID:           launchByID,
 		now:                  time.Now(),

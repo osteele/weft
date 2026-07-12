@@ -240,6 +240,62 @@ func TestExpandJobsForOpenMovesShowsTerminalMoveAttemptsAsMoveRows(t *testing.T)
 	}
 }
 
+func TestExpandJobsForOpenMovesSuppressesFailedSourceContext(t *testing.T) {
+	sourceLaunchID := int64(5001)
+	targetLaunchID := int64(5003)
+	sourceAttemptID := int64(36855)
+	targetAttemptID := int64(36857)
+	job := &db.Job{
+		ID:          4333,
+		Status:      db.StatusQueued,
+		Project:     "adjective-order",
+		Description: "rental duplicate",
+	}
+
+	got := ExpandJobsForOpenMoves([]*db.Job{job}, map[int64]PlacementStatus{
+		4333: {
+			JobID: 4333,
+			Move: &MoveDisplay{
+				IntentID:         531,
+				State:            db.MoveIntentStateOpen,
+				SourceAttemptID:  &sourceAttemptID,
+				TargetAttemptID:  &targetAttemptID,
+				SourceLabel:      "wi5001",
+				TargetLabel:      "wi5003",
+				SourceLaunchDead: true,
+				AttemptsByID: map[int64]db.JobAttempt{
+					sourceAttemptID: {
+						ID:            sourceAttemptID,
+						JobID:         4333,
+						AttemptNumber: 2,
+						LaunchID:      &sourceLaunchID,
+						Status:        db.StatusCanceled,
+						EndTime:       int64Ptr(9_000),
+						CloudOutcome:  db.AttemptOutcomeOrphaned,
+					},
+					targetAttemptID: {
+						ID:            targetAttemptID,
+						JobID:         4333,
+						AttemptNumber: 3,
+						LaunchID:      &targetLaunchID,
+						Status:        db.StatusQueued,
+					},
+				},
+			},
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("expanded rows = %d, want only target row when source launch failed: %+v", len(got), got)
+	}
+	if got[0].DisplayMoveDim {
+		t.Fatalf("remaining row should be active target, got dim source: %+v", got[0])
+	}
+	if got[0].LaunchID == nil || *got[0].LaunchID != targetLaunchID {
+		t.Fatalf("remaining row launch = %v, want target launch %d", got[0].LaunchID, targetLaunchID)
+	}
+}
+
 func int64Ptr(v int64) *int64 {
 	return &v
 }

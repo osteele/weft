@@ -34,6 +34,7 @@ func (m listTUIModel) exitSummaryAt(now time.Time, width int) string {
 			placingJobIDs:          m.placingJobIDs,
 			placementQueuedAtByJob: m.placementQueuedAtByJob,
 			placementStatusByJob:   m.placementStatusByJob,
+			attemptOutcomeByJob:    m.attemptOutcomeByJob,
 			launchByID:             m.launchByID,
 			now:                    now,
 			launchSpinner:          m.launchSpinner.View(),

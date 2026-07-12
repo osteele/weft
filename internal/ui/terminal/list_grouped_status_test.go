@@ -93,6 +93,32 @@ func TestRenderJobListGroupedStatusPlainWrapsBlockedRunRateReason(t *testing.T) 
 	}
 }
 
+func TestRenderJobListGroupedStatusPlain_UnplacedShowsOrphanedLatestEvent(t *testing.T) {
+	jobs := []*db.Job{{
+		ID:          4426,
+		Status:      db.StatusQueued,
+		Project:     "adaptive-escalation",
+		Description: "moved job",
+		CreatedAt:   1_000,
+		PlacementReasons: []string{
+			"cloud instance 5067 failed (phase_stall)",
+		},
+	}}
+
+	out := stripANSI(renderJobListGroupedStatusPlainWithOptions(jobs, 0, groupedStatusRenderOptions{
+		attemptOutcomeByJob: map[int64]db.AttemptOutcomeEvent{
+			4426: {JobID: 4426, Outcome: db.AttemptOutcomeOrphaned, AtUnix: 9_400},
+		},
+		now: time.Unix(10_000, 0),
+	}))
+	if !strings.Contains(out, "orphaned 10m ago") {
+		t.Fatalf("expected orphaned latest event, got:\n%s", out)
+	}
+	if strings.Contains(out, "retry pending") {
+		t.Fatalf("orphaned event should override retry pending, got:\n%s", out)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainNone(t *testing.T) {
 	out := renderJobListGroupedStatusPlain(nil, 0)
 	if out != "None\n" {
@@ -2000,10 +2026,10 @@ func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *t
 	if !strings.Contains(out, "Placing (1):") {
 		t.Fatalf("expected authoritative target placing row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "move source wi3656 -> cool30 (non-authoritative)") {
+	if !strings.Contains(out, "move source wi3656 → cool30 (non-authoritative)") {
 		t.Fatalf("expected non-authoritative source suffix, got:\n%s", out)
 	}
-	if !strings.Contains(out, "move pending wi3656 -> cool30") {
+	if !strings.Contains(out, "move pending wi3656 → cool30") {
 		t.Fatalf("expected active target move suffix, got:\n%s", out)
 	}
 	var sourceLine, targetLine string
@@ -2207,10 +2233,10 @@ func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveSourceFallbackShowsQ
 	if strings.Count(plain, "wj4420") != 2 {
 		t.Fatalf("expected source and target rows for wj4420, got:\n%s", plain)
 	}
-	if !strings.Contains(plain, "move pending wi5048 -> wi5043") {
+	if !strings.Contains(plain, "move pending wi5048 → wi5043") {
 		t.Fatalf("expected active move suffix, got:\n%s", plain)
 	}
-	if !strings.Contains(plain, "move source wi5048 -> wi5043 (non-authoritative)") {
+	if !strings.Contains(plain, "move source wi5048 → wi5043 (non-authoritative)") {
 		t.Fatalf("expected source context move suffix, got:\n%s", plain)
 	}
 }
@@ -2232,12 +2258,13 @@ func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillSh
 				JobID:  4333,
 				Bucket: jobview.BucketPlacing,
 				Move: &jobview.MoveDisplay{
-					IntentID:        531,
-					State:           db.MoveIntentStateOpen,
-					SourceAttemptID: &sourceAttemptID,
-					TargetAttemptID: &targetAttemptID,
-					SourceLabel:     "wi5001",
-					TargetLabel:     "wi5003",
+					IntentID:         531,
+					State:            db.MoveIntentStateOpen,
+					SourceAttemptID:  &sourceAttemptID,
+					TargetAttemptID:  &targetAttemptID,
+					SourceLabel:      "wi5001",
+					TargetLabel:      "wi5003",
+					SourceLaunchDead: true,
 					AttemptsByID: map[int64]db.JobAttempt{
 						sourceAttemptID: {
 							ID:            sourceAttemptID,
@@ -2267,11 +2294,11 @@ func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillSh
 		now: time.Unix(10_000, 0),
 	})
 	plain := stripANSI(out)
-	if !strings.Contains(plain, "Queued (1):") {
-		t.Fatalf("expected dim infra-closed source row in Queued, got:\n%s", plain)
-	}
 	if !strings.Contains(plain, "Placing (1):") {
 		t.Fatalf("expected active target row in Placing, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "Queued (") {
+		t.Fatalf("failed source instance should suppress source context row, got:\n%s", plain)
 	}
 	if strings.Contains(plain, "Unplaced (") {
 		t.Fatalf("move source context should not appear under Unplaced, got:\n%s", plain)
@@ -2279,7 +2306,7 @@ func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillSh
 	if strings.Contains(plain, "Killed/Canceled (") {
 		t.Fatalf("infra-closed move rows should not appear under Killed/Canceled, got:\n%s", plain)
 	}
-	if !strings.Contains(plain, "move pending wi5001 -> wi5003") {
+	if !strings.Contains(plain, "move pending wi5001 → wi5003") {
 		t.Fatalf("expected active target move suffix, got:\n%s", plain)
 	}
 }
@@ -2362,13 +2389,13 @@ func TestRenderSelectedGroupedRowPreservesMoveDim(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
 
-	line := moveAttemptDimStyle.Render("- wj4111 — move target wi4817 -> wi4821")
+	line := moveAttemptDimStyle.Render("- wj4111 — move target wi4817 → wi4821")
 	got := renderSelectedGroupedRow(line, &db.Job{ID: 4111, DisplayMoveDim: true}, 80)
 	if !isVisibleDimLine(got) {
 		t.Fatalf("selected non-authoritative move row lost dim styling: %q", got)
 	}
 
-	active := renderSelectedGroupedRow("- wj4111 — move pending wi4817 -> wi4821", &db.Job{ID: 4111}, 80)
+	active := renderSelectedGroupedRow("- wj4111 — move pending wi4817 → wi4821", &db.Job{ID: 4111}, 80)
 	if isVisibleDimLine(active) {
 		t.Fatalf("selected active move row should not be dimmed: %q", active)
 	}

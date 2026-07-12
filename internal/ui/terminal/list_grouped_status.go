@@ -66,6 +66,7 @@ type groupedStatusRenderOptions struct {
 	placingJobIDs          map[int64]struct{}
 	placementQueuedAtByJob map[int64]int64
 	placementStatusByJob   map[int64]jobview.PlacementStatus
+	attemptOutcomeByJob    map[int64]db.AttemptOutcomeEvent
 	overloadedHostsByName  map[string]bool
 	failedInstances        *recentFailedInstances
 	launchByID             map[int64]*db.Launch
@@ -275,7 +276,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			rows = appendLaunchingGroupedJobRows(rows, section, projectWidth, width, opts)
 		} else {
 			for _, job := range section.jobs {
-				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
+				rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
 			}
 		}
 		rows = append(rows, groupedStatusRow{text: ""})
@@ -429,7 +430,7 @@ func appendBlockedGroupedJobRows(
 		if key.reason == "" {
 			if sharedLaunch != "" {
 				for _, job := range buckets[key] {
-					rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
+					rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
 					rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 				}
 			}
@@ -445,13 +446,13 @@ func appendBlockedGroupedJobRows(
 			section:   section.key,
 		})
 		for _, job := range jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
 			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
 	if sharedLaunch == "" {
 		for _, job := range buckets[blockedReasonBucketKey{}] {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, nil, now, "", groupedStatusLaunchingETA{}, false, opts.overloadedHostsByName)
 			rows = appendBlockedDisclosureRows(rows, job, opts, section.key, width)
 		}
 	}
@@ -920,16 +921,16 @@ func appendLaunchingGroupedJobRows(
 		bucket := buckets[launchID]
 		sort.SliceStable(bucket.jobs, func(i, j int) bool { return bucket.jobs[i].ID < bucket.jobs[j].ID })
 		if len(bucket.jobs) == 1 {
-			rows = appendGroupedStatusJobRow(rows, bucket.jobs[0], section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
+			rows = appendGroupedStatusJobRow(rows, bucket.jobs[0], section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
 			continue
 		}
 		rows = append(rows, launchingInstanceHeaderRow(bucket, section.key, width, opts))
 		for _, job := range bucket.jobs {
-			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
+			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, opts.launchByID, opts.now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
 		}
 	}
 	for _, job := range ungrouped {
-		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
+		rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, opts.launchByID, opts.now, opts.launchSpinner, opts.launchingETA, false, opts.overloadedHostsByName)
 	}
 	return rows
 }
@@ -1016,6 +1017,7 @@ func appendGroupedStatusJobRow(
 	projectWidth, width int,
 	launchLiveByID map[int64]*db.LaunchLiveState,
 	placementQueuedAtByJob map[int64]int64,
+	attemptOutcomeByJob map[int64]db.AttemptOutcomeEvent,
 	launchByID map[int64]*db.Launch,
 	now time.Time,
 	launchSpinner string,
@@ -1040,7 +1042,7 @@ func appendGroupedStatusJobRow(
 		if etaText := groupedStatusETASuffix(job, section.key, launchLiveByID, now); etaText != "" {
 			suffixParts = append(suffixParts, etaText)
 		}
-		if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, now); timing != "" {
+		if timing := groupedStatusTimingSuffix(job, section.key, placementQueuedAtByJob, attemptOutcomeByJob, now); timing != "" {
 			suffixParts = append(suffixParts, timing)
 		}
 		if moveText := groupedStatusMoveSuffix(job); moveText != "" {
@@ -1103,7 +1105,7 @@ func groupedStatusMoveSuffix(job *db.Job) string {
 	if job == nil || strings.TrimSpace(job.DisplayMoveSource) == "" || strings.TrimSpace(job.DisplayMoveTarget) == "" {
 		return ""
 	}
-	path := strings.TrimSpace(job.DisplayMoveSource) + " -> " + strings.TrimSpace(job.DisplayMoveTarget)
+	path := jobview.FormatMovePath(job.DisplayMoveSource, job.DisplayMoveTarget)
 	if job.DisplayMoveDim {
 		return "move source " + path + " (non-authoritative)"
 	}
@@ -1340,7 +1342,7 @@ func launchLiveStateForLaunchingJob(job *db.Job, launchLiveByID map[int64]*db.La
 	return launchLiveByID[*job.LaunchID]
 }
 
-func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAtByJob map[int64]int64, now time.Time) string {
+func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAtByJob map[int64]int64, attemptOutcomeByJob map[int64]db.AttemptOutcomeEvent, now time.Time) string {
 	if job == nil {
 		return ""
 	}
@@ -1358,6 +1360,11 @@ func groupedStatusTimingSuffix(job *db.Job, sectionKey string, placementQueuedAt
 	}
 	if sectionKey == "failures" && job.EndTime != nil && *job.EndTime > 0 {
 		return "failed " + shortRelativeTime(now.Unix()-*job.EndTime)
+	}
+	if sectionKey == "unplaced" {
+		if event, ok := attemptOutcomeByJob[job.ID]; ok && event.Outcome == db.AttemptOutcomeOrphaned && event.AtUnix > 0 {
+			return "orphaned " + shortRelativeTime(now.Unix()-event.AtUnix)
+		}
 	}
 	if sectionKey == "unplaced" && job.EndTime != nil && *job.EndTime > 0 {
 		display := queueblock.Display(job, nil)

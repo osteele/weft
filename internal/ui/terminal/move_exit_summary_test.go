@@ -23,7 +23,7 @@ func TestFormatMoveExitSummaryAt_PrintsReceipt(t *testing.T) {
 
 	for _, want := range []string{
 		"weft move ended - ",
-		"Moved: wj1862, wj1863 -> 1 new instance",
+		"Moved: wj1862, wj1863 → 1 new instance",
 		"Instances:",
 		"wi2672",
 	} {
@@ -75,9 +75,9 @@ func TestFormatMoveExitSummaryAt_ShortfallNamesUnplaced(t *testing.T) {
 			t.Fatalf("shortfall receipt missing %q:\n%s", want, out)
 		}
 	}
-	// The misleading old "Moved: <all 6 ids> -> 3 new instances" line must
+	// The misleading old "Moved: <all 6 ids> → 3 new instances" line must
 	// not appear in the shortfall path.
-	if strings.Contains(out, "-> 3 new instances") || strings.Contains(out, "-> 3 distinct instances") {
+	if strings.Contains(out, "→ 3 new instances") || strings.Contains(out, "→ 3 distinct instances") {
 		t.Fatalf("shortfall receipt should not pretend every job was moved:\n%s", out)
 	}
 }

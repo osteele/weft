@@ -1473,9 +1473,12 @@ rule TUIPeriodicSync {
         --               LaunchLiveState.JobProgressID (which can go stale).
         --               Open MoveIntent source-context rows are also Queued
         --               when their logical job row is queued/pending but has
-        --               no current target. The intent says this is a dim,
+        --               no current target and the source launch is still
+        --               live. The intent says this is a dim,
         --               non-authoritative source position, not auto-placement
-        --               work.
+        --               work. If the source launch has failed or been
+        --               canceled, suppress the source-context row and show
+        --               only the active target row.
         --   - Launching: placed job whose launch is Planned/Launching, OR
         --               rental-assigned job whose launch is Running but whose
         --               agent has never been ready yet (bootstrap window).
@@ -1488,9 +1491,27 @@ rule TUIPeriodicSync {
         --               launch has Failed/Cancelled, plus stale pending
         --               placements without a launch. Exception: an open
         --               MoveIntent source-context row is not Unplaced even if
-        --               the logical job row is currently targetless; render it
-        --               as dim Queued source context, with the move target as
-        --               active Placing.
+        --               the logical job row is currently targetless; when the
+        --               source launch is still live, render it as dim Queued
+        --               source context, with the move target as active
+        --               Placing. If the source launch failed/canceled, omit
+        --               that source context row.
+        --               When a targetless queued/pending job's latest cloud
+        --               fate event is orphaned, the row event suffix SHOULD
+        --               show "orphaned <age> ago". This includes both
+        --               attempts explicitly stamped cloud_outcome=orphaned
+        --               and the fresh pre-repair window where job_status
+        --               derives orphaned from an authoritative attempt whose
+        --               launch has failed/canceled. The event time is the
+        --               launch terminal time when available, otherwise the
+        --               best attempt event time. This is more specific than
+        --               generic retry text such as "retry pending", so it
+        --               takes precedence for the row suffix. Attempts without
+        --               cloud_outcome do not clear an older orphaned-event
+        --               display unless they themselves are the authoritative
+        --               failed-launch evidence; grouped blocked/waiting
+        --               reason headers may still describe current placement
+        --               blockers separately.
         --   - Completed / Failed / Killed/Canceled: terminal buckets.
         --   - In grouped unprocessed outcome triage, canceled rows are
         --     omitted while killed rows remain visible.

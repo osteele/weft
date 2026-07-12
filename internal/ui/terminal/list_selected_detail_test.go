@@ -58,7 +58,7 @@ func TestSelectedJobDetail_MoveIntentPhase(t *testing.T) {
 		},
 	}, now)
 	joined := strings.Join(lines, "\n")
-	if !strings.Contains(joined, "Move: wi3656 -> cool30") {
+	if !strings.Contains(joined, "Move: wi3656 → cool30") {
 		t.Fatalf("missing move path in detail lines: %v", lines)
 	}
 	if !strings.Contains(joined, "waiting for destination acceptance") {
@@ -258,7 +258,7 @@ func TestSelectedJobDetail_OpenMoveSuppressesUnplacedBlockedReason(t *testing.T)
 		},
 	}, now)
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"Job: wj2921", "unplaced", "ampere+", "≥132GB", "Move:  -> wi3738", "waiting for destination acceptance"} {
+	for _, want := range []string{"Job: wj2921", "unplaced", "ampere+", "≥132GB", "Move:  → wi3738", "waiting for destination acceptance"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected %q in detail lines, got:\n%s", want, joined)
 		}
