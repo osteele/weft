@@ -90,6 +90,16 @@ func requestJobStatus(database *sql.DB, job *db.Job, targetStatus string, opts E
 	job = refreshed
 	outcome.currentStatus = job.Status
 
+	if !job.HasInventoryHost() && !job.IsLaunchJob() && (targetStatus == db.StatusQueued || targetStatus == db.StatusDraft) {
+		if err := db.SetRequestedStatus(database, job.ID, targetStatus); err != nil {
+			return outcome, fmt.Errorf("set requested status: %w", err)
+		}
+		outcome.hostAvailable = true
+		outcome.resolved = true
+		outcome.currentStatus = targetStatus
+		return outcome, nil
+	}
+
 	reconcileOpts := ReconcileOptions{
 		Timeout: opts.Timeout,
 	}

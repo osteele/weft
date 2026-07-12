@@ -41,6 +41,17 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		}, nil
 	}
 
+	if !job.HasInventoryHost() && !job.IsLaunchJob() {
+		if err := db.SetRequestedStatus(database, job.ID, db.StatusDraft); err != nil {
+			return Result{}, fmt.Errorf("update draft status: %w", err)
+		}
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %s marked as draft", ids.FormatJobID(job.ID)),
+		}, nil
+	}
+
 	if err := db.MarkJobDraftPending(database, job.ID); err != nil {
 		return Result{}, fmt.Errorf("set draft pending: %w", err)
 	}

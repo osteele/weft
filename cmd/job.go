@@ -308,6 +308,14 @@ var jobResumeCmd = &cobra.Command{
 	RunE:  runResume,
 }
 
+var jobUnpauseCmd = &cobra.Command{
+	Use:   "unpause <job-id>...",
+	Short: unpauseCmd.Short,
+	Long:  unpauseCmd.Long,
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runUnpause,
+}
+
 var jobCleanupCmd = &cobra.Command{
 	Use:   "cleanup <host>",
 	Short: cleanupCmd.Short,
@@ -420,6 +428,7 @@ func init() {
 	jobCmd.AddCommand(jobPriorityCmd)
 	jobCmd.AddCommand(jobCancelCmd)
 	jobCmd.AddCommand(jobPauseCmd)
+	jobCmd.AddCommand(jobUnpauseCmd)
 	jobCmd.AddCommand(jobResumeCmd)
 	jobCmd.AddCommand(jobCleanupCmd)
 	jobCmd.AddCommand(jobMarkProcessedCmd)

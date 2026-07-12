@@ -140,14 +140,16 @@ var instanceUncordonCmd = &cobra.Command{
 }
 
 var instanceWatchCmd = &cobra.Command{
-	Use:   "watch",
+	Use:   "watch [instance-id...]",
 	Short: "Watch cloud instances, on-prem jobs, and unplaced jobs",
-	Long: `Watch the full active system state.
+	Long: `Watch the full active system state, or a specific cloud instance.
 
 In an interactive terminal this launches an instance-centric TUI. In plain mode
 it prints periodic summaries of cloud instances, on-prem active jobs, and
-unplaced jobs.`,
-	RunE: runWatchCommand,
+unplaced jobs. Pass one or more instance IDs to scope the watch to those
+instances.`,
+	Args: usageArgs(cobra.ArbitraryArgs),
+	RunE: runInstanceWatch,
 }
 
 var instanceLaunchCmd = &cobra.Command{

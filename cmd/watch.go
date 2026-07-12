@@ -151,6 +151,50 @@ func printWatchJobSummary(database *sql.DB, jobIDs []int64) error {
 	return nil
 }
 
+func runInstanceWatch(cmd *cobra.Command, args []string) error {
+	useTUI, err := resolveTUIMode(watchTUI, watchPlain, hasTerminalIO(), inAgentContext())
+	if err != nil {
+		return err
+	}
+
+	instanceIDs, err := parseInstanceWatchIDs(args)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	agentdeploy.StartBackgroundPrewarm("linux", "amd64")
+
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if len(instanceIDs) > 0 {
+		return watchAndReport(database, useTUI, terminal.ModeInstances, instanceIDs, nil, "")
+	}
+	if useTUI {
+		return runWatchLoop(database, cfg)
+	}
+	return terminal.WatchAllPlain(database, cfg, watchPlainOptions())
+}
+
+func parseInstanceWatchIDs(args []string) ([]int64, error) {
+	instanceIDs := make([]int64, 0, len(args))
+	for _, arg := range args {
+		id, err := ids.ParseInstanceID(arg)
+		if err != nil {
+			return nil, usageErrorf("invalid instance ID %q: %v", arg, err)
+		}
+		instanceIDs = append(instanceIDs, id)
+	}
+	return instanceIDs, nil
+}
+
 func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 	return terminal.RunWatchLoop(database, cfg)
 }

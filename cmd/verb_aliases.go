@@ -142,7 +142,7 @@ func init() {
 	}{
 		{withPluralAlias(verbAlias("jobs [job-id]...", jobWatchCmd)), addJobWatchFlags},
 		{withPluralAlias(verbAlias("campaign [campaign-id]", campaignWatchCmd)), addCampaignWatchFlags},
-		{withPluralAlias(verbAlias("instance", instanceWatchCmd)), configureWatchFlags},
+		{withPluralAlias(verbAlias("instance [instance-id...]", instanceWatchCmd)), configureWatchFlags},
 		{watchSystemCmd, configureWatchFlags},
 		{withPluralAlias(verbAlias("project", projectWatchCmd)), addProjectWatchFlags},
 	} {
