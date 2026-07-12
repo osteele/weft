@@ -59,8 +59,7 @@ func TestStdoutSilenceKillsHangingJob(t *testing.T) {
 }
 
 // TestGPUIdleKillsHangingGPUJob uses a fake GPU probe that always reports
-// idle. The job prints every 100ms (so silence doesn't fire) and sleeps.
-// Expect exit 125 with reason gpu-idle.
+// idle. A silent GPU-intent job should be killed with reason gpu-idle.
 func TestGPUIdleKillsHangingGPUJob(t *testing.T) {
 	skipSlowInShort(t)
 	logDir := t.TempDir()
@@ -69,7 +68,7 @@ func TestGPUIdleKillsHangingGPUJob(t *testing.T) {
 	cfg := SingleJobConfig{
 		JobID: 702,
 		Job: opsqueue.CommandJob{
-			Cmd:      "while true; do echo tick; sleep 0.1; done",
+			Cmd:      "sleep 300",
 			GPUClass: "test-gpu", // arms the GPU watchdog
 		},
 		LogDir:               logDir,
@@ -100,6 +99,38 @@ func TestGPUIdleKillsHangingGPUJob(t *testing.T) {
 
 	if got := DetectFailureReasonFromExitInfo(ei); got != FailureReasonGPUIdle {
 		t.Errorf("failure reason = %q, want %q", got, FailureReasonGPUIdle)
+	}
+}
+
+// TestLogActivityResetsGPUIdleTimer: dependency setup can keep a GPU-intent
+// job busy on network/disk before CUDA is touched. Log growth is positive
+// progress, so the GPU-idle watchdog must not kill while that progress
+// continues.
+func TestLogActivityResetsGPUIdleTimer(t *testing.T) {
+	skipSlowInShort(t)
+	logDir := t.TempDir()
+
+	cfg := SingleJobConfig{
+		JobID: 708,
+		Job: opsqueue.CommandJob{
+			Cmd:      "for i in 1 2 3 4 5 6 7 8; do echo downloading-$i; sleep 0.2; done",
+			GPUClass: "test-gpu",
+		},
+		LogDir:               logDir,
+		SampleInterval:       50 * time.Millisecond,
+		GPUIdleTimeout:       500 * time.Millisecond,
+		StdoutSilenceTimeout: 0,
+		WatchdogInitialGrace: 50 * time.Millisecond,
+		GPUActiveProbe:       func() bool { return false },
+		SkipProbes:           true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (log progress should reset GPU idle timer)", ei.ExitCode)
 	}
 }
 

@@ -57,6 +57,55 @@ func watchdogTickPeriod(timeout time.Duration) time.Duration {
 	return p
 }
 
+type watchdogActivityTracker struct {
+	mu              sync.Mutex
+	logPath         string
+	workingDir      string
+	outputDirs      []string
+	lastLogSize     int64
+	outputThreshold time.Time
+	lastActivity    time.Time
+}
+
+func newWatchdogActivityTracker(logPath, workingDir string, outputDirs []string, since time.Time) *watchdogActivityTracker {
+	lastLogSize := int64(0)
+	if info, err := os.Stat(logPath); err == nil {
+		lastLogSize = info.Size()
+	}
+	return &watchdogActivityTracker{
+		logPath:         logPath,
+		workingDir:      workingDir,
+		outputDirs:      outputDirs,
+		lastLogSize:     lastLogSize,
+		outputThreshold: since,
+		lastActivity:    since,
+	}
+}
+
+func (t *watchdogActivityTracker) newProbe() func() bool {
+	t.mu.Lock()
+	lastSeen := t.lastActivity
+	t.mu.Unlock()
+	return func() bool {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		now := time.Now()
+		if info, err := os.Stat(t.logPath); err == nil && info.Size() > t.lastLogSize {
+			t.lastLogSize = info.Size()
+			t.lastActivity = now
+		}
+		if anyOutputMtimeAfter(t.workingDir, t.outputDirs, t.outputThreshold) {
+			t.outputThreshold = now
+			t.lastActivity = now
+		}
+		if t.lastActivity.After(lastSeen) {
+			lastSeen = t.lastActivity
+			return true
+		}
+		return false
+	}
+}
+
 // RunSingleJob executes a single job synchronously with full telemetry.
 // It handles GPU discovery, process management, sampling, failure detection,
 // completion records, and output discovery — the same as the queue runner
@@ -456,32 +505,14 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		return done, fired
 	}
 
-	// Seed with header bytes from WriteLogHeader so the watchdog arms on
-	// actual process output, not the pre-run header.
-	silenceLastSize := int64(0)
-	if info, err := os.Stat(paths.Log); err == nil {
-		silenceLastSize = info.Size()
-	}
-	// Output-dir mtime updates (e.g. periodic checkpoint writes) count as a
-	// sign of life alongside log growth. Seed at run start so files staged
-	// before the run don't falsely arm the watchdog.
 	outputDirs := job.OutputDirs
 	if len(outputDirs) == 0 {
 		outputDirs = config.DefaultOutputDirs
 	}
-	silenceOutputThreshold := time.Now()
-	silenceDone, silenceKill := startWatchdog(KillReasonStdoutSilence, cfg.StdoutSilenceTimeout, func() bool {
-		active := false
-		if info, err := os.Stat(paths.Log); err == nil && info.Size() > silenceLastSize {
-			silenceLastSize = info.Size()
-			active = true
-		}
-		if anyOutputMtimeAfter(workingDir, outputDirs, silenceOutputThreshold) {
-			silenceOutputThreshold = time.Now()
-			active = true
-		}
-		return active
-	})
+	// Seed with header bytes and pre-run output mtimes so watchdogs arm only
+	// on activity produced by the running command.
+	activity := newWatchdogActivityTracker(paths.Log, workingDir, outputDirs, time.Now())
+	silenceDone, silenceKill := startWatchdog(KillReasonStdoutSilence, cfg.StdoutSilenceTimeout, activity.newProbe())
 
 	gpuIdleTimeout := cfg.GPUIdleTimeout
 	if !JobHasExplicitGPUIntent(job) {
@@ -491,7 +522,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if probe == nil {
 		probe = func() bool { return HostGPUMetrics().UtilPct > 0 }
 	}
-	gpuIdleDone, gpuIdleKill := startWatchdog(KillReasonGPUIdle, gpuIdleTimeout, probe)
+	logProgress := activity.newProbe()
+	gpuIdleDone, gpuIdleKill := startWatchdog(KillReasonGPUIdle, gpuIdleTimeout, func() bool {
+		return probe() || logProgress()
+	})
 
 	// Wait for process
 	waitErr := proc.Cmd.Wait()

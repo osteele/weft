@@ -1628,11 +1628,16 @@ rule GPUIdleKillsJob {
              job.exit_code = 125
     @guidance
         -- Triggered when every GPU assigned to the job has reported 0%
-        -- utilisation for longer than config.gpu_idle_timeout, after the
-        -- watchdog has armed (first non-zero sample or config.watchdog_initial_grace,
-        -- whichever comes first). Kill path: SIGTERM to the process group,
-        -- then SIGKILL after config.kill_grace_period. The rental instance
-        -- remains alive and continues its queue.
+        -- utilisation and the job has produced no watchdog-visible progress
+        -- for longer than config.gpu_idle_timeout, after the watchdog has
+        -- armed (first non-zero sample, first log/output activity, or
+        -- config.watchdog_initial_grace, whichever comes first). The same
+        -- log growth and output-directory writes that reset
+        -- StdoutSilenceKillsJob also reset GPU idle time, because positive
+        -- setup progress is not evidence of a dead GPU job. Kill path:
+        -- SIGTERM to the process group, then SIGKILL after
+        -- config.kill_grace_period. The rental instance remains alive and
+        -- continues its queue.
 }
 
 rule StdoutSilenceKillsJob {
