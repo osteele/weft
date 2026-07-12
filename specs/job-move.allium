@@ -791,18 +791,26 @@ invariant ResolvedMoveLoserHasStopWork {
 --   pending_placement (which is also used by initial placement).
 -- jobview/status-sync.allium: Open move display is deliberately separate
 --   from job_status authority. While MoveIntent.state = open, grouped status
---   views SHOULD render both positions when they are known:
---     * source_attempt as a dim, non-authoritative context row
---     * target_attempt / target_launch / target_host as the full-contrast
---       active move row
+--   views SHOULD render the source and target positions described by the
+--   intent when those endpoints are known. Attempts are supporting evidence
+--   for labels, timing, and attempt-specific status; their presence is not the
+--   condition for showing the move. In particular:
+--     * the source endpoint is a dim, non-authoritative context row driven by
+--       MoveIntent.source_launch_id / source_attempt_id / source label data.
+--       If the current logical job row has been reset to queued/pending with
+--       no target, the source context still belongs in Queued, not Unplaced;
+--       it is move context, not auto-placement work.
+--     * the target endpoint is the full-contrast active move row driven by
+--       MoveIntent.target_attempt_id / target_launch_id / target_host /
+--       target_kind. Its bucket is driven by the open move intent ("Placing"
+--       while destination acceptance is pending), not by a terminal status
+--       copied from a hidden target attempt row.
 --   The target row remains visible even though OpenMoveTargetAttemptHidden
---   excludes it from job_status authority. Its bucket is driven by the open
---   move intent ("Placing" while destination acceptance is pending), not by
---   a terminal status copied from a hidden attempt row.
+--   excludes hidden target attempts from job_status authority.
 --
 --   Likewise, a source attempt that was closed by infrastructure cleanup
 --   (cloud_outcome in {orphaned, canceled, superseded, preempted}) MUST NOT
---   be shown as the logical job being Killed/Canceled. It may be shown as a
+--   be shown as the logical job being Killed/Canceled. It may contribute to a
 --   dim source-context row, but its display status must be normalized so
 --   terminal buckets remain reserved for user-visible logical job outcomes.
 

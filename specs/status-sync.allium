@@ -1471,6 +1471,11 @@ rule TUIPeriodicSync {
         --               Sibling membership is computed from actual job
         --               statuses in the current snapshot, not from
         --               LaunchLiveState.JobProgressID (which can go stale).
+        --               Open MoveIntent source-context rows are also Queued
+        --               when their logical job row is queued/pending but has
+        --               no current target. The intent says this is a dim,
+        --               non-authoritative source position, not auto-placement
+        --               work.
         --   - Launching: placed job whose launch is Planned/Launching, OR
         --               rental-assigned job whose launch is Running but whose
         --               agent has never been ready yet (bootstrap window).
@@ -1481,7 +1486,11 @@ rule TUIPeriodicSync {
         --               deadline is within ~10 minutes.
         --   - Unplaced:  queued/pending jobs with no target, plus jobs whose
         --               launch has Failed/Cancelled, plus stale pending
-        --               placements without a launch.
+        --               placements without a launch. Exception: an open
+        --               MoveIntent source-context row is not Unplaced even if
+        --               the logical job row is currently targetless; render it
+        --               as dim Queued source context, with the move target as
+        --               active Placing.
         --   - Completed / Failed / Killed/Canceled: terminal buckets.
         --   - In grouped unprocessed outcome triage, canceled rows are
         --     omitted while killed rows remain visible.

@@ -1105,7 +1105,7 @@ func groupedStatusMoveSuffix(job *db.Job) string {
 	}
 	path := strings.TrimSpace(job.DisplayMoveSource) + " -> " + strings.TrimSpace(job.DisplayMoveTarget)
 	if job.DisplayMoveDim {
-		return "move target " + path + " (non-authoritative)"
+		return "move source " + path + " (non-authoritative)"
 	}
 	return "move pending " + path
 }

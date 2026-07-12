@@ -2000,7 +2000,7 @@ func TestRenderJobListGroupedStatusPlainWithOptions_ExpandsOpenMoveAttempts(t *t
 	if !strings.Contains(out, "Placing (1):") {
 		t.Fatalf("expected authoritative target placing row, got:\n%s", out)
 	}
-	if !strings.Contains(out, "move target wi3656 -> cool30 (non-authoritative)") {
+	if !strings.Contains(out, "move source wi3656 -> cool30 (non-authoritative)") {
 		t.Fatalf("expected non-authoritative source suffix, got:\n%s", out)
 	}
 	if !strings.Contains(out, "move pending wi3656 -> cool30") {
@@ -2165,6 +2165,56 @@ func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveWithoutSourceAttempt
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveSourceFallbackShowsQueuedNotUnplaced(t *testing.T) {
+	targetLaunchID := int64(5043)
+	targetAttemptID := int64(31)
+	job := &db.Job{
+		ID:          4420,
+		Status:      db.StatusQueued,
+		Project:     "adaptive-escalation",
+		Description: "EXP-005 Phase 2",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			4420: {
+				JobID:  4420,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1,
+					State:           db.MoveIntentStateOpen,
+					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi5048",
+					TargetLabel:     "wi5043",
+					Phase:           "waiting for destination acceptance",
+					AttemptsByID: map[int64]db.JobAttempt{
+						targetAttemptID: {ID: targetAttemptID, JobID: 4420, AttemptNumber: 2, LaunchID: &targetLaunchID, Status: db.StatusQueued},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Placing (1):") {
+		t.Fatalf("expected active target row in Placing, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "Queued (1):") {
+		t.Fatalf("expected source context row in Queued, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "Unplaced (") {
+		t.Fatalf("unanchored source context must not render as Unplaced:\n%s", plain)
+	}
+	if strings.Count(plain, "wj4420") != 2 {
+		t.Fatalf("expected source and target rows for wj4420, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "move pending wi5048 -> wi5043") {
+		t.Fatalf("expected active move suffix, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "move source wi5048 -> wi5043 (non-authoritative)") {
+		t.Fatalf("expected source context move suffix, got:\n%s", plain)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillShowsPlacingMove(t *testing.T) {
 	sourceLaunchID := int64(5001)
 	targetLaunchID := int64(5003)
@@ -2217,11 +2267,14 @@ func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillSh
 		now: time.Unix(10_000, 0),
 	})
 	plain := stripANSI(out)
-	if !strings.Contains(plain, "Unplaced (1):") {
-		t.Fatalf("expected dim infra-closed source row in Unplaced, got:\n%s", plain)
+	if !strings.Contains(plain, "Queued (1):") {
+		t.Fatalf("expected dim infra-closed source row in Queued, got:\n%s", plain)
 	}
 	if !strings.Contains(plain, "Placing (1):") {
 		t.Fatalf("expected active target row in Placing, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "Unplaced (") {
+		t.Fatalf("move source context should not appear under Unplaced, got:\n%s", plain)
 	}
 	if strings.Contains(plain, "Killed/Canceled (") {
 		t.Fatalf("infra-closed move rows should not appear under Killed/Canceled, got:\n%s", plain)

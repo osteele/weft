@@ -85,7 +85,14 @@ func DisplayBucket(job *db.Job, input ClassifyInput, placementStatusByJob map[in
 	}
 	if job.DisplayMoveDim {
 		input.HasOpenPlacingIntent = false
-		return ClassifyBucket(job, input)
+		bucket := ClassifyBucket(job, input)
+		if bucket == BucketUnplaced {
+			switch job.EffectiveStatus() {
+			case db.StatusQueued, db.StatusPendingPlacement:
+				return BucketQueued
+			}
+		}
+		return bucket
 	}
 	if strings.TrimSpace(job.DisplayMoveSource) != "" && strings.TrimSpace(job.DisplayMoveTarget) != "" {
 		input.HasOpenPlacingIntent = true
