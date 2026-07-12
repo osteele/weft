@@ -1213,6 +1213,76 @@ func TestCheckInstance_OnStartStall_NotYetStalled(t *testing.T) {
 	}
 }
 
+// TestCheckInstance_OnStartRestartLoop_Terminates: the wi5105 incident — a
+// RunPod OnStart that re-runs from the top on each failure keeps the stage
+// marker perpetually fresh, so rule 4f (per-stage stall) never fires. Rule 4g
+// anchors on FirstOnStartProbeSeenUnix (set-once) and reaps the looping
+// instance regardless of marker churn.
+func TestCheckInstance_OnStartRestartLoop_Terminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-40 * time.Minute).Unix()
+	firstProbe := now.Add(-onStartTotalActiveTimeout - time.Minute).Unix()
+	// Marker looks fresh (well under onStartStallTimeout) — the loop just
+	// rewrote it — so rule 4f must NOT be what fires here.
+	stageAt := now.Add(-30 * time.Second)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-loop",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "onstart-deps-ready",
+		OnStartStageChangedAt: &stageAt,
+		Now:                   now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "OnStart active") {
+		t.Errorf("StallMessage = %q, want it to mention total OnStart-active time", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+	}
+	if action.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Errorf("TerminationReason = %q, want infra failure", action.TerminationReason)
+	}
+}
+
+// TestCheckInstance_OnStartTotalCap_NotYetExceeded: a fresh, genuinely
+// progressing OnStart (probe seen recently, marker advancing) must not trip
+// rule 4g — the cap sits well above onStartStallTimeout so slow-but-healthy
+// setup is not clipped.
+func TestCheckInstance_OnStartTotalCap_NotYetExceeded(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-6 * time.Minute).Unix()
+	firstProbe := now.Add(-5 * time.Minute).Unix()
+	stageAt := now.Add(-30 * time.Second)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-young",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "rclone-installing",
+		OnStartStageChangedAt: &stageAt,
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired on a young, progressing OnStart: %q", action.StallMessage)
+	}
+}
+
 // TestCheckInstance_OnStartStall_QuietOnceBootstrapStarted: once bootstrap.sh
 // has written a stage, the bootstrap-deadline machinery (rules 5/5a) owns the
 // adjudication — the OnStart rules must stand down even if a stale OnStart

@@ -634,6 +634,27 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 				}
 			}
 		}
+		// 4g. Total OnStart time exceeded without ever reaching bootstrap.sh
+		// or agent-ready. Rule 4f measures the stall from the marker's R2
+		// last-modified, so a provider that re-runs a failed OnStart from the
+		// top (e.g. RunPod) refreshes the marker every loop and 4f never
+		// fires. Anchoring on FirstOnStartProbeSeenUnix (set-once, immune to
+		// marker rewrites) reaps the looping instance instead of letting it
+		// bleed to the ~2h adaptive bootstrap deadline.
+		if ci.FirstOnStartProbeSeenUnix != nil {
+			active := p.Now.Sub(time.Unix(*ci.FirstOnStartProbeSeenUnix, 0))
+			if active >= onStartTotalActiveTimeout {
+				return InstanceAction{
+					Kind:              ActionBootstrapStalled,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+					StallMessage:      fmt.Sprintf("OnStart active %s without reaching bootstrap (marker at %s; likely restarting/looping) — terminating instance, jobs reset to queued", active.Truncate(time.Second), p.OnStartStage),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
+			}
+		}
 	}
 
 	// 5. Bootstrap stall: no job progress past the per-launch deadline.

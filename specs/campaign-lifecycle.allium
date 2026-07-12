@@ -2016,7 +2016,8 @@ rule OnStartChainWatchdog {
             and BootstrapStage(instance) = ""
             and OnStartStage(instance) != ""
             and ( IsOnStartFailureStage(OnStartStage(instance))
-                  or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout )
+                  or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout
+                  or now - FirstOnStartProbeSeen(instance) >= config.onstart_total_active_timeout )
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
@@ -2051,6 +2052,20 @@ rule OnStartChainWatchdog {
         --   - Stall: an in-progress token (apt-installing, etc.) unchanged
         --     for onstart_stall_timeout — the chain hung (e.g. an
         --     unresponsive apt mirror) and will not recover.
+        --   - Total-active cap: the marker's R2 last-modified anchors the
+        --     stall sub-case, so a provider that re-runs a failed OnStart
+        --     from the top (RunPod restarts the container on OnStart exit)
+        --     rewrites the marker every loop — it looks perpetually fresh
+        --     while the chain never progresses to bootstrap.sh, so the stall
+        --     sub-case never trips and the instance bleeds to the adaptive
+        --     deadline. FirstOnStartProbeSeen is set once (first probe
+        --     observation, never overwritten), so now - FirstOnStartProbeSeen
+        --     >= onstart_total_active_timeout reaps the looping instance.
+        --     Set generously above onstart_stall_timeout so a slow but
+        --     genuinely progressing OnStart is not clipped. Incident
+        --     wi5105 (2026-07-12): a RunPod OnStart looped started↔deps-ready
+        --     for ~90 min ($1.02) because the churning marker defeated the
+        --     stall sub-case.
         --
         -- Gated pre-bootstrap (BootstrapStage = ""), pre-ready, pre-job: once
         -- bootstrap.sh writes a stage, or the agent reaches ready, or a job
@@ -2060,10 +2075,11 @@ rule OnStartChainWatchdog {
         -- Reason is infra_failure (retryable): orphaned jobs reset to
         -- unplaced and relaunch on a fresh offer, same as DudVastDetection.
         --
-        -- Implementation: internal/campaign/instance_check.go §4e/4f
+        -- Implementation: internal/campaign/instance_check.go §4e/4f/4g
         -- (ActionBootstrapStalled). SyncInstanceState fetches the OnStart
         -- stage marker (body + R2 last-modified) in the same pre-job window
-        -- as the bootstrap stage, via internal/campaign/sync_state.go.
+        -- as the bootstrap stage, via internal/campaign/sync_state.go, and
+        -- persists FirstOnStartProbeSeenUnix set-once on first probe sighting.
 }
 
 rule HeartbeatStaleAfterReady {

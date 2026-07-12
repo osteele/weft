@@ -56,6 +56,18 @@ const (
 	// so a stalled OnStart chain is reaped in minutes instead of waiting the
 	// full adaptive bootstrap deadline. See instance_check.go rule 4f.
 	onStartStallTimeout = 10 * time.Minute
+
+	// onStartTotalActiveTimeout caps the total time an instance may sit in
+	// the OnStart phase (probe seen, no bootstrap.sh handoff, no agent ready)
+	// regardless of stage-marker freshness. Rule 4f measures a stall from the
+	// marker's R2 last-modified, which some providers (e.g. RunPod) refresh by
+	// re-running a failed OnStart from the top — the marker looks fresh while
+	// the chain loops without ever progressing to bootstrap.sh, so 4f never
+	// fires and the instance bleeds budget until the ~2h adaptive bootstrap
+	// deadline. Anchoring on FirstOnStartProbeSeenUnix (set-once, churn-immune)
+	// bounds that case. Set generously above onStartStallTimeout so a slow but
+	// genuinely progressing OnStart is not clipped. See instance_check.go rule 4g.
+	onStartTotalActiveTimeout = 25 * time.Minute
 )
 
 // Setup phase stall defaults (used when no survival data is available).
