@@ -2648,3 +2648,113 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedCompatibleInstanceStaysBud
 		t.Fatalf("placement_blocked = %q, want empty (budget-only blocker)", refreshed.PlacementBlockedJSON)
 	}
 }
+
+func TestLastAttemptRelaunchNote(t *testing.T) {
+	tests := []struct {
+		name   string
+		launch *db.Launch
+		want   string // "" => no note; otherwise a required substring
+	}{
+		{name: "nil", launch: nil, want: ""},
+		{name: "infra failure", launch: &db.Launch{ID: 5099, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure}, want: "infrastructure failure"},
+		{name: "bootstrap timeout", launch: &db.Launch{ID: 12, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonBootstrapTimeout}, want: "bootstrap timeout"},
+		{name: "preempted", launch: &db.Launch{ID: 13, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonPreempted}, want: "preempted"},
+		{name: "job failure excluded", launch: &db.Launch{ID: 3, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure}, want: ""},
+		{name: "disk full excluded", launch: &db.Launch{ID: 9, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonDiskFull}, want: ""},
+		{name: "canceled excluded", launch: &db.Launch{ID: 4, Status: db.LaunchStatusCancelled, TerminationReason: db.TerminationReasonCancelled}, want: ""},
+		{name: "completed excluded", launch: &db.Launch{ID: 6, Status: db.LaunchStatusCompleted, TerminationReason: db.TerminationReasonCompleted}, want: ""},
+		{name: "running not terminal", launch: &db.Launch{ID: 7, Status: db.LaunchStatusRunning}, want: ""},
+		{name: "empty reason humanized", launch: &db.Launch{ID: 8, Status: db.LaunchStatusFailed, TerminationReason: ""}, want: "infrastructure failure"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lastAttemptRelaunchNote(tc.launch)
+			if tc.want == "" {
+				if got != "" {
+					t.Fatalf("note = %q, want empty", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("note = %q, want substring %q", got, tc.want)
+			}
+			if !strings.Contains(got, "awaiting relaunch") {
+				t.Fatalf("note = %q, want 'awaiting relaunch'", got)
+			}
+		})
+	}
+}
+
+// TestEnrichPlaceholderWithLastAttempt verifies the unclassified placeholder is
+// enriched with a last-attempt note when the job's most recent instance failed
+// for an infra-side reason, and left untouched for a job-level failure.
+func TestEnrichPlaceholderWithLastAttempt(t *testing.T) {
+	newQueuedJobOnFailedInstance := func(t *testing.T, database *sql.DB, reason string) (int64, int64, *db.Job) {
+		t.Helper()
+		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
+			WorkingDir: t.TempDir(),
+			Command:    "python train.py",
+			GPUClass:   "nvidia",
+		})
+		if err != nil {
+			t.Fatalf("RecordQueuedJob: %v", err)
+		}
+		instanceID, err := db.CreateLaunch(database, &db.Launch{
+			Status:   db.LaunchStatusLaunching,
+			Provider: "vastai",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		status := db.LaunchStatusFailed
+		if reason == db.TerminationReasonCancelled {
+			status = db.LaunchStatusCancelled
+		}
+		if err := db.UpdateLaunchStatus(database, instanceID, status, reason); err != nil {
+			t.Fatalf("UpdateLaunchStatus: %v", err)
+		}
+		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("GetJobByID: %v", err)
+		}
+		return jobID, instanceID, job
+	}
+
+	t.Run("infra failure enriches", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		jobID, instanceID, job := newQueuedJobOnFailedInstance(t, database, db.TerminationReasonInfraFailure)
+		base := blockReasonBase(unclassifiedLaunchReason)
+		blockedReasons := map[int64]string{jobID: base}
+		structured := map[int64]*blockreason.Structured{jobID: {Summary: base, Launch: unclassifiedLaunchReason}}
+
+		enrichPlaceholderWithLastAttempt(database, blockedReasons, structured, map[int64]*db.Job{jobID: job}, []int64{jobID})
+
+		inst := ids.FormatInstanceID(instanceID)
+		if !strings.Contains(blockedReasons[jobID], "awaiting relaunch") || !strings.Contains(blockedReasons[jobID], inst) {
+			t.Fatalf("flat reason not enriched: %q", blockedReasons[jobID])
+		}
+		if structured[jobID].LastAttempt == "" || !strings.Contains(structured[jobID].LastAttempt, inst) {
+			t.Fatalf("structured LastAttempt not set: %+v", structured[jobID])
+		}
+	})
+
+	t.Run("job failure leaves placeholder untouched", func(t *testing.T) {
+		database := db.SetupTestDB(t)
+		jobID, _, job := newQueuedJobOnFailedInstance(t, database, db.TerminationReasonJobFailure)
+		base := blockReasonBase(unclassifiedLaunchReason)
+		blockedReasons := map[int64]string{jobID: base}
+		structured := map[int64]*blockreason.Structured{jobID: {Summary: base, Launch: unclassifiedLaunchReason}}
+
+		enrichPlaceholderWithLastAttempt(database, blockedReasons, structured, map[int64]*db.Job{jobID: job}, []int64{jobID})
+
+		if blockedReasons[jobID] != base {
+			t.Fatalf("flat reason changed for job-level failure: %q", blockedReasons[jobID])
+		}
+		if structured[jobID].LastAttempt != "" {
+			t.Fatalf("LastAttempt set for job-level failure: %q", structured[jobID].LastAttempt)
+		}
+	})
+}

@@ -54,6 +54,15 @@ type Structured struct {
 	// here lets weft info/explain show the on-prem avenue after a daemon
 	// restart — previously it lived only in the oplog.
 	OnPrem string `json:"onprem,omitempty"`
+	// LastAttempt carries positive-evidence context for the launch avenue:
+	// when the job's most recent instance terminated for a retryable
+	// infra-side reason (bootstrap stall, provider failure, preemption) and
+	// reset the job to the unplaced queue, this note says so. It explains why
+	// the launch avenue shows the "no launch path determined" placeholder —
+	// the planner has not yet emitted a fresh relaunch decision, not because
+	// the constraint is unsatisfiable. Empty when the last attempt was not an
+	// infra-side failure (or there was no prior attempt).
+	LastAttempt string `json:"last_attempt,omitempty"`
 }
 
 // IsPlacementFailure reports whether the reason has the launch/reuse structure
@@ -63,7 +72,7 @@ func (s *Structured) IsPlacementFailure() bool {
 	if s == nil {
 		return false
 	}
-	return strings.TrimSpace(s.Launch) != "" || len(s.Reuse) > 0 || strings.TrimSpace(s.OnPrem) != ""
+	return strings.TrimSpace(s.Launch) != "" || len(s.Reuse) > 0 || strings.TrimSpace(s.OnPrem) != "" || strings.TrimSpace(s.LastAttempt) != ""
 }
 
 // Flat renders the structured reason as the one-line string used by display
@@ -132,9 +141,12 @@ func (s *Structured) DetailLines() []string {
 		}
 		return nil
 	}
-	lines := make([]string, 0, 2+len(s.Reuse))
+	lines := make([]string, 0, 3+len(s.Reuse))
 	if launch := strings.TrimSpace(s.Launch); launch != "" {
 		lines = appendAvenueLines(lines, "new instance", launch, s.LaunchDetail)
+	}
+	if last := strings.TrimSpace(s.LastAttempt); last != "" {
+		lines = appendAvenueLines(lines, "last attempt", last, "")
 	}
 	if onPrem := strings.TrimSpace(s.OnPrem); onPrem != "" {
 		lines = appendAvenueLines(lines, "on-prem hosts", onPrem, "")

@@ -3398,6 +3398,23 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         --     verdict when the actual cause is, say, an upstream offer
         --     search failure or a planner classification gap.
         --
+        -- Last-attempt enrichment: when a candidate still carries the
+        -- "no launch path determined" placeholder AND its most recent
+        -- instance (job.LaunchID) terminated for a retryable infra-side
+        -- reason (the db.IsRetryableTermination set: bootstrap stall,
+        -- provider failure, phase stall, preemption, provider timeout),
+        -- enrichPlaceholderWithLastAttempt appends a positive-evidence note
+        -- ("last instance wiN terminated (<reason>) — job requeued, awaiting
+        -- relaunch") to the flat reason and records it on
+        -- Structured.LastAttempt. This keeps the bare placeholder from
+        -- reading as "constraint unsatisfiable" when the real story is
+        -- "the instance we launched died in bootstrap and we will relaunch".
+        -- It is positive evidence only: a nil/unfetchable launch or a
+        -- non-infra outcome (job failure, cancellation, completion) yields
+        -- no note, so the enrichment never fabricates a relaunch story the
+        -- DB cannot back. It never replaces the authoritative launch reason;
+        -- it is trailing context, like the reuse diagnostics.
+        --
         -- Structured form: a job blocked because no placement avenue is
         -- available (no new instance could be launched AND no running
         -- instance could be reused) also carries a blockreason.Structured

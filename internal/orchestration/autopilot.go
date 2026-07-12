@@ -1240,6 +1240,14 @@ func finalizeUnplacedBlockedReasons(
 			}
 		}
 	}
+	// Attach positive-evidence "last attempt" context to jobs still showing
+	// the unclassified launch placeholder because their most recent instance
+	// failed for a retryable infra-side reason and reset them to the queue.
+	// This keeps the bare "no launch path determined" headline from reading as
+	// "constraint unsatisfiable" when the real story is "instance died in
+	// bootstrap; awaiting relaunch". See specs/campaign-lifecycle.allium §
+	// AutoPilotBlockedReasonIsAuthoritative.
+	enrichPlaceholderWithLastAttempt(database, blockedReasons, structuredBlocked, remainingByID, candidateIDs)
 	// Overlay observed outcomes on the structured breakdowns before they
 	// persist: recorded reuse failures beat re-probed entries, and the
 	// per-host on-prem rejection detail (previously oplog-only) rides along
@@ -1256,6 +1264,77 @@ func finalizeUnplacedBlockedReasons(
 		}
 	}
 	persistBlockedReasonsForUnplaced(database, blockedReasons, structuredBlocked)
+}
+
+// enrichPlaceholderWithLastAttempt adds a "last attempt" note to every
+// still-unplaced candidate whose flat reason is the unclassified launch
+// placeholder ("no launch path determined") and whose most recent instance
+// terminated for a retryable infra-side reason. The note is positive evidence
+// only: a nil launch, an unfetchable launch, or a non-infra outcome yields no
+// note, so the enrichment never fabricates a relaunch story the DB can't back.
+func enrichPlaceholderWithLastAttempt(
+	database *sql.DB,
+	blockedReasons map[int64]string,
+	structuredBlocked map[int64]*blockreason.Structured,
+	remainingByID map[int64]*db.Job,
+	candidateIDs []int64,
+) {
+	if database == nil || blockedReasons == nil {
+		return
+	}
+	launchIDByJob := make(map[int64]int64)
+	launchIDs := make([]int64, 0, len(candidateIDs))
+	for _, jobID := range candidateIDs {
+		if !strings.HasPrefix(blockedReasons[jobID], unclassifiedLaunchReason) {
+			continue
+		}
+		job, ok := remainingByID[jobID]
+		if !ok || job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
+			continue
+		}
+		launchIDByJob[jobID] = *job.LaunchID
+		launchIDs = append(launchIDs, *job.LaunchID)
+	}
+	if len(launchIDs) == 0 {
+		return
+	}
+	launches, err := db.GetLaunchesByIDs(database, launchIDs)
+	if err != nil {
+		// Fail closed on the note: without the launch record we cannot
+		// confirm the last attempt was an infra failure, so we say nothing
+		// rather than guess. The placeholder reason still persists.
+		return
+	}
+	for jobID, launchID := range launchIDByJob {
+		note := lastAttemptRelaunchNote(launches[launchID])
+		if note == "" {
+			continue
+		}
+		addAutoPilotBlockedReason(blockedReasons, jobID, note)
+		if structuredBlocked != nil {
+			if s := structuredBlocked[jobID]; s != nil {
+				s.LastAttempt = note
+			}
+		}
+	}
+}
+
+// lastAttemptRelaunchNote returns a positive-evidence note for a job's most
+// recent instance when that instance terminated for a retryable infra-side
+// reason — the same set db.IsRetryableTermination auto-relaunches on, so
+// "awaiting relaunch" is what the autopilot will actually do. It is empty for
+// job-level failures, cancellations, completions, or a nil launch, where that
+// framing would misstate what happened.
+func lastAttemptRelaunchNote(launch *db.Launch) string {
+	if launch == nil || !db.IsRetryableTermination(launch) {
+		return ""
+	}
+	reason := db.HumanizeTerminationReason(launch.TerminationReason)
+	if reason == "" {
+		reason = "infrastructure failure"
+	}
+	return fmt.Sprintf("last instance %s terminated (%s) — job requeued, awaiting relaunch",
+		ids.FormatInstanceID(launch.ID), reason)
 }
 
 func remainingLaunchCandidates(database *sql.DB, launchJobIDs []int64) (map[int64]*db.Job, []int64) {

@@ -291,3 +291,39 @@ func TestMergeRecordedReuse(t *testing.T) {
 		t.Errorf("recorded outcome did not replace probe entry for wi1: %+v", s.Reuse)
 	}
 }
+
+func TestStructuredLastAttemptSurfaces(t *testing.T) {
+	s := &Structured{
+		Summary:     "no launch path determined; running instances couldn't accept this job",
+		Launch:      "no launch path determined",
+		LastAttempt: "last instance wi5099 terminated (infrastructure failure) — job requeued, awaiting relaunch",
+	}
+	if !s.IsPlacementFailure() {
+		t.Fatal("IsPlacementFailure() = false, want true when LastAttempt set")
+	}
+	lines := s.DetailLines()
+	var foundLast bool
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "last attempt") && strings.Contains(ln, "wi5099") && strings.Contains(ln, "awaiting relaunch") {
+			foundLast = true
+		}
+	}
+	if !foundLast {
+		t.Fatalf("DetailLines() missing last-attempt avenue: %q", lines)
+	}
+	got := Parse(s.Marshal())
+	if got == nil || got.LastAttempt != s.LastAttempt {
+		t.Fatalf("LastAttempt round trip mismatch: %+v", got)
+	}
+}
+
+func TestStructuredLastAttemptOnlyIsPlacementFailure(t *testing.T) {
+	s := &Structured{LastAttempt: "last instance wi1 terminated (bootstrap timeout) — job requeued, awaiting relaunch"}
+	if !s.IsPlacementFailure() {
+		t.Fatal("IsPlacementFailure() = false, want true for LastAttempt-only")
+	}
+	lines := s.DetailLines()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "last attempt") {
+		t.Fatalf("DetailLines() = %q, want single last-attempt line", lines)
+	}
+}
