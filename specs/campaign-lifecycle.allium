@@ -6,7 +6,11 @@
 --           provider abstraction, reconciliation, termination
 -- Excludes:
 --   - Job lifecycle (separate spec: job-lifecycle.allium)
---   - Placement scoring algorithm internals
+--   - The economic launch decision contract — the cost+time objective,
+--     grouping/reuse/count decisions, and the models that feed them — now
+--     lives in launch-objective.allium; statistical estimator internals
+--     (distributions, priors, decay constants, weight values) remain
+--     implementation detail
 --   - TUI/dashboard rendering
 --   - Source syncing and output artifact collection
 --   - Offer search and selection UI
@@ -3040,6 +3044,13 @@ rule NewsvendorLaunchRecommendation {
         -- the count implied by uncertain demand and the active cost/time
         -- score profile; launch planning still constrains the feasible
         -- candidate set before this recommendation is computed.
+        --
+        -- Advisory display ONLY: the recommendation is not a planner input.
+        -- Its call sites are the `weft start instance` output paths
+        -- (cmd/instance_launch.go, via campaign.FormatNewsvendorRecommendation
+        -- over campaign.RecommendInstanceCount). The autopilot planner does
+        -- not consume it. See the non-goals section of
+        -- specs/launch-objective.allium.
 }
 
 -- ==========================================================================
@@ -3047,10 +3058,13 @@ rule NewsvendorLaunchRecommendation {
 -- ==========================================================================
 --
 -- Queue re-balance moves queued (never running) jobs between already-running
--- instances to minimize a scalarized cost+time objective over the predicted
--- queue-drain plan. The objective and weights mirror campaign placement
--- (see internal/bidding/model.go ScoreProfile) so users see one consistent
--- exchange rate between dollars and wall-clock hours.
+-- instances to minimize an objective over the predicted queue-drain plan.
+-- This objective is LEXICOGRAPHIC (see below), which is a different objective
+-- from launch planning: launch planning ranks candidates by the weighted-sum
+-- cost+time objective in specs/launch-objective.allium (LaunchObjective). The
+-- two share only the ScoreProfile dollar/hour weights
+-- (internal/bidding/model.go ScoreProfile), and only inside this objective's
+-- scalar-score component (item 4 below) — not the ordering as a whole.
 --
 -- A move is accepted iff it lowers
 --

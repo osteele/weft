@@ -1,0 +1,378 @@
+-- allium: 3
+-- launch-objective.allium
+--
+-- Scope: The economic decision contract for cloud launch planning — the
+-- objective every launch candidate is scored by, the models that feed it,
+-- the grouping / reuse / count decisions it drives, its fallbacks when models
+-- are absent, and the deliberate non-goals of the current planner.
+--
+-- This spec describes the DECISION CONTRACT, not the estimator internals.
+-- Formula constants, priors, decay half-lives, and profile weight values live
+-- in code behind @guidance pointers.
+--
+-- Includes:
+--   - The scalarized cost+time launch objective (LaunchObjective)
+--   - Grouping / reuse / instance-count decisions scored under that objective
+--   - The survival and setup-overhead models that feed the objective, and
+--     when they are (re)built
+--   - Deterministic fallbacks when no model can be built
+--   - The precise distinction between launch scoring and queue rebalance
+--   - Deliberate current limitations of the planner
+-- Excludes:
+--   - Statistical estimator internals: distributions, priors, decay
+--     constants, profile weight VALUES (implementation detail in
+--     internal/bidding and internal/estimate)
+--   - Instance lifecycle from launch through termination
+--     (campaign-lifecycle.allium)
+--   - On-prem host scoring and eligibility (inventory-placement.allium)
+--   - Offer search UI and TUI rendering
+
+-- ==========================================================================
+-- External entities
+-- ==========================================================================
+--
+-- These are governed elsewhere; this spec references them to describe the
+-- decision, not to define them.
+
+-- A queued unit of work the planner is trying to place. Governed by
+-- job-lifecycle.allium.
+external entity Job {
+    gpu_mem_gb: Decimal?
+}
+
+-- A running or grace-period cloud rental that may be reused. Governed by
+-- campaign-lifecycle.allium (entity Instance).
+external entity Instance {
+    running_job_count: Integer
+}
+
+-- A live provider offer for a fresh rental. Maps to campaign-lifecycle.allium
+-- value OfferSnapshot.
+external entity Offer {
+    cost_per_hour_cents: Integer
+    reliability: Decimal
+}
+
+-- ==========================================================================
+-- Value types
+-- ==========================================================================
+
+-- A named cost/time weighting. Its weight VALUES live in code
+-- (internal/bidding/model.go strategyWeights); only the shape is specified
+-- here. Profile ids: cheap, balanced, fast, fastest, plus the Pareto sweep.
+value ScoreProfile {
+    id: String                  -- cheap | balanced | fast | fastest | pareto-*
+    cost_weight: Decimal        -- weight on expected dollar cost
+    time_weight: Decimal        -- weight on expected aggregate completion time
+    happy_path: Bool            -- true for profiles that do NOT survival-divide
+                                -- the time term (e.g. fastest)
+}
+
+-- One thing the planner can rank: a fresh-launch grouping placed on an offer,
+-- or the assignment of a group to an already-running reusable instance.
+value LaunchCandidate {
+    kind: new_launch | reuse
+    jobs: List<Job>             -- the group scored as a unit
+    offer: Offer?               -- present for kind = new_launch
+    instance: Instance?         -- present for kind = reuse
+}
+
+-- ==========================================================================
+-- The launch objective
+-- ==========================================================================
+
+contract LaunchObjective {
+    score: (candidate: LaunchCandidate, profile: ScoreProfile) -> Decimal
+        -- The single scalarized objective every launch candidate — new-instance
+        -- grouping, reuse assignment, and offer — is ranked by, under the
+        -- active profile:
+        --   profile.cost_weight * expected_cost(candidate, profile)
+        -- + profile.time_weight * expected_completion(candidate, profile)
+        -- Lower is better.
+    expected_cost: (candidate: LaunchCandidate, profile: ScoreProfile) -> Decimal
+        -- Retry- and survival-adjusted expected dollar spend for the candidate.
+    expected_completion: (candidate: LaunchCandidate, profile: ScoreProfile) -> Decimal
+        -- Survival-adjusted aggregate job-completion time, in hours, over the
+        -- candidate's whole job set.
+
+    @invariant BothTermsSurvivalAdjusted
+        -- Neither term is a happy-path point estimate. Expected cost is
+        -- retry-adjusted: a failed attempt's setup spend recurs with the
+        -- attempt's failure probability, so unreliable offers cost more than
+        -- their nominal $/hr. Expected completion divides by survival
+        -- probability, EXCEPT for profiles whose profile.happy_path is true
+        -- (e.g. `fastest`), which score the happy-path wall-clock time by
+        -- design.
+
+    @invariant TimeTermIsAggregate
+        -- The time term is aggregate over the group's jobs, not per-job.
+        -- Setup overhead is counted once per instance, and each job on a
+        -- shared instance waits sequentially behind the jobs ahead of it in
+        -- the group's queue. A grouping that packs more jobs onto one instance
+        -- amortizes setup but lengthens later jobs' completion; the objective
+        -- prices both effects.
+
+    @invariant RequiredFactorsParticipate
+        -- Every score must incorporate, at minimum: the overhead-model setup
+        -- estimate, the survival probability for the candidate's bucket,
+        -- per-group amortization of setup, and predicted per-job runtime (from
+        -- the estimator when a prediction is available, from a duration
+        -- fallback otherwise). Dropping any of these silently biases the
+        -- objective and is a defect, not a simplification.
+
+    @invariant ActiveProfileRecorded
+        -- The active profile's id is recorded on placement telemetry for every
+        -- scored candidate, so a decision can be reconstructed against the
+        -- exchange rate that produced it.
+
+    @guidance
+        -- Implementation: internal/bidding/model.go — ScoreProfile (weights),
+        -- ExpectedCost (retry-adjusted spend), ExpectedWallclockTime, and
+        -- aggregateJobCompletionTimeHrs (setup-once, sequential per-job wait).
+        -- internal/campaign/strategy_plan.go ScoreEstimatesWithProfile and
+        -- BestCandidateForProfile rank candidates; internal/campaign/offers.go
+        -- bestOfferWithCompatibilityProfile picks the offer for a group under
+        -- the profile. Profile ids and the Pareto sweep:
+        -- StrategyCheap/StrategyFast/StrategyFastest and ParetoSamplingProfiles
+        -- in internal/bidding/model.go. Active-profile telemetry:
+        -- internal/campaign/telemetry.go and
+        -- internal/db/scheduling_telemetry.go.
+}
+
+-- ==========================================================================
+-- Decisions scored under the objective
+-- ==========================================================================
+
+rule GroupingCandidatesScoredUnderObjective {
+    when: RentalLaunchSelection(unplaced_jobs)
+          or AutoPilotTick(unplaced_jobs)
+          or MoveToNewLaunchSelection(jobs)
+
+    -- The planner enumerates alternative groupings of the compatible jobs —
+    -- split into parallel single-job instances, merged onto shared instances,
+    -- and intermediate affinity groupings — and scores each grouping's
+    -- candidates under the same LaunchObjective. The lowest-scoring candidate
+    -- wins.
+    let candidates = CandidateGroupings(unplaced_jobs)
+
+    ensures:
+        SelectedGrouping = argmin LaunchObjective.score(candidate, active_profile)
+                                  over candidates
+        -- jobs-per-instance is an OUTPUT of this argmin, never a fixed cap:
+        -- the objective's setup amortization vs. sequential-wait tradeoff
+        -- decides how many jobs share an instance.
+        JobsPerInstance(SelectedGrouping) is not bounded by a fixed constant
+
+    @guidance
+        -- The shared-input setup benefit that biases grouping toward
+        -- co-locating jobs with overlapping HF model/dataset inputs is
+        -- specified in campaign-lifecycle.allium AssetOverlapLaunchGrouping;
+        -- it is a scoring term of this same objective, not a separate gate.
+        -- Implementation: internal/campaign/offers.go FetchCandidateGroupings
+        -- enumerates candidates; internal/campaign/campaign.go
+        -- MergeCompatibleGroups / SplitToParallel and GroupByAffinity produce
+        -- the grouping alternatives that are then scored.
+}
+
+rule ReuseOnlyWhenItBeatsNewLaunch {
+    when: BuildAutoPlacementPlan(unplaced_jobs)
+
+    -- A reusable instance is assigned to a group iff its objective score beats
+    -- the best fresh-launch alternative for that group under the active
+    -- profile. Reuse is not preferred merely because it is zero-launch-cost;
+    -- it must win on the objective.
+    ensures:
+        for group in groups_to_place:
+            let best_reuse = min LaunchObjective.score(reuse_candidate, active_profile)
+                                 over ReuseCandidates(group)
+            let best_new = min LaunchObjective.score(new_candidate, active_profile)
+                               over NewLaunchCandidates(group)
+            AssignReuse(group) only if best_reuse < best_new
+
+        -- Queue depth on a reusable instance enters the objective as a longer
+        -- expected completion (sequential wait), NEVER as an eligibility cap.
+        -- See campaign-lifecycle.allium InstanceReuseQueueDepthIsObjectiveSignal.
+        ReuseEligibility(group, instance) does_not_reject because queue_depth alone
+
+        -- Scarcity / opportunity cost: when other queued compatible groups
+        -- also demand the reusable supply, assigning this scarce instance
+        -- carries an opportunity-cost penalty in the objective, so a group
+        -- that could launch fresh does not monopolize reuse another group
+        -- needs more.
+        CompatibleReuseDemand(group) > CompatibleReuseSupply(group) implies
+            LaunchObjective.score(reuse_candidate, active_profile)
+                includes a scarcity opportunity-cost penalty
+
+    @guidance
+        -- Implementation: internal/campaign/strategy_plan.go chooseReuseGroups
+        -- compares reuse against fresh-launch candidates and applies
+        -- reuseOpportunityPenaltyUSD when demand for compatible reusable
+        -- capacity exceeds supply. Reuse candidate discovery and matching:
+        -- internal/campaign/reuse.go FindReusableInstances, MatchJobToInstance
+        -- (queue depth is a completion-time signal, not a reject), and
+        -- rankBetter.
+}
+
+-- ==========================================================================
+-- The models that feed the objective
+-- ==========================================================================
+
+rule ModelsRebuiltFromHistory {
+    when: AutoPilotTick(_)
+          or RentalLaunchSelection(_)
+          or RelaunchOrphanedJob(_)
+          or UserRequestsLaunch(_)
+
+    -- The survival model and the setup-overhead model are rebuilt from
+    -- persisted history at each planning invocation. Planning never consumes a
+    -- stale cached model artifact carried across passes; a pass sees the
+    -- outcomes recorded since the previous one.
+    ensures:
+        survival_model = BuildSurvivalModel(LoadInstanceOutcomes())
+        overhead_model = BuildOverheadModel(QueryOverheadObservations())
+
+        -- Survival training excludes non-signal outcomes. An
+        -- account_credit_exhausted termination says nothing about the machine,
+        -- SKU, or region and must not depress a bucket's survival estimate.
+        SurvivalTrainingSet excludes outcomes classified account_credit_exhausted
+
+    @guidance
+        -- Survival training and its outcome classification:
+        -- internal/bidding/build.go LoadInstanceOutcomes and
+        -- ClassifySurvivalTrainingOutcome (which drops the credit-exhaustion
+        -- class — see campaign-lifecycle.allium ProviderCreditGate and the
+        -- account_credit_exhausted TerminationReason prose). Overhead model:
+        -- internal/estimate/overhead_build.go BuildOverheadModel over
+        -- observations from launches timestamps and job_phase_timings via
+        -- internal/db/overhead_stats.go QueryOverheadObservations. Per-pass
+        -- build call sites: internal/orchestration/relaunch.go
+        -- buildOverheadModel and cmd/instance_launch.go buildOverheadModel /
+        -- LoadInstanceOutcomes.
+}
+
+rule FallbacksWhenModelsAbsent {
+    when: ScoreCandidate(candidate, active_profile)
+
+    -- Fallbacks are deterministic and must never block planning: an absent
+    -- model degrades the estimate, it does not veto a launch. This mirrors
+    -- inventory-placement.allium PredictorNeverBlocksPlacement.
+    ensures:
+        not exists overhead_model implies
+            SetupEstimate(candidate) = ConstantSetupFallback
+
+        not exists SurvivalHistory(candidate.bucket) implies
+            SurvivalPrior(candidate.bucket) = seeded from candidate.offer.reliability
+
+        Planning does_not_block because a model was absent
+
+    @guidance
+        -- Constant setup fallback: bidding.ConstantSetup(0.5) applied in
+        -- internal/campaign/offers.go and internal/campaign/strategy_plan.go
+        -- when no OverheadModel can be built. Survival prior seeding: the
+        -- Beta-Binomial prior in internal/bidding/model.go seeds an offer
+        -- bucket with no history from the provider-advertised reliability
+        -- (PriorStrength pseudo-observations). The exact constant, prior
+        -- strength, and shrinkage are code-level; only the "deterministic,
+        -- never blocks" contract is specified here.
+}
+
+-- ==========================================================================
+-- Invariants
+-- ==========================================================================
+
+invariant LaunchAndRebalanceObjectivesAreDistinct {
+    -- Launch planning and queue rebalance use DIFFERENT objectives today, and
+    -- any claim that they are the same is wrong.
+    --
+    -- Launch planning ranks candidates by the weighted-sum LaunchObjective
+    -- above: cost_weight * expected_cost + time_weight * expected_completion.
+    --
+    -- Queue rebalance (campaign-lifecycle.allium § Queue re-balance) ranks
+    -- moves by a LEXICOGRAPHIC objective:
+    --   1. priority completion sum, 2. total completion sum,
+    --   3. total rental cost, 4. scalar score, 5. global makespan.
+    -- The two objectives share only the ScoreProfile dollar/hour weights, and
+    -- only inside the lexicographic objective's scalar-score component (4).
+    invariant_holds:
+        LaunchPlanningObjective = weighted_sum(cost_weight, time_weight)
+        and RebalanceObjective = lexicographic(priority_completion,
+                                               total_completion,
+                                               rental_cost,
+                                               scalar_score,
+                                               global_makespan)
+        and Shared(LaunchPlanningObjective, RebalanceObjective)
+                = { ScoreProfile.cost_weight, ScoreProfile.time_weight }
+                  used only in RebalanceObjective.scalar_score
+
+    @guidance
+        -- Launch scoring: internal/bidding/model.go +
+        -- internal/campaign/strategy_plan.go (see LaunchObjective above).
+        -- Rebalance scoring: internal/orchestration/rebalance.go
+        -- (LexicographicObjective / ScoreUnder). If these two are ever
+        -- unified, this invariant and campaign-lifecycle.allium § Queue
+        -- re-balance must be updated together.
+}
+
+-- ==========================================================================
+-- Deliberate non-goals and known limitations
+-- ==========================================================================
+--
+-- Each item below is a CURRENT limitation recorded on purpose, so a gap
+-- analysis reads intent rather than inferring an oversight.
+--
+-- 1. No historical stock-availability model. Offers are fetched live each
+--    pass and cached only within that pass; there is no persisted offer /
+--    market-price history and no model of how likely a SKU is to be
+--    available. Unavailability is handled reactively: a failed fetch is
+--    "unknown", not "empty" (see campaign-lifecycle.allium
+--    OfferFetchFailureIsUnknownNotEmpty). Planned work: telemetry collection
+--    in lab-notebook/plans/2026-07-12-launch-objective-now.md; the model in
+--    lab-notebook/plans/backlog/2026-07-12-scheduler-economics-later.md
+--    Part 1.
+--
+-- 2. No wait / defer action. Every pass either launches now or blocks with a
+--    reason; there is no option-value-of-waiting model that would hold a job
+--    back expecting cheaper or more-available capacity soon. Planned work:
+--    lab-notebook/plans/backlog/2026-07-12-scheduler-economics-later.md
+--    Part 2.
+--
+-- 3. The newsvendor instance-count recommendation is advisory display only,
+--    not a planner input. It surfaces the count implied by uncertain demand
+--    and the active profile to the user; the autopilot planner does not
+--    consume it. See campaign-lifecycle.allium NewsvendorLaunchRecommendation.
+--
+-- 4. Market prices are deliberately excluded from spend-authorization
+--    ceilings. The authorization gate uses per-job / per-class overrides and a
+--    price anchor, not the live market median (which is informational only).
+--    See campaign-lifecycle.allium PriceAuthorizationGate.
+--
+-- 5. Group disk is sized for the whole group's inputs for the instance's whole
+--    life; there is no per-phase disk / eviction model that would let
+--    sequential jobs on one instance reclaim space between phases. See
+--    campaign-lifecycle.allium FreshRentalDiskEstimate.
+--
+-- 6. The amortization deferrals listed in campaign-lifecycle.allium § Queue
+--    re-balance under "Logistics intentionally deferred" (same-disk affinity
+--    for --produces / --needs pairs, HF model/dataset runtime-cost
+--    amortization beyond the provisioned-input heuristic, artifact-staging
+--    amortization, and uv package-cache setup-time reuse) apply to launch
+--    scoring as well.
+
+-- ==========================================================================
+-- Cross-references
+-- ==========================================================================
+--
+-- campaign-lifecycle.allium owns cloud instance lifecycle (launch through
+-- termination), the AssetOverlapLaunchGrouping setup-benefit term, the
+-- InstanceReuseQueueDepthIsObjectiveSignal reuse-penalty rule, the
+-- lexicographic queue-rebalance objective (§ Queue re-balance), the
+-- NewsvendorLaunchRecommendation advisory, PriceAuthorizationGate,
+-- FreshRentalDiskEstimate, and OfferFetchFailureIsUnknownNotEmpty. This spec
+-- references those anchors but does not redefine them.
+--
+-- inventory-placement.allium owns on-prem host scoring and eligibility, and
+-- the PredictorNeverBlocksPlacement invariant this spec's fallback rule
+-- mirrors for the cloud side.
+--
+-- job-lifecycle.allium governs Job status and the queue this planner draws
+-- unplaced work from.

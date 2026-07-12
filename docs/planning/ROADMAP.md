@@ -27,10 +27,7 @@ instead of maintaining its own provisioning infrastructure.
 | Per-instance actual cost tracking | Medium | Show real campaign spend from observed runtime, not just estimates or limits. | Cost summary with per-GPU breakdown |
 | Resume interrupted campaigns | Medium | Recover quickly after interruption by continuing from persisted state rather than restarting all work. | `--resume` flag, JSON state file |
 | Seed-first validation | Medium | Reduce blast radius by validating the setup path on one seed before provisioning full scale. | `--seed-first` flag |
-| Price-gate market median | Low | The price-authorization error message already has a structurally present market-median informational field, but it currently always displays `0`. Compute the median across the candidate offer list at search time and thread it into the displayed context. This does not affect the gate decision, only the operator-facing explanation. | — |
 | First-party import diagnosis precision | Medium | Fix wb27: when a traceback reports `ModuleNotFoundError` for a local first-party package such as `experiments`, diagnose the invocation/sys.path problem instead of `vllm_setup` or generic missing dependency. The classifier should use the failing module and traceback frame, check whether the module exists in the synced source tree, and suggest `uv run <script>` for PEP 723 scripts launched as `uv run python <script>`. | — |
-| Image-aware setup economics | Medium | Explicitly price groups that mix jobs whose images are technically compatible but have very different setup-disk economics, such as CUDA-devel vLLM jobs and torch jobs that would be cheaper on PyTorch images. Image correctness is already enforced by launch grouping, reuse validation, submit-time image probes, and repeated pre-start image failure blocking; this item is about cost/setup efficiency. | — |
-| Unified setup disk model | Medium | Move launch sizing, reuse admission, and candidate scoring onto one image-aware setup disk model. It should reason about cached uv manifests, PyTorch image package reuse, Python-version shortcut eligibility, and CUDA-only image fallbacks without duplicating constants across launch and reuse paths. | — |
 
 ## Tier 3: Nice to Have
 
@@ -424,43 +421,6 @@ facts, while live intent and sync state live in constrained current-state
 tables. Defer this until the current open-attempt and execution-target
 normalization has settled; doing it together with placement identity changes
 would make lifecycle regressions harder to isolate.
-
-## Rebalance: variance-aware and regret-minimizing objectives
-
-The initial rebalance redesign (see `specs/campaign-lifecycle.allium`
-QueueRebalanceJob) accepts moves that improve a scalarized
-`Cost·$ + Time·hr` score using **mean** runtime predictions from
-`predictor.ResolvePredictBatch`. Two follow-ups are deferred behind an
-empirical trigger.
-
-**Promotion criterion.** V1 logs the lower- and upper-bound Δscore
-alongside the mean Δscore for every accepted/rejected move (cheap —
-three score evaluations, not 100). If the bounds straddle zero on a
-material fraction of decisions, mean-only is making coin-flip calls and
-the variance-aware version moves up. If they don't, these stay
-deferred indefinitely.
-
-- **Monte Carlo over predictor variance.** The predictor returns
-  Mean/Lower/Upper per job. Sample N ≈ 100 runtime draws from the
-  implied distribution (PERT or triangular) and accept moves whose
-  *expected* score improvement clears the threshold. ~10× v1's per-pass
-  compute (still single-digit ms). Same code path — replace `Mean`
-  with sampled values. Needs deterministic seeding (job IDs or pass
-  count) so consecutive `weft rebalance` runs agree, and a fallback for
-  jobs without a predictor result (`DefaultJobDuration`'s 4× spread
-  produces noise, not signal).
-
-- **Expected-regret minimization.** Strict regret-minimizing objective:
-  for each candidate move sample joint runtimes, compute makespan with
-  and without the move, and take the mean of
-  `max(0, makespan_before − makespan_after)` minus the symmetric loss.
-  Accept only when expected improvement is positive. Conceptually
-  cleaner; harder to debug ("why didn't this move?") and shares MC
-  infrastructure with the variance-aware version. Worth doing only if
-  MC-mean rebalance proves systematically wrong.
-
-True online regret minimization (Thompson sampling, posterior updates
-from realized outcomes) is a larger build-out and not on this list.
 
 ## InstanceAcceptsJobs unified predicate
 
