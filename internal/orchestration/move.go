@@ -414,6 +414,10 @@ func BuildNewOptionsWithSurvivalAndTelemetry(
 	if len(cloudClients) == 0 {
 		return nil, nil
 	}
+	excludedMachineIDs, err := mergeJobMachineExclusions(database, job, excludedMachineIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	provider, _ := db.RequestedProvider(job.Tags)
 	group := campaign.InstanceGroup{
@@ -474,6 +478,27 @@ func BuildNewOptionsWithSurvivalAndTelemetry(
 	return options, nil
 }
 
+func mergeJobMachineExclusions(database *sql.DB, job *db.Job, excludedMachineIDs map[string]struct{}) (map[string]struct{}, error) {
+	if database == nil || job == nil || job.ID <= 0 {
+		return excludedMachineIDs, nil
+	}
+	torchPreflightMachines, err := db.FailedTorchPreflightMachineIDs(database, job.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(torchPreflightMachines) == 0 {
+		return excludedMachineIDs, nil
+	}
+	merged := make(map[string]struct{}, len(excludedMachineIDs)+len(torchPreflightMachines))
+	for machineID := range excludedMachineIDs {
+		merged[machineID] = struct{}{}
+	}
+	for machineID := range torchPreflightMachines {
+		merged[machineID] = struct{}{}
+	}
+	return merged, nil
+}
+
 func existingInstanceMoveWait(cap campaign.InstanceCapacity, queuedJobs int) time.Duration {
 	jobsAhead := cap.RunningJobCount + queuedJobs
 	if jobsAhead <= 0 {
@@ -490,6 +515,9 @@ func filterOffersByMachine(offers []cloud.Offer, excludedMachineIDs map[string]s
 	for _, offer := range offers {
 		if offer.MachineID != "" {
 			if _, excluded := excludedMachineIDs[offer.MachineID]; excluded {
+				continue
+			}
+			if _, excluded := excludedMachineIDs[db.ProviderMachineKey(string(offer.Provider), offer.MachineID)]; excluded {
 				continue
 			}
 		}

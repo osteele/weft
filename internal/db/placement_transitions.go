@@ -145,7 +145,7 @@ func FailedMoveTargetMachineIDs(database *sql.DB, intent *MoveIntent) (map[strin
 		sourceLaunchID = *intent.SourceLaunchID
 	}
 	rows, err := database.Query(`
-		SELECT DISTINCT COALESCE(l.machine_id, '')
+		SELECT DISTINCT COALESCE(l.provider, ''), COALESCE(l.machine_id, '')
 		  FROM job_attempts ja
 		  JOIN launches l ON l.id = ja.launch_id
 		 WHERE ja.job_id = ?
@@ -169,12 +169,49 @@ func FailedMoveTargetMachineIDs(database *sql.DB, intent *MoveIntent) (map[strin
 	}
 	defer rows.Close()
 	for rows.Next() {
+		var provider string
 		var machineID string
-		if err := rows.Scan(&machineID); err != nil {
+		if err := rows.Scan(&provider, &machineID); err != nil {
 			return nil, err
 		}
-		if machineID != "" {
-			out[machineID] = struct{}{}
+		if key := ProviderMachineKey(provider, machineID); key != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out, rows.Err()
+}
+
+// FailedTorchPreflightMachineIDs returns provider machine IDs where this job
+// already failed the weft-owned torch CUDA preflight. Replacement placement
+// should avoid those machines when the provider exposes machine identity.
+func FailedTorchPreflightMachineIDs(database *sql.DB, jobID int64) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if database == nil || jobID <= 0 {
+		return out, nil
+	}
+	rows, err := database.Query(`
+		SELECT DISTINCT COALESCE(l.provider, ''), COALESCE(l.machine_id, '')
+		  FROM job_attempts ja
+		  JOIN launches l ON l.id = ja.launch_id
+		 WHERE ja.job_id = ?
+		   AND ja.launch_id IS NOT NULL
+		   AND COALESCE(l.machine_id, '') != ''
+		   AND COALESCE(ja.failure_reason, '') = ?`,
+		jobID,
+		FailureReasonInfraTorchPreflightFailed,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var provider string
+		var machineID string
+		if err := rows.Scan(&provider, &machineID); err != nil {
+			return nil, err
+		}
+		if key := ProviderMachineKey(provider, machineID); key != "" {
+			out[key] = struct{}{}
 		}
 	}
 	return out, rows.Err()

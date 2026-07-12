@@ -2153,9 +2153,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			      AND js.status = ?
 			      AND COALESCE(js.failure_reason, '') IN (`+infraReasonPlaceholders+`)
 			      AND (
-			        SELECT COUNT(*)
+			        SELECT COUNT(DISTINCT ja.launch_id)
 			          FROM job_attempts ja
 			         WHERE ja.job_id = js.id
+			           AND ja.launch_id IS NOT NULL
 			           AND COALESCE(ja.failure_reason, '') IN (`+infraReasonPlaceholders+`)
 			      ) < ?
 			    )
@@ -2170,6 +2171,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 		return 0, err
 	}
 	if len(jobs) == 0 {
+		if err := markCappedTorchPreflightFailuresTx(tx, instanceID); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 		if err := tx.Commit(); err != nil {
 			return 0, err
 		}
@@ -2252,11 +2257,75 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 		}
 		n++
 	}
+	if err := markCappedTorchPreflightFailuresTx(tx, instanceID); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return n, nil
+}
+
+func markCappedTorchPreflightFailuresTx(tx *sql.Tx, instanceID int64) error {
+	rows, err := tx.Query(`
+		SELECT js.id,
+		       (
+		         SELECT COUNT(DISTINCT ja2.launch_id)
+		           FROM job_attempts ja2
+		          WHERE ja2.job_id = js.id
+		            AND ja2.launch_id IS NOT NULL
+		            AND COALESCE(ja2.failure_reason, '') = ?
+		       ) AS failed_instances
+		  FROM job_status js
+		  JOIN authoritative_job_attempts latest ON latest.id = js.latest_run_id
+		 WHERE latest.launch_id = ?
+		   AND js.status = ?
+		   AND COALESCE(js.failure_reason, '') = ?
+		   AND (
+		         SELECT COUNT(DISTINCT ja2.launch_id)
+		           FROM job_attempts ja2
+		          WHERE ja2.job_id = js.id
+		            AND ja2.launch_id IS NOT NULL
+		            AND COALESCE(ja2.failure_reason, '') = ?
+		       ) >= ?`,
+		FailureReasonInfraTorchPreflightFailed,
+		instanceID,
+		StatusFailed,
+		FailureReasonInfraTorchPreflightFailed,
+		FailureReasonInfraTorchPreflightFailed,
+		AutoRequeueMaxInfraFailureAttempts,
+	)
+	if err != nil {
+		return fmt.Errorf("query capped torch preflight failures: %w", err)
+	}
+	defer rows.Close()
+	capped := map[int64]int{}
+	for rows.Next() {
+		var jobID int64
+		var failedInstances int
+		if err := rows.Scan(&jobID, &failedInstances); err != nil {
+			return fmt.Errorf("scan capped torch preflight failure: %w", err)
+		}
+		capped[jobID] = failedInstances
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate capped torch preflight failures: %w", err)
+	}
+	for jobID, failedInstances := range capped {
+		message := fmt.Sprintf("instance pool has broken CUDA (%d instances failed torch preflight)", failedInstances)
+		if _, err := tx.Exec(
+			`UPDATE job_attempts
+			    SET error_message = ?
+			  WHERE id = `+latestAuthoritativeAttemptSubquery,
+			message,
+			jobID,
+		); err != nil {
+			return fmt.Errorf("annotate capped torch preflight failure for job %d: %w", jobID, err)
+		}
+	}
+	return nil
 }
 
 func launchResetPlacementReasons(ci *Launch, outcome string) []string {

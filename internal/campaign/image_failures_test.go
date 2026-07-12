@@ -83,6 +83,53 @@ func TestApplyImagePrestartFailureBlocks_UsesDefaultImageForEmptyGroupImage(t *t
 	}
 }
 
+func TestApplyTorchPreflightMachineBlocks_ExcludesFailedMachine(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := insertTorchPreflightFailureFixture(t, database, "vastai", "bad-machine")
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "L40S",
+			Jobs:     []*db.Job{job},
+		},
+		Offers: []cloud.Offer{
+			{Provider: cloud.ProviderVastai, ProviderID: "bad-offer", MachineID: "bad-machine", GPUName: "L40S", GPUMemGB: 48},
+			{Provider: cloud.ProviderVastai, ProviderID: "good-offer", MachineID: "good-machine", GPUName: "L40S", GPUMemGB: 48},
+		},
+	}}
+
+	got := applyTorchPreflightMachineBlocks(database, raw)
+
+	if got[0].Err != nil {
+		t.Fatalf("Err = %v, want nil with a fresh machine still available", got[0].Err)
+	}
+	if len(got[0].Offers) != 1 || got[0].Offers[0].ProviderID != "good-offer" {
+		t.Fatalf("Offers = %+v, want only good-offer", got[0].Offers)
+	}
+}
+
+func TestApplyTorchPreflightMachineBlocks_ReportsExhausted(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := insertTorchPreflightFailureFixture(t, database, "vastai", "bad-machine")
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "L40S",
+			Jobs:     []*db.Job{job},
+		},
+		Offers: []cloud.Offer{
+			{Provider: cloud.ProviderVastai, ProviderID: "bad-offer", MachineID: "bad-machine", GPUName: "L40S", GPUMemGB: 48},
+		},
+	}}
+
+	got := applyTorchPreflightMachineBlocks(database, raw)
+
+	if !errors.Is(got[0].Err, ErrTorchPreflightMachinesExhausted) {
+		t.Fatalf("Err = %v, want ErrTorchPreflightMachinesExhausted", got[0].Err)
+	}
+	if len(got[0].Offers) != 0 {
+		t.Fatalf("Offers = %+v, want none after all machines are blocked", got[0].Offers)
+	}
+}
+
 func insertCampaignImageLaunchFixture(t *testing.T, database *sql.DB, image, status, reason, detail string, endedAt, agentReadyAt, onStartSeenAt int64) int64 {
 	t.Helper()
 	id, err := db.CreateLaunch(database, &db.Launch{
@@ -103,4 +150,36 @@ func insertCampaignImageLaunchFixture(t *testing.T, database *sql.DB, image, sta
 		t.Fatalf("update launch fixture: %v", err)
 	}
 	return id
+}
+
+func insertTorchPreflightFailureFixture(t *testing.T, database *sql.DB, provider, machineID string) *db.Job {
+	t.Helper()
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "torch job", "L40S")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:    db.LaunchStatusFailed,
+		Provider:  provider,
+		MachineID: machineID,
+		GPUSpec:   "L40S",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusFailed)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET failure_reason = ? WHERE id = ?`,
+		db.FailureReasonInfraTorchPreflightFailed, attemptID,
+	); err != nil {
+		t.Fatalf("stamp torch preflight failure: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	return job
 }

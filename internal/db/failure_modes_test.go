@@ -39,6 +39,14 @@ func TestClassifyInfraFailure(t *testing.T) {
 			wantInfra: true,
 		},
 		{
+			name:       "torch preflight failure is infra",
+			phase:      PhaseTorchPreflight,
+			exitCode:   1,
+			logTail:    "cuda error: unknown error",
+			wantReason: FailureReasonInfraTorchPreflightFailed,
+			wantInfra:  true,
+		},
+		{
 			name:      "setup timeout exit 124 is infra without reason override",
 			phase:     PhaseSetup,
 			exitCode:  ExitCodeSetupTimeout,
@@ -107,6 +115,7 @@ func TestIsInfraFailureReason(t *testing.T) {
 		FailureReasonInfraPrewarmDownloadFailed:    true,
 		FailureReasonInfraCloudArtifactStageFailed: true,
 		FailureReasonInfraCUDAHardwareFault:        true,
+		FailureReasonInfraTorchPreflightFailed:     true,
 		"setup_timeout":                            false,
 		"error":                                    false,
 		"":                                         false,

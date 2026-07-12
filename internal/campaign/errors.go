@@ -20,6 +20,10 @@ var ErrDistinctMachinesExhausted = errors.New("all distinct machines covered or 
 // otherwise eligible offer.
 var ErrMachineAffinityUnsatisfied = errors.New("no offers on requested machine")
 
+// ErrTorchPreflightMachinesExhausted is returned when every otherwise
+// eligible offer is on a machine that already failed this job's torch preflight.
+var ErrTorchPreflightMachinesExhausted = errors.New("all offers are on machines that already failed torch preflight")
+
 // ErrOfferSnapshotUnavailable is returned when planning is restricted to a
 // cached offer snapshot and no cached result exists for a requested group.
 var ErrOfferSnapshotUnavailable = errors.New("offer fetch unavailable")

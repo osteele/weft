@@ -631,8 +631,24 @@ contract CUDACompatibilityChain {
 -- torch.cuda.is_available(), initialize CUDA, and execute a tiny CUDA operation
 -- on the assigned device. If any step fails, the job fails in setup with a
 -- CUDA/driver diagnosis instead of silently running the user script on CPU.
+-- The failure is infrastructure-side, not user-code failure: the preflight is
+-- owned by Weft and runs before the user command. A failed torch preflight
+-- therefore terminates the instance as infra_failure, resets the job to the
+-- queue, and lets autopilot place it on a fresh instance.
+--
+-- Bounded recovery: a job may be auto-requeued for at most three distinct
+-- instance launches that fail torch preflight. After the third distinct
+-- instance, the job remains failed with a user-visible explanation that the
+-- instance pool appears to have broken CUDA for this workload.
+--
+-- Machine avoidance: when provider machine identity is known, re-placement of
+-- the same job excludes physical machines that already failed its torch
+-- preflight. This prevents bouncing between offers on the same bad GPU.
 -- Implementation: internal/runner/torch_preflight.go runTorchPreflight;
--- internal/runner/single.go (call site before user command).
+-- internal/runner/single.go (call site before user command);
+-- internal/db/failure_modes.go ClassifyInfraFailure(PhaseTorchPreflight);
+-- internal/db/cloud_instances.go ResetLaunchJobs cap logic;
+-- internal/db/placement_transitions.go FailedTorchPreflightMachineIDs.
 
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil
@@ -2351,6 +2367,10 @@ rule RelaunchAfterInfraFailure {
         -- bootstrap_timeout, phase_stall, preempted) are automatically
         -- relaunched on a different provider instance. Job-level failures
         -- (job_failure, disk_full) are not retried automatically.
+        -- Torch CUDA preflight failures are infra_failure because the
+        -- preflight runs before user code; they are auto-retried up to
+        -- three distinct failed instances, with known failed machine_ids
+        -- excluded from subsequent offer selection for that job.
         --
         -- Canceled and killed jobs are excluded: a user-issued cancel/kill
         -- is a durable retraction intent. Carrying those jobs onto the

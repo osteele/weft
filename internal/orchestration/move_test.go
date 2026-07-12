@@ -424,6 +424,59 @@ func TestBuildOptionsWithSurvival_ExcludesFailedMoveMachine(t *testing.T) {
 	}
 }
 
+func TestBuildNewOptionsWithSurvivalAndTelemetry_ExcludesTorchPreflightMachine(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "torch job", "L40S")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	failedLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai", MachineID: "bad-machine"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", &failedLaunch, db.StatusFailed); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET failure_reason = ? WHERE job_id = ? AND launch_id = ?`,
+		db.FailureReasonInfraTorchPreflightFailed, jobID, failedLaunch,
+	); err != nil {
+		t.Fatalf("mark torch preflight failure: %v", err)
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "same-machine-new-offer", Provider: cloud.ProviderVastai, GPUName: "L40S", GPUMemGB: 48, CostPerHour: 0.10, MachineID: "bad-machine", Reliability: 0.99},
+				{ProviderID: "other-machine", Provider: cloud.ProviderVastai, GPUName: "L40S", GPUMemGB: 48, CostPerHour: 0.20, MachineID: "good-machine", Reliability: 0.99},
+			}, nil
+		},
+	}
+
+	options, err := BuildNewOptionsWithSurvivalAndTelemetry(database, []cloud.Client{client}, job, 0, nil, 0, nil)
+	if err != nil {
+		t.Fatalf("BuildNewOptionsWithSurvivalAndTelemetry: %v", err)
+	}
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == "bad-machine" {
+			t.Fatalf("torch-preflight failed machine was returned: %+v", opt.Offer)
+		}
+	}
+	foundGood := false
+	for _, opt := range options {
+		if opt.IsNew && opt.Offer != nil && opt.Offer.MachineID == "good-machine" {
+			foundGood = true
+		}
+	}
+	if !foundGood {
+		t.Fatalf("expected offer from good machine, got %+v", options)
+	}
+}
+
 func TestBuildNewOptionsWithSurvivalAndTelemetry_RecordsOfferSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := &db.Job{

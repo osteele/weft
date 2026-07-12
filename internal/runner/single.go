@@ -261,7 +261,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		if preflightErr != nil {
 			now := time.Now().Unix()
 			phases.SetupEnd = now
-			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+			failureReason, _ := db.ClassifyInfraFailure(db.PhaseTorchPreflight, ei.ExitCode, "")
 			if failureReason == "" {
 				failureReason = FailureReasonTorchPreflight
 			}

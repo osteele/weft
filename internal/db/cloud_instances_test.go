@@ -1676,11 +1676,57 @@ func TestFailedMoveTargetMachineIDs_ReturnsNoStartFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FailedMoveTargetMachineIDs: %v", err)
 	}
-	if _, ok := got["machine-bad"]; !ok {
+	if _, ok := got["vastai/machine-bad"]; !ok {
 		t.Fatalf("machine-bad missing from failed machines: %#v", got)
 	}
-	if _, ok := got["machine-started"]; ok {
+	if _, ok := got["vastai/machine-started"]; ok {
 		t.Fatalf("started target should not be excluded as no-start failure: %#v", got)
+	}
+}
+
+func TestFailedTorchPreflightMachineIDs(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "torch job", "l40s")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	badLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai", MachineID: "bad-machine"})
+	if err != nil {
+		t.Fatalf("CreateLaunch bad: %v", err)
+	}
+	goodLaunch, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai", MachineID: "good-machine"})
+	if err != nil {
+		t.Fatalf("CreateLaunch good: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", &badLaunch, StatusFailed); err != nil {
+		t.Fatalf("CreateAttempt bad: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET failure_reason = ? WHERE job_id = ? AND launch_id = ?`,
+		FailureReasonInfraTorchPreflightFailed, jobID, badLaunch,
+	); err != nil {
+		t.Fatalf("mark bad preflight: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", &goodLaunch, StatusFailed); err != nil {
+		t.Fatalf("CreateAttempt good: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET failure_reason = ? WHERE job_id = ? AND launch_id = ?`,
+		FailureReasonInfraCUDAHardwareFault, jobID, goodLaunch,
+	); err != nil {
+		t.Fatalf("mark good non-preflight failure: %v", err)
+	}
+
+	got, err := FailedTorchPreflightMachineIDs(database, jobID)
+	if err != nil {
+		t.Fatalf("FailedTorchPreflightMachineIDs: %v", err)
+	}
+	if _, ok := got["vastai/bad-machine"]; !ok {
+		t.Fatalf("missing bad-machine exclusion: %#v", got)
+	}
+	if _, ok := got["vastai/good-machine"]; ok {
+		t.Fatalf("unexpected non-preflight machine exclusion: %#v", got)
 	}
 }
 
@@ -1950,6 +1996,49 @@ func TestNormalizeTerminalLaunchJobs_RequeuesCUDAHardwareFaultOnInfraFailure(t *
 	}
 }
 
+func TestNormalizeTerminalLaunchJobs_RequeuesTorchPreflightOnInfraFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "L40S",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraTorchPreflightFailed))
+
+	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 1", n)
+	}
+
+	attempts, err := ListAttempts(database, 1)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("attempt count = %d, want 2: %#v", len(attempts), attempts)
+	}
+	if attempts[0].Status != StatusQueued || attempts[0].LaunchID != nil {
+		t.Fatalf("latest attempt = %+v, want queued unplaced retry", attempts[0])
+	}
+	if attempts[1].Status != StatusFailed || attempts[1].FailureReason != FailureReasonInfraTorchPreflightFailed {
+		t.Fatalf("prior attempt = %+v, want preserved torch preflight failure", attempts[1])
+	}
+}
+
 func TestNormalizeTerminalLaunchJobs_DoesNotAutoRequeueInfraFailureOverBudget(t *testing.T) {
 	database := setupTestDB(t)
 
@@ -1970,14 +2059,29 @@ func TestNormalizeTerminalLaunchJobs_DoesNotAutoRequeueInfraFailureOverBudget(t 
 		withExitCode(1),
 		withFailureReason(FailureReasonInfraCUDAHardwareFault))
 	now := time.Now().Unix()
-	if _, err := database.Exec(`
-		INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, start_time, end_time, exit_code, failure_reason)
-		VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?)`,
-		1, instanceID, StatusFailed, now-20, now-10, now, 1, FailureReasonInfraCUDAHardwareFault); err != nil {
-		t.Fatalf("insert repeated infra attempt: %v", err)
+	currentLaunch := instanceID
+	for attempt := 2; attempt <= AutoRequeueMaxInfraFailureAttempts; attempt++ {
+		retryLaunch, err := CreateLaunch(database, &Launch{
+			Status:   LaunchStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "RTX 4090",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch retry %d: %v", attempt, err)
+		}
+		if err := UpdateLaunchStatus(database, retryLaunch, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+			t.Fatalf("UpdateLaunchStatus retry %d: %v", attempt, err)
+		}
+		if _, err := database.Exec(`
+			INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, start_time, end_time, exit_code, failure_reason)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			1, attempt, retryLaunch, StatusFailed, now-20, now-10, now, 1, FailureReasonInfraCUDAHardwareFault); err != nil {
+			t.Fatalf("insert repeated infra attempt %d: %v", attempt, err)
+		}
+		currentLaunch = retryLaunch
 	}
 
-	n, err := NormalizeTerminalLaunchJobs(database, instanceID)
+	n, err := NormalizeTerminalLaunchJobs(database, currentLaunch)
 	if err != nil {
 		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
 	}
@@ -1998,6 +2102,67 @@ func TestNormalizeTerminalLaunchJobs_DoesNotAutoRequeueInfraFailureOverBudget(t 
 	}
 	if len(attempts) != AutoRequeueMaxInfraFailureAttempts {
 		t.Fatalf("attempt count = %d, want %d", len(attempts), AutoRequeueMaxInfraFailureAttempts)
+	}
+}
+
+func TestNormalizeTerminalLaunchJobs_CappedTorchPreflightAnnotatesFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "L40S",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	insertTestJob(t, database, 1, "python train.py", "/tmp/project", StatusFailed,
+		withLaunch(instanceID),
+		withExitCode(1),
+		withFailureReason(FailureReasonInfraTorchPreflightFailed))
+	now := time.Now().Unix()
+	currentLaunch := instanceID
+	for attempt := 2; attempt <= AutoRequeueMaxInfraFailureAttempts; attempt++ {
+		retryLaunch, err := CreateLaunch(database, &Launch{
+			Status:   LaunchStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "L40S",
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch retry %d: %v", attempt, err)
+		}
+		if err := UpdateLaunchStatus(database, retryLaunch, LaunchStatusFailed, TerminationReasonInfraFailure); err != nil {
+			t.Fatalf("UpdateLaunchStatus retry %d: %v", attempt, err)
+		}
+		if _, err := database.Exec(`
+			INSERT INTO job_attempts (job_id, attempt_number, launch_id, status, queued_at, start_time, end_time, exit_code, failure_reason)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			1, attempt, retryLaunch, StatusFailed, now-20, now-10, now, 1, FailureReasonInfraTorchPreflightFailed); err != nil {
+			t.Fatalf("insert repeated torch preflight attempt %d: %v", attempt, err)
+		}
+		currentLaunch = retryLaunch
+	}
+
+	n, err := NormalizeTerminalLaunchJobs(database, currentLaunch)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("NormalizeTerminalLaunchJobs reset %d jobs, want 0", n)
+	}
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusFailed {
+		t.Fatalf("job status = %q, want failed", job.Status)
+	}
+	if !strings.Contains(job.ErrorMessage, "3 instances failed torch preflight") {
+		t.Fatalf("error message = %q, want capped torch preflight explanation", job.ErrorMessage)
 	}
 }
 
