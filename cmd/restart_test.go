@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -553,6 +554,77 @@ func TestRestartQueuedWithCloudHistory_CreatesFreshAttempt(t *testing.T) {
 	}
 	if priorOutcome != db.AttemptOutcomeSuperseded {
 		t.Fatalf("prior cloud_outcome = %q, want %q", priorOutcome, db.AttemptOutcomeSuperseded)
+	}
+}
+
+func TestRestartQueuedWithCloudHistoryRollsBackMetadataOnFreshAttemptFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "queued retry reset")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	initialReasons := []string{"planner: previous blocker"}
+	if err := db.SetJobPlacementReasons(database, jobID, initialReasons); err != nil {
+		t.Fatalf("set placement reasons: %v", err)
+	}
+
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	attempt1, err := db.CreateAttempt(database, jobID, "", &launchID, db.StatusCanceled)
+	if err != nil {
+		t.Fatalf("create cloud attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ?, status = ?, cloud_outcome = ? WHERE id = ?`,
+		1_699_999_000, 1_700_000_000, db.StatusCanceled, db.AttemptOutcomeOrphaned, attempt1); err != nil {
+		t.Fatalf("close cloud attempt: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create open queued attempt: %v", err)
+	}
+	if _, err := database.Exec(`
+		CREATE TRIGGER fail_retry_attempt
+		BEFORE INSERT ON job_attempts
+		WHEN NEW.job_id = ` + fmt.Sprint(jobID) + ` AND NEW.attempt_number > 2
+		BEGIN
+			SELECT RAISE(FAIL, 'forced retry insert failure');
+		END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	err = restartJob(database, jobID, restartOverrides{GPUClass: "a100", HasAny: true})
+	if err == nil {
+		t.Fatal("restartJob succeeded, want forced trigger failure")
+	}
+	if !strings.Contains(err.Error(), "forced retry insert failure") {
+		t.Fatalf("error = %v, want forced trigger failure", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUClass != "" {
+		t.Fatalf("GPUClass = %q, want rollback to empty", job.GPUClass)
+	}
+	if job.CLIResourceOverrides != nil {
+		t.Fatalf("CLIResourceOverrides = %+v, want nil after rollback", job.CLIResourceOverrides)
+	}
+	if !slices.Equal(job.PlacementReasons, initialReasons) {
+		t.Fatalf("PlacementReasons = %v, want %v", job.PlacementReasons, initialReasons)
+	}
+
+	var attempts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attempts); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempt count = %d, want original two attempts", attempts)
 	}
 }
 

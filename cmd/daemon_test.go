@@ -75,9 +75,11 @@ func TestRunDaemonPrePassSyncTimesOut(t *testing.T) {
 	})
 
 	daemonPrePassSyncGrace = 0
-	daemonSyncAll = func(*sql.DB, *config.Config, syncorch.SyncOptions) syncorch.SyncResult {
-		time.Sleep(time.Minute)
-		return syncorch.SyncResult{AllCompleted: true}
+	workerStopped := make(chan struct{})
+	daemonSyncAll = func(_ *sql.DB, _ *config.Config, opts syncorch.SyncOptions) syncorch.SyncResult {
+		defer close(workerStopped)
+		<-opts.Context.Done()
+		return syncorch.SyncResult{AllCompleted: false}
 	}
 
 	start := time.Now()
@@ -94,6 +96,11 @@ func TestRunDaemonPrePassSyncTimesOut(t *testing.T) {
 	}
 	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "pre-pass sync exceeded") {
 		t.Fatalf("Warnings = %#v, want pre-pass timeout warning", result.Warnings)
+	}
+	select {
+	case <-workerStopped:
+	default:
+		t.Fatal("daemonSyncAll was still running after runDaemonPrePassSync returned")
 	}
 }
 

@@ -59,6 +59,23 @@ daemon exposes a versioned Unix-socket subscription API for repeated reads and
 watch fanout, while CLI JSON/JSONL remains the stable external scripting
 surface. See [Daemon Subscription API](daemon-subscription-api.md).
 
+### Local Mutation Boundary
+
+The local SQLite database remains the correctness boundary for writes. CLI
+commands, the TUI, daemon socket handlers, autopilot, and sync code may all
+write to the same database; correctness comes from SQLite transactions, WAL
+serialization, busy-timeout retry loops, and operation-level idempotency. The
+daemon is not a universal single-writer coordinator.
+
+The daemon's `WriteExecutor` serializes mutation requests that arrive through
+the daemon socket, currently job submission and tag updates. This keeps socket
+handlers from competing with each other for SQLite's single writer slot, but
+it does not order direct CLI writes or daemon-internal autopilot/sync writes.
+Multi-step CLI mutations that must not be observed halfway through, such as
+`weft restart`, must use an explicit transaction around their local database
+updates and must not hold that transaction across SSH, provider, or relay
+calls.
+
 ## Job States
 
 Every job lives in the local SQLite database and transitions through a finite

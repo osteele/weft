@@ -10,7 +10,8 @@ const defaultWriteExecutorQueueSize = 256
 
 // WriteExecutor serializes local DB mutations through one daemon-owned worker.
 // It keeps socket handlers from competing with each other for SQLite's single
-// writer slot and gives the daemon one place to route future background writes.
+// writer slot. Direct CLI writes and daemon-internal autopilot/sync writes use
+// SQLite transactions and retry loops as their correctness boundary.
 type WriteExecutor struct {
 	database *sql.DB
 	jobs     chan writeExecutorJob

@@ -1369,7 +1369,7 @@ func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 }
 
 // SetJobCommand updates the command for a job regardless of status.
-func SetJobCommand(db *sql.DB, id int64, command string) error {
+func SetJobCommand(db dbExecer, id int64, command string) error {
 	_, err := db.Exec(`UPDATE jobs SET command = ? WHERE id = ?`, command, id)
 	return err
 }
@@ -1418,7 +1418,7 @@ func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 }
 
 // SetJobPlacementReasons stores why a job is currently unplaced.
-func SetJobPlacementReasons(db *sql.DB, jobID int64, reasons []string) error {
+func SetJobPlacementReasons(db dbExecer, jobID int64, reasons []string) error {
 	encoded := encodeStringSlice(reasons)
 	_, err := db.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`, encoded, jobID)
 	return err
@@ -1741,23 +1741,30 @@ func RequeueByID(database *sql.DB, id int64) error {
 		return RequeueFreshAttemptByID(database, id, "")
 	}
 
-	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
 	tx, err := database.Begin()
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	if err := RequeueByIDTx(tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RequeueByIDTx is RequeueByID's on-prem branch inside a caller-owned
+// transaction. The caller is responsible for transition validation/logging.
+func RequeueByIDTx(tx *sql.Tx, id int64) error {
+	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
 	now := time.Now().Unix()
 	if err := closeOpenAttempts(tx, id, now); err != nil {
-		tx.Rollback()
 		return err
 	}
 	attemptID, err := createAttemptTx(tx, id, "", nil, StatusQueued)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ? WHERE id = ?`, StatusQueued, attemptID); err != nil {
-		tx.Rollback()
 		return err
 	}
 	// Clear any prior user-cancel/kill intent so the job_status view derives
@@ -1767,10 +1774,9 @@ func RequeueByID(database *sql.DB, id int64) error {
 	// (RequeueFreshAttemptByID) handles this; the on-prem branch did not.
 	// See specs/job-lifecycle.allium UserRequeuesJob.
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
-		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // RequeueFreshAttemptByID creates a fresh queued attempt for manual retries.
@@ -1792,23 +1798,29 @@ func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launch
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	if err := RequeueFreshAttemptByTargetTx(tx, id, host, launchID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RequeueFreshAttemptByTargetTx creates a fresh queued retry attempt inside a
+// caller-owned transaction.
+func RequeueFreshAttemptByTargetTx(tx *sql.Tx, id int64, host string, launchID *int64) error {
 	now := time.Now().Unix()
 	if err := closeOpenAttempts(tx, id, now); err != nil {
-		tx.Rollback()
 		return err
 	}
 	attemptID, err := createAttemptTx(tx, id, host, launchID, StatusQueued)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ?, pending_at = ?, last_synced_status = NULL WHERE id = ?`,
 		StatusQueued, now, attemptID); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
-		tx.Rollback()
 		return err
 	}
 	// Manual retry starts a new launch chain for budgeting purposes.
@@ -1823,10 +1835,9 @@ func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launch
 		   AND COALESCE(cloud_outcome, '') != ?`,
 		AttemptOutcomeSuperseded, id, AttemptOutcomeSuperseded,
 	); err != nil {
-		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 // MoveQueuedJobToUnplaced clears a queued job's host assignment and promotes it
@@ -1921,29 +1932,35 @@ func (j *Job) HasTagHostConflict() bool {
 func ResetJobToUnplaced(database *sql.DB, jobID int64) error {
 	job, _ := GetJobByID(database, jobID)
 
-	now := time.Now().Unix()
 	tx, err := database.Begin()
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
+	if err := ResetJobToUnplacedTx(tx, jobID, job); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ResetJobToUnplacedTx resets a single job to unplaced state inside a
+// caller-owned transaction.
+func ResetJobToUnplacedTx(tx *sql.Tx, jobID int64, job *Job) error {
+	now := time.Now().Unix()
 	if err := closeAttemptsAndRequeue(tx, jobID, now); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
 		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
-		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func resetJobPlacementReasons(job *Job) []string {
@@ -2174,7 +2191,7 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, dep
 }
 
 // SetJobGPU updates the GPU field for a job
-func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
+func SetJobGPU(db dbExecer, jobID int64, gpu string) error {
 	_, err := db.Exec(`UPDATE jobs SET gpu = ? WHERE id = ?`, gpu, jobID)
 	return err
 }

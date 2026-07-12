@@ -6,7 +6,12 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func updateJobCLIResourceOverrides(database *sql.DB, job *db.Job, update func(*db.CLIResourceOverrides)) error {
+type restartExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func updateJobCLIResourceOverrides(database restartExecer, job *db.Job, update func(*db.CLIResourceOverrides)) error {
 	snap := cloneCLIResourceOverrides(job.CLIResourceOverrides)
 	update(snap)
 	if err := db.SetJobCLIResourceOverrides(database, job.ID, snap); err != nil {
@@ -56,7 +61,7 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 	return &clone
 }
 
-func setJobCLIGPUOverride(database *sql.DB, job *db.Job, gpu string) error {
+func setJobCLIGPUOverride(database restartExecer, job *db.Job, gpu string) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.GPU = gpu
 		if gpu != "" {
@@ -65,7 +70,7 @@ func setJobCLIGPUOverride(database *sql.DB, job *db.Job, gpu string) error {
 	})
 }
 
-func setJobCLIGPUClassOverride(database *sql.DB, job *db.Job, gpuClass string) error {
+func setJobCLIGPUClassOverride(database restartExecer, job *db.Job, gpuClass string) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.GPUClass = gpuClass
 		if gpuClass != "" {
@@ -74,7 +79,7 @@ func setJobCLIGPUClassOverride(database *sql.DB, job *db.Job, gpuClass string) e
 	})
 }
 
-func setJobCLIGPUMemOverride(database *sql.DB, job *db.Job, gpuMemGB *int) error {
+func setJobCLIGPUMemOverride(database restartExecer, job *db.Job, gpuMemGB *int) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.GPUMemGB = cloneGPUMemPtr(gpuMemGB)
 		if gpuMemGB == nil {
@@ -89,32 +94,32 @@ func setJobCLIGPUMemOverride(database *sql.DB, job *db.Job, gpuMemGB *int) error
 	})
 }
 
-func setJobCLIGPUMemStrictOverride(database *sql.DB, job *db.Job, strict bool) error {
+func setJobCLIGPUMemStrictOverride(database restartExecer, job *db.Job, strict bool) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		v := strict
 		snap.GPUMemStrict = &v
 	})
 }
 
-func setJobCLIDiskOverride(database *sql.DB, job *db.Job, diskGB *int) error {
+func setJobCLIDiskOverride(database restartExecer, job *db.Job, diskGB *int) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.DiskGB = cloneIntPtr(diskGB)
 	})
 }
 
-func setJobCLIRuntimeDiskOverride(database *sql.DB, job *db.Job, runtimeDiskGB *int) error {
+func setJobCLIRuntimeDiskOverride(database restartExecer, job *db.Job, runtimeDiskGB *int) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.RuntimeDiskGB = cloneIntPtr(runtimeDiskGB)
 	})
 }
 
-func setJobCLIRunpodCloudTypeOverride(database *sql.DB, job *db.Job, cloudType string) error {
+func setJobCLIRunpodCloudTypeOverride(database restartExecer, job *db.Job, cloudType string) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.RunpodCloudType = cloudType
 	})
 }
 
-func setJobCLIMinSurvivalOverride(database *sql.DB, job *db.Job, minSurvival float64) error {
+func setJobCLIMinSurvivalOverride(database restartExecer, job *db.Job, minSurvival float64) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		v := minSurvival
 		snap.MinSurvival = &v

@@ -1,6 +1,7 @@
 package syncorch
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -24,6 +25,10 @@ type HostSyncResult struct {
 var hostSyncFn = syncHostWithTimeoutDetailed
 
 func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	hosts := uniqueHosts(opts.Hosts)
 	if len(hosts) == 0 {
 		var err error
@@ -91,6 +96,11 @@ func SyncHosts(database *sql.DB, opts SyncOptions) HostSyncResult {
 				result.Reached++
 				result.Warnings = append(result.Warnings, hostSyncWarnings(host, out.res)...)
 			case <-time.After(hostTimeout):
+				mu.Lock()
+				result.Completed = false
+				result.Slow = append(result.Slow, host)
+				mu.Unlock()
+			case <-ctx.Done():
 				mu.Lock()
 				result.Completed = false
 				result.Slow = append(result.Slow, host)

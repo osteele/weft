@@ -130,6 +130,10 @@ test-all:
 test-verbose:
     cgo-test -short -v ./...
 
+# Run race-detector coverage for daemon/local mutation boundaries and shared DB writers
+test-race:
+    cgo-test -race ./internal/daemonapi ./internal/localmutate ./internal/db ./internal/orchestration
+
 # Regenerate internal/db/testdata/schema.txt, the table-schema golden the
 # schema-guard test compares against. Run after a goose migration intentionally
 # changes the schema.

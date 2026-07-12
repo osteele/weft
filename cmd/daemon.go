@@ -262,29 +262,23 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 }
 
 func runDaemonPrePassSync(ctx context.Context, database *sql.DB, cfg *config.Config, opts syncorch.SyncOptions) syncorch.SyncResult {
-	done := make(chan syncorch.SyncResult, 1)
-	go func() {
-		done <- daemonSyncAll(database, cfg, opts)
-	}()
-
 	budget := daemonPrePassSyncBudget(opts)
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
+	syncCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	opts.Context = syncCtx
 
-	select {
-	case result := <-done:
-		return result
-	case <-ctx.Done():
+	result := daemonSyncAll(database, cfg, opts)
+	if ctx.Err() != nil {
 		return syncorch.SyncResult{
 			Warnings:     []string{"daemon pre-pass sync canceled; continuing shutdown"},
 			AllCompleted: false,
 		}
-	case <-timer.C:
-		return syncorch.SyncResult{
-			Warnings:     []string{fmt.Sprintf("daemon pre-pass sync exceeded %s; continuing to autopilot", budget.Truncate(time.Second))},
-			AllCompleted: false,
-		}
 	}
+	if syncCtx.Err() != nil && !result.AllCompleted {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("daemon pre-pass sync exceeded %s; continuing to autopilot", budget.Truncate(time.Second)))
+		result.AllCompleted = false
+	}
+	return result
 }
 
 func daemonPrePassSyncBudget(opts syncorch.SyncOptions) time.Duration {

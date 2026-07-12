@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,6 +95,62 @@ func TestRecordQueuedJobUsesMutationBeforeLegacySubmit(t *testing.T) {
 	}
 	if job == nil || job.Command != "echo daemon" || job.Description != "daemon mutation" {
 		t.Fatalf("job = %+v", job)
+	}
+}
+
+func TestConcurrentDaemonAndDirectSubmissions(t *testing.T) {
+	database := db.SetupTestDB(t)
+	socketPath := testDaemonSocketPath(t)
+	server, err := daemonapi.StartServerWithOptions(t.Context(), database, socketPath, daemonapi.ServerOptions{
+		Mutate: Handler,
+	})
+	if err != nil {
+		t.Fatalf("StartServerWithOptions: %v", err)
+	}
+	defer server.Close()
+	withTestDaemon(t, socketPath)
+
+	const n = 20
+	errs := make(chan error, 2*n)
+	var wg sync.WaitGroup
+	for i := range n {
+		i := i
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := RecordQueuedJob(context.Background(), database, ops.QueueJobParams{
+				WorkingDir:  "/tmp/project",
+				Command:     fmt.Sprintf("echo daemon %d", i),
+				Description: "daemon stress",
+				SubmitToken: fmt.Sprintf("daemon-stress-%d", i),
+			})
+			errs <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
+				WorkingDir:  "/tmp/project",
+				Command:     fmt.Sprintf("echo direct %d", i),
+				Description: "direct stress",
+				SubmitToken: fmt.Sprintf("direct-stress-%d", i),
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent submission failed: %v", err)
+		}
+	}
+
+	var jobs int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM jobs WHERE tombstoned = 0`).Scan(&jobs); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobs != 2*n {
+		t.Fatalf("job count = %d, want %d", jobs, 2*n)
 	}
 }
 

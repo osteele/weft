@@ -10,10 +10,15 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // RefreshProjectDerivedMetadata updates a job's stored inputs and output dirs
 // from the current project config and source scans, while preserving any
 // existing explicit input declarations already recorded on the job.
-func RefreshProjectDerivedMetadata(database *sql.DB, job *db.Job) error {
+func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
 	jobID, command := job.ID, job.Command
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 

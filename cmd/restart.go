@@ -300,7 +300,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	return out, nil
 }
 
-func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverrides) ([]string, error) {
+func applyRestartOverrides(database restartExecer, job *db.Job, overrides restartOverrides) ([]string, error) {
 	var strictOverride *bool
 	if overrides.HasGPUMemStrict {
 		strictOverride = &overrides.GPUMemStrict
@@ -432,7 +432,7 @@ func applyRestartOverrides(database *sql.DB, job *db.Job, overrides restartOverr
 	return updates, nil
 }
 
-func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool) ([]string, error) {
+func applyScriptGPUDefaults(database restartExecer, job *db.Job, strictOverride *bool) ([]string, error) {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	meta, err := dataloc.ScanScriptMeta(localDir, job.Command)
 	if err != nil {
@@ -591,7 +591,7 @@ func applyScriptGPUDefaults(database *sql.DB, job *db.Job, strictOverride *bool)
 	return updates, nil
 }
 
-func applyScriptDiskDefaults(database *sql.DB, job *db.Job) ([]string, error) {
+func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, error) {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	meta, err := dataloc.ScanScriptMeta(localDir, job.Command)
 	if err != nil {
@@ -672,7 +672,7 @@ func sameDiskMetadata(a, b *db.JobDiskMetadata) bool {
 	return a.DiskGB == b.DiskGB && a.RuntimeDiskGB == b.RuntimeDiskGB
 }
 
-func setJobDiskMetadata(database *sql.DB, job *db.Job, disk *db.JobDiskMetadata) error {
+func setJobDiskMetadata(database restartExecer, job *db.Job, disk *db.JobDiskMetadata) error {
 	meta := cloneJobMetadata(job.Metadata)
 	if meta == nil {
 		meta = &db.JobMetadata{}
@@ -743,24 +743,11 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return db.ErrJobNotFound
 	}
 
-	// Validate job can be retried
 	effectiveStatus := job.EffectiveStatus()
+	oldStatus := job.Status
 	if effectiveStatus == db.StatusQueued {
-		updates, err := applyRestartOverrides(database, job, overrides)
-		if err != nil {
-			return err
-		}
 		if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 			return err
-		}
-		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
-			return err
-		}
-		if len(updates) > 0 {
-			if err := db.SetJobPlacementReasons(database, job.ID, nil); err != nil {
-				return fmt.Errorf("clear stale placement reasons: %w", err)
-			}
-			job.PlacementReasons = nil
 		}
 		queuedEnded := job.EndTime != nil && *job.EndTime > 0
 		cloudAttemptCount, err := db.CountLaunchAttempts(database, jobID)
@@ -769,6 +756,55 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		hasCloudRetryHistory := cloudAttemptCount > 0
 		shouldForceFreshAttempt := queuedEnded || hasCloudRetryHistory || restartFromScratch
+		var retryHost string
+		var retryLaunchID *int64
+		if shouldForceFreshAttempt {
+			retryHost, retryLaunchID, err = resolveRetryTarget(database, job)
+			if err != nil {
+				return err
+			}
+		}
+
+		var updates []string
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			var err error
+			updates, err = applyRestartOverrides(tx, job, overrides)
+			if err != nil {
+				return err
+			}
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if len(updates) > 0 {
+				if err := db.SetJobPlacementReasons(tx, job.ID, nil); err != nil {
+					return fmt.Errorf("clear stale placement reasons: %w", err)
+				}
+				job.PlacementReasons = nil
+			}
+			if !shouldForceFreshAttempt && len(updates) == 0 {
+				return nil
+			}
+			if shouldForceFreshAttempt {
+				if job.HasTag(db.ProcessedTag) {
+					if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+						return fmt.Errorf("remove processed tag: %w", err)
+					}
+				}
+				if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
+					return fmt.Errorf("create fresh queued attempt: %w", err)
+				}
+				if err := db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+					return fmt.Errorf("carry retry metadata: %w", err)
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+
 		if !shouldForceFreshAttempt && len(updates) == 0 {
 			fmt.Printf("Job %s is already queued; metadata refreshed, changed sources will be re-synced on dispatch\n", ids.FormatJobID(jobID))
 			tryResumeRunawayBreaker(database, job)
@@ -776,25 +812,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 
 		if shouldForceFreshAttempt {
-			// Remove processed tag so the retried job appears in unprocessed listings.
-			if job.HasTag(db.ProcessedTag) {
-				if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {
-					return fmt.Errorf("remove processed tag: %w", err)
-				}
-			}
-
-			retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
-			if err != nil {
-				return err
-			}
-			if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
-				return fmt.Errorf("create fresh queued attempt: %w", err)
-			}
-			if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
-				return fmt.Errorf("carry retry metadata: %w", err)
-			}
 			_ = logcache.Delete(jobID)
-
 			fmt.Printf("Restarted queued job %s (fresh retry attempt)\n", ids.FormatJobID(jobID))
 			fmt.Printf("  Retry budget reset\n")
 			fmt.Printf("  Source metadata refreshed; changed sources will be re-synced on dispatch\n")
@@ -820,42 +838,47 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if job.Command == "" {
 		return fmt.Errorf("job missing command")
 	}
-
-	updates, err := applyRestartOverrides(database, job, overrides)
-	if err != nil {
-		return err
-	}
 	if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 		return err
 	}
 
-	// Remove processed tag so the retried job appears in unprocessed listings
-	if job.HasTag(db.ProcessedTag) {
-		if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {
-			return fmt.Errorf("remove processed tag: %w", err)
-		}
-	}
-
 	// Cloud jobs: reset to unplaced (the original instance is gone)
 	if job.IsLaunchJob() {
-		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
-			return err
-		}
 		retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
 		if err != nil {
 			return err
 		}
-		if retryHost != "" || retryLaunchID != nil {
-			if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
-				return fmt.Errorf("create fresh queued attempt: %w", err)
-			}
-		} else {
-			if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+		var updates []string
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			var err error
+			updates, err = applyRestartOverrides(tx, job, overrides)
+			if err != nil {
 				return err
 			}
-		}
-		if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
-			return fmt.Errorf("carry retry metadata: %w", err)
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if job.HasTag(db.ProcessedTag) {
+				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if retryHost != "" || retryLaunchID != nil {
+				if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
+					return fmt.Errorf("create fresh queued attempt: %w", err)
+				}
+			} else if err := db.ResetJobToUnplacedTx(tx, jobID, job); err != nil {
+				return err
+			}
+			if err := db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+				return fmt.Errorf("carry retry metadata: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued\n", ids.FormatJobID(jobID))
@@ -870,14 +893,30 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if !job.HasInventoryHost() {
 		// Unplaced terminal jobs can always be retried. Missing host only
 		// disqualifies inventory-pinned retries (handled by HasInventoryHost).
-		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			if _, err := applyRestartOverrides(tx, job, overrides); err != nil {
+				return err
+			}
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if job.HasTag(db.ProcessedTag) {
+				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if err := db.ResetJobToUnplacedTx(tx, jobID, job); err != nil {
+				return err
+			}
+			if err := db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+				return fmt.Errorf("carry retry metadata: %w", err)
+			}
+			return nil
+		}); err != nil {
 			return err
-		}
-		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
-			return err
-		}
-		if err := db.SetJobMetadata(database, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
-			return fmt.Errorf("carry retry metadata: %w", err)
 		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued (unplaced job)\n", ids.FormatJobID(jobID))
@@ -891,19 +930,36 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled/completed jobs can be retried", effectiveStatus)
 	}
 
-	oldStatus := job.Status
-
 	cfg, relayClient, err := loadCoordinatorRelay()
 	if err != nil {
 		return err
 	}
 	if relayEnabled(cfg, relayClient) {
-		// Refresh here since the relay path bypasses ops.RequeueJob (which does its own refresh).
-		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
-			slog.Warn("failed to refresh metadata", "error", err)
-		}
-		if err := db.RequeueByID(database, jobID); err != nil {
-			return fmt.Errorf("update status to queued: %w", err)
+		var updates []string
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			var err error
+			updates, err = applyRestartOverrides(tx, job, overrides)
+			if err != nil {
+				return err
+			}
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if job.HasTag(db.ProcessedTag) {
+				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+			// Refresh here since the relay path bypasses ops.RequeueJob.
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if err := db.RequeueByIDTx(tx, jobID); err != nil {
+				return fmt.Errorf("update status to queued: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		_ = logcache.Delete(jobID)
 		ack, err := relayRequeueJob(cfg, relayClient, job)
@@ -913,6 +969,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		fmt.Printf("Restarted job %s via legacy relay\n", ids.FormatJobID(jobID))
 		fmt.Printf("  Status: %s → queued\n", oldStatus)
 		printRestartModeLine()
+		for _, update := range updates {
+			fmt.Printf("  %s\n", update)
+		}
 		if ack != nil && ack.Message != "" {
 			fmt.Printf("  relay: %s\n", ack.Message)
 		}
@@ -924,37 +983,123 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return err
 	}
 	if retryHost != "" || retryLaunchID != nil {
-		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
+		var updates []string
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			var err error
+			updates, err = applyRestartOverrides(tx, job, overrides)
+			if err != nil {
+				return err
+			}
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if job.HasTag(db.ProcessedTag) {
+				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
+				return fmt.Errorf("create fresh queued attempt: %w", err)
+			}
+			return nil
+		}); err != nil {
 			return err
-		}
-		if err := db.RequeueFreshAttemptByTarget(database, jobID, retryHost, retryLaunchID); err != nil {
-			return fmt.Errorf("create fresh queued attempt: %w", err)
 		}
 		_ = logcache.Delete(jobID)
+		fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
+		fmt.Printf("  Status: %s → queued\n", oldStatus)
+		printRestartModeLine()
+		for _, update := range updates {
+			fmt.Printf("  %s\n", update)
+		}
+		if job.Description != "" {
+			fmt.Printf("  Description: %s\n", job.Description)
+		}
+		if len(job.EnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(job.EnvVars))
+		}
+		return nil
 	} else {
-		result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
-		if err != nil {
+		var updates []string
+		var message string
+		if err := withRestartTx(database, func(tx *sql.Tx) error {
+			var err error
+			updates, err = applyRestartOverrides(tx, job, overrides)
+			if err != nil {
+				return err
+			}
+			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
+				return err
+			}
+			if job.HasTag(db.ProcessedTag) {
+				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
+					return fmt.Errorf("remove processed tag: %w", err)
+				}
+			}
+			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+				return err
+			}
+			if err := db.RequeueByIDTx(tx, jobID); err != nil {
+				return fmt.Errorf("update status to queued: %w", err)
+			}
+			message = fmt.Sprintf("Job %s requeued locally; source sync + dispatch will run on next host sync", ids.FormatJobID(job.ID))
+			return nil
+		}); err != nil {
 			return err
 		}
-		if result.Deferred {
-			if result.Message != "" {
-				fmt.Println(result.Message)
-			}
+		if message != "" {
+			fmt.Println(message)
+		}
+		_ = logcache.Delete(jobID)
+		fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
+		fmt.Printf("  Status: %s → queued\n", oldStatus)
+		printRestartModeLine()
+		for _, update := range updates {
+			fmt.Printf("  %s\n", update)
+		}
+		if job.Description != "" {
+			fmt.Printf("  Description: %s\n", job.Description)
+		}
+		if len(job.EnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(job.EnvVars))
+		}
+		return nil
+	}
+}
+
+func withRestartTx(database *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func removeJobTagFromLoaded(database restartExecer, job *db.Job, tag string) error {
+	tag = db.CanonicalizeTag(tag)
+	if tag == "" {
+		return fmt.Errorf("tag cannot be empty")
+	}
+	if job == nil || len(job.Tags) == 0 {
+		return nil
+	}
+	updated := make([]string, 0, len(job.Tags))
+	for _, existing := range job.Tags {
+		if existing != tag {
+			updated = append(updated, existing)
 		}
 	}
-
-	fmt.Printf("Restarted job %s on %s\n", ids.FormatJobID(jobID), job.Host)
-	fmt.Printf("  Status: %s → queued\n", oldStatus)
-	printRestartModeLine()
-	for _, update := range updates {
-		fmt.Printf("  %s\n", update)
+	if err := db.SetJobTags(database, job.ID, updated); err != nil {
+		return err
 	}
-	if job.Description != "" {
-		fmt.Printf("  Description: %s\n", job.Description)
-	}
-	if len(job.EnvVars) > 0 {
-		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(job.EnvVars))
-	}
+	job.Tags = updated
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package syncorch
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ const (
 )
 
 type SyncOptions struct {
+	Context           context.Context
 	Hosts             []string
 	SSHTimeout        time.Duration
 	HostTimeout       time.Duration
@@ -47,6 +49,11 @@ type SyncResult struct {
 }
 
 func SyncAll(database *sql.DB, cfg *config.Config, opts SyncOptions) SyncResult {
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opts.Context = ctx
 	var hostResult HostSyncResult
 	var cloudResult CloudSyncResult
 	var wg sync.WaitGroup
@@ -62,6 +69,7 @@ func SyncAll(database *sql.DB, cfg *config.Config, opts SyncOptions) SyncResult 
 		go func() {
 			defer wg.Done()
 			cloudOpts := CloudSyncOptions{
+				Context:     ctx,
 				Timeout:     opts.CloudTimeout,
 				Verbose:     opts.Verbose,
 				Reconciler:  opts.Reconciler,
