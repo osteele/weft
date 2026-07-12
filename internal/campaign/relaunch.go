@@ -405,6 +405,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	rawOffers := FetchGroupRawOffers(cfg.Clients, groups, minReliability)
 	driverExclusionSummaries := applyDriverFailureExclusions(cfg.Database, r2Client, rawOffers)
 	groupOffers := RankGroupOffersWithPredictor(rawOffers, cfg.PredictorConfig, cfg.SurvivalModel, cfg.SetupFactory, strategy, cfg.MinSurvival)
+	RecordOfferAvailabilitySnapshots(cfg.Database, rawOffers, groupOffers, minReliability)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup

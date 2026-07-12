@@ -76,6 +76,7 @@ func AutoPlannerOptions(cfg *config.Config) PlanOptions {
 	opts := defaultPlanOptions()
 	if cfg != nil {
 		opts.OpportunityCostWeight = cfg.CampaignOpportunityCostWeight()
+		opts.MinReliability = cfg.CampaignReliability()
 	}
 	return opts
 }

@@ -320,15 +320,16 @@ invariant LaunchAndRebalanceObjectivesAreDistinct {
 -- Each item below is a CURRENT limitation recorded on purpose, so a gap
 -- analysis reads intent rather than inferring an oversight.
 --
--- 1. No historical stock-availability model. Offers are fetched live each
---    pass and cached only within that pass; there is no persisted offer /
---    market-price history and no model of how likely a SKU is to be
---    available. Unavailability is handled reactively: a failed fetch is
---    "unknown", not "empty" (see campaign-lifecycle.allium
---    OfferFetchFailureIsUnknownNotEmpty). Planned work: telemetry collection
---    in lab-notebook/plans/2026-07-12-launch-objective-now.md; the model in
---    lab-notebook/plans/backlog/2026-07-12-scheduler-economics-later.md
---    Part 1.
+-- 1. No historical stock-availability model. Planning offers are fetched live
+--    each pass and cached only within that pass. Weft records compact,
+--    rate-limited offer-availability snapshots for later modeling, but the
+--    current launch objective does not consume that history and does not model
+--    how likely a SKU is to be available. Unavailability is handled
+--    reactively: a failed fetch is "unknown", not "empty" (see
+--    campaign-lifecycle.allium OfferFetchFailureIsUnknownNotEmpty). Planned
+--    work: the model in
+--    lab-notebook/plans/backlog/2026-07-12-scheduler-economics-later.md Part
+--    1.
 --
 -- 2. No wait / defer action. Every pass either launches now or blocks with a
 --    reason; there is no option-value-of-waiting model that would hold a job

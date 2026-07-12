@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1308,6 +1309,127 @@ func searchAllProvidersWithDiagnostics(clients []cloud.Client, constraints cloud
 // Returns unranked offers suitable for caching and later ranking by strategy.
 func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup, minReliability float64) []GroupRawOffers {
 	return newOfferSearchSession(clients, minReliability).fetchGroupRawOffers(groups)
+}
+
+// RecordOfferAvailabilitySnapshots persists compact, rate-limited offer
+// availability observations for later stock-availability modeling. It is
+// best-effort telemetry: callers must not let a write failure affect planning.
+func RecordOfferAvailabilitySnapshots(database *sql.DB, raw []GroupRawOffers, ranked []GroupOffer, minReliability float64) {
+	if database == nil || len(raw) == 0 {
+		return
+	}
+	filteredByKey := make(map[string]int, len(ranked))
+	for _, offer := range ranked {
+		key := GroupRawOfferCacheKey(offer.Group, minReliability)
+		if offer.FilterStats.AfterSurvival > 0 {
+			filteredByKey[key] = offer.FilterStats.AfterSurvival
+			continue
+		}
+		if _, ok := filteredByKey[key]; !ok {
+			filteredByKey[key] = 0
+		}
+	}
+	for _, groupRaw := range raw {
+		if groupRaw.Err != nil {
+			continue
+		}
+		key := GroupRawOfferCacheKey(groupRaw.Group, minReliability)
+		postFilter := filteredByKey[key]
+		snapshot := offerAvailabilitySnapshotForGroup(groupRaw.Group, groupRaw.Offers, minReliability, &postFilter, groupRaw.ProviderErrors)
+		if err := db.RecordOfferAvailabilitySnapshot(database, snapshot); err != nil {
+			slog.Debug("record offer availability snapshot failed", "component", "campaign", "error", err)
+		}
+	}
+}
+
+func offerAvailabilitySnapshotForGroup(group InstanceGroup, offers []cloud.Offer, minReliability float64, postFilterCount *int, providerErrors []string) db.OfferAvailabilitySnapshot {
+	minCents, medianCents, p75Cents := OfferPriceQuantilesCents(offers)
+	constraints := offerConstraintsForGroup(group, minReliability)
+	return db.OfferAvailabilitySnapshot{
+		Provider:         strings.TrimSpace(group.Provider),
+		GPUClass:         strings.TrimSpace(constraints.GPUClass),
+		GPUMemBucketGB:   constraints.MinGPUMemGB,
+		DiskBucketGB:     constraints.MinDiskGB,
+		NumGPUs:          normalizedGPUCount(constraints.NumGPUs),
+		Interconnect:     strings.TrimSpace(constraints.Interconnect),
+		InstanceType:     strings.TrimSpace(constraints.InstanceType),
+		RunpodCloudType:  strings.TrimSpace(constraints.RunpodCloudType),
+		MinReliability:   minReliability,
+		OfferCount:       len(offers),
+		PostFilterCount:  postFilterCount,
+		PriceMinCents:    positiveIntPtr(minCents),
+		PriceMedianCents: positiveIntPtr(medianCents),
+		PriceP75Cents:    positiveIntPtr(p75Cents),
+		Details:          offerAvailabilityDetails(offers, providerErrors),
+	}
+}
+
+func offerAvailabilityDetails(offers []cloud.Offer, providerErrors []string) map[string]any {
+	counts := make(map[string]int)
+	for _, offer := range offers {
+		provider := strings.TrimSpace(string(offer.Provider))
+		if provider == "" {
+			provider = "unknown"
+		}
+		counts[provider]++
+	}
+	details := map[string]any{
+		"provider_offer_counts": counts,
+	}
+	if len(providerErrors) > 0 {
+		details["provider_errors"] = append([]string(nil), providerErrors...)
+	}
+	return details
+}
+
+// OfferPriceQuantilesCents returns min, median, and p75 $/hr prices in cents
+// for currently visible offers. Zero values mean no priced offers were present.
+func OfferPriceQuantilesCents(offers []cloud.Offer) (int, int, int) {
+	if len(offers) == 0 {
+		return 0, 0, 0
+	}
+	cents := make([]int, 0, len(offers))
+	for _, offer := range offers {
+		if offer.CostPerHour <= 0 {
+			continue
+		}
+		cents = append(cents, int(offer.CostPerHour*100+0.5))
+	}
+	if len(cents) == 0 {
+		return 0, 0, 0
+	}
+	sort.Ints(cents)
+	return cents[0], percentileSortedInts(cents, 0.5), percentileSortedInts(cents, 0.75)
+}
+
+func percentileSortedInts(values []int, p float64) int {
+	if len(values) == 0 {
+		return 0
+	}
+	if len(values) == 1 {
+		return values[0]
+	}
+	if p <= 0 {
+		return values[0]
+	}
+	if p >= 1 {
+		return values[len(values)-1]
+	}
+	idx := int(math.Ceil(p*float64(len(values)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
+}
+
+func positiveIntPtr(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+	return &v
 }
 
 // SetupOverheadFactory builds per-group OfferSetupFuncs. If nil, a constant

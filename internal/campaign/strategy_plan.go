@@ -52,10 +52,11 @@ type PlanOptions struct {
 	MachineAffinity        map[string]struct{}
 	RawOffers              []GroupRawOffers
 	CachedOffersOnly       bool
+	MinReliability         float64
 }
 
 func defaultPlanOptions() PlanOptions {
-	return PlanOptions{OpportunityCostWeight: 1.0}
+	return PlanOptions{OpportunityCostWeight: 1.0, MinReliability: cloud.DefaultMinReliability}
 }
 
 func (p StrategyPlan) HasReuse() bool {
@@ -318,6 +319,9 @@ func BuildProfilePlansWithProgressAndOptions(
 			reusable = caps
 		}
 	}
+	if options.MinReliability == 0 {
+		options.MinReliability = minReliability
+	}
 
 	splitRaw := make([]GroupRawOffers, len(splitGroups))
 	for i, g := range splitGroups {
@@ -461,6 +465,9 @@ func BuildProfilePlansFromSplitRawWithPlanSpecsAndOptions(
 	onProgress PlanProgressFunc,
 	options PlanOptions,
 ) map[string]StrategyPlan {
+	if options.MinReliability == 0 {
+		options.MinReliability = minReliability
+	}
 	var offerSession *offerSearchSession
 	switch {
 	case len(clients) > 0 || options.CachedOffersOnly:
@@ -547,6 +554,9 @@ func buildProfilePlansFromSplitRawWithSession(
 	rawEvalDur := time.Since(rawEvalStart)
 
 	workerLimit := planProfileWorkerLimit(len(validSpecs))
+	telemetryOffers, _ := evaluator.selectOffers(splitEval, validSpecs[0].Profile)
+	RecordOfferAvailabilitySnapshots(database, splitRaw, telemetryOffers, options.MinReliability)
+
 	sem := make(chan struct{}, workerLimit)
 	var mu sync.Mutex
 	var wg sync.WaitGroup

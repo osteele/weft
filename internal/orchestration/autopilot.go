@@ -1496,7 +1496,7 @@ func launchMoveIntentRetry(ctx context.Context, database *sql.DB, intent *db.Mov
 	if err != nil {
 		return 0, err
 	}
-	options, err := BuildOptionsWithSurvival(clients, job, capacities, queuedCounts, sourceLaunchID, cfg.CampaignReliability(), buildSurvivalModel(database), 0.4, excludedMachines)
+	options, err := BuildOptionsWithSurvivalAndTelemetry(database, clients, job, capacities, queuedCounts, sourceLaunchID, cfg.CampaignReliability(), buildSurvivalModel(database), 0.4, excludedMachines)
 	if err != nil {
 		return 0, err
 	}

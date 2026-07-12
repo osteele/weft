@@ -424,6 +424,46 @@ func TestBuildOptionsWithSurvival_ExcludesFailedMoveMachine(t *testing.T) {
 	}
 }
 
+func TestBuildNewOptionsWithSurvivalAndTelemetry_RecordsOfferSnapshot(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job := &db.Job{
+		ID:       1906,
+		Status:   db.StatusQueued,
+		GPUClass: "A100",
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{
+				{ProviderID: "vast-1", Provider: cloud.ProviderVastai, GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 0.20, Reliability: 0.99},
+			}, nil
+		},
+	}
+
+	options, err := BuildNewOptionsWithSurvivalAndTelemetry(database, []cloud.Client{client}, job, 0.95, nil, 0, nil)
+	if err != nil {
+		t.Fatalf("BuildNewOptionsWithSurvivalAndTelemetry: %v", err)
+	}
+	if len(options) == 0 {
+		t.Fatal("expected at least one move-to-new option")
+	}
+	var count, offers int
+	var details string
+	if err := database.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(offer_count), 0), COALESCE(MAX(details_json), '')
+		FROM offer_availability_snapshots
+		WHERE gpu_class = 'A100'`,
+	).Scan(&count, &offers, &details); err != nil {
+		t.Fatalf("query offer snapshot: %v", err)
+	}
+	if count != 1 || offers != 1 {
+		t.Fatalf("snapshot count=%d offers=%d, want count=1 offers=1", count, offers)
+	}
+	if !strings.Contains(details, `"provider_offer_counts":{"vastai":1}`) {
+		t.Fatalf("details_json = %s, want vastai provider count", details)
+	}
+}
+
 func TestUnplaceIfNeeded_AlreadyUnplaced(t *testing.T) {
 	database := db.SetupTestDB(t)
 

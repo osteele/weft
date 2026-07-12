@@ -547,6 +547,24 @@ table named_assets
   col 7 updated_at INTEGER notnull=1 default=<none> pk=0
   col 8 content_type TEXT notnull=1 default='file' pk=0
   unique-index (name) origin=u partial=0
+table offer_availability_snapshots
+  col 0 id INTEGER notnull=0 default=<none> pk=1
+  col 1 created_at INTEGER notnull=1 default=<none> pk=0
+  col 2 provider TEXT notnull=1 default='' pk=0
+  col 3 gpu_class TEXT notnull=1 default='' pk=0
+  col 4 gpu_mem_bucket_gb INTEGER notnull=1 default=0 pk=0
+  col 5 disk_bucket_gb INTEGER notnull=1 default=0 pk=0
+  col 6 num_gpus INTEGER notnull=1 default=1 pk=0
+  col 7 interconnect TEXT notnull=1 default='' pk=0
+  col 8 instance_type TEXT notnull=1 default='' pk=0
+  col 9 runpod_cloud_type TEXT notnull=1 default='' pk=0
+  col 10 min_reliability REAL notnull=1 default=0 pk=0
+  col 11 offer_count INTEGER notnull=1 default=0 pk=0
+  col 12 post_filter_count INTEGER notnull=0 default=<none> pk=0
+  col 13 price_min_cents INTEGER notnull=0 default=<none> pk=0
+  col 14 price_median_cents INTEGER notnull=0 default=<none> pk=0
+  col 15 price_p75_cents INTEGER notnull=0 default=<none> pk=0
+  col 16 details_json TEXT notnull=0 default=<none> pk=0
 table placement_candidates
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 decision_id INTEGER notnull=1 default=<none> pk=0

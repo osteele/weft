@@ -118,7 +118,7 @@ func BuildMovePickerOptions(
 	minReliability float64,
 ) ([]Option, error) {
 	options := BuildMovePickerExistingOptions(database, cfg, job, capacities, queuedCounts, sourceInstanceID)
-	cloudOptions, err := BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, nil, 0, nil)
+	cloudOptions, err := BuildOptionsWithSurvivalAndTelemetry(database, cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, nil, 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -199,8 +199,23 @@ func BuildOptionsWithSurvival(
 	minSurvival float64,
 	excludedMachineIDs map[string]struct{},
 ) ([]Option, error) {
+	return BuildOptionsWithSurvivalAndTelemetry(nil, cloudClients, job, capacities, queuedCounts, sourceInstanceID, minReliability, survivalModel, minSurvival, excludedMachineIDs)
+}
+
+func BuildOptionsWithSurvivalAndTelemetry(
+	database *sql.DB,
+	cloudClients []cloud.Client,
+	job *db.Job,
+	capacities []campaign.InstanceCapacity,
+	queuedCounts map[int64]int,
+	sourceInstanceID int64,
+	minReliability float64,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+	excludedMachineIDs map[string]struct{},
+) ([]Option, error) {
 	options := BuildExistingOptions(job, capacities, queuedCounts, sourceInstanceID)
-	newOptions, err := BuildNewOptionsWithSurvival(cloudClients, job, minReliability, survivalModel, minSurvival, excludedMachineIDs)
+	newOptions, err := BuildNewOptionsWithSurvivalAndTelemetry(database, cloudClients, job, minReliability, survivalModel, minSurvival, excludedMachineIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -384,6 +399,18 @@ func BuildNewOptionsWithSurvival(
 	minSurvival float64,
 	excludedMachineIDs map[string]struct{},
 ) ([]Option, error) {
+	return BuildNewOptionsWithSurvivalAndTelemetry(nil, cloudClients, job, minReliability, survivalModel, minSurvival, excludedMachineIDs)
+}
+
+func BuildNewOptionsWithSurvivalAndTelemetry(
+	database *sql.DB,
+	cloudClients []cloud.Client,
+	job *db.Job,
+	minReliability float64,
+	survivalModel *bidding.SurvivalModel,
+	minSurvival float64,
+	excludedMachineIDs map[string]struct{},
+) ([]Option, error) {
 	if len(cloudClients) == 0 {
 		return nil, nil
 	}
@@ -417,8 +444,12 @@ func BuildNewOptionsWithSurvival(
 	}
 	var options []Option
 	seen := make(map[string]bool)
+	var telemetryRanked []campaign.GroupOffer
 	for _, strategy := range strategies {
 		ranked := campaign.RankGroupOffers(rawOffers, survivalModel, 1.0, nil, strategy, minSurvival)
+		if telemetryRanked == nil {
+			telemetryRanked = ranked
+		}
 		if len(ranked) == 0 || ranked[0].Offer == nil {
 			continue
 		}
@@ -439,6 +470,7 @@ func BuildNewOptionsWithSurvival(
 			Eligible:    true,
 		})
 	}
+	campaign.RecordOfferAvailabilitySnapshots(database, rawOffers, telemetryRanked, minReliability)
 	return options, nil
 }
 
@@ -546,6 +578,7 @@ func LaunchNewForJob(
 		return "", rawOffers[0].Err
 	}
 	ranked := campaign.RankGroupOffers(rawOffers, nil, 1.0, nil, strategy, 0)
+	campaign.RecordOfferAvailabilitySnapshots(database, rawOffers, ranked, cfg.CampaignReliability())
 	if len(ranked) == 0 || ranked[0].Offer == nil {
 		return "", fmt.Errorf("no compatible new-instance offer found")
 	}
@@ -941,7 +974,7 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64, force bool) (Resu
 	}
 
 	optionsStarted := time.Now()
-	options, err := BuildOptionsWithSurvival(cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability(), buildSurvivalModel(database), 0.4, nil)
+	options, err := BuildOptionsWithSurvivalAndTelemetry(database, cloudClients, job, capacities, queuedCounts, sourceInstanceID, cfg.CampaignReliability(), buildSurvivalModel(database), 0.4, nil)
 	if err != nil {
 		logPhase("lookup_options", optionsStarted, "", err)
 		return Result{}, err

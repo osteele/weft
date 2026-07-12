@@ -30,6 +30,66 @@ func TestCheapestOffer(t *testing.T) {
 	}
 }
 
+func TestOfferPriceQuantilesCents(t *testing.T) {
+	minCents, medianCents, p75Cents := OfferPriceQuantilesCents([]cloud.Offer{
+		{CostPerHour: 3.00},
+		{CostPerHour: 1.00},
+		{CostPerHour: 2.00},
+		{CostPerHour: 4.00},
+	})
+	if minCents != 100 || medianCents != 200 || p75Cents != 300 {
+		t.Fatalf("quantiles = (%d, %d, %d), want (100, 200, 300)", minCents, medianCents, p75Cents)
+	}
+}
+
+func TestRecordOfferAvailabilitySnapshots_RateLimited(t *testing.T) {
+	database := db.SetupTestDB(t)
+	group := InstanceGroup{GPUClass: "A100", GPUMemGB: 80, DiskGB: 120, NumGPUs: 1}
+	raw := []GroupRawOffers{{
+		Group: group,
+		Offers: []cloud.Offer{
+			{Provider: cloud.ProviderVastai, CostPerHour: 1.00},
+			{Provider: cloud.ProviderVastai, CostPerHour: 2.00},
+			{Provider: cloud.ProviderRunpod, CostPerHour: 3.00},
+		},
+		ProviderErrors: []string{"runpod: temporary API failure"},
+	}}
+	ranked := []GroupOffer{{
+		Group:       group,
+		FilterStats: OfferFilterStats{RawCount: 3, AfterSurvival: 2},
+	}}
+
+	RecordOfferAvailabilitySnapshots(database, raw, ranked, 0.95)
+	RecordOfferAvailabilitySnapshots(database, raw, ranked, 0.95)
+
+	var count, offers, postFilter, minPrice, medianPrice, p75Price int
+	var details string
+	if err := database.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(offer_count), 0), COALESCE(MAX(post_filter_count), 0),
+		       COALESCE(MAX(price_min_cents), 0), COALESCE(MAX(price_median_cents), 0),
+		       COALESCE(MAX(price_p75_cents), 0), COALESCE(MAX(details_json), '')
+		FROM offer_availability_snapshots
+		WHERE gpu_class = 'A100' AND gpu_mem_bucket_gb = 80 AND disk_bucket_gb = 120`,
+	).Scan(&count, &offers, &postFilter, &minPrice, &medianPrice, &p75Price, &details); err != nil {
+		t.Fatalf("query snapshots: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("snapshot count = %d, want 1 after rate-limited duplicate", count)
+	}
+	if offers != 3 || postFilter != 2 || minPrice != 100 || medianPrice != 200 || p75Price != 300 {
+		t.Fatalf("snapshot values offers=%d post=%d prices=(%d,%d,%d), want offers=3 post=2 prices=(100,200,300)",
+			offers, postFilter, minPrice, medianPrice, p75Price)
+	}
+	for _, want := range []string{
+		`"provider_errors":["runpod: temporary API failure"]`,
+		`"provider_offer_counts":{"runpod":1,"vastai":2}`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details_json = %s, want to contain %s", details, want)
+		}
+	}
+}
+
 func TestSortOffersByCost(t *testing.T) {
 	offers := []cloud.Offer{
 		{ProviderID: "1", CostPerHour: 2.50},

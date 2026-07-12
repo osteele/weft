@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -113,11 +114,16 @@ func TestSearchAuthorizedReplacementOffer_ReturnsErrorWhenAllRejected(t *testing
 	insertAnchorHistory(t, database, "A100", 80, 100, 110, 120, 130)
 	ctx := PriceGateContext{GPUClass: "A100", GPUMemGB: 80, DB: database}
 
+	costs := []float64{9.00, 10.00, 11.00}
 	calls := 0
 	search := func(_ map[string]struct{}) GroupOffer {
+		if calls >= len(costs) {
+			return GroupOffer{}
+		}
+		cost := costs[calls]
 		calls++
 		// Every offer is way over the auto-approve ceiling.
-		return GroupOffer{Offer: &cloud.Offer{ProviderID: "offer-X", CostPerHour: 9.99}}
+		return GroupOffer{Offer: &cloud.Offer{ProviderID: fmt.Sprintf("offer-%d", calls), CostPerHour: cost}}
 	}
 
 	exclude := make(map[string]struct{})
@@ -135,8 +141,11 @@ func TestSearchAuthorizedReplacementOffer_ReturnsErrorWhenAllRejected(t *testing
 	if !errors.As(err, &typed) {
 		t.Fatalf("errors.As failed: %v", err)
 	}
-	if typed.OfferedCents != 999 {
-		t.Errorf("OfferedCents = %d, want 999", typed.OfferedCents)
+	if typed.OfferedCents != 1100 {
+		t.Errorf("OfferedCents = %d, want 1100", typed.OfferedCents)
+	}
+	if typed.MarketMedianCents != 1000 {
+		t.Errorf("MarketMedianCents = %d, want 1000", typed.MarketMedianCents)
 	}
 	if calls < 1 {
 		t.Errorf("inner search called %d times, want at least 1", calls)

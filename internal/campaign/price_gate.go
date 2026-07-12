@@ -199,6 +199,7 @@ func searchAuthorizedReplacementOffer(
 	search func(map[string]struct{}) GroupOffer,
 ) (*cloud.Offer, error) {
 	var lastDecision PriceGateDecision
+	var candidates []cloud.Offer
 	for range retrypolicy.MaxReplacementOfferSearchAttempts() {
 		replacement := search(excludeOfferKeys)
 		if replacement.Err != nil {
@@ -207,6 +208,7 @@ func searchAuthorizedReplacementOffer(
 		if replacement.Offer == nil {
 			break
 		}
+		candidates = append(candidates, *replacement.Offer)
 		decision := evaluatePriceGate(gateCtx, *replacement.Offer)
 		if decision.Approved {
 			return replacement.Offer, nil
@@ -215,18 +217,16 @@ func searchAuthorizedReplacementOffer(
 		excludeOfferKeys[replacement.Offer.Key()] = struct{}{}
 	}
 	if lastDecision.OfferedCents > 0 {
+		_, marketMedianCents, _ := OfferPriceQuantilesCents(candidates)
 		return nil, &PriceAuthorizationRequiredError{
-			GPUClass:         gateCtx.GPUClass,
-			GPUMemGB:         gateCtx.GPUMemGB,
-			OfferedCents:     lastDecision.OfferedCents,
-			AnchorCents:      lastDecision.AnchorCents,
-			CeilingCents:     lastDecision.CeilingCents,
-			AnchorSamples:    lastDecision.AnchorSamples,
-			AnchorWindowDays: lastDecision.AnchorWindowDays,
-			// MarketMedianCents is computed by the caller (which has the
-			// offer-search filters) and merged in before placement_blocked
-			// is written; the gate itself doesn't see the full candidate
-			// list.
+			GPUClass:          gateCtx.GPUClass,
+			GPUMemGB:          gateCtx.GPUMemGB,
+			OfferedCents:      lastDecision.OfferedCents,
+			AnchorCents:       lastDecision.AnchorCents,
+			CeilingCents:      lastDecision.CeilingCents,
+			MarketMedianCents: marketMedianCents,
+			AnchorSamples:     lastDecision.AnchorSamples,
+			AnchorWindowDays:  lastDecision.AnchorWindowDays,
 		}
 	}
 	return nil, nil
