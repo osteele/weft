@@ -189,6 +189,12 @@ func TestMatchGroupToInstance_PyTorchImageFallsBackWhenShortcutMismatch(t *testi
 	if !strings.Contains(reason, "need=18GB free=6GB") {
 		t.Fatalf("reason = %q, want full CUDA setup need", reason)
 	}
+	// The reason must name the real cause — a Python-version mismatch — not the
+	// misleading "CUDA packages not provided", since the pytorch/pytorch image
+	// does provide CUDA.
+	if !strings.Contains(reason, "Python 3.13") || strings.Contains(reason, "CUDA packages not provided") {
+		t.Fatalf("reason = %q, want a Python-version-mismatch explanation naming Python 3.13", reason)
+	}
 }
 
 func TestMatchGroupToInstance_RejectsExplicitRuntimeDisk(t *testing.T) {

@@ -617,8 +617,19 @@ func estimateReuseSetupDiskGB(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 	if cap.Instance != nil {
 		image = cap.Instance.DockerImage
 	}
-	if isPyTorchImage(image) && pyTorchImageShortcutLikely(localDir) {
-		return CUDAOverheadWithPyTorchImageGB, "setup estimate assumes PyTorch image provides torch"
+	if isPyTorchImage(image) {
+		if pyTorchImageShortcutLikely(localDir) {
+			return CUDAOverheadWithPyTorchImageGB, "setup estimate assumes PyTorch image provides torch"
+		}
+		// The image supplies CUDA and torch, but its torch is built for the
+		// image's Python (3.11). A job on a different Python cannot reuse that
+		// torch and must reinstall it (with its bundled CUDA), so the full
+		// overhead applies — this is a Python-version mismatch, not a missing
+		// CUDA runtime.
+		if pyReq, ok := pythonVersionRequestForReuse(localDir); ok && pyReq != "" {
+			return CUDAOverheadGB, fmt.Sprintf("image %s ships Python 3.11 but this job requires Python %s; its prebuilt torch cannot be reused and must be reinstalled", image, pyReq)
+		}
+		return CUDAOverheadGB, fmt.Sprintf("image %s prebuilt torch does not match this job's Python; torch must be reinstalled", image)
 	}
 	if image == "" {
 		image = cloud.DefaultImage
