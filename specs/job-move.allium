@@ -775,6 +775,39 @@ invariant ResolvedMoveLoserHasStopWork {
     aspirational: true
 }
 
+invariant StaleMoveIntentRepairConverges {
+    -- Stale-intent repair paths are lifecycle transitions, not display
+    -- cleanups. They must use the same resolution semantics as explicit
+    -- cancel/confirm flows so loser attempts are abandoned and terminal
+    -- intent state is stable.
+    --
+    -- A repair pass over an open intent may resolve it only through
+    -- ResolveMoveIntent / ConfirmMoveTargetAccepted / ObsoleteMove. It
+    -- must not raw-update MoveIntent.state in a way that skips
+    -- target/source loser cleanup.
+    for intent in MoveIntent:
+        intent.state = open
+        and StaleMoveIntentRepairApplies(intent)
+        ensures:
+            intent.state in {confirmed, canceled, obsoleted}
+            and intent.resolved_at != null
+            and (
+                intent.target_attempt = null
+                or intent.state = confirmed
+                or intent.target_attempt not in authoritative_job_attempts
+            )
+
+    -- Re-running the same repair after it resolves an intent is a no-op:
+    -- terminal states never reopen, change terminal category, or produce a
+    -- second authoritative attempt.
+    for intent in MoveIntent:
+        intent.state in {confirmed, canceled, obsoleted}
+        and StaleMoveIntentRepairApplies(intent)
+        ensures stable(intent.state)
+                and stable(intent.resolved_at)
+                and stable(intent.resolution)
+}
+
 -- ==========================================================================
 -- Cross-spec interactions
 -- ==========================================================================

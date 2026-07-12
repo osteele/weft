@@ -537,15 +537,14 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 	if database == nil {
 		return nil, nil
 	}
-	now := time.Now().Unix()
 	cutoff := time.Now().Add(-protectionWindow).Unix()
 	const query = `
- 		UPDATE move_intents
- 		   SET state = 'canceled', resolved_at = ?, resolution = ?
- 		 WHERE state = 'open'
- 		   AND created_at < ?
- 		   AND (
- 		         target_launch_id IS NULL
+		SELECT id, job_id, created_at
+		  FROM move_intents
+		 WHERE state = 'open'
+		   AND created_at < ?
+		   AND (
+		         target_launch_id IS NULL
 		         OR NOT EXISTS (
 		              SELECT 1
 		                FROM launches l
@@ -553,22 +552,34 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 		                 AND l.status NOT IN ('failed','canceled','completed')
 		            )
 		       )
-		RETURNING id, job_id, created_at`
-	rows, err := database.Query(query, now, MoveIntentResolutionStale, cutoff)
+		 ORDER BY id`
+	rows, err := database.Query(query, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("prune stale move intents: %w", err)
 	}
-	defer rows.Close()
 
 	var pruned []PrunedMoveIntent
 	for rows.Next() {
 		var mi PrunedMoveIntent
 		if err := rows.Scan(&mi.ID, &mi.JobID, &mi.CreatedAt); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan pruned move intent: %w", err)
 		}
 		pruned = append(pruned, mi)
 	}
-	return pruned, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, mi := range pruned {
+		if err := ResolveMoveIntent(database, mi.ID, MoveIntentStateCanceled, MoveIntentResolutionStale); err != nil {
+			return nil, fmt.Errorf("resolve stale move intent %d: %w", mi.ID, err)
+		}
+	}
+	return pruned, nil
 }
 
 const moveIntentSelect = `SELECT

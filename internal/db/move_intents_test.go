@@ -528,6 +528,57 @@ func TestPruneMoveIntents(t *testing.T) {
 			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
 		}
 	})
+
+	t.Run("abandon hidden target and converge", func(t *testing.T) {
+		database := SetupTestDB(t)
+		jobID, err := RecordQueued(database, "cool30", "/tmp", "echo hi", "move")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		sourceAttemptID, err := GetLatestAttemptID(database, jobID)
+		if err != nil {
+			t.Fatalf("GetLatestAttemptID source: %v", err)
+		}
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:           jobID,
+			SourceAttemptID: &sourceAttemptID,
+			TargetKind:      MoveTargetExisting,
+			TargetHost:      "cool100",
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateMoveTargetAttempt: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].ID != intent.ID {
+			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		}
+		var reason string
+		if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&reason); err != nil {
+			t.Fatalf("target abandoned reason: %v", err)
+		}
+		if reason != AttemptAbandonedMoveDestinationRejected {
+			t.Fatalf("target abandoned reason = %q, want %q", reason, AttemptAbandonedMoveDestinationRejected)
+		}
+
+		pruned, err = PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents second pass: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("second prune = %+v, want none", pruned)
+		}
+	})
 }
 
 func TestAttachMoveIntentTargetLaunch(t *testing.T) {
