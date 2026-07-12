@@ -238,6 +238,10 @@ func renderListPlain(database *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
+	if listOlderHiddenCount > 0 {
+		fmt.Fprintf(os.Stderr, "%d older %s hidden by the default %d-day window — pass --all to include them.\n",
+			listOlderHiddenCount, pluralize("job", listOlderHiddenCount), defaultListMaxAgeDays)
+	}
 	return printJobs(database, jobs)
 }
 
@@ -370,7 +374,22 @@ func syncListData(database *sql.DB) []string {
 	return warnings
 }
 
+// defaultListMaxAgeDays is the recency window a bare `weft job list` applies:
+// jobs that started more than this many days ago are hidden unless --all or
+// --since widens the horizon. --limit caps within this window; it does not
+// widen it.
+const defaultListMaxAgeDays = 7
+
+// listOlderHiddenCount records how many jobs matched the current list filters
+// but were hidden by the default recency window (0 when the window is not
+// active or nothing older matched). collectJobsForList sets it; renderListPlain
+// reads it to warn that older jobs exist, so the cutoff does not read as
+// "these jobs are gone". It is a package-level var to match the surrounding
+// list-flag state rather than thread an extra return value through every caller.
+var listOlderHiddenCount int
+
 func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
+	listOlderHiddenCount = 0
 	statusFilter, processedFilter, failedOnly, err := listFilters()
 	if err != nil {
 		return nil, err
@@ -449,34 +468,50 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		return jobs, nil
 	}
 
-	// Default to 7 days unless --all is specified
-	maxAgeDays := 7
-	if listAll {
-		maxAgeDays = 0
-	}
-	if listSince != "" {
+	// Default to the recency window unless --all or --since widens it.
+	maxAgeDays := defaultListMaxAgeDays
+	if listAll || listSince != "" {
 		maxAgeDays = 0
 	}
 
-	queryLimit := listLimit
-	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" || listMine || wantRental || wantInventory || listSince != "" || listActive {
-		queryLimit = 0
+	// applyGoFilters runs the in-Go filter chain that the SQL query cannot
+	// express. Sharing it between the display fetch and the hidden-older count
+	// keeps the two counts comparable across the window boundary.
+	applyGoFilters := func(js []*db.Job) ([]*db.Job, error) {
+		js = filterJobsByHostFlag(js)
+		js = jobsWithEffectiveStatus(js, statusFilter)
+		js = filterJobsByFailureState(js, failedOnly)
+		js = db.FilterJobsByExcludedTags(js, listExcludeTags)
+		js = db.FilterJobsByProject(js, listProject)
+		js = filterJobsByMine(js)
+		js = filterJobsByPlacementScope(js, wantRental, wantInventory)
+		return applyPostListFilters(js)
 	}
-	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
+
+	// Fetch the window unbounded (the window itself already bounds the set to
+	// recent jobs); --limit is applied last, after the filters. Bounding the
+	// SQL query by --limit here would let filters drop rows and silently
+	// under-fill the result below the requested limit.
+	raw, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, 0, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
-	jobs = filterJobsByHostFlag(jobs)
-	jobs = jobsWithEffectiveStatus(jobs, statusFilter)
-	jobs = filterJobsByFailureState(jobs, failedOnly)
-	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
-	jobs = db.FilterJobsByProject(jobs, listProject)
-	jobs = filterJobsByMine(jobs)
-	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
-	jobs, err = applyPostListFilters(jobs)
+	jobs, err := applyGoFilters(raw)
 	if err != nil {
 		return nil, err
 	}
+
+	// When the recency window is active, jobs that started before it are hidden
+	// and --limit will never reveal them. Count the hidden matches so the caller
+	// can say so — otherwise the cutoff reads as "these jobs were deleted".
+	if maxAgeDays > 0 {
+		allRaw, allErr := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, 0, 0, listTags, processedFilter)
+		all, filterErr := applyGoFilters(allRaw)
+		if allErr == nil && filterErr == nil && len(all) > len(jobs) {
+			listOlderHiddenCount = len(all) - len(jobs)
+		}
+	}
+
 	if listLimit > 0 && len(jobs) > listLimit {
 		jobs = jobs[:listLimit]
 	}

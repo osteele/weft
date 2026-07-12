@@ -498,6 +498,79 @@ func TestCollectJobsForListWithFiltersOverridesProject(t *testing.T) {
 	}
 }
 
+func TestCollectJobsForListReportsOlderHiddenByWindow(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// started long before the window: hidden by the default recency window.
+	oldID, err := db.RecordQueued(database, "studio", "/tmp/old", "echo old", "")
+	if err != nil {
+		t.Fatalf("record old: %v", err)
+	}
+	old := time.Now().AddDate(0, 0, -30).Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ?, end_time = ?, status = 'completed', exit_code = 0 WHERE job_id = ?`,
+		old, old, oldID); err != nil {
+		t.Fatalf("age old job: %v", err)
+	}
+	// started inside the window: shown.
+	recentID, err := db.RecordQueued(database, "studio", "/tmp/recent", "echo recent", "")
+	if err != nil {
+		t.Fatalf("record recent: %v", err)
+	}
+	recent := time.Now().AddDate(0, 0, -1).Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET start_time = ?, end_time = ?, status = 'completed', exit_code = 0 WHERE job_id = ?`,
+		recent, recent, recentID); err != nil {
+		t.Fatalf("age recent job: %v", err)
+	}
+	// never started: always shown, never age-filtered.
+	queuedID, err := db.RecordQueued(database, "studio", "/tmp/queued", "echo queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	prevAll, prevSince, prevLimit, prevAllHosts := listAll, listSince, listLimit, listAllHosts
+	listAll, listSince, listLimit, listAllHosts = false, "", 0, true
+	t.Cleanup(func() {
+		listAll, listSince, listLimit, listAllHosts = prevAll, prevSince, prevLimit, prevAllHosts
+	})
+
+	jobs, err := collectJobsForList(database, nil)
+	if err != nil {
+		t.Fatalf("collectJobsForList: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, j := range jobs {
+		got[j.ID] = true
+	}
+	if got[oldID] {
+		t.Fatalf("old job %d should be hidden by the default window", oldID)
+	}
+	if !got[recentID] || !got[queuedID] {
+		t.Fatalf("recent %d and queued %d should be shown; got %+v", recentID, queuedID, got)
+	}
+	if listOlderHiddenCount != 1 {
+		t.Fatalf("listOlderHiddenCount = %d, want 1 (the one older job)", listOlderHiddenCount)
+	}
+
+	// --all widens the horizon: the old job appears and nothing is hidden.
+	listAll = true
+	jobs, err = collectJobsForList(database, nil)
+	if err != nil {
+		t.Fatalf("collectJobsForList --all: %v", err)
+	}
+	got = map[int64]bool{}
+	for _, j := range jobs {
+		got[j.ID] = true
+	}
+	if !got[oldID] {
+		t.Fatalf("old job %d should appear with --all", oldID)
+	}
+	if listOlderHiddenCount != 0 {
+		t.Fatalf("listOlderHiddenCount = %d with --all, want 0", listOlderHiddenCount)
+	}
+}
+
 func TestPrintJobsGroupedStatus(t *testing.T) {
 	stubEmptyQueueStatus(t)
 
