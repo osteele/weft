@@ -666,10 +666,13 @@ contract CUDACompatibilityChain {
 -- launch time the placement classifier inspects each referenced producer's
 -- current state: if the producer is live on a reusable rental instance the
 -- consumer is co-located there (and the agent gates the consumer on
--- producer success via cloud_after); otherwise the classifier emits
--- cloud_needs so the producer's outputs are staged from R2 onto the
--- consumer's fresh instance. Users who require the producer to finish
--- before the consumer can run must combine `--needs` with `--after`.
+-- producer success via cloud_after). The consumer should be assigned to the
+-- producer's rental queue so it starts automatically after the producer
+-- completes, without another autopilot pass. If no live reusable producer
+-- rental exists, the classifier emits cloud_needs so the producer's outputs
+-- are staged from R2 onto the consumer's fresh instance. Users who require
+-- the producer to finish before the consumer can run must combine `--needs`
+-- with `--after`.
 --
 -- Semantics by dependency mode:
 --   --after (strict):    upstream must be Completed with exit_code = 0
@@ -3273,21 +3276,27 @@ rule InstanceReuseDiskCheck {
         -- estimateReuseJobDiskNeedGB.
 }
 
-rule InstanceReuseQueueDepthBounded {
+rule InstanceReuseQueueDepthIsObjectiveSignal {
     when: MatchJobToInstance(job, instance)
 
     ensures:
-        instance.running_job_count + PlannedReuseAssignments(instance)
-            < MaxReuseQueueDepth * max(1, instance.num_gpus)
+        EstimatedCompletionTime(job, instance)
+            includes QueueWaitEstimate(instance.running_job_count
+                                       + PlannedReuseAssignments(instance))
+        and MatchJobToInstance does_not_reject because queue_depth alone
 
     @guidance
         -- Cloud agents run the assigned sequence on one rental, so extra
-        -- reuse assignments wait behind active work. The matcher caps that
-        -- wait using internal/campaign.MaxReuseQueueDepth (2) scaled by GPU
-        -- count so one-GPU rentals do not accumulate long queues while
-        -- multi-GPU rebalance/drain planning keeps its existing slot model.
+        -- reuse assignments wait behind active work. That wait is an
+        -- objective penalty, not a hard eligibility cap: the planner should
+        -- prefer lower expected average completion time across the job set
+        -- rather than reject a reusable rental only because its queue is long.
+        -- A same-rental --needs edge can legitimately choose a longer queue
+        -- because placement onto the producer's rental lets the cloud agent
+        -- advance the consumer after the producer writes the artifact, with
+        -- no later autopilot intervention.
         -- PlanReuse increments InstanceCapacity.RunningJobCount after each
-        -- planned assignment, so the same predicate covers already-running
+        -- planned assignment, so later objective estimates see already-running
         -- jobs and assignments made earlier in the current plan.
 }
 

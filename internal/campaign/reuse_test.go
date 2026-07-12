@@ -343,7 +343,7 @@ func TestPlanReuse_SkipsRequiredImageMismatch(t *testing.T) {
 	}
 }
 
-func TestMatchJobToInstance_RejectsFullReuseQueue(t *testing.T) {
+func TestMatchJobToInstance_AllowsLongReuseQueue(t *testing.T) {
 	mem := 24
 	job := &db.Job{GPUClass: "nvidia", GPUMemGB: &mem}
 	cap := InstanceCapacity{
@@ -354,15 +354,33 @@ func TestMatchJobToInstance_RejectsFullReuseQueue(t *testing.T) {
 			GPUMemGB:        24,
 			NumGPUs:         1,
 		},
-		RunningJobCount: MaxReuseQueueDepth,
+		RunningJobCount: 7,
 	}
 
 	got, reason := MatchJobToInstance(job, cap)
-	if got {
-		t.Fatal("MatchJobToInstance() = true, want false for full reuse queue")
+	if !got {
+		t.Fatalf("MatchJobToInstance() = false, want true for long queue treated as a cost signal: %s", reason)
 	}
-	if !strings.Contains(reason, "reuse queue full") {
-		t.Fatalf("reason = %q, want reuse queue full", reason)
+}
+
+func TestRankForJob_AllowsLongReuseQueue(t *testing.T) {
+	mem := 24
+	job := &db.Job{GPUClass: "nvidia", GPUMemGB: &mem}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			ID:              5063,
+			Status:          db.LaunchStatusRunning,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX A6000",
+			GPUMemGB:        48,
+			NumGPUs:         1,
+		},
+		RunningJobCount: 7,
+	}
+
+	got := RankForJob(job, []InstanceCapacity{cap})
+	if len(got) != 1 || got[0].Instance.ID != 5063 {
+		t.Fatalf("RankForJob = %+v, want long-queue instance retained", got)
 	}
 }
 

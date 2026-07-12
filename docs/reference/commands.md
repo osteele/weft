@@ -126,7 +126,7 @@ submit time, baking 82 into the DB for an A100 80GB request) are
 recognised at filter time and rolled back automatically — no manual
 `weft restart` is required.
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
-- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; rental/ephemeral producers are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
+- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; if the producer is on a live reusable rental, autopilot co-locates the consumer on that rental queue so it starts after the producer completes; otherwise rental/ephemeral producer artifacts are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
 - `--dry-run`: Show placement scores without submitting the job. For rental offer cost, survival, and memory-headroom previews, use `weft start instance --dry-run` or `weft instance new --dry-run` after the job is queued.
 - `--no-sync`: Skip source sync before submission
 - `--wait`: Wait for the job to complete before returning

@@ -30,14 +30,13 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 		job.GPUMemGB = &v
 	}
 
-	ranked := RankForJob(job, instances)
-	if len(ranked) == 0 {
-		return nil, nil
-	}
-
 	preferred := make(map[int64]bool, len(constraints.PreferredInstanceIDs))
 	for _, id := range constraints.PreferredInstanceIDs {
 		preferred[id] = true
+	}
+	ranked := RankForJobWithPreferredIDs(job, instances, preferred)
+	if len(ranked) == 0 {
+		return nil, nil
 	}
 
 	var candidates []placement.Candidate

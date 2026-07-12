@@ -6,6 +6,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/placement"
 )
 
 func TestPreferredInstanceIDsFromNeeds_CollectsLiveProducerInstances(t *testing.T) {
@@ -66,6 +67,55 @@ func TestPreferredInstanceIDsFromNeeds_DeduplicatesAndIgnoresMalformed(t *testin
 	got := PreferredInstanceIDsFromNeeds(database, needs)
 	if len(got) != 1 || got[0] != launchID {
 		t.Fatalf("got %v, want [%d]", got, launchID)
+	}
+}
+
+func TestReuseSourceCollect_LongQueueRemainsCandidateAndPreferenceLowersWait(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "NVIDIA",
+		ResolvedGPUName: "RTX A6000",
+		GPUMemGB:        48,
+		NumGPUs:         1,
+		DiskGB:          120,
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	for i := 0; i < 7; i++ {
+		jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo queued", fmt.Sprintf("queued %d", i), "nvidia")
+		if err != nil {
+			t.Fatalf("create queued job %d: %v", i, err)
+		}
+		if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+			t.Fatalf("SetJobLaunchID %d: %v", jobID, err)
+		}
+	}
+
+	source := &ReuseSource{}
+	withoutPreference, err := source.Collect(database, placement.Constraints{GPUClass: "nvidia"}, nil)
+	if err != nil {
+		t.Fatalf("Collect without preference: %v", err)
+	}
+	if len(withoutPreference) != 1 || withoutPreference[0].Reuse == nil || withoutPreference[0].Reuse.InstanceID != launchID {
+		t.Fatalf("without preference candidates = %+v, want long-queue instance %d", withoutPreference, launchID)
+	}
+
+	withPreference, err := source.Collect(database, placement.Constraints{
+		GPUClass:             "nvidia",
+		PreferredInstanceIDs: []int64{launchID},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Collect with preference: %v", err)
+	}
+	if len(withPreference) != 1 || withPreference[0].Reuse == nil || withPreference[0].Reuse.InstanceID != launchID {
+		t.Fatalf("with preference candidates = %+v, want preferred instance %d", withPreference, launchID)
+	}
+	if !(withPreference[0].Reuse.EstWait.Mean < withoutPreference[0].Reuse.EstWait.Mean) {
+		t.Fatalf("preferred wait = %s, want less than non-preferred wait %s",
+			withPreference[0].Reuse.EstWait.Mean, withoutPreference[0].Reuse.EstWait.Mean)
 	}
 }
 

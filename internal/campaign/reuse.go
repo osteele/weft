@@ -38,11 +38,6 @@ var (
 // instance for reuse. Instances with less time are auto-extended.
 const MinGraceRemaining = 5 * time.Minute
 
-// MaxReuseQueueDepth caps jobs time-multiplexed onto one sequential rental.
-// A running cloud agent executes one job at a time, so extra assignments wait
-// behind the active job instead of consuming GPUs concurrently.
-const MaxReuseQueueDepth = 2
-
 // InstanceCapacity describes a reusable cloud instance and its available resources.
 type InstanceCapacity struct {
 	Instance          *db.Launch
@@ -346,11 +341,6 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if ok, reason := matchJobRequiredImage(job, inst); !ok {
 		return false, reason
 	}
-	maxQueueDepth := effectiveMaxReuseQueueDepth(inst)
-	if cap.RunningJobCount >= maxQueueDepth {
-		return false, fmt.Sprintf("reuse queue full: depth=%d max=%d", cap.RunningJobCount, maxQueueDepth)
-	}
-
 	if job.HasTag(db.TagCPUIntensive) {
 		floor := computeCPUCoresFloor()
 		if inst.CPUCores <= 0 {
@@ -408,13 +398,6 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	}
 
 	return true, ""
-}
-
-func effectiveMaxReuseQueueDepth(inst *db.Launch) int {
-	if inst == nil || inst.NumGPUs <= 1 {
-		return MaxReuseQueueDepth
-	}
-	return MaxReuseQueueDepth * inst.NumGPUs
 }
 
 func matchProviderIntent(job *db.Job, inst *db.Launch) (bool, string) {
@@ -720,6 +703,14 @@ func subtractInputs(jobInputs, provisioned []string) []string {
 // RankForJob sorts compatible instances: grace first (free), then by data locality
 // (more provisioned inputs = better). Returns only compatible instances.
 func RankForJob(job *db.Job, instances []InstanceCapacity) []InstanceCapacity {
+	return RankForJobWithPreferredIDs(job, instances, nil)
+}
+
+// RankForJobWithPreferredIDs sorts compatible instances while allowing
+// preferred instances to exceed the generic reuse queue cap. This is used for
+// --needs producer co-location: the consumer must sit behind the producer on
+// the same rental queue so it can start automatically when the artifact exists.
+func RankForJobWithPreferredIDs(job *db.Job, instances []InstanceCapacity, preferredIDs map[int64]bool) []InstanceCapacity {
 	var compatible []InstanceCapacity
 	for _, cap := range instances {
 		if ok, _ := MatchJobToInstance(job, cap); ok {
@@ -779,7 +770,8 @@ func countOverlap(a, b []string) int {
 
 // PlanReuse assigns jobs to reusable instances, returning assignments and remaining jobs.
 // Tries grace instances first (free), then running instances (shared cost).
-// Mutates the instances slice to track consumed capacity.
+// Mutates the instances slice to track queue depth, data locality, and disk
+// budget after each planned assignment.
 func PlanReuse(jobs []*db.Job, instances []InstanceCapacity) ([]ReuseAssignment, []*db.Job) {
 	var assignments []ReuseAssignment
 	var remaining []*db.Job

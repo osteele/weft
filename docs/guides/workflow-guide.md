@@ -1273,10 +1273,16 @@ laptop$ weft run \
   'uv run python eval.py'
 ```
 
-For rental producers, weft waits for completion and artifact upload, then
-stages needed files from cloud artifact storage before the consumer starts.
-`--produces` paths are uploaded to R2 with no size cap, so multi-GB
-checkpoints, representation pkls, etc. are supported as artifact edges.
+When the producer is already assigned to a live reusable rental, autopilot
+prefers placing the consumer onto that same rental queue. The rental agent then
+starts the consumer automatically after the producer completes and the needed
+artifact exists, without waiting for another autopilot pass.
+
+When same-rental co-location is not available, weft waits for completion and
+artifact upload, then stages needed files from cloud artifact storage before
+the consumer starts. `--produces` paths are uploaded to R2 with no size cap, so
+multi-GB checkpoints, representation pkls, etc. are supported as artifact
+edges.
 
 Each `--needs` spec names a single file (`path:<job-id>`), not a directory.
 Directory targets such as `--needs output/:1046` are not supported — give each

@@ -629,9 +629,9 @@ invariant NoOversubscription {
 
     @guidance
         -- Scope: on-prem concurrent-execution (queue-runner) targets only.
-        -- Cloud/rental and sequential targets are governed by the
-        -- reuse queue-depth cap (campaign/reuse.go) and are NOT subject
-        -- to this accounting.
+        -- Cloud/rental and sequential targets are governed by rental reuse
+        -- objective scoring and agent queue ordering, and are NOT subject
+        -- to this device reservation accounting.
         --
         -- Degradation ladder (behavior-safe by construction):
         --   devices known    -> subtract exactly those indices from the
@@ -1190,8 +1190,8 @@ invariant TargetSatisfiesRequestedGPUCount {
         -- NoOversubscription and EvaluateEligibility clause 3b): two
         -- num_gpus=2 jobs are no longer auto-placed onto one 2-GPU host at
         -- the same time, because the first job's reservation leaves too few
-        -- free devices for the second. Rental instances remain governed by
-        -- the reuse queue-depth cap instead (wb41 note).
+        -- free devices for the second. Rental instances account for queued
+        -- work through estimated wait/completion time instead (wb41 note).
 }
 
 -- =========================================================================
