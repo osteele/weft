@@ -3,6 +3,7 @@ package ops
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -180,6 +181,54 @@ func TestRequeueJob_RefreshesProjectMetadata(t *testing.T) {
 	}
 	if len(updated.OutputDirs) != 1 || updated.OutputDirs[0] != "results/" {
 		t.Fatalf("updated output dirs = %v, want [results/]", updated.OutputDirs)
+	}
+}
+
+func TestRefreshProjectDerivedMetadataExplicitInputsDropBestEffortAuto(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# inputs = ["hf:hf-internal-testing/tiny-random-LlamaForCausalLM"]
+# ///
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model-name", default="tiny-random-llama")
+`
+	if err := os.WriteFile(filepath.Join(workDir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	command := "uv run python train.py --model-name tiny-random-llama"
+	jobID, err := db.RecordQueued(database, "test-host", workDir, command, "needs refresh")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobInputs(database, jobID, []string{"hf:tiny-random-llama"}); err != nil {
+		t.Fatalf("set inputs: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{BestEffortInputs: []string{"hf:tiny-random-llama"}}); err != nil {
+		t.Fatalf("set metadata: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if err := RefreshProjectDerivedMetadata(database, job); err != nil {
+		t.Fatalf("RefreshProjectDerivedMetadata: %v", err)
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	wantInputs := []string{"hf:hf-internal-testing/tiny-random-LlamaForCausalLM"}
+	if !reflect.DeepEqual(updated.Inputs, wantInputs) {
+		t.Fatalf("updated inputs = %v, want %v", updated.Inputs, wantInputs)
+	}
+	if len(updated.BestEffortInputs) != 0 {
+		t.Fatalf("best-effort inputs = %v, want empty", updated.BestEffortInputs)
 	}
 }
 

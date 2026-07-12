@@ -668,17 +668,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 	originalRunInputs := append([]string(nil), runInputs...)
 	projectInputs := config.ProjectInputs(localDir)
 	runInputs = mergeDedup(projectInputs, runInputs)
-	inputsBeforeAutoDetect := mergeDedup(projectInputs, originalRunInputs)
-	explicitInputs := append([]string(nil), inputsBeforeAutoDetect...)
 
-	// Auto-detect HF inputs from Python source and command string.
-	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
-		runInputs = mergeDedup(runInputs, detected)
+	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
+	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)
+	if scriptMetaErr != nil {
+		return scriptMetaErr
 	}
-	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
-		runInputs = mergeDedup(runInputs, detected)
+	if scriptMeta != nil && len(scriptMeta.Inputs) > 0 {
+		runInputs = mergeDedup(runInputs, scriptMeta.Inputs)
 	}
-	autoDetectedInputs := filterNew(runInputs, inputsBeforeAutoDetect)
+	explicitInputs := mergeDedup(mergeDedup(projectInputs, originalRunInputs), scriptMetaInputs(scriptMeta))
+
+	autoDetectedInputs := autoDetectedInputsForCommand(localDir, command, explicitInputs)
+	runInputs = mergeDedup(runInputs, autoDetectedInputs)
 	if len(autoDetectedInputs) > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(autoDetectedInputs, ", "))
 	}
@@ -739,11 +741,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	submitToken := "run-" + uuid.NewString()
 
-	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
-	scriptMeta, scriptMetaErr := scanRunScriptMeta(localDir, command)
-	if scriptMetaErr != nil {
-		return scriptMetaErr
-	}
 	if meta := scriptMeta; meta != nil {
 		var applied []string
 		if runGPU == "" && runGPUClass == "" && meta.GPU != "" {
@@ -2336,6 +2333,21 @@ func mergeDedup(a, b []string) []string {
 		}
 	}
 	return result
+}
+
+func scriptMetaInputs(meta *dataloc.ScriptMeta) []string {
+	if meta == nil {
+		return nil
+	}
+	return meta.Inputs
+}
+
+func autoDetectedInputsForCommand(localDir, command string, explicitInputs []string) []string {
+	detected := mergeDedup(
+		dataloc.ScanPythonHFRefsForCommand(localDir, command),
+		dataloc.ScanCommandHFRefs(command),
+	)
+	return dataloc.FilterAutoDetectedInputs(detected, explicitInputs)
 }
 
 // filterNew returns items that exist in items but not in baseline.

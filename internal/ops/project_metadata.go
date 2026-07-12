@@ -22,21 +22,24 @@ func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
 	jobID, command := job.ID, job.Command
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 
-	inputs := mergeStringSlices(config.ProjectInputs(localDir), job.Inputs)
-	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
-		inputs = mergeStringSlices(inputs, detected)
-	}
-	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
-		inputs = mergeStringSlices(inputs, detected)
-	}
+	inputs := mergeStringSlices(config.ProjectInputs(localDir), explicitJobInputs(job))
 	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
 		inputs = mergeStringSlices(inputs, meta.Inputs)
 	}
+	detected := mergeStringSlices(
+		dataloc.ScanPythonHFRefsForCommand(localDir, command),
+		dataloc.ScanCommandHFRefs(command),
+	)
+	bestEffortInputs := dataloc.FilterAutoDetectedInputs(detected, inputs)
+	inputs = mergeStringSlices(inputs, bestEffortInputs)
 	// Re-correct hf:-misprefixed datasets so a restart/requeue does not
 	// reintroduce the raw hf: form from PEP-723 metadata.
 	inputs, _ = dataloc.NormalizeMisprefixedHFDatasets(inputs)
 	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
 		return fmt.Errorf("refresh job inputs: %w", err)
+	}
+	if err := setJobBestEffortInputs(database, job, bestEffortInputs); err != nil {
+		return fmt.Errorf("refresh best-effort inputs: %w", err)
 	}
 
 	if err := db.SetJobOutputDirs(database, jobID, config.ProjectOutputDirs(localDir)); err != nil {
@@ -54,6 +57,39 @@ func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
 	}
 
 	return nil
+}
+
+func explicitJobInputs(job *db.Job) []string {
+	if len(job.Inputs) == 0 || len(job.BestEffortInputs) == 0 {
+		return job.Inputs
+	}
+	bestEffort := make(map[string]struct{}, len(job.BestEffortInputs))
+	for _, input := range job.BestEffortInputs {
+		bestEffort[input] = struct{}{}
+	}
+	out := make([]string, 0, len(job.Inputs))
+	for _, input := range job.Inputs {
+		if _, ok := bestEffort[input]; ok {
+			continue
+		}
+		out = append(out, input)
+	}
+	return out
+}
+
+func setJobBestEffortInputs(database dbExecer, job *db.Job, inputs []string) error {
+	meta := job.Metadata
+	if meta == nil {
+		if len(inputs) == 0 {
+			return nil
+		}
+		meta = &db.JobMetadata{}
+	} else {
+		copied := *meta
+		meta = &copied
+	}
+	meta.BestEffortInputs = append([]string(nil), inputs...)
+	return db.SetJobMetadata(database, job.ID, meta)
 }
 
 // ResolveProjectMaxComputeCap resolves the persisted cap encoding for project

@@ -360,15 +360,15 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	outputDirs := config.ProjectOutputDirs(localDir)
 
 	projectInputs := config.ProjectInputs(localDir)
-	queueInputs := projectInputs
-	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
-		queueInputs = mergeDedup(queueInputs, detected)
+	scriptMeta, scriptMetaErr := dataloc.ScanScriptMeta(localDir, command)
+	if scriptMetaErr != nil {
+		return scriptMetaErr
 	}
-	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
-		queueInputs = mergeDedup(queueInputs, detected)
-	}
-	if newInputs := filterNew(queueInputs, projectInputs); len(newInputs) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
+	queueInputs := mergeDedup(projectInputs, scriptMetaInputs(scriptMeta))
+	autoDetectedInputs := autoDetectedInputsForCommand(localDir, command, queueInputs)
+	queueInputs = mergeDedup(queueInputs, autoDetectedInputs)
+	if len(autoDetectedInputs) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(autoDetectedInputs, ", "))
 	}
 	queueEnvVars, err = applySecretEnv(queueEnvVars, queueInputs, queueHFToken, queueHFTokenFrom, queueSecretVars)
 	if err != nil {

@@ -1095,3 +1095,22 @@ func TestBestEffortAutoDetectedInputsIgnoresDroppedRefs(t *testing.T) {
 		t.Fatalf("bestEffortAutoDetectedInputs = %v, want empty", got)
 	}
 }
+
+func TestAutoDetectedInputsForCommandRequiresRepoShape(t *testing.T) {
+	got := autoDetectedInputsForCommand("", "python train.py --model gpt2 --base-model Qwen/Qwen2.5-7B", nil)
+	want := []string{"hf:Qwen/Qwen2.5-7B"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("autoDetectedInputsForCommand = %v, want %v", got, want)
+	}
+}
+
+func TestAutoDetectedInputsForCommandExplicitInputsWin(t *testing.T) {
+	got := autoDetectedInputsForCommand(
+		"",
+		"python train.py --model-name tiny-random-llama --base-model Qwen/Qwen2.5-7B",
+		[]string{"hf:hf-internal-testing/tiny-random-LlamaForCausalLM"},
+	)
+	if len(got) != 0 {
+		t.Fatalf("autoDetectedInputsForCommand = %v, want empty when explicit inputs are declared", got)
+	}
+}

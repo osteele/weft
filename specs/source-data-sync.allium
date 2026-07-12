@@ -1172,11 +1172,15 @@ rule HFAssetsPrestagedOnCloud {
         -- (infra_prewarm_download_failed), not a user-code failure, for
         -- explicit inputs declared through --input, project config, or
         -- PEP-723 [tool.weft] inputs. HF refs contributed only by
-        -- source/command auto-detection are best-effort: after the same
-        -- retry/xet-disable sequence fails, the agent logs a warning and
-        -- starts the job. If the command truly needs that ref, user code
-        -- fails at runtime; a spurious argparse default must not block a
-        -- job with a different explicit model. Implementation:
+        -- source/command auto-detection are best-effort. Submission and
+        -- retry refresh must not add auto-detected HF refs when any inputs
+        -- were explicitly declared, and auto-detected HF refs that lack the
+        -- org/name repo shape are discarded before staging. After the same
+        -- retry/xet-disable sequence fails for a remaining best-effort ref,
+        -- the agent logs a warning and starts the job. If the command truly
+        -- needs that ref, user code fails at runtime; a spurious argparse
+        -- default must not block a job with a different explicit model.
+        -- Implementation:
         -- cmd/agent/jobloop.go runHFDownloadPrewarm, hfPrewarmBackoff,
         -- hfPrewarmTextHasXetWriterError.
 }
