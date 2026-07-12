@@ -137,11 +137,14 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	var livePhase string
 	var livePhaseChanged *time.Time
 	if liveState, err := db.GetLaunchLiveState(database, inst.ID); err == nil && liveState != nil {
-		livePhase = strings.TrimSpace(liveState.InstancePhase)
+		livePhase = reconcileInstanceDiagnoseLivePhase(jobs, liveState.InstancePhase)
 		if liveState.PhaseChangedAt != nil {
 			ts := time.Unix(*liveState.PhaseChangedAt, 0)
 			livePhaseChanged = &ts
 		}
+	}
+	if livePhase == "" {
+		livePhase = reconcileInstanceDiagnoseLivePhase(jobs, "")
 	}
 	livePhaseRaw := ""
 	bootstrapStage := ""
@@ -198,6 +201,14 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 
 	fmt.Print(formatInstanceDiagnoseReport(report))
 	return nil
+}
+
+func reconcileInstanceDiagnoseLivePhase(jobs []*db.Job, phase string) string {
+	phase = strings.TrimSpace(phase)
+	if reconciled, _ := campaign.DisplayPhase(jobs, phase); reconciled != "" {
+		return reconciled
+	}
+	return phase
 }
 
 // buildTimeline constructs a chronological list of events from all sources.

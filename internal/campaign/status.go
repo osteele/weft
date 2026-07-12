@@ -365,6 +365,19 @@ func displayPhase(jobStatuses map[int64]string, jobs []*db.Job, r2Phase string) 
 	return r2Phase, r2Verb
 }
 
+// DisplayPhase reconciles a stored or observed instance phase with current DB
+// job state for read-only display paths.
+func DisplayPhase(jobs []*db.Job, phase string) (string, string) {
+	jobStatuses := make(map[int64]string, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		jobStatuses[job.ID] = job.Status
+	}
+	return displayPhase(jobStatuses, jobs, phase)
+}
+
 func fallbackRunningPhase(jobStatuses map[int64]string, jobs []*db.Job) (phase string, verb string) {
 	var (
 		bestJobID    int64

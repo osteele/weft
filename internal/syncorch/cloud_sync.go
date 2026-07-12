@@ -138,7 +138,7 @@ func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts C
 			return res
 		}
 		if !ok {
-			slog.Debug("cloud sync lease held; running database-only fallback", "component", "sync", "scope", leaseScope)
+			slog.Info("cloud sync lease held; running database-only fallback", "component", "sync", "scope", leaseScope)
 			return syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 		}
 		defer func() {

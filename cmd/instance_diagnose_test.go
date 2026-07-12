@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2upload"
 )
@@ -83,6 +84,29 @@ func TestFormatPhaseDurations(t *testing.T) {
 			t.Errorf("expected empty for missing end, got %q", got)
 		}
 	})
+}
+
+func TestReconcileInstanceDiagnoseLivePhase(t *testing.T) {
+	jobs := []*db.Job{{ID: 4483, Status: db.StatusRunning}}
+	tests := []struct {
+		name  string
+		phase string
+		want  string
+	}{
+		{"empty", "", "running:4483"},
+		{"ready", "ready", "running:4483"},
+		{"setup", "setup:4483", "running:4483"},
+		{"disk-full", campaign.PhaseDiskFull, campaign.PhaseDiskFull},
+		{"grace", campaign.PhaseGrace, campaign.PhaseGrace},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reconcileInstanceDiagnoseLivePhase(jobs, tt.phase)
+			if got != tt.want {
+				t.Fatalf("reconcileInstanceDiagnoseLivePhase(%q) = %q, want %q", tt.phase, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestFormatGPUMetrics(t *testing.T) {

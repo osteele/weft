@@ -33,9 +33,20 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 	if update.BootstrapStage != "" {
 		activity.Bootstrap = campaign.BootstrapStageLabel(update.BootstrapStage)
 	}
-	if update.InstancePhase != "" && (ci == nil || !campaign.IsInstanceTerminal(ci.Status)) {
-		activity.Phase = formatObservedPhase(update, now)
-		return activity
+	if ci == nil || !campaign.IsInstanceTerminal(ci.Status) {
+		reconciledPhase, reconciledVerb := campaign.DisplayPhase(update.Jobs, update.InstancePhase)
+		if reconciledPhase != "" {
+			reconciled := update
+			reconciled.InstancePhase = reconciledPhase
+			if reconciledPhase != update.InstancePhase && reconciledVerb == campaign.PhaseRunning {
+				if _, jobID, ok := campaign.ParsePhaseJobID(reconciledPhase); ok {
+					activity.Phase = fmt.Sprintf("running job %s (observed from DB)", ids.FormatJobID(jobID))
+					return activity
+				}
+			}
+			activity.Phase = formatObservedPhase(reconciled, now)
+			return activity
+		}
 	}
 	if activity.Bootstrap != "" {
 		return activity

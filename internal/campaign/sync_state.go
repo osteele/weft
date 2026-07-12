@@ -143,6 +143,18 @@ func SyncInstanceState(
 		s.TerminationIntent = ci.TerminationIntent
 	}
 
+	if freshJobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID); err == nil {
+		jobs = freshJobs
+		for _, job := range jobs {
+			if jobStartedOnInstance(job) {
+				jobState.HasStartedJob = true
+				break
+			}
+		}
+	} else {
+		slog.Warn("refresh launch jobs for instance phase", "component", "sync", "instance", instanceID, "error", err)
+	}
+
 	jobStatuses := make(map[int64]string, len(jobs))
 	for _, job := range jobs {
 		if job == nil {
@@ -377,6 +389,57 @@ func SyncInstanceState(
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
 	return s
+}
+
+// RefreshLaunchPhasesFromDB refreshes the cached display phase for live
+// launches without provider observations. It is intentionally read-only with
+// respect to provider state and must not call CheckInstance or termination
+// logic; it exists so database-observed running jobs can correct stale
+// launch_live_state.instance_phase even when cloud provider clients or the
+// cloud-sync lease are unavailable.
+func RefreshLaunchPhasesFromDB(ctx context.Context, database *sql.DB, r2Client *r2.Client) (int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if database == nil {
+		return 0, nil
+	}
+	launches, err := db.ListRunningLaunches(database)
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for _, launch := range launches {
+		if launch == nil {
+			continue
+		}
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, launch.ID)
+		if err != nil {
+			slog.Warn("refresh phase jobs", "component", "sync", "instance", launch.ID, "error", err)
+			continue
+		}
+		observedPhase := ""
+		if r2Client != nil && (launch.Status == db.LaunchStatusRunning || launch.Status == db.LaunchStatusGrace) {
+			observedPhase = syncFetchInstancePhase(ctx, r2Client, launch.ID)
+		}
+		if observedPhase == "" {
+			if live, err := db.GetLaunchLiveState(database, launch.ID); err == nil && live != nil {
+				observedPhase = strings.TrimSpace(live.InstancePhase)
+			} else if err != nil {
+				slog.Warn("read live phase for refresh", "component", "sync", "instance", launch.ID, "error", err)
+			}
+		}
+		phase, _ := DisplayPhase(jobs, observedPhase)
+		if phase == "" {
+			continue
+		}
+		if changedAt, err := db.SetLaunchLiveInstancePhase(database, launch.ID, phase); err != nil {
+			slog.Warn("refresh launch phase", "component", "sync", "instance", launch.ID, "phase", phase, "error", err)
+		} else if changedAt != nil {
+			updated++
+		}
+	}
+	return updated, nil
 }
 
 func confirmMoveIntentsForReadyLaunch(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64) {

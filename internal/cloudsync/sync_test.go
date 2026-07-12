@@ -2,6 +2,7 @@ package cloudsync
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -99,5 +100,46 @@ func TestSyncState_PropagatesContextCancellation(t *testing.T) {
 
 	if !observedCancel.Load() {
 		t.Fatal("inner work did not observe ctx cancellation")
+	}
+}
+
+func TestSyncState_RefreshesLaunchPhaseWithoutClients(t *testing.T) {
+	database := db.SetupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "L40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	if _, err := db.SetLaunchLiveInstancePhase(database, instanceID, "ready"); err != nil {
+		t.Fatalf("SetLaunchLiveInstancePhase: %v", err)
+	}
+
+	result := SyncState(context.Background(), database, nil, nil, nil, nil)
+
+	want := fmt.Sprintf("running:%d", jobID)
+	live, err := db.GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if live == nil || live.InstancePhase != want {
+		t.Fatalf("live phase = %+v, want %q", live, want)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("Updated = %d, want 1", result.Updated)
 	}
 }

@@ -78,6 +78,70 @@ func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
 	}
 }
 
+func TestFormatObservedActivityReconcilesStoredPhaseWithDBJobs(t *testing.T) {
+	instanceID := int64(107)
+	runningJob := &db.Job{ID: 88, Status: db.StatusRunning, LaunchID: &instanceID}
+	tests := []struct {
+		name  string
+		phase string
+		want  string
+	}{
+		{
+			name:  "empty uses DB running job",
+			phase: "",
+			want:  "running job wj88 (observed from DB)",
+		},
+		{
+			name:  "ready uses DB running job",
+			phase: "ready",
+			want:  "running job wj88 (observed from DB)",
+		},
+		{
+			name:  "setup for running job promotes to running",
+			phase: "setup:88",
+			want:  "running job wj88 (observed from DB)",
+		},
+		{
+			name:  "running phase stays job scoped",
+			phase: "running:88",
+			want:  "running job 88",
+		},
+		{
+			name:  "disk full is not masked by running job",
+			phase: campaign.PhaseDiskFull,
+			want:  "disk full",
+		},
+		{
+			name:  "grace is not masked by running job",
+			phase: campaign.PhaseGrace,
+			want:  "grace period",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			activity := formatObservedActivity(campaign.InstanceUpdate{
+				Launch: &db.Launch{
+					ID:                 instanceID,
+					Status:             db.LaunchStatusRunning,
+					Provider:           "vastai",
+					ProviderInstanceID: "32712487",
+					GPUSpec:            "A100",
+				},
+				InstancePhase: tt.phase,
+				Jobs:          []*db.Job{runningJob},
+			}, time.Now())
+
+			if activity.Phase != tt.want {
+				t.Fatalf("phase = %q, want %q", activity.Phase, tt.want)
+			}
+			if activity.Bootstrap != "" {
+				t.Fatalf("bootstrap = %q, want empty", activity.Bootstrap)
+			}
+		})
+	}
+}
+
 func TestFormatBootstrapWaitingShowsElapsedTime(t *testing.T) {
 	launchedAt := time.Now().Add(-45 * time.Second).Unix()
 	activity := formatObservedActivity(campaign.InstanceUpdate{

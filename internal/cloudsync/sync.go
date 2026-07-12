@@ -55,11 +55,22 @@ func SyncState(ctx context.Context, database *sql.DB, reconciler *campaign.Recon
 	}
 	wg.Wait()
 
+	phaseRefreshUpdated := 0
+	if len(clients) == 0 {
+		n, err := campaign.RefreshLaunchPhasesFromDB(ctx, database, r2Client)
+		if err != nil {
+			slog.Warn("refresh launch phases failed", "component", "cloudsync", "error", err)
+		} else {
+			phaseRefreshUpdated = n
+		}
+	}
+
 	result.ReconcileResult = reconcileResult
 	if reconcileResult != nil {
 		result.Updated += reconcileResult.Reconciled + reconcileResult.JobsUpdated
 	}
 	result.Updated += resultsUpdated
+	result.Updated += phaseRefreshUpdated
 
 	if _, err := campaign.ReconcileCampaigns(database); err != nil {
 		slog.Warn("reconcile campaigns failed", "component", "cloudsync", "error", err)
