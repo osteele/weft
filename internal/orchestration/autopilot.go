@@ -1328,6 +1328,14 @@ func autoReplanStuckInventoryJobs(database *sql.DB, scoped map[int64]struct{}, m
 }
 
 func fulfillOpenMoveToNewIntents(ctx context.Context, database *sql.DB, scoped map[int64]struct{}) (int, error) {
+	pruned, err := db.PruneMoveIntents(database, placementIntentProtectionWindow)
+	if err != nil {
+		return 0, err
+	}
+	for _, intent := range pruned {
+		oplog.LogJob("auto_pilot.move_intent_pruned", intent.JobID, "",
+			oplog.WithDetailf("intent=%d created_at=%d", intent.ID, intent.CreatedAt))
+	}
 	intents, err := db.ListOpenNewMoveIntents(database)
 	if err != nil {
 		return 0, err

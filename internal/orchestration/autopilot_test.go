@@ -1642,6 +1642,54 @@ func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(
 	}
 }
 
+func TestFulfillOpenMoveToNewIntents_PrunesStaleTerminalTargetBeforeRetry(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "stale move", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	originalRetry := autoPilotLaunchMoveIntentRetry
+	t.Cleanup(func() { autoPilotLaunchMoveIntentRetry = originalRetry })
+	autoPilotLaunchMoveIntentRetry = func(context.Context, *sql.DB, *db.MoveIntent) (int, error) {
+		t.Fatal("stale terminal target should be pruned before retry")
+		return 0, nil
+	}
+
+	launched, err := fulfillOpenMoveToNewIntents(context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("fulfillOpenMoveToNewIntents: %v", err)
+	}
+	if launched != 0 {
+		t.Fatalf("launched = %d, want 0", launched)
+	}
+	got, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != db.MoveIntentStateCanceled || got.Resolution != db.MoveIntentResolutionStale {
+		t.Fatalf("intent = (%s, %q), want canceled stale", got.State, got.Resolution)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_ReusesExistingInstanceWhenLaunchBlocked(t *testing.T) {
 	database := db.SetupTestDB(t)
 
