@@ -106,6 +106,7 @@ func SyncInstanceState(
 
 	instanceID := ci.ID
 	reconcilePendingMoveTargetRequestAcks(ctx, database, r2Client, instanceID)
+	reconcileAbandonedMoveTargetAttempts(ctx, database, r2Client, instanceID)
 
 	if opts.AgentVersionFetched {
 		s.AgentVersion = opts.AgentVersion
@@ -484,6 +485,34 @@ func adoptObservedMoveTarget(ctx context.Context, database *sql.DB, r2Client *r2
 		return
 	}
 	stopMoveIntentSources(ctx, r2Client, sourceStops)
+}
+
+// abandonedMoveCancelWindow bounds how long sync keeps re-sending
+// cancel-attempts markers for recently abandoned move targets. Markers are
+// idempotent (the agent unions attempt IDs), so repeats within the window are
+// harmless; the window just keeps steady-state syncs from scanning all
+// history.
+const abandonedMoveCancelWindow = 30 * time.Minute
+
+// reconcileAbandonedMoveTargetAttempts tells the target agent to drop hidden
+// move-target attempts whose intent was resolved canceled/obsoleted before
+// the attempt started. Without this, a jobs request parked in the target's R2
+// queue can start an attempt the DB already canceled, which the stall
+// detector then answers by terminating the whole instance.
+func reconcileAbandonedMoveTargetAttempts(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	since := time.Now().Add(-abandonedMoveCancelWindow).Unix()
+	attemptIDs, err := db.ListAbandonedMoveTargetCancelAttempts(database, instanceID, since)
+	if err != nil {
+		slog.Warn("list abandoned move target attempts", "component", "sync", "instance", instanceID, "error", err)
+		return
+	}
+	if len(attemptIDs) == 0 {
+		return
+	}
+	if err := sendGraceCancelAttempts(ctx, r2Client, instanceID, attemptIDs); err != nil {
+		slog.Warn("send cancel-attempts for abandoned move targets",
+			"component", "sync", "instance", instanceID, "attempt_ids", attemptIDs, "error", err)
+	}
 }
 
 func reconcilePendingMoveTargetRequestAcks(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64) {

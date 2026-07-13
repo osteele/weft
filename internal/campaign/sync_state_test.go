@@ -1724,3 +1724,65 @@ func TestSyncInstanceState_PersistsFirstOnStartProbeSeen(t *testing.T) {
 		t.Fatalf("R2-errored 'presumed-present' must not persist a first-seen time; corrupts survival training data. got %v", *got2.FirstOnStartProbeSeenUnix)
 	}
 }
+
+func TestReconcileAbandonedMoveTargetAttempts_SendsCancelMarkers(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	src, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, GPUSpec: "RTX_4090"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, GPUSpec: "RTX_4090"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, src); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "launch reset; move abandoned"); err != nil {
+		t.Fatalf("ResolveMoveIntent: %v", err)
+	}
+
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() { sendGraceCancelAttempts = prevSendCancel })
+	var gotLaunch int64
+	var gotAttempts []int64
+	sendGraceCancelAttempts = func(_ context.Context, _ controlplane.GraceStore, launchID int64, attemptIDs []int64) error {
+		gotLaunch = launchID
+		gotAttempts = append(gotAttempts, attemptIDs...)
+		return nil
+	}
+
+	reconcileAbandonedMoveTargetAttempts(context.Background(), database, nil, target)
+
+	if gotLaunch != target {
+		t.Fatalf("cancel sent to launch %d, want %d", gotLaunch, target)
+	}
+	if len(gotAttempts) != 1 || gotAttempts[0] != attemptID {
+		t.Fatalf("cancel attempts = %v, want [%d]", gotAttempts, attemptID)
+	}
+
+	// No recent abandons on the source launch: nothing sent.
+	gotLaunch, gotAttempts = 0, nil
+	reconcileAbandonedMoveTargetAttempts(context.Background(), database, nil, src)
+	if gotLaunch != 0 || len(gotAttempts) != 0 {
+		t.Fatalf("unexpected cancel send for source launch: launch=%d attempts=%v", gotLaunch, gotAttempts)
+	}
+}

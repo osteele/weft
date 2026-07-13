@@ -160,6 +160,39 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	return GetMoveIntent(database, id)
 }
 
+// resolveOpenMoveIntentAbandonedTx cancels a job's open move intent inside a
+// caller-owned transaction, stamping the hidden target attempt abandoned so
+// it can never become authoritative. Used by requeue paths (ResetLaunchJobs)
+// that close all of a job's attempts: once the attempts are gone the intent
+// no longer describes an executable move, and leaving it open hides the job
+// from the autopilot forever (AutopilotIgnoresMovingJobs).
+func resolveOpenMoveIntentAbandonedTx(tx *sql.Tx, jobID, now int64, resolution string) error {
+	var intentID int64
+	var targetAttempt sql.NullInt64
+	err := tx.QueryRow(
+		`SELECT id, target_attempt_id FROM move_intents WHERE job_id = ? AND state = 'open' LIMIT 1`,
+		jobID,
+	).Scan(&intentID, &targetAttempt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if targetAttempt.Valid {
+		if err := AbandonAttempt(tx, targetAttempt.Int64, AttemptAbandonedMoveDestinationRejected, &intentID); err != nil {
+			return fmt.Errorf("abandon move target attempt: %w", err)
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE move_intents SET state = ?, resolved_at = ?, resolution = ? WHERE id = ? AND state = 'open'`,
+		string(MoveIntentStateCanceled), now, resolution, intentID,
+	); err != nil {
+		return fmt.Errorf("cancel abandoned move intent: %w", err)
+	}
+	return nil
+}
+
 func isUniqueConstraintErr(err error) bool {
 	if err == nil {
 		return false
@@ -432,6 +465,43 @@ func ListOpenMoveIntentPendingTargetRequests(database *sql.DB, launchID int64) (
 	return out, rows.Err()
 }
 
+// ListAbandonedMoveTargetCancelAttempts returns target attempt IDs of move
+// intents that resolved canceled/obsoleted at or after sinceUnix while their
+// hidden target attempt on launchID never started. Sync sends these to the
+// target agent as cancel-attempts markers so a stale R2 jobs request cannot
+// start an attempt the DB has already closed (the running-canceled-attempt
+// stall that terminated wi5141). The recency window bounds repeat sends; the
+// marker is idempotent on the agent side.
+func ListAbandonedMoveTargetCancelAttempts(database *sql.DB, launchID, sinceUnix int64) ([]int64, error) {
+	if launchID <= 0 {
+		return nil, nil
+	}
+	rows, err := database.Query(`
+		SELECT ta.id
+		  FROM move_intents mi
+		  JOIN job_attempts ta ON ta.id = mi.target_attempt_id
+		 WHERE mi.target_launch_id = ?
+		   AND mi.state IN ('canceled','obsoleted')
+		   AND mi.resolved_at >= ?
+		   AND (ta.start_time IS NULL OR ta.start_time = 0)
+		 ORDER BY ta.id`,
+		launchID, sinceUnix,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // UpdateMoveIntentTargetLaunch fills in target_launch_id once a 'new' move
 // has had its instance created. No-op if the intent is no longer open.
 func UpdateMoveIntentTargetLaunch(database *sql.DB, intentID, launchID int64) error {
@@ -682,6 +752,11 @@ func moveSourceWonResolution(status string) string {
 	return "source attempt finished before target won (status=" + status + ")"
 }
 
+// listOpenMoveIntentOutcomeRepairs derives outcomes for open move intents
+// from their attempts' recorded states. Block order is load-bearing:
+// PruneMoveIntents collapses repairs per intent with last-writer-wins, so
+// when one intent matches several blocks the later block decides — source-won
+// (obsoleted) overrides both target outcomes.
 func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, error) {
 	const targetQuery = `
 		SELECT mi.id, mi.job_id, mi.created_at, ta.status
@@ -696,6 +771,25 @@ func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, err
 	if err != nil {
 		return nil, err
 	}
+
+	// A canceled target attempt can never win: something outside the move
+	// (launch reset, job cancel) closed it, so the intent must resolve as
+	// canceled — never confirmed — or it hides the job from the autopilot
+	// forever (wj4620).
+	const targetCanceledQuery = `
+		SELECT mi.id, mi.job_id, mi.created_at, ta.status
+		  FROM move_intents mi
+		  JOIN job_attempts ta ON ta.id = mi.target_attempt_id
+		 WHERE mi.state = 'open'
+		   AND ta.end_time IS NOT NULL
+		   AND ta.status = 'canceled'
+		 ORDER BY mi.id`
+	targetCanceledRepairs, err := scanMoveIntentOutcomeRepairs(database, targetCanceledQuery, MoveIntentStateCanceled,
+		func(status string) string { return "target attempt " + status + " before the move completed" })
+	if err != nil {
+		return nil, err
+	}
+	repairs = append(repairs, targetCanceledRepairs...)
 
 	const sourceQuery = `
 		SELECT mi.id, mi.job_id, mi.created_at, sa.status

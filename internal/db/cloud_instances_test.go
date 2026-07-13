@@ -1539,6 +1539,72 @@ func TestResetLaunchJobs_RestoresRetryableNoStartMoveTargetAndKeepsIntentOpen(t 
 	}
 }
 
+func TestResetLaunchJobs_AbandonsOpenMoveIntentOnSourceReset(t *testing.T) {
+	// wj4620: the reconciler terminated the move SOURCE launch. The requeue
+	// closed all of the job's attempts — including the hidden target attempt
+	// on another live launch — but left the intent open, hiding the job from
+	// the autopilot forever.
+	database := setupTestDB(t)
+
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	dst, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	insertTestJob(t, database, 1206, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 1206, src); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          1206,
+		TargetKind:     MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, 1206, "", &dst, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+
+	if _, err := ResetLaunchJobs(database, src, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
+	}
+
+	gotIntent, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.State != MoveIntentStateCanceled {
+		t.Fatalf("move intent state = %q, want canceled", gotIntent.State)
+	}
+	if !strings.Contains(gotIntent.Resolution, "move abandoned") {
+		t.Fatalf("resolution = %q, want it to mention move abandoned", gotIntent.Resolution)
+	}
+	var abandonedReason string
+	if err := database.QueryRow(
+		`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID,
+	).Scan(&abandonedReason); err != nil {
+		t.Fatalf("target abandoned reason: %v", err)
+	}
+	if abandonedReason != AttemptAbandonedMoveDestinationRejected {
+		t.Fatalf("target abandoned reason = %q, want %q", abandonedReason, AttemptAbandonedMoveDestinationRejected)
+	}
+	var openAttempts int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = 1206 AND end_time IS NULL`,
+	).Scan(&openAttempts); err != nil {
+		t.Fatalf("count open attempts: %v", err)
+	}
+	if openAttempts != 0 {
+		t.Fatalf("open attempts = %d, want 0", openAttempts)
+	}
+}
+
 func TestHandleMoveTargetFailedBeforeStart_ConsumesStaleClosedTarget(t *testing.T) {
 	database := setupTestDB(t)
 

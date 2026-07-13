@@ -381,10 +381,13 @@ rule MoveToNewLaunchAttachesIntent {
 }
 
 rule ExistingRunningRentalMoveWaitsForTargetAck {
-    -- Running rental agents do not continuously poll for added jobs while a
-    -- job is executing. The R2 grace request is therefore only a durable
-    -- request, not acceptance. The coordinator records the request id and
-    -- leaves the move open until sync observes the corresponding ack.
+    -- The R2 grace request is a durable request, not acceptance. The
+    -- coordinator records the request id and leaves the move open until
+    -- sync observes the corresponding ack. Running rental agents drain
+    -- jobs requests on a background interval WHILE a job executes (the
+    -- accepted jobs still run after the current job), so the ack — and
+    -- with it move confirmation and the source stop — arrives within a
+    -- drain interval rather than after the current job finishes.
     when: ExecuteMoveOption(job, target, intent) writes GraceJobsRequest
           and target.kind = existing
           and target.launch.status = running
@@ -464,6 +467,50 @@ rule CancelMoveOnFailure {
             -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
             -- the intent is canceled.
             ResolveMoveIntent(intent, canceled, "move failed")
+}
+
+rule LaunchResetAbandonsOpenMoveIntent {
+    -- A launch reset (reconcile termination, orphan requeue) closes every
+    -- attempt of each affected job — including a hidden move-target attempt
+    -- on a DIFFERENT launch — and returns the job to the queue. An intent
+    -- left open after that describes no executable move, and via
+    -- AutopilotIgnoresMovingJobs it would hide the requeued job from
+    -- placement forever (wj4620). The reset therefore resolves the intent in
+    -- the same transaction that closes the attempts. The move-to-new
+    -- restore path (MoveTargetFailedBeforeStart) takes precedence when the
+    -- reset launch is the intent's target.
+    when: ResetLaunchJobs(launch) requeues job
+          and not MoveTargetFailedBeforeStart(job, launch)
+    requires: exists(MoveIntent { job = job, state = open })
+
+    ensures:
+        let intent = MoveIntent { job = job, state = open }
+        if intent.target_attempt != null:
+            AbandonAttempt(intent.target_attempt,
+                           reason = "move_destination_rejected",
+                           by_intent = intent)
+        ResolveMoveIntent(intent, canceled, "launch reset; move abandoned")
+}
+
+rule SyncCancelsAbandonedMoveTargetAttempts {
+    -- Resolving an intent does not by itself retract the durable R2 jobs
+    -- request already parked at the target. Without retraction the target
+    -- agent would eventually drain the request and start an attempt the DB
+    -- has already canceled — the running-canceled-attempt stall that
+    -- terminates instances. Per-instance sync re-sends cancel-attempts
+    -- markers for recently abandoned move targets; the marker is idempotent
+    -- (the agent unions attempt ids and checks them before each job start),
+    -- and a recency window bounds the re-sends.
+    when: SyncInstanceState(target_launch)
+    requires: exists(MoveIntent { target_launch = target_launch,
+                                  state in {canceled, obsoleted},
+                                  target_attempt != null,
+                                  target_attempt.start_time = null,
+                                  resolved_at >= now - recency_window })
+
+    ensures:
+        SendGraceCancelAttempts(target_launch,
+            [intent.target_attempt for each such MoveIntent])
 }
 
 rule ObsoleteMoveOnSourceCompletion {
@@ -842,13 +889,18 @@ invariant StaleMoveIntentRepairConverges {
     -- determine the intent's outcome from existing evidence:
     --   * no non-terminal target launch after the protection window
     --     -> canceled (MoveIntentResolutionStale)
-    --   * the target attempt reached a terminal status
-    --     -> confirmed (mirrors the auto-confirm trigger)
-    --   * the source attempt reached a terminal status
+    --   * the target attempt reached a job-owned terminal status
+    --     (completed/failed) -> confirmed (mirrors the auto-confirm trigger)
+    --   * the target attempt was canceled -> canceled, never confirmed: a
+    --     canceled destination did not win, something outside the move
+    --     (launch reset, job cancel) closed it
+    --   * the source attempt reached a job-owned terminal status
     --     -> obsoleted (mirrors the auto-obsolete triggers); for legacy
     --     intents predating the constructor snapshot (source_attempt null,
     --     source_launch set), the source is identified as the latest
     --     terminal non-target attempt on the source launch
+    -- When both source-won and target-canceled evidence exist, source-won
+    -- (obsoleted) takes precedence.
     --
     -- A repair pass over an open intent may resolve it only through
     -- ResolveMoveIntent / ConfirmMoveTargetAccepted / ObsoleteMove. It

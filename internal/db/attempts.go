@@ -363,7 +363,7 @@ func closeOpenAttempts(execer dbExecer, jobID int64, now int64) error {
 
 // AbandonAttempt removes an attempt from logical job authority while retaining
 // its row for audit and explicit attempt-level queries.
-func AbandonAttempt(database *sql.DB, attemptID int64, reason string, intentID *int64) error {
+func AbandonAttempt(execer dbExecer, attemptID int64, reason string, intentID *int64) error {
 	if attemptID <= 0 {
 		return fmt.Errorf("invalid attempt id")
 	}
@@ -372,7 +372,7 @@ func AbandonAttempt(database *sql.DB, attemptID int64, reason string, intentID *
 		return fmt.Errorf("abandon attempt reason is required")
 	}
 	now := time.Now().Unix()
-	_, err := database.Exec(
+	_, err := execer.Exec(
 		`UPDATE job_attempts
 		    SET abandoned_at = COALESCE(abandoned_at, ?),
 		        abandoned_reason = COALESCE(NULLIF(abandoned_reason, ''), ?),

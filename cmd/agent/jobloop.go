@@ -711,6 +711,12 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	}
 	drainCancels()
 
+	// Drain incoming jobs requests while jobs execute, not just between them:
+	// the ack is what lets the coordinator confirm a pending move and cancel
+	// the source, so it must not wait behind a multi-hour job.
+	newJobsPoller := startJobRequestPoller(cfg.R2Bucket, cfg.InstanceID)
+	defer newJobsPoller.Stop()
+
 	for i := 0; i < len(jobs); i++ {
 		job := jobs[i]
 		drainCancels()
@@ -1002,9 +1008,10 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
 		lastPostJobID = job.ID
 
-		// Check for newly submitted jobs via R2 (between-job reuse)
+		// Merge jobs accepted since the last merge (mid-job drains plus one
+		// final synchronous drain) into the sequence.
 		setSequencePhase(cfg, "ready_for_next_job", job.ID)
-		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID, func(phase string) {
+		if newJobs := newJobsPoller.Take(func(phase string) {
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(phase)
 			}
@@ -1018,7 +1025,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 	// Wait for remaining background work, then clean up workdirs.
 	// Cleanup is intentionally deferred to here (after the new-job pickup
-	// loop has exited) to avoid racing with checkForNewJobs.
+	// loop has exited and the poller is stopped) to avoid racing a source
+	// extract against workdir deletion.
+	newJobsPoller.Stop()
 	bgm.Barrier()
 	if lastPostJobID > 0 {
 		setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)

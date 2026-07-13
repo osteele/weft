@@ -1151,10 +1151,11 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		return fmt.Errorf("instance %s cannot accept reused jobs: %s", ids.FormatInstanceID(instanceID), reason)
 	}
 
-	// Running instances pick up queued jobs between job executions but don't
-	// ack immediately — the agent only drains grace requests after the current
-	// job finishes. Write the request to R2 but skip waiting for the ack;
-	// the agent will find it. Grace instances poll continuously, so we wait.
+	// Running instances drain jobs requests on a background interval while a
+	// job executes, but the ack still arrives asynchronously. Write the
+	// request to R2 without waiting for the ack; sync's
+	// reconcilePendingMoveTargetRequestAcks consumes it. Grace instances poll
+	// continuously, so we wait for the ack synchronously.
 	targetRequestID := ""
 	usedNoAckSubmission := false
 	if inst.Status == db.LaunchStatusRunning {

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -695,6 +696,74 @@ func TestPruneMoveIntents(t *testing.T) {
 		}
 	})
 
+	t.Run("repairs canceled target attempt as canceled", func(t *testing.T) {
+		// wj4620: a launch reset canceled both the source attempt and the
+		// hidden target attempt but left the intent open. A canceled target
+		// never won, so the repair must resolve canceled — not confirmed.
+		database := SetupTestDB(t)
+		src := mustCreateLaunch(t, database)
+		target := mustCreateLaunch(t, database)
+		jobID, err := RecordQueued(database, "", "/tmp", "echo hi", "move")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := SetJobLaunchID(database, jobID, src); err != nil {
+			t.Fatalf("SetJobLaunchID source: %v", err)
+		}
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:          jobID,
+			TargetKind:     MoveTargetExisting,
+			TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateMoveTargetAttempt: %v", err)
+		}
+		now := time.Now().Unix()
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ?`,
+			StatusCanceled, now, jobID,
+		); err != nil {
+			t.Fatalf("cancel attempts: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET source_attempt_id = NULL WHERE id = ?`, intent.ID); err != nil {
+			t.Fatalf("clear source snapshot: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].ID != intent.ID {
+			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		}
+		if pruned[0].State != MoveIntentStateCanceled {
+			t.Fatalf("pruned state = %s, want canceled", pruned[0].State)
+		}
+		got, err := GetMoveIntent(database, intent.ID)
+		if err != nil {
+			t.Fatalf("GetMoveIntent: %v", err)
+		}
+		if got.State != MoveIntentStateCanceled {
+			t.Fatalf("state = %s, want canceled", got.State)
+		}
+		if !strings.Contains(got.Resolution, "target attempt canceled") {
+			t.Fatalf("resolution = %q, want it to mention target attempt canceled", got.Resolution)
+		}
+		var abandonedReason string
+		if err := database.QueryRow(
+			`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID,
+		).Scan(&abandonedReason); err != nil {
+			t.Fatalf("target abandoned reason: %v", err)
+		}
+		if abandonedReason != AttemptAbandonedMoveDestinationRejected {
+			t.Fatalf("target abandoned reason = %q, want %q", abandonedReason, AttemptAbandonedMoveDestinationRejected)
+		}
+	})
+
 	t.Run("repairs completed target attempt", func(t *testing.T) {
 		database := SetupTestDB(t)
 		target := mustCreateLaunch(t, database)
@@ -753,6 +822,70 @@ func TestPruneMoveIntents(t *testing.T) {
 			t.Fatalf("source abandoned reason = %q, want %q", reason, AttemptAbandonedMoveTargetAccepted)
 		}
 	})
+}
+
+func TestListAbandonedMoveTargetCancelAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+	src := mustCreateLaunch(t, database)
+	target := mustCreateLaunch(t, database)
+
+	openIntent := func(jobID int64) (*MoveIntent, int64) {
+		t.Helper()
+		if err := SetJobLaunchID(database, jobID, src); err != nil {
+			t.Fatalf("SetJobLaunchID job %d: %v", jobID, err)
+		}
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:          jobID,
+			TargetKind:     MoveTargetExisting,
+			TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent job %d: %v", jobID, err)
+		}
+		attemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateMoveTargetAttempt job %d: %v", jobID, err)
+		}
+		return intent, attemptID
+	}
+
+	// Abandoned before start: should be listed.
+	insertTestJob(t, database, 300, "echo hi", "/tmp", StatusQueued)
+	intentA, attemptA := openIntent(300)
+	if err := ResolveMoveIntent(database, intentA.ID, MoveIntentStateCanceled, "launch reset; move abandoned"); err != nil {
+		t.Fatalf("resolve intent A: %v", err)
+	}
+
+	// Still open: not listed.
+	insertTestJob(t, database, 301, "echo hi", "/tmp", StatusQueued)
+	_, attemptB := openIntent(301)
+
+	// Abandoned but the target attempt had already started: not listed.
+	insertTestJob(t, database, 302, "echo hi", "/tmp", StatusQueued)
+	intentC, attemptC := openIntent(302)
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE id = ?`, time.Now().Unix(), attemptC); err != nil {
+		t.Fatalf("start attempt C: %v", err)
+	}
+	if err := ResolveMoveIntent(database, intentC.ID, MoveIntentStateCanceled, "canceled after start"); err != nil {
+		t.Fatalf("resolve intent C: %v", err)
+	}
+
+	got, err := ListAbandonedMoveTargetCancelAttempts(database, target, time.Now().Add(-time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("ListAbandonedMoveTargetCancelAttempts: %v", err)
+	}
+	if len(got) != 1 || got[0] != attemptA {
+		t.Fatalf("attempts = %v, want [%d] (not open %d or started %d)", got, attemptA, attemptB, attemptC)
+	}
+
+	// Outside the recency window: not listed.
+	got, err = ListAbandonedMoveTargetCancelAttempts(database, target, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("ListAbandonedMoveTargetCancelAttempts future window: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("attempts = %v, want none outside window", got)
+	}
 }
 
 func TestAttachMoveIntentTargetLaunch(t *testing.T) {
