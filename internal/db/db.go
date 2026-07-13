@@ -1898,6 +1898,15 @@ func moveQueuedJobToUnplaced(database *sql.DB, id int64, reason string, promoteT
 	if err != nil {
 		return err
 	}
+	now := time.Now().Unix()
+	if err := resolveOpenMoveIntentAbandonedTx(tx, id, now, "job unplaced; move abandoned"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := resolveOpenPlacementIntentCanceledTx(tx, id, now, "job unplaced; placement abandoned"); err != nil {
+		tx.Rollback()
+		return err
+	}
 	result, err := tx.Exec(`UPDATE job_attempts SET host = '', launch_id = NULL, target_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
 	if err != nil {
 		tx.Rollback()

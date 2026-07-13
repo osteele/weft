@@ -192,6 +192,16 @@ func ResolvePlacementIntent(database *sql.DB, intentID int64, state PlacementInt
 	return err
 }
 
+func resolveOpenPlacementIntentCanceledTx(db dbExecer, jobID, now int64, resolution string) error {
+	_, err := db.Exec(
+		`UPDATE placement_intents
+		    SET state = ?, resolved_at = ?, resolution = ?
+		  WHERE job_id = ? AND state = 'open'`,
+		string(PlacementIntentStateCanceled), now, resolution, jobID,
+	)
+	return err
+}
+
 // CancelStalePlacementIntents resolves any open placement intent whose
 // created_at is older than `olderThan`. Returns the number of intents
 // canceled. Stale intents are usually a sign that a launch / relaunch

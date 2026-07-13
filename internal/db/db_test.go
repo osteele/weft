@@ -1301,6 +1301,81 @@ func TestMoveQueuedJobToUnplacedWithReason(t *testing.T) {
 	}
 }
 
+func TestMoveQueuedJobToUnplacedAbandonsOpenMoveIntent(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	target, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+
+	if err := MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	got, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != MoveIntentStateCanceled {
+		t.Fatalf("intent state = %s, want canceled", got.State)
+	}
+	if got.Resolution != "job unplaced; move abandoned" {
+		t.Fatalf("resolution = %q, want unplace reason", got.Resolution)
+	}
+	var abandonedReason string
+	if err := database.QueryRow(`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID).Scan(&abandonedReason); err != nil {
+		t.Fatalf("target attempt abandoned reason: %v", err)
+	}
+	if abandonedReason != AttemptAbandonedMoveDestinationRejected {
+		t.Fatalf("abandoned reason = %q, want %q", abandonedReason, AttemptAbandonedMoveDestinationRejected)
+	}
+}
+
+func TestMoveQueuedJobToUnplacedCancelsOpenPlacementIntent(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	intent, err := CreatePlacementIntent(database, jobID, "test placement")
+	if err != nil {
+		t.Fatalf("CreatePlacementIntent: %v", err)
+	}
+
+	if err := MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	got, err := GetPlacementIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetPlacementIntent: %v", err)
+	}
+	if got.State != PlacementIntentStateCanceled {
+		t.Fatalf("placement intent state = %s, want canceled", got.State)
+	}
+	if got.Resolution != "job unplaced; placement abandoned" {
+		t.Fatalf("resolution = %q, want unplace reason", got.Resolution)
+	}
+}
+
 func TestHasTagHostConflict(t *testing.T) {
 	database := SetupTestDB(t)
 
