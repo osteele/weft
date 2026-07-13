@@ -137,7 +137,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 		fetchGroupRawOffersForPlanning = originalFetchRaw
 	})
 
-	fetchCandidateGroupingsForPlanning = func(_ *offerSearchSession, _ []InstanceGroup) []GroupingCandidate {
+	fetchCandidateGroupingsForPlanning = func(_ *offerSearchSession, _ []InstanceGroup, _ func(InstanceGroup) int) []GroupingCandidate {
 		t.Fatal("split-only pass should not fetch merged/parallel candidates")
 		return nil
 	}
@@ -184,6 +184,66 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 	}
 	if len(plan.DisplayOffers) != 1 || plan.DisplayOffers[0].Offer == nil {
 		t.Fatalf("expected split offer to be displayed, got %#v", plan.DisplayOffers)
+	}
+}
+
+func TestBuildProfilePlans_ParallelCandidateUsesPerJobDisk(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:  "A40",
+		GPUMemGB:  48,
+		DiskGB:    141,
+		JobDiskGB: map[int64]int{1: 70, 2: 72},
+		Jobs: []*db.Job{
+			{ID: 1, Command: "python train-a.py", GPUClass: "A40", GPUMemGB: intPtr(48)},
+			{ID: 2, Command: "python train-b.py", GPUClass: "A40", GPUMemGB: intPtr(48)},
+		},
+	}
+	queriedDisks := map[int]int{}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(c cloud.OfferConstraints) ([]cloud.Offer, error) {
+			queriedDisks[c.MinDiskGB]++
+			if c.MinDiskGB > 72 {
+				return nil, nil
+			}
+			return []cloud.Offer{{
+				Provider:    cloud.ProviderVastai,
+				ProviderID:  fmt.Sprintf("a40-%d", c.MinDiskGB),
+				GPUName:     "A40",
+				GPUMemGB:    48,
+				CostPerHour: 1.0,
+				DLPerf:      40,
+				Reliability: 0.99,
+			}}, nil
+		},
+	}
+
+	plans, _ := BuildProfilePlansWithProgressAndOptions(
+		nil,
+		[]cloud.Client{client},
+		[]InstanceGroup{group},
+		nil,
+		nil,
+		nil,
+		nil,
+		[]bidding.ScoreProfile{bidding.StrategyCheap.Profile()},
+		0.95,
+		0,
+		nil,
+		defaultPlanOptions(),
+	)
+	plan := plans[bidding.StrategyCheap.Profile().ID]
+	if plan.NewCandidate == nil {
+		t.Fatalf("expected a new-instance candidate, got %#v", plan)
+	}
+	if plan.NewCandidate.Label != "parallel" {
+		t.Fatalf("candidate label = %q, want parallel", plan.NewCandidate.Label)
+	}
+	if len(plan.NewCandidate.Groups) != 2 {
+		t.Fatalf("parallel groups = %d, want 2", len(plan.NewCandidate.Groups))
+	}
+	if queriedDisks[141] == 0 || queriedDisks[70] == 0 || queriedDisks[72] == 0 {
+		t.Fatalf("queried disks = %v, want combined and per-job disk searches", queriedDisks)
 	}
 }
 

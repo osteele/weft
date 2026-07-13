@@ -162,16 +162,14 @@ func autoPilotOfferSnapshotGroups(database *sql.DB, cfg *config.Config, scopedJo
 	groups = campaign.SplitGroupsByImage(database, groups)
 	groups = campaign.ApplyImageMetadataRequirements(cfg, groups)
 	campaign.ApplyBidLossEscalation(database, groups)
-	for i := range groups {
-		groups[i].DiskGB, _ = campaign.EstimateGroupDisk(groups[i], database, nil)
-	}
-	return uniqueAutoPilotOfferSnapshotGroups(groups, cfg.CampaignReliability())
+	groups = campaign.EstimateGroupDisks(groups, database, nil)
+	return uniqueAutoPilotOfferSnapshotGroups(database, groups, cfg.CampaignReliability())
 }
 
-func uniqueAutoPilotOfferSnapshotGroups(groups []campaign.InstanceGroup, minReliability float64) []campaign.InstanceGroup {
+func uniqueAutoPilotOfferSnapshotGroups(database *sql.DB, groups []campaign.InstanceGroup, minReliability float64) []campaign.InstanceGroup {
 	candidates := make([]campaign.InstanceGroup, 0, len(groups)*3)
 	candidates = append(candidates, groups...)
-	candidates = append(candidates, campaign.MergeCompatibleGroups(groups)...)
+	candidates = append(candidates, campaign.MergeCompatibleGroupsWithDisk(groups, campaign.GroupDiskEstimator(database))...)
 	candidates = append(candidates, campaign.SplitToParallel(groups)...)
 
 	seen := make(map[string]struct{}, len(candidates))

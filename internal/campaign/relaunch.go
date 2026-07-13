@@ -360,15 +360,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			slog.Warn("failed to build R2 client for disk estimation", "component", "relaunch", "error", err)
 		}
 	}
-	var diskAnomalies []DiskTelemetryAnomaly
-	for i := range groups {
-		var anomalies []DiskTelemetryAnomaly
-		groups[i].DiskGB, anomalies = EstimateGroupDisk(groups[i], cfg.Database, r2Client)
-		diskAnomalies = append(diskAnomalies, anomalies...)
-	}
-	if len(diskAnomalies) > 0 {
-		recordDiskTelemetryAnomalies(cfg.Database, groups, diskAnomalies)
-	}
+	groups = EstimateGroupDisks(groups, cfg.Database, r2Client)
 
 	// If the most recent attempt for a group failed with disk_full, bump the
 	// disk allocation so we don't retry a failing configuration. This only

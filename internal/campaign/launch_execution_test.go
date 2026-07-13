@@ -33,10 +33,10 @@ func TestPrepareNewInstanceLaunchPlan_MergesCompatibleSplitGroupsWithDisjointHF(
 	// two $1.00/hr instances running in parallel), forcing the planner to
 	// pick "merged" over "split". The split candidate's per-group offer
 	// comes from the MockClient below.
-	fetchCandidateGroupingsForPlanning = func(_ *offerSearchSession, splitGroups []InstanceGroup) []GroupingCandidate {
+	fetchCandidateGroupingsForPlanning = func(_ *offerSearchSession, splitGroups []InstanceGroup, diskEstimator func(InstanceGroup) int) []GroupingCandidate {
 		// Reproduce the production candidate set (split + merged + parallel)
 		// but with controlled raw offers.
-		mergedGroups := MergeCompatibleGroups(splitGroups)
+		mergedGroups := MergeCompatibleGroupsWithDisk(splitGroups, diskEstimator)
 		makeRaw := func(groups []InstanceGroup, cost float64, providerID string) []GroupRawOffers {
 			raw := make([]GroupRawOffers, len(groups))
 			for i, g := range groups {

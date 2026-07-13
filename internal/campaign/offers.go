@@ -1567,11 +1567,11 @@ type GroupingCandidate struct {
 // function to evaluate running jobs concurrently on separate instances, each
 // sized to the individual job's needs.
 func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup, minReliability float64) []GroupingCandidate {
-	return fetchCandidateGroupingsWithSession(newOfferSearchSession(clients, minReliability), splitGroups)
+	return fetchCandidateGroupingsWithSession(newOfferSearchSession(clients, minReliability), splitGroups, nil)
 }
 
-func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups []InstanceGroup) []GroupingCandidate {
-	mergedGroups := MergeCompatibleGroups(splitGroups)
+func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups []InstanceGroup, diskEstimator func(InstanceGroup) int) []GroupingCandidate {
+	mergedGroups := MergeCompatibleGroupsWithDisk(splitGroups, diskEstimator)
 	parallelGroups := SplitToParallel(splitGroups)
 
 	// Determine which candidates are distinct

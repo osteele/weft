@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -55,16 +56,19 @@ func normalizedGPUCount(n int) int {
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
-	GPUClass         string   // Normalized GPU class (uppercase), e.g. "H100"
-	Provider         string   // Requested provider ("vastai" or "runpod"), empty = any
-	RunpodCloudType  string   // RunPod cloud type override ("community" or "secure"), empty = config/default
-	NumGPUs          int      // Exact number of GPUs requested on one host/rental (0/1 = one)
-	GPUMemGB         int      // Supremum of GPU memory across all jobs in the group
-	CPUCores         int      // Minimum effective CPU cores/vCPUs
-	CPUMemGB         int      // Supremum of host/system RAM (effective) across all jobs in the group
-	Interconnect     string   // Requested intra-host interconnect: any, pcie, nvlink
-	MaxGPUMemGB      int      // Legacy metadata retained for old rows; not used for placement
-	DiskGB           int      // Estimated disk space needed (0 = use default)
+	GPUClass        string // Normalized GPU class (uppercase), e.g. "H100"
+	Provider        string // Requested provider ("vastai" or "runpod"), empty = any
+	RunpodCloudType string // RunPod cloud type override ("community" or "secure"), empty = config/default
+	NumGPUs         int    // Exact number of GPUs requested on one host/rental (0/1 = one)
+	GPUMemGB        int    // Supremum of GPU memory across all jobs in the group
+	CPUCores        int    // Minimum effective CPU cores/vCPUs
+	CPUMemGB        int    // Supremum of host/system RAM (effective) across all jobs in the group
+	Interconnect    string // Requested intra-host interconnect: any, pcie, nvlink
+	MaxGPUMemGB     int    // Legacy metadata retained for old rows; not used for placement
+	DiskGB          int    // Estimated disk space needed (0 = use default)
+	// JobDiskGB holds per-job disk floors so SplitToParallel can size each
+	// single-job candidate; EstimateGroupDisks fills it for multi-job groups.
+	JobDiskGB        map[int64]int
 	Image            string   // Docker image override/default for this group ("" = use global default)
 	MinDriverVersion int      // Minimum NVIDIA driver version required by the image
 	MinCUDAVersion   string   // Minimum provider CUDA compatibility required by the image
@@ -96,7 +100,30 @@ func cloneInstanceGroupWithJobs(g InstanceGroup, jobs []*db.Job) InstanceGroup {
 	clone := g
 	clone.Jobs = append([]*db.Job(nil), jobs...)
 	clone.VastCapAdd = append([]string(nil), g.VastCapAdd...)
+	clone.JobDiskGB = pruneJobDiskGB(g.JobDiskGB, jobs)
 	return clone
+}
+
+// pruneJobDiskGB copies the per-job disk floors belonging to the retained
+// jobs, so a clone never aliases the source map or carries floors for jobs
+// outside its own set.
+func pruneJobDiskGB(disk map[int64]int, jobs []*db.Job) map[int64]int {
+	if len(disk) == 0 {
+		return nil
+	}
+	out := make(map[int64]int, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if d, ok := disk[job.ID]; ok {
+			out[job.ID] = d
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type jobPlacementIntent struct {
@@ -571,11 +598,23 @@ func mergeMinComputeCap(a, b string) string {
 // instance launch overhead and rental minimums when jobs have no data affinity.
 // Groups are merged greedily: each group joins the first compatible group found.
 func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
+	return MergeCompatibleGroupsWithDisk(groups, nil)
+}
+
+// MergeCompatibleGroupsWithDisk is MergeCompatibleGroups with an optional
+// estimator that recomputes disk for each group that absorbed another group
+// (whose input union therefore exceeds the max of the source estimates). The
+// estimator should match the launch-time disk estimator so offer filtering and
+// create requests use the same floor for derived merged candidates.
+// Pass-through groups keep the disk they were prepared with, which may be
+// r2-informed where this estimator is not.
+func MergeCompatibleGroupsWithDisk(groups []InstanceGroup, estimator func(InstanceGroup) int) []InstanceGroup {
 	if len(groups) <= 1 {
 		return groups
 	}
 
 	var merged []InstanceGroup
+	var absorbed []bool
 	for _, g := range groups {
 		found := false
 		for i := range merged {
@@ -607,6 +646,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			}
 			merged[i].GPUClass = gpuSup
 			merged[i].Image = imgSup
+			// Capture per-job disk before the Jobs append below: jobDiskEntries
+			// synthesizes entries only while a side is still single-job.
+			merged[i].JobDiskGB = mergeJobDiskGB(jobDiskEntries(merged[i]), jobDiskEntries(g))
 			merged[i].Jobs = append(merged[i].Jobs, g.Jobs...)
 			if g.GPUMemGB > merged[i].GPUMemGB {
 				merged[i].GPUMemGB = g.GPUMemGB
@@ -628,17 +670,50 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			// SplitGroupsByImage / ResolveJobImageSettings.
 			merged[i].MinDriverVersion = maxInt(merged[i].MinDriverVersion, g.MinDriverVersion)
 			merged[i].MinCUDAVersion = maxCUDAVersionString(merged[i].MinCUDAVersion, g.MinCUDAVersion)
+			absorbed[i] = true
 			found = true
 			break
 		}
 		if !found {
 			// Copy the group to avoid mutating the original
 			merged = append(merged, cloneInstanceGroupWithJobs(g, g.Jobs))
+			absorbed = append(absorbed, false)
 		}
 	}
 
+	if estimator != nil {
+		for i := range merged {
+			if absorbed[i] {
+				merged[i].DiskGB = estimator(merged[i])
+			}
+		}
+	}
 	sortGroups(merged)
 	return merged
+}
+
+// jobDiskEntries returns the group's per-job disk floors, synthesizing a
+// single-entry map for single-job groups (whose DiskGB already is the per-job
+// floor). Multi-job groups without JobDiskGB return nil — the per-job split
+// cannot be recovered from a combined estimate.
+func jobDiskEntries(g InstanceGroup) map[int64]int {
+	if len(g.JobDiskGB) > 0 {
+		return g.JobDiskGB
+	}
+	if len(g.Jobs) == 1 && g.Jobs[0] != nil && g.DiskGB > 0 {
+		return map[int64]int{g.Jobs[0].ID: g.DiskGB}
+	}
+	return nil
+}
+
+func mergeJobDiskGB(a, b map[int64]int) map[int64]int {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[int64]int, len(a)+len(b))
+	maps.Copy(out, a)
+	maps.Copy(out, b)
+	return out
 }
 
 // SplitToParallel expands multi-job groups into one-job-per-group, using each
@@ -661,6 +736,9 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 			}
 			split := cloneInstanceGroupWithJobs(g, []*db.Job{job})
 			split.GPUMemGB = mem
+			if disk, ok := g.JobDiskGB[job.ID]; ok && disk > 0 {
+				split.DiskGB = disk
+			}
 			split.MaxGPUMemGB = 0
 			split.MaxComputeCap = groupMaxComputeCap(nil, []*db.Job{job})
 			split.MinComputeCap = groupMinComputeCap([]*db.Job{job})

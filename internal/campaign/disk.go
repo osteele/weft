@@ -416,6 +416,48 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	return diskGB, anomalies
 }
 
+// EstimateGroupDisks fills DiskGB for each group and JobDiskGB for jobs inside
+// multi-job groups. Callers get the same anomaly surfacing as EstimateGroupDisk
+// while SplitToParallel gets deterministic per-job disk floors.
+func EstimateGroupDisks(groups []InstanceGroup, localDB *sql.DB, r2Client *r2.Client) []InstanceGroup {
+	var diskAnomalies []DiskTelemetryAnomaly
+	for i := range groups {
+		var anomalies []DiskTelemetryAnomaly
+		groups[i].DiskGB, anomalies = EstimateGroupDisk(groups[i], localDB, r2Client)
+		diskAnomalies = append(diskAnomalies, anomalies...)
+
+		if len(groups[i].Jobs) <= 1 {
+			continue
+		}
+		jobDisk := make(map[int64]int, len(groups[i].Jobs))
+		for _, job := range groups[i].Jobs {
+			if job == nil {
+				continue
+			}
+			single := cloneInstanceGroupWithJobs(groups[i], []*db.Job{job})
+			disk, anomalies := EstimateGroupDisk(single, localDB, r2Client)
+			diskAnomalies = append(diskAnomalies, anomalies...)
+			jobDisk[job.ID] = disk
+		}
+		groups[i].JobDiskGB = jobDisk
+	}
+	if len(diskAnomalies) > 0 {
+		recordDiskTelemetryAnomalies(localDB, groups, diskAnomalies)
+	}
+	return groups
+}
+
+// GroupDiskEstimator returns the estimator used to re-size planner-derived
+// candidate groupings (see MergeCompatibleGroupsWithDisk). It runs
+// EstimateGroupDisk against the local DB without R2, keeping candidate
+// shaping network-free.
+func GroupDiskEstimator(localDB *sql.DB) func(InstanceGroup) int {
+	return func(group InstanceGroup) int {
+		diskGB, _ := EstimateGroupDisk(group, localDB, nil)
+		return diskGB
+	}
+}
+
 func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, []DiskTelemetryAnomaly, bool) {
 	if localDB == nil || len(group.Jobs) == 0 {
 		return 0, nil, false

@@ -131,15 +131,7 @@ func BuildAutoPlacementPlanWithOptions(
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
 	ApplyBidLossEscalation(database, groups)
-	var diskAnomalies []DiskTelemetryAnomaly
-	for i := range groups {
-		var anomalies []DiskTelemetryAnomaly
-		groups[i].DiskGB, anomalies = EstimateGroupDisk(groups[i], database, nil)
-		diskAnomalies = append(diskAnomalies, anomalies...)
-	}
-	if len(diskAnomalies) > 0 {
-		recordDiskTelemetryAnomalies(database, groups, diskAnomalies)
-	}
+	groups = EstimateGroupDisks(groups, database, nil)
 	if len(groups) == 0 {
 		return plan, nil
 	}

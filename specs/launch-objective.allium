@@ -171,7 +171,10 @@ rule GroupingCandidatesScoredUnderObjective {
         -- Implementation: internal/campaign/offers.go FetchCandidateGroupings
         -- enumerates candidates; internal/campaign/campaign.go
         -- MergeCompatibleGroups / SplitToParallel and GroupByAffinity produce
-        -- the grouping alternatives that are then scored.
+        -- the grouping alternatives that are then scored. Each alternative
+        -- carries a disk floor derived from its own job set (see
+        -- campaign-lifecycle.allium FreshRentalDiskEstimate), so no grouping
+        -- is scored or offer-filtered against another grouping's disk need.
 }
 
 rule ReuseOnlyWhenItBeatsNewLaunch {

@@ -820,6 +820,8 @@ func buildStrategyPlanForSplitRaw(
 		return plan
 	}
 
+	groupDiskEstimator := GroupDiskEstimator(evaluator.database)
+
 	remainingSplitEval := subsetRawOfferEvaluation(splitEval, remainingIdx)
 	splitCandidateStart := time.Now()
 	splitResult := evaluateSingleCandidateForProfile(
@@ -842,7 +844,7 @@ func buildStrategyPlanForSplitRaw(
 	case CandidatePlanModeMergedPreferred:
 		result = splitResult
 		if offerSession != nil {
-			mergedGroups := MergeCompatibleGroups(remainingGroups)
+			mergedGroups := MergeCompatibleGroupsWithDisk(remainingGroups, groupDiskEstimator)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
 				mergedFetchStart := time.Now()
@@ -878,7 +880,7 @@ func buildStrategyPlanForSplitRaw(
 			},
 		}
 		if offerSession != nil {
-			mergedGroups := MergeCompatibleGroups(remainingGroups)
+			mergedGroups := MergeCompatibleGroupsWithDisk(remainingGroups, groupDiskEstimator)
 			if len(mergedGroups) != len(remainingGroups) {
 				reportPlanProgressForLane(onProgress, "Fetching merged candidate", progressLabel, "", 0, 0)
 				mergedFetchStart := time.Now()
@@ -938,7 +940,7 @@ func buildStrategyPlanForSplitRaw(
 		}
 		reportPlanProgressForLane(onProgress, "Fetching merged and parallel candidates", progressLabel, "", 0, 0)
 		candidateFetchStart := time.Now()
-		candidates := fetchCandidateGroupingsForPlanning(offerSession, remainingGroups)
+		candidates := fetchCandidateGroupingsForPlanning(offerSession, remainingGroups, groupDiskEstimator)
 		candidateFetchDur += time.Since(candidateFetchStart)
 		candidateEvalStart := time.Now()
 		evaluations := evaluator.evaluateCandidateGroupings(candidates)

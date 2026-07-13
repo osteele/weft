@@ -29,6 +29,45 @@ type groupedAutoPilotPassTestOptions struct {
 	placeInventory            func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)
 }
 
+func TestUniqueAutoPilotOfferSnapshotGroupsMatchesPlannerDerivedDiskKeys(t *testing.T) {
+	groups := []campaign.InstanceGroup{{
+		GPUClass:  "A40",
+		GPUMemGB:  48,
+		DiskGB:    141,
+		JobDiskGB: map[int64]int{1: 70, 2: 72},
+		Jobs: []*db.Job{
+			{ID: 1, GPUClass: "A40", GPUMemGB: testIntPtr(48)},
+			{ID: 2, GPUClass: "A40", GPUMemGB: testIntPtr(48)},
+		},
+	}}
+	minReliability := 0.95
+	prefetch := uniqueAutoPilotOfferSnapshotGroups(nil, groups, minReliability)
+	planner := append([]campaign.InstanceGroup{}, groups...)
+	planner = append(planner, campaign.MergeCompatibleGroupsWithDisk(groups, campaign.GroupDiskEstimator(nil))...)
+	planner = append(planner, campaign.SplitToParallel(groups)...)
+
+	prefetchKeys := groupOfferKeySet(prefetch, minReliability)
+	plannerKeys := groupOfferKeySet(planner, minReliability)
+	for key := range plannerKeys {
+		if _, ok := prefetchKeys[key]; !ok {
+			t.Fatalf("prefetch keys missing planner key %q; prefetch=%v planner=%v", key, prefetchKeys, plannerKeys)
+		}
+	}
+}
+
+func groupOfferKeySet(groups []campaign.InstanceGroup, minReliability float64) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, group := range groups {
+		key := campaign.GroupRawOfferCacheKey(group, minReliability)
+		if strings.TrimSpace(key) != "" {
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+func testIntPtr(n int) *int { return &n }
+
 func writeSparseTestFile(t *testing.T, path string, size int64) {
 	t.Helper()
 	file, err := os.Create(path)

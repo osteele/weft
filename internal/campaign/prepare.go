@@ -69,16 +69,7 @@ func PrepareGroupsWithConfig(jobs []*db.Job, database *sql.DB, cfg *config.Confi
 	groups = SplitGroupsByImage(database, groups)
 	groups = ApplyImageMetadataRequirements(cfg, groups)
 	ApplyBidLossEscalation(database, groups)
-	var diskAnomalies []DiskTelemetryAnomaly
-	for i := range groups {
-		var anomalies []DiskTelemetryAnomaly
-		groups[i].DiskGB, anomalies = EstimateGroupDisk(groups[i], database, r2Client)
-		diskAnomalies = append(diskAnomalies, anomalies...)
-	}
-	if len(diskAnomalies) > 0 {
-		recordDiskTelemetryAnomalies(database, groups, diskAnomalies)
-	}
-	return groups
+	return EstimateGroupDisks(groups, database, r2Client)
 }
 
 // FlattenGroupJobs collects all jobs from the given groups, sorted by ID.

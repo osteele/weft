@@ -426,6 +426,45 @@ func TestMergeCompatibleGroups_MergesCompatible(t *testing.T) {
 	}
 }
 
+func TestMergeCompatibleGroupsWithDisk_UsesEstimator(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, DiskGB: 70, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, DiskGB: 80, Jobs: []*db.Job{{ID: 2}}},
+		// Incompatible pinned model: passes through unmerged and must keep
+		// its prepare-time disk without an estimator call.
+		{GPUClass: "H100", GPUMemGB: 80, DiskGB: 55, Jobs: []*db.Job{{ID: 3}}},
+	}
+	var calls int
+	var seen InstanceGroup
+	merged := MergeCompatibleGroupsWithDisk(groups, func(group InstanceGroup) int {
+		calls++
+		seen = group
+		return 141
+	})
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 groups (merged pair + pass-through), got %d", len(merged))
+	}
+	if calls != 1 {
+		t.Fatalf("estimator called %d times, want 1 (absorbed group only)", calls)
+	}
+	if len(seen.Jobs) != 2 {
+		t.Fatalf("estimator saw %d jobs, want 2", len(seen.Jobs))
+	}
+	byClass := map[string]InstanceGroup{}
+	for _, g := range merged {
+		byClass[g.GPUClass] = g
+	}
+	if got := byClass["NVIDIA"].DiskGB; got != 141 {
+		t.Fatalf("merged DiskGB = %d, want estimator output 141", got)
+	}
+	if got := byClass["NVIDIA"].JobDiskGB; got[1] != 70 || got[2] != 80 {
+		t.Fatalf("merged JobDiskGB = %v, want backfilled 1:70 2:80", got)
+	}
+	if got := byClass["H100"].DiskGB; got != 55 {
+		t.Fatalf("pass-through DiskGB = %d, want unchanged 55", got)
+	}
+}
+
 func TestMergeCompatibleGroups_PreservesIncompatible(t *testing.T) {
 	// H100 and A100 are incompatible pinned models → stay separate
 	groups := []InstanceGroup{
@@ -1817,6 +1856,33 @@ func TestSplitToParallel_MultiJobGroup(t *testing.T) {
 			t.Errorf("8GB group (job %d): MaxComputeCap = %q, want 12.0",
 				g.Jobs[0].ID, g.MaxComputeCap)
 		}
+	}
+}
+
+func TestSplitToParallel_UsesJobDiskWhenPresent(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:  "NVIDIA",
+		GPUMemGB:  20,
+		DiskGB:    141,
+		JobDiskGB: map[int64]int{1: 70, 2: 72},
+		Jobs: []*db.Job{
+			{ID: 1, GPUMemGB: intPtr(20)},
+			{ID: 2, GPUMemGB: intPtr(8)},
+		},
+	}
+	result := SplitToParallel([]InstanceGroup{group})
+	if len(result) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(result))
+	}
+	got := map[int64]int{}
+	for _, g := range result {
+		if len(g.Jobs) != 1 {
+			t.Fatalf("parallel group has %d jobs, want 1", len(g.Jobs))
+		}
+		got[g.Jobs[0].ID] = g.DiskGB
+	}
+	if got[1] != 70 || got[2] != 72 {
+		t.Fatalf("parallel disk = %v, want job disks 1:70 2:72", got)
 	}
 }
 

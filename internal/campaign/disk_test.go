@@ -142,6 +142,27 @@ print("train")
 	}
 }
 
+func TestEstimateGroupDisks_FillsPerJobDisk(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "NVIDIA",
+		Jobs: []*db.Job{
+			{ID: 1, Metadata: &db.JobMetadata{Disk: &db.JobDiskMetadata{DiskGB: 70}}},
+			{ID: 2, Metadata: &db.JobMetadata{Disk: &db.JobDiskMetadata{DiskGB: 72}}},
+		},
+	}}
+
+	got := EstimateGroupDisks(groups, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("groups len = %d, want 1", len(got))
+	}
+	if got[0].DiskGB != 72 {
+		t.Fatalf("group DiskGB = %d, want max floor 72", got[0].DiskGB)
+	}
+	if got[0].JobDiskGB[1] != 70 || got[0].JobDiskGB[2] != 72 {
+		t.Fatalf("JobDiskGB = %v, want 1:70 2:72", got[0].JobDiskGB)
+	}
+}
+
 func TestEstimateGroupDisk_HonorsDiskFloor(t *testing.T) {
 	group := InstanceGroup{
 		Jobs: []*db.Job{{

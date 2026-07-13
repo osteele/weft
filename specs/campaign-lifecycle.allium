@@ -1323,6 +1323,18 @@ rule FreshRentalDiskEstimate {
         -- Historical disk telemetry above the plausibility bound is rejected
         -- and surfaced as an anomaly instead of silently clamped.
         -- Implementation: internal/campaign/disk.go EstimateGroupDisk.
+        --
+        -- These floors bind every group whose shape reaches an offer search,
+        -- including planner-derived candidate groupings: a parallel (one job
+        -- per instance) candidate uses that job's own floor (per-job floors
+        -- are captured at preparation time — internal/campaign/disk.go
+        -- EstimateGroupDisks fills InstanceGroup.JobDiskGB), and a merged
+        -- candidate that absorbed another group re-estimates over its
+        -- combined job set rather than taking the max of the source
+        -- estimates (max under-counts disjoint inputs). This keeps the offer
+        -- filter and the eventual create request on the same floor for the
+        -- same shape. Implementation: internal/campaign/campaign.go
+        -- SplitToParallel / MergeCompatibleGroupsWithDisk.
 }
 
 rule BidLossEscalation {
