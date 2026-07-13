@@ -1757,6 +1757,12 @@ func RequeueByID(database *sql.DB, id int64) error {
 func RequeueByIDTx(tx *sql.Tx, id int64) error {
 	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
 	now := time.Now().Unix()
+	// The requeue closes every attempt, so any open move intent no longer
+	// describes an executable move (RequeueAbandonsOpenMoveIntent in
+	// specs/job-move.allium).
+	if err := resolveOpenMoveIntentAbandonedTx(tx, id, now, "job requeued; move abandoned"); err != nil {
+		return err
+	}
 	if err := closeOpenAttempts(tx, id, now); err != nil {
 		return err
 	}
@@ -1809,6 +1815,12 @@ func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launch
 // caller-owned transaction.
 func RequeueFreshAttemptByTargetTx(tx *sql.Tx, id int64, host string, launchID *int64) error {
 	now := time.Now().Unix()
+	// The requeue closes every attempt, so any open move intent no longer
+	// describes an executable move (RequeueAbandonsOpenMoveIntent in
+	// specs/job-move.allium).
+	if err := resolveOpenMoveIntentAbandonedTx(tx, id, now, "job requeued; move abandoned"); err != nil {
+		return err
+	}
 	if err := closeOpenAttempts(tx, id, now); err != nil {
 		return err
 	}

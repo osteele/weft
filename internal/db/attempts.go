@@ -75,7 +75,20 @@ func closeAttemptsAndRequeue(db dbExecer, jobID int64, now int64) error {
 // the just-closed attempts. Status and cloud_outcome are written in one
 // UPDATE so a follow-up predicated on end_time can't race with an earlier
 // close.
+//
+// Any open move intent is canceled alongside the closure: the requeue closes
+// every attempt — including a hidden move-target attempt on another launch —
+// so the intent no longer describes an executable move, and leaving it open
+// would hide the requeued job from the autopilot forever. See rule
+// RequeueAbandonsOpenMoveIntent in specs/job-move.allium.
 func closeAttemptsAndRequeueWithOutcome(db dbExecer, jobID int64, now int64, cloudOutcome string) error {
+	resolution := "job requeued; move abandoned"
+	if cloudOutcome != "" {
+		resolution = fmt.Sprintf("job requeued (%s); move abandoned", cloudOutcome)
+	}
+	if err := resolveOpenMoveIntentAbandonedTx(db, jobID, now, resolution); err != nil {
+		return err
+	}
 	if _, err := db.Exec(
 		`UPDATE job_attempts
 		    SET status = ?,

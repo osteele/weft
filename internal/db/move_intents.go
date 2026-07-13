@@ -162,14 +162,18 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 
 // resolveOpenMoveIntentAbandonedTx cancels a job's open move intent inside a
 // caller-owned transaction, stamping the hidden target attempt abandoned so
-// it can never become authoritative. Used by requeue paths (ResetLaunchJobs)
-// that close all of a job's attempts: once the attempts are gone the intent
-// no longer describes an executable move, and leaving it open hides the job
-// from the autopilot forever (AutopilotIgnoresMovingJobs).
-func resolveOpenMoveIntentAbandonedTx(tx *sql.Tx, jobID, now int64, resolution string) error {
+// it can never become authoritative. Called by the requeue primitives —
+// closeAttemptsAndRequeueWithOutcome, RequeueByIDTx, and
+// RequeueFreshAttemptByTargetTx — so every requeue path (launch reset,
+// restart, requeue, unplace, replan, stale-host repair) resolves the intent
+// in the same transaction that closes the job's attempts: once the attempts
+// are gone the intent no longer describes an executable move, and leaving it
+// open hides the job from the autopilot forever
+// (AutopilotIgnoresMovingJobs).
+func resolveOpenMoveIntentAbandonedTx(db dbExecer, jobID, now int64, resolution string) error {
 	var intentID int64
 	var targetAttempt sql.NullInt64
-	err := tx.QueryRow(
+	err := db.QueryRow(
 		`SELECT id, target_attempt_id FROM move_intents WHERE job_id = ? AND state = 'open' LIMIT 1`,
 		jobID,
 	).Scan(&intentID, &targetAttempt)
@@ -180,11 +184,11 @@ func resolveOpenMoveIntentAbandonedTx(tx *sql.Tx, jobID, now int64, resolution s
 		return err
 	}
 	if targetAttempt.Valid {
-		if err := AbandonAttempt(tx, targetAttempt.Int64, AttemptAbandonedMoveDestinationRejected, &intentID); err != nil {
+		if err := AbandonAttempt(db, targetAttempt.Int64, AttemptAbandonedMoveDestinationRejected, &intentID); err != nil {
 			return fmt.Errorf("abandon move target attempt: %w", err)
 		}
 	}
-	if _, err := tx.Exec(
+	if _, err := db.Exec(
 		`UPDATE move_intents SET state = ?, resolved_at = ?, resolution = ? WHERE id = ? AND state = 'open'`,
 		string(MoveIntentStateCanceled), now, resolution, intentID,
 	); err != nil {

@@ -2204,15 +2204,6 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
 		}
-		// The requeue closed every attempt, including any hidden move-target
-		// attempt on another launch. An open move intent left behind would
-		// hide the job from the autopilot forever (wj4620): cancel it and
-		// stamp the target attempt abandoned.
-		if err := resolveOpenMoveIntentAbandonedTx(tx, jobID, now,
-			fmt.Sprintf("launch %d reset (%s); move abandoned", instanceID, outcome)); err != nil {
-			tx.Rollback()
-			return 0, fmt.Errorf("abandon move intent for job %d: %w", jobID, err)
-		}
 		if retryInfraFailed && job.Status == StatusFailed && IsInfraFailureReason(job.FailureReason) {
 			if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
 				tx.Rollback()

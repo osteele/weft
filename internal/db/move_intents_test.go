@@ -824,6 +824,85 @@ func TestPruneMoveIntents(t *testing.T) {
 	})
 }
 
+func TestRequeue_AbandonsOpenMoveIntent(t *testing.T) {
+	// Every full-requeue path closes all of the job's attempts, so each must
+	// resolve the open move intent, or the requeued job stays hidden from the
+	// autopilot (AutopilotIgnoresMovingJobs). See RequeueAbandonsOpenMoveIntent
+	// in specs/job-move.allium.
+	cases := []struct {
+		name    string
+		requeue func(database *sql.DB, jobID int64) error
+	}{
+		// Unplace, replan, and restart's unplaced branch.
+		{"ResetJobToUnplaced", ResetJobToUnplaced},
+		// User requeue; the latest (move-target) attempt has a launch, so
+		// this routes through RequeueFreshAttemptByTargetTx.
+		{"RequeueByID", RequeueByID},
+		// RequeueByID's on-prem branch.
+		{"RequeueByIDTx", func(database *sql.DB, jobID int64) error {
+			tx, err := database.Begin()
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if err := RequeueByIDTx(tx, jobID); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := SetupTestDB(t)
+			src := mustCreateLaunch(t, database)
+			target := mustCreateLaunch(t, database)
+			jobID, err := RecordQueued(database, "", "/tmp", "echo hi", "move")
+			if err != nil {
+				t.Fatalf("RecordQueued: %v", err)
+			}
+			if err := SetJobLaunchID(database, jobID, src); err != nil {
+				t.Fatalf("SetJobLaunchID: %v", err)
+			}
+			intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+				JobID:          jobID,
+				TargetKind:     MoveTargetExisting,
+				TargetLaunchID: &target,
+			})
+			if err != nil {
+				t.Fatalf("CreateMoveIntent: %v", err)
+			}
+			targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued)
+			if err != nil {
+				t.Fatalf("CreateMoveTargetAttempt: %v", err)
+			}
+
+			if err := tc.requeue(database, jobID); err != nil {
+				t.Fatalf("requeue: %v", err)
+			}
+
+			got, err := GetMoveIntent(database, intent.ID)
+			if err != nil {
+				t.Fatalf("GetMoveIntent: %v", err)
+			}
+			if got.State != MoveIntentStateCanceled {
+				t.Fatalf("intent state = %s, want canceled", got.State)
+			}
+			if !strings.Contains(got.Resolution, "move abandoned") {
+				t.Fatalf("resolution = %q, want it to mention move abandoned", got.Resolution)
+			}
+			var abandonedReason string
+			if err := database.QueryRow(
+				`SELECT COALESCE(abandoned_reason, '') FROM job_attempts WHERE id = ?`, targetAttemptID,
+			).Scan(&abandonedReason); err != nil {
+				t.Fatalf("target abandoned reason: %v", err)
+			}
+			if abandonedReason != AttemptAbandonedMoveDestinationRejected {
+				t.Fatalf("target abandoned reason = %q, want %q", abandonedReason, AttemptAbandonedMoveDestinationRejected)
+			}
+		})
+	}
+}
+
 func TestListAbandonedMoveTargetCancelAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 	src := mustCreateLaunch(t, database)

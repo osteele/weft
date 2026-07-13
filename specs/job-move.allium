@@ -469,18 +469,20 @@ rule CancelMoveOnFailure {
             ResolveMoveIntent(intent, canceled, "move failed")
 }
 
-rule LaunchResetAbandonsOpenMoveIntent {
-    -- A launch reset (reconcile termination, orphan requeue) closes every
-    -- attempt of each affected job — including a hidden move-target attempt
-    -- on a DIFFERENT launch — and returns the job to the queue. An intent
-    -- left open after that describes no executable move, and via
-    -- AutopilotIgnoresMovingJobs it would hide the requeued job from
-    -- placement forever (wj4620). The reset therefore resolves the intent in
-    -- the same transaction that closes the attempts. The move-to-new
-    -- restore path (MoveTargetFailedBeforeStart) takes precedence when the
-    -- reset launch is the intent's target.
-    when: ResetLaunchJobs(launch) requeues job
-          and not MoveTargetFailedBeforeStart(job, launch)
+rule RequeueAbandonsOpenMoveIntent {
+    -- A full requeue (launch reset, user restart/requeue/unplace/replan,
+    -- stale-host repair, startup attempt cleanup) closes every attempt of the
+    -- job — including a hidden move-target attempt on a DIFFERENT launch —
+    -- and returns the job to the queue. An intent left open after that
+    -- describes no executable move, and via AutopilotIgnoresMovingJobs it
+    -- would hide the requeued job from placement forever (wj4620). Each
+    -- requeue primitive therefore resolves the intent alongside closing the
+    -- attempts, so no requeue path can reintroduce the wedge.
+    -- The move-to-new restore path (MoveTargetFailedBeforeStart) takes
+    -- precedence when the reset launch is the intent's target: that path
+    -- skips the requeue primitive and manages the intent's retry lifecycle
+    -- itself.
+    when: CloseAttemptsAndRequeue(job)
     requires: exists(MoveIntent { job = job, state = open })
 
     ensures:
@@ -489,7 +491,7 @@ rule LaunchResetAbandonsOpenMoveIntent {
             AbandonAttempt(intent.target_attempt,
                            reason = "move_destination_rejected",
                            by_intent = intent)
-        ResolveMoveIntent(intent, canceled, "launch reset; move abandoned")
+        ResolveMoveIntent(intent, canceled, "job requeued; move abandoned")
 }
 
 rule SyncCancelsAbandonedMoveTargetAttempts {
