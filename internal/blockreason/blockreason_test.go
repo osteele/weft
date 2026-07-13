@@ -64,6 +64,19 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 			},
 		},
 		{
+			name: "compact composite blocker keeps primary reason",
+			job: &db.Job{
+				ID:     14,
+				Status: db.StatusQueued,
+			},
+			opts: Options{
+				AutoPilotReason: "run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr); could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible",
+			},
+			want:   "run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr)",
+			kind:   KindBlocked,
+			source: SourceAutoPilot,
+		},
+		{
 			name: "unplaced uses latest persisted placement reason",
 			job: &db.Job{
 				ID:               3,
@@ -191,6 +204,17 @@ func TestResolveCompactBlockerSources(t *testing.T) {
 				t.Fatalf("Blocked = %v, want %v", got.Blocked, tc.want != "")
 			}
 		})
+	}
+}
+
+func TestStripReuseDiagnostics(t *testing.T) {
+	got := StripReuseDiagnostics("run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr); could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible; reuse backoff 22s")
+	want := "run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr)"
+	if got != want {
+		t.Fatalf("StripReuseDiagnostics() = %q, want %q", got, want)
+	}
+	if got := StripReuseDiagnostics("could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible"); got != "" {
+		t.Fatalf("reuse-only StripReuseDiagnostics() = %q, want empty", got)
 	}
 }
 

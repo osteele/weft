@@ -2640,6 +2640,73 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedAttachesReuseBreakdown(t *
 	}
 }
 
+// Regression for wj4656: when a run-rate blocker already had a trailing
+// "could not reuse..." diagnostic appended, placement_blocked.launch inherited
+// that whole composite string. The grouped TUI then treated the reuse text as
+// part of the primary launch blocker. Launch must remain launch-only while the
+// structured Reuse section carries the secondary instance diagnostics.
+func TestFinalizeUnplacedBlockedReasons_RunRateCompositeKeepsLaunchClean(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUSpec:         "A100_PCIE",
+		GPUClass:        "A100",
+		ResolvedGPUName: "A100 PCIE",
+		GPUMemGB:        40,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	mem := 48
+	job.GPUClass = "A100"
+	job.GPUMemGB = &mem
+
+	runRate := "run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr)"
+	composite := runRate + "; could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible"
+	blockedReasons := map[int64]string{jobID: composite}
+	structuredBlocked := map[int64]*blockreason.Structured{}
+
+	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
+		map[int64]string{}, nil, nil,
+		map[int64]*db.Job{jobID: job}, nil,
+		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID refreshed: %v", err)
+	}
+	s := blockreason.Parse(refreshed.PlacementBlockedJSON)
+	if s == nil {
+		t.Fatalf("placement_blocked did not decode: %q", refreshed.PlacementBlockedJSON)
+	}
+	if s.Launch != runRate {
+		t.Fatalf("launch blocker = %q, want %q", s.Launch, runRate)
+	}
+	if strings.Contains(s.Launch, "could not reuse") {
+		t.Fatalf("launch blocker = %q, must not include reuse diagnostics", s.Launch)
+	}
+	if len(s.Reuse) == 0 {
+		t.Fatalf("expected reuse rejections recovered by probing, got none")
+	}
+	if !strings.Contains(s.Reuse[0].Reason, "GPU memory insufficient") {
+		t.Fatalf("reuse rejection = %q, want GPU memory diagnostic", s.Reuse[0].Reason)
+	}
+}
+
 // When the run-rate gate blocks a launch but a running instance could actually
 // accept the job (compatible, merely busy), there is only one operative reason
 // — the budget verdict. The finalize step must not fabricate a reuse-side

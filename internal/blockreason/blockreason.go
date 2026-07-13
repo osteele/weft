@@ -151,6 +151,7 @@ func visibleReason(job *db.Job, reason string, opts Options) string {
 	reason = campaign.SanitizeBlockedReason(reason)
 	if opts.Compact {
 		reason = StripContractRef(reason)
+		reason = StripReuseDiagnostics(reason)
 		if IsReuseOnlyDiagnostic(reason) {
 			return ""
 		}
@@ -238,6 +239,25 @@ func IsReuseOnlyDiagnostic(reason string) bool {
 		seen = true
 	}
 	return seen
+}
+
+// StripReuseDiagnostics removes semicolon-separated reuse-only fragments from a
+// composite blocker, leaving the primary placement reason for compact display.
+func StripReuseDiagnostics(reason string) string {
+	reason = strings.TrimSpace(campaign.SanitizeBlockedReason(reason))
+	if reason == "" {
+		return ""
+	}
+	parts := strings.Split(reason, "; ")
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || isReuseDiagnosticPart(part) {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.TrimSpace(strings.Join(kept, "; "))
 }
 
 func isReuseDiagnosticPart(reason string) bool {

@@ -1235,7 +1235,11 @@ func finalizeUnplacedBlockedReasons(
 			if !ok || job == nil {
 				continue
 			}
-			if s := placementFailureStructured(job, capacities, r2Client, flat); len(s.Reuse) > 0 {
+			launch := blockreason.StripReuseDiagnostics(flat)
+			if launch == "" {
+				launch = flat
+			}
+			if s := placementFailureStructured(job, capacities, r2Client, launch); len(s.Reuse) > 0 {
 				structuredBlocked[jobID] = s
 			}
 		}

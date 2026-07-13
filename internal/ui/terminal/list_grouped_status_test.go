@@ -432,11 +432,11 @@ func TestRenderJobListGroupedStatusPlainAt_RetryableOfferUnavailableIsWaiting(t 
 	}
 
 	out := renderJobListGroupedStatusPlainAt(jobs, 0, nil, nil, nil, nil, nil, now)
-	waitingWant := "  waiting: offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers; could not reuse running instances: wi4094 RTX 4060 Ti 16GB: GPU memory insufficient: job=24GB instance=16GB"
+	waitingWant := "  waiting: offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers"
 	if !strings.Contains(out, waitingWant) {
 		t.Fatalf("missing %q in output:\n%s", waitingWant, out)
 	}
-	for _, unwanted := range []string{"blocked: offer unavailable", "Please refresh", "again.;"} {
+	for _, unwanted := range []string{"blocked: offer unavailable", "Please refresh", "again.;", "could not reuse running instances"} {
 		if strings.Contains(out, unwanted) {
 			t.Fatalf("unexpected %q in output:\n%s", unwanted, out)
 		}
