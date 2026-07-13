@@ -25,6 +25,8 @@ import (
 
 const (
 	defaultRebalanceCostCeiling = 1.10
+	rebalanceMoveFailureWindow  = 30 * time.Minute
+	rebalanceMoveFailureLimit   = 3
 )
 
 var estimateRebalanceDurationsDetailed = estimate.EstimateJobDurationsDetailedWithProgress
@@ -128,12 +130,21 @@ func copyJobIDSet(in map[int64]struct{}) map[int64]struct{} {
 }
 
 type rebalanceInstanceState struct {
-	launch      *db.Launch
-	capacity    campaign.InstanceCapacity
-	running     int
-	runningJobs []*db.Job
-	queued      []*db.Job
-	queuedIdx   map[int64]int
+	launch *db.Launch
+	// capacity carries DB-accounted reusable disk when reusableTarget is
+	// true; otherwise the static estimate (only sources ever have it).
+	capacity campaign.InstanceCapacity
+	// reusableTarget marks instances that pass the reuse path's destination
+	// gates (live heartbeat, no disk-failure history, DB-accounted disk).
+	// Instances failing those gates stay in the plan as move SOURCES — a
+	// wedged or disk-troubled instance is exactly one whose queued jobs
+	// should be movable away — but are never picked as destinations. See
+	// specs/job-move.allium § QueueRebalanceCandidatesAreSubmitEligible.
+	reusableTarget bool
+	running        int
+	runningJobs    []*db.Job
+	queued         []*db.Job
+	queuedIdx      map[int64]int
 }
 
 type rebalanceJobPolicy struct {
@@ -195,6 +206,24 @@ func RebalanceQueuedJobsAcrossInstances(ctx context.Context, database *sql.DB, o
 		if err != nil {
 			return QueueRebalanceResult{}, err
 		}
+	}
+	recentFailedMoves, err := db.JobIDsWithRecentFailedMoveIntents(database, time.Now().Add(-rebalanceMoveFailureWindow), rebalanceMoveFailureLimit)
+	if err != nil {
+		return QueueRebalanceResult{}, err
+	}
+	if len(recentFailedMoves) > 0 {
+		// Merge into a copy: opts.MovingJobs is caller-owned (the autopilot
+		// shares one open-intents map across several passes), and cooldown
+		// jobs have no open intent — leaking them into that map would make
+		// other paths treat them as moving.
+		merged := copyJobIDSet(movingJobs)
+		if merged == nil {
+			merged = make(map[int64]struct{}, len(recentFailedMoves))
+		}
+		for jobID := range recentFailedMoves {
+			merged[jobID] = struct{}{}
+		}
+		movingJobs = merged
 	}
 	if len(movingJobs) > 0 {
 		filtered := candidates[:0]
@@ -371,6 +400,16 @@ func buildRebalanceInstanceState(database *sql.DB) (map[int64]*rebalanceInstance
 	if err != nil {
 		return nil, fmt.Errorf("list running launches: %w", err)
 	}
+	reusable, err := campaign.FindReusableInstances(database)
+	if err != nil {
+		return nil, fmt.Errorf("list reusable move targets: %w", err)
+	}
+	reusableByID := make(map[int64]campaign.InstanceCapacity, len(reusable))
+	for _, cap := range reusable {
+		if cap.Instance != nil {
+			reusableByID[cap.Instance.ID] = cap
+		}
+	}
 	out := make(map[int64]*rebalanceInstanceState, len(launches))
 	for _, launch := range launches {
 		if launch == nil {
@@ -385,13 +424,19 @@ func buildRebalanceInstanceState(database *sql.DB) (map[int64]*rebalanceInstance
 		if !ok {
 			continue
 		}
+		dbCap, isTarget := reusableByID[launch.ID]
+		if isTarget {
+			dbCap.RunningJobCount = running
+			cap = dbCap
+		}
 		state := &rebalanceInstanceState{
-			launch:      launch,
-			capacity:    cap,
-			running:     running,
-			runningJobs: make([]*db.Job, 0, running),
-			queued:      make([]*db.Job, 0),
-			queuedIdx:   map[int64]int{},
+			launch:         launch,
+			capacity:       cap,
+			reusableTarget: isTarget,
+			running:        running,
+			runningJobs:    make([]*db.Job, 0, running),
+			queued:         make([]*db.Job, 0),
+			queuedIdx:      map[int64]int{},
 		}
 		for _, job := range jobs {
 			if job == nil {
@@ -435,9 +480,34 @@ func listRebalanceCandidates(database *sql.DB, jobScope map[int64]struct{}) ([]*
 				continue
 			}
 		}
+		if !rebalanceCandidateNeedsReady(database, job) {
+			continue
+		}
 		out = append(out, job)
 	}
 	return out, nil
+}
+
+// rebalanceCandidateNeedsReady excludes consumers whose --needs producers
+// could not satisfy a cross-instance move yet. It shares the submit path's
+// validator (targetInstanceID = 0: no destination is chosen at candidacy
+// time, so the strict cross-instance rule applies to every producer).
+func rebalanceCandidateNeedsReady(database *sql.DB, job *db.Job) bool {
+	if database == nil || job == nil {
+		return false
+	}
+	err := campaign.ValidateJobNeedsReadyForCloud(database, job, 0)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, campaign.ErrMalformedNeedsSpec) {
+		slog.Warn("rebalance: excluding candidate with malformed --needs spec",
+			"component", "rebalance", "job_id", job.ID, "error", err)
+	} else {
+		slog.Debug("rebalance: excluding candidate until --needs producers complete",
+			"component", "rebalance", "job_id", job.ID, "reason", err)
+	}
+	return false
 }
 
 func queuedOrderLess(a, b *db.Job) bool {
@@ -801,6 +871,9 @@ func pickBestRebalanceDestination(
 	baseObj := plan.objective(profile, runtimes, durationPointMean)
 	for id, dst := range plan.instances {
 		if id == srcID || dst == nil || dst.launch == nil {
+			continue
+		}
+		if !dst.reusableTarget {
 			continue
 		}
 		if len(instanceScope) > 0 {

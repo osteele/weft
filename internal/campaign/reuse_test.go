@@ -1195,6 +1195,10 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if err := db.SetJobLaunchID(database, producerID, producerInstanceID); err != nil {
 		t.Fatalf("SetJobLaunchID producer: %v", err)
 	}
+	exitCode := 0
+	if err := db.CloseAttempt(database, producerID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt producer: %v", err)
+	}
 
 	consumerDir := testProjectDir(t)
 	if err := os.MkdirAll(filepath.Join(consumerDir, "data", "conllu"), 0o755); err != nil {
@@ -1290,6 +1294,162 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	if !reflect.DeepEqual(uploadedInputs, []string{"local:data/conllu/"}) {
 		t.Fatalf("uploaded inputs = %v", uploadedInputs)
 	}
+}
+
+func TestSubmitJobsToInstanceForMoveRejectsIncompleteNeedsBeforeTargetAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	srcID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch src: %v", err)
+	}
+	dstID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch dst: %v", err)
+	}
+	producerID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "echo producer", "producer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	consumerID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "consumer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, consumerID, srcID); err != nil {
+		t.Fatalf("SetJobLaunchID consumer: %v", err)
+	}
+	needsSpec := fmt.Sprintf("output/model.pt:%d", producerID)
+	if err := db.SetJobNeeds(database, consumerID, []string{needsSpec}); err != nil {
+		t.Fatalf("SetJobNeeds consumer: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("GetJobByID consumer: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          consumerID,
+		SourceLaunchID: &srcID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dstID,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+
+	err = SubmitJobsToInstanceForMove(context.Background(), database, nil, dstID, []*db.Job{consumer})
+	if err == nil || !strings.Contains(err.Error(), "has not completed") {
+		t.Fatalf("SubmitJobsToInstanceForMove error = %v, want incomplete producer rejection", err)
+	}
+	gotIntent, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if gotIntent.TargetAttemptID != nil {
+		t.Fatalf("target_attempt_id = %v, want nil because needs failed before claim", gotIntent.TargetAttemptID)
+	}
+	var dstAttempts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND launch_id = ?`, consumerID, dstID).Scan(&dstAttempts); err != nil {
+		t.Fatalf("count dst attempts: %v", err)
+	}
+	if dstAttempts != 0 {
+		t.Fatalf("destination attempts = %d, want 0", dstAttempts)
+	}
+}
+
+func TestValidateJobNeedsReadyForCloud(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	otherInstanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch other: %v", err)
+	}
+
+	newProducer := func(t *testing.T, host string) int64 {
+		t.Helper()
+		id, err := db.RecordQueuedWithGPU(database, host, testProjectDir(t), "echo producer", "producer", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+		}
+		return id
+	}
+	newConsumer := func(t *testing.T, needs ...string) *db.Job {
+		t.Helper()
+		id, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "consumer", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+		}
+		if err := db.SetJobNeeds(database, id, needs); err != nil {
+			t.Fatalf("SetJobNeeds: %v", err)
+		}
+		job, err := db.GetJobByID(database, id)
+		if err != nil {
+			t.Fatalf("GetJobByID consumer: %v", err)
+		}
+		return job
+	}
+
+	t.Run("same-instance incomplete producer accepted (CloudAfter)", func(t *testing.T) {
+		producerID := newProducer(t, "")
+		if err := db.SetJobLaunchID(database, producerID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		consumer := newConsumer(t, fmt.Sprintf("output/model.pt:%d", producerID))
+		if err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID); err != nil {
+			t.Fatalf("same-instance producer rejected: %v", err)
+		}
+	})
+
+	t.Run("cross-instance incomplete producer rejected", func(t *testing.T) {
+		producerID := newProducer(t, "")
+		if err := db.SetJobLaunchID(database, producerID, otherInstanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		consumer := newConsumer(t, fmt.Sprintf("output/model.pt:%d", producerID))
+		err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID)
+		if err == nil || !strings.Contains(err.Error(), "has not completed") {
+			t.Fatalf("error = %v, want incomplete-producer rejection", err)
+		}
+	})
+
+	t.Run("cross-instance completed producer accepted", func(t *testing.T) {
+		producerID := newProducer(t, "")
+		if err := db.SetJobLaunchID(database, producerID, otherInstanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		exitCode := 0
+		if err := db.CloseAttempt(database, producerID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+			t.Fatalf("CloseAttempt: %v", err)
+		}
+		consumer := newConsumer(t, fmt.Sprintf("output/model.pt:%d", producerID))
+		if err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID); err != nil {
+			t.Fatalf("completed producer rejected: %v", err)
+		}
+	})
+
+	t.Run("on-prem producer accepted (host-pinned)", func(t *testing.T) {
+		producerID := newProducer(t, "host-alpha")
+		consumer := newConsumer(t, fmt.Sprintf("output/model.pt:%d", producerID))
+		if err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID); err != nil {
+			t.Fatalf("on-prem producer rejected: %v", err)
+		}
+	})
+
+	t.Run("named asset accepted without producer lookup", func(t *testing.T) {
+		consumer := newConsumer(t, "asset:vocab-v2")
+		if err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID); err != nil {
+			t.Fatalf("asset need rejected: %v", err)
+		}
+	})
+
+	t.Run("malformed spec returns ErrMalformedNeedsSpec", func(t *testing.T) {
+		consumer := newConsumer(t, "output/model.pt")
+		err := ValidateJobNeedsReadyForCloud(database, consumer, instanceID)
+		if !errors.Is(err, ErrMalformedNeedsSpec) {
+			t.Fatalf("error = %v, want ErrMalformedNeedsSpec", err)
+		}
+	})
 }
 
 func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {

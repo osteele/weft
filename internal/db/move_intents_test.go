@@ -415,6 +415,55 @@ func TestJobIDsWithOpenMoveIntents(t *testing.T) {
 	}
 }
 
+func TestJobIDsWithRecentFailedMoveIntents(t *testing.T) {
+	database := SetupTestDB(t)
+	insertTestJob(t, database, 100, "j1", "/tmp", StatusQueued)
+	insertTestJob(t, database, 200, "j2", "/tmp", StatusQueued)
+	insertTestJob(t, database, 300, "j3", "/tmp", StatusQueued)
+	target := mustCreateLaunch(t, database)
+
+	resolve := func(jobID int64, resolution string, resolvedAt time.Time) {
+		t.Helper()
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID: jobID, TargetKind: MoveTargetExisting, TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent(%d): %v", jobID, err)
+		}
+		if err := ResolveMoveIntent(database, intent.ID, MoveIntentStateCanceled, resolution); err != nil {
+			t.Fatalf("ResolveMoveIntent(%d): %v", jobID, err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET resolved_at = ? WHERE id = ?`, resolvedAt.Unix(), intent.ID); err != nil {
+			t.Fatalf("set resolved_at: %v", err)
+		}
+	}
+
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		resolve(100, "destination did not accept", now.Add(-time.Duration(i)*time.Minute))
+	}
+	for i := 0; i < 3; i++ {
+		resolve(200, "destination did not accept", now.Add(-time.Hour))
+	}
+	resolve(300, "destination did not accept", now)
+	resolve(300, MoveIntentResolutionStale, now)
+	resolve(300, "superseded by explicit move", now)
+
+	got, err := JobIDsWithRecentFailedMoveIntents(database, now.Add(-30*time.Minute), 3)
+	if err != nil {
+		t.Fatalf("JobIDsWithRecentFailedMoveIntents: %v", err)
+	}
+	if _, ok := got[100]; !ok {
+		t.Errorf("job 100 missing from recent failed set")
+	}
+	if _, ok := got[200]; ok {
+		t.Errorf("job 200 should be outside cooldown window")
+	}
+	if _, ok := got[300]; ok {
+		t.Errorf("job 300 should not count benign resolutions toward failures")
+	}
+}
+
 func TestPruneMoveIntents(t *testing.T) {
 	t.Run("stale new target without launch", func(t *testing.T) {
 		database := SetupTestDB(t)

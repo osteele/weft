@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/runner"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
@@ -909,6 +910,58 @@ func SendCancelAttempts(ctx context.Context, r2Client *r2.Client, launchID int64
 	return sendGraceCancelAttempts(ctx, r2Client, launchID, attemptIDs)
 }
 
+// ErrMalformedNeedsSpec marks a --needs spec that cannot be parsed. Callers
+// that skip jobs on validation failure (the rebalance candidate filter) use
+// it to surface permanent user errors louder than routine waits.
+var ErrMalformedNeedsSpec = errors.New("malformed --needs spec")
+
+// ValidateJobNeedsReadyForCloud checks that every job-output --needs spec on
+// the job could be resolved by the destination submit path. It mirrors
+// ClassifyNeedsForLaunch's carve-outs: named assets, on-prem producers
+// (host-pinned at submission), and producers co-located on the same live
+// target instance (CloudAfter) are exempt. Only cross-instance R2-staged
+// needs require a completed producer; the submit path remains the authority
+// for R2 artifact existence. targetInstanceID = 0 means "no particular
+// destination" and applies the strict cross-instance rule to every producer.
+func ValidateJobNeedsReadyForCloud(database *sql.DB, job *db.Job, targetInstanceID int64) error {
+	if database == nil || job == nil {
+		return nil
+	}
+	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.Needs = fresh.Needs
+	}
+	if len(job.Needs) == 0 {
+		return nil
+	}
+	for _, raw := range job.Needs {
+		need, err := runner.ParseNeedsSpec(raw)
+		if err != nil {
+			return fmt.Errorf("%w: %q for job %s: %v", ErrMalformedNeedsSpec, raw, ids.FormatJobID(job.ID), err)
+		}
+		if need.IsAsset() {
+			continue
+		}
+		producer, err := db.GetJobByID(database, need.Version)
+		if err != nil {
+			return fmt.Errorf("check producer %s for job %s --needs %q: %w", ids.FormatJobID(need.Version), ids.FormatJobID(job.ID), raw, err)
+		}
+		if producer == nil {
+			return fmt.Errorf("job %s requires %q that producer %s was not found", ids.FormatJobID(job.ID), raw, ids.FormatJobID(need.Version))
+		}
+		if producer.HasInventoryHost() {
+			continue
+		}
+		if isSameLiveInstance(database, producer, targetInstanceID) {
+			continue
+		}
+		if producer.EffectiveStatus() != db.StatusCompleted {
+			return fmt.Errorf("job %s requires %q that producer %s has not completed (status=%s)",
+				ids.FormatJobID(job.ID), raw, ids.FormatJobID(producer.ID), producer.EffectiveStatus())
+		}
+	}
+	return nil
+}
+
 func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job, transfer bool) error {
 	inst, err := db.GetLaunch(database, instanceID)
 	if err != nil {
@@ -926,6 +979,9 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	// costs an attempt row per retry — the wj2812 churn pattern.
 	for _, job := range jobs {
 		if err := ValidateJobSourceForCloud(job); err != nil {
+			return err
+		}
+		if err := ValidateJobNeedsReadyForCloud(database, job, instanceID); err != nil {
 			return err
 		}
 	}

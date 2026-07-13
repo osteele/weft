@@ -223,6 +223,44 @@ func JobIDsWithOpenMoveIntents(database *sql.DB) (map[int64]struct{}, error) {
 	return out, rows.Err()
 }
 
+// JobIDsWithRecentFailedMoveIntents returns jobs with at least minFailures
+// recent canceled move intents. Benign cancellations that should not suppress
+// automatic rebalancing are excluded explicitly; every other cancellation is
+// treated as failure evidence so new rejection paths do not bypass convergence.
+func JobIDsWithRecentFailedMoveIntents(database *sql.DB, since time.Time, minFailures int) (map[int64]struct{}, error) {
+	if database == nil || minFailures <= 0 {
+		return map[int64]struct{}{}, nil
+	}
+	rows, err := database.Query(`
+		SELECT job_id
+		  FROM move_intents
+		 WHERE state = ?
+		   AND resolved_at IS NOT NULL
+		   AND resolved_at >= ?
+		   AND COALESCE(resolution, '') NOT IN (?, ?)
+		 GROUP BY job_id
+		HAVING COUNT(*) >= ?`,
+		string(MoveIntentStateCanceled),
+		since.Unix(),
+		MoveIntentResolutionStale,
+		MoveIntentResolutionSuperseded,
+		minFailures,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]struct{}{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // MoveIntentSourceStop describes the source side effects to perform after a
 // target launch accepts a move-to-new job.
 type MoveIntentSourceStop struct {
@@ -529,6 +567,12 @@ type PrunedMoveIntent struct {
 // MoveIntentResolutionStale is the resolution string written to stale move
 // intents whose target launch is no longer live.
 const MoveIntentResolutionStale = "stale: no non-terminal target launch (auto-pruned)"
+
+// MoveIntentResolutionSuperseded is the resolution string written when an
+// explicit user-initiated move supersedes an open intent. Both benign
+// resolutions are excluded from JobIDsWithRecentFailedMoveIntents; keep the
+// write sites and that query on these constants.
+const MoveIntentResolutionSuperseded = "superseded by explicit move"
 
 // PruneMoveIntents cancels open move intents that no longer represent an
 // active move. A fresh intent is protected for protectionWindow so the

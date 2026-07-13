@@ -284,14 +284,14 @@ func supersedeOpenPlacementForMove(database *sql.DB, jobID int64) error {
 	if intent, err := db.GetOpenMoveIntent(database, jobID); err != nil {
 		return fmt.Errorf("get open move intent: %w", err)
 	} else if intent != nil {
-		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "superseded by explicit move"); err != nil {
+		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, db.MoveIntentResolutionSuperseded); err != nil {
 			return fmt.Errorf("cancel open move intent: %w", err)
 		}
 	}
 	if intent, err := db.GetOpenPlacementIntent(database, jobID); err != nil {
 		return fmt.Errorf("get open placement intent: %w", err)
 	} else if intent != nil {
-		if err := db.ResolvePlacementIntent(database, intent.ID, db.PlacementIntentStateCanceled, "superseded by explicit move"); err != nil {
+		if err := db.ResolvePlacementIntent(database, intent.ID, db.PlacementIntentStateCanceled, db.MoveIntentResolutionSuperseded); err != nil {
 			return fmt.Errorf("cancel open placement intent: %w", err)
 		}
 	}

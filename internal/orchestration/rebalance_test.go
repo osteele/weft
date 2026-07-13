@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,11 +126,16 @@ func TestRebalanceQueuedJobsAcrossInstances_RespectsCostCeiling(t *testing.T) {
 	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
-	_ = createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
-	_ = createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstQueuedJob := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	runtimeDiskGB := 3
+	if err := db.SetJobCLIResourceOverrides(database, dstQueuedJob, &db.CLIResourceOverrides{RuntimeDiskGB: &runtimeDiskGB}); err != nil {
+		t.Fatalf("SetJobCLIResourceOverrides(dst): %v", err)
+	}
 
 	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
-		Apply: false,
+		Apply:    false,
+		JobScope: map[int64]struct{}{queuedJob: {}},
 	})
 	if err != nil {
 		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
@@ -508,6 +514,196 @@ func TestRebalanceQueuedJobsAcrossInstances_ApplySkipsJobWithOpenIntent(t *testi
 	}
 }
 
+func TestRebalanceQueuedJobsAcrossInstances_CoolsDownRecentFailedMoves(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	for i := 0; i < rebalanceMoveFailureLimit; i++ {
+		intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+			JobID:          queuedJob,
+			SourceLaunchID: &srcID,
+			TargetKind:     db.MoveTargetExisting,
+			TargetLaunchID: &dstID,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent %d: %v", i, err)
+		}
+		if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "destination did not accept"); err != nil {
+			t.Fatalf("ResolveMoveIntent %d: %v", i, err)
+		}
+	}
+
+	callerMoving := map[int64]struct{}{}
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:      false,
+		MovingJobs: callerMoving,
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 0 {
+		t.Fatalf("moves len = %d, want 0 while recent failures are cooling down", len(result.Moves))
+	}
+	if len(callerMoving) != 0 {
+		t.Fatalf("opts.MovingJobs mutated by cooldown merge: %v", callerMoving)
+	}
+
+	old := time.Now().Add(-rebalanceMoveFailureWindow - time.Minute).Unix()
+	if _, err := database.Exec(`UPDATE move_intents SET resolved_at = ? WHERE job_id = ?`, old, queuedJob); err != nil {
+		t.Fatalf("age move intents: %v", err)
+	}
+	result, err = RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:      false,
+		MovingJobs: map[int64]struct{}{},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances after cooldown: %v", err)
+	}
+	if len(result.Moves) != 1 || result.Moves[0].JobID != queuedJob {
+		t.Fatalf("moves after cooldown = %+v, want job %d re-selected", result.Moves, queuedJob)
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_SkipsConsumerWithIncompleteProducer(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	producerID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python producer.py", "producer", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	consumerID := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.SetJobNeeds(database, consumerID, []string{"output/model.pt:" + idsForTest(producerID)}); err != nil {
+		t.Fatalf("SetJobNeeds: %v", err)
+	}
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply: false,
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 0 {
+		t.Fatalf("moves len = %d, want 0 because consumer waits on producer %d", len(result.Moves), producerID)
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_UsesDBAccountedDestinationDisk(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+	setLaunchDiskGBForRebalanceTest(t, database, dstID, campaign.BaseOverheadGB+2*campaign.CUDAOverheadGB+2)
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstDirA := t.TempDir()
+	writeTorchPyprojectForRebalanceTest(t, dstDirA)
+	_ = createQueuedLaunchJob(t, database, dstID, "A100", dstDirA)
+	dstDirB := t.TempDir()
+	writeTorchPyprojectForRebalanceTest(t, dstDirB)
+	_ = createQueuedLaunchJob(t, database, dstID, "A100", dstDirB)
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:    false,
+		JobScope: map[int64]struct{}{queuedJob: {}},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 0 {
+		t.Fatalf("moves len = %d, want 0 because destination disk headroom is already consumed", len(result.Moves))
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_MovesOffDiskFailedSource(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	// Disk-failure history makes an instance ineligible as a move
+	// destination but must not hide it as a source: it is exactly the
+	// instance whose queued jobs should be movable away.
+	recordDiskFullAttemptForRebalanceTest(t, database, srcID)
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:    false,
+		JobScope: map[int64]struct{}{queuedJob: {}},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 1 || result.Moves[0].JobID != queuedJob || result.Moves[0].ToInstanceID != dstID {
+		t.Fatalf("moves = %+v, want job %d moved off disk-failed source %d to %d", result.Moves, queuedJob, srcID, dstID)
+	}
+}
+
+func TestRebalanceQueuedJobsAcrossInstances_SkipsDiskFailedDestination(t *testing.T) {
+	withDefaultRebalanceDurations(t)
+	database := db.SetupTestDB(t)
+	srcID := createRebalanceLaunch(t, database, "A100", 80, 100, 1, "")
+	dstID := createRebalanceLaunch(t, database, "A100", 80, 100, 2, "")
+
+	runJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, runJob); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	queuedJob := createQueuedLaunchJob(t, database, srcID, "A100", t.TempDir())
+	dstRun := createQueuedLaunchJob(t, database, dstID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, dstRun); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(dst): %v", err)
+	}
+
+	recordDiskFullAttemptForRebalanceTest(t, database, dstID)
+
+	result, err := RebalanceQueuedJobsAcrossInstances(context.Background(), database, QueueRebalanceOptions{
+		Apply:    false,
+		JobScope: map[int64]struct{}{queuedJob: {}},
+	})
+	if err != nil {
+		t.Fatalf("RebalanceQueuedJobsAcrossInstances: %v", err)
+	}
+	if len(result.Moves) != 0 {
+		t.Fatalf("moves = %+v, want 0 because the only destination has disk-failure history", result.Moves)
+	}
+}
+
 func TestAppendPlacementReason_RunRateReasonSupersedesPrior(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "rrtest", "")
@@ -583,4 +779,39 @@ func createQueuedLaunchJob(t *testing.T, database *sql.DB, launchID int64, gpuCl
 		t.Fatalf("SetJobGPUClass: %v", err)
 	}
 	return jobID
+}
+
+func idsForTest(id int64) string {
+	return strconv.FormatInt(id, 10)
+}
+
+func setLaunchDiskGBForRebalanceTest(t *testing.T, database *sql.DB, launchID int64, diskGB int) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE launches SET disk_gb = ? WHERE id = ?`, diskGB, launchID); err != nil {
+		t.Fatalf("set launch disk_gb: %v", err)
+	}
+}
+
+func writeTorchPyprojectForRebalanceTest(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch\"]\n"), 0o644); err != nil {
+		t.Fatalf("write torch pyproject: %v", err)
+	}
+}
+
+// recordDiskFullAttemptForRebalanceTest gives launchID the disk-failure
+// history that campaign.FindReusableInstances screens destinations on.
+func recordDiskFullAttemptForRebalanceTest(t *testing.T, database *sql.DB, launchID int64) {
+	t.Helper()
+	jobID := createQueuedLaunchJob(t, database, launchID, "A100", t.TempDir())
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(disk job): %v", err)
+	}
+	exitCode := 1
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, &exitCode, time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt(disk job): %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET failure_reason = 'disk_full', launch_id = ? WHERE job_id = ?`, launchID, jobID); err != nil {
+		t.Fatalf("set disk_full failure_reason: %v", err)
+	}
 }

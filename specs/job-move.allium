@@ -550,6 +550,59 @@ invariant AutopilotIgnoresMovingJobs {
         and not exists(PlacementIntent { job = j, state = open })
 }
 
+invariant QueueRebalanceCandidatesAreSubmitEligible {
+    -- Queue rebalancing may only propose moves that the destination submit
+    -- path could accept from DB-visible state. This is planner/validator
+    -- parity: target capacity is built with the same reusable-instance gates
+    -- as SubmitJobsToInstance (live heartbeat, disk-failure exclusion, and
+    -- DB-accounted reusable disk), and consumer jobs whose job-output
+    -- `--needs` producers have not completed are not rebalance candidates.
+    --
+    -- Named asset needs are not producer-job edges and remain eligible.
+    -- Completed producers pass this cheap gate; the submit path remains the
+    -- authority for R2 artifact existence and transport.
+    --
+    -- The gates apply to DESTINATIONS only. Instances failing them (stale
+    -- heartbeat, disk-failure history) remain visible as move sources — a
+    -- wedged or disk-troubled instance is exactly one whose queued jobs
+    -- should be movable away.
+    --
+    -- The submit-path guard behind the needs gate mirrors
+    -- ClassifyNeedsForLaunch: on-prem producers (host-pinned at submission)
+    -- and producers co-located on the same live target instance (CloudAfter)
+    -- are exempt from the completed-producer requirement, so submitting a
+    -- consumer to the instance its producer runs on stays valid. Rebalance
+    -- candidacy has no chosen destination yet, so it applies the strict
+    -- cross-instance rule.
+    for move in QueueRebalancePlan.moves:
+        ReusableInstanceAccepts(move.target)
+        and ReusableDiskAccounted(move.target)
+        and forall need in move.job.needs:
+            need.kind = asset
+            or ProducerJob(need).status = completed
+}
+
+invariant QueueRebalanceFailureCooldownConverges {
+    -- A rejected rebalance move must change future candidate membership long
+    -- enough for the repair loop to converge. Rebalance excludes any job with
+    -- at least three recently canceled MoveIntents in a thirty-minute window.
+    --
+    -- Failure detection is intentionally inverted: all canceled move intents
+    -- count except a small benign set. This prevents new rejection paths from
+    -- bypassing the cooldown merely because their resolution string was not
+    -- added to an allowlist.
+    for j in QueueRebalanceCandidates:
+        count(MoveIntent {
+            job = j,
+            state = canceled,
+            resolved_at >= now - 30m,
+            resolution not in {
+                MoveIntentResolutionStale,
+                MoveIntentResolutionSuperseded
+            }
+        }) < 3
+}
+
 -- ==========================================================================
 -- PlacementIntent (sibling of MoveIntent)
 -- ==========================================================================
@@ -816,9 +869,10 @@ invariant StaleMoveIntentRepairConverges {
 --   from its candidate set (already implemented at autopilot.go's unplaced
 --   filter and in the rentalScope construction).
 -- campaign-lifecycle.allium: QueueRebalanceJob MUST exclude jobs with open
---   intents (implemented at rebalance.go's candidates filter) AND now opens
---   its own MoveIntent { target_kind = existing } per planned move, with the
---   R2 submission performed asynchronously by a background goroutine.
+--   intents and with recent failed move-intent cooldowns (implemented at
+--   rebalance.go's candidates filter) AND now opens its own MoveIntent {
+--   target_kind = existing } per planned move, with the R2 submission
+--   performed asynchronously by a background goroutine.
 -- status-sync.allium: TUI views that display "moving..." status SHOULD
 --   read from MoveIntent.state, not infer move-in-progress from
 --   pending_placement (which is also used by initial placement).
