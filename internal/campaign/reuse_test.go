@@ -144,6 +144,13 @@ func TestMatchJobToInstance_GPUClass(t *testing.T) {
 		{"rtx-4080 alias matches RTX 4080S resolved", "rtx-4080", "RTX_4080S", "RTX 4080S", true},
 		{"rtx-4080-super alias matches RTX 4080S resolved", "rtx-4080-super", "RTX_4080S", "RTX 4080S", true},
 		{"volta matches Tesla V100 resolved", "volta", "nvidia", "Tesla V100", true},
+		{"h100 broad matches pcie resolved", "h100", "H100", "H100 PCIE", true},
+		{"h100 broad matches sxm resolved", "h100", "H100", "H100 SXM", true},
+		{"h100 pcie matches pcie resolved", "h100-pcie", "H100", "H100 PCIE", true},
+		{"h100 pcie rejects sxm resolved", "h100-pcie", "H100", "H100 SXM", false},
+		{"h100 hbm3 matches sxm resolved", "h100-hbm3", "H100", "H100 SXM", true},
+		{"h100 hbm3 rejects pcie resolved", "h100-hbm3", "H100", "H100 PCIE", false},
+		{"h100 sxm matches hbm3 resolved", "h100-sxm", "H100", "NVIDIA H100 80GB HBM3", true},
 	}
 
 	for _, tt := range tests {

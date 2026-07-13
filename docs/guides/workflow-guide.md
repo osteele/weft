@@ -599,6 +599,11 @@ Memory inside a GPU selector is different. `gpu = "a100>=80GB"` or
 least 80GB"; weft does not add `+2GB` to that hardware floor. Use separate
 `gpu-mem` / `--gpu-mem` when the number is the workload's expected VRAM use.
 
+GPU selectors can also pin known data-center variants. `gpu = "h100"` remains
+broad, while `gpu = "h100-pcie"` selects H100 PCIe and `gpu = "h100-hbm3"`
+selects the H100 SXM/HBM3 class. `h100-sxm` and `h100-nvl` are also accepted
+when the job needs those variants specifically.
+
 The default floor is 20GB when any GPU flag is used and no explicit `gpu-mem`
 is provided. For lightweight workloads, this default causes the bidding system
 to consider all GPU tiers including expensive H100 and H200 instances that

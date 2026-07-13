@@ -140,6 +140,7 @@ invariant ExecutionTargetShapeIsExclusive {
 --   "2080ti"      -> "rtx2080ti"
 --   "A100 80GB"   -> "a10080gb"
 --   "ampere"      -> "ampere"
+--   "H100 HBM3"   -> "h100hbm3"
 rule NormalizeGPUClass {
     when: NormalizeRequested(input)
     let letters_digits = input.lowercase.filter(c => c.is_alphanumeric)
@@ -173,6 +174,7 @@ value GPUConstraint {
     model: String?              -- set when mode = exact_model (normalized)
     generation: GPUGeneration?  -- set when mode in {exact_generation, min_generation}
     family: GPUFamily?          -- set when mode = family
+    aliases: List<String>        -- exact-model aliases such as h100hbm3 -> h100sxm
 }
 
 rule ParseGPUConstraint {
@@ -188,6 +190,11 @@ rule ParseGPUConstraint {
     -- (e.g. "a100+"); the parser resolves it to that model's generation.
     -- The "+" suffix is always generation-level: it never matches
     -- "this exact model or a newer submodel".
+    --
+    -- Exact-model mode preserves known package / memory variant intent:
+    -- "h100" matches H100 PCIe, SXM/HBM3, and NVL variants; "h100-pcie"
+    -- matches only PCIe; "h100-sxm" and "h100-hbm3" match the H100
+    -- SXM/HBM3 class; "h100-nvl" matches only NVL.
 
     ensures: GPUConstraintParsed(result)
 
@@ -201,7 +208,11 @@ rule MatchGPU {
     when: MatchRequested(constraint: GPUConstraint, gpu: GPUSpec)
 
     if constraint.mode = exact_model:
-        ensures: Matches = (gpu.class = constraint.model)
+        ensures: Matches = (
+            gpu.class = constraint.model
+            or gpu.class in constraint.aliases
+            or IsKnownVariantOf(gpu.class, constraint.model)
+        )
 
     if constraint.mode = family:
         ensures: Matches = (family_of(gpu.class) = constraint.family)

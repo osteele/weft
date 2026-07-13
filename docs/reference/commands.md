@@ -100,8 +100,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`, or project output directories). Recorded on successful completion for downstream jobs; repeat it for extra files or directories outside the conventional `output/` and `outputs/` directories
-- `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
-- `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `gh200`, `ampere+`)
+- `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`, `h100-pcie`, `h100-hbm3`)
+- `--gpu-class CLASS`: Require a specific GPU class, variant, or generation (e.g., `a100`, `gh200`, `h100-sxm`, `ampere+`)
 - `--gpus N`: Require exactly N GPUs on one host or rental instance
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default, except when the value matches a known hardware ceiling — see below)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)

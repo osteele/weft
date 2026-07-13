@@ -45,6 +45,9 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 	if !minMode && norm == "gh200" {
 		return []string{"GH200", "GH200 Superchip", "Grace Hopper"}, nil
 	}
+	if !minMode && norm == "h100hbm3" {
+		return []string{"H100 SXM"}, nil
+	}
 
 	// Generation name (e.g., "hopper", "hopper+")
 	if gen, ok := gpucatalog.GenerationNameToGeneration[norm]; ok {

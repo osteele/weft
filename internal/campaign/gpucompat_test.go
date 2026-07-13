@@ -20,6 +20,7 @@ func TestGPUClassSupremum(t *testing.T) {
 		{"nvidia", "nvidia", "NVIDIA", true},
 		{"ampere", "ampere", "AMPERE", true},
 		{"a100", "a100", "A100", true},
+		{"h100-pcie", "h100-pcie", "H100-PCIE", true},
 
 		// Family subsumes generation and model
 		{"nvidia", "ampere", "AMPERE", true},
@@ -34,6 +35,7 @@ func TestGPUClassSupremum(t *testing.T) {
 		{"ampere+", "hopper+", "HOPPER+", true},
 		{"ampere+", "hopper", "HOPPER", true},
 		{"ampere+", "h100", "H100", true},
+		{"hopper+", "h100-hbm3", "H100-HBM3", true},
 
 		// Incompatible: different generations
 		{"ampere", "turing", "", false},
@@ -42,6 +44,15 @@ func TestGPUClassSupremum(t *testing.T) {
 
 		// Incompatible: different exact models (even same gen)
 		{"a100", "rtx3090", "", false},
+		{"h100-pcie", "h100-sxm", "", false},
+		{"h100-pcie", "h100-hbm3", "", false},
+		{"h100-nvl", "h100-hbm3", "", false},
+
+		// Broad model selectors merge with compatible variants.
+		{"h100", "h100-pcie", "H100-PCIE", true},
+		{"h100", "h100-sxm", "H100-SXM", true},
+		{"h100", "h100-hbm3", "H100-HBM3", true},
+		{"h100-sxm", "h100-hbm3", "H100-HBM3", true},
 
 		// Incompatible: cross-family
 		{"nvidia", "apple", "", false},

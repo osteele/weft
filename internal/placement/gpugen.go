@@ -190,6 +190,11 @@ func generationOf(normalizedClass string) GPUGeneration {
 	if gen, ok := gpucatalog.GenerationForNormalizedClass(normalizedClass); ok {
 		return GPUGeneration(gen)
 	}
+	for _, alias := range gpuClassAliases[normalizedClass] {
+		if gen, ok := gpucatalog.GenerationForNormalizedClass(alias); ok {
+			return GPUGeneration(gen)
+		}
+	}
 	return GenUnknown
 }
 
@@ -218,6 +223,10 @@ const (
 var familyCheckers = map[string]func(GPUGeneration) bool{
 	"nvidia": GPUGeneration.isNVIDIA,
 	"apple":  GPUGeneration.isApple,
+}
+
+var gpuClassAliases = map[string][]string{
+	"h100hbm3": {"h100sxm"},
 }
 
 // GPUConstraint represents a parsed --gpu-class value.
@@ -295,7 +304,7 @@ func (c GPUConstraint) MatchesGPU(inventoryClass string) bool {
 
 	switch c.mode {
 	case constraintExactModel:
-		return invNorm == c.normalized
+		return c.matchesExactNormalized(invNorm)
 	case constraintExactGen, constraintMinGen, constraintFamily:
 		return c.matchesGeneration(generationOf(invNorm))
 	}
@@ -364,7 +373,7 @@ func (c GPUConstraint) Subsumes(other GPUConstraint) bool {
 	case constraintExactModel:
 		// Exact model only subsumes itself.
 		if other.mode == constraintExactModel {
-			return c.normalized == other.normalized
+			return c.matchesExactNormalized(other.normalized)
 		}
 		return false
 	}
@@ -406,25 +415,28 @@ func (c GPUConstraint) matchesExactFullName(normFull string) bool {
 	}
 	bestClass := bestKnownGPUClassInFullName(normFull)
 	if bestClass == "" {
-		return strings.Contains(normFull, c.normalized)
+		for _, norm := range gpuClassEquivalents(c.normalized) {
+			if strings.Contains(normFull, norm) {
+				return true
+			}
+		}
+		return c.normalized == "h100hbm3" && strings.Contains(normFull, "h100") && strings.Contains(normFull, "hbm3")
 	}
-	if c.normalized == bestClass {
+	if c.matchesExactNormalized(bestClass) {
 		return true
 	}
-	if strings.Contains(normFull, c.normalized) && len(c.normalized) > len(bestClass) {
-		return true
-	}
-	if strings.HasPrefix(bestClass, c.normalized) {
-		suffix := bestClass[len(c.normalized):]
-		return isKnownGPUVariantSuffix(suffix)
-	}
-	if strings.HasPrefix(bestClass, "rtx") && strings.TrimPrefix(bestClass, "rtx") == c.normalized {
-		return true
+	for _, norm := range gpuClassEquivalents(c.normalized) {
+		if strings.Contains(normFull, norm) && len(norm) > len(bestClass) {
+			return true
+		}
 	}
 	return false
 }
 
 func bestKnownGPUClassInFullName(normFull string) string {
+	if strings.Contains(normFull, "h100") && strings.Contains(normFull, "hbm3") {
+		return "h100sxm"
+	}
 	bestClass := ""
 	for _, class := range knownGPUClasses {
 		if strings.Contains(normFull, class) && len(class) > len(bestClass) {
@@ -432,6 +444,50 @@ func bestKnownGPUClassInFullName(normFull string) string {
 		}
 	}
 	return bestClass
+}
+
+func (c GPUConstraint) matchesExactNormalized(candidate string) bool {
+	if c.normalized == "" || candidate == "" {
+		return false
+	}
+	for _, constraintNorm := range gpuClassEquivalents(c.normalized) {
+		for _, candidateNorm := range gpuClassEquivalents(candidate) {
+			if candidateNorm == constraintNorm {
+				return true
+			}
+			if strings.HasPrefix(candidateNorm, constraintNorm) {
+				suffix := candidateNorm[len(constraintNorm):]
+				if isKnownGPUVariantSuffix(suffix) {
+					return true
+				}
+			}
+			if strings.HasPrefix(candidateNorm, "rtx") && strings.TrimPrefix(candidateNorm, "rtx") == constraintNorm {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func gpuClassEquivalents(norm string) []string {
+	equivalents := []string{norm}
+	for _, alias := range gpuClassAliases[norm] {
+		if alias != "" && alias != norm {
+			equivalents = append(equivalents, alias)
+		}
+	}
+	for alias, targets := range gpuClassAliases {
+		if alias == norm {
+			continue
+		}
+		for _, target := range targets {
+			if target == norm {
+				equivalents = append(equivalents, alias)
+				break
+			}
+		}
+	}
+	return equivalents
 }
 
 func isKnownGPUVariantSuffix(s string) bool {

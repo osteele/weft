@@ -56,6 +56,8 @@ weft run --gpu 'nvidia>=24GB' 'python train.py'
 weft run --gpu ampere+ 'python train.py'
 weft run --gpu-class a100 --gpu-mem 60 'python train.py'
 weft run --gpu h100 --gpus 4 --gpu-mem 80 'python train.py'
+weft run --gpu h100-pcie 'python train.py'
+weft run --gpu h100-hbm3 'python train.py'
 ```
 
 GPU class matching supports exact models (`a100`, `rtx3090`, `gh200`),
@@ -64,6 +66,12 @@ families (`nvidia`, `apple`). Bare RTX model numbers such as `3090` are
 normalized to `rtx3090`. Use `gh200` when the job needs a Grace Hopper
 superchip specifically; `hopper` remains a broad generation constraint that
 can also match H100 and H200.
+
+Some data-center GPU families expose distinct package or memory variants.
+For H100, `--gpu h100` remains broad and can match PCIe, SXM/HBM3, or NVL
+offers. Use `--gpu h100-pcie`, `--gpu h100-sxm`, `--gpu h100-hbm3`, or
+`--gpu h100-nvl` to pin the variant. `h100-hbm3` is an alias for the
+SXM/HBM3 class and excludes H100 PCIe offers.
 
 The `>=NGB` form on `--gpu` is a hardware capacity floor. For example,
 `--gpu a100>=80GB` matches 80GB A100 offers exactly; it does not add the

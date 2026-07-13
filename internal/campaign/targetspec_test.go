@@ -26,6 +26,11 @@ func TestTargetSpecFromOfferPreservesCloudGPUClassCompatibility(t *testing.T) {
 		{name: "rtx4080 admits super variant", requested: "rtx-4080", gpuName: "RTX 4080S"},
 		{name: "rtx4080 super admits short provider spelling", requested: "rtx-4080-super", gpuName: "RTX 4080S"},
 		{name: "rtx4080 super admits long provider spelling", requested: "rtx-4080-super", gpuName: "RTX 4080 SUPER"},
+		{name: "h100 broad admits pcie variant", requested: "h100", gpuName: "H100 PCIE"},
+		{name: "h100 broad admits sxm variant", requested: "h100", gpuName: "H100 SXM"},
+		{name: "h100 pcie pins pcie variant", requested: "h100-pcie", gpuName: "H100 PCIE"},
+		{name: "h100 sxm pins sxm variant", requested: "h100-sxm", gpuName: "H100 SXM"},
+		{name: "h100 hbm3 aliases sxm variant", requested: "h100-hbm3", gpuName: "H100 SXM"},
 		{name: "unknown vastai still satisfies broad nvidia", requested: "nvidia", gpuName: "Future Accelerator Z9"},
 	}
 
@@ -41,6 +46,34 @@ func TestTargetSpecFromOfferPreservesCloudGPUClassCompatibility(t *testing.T) {
 			got := placement.EvaluateEligibility(placement.Constraints{GPUClass: tt.requested}, target).Eligible
 			if !got {
 				t.Fatalf("EvaluateEligibility rejected %q vs %q", tt.requested, tt.gpuName)
+			}
+		})
+	}
+}
+
+func TestTargetSpecFromOfferRejectsMismatchedH100Variant(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested string
+		gpuName   string
+	}{
+		{name: "pcie excludes sxm", requested: "h100-pcie", gpuName: "H100 SXM"},
+		{name: "sxm excludes pcie", requested: "h100-sxm", gpuName: "H100 PCIE"},
+		{name: "hbm3 excludes pcie", requested: "h100-hbm3", gpuName: "H100 PCIE"},
+		{name: "nvl excludes sxm", requested: "h100-nvl", gpuName: "H100 SXM"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := TargetSpecFromOffer(cloud.Offer{
+				Provider:   cloud.ProviderVastai,
+				ProviderID: tt.name,
+				GPUName:    tt.gpuName,
+				GPUMemGB:   80,
+				NumGPUs:    1,
+			})
+			if got := placement.EvaluateEligibility(placement.Constraints{GPUClass: tt.requested}, target); got.Eligible {
+				t.Fatalf("EvaluateEligibility accepted %q vs %q", tt.requested, tt.gpuName)
 			}
 		})
 	}
