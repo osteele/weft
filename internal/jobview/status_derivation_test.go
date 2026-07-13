@@ -140,14 +140,15 @@ func TestStatusDerivation_OpenMoveSplitsIntoSourceAndTargetRows(t *testing.T) {
 		t.Fatalf("CreateLaunch target: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &sourceLaunchID,
-		TargetKind:      db.MoveTargetNew,
-		TargetLaunchID:  &targetLaunchID,
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &targetLaunchID,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != sourceAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, sourceAttemptID)
 	}
 	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &targetLaunchID, db.StatusQueued); err != nil {
 		t.Fatalf("CreateMoveTargetAttempt: %v", err)

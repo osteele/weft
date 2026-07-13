@@ -186,7 +186,6 @@ func TestExpandJobsForOpenMovesShowsTerminalMoveAttemptsAsMoveRows(t *testing.T)
 			Move: &MoveDisplay{
 				IntentID:        531,
 				State:           db.MoveIntentStateOpen,
-				SourceAttemptID: &sourceAttemptID,
 				TargetAttemptID: &targetAttemptID,
 				SourceLabel:     "wi5001",
 				TargetLabel:     "wi5003",
@@ -258,7 +257,6 @@ func TestExpandJobsForOpenMovesSuppressesFailedSourceContext(t *testing.T) {
 			Move: &MoveDisplay{
 				IntentID:         531,
 				State:            db.MoveIntentStateOpen,
-				SourceAttemptID:  &sourceAttemptID,
 				TargetAttemptID:  &targetAttemptID,
 				SourceLabel:      "wi5001",
 				TargetLabel:      "wi5003",

@@ -49,9 +49,12 @@
 
 entity MoveIntent {
     job: Job
-    -- The job's last open attempt at the moment the intent was created.
-    -- Populated for audit / overlap-resolution; not required for the
-    -- model's correctness invariants.
+    -- The job's last authoritative open attempt at the moment the intent was
+    -- created. Snapshotted by the DB constructor, not supplied by individual
+    -- callers. This field is load-bearing: auto-obsolete/source-wins logic,
+    -- source-abandon on target acceptance, and deferred source-stop markers
+    -- all depend on it. Null means there was no open source attempt to stop,
+    -- not that a caller omitted the snapshot.
     source_attempt: JobAttempt?
     -- Where the job was placed when the move started. Drives the
     -- restore-to-source rollback on cancellation.
@@ -833,6 +836,19 @@ invariant StaleMoveIntentRepairConverges {
     -- cleanups. They must use the same resolution semantics as explicit
     -- cancel/confirm flows so loser attempts are abandoned and terminal
     -- intent state is stable.
+    --
+    -- StaleMoveIntentRepairApplies(intent) holds when the periodic sweep
+    -- (PruneMoveIntents: run at DB open and each autopilot pass) can
+    -- determine the intent's outcome from existing evidence:
+    --   * no non-terminal target launch after the protection window
+    --     -> canceled (MoveIntentResolutionStale)
+    --   * the target attempt reached a terminal status
+    --     -> confirmed (mirrors the auto-confirm trigger)
+    --   * the source attempt reached a terminal status
+    --     -> obsoleted (mirrors the auto-obsolete triggers); for legacy
+    --     intents predating the constructor snapshot (source_attempt null,
+    --     source_launch set), the source is identified as the latest
+    --     terminal non-target attempt on the source launch
     --
     -- A repair pass over an open intent may resolve it only through
     -- ResolveMoveIntent / ConfirmMoveTargetAccepted / ObsoleteMove. It

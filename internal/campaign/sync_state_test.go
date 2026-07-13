@@ -118,11 +118,9 @@ func TestConfirmMoveIntentsForReadyLaunchStopsCloudSource(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           101,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &sourceLaunch,
-		TargetKind:      db.MoveTargetNew,
-		TargetLaunchID:  &targetLaunch,
+		JobID:          101,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &targetLaunch,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -259,11 +257,9 @@ func TestSyncInstanceState_PhaseConfirmsHiddenMoveTarget(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           104,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &sourceLaunch,
-		TargetKind:      db.MoveTargetNew,
-		TargetLaunchID:  &targetLaunch,
+		JobID:          104,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &targetLaunch,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -384,11 +380,9 @@ func TestReconcilePendingMoveTargetRequestAckConfirmsAndStopsSource(t *testing.T
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           102,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &sourceLaunch,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &targetLaunch,
+		JobID:          102,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &targetLaunch,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -473,11 +467,9 @@ func TestReconcilePendingMoveTargetRequestAckRejectedCancelsMove(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           103,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &sourceLaunch,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &targetLaunch,
+		JobID:          103,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &targetLaunch,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)

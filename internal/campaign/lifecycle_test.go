@@ -1615,14 +1615,15 @@ func TestLaunchInstanceMoveTargetClaimKeepsSourceAuthoritative(t *testing.T) {
 		return nil
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           job.ID,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &src,
-		TargetKind:      db.MoveTargetNew,
-		TargetOfferID:   offer.ProviderID,
+		JobID:         job.ID,
+		TargetKind:    db.MoveTargetNew,
+		TargetOfferID: offer.ProviderID,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != sourceAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, sourceAttemptID)
 	}
 
 	dst, err := LaunchInstance(

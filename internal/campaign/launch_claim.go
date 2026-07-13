@@ -8,34 +8,25 @@ import (
 	"github.com/osteele/weft/internal/ids"
 )
 
-// PriorAttempt captures (attempt_id, launch_id) of the open attempt that
-// would be superseded by a transfer-claim. Returned by
-// capturePriorAttempt before the transfer. Used by callers to write a
-// cancel marker to the source launch's R2 grace bucket so the source
-// agent drops the superseded attempt instead of running it.
+// PriorAttempt captures (attempt_id, launch_id) of the source attempt that
+// a move intent will supersede. Used by callers to write a cancel marker to
+// the source launch's R2 grace bucket so the source agent drops the
+// superseded attempt instead of running it.
 type PriorAttempt struct {
 	AttemptID int64
 	LaunchID  int64
 }
 
-// capturePriorAttempt looks up the latest open attempt for a job and
-// returns its (id, launch_id). Both fields are zero if there is no open
-// attempt or it has no launch_id (on-prem job, etc.). Best-effort —
-// errors are silently dropped because cancel markers are an optimization
-// (the DB transition is the authoritative supersede).
-func capturePriorAttempt(database *sql.DB, jobID int64) PriorAttempt {
-	var attemptID, launchID sql.NullInt64
-	_ = database.QueryRow(`
-		SELECT id, launch_id FROM job_attempts
-		WHERE job_id = ? AND end_time IS NULL
-		ORDER BY attempt_number DESC LIMIT 1`, jobID,
-	).Scan(&attemptID, &launchID)
+func priorAttemptFromMoveIntent(intent *db.MoveIntent) PriorAttempt {
 	prev := PriorAttempt{}
-	if attemptID.Valid {
-		prev.AttemptID = attemptID.Int64
+	if intent == nil {
+		return prev
 	}
-	if launchID.Valid {
-		prev.LaunchID = launchID.Int64
+	if intent.SourceAttemptID != nil {
+		prev.AttemptID = *intent.SourceAttemptID
+	}
+	if intent.SourceLaunchID != nil {
+		prev.LaunchID = *intent.SourceLaunchID
 	}
 	return prev
 }

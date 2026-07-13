@@ -1601,15 +1601,16 @@ func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
+	source, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
 	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
 	if err != nil {
 		t.Fatalf("CreateLaunch target: %v", err)
-	}
-	if err := db.SetJobLaunchID(database, jobID, target); err != nil {
-		t.Fatalf("SetJobLaunchID target: %v", err)
-	}
-	if err := db.UpdateLaunchStatus(database, target, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
-		t.Fatalf("UpdateLaunchStatus target: %v", err)
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 		JobID:          jobID,
@@ -1620,6 +1621,9 @@ func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, target, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus target: %v", err)
 	}
 
 	originalRetry := autoPilotLaunchMoveIntentRetry

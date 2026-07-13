@@ -378,11 +378,9 @@ func TestRecordCloudJobCompletion_IgnoresAbandonedMoveTargetAttempt(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateLaunch target: %v", err)
 	}
-	src := sourceLaunchID
 	dst := targetLaunchID
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          jobID,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetExisting,
 		TargetLaunchID: &dst,
 	})

@@ -682,10 +682,8 @@ func executeWithIntent(
 // runs. Rejects a second move on a job that already has one in flight.
 func openMoveIntent(database *sql.DB, job *db.Job, opt Option) (*db.MoveIntent, error) {
 	params := db.CreateMoveIntentParams{
-		JobID:           job.ID,
-		SourceAttemptID: job.LatestRunID,
-		SourceLaunchID:  job.LaunchID,
-		TargetGPUName:   opt.GPUName,
+		JobID:         job.ID,
+		TargetGPUName: opt.GPUName,
 	}
 	if opt.IsNew {
 		params.TargetKind = db.MoveTargetNew

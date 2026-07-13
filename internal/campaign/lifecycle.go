@@ -2250,7 +2250,6 @@ func LaunchInstance(
 		var prior PriorAttempt
 		var updatedJob *db.Job
 		if opts.MoveTargetClaim {
-			prior = capturePriorAttempt(database, job.ID)
 			intent, err := db.GetOpenMoveIntent(database, job.ID)
 			if err != nil {
 				oplog.Log(oplog.OpCloudSetJobInstance,
@@ -2271,6 +2270,7 @@ func LaunchInstance(
 				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 				return instanceID, err
 			}
+			prior = priorAttemptFromMoveIntent(intent)
 			attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, job.ID, "", &instanceID, db.StatusQueued)
 			if err != nil {
 				oplog.Log(oplog.OpCloudSetJobInstance,

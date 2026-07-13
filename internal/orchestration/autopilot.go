@@ -1413,7 +1413,8 @@ func fulfillOpenMoveToNewIntents(ctx context.Context, database *sql.DB, scoped m
 	}
 	for _, intent := range pruned {
 		oplog.LogJob("auto_pilot.move_intent_pruned", intent.JobID, "",
-			oplog.WithDetailf("intent=%d created_at=%d", intent.ID, intent.CreatedAt))
+			oplog.WithDetailf("intent=%d created_at=%d state=%s resolution=%q",
+				intent.ID, intent.CreatedAt, intent.State, intent.Resolution))
 	}
 	intents, err := db.ListOpenNewMoveIntents(database)
 	if err != nil {

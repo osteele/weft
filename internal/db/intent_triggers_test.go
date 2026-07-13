@@ -129,10 +129,8 @@ func TestTrigger_AutoObsoleteMoveIntentOnSourceAttemptEnd(t *testing.T) {
 		t.Fatalf("CreateAttempt: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:           9004,
-		TargetKind:      MoveTargetNew,
-		SourceLaunchID:  &src,
-		SourceAttemptID: &sourceAttempt,
+		JobID:      9004,
+		TargetKind: MoveTargetNew,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)

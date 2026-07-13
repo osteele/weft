@@ -210,9 +210,8 @@ func TestAbandonMoveLoserRecordsIntentID(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &attemptID,
-		TargetKind:      MoveTargetNew,
+		JobID:      jobID,
+		TargetKind: MoveTargetNew,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -246,10 +245,9 @@ func TestOpenMoveTargetAttemptHiddenUntilAccepted(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &sourceAttemptID,
-		TargetKind:      MoveTargetExisting,
-		TargetHost:      "cool100",
+		JobID:      jobID,
+		TargetKind: MoveTargetExisting,
+		TargetHost: "cool100",
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -315,10 +313,9 @@ func TestMoveSourceCompletionAbandonsTargetAttempt(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &sourceAttemptID,
-		TargetKind:      MoveTargetExisting,
-		TargetHost:      "cool100",
+		JobID:      jobID,
+		TargetKind: MoveTargetExisting,
+		TargetHost: "cool100",
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -366,10 +363,9 @@ func TestMoveTargetCompletionAbandonsSourceAttempt(t *testing.T) {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &sourceAttemptID,
-		TargetKind:      MoveTargetExisting,
-		TargetHost:      "cool100",
+		JobID:      jobID,
+		TargetKind: MoveTargetExisting,
+		TargetHost: "cool100",
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)

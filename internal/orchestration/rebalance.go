@@ -1090,11 +1090,9 @@ func applyRebalanceMove(_ context.Context, database *sql.DB, r2Client *r2.Client
 		return nil
 	}
 
-	sourceLaunchID := move.FromInstanceID
 	targetLaunchID := move.ToInstanceID
 	params := db.CreateMoveIntentParams{
 		JobID:          job.ID,
-		SourceLaunchID: &sourceLaunchID,
 		TargetKind:     db.MoveTargetExisting,
 		TargetLaunchID: &targetLaunchID,
 	}

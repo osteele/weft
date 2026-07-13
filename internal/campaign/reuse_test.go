@@ -1327,7 +1327,6 @@ func TestSubmitJobsToInstanceForMoveRejectsIncompleteNeedsBeforeTargetAttempt(t 
 	}
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 		JobID:          consumerID,
-		SourceLaunchID: &srcID,
 		TargetKind:     db.MoveTargetExisting,
 		TargetLaunchID: &dstID,
 	})
@@ -1644,14 +1643,16 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLatestAttemptID source: %v", err)
 	}
-	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &sourceAttemptID,
-		SourceLaunchID:  &src,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &dst,
-	}); err != nil {
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != sourceAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, sourceAttemptID)
 	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -1686,7 +1687,7 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 	if reloaded.LaunchID == nil || *reloaded.LaunchID != src {
 		t.Fatalf("before target ack: launch_id = %v, want source %d", reloaded.LaunchID, src)
 	}
-	intent, err := db.GetOpenMoveIntent(database, jobID)
+	intent, err = db.GetOpenMoveIntent(database, jobID)
 	if err != nil {
 		t.Fatalf("GetOpenMoveIntent: %v", err)
 	}
@@ -1735,14 +1736,16 @@ func TestSubmitJobsToInstanceForMove_RunningTargetWaitsForAckBeforeSourceCancel(
 	if err := database.QueryRow(`SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL`, jobID).Scan(&srcAttemptID); err != nil {
 		t.Fatalf("source attempt: %v", err)
 	}
-	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &srcAttemptID,
-		SourceLaunchID:  &src,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &dst,
-	}); err != nil {
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != srcAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, srcAttemptID)
 	}
 
 	job, err := db.GetJobByID(database, jobID)
@@ -1776,7 +1779,7 @@ func TestSubmitJobsToInstanceForMove_RunningTargetWaitsForAckBeforeSourceCancel(
 	if len(canceledByLaunch) != 0 {
 		t.Fatalf("cancel-attempts before target ack = %v, want none", canceledByLaunch)
 	}
-	intent, err := db.GetOpenMoveIntent(database, jobID)
+	intent, err = db.GetOpenMoveIntent(database, jobID)
 	if err != nil {
 		t.Fatalf("GetOpenMoveIntent: %v", err)
 	}
@@ -1815,14 +1818,16 @@ func TestSubmitJobsToInstanceForMove_NoAckStatusFlipStillWaitsForAck(t *testing.
 	if err != nil {
 		t.Fatalf("GetLatestAttemptID: %v", err)
 	}
-	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &srcAttemptID,
-		SourceLaunchID:  &src,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &dst,
-	}); err != nil {
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != srcAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, srcAttemptID)
 	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -1858,7 +1863,7 @@ func TestSubmitJobsToInstanceForMove_NoAckStatusFlipStillWaitsForAck(t *testing.
 	if len(canceledByLaunch) != 0 {
 		t.Fatalf("cancel-attempts before target ack = %v, want none", canceledByLaunch)
 	}
-	intent, err := db.GetOpenMoveIntent(database, jobID)
+	intent, err = db.GetOpenMoveIntent(database, jobID)
 	if err != nil {
 		t.Fatalf("GetOpenMoveIntent: %v", err)
 	}
@@ -1897,14 +1902,16 @@ func TestSubmitJobsToInstanceForMove_PersistsRequestBeforeFinalCheckFailure(t *t
 	if err != nil {
 		t.Fatalf("GetLatestAttemptID: %v", err)
 	}
-	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
-		JobID:           jobID,
-		SourceAttemptID: &srcAttemptID,
-		SourceLaunchID:  &src,
-		TargetKind:      db.MoveTargetExisting,
-		TargetLaunchID:  &dst,
-	}); err != nil {
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &dst,
+	})
+	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceAttemptID == nil || *intent.SourceAttemptID != srcAttemptID {
+		t.Fatalf("source_attempt_id = %v, want %d", intent.SourceAttemptID, srcAttemptID)
 	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {

@@ -1022,7 +1022,6 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		var prior PriorAttempt
 		var claimedJob *db.Job
 		if transfer {
-			prior = capturePriorAttempt(database, job.ID)
 			intent, err := db.GetOpenMoveIntent(database, job.ID)
 			if err != nil {
 				return fmt.Errorf("get open move intent for job %s: %w", ids.FormatJobID(job.ID), err)
@@ -1030,6 +1029,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			if intent == nil {
 				return fmt.Errorf("job %s has no open move intent", ids.FormatJobID(job.ID))
 			}
+			prior = priorAttemptFromMoveIntent(intent)
 			attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, job.ID, "", &instanceID, db.StatusQueued)
 			if err != nil {
 				rollbackErr := rollbackClaims()

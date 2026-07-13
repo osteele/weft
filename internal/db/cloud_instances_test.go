@@ -1437,7 +1437,6 @@ func TestResetLaunchJobs_RestoresOpenNoStartMoveTargetToLiveSource(t *testing.T)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          1201,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",
@@ -1501,7 +1500,6 @@ func TestResetLaunchJobs_RestoresRetryableNoStartMoveTargetAndKeepsIntentOpen(t 
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          1204,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",
@@ -1558,7 +1556,6 @@ func TestHandleMoveTargetFailedBeforeStart_ConsumesStaleClosedTarget(t *testing.
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          1205,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",
@@ -1642,10 +1639,9 @@ func TestFailedMoveTargetMachineIDs_ReturnsNoStartFailures(t *testing.T) {
 		t.Fatalf("SetJobLaunchID source: %v", err)
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
-		JobID:          jobID,
-		SourceLaunchID: &src,
-		TargetKind:     MoveTargetNew,
-		MaxAttempts:    4,
+		JobID:       jobID,
+		TargetKind:  MoveTargetNew,
+		MaxAttempts: 4,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
@@ -1747,7 +1743,6 @@ func TestResetLaunchJobs_DoesNotRestoreConfirmedNoStartMoveTarget(t *testing.T) 
 	}
 	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          1203,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",
@@ -1791,7 +1786,6 @@ func TestResetLaunchJobs_DoesNotRestoreMoveTargetAfterJobStarted(t *testing.T) {
 	}
 	if _, err := CreateMoveIntent(database, CreateMoveIntentParams{
 		JobID:          1202,
-		SourceLaunchID: &src,
 		TargetKind:     MoveTargetNew,
 		TargetLaunchID: &dst,
 		TargetGPUName:  "A100",

@@ -427,16 +427,17 @@ func TestSubmitRebalanceMoveAsyncLeavesSuccessfulIntentOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	src := srcID
 	dst := dstID
 	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 		JobID:          jobID,
-		SourceLaunchID: &src,
 		TargetKind:     db.MoveTargetExisting,
 		TargetLaunchID: &dst,
 	})
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceLaunchID == nil || *intent.SourceLaunchID != srcID {
+		t.Fatalf("source_launch_id = %v, want %d", intent.SourceLaunchID, srcID)
 	}
 
 	done := make(chan struct{})
@@ -488,11 +489,9 @@ func TestRebalanceQueuedJobsAcrossInstances_ApplySkipsJobWithOpenIntent(t *testi
 	}
 
 	// Open an intent on the job out-of-band; rebalance must skip it.
-	src := srcID
 	dst := dstID
 	if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 		JobID:          queuedJob,
-		SourceLaunchID: &src,
 		TargetKind:     db.MoveTargetExisting,
 		TargetLaunchID: &dst,
 	}); err != nil {
@@ -533,7 +532,6 @@ func TestRebalanceQueuedJobsAcrossInstances_CoolsDownRecentFailedMoves(t *testin
 	for i := 0; i < rebalanceMoveFailureLimit; i++ {
 		intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 			JobID:          queuedJob,
-			SourceLaunchID: &srcID,
 			TargetKind:     db.MoveTargetExisting,
 			TargetLaunchID: &dstID,
 		})

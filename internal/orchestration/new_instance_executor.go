@@ -130,8 +130,6 @@ func openMoveIntentsForNewInstanceGroups(database *sql.DB, groups []campaign.Ins
 			}
 			intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
 				JobID:               job.ID,
-				SourceAttemptID:     job.LatestRunID,
-				SourceLaunchID:      job.LaunchID,
 				TargetKind:          db.MoveTargetNew,
 				TargetOfferProvider: string(offer.Provider),
 				TargetOfferID:       offer.ProviderID,

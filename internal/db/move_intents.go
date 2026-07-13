@@ -65,8 +65,6 @@ var ErrMoveIntentAlreadyOpen = errors.New("job already has an open move intent")
 // CreateMoveIntentParams carries the fields needed to open an intent.
 type CreateMoveIntentParams struct {
 	JobID               int64
-	SourceAttemptID     *int64
-	SourceLaunchID      *int64
 	TargetKind          MoveTargetKind
 	TargetLaunchID      *int64 // pass nil for MoveTargetNew until launch resolves
 	TargetAttemptID     *int64
@@ -106,14 +104,41 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 		maxAttempts = retrypolicy.MaxPlacementAttempts()
 	}
 
-	res, err := database.Exec(
+	tx, err := database.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var sourceAttemptID sql.NullInt64
+	var sourceLaunchID sql.NullInt64
+	if err := tx.QueryRow(`
+		SELECT ja.id, ja.launch_id
+		  FROM job_attempts ja
+		 WHERE ja.job_id = ?
+		   AND ja.end_time IS NULL
+		   AND ja.abandoned_at IS NULL
+		   AND NOT EXISTS (
+		       SELECT 1
+		         FROM move_intents mi
+		        WHERE mi.state = 'open'
+		          AND mi.id = ja.move_intent_id
+		   )
+		 ORDER BY ja.attempt_number DESC, ja.id DESC
+		 LIMIT 1`,
+		p.JobID,
+	).Scan(&sourceAttemptID, &sourceLaunchID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("snapshot move source attempt: %w", err)
+	}
+
+	res, err := tx.Exec(
 		`INSERT INTO move_intents (
 			job_id, source_attempt_id, source_launch_id,
 			target_kind, target_launch_id, target_attempt_id, target_host, target_offer_provider, target_offer_id, target_gpu_name,
 			target_request_id, target_request_kind, target_request_created_at,
 			state, attempt_count, max_attempts, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
-		p.JobID, nullableInt64(p.SourceAttemptID), nullableInt64(p.SourceLaunchID),
+		p.JobID, nullableSQLInt64(sourceAttemptID), nullableSQLInt64(sourceLaunchID),
 		string(p.TargetKind), nullableInt64(p.TargetLaunchID), nullableInt64(p.TargetAttemptID), emptyToNull(targetHost),
 		emptyToNull(p.TargetOfferProvider), emptyToNull(p.TargetOfferID), emptyToNull(p.TargetGPUName),
 		emptyToNull(p.TargetRequestID), emptyToNull(p.TargetRequestKind), nullableInt64(p.TargetRequestAt),
@@ -127,6 +152,9 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return GetMoveIntent(database, id)
@@ -557,11 +585,15 @@ func ConfirmOpenMoveIntentsForTargetLaunch(database *sql.DB, launchID int64, res
 }
 
 // PrunedMoveIntent describes a move intent that PruneMoveIntents just
-// resolved, suitable for logging or UI narration.
+// resolved, suitable for logging or UI narration. State and Resolution
+// carry the sweep's verdict: canceled (stale target), obsoleted (source
+// won), or confirmed (target attempt finished first).
 type PrunedMoveIntent struct {
-	ID        int64
-	JobID     int64
-	CreatedAt int64
+	ID         int64
+	JobID      int64
+	CreatedAt  int64
+	State      MoveIntentState
+	Resolution string
 }
 
 // MoveIntentResolutionStale is the resolution string written to stale move
@@ -597,19 +629,22 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 		            )
 		       )
 		 ORDER BY id`
+	repairsByID := map[int64]PrunedMoveIntent{}
 	rows, err := database.Query(query, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("prune stale move intents: %w", err)
 	}
 
-	var pruned []PrunedMoveIntent
 	for rows.Next() {
-		var mi PrunedMoveIntent
+		mi := PrunedMoveIntent{
+			State:      MoveIntentStateCanceled,
+			Resolution: MoveIntentResolutionStale,
+		}
 		if err := rows.Scan(&mi.ID, &mi.JobID, &mi.CreatedAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan pruned move intent: %w", err)
 		}
-		pruned = append(pruned, mi)
+		repairsByID[mi.ID] = mi
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -618,12 +653,108 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	for _, mi := range pruned {
-		if err := ResolveMoveIntent(database, mi.ID, MoveIntentStateCanceled, MoveIntentResolutionStale); err != nil {
-			return nil, fmt.Errorf("resolve stale move intent %d: %w", mi.ID, err)
+
+	outcomeRepairs, err := listOpenMoveIntentOutcomeRepairs(database)
+	if err != nil {
+		return nil, err
+	}
+	for _, repair := range outcomeRepairs {
+		repairsByID[repair.ID] = repair
+	}
+
+	pruned := make([]PrunedMoveIntent, 0, len(repairsByID))
+	for _, repair := range repairsByID {
+		if err := ResolveMoveIntent(database, repair.ID, repair.State, repair.Resolution); err != nil {
+			return nil, fmt.Errorf("resolve stale move intent %d: %w", repair.ID, err)
 		}
+		pruned = append(pruned, repair)
 	}
 	return pruned, nil
+}
+
+// moveOutcomeTerminalStatuses is the attempt-status set that decides a move's
+// outcome. It must match the move_intents auto-resolution triggers
+// (move_intents_auto_obsolete_on_source_attempt_* and
+// move_intents_auto_confirm_on_target_attempt_end).
+const moveOutcomeTerminalStatuses = `('completed','failed')`
+
+func moveSourceWonResolution(status string) string {
+	return "source attempt finished before target won (status=" + status + ")"
+}
+
+func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, error) {
+	const targetQuery = `
+		SELECT mi.id, mi.job_id, mi.created_at, ta.status
+		  FROM move_intents mi
+		  JOIN job_attempts ta ON ta.id = mi.target_attempt_id
+		 WHERE mi.state = 'open'
+		   AND ta.end_time IS NOT NULL
+		   AND ta.status IN ` + moveOutcomeTerminalStatuses + `
+		 ORDER BY mi.id`
+	repairs, err := scanMoveIntentOutcomeRepairs(database, targetQuery, MoveIntentStateConfirmed,
+		func(status string) string { return "target attempt finished first (status=" + status + ")" })
+	if err != nil {
+		return nil, err
+	}
+
+	const sourceQuery = `
+		SELECT mi.id, mi.job_id, mi.created_at, sa.status
+		  FROM move_intents mi
+		  JOIN job_attempts sa ON sa.id = mi.source_attempt_id
+		 WHERE mi.state = 'open'
+		   AND sa.end_time IS NOT NULL
+		   AND sa.status IN ` + moveOutcomeTerminalStatuses + `
+		 ORDER BY mi.id`
+	sourceRepairs, err := scanMoveIntentOutcomeRepairs(database, sourceQuery, MoveIntentStateObsoleted, moveSourceWonResolution)
+	if err != nil {
+		return nil, err
+	}
+	repairs = append(repairs, sourceRepairs...)
+
+	const missingSourceQuery = `
+		SELECT mi.id, mi.job_id, mi.created_at, sa.status
+		  FROM move_intents mi
+		  JOIN job_attempts sa ON sa.id = (
+		       SELECT ja.id
+		         FROM job_attempts ja
+		        WHERE ja.job_id = mi.job_id
+		          AND ja.launch_id = mi.source_launch_id
+		          AND ja.end_time IS NOT NULL
+		          AND ja.status IN ` + moveOutcomeTerminalStatuses + `
+		          AND (mi.target_attempt_id IS NULL OR ja.id != mi.target_attempt_id)
+		        ORDER BY ja.attempt_number DESC, ja.id DESC
+		        LIMIT 1
+		   )
+		 WHERE mi.state = 'open'
+		   AND mi.source_attempt_id IS NULL
+		   AND mi.source_launch_id IS NOT NULL
+		 ORDER BY mi.id`
+	missingSourceRepairs, err := scanMoveIntentOutcomeRepairs(database, missingSourceQuery, MoveIntentStateObsoleted, moveSourceWonResolution)
+	if err != nil {
+		return nil, err
+	}
+	repairs = append(repairs, missingSourceRepairs...)
+	return repairs, nil
+}
+
+func scanMoveIntentOutcomeRepairs(database *sql.DB, query string, state MoveIntentState, resolution func(string) string) ([]PrunedMoveIntent, error) {
+	rows, err := database.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var repairs []PrunedMoveIntent
+	for rows.Next() {
+		var repair PrunedMoveIntent
+		var status string
+		if err := rows.Scan(&repair.ID, &repair.JobID, &repair.CreatedAt, &status); err != nil {
+			return nil, err
+		}
+		repair.State = state
+		repair.Resolution = resolution(status)
+		repairs = append(repairs, repair)
+	}
+	return repairs, rows.Err()
 }
 
 const moveIntentSelect = `SELECT
@@ -691,6 +822,13 @@ func nullableInt64(p *int64) any {
 		return nil
 	}
 	return *p
+}
+
+func nullableSQLInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
 }
 
 func emptyToNull(s string) any {
