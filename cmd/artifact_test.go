@@ -303,6 +303,57 @@ func TestDeliverArtifactToken_BasenameMatchesArtifactsConventionOutput(t *testin
 	}
 }
 
+func TestDeliverArtifactToken_PrefersFinalCloudObjectOverPreEndCache(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	if job.LatestRunID == nil {
+		t.Fatal("job missing latest run id")
+	}
+	runID := *job.LatestRunID
+
+	staleSource := filepath.Join(t.TempDir(), "result.json")
+	if err := os.WriteFile(staleSource, []byte(`{"policies":["early"]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stale source: %v", err)
+	}
+	if err := artifacts.StoreLocalArtifact(database, job.ID, "output/result.json", staleSource); err != nil {
+		t.Fatalf("StoreLocalArtifact: %v", err)
+	}
+	end := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE artifacts SET created_at = ? WHERE job_id = ? AND path = ?`, end-10, job.ID, "output/result.json"); err != nil {
+		t.Fatalf("backdate cached artifact: %v", err)
+	}
+	if err := db.CloseAttempt(database, job.ID, db.StatusCompleted, intPtr(0), end); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/result.json": []byte(`{"policies":["early","final"]}` + "\n"),
+		},
+	}
+	oldBuild := buildArtifactR2Client
+	buildArtifactR2Client = func() cloudOutputStore { return store }
+	oldOutput := artifactOutput
+	artifactOutput = "-"
+	t.Cleanup(func() {
+		buildArtifactR2Client = oldBuild
+		artifactOutput = oldOutput
+	})
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := deliverArtifactToken(cmd, database, job.ID, job, "output/result.json", false, false); err != nil {
+		t.Fatalf("deliverArtifactToken: %v", err)
+	}
+	if got := out.String(); got != "{\"policies\":[\"early\",\"final\"]}\n" {
+		t.Fatalf("stdout = %q, want final cloud artifact", got)
+	}
+}
+
 func TestRunArtifactCatFallsBackToCloudOutputPath(t *testing.T) {
 	_, job := setupLaunchArtifactJobWithDB(t)
 	runID := int64(0)

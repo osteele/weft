@@ -1192,6 +1192,10 @@ rule ArtifactListGetConsistency {
         local artifact cache,
         the job's R2 per-run objects (any target kind, not only rentals),
         an on-demand sync from the job's inventory host
+    ensures:
+        if job is terminal and local cache row.created_at <= job.end_time
+           and R2 lists the same canonical artifact path:
+            retrieve the R2 object, not the pre-end cached snapshot
     ensures: if every source misses, the error names each source checked
 
     @guidance
@@ -1206,7 +1210,10 @@ rule ArtifactListGetConsistency {
         -- materializes the union once, and deliverArtifactToken (used by
         -- fetchArtifactForJobs and runArtifactCat) retrieves through the
         -- same rows and matcher, with syncArtifactOnDemand as the final
-        -- host rung for outputs no listing source has recorded. Design:
+        -- host rung for outputs no listing source has recorded. Terminal
+        -- jobs prefer a same-path R2 row over a cache row written before
+        -- job end, so repeated writes to an output path return the final
+        -- upload rather than an incremental snapshot (wb57). Design:
         -- docs/design/artifacts.md § Intended invariants.
 }
 

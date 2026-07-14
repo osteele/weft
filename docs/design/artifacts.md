@@ -136,7 +136,10 @@ list/get mismatch reports (wb11, wb16, wb20, wb40). The contract is
 
 1. the local artifact cache (`db.FindArtifactByNameOrPath`, scoped to the
    latest run first, then job-wide) — the fast path; serving cached bytes
-   does not depend on R2 reachability;
+   does not depend on R2 reachability. For terminal jobs, if the cache row
+   was written at or before job end and R2 lists the same canonical path,
+   retrieval uses the R2 object so final overwrites beat incremental
+   snapshots;
 2. the shared resolver's rows, matched with the shared matcher; cloud rows
    download the R2 object the listing named, with a per-transfer idle
    timeout (`--timeout`, default 2m of no progress) and a progress status

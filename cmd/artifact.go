@@ -775,7 +775,9 @@ func serveCachedArtifact(cmd *cobra.Command, entry *db.Artifact, destFor func(st
 //
 // Resolution order:
 //  1. The local artifact cache (db.FindArtifactByNameOrPath) — serving
-//     cached bytes must not depend on R2 reachability.
+//     cached bytes must not depend on R2 reachability. For terminal jobs, a
+//     cache row captured before job end yields to a same-path cloud row so
+//     final overwrites beat incremental snapshots.
 //  2. The shared resolver (resolveJobArtifacts): the same materialized rows
 //     `artifact list` prints, matched with the same matcher, each carrying
 //     its own retrieval handle — so any spelling list printed resolves here
@@ -793,29 +795,47 @@ func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job
 		return resolveArtifactOutputPathForJob(source, artifactOutput, jobID, multiple)
 	}
 
-	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
-	if err == nil {
+	var cachedEntry *db.Artifact
+	if entry, err := db.FindArtifactByNameOrPath(database, jobID, token); err == nil {
 		localPath, pathErr := artifacts.LocalPathFromStored(entry.StoredPath)
 		if pathErr != nil {
 			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), pathErr)
 		}
 		if _, statErr := os.Stat(localPath); statErr == nil {
-			if serveErr := serveCachedArtifact(cmd, entry, destFor); serveErr != nil {
-				return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), serveErr)
-			}
-			return nil
+			cachedEntry = entry
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), statErr)
 		}
-	}
-	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
+	} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), err)
+	}
+
+	r2Client := buildArtifactR2Client()
+	if cachedEntry != nil {
+		if cachedArtifactMayPredateFinalUpload(cachedEntry, job) && r2Client != nil {
+			resolution, err := resolveJobArtifacts(database, r2Client, job)
+			if err != nil {
+				return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), err)
+			}
+			if cloudArt, ok := matchingSamePathCloudArtifact(resolution.rows, token, cachedEntry.Path); ok {
+				deliverErr := deliverResolvedArtifact(cmd, r2Client, job, cloudArt, destFor)
+				if deliverErr == nil {
+					return nil
+				}
+				if !errors.Is(deliverErr, r2resolve.ErrArtifactMissing) && !r2.IsNotFound(deliverErr) {
+					return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), deliverErr)
+				}
+			}
+		}
+		if serveErr := serveCachedArtifact(cmd, cachedEntry, destFor); serveErr != nil {
+			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), serveErr)
+		}
+		return nil
 	}
 	if job == nil {
 		return fmt.Errorf("artifact %q not found for job %s", token, ids.FormatJobID(jobID))
 	}
 
-	r2Client := buildArtifactR2Client()
 	resolution, err := resolveJobArtifacts(database, r2Client, job)
 	if err != nil {
 		return fmt.Errorf("job %s: %w", ids.FormatJobID(job.ID), err)
@@ -831,6 +851,9 @@ func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job
 		deliverErr := deliverResolvedArtifact(cmd, r2Client, job, art, destFor)
 		if deliverErr == nil {
 			return nil
+		}
+		if art.Source == artifactSourceCache && errors.Is(deliverErr, os.ErrNotExist) {
+			continue // stale local cache row; try cloud/host matches
 		}
 		if errors.Is(deliverErr, r2resolve.ErrArtifactMissing) || r2.IsNotFound(deliverErr) {
 			continue // the listing row went stale; try the next match
@@ -852,6 +875,23 @@ func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job
 		}
 	}
 	return errors.New(artifactNotFoundMessage(job, token, r2Client != nil, resolution.r2ListErr != nil))
+}
+
+func cachedArtifactMayPredateFinalUpload(entry *db.Artifact, job *db.Job) bool {
+	return entry != nil && job != nil && job.EndTime != nil && entry.CreatedAt > 0 && entry.CreatedAt <= *job.EndTime
+}
+
+func matchingSamePathCloudArtifact(rows []resolvedArtifact, token, cachedPath string) (resolvedArtifact, bool) {
+	cachedCanon := canonicalArtifactRelPath(cachedPath)
+	for _, art := range rows {
+		if art.Source != artifactSourceCloud || !art.matchesToken(token) {
+			continue
+		}
+		if canonicalArtifactRelPath(art.RelPath) == cachedCanon {
+			return art, true
+		}
+	}
+	return resolvedArtifact{}, false
 }
 
 // canonicalArtifactRelPath strips the ambiguous "artifacts/" display prefix:
