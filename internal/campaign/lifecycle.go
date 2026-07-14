@@ -32,6 +32,7 @@ import (
 	"github.com/osteele/weft/internal/retrypolicy"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // Cloud rental instances are currently always linux/amd64 (Vast.ai, RunPod).
@@ -2339,12 +2340,12 @@ func LaunchInstance(
 	// Build local-to-remote directory mapping and agent job list.
 	localToRemote := make(map[string]string)
 	for _, d := range group.SourceDirs() {
-		localToRemote[d] = path.Join(cloud.ProjectRootDir, path.Base(d))
+		localToRemote[d] = baseRemoteDirForLocal(d)
 	}
 
 	var agentJobs []cloud.AgentJob
 	for _, job := range group.Jobs {
-		agentJob, err := newCloudAgentJob(job, remoteDirForAgentJob(job, localToRemote))
+		agentJob, err := newCloudAgentJob(job, remoteDirForLaunchAgentJob(group, job, localToRemote))
 		if err != nil {
 			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
 			return instanceID, fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
@@ -2376,6 +2377,7 @@ func LaunchInstance(
 	sort.Slice(agentJobs, func(i, j int) bool {
 		return agentJobs[i].ID < agentJobs[j].ID
 	})
+	assignAgentGPUSlots(group, agentJobs)
 
 	createOpts.DiskGB = requestedDiskGB
 	if group.HasPreemptibleJob() {
@@ -2730,15 +2732,7 @@ func LaunchInstance(
 
 	// Build source mappings for the bootstrap script
 	var sources []SourceMapping
-	for localDir, remoteDir := range localToRemote {
-		if r2Key, ok := r2Assets.SourceR2Keys[localDir]; ok {
-			sources = append(sources, SourceMapping{
-				R2Key:     r2Key,
-				RemoteDir: remoteDir,
-				LocalDir:  localDir,
-			})
-		}
-	}
+	sources = sourceMappingsForLaunch(group, localToRemote, r2Assets.SourceR2Keys)
 
 	// Store grace period in DB if configured
 	if opts.GracePeriodSeconds > 0 {
@@ -2842,6 +2836,80 @@ func LaunchInstance(
 	}
 
 	return instanceID, nil
+}
+
+func assignAgentGPUSlots(group InstanceGroup, jobs []cloud.AgentJob) {
+	if !group.SlotGPUs {
+		return
+	}
+	for i := range jobs {
+		jobs[i].SlotGPU = true
+		jobs[i].GPU = strconv.Itoa(i)
+		if jobs[i].GPUCount <= 0 {
+			jobs[i].GPUCount = 1
+		}
+	}
+}
+
+func baseRemoteDirForLocal(localDir string) string {
+	return path.Join(cloud.ProjectRootDir, path.Base(localDir))
+}
+
+func remoteDirForLaunchAgentJob(group InstanceGroup, job *db.Job, localToRemote map[string]string) string {
+	base := remoteDirForAgentJob(job, localToRemote)
+	if !group.SlotGPUs || job == nil || base == "" {
+		return base
+	}
+	return path.Join(path.Dir(base), fmt.Sprintf("%s-job-%d", path.Base(base), job.ID))
+}
+
+func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]string, sourceR2Keys map[string]string) []SourceMapping {
+	var sources []SourceMapping
+	seen := map[string]bool{}
+	add := func(localDir, remoteDir string) {
+		if localDir == "" || remoteDir == "" {
+			return
+		}
+		r2Key, ok := sourceR2Keys[localDir]
+		if !ok {
+			return
+		}
+		key := localDir + "\x00" + remoteDir
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		sources = append(sources, SourceMapping{
+			R2Key:     r2Key,
+			RemoteDir: remoteDir,
+			LocalDir:  localDir,
+		})
+	}
+	if group.SlotGPUs {
+		jobs := append([]*db.Job(nil), group.Jobs...)
+		sort.Slice(jobs, func(i, j int) bool {
+			if jobs[i] == nil {
+				return false
+			}
+			if jobs[j] == nil {
+				return true
+			}
+			return jobs[i].ID < jobs[j].ID
+		})
+		for _, job := range jobs {
+			if job == nil {
+				continue
+			}
+			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+			add(localDir, remoteDirForLaunchAgentJob(group, job, localToRemote))
+		}
+		return sources
+	}
+	for localDir, remoteDir := range localToRemote {
+		add(localDir, remoteDir)
+	}
+	sort.Slice(sources, func(i, j int) bool { return sources[i].RemoteDir < sources[j].RemoteDir })
+	return sources
 }
 
 // destroyLeakedInstance attempts to destroy a provider instance that was created

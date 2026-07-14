@@ -36,6 +36,8 @@ type jobSequenceConfig struct {
 	OnPhase             func(string)  // update current phase string (for heartbeat)
 	SkipWorkdirDeletion bool          // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool          // run CUDA warmup before first benchmark job
+	DisableJobPolling   bool          // disable dynamic mid-job pickup for nested packed-slot workers
+	ConcurrentSlot      bool          // this sequence is one worker inside a packed concurrent slot group
 	// CostPerHourCents drives hang-watchdog tier selection; 0 means on-prem
 	// or unknown, which picks conservative thresholds.
 	CostPerHourCents int
@@ -677,10 +679,14 @@ type jobSequenceResult struct {
 	CompletionManifest *runner.InstanceCompletionManifest
 }
 
-// runJobSequence runs a slice of agent jobs sequentially, overlapping post-job
-// uploads with the next job's execution. Benchmark jobs act as a barrier —
-// all background work must finish before a benchmark job starts.
+// runJobSequence runs a slice of agent jobs. Slotted non-benchmark manifests
+// run concurrently; other groups run sequentially, overlapping post-job uploads
+// with the next job's execution. Benchmark jobs act as a barrier — all
+// background work must finish before a benchmark job starts.
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
+	if canRunSlottedJobsConcurrently(jobs) {
+		return runSlottedJobSequence(jobs, cfg)
+	}
 	jobs = orderJobsForSetupOverlap(jobs)
 
 	// GPU-shape preflight BEFORE any billable setup / HF prewarm work (wb41):
@@ -714,8 +720,11 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	// Drain incoming jobs requests while jobs execute, not just between them:
 	// the ack is what lets the coordinator confirm a pending move and cancel
 	// the source, so it must not wait behind a multi-hour job.
-	newJobsPoller := startJobRequestPoller(cfg.R2Bucket, cfg.InstanceID)
-	defer newJobsPoller.Stop()
+	var newJobsPoller *jobRequestPoller
+	if !cfg.DisableJobPolling {
+		newJobsPoller = startJobRequestPoller(cfg.R2Bucket, cfg.InstanceID)
+		defer newJobsPoller.Stop()
+	}
 
 	for i := 0; i < len(jobs); i++ {
 		job := jobs[i]
@@ -798,7 +807,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			now := time.Now().Unix()
 			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", failureReason, now, now, nil)
 			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
-			if infra && cfg.SelfDestructCmd != "" {
+			if infra && cfg.SelfDestructCmd != "" && !cfg.ConcurrentSlot {
 				terminateInstanceWithReason(
 					cfg.R2Bucket, cfg.InstanceID, cfg.SelfDestructCmd,
 					fmt.Sprintf("artifact_stage_infra_failure:%d", job.ID),
@@ -849,7 +858,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			// failures are infrastructure-side: terminate the rental so the
 			// reconciler resets affected jobs to queued and autopilot places
 			// them on a fresh instance. See specs/job-lifecycle.allium.
-			if prewarmShouldTerminateAsInfra(prewarm) && cfg.SelfDestructCmd != "" {
+			if prewarmShouldTerminateAsInfra(prewarm) && cfg.SelfDestructCmd != "" && !cfg.ConcurrentSlot {
 				slog.Warn("prewarm infrastructure failure: terminating instance as infra_failure",
 					"component", "agent",
 					"job_id", job.ID,
@@ -1011,6 +1020,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// Merge jobs accepted since the last merge (mid-job drains plus one
 		// final synchronous drain) into the sequence.
 		setSequencePhase(cfg, "ready_for_next_job", job.ID)
+		if newJobsPoller == nil {
+			continue
+		}
 		if newJobs := newJobsPoller.Take(func(phase string) {
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(phase)
@@ -1027,7 +1039,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	// Cleanup is intentionally deferred to here (after the new-job pickup
 	// loop has exited and the poller is stopped) to avoid racing a source
 	// extract against workdir deletion.
-	newJobsPoller.Stop()
+	if newJobsPoller != nil {
+		newJobsPoller.Stop()
+	}
 	bgm.Barrier()
 	if lastPostJobID > 0 {
 		setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
@@ -1035,6 +1049,144 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
 	bgm.CleanupWorkdirs()
 	return result
+}
+
+func canRunSlottedJobsConcurrently(jobs []cloud.AgentJob) bool {
+	if len(jobs) < 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, job := range jobs {
+		if !job.SlotGPU {
+			return false
+		}
+		gpu := strings.TrimSpace(job.GPU)
+		if gpu == "" {
+			return false
+		}
+		if strings.Contains(gpu, ",") {
+			return false
+		}
+		if _, err := strconv.Atoi(gpu); err != nil {
+			return false
+		}
+		if db.HasBenchmarkTag(job.Tags) || agentJobHasTag(job.Tags, db.TagExclusive) {
+			return false
+		}
+		if job.GPUCount > 1 {
+			return false
+		}
+		if seen[gpu] {
+			return false
+		}
+		seen[gpu] = true
+	}
+	return true
+}
+
+func agentJobHasTag(tags []string, tag string) bool {
+	for _, t := range tags {
+		if db.CanonicalizeTag(t) == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func runSlottedJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
+	if checkGPUCount(cfg.R2Bucket, cfg.InstanceID, requiredSlottedGPUCount(jobs), cfg.SelfDestructCmd) {
+		return jobSequenceResult{AnyFailed: true, AnyInfraFailed: true}
+	}
+	fmt.Printf("--- Running %d slotted jobs concurrently ---\n", len(jobs))
+	setSequencePhase(cfg, fmt.Sprintf("running_slotted:%d", len(jobs)), 0)
+	var newJobsPoller *jobRequestPoller
+	if !cfg.DisableJobPolling {
+		newJobsPoller = startJobRequestPoller(cfg.R2Bucket, cfg.InstanceID)
+	}
+
+	type slotResult struct {
+		result jobSequenceResult
+	}
+	ch := make(chan slotResult, len(jobs))
+	for _, job := range jobs {
+		job := job
+		fatalAgentGo(fmt.Sprintf("slotted-job-%d", job.ID), func() {
+			slotCfg := cfg
+			slotCfg.DisableJobPolling = true
+			slotCfg.SkipWorkdirDeletion = true
+			slotCfg.ConcurrentSlot = true
+			ch <- slotResult{result: runJobSequence([]cloud.AgentJob{job}, slotCfg)}
+		})
+	}
+
+	var result jobSequenceResult
+	summaries := make([]runner.JobCompletionSummary, 0, len(jobs))
+	for range jobs {
+		r := (<-ch).result
+		mergeJobSequenceResult(&result, r, &summaries)
+	}
+	if newJobsPoller != nil {
+		newJobs := newJobsPoller.Take(func(phase string) {
+			if cfg.OnPhase != nil {
+				cfg.OnPhase(phase)
+			}
+			writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
+		})
+		newJobsPoller.Stop()
+		newJobsPoller = nil
+		if len(newJobs) > 0 {
+			fmt.Printf("Picked up %d new job(s) after slotted jobs drained\n", len(newJobs))
+			followup := runJobSequence(newJobs, cfg)
+			mergeJobSequenceResult(&result, followup, &summaries)
+			jobs = append(jobs, newJobs...)
+		}
+	}
+	sort.Slice(result.FailedJobs, func(i, j int) bool { return result.FailedJobs[i] < result.FailedJobs[j] })
+	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, summaries...)
+	cleanupSlottedWorkdirs(jobs, cfg.SkipWorkdirDeletion)
+	return result
+}
+
+func mergeJobSequenceResult(dst *jobSequenceResult, src jobSequenceResult, summaries *[]runner.JobCompletionSummary) {
+	dst.FailedJobs = append(dst.FailedJobs, src.FailedJobs...)
+	dst.AnyFailed = dst.AnyFailed || src.AnyFailed
+	dst.AnyInfraFailed = dst.AnyInfraFailed || src.AnyInfraFailed
+	dst.AnyCanceled = dst.AnyCanceled || src.AnyCanceled
+	dst.StartedJobCount += src.StartedJobCount
+	if src.CompletionManifest != nil {
+		*summaries = append(*summaries, src.CompletionManifest.Jobs...)
+	}
+}
+
+func cleanupSlottedWorkdirs(jobs []cloud.AgentJob, skip bool) {
+	if skip {
+		return
+	}
+	seen := map[string]bool{}
+	for _, job := range jobs {
+		if !job.SlotGPU {
+			continue
+		}
+		dir := runner.ExpandTilde(job.Dir)
+		if dir == "" || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := os.RemoveAll(dir); err != nil {
+			slog.Warn("delete slotted workdir", "component", "agent", "job_id", job.ID, "path", dir, "error", err)
+		}
+	}
+}
+
+func requiredSlottedGPUCount(jobs []cloud.AgentJob) int {
+	required := len(jobs)
+	for _, job := range jobs {
+		idx, err := strconv.Atoi(strings.TrimSpace(job.GPU))
+		if err == nil && idx+1 > required {
+			required = idx + 1
+		}
+	}
+	return required
 }
 
 func jobFailureReasonIsInfra(logDir string, jobID int64) bool {
@@ -1134,11 +1286,12 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 		v := job.GPUMemGB
 		gpuMem = &v
 	}
-	return runner.SingleJobConfig{
+	jobCfg := runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: opsqueue.CommandJob{
 			Cmd:          job.Command,
 			Tags:         append([]string(nil), job.Tags...),
+			GPU:          job.GPU,
 			GPUClass:     job.GPUClass,
 			GPUCount:     job.GPUCount,
 			GPUMem:       gpuMem,
@@ -1158,6 +1311,11 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 		StdoutSilenceTimeout: stdoutSilence,
 		OnPhase:              phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 	}
+	if strings.TrimSpace(job.GPU) != "" {
+		devices := strings.Split(job.GPU, ",")
+		jobCfg.GPUActiveProbe = func() bool { return runner.GPUDevicesActive(devices) }
+	}
+	return jobCfg
 }
 
 func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUploadResult) {

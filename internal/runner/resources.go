@@ -336,6 +336,35 @@ func HostGPUMetrics() HostGPUStats {
 	return stats
 }
 
+// GPUDevicesActive reports whether any selected GPU has non-zero utilization.
+// Device names are CUDA_VISIBLE_DEVICES indices, e.g. "0" or "1".
+func GPUDevicesActive(devices []string) bool {
+	if len(devices) == 0 {
+		return HostGPUMetrics().UtilPct > 0
+	}
+	want := make(map[string]bool, len(devices))
+	for _, device := range devices {
+		device = strings.TrimSpace(device)
+		if device != "" {
+			want[device] = true
+		}
+	}
+	if len(want) == 0 {
+		return HostGPUMetrics().UtilPct > 0
+	}
+	rows := queryNvidiaSmi("--query-gpu=index,utilization.gpu", 2)
+	for _, parts := range rows {
+		if !want[parts[0]] {
+			continue
+		}
+		util, _ := strconv.Atoi(parts[1])
+		if util > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ProcGPUMemMiB returns the total GPU memory used by a process tree in MiB.
 func ProcGPUMemMiB(pid int) int {
 	pids := GetProcessTree(pid)

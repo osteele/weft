@@ -54,12 +54,15 @@ func normalizedGPUCount(n int) int {
 }
 
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
-// and can run sequentially on a single cloud instance.
+// and can run on a single cloud instance. By default jobs run sequentially;
+// SlotGPUs marks groups whose jobs run concurrently, one single-GPU job per
+// visible device on a multi-GPU rental.
 type InstanceGroup struct {
 	GPUClass        string // Normalized GPU class (uppercase), e.g. "H100"
 	Provider        string // Requested provider ("vastai" or "runpod"), empty = any
 	RunpodCloudType string // RunPod cloud type override ("community" or "secure"), empty = config/default
 	NumGPUs         int    // Exact number of GPUs requested on one host/rental (0/1 = one)
+	SlotGPUs        bool   // Run one single-GPU job per GPU concurrently on this rental
 	GPUMemGB        int    // Supremum of GPU memory across all jobs in the group
 	CPUCores        int    // Minimum effective CPU cores/vCPUs
 	CPUMemGB        int    // Supremum of host/system RAM (effective) across all jobs in the group
@@ -747,6 +750,48 @@ func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
 	}
 	sortGroups(result)
 	return result
+}
+
+const maxPackedGPUSlots = 4
+
+// PackSingleGPUJobs converts compatible multi-job groups into one multi-GPU
+// rental group whose jobs can run concurrently, one job per GPU. Benchmark and
+// exclusive jobs stay on the sequential path because their semantics require an
+// otherwise idle host.
+func PackSingleGPUJobs(groups []InstanceGroup, estimator func(InstanceGroup) int) []InstanceGroup {
+	var result []InstanceGroup
+	for _, g := range groups {
+		packed := cloneInstanceGroupWithJobs(g, g.Jobs)
+		if groupCanUseGPUSlots(g) {
+			packed.NumGPUs = len(g.Jobs)
+			packed.SlotGPUs = true
+			packed.MaxGPUMemGB = 0
+			if estimator != nil {
+				packed.DiskGB = estimator(packed)
+			}
+		}
+		result = append(result, packed)
+	}
+	sortGroups(result)
+	return result
+}
+
+func groupCanUseGPUSlots(g InstanceGroup) bool {
+	if len(g.Jobs) < 2 || len(g.Jobs) > maxPackedGPUSlots {
+		return false
+	}
+	if normalizedGPUCount(g.NumGPUs) != 1 {
+		return false
+	}
+	for _, job := range g.Jobs {
+		if job == nil || job.RequestedGPUCount() != 1 {
+			return false
+		}
+		if db.HasBenchmarkTag(job.Tags) || job.HasTag(db.TagExclusive) {
+			return false
+		}
+	}
+	return true
 }
 
 // FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).

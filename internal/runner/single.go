@@ -228,7 +228,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Resolve GPU devices
 	var gpuDevices []string
-	if job.GPUClass != "" {
+	if explicit := GetJobGPUDevices(job); len(explicit) > 0 {
+		gpuDevices = explicit
+	} else if job.GPUClass != "" {
 		canStart, devices, reason := gpuInv.CanStartGPUJobWithReason(NewState(), &RunnerJob{Data: job, ID: cfg.JobID})
 		if !canStart {
 			if requestedGPUCount(job) > 1 {
@@ -238,8 +240,6 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		} else {
 			gpuDevices = devices
 		}
-	} else {
-		gpuDevices = GetJobGPUDevices(job)
 	}
 	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
 		msg := fmt.Sprintf("requested=%d visible=%d", requested, len(gpuDevices))

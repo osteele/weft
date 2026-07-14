@@ -82,6 +82,30 @@ func TestDefaultProfilePlanSpecs_FastestUsesParallelPreferred(t *testing.T) {
 	}
 }
 
+func TestCandidateGroupingBeatsPrefersPackedWithinTieBand(t *testing.T) {
+	packed := groupingEvaluation{
+		label: "packed",
+		groups: []InstanceGroup{{
+			SlotGPUs: true,
+			Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+		}},
+	}
+	parallel := groupingEvaluation{
+		label: "parallel",
+		groups: []InstanceGroup{
+			{Jobs: []*db.Job{{ID: 1}}},
+			{Jobs: []*db.Job{{ID: 2}}},
+		},
+	}
+
+	if !candidateGroupingBeats(packed, 10.4, parallel, 10.0) {
+		t.Fatal("packed grouping should win when scores are tied within tolerance")
+	}
+	if candidateGroupingBeats(packed, 11.0, parallel, 10.0) {
+		t.Fatal("packed grouping should not win when score is outside tolerance")
+	}
+}
+
 func TestRankOfferWithPredictedRuntime_PreservesFilterStatsAfterCUDAFilter(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "RTX-5090",
@@ -194,7 +218,7 @@ func TestBuildProfilePlans_ParallelCandidateUsesPerJobDisk(t *testing.T) {
 		DiskGB:    141,
 		JobDiskGB: map[int64]int{1: 70, 2: 72},
 		Jobs: []*db.Job{
-			{ID: 1, Command: "python train-a.py", GPUClass: "A40", GPUMemGB: intPtr(48)},
+			{ID: 1, Command: "python train-a.py", GPUClass: "A40", GPUMemGB: intPtr(48), Tags: []string{db.TagExclusive}},
 			{ID: 2, Command: "python train-b.py", GPUClass: "A40", GPUMemGB: intPtr(48)},
 		},
 	}
@@ -1659,6 +1683,30 @@ func TestApplySelectedOfferRuntimePredictions_UsesAdjustedDurations(t *testing.T
 	wantCost := (100 * time.Minute).Hours() * 2.0
 	if est.TotalCost != wantCost {
 		t.Fatalf("TotalCost = %.2f, want %.2f", est.TotalCost, wantCost)
+	}
+}
+
+func TestEstimateTotalJobCompletionHours_SlottedJobsAreNotQueued(t *testing.T) {
+	est := CostEstimate{
+		Group: InstanceGroup{
+			SlotGPUs: true,
+			Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+		},
+		Breakdown: estimate.Breakdown{
+			Run:   estimate.Constant(time.Hour),
+			Total: estimate.Constant(70 * time.Minute),
+		},
+		JobDurations: map[int64]time.Duration{
+			1: 30 * time.Minute,
+			2: time.Hour,
+		},
+		TotalTime: 70 * time.Minute,
+	}
+
+	got := estimateTotalJobCompletionHours(est)
+	want := (110 * time.Minute).Hours()
+	if got != want {
+		t.Fatalf("total completion hours = %v, want %v", got, want)
 	}
 }
 

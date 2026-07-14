@@ -209,7 +209,7 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 					jobEstimate = estimate.Constant(pred.jobDurations[jobIdx])
 				}
 				est.JobDurations[job.ID] = jobEstimate.Mean
-				runEst = runEst.Add(jobEstimate)
+				runEst = combineGroupRunEstimate(runEst, jobEstimate, go_.Group.SlotGPUs)
 				if jobIdx < len(pred.jobQuantiles) && pred.jobQuantiles[jobIdx] != nil {
 					est.JobDurationQuantiles[job.ID] = pred.jobQuantiles[jobIdx]
 				}
@@ -221,7 +221,7 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 			for _, job := range go_.Group.Jobs {
 				if pred, ok := allPredictions[job.ID]; ok {
 					est.JobDurations[job.ID] = pred.Estimate.Mean
-					runEst = runEst.Add(pred.Estimate)
+					runEst = combineGroupRunEstimate(runEst, pred.Estimate, go_.Group.SlotGPUs)
 					if pred.Quantiles != nil {
 						est.JobDurationQuantiles[job.ID] = pred.Quantiles
 					}
@@ -229,7 +229,7 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 						est.JobRuntimeMetadata[job.ID] = *pred.Metadata
 					}
 				} else {
-					runEst = runEst.Add(estimate.DefaultJobDuration)
+					runEst = combineGroupRunEstimate(runEst, estimate.DefaultJobDuration, go_.Group.SlotGPUs)
 				}
 				jobsDone++
 				if onProgress != nil {
@@ -276,6 +276,34 @@ func estimateCosts(database *sql.DB, groupOffers []GroupOffer, runtimePrediction
 	}
 
 	return estimates
+}
+
+func combineGroupRunEstimate(total, next estimate.Estimate, slotted bool) estimate.Estimate {
+	if !slotted {
+		return total.Add(next)
+	}
+	return maxEstimate(total, next)
+}
+
+func maxEstimate(a, b estimate.Estimate) estimate.Estimate {
+	if a.Zero() {
+		return b
+	}
+	if b.Zero() {
+		return a
+	}
+	return estimate.Estimate{
+		Mean:  maxDuration(a.Mean, b.Mean),
+		Lower: maxDuration(a.Lower, b.Lower),
+		Upper: maxDuration(a.Upper, b.Upper),
+	}
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func selectedRuntimePredictionComplete(runtimePredictions []offerRuntimePrediction, idx int, jobCount int) bool {
@@ -553,6 +581,13 @@ func completionTimeEstimate(est CostEstimate, selectedJobs int) estimate.Estimat
 			durLower := time.Duration(float64(durMean) * runLowerScale)
 			durUpper := time.Duration(float64(durMean) * runUpperScale)
 
+			if est.Group.SlotGPUs {
+				result.Mean += durMean
+				result.Lower += durLower
+				result.Upper += durUpper
+				continue
+			}
+
 			cumulativeMean += durMean
 			cumulativeLower += durLower
 			cumulativeUpper += durUpper
@@ -560,6 +595,13 @@ func completionTimeEstimate(est CostEstimate, selectedJobs int) estimate.Estimat
 			result.Lower += cumulativeLower
 			result.Upper += cumulativeUpper
 		}
+		return result
+	}
+
+	if est.Group.SlotGPUs {
+		result.Mean += time.Duration(selectedJobs) * est.Breakdown.Run.Mean
+		result.Lower += time.Duration(selectedJobs) * est.Breakdown.Run.Lower
+		result.Upper += time.Duration(selectedJobs) * est.Breakdown.Run.Upper
 		return result
 	}
 

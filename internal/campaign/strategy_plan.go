@@ -2449,10 +2449,18 @@ func estimateTotalJobCompletionHours(est CostEstimate) float64 {
 			if !ok {
 				dur = runFallback
 			}
+			if est.Group.SlotGPUs {
+				total += dur
+				continue
+			}
 			cumulativeRun += dur
 			total += cumulativeRun
 		}
 		return total.Hours()
+	}
+
+	if est.Group.SlotGPUs {
+		return total.Hours() + float64(jobCount)*est.Breakdown.Run.Mean.Hours()
 	}
 
 	runFactor := float64(jobCount+1) / 2
@@ -2561,6 +2569,7 @@ func bestCandidateForProfileEvaluations(
 ) CandidateResult {
 	bestScore := math.Inf(1)
 	var best CandidateResult
+	var bestGrouping groupingEvaluation
 	if len(candidates) == 0 {
 		return best
 	}
@@ -2570,8 +2579,9 @@ func bestCandidateForProfileEvaluations(
 		offers, selectedPredictions := evaluator.selectOffers(cand.rawEval, profile)
 		estimates := evaluator.estimateSelectedOffers(offers, selectedPredictions)
 		score := scoreGroupingWithOverlap(estimates, profile, cand.overlapSavedHours)
-		if i == 0 || score < bestScore {
+		if i == 0 || candidateGroupingBeats(cand, score, bestGrouping, bestScore) {
 			bestScore = score
+			bestGrouping = cand
 			best = CandidateResult{
 				CandidateIdx: i,
 				Label:        cand.label,
@@ -2582,6 +2592,48 @@ func bestCandidateForProfileEvaluations(
 		}
 	}
 	return best
+}
+
+const candidateGroupingTieRelativeTolerance = 0.05
+
+func candidateGroupingBeats(candidate groupingEvaluation, score float64, incumbent groupingEvaluation, incumbentScore float64) bool {
+	if math.IsInf(incumbentScore, 1) {
+		return true
+	}
+	if !candidateGroupingScoreTied(score, incumbentScore) {
+		return score < incumbentScore
+	}
+	candidatePreference := candidateGroupingPreference(candidate.groups)
+	incumbentPreference := candidateGroupingPreference(incumbent.groups)
+	if candidatePreference != incumbentPreference {
+		return candidatePreference > incumbentPreference
+	}
+	return score < incumbentScore
+}
+
+func candidateGroupingScoreTied(a, b float64) bool {
+	if math.IsInf(a, 0) || math.IsInf(b, 0) || math.IsNaN(a) || math.IsNaN(b) {
+		return false
+	}
+	scale := maxFloat64(1, math.Abs(b))
+	return math.Abs(a-b) <= scale*candidateGroupingTieRelativeTolerance
+}
+
+func candidateGroupingPreference(groups []InstanceGroup) int {
+	slotJobs := 0
+	for _, group := range groups {
+		if group.SlotGPUs {
+			slotJobs += len(group.Jobs)
+		}
+	}
+	return slotJobs*100 - len(groups)
+}
+
+func maxFloat64(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func reportPlanProgress(onProgress PlanProgressFunc, phase, detail string, current, total int) {

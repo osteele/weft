@@ -238,15 +238,17 @@ weight, and `time_first` spends more readily to reduce completion time.
 ## Why Are My Jobs on Separate Instances?
 
 A rental instance runs one GPU job per GPU at a time. Most rentals are
-single-GPU, so a job placed on a busy instance waits in that instance's queue
-and runs only after the current job finishes. To run queued jobs **at the same
-time**, the autopilot spreads them across separate instances — co-locating them
-on one instance would serialize them instead.
+single-GPU, so a job placed on a busy 1-GPU instance waits in that instance's
+queue and runs only after the current job finishes. When compatible
+single-GPU jobs can use the same GPU shape and a matching multi-GPU rental is
+available, Weft may instead choose a packed candidate: one multi-GPU rental,
+one job per GPU, each job pinned with its own `CUDA_VISIBLE_DEVICES` value.
 
-So separate instances is the autopilot buying parallelism, not a misplacement.
-Packing still happens: when the autopilot does not launch a fresh instance per
-job, it stacks the extras into one instance's queue, and they run serially
-there.
+Separate instances are still common. The autopilot may buy parallelism with
+separate rentals when that scores better than packing, when only single-GPU
+offers are available, or when jobs are not safe to co-run. Jobs tagged
+`benchmark-isolation` are not packed with other jobs; they keep the idle-host
+benchmark protections.
 
 Two related surprises:
 
@@ -261,8 +263,9 @@ Two related surprises:
 
 To see the concurrency limit directly, read `weft instance list`: the `GPUS`
 column is the per-instance GPU count and `JOBS` is how many jobs are assigned.
-`GPUS 1` with `JOBS 3` means one job runs and two wait. For a single job, ask
-why it landed where it did:
+`GPUS 1` with `JOBS 3` means one job runs and two wait; `GPUS 2` with two
+compatible packed jobs can run both jobs at once. For a single job, ask why it
+landed where it did:
 
 ```bash
 weft job diagnose wj123   # the `placed:` line explains reuse vs. new launch

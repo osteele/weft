@@ -1886,6 +1886,50 @@ func TestSplitToParallel_UsesJobDiskWhenPresent(t *testing.T) {
 	}
 }
 
+func TestPackSingleGPUJobsCreatesSlottedMultiGPUGroup(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "A40",
+		NumGPUs:  1,
+		GPUMemGB: 48,
+		DiskGB:   200,
+		Jobs: []*db.Job{
+			{ID: 1},
+			{ID: 2},
+		},
+	}}
+
+	packed := PackSingleGPUJobs(groups, nil)
+	if len(packed) != 1 {
+		t.Fatalf("len(packed) = %d, want 1", len(packed))
+	}
+	if !packed[0].SlotGPUs {
+		t.Fatal("packed group should enable SlotGPUs")
+	}
+	if packed[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", packed[0].NumGPUs)
+	}
+}
+
+func TestPackSingleGPUJobsSkipsBenchmarkJobs(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "A40",
+		NumGPUs:  1,
+		GPUMemGB: 48,
+		Jobs: []*db.Job{
+			{ID: 1, Tags: []string{db.TagBenchmark}},
+			{ID: 2},
+		},
+	}}
+
+	packed := PackSingleGPUJobs(groups, nil)
+	if packed[0].SlotGPUs {
+		t.Fatal("benchmark jobs must not be packed into concurrent GPU slots")
+	}
+	if packed[0].NumGPUs != 1 {
+		t.Fatalf("NumGPUs = %d, want 1", packed[0].NumGPUs)
+	}
+}
+
 func TestSplitToParallel_SingleJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:      "RTX_3090",

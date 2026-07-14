@@ -42,6 +42,51 @@ func TestEstimateCosts_NoPredictions(t *testing.T) {
 	}
 }
 
+func TestEstimateCosts_SlottedGroupUsesMaxRuntime(t *testing.T) {
+	groupOffers := []GroupOffer{
+		{
+			Group: InstanceGroup{
+				GPUClass: "A40",
+				NumGPUs:  2,
+				SlotGPUs: true,
+				GPUMemGB: 48,
+				Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+			},
+			Offer: &cloud.Offer{GPUName: "A40", NumGPUs: 2, GPUMemGB: 48, CostPerHour: 2.00},
+		},
+	}
+
+	estimates := EstimateCosts(nil, groupOffers, nil, nil, nil, nil, nil)
+	got := estimates[0].Breakdown.Run.Mean
+	if got != estimate.DefaultJobDuration.Mean {
+		t.Fatalf("slotted Run.Mean = %v, want one default duration %v", got, estimate.DefaultJobDuration.Mean)
+	}
+}
+
+func TestCompletionTimeEstimate_SlottedJobsAreNotQueued(t *testing.T) {
+	est := CostEstimate{
+		Group: InstanceGroup{
+			SlotGPUs: true,
+			Jobs:     []*db.Job{{ID: 1}, {ID: 2}},
+		},
+		Breakdown: estimate.Breakdown{
+			Run:   estimate.Constant(time.Hour),
+			Total: estimate.Constant(70 * time.Minute),
+		},
+		JobDurations: map[int64]time.Duration{
+			1: 30 * time.Minute,
+			2: time.Hour,
+		},
+		TotalTime: 70 * time.Minute,
+	}
+
+	got := completionTimeEstimate(est, 2)
+	want := 110 * time.Minute // 2*(10m shared setup) + 30m + 60m
+	if got.Mean != want {
+		t.Fatalf("completion time = %v, want %v", got.Mean, want)
+	}
+}
+
 func TestEstimateCosts_NilOffer(t *testing.T) {
 	groupOffers := []GroupOffer{
 		{

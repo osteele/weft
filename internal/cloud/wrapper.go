@@ -6,9 +6,11 @@ type AgentJob struct {
 	RunID        int64    `json:"run_id,omitempty"`
 	Command      string   `json:"cmd"`
 	Dir          string   `json:"dir,omitempty"`
+	SlotGPU      bool     `json:"slot_gpu,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	Priority     int      `json:"priority,omitempty"`
 	UsesGPU      bool     `json:"uses_gpu,omitempty"`
+	GPU          string   `json:"gpu,omitempty"`
 	GPUClass     string   `json:"gpu_class,omitempty"`
 	GPUCount     int      `json:"gpu_count,omitempty"`
 	GPUMemGB     int      `json:"gpu_mem_gb,omitempty"`

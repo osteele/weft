@@ -281,8 +281,8 @@ func TestBuildProfilePlansFromSplitRaw_ReusesCandidateOfferSearchesAcrossProfile
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(searchCounts) != 2 {
-		t.Fatalf("expected 2 unique candidate searches, got %d (%v)", len(searchCounts), searchCounts)
+	if len(searchCounts) != 3 {
+		t.Fatalf("expected 3 unique candidate searches (split, packed, parallel), got %d (%v)", len(searchCounts), searchCounts)
 	}
 	for key, count := range searchCounts {
 		if count != 1 {

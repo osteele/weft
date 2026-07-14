@@ -96,6 +96,51 @@ func TestCreateInstanceWithReplacement_PreservesExplicitGPUCount(t *testing.T) {
 	}
 }
 
+func TestAssignAgentGPUSlots(t *testing.T) {
+	jobs := []cloud.AgentJob{{ID: 10}, {ID: 11}}
+
+	assignAgentGPUSlots(InstanceGroup{SlotGPUs: true}, jobs)
+
+	if jobs[0].GPU != "0" || jobs[1].GPU != "1" {
+		t.Fatalf("assigned GPUs = %q, %q; want 0, 1", jobs[0].GPU, jobs[1].GPU)
+	}
+	if !jobs[0].SlotGPU || !jobs[1].SlotGPU {
+		t.Fatal("assigned jobs should carry SlotGPU=true")
+	}
+	if jobs[0].GPUCount != 1 || jobs[1].GPUCount != 1 {
+		t.Fatalf("GPUCount = %d, %d; want 1, 1", jobs[0].GPUCount, jobs[1].GPUCount)
+	}
+}
+
+func TestSlottedLaunchUsesPerJobRemoteDirsAndSources(t *testing.T) {
+	local := t.TempDir()
+	group := InstanceGroup{
+		SlotGPUs: true,
+		Jobs: []*db.Job{
+			{ID: 10, WorkingDir: local},
+			{ID: 11, WorkingDir: local},
+		},
+	}
+	localToRemote := map[string]string{local: baseRemoteDirForLocal(local)}
+
+	dir10 := remoteDirForLaunchAgentJob(group, group.Jobs[0], localToRemote)
+	dir11 := remoteDirForLaunchAgentJob(group, group.Jobs[1], localToRemote)
+	if dir10 == dir11 {
+		t.Fatalf("slotted jobs share remote dir %q", dir10)
+	}
+
+	sources := sourceMappingsForLaunch(group, localToRemote, map[string]string{local: "sources/src.tar.gz"})
+	if len(sources) != 2 {
+		t.Fatalf("source mappings = %d, want 2", len(sources))
+	}
+	if sources[0].RemoteDir == sources[1].RemoteDir {
+		t.Fatalf("source mappings share remote dir %q", sources[0].RemoteDir)
+	}
+	if sources[0].R2Key != "sources/src.tar.gz" || sources[1].R2Key != "sources/src.tar.gz" {
+		t.Fatalf("source R2 keys = %q, %q; want same source tarball", sources[0].R2Key, sources[1].R2Key)
+	}
+}
+
 func TestLaunchInstanceRejectsOfferBelowGroupGPUCount(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

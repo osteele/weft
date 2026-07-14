@@ -1559,8 +1559,11 @@ type GroupingCandidate struct {
 }
 
 // FetchCandidateGroupings generates candidate groupings (split, merged,
-// parallel) and fetches raw offers for all in parallel. The split groups are
+// packed, parallel) and fetches raw offers for all in parallel. The split groups are
 // the input; merged and parallel groups are derived variants.
+//
+// The "packed" candidate keeps compatible single-GPU jobs on one multi-GPU
+// rental and gives each job a dedicated CUDA device.
 //
 // The "parallel" candidate splits multi-job groups into one-job-per-group,
 // using each job's individual GPU memory requirements. This allows the scoring
@@ -1572,13 +1575,15 @@ func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup
 
 func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups []InstanceGroup, diskEstimator func(InstanceGroup) int) []GroupingCandidate {
 	mergedGroups := MergeCompatibleGroupsWithDisk(splitGroups, diskEstimator)
+	packedGroups := PackSingleGPUJobs(mergedGroups, diskEstimator)
 	parallelGroups := SplitToParallel(splitGroups)
 
 	// Determine which candidates are distinct
 	hasMerged := len(mergedGroups) != len(splitGroups)
+	hasPacked := groupsDifferInShape(packedGroups, mergedGroups)
 	hasParallel := len(parallelGroups) != len(splitGroups)
 
-	if !hasMerged && !hasParallel {
+	if !hasMerged && !hasPacked && !hasParallel {
 		raw := session.fetchGroupRawOffers(splitGroups)
 		return []GroupingCandidate{
 			{Label: "split", Groups: splitGroups, Raw: raw},
@@ -1596,6 +1601,9 @@ func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups
 	if hasMerged {
 		candidates = append(candidates, GroupingCandidate{Label: "merged", Groups: mergedGroups})
 	}
+	if hasPacked {
+		candidates = append(candidates, GroupingCandidate{Label: "packed", Groups: packedGroups})
+	}
 	if hasParallel {
 		candidates = append(candidates, GroupingCandidate{Label: "parallel", Groups: parallelGroups})
 	}
@@ -1611,6 +1619,20 @@ func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups
 		candidates[r.idx].Raw = r.raw
 	}
 	return candidates
+}
+
+func groupsDifferInShape(a, b []InstanceGroup) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if len(a[i].Jobs) != len(b[i].Jobs) ||
+			normalizedGPUCount(a[i].NumGPUs) != normalizedGPUCount(b[i].NumGPUs) ||
+			a[i].SlotGPUs != b[i].SlotGPUs {
+			return true
+		}
+	}
+	return false
 }
 
 // ScoreGrouping evaluates a candidate grouping for a strategy using the unified

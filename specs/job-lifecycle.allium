@@ -948,6 +948,28 @@ rule SharedWorkdirUploadBarrierBeforeNextJob {
         -- at the top of each iteration after the benchmark barrier.
 }
 
+rule PackedSlotsUseIsolatedWorkdirs {
+    when: a rental manifest runs multiple jobs concurrently via per-GPU slots
+
+    ensures: every concurrently running slot has a distinct working_dir
+    ensures: each slot's source tarball is extracted into that slot's working_dir
+
+    @guidance
+        -- The sequential SharedWorkdirUploadBarrierBeforeNextJob rule cannot
+        -- protect two jobs that run at the same time: each job can discover
+        -- and upload any file another slot writes into the same `output/`
+        -- tree. Packed GPU-slot launches therefore isolate source/work
+        -- directories per job even when the jobs come from the same local
+        -- project. The same source tarball may be extracted more than once,
+        -- but convention output discovery, uv sync, source refresh, and
+        -- post-job uploads stay per-slot.
+        --
+        -- Implementation: internal/campaign/lifecycle.go
+        -- remoteDirForLaunchAgentJob gives SlotGPUs jobs a
+        -- `<project>-job-<id>` remote directory, and
+        -- sourceMappingsForLaunch emits one source mapping per slot.
+}
+
 invariant Attribution {
     -- Bytes stored or uploaded under job J's keys (R2 per-run prefixes,
     -- local artifact cache rows, host_data job-output assets) were written

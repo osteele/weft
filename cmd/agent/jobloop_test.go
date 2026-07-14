@@ -65,6 +65,36 @@ func TestPatchCompletionUpload(t *testing.T) {
 	}
 }
 
+func TestCanRunSlottedJobsConcurrently(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, SlotGPU: true, GPU: "0", GPUCount: 1},
+		{ID: 2, SlotGPU: true, GPU: "1", GPUCount: 1},
+	}
+	if !canRunSlottedJobsConcurrently(jobs) {
+		t.Fatal("distinct slotted jobs should run concurrently")
+	}
+}
+
+func TestCanRunSlottedJobsConcurrentlyRejectsBenchmark(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, SlotGPU: true, GPU: "0", GPUCount: 1, Tags: []string{db.TagBenchmark}},
+		{ID: 2, SlotGPU: true, GPU: "1", GPUCount: 1},
+	}
+	if canRunSlottedJobsConcurrently(jobs) {
+		t.Fatal("benchmark jobs must stay on the sequential barrier path")
+	}
+}
+
+func TestCanRunSlottedJobsConcurrentlyRequiresSlotFlag(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, GPU: "0", GPUCount: 1},
+		{ID: 2, GPU: "1", GPUCount: 1},
+	}
+	if canRunSlottedJobsConcurrently(jobs) {
+		t.Fatal("plain device-pinned jobs must not imply packed slot concurrency")
+	}
+}
+
 func TestCollectCompletionManifestIncludesPriorGraceJob(t *testing.T) {
 	logDir := t.TempDir()
 	writeCompletionRecordForTest(t, logDir, 2002, runner.CompletionRecord{

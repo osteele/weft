@@ -347,10 +347,11 @@ weft instance info <instance-id>        # Alias for status
 
 In `weft instance list`, the `GPU` column is the per-GPU spec, `GPUS` is the GPU
 count, and `JOBS` is how many jobs are assigned to the instance. An instance
-runs one GPU job per GPU at a time, so `GPUS 1` with `JOBS 3` means one job is
-running and two are waiting in that instance's queue. See
+runs one GPU job per GPU at a time: `GPUS 1` with `JOBS 3` means one job is
+running and two are waiting in that instance's queue, while a compatible packed
+`GPUS 2` instance can run two single-GPU jobs concurrently. See
 [Why are my jobs on separate instances?](placement.md#why-are-my-jobs-on-separate-instances)
-for why the autopilot spreads jobs across instances rather than packing them.
+for why the autopilot may spread jobs across instances rather than packing them.
 
 ### Cost reporting
 
@@ -604,10 +605,11 @@ reconciliation owns success or rollback.
    configuration, the Go agent binary (`weft-agent`), and rsyncs project
    sources via SSH. Agent deployment and source sync run in parallel for
    faster setup.
-3. **Execution**: The agent runs each assigned job sequentially with full
-   telemetry: per-process CPU/RSS, GPU memory, timeseries sampling,
-   structured completion records, and failure detection (OOM, segfault,
-   signals).
+3. **Execution**: The agent runs assigned jobs with full telemetry:
+   per-process CPU/RSS, GPU memory, timeseries sampling, structured completion
+   records, and failure detection (OOM, segfault, signals). Sequential groups
+   run one job at a time; packed multi-GPU groups run compatible single-GPU
+   jobs concurrently, one job per GPU slot.
    - **GPU warmup** (opt-in): The agent can run a lightweight CUDA warmup
      (context init + cuBLAS handle creation) before the first GPU benchmark
      job. Disabled by default. Enable in `~/.config/weft/config.toml`:
@@ -617,7 +619,8 @@ reconciliation owns success or rollback.
      ```
    - **Benchmark barrier**: Benchmark jobs (tagged `benchmark-isolation`) wait for all
      background uploads from prior jobs to complete before starting,
-     preventing I/O interference with measurements.
+     preventing I/O interference with measurements. Benchmark jobs are not
+     included in packed concurrent GPU-slot groups.
 4. **Result upload**: After each job, the wrapper uploads results (logs,
    completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
 5. **Sweep**: The local sync/autopilot sweep polls R2 for completed markers,
