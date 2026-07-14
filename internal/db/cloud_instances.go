@@ -1831,10 +1831,12 @@ func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64, allowSupersed
 
 	if !allowSupersede {
 		// Reject if the job is already claimed by an active launch.
+		// Abandoned attempts no longer hold logical ownership, even when their
+		// historical launch is still running.
 		var currentLaunchID sql.NullInt64
 		_ = tx.QueryRow(`
 			SELECT launch_id FROM job_attempts
-			WHERE job_id = ? AND end_time IS NULL
+			WHERE job_id = ? AND end_time IS NULL AND abandoned_at IS NULL
 			ORDER BY attempt_number DESC LIMIT 1`, jobID,
 		).Scan(&currentLaunchID)
 		if currentLaunchID.Valid {

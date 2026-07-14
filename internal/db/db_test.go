@@ -992,6 +992,54 @@ func TestSetJobLaunchID_RejectsActiveClaimReturnsError(t *testing.T) {
 	}
 }
 
+func TestSetJobLaunchID_IgnoresAbandonedActiveClaim(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceA, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch A: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceA); err != nil {
+		t.Fatalf("SetJobLaunchID (first claim): %v", err)
+	}
+	attemptA, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	if err := AbandonAttempt(database, attemptA, AttemptAbandonedMoveTargetAccepted, nil); err != nil {
+		t.Fatalf("AbandonAttempt: %v", err)
+	}
+
+	instanceB, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch B: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceB); err != nil {
+		t.Fatalf("SetJobLaunchID (reclaim from abandoned active claim): %v", err)
+	}
+
+	var launchID sql.NullInt64
+	err = database.QueryRow(`SELECT launch_id FROM job_attempts WHERE job_id = ? AND end_time IS NULL AND abandoned_at IS NULL ORDER BY attempt_number DESC LIMIT 1`, jobID).Scan(&launchID)
+	if err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if !launchID.Valid || launchID.Int64 != instanceB {
+		t.Fatalf("launch_id = %v, want %d", launchID, instanceB)
+	}
+}
+
 func TestSetJobLaunchID_AllowsReclaimFromStaleLaunch(t *testing.T) {
 	database := SetupTestDB(t)
 
