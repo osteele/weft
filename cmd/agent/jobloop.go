@@ -769,7 +769,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// Cloud-after gate: if a same-instance producer this job depends on
 		// has failed, skip the consumer with a clear reason.
-		if skip, reason := checkCloudAfter(job, result.FailedJobs); skip {
+		if skip, reason := checkCloudAfter(cfg.R2Bucket, job, result.FailedJobs); skip {
 			fmt.Fprintf(os.Stderr, "job %d skipped: %s\n", job.ID, reason)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetail(reason))
 			result.AnyFailed = true
@@ -1596,15 +1596,31 @@ func runGPUWarmup(r2Bucket, phaseKey string, nextJobID int64, onPhase func(strin
 	}
 }
 
-// checkCloudAfter returns (skip=true, reason) when any CloudAfter ref points
-// at a producer job that failed earlier in this agent session. Producers that
-// are not in failedJobs (i.e. they succeeded, or were never run by this
-// agent — e.g. completed in a prior session before a grace-wake) are treated
-// as satisfied: we only skip on observed failure, not on "not observed".
+// checkCloudAfter returns (skip=true, reason) when a CloudAfter-referenced
+// producer has not confirmably completed successfully.
 //
-// AllowFailure refs are not skip-triggers.
-func checkCloudAfter(job cloud.AgentJob, failedJobs []int64) (bool, string) {
-	if len(job.CloudAfter) == 0 || len(failedJobs) == 0 {
+// A producer observed to fail within this same agent session (present in
+// failedJobs) is treated as failed without an extra round trip. Otherwise,
+// completion is verified positively via the producer's R2 completion marker
+// (r2keys.JobAttemptComplete, written by both the success and failure paths
+// in runJobSequence) rather than inferred from absence in failedJobs.
+//
+// The old "absence of evidence" check treated "producer not observed to
+// fail" as "satisfied" -- but that's indistinguishable from "producer was
+// assigned to this same launch but never actually got dispatched" (still
+// queued in the DB) or "producer's attempt was canceled by the
+// orchestrator". Both looked like "completed in a prior session" from this
+// agent's point of view. wj4663/wj4665 incident: the declared producer sat
+// queued on the same launch_id as the consumer, and the consumer ran anyway
+// because it was never observed to fail. Requiring a completion marker
+// closes that gap while still treating genuinely prior-session completions
+// (e.g. before a grace-wake) as satisfied, since those write the marker too.
+//
+// AllowFailure refs skip the failure check but still require a completion
+// marker to exist -- an unmarked producer means "unknown", not "failure is
+// fine".
+func checkCloudAfter(bucket string, job cloud.AgentJob, failedJobs []int64) (bool, string) {
+	if len(job.CloudAfter) == 0 {
 		return false, ""
 	}
 	failed := make(map[int64]bool, len(failedJobs))
@@ -1612,14 +1628,49 @@ func checkCloudAfter(job cloud.AgentJob, failedJobs []int64) (bool, string) {
 		failed[id] = true
 	}
 	for _, ref := range job.CloudAfter {
-		if ref.AllowFailure {
+		if failed[ref.JobID] {
+			if ref.AllowFailure {
+				continue
+			}
+			return true, fmt.Sprintf("cloud_after_failed: producer job %d failed on this instance", ref.JobID)
+		}
+		exitCode, ok, err := producerCompletionExitCode(bucket, ref.JobID, ref.RunID)
+		if err != nil {
+			// R2 unreachable or an unparseable marker: don't wedge the
+			// whole sequence on a transient issue we can't resolve here.
+			fmt.Fprintf(os.Stderr, "cloud_after completion check for producer %d: %v\n", ref.JobID, err)
 			continue
 		}
-		if failed[ref.JobID] {
-			return true, fmt.Sprintf("cloud_after_failed: producer job %d failed on this instance", ref.JobID)
+		if !ok {
+			// AllowFailure tolerates any *terminal* outcome (mirrors
+			// --after-any in dependencySatisfied, cmd/instance_launch.go) --
+			// it does not tolerate "unknown", so this still gates.
+			return true, fmt.Sprintf("cloud_after_incomplete: producer job %d has not completed", ref.JobID)
+		}
+		if exitCode != 0 && !ref.AllowFailure {
+			return true, fmt.Sprintf("cloud_after_failed: producer job %d failed (exit %d)", ref.JobID, exitCode)
 		}
 	}
 	return false, ""
+}
+
+// producerCompletionExitCode reads the R2 completion marker for a specific
+// job attempt. ok=false means no marker exists yet (attempt not started, not
+// yet finished, or never dispatched) -- distinct from an error, which means
+// the check itself could not be completed.
+func producerCompletionExitCode(bucket string, jobID, runID int64) (exitCode int, ok bool, err error) {
+	content, err := graceR2Get(bucket, r2keys.JobAttemptComplete(jobID, runID))
+	if err != nil {
+		return 0, false, err
+	}
+	if content == "" {
+		return 0, false, nil
+	}
+	code, convErr := strconv.Atoi(content)
+	if convErr != nil {
+		return 0, false, fmt.Errorf("parse completion marker for job %d run %d: %q: %w", jobID, runID, content, convErr)
+	}
+	return code, true, nil
 }
 
 func hasOutputDirs(workDir string) bool {
