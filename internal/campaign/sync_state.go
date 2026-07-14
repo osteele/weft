@@ -144,6 +144,10 @@ func SyncInstanceState(
 		s.TerminationIntent = ci.TerminationIntent
 	}
 
+	if verb, rawJobID, ok := ParsePhaseJobID(s.RawInstancePhase); ok && rawJobID > 0 && phaseAdoptsMoveTarget(verb) {
+		adoptObservedMoveTarget(ctx, database, r2Client, instanceID, rawJobID)
+	}
+
 	if freshJobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID); err == nil {
 		jobs = freshJobs
 		for _, job := range jobs {
@@ -258,8 +262,7 @@ func SyncInstanceState(
 		// setup or execution, and re-associate orphaned jobs with this
 		// launch.
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
-			switch verb {
-			case PhaseSetup, PhaseGPUWarmup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+			if phaseAdoptsMoveTarget(verb) {
 				adoptObservedMoveTarget(ctx, database, r2Client, instanceID, phaseJobID)
 				j := findJobInSlice(jobs, phaseJobID)
 				if j == nil {
@@ -390,6 +393,15 @@ func SyncInstanceState(
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
 	return s
+}
+
+func phaseAdoptsMoveTarget(verb string) bool {
+	switch verb {
+	case PhaseSetup, PhaseGPUWarmup, PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+		return true
+	default:
+		return false
+	}
 }
 
 // RefreshLaunchPhasesFromDB refreshes the cached display phase for live

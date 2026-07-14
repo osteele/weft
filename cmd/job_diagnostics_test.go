@@ -29,6 +29,7 @@ func TestResolveJobDiagnosis(t *testing.T) {
 	storedOOM := mustMarshalDiagnosis(t, &remediation.ErrorDiagnosis{
 		Pattern: "module_not_found", Category: "environment", Message: "missing module: torch",
 	})
+	zero := 0
 
 	cases := []struct {
 		name          string
@@ -58,6 +59,11 @@ func TestResolveJobDiagnosis(t *testing.T) {
 			job:         &db.Job{ID: 7, ErrorDiagnosis: "{not valid json"},
 			logContent:  "torch.cuda.OutOfMemoryError\n",
 			wantPattern: "gpu_oom",
+		},
+		{
+			name:       "clean completed job ignores stale log-cache diagnosis",
+			job:        &db.Job{ID: 4615, Status: db.StatusCompleted, ExitCode: &zero},
+			logContent: "Execution timed out after 4h\nRuntimeError: CUDA out of memory\n",
 		},
 		{
 			name: "no stored and no log returns nil",

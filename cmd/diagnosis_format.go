@@ -21,6 +21,10 @@ func ResolveJobDiagnosis(job *db.Job) *remediation.ErrorDiagnosis {
 			return d
 		}
 	}
+	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0 &&
+		strings.TrimSpace(job.FailureReason) == "" && strings.TrimSpace(job.ErrorMessage) == "" {
+		return nil
+	}
 	cached, err := logcache.Read(job.ID)
 	if err != nil || cached == "" {
 		return nil

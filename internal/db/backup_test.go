@@ -120,8 +120,8 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	// Model a real upgrade: the schema and goose version are both at the
-	// previous migration, so only the latest migration is pending.
+	// Model a real upgrade by rewinding the goose version so only the
+	// latest migration is pending.
 	preparePreviousMigrationVersionForTest(t, database)
 	database.Close()
 
@@ -214,14 +214,8 @@ func TestOpen_DoesNotReportMigrationProgressForFreshDB(t *testing.T) {
 
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if migrations.Target() != 33 {
+	if migrations.Target() != 34 {
 		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
-	}
-	if _, err := database.Exec(`
-		DROP INDEX IF EXISTS idx_offer_availability_snapshots_bucket_time;
-		DROP TABLE IF EXISTS offer_availability_snapshots;
-	`); err != nil {
-		t.Fatalf("revert latest migration fixture: %v", err)
 	}
 	setGooseVersionForTest(t, database, int(migrations.Target()-1))
 }

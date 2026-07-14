@@ -151,6 +151,12 @@ entity Campaign {
     -- their attempts. A job requeued for relaunch has its current
     -- cloud_instance cleared, but the prior JobAttempt still links it
     -- here — so requeued jobs are included and keep the campaign open.
+    -- Open move-target attempts are also visible in instance-scoped
+    -- membership before the MoveIntent confirms. The canonical job view
+    -- remains source-authoritative until acceptance, but instance views
+    -- and diagnosis must show the destination attempt once it exists so
+    -- raw agent phase such as running:<job_id> cannot appear detached
+    -- from the launch that is actually executing it.
     -- Implementation: internal/campaign/reconcile.go allCampaignJobsTerminal,
     -- via db.GetLaunchJobsIncludingAttempts (launch_job_membership view).
     jobs: jobs/Job with attempts.any(a => a.cloud_instance in instances)

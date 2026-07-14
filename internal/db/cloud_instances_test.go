@@ -124,6 +124,84 @@ func TestGetLaunchJobsIncludingAttemptsTreatsOpenAttemptsAsCurrent(t *testing.T)
 	}
 }
 
+func TestGetLaunchJobsIncludingAttemptsIncludesOpenMoveTarget(t *testing.T) {
+	database := setupTestDB(t)
+
+	source, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	target, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+
+	insertTestJob(t, database, 204, "move target", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 204, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          204,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttempt, err := CreateMoveTargetAttempt(database, intent.ID, 204, "", &target, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+
+	job, err := GetJobByID(database, 204)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != source {
+		t.Fatalf("global job launch = %v, want source %d", job.LaunchID, source)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID == targetAttempt {
+		t.Fatalf("global latest run = %v, want source attempt before move confirms", job.LatestRunID)
+	}
+
+	current, err := GetLaunchJobs(database, target)
+	if err != nil {
+		t.Fatalf("GetLaunchJobs target: %v", err)
+	}
+	if len(current) != 0 {
+		t.Fatalf("GetLaunchJobs target: got %d current jobs, want 0 before move confirms", len(current))
+	}
+
+	jobs, err := GetLaunchJobsIncludingAttempts(database, target)
+	if err != nil {
+		t.Fatalf("GetLaunchJobsIncludingAttempts target: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("GetLaunchJobsIncludingAttempts target: got %d jobs, want 1", len(jobs))
+	}
+	got := jobs[0]
+	if got.ID != 204 {
+		t.Fatalf("job ID = %d, want 204", got.ID)
+	}
+	if got.LaunchID == nil || *got.LaunchID != target {
+		t.Fatalf("membership launch = %v, want target %d", got.LaunchID, target)
+	}
+	if got.LatestRunID == nil || *got.LatestRunID != targetAttempt {
+		t.Fatalf("membership latest run = %v, want target attempt %d", got.LatestRunID, targetAttempt)
+	}
+	if got.Status != StatusQueued {
+		t.Fatalf("membership status = %q, want queued", got.Status)
+	}
+}
+
 func TestSetLaunchLiveInstancePhasePreservesBootstrapState(t *testing.T) {
 	database := setupTestDB(t)
 
