@@ -822,7 +822,7 @@ func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
 	}
 }
 
-func TestParseRestartOverrides_SeparateGPUMemAddsHeadroom(t *testing.T) {
+func TestParseRestartOverrides_FloatableGPUMemHardwareFloor(t *testing.T) {
 	restartGPU = ""
 	restartGPUClass = "nvidia"
 	restartGPUMem = 24
@@ -841,11 +841,11 @@ func TestParseRestartOverrides_SeparateGPUMemAddsHeadroom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseRestartOverrides: %v", err)
 	}
-	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 26 {
-		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", overrides.GPUMemGB)
+	if overrides.GPUMemGB == nil || *overrides.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24 (hardware floor)", overrides.GPUMemGB)
 	}
-	if overrides.GPUMemHardwareFloor {
-		t.Fatalf("GPUMemHardwareFloor = true, want false")
+	if !overrides.GPUMemHardwareFloor {
+		t.Fatalf("GPUMemHardwareFloor = false, want true")
 	}
 }
 
@@ -954,6 +954,7 @@ func TestRestartQueuedJob_ReappliesScriptGPUMetadata(t *testing.T) {
 	workDir := t.TempDir()
 	script := `# /// script
 # [tool.weft]
+# gpu = "ampere+"
 # gpu-mem = 24
 # ///
 print("train")
@@ -977,8 +978,11 @@ print("train")
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if job.GPUMemGB == nil || *job.GPUMemGB != 26 {
-		t.Fatalf("GPUMemGB = %v, want 26 (24 + headroom)", job.GPUMemGB)
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("GPUClass = %q, want ampere+", job.GPUClass)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("GPUMemGB = %v, want 24 (hardware floor)", job.GPUMemGB)
 	}
 }
 

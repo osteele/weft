@@ -836,6 +836,56 @@ func TestRunDraftWithPositionalHostRecordsHost(t *testing.T) {
 	}
 }
 
+func TestRunDraftScriptMetadataFloatableGPUMemHardwareFloor(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	script := `# /// script
+# [tool.weft]
+# gpu = "ampere+"
+# gpu-mem = 24
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(script), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	resetRunGlobals(t)
+	runDraft = true
+	runDir = dir
+	runDescription = "script metadata hardware floor"
+
+	cmd := newRunTestCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runRun(cmd, []string{"python train.py"}); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(jobs))
+	}
+	job := jobs[0]
+	if job.GPUClass != "ampere+" {
+		t.Fatalf("gpu_class = %q, want ampere+", job.GPUClass)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != 24 {
+		t.Fatalf("gpu_mem_gb = %v, want 24", job.GPUMemGB)
+	}
+}
+
 func TestRunForwardsDashPassthroughArgs(t *testing.T) {
 	database := db.SetupTestDB(t)
 	database.Close()

@@ -162,6 +162,29 @@ func TestKnownHardwareMemoryGB(t *testing.T) {
 	}
 }
 
+func TestKnownLargeHardwareMemoryGB(t *testing.T) {
+	cases := []struct {
+		mem  int
+		want bool
+	}{
+		{8, false},
+		{10, false},
+		{16, false},
+		{24, true},
+		{32, true},
+		{40, true},
+		{48, true},
+		{50, false},
+		{80, true},
+		{141, true},
+	}
+	for _, tc := range cases {
+		if got := KnownLargeHardwareMemoryGB(tc.mem); got != tc.want {
+			t.Errorf("KnownLargeHardwareMemoryGB(%d) = %v, want %v", tc.mem, got, tc.want)
+		}
+	}
+}
+
 // TestHardwareMemoryTableHasCorePinnedModels guards against accidental
 // table edits that drop the entries the rest of the codebase relies on.
 func TestHardwareMemoryTableHasCorePinnedModels(t *testing.T) {

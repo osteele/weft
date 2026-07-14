@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/vastai"
 )
@@ -65,8 +66,19 @@ func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwa
 	if !hasExplicitRequest || strict || hardwareFloor || memGB <= 0 {
 		return memGB
 	}
-	if vastai.KnownHardwareMemoryGB(gpuClass, memGB) {
+	if explicitGPUMemHardwareFloor(gpuClass, memGB) {
 		return memGB
 	}
 	return memGB + defaultGPUMemHeadroomGB
+}
+
+func explicitGPUMemHardwareFloor(gpuClass string, memGB int) bool {
+	return vastai.KnownHardwareMemoryGB(gpuClass, memGB) || floatableHardwareMemoryFloor(gpuClass, memGB)
+}
+
+func floatableHardwareMemoryFloor(gpuClass string, memGB int) bool {
+	if gpuClass == "" || memGB <= 0 {
+		return false
+	}
+	return placement.ParseGPUConstraint(gpuClass).IsFloatable() && vastai.KnownLargeHardwareMemoryGB(memGB)
 }

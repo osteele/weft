@@ -218,6 +218,27 @@ func KnownHardwareMemoryGB(class string, memGB int) bool {
 	return false
 }
 
+// KnownLargeHardwareMemoryGB reports whether memGB is a catalogued per-GPU
+// hardware capacity large enough that users commonly mean "pick this VRAM
+// class" rather than "my workload needs exactly this many GB". This is used
+// for broad selectors such as "nvidia" or "ampere+" where no single model
+// table entry exists, but values like 24/32/40/48/80 still name real market
+// buckets. Small cards remain workload-style requests so gpu-mem=8 keeps the
+// usual safety headroom.
+func KnownLargeHardwareMemoryGB(memGB int) bool {
+	if memGB < 24 {
+		return false
+	}
+	for _, sizes := range hardwareMemoryByClass {
+		for _, size := range sizes {
+			if memGB == size {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hardwareMemoryClassesSorted is a deterministic snapshot of the
 // hardwareMemoryByClass keys for tests and diagnostics.
 func hardwareMemoryClassesSorted() []string {

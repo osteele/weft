@@ -22,8 +22,11 @@ func TestApplyGPUMemHeadroom(t *testing.T) {
 		{name: "non-explicit keeps value", memGB: 20, hasExplicit: false, strict: false, want: 20},
 		{name: "known A100 80GB ceiling skips headroom", memGB: 80, hasExplicit: true, strict: false, gpuClass: "a100", want: 80},
 		{name: "known H100 80GB ceiling skips headroom", memGB: 80, hasExplicit: true, strict: false, gpuClass: "h100", want: 80},
+		{name: "floatable 24GB hardware bucket skips headroom", memGB: 24, hasExplicit: true, strict: false, gpuClass: "ampere+", want: 24},
+		{name: "floatable 80GB hardware bucket skips headroom", memGB: 80, hasExplicit: true, strict: false, gpuClass: "nvidia", want: 80},
+		{name: "floatable small request still gets headroom", memGB: 8, hasExplicit: true, strict: false, gpuClass: "ampere+", want: 10},
 		{name: "below-ceiling A100 request still gets headroom", memGB: 50, hasExplicit: true, strict: false, gpuClass: "a100", want: 52},
-		{name: "unknown class still gets headroom", memGB: 24, hasExplicit: true, strict: false, gpuClass: "nvidia", want: 26},
+		{name: "classless request still gets headroom", memGB: 24, hasExplicit: true, strict: false, gpuClass: "", want: 26},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
