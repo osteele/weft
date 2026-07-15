@@ -192,12 +192,12 @@ func TestForJobShowsTransitiveProducerRootBlocker(t *testing.T) {
 	if x.PrimaryReason != `waiting for "output/mid.pt" from wj301 (queued)` {
 		t.Fatalf("PrimaryReason = %q", x.PrimaryReason)
 	}
-	root, ok := evidenceValue(x, "root blocker")
+	root, ok := evidenceValue(x, "root wait")
 	if !ok {
-		t.Fatalf("missing root blocker evidence: %+v", x.Evidence)
+		t.Fatalf("missing root wait evidence: %+v", x.Evidence)
 	}
 	if !strings.Contains(root, `waiting for "output/root.pt" from wj300 (running)`) {
-		t.Fatalf("root blocker = %q", root)
+		t.Fatalf("root wait = %q", root)
 	}
 	if x.SuggestedAction != "inspect root producer" {
 		t.Fatalf("SuggestedAction = %q", x.SuggestedAction)

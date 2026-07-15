@@ -163,9 +163,9 @@ func appendProducerWaitEvidence(x *Explanation, chain []queueblock.ProducerWait)
 		return
 	}
 	for i := 1; i < len(chain); i++ {
-		label := "producer blocker"
+		label := producerWaitEvidenceLabel("producer", chain[i])
 		if i == len(chain)-1 {
-			label = "root blocker"
+			label = producerWaitEvidenceLabel("root", chain[i])
 		}
 		x.Evidence = append(x.Evidence, Evidence{Label: label, Value: chain[i].Reason()})
 	}
@@ -174,6 +174,13 @@ func appendProducerWaitEvidence(x *Explanation, chain []queueblock.ProducerWait)
 		Label:  "root",
 		Detail: "inspect " + ids.FormatJobID(root.ProducerID),
 	})
+}
+
+func producerWaitEvidenceLabel(prefix string, wait queueblock.ProducerWait) string {
+	if queueblock.ReasonKind(wait.Reason()) == queueblock.KindWaiting {
+		return prefix + " wait"
+	}
+	return prefix + " blocker"
 }
 
 // appendPlacementEvidence adds a "placed" line explaining why a rental-instance

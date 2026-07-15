@@ -791,8 +791,8 @@ func TestRunJobInfoDependencyBlockerSuppressesStalePlacementHistory(t *testing.T
 	if !strings.Contains(out, `Reason:      waiting for "output/mid.pt" from wj301 (queued)`) {
 		t.Fatalf("missing immediate dependency reason, got:\n%s", out)
 	}
-	if !strings.Contains(out, `root blocker: waiting for "output/root.pt" from wj300 (running)`) {
-		t.Fatalf("missing root blocker, got:\n%s", out)
+	if !strings.Contains(out, `root wait: waiting for "output/root.pt" from wj300 (running)`) {
+		t.Fatalf("missing root wait, got:\n%s", out)
 	}
 	if strings.Contains(out, stale) {
 		t.Fatalf("stale placement history should not be printed as a live reason, got:\n%s", out)

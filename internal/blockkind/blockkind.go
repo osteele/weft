@@ -30,7 +30,8 @@ func ReasonKind(reason string) Kind {
 		strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),
 		strings.Contains(cleaned, "source sync deferred"),
-		strings.Contains(cleaned, "source sync failed"):
+		strings.Contains(cleaned, "source sync failed"),
+		isIncompleteProducerWait(cleaned):
 		return KindWaiting
 	case cleaned == "":
 		return KindNone
@@ -103,4 +104,17 @@ func isRetryableCreateProviderRejection(reason string) bool {
 	return strings.Contains(lower, "provider rejected request") &&
 		strings.Contains(lower, "create-instance") &&
 		strings.Contains(reason, "Weft will retry with fresh offers")
+}
+
+func isIncompleteProducerWait(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	if !strings.HasPrefix(reason, "waiting for ") || !strings.Contains(reason, " from wj") {
+		return false
+	}
+	if beforeDetail, _, ok := strings.Cut(reason, ";"); ok {
+		reason = strings.TrimSpace(beforeDetail)
+	}
+	return strings.HasSuffix(reason, "(queued)") ||
+		strings.HasSuffix(reason, "(running)") ||
+		strings.HasSuffix(reason, "(starting)")
 }

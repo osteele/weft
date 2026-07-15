@@ -1138,7 +1138,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		x := explain.ForJob(database, job, time.Now())
 		if explanationHasHighConfidenceBlocker(x) {
-			fmt.Printf("Blocker:     %s\n", explanationBlockerSummary(x))
+			fmt.Printf("%-12s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
 		}
 		if x.SuggestedAction != "" && x.SuggestedAction != "none" {
 			fmt.Printf("Explain:     %s\n", x.SuggestedAction)

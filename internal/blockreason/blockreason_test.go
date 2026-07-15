@@ -253,6 +253,32 @@ func TestReasonKindSourceSyncReasonsAreWaiting(t *testing.T) {
 	}
 }
 
+func TestReasonKindIncompleteProducerWaitsAreWaiting(t *testing.T) {
+	for _, reason := range []string{
+		`waiting for "output/model.pt" from wj1570 (queued)`,
+		`waiting for "output/model.pt" from wj1570 (running)`,
+		`waiting for "output/model.pt" from wj1570 (starting)`,
+		`waiting for "output/model.pt" from wj1570 (running); could not reuse wi42: image incompatible`,
+	} {
+		if got := ReasonKind(reason); got != KindWaiting {
+			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindWaiting)
+		}
+	}
+}
+
+func TestReasonKindUnavailableProducerWaitsRemainBlocked(t *testing.T) {
+	for _, reason := range []string{
+		`waiting for "output/model.pt" from wj1570 (failed)`,
+		`waiting for "output/model.pt" from wj1570 (canceled)`,
+		`waiting for "output/model.pt" from wj1570 (producer not found)`,
+		`waiting for "output/model.pt" from wj1570 (on-prem, not in R2)`,
+	} {
+		if got := ReasonKind(reason); got != KindBlocked {
+			t.Fatalf("ReasonKind(%q) = %q, want %q", reason, got, KindBlocked)
+		}
+	}
+}
+
 func TestReasonKindRetryableOfferUnavailableIsWaiting(t *testing.T) {
 	for _, reason := range []string{
 		"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers",

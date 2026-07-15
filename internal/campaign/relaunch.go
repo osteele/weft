@@ -2134,20 +2134,19 @@ func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job) []*db.Job
 		if j.LaunchID != nil && *j.LaunchID != 0 {
 			continue // already placed
 		}
-		// Skip dep-blocked consumers: re-routing them every tick supersedes
-		// the prior attempt, generating a thrashing chain of canceled
-		// attempts on whichever instance the placement scoring picks. The
-		// main relaunch path has the same gate; this pass needs it too.
-		if _, blocked := queueblock.WaitingOnProducerReason(cfg.Database, j); blocked {
-			remaining = append(remaining, j)
-			continue
-		}
 		constraints := placement.ConstraintsFromJob(j)
 		// Bias scoring toward the live instance hosting any --needs producer
 		// so consumers co-locate with their producers (zero-wait estimate
 		// in reuse_source.go). cmd/run.go does this at submit time; the
 		// daemon-side relaunch path needs the same hint.
 		constraints.PreferredInstanceIDs = PreferredInstanceIDsFromNeeds(cfg.Database, j.Needs)
+		// Skip dep-blocked consumers only when no live producer instance can
+		// accept them. Same-instance --needs edges are valid: the agent gates
+		// the consumer behind the producer via cloud_after.
+		if _, blocked := queueblock.WaitingOnProducerReason(cfg.Database, j); blocked && len(constraints.PreferredInstanceIDs) == 0 {
+			remaining = append(remaining, j)
+			continue
+		}
 
 		plan, err := placement.Evaluate(placement.EvaluateRequest{
 			Constraints: constraints,

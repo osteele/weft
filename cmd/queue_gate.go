@@ -88,13 +88,20 @@ func blockedReasonDetailLines(database *sql.DB, job *db.Job, live string) []stri
 	lines := []string{live}
 	chain := queueblock.TraceWaitingOnProducer(database, job)
 	for i := 1; i < len(chain); i++ {
-		label := "producer blocker"
+		label := producerWaitDetailLabel("producer", chain[i])
 		if i == len(chain)-1 {
-			label = "root blocker"
+			label = producerWaitDetailLabel("root", chain[i])
 		}
 		lines = append(lines, label+": "+chain[i].Reason())
 	}
 	return lines
+}
+
+func producerWaitDetailLabel(prefix string, wait queueblock.ProducerWait) string {
+	if queueblock.ReasonKind(wait.Reason()) == queueblock.KindWaiting {
+		return prefix + " wait"
+	}
+	return prefix + " blocker"
 }
 
 func hydrateQueueBlockedReasons(jobs []*db.Job) {

@@ -32,6 +32,13 @@ func explanationBlockerSummary(x explain.Explanation) string {
 	return state + ": " + reason
 }
 
+func explanationBlockerLabel(x explain.Explanation) string {
+	if strings.TrimSpace(x.State) == "waiting" {
+		return "Waiting on"
+	}
+	return "Blocker"
+}
+
 func printDiagnoseJobHint(label string, labelWidth int, jobID int64) {
 	fmt.Printf("%-*s weft diagnose job %s  # Explain blocker and evidence\n", labelWidth, label+":", ids.FormatJobID(jobID))
 }
