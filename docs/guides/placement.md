@@ -46,6 +46,13 @@ When placement is active, Weft considers destinations in this order:
 If no inventory host fits, a rental-eligible job can remain queued as
 unplaced until the autopilot or a manual launch assigns it to an instance.
 
+Queued placement states are not, by themselves, evidence of a stall. Rental
+placement and new-instance startup commonly take 5-40 minutes and may retry
+several provider offers or launches as the market changes. Use job-level
+monitoring (`weft status <job> --wait`, `weft info <job>`, `weft log <job>`)
+unless Weft reports a concrete blocker or terminal failure; avoid killing or
+manually relaunching jobs just because placement is still retrying.
+
 ## Steering Placement
 
 Use `--gpu`, `--gpu-class`, and `--gpu-mem` to describe required hardware:

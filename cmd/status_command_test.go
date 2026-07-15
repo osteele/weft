@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -952,6 +953,73 @@ func TestQueuedPlacementLinesPreferQueueBlockedReason(t *testing.T) {
 	}
 	if strings.Contains(reason, "waiting for assigned target") {
 		t.Fatalf("Queue reason = %q, should not fall back to generic assigned-target wait", reason)
+	}
+}
+
+func TestQueuedPlacementLinesShowNormalRangeAndAction(t *testing.T) {
+	job := &db.Job{
+		ID:        4730,
+		Status:    db.StatusQueued,
+		Tags:      []string{db.TagRental},
+		CreatedAt: time.Now().Add(-7 * time.Minute).Unix(),
+	}
+
+	lines := queuedPlacementLines(nil, job)
+	values := map[string]string{}
+	for _, line := range lines {
+		values[line.Label] = line.Value
+	}
+	if !strings.Contains(values["Waiting"], "7m") {
+		t.Fatalf("Waiting = %q, want elapsed wait", values["Waiting"])
+	}
+	if !strings.Contains(values["Normal range"], "5-40m") || !strings.Contains(values["Normal range"], "1-6") {
+		t.Fatalf("Normal range = %q, want rental placement/startup range", values["Normal range"])
+	}
+	if !strings.Contains(values["Action"], "weft status wj4730 --wait") {
+		t.Fatalf("Action = %q, want job-level wait command", values["Action"])
+	}
+}
+
+func TestPrintJobStatusLineIncludesQueuedContext(t *testing.T) {
+	job := &db.Job{
+		ID:        4730,
+		Status:    db.StatusQueued,
+		Tags:      []string{db.TagRental},
+		CreatedAt: time.Now().Add(-7 * time.Minute).Unix(),
+	}
+
+	out := captureStdout(t, func() {
+		printJobStatusLineWithContext(nil, job)
+	})
+	for _, want := range []string{
+		"Job wj4730 (): queued",
+		"Normal range: rental placement commonly takes 5-40m",
+		"Action: wait; autopilot owns placement",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status line missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintRunSubmissionExpectation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{db.TagRental}); err != nil {
+		t.Fatalf("SetJobTags: %v", err)
+	}
+
+	var out bytes.Buffer
+	printRunSubmissionExpectation(&out, database, jobID)
+	got := out.String()
+	if !strings.Contains(got, "Normal range: rental placement commonly takes 5-40m") {
+		t.Fatalf("missing normal range, got:\n%s", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("Action: wait; autopilot owns placement, monitor with weft status %s --wait", ids.FormatJobID(jobID))) {
+		t.Fatalf("missing action, got:\n%s", got)
 	}
 }
 

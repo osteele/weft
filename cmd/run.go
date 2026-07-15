@@ -207,6 +207,7 @@ func trySubmitJobToGraceReuse(cmd *cobra.Command, database *sql.DB, jobID int64)
 	case cloudReuseAckReceived:
 		fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted and assigned to warm instance %s\n",
 			ids.FormatJobID(jobID), ids.FormatInstanceID(inst.ID))
+		printRunSubmissionExpectation(cmd.OutOrStdout(), database, jobID)
 		return true, nil
 	case cloudReuseAckNotObserved:
 		fmt.Fprintf(os.Stderr, "warning: warm instance %s did not acknowledge job %s before the short submit timeout; continuing with normal placement\n",
@@ -1314,6 +1315,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Fprintln(w)
 		}
+		printRunSubmissionExpectation(w, database, jobID)
 		printSubmissionPreview(w, placementResult)
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
@@ -1597,6 +1599,7 @@ func shouldValidateRentalJobImage(host string, tags []string, draft, dryRun bool
 func printAutoPlacementPending(w io.Writer, database *sql.DB, jobID int64, reason string) {
 	if runNoWait {
 		fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
+		printRunSubmissionExpectation(w, database, jobID)
 		return
 	}
 	if placed := waitForAutoPlacement(database, jobID, runAutoPlacementWaitTimeout); placed != nil {
@@ -1612,9 +1615,27 @@ func printAutoPlacementPending(w io.Writer, database *sql.DB, jobID int64, reaso
 		default:
 			fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
 		}
+		printRunSubmissionExpectation(w, database, jobID)
 		return
 	}
 	fmt.Fprintf(w, "Job #%d accepted; placement pending (%s)\n", jobID, reason)
+	printRunSubmissionExpectation(w, database, jobID)
+}
+
+func printRunSubmissionExpectation(w io.Writer, database *sql.DB, jobID int64) {
+	if w == nil || database == nil || jobID <= 0 {
+		return
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		return
+	}
+	for _, line := range queuedExpectationLines(database, job) {
+		switch line.Label {
+		case "Normal range", "Action":
+			fmt.Fprintf(w, "  %s: %s\n", line.Label, line.Value)
+		}
+	}
 }
 
 func waitForAutoPlacement(database *sql.DB, jobID int64, timeout time.Duration) *db.Job {

@@ -434,7 +434,7 @@ func waitForJobsCompletion(ctx context.Context, database *sql.DB, jobs []jobStat
 			continue
 		}
 		lastReported[req.ID] = req.Job.Status
-		printJobStatusLine(req.Job)
+		printJobStatusLineWithContext(database, req.Job)
 		if isWaitTerminalStatus(req.Job.Status) {
 			continue
 		}
@@ -478,7 +478,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 		}
 		if last, ok := lastReported[job.ID]; !ok || last != job.Status {
 			lastReported[job.ID] = job.Status
-			printJobStatusLine(job)
+			printJobStatusLineWithContext(database, job)
 		}
 	}
 	pendingTimeoutErr := func() error {
@@ -571,7 +571,7 @@ func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pen
 		}
 		if last, ok := lastReported[job.ID]; !ok || last != job.Status {
 			lastReported[job.ID] = job.Status
-			printJobStatusLine(job)
+			printJobStatusLineWithContext(database, job)
 		}
 	}
 
@@ -836,6 +836,10 @@ func syncRentalJobsStatusWithTimeout(database *sql.DB, timeout time.Duration) bo
 }
 
 func printJobStatusLine(job *db.Job) {
+	printJobStatusLineWithContext(nil, job)
+}
+
+func printJobStatusLineWithContext(database *sql.DB, job *db.Job) {
 	if job == nil {
 		return
 	}
@@ -847,6 +851,11 @@ func printJobStatusLine(job *db.Job) {
 		line = fmt.Sprintf("%s — %s", line, reason)
 	}
 	fmt.Println(line)
+	if job.EffectiveStatus() == db.StatusQueued || job.EffectiveStatus() == db.StatusPendingPlacement {
+		for _, line := range queuedPlacementLines(database, job) {
+			fmt.Printf("  %s: %s\n", line.Label, line.Value)
+		}
+	}
 }
 
 func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {

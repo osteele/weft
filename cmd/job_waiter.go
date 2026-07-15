@@ -37,7 +37,7 @@ func waitForQueuedJobCompletion(database *sql.DB, jobID int64, deferred bool) er
 	}
 
 	// Report final status
-	printJobStatusLine(finalJob)
+	printJobStatusLineWithContext(database, finalJob)
 
 	// Exit with appropriate code based on job result
 	if finalJob.ExitCode != nil && *finalJob.ExitCode == 0 {
@@ -106,7 +106,7 @@ func waitUntilJobRunning(database *sql.DB, jobID int64, tracker *hostConnectionT
 
 		// Report status changes
 		if job.Status != lastStatus {
-			printJobStatusLine(job)
+			printJobStatusLineWithContext(database, job)
 			lastStatus = job.Status
 		}
 

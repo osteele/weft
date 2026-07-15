@@ -14,6 +14,7 @@ detail quickly.
 - [Activity Narration](guides/narrate.md) for `weft narrate` — LLM-streamed commentary on job and instance transitions
 - [LLM and Claude Integrations](guides/llm-integrations.md) for which features call Anthropic/OpenRouter or `claude -p`
 - [Claude Code Channels](guides/claude-code-channels.md) for sending Weft job events into Claude Code sessions
+- [Agent-Oriented Workflows](guides/agent-workflows.md) for CLI features designed for coding agents and unattended automation
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting
 - [Iterative Weft Improvement](guides/iterative-improvement.md) for mining job history and source snapshots into product fixes
