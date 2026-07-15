@@ -231,3 +231,39 @@ func TestWaitingOnProducer_NeedsRoundTripFromDB(t *testing.T) {
 		t.Fatalf("expected blocked on wj201, got blocked=%v reason=%q", blocked, reason)
 	}
 }
+
+func TestTraceWaitingOnProducer_FollowsQueuedIntermediateToRunningRoot(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.RecordQueuedWithGPUAndID(database, 300, "", "/tmp/root", "python root.py", "root producer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 300: %v", err)
+	}
+	ensureRentalLaunch(t, database, 300, "running")
+	upsertAttempt(t, database, 300, db.StatusRunning, db.LaunchHost(300), 300, false)
+	if err := db.RecordQueuedWithGPUAndID(database, 301, "", "/tmp/mid", "python mid.py", "intermediate", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 301: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 301, []string{"output/root.pt:300"}); err != nil {
+		t.Fatalf("SetJobNeeds 301: %v", err)
+	}
+	if err := db.RecordQueuedWithGPUAndID(database, 302, "", "/tmp/consumer", "python consumer.py", "consumer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 302: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 302, []string{"output/mid.pt:301"}); err != nil {
+		t.Fatalf("SetJobNeeds 302: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, 302)
+	if err != nil || consumer == nil {
+		t.Fatalf("GetJobByID(302): %v %v", consumer, err)
+	}
+
+	chain := TraceWaitingOnProducer(database, consumer)
+	if len(chain) != 2 {
+		t.Fatalf("chain len = %d, want 2: %#v", len(chain), chain)
+	}
+	if chain[0].ProducerID != 301 || chain[0].ProducerStatus != db.StatusQueued {
+		t.Fatalf("first edge = %#v, want queued wj301", chain[0])
+	}
+	if chain[1].ProducerID != 300 || chain[1].ProducerStatus != db.StatusRunning {
+		t.Fatalf("root edge = %#v, want running wj300", chain[1])
+	}
+}

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -77,6 +78,23 @@ func mergeBlockedReasons(live string, placement []string) []string {
 		add(r)
 	}
 	return out
+}
+
+func blockedReasonDetailLines(database *sql.DB, job *db.Job, live string) []string {
+	live = strings.TrimSpace(live)
+	if live == "" {
+		return nil
+	}
+	lines := []string{live}
+	chain := queueblock.TraceWaitingOnProducer(database, job)
+	for i := 1; i < len(chain); i++ {
+		label := "producer blocker"
+		if i == len(chain)-1 {
+			label = "root blocker"
+		}
+		lines = append(lines, label+": "+chain[i].Reason())
+	}
+	return lines
 }
 
 func hydrateQueueBlockedReasons(jobs []*db.Job) {

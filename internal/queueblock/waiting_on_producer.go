@@ -10,14 +10,48 @@ import (
 	"github.com/osteele/weft/internal/runner"
 )
 
+// ProducerWait describes one unsatisfied artifact dependency edge.
+type ProducerWait struct {
+	Path           string
+	ProducerID     int64
+	ProducerStatus string
+}
+
+func (w ProducerWait) Reason() string {
+	return formatProducerWait(w.Path, w.ProducerID, w.ProducerStatus)
+}
+
 // WaitingOnProducerReason inspects job.Needs and returns a human-readable
 // reason if any declared producer is not yet ready. Returns ("", false) when
 // the job has no needs or all producers have terminally completed with an R2
 // upload path. DB-only (no R2 HEADs), so safe to call from display paths.
 func WaitingOnProducerReason(database *sql.DB, job *db.Job) (string, bool) {
-	if database == nil || job == nil || len(job.Needs) == 0 {
+	chain := TraceWaitingOnProducer(database, job)
+	if len(chain) == 0 {
 		return "", false
 	}
+	return chain[0].Reason(), true
+}
+
+// TraceWaitingOnProducer returns the first unsatisfied producer dependency and
+// then follows that producer's own unsatisfied dependency, if any. This lets
+// diagnose surfaces explain both "this job waits on wjB" and "wjB is queued
+// because it waits on root producer wjA".
+func TraceWaitingOnProducer(database *sql.DB, job *db.Job) []ProducerWait {
+	if database == nil || job == nil {
+		return nil
+	}
+	return traceWaitingOnProducer(database, job, make(map[int64]struct{}))
+}
+
+func traceWaitingOnProducer(database *sql.DB, job *db.Job, seen map[int64]struct{}) []ProducerWait {
+	if job == nil || len(job.Needs) == 0 {
+		return nil
+	}
+	if _, ok := seen[job.ID]; ok {
+		return nil
+	}
+	seen[job.ID] = struct{}{}
 	for _, spec := range job.Needs {
 		parsed, err := runner.ParseNeedsSpec(spec)
 		if err != nil {
@@ -31,23 +65,32 @@ func WaitingOnProducerReason(database *sql.DB, job *db.Job) (string, bool) {
 		}
 		producer, err := db.GetJobByID(database, parsed.Version)
 		if err != nil || producer == nil {
-			return formatProducerWait(parsed.Path, parsed.Version, "producer not found"), true
+			return []ProducerWait{{
+				Path:           parsed.Path,
+				ProducerID:     parsed.Version,
+				ProducerStatus: "producer not found",
+			}}
 		}
 		status := producer.EffectiveStatus()
 		if !db.IsTerminalStatus(status) {
-			return formatProducerWait(parsed.Path, producer.ID, status), true
+			head := ProducerWait{Path: parsed.Path, ProducerID: producer.ID, ProducerStatus: status}
+			return append([]ProducerWait{head}, traceWaitingOnProducer(database, producer, seen)...)
 		}
 		if status != db.StatusCompleted {
 			// Failed / canceled / etc. — the artifact will never appear in R2;
 			// surface the producer state so the user can intervene.
-			return formatProducerWait(parsed.Path, producer.ID, status), true
+			return []ProducerWait{{Path: parsed.Path, ProducerID: producer.ID, ProducerStatus: status}}
 		}
 		if producer.HasInventoryHost() {
 			// Completed on-prem only; no R2 copy was uploaded.
-			return formatProducerWait(parsed.Path, producer.ID, "on-prem, not in R2"), true
+			return []ProducerWait{{
+				Path:           parsed.Path,
+				ProducerID:     producer.ID,
+				ProducerStatus: "on-prem, not in R2",
+			}}
 		}
 	}
-	return "", false
+	return nil
 }
 
 func formatProducerWait(path string, producerID int64, suffix string) string {

@@ -746,6 +746,59 @@ func TestRunJobInfoShowsStructuredPlacementBreakdown(t *testing.T) {
 	}
 }
 
+func TestRunJobInfoDependencyBlockerSuppressesStalePlacementHistory(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.RecordQueuedWithGPUAndID(database, 300, "", "/tmp/root", "python root.py", "root producer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 300: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 300, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ?`,
+		db.StatusRunning, now-120, 300); err != nil {
+		t.Fatalf("set root running: %v", err)
+	}
+	if err := db.RecordQueuedWithGPUAndID(database, 301, "", "/tmp/mid", "python mid.py", "intermediate", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 301: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 301, []string{"output/root.pt:300"}); err != nil {
+		t.Fatalf("SetJobNeeds 301: %v", err)
+	}
+	if err := db.RecordQueuedWithGPUAndID(database, 302, "", "/tmp/consumer", "python consumer.py", "consumer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 302: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 302, []string{"output/mid.pt:301"}); err != nil {
+		t.Fatalf("SetJobNeeds 302: %v", err)
+	}
+	stale := "could not reuse wi9999: stale placement failure"
+	if err := db.SetJobPlacementReasons(database, 302, []string{stale}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{"302"}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	if !strings.Contains(out, `Reason:      waiting for "output/mid.pt" from wj301 (queued)`) {
+		t.Fatalf("missing immediate dependency reason, got:\n%s", out)
+	}
+	if !strings.Contains(out, `root blocker: waiting for "output/root.pt" from wj300 (running)`) {
+		t.Fatalf("missing root blocker, got:\n%s", out)
+	}
+	if strings.Contains(out, stale) {
+		t.Fatalf("stale placement history should not be printed as a live reason, got:\n%s", out)
+	}
+}
+
 func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "cool30", "/tmp", "echo hi", "blocked status", "")

@@ -105,6 +105,12 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.State = string(result.Kind)
 		x.PrimaryReason = blockreason.DisplayReasonForKind(result.Kind, result.Reason)
 		x.Confidence = "high"
+		var producerWaitChain []queueblock.ProducerWait
+		if chain := queueblock.TraceWaitingOnProducer(database, job); len(chain) > 0 {
+			producerWaitChain = chain
+			x.PrimaryReason = chain[0].Reason()
+			appendProducerWaitEvidence(&x, chain)
+		}
 		if result.Source == blockreason.SourcePlacement {
 			x.Evidence = append(x.Evidence, Evidence{Label: "placement", Value: result.Reason})
 			if s := blockreason.ForJob(job); s.IsPlacementFailure() {
@@ -117,7 +123,11 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		if job.TargetKind() != db.JobTargetUnplaced {
 			x.Options = append(x.Options, Option{Label: "replan", Detail: "return the job to the unplaced pool"})
 		}
-		x.SuggestedAction = "inspect blocker"
+		if len(producerWaitChain) > 1 {
+			x.SuggestedAction = "inspect root producer"
+		} else {
+			x.SuggestedAction = "inspect blocker"
+		}
 		return x
 	}
 	if display.Kind != "" {
@@ -143,6 +153,27 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.SuggestedAction = "none"
 	}
 	return x
+}
+
+func appendProducerWaitEvidence(x *Explanation, chain []queueblock.ProducerWait) {
+	if x == nil || len(chain) == 0 {
+		return
+	}
+	if len(chain) == 1 {
+		return
+	}
+	for i := 1; i < len(chain); i++ {
+		label := "producer blocker"
+		if i == len(chain)-1 {
+			label = "root blocker"
+		}
+		x.Evidence = append(x.Evidence, Evidence{Label: label, Value: chain[i].Reason()})
+	}
+	root := chain[len(chain)-1]
+	x.Options = append(x.Options, Option{
+		Label:  "root",
+		Detail: "inspect " + ids.FormatJobID(root.ProducerID),
+	})
 }
 
 // appendPlacementEvidence adds a "placed" line explaining why a rental-instance

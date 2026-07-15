@@ -1097,7 +1097,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 					fmt.Printf("             %s\n", line)
 				}
 			} else {
-				reasons := mergeBlockedReasons(display.Reason, job.PlacementReasons)
+				reasons := blockedReasonDetailLines(database, job, display.Reason)
 				for i, reason := range reasons {
 					if i == 0 {
 						fmt.Printf("Reason:      %s\n", reason)

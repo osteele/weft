@@ -153,6 +153,57 @@ func TestForJobExplainsQueuedRentalTarget(t *testing.T) {
 	}
 }
 
+func TestForJobShowsTransitiveProducerRootBlocker(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.RecordQueuedWithGPUAndID(database, 300, "", "/tmp/root", "python root.py", "root producer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 300: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, 300, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	nowUnix := time.Unix(20_000, 0).Unix()
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ?`,
+		db.StatusRunning, nowUnix-120, 300); err != nil {
+		t.Fatalf("set root running: %v", err)
+	}
+	if err := db.RecordQueuedWithGPUAndID(database, 301, "", "/tmp/mid", "python mid.py", "intermediate", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 301: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 301, []string{"output/root.pt:300"}); err != nil {
+		t.Fatalf("SetJobNeeds 301: %v", err)
+	}
+	if err := db.RecordQueuedWithGPUAndID(database, 302, "", "/tmp/consumer", "python consumer.py", "consumer", ""); err != nil {
+		t.Fatalf("RecordQueuedWithGPUAndID 302: %v", err)
+	}
+	if err := db.SetJobNeeds(database, 302, []string{"output/mid.pt:301"}); err != nil {
+		t.Fatalf("SetJobNeeds 302: %v", err)
+	}
+	job, err := db.GetJobByID(database, 302)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID(302): %v %v", job, err)
+	}
+	job.QueueBlockedReason = `waiting for "output/mid.pt" from wj301 (queued)`
+
+	x := ForJob(database, job, time.Unix(20_000, 0))
+	if x.PrimaryReason != `waiting for "output/mid.pt" from wj301 (queued)` {
+		t.Fatalf("PrimaryReason = %q", x.PrimaryReason)
+	}
+	root, ok := evidenceValue(x, "root blocker")
+	if !ok {
+		t.Fatalf("missing root blocker evidence: %+v", x.Evidence)
+	}
+	if !strings.Contains(root, `waiting for "output/root.pt" from wj300 (running)`) {
+		t.Fatalf("root blocker = %q", root)
+	}
+	if x.SuggestedAction != "inspect root producer" {
+		t.Fatalf("SuggestedAction = %q", x.SuggestedAction)
+	}
+}
+
 func evidenceValue(x Explanation, label string) (string, bool) {
 	for _, ev := range x.Evidence {
 		if ev.Label == label {
