@@ -58,6 +58,8 @@ func r2Put(bucket, key, content string) error {
 	return r2PutReader(bucket, key, strings.NewReader(content))
 }
 
+var r2PutForAgent = r2Put
+
 func r2PutReader(bucket, key string, body io.Reader) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)
 	defer cancel()

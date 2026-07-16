@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -62,6 +63,71 @@ func TestPatchCompletionUpload(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded.OutputUpload, &upload) {
 		t.Fatalf("output upload mismatch: %#v != %#v", decoded.OutputUpload, upload)
+	}
+}
+
+func TestRecordEarlyJobFailureWritesReasonAndUploadsResults(t *testing.T) {
+	logDir := t.TempDir()
+	jobID := int64(77)
+	runID := int64(88)
+	reason := "cloud_after_incomplete: producer job 5 run 50 has not completed"
+
+	prevUpload := uploadJobResultsForAgent
+	prevPut := r2PutForAgent
+	t.Cleanup(func() {
+		uploadJobResultsForAgent = prevUpload
+		r2PutForAgent = prevPut
+	})
+
+	uploaded := false
+	uploadJobResultsForAgent = func(bucket string, gotJobID, gotRunID int64, gotLogDir string) runner.UploadSummary {
+		if bucket != "bucket" || gotJobID != jobID || gotRunID != runID || gotLogDir != logDir {
+			t.Fatalf("upload args = bucket %q job %d run %d dir %q", bucket, gotJobID, gotRunID, gotLogDir)
+		}
+		paths := runner.NewJobPaths(gotLogDir, gotJobID)
+		if got := runner.ReadFailureReasonFile(paths.FailureReason); got != reason {
+			t.Fatalf("failure_reason before upload = %q, want %q", got, reason)
+		}
+		data, err := os.ReadFile(paths.Completion)
+		if err != nil {
+			t.Fatalf("read completion before upload: %v", err)
+		}
+		var rec runner.CompletionRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Fatalf("parse completion before upload: %v", err)
+		}
+		if rec.ExitCode != 1 || rec.FailureReason != reason {
+			t.Fatalf("completion before upload = exit %d reason %q", rec.ExitCode, rec.FailureReason)
+		}
+		uploaded = true
+		return runner.UploadSummary{Status: "ok"}
+	}
+
+	var markerKey, markerContent string
+	r2PutForAgent = func(bucket, key, content string) error {
+		if bucket != "bucket" {
+			t.Fatalf("marker bucket = %q, want bucket", bucket)
+		}
+		if !uploaded {
+			t.Fatal("completion marker written before results upload")
+		}
+		markerKey = key
+		markerContent = content
+		return nil
+	}
+
+	recordEarlyJobFailure(
+		jobSequenceConfig{R2Bucket: "bucket", LogDir: logDir},
+		cloud.AgentJob{ID: jobID, RunID: runID},
+		reason,
+		1,
+	)
+
+	if !uploaded {
+		t.Fatal("results upload was not invoked")
+	}
+	if want := r2keys.JobAttemptComplete(jobID, runID); markerKey != want || markerContent != "1" {
+		t.Fatalf("marker = %q content %q, want %q content 1", markerKey, markerContent, want)
 	}
 }
 

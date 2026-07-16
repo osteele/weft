@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,18 @@ import (
 // completion write attempt. Tests set it to simulate transient SQLITE_BUSY so the
 // retry wrapper can be exercised end-to-end; it is nil in production.
 var recordCloudCompletionLockHook func() error
+
+var (
+	// ErrCloudCompletionAttemptNotFound marks a completion for a run that no longer has a DB attempt row.
+	ErrCloudCompletionAttemptNotFound = errors.New("cloud completion attempt not found")
+	// ErrCloudCompletionAttemptAbandoned marks a completion for a run that has been removed from job authority.
+	ErrCloudCompletionAttemptAbandoned = errors.New("cloud completion attempt abandoned")
+)
+
+// IsPermanentCloudCompletionNoop reports whether a completion can never be recorded for its run.
+func IsPermanentCloudCompletionNoop(err error) bool {
+	return errors.Is(err, ErrCloudCompletionAttemptNotFound) || errors.Is(err, ErrCloudCompletionAttemptAbandoned)
+}
 
 // RecordCloudJobCompletion updates the job attempt in the DB with the given
 // exit code, times, and failure reason. Returns the cloud instance ID if the
@@ -76,13 +89,13 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			runID, jobID,
 		).Scan(&cloudInstanceID, &abandonedAt)
 		if err == sql.ErrNoRows {
-			return 0, nil
+			return 0, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptNotFound, jobID, runID)
 		}
 		if err != nil {
 			return 0, err
 		}
 		if abandonedAt.Valid {
-			return 0, nil
+			return 0, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptAbandoned, jobID, runID)
 		}
 	}
 	if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {

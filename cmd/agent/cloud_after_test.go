@@ -78,6 +78,9 @@ func TestCheckCloudAfter_ProducerNeverCompleted(t *testing.T) {
 	if !strings.Contains(reason, "cloud_after_incomplete") {
 		t.Fatalf("reason=%q, expected it to mention cloud_after_incomplete", reason)
 	}
+	if !strings.Contains(reason, "producer job 5 run 50") {
+		t.Fatalf("reason=%q, expected producer job and run IDs", reason)
+	}
 }
 
 func TestCheckCloudAfter_ProducerCanceledMidBatch(t *testing.T) {
@@ -116,6 +119,9 @@ func TestCheckCloudAfter_AllowFailureStillRequiresCompletion(t *testing.T) {
 	}
 	if !strings.Contains(reason, "cloud_after_incomplete") {
 		t.Fatalf("reason=%q, expected it to mention cloud_after_incomplete", reason)
+	}
+	if !strings.Contains(reason, "producer job 5 run 50") {
+		t.Fatalf("reason=%q, expected producer job and run IDs", reason)
 	}
 }
 

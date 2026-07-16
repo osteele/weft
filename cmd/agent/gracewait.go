@@ -279,6 +279,8 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 	return summary
 }
 
+var uploadJobResultsForAgent = uploadJobResults
+
 type selfDestructOpts struct {
 	Bucket             string
 	InstanceID         string

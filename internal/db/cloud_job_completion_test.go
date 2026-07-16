@@ -396,8 +396,8 @@ func TestRecordCloudJobCompletion_IgnoresAbandonedMoveTargetAttempt(t *testing.T
 	}
 
 	gotLaunch, err := RecordCloudJobCompletion(database, jobID, 0, 100, 200, "", "", time.Time{}, targetRunID)
-	if err != nil {
-		t.Fatalf("RecordCloudJobCompletion abandoned target: %v", err)
+	if !errors.Is(err, ErrCloudCompletionAttemptAbandoned) {
+		t.Fatalf("RecordCloudJobCompletion abandoned target error = %v, want ErrCloudCompletionAttemptAbandoned", err)
 	}
 	if gotLaunch != 0 {
 		t.Fatalf("abandoned completion launch id = %d, want 0", gotLaunch)

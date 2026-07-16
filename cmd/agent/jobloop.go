@@ -775,12 +775,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 
-			ei := runner.ExitInfo{ExitCode: 1}
-			paths := runner.NewJobPaths(cfg.LogDir, job.ID)
-			_ = runner.WriteStatusFile(paths, ei)
-			now := time.Now().Unix()
-			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)
-			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+			recordEarlyJobFailure(cfg, job, reason, 1)
 			continue
 		}
 
@@ -796,17 +791,12 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 
 			// Mark job complete with failure even when command did not start.
-			ei := runner.ExitInfo{ExitCode: 1}
-			paths := runner.NewJobPaths(cfg.LogDir, job.ID)
-			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, ei.ExitCode, err.Error())
+			exitCode := 1
+			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, exitCode, err.Error())
 			if failureReason == "" {
 				failureReason = "artifact_stage_failed"
 			}
-			_ = runner.WriteStatusFile(paths, ei)
-			_ = runner.WriteFailureReasonFile(paths, failureReason)
-			now := time.Now().Unix()
-			_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", failureReason, now, now, nil)
-			r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+			recordEarlyJobFailure(cfg, job, failureReason, exitCode)
 			if infra && cfg.SelfDestructCmd != "" && !cfg.ConcurrentSlot {
 				terminateInstanceWithReason(
 					cfg.R2Bucket, cfg.InstanceID, cfg.SelfDestructCmd,
@@ -1258,6 +1248,27 @@ func prewarmFailureExitCode(prewarm setupPrewarmResult) int {
 	return prewarm.exitInfo.ExitCode
 }
 
+func recordEarlyJobFailure(cfg jobSequenceConfig, job cloud.AgentJob, reason string, exitCode int) {
+	if exitCode == 0 {
+		exitCode = 1
+	}
+	ei := runner.ExitInfo{ExitCode: exitCode}
+	paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+	_ = os.MkdirAll(cfg.LogDir, 0o755)
+	_ = runner.WriteStatusFile(paths, ei)
+	_ = runner.WriteFailureReasonFile(paths, reason)
+	now := time.Now().Unix()
+	_ = runner.WriteCompletionRecord(paths, ei, runner.RunningJobState{}, "", reason, now, now, nil)
+
+	if cfg.R2Bucket != "" {
+		upload := uploadJobResultsForAgent(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir)
+		if upload.Status != "ok" {
+			fmt.Fprintf(os.Stderr, "upload results for failed job %d: %s %s\n", job.ID, upload.Status, upload.Error)
+		}
+	}
+	_ = r2PutForAgent(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
+}
+
 func appendPrewarmLogForFailure(jobLog, prewarmLog string) {
 	data, err := os.ReadFile(prewarmLog)
 	if err != nil || len(data) == 0 {
@@ -1645,7 +1656,7 @@ func checkCloudAfter(bucket string, job cloud.AgentJob, failedJobs []int64) (boo
 			// AllowFailure tolerates any *terminal* outcome (mirrors
 			// --after-any in dependencySatisfied, cmd/instance_launch.go) --
 			// it does not tolerate "unknown", so this still gates.
-			return true, fmt.Sprintf("cloud_after_incomplete: producer job %d has not completed", ref.JobID)
+			return true, fmt.Sprintf("cloud_after_incomplete: producer job %d run %d has not completed", ref.JobID, ref.RunID)
 		}
 		if exitCode != 0 && !ref.AllowFailure {
 			return true, fmt.Sprintf("cloud_after_failed: producer job %d failed (exit %d)", ref.JobID, exitCode)

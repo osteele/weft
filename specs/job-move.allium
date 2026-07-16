@@ -553,6 +553,17 @@ rule ObsoleteMoveOnSourceCompletion {
 --     therefore from job_status/job-info/artifact default lookup. When
 --     a loser is abandoned, it remains excluded permanently.
 --
+--   * Completion markers for abandoned attempts are inert. A move-overlap
+--     loser may keep executing until it is stopped and leave its own
+--     jobs/<jobID>/runs/<runID>/.complete marker on R2. Ingesting that
+--     orphaned marker must never revive the abandoned attempt, flip the job
+--     terminal, emit a completion oplog entry, or fire a terminal-status
+--     notification: it is marked processed on first observation and the
+--     audit row is left untouched. See status-sync.allium §
+--     SyncRecordsCloudCompletion (incident wb60: a move-source loser's
+--     marker produced 19 duplicate "completed" notifications while the job
+--     was still running on the target).
+--
 --   * Race resolution is trigger-backed for job-owned terminal results.
 --     If the source attempt finishes completed/failed while the intent is
 --     open, the target attempt is abandoned and the intent is obsoleted.

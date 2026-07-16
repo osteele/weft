@@ -152,14 +152,22 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		cloudOutcome = db.AttemptOutcomeFailed
 	}
 	wasTerminal := db.JobIsTerminal(c.db, jobID)
-	_, err = c.db.Exec(
+	res, err := c.db.Exec(
 		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL,
 		    cloud_outcome = CASE WHEN cloud_outcome IS NULL THEN ? ELSE cloud_outcome END
-		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
+		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL AND abandoned_at IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
 		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, cloudOutcome, jobID,
 	)
 	if err != nil {
 		c.logger.Warn("failed to update job", "job_id", jobID, "error", err)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
+		for completeKey := range markers.CompletedKeysForJob(jobID) {
+			_ = r2Client.PutMarker(ctx, r2.PairedProcessedKey(completeKey))
+		}
+		c.logger.Debug("marked permanently unrecordable vastai completion processed", "job_id", jobID, "run_id", runID)
 		return
 	}
 	var cloudInstanceID sql.NullInt64

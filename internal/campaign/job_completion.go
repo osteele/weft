@@ -97,14 +97,12 @@ type ProcessedMarkerWriter interface {
 // MarkRejectedCompletionProcessed writes the .processed marker for a
 // completion that RecordCloudJobCompletion permanently rejected, so the
 // .complete marker is not re-read and re-rejected on every sync pass.
-// Transition-validation rejections are permanent: the attempt's terminal
-// status and the marker's target status won't change, so re-reading the
-// marker just re-rejects it. Transient errors (e.g. DB I/O) are left
-// unprocessed so a later pass can retry. Returns true if the marker was
-// written.
+// Transition-validation rejections and abandoned/missing attempt completions
+// are permanent; transient errors (e.g. DB I/O) are left unprocessed so a
+// later pass can retry. Returns true if the marker was written.
 func MarkRejectedCompletionProcessed(ctx context.Context, w ProcessedMarkerWriter, jobID, runID int64, err error) bool {
 	var ite *status.InvalidTransitionError
-	if !errors.As(err, &ite) {
+	if !errors.As(err, &ite) && !db.IsPermanentCloudCompletionNoop(err) {
 		return false
 	}
 	_ = w.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
@@ -210,12 +208,13 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 	wasTerminal := db.JobIsTerminal(database, jobID)
 	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
+		if MarkRejectedCompletionProcessed(ctx, r2c, jobID, runID, err) {
+			slog.Debug("marked permanently unrecordable cloud completion processed",
+				"component", "reconcile", "job_id", jobID, "run_id", runID, "source", source, "error", err)
+			return false
+		}
 		slog.Warn("failed to record completion for job",
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
-		// If the rejection is permanent (transition validation), mark the
-		// completion processed so it is not re-fetched and re-rejected on
-		// every reconcile pass.
-		MarkRejectedCompletionProcessed(ctx, r2c, jobID, runID, err)
 		return false
 	}
 
@@ -329,6 +328,12 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 		// endTimeUnix == 0: leave last_synced_status NULL so the full sync
 		// pass can still backfill authoritative phase timings.
 		if _, err := db.RecordCloudJobCompletion(database, summary.JobID, 0, 0, 0, "", "", marker, runID); err != nil {
+			if db.IsPermanentCloudCompletionNoop(err) {
+				slog.Debug("skipping permanently unrecordable manifest completion",
+					"component", "reconcile", "instance", instanceID,
+					"job_id", summary.JobID, "run_id", runID, "error", err)
+				continue
+			}
 			slog.Warn("credit manifest completion failed",
 				"component", "reconcile", "instance", instanceID,
 				"job_id", summary.JobID, "error", err)

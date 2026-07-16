@@ -233,6 +233,19 @@ func TestMarkRejectedCompletionProcessed_TransitionRejectionWritesMarker(t *test
 	}
 }
 
+func TestMarkRejectedCompletionProcessed_AbandonedAttemptWritesMarker(t *testing.T) {
+	w := &fakeMarkerWriter{}
+	rejection := fmt.Errorf("record completion: %w", db.ErrCloudCompletionAttemptAbandoned)
+
+	if !markRejectedCompletionProcessed(context.Background(), w, 42, 7, rejection) {
+		t.Fatal("markRejectedCompletionProcessed = false, want true for abandoned-attempt completion")
+	}
+	want := r2keys.JobAttemptProcessed(42, 7)
+	if len(w.keys) != 1 || w.keys[0] != want {
+		t.Fatalf("PutMarker keys = %v, want [%s]", w.keys, want)
+	}
+}
+
 // TestMarkRejectedCompletionProcessed_TransientErrorLeavesMarkerUnprocessed
 // verifies that transient errors (DB I/O, etc.) do NOT mark the completion
 // processed, so a later sync pass can retry ingestion.

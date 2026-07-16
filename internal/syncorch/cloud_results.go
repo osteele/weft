@@ -580,11 +580,9 @@ type processedMarkerWriter interface {
 	PutMarker(ctx context.Context, key string) error
 }
 
-// markRejectedCompletionProcessed writes the .processed marker for a
-// completion that RecordCloudJobCompletion permanently rejected, so the
-// .complete marker is not re-read and re-rejected on every sync pass.
-// Transient errors (e.g. DB I/O) are left unprocessed so a later pass can
-// retry. Returns true if the marker was written.
+// markRejectedCompletionProcessed delegates to
+// campaign.MarkRejectedCompletionProcessed; see there for which rejections
+// are permanent and settle the marker. Returns true if the marker was written.
 func markRejectedCompletionProcessed(ctx context.Context, w processedMarkerWriter, jobID, runID int64, err error) bool {
 	return campaign.MarkRejectedCompletionProcessed(ctx, w, jobID, runID, err)
 }
@@ -731,11 +729,13 @@ func syncCompletedJobAtRun(
 	wasTerminal := db.JobIsTerminal(database, jobID)
 	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
+		if markRejectedCompletionProcessed(ctx, r2Client, jobID, runID, err) {
+			slog.Debug("marked permanently unrecordable cloud completion processed",
+				"component", "sync", "job_id", jobID, "run_id", runID, "error", err)
+			os.RemoveAll(tmpDir)
+			return completedMarkerResult{}
+		}
 		slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
-		// Defense in depth: if the rejection is permanent (transition
-		// validation), mark the completion processed so it is not re-read
-		// and re-rejected on every sync pass.
-		markRejectedCompletionProcessed(ctx, r2Client, jobID, runID, err)
 		os.RemoveAll(tmpDir)
 		return completedMarkerResult{}
 	}

@@ -970,6 +970,42 @@ rule PackedSlotsUseIsolatedWorkdirs {
         -- sourceMappingsForLaunch emits one source mapping per slot.
 }
 
+-- A cloud agent job that fails BEFORE its user command starts — the
+-- cloud_after dependency gate skips it, or artifact staging fails — still
+-- owns a terminal outcome that a later sync must be able to explain. The
+-- recovery data (status file, failure-reason file, completion record) and
+-- the job's results directory are uploaded to R2 BEFORE the
+-- jobs/<jobID>/runs/<runID>/.complete marker is written, so any sync that
+-- observes the marker can also fetch the reason and log. Writing a bare
+-- .complete marker without first uploading the results directory strands
+-- the reason on the instance's local disk, lost when the instance is
+-- destroyed (incident wb59: marker-only ingestion produced exit 1 with an
+-- empty failure_reason and no log).
+rule EarlyJobFailureUploadsResultsBeforeCompleteMarker {
+    when: cloud agent records a job failure before the user command starts
+
+    ensures: the attempt's status file, failure-reason file, and completion
+             record are written locally
+    ensures: the job's results directory is uploaded to R2
+    ensures: the .complete marker is written only after the results upload,
+             never before it
+
+    @guidance
+        -- Implementation: cmd/agent/jobloop.go recordEarlyJobFailure is the
+        -- single helper for both early-failure sites (the cloud_after gate
+        -- skip and the artifact-staging failure). It calls WriteStatusFile,
+        -- WriteFailureReasonFile, WriteCompletionRecord, then
+        -- uploadJobResultsForAgent over the log/results dir, and only then
+        -- writes r2keys.JobAttemptComplete via r2PutForAgent. Results upload
+        -- before marker is the contract; the upload is best-effort (a failure
+        -- is logged to stderr) but the marker is never written first.
+        --
+        -- The cloud_after gate skip reason names the probed producer run:
+        -- "cloud_after_incomplete: producer job <N> run <M> has not
+        -- completed", so diagnosis points at the exact unfinished attempt
+        -- rather than only the producer job id.
+}
+
 invariant Attribution {
     -- Bytes stored or uploaded under job J's keys (R2 per-run prefixes,
     -- local artifact cache rows, host_data job-output assets) were written

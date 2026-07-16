@@ -1056,6 +1056,84 @@ rule RepairHistoricalCloudCompletions {
         --   internal/syncorch/cloud_results.go repair/broad-scan helpers
 }
 
+-- Recording a cloud completion for a specific (jobID, runID) attempt.
+-- A per-run .complete marker names an exact attempt; sync records the
+-- completion against that attempt's row, then — only if the record actually
+-- moved a not-yet-terminal job — logs a completion oplog entry and fires the
+-- terminal-status notification.
+--
+-- Three conditions make the record a *permanent* no-op that can never
+-- succeed on any later pass, the same permanence class as a status
+-- transition the graph forbids (jobs/job-lifecycle.allium § Job.status,
+-- e.g. completed -> failed):
+--   1. no attempt row exists for (jobID, runID);
+--   2. the attempt row is abandoned — a move-overlap loser retained as an
+--      audit row (job-move.allium § abandoned attempts). Its live sibling
+--      is running or terminal elsewhere, so the job is NOT terminal by way
+--      of this marker;
+--   3. the resulting transition is not permitted for the attempt's current
+--      status (an InvalidTransitionError, e.g. a stale failed marker over a
+--      later authoritative completed).
+--
+-- On any permanent rejection the marker is marked processed on first
+-- observation so the orphaned .complete is never re-read, NO completion
+-- oplog entry is written, and NO terminal-status notification fires. The
+-- attempt row (when it exists) is left untouched as forensic evidence.
+--
+-- Real incident (wb60): an abandoned move-source attempt ran to completion
+-- and its orphaned .complete marker fired 19 duplicate "job completed"
+-- notifications while the job was still queued/running on the move target.
+rule SyncRecordsCloudCompletion {
+    when: CloudCompletionMarkerObserved(job, run_id, exit_code)
+
+    -- Sampled BEFORE the record so a terminal-status notification fires at
+    -- most once — on the pass that actually transitions the job.
+    let was_terminal = job.is_terminal
+    -- physical-latest lookup: the exact attempt named by the marker, which
+    -- may be abandoned or absent (see file header § Physical attempt selection).
+    let attempt = AttemptByRunID(job, run_id)
+    let target_status = if exit_code = 0: completed else: failed
+
+    if attempt = null
+       or attempt.abandoned_at != null
+       or not StatusTransitionAllowed(attempt.status, target_status):
+        -- Permanent no-op: settle the marker, touch nothing else.
+        ensures: R2AttemptCompletionMarkedProcessed(job, run_id)
+
+    else:
+        ensures: attempt.status = target_status
+        ensures: attempt.exit_code = exit_code
+        ensures: job.status = target_status
+        if not was_terminal:
+            ensures: CloudCompletionOplogRecorded(job, target_status, exit_code)
+            ensures: NotifyJobTerminal(job, target_status, exit_code)
+
+    @guidance
+        -- Implementation anchors:
+        --   internal/db/cloud_job_completion.go RecordCloudJobCompletion
+        --     returns ErrCloudCompletionAttemptNotFound /
+        --     ErrCloudCompletionAttemptAbandoned; IsPermanentCloudCompletionNoop
+        --     reports either. The attempt SELECT is gated on
+        --     end_time IS NULL AND abandoned_at IS NULL, so an abandoned row
+        --     is skipped rather than reopened.
+        --   internal/campaign/job_completion.go MarkRejectedCompletionProcessed
+        --     unifies the abandoned/missing cases with the pre-existing
+        --     InvalidTransitionError case and writes the paired .processed
+        --     marker (r2keys.JobAttemptProcessed). Callers:
+        --     checkAndSyncJobCompleteRun and the manifest-credit loop.
+        --   internal/syncorch/cloud_results.go syncCompletedJobAtRun applies
+        --     the same rejection-then-mark-processed branch.
+        --   The deprecated internal/coordinator/vastai_sweep.go UPDATE excludes
+        --     abandoned attempts (abandoned_at IS NULL) and, when zero rows
+        --     match, marks the run's .complete and the job-scoped completed
+        --     markers processed.
+        -- Both the completion oplog entry (OpJobComplete / OpJobFail) and
+        -- notify.JobTerminal fire only inside the `not was_terminal` guard,
+        -- after a successful record — never on the permanent-noop path. This
+        -- is what stops an orphaned marker from re-notifying a live job on
+        -- every sync pass.
+}
+
 invariant ProcessedMarkerIsPerAttempt {
     -- The "already ingested" gate on R2 .complete markers is per-attempt,
     -- not per-job. Each .complete marker is paired with a .processed marker
