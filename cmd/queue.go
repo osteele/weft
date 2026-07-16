@@ -354,6 +354,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	localDir := workdir.ResolveLocal(workingDir)
 
+	if err := validatePEP723ScriptDependencyInvocation(localDir, command); err != nil {
+		return err
+	}
+
 	// Print recommendations for common patterns
 	printCommandRecommendations(command, localDir)
 

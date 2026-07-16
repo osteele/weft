@@ -587,6 +587,59 @@ print("hello")
 	}
 }
 
+func TestValidatePEP723ScriptDependencyInvocationRejectsUVRunPython(t *testing.T) {
+	dir := t.TempDir()
+	content := `# /// script
+# dependencies = ["torch>=2.5", "transformers>=4.44"]
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	err := validatePEP723ScriptDependencyInvocation(dir, "uv run python train.py --epochs 1")
+	if err == nil {
+		t.Fatal("expected uv run python to reject PEP 723 dependency bypass")
+	}
+	if !strings.Contains(err.Error(), "PEP 723 dependencies are bypassed") || !strings.Contains(err.Error(), "torch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidatePEP723ScriptDependencyInvocationAllowsUVRunScript(t *testing.T) {
+	dir := t.TempDir()
+	content := `# /// script
+# dependencies = ["torch>=2.5"]
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	if err := validatePEP723ScriptDependencyInvocation(dir, "uv run train.py --epochs 1"); err != nil {
+		t.Fatalf("validatePEP723ScriptDependencyInvocation: %v", err)
+	}
+}
+
+func TestValidatePEP723ScriptDependencyInvocationAllowsExplicitUVWith(t *testing.T) {
+	dir := t.TempDir()
+	content := `# /// script
+# dependencies = ["torch>=2.5", "transformers>=4.44"]
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	command := "uv run --with 'torch>=2.5' --with transformers>=4.44 python train.py"
+	if err := validatePEP723ScriptDependencyInvocation(dir, command); err != nil {
+		t.Fatalf("validatePEP723ScriptDependencyInvocation: %v", err)
+	}
+}
+
 func TestHasEnvAssignment(t *testing.T) {
 	if !hasEnvAssignment([]string{"HF_HUB_OFFLINE=0"}, "HF_HUB_OFFLINE") {
 		t.Fatal("expected exact env assignment to match")
