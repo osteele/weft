@@ -795,6 +795,28 @@ func TestRestartJobRejectsDeterministicPinnedHostGateMismatch(t *testing.T) {
 	}
 }
 
+func TestRestartJobRejectsMalformedNeeds(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python consume.py", "consumer")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"output/nsweep_reps.tar:wj5070"}); err != nil {
+		t.Fatalf("seed malformed needs: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, time.Now().Unix(), jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	err = restartJob(database, jobID, restartOverrides{})
+	if err == nil {
+		t.Fatal("expected malformed needs to be rejected")
+	}
+	if !strings.Contains(err.Error(), `job wj`) || !strings.Contains(err.Error(), `needs spec "output/nsweep_reps.tar:wj5070"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseRestartOverrides_ParsesGPUAndMem(t *testing.T) {
 	restartGPU = "nvidia>=24GB"
 	restartGPUClass = ""

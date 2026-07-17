@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
+	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
@@ -181,7 +182,7 @@ Examples:
   weft edit wj1595 --env FOO=bar --env BAZ=qux
   weft edit wj1595 --tag benchmark-isolation --tag exp-012
   weft edit wj1595 --input hf:meta-llama/Llama-3-8B
-  weft edit wj1595 --needs output/run/ckpt.pt:wj1778`,
+  weft edit wj1595 --needs output/run/ckpt.pt:1778`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
 }
@@ -1294,6 +1295,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		var newNeeds []string
 		if !editClearNeeds {
 			newNeeds = editNeeds
+			if err := artifactspec.ValidateNeedsSpecs(newNeeds); err != nil {
+				return fmt.Errorf("--needs: %w", err)
+			}
 		}
 		if err := db.SetJobNeeds(database, jobID, newNeeds); err != nil {
 			return fmt.Errorf("update needs: %w", err)
@@ -1669,6 +1673,6 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure (use default/auto/none/clear to clear)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
-	cmd.Flags().StringSliceVar(&editNeeds, "needs", nil, "Producer artifact dependency (e.g., output/foo.pt:wj1234), can be repeated; replaces existing --needs")
+	cmd.Flags().StringSliceVar(&editNeeds, "needs", nil, "Producer artifact dependency (e.g., output/foo.pt:1234), can be repeated; replaces existing --needs")
 	cmd.Flags().BoolVar(&editClearNeeds, "clear-needs", false, "Remove all --needs declarations")
 }

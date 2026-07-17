@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -135,6 +136,9 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 	}
 	if strings.TrimSpace(params.Host) == "" && strings.TrimSpace(params.WorkingDir) == "" {
 		return 0, fmt.Errorf("cloud jobs require a local working directory; run from a configured automap directory or pass --dir")
+	}
+	if err := artifactspec.ValidateNeedsSpecs(params.Needs); err != nil {
+		return 0, fmt.Errorf("needs: %w", err)
 	}
 
 	// Extract GPU from env vars if not explicitly set

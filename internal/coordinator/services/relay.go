@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/coordinatorrelay"
@@ -334,6 +335,9 @@ func (p *RelayProcessor) handleUpdate(ctx context.Context, req *coordinatorrelay
 		}
 	}
 	if req.Update.Needs != nil {
+		if err := artifactspec.ValidateNeedsSpecs(req.Update.Needs); err != nil {
+			return fmt.Errorf("update needs: %w", err)
+		}
 		if err := db.SetJobNeeds(p.db, job.ID, req.Update.Needs); err != nil {
 			return err
 		}

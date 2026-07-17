@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
@@ -745,6 +746,10 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	}
 	if job == nil {
 		return db.ErrJobNotFound
+	}
+	if err := artifactspec.ValidateNeedsSpecs(job.Needs); err != nil {
+		jobRef := ids.FormatJobID(jobID)
+		return fmt.Errorf("job %s has malformed --needs: %w; fix with `weft edit %s --needs ...` or clear with `weft edit %s --clear-needs`", jobRef, err, jobRef, jobRef)
 	}
 
 	effectiveStatus := job.EffectiveStatus()

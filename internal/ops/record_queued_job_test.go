@@ -182,6 +182,32 @@ func TestRecordQueuedJob_RollsBackPartialRecordOnLateError(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJob_RejectsMalformedNeedsBeforePersisting(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		Host:        "test-host",
+		WorkingDir:  "/tmp/project",
+		Command:     "python consume.py",
+		Description: "bad needs submit",
+		Needs:       []string{"output/nsweep_reps.tar:wj5070"},
+	})
+	if err == nil {
+		t.Fatal("expected malformed needs to be rejected")
+	}
+	if !strings.Contains(err.Error(), `needs spec "output/nsweep_reps.tar:wj5070"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM jobs WHERE command = ?`, "python consume.py").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("persisted jobs = %d, want 0", count)
+	}
+}
+
 func TestRecordQueuedJob_CloudRequiresWorkingDir(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -1012,10 +1012,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validate --needs entries have valid path:version or asset:NAME format
-	for _, spec := range runNeeds {
-		if _, err := runner.ParseNeedsSpec(spec); err != nil {
-			return fmt.Errorf("--needs: %w", err)
-		}
+	if err := runner.ValidateNeedsSpecs(runNeeds); err != nil {
+		return fmt.Errorf("--needs: %w", err)
 	}
 	if err := campaign.ValidateCUDADriverMinOverride(cliOverrides.MinCUDAVersion); err != nil {
 		return err

@@ -699,6 +699,39 @@ func resetEditState() {
 	editClearNeeds = false
 }
 
+func TestRunEditRejectsMalformedNeeds(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python consume.py", "consumer")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"output/old.pt:123"}); err != nil {
+		t.Fatalf("set original needs: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("needs", "output/nsweep_reps.tar:wj5070"); err != nil {
+		t.Fatalf("set needs flag: %v", err)
+	}
+
+	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
+	if err == nil {
+		t.Fatal("expected malformed needs to be rejected")
+	}
+	if !strings.Contains(err.Error(), `needs spec "output/nsweep_reps.tar:wj5070"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if got, want := strings.Join(job.Needs, ","), "output/old.pt:123"; got != want {
+		t.Fatalf("needs = %q, want %q", got, want)
+	}
+}
+
 func newEditTestCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "edit <job-id>"}
 	addEditFlags(cmd)

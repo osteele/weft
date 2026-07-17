@@ -217,7 +217,7 @@ cool100) and you want to avoid re-copying it. Use `asset:` when the file is
 on your laptop, on a remote host but should become portable, or you want
 any-host availability.
 
-**`asset:NAME` vs `--needs path:<job-id>`.** Use `--needs` when the file is
+**`asset:NAME` vs `--needs path:<numeric-job-id>`.** Use `--needs` when the file is
 the output of another weft job — weft already auto-tracks files in
 `output/` and pulls them from the producer's R2 artifacts. Use `asset:` for
 files you publish explicitly (no producer job).
@@ -1289,7 +1289,7 @@ the consumer starts. `--produces` paths are uploaded to R2 with no size cap, so
 multi-GB checkpoints, representation pkls, etc. are supported as artifact
 edges.
 
-Each `--needs` spec names a single file (`path:<job-id>`), not a directory.
+Each `--needs` spec names a single file (`path:<numeric-job-id>`), not a directory.
 Directory targets such as `--needs output/:1046` are not supported — give each
 file its own `--needs` flag.
 
@@ -1298,7 +1298,7 @@ state. A rental producer that already completed (hours or days ago) works the
 same as one still running — weft looks up the job in the DB and stages the
 needed files from R2 before the consumer starts. You do **not** need
 `weft artifact get` + `--input local:` for this; reference the completed job
-by ID with `--needs path:<job-id>`.
+by ID with `--needs path:<numeric-job-id>`.
 
 Caveat for on-prem (inventory) producers: staging reads from the producer
 host's filesystem, not R2. If the producer's on-disk artifacts have been

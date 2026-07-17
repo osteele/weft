@@ -854,7 +854,7 @@ rule ArtifactUploadHasNoSizeCap {
         -- Neither cloud agent path (uploadOutputDirs,
         -- uploadArtifactManifestEntries) consults any size threshold, and
         -- the on-prem SyncOutputsBack caller passes maxMB=0. Consumers
-        -- (--needs path:<job-id>) can rely on multi-GB --produces artifacts
+        -- (--needs path:<numeric-job-id>) can rely on multi-GB --produces artifacts
         -- (checkpoints, representation tensors) being available, subject to
         -- the per-invocation timeout below and to disk available on the
         -- rental.

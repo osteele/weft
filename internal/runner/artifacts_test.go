@@ -92,6 +92,16 @@ func TestParseNeedsSpec_Asset(t *testing.T) {
 	})
 }
 
+func TestValidateNeedsSpecsRejectsWJPrefix(t *testing.T) {
+	err := ValidateNeedsSpecs([]string{"output/nsweep_reps.tar:wj5070"})
+	if err == nil {
+		t.Fatal("expected malformed wj-prefixed needs spec to be rejected")
+	}
+	if got, want := err.Error(), `needs spec "output/nsweep_reps.tar:wj5070" must include :version suffix or use asset:NAME form`; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestArtifactSatisfiedFile(t *testing.T) {
 	tests := []struct {
 		name     string
