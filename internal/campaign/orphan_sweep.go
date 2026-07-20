@@ -27,6 +27,10 @@ var (
 	lastOrphanSweep   time.Time
 )
 
+type cleanupInventoryClient interface {
+	ListInstancesForCleanup() ([]cloud.Instance, error)
+}
+
 // SweepOrphanedInstances lists all instances from each provider, filters to
 // weft-labeled ones, cross-references with the local DB, and destroys any
 // whose launch row is terminal or whose provider ID is unknown to weft.
@@ -38,7 +42,7 @@ var (
 // instances are never touched.
 func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed int, err error) {
 	for _, client := range clients {
-		instances, listErr := client.ListAllInstances()
+		instances, listErr := listInstancesForOrphanSweep(client)
 		if listErr != nil {
 			slog.Warn("ListAllInstances failed", "component", "orphan-sweep", "provider", client.Provider(), "error", listErr)
 			continue
@@ -66,6 +70,13 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 		}
 	}
 	return destroyed, nil
+}
+
+func listInstancesForOrphanSweep(client cloud.Client) ([]cloud.Instance, error) {
+	if cleanupClient, ok := client.(cleanupInventoryClient); ok {
+		return cleanupClient.ListInstancesForCleanup()
+	}
+	return client.ListAllInstances()
 }
 
 // shouldDestroyWeftInstance returns true when a weft-labeled provider

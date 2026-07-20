@@ -81,8 +81,8 @@ type gqlResponse struct {
 	} `json:"errors"`
 }
 
-// readAPIKey returns the RunPod API key from $RUNPOD_API_KEY or ~/.runpod/config.toml.
-func readAPIKey() (string, error) {
+// ReadAPIKey returns the RunPod API key from $RUNPOD_API_KEY or ~/.runpod/config.toml.
+func ReadAPIKey() (string, error) {
 	if key := strings.TrimSpace(os.Getenv("RUNPOD_API_KEY")); key != "" {
 		return key, nil
 	}
@@ -102,6 +102,10 @@ func readAPIKey() (string, error) {
 		return "", fmt.Errorf("runpod api key not found; set RUNPOD_API_KEY or run `runpodctl doctor`")
 	}
 	return key, nil
+}
+
+func readAPIKey() (string, error) {
+	return ReadAPIKey()
 }
 
 // fetchGPUTypes queries the RunPod GraphQL API for GPU types with pricing and

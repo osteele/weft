@@ -37,6 +37,13 @@ func TestRunpodctlCommandEnvLoadsKeyFromConfig(t *testing.T) {
 	if !envContainsKV(env, "RUNPOD_API_KEY", "from-config") {
 		t.Fatalf("expected RUNPOD_API_KEY from ~/.runpod/config.toml, env=%v", env)
 	}
+	key, err := ReadAPIKey()
+	if err != nil {
+		t.Fatalf("ReadAPIKey: %v", err)
+	}
+	if key != "from-config" {
+		t.Fatalf("ReadAPIKey = %q, want from-config", key)
+	}
 }
 
 func TestCleanRunpodctlErrorDetailPrefersJSONError(t *testing.T) {

@@ -37,6 +37,20 @@ func TestEncodeTemplateStartCommandArg(t *testing.T) {
 	})
 }
 
+func TestSelfDestructCmdDoesNotMaskDeleteFailure(t *testing.T) {
+	client := NewCloudClient()
+	cmd := client.SelfDestructCmd("pod-123")
+	if strings.Contains(cmd, "|| true") {
+		t.Fatalf("SelfDestructCmd masks delete failures: %q", cmd)
+	}
+	if strings.Contains(cmd, "2>/dev/null") {
+		t.Fatalf("SelfDestructCmd hides delete stderr: %q", cmd)
+	}
+	if !strings.Contains(cmd, "runpodctl pod delete") {
+		t.Fatalf("SelfDestructCmd = %q, want runpodctl pod delete", cmd)
+	}
+}
+
 func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
 	args, err := buildCreatePodArgs("NVIDIA A100 80GB PCIe", cloud.CreateOpts{
 		TemplateID: "tpl-bootstrap",

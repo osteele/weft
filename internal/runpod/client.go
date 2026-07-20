@@ -390,7 +390,7 @@ func (c *CloudClient) CopyBetweenInstances(_, _ string, _, _ string) error {
 }
 
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
-	return `runpodctl pod delete "${RUNPOD_POD_ID:-` + providerInstanceID + `}" 2>/dev/null || true`
+	return `runpodctl pod delete "${RUNPOD_POD_ID:-` + providerInstanceID + `}"`
 }
 
 func (c *CloudClient) capabilities(ctx context.Context) (*cliCapabilities, error) {

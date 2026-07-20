@@ -10,6 +10,15 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+type cleanupInventoryMockClient struct {
+	*cloud.MockClient
+	listInstancesForCleanup func() ([]cloud.Instance, error)
+}
+
+func (m *cleanupInventoryMockClient) ListInstancesForCleanup() ([]cloud.Instance, error) {
+	return m.listInstancesForCleanup()
+}
+
 func TestExtractCampaignID(t *testing.T) {
 	tests := []struct {
 		label string
@@ -30,6 +39,62 @@ func TestExtractCampaignID(t *testing.T) {
 		if ok != tt.ok || got != tt.want {
 			t.Errorf("extractCampaignID(%q) = (%d, %v), want (%d, %v)", tt.label, got, ok, tt.want, tt.ok)
 		}
+	}
+}
+
+func TestSweepOrphanedInstances_UsesCleanupInventoryForRunPodExitedPods(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: string(cloud.ProviderRunpod),
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "pod-exited-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	listAllCalled := false
+	var destroyedID string
+	mockClient := &cleanupInventoryMockClient{
+		MockClient: &cloud.MockClient{
+			ProviderVal: cloud.ProviderRunpod,
+			ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+				listAllCalled = true
+				return nil, nil
+			},
+			DestroyInstanceFunc: func(id string) error {
+				destroyedID = id
+				return nil
+			},
+		},
+		listInstancesForCleanup: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{
+					ProviderID: "pod-exited-123",
+					Status:     cloud.ProviderStatusExited,
+					Label:      "weft/i" + strconv.FormatInt(instanceID, 10),
+				},
+			}, nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 1 {
+		t.Errorf("destroyed = %d, want 1", destroyed)
+	}
+	if destroyedID != "pod-exited-123" {
+		t.Errorf("destroyed ID = %q, want pod-exited-123", destroyedID)
+	}
+	if listAllCalled {
+		t.Error("ListAllInstances should not be called when cleanup inventory is available")
 	}
 }
 

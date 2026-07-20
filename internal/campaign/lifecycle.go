@@ -30,6 +30,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/retrypolicy"
+	"github.com/osteele/weft/internal/runpod"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
@@ -941,8 +942,9 @@ func runpodDistinctMachineConflict(database *sql.DB, campaignID *int64, currentL
 }
 
 var (
-	retryAttemptPattern = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
-	replanChainPattern  = regexp.MustCompile(`chain\s+(\d+)/(\d+)`)
+	retryAttemptPattern   = regexp.MustCompile(`attempt\s+(\d+)/(\d+)`)
+	replanChainPattern    = regexp.MustCompile(`chain\s+(\d+)/(\d+)`)
+	runpodAPIKeyForLaunch = runpod.ReadAPIKey
 )
 
 func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEvent {
@@ -982,6 +984,17 @@ func classifyLaunchGroupPhaseEvent(group InstanceGroup, phase string) LaunchEven
 		return event
 	}
 	return event
+}
+
+func addRunpodAPIKeyEnv(envVars map[string]string, launchID int64) {
+	token, err := runpodAPIKeyForLaunch()
+	if err == nil && strings.TrimSpace(token) != "" {
+		envVars["RUNPOD_API_KEY"] = token
+		return
+	}
+	if err != nil {
+		slog.Warn("runpod api key unavailable for in-pod self-destruct", "launch_id", launchID, "error", err)
+	}
 }
 
 func createInstanceWithReplacement(
@@ -2433,9 +2446,7 @@ func LaunchInstance(
 		envVars["HUGGING_FACE_HUB_TOKEN"] = token
 	}
 	if client.Provider() == cloud.ProviderRunpod {
-		if token := os.Getenv("RUNPOD_API_KEY"); token != "" {
-			envVars["RUNPOD_API_KEY"] = token
-		}
+		addRunpodAPIKeyEnv(envVars, instanceID)
 	}
 
 	// Merge env vars into createOpts

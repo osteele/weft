@@ -68,6 +68,21 @@ func TestApplyGroupCreateRequirements_RunpodCloudType(t *testing.T) {
 	}
 }
 
+func TestAddRunpodAPIKeyEnvUsesConfigBackedResolver(t *testing.T) {
+	orig := runpodAPIKeyForLaunch
+	t.Cleanup(func() { runpodAPIKeyForLaunch = orig })
+	runpodAPIKeyForLaunch = func() (string, error) {
+		return "from-config", nil
+	}
+
+	env := map[string]string{}
+	addRunpodAPIKeyEnv(env, 123)
+
+	if env["RUNPOD_API_KEY"] != "from-config" {
+		t.Fatalf("RUNPOD_API_KEY = %q, want from-config", env["RUNPOD_API_KEY"])
+	}
+}
+
 func TestCreateInstanceWithReplacement_PreservesExplicitGPUCount(t *testing.T) {
 	var gotGPUCount int
 	client := &cloud.MockClient{
