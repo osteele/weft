@@ -176,6 +176,8 @@ type groupedViewLayout struct {
 	daemonActionable            bool
 	vastCreditWarningY          int
 	vastCreditWarningActionable bool
+	creditWarningBillingURL     string
+	creditWarningProviderName   string
 }
 
 type groupedSelectionKey struct {
@@ -188,6 +190,7 @@ var listRestartDaemonFunc = restartDaemonForListTUI
 var listOpenURLFunc = openURLForListTUI
 
 const vastaiBillingURL = "https://cloud.vast.ai/billing/"
+const runpodBillingURL = "https://console.runpod.io/user/billing"
 
 type listGroupMode string
 
@@ -1231,7 +1234,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = fmt.Sprintf("Open browser failed: %v", msg.err)
 			return m, nil
 		}
-		m.statusMessage = "Opened Vast.ai billing"
+		m.statusMessage = fmt.Sprintf("Opened %s billing", providerNameForBillingURL(msg.url))
 		return m, nil
 
 	case listProjectCandidatesLoadedMsg:
@@ -1612,6 +1615,8 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		daemonActionable:            sharedStatus.daemonActionable,
 		vastCreditWarningY:          vastCreditWarningY,
 		vastCreditWarningActionable: sharedStatus.vastCreditWarningActionable,
+		creditWarningBillingURL:     sharedStatus.creditWarningBillingURL,
+		creditWarningProviderName:   sharedStatus.creditWarningProviderName,
 	}
 }
 
@@ -2024,8 +2029,8 @@ func (m *listTUIModel) handleGroupedStatusClick(y int, layout groupedViewLayout)
 		return restartDaemonListCmd()
 	}
 	if layout.vastCreditWarningActionable && y == layout.vastCreditWarningY {
-		m.statusMessage = "Opening Vast.ai billing..."
-		return openURLListCmd(vastaiBillingURL)
+		m.statusMessage = fmt.Sprintf("Opening %s billing...", layout.creditWarningProviderName)
+		return openURLListCmd(layout.creditWarningBillingURL)
 	}
 	return nil
 }
@@ -2034,25 +2039,30 @@ func (m *listTUIModel) handleFlatStatusClick(y int) tea.Cmd {
 	if m.hideStatusArea {
 		return nil
 	}
-	warningY, actionable := m.flatVastCreditWarningY()
-	if !actionable || y != warningY {
+	warningY, billingURL, providerName := m.flatCreditWarningTarget()
+	if billingURL == "" || y != warningY {
 		return nil
 	}
-	m.statusMessage = "Opening Vast.ai billing..."
-	return openURLListCmd(vastaiBillingURL)
+	m.statusMessage = fmt.Sprintf("Opening %s billing...", providerName)
+	return openURLListCmd(billingURL)
 }
 
 func (m listTUIModel) flatVastCreditWarningY() (int, bool) {
+	y, billingURL, _ := m.flatCreditWarningTarget()
+	return y, billingURL != ""
+}
+
+func (m listTUIModel) flatCreditWarningTarget() (int, string, string) {
 	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, -1, m.autoRunRateTargetCents, false)
 	if !sharedStatus.vastCreditWarningActionable || sharedStatus.vastCreditWarningLineIndex < 0 {
-		return -1, false
+		return -1, "", ""
 	}
 	y := 2 + m.flatBodyRows() + 1
 	if m.projectInputActive {
 		y += len(m.projectFilterPromptLines())
 	}
 	y += len(m.selectedJobDetailLines())
-	return y + sharedStatus.vastCreditWarningLineIndex, true
+	return y + sharedStatus.vastCreditWarningLineIndex, sharedStatus.creditWarningBillingURL, sharedStatus.creditWarningProviderName
 }
 
 func (m listTUIModel) isUJGroupedView() bool {

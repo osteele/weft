@@ -110,6 +110,8 @@ type sharedTUIStatusLinesView struct {
 	daemonActionable            bool
 	vastCreditWarningLineIndex  int
 	vastCreditWarningActionable bool
+	creditWarningBillingURL     string
+	creditWarningProviderName   string
 }
 
 func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning int, targetCents int, daemonActionHint bool) sharedTUIStatusLinesView {
@@ -125,7 +127,9 @@ func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning 
 	}
 	if warning := renderProviderCreditWarningLineView(width); warning.line != "" {
 		view.vastCreditWarningLineIndex = len(lines)
-		view.vastCreditWarningActionable = warning.vastActionable
+		view.vastCreditWarningActionable = warning.billingURL != ""
+		view.creditWarningBillingURL = warning.billingURL
+		view.creditWarningProviderName = warning.providerName
 		lines = append(lines, warning.line)
 	}
 	if banner := renderPausedLaunchesBanner(database, width); banner != "" {
@@ -136,8 +140,9 @@ func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning 
 }
 
 type providerCreditWarningLineView struct {
-	line           string
-	vastActionable bool
+	line         string
+	billingURL   string
+	providerName string
 }
 
 func renderProviderCreditWarningLineView(width int) providerCreditWarningLineView {
@@ -145,11 +150,31 @@ func renderProviderCreditWarningLineView(width int) providerCreditWarningLineVie
 	if warning == "" {
 		return providerCreditWarningLineView{}
 	}
-	actionable := strings.Contains(warning, "WARNING: Vast.ai credits low")
+	billingURL, providerName := providerCreditBillingTarget(warning)
 	if width > 0 {
 		warning = truncateDisplayWidth(warning, width)
 	}
-	return providerCreditWarningLineView{line: tuiFailedStyle.Render(warning), vastActionable: actionable}
+	return providerCreditWarningLineView{line: tuiFailedStyle.Render(warning), billingURL: billingURL, providerName: providerName}
+}
+
+func providerCreditBillingTarget(warning string) (string, string) {
+	switch {
+	case strings.Contains(warning, "WARNING: Vast.ai credits low"):
+		return vastaiBillingURL, "Vast.ai"
+	case strings.Contains(warning, "WARNING: RunPod credits low"):
+		return runpodBillingURL, "RunPod"
+	default:
+		return "", ""
+	}
+}
+
+func providerNameForBillingURL(url string) string {
+	switch url {
+	case runpodBillingURL:
+		return "RunPod"
+	default:
+		return "Vast.ai"
+	}
 }
 
 func renderDaemonStatusLine(width int) string {

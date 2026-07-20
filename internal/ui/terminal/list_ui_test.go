@@ -3027,10 +3027,63 @@ func TestListTUIMouseClickFlatVastCreditWarningOpensBilling(t *testing.T) {
 	}
 }
 
-func TestListTUIMouseClickCreditWarningIgnoresNonVastLowCredit(t *testing.T) {
+func TestListTUIMouseClickFlatRunPodCreditWarningOpensBilling(t *testing.T) {
+	SeedProviderCreditWarningForTesting(t, "WARNING: RunPod credits low ($5.00 < $10.00)")
+	var opened []string
+	oldOpen := listOpenURLFunc
+	listOpenURLFunc = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	t.Cleanup(func() { listOpenURLFunc = oldOpen })
+
+	m := listTUIModel{
+		title:  "Jobs",
+		width:  100,
+		height: 12,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	warningY, actionable := m.flatVastCreditWarningY()
+	if !actionable || warningY < 0 {
+		t.Fatal("expected actionable RunPod credit warning row")
+	}
+
+	next, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      warningY,
+	})
+	got := next.(listTUIModel)
+	if got.statusMessage != "Opening RunPod billing..." {
+		t.Fatalf("statusMessage = %q, want open progress", got.statusMessage)
+	}
+	if cmd == nil {
+		t.Fatal("expected open command")
+	}
+	msg, ok := cmd().(listURLOpenedMsg)
+	if !ok {
+		t.Fatalf("open command returned %T", msg)
+	}
+	if msg.url != runpodBillingURL {
+		t.Fatalf("opened url = %q, want %q", msg.url, runpodBillingURL)
+	}
+	if len(opened) != 1 || opened[0] != runpodBillingURL {
+		t.Fatalf("opened = %v, want [%q]", opened, runpodBillingURL)
+	}
+
+	next, _ = got.Update(msg)
+	got = next.(listTUIModel)
+	if got.statusMessage != "Opened RunPod billing" {
+		t.Fatalf("statusMessage = %q, want success", got.statusMessage)
+	}
+}
+
+func TestListTUIMouseClickCreditWarningIgnoresNonBillingWarning(t *testing.T) {
 	for _, warning := range []string{
-		"WARNING: RunPod credits low ($5.00 < $10.00)",
 		"WARNING: Vast.ai credit check failed (owner: Extra inputs are not permitted)",
+		"WARNING: RunPod credit check failed (401 Unauthorized)",
 	} {
 		t.Run(warning, func(t *testing.T) {
 			SeedProviderCreditWarningForTesting(t, warning)
