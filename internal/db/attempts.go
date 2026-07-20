@@ -496,6 +496,9 @@ func CreateMoveTargetAttempt(database *sql.DB, intentID, jobID int64, host strin
 	); err != nil {
 		return 0, fmt.Errorf("record move target attempt: %w", err)
 	}
+	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID); err != nil {
+		return 0, fmt.Errorf("clear placement reasons for move target: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -554,6 +557,14 @@ func ConfirmMoveTargetAccepted(database *sql.DB, intentID int64, resolution stri
 		string(MoveIntentStateConfirmed), now, resolution, intentID, string(MoveIntentStateOpen),
 	); err != nil {
 		return fmt.Errorf("confirm move intent: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs
+		    SET placement_reasons = NULL
+		  WHERE id = (SELECT job_id FROM move_intents WHERE id = ?)`,
+		intentID,
+	); err != nil {
+		return fmt.Errorf("clear placement reasons for accepted move target: %w", err)
 	}
 	return tx.Commit()
 }

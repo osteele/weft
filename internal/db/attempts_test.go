@@ -252,6 +252,9 @@ func TestOpenMoveTargetAttemptHiddenUntilAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateMoveIntent: %v", err)
 	}
+	if err := SetJobPlacementReasons(database, jobID, []string{`waiting for "output/nsweep_reps.tar" from wj5070 (running)`}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
 	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "cool100", nil, StatusQueued)
 	if err != nil {
 		t.Fatalf("CreateMoveTargetAttempt: %v", err)
@@ -281,7 +284,13 @@ func TestOpenMoveTargetAttemptHiddenUntilAccepted(t *testing.T) {
 	if job.Host != "cool30" || job.LatestRunID == nil || *job.LatestRunID != sourceAttemptID {
 		t.Fatalf("job = host %q latest %v, want source cool30/%d", job.Host, job.LatestRunID, sourceAttemptID)
 	}
+	if len(job.PlacementReasons) != 0 {
+		t.Fatalf("placement reasons after target attempt = %v, want cleared", job.PlacementReasons)
+	}
 
+	if err := SetJobPlacementReasons(database, jobID, []string{`waiting for "output/nsweep_reps.tar" from wj5070 (running)`}); err != nil {
+		t.Fatalf("SetJobPlacementReasons before confirm: %v", err)
+	}
 	if err := ConfirmMoveTargetAccepted(database, intent.ID, "accepted"); err != nil {
 		t.Fatalf("ConfirmMoveTargetAccepted: %v", err)
 	}
@@ -298,6 +307,13 @@ func TestOpenMoveTargetAttemptHiddenUntilAccepted(t *testing.T) {
 	}
 	if sourceReason != AttemptAbandonedMoveTargetAccepted {
 		t.Fatalf("source abandoned reason = %q, want %q", sourceReason, AttemptAbandonedMoveTargetAccepted)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after confirm: %v", err)
+	}
+	if len(job.PlacementReasons) != 0 {
+		t.Fatalf("placement reasons after confirm = %v, want cleared", job.PlacementReasons)
 	}
 }
 
