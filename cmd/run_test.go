@@ -349,6 +349,68 @@ dependencies = ["torch==2.6.0"]
 	}
 }
 
+func TestRejectUnlockedTorchCloudRuntimeRejectsLockWithoutCUDAVariant(t *testing.T) {
+	dir := t.TempDir()
+	// pyproject proves the project uses torch (ProjectUsesTorch reads it, not
+	// uv.lock).
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A uv.lock exists, but its torch is a CPU/macOS wheel: no /whl/cuXXX URL
+	// and no nvidia-*-cuNN runtime deps, so no CUDA variant (driver floor) is
+	// derivable, and auto cloud placement must be rejected at submit.
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://pypi.org/simple" }
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
+	if err == nil {
+		t.Fatal("expected uv.lock without a derivable CUDA variant to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot derive a CUDA wheel variant") {
+		t.Fatalf("error = %q, want CUDA-variant-underivable diagnosis", err.Error())
+	}
+	// An explicit driver floor unblocks it.
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.8", nil, nil); err != nil {
+		t.Fatalf("explicit CUDA floor rejected: %v", err)
+	}
+}
+
+func TestRejectUnlockedTorchCloudRuntimeAllowsLockWithCUDAVariant(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`
+[project]
+dependencies = ["torch"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// uv.lock resolves a CUDA torch stack (nvidia-*-cu12 runtime deps), from
+	// which weft derives a cu124 variant and hence a driver floor — placement
+	// can proceed.
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "nvidia-cublas-cu12"
+version = "12.4.5.8"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil); err != nil {
+		t.Fatalf("lock with derivable CUDA variant should be allowed: %v", err)
+	}
+}
+
 func TestRejectUnlockedTorchCloudRuntimeAllowsScriptTorchRange(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(`

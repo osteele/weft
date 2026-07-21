@@ -2013,11 +2013,12 @@ func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, command, host, cu
 		return
 	}
 	fmt.Fprintln(cmd.ErrOrStderr(),
-		"Tip: this project looks torch-using but has no torch pin in uv.lock / pyproject.toml. "+
-			"Cloud rentals may have older CUDA drivers than the wheel an in-script `uv venv` "+
-			"resolves on the rental. Add `--cuda-driver-min 12.4` (or whatever your wheel needs) "+
-			"to gate placement on driver version. See docs/guides/cloud-instance-debugging.md "+
-			"§ \"Torch driver too old\".")
+		"Tip: this project looks torch-using but exposes no CUDA-pinned torch wheel in uv.lock / "+
+			"pyproject.toml. Cloud rentals often carry OLDER CUDA drivers than the wheel `uv sync` "+
+			"resolves on the rental — and the resolved wheel sometimes needs a NEWER driver than a "+
+			"typical rental has. Add `--cuda-driver-min <version>` set to whatever your resolved wheel "+
+			"needs (its cuXXX tag — frequently higher than common rental drivers) to gate placement on "+
+			"driver version. See docs/guides/cloud-instance-debugging.md § \"Torch driver too old\".")
 }
 
 func rejectUnlockedTorchCloudRuntime(localDir, command, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta) error {
@@ -2030,20 +2031,29 @@ func rejectUnlockedTorchCloudRuntime(localDir, command, host, cudaDriverMin stri
 	if dataloc.ScanScriptTorchRequirement(localDir, command) != nil {
 		return nil
 	}
-	if dataloc.HasUVLock(localDir) {
-		return nil
-	}
 	if !dataloc.ProjectUsesTorch(localDir) {
 		return nil
+	}
+	// Cloud placement is safe only when weft can derive a CUDA wheel variant —
+	// and therefore a driver floor — from the torch pin. ScanTorchPin prefers
+	// uv.lock (what actually installs) and falls back to pyproject.toml; a
+	// variant gives the offer filter and pre-setup driver probe a floor to
+	// enforce.
+	if pin := dataloc.ScanTorchPin(localDir); pin != nil && pin.CudaVariant != "" {
+		return nil
+	}
+	// A uv.lock with no recognizable CUDA variant (a CPU/macOS wheel, or a CUDA
+	// runtime family the scanner does not recognize) yields no driver floor, so
+	// uv can resolve a newer CUDA wheel on the rental than weft gated on. Fail
+	// closed at submit rather than at the post-`uv sync` preflight after full
+	// rental spend.
+	if dataloc.HasUVLock(localDir) {
+		return fmt.Errorf("torch runtime is locked but weft cannot derive a CUDA wheel variant (driver floor) from uv.lock: the lock may pin a CPU/macOS torch wheel or a CUDA family weft does not recognize, so `uv sync` can resolve a newer CUDA wheel on the rental than weft can gate placement on. Pass --cuda-driver-min <version> (the CUDA version your resolved wheel needs), pin a CUDA-specific torch wheel, or target an explicit --host")
 	}
 	req := dataloc.ScanPyprojectTorchRequirement(localDir)
 	if req == nil || !req.Exact {
 		return fmt.Errorf("torch runtime is not locked for cloud placement: %s. Weft cannot derive reliable CUDA/driver floors from an unlocked torch range before choosing a rental. Run `uv lock`, use an exact torch dependency, or target an explicit --host",
 			describeTorchRequirement(req))
-	}
-	pin := dataloc.ScanTorchPin(localDir)
-	if pin != nil && pin.CudaVariant != "" {
-		return nil
 	}
 	return fmt.Errorf("torch runtime is not locked for cloud placement: pyproject.toml pins torch %s but does not expose the CUDA wheel variant. Run `uv lock`, add a CUDA-specific [tool.uv] index, pass --cuda-driver-min, or target an explicit --host",
 		req.Version)

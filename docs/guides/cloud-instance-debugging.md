@@ -311,14 +311,25 @@ against the driver's CUDA compatibility.
 - **If the project can't pin torch** (the script orchestrates an isolated
   venv that resolves torch on the rental — see workflow-guide.md
   § "Pinning torch inside an isolated venv"), declare the floor in the
-  script's PEP 723 block:
+  script's PEP 723 block. Set it to the CUDA version the wheel your venv
+  resolves actually needs — check its `cuXXX` tag. Note this is frequently
+  *higher* than common rental drivers (older Vast hosts sit at 12.2–12.4),
+  so the latest torch may need e.g. 12.8 or 13.0, not 12.4:
   ```python
   # [tool.weft]
-  # cuda-driver-min = "12.4"   # matches the cu124 wheel the venv installs
+  # cuda-driver-min = "12.8"   # = the cuXXX tag of the wheel the venv installs
   ```
   This is the **permanent** property of the script and should ride with
-  it. Use `--cuda-driver-min 12.4` on `weft run` only for ad-hoc
+  it. Use `--cuda-driver-min <version>` on `weft run` only for ad-hoc
   overrides.
+
+- **Lock present but no derivable CUDA variant.** A `uv.lock` that records
+  torch but a CPU/macOS wheel — or a CUDA runtime family the scanner doesn't
+  recognize — yields no `cuXXX` tag, so weft cannot derive a driver floor.
+  Auto-placed cloud submissions are rejected at submit in this case (rather
+  than renting and failing at the post-`uv sync` preflight). Re-lock with a
+  CUDA-specific torch wheel, pass `--cuda-driver-min <version>`, or target an
+  explicit `--host`.
 - **`gpu-arch-max` and `cuda-driver-min` are different axes.**
   `gpu-arch-max` catches "torch wheel was built for sm_90 but this GPU
   is sm_80". `cuda-driver-min` catches "torch needs CUDA runtime 12.8 but

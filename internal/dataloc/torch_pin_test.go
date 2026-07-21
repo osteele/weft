@@ -60,6 +60,47 @@ version = "12.8.90"
 	}
 }
 
+func TestScanTorchPin_UVLockNvidiaCUDA13Deps(t *testing.T) {
+	dir := t.TempDir()
+	// A CUDA 13 stack ships nvidia-*-cu13 runtime packages. The scanner's
+	// nvidia matcher must recognize the open -cuNN suffix, not just cu12, or
+	// the variant silently comes back empty and cloud placement loses its
+	// driver floor. nvidia-nccl-cu13 is present to confirm it is ignored: its
+	// version (2.x, the NCCL version) does not track the CUDA toolkit and would
+	// infer a bogus variant if matched.
+	mustWrite(t, filepath.Join(dir, "uv.lock"), `
+[[package]]
+name = "torch"
+version = "2.12.1"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "nvidia-cublas-cu13"
+version = "13.0.0.19"
+
+[[package]]
+name = "nvidia-cusparse-cu13"
+version = "13.0.1.3"
+
+[[package]]
+name = "nvidia-nccl-cu13"
+version = "2.28.3"
+`)
+	pin := ScanTorchPin(dir)
+	if pin == nil {
+		t.Fatalf("expected pin, got nil")
+	}
+	if pin.Version != "2.12.1" {
+		t.Errorf("Version = %q", pin.Version)
+	}
+	if pin.CudaVariant != "cu130" {
+		t.Errorf("CudaVariant = %q, want cu130", pin.CudaVariant)
+	}
+	if got := TorchMinCUDAVersion(dir); got != "13.0" {
+		t.Errorf("TorchMinCUDAVersion = %q, want 13.0", got)
+	}
+}
+
 func TestCUDAVariantVersion(t *testing.T) {
 	tests := []struct {
 		variant string

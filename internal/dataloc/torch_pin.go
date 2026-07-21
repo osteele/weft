@@ -178,10 +178,20 @@ var (
 	uvLockWhlCudaRe      = regexp.MustCompile(`/whl/(cu\d+)\b`)
 	cudaRuntimeVersionRe = regexp.MustCompile(`^(\d+)\.(\d+)\.`)
 	// cudaRuntimePackageRe matches uv.lock package names that ship native CUDA
-	// runtime libraries bundled with a PyTorch wheel (the nvidia-*-cu12 family,
-	// e.g. nvidia-cusparse-cu12, nvidia-nvjitlink-cu12). Pure-Python nvidia
-	// packages such as nvidia-ml-py have no -cu12 suffix and do not match.
-	cudaRuntimePackageRe = regexp.MustCompile(`^nvidia-.+-cu12$`)
+	// runtime libraries bundled with a PyTorch wheel (the nvidia-*-cuNN family,
+	// e.g. nvidia-cusparse-cu12, nvidia-nvjitlink-cu13). Pure-Python nvidia
+	// packages such as nvidia-ml-py have no -cuNN suffix and do not match. The
+	// suffix is left open (\d+) so CUDA 13+ stacks are recognized too.
+	cudaRuntimePackageRe = regexp.MustCompile(`^nvidia-.+-cu\d+$`)
+	// cudaToolkitVersionedNvidiaRe matches the nvidia-*-cuNN runtime packages
+	// whose own PyPI version tracks the CUDA toolkit major.minor (cublas,
+	// cusparse, nvjitlink, ...), which scanUVLock reads to infer a torch CUDA
+	// variant. The -cuNN suffix is deliberately open so CUDA 13+ stacks
+	// (nvidia-*-cu13) are recognized, not just the cu12 family. NCCL, cuDNN,
+	// nvtx, and nvidia-ml-py are excluded: their versions do not track the CUDA
+	// toolkit version, so reading them would infer a bogus variant.
+	cudaToolkitVersionedNvidiaRe = regexp.MustCompile(
+		`^nvidia-(?:cublas|cuda-cupti|cuda-nvrtc|cuda-runtime|cufft|curand|cusolver|cusparse|nvjitlink)-cu\d+$`)
 )
 
 // extraReusablePackages names non-nvidia packages that a PyTorch base image
@@ -196,18 +206,6 @@ var extraReusablePackages = map[string]bool{
 // provides directly. They are always excluded when reusing the image's torch,
 // independent of the project's uv.lock.
 var torchImageBundledPackages = []string{"torch", "torchaudio", "torchvision"}
-
-var cudaBearingNvidiaPackages = map[string]bool{
-	"nvidia-cublas-cu12":       true,
-	"nvidia-cuda-cupti-cu12":   true,
-	"nvidia-cuda-nvrtc-cu12":   true,
-	"nvidia-cuda-runtime-cu12": true,
-	"nvidia-cufft-cu12":        true,
-	"nvidia-curand-cu12":       true,
-	"nvidia-cusolver-cu12":     true,
-	"nvidia-cusparse-cu12":     true,
-	"nvidia-nvjitlink-cu12":    true,
-}
 
 // CUDAVariantVersion converts a torch CUDA wheel tag such as "cu128" or
 // "cu121" to a provider CUDA version floor such as "12.8" or "12.1".
@@ -328,7 +326,7 @@ func scanUVLock(path string) *TorchPin {
 				torchVersion = curVersion
 			}
 		default:
-			if cudaBearingNvidiaPackages[curName] {
+			if cudaToolkitVersionedNvidiaRe.MatchString(curName) {
 				if m := cudaRuntimeVersionRe.FindStringSubmatch(curVersion); m != nil {
 					cu := "cu" + m[1] + m[2]
 					if cu > cudaFromNvidia {
@@ -360,7 +358,7 @@ func scanUVLock(path string) *TorchPin {
 			curName = m[1]
 			continue
 		}
-		if curName == "torch" || cudaBearingNvidiaPackages[curName] {
+		if curName == "torch" || cudaToolkitVersionedNvidiaRe.MatchString(curName) {
 			if m := uvLockVersionRe.FindStringSubmatch(trimmed); m != nil && curVersion == "" {
 				curVersion = m[1]
 			}
