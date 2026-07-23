@@ -1,6 +1,7 @@
 package orchestration
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -109,14 +110,86 @@ func TestHydrateRelaunchBlockedReasons_IgnoresStalePriorQueueEpoch(t *testing.T)
 
 func TestHydrateRelaunchBlockedReasons_SurfacesWaitingOnProducer(t *testing.T) {
 	database := db.SetupTestDB(t)
+	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "producer", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, producerID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID producer: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, producerID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning producer: %v", err)
+	}
+
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python eval.py", "queued", "A100")
 	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU: %v", err)
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"output/model.pt:" + strconv.FormatInt(producerID, 10)}); err != nil {
+		t.Fatalf("SetJobNeeds consumer: %v", err)
 	}
 
 	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		EventKind: db.EventRelaunchSkippedWaitingOnProducer,
 		JobID:     jobID,
+		Detail:    `waiting for "output/model.pt" from wj999999 (running)`,
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+
+	jobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	HydrateRelaunchBlockedReasons(database, jobs)
+
+	if len(jobs) != 1 {
+		t.Fatalf("ListUnplacedJobs returned %d jobs, want 1", len(jobs))
+	}
+	want := `waiting for "output/model.pt" from wj` + strconv.FormatInt(producerID, 10) + ` (running)`
+	if jobs[0].QueueBlockedReason != want {
+		t.Fatalf("QueueBlockedReason = %q, want %q", jobs[0].QueueBlockedReason, want)
+	}
+}
+
+func TestHydrateRelaunchBlockedReasons_IgnoresStaleWaitingOnProducer(t *testing.T) {
+	database := db.SetupTestDB(t)
+	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "producer", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusCompleted, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, producerID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID producer: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		    SET status = ?, start_time = ?, end_time = ?, exit_code = 0
+		  WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusCompleted, now-60, now-1, producerID,
+	); err != nil {
+		t.Fatalf("complete producer attempt: %v", err)
+	}
+
+	consumerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python eval.py", "consumer", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	need := "output/model.pt:" + strconv.FormatInt(producerID, 10)
+	if err := db.SetJobNeeds(database, consumerID, []string{need}); err != nil {
+		t.Fatalf("SetJobNeeds consumer: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchSkippedWaitingOnProducer,
+		JobID:     consumerID,
 		Detail:    `waiting for "output/model.pt" from wj1555 (running)`,
 	}); err != nil {
 		t.Fatalf("InsertLifecycleEvent: %v", err)
@@ -131,9 +204,8 @@ func TestHydrateRelaunchBlockedReasons_SurfacesWaitingOnProducer(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Fatalf("ListUnplacedJobs returned %d jobs, want 1", len(jobs))
 	}
-	want := `waiting for "output/model.pt" from wj1555 (running)`
-	if jobs[0].QueueBlockedReason != want {
-		t.Fatalf("QueueBlockedReason = %q, want %q", jobs[0].QueueBlockedReason, want)
+	if jobs[0].QueueBlockedReason != "" {
+		t.Fatalf("QueueBlockedReason = %q, want empty for stale producer wait", jobs[0].QueueBlockedReason)
 	}
 }
 

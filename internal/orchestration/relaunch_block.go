@@ -561,9 +561,24 @@ func RelaunchBlockedReasonsFromEventsWithFloor(database *sql.DB, floorByJob map[
 		if eventKind == db.EventRelaunchSkippedOfferError && isRelaunchOfferErrorStale(occurredAt) {
 			continue
 		}
+		if eventKind == db.EventRelaunchSkippedWaitingOnProducer {
+			currentReason, blocked := currentWaitingOnProducerReason(database, jobID)
+			if !blocked {
+				continue
+			}
+			detail = sql.NullString{String: currentReason, Valid: true}
+		}
 		reasons[jobID] = summarizeRelaunchSkipEvent(eventKind, detail.String, int(attemptNumber.Int64), int(maxAttempts.Int64))
 	}
 	return reasons
+}
+
+func currentWaitingOnProducerReason(database *sql.DB, jobID int64) (string, bool) {
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		return "", false
+	}
+	return queueblock.WaitingOnProducerReason(database, job)
 }
 
 func isRelaunchOfferErrorStale(occurredAt int64) bool {
