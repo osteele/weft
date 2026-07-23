@@ -17,6 +17,7 @@ import (
 func HydrateUnplacedBlockedReasons(database *sql.DB, jobs []*db.Job) {
 	HydrateRelaunchBlockedReasons(database, jobs)
 	HydrateCloudQueuedRetryBlockedReasons(database, jobs)
+	queueblock.HydrateWaitingOnJobDependencyReasons(database, jobs)
 	queueblock.HydrateWaitingOnProducerReasons(database, jobs)
 	HydrateInventoryDispatchBlockedReasons(database, jobs)
 }

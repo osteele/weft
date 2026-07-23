@@ -307,6 +307,21 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 				continue
 			}
 		}
+		if reason, blocked := queueblock.WaitingOnJobDependencyReason(cfg.Database, j); blocked {
+			slog.Debug("job waiting on dependency, skipping",
+				"component", "relaunch",
+				"job_id", j.ID,
+				"reason", reason)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedWaitingOnProducer,
+				JobID:     j.ID,
+				GPUSpec:   j.GPUClass,
+				Detail:    reason,
+			})
+			result.Skipped++
+			recordJobSkipReason(result, j.ID, failedInstanceID, reason)
+			continue
+		}
 		// Pre-flight: skip consumers whose --needs producers aren't ready
 		// (avoids guaranteed 404s in ResolveSpecs and the resulting retry loop).
 		if reason, blocked := queueblock.WaitingOnProducerReason(cfg.Database, j); blocked {

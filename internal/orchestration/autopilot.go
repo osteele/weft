@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/retrypolicy"
 	weftsync "github.com/osteele/weft/internal/sync"
@@ -988,6 +989,12 @@ func fillReusableInstances(
 			}
 		}
 		if _, moving := movingJobs[job.ID]; moving {
+			continue
+		}
+		if reason, blocked := queueblock.WaitingOnJobDependencyReason(database, job); blocked {
+			addAutoPilotBlockedReason(blockedReasons, job.ID, reason)
+			oplog.LogJob("auto_pilot.reuse_fill_blocked", job.ID, "",
+				oplog.WithDetail(reason))
 			continue
 		}
 		candidates = append(candidates, job)

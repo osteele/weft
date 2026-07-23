@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
@@ -362,12 +363,12 @@ func filterLaunchJobsByDependencies(database *sql.DB, jobs []*db.Job, onDefer fu
 		if job == nil {
 			continue
 		}
-		deps := decodeQueueDependencies(job.DepSpec)
+		deps := queueblock.ParseJobDependencies(job.DepSpec)
 		if len(deps) == 0 {
 			filtered = append(filtered, job)
 			continue
 		}
-		reason, ok := dependencySatisfied(database, deps)
+		reason, ok := queueblock.JobDependenciesSatisfied(database, deps)
 		if ok {
 			filtered = append(filtered, job)
 			continue
@@ -377,38 +378,6 @@ func filterLaunchJobsByDependencies(database *sql.DB, jobs []*db.Job, onDefer fu
 		}
 	}
 	return filtered
-}
-
-// dependencySatisfied reports whether every dependency in deps is satisfied.
-// A strict (--after) dependency is satisfied when the upstream job reached
-// Completed with exit code 0. An AllowFailure (--after-any) dependency is
-// satisfied when the upstream reached any terminal status. Returns the
-// reason for the first unsatisfied dependency when ok is false.
-func dependencySatisfied(database *sql.DB, deps []queueDependency) (string, bool) {
-	for _, dep := range deps {
-		depLabel := ids.FormatJobID(dep.JobID)
-		depJob, err := db.GetJobByID(database, dep.JobID)
-		if err != nil || depJob == nil {
-			return fmt.Sprintf("dependency %s not found", depLabel), false
-		}
-		if dep.AllowFailure {
-			if db.IsTerminalStatus(depJob.Status) {
-				continue
-			}
-			return fmt.Sprintf("waiting for %s to finish (status: %s)", depLabel, depJob.Status), false
-		}
-		switch {
-		case depJob.Status == db.StatusCompleted && depJob.ExitCode != nil && *depJob.ExitCode == 0:
-			continue
-		case depJob.Status == db.StatusCompleted:
-			return fmt.Sprintf("dependency %s exited non-zero; re-queue or switch to --after-any", depLabel), false
-		case db.IsTerminalStatus(depJob.Status):
-			return fmt.Sprintf("dependency %s %s; re-queue or switch to --after-any", depLabel, depJob.Status), false
-		default:
-			return fmt.Sprintf("waiting for %s to succeed (status: %s)", depLabel, depJob.Status), false
-		}
-	}
-	return "", true
 }
 
 func printDeferredJob(job *db.Job, reason string) {

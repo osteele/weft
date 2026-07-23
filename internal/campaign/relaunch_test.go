@@ -1,6 +1,8 @@
 package campaign
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,39 @@ import (
 func TestDefaultMaxCloudAttemptsUsesSharedPlacementBudget(t *testing.T) {
 	if got, want := DefaultMaxCloudAttempts, retrypolicy.MaxPlacementAttempts(); got != want {
 		t.Fatalf("DefaultMaxCloudAttempts = %d, want %d", got, want)
+	}
+}
+
+func TestRelaunchOrphanedJobsSkipsUnsatisfiedAfterDependency(t *testing.T) {
+	database := db.SetupTestDB(t)
+	producerID, err := db.RecordJobStarting(database, "cool30", "/tmp/p", "cmd", "producer")
+	if err != nil {
+		t.Fatalf("RecordJobStarting producer: %v", err)
+	}
+	consumerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/c", "cmd", "consumer", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobDepSpec(database, consumerID, strconv.FormatInt(producerID, 10)); err != nil {
+		t.Fatalf("SetJobDepSpec consumer: %v", err)
+	}
+
+	result, err := RelaunchOrphanedJobs(RelaunchConfig{
+		Database:             database,
+		IncludeFreshUnplaced: true,
+	})
+	if err != nil {
+		t.Fatalf("RelaunchOrphanedJobs: %v", err)
+	}
+	if len(result.InstanceIDs) != 0 {
+		t.Fatalf("InstanceIDs = %v, want none", result.InstanceIDs)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	reason := result.JobReasons[consumerID]
+	if !strings.Contains(reason, "waiting for") || !strings.Contains(reason, "to succeed") {
+		t.Fatalf("JobReasons[%d] = %q, want dependency wait", consumerID, reason)
 	}
 }
 
