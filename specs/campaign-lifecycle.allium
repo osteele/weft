@@ -1726,9 +1726,18 @@ rule BootstrapCompleteOverride {
 rule SelfDestructFailed {
     when: AllJobsTerminalButInstanceLingering(instance)
     requires: instance.status = running
-    requires: instance.jobs.all(j => j.is_terminal)
 
-    let terminal_status = if instance.jobs.all(j => j.status = completed) then completed else failed
+    -- A superseded attempt (the job migrated to a newer attempt — e.g. a
+    -- `weft edit --retry` requeue) is terminal-and-neutral for this launch:
+    -- its outcome belongs to the new attempt elsewhere, so it satisfies
+    -- termination here and is excluded from the completed/failed verdict.
+    -- Without this, a launch whose only job was requeued away is believed to
+    -- hold an active job forever and is never reaped (the idle rental runs to
+    -- its own time/spend cap).
+    requires: instance.jobs.all(j => j.is_terminal or j.attempt_outcome = superseded)
+
+    let deciding = instance.jobs.filter(j => j.attempt_outcome != superseded)
+    let terminal_status = if deciding.all(j => j.status = completed) then completed else failed
     let reason = if terminal_status = completed then completed else job_failure
 
     ensures: instance.status = terminal_status
@@ -1743,6 +1752,11 @@ rule SelfDestructFailed {
         -- self_destruct_unknown_end_fallback (3 min) as a conservative
         -- synthetic duration that exceeds the threshold, triggering
         -- immediate cleanup.
+        -- Superseded attempts are dropped from `deciding`, so a launch whose
+        -- jobs all migrated off reaps as completed (empty deciding set ->
+        -- vacuously all-completed) rather than failed. Implementation:
+        -- campaign.ComputeJobState / hasActiveLaunchJobs skip superseded
+        -- attempts; TerminalLaunchStatus then yields completed.
 }
 
 -- ==========================================================================

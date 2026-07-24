@@ -87,22 +87,30 @@ func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
 		if jobStartedOnInstance(j) {
 			s.HasStartedJob = true
 		}
-		if !IsJobTerminal(displayStatus) {
-			s.AllJobsTerminal = false
-			s.AllJobsCompleted = false
-			s.AllJobsCanceled = false
-		} else {
-			if displayStatus != db.StatusCompleted {
+		// A superseded attempt migrated to a newer attempt (e.g. requeued by
+		// `weft edit --retry`); its outcome belongs to that new attempt, not to
+		// this launch. Treat it as terminal-and-neutral: it neither blocks
+		// AllJobsTerminal nor drags the launch to a failed/canceled terminal
+		// status. Without this, a launch whose only job was requeued away sits
+		// non-terminal forever and is never reaped.
+		if displayStatus != db.AttemptOutcomeSuperseded {
+			if !IsJobTerminal(displayStatus) {
+				s.AllJobsTerminal = false
 				s.AllJobsCompleted = false
-			}
-			if displayStatus != db.StatusCanceled {
 				s.AllJobsCanceled = false
-			}
-			switch displayStatus {
-			case db.StatusFailed, db.StatusDead, db.StatusKilled:
-				s.AnyFailed = true
-			case db.AttemptOutcomeOrphaned:
-				s.AnyOrphaned = true
+			} else {
+				if displayStatus != db.StatusCompleted {
+					s.AllJobsCompleted = false
+				}
+				if displayStatus != db.StatusCanceled {
+					s.AllJobsCanceled = false
+				}
+				switch displayStatus {
+				case db.StatusFailed, db.StatusDead, db.StatusKilled:
+					s.AnyFailed = true
+				case db.AttemptOutcomeOrphaned:
+					s.AnyOrphaned = true
+				}
 			}
 		}
 		if j.EndTime != nil && *j.EndTime > s.LatestJobEnd {
