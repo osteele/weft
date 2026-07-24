@@ -1001,8 +1001,10 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	claimedJobs := make([]*db.Job, 0, len(jobs))
 	claimedJobIDs := make([]int64, 0, len(jobs))
 	type moveClaim struct {
-		intentID  int64
-		attemptID int64
+		intentID       int64
+		jobID          int64
+		attemptID      int64
+		sourceLaunchID int64
 	}
 	moveClaims := make([]moveClaim, 0, len(jobs))
 	rollbackClaims := func() error {
@@ -1038,7 +1040,12 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 				}
 				return fmt.Errorf("create move target attempt for job %s on instance %s: %w", ids.FormatJobID(job.ID), ids.FormatInstanceID(instanceID), err)
 			}
-			moveClaims = append(moveClaims, moveClaim{intentID: intent.ID, attemptID: attemptID})
+			moveClaims = append(moveClaims, moveClaim{
+				intentID:       intent.ID,
+				jobID:          job.ID,
+				attemptID:      attemptID,
+				sourceLaunchID: prior.LaunchID,
+			})
 			copyJob := *job
 			copyJob.Host = ""
 			copyJob.LaunchID = &instanceID
@@ -1208,6 +1215,15 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		for _, claim := range moveClaims {
 			if err := db.ConfirmMoveTargetAccepted(database, claim.intentID, fmt.Sprintf("submitted to instance %s", ids.FormatInstanceID(instanceID))); err != nil {
 				slog.Warn("confirm move target accepted", "component", "reuse", "intent_id", claim.intentID, "instance", instanceID, "error", err)
+			}
+			reset, err := ResetStrandedCloudAfterConsumers(database, claim.jobID, claim.sourceLaunchID)
+			if err != nil {
+				slog.Warn("reset stranded cloud-after consumers",
+					"component", "reuse", "job_id", claim.jobID, "source_launch_id", claim.sourceLaunchID, "error", err)
+			} else if len(reset.AttemptIDs) > 0 {
+				cancelByLaunch[claim.sourceLaunchID] = append(cancelByLaunch[claim.sourceLaunchID], reset.AttemptIDs...)
+				slog.Info("reset stranded cloud-after consumers",
+					"component", "reuse", "job_id", claim.jobID, "source_launch_id", claim.sourceLaunchID, "consumer_job_ids", reset.JobIDs)
 			}
 		}
 	}

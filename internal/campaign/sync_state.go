@@ -464,7 +464,7 @@ func confirmMoveIntentsForReadyLaunch(ctx context.Context, database *sql.DB, r2C
 		slog.Warn("confirm move intents for ready launch", "component", "sync", "instance", instanceID, "error", err)
 		return
 	}
-	stopMoveIntentSources(ctx, r2Client, sourceStops)
+	stopMoveIntentSources(ctx, database, r2Client, sourceStops)
 }
 
 func adoptObservedMoveTarget(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobID int64) {
@@ -496,7 +496,7 @@ func adoptObservedMoveTarget(ctx context.Context, database *sql.DB, r2Client *r2
 		slog.Warn("confirm move intent from phase job", "component", "sync", "job_id", jobID, "instance", instanceID, "intent_id", intent.ID, "error", err)
 		return
 	}
-	stopMoveIntentSources(ctx, r2Client, sourceStops)
+	stopMoveIntentSources(ctx, database, r2Client, sourceStops)
 }
 
 // abandonedMoveCancelWindow bounds how long sync keeps re-sending
@@ -577,7 +577,7 @@ func reconcilePendingMoveTargetRequestAcks(ctx context.Context, database *sql.DB
 				"component", "sync", "instance", instanceID, "intent_id", req.IntentID, "error", err)
 			continue
 		}
-		stopMoveIntentSources(ctx, r2Client, []db.MoveIntentSourceStop{stop})
+		stopMoveIntentSources(ctx, database, r2Client, []db.MoveIntentSourceStop{stop})
 	}
 }
 
@@ -588,14 +588,24 @@ func ackKind(ack *controlplane.GraceCommandAck) controlplane.GraceCommandKind {
 	return ack.Kind
 }
 
-func stopMoveIntentSources(ctx context.Context, r2Client *r2.Client, sourceStops []db.MoveIntentSourceStop) {
+func stopMoveIntentSources(ctx context.Context, database *sql.DB, r2Client *r2.Client, sourceStops []db.MoveIntentSourceStop) {
 	if len(sourceStops) == 0 {
 		return
 	}
 	cancelByLaunch := map[int64][]int64{}
 	for _, stop := range sourceStops {
 		if stop.SourceLaunchID != nil && *stop.SourceLaunchID > 0 && stop.SourceAttemptID > 0 {
-			cancelByLaunch[*stop.SourceLaunchID] = append(cancelByLaunch[*stop.SourceLaunchID], stop.SourceAttemptID)
+			sourceLaunchID := *stop.SourceLaunchID
+			cancelByLaunch[sourceLaunchID] = append(cancelByLaunch[sourceLaunchID], stop.SourceAttemptID)
+			reset, err := ResetStrandedCloudAfterConsumers(database, stop.JobID, sourceLaunchID)
+			if err != nil {
+				slog.Warn("reset stranded cloud-after consumers after target ready",
+					"component", "sync", "job_id", ids.FormatJobID(stop.JobID), "source_launch_id", sourceLaunchID, "error", err)
+			} else if len(reset.AttemptIDs) > 0 {
+				cancelByLaunch[sourceLaunchID] = append(cancelByLaunch[sourceLaunchID], reset.AttemptIDs...)
+				slog.Info("reset stranded cloud-after consumers after target ready",
+					"component", "sync", "job_id", ids.FormatJobID(stop.JobID), "source_launch_id", sourceLaunchID, "consumer_job_ids", reset.JobIDs)
+			}
 			continue
 		}
 		if stop.SourceHost == "" || stop.SourceStartTime <= 0 {

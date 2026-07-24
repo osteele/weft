@@ -750,12 +750,24 @@ func executeHostMoveWithIntent(
 	if err := db.ConfirmMoveTargetAccepted(database, intent.ID, "moved to host "+host); err != nil {
 		slog.Warn("resolve host move intent confirmed", "component", "move", "intent_id", intent.ID, "error", err)
 	}
-	if sourceLaunchID > 0 && sourceAttemptID > 0 && r2Client != nil {
+	cancelAttemptIDs := make([]int64, 0, 1)
+	if sourceAttemptID > 0 {
+		cancelAttemptIDs = append(cancelAttemptIDs, sourceAttemptID)
+	}
+	if reset, err := campaign.ResetStrandedCloudAfterConsumers(database, job.ID, sourceLaunchID); err != nil {
+		slog.Warn("reset stranded cloud-after consumers",
+			"component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "error", err)
+	} else if len(reset.AttemptIDs) > 0 {
+		cancelAttemptIDs = append(cancelAttemptIDs, reset.AttemptIDs...)
+		slog.Info("reset stranded cloud-after consumers",
+			"component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "consumer_job_ids", reset.JobIDs)
+	}
+	if sourceLaunchID > 0 && len(cancelAttemptIDs) > 0 && r2Client != nil {
 		cancelCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		err := sendMoveCancelAttempts(cancelCtx, r2Client, sourceLaunchID, []int64{sourceAttemptID})
+		err := sendMoveCancelAttempts(cancelCtx, r2Client, sourceLaunchID, cancelAttemptIDs)
 		cancel()
 		if err != nil {
-			slog.Warn("send source cancel-attempts marker", "component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "attempt_id", sourceAttemptID, "error", err)
+			slog.Warn("send source cancel-attempts marker", "component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "attempt_ids", cancelAttemptIDs, "error", err)
 		}
 	}
 	terminateMoveForcedSources(database, sourceSnapshots, func(msg string) {
