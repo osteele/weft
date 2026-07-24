@@ -865,10 +865,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// can't tell whether the rental's driver will satisfy the eventual
 	// `uv sync` (or an in-script `uv venv` that resolves torch on-instance).
 	// Most likely failure is `cuda_driver_too_old` 2-3 minutes into the run.
-	if err := rejectUnlockedTorchCloudRuntime(localDir, command, host, runCUDADriverMin, runTags, scriptMeta); err != nil {
+	// Only jobs that request a GPU consume a GPU rental where a driver floor
+	// matters; a no-GPU job is CPU-placed, so the torch driver-floor gate has
+	// nothing to protect (runGPU/runGPUClass/runGPUMem/runGPUCount already
+	// reflect CLI flags and PEP 723 [tool.weft] GPU metadata by this point).
+	gpuRequested := runGPU != "" || runGPUClass != "" || runGPUMem > 0 || runGPUCount > 0
+	if err := rejectUnlockedTorchCloudRuntime(localDir, command, host, runCUDADriverMin, runTags, scriptMeta, gpuRequested); err != nil {
 		return err
 	}
-	maybeWarnNoTorchPinForCloud(cmd, localDir, command, host, runCUDADriverMin, scriptMeta)
+	maybeWarnNoTorchPinForCloud(cmd, localDir, command, host, runCUDADriverMin, scriptMeta, gpuRequested)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command, localDir)
@@ -1990,7 +1995,11 @@ func pathHasHomePrefix(dir, home string) bool {
 //   - the user has already specified a CUDA/driver floor,
 //   - --host targets an inventory host (driver floor is set there at boot),
 //   - the project has a torch pin (the auto-floor will fire).
-func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, command, host, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta) {
+func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, command, host, cudaDriverMin string, scriptMeta *dataloc.ScriptMeta, gpuRequested bool) {
+	if !gpuRequested {
+		// A no-GPU job is CPU-placed; the driver floor is irrelevant there.
+		return
+	}
 	if !usageHintsEnabled() || hasExplicitCUDAFloor(localDir, cudaDriverMin, scriptMeta) || localDir == "" {
 		return
 	}
@@ -2021,7 +2030,16 @@ func maybeWarnNoTorchPinForCloud(cmd *cobra.Command, localDir, command, host, cu
 			"driver version. See docs/guides/cloud-instance-debugging.md § \"Torch driver too old\".")
 }
 
-func rejectUnlockedTorchCloudRuntime(localDir, command, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta) error {
+func rejectUnlockedTorchCloudRuntime(localDir, command, host, cudaDriverMin string, tags []string, scriptMeta *dataloc.ScriptMeta, gpuRequested bool) error {
+	if !gpuRequested {
+		// The gate protects GPU-rental placement: it fails fast when weft can't
+		// derive a CUDA driver floor to filter offers / probe the rental driver
+		// before `uv sync`. A job that requests no GPU is placed CPU-only, where
+		// the driver floor is moot (CPU hosts satisfy GPU floor checks vacuously),
+		// so rejecting it — e.g. an API-only PEP 723 script that merely lives in a
+		// torch repo — is a false positive.
+		return nil
+	}
 	if host != "" || localDir == "" || slices.Contains(tags, db.TagInventory) {
 		return nil
 	}

@@ -307,7 +307,7 @@ dependencies = ["torch>=2.5"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil, true)
 	if err == nil {
 		t.Fatal("expected unlocked torch range to be rejected")
 	}
@@ -324,7 +324,7 @@ dependencies = ["torch>=2.5"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "", "cool30", "", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "cool30", "", nil, nil, true); err != nil {
 		t.Fatalf("pinned host rejected: %v", err)
 	}
 }
@@ -337,14 +337,14 @@ dependencies = ["torch==2.6.0"]
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil, true)
 	if err == nil {
 		t.Fatal("expected exact pyproject pin without CUDA variant to be rejected")
 	}
 	if !strings.Contains(err.Error(), "does not expose the CUDA wheel variant") {
 		t.Fatalf("error = %q, want CUDA wheel variant diagnosis", err.Error())
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.4", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.4", nil, nil, true); err != nil {
 		t.Fatalf("explicit CUDA floor rejected: %v", err)
 	}
 }
@@ -370,7 +370,7 @@ source = { registry = "https://pypi.org/simple" }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil)
+	err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil, true)
 	if err == nil {
 		t.Fatal("expected uv.lock without a derivable CUDA variant to be rejected")
 	}
@@ -378,8 +378,14 @@ source = { registry = "https://pypi.org/simple" }
 		t.Fatalf("error = %q, want CUDA-variant-underivable diagnosis", err.Error())
 	}
 	// An explicit driver floor unblocks it.
-	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.8", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "12.8", nil, nil, true); err != nil {
 		t.Fatalf("explicit CUDA floor rejected: %v", err)
+	}
+	// A no-GPU job in the same torch project is exempt: it is CPU-placed, so
+	// the driver-floor gate has nothing to protect (regression for the
+	// mental-spaces API-only PEP 723 script report).
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil, false); err != nil {
+		t.Fatalf("no-GPU job in a torch project should be allowed: %v", err)
 	}
 }
 
@@ -406,7 +412,7 @@ version = "12.4.5.8"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "", "", "", nil, nil, true); err != nil {
 		t.Fatalf("lock with derivable CUDA variant should be allowed: %v", err)
 	}
 }
@@ -426,7 +432,7 @@ import torch
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := rejectUnlockedTorchCloudRuntime(dir, "uv run train.py", "", "", nil, nil); err != nil {
+	if err := rejectUnlockedTorchCloudRuntime(dir, "uv run train.py", "", "", nil, nil, true); err != nil {
 		t.Fatalf("script torch range should be handled by inferred floor: %v", err)
 	}
 }

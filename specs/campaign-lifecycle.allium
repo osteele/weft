@@ -512,14 +512,21 @@ config {
 -- merely existing is NOT proof the resolved torch wheel's driver floor is
 -- knowable: a lock can record torch as a CPU/macOS wheel, or in a CUDA runtime
 -- family the scanner does not recognize, exposing no cuXXX variant. For cloud
--- auto-placement, submit must reject torch-using projects for which weft can
--- derive no CUDA wheel variant (hence no driver floor) from any source —
--- whether uv.lock is missing OR present-but-variantless — because the resolver
--- can then pick a newer CUDA wheel on the rental than weft gated on, surfacing
--- only at the post-`uv sync` torch preflight after full rental spend. Users can
--- submit after running uv lock with a CUDA-specific torch wheel, pinning torch
--- exactly with a CUDA-specific [tool.uv] index or explicit cuda-driver-min, or
--- targeting an explicit host.
+-- auto-placement, submit must reject GPU-requesting torch-using projects for
+-- which weft can derive no CUDA wheel variant (hence no driver floor) from any
+-- source — whether uv.lock is missing OR present-but-variantless — because the
+-- resolver can then pick a newer CUDA wheel on the rental than weft gated on,
+-- surfacing only at the post-`uv sync` torch preflight after full rental spend.
+-- The reject is scoped to jobs that request a GPU (gpu_class / gpu_mem_gb /
+-- gpu_count set via CLI flag or PEP 723 [tool.weft] metadata): only those
+-- consume a GPU rental where a driver floor is enforced. A no-GPU / CPU-only
+-- job is CPU-placed, where the driver floor is moot (CPU hosts satisfy GPU
+-- floor checks vacuously), so it is exempt — e.g. an API-only PEP 723 script
+-- (openai-only, run with `uv run --no-project`) that merely lives in a torch
+-- repo whose lockfile pins a CPU/macOS wheel. Users can submit a GPU job after
+-- running uv lock with a CUDA-specific torch wheel, pinning torch exactly with
+-- a CUDA-specific [tool.uv] index or explicit cuda-driver-min, or targeting an
+-- explicit host.
 -- Implementation: cmd/run.go rejectUnlockedTorchCloudRuntime;
 -- internal/dataloc/torch_pin.go ScanTorchPin / ScanPyprojectTorchRequirement.
 -- Vast.ai offers are filtered at search time with driver_version/cuda_vers
