@@ -1089,7 +1089,7 @@ type JobAttempt struct {
 	Backend       string
 }
 
-// ListAttempts returns every attempt for a job, newest first.
+// ListAttempts returns non-abandoned attempts for a job, newest first.
 func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
 	rows, err := database.Query(`
 		SELECT id, job_id, attempt_number, host, launch_id, status,
@@ -1097,7 +1097,7 @@ func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
 		       COALESCE(error_message, ''), COALESCE(failure_reason, ''),
 		       COALESCE(cloud_outcome, ''), COALESCE(backend, '')
 		FROM job_attempts
-		WHERE job_id = ?
+		WHERE job_id = ? AND abandoned_at IS NULL
 		ORDER BY attempt_number DESC`, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("list attempts for job %d: %w", jobID, err)

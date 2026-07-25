@@ -259,6 +259,13 @@ func TestAbandonDuplicateTerminalCloudAttempts(t *testing.T) {
 	if job.RetryCount != 0 {
 		t.Fatalf("retry count after repair = %d, want 0", job.RetryCount)
 	}
+	attempts, err := ListAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 1 || attempts[0].ID != keepAttemptID {
+		t.Fatalf("ListAttempts after repair = %+v, want only kept attempt %d", attempts, keepAttemptID)
+	}
 }
 
 func TestAbandonedAttemptDoesNotDriveJobStatus(t *testing.T) {
