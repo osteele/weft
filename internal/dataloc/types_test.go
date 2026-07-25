@@ -1,6 +1,9 @@
 package dataloc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseAssetRef(t *testing.T) {
 	tests := []struct {
@@ -93,6 +96,60 @@ func TestParseInputRef(t *testing.T) {
 				t.Errorf("ParseInputRef(%q).FilePath = %q, want %q", tt.input, ref.FilePath, tt.wantPath)
 			}
 		})
+	}
+}
+
+func TestCanonicalHFModelAlias(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"llama-3.1-8b", "meta-llama/Llama-3.1-8B"},
+		{"Llama_3.1_70B_Instruct", "meta-llama/Llama-3.1-70B-Instruct"},
+		{"meta-llama/Llama-3.1-8B", ""},
+		{"gpt2", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, ok := CanonicalHFModelAlias(tt.input)
+			if tt.want == "" {
+				if ok {
+					t.Fatalf("CanonicalHFModelAlias(%q) = %q, true; want false", tt.input, got)
+				}
+				return
+			}
+			if !ok || got != tt.want {
+				t.Fatalf("CanonicalHFModelAlias(%q) = %q, %v; want %q, true", tt.input, got, ok, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateExplicitHFInputsRejectsLlamaAlias(t *testing.T) {
+	err := ValidateExplicitHFInputs([]string{"hf:llama-3.1-8b"}, nil)
+	if err == nil {
+		t.Fatal("expected shorthand alias error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "hf:meta-llama/Llama-3.1-8B") {
+		t.Fatalf("error should suggest canonical repo, got %q", msg)
+	}
+}
+
+func TestValidateExplicitHFInputsAllowsBestEffortAlias(t *testing.T) {
+	inputs := []string{"hf:llama-3.1-8b"}
+	if err := ValidateExplicitHFInputs(inputs, inputs); err != nil {
+		t.Fatalf("best-effort input should not block submission: %v", err)
+	}
+}
+
+func TestValidateExplicitHFInputsRejectsInvalidID(t *testing.T) {
+	err := ValidateExplicitHFInputs([]string{"hf:gpt2 9"}, nil)
+	if err == nil {
+		t.Fatal("expected invalid ID error")
+	}
+	if !strings.Contains(err.Error(), "not a valid Hugging Face model repo ID") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -551,6 +551,20 @@ var dataPatterns = []*pattern{
 		remediable: false,
 	},
 	{
+		re:         regexp.MustCompile(`(?is)(?:RepositoryNotFoundError|Repository Not Found).*?huggingface\.co/(?:api/models/)?((?:[^/\s'")]+/[^/\s'")]+)|[^/\s'")]+)/(?:resolve|tree)\b`),
+		patternID:  "hf_model_repo_not_found",
+		category:   "data",
+		message:    "HuggingFace model repo not found",
+		solution:   "Use the full Hugging Face model repo ID in --input, for example `hf:org/model`, then resubmit.",
+		remediable: false,
+		extractAssets: func(match []string) []string {
+			if len(match) < 2 {
+				return nil
+			}
+			return []string{"hf:" + match[1]}
+		},
+	},
+	{
 		// HuggingFace gated-repo access denied. The repo exists but the
 		// HF_TOKEN doesn't have access approval for it. Distinguished from
 		// "missing model" (no cache entry) and from "timeout" (the request
@@ -561,7 +575,7 @@ var dataPatterns = []*pattern{
 		// "HTTPSConnectionPool ... read timed out" tail if HF was slow to
 		// return the 401, or a "Cannot access gated repo for url" phrase
 		// that happens to contain the substring "access ... gated".
-		re:         regexp.MustCompile(`(?is)(?:GatedRepoError|access .{0,40}?gated repo|HfHubHTTPError.*?\b401\b|\b401 Client Error.*?(?:Repository|gated|Unauthorized))`),
+		re:         regexp.MustCompile(`(?is)(?:GatedRepoError|access .{0,40}?gated repo|HfHubHTTPError.*?\b401\b.*?(?:gated|Unauthorized)|\b401 Client Error.*?(?:gated|Unauthorized))`),
 		patternID:  "hf_gated_repo",
 		category:   "data",
 		message:    "HuggingFace gated repo: token lacks access approval",

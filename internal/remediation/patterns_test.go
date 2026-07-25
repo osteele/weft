@@ -71,6 +71,30 @@ ConnectionError: HTTPSConnectionPool(host='huggingface.co', port=443): Read time
 	}
 }
 
+func TestDataPatterns_HFRepoNotFoundDoesNotMatchGated(t *testing.T) {
+	log := `Traceback (most recent call last):
+huggingface_hub.errors.RepositoryNotFoundError: 401 Client Error. Repository Not Found for url: https://huggingface.co/llama-3.1-8b/resolve/main/config.json.
+Please make sure you specified the correct repo_id and repo_type.
+OSError: llama-3.1-8b is not a local folder and is not a valid model identifier listed on 'https://huggingface.co/models'`
+
+	if d := patternByID(dataPatterns, "hf_gated_repo").Match(log); d != nil {
+		t.Fatalf("gated-repo pattern should not match repo-not-found, got %+v", d)
+	}
+	d := DiagnoseFromLog(log)
+	if d == nil {
+		t.Fatal("expected repo-not-found diagnosis")
+	}
+	if d.Pattern != "hf_model_repo_not_found" {
+		t.Fatalf("pattern = %q, want hf_model_repo_not_found", d.Pattern)
+	}
+	if d.Remediable {
+		t.Fatal("repo-not-found should not be marked remediable")
+	}
+	if len(d.MissingAssets) != 1 || d.MissingAssets[0] != "hf:llama-3.1-8b" {
+		t.Fatalf("missing assets = %v, want [hf:llama-3.1-8b]", d.MissingAssets)
+	}
+}
+
 func TestDataPatterns_HFNetworkCacheMissBeatsSSHDisconnect(t *testing.T) {
 	log := `'(ProtocolError('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer')), '(Request ID: 47dbd0f3-eafa-494f-ae31-027b91043797)')' thrown while requesting HEAD https://huggingface.co/microsoft/phi-1/resolve/main/tokenizer_config.json
 huggingface_hub.errors.LocalEntryNotFoundError: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache.

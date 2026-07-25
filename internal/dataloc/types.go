@@ -3,6 +3,8 @@
 package dataloc
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -151,6 +153,54 @@ func ClassifyInputs(inputs []string) (assetRefs []string, filePaths []string) {
 
 // String returns the canonical ref string for a DataAsset.
 func (a DataAsset) String() string { return a.Ref() }
+
+var llama31AliasPattern = regexp.MustCompile(`^llama[-_]?3\.1[-_]?([0-9]+)b(?:[-_]?(instruct))?$`)
+
+// CanonicalHFModelAlias resolves short local names that look like common
+// experiment aliases but are not Hugging Face repo IDs.
+func CanonicalHFModelAlias(id string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(id))
+	key = strings.TrimPrefix(key, "hf:")
+	key = strings.ReplaceAll(key, "_", "-")
+	if strings.Contains(key, "/") {
+		return "", false
+	}
+	match := llama31AliasPattern.FindStringSubmatch(key)
+	if match == nil {
+		return "", false
+	}
+	model := "meta-llama/Llama-3.1-" + match[1] + "B"
+	if match[2] == "instruct" {
+		model += "-Instruct"
+	}
+	return model, true
+}
+
+// ValidateExplicitHFInputs rejects explicit HF model refs that cannot be
+// staged as submitted. Best-effort refs came from source/command inference and
+// are allowed to fail during non-fatal prewarm.
+func ValidateExplicitHFInputs(inputs, bestEffortInputs []string) error {
+	bestEffort := make(map[string]struct{}, len(bestEffortInputs))
+	for _, input := range bestEffortInputs {
+		bestEffort[input] = struct{}{}
+	}
+	for _, input := range inputs {
+		if _, ok := bestEffort[input]; ok {
+			continue
+		}
+		asset, ok := ParseAssetRef(input)
+		if !ok || asset.Kind != AssetHFModel {
+			continue
+		}
+		if canonical, ok := CanonicalHFModelAlias(asset.ID); ok {
+			return fmt.Errorf("%s is a shorthand model alias, not a Hugging Face repo ID; use hf:%s", input, canonical)
+		}
+		if !IsHFModelID(asset.ID) {
+			return fmt.Errorf("%s is not a valid Hugging Face model repo ID", input)
+		}
+	}
+	return nil
+}
 
 // HostDataEntry records that a specific asset exists on a specific host.
 type HostDataEntry struct {

@@ -73,6 +73,29 @@ func TestRecordQueuedJob_PersistsBestEffortInputs(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJobRejectsExplicitHFModelAlias(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		WorkingDir: "/tmp/project",
+		Command:    "python train.py",
+		Inputs:     []string{"hf:llama-3.1-8b"},
+	})
+	if err == nil {
+		t.Fatal("expected input validation error")
+	}
+	if !strings.Contains(err.Error(), "hf:meta-llama/Llama-3.1-8B") {
+		t.Fatalf("error should suggest canonical repo, got %v", err)
+	}
+	jobs, listErr := db.ListJobsWithMaxAge(database, "", "", 10, 0, nil, "")
+	if listErr != nil {
+		t.Fatalf("ListJobsWithMaxAge: %v", listErr)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(jobs))
+	}
+}
+
 func TestRecordQueuedJob_PersistsSubmitMetadataAtomically(t *testing.T) {
 	database := db.SetupTestDB(t)
 

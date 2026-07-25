@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/artifactspec"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -139,6 +140,9 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 	}
 	if err := artifactspec.ValidateNeedsSpecs(params.Needs); err != nil {
 		return 0, fmt.Errorf("needs: %w", err)
+	}
+	if err := dataloc.ValidateExplicitHFInputs(params.Inputs, params.BestEffortInputs); err != nil {
+		return 0, fmt.Errorf("inputs: %w", err)
 	}
 
 	// Extract GPU from env vars if not explicitly set

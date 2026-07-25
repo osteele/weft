@@ -45,6 +45,8 @@ value DiagnosisPattern =
     | hf_gated_repo             -- data: HF gated repo, token lacks access
                                 -- approval (401/GatedRepoError); NOT
                                 -- auto-fetchable
+    | hf_model_repo_not_found   -- data: HF model repo does not exist under
+                                -- the submitted repo id; NOT auto-fetchable
     | hf_network_cache_miss     -- data: HF fetch failed and local cache is
                                 -- missing; declare the model as an input
     | hf_transient_network      -- data: HF fetch interrupted by a network

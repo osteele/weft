@@ -84,6 +84,8 @@ Use `hf:<repo>` for Hugging Face model repositories and
 `hf-dataset:<repo>` for dataset repositories. If a dataset is declared with
 `hf:`, Weft treats it as a model and the Hugging Face model lookup can fail
 before staging starts.
+Use the full Hub repo ID for model inputs; local shorthand aliases such as
+`hf:llama-3.1-8b` are rejected at submission with the canonical repo suggestion.
 
 If the model is on atlas but not titan, Weft places the job on
 atlas. If neither host has it, Weft can download it before the job

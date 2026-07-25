@@ -856,6 +856,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			strings.Join(corrected, ", "))
 	}
 	bestEffortInputs := bestEffortAutoDetectedInputs(runInputs, autoDetectedInputs, explicitInputs)
+	if err := dataloc.ValidateExplicitHFInputs(runInputs, bestEffortInputs); err != nil {
+		return fmt.Errorf("--input: %w", err)
+	}
 	runEnvVars, err = applySecretEnv(runEnvVars, runInputs, runHFToken, runHFTokenFrom, runSecretVars)
 	if err != nil {
 		return err
