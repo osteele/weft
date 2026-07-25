@@ -102,6 +102,165 @@ func TestSetAttemptLaunch_NormalizesPendingPlacement(t *testing.T) {
 	}
 }
 
+func TestMarkAttemptQueuedByIDDoesNotCloneTerminalCloudAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	attemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		    SET status = ?, start_time = ?, end_time = ?, exit_code = ?, cloud_outcome = ?
+		  WHERE id = ?`,
+		StatusFailed, int64(100), int64(200), 1, AttemptOutcomeFailed, attemptID,
+	); err != nil {
+		t.Fatalf("seed terminal attempt: %v", err)
+	}
+
+	if err := MarkAttemptQueuedByID(database, jobID); err != nil {
+		t.Fatalf("MarkAttemptQueuedByID: %v", err)
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&count); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("attempt count = %d, want 1; stale queued sync must not clone terminal attempts", count)
+	}
+	got, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if got == nil || got.Status != StatusFailed {
+		t.Fatalf("job status = %v, want failed", got)
+	}
+	if got.LatestRunID == nil || *got.LatestRunID != attemptID {
+		t.Fatalf("latest run = %v, want original attempt %d", got.LatestRunID, attemptID)
+	}
+}
+
+func TestAbandonDuplicateTerminalCloudAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	keepAttemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		    SET status = ?, start_time = ?, end_time = ?, exit_code = ?, failure_reason = ?, cloud_outcome = ?
+		  WHERE id = ?`,
+		StatusFailed, int64(100), int64(200), 1, "boot failed", AttemptOutcomeFailed, keepAttemptID,
+	); err != nil {
+		t.Fatalf("seed authoritative terminal attempt: %v", err)
+	}
+	for attemptNumber := 2; attemptNumber <= 3; attemptNumber++ {
+		if _, err := database.Exec(
+			`INSERT INTO job_attempts (
+				job_id, attempt_number, host, launch_id, target_id, status, queued_at,
+				start_time, end_time, exit_code, failure_reason, cloud_outcome
+			)
+			SELECT job_id, ?, host, launch_id, target_id, status, queued_at,
+			       start_time, end_time, exit_code, failure_reason, cloud_outcome
+			  FROM job_attempts
+			 WHERE id = ?`,
+			attemptNumber, keepAttemptID,
+		); err != nil {
+			t.Fatalf("insert duplicate attempt %d: %v", attemptNumber, err)
+		}
+	}
+
+	groups, err := FindDuplicateTerminalCloudAttemptGroups(database)
+	if err != nil {
+		t.Fatalf("FindDuplicateTerminalCloudAttemptGroups: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("duplicate group count = %d, want 1: %+v", len(groups), groups)
+	}
+	if groups[0].JobID != jobID || groups[0].LaunchID != launchID || groups[0].Count != 3 || groups[0].KeepAttemptID != keepAttemptID {
+		t.Fatalf("duplicate group = %+v, want job=%d launch=%d count=3 keep=%d", groups[0], jobID, launchID, keepAttemptID)
+	}
+
+	n, err := AbandonDuplicateTerminalCloudAttempts(database)
+	if err != nil {
+		t.Fatalf("AbandonDuplicateTerminalCloudAttempts: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("abandoned rows = %d, want 2", n)
+	}
+	groups, err = FindDuplicateTerminalCloudAttemptGroups(database)
+	if err != nil {
+		t.Fatalf("FindDuplicateTerminalCloudAttemptGroups after repair: %v", err)
+	}
+	if len(groups) != 0 {
+		t.Fatalf("duplicate groups after repair = %+v, want none", groups)
+	}
+
+	var activeCount, abandonedCount int
+	var abandonedReason string
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND abandoned_at IS NULL`,
+		jobID,
+	).Scan(&activeCount); err != nil {
+		t.Fatalf("count active attempts: %v", err)
+	}
+	if err := database.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(abandoned_reason), '')
+		   FROM job_attempts
+		  WHERE job_id = ? AND abandoned_at IS NOT NULL`,
+		jobID,
+	).Scan(&abandonedCount, &abandonedReason); err != nil {
+		t.Fatalf("count abandoned attempts: %v", err)
+	}
+	if activeCount != 1 || abandonedCount != 2 || abandonedReason != AttemptAbandonedDuplicateSameLaunchTerminal {
+		t.Fatalf("active=%d abandoned=%d reason=%q, want active=1 abandoned=2 reason=%q",
+			activeCount, abandonedCount, abandonedReason, AttemptAbandonedDuplicateSameLaunchTerminal)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.LatestRunID == nil || *job.LatestRunID != keepAttemptID {
+		t.Fatalf("latest run after repair = %v, want kept attempt %d", job.LatestRunID, keepAttemptID)
+	}
+	if job.RetryCount != 0 {
+		t.Fatalf("retry count after repair = %d, want 0", job.RetryCount)
+	}
+}
+
 func TestAbandonedAttemptDoesNotDriveJobStatus(t *testing.T) {
 	database := setupTestDB(t)
 

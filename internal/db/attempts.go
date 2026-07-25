@@ -356,12 +356,13 @@ AND status NOT IN (?, ?)
 AND COALESCE(cloud_outcome, '') NOT IN (?, ?))`
 
 const (
-	AttemptAbandonedMoveSourceWon              = "move_source_won"
-	AttemptAbandonedMoveTargetWon              = "move_target_won"
-	AttemptAbandonedMoveTargetAccepted         = "move_target_accepted"
-	AttemptAbandonedMoveDestinationRejected    = "move_destination_rejected"
-	AttemptAbandonedMoveDestinationInfraFailed = "move_destination_infra_failed"
-	AttemptAbandonedDuplicateSuperseded        = "duplicate_superseded"
+	AttemptAbandonedMoveSourceWon               = "move_source_won"
+	AttemptAbandonedMoveTargetWon               = "move_target_won"
+	AttemptAbandonedMoveTargetAccepted          = "move_target_accepted"
+	AttemptAbandonedMoveDestinationRejected     = "move_destination_rejected"
+	AttemptAbandonedMoveDestinationInfraFailed  = "move_destination_infra_failed"
+	AttemptAbandonedDuplicateSuperseded         = "duplicate_superseded"
+	AttemptAbandonedDuplicateSameLaunchTerminal = "duplicate_same_launch_terminal"
 )
 
 // closeOpenAttempts closes all open attempts for a job.
@@ -1151,16 +1152,37 @@ func MarkAttemptQueuedByID(database *sql.DB, jobID int64) error {
 		return err
 	}
 
-	// Read placement and intent fields from the current attempt before closing.
+	// Prefer placement and intent fields from the current open attempt before
+	// closing. If sync requeues a closed on-prem attempt, preserve the previous
+	// host for legacy queue-runner behavior. Closed cloud attempts are
+	// historical facts; reusing their launch_id here fabricates duplicate
+	// same-launch attempts when a stale sync path reports "queued" after
+	// completion backfill has already landed.
 	var host string
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 	var launchID sql.NullInt64
 	err = tx.QueryRow(`
 		SELECT host, pending_status, pending_at, launch_id FROM job_attempts
-		WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`, jobID,
+		WHERE job_id = ? AND end_time IS NULL
+		ORDER BY attempt_number DESC LIMIT 1`, jobID,
 	).Scan(&host, &pendingStatus, &pendingAt, &launchID)
-	if err != nil && err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		err = tx.QueryRow(`
+			SELECT host, pending_status, pending_at, launch_id FROM job_attempts
+			WHERE job_id = ?
+			ORDER BY attempt_number DESC LIMIT 1`, jobID,
+		).Scan(&host, &pendingStatus, &pendingAt, &launchID)
+		if err == sql.ErrNoRows {
+			// Preserve historical first-queue behavior for jobs with no
+			// attempt rows at all.
+		} else if err != nil {
+			tx.Rollback()
+			return err
+		} else if launchID.Valid {
+			return tx.Commit()
+		}
+	} else if err != nil {
 		tx.Rollback()
 		return err
 	}
