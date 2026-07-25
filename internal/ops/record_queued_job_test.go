@@ -96,6 +96,64 @@ func TestRecordQueuedJobRejectsExplicitHFModelAlias(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJobRejectsMissingNamedAssetInput(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		WorkingDir: "/tmp/project",
+		Command:    "python train.py",
+		Inputs:     []string{"asset:output/exp359/mooncake_toolagent_admission_schedule.jsonl"},
+	})
+	if err == nil {
+		t.Fatal("expected named asset validation error")
+	}
+	if !strings.Contains(err.Error(), `named asset "output/exp359/mooncake_toolagent_admission_schedule.jsonl" not found`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not a file path") {
+		t.Fatalf("path-like asset error should explain asset:NAME semantics: %v", err)
+	}
+	jobs, listErr := db.ListJobsWithMaxAge(database, "", "", 10, 0, nil, "")
+	if listErr != nil {
+		t.Fatalf("ListJobsWithMaxAge: %v", listErr)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs len = %d, want 0", len(jobs))
+	}
+}
+
+func TestRecordQueuedJobAllowsPublishedNamedAsset(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "trace-v1",
+		ContentHash: "abc123",
+		SizeBytes:   123,
+		TargetPath:  "data/trace.jsonl",
+	}); err != nil {
+		t.Fatalf("UpsertNamedAsset: %v", err)
+	}
+
+	jobID, err := RecordQueuedJob(database, QueueJobParams{
+		WorkingDir: "/tmp/project",
+		Command:    "python train.py",
+		Inputs:     []string{"asset:trace-v1"},
+		Needs:      []string{"asset:trace-v1"},
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if got, want := job.Inputs, []string{"asset:trace-v1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Inputs = %v, want %v", got, want)
+	}
+	if got, want := job.Needs, []string{"asset:trace-v1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Needs = %v, want %v", got, want)
+	}
+}
+
 func TestRecordQueuedJob_PersistsSubmitMetadataAtomically(t *testing.T) {
 	database := db.SetupTestDB(t)
 

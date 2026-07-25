@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -141,6 +142,9 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 	if err := artifactspec.ValidateNeedsSpecs(params.Needs); err != nil {
 		return 0, fmt.Errorf("needs: %w", err)
 	}
+	if err := validateNamedAssetRefs(database, params.Inputs, params.Needs); err != nil {
+		return 0, err
+	}
 	if err := dataloc.ValidateExplicitHFInputs(params.Inputs, params.BestEffortInputs); err != nil {
 		return 0, fmt.Errorf("inputs: %w", err)
 	}
@@ -192,6 +196,47 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 		committed = true
 		return jobID, nil
 	})
+}
+
+func validateNamedAssetRefs(database *sql.DB, inputs, needs []string) error {
+	sources := make(map[string]string)
+	add := func(name, source string) {
+		if strings.TrimSpace(name) != "" {
+			if prev, ok := sources[name]; ok && prev != source {
+				sources[name] = "inputs/needs"
+				return
+			}
+			sources[name] = source
+		}
+	}
+	for _, input := range inputs {
+		asset, ok := dataloc.ParseAssetRef(input)
+		if ok && asset.Kind == dataloc.AssetNamed {
+			add(asset.ID, "inputs")
+		}
+	}
+	for _, need := range needs {
+		spec, err := artifactspec.ParseNeedsSpec(need)
+		if err != nil {
+			continue
+		}
+		if spec.IsAsset() {
+			add(spec.AssetName, "needs")
+		}
+	}
+	for name, source := range sources {
+		if _, err := db.GetNamedAssetByName(database, name); err != nil {
+			if errors.Is(err, db.ErrNamedAssetNotFound) {
+				hint := fmt.Sprintf("publish it first with `weft data publish <path> --name %s`, or use an existing asset:NAME", name)
+				if strings.ContainsAny(name, `/\`) {
+					hint = "asset: expects a published asset name, not a file path; publish the file first with `weft data publish <path> --name <name>`, then use asset:<name>"
+				}
+				return fmt.Errorf("%s: named asset %q not found; %s", source, name, hint)
+			}
+			return fmt.Errorf("%s: lookup named asset %q: %w", source, name, err)
+		}
+	}
+	return nil
 }
 
 func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata, submitToken string) (int64, error) {

@@ -209,6 +209,8 @@ At launch time weft stages the asset into the consumer's working directory
 at the path recorded when you published (or the path given by
 `--target-path`). The consumer script reads it the same way it would in the
 producer's workspace.
+Submissions that reference an unpublished `asset:NAME` fail before the job is
+recorded; `asset:` takes the published name, not a workspace path.
 
 **`asset:NAME` vs `checkpoint:NAME`.** `checkpoint:` is a placement-scoring
 hint that pins the consumer to a host where the file is already present

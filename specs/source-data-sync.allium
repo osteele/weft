@@ -1099,6 +1099,9 @@ rule OnPremStagingFromR2 {
 --     target_path.
 -- This is the wb29 fix: previously asset: inputs were neither staged nor
 -- blocking, so the command ran and failed with missing_file.
+-- Submit validates every referenced asset:NAME against named_assets before
+-- recording the job; a path-like value such as asset:output/foo.jsonl is not
+-- accepted unless it is literally the published asset name.
 rule OnPremNamedAssetStagingFromR2 {
     when: OnPremDispatchTick(host)
     requires: host.target_kind = inventory_host
