@@ -921,12 +921,30 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	// Print usage hints
 	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()
-		fmt.Printf("Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
+		if launch, ok := latestJobLaunchWithTermination(database, job, db.TerminationReasonDiskFull); ok {
+			fmt.Printf("Hints:    weft instance disk-report %s  # Show disk-full report\n", ids.FormatInstanceID(launch.ID))
+		} else {
+			fmt.Printf("Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
+		}
 		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusQueued || effectiveStatus == db.StatusStarting {
 			fmt.Printf("          weft status %s --wait   # Don't exit until the job completes\n", ids.FormatJobID(job.ID))
 		}
 	}
 
+}
+
+func latestJobLaunchWithTermination(database *sql.DB, job *db.Job, reason string) (*db.Launch, bool) {
+	if database == nil || job == nil || job.LaunchID == nil || !status.IsTerminal(job.Status) {
+		return nil, false
+	}
+	launch, err := db.GetLaunch(database, *job.LaunchID)
+	if err != nil || launch == nil {
+		return nil, false
+	}
+	if launch.TerminationReason != reason {
+		return nil, false
+	}
+	return launch, true
 }
 
 // showActiveJobs displays all active jobs (running, starting, queued) and recent failures

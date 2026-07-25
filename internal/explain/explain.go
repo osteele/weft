@@ -147,12 +147,27 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		x.SuggestedAction = "monitor progress"
 	case db.StatusFailed, db.StatusDead:
 		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "job failed")
-		x.SuggestedAction = "inspect log or retry"
+		if latestLaunchTerminatedWith(database, job, db.TerminationReasonDiskFull) {
+			x.SuggestedAction = "inspect instance disk report or retry"
+		} else {
+			x.SuggestedAction = "inspect log or retry"
+		}
 	default:
 		x.PrimaryReason = "no blocker detected"
 		x.SuggestedAction = "none"
 	}
 	return x
+}
+
+func latestLaunchTerminatedWith(database *sql.DB, job *db.Job, reason string) bool {
+	if database == nil || job == nil || job.LaunchID == nil {
+		return false
+	}
+	launch, err := db.GetLaunch(database, *job.LaunchID)
+	if err != nil || launch == nil {
+		return false
+	}
+	return launch.TerminationReason == reason
 }
 
 func appendProducerWaitEvidence(x *Explanation, chain []queueblock.ProducerWait) {

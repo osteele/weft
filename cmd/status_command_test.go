@@ -831,6 +831,51 @@ func TestRunStatusShowsBlockedReasonFromQueueState(t *testing.T) {
 	}
 }
 
+func TestRunStatusDiskFullRentalSuggestsDiskReport(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, launchID, db.LaunchStatusFailed, db.TerminationReasonDiskFull); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(launchID), "/tmp", "echo hi", "disk full status", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, start_time = ?, end_time = ?, exit_code = ?, failure_reason = ?
+		 WHERE job_id = ?`,
+		db.StatusFailed, now-2, now-1, 2, "exit_2", jobID,
+	); err != nil {
+		t.Fatalf("set failed attempt: %v", err)
+	}
+
+	restoreStatusFlags(t)
+	statusNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runStatus(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Explain:  inspect instance disk report or retry") {
+		t.Fatalf("missing disk-report explanation, got:\n%s", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Hints:    weft instance disk-report %s", ids.FormatInstanceID(launchID))) {
+		t.Fatalf("missing disk-report hint, got:\n%s", out)
+	}
+	if strings.Contains(out, fmt.Sprintf("weft log %s", ids.FormatJobID(jobID))) {
+		t.Fatalf("stale log hint should not be printed, got:\n%s", out)
+	}
+}
+
 func TestRunStatusHidesMissingPayloadDetailWithoutReportingBug(t *testing.T) {
 	database := db.SetupTestDB(t)
 	bugDatabase := db.SetupTestBugDB(t)
