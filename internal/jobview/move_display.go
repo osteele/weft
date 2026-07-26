@@ -107,7 +107,7 @@ func ExpandJobsForOpenMoves(jobs []*db.Job, placementStatusByJob map[int64]Place
 			continue
 		}
 		var source *db.Job
-		if moveSourceDisplayable(move) && (move.SourceAttemptID != nil || job.LaunchID == nil) {
+		if moveSourceDisplayable(move) && moveHasSourceEndpoint(move) && (move.SourceAttemptID != nil || job.LaunchID == nil) {
 			source = cloneJobForMoveDisplay(job, move, move.SourceAttemptID, true)
 		}
 		if source != nil && source.DisplayMoveDim {
@@ -130,6 +130,13 @@ func moveSourceDisplayable(move *MoveDisplay) bool {
 		return false
 	}
 	return !move.SourceLaunchDead
+}
+
+func moveHasSourceEndpoint(move *MoveDisplay) bool {
+	if move == nil {
+		return false
+	}
+	return move.SourceAttemptID != nil || strings.TrimSpace(move.SourceLabel) != ""
 }
 
 func moveSourceLaunchDead(database *sql.DB, launchID *int64) (bool, error) {

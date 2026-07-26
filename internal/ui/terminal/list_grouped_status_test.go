@@ -2241,6 +2241,46 @@ func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveSourceFallbackShowsQ
 	}
 }
 
+func TestRenderJobListGroupedStatusPlainWithOptions_OpenMoveWithoutSourceEndpointDoesNotDuplicate(t *testing.T) {
+	targetLaunchID := int64(6204)
+	targetAttemptID := int64(39425)
+	job := &db.Job{
+		ID:          5451,
+		Status:      db.StatusQueued,
+		Project:     "llm-performance-models",
+		Description: "BNN targeted: 2xH100 TP2 matched cells",
+	}
+	out := renderJobListGroupedStatusPlainWithOptions([]*db.Job{job}, 0, groupedStatusRenderOptions{
+		placementStatusByJob: map[int64]jobview.PlacementStatus{
+			5451: {
+				JobID:  5451,
+				Bucket: jobview.BucketPlacing,
+				Move: &jobview.MoveDisplay{
+					IntentID:        1086,
+					State:           db.MoveIntentStateOpen,
+					TargetAttemptID: &targetAttemptID,
+					TargetLabel:     "wi6204",
+					Phase:           "waiting for destination acceptance",
+					AttemptsByID: map[int64]db.JobAttempt{
+						targetAttemptID: {ID: targetAttemptID, JobID: 5451, AttemptNumber: 3, LaunchID: &targetLaunchID, Status: db.StatusQueued},
+					},
+				},
+			},
+		},
+		now: time.Unix(10_000, 0),
+	})
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Placing (1):") {
+		t.Fatalf("expected active target row in Placing, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "Queued (") || strings.Contains(plain, "Unplaced (") {
+		t.Fatalf("source-less move must not invent queued/unplaced source row:\n%s", plain)
+	}
+	if strings.Count(plain, "wj5451") != 1 {
+		t.Fatalf("expected one row for wj5451, got:\n%s", plain)
+	}
+}
+
 func TestRenderJobListGroupedStatusPlainWithOptions_TerminalTargetAttemptStillShowsPlacingMove(t *testing.T) {
 	sourceLaunchID := int64(5001)
 	targetLaunchID := int64(5003)
@@ -2334,6 +2374,7 @@ func TestRenderJobListGroupedStatusPlainWithOptions_DimsFallbackMoveRowsAfterTru
 					IntentID:        1,
 					State:           db.MoveIntentStateOpen,
 					TargetAttemptID: &targetAttemptID,
+					SourceLabel:     "wi3700",
 					TargetLabel:     "wi3737",
 					Phase:           "waiting for destination acceptance",
 					AttemptsByID: map[int64]db.JobAttempt{
