@@ -129,9 +129,11 @@ func (m Model) editJob() tea.Cmd {
 		if job == nil {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
 		}
-		if job.EffectiveStatus() != db.StatusQueued {
-			return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("can only edit queued jobs")}
+		status := job.EffectiveStatus()
+		if status != db.StatusQueued && status != db.StatusDraft {
+			return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("can only edit queued or draft jobs")}
 		}
+		editWasDraft := status == db.StatusDraft
 
 		// Check if host is being changed - not allowed in edit, use job move instead
 		if newHost != job.Host {
@@ -173,7 +175,8 @@ func (m Model) editJob() tea.Cmd {
 		cpuChanged := !equalCPUAllotment(newAllotment, job.CPUAllotment)
 		operationalChange := workingDirChanged || commandChanged || gpuChanged || envChanged || cpuChanged
 
-		// Update the remote queue file
+		// Prepare dependency metadata for local update and, for queued jobs,
+		// remote queue propagation below.
 		depSpec := m.editingJobDepSpec
 		if depSpec == "" {
 			depSpec = job.DepSpec
@@ -225,7 +228,7 @@ func (m Model) editJob() tea.Cmd {
 		job.CPUAllotment = newAllotment
 		job.DepSpec = depSpec
 
-		if descriptionChanged || operationalChange {
+		if !editWasDraft && (descriptionChanged || operationalChange) {
 			if _, relayClient, err := m.coordinatorRelay(); err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
 			} else if relayClient != nil {
@@ -262,7 +265,7 @@ func (m Model) editJob() tea.Cmd {
 			}
 		}
 
-		if operationalChange {
+		if !editWasDraft && operationalChange {
 			result, err := ops.RequestQueueUpdate(database, job, ops.OptionsForMode(ops.TimeoutFast))
 			if err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}

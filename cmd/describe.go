@@ -30,8 +30,8 @@ var describeCmd = &cobra.Command{
 	Short: "Set or update job metadata",
 	Long: `Set or update the description, directory, command, GPU, or resource allotments of a job.
 
-For queued jobs, you can also update the working directory, command, GPU, and resource
-allotments (GPU memory, CPU). The remote queue file will be updated automatically.
+For queued and draft jobs, you can also update the working directory, command, GPU, and resource
+allotments (GPU memory, CPU). Queued jobs that are already placed on a host update the remote queue file automatically.
 
 Examples:
   weft describe wj42 -m "Training GPT-2 with lr=0.001"
@@ -52,10 +52,10 @@ func init() {
 	// rootCmd.AddCommand(describeCmd)
 	describeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
 	describeCmd.Flags().StringVar(&describeProject, "project", "", "Set project name")
-	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
-	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
-	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB) - queued jobs only")
-	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
+	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory")
+	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command")
+	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
+	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES)")
 	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
 	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
@@ -115,10 +115,11 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	hasGPUClass := gpuClassValue != ""
 	hasProvider := cmd.Flags().Changed("provider")
 
-	// Check if trying to update command/directory/gpu/allotments on non-queued job
+	// Check if trying to update command/directory/gpu/allotments on a job that
+	// may already have run.
 	effectiveStatus := job.EffectiveStatus()
-	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasProvider) && effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued jobs (job %s has status: %s)", ids.FormatJobID(jobID), effectiveStatus)
+	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasProvider) && effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
+		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued or draft jobs (job %s has status: %s)", ids.FormatJobID(jobID), effectiveStatus)
 	}
 
 	// Track what was updated
@@ -136,7 +137,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Update working directory if provided (queued jobs only)
+	// Update working directory if provided.
 	if describeDirectory != "" {
 		if err := db.UpdateJobWorkingDir(database, jobID, describeDirectory); err != nil {
 			return fmt.Errorf("update directory: %w", err)
@@ -145,7 +146,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("directory: %s", describeDirectory))
 	}
 
-	// Update command if provided (queued jobs only)
+	// Update command if provided.
 	if describeCommand != "" {
 		if err := db.UpdateJobCommand(database, jobID, describeCommand); err != nil {
 			return fmt.Errorf("update command: %w", err)
@@ -174,7 +175,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Update GPU (CUDA_VISIBLE_DEVICES) if provided (queued jobs only)
+	// Update GPU (CUDA_VISIBLE_DEVICES) if provided.
 	if gpuValue != "" {
 		// Update the GPU field in database
 		if err := db.SetJobGPU(database, jobID, gpuValue); err != nil {
@@ -198,7 +199,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("gpu: %s", gpuValue))
 	}
 
-	// Update GPU class if provided (queued jobs only)
+	// Update GPU class if provided.
 	if hasGPUClass {
 		if err := db.SetJobGPUClass(database, jobID, gpuClassValue); err != nil {
 			return fmt.Errorf("update GPU class: %w", err)
@@ -217,7 +218,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("gpu-class: %s", gpuClassValue))
 	}
 
-	// Update GPU memory reservation if provided (queued jobs only)
+	// Update GPU memory reservation if provided.
 	if hasGPUMem {
 		mem := describeGPUMem
 		var memPtr *int
@@ -238,7 +239,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Update CPU allotment if provided (queued jobs only)
+	// Update CPU allotment if provided.
 	if hasCPU {
 		cpu := describeCPU
 		var cpuPtr *int
@@ -261,7 +262,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--provider: %w", providerErr)
 		}
 		if normalizedProvider != "" && job.HasInventoryHost() {
-			return fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+			return fmt.Errorf("--provider=%s cannot be set while job is assigned to inventory host %q; unplace the job first", normalizedProvider, job.Host)
 		}
 		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
 		if providerErr != nil {
@@ -278,7 +279,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	needsRemoteUpdate := effectiveStatus == db.StatusQueued &&
+	needsRemoteUpdate := effectiveStatus == db.StatusQueued && job.Host != "" &&
 		(hasDescription || cmd.Flags().Changed("project") || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU)
 	if needsRemoteUpdate {
 		relayCfg, relayClient, err := loadCoordinatorRelay()

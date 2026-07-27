@@ -173,8 +173,8 @@ Examples:
 
 var editCmd = &cobra.Command{
 	Use:   "edit <job-id>",
-	Short: "Edit queued job metadata",
-	Long: `Edit a queued job's description, command, directory, environment variables, tags, or dependencies.
+	Short: "Edit queued or draft job metadata",
+	Long: `Edit a queued or draft job's description, command, directory, environment variables, tags, or dependencies.
 
 Examples:
   weft edit wj1595 --depends-on wj1599
@@ -1009,9 +1009,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		} else if !requeueableStatuses[effectiveStatus] {
 			return fmt.Errorf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", ids.FormatJobID(jobID), effectiveStatus)
 		}
-	} else if effectiveStatus != db.StatusQueued {
+	} else if effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
 		return editNonQueuedJobError(jobID, effectiveStatus)
 	}
+	editWasDraft := effectiveStatus == db.StatusDraft
 
 	var updates []string
 
@@ -1151,7 +1152,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("job %s not found after updating tags", ids.FormatJobID(jobID))
 		}
 		job.Tags = updated.Tags
-		if job.HasTagHostConflict() {
+		if !editWasDraft && job.HasTagHostConflict() {
 			oldHost := job.Host
 			if result, err := ops.UnplaceQueuedJob(database, job, ops.DefaultOptions()); err != nil {
 				return fmt.Errorf("unplace after tag change: %w", err)
@@ -1234,7 +1235,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--provider: %w", providerErr)
 		}
 		if normalizedProvider != "" && job.HasInventoryHost() {
-			return fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+			return fmt.Errorf("--provider=%s cannot be set while job is assigned to inventory host %q; unplace the job first", normalizedProvider, job.Host)
 		}
 		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
 		if providerErr != nil {
@@ -1376,67 +1377,70 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		job.Metadata = meta
 	}
 
-	// Push to remote queue
 	deferredUpdate := false
-	relayCfg, relayClient, err := loadCoordinatorRelay()
-	if err != nil {
-		return err
-	}
-	if relayEnabled(relayCfg, relayClient) {
-		var ack *coordinatorrelay.Ack
-		if wasRequeued {
-			ack, err = relayRequeueJob(relayCfg, relayClient, job)
-		} else {
-			update := &coordinatorrelay.UpdateJobPayload{
-				WorkingDir:   &job.WorkingDir,
-				Command:      &job.Command,
-				Project:      &job.Project,
-				EnvVars:      append([]string(nil), job.EnvVars...),
-				Tags:         append([]string(nil), job.Tags...),
-				GPU:          stringPtr(job.GPU),
-				GPUClass:     stringPtr(job.GPUClass),
-				GPUMemGB:     job.GPUMemGB,
-				DepSpec:      stringPtr(job.DepSpec),
-				Inputs:       append([]string(nil), job.Inputs...),
-				Outputs:      append([]string(nil), job.Outputs...),
-				OutputDirs:   append([]string(nil), job.OutputDirs...),
-				Produces:     append([]string(nil), job.Produces...),
-				Needs:        append([]string(nil), job.Needs...),
-				CPUAllotment: job.CPUAllotment,
-			}
-			if len(job.Tags) == 0 {
-				update.ClearTags = true
-			}
-			if cmd.Flags().Changed("message") {
-				update.Description = &job.Description
-			}
-			ack, err = relayUpdateJob(relayCfg, relayClient, job, update)
-		}
+	if !editWasDraft {
+		relayCfg, relayClient, err := loadCoordinatorRelay()
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Updated job %s via legacy relay\n", ids.FormatJobID(jobID))
-		for _, update := range updates {
-			fmt.Printf("  %s\n", update)
+		if relayEnabled(relayCfg, relayClient) {
+			var ack *coordinatorrelay.Ack
+			if wasRequeued {
+				ack, err = relayRequeueJob(relayCfg, relayClient, job)
+			} else {
+				update := &coordinatorrelay.UpdateJobPayload{
+					WorkingDir:   &job.WorkingDir,
+					Command:      &job.Command,
+					Project:      &job.Project,
+					EnvVars:      append([]string(nil), job.EnvVars...),
+					Tags:         append([]string(nil), job.Tags...),
+					GPU:          stringPtr(job.GPU),
+					GPUClass:     stringPtr(job.GPUClass),
+					GPUMemGB:     job.GPUMemGB,
+					DepSpec:      stringPtr(job.DepSpec),
+					Inputs:       append([]string(nil), job.Inputs...),
+					Outputs:      append([]string(nil), job.Outputs...),
+					OutputDirs:   append([]string(nil), job.OutputDirs...),
+					Produces:     append([]string(nil), job.Produces...),
+					Needs:        append([]string(nil), job.Needs...),
+					CPUAllotment: job.CPUAllotment,
+				}
+				if len(job.Tags) == 0 {
+					update.ClearTags = true
+				}
+				if cmd.Flags().Changed("message") {
+					update.Description = &job.Description
+				}
+				ack, err = relayUpdateJob(relayCfg, relayClient, job, update)
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Updated job %s via legacy relay\n", ids.FormatJobID(jobID))
+			for _, update := range updates {
+				fmt.Printf("  %s\n", update)
+			}
+			if ack != nil && ack.Message != "" {
+				fmt.Printf("  relay: %s\n", ack.Message)
+			}
+			detail := "edit"
+			if wasRequeued {
+				detail = "edit retry"
+			}
+			if len(updates) > 0 {
+				detail += ": " + strings.Join(updates, "; ")
+			}
+			oplog.Log(oplog.OpCLICommand, oplog.WithDetail(detail), oplog.WithJobID(jobID))
+			if wasRequeued {
+				ensureDaemonForWork(os.Stderr)
+			}
+			return nil
 		}
-		if ack != nil && ack.Message != "" {
-			fmt.Printf("  relay: %s\n", ack.Message)
-		}
-		detail := "edit"
-		if wasRequeued {
-			detail = "edit retry"
-		}
-		if len(updates) > 0 {
-			detail += ": " + strings.Join(updates, "; ")
-		}
-		oplog.Log(oplog.OpCLICommand, oplog.WithDetail(detail), oplog.WithJobID(jobID))
-		if wasRequeued {
-			ensureDaemonForWork(os.Stderr)
-		}
-		return nil
 	}
 
-	if wasRequeued {
+	if editWasDraft {
+		job.DepSpec = depSpec
+	} else if wasRequeued {
 		// Reload job to get all fields (including tags, CPU allotment)
 		job, err = db.GetJobByID(database, jobID)
 		if err != nil {
@@ -1488,7 +1492,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if deferredUpdate {
+	if editWasDraft {
+		fmt.Printf("Updated draft job %s\n", ids.FormatJobID(jobID))
+	} else if deferredUpdate {
 		fmt.Printf("Updated job %s locally (will apply to %s when reachable)\n", ids.FormatJobID(jobID), job.TargetDisplay())
 	} else if job.Host == "" {
 		fmt.Printf("Updated job %s (unplaced — sources will be synced at launch)\n", ids.FormatJobID(jobID))
@@ -1501,8 +1507,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if len(updates) == 0 && job.Host != "" {
 		fmt.Println("  (no metadata fields changed)")
 	}
-	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {
-		reportQueueChangeSyncFailure(job.Host, syncErr)
+	if !editWasDraft {
+		if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {
+			reportQueueChangeSyncFailure(job.Host, syncErr)
+		}
 	}
 	detail := "edit"
 	if wasRequeued {
@@ -1523,7 +1531,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 func editNonQueuedJobError(jobID int64, status string) error {
 	jobRef := ids.FormatJobID(jobID)
-	message := fmt.Sprintf("job %s has status '%s', can only edit queued jobs", jobRef, status)
+	message := fmt.Sprintf("job %s has status '%s', can only edit queued or draft jobs", jobRef, status)
 	if requeueableStatuses[status] {
 		message += fmt.Sprintf("\nSolution: use `weft edit %s --retry ...` to requeue and apply edits, or `weft restart %s ...` to retry with overrides.", jobRef, jobRef)
 	}
@@ -1654,8 +1662,8 @@ func decodeQueueDependencies(spec string) []queueDependency {
 func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&editMessage, "message", "m", "", "Set job description")
 	cmd.Flags().StringVar(&editProject, "project", "", "Set project name")
-	cmd.Flags().StringVarP(&editDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
-	cmd.Flags().StringVar(&editCommand, "command", "", "Set command (queued jobs only)")
+	cmd.Flags().StringVarP(&editDirectory, "directory", "C", "", "Set working directory")
+	cmd.Flags().StringVar(&editCommand, "command", "", "Set command")
 	cmd.Flags().StringSliceVarP(&editEnvVars, "env", "e", nil, "Replace environment variables (VAR=value)")
 	cmd.Flags().BoolVar(&editClearEnv, "clear-env", false, "Remove all environment variables")
 	cmd.Flags().StringSliceVar(&editTags, "tag", nil, "Replace job tags (repeat or comma-separate values)")

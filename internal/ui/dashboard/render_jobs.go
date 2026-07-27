@@ -66,7 +66,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"H", "Cycle host filter"},
 			{"r", "Refresh job statuses"},
 			{"n", "New job"},
-			{"e", "Edit queued job"},
+			{"e", "Edit queued/draft job"},
 			{"R", "Restart job"},
 			{"E", "Edit & restart job"},
 			{"k", "Kill/cancel job"},

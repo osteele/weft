@@ -1387,7 +1387,7 @@ The TUI shows stale data with a visual indicator when a host is unreachable.
 | `H` | Cycle host filter |
 | `o` | Cycle sort order |
 | `n` | New job |
-| `e` | Edit queued job |
+| `e` | Edit queued or draft job |
 | `E` | Edit & restart (new job form pre-populated from selected job) |
 | `r` | Refresh / sync |
 | `g` | Start queued job now / resume paused |

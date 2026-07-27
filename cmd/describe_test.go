@@ -1,7 +1,13 @@
 package cmd
 
 import (
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ids"
+	"github.com/spf13/cobra"
 )
 
 func TestExtractGPUFromEnvVars(t *testing.T) {
@@ -55,6 +61,72 @@ func TestExtractGPUFromEnvVars(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunDescribeUpdatesDraftLocally(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordDraftJob(database, "", "/tmp/project", "echo old", "draft", "", "")
+	if err != nil {
+		t.Fatalf("record draft job: %v", err)
+	}
+
+	resetDescribeState()
+	cmd := newDescribeTestCommand()
+	if err := cmd.Flags().Set("message", "edited draft"); err != nil {
+		t.Fatalf("set message flag: %v", err)
+	}
+	if err := cmd.Flags().Set("command", "echo new"); err != nil {
+		t.Fatalf("set command flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runDescribe(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runDescribe: %v", err)
+		}
+	})
+	if !strings.Contains(out, fmt.Sprintf("Updated job %s", ids.FormatJobID(jobID))) {
+		t.Fatalf("output missing update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.EffectiveStatus() != db.StatusDraft {
+		t.Fatalf("status = %q, want draft", job.EffectiveStatus())
+	}
+	if job.Command != "echo new" || job.Description != "edited draft" {
+		t.Fatalf("job fields = command %q description %q", job.Command, job.Description)
+	}
+}
+
+func resetDescribeState() {
+	describeMessage = ""
+	describeProject = ""
+	describeDirectory = ""
+	describeCommand = ""
+	describeGPU = ""
+	describeGPUs = ""
+	describeGPUMem = 0
+	describeCPU = 0
+	describeGPUClass = ""
+	describeProvider = ""
+}
+
+func newDescribeTestCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "describe <job-id>"}
+	cmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
+	cmd.Flags().StringVar(&describeProject, "project", "", "Set project name")
+	cmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory")
+	cmd.Flags().StringVar(&describeCommand, "command", "", "Set command")
+	cmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU")
+	cmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs")
+	cmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
+	cmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	cmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation")
+	cmd.Flags().StringVar(&describeProvider, "provider", "", "Cloud provider preference for rental placement")
+	return cmd
 }
 
 func TestUpdateCudaVisibleDevices(t *testing.T) {

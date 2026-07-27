@@ -544,6 +544,56 @@ func TestRunEditUpdatesMinSurvivalOverride(t *testing.T) {
 	}
 }
 
+func TestRunEditUpdatesDraftLocally(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordDraftJob(database, "", "/tmp/project", "echo old", "draft", "", "")
+	if err != nil {
+		t.Fatalf("record draft job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("message", "edited draft"); err != nil {
+		t.Fatalf("set message flag: %v", err)
+	}
+	if err := cmd.Flags().Set("command", "echo new"); err != nil {
+		t.Fatalf("set command flag: %v", err)
+	}
+	if err := cmd.Flags().Set("env", "FOO=bar"); err != nil {
+		t.Fatalf("set env flag: %v", err)
+	}
+	if err := cmd.Flags().Set("tag", "exp-001"); err != nil {
+		t.Fatalf("set tag flag: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, fmt.Sprintf("Updated draft job %s", ids.FormatJobID(jobID))) {
+		t.Fatalf("output missing draft update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.EffectiveStatus() != db.StatusDraft {
+		t.Fatalf("status = %q, want draft", job.EffectiveStatus())
+	}
+	if job.Command != "echo new" || job.Description != "edited draft" {
+		t.Fatalf("job fields = command %q description %q", job.Command, job.Description)
+	}
+	if len(job.EnvVars) != 1 || job.EnvVars[0] != "FOO=bar" {
+		t.Fatalf("env vars = %v, want [FOO=bar]", job.EnvVars)
+	}
+	if len(job.Tags) != 1 || job.Tags[0] != "exp-001" {
+		t.Fatalf("tags = %v, want [exp-001]", job.Tags)
+	}
+}
+
 func TestRunEditRejectsInvalidMinSurvival(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -594,7 +644,7 @@ func TestRunEditFailedJobSuggestsRetry(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, want := range []string{
-		"can only edit queued jobs",
+		"can only edit queued or draft jobs",
 		"Solution:",
 		fmt.Sprintf("weft edit %s --retry", ids.FormatJobID(jobID)),
 		fmt.Sprintf("weft restart %s", ids.FormatJobID(jobID)),

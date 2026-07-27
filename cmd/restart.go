@@ -377,7 +377,7 @@ func applyRestartOverrides(database restartExecer, job *db.Job, overrides restar
 			normalizedProvider = *overrides.Provider
 		}
 		if normalizedProvider != "" && job.HasInventoryHost() {
-			return nil, fmt.Errorf("--provider=%s cannot be set while job is queued on inventory host %q; unplace the job first", normalizedProvider, job.Host)
+			return nil, fmt.Errorf("--provider=%s cannot be set while job is assigned to inventory host %q; unplace the job first", normalizedProvider, job.Host)
 		}
 		newTags, providerErr := withProviderTag(job.Tags, normalizedProvider)
 		if providerErr != nil {

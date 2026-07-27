@@ -1843,7 +1843,8 @@ weft queue add --after-any wj42 titan 'python cleanup.py' # Run after job wj42 c
 
 #### weft edit
 
-Edit a queued job’s metadata—description, working directory, command, environment variables, tags, or dependencies.  
+Edit a queued or draft job’s metadata—description, working directory, command, environment variables, tags, or dependencies.
+Draft edits are local-only; queued edits are propagated to the remote queue entry when the job is already placed on a host.
 `weft queue edit` is an alias for this command and accepts the same flags.
 
 ```bash
@@ -1853,7 +1854,7 @@ weft edit [flags] <job-id>
 **Flags:**
 - `-m, --message TEXT`: Set job description
 - `-C, --directory DIR`: Set working directory
-- `--command CMD`: Replace the queued command
+- `--command CMD`: Replace the command
 - `-e, --env VAR=value`: Replace environment variables (repeat flag to set multiple)
 - `--clear-env`: Remove all environment variables
 - `--tag TAG`: Replace the job's tags (repeat flag to set multiple)
@@ -1862,9 +1863,9 @@ weft edit [flags] <job-id>
 - `--depends-on ID[,ID...]`: Require the listed jobs to succeed before running
 - `--depends-on-any ID[,ID...]`: Wait for the listed jobs to finish (success or failure)
 - `--clear-depends`: Remove all dependencies from the job
-- `--provider vastai|runpod`: Change the queued job's rental provider preference
-- `--runpod-cloud-type community|secure`: Set the queued job's RunPod cloud type; use `default`, `auto`, `none`, or `clear` to remove the per-job override
-- `--min-survival FRACTION`: Set the queued job's rental offer survival floor; `0` disables the floor for this job
+- `--provider vastai|runpod`: Change the job's rental provider preference
+- `--runpod-cloud-type community|secure`: Set the job's RunPod cloud type; use `default`, `auto`, `none`, or `clear` to remove the per-job override
+- `--min-survival FRACTION`: Set the job's rental offer survival floor; `0` disables the floor for this job
 - `--retry`: Requeue a terminal job and apply the requested edits in the same command
 
 IDs can also be suffixed with `+` or `:any` to mark them as completion-based dependencies, e.g. `--depends-on 101+` or `--depends-on 101:any`.

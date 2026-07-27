@@ -104,7 +104,7 @@ type Model struct {
 	createJobStart time.Time
 	createJobStep  string
 
-	// Edit job mode (for queued jobs only)
+	// Edit job mode (for queued or draft jobs)
 	editMode          bool
 	editingJobID      int64
 	editingJobDepSpec string

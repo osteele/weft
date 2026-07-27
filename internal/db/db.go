@@ -1343,7 +1343,7 @@ func GetJobsNeedingDescriptions(db *sql.DB, limit int) ([]*Job, error) {
 	return queryJobs(db, query, limit)
 }
 
-// UpdateJobWorkingDir updates the working directory for a queued job
+// UpdateJobWorkingDir updates the working directory for a queued or draft job.
 func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
 	var err error
 	workingDir, err = workdir.Normalize(workingDir)
@@ -1352,18 +1352,18 @@ func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
 	}
 	_, err = db.Exec(
 		`UPDATE jobs SET working_dir = ? WHERE id = ?
-		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status = ?)`,
-		workingDir, id, id, StatusQueued,
+		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status IN (?, ?))`,
+		workingDir, id, id, StatusQueued, StatusDraft,
 	)
 	return err
 }
 
-// UpdateJobCommand updates the command for a queued job
+// UpdateJobCommand updates the command for a queued or draft job.
 func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET command = ? WHERE id = ?
-		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status = ?)`,
-		command, id, id, StatusQueued,
+		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status IN (?, ?))`,
+		command, id, id, StatusQueued, StatusDraft,
 	)
 	return err
 }

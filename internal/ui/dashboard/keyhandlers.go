@@ -637,8 +637,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
-		if job.EffectiveStatus() != db.StatusQueued {
-			return m, m.setFlash("Can only edit queued jobs", true)
+		status := job.EffectiveStatus()
+		if status != db.StatusQueued && status != db.StatusDraft {
+			return m, m.setFlash("Can only edit queued or draft jobs", true)
 		}
 		// Enter edit mode with form pre-populated
 		m.inputMode = true
