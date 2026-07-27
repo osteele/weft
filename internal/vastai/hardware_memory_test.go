@@ -15,7 +15,11 @@ func TestEffectiveMemGB_HardwareCeilingExact(t *testing.T) {
 	}{
 		{"a100", 80, 80},
 		{"a100", 40, 40},
+		{"A100 PCIE", 80, 80},
+		{"A100 SXM4", 80, 80},
 		{"h100", 80, 80},
+		{"H100 PCIe", 80, 80},
+		{"H100 HBM3", 80, 80},
 		{"h200", 141, 141},
 		{"rtx4090", 24, 24},
 		{"rtx5090", 32, 32},
@@ -42,7 +46,11 @@ func TestEffectiveMemGB_RollbackPostHeadroom(t *testing.T) {
 	}{
 		{"a100", 82, 80},
 		{"a100", 42, 40},
+		{"A100 PCIE", 82, 80},
+		{"A100 SXM4", 82, 80},
 		{"h100", 82, 80},
+		{"H100 PCIe", 82, 80},
+		{"H100 HBM3", 82, 80},
 		{"h200", 143, 141},
 		{"rtx4090", 26, 24},
 		{"a40", 50, 48},
@@ -122,6 +130,7 @@ func TestIntendedMemGB(t *testing.T) {
 		{"rtx4090", 26, 24},
 		// Exact ceilings pass through.
 		{"a100", 80, 80},
+		{"A100 PCIE", 80, 80},
 		{"rtx4090", 24, 24},
 		// Non-ceiling values pass through WITHOUT adding headroom — that's
 		// the difference from EffectiveMemGB. A job stored as 50GB on an
@@ -148,10 +157,13 @@ func TestKnownHardwareMemoryGB(t *testing.T) {
 		want  bool
 	}{
 		{"a100", 80, true},
+		{"A100 PCIE", 80, true},
+		{"A100 SXM4", 80, true},
 		{"a100", 40, true},
 		{"a100", 50, false},
 		{"a100", 82, false},
 		{"h100", 80, true},
+		{"H100 PCIe", 80, true},
 		{"", 80, false},
 		{"nvidia", 80, false},
 	}

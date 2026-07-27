@@ -992,6 +992,30 @@ func TestRankOffer_FiltersInsufficientGPUCount(t *testing.T) {
 	}
 }
 
+func TestRankOffer_FiltersPCIeInterconnect(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:     "A100",
+		GPUMemGB:     80,
+		Interconnect: "pcie",
+		Jobs:         []*db.Job{{ID: 1}},
+	}
+	offers := []cloud.Offer{
+		{ProviderID: "sxm", GPUName: "A100 SXM4", GPUMemGB: 80, CostPerHour: 0.10},
+		{ProviderID: "pcie", GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 0.20},
+	}
+
+	got := rankOffer(group, offers, nil, 1.0, bidding.ConstantSetup(0), bidding.StrategyCheap, 0)
+	if got.Offer == nil {
+		t.Fatal("expected an offer, got nil")
+	}
+	if got.Offer.ProviderID != "pcie" {
+		t.Fatalf("picked offer %q, want pcie", got.Offer.ProviderID)
+	}
+	if got.FilterStats.InterconnectFiltered != 1 || got.FilterStats.AfterInterconnect != 1 {
+		t.Fatalf("interconnect stats = %+v, want one filtered and one remaining", got.FilterStats)
+	}
+}
+
 func TestRankOffer_UsesJobMinSurvivalOverride(t *testing.T) {
 	minSurvivalZero := 0.0
 	lowSurvivalOffer := cloud.Offer{

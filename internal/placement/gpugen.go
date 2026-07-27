@@ -226,6 +226,7 @@ var familyCheckers = map[string]func(GPUGeneration) bool{
 }
 
 var gpuClassAliases = map[string][]string{
+	"a100sxm":  {"a100sxm4"},
 	"h100hbm3": {"h100sxm"},
 }
 

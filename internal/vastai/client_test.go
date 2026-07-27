@@ -848,10 +848,14 @@ func TestBuildSearchFilter_HardwareCeilingDoesNotInflateMem(t *testing.T) {
 	}{
 		{"exact ceiling", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 80}, "gpu_ram>=80"},
 		{"post-headroom rollback", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 82}, "gpu_ram>=80"},
+		{"a100 pcie exact ceiling", OfferConstraints{GPUClass: "A100 PCIE", MinGPUMemGB: 80}, "gpu_ram>=80"},
+		{"a100 pcie post-headroom rollback", OfferConstraints{GPUClass: "A100 PCIE", MinGPUMemGB: 82}, "gpu_ram>=80"},
+		{"a100 sxm exact ceiling", OfferConstraints{GPUClass: "A100 SXM4", MinGPUMemGB: 80}, "gpu_ram>=80"},
 		{"non-ceiling adds headroom", OfferConstraints{GPUClass: "a100", MinGPUMemGB: 50}, "gpu_ram>=52"},
 		{"unknown class adds headroom", OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 24}, "gpu_ram>=26"},
 		{"h100 80GB", OfferConstraints{GPUClass: "h100", MinGPUMemGB: 80}, "gpu_ram>=80"},
 		{"h100 post-headroom", OfferConstraints{GPUClass: "h100", MinGPUMemGB: 82}, "gpu_ram>=80"},
+		{"h100 pcie exact ceiling", OfferConstraints{GPUClass: "H100 PCIe", MinGPUMemGB: 80}, "gpu_ram>=80"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

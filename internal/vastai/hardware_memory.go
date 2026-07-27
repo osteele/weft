@@ -35,6 +35,9 @@ const defaultHeadroomGB = 2
 var hardwareMemoryByClass = map[string][]int{
 	// Ampere
 	"a100":     {40, 80},
+	"a100pcie": {40, 80},
+	"a100sxm":  {40, 80},
+	"a100sxm4": {40, 80},
 	"a800":     {80},
 	"a40":      {48},
 	"a10":      {24},
@@ -47,8 +50,11 @@ var hardwareMemoryByClass = map[string][]int{
 	"rtx3070":  {8},
 	"rtx3060":  {8, 12},
 	// Hopper
-	"h100": {80},
-	"h200": {141},
+	"h100":     {80},
+	"h100pcie": {80},
+	"h100sxm":  {80},
+	"h100hbm3": {80},
+	"h200":     {141},
 	// Ada Lovelace
 	"rtx4090":     {24},
 	"rtx4080":     {16},

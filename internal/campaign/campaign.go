@@ -794,15 +794,24 @@ func groupCanUseGPUSlots(g InstanceGroup) bool {
 	return true
 }
 
-// FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).
+// FilterByGPUClass returns groups whose GPU constraint is within the requested
+// filter. A broad filter such as A100 includes narrower groups like A100 PCIE,
+// but a narrow filter does not include broader groups because it would not
+// rewrite the group's actual offer constraint.
 // Returns all groups if filter is empty.
 func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
+	filter = strings.TrimSpace(filter)
 	if filter == "" {
 		return groups
 	}
+	filterConstraint := placement.ParseGPUConstraint(filter)
 	var filtered []InstanceGroup
 	for _, g := range groups {
-		if strings.EqualFold(g.GPUClass, filter) {
+		groupClass := strings.TrimSpace(g.GPUClass)
+		if groupClass == "" {
+			continue
+		}
+		if strings.EqualFold(groupClass, filter) || filterConstraint.Subsumes(placement.ParseGPUConstraint(groupClass)) {
 			filtered = append(filtered, g)
 		}
 	}
