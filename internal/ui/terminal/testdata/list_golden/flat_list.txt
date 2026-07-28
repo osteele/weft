@@ -1,8 +1,8 @@
        ID HOST         STATUS         TIME        PROJECT DESCRIPTION                                                   
-    wj501 wi6202       running non-a… 01/01 13:00 alpha   open move source and target                                   
+    wj501 wi6202       running non-a… 01/01 05:00 alpha   open move source and target                                   
     wj501 wi6201 → wi… queued moving  -           alpha   open move source and target                                   
     wj502 (unplaced)   waiting        -           alpha   blocked rental offer                                          
     wj503 wi7001       launching      -           beta    launching setup                                               
-    wj504 cool30       completed ok   01/01 13:25 beta    finished cleanly                                              
-    wj505 cool30       failed (2) re… 01/01 13:18 gamma   finished with nonzero exit                                    
+    wj504 cool30       completed ok   01/01 05:25 beta    finished cleanly                                              
+    wj505 cool30       failed (2) re… 01/01 05:18 gamma   finished with nonzero exit                                    
     wj506 (unplaced)   canceled       -           gamma   operator canceled                                             
