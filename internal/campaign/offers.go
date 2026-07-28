@@ -73,9 +73,15 @@ type OfferFilterStats struct {
 	ProviderErrors []string
 }
 
+// ZeroOffersPrefix begins every zero-raw-offer detail. Callers asserting that a
+// reason did *not* come from the provider-empty branch should match on this
+// rather than copying the phrasing, so rewording cannot silently defang them.
+const ZeroOffersPrefix = "provider search returned 0 offers"
+
 // NoOffersDetail returns a human-readable explanation of why no offers survived
-// filtering. When constraints is non-empty it is appended to the zero-offers
-// branch so the caller can see which search predicates yielded nothing.
+// filtering. When constraints is non-empty the zero-offers branch lists the
+// predicates that were searched — note that it reports what was asked for, not
+// which predicate bound.
 func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	if s.RawCount == 0 {
 		if len(s.ProviderErrors) > 0 {
@@ -85,10 +91,15 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			}
 			return "provider offer fetch unavailable (market unknown; Weft will retry)"
 		}
+		// Every predicate is sent to the provider in one server-side query (see
+		// vastai.Client.SearchOffers), so a zero-offer result says nothing about
+		// which one bound. Isolating that would cost one extra provider search
+		// per relaxed constraint. The disclaimer leads so that truncation
+		// (SanitizeBlockedReason, TUI footers) eats predicates, not framing.
 		if constraints != "" {
-			return fmt.Sprintf("no offers from providers for %s", constraints)
+			return fmt.Sprintf("%s; no single predicate isolated (searched: %s)", ZeroOffersPrefix, constraints)
 		}
-		return "no offers from providers"
+		return ZeroOffersPrefix
 	}
 	found := offerCount(s.RawCount) + " found"
 	passedGPUCount := s.AfterGPUCount

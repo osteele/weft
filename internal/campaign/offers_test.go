@@ -1144,12 +1144,34 @@ func TestApproximateEstimates_UsesNeutralRuntimeAcrossOffers(t *testing.T) {
 	}
 }
 
-func TestNoOffersDetail_IncludesConstraints(t *testing.T) {
+// The predicates stay visible — they are what was searched — but the wording
+// must not read as an attribution, or readers pin the blame on whichever
+// constraint looks largest. Guards a real misdiagnosis: an unplaced A40 job was
+// attributed to disk>=140GB when the causes were zero market supply (A40) and a
+// driver>=570 pin (RTX A6000).
+func TestNoOffersDetail_ListsConstraintsWithoutAttributingBlame(t *testing.T) {
 	stats := OfferFilterStats{RawCount: 0}
 	got := stats.NoOffersDetail("gpu=ampere+ vram>=40GB")
-	want := "no offers from providers for gpu=ampere+ vram>=40GB"
+	want := "provider search returned 0 offers; no single predicate isolated (searched: gpu=ampere+ vram>=40GB)"
 	if got != want {
 		t.Fatalf("NoOffersDetail = %q, want %q", got, want)
+	}
+}
+
+// The disclaimer must precede the predicate list: SanitizeBlockedReason caps
+// reasons at 240 bytes and TUI footers truncate to terminal width, both from the
+// right. A trailing disclaimer is the first thing dropped, leaving exactly the
+// bare enumeration this wording exists to prevent.
+func TestNoOffersDetail_DisclaimerSurvivesTruncation(t *testing.T) {
+	stats := OfferFilterStats{RawCount: 0}
+	got := stats.NoOffersDetail("gpu=A40 vram>=20GB disk>=140GB reliability>=0.85 driver>=570 cuda>=12.8")
+
+	disclaimerEnd := strings.Index(got, "isolated") + len("isolated")
+	if disclaimerEnd < len("isolated") {
+		t.Fatalf("NoOffersDetail = %q, want a non-attribution disclaimer", got)
+	}
+	if firstPredicate := strings.Index(got, "gpu=A40"); firstPredicate < disclaimerEnd {
+		t.Fatalf("NoOffersDetail = %q, predicates must follow the disclaimer so truncation drops them first", got)
 	}
 }
 

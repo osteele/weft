@@ -145,7 +145,7 @@ func TestRankOfferWithPredictedRuntime_PreservesFilterStatsAfterCUDAFilter(t *te
 		t.Fatalf("unexpected filter stats: %#v", got.FilterStats)
 	}
 	detail := got.FilterStats.NoOffersDetail("")
-	if strings.Contains(detail, "no offers from providers") {
+	if strings.Contains(detail, ZeroOffersPrefix) {
 		t.Fatalf("unexpected provider-empty detail after non-empty raw offers: %q", detail)
 	}
 	if !strings.Contains(detail, "CUDA compatibility") {

@@ -672,7 +672,7 @@ contract CUDACompatibilityChain {
 -- Auto-relaunch must classify per-group offer outcomes by error first,
 -- not by Offer == nil first. A failed provider search returns Offer = nil
 -- AND Err != nil; checking Offer == nil before Err mis-classifies provider
--- failures (CLI exit, network) as "no offers from providers" with a
+-- failures (CLI exit, network) as "provider search returned 0 offers" with a
 -- FilterStats-derived detail that is empty/misleading. Required event kinds:
 --   * relaunch.skipped.no_offers   — provider returned 0 candidates
 --   * relaunch.skipped.offer_error — provider call itself failed

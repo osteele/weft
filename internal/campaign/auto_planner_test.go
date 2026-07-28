@@ -367,7 +367,7 @@ func TestApplyGroupOffer_MappedStatsDoNotRegressToProviderEmpty(t *testing.T) {
 	applyGroupOffer(&plan, split[0], mapped[0], nil, 0.95)
 
 	reason := plan.BlockedReasons[1229]
-	if strings.Contains(reason, "no offers from providers") {
+	if strings.Contains(reason, ZeroOffersPrefix) {
 		t.Fatalf("blocked reason regressed to provider-empty despite RawCount>0: %q", reason)
 	}
 	if !strings.Contains(reason, "CUDA compatibility") {

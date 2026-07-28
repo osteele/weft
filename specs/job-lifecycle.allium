@@ -97,7 +97,7 @@ entity Job {
     target_kind: TargetKind
     -- Why the job is unplaced. Each string is one reason, e.g. "no local
     -- host matched <constraints>", per-host non-eligibility ("2 hosts: no
-    -- A100 GPU"), or rental-side reasons ("no offers from providers ...",
+    -- A100 GPU"), or rental-side reasons ("provider search returned 0 offers ...",
     -- "offer query failed: ..."). UI surfaces are responsible for
     -- distinguishing actionable blockers from routine handoff state — when
     -- any cloud provider is configured, the on-prem rejection reasons
