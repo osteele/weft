@@ -2,12 +2,14 @@ package cmd
 
 import "github.com/osteele/weft/internal/db"
 
-func buildDiskMetadata(diskGB, runtimeDiskGB int) *db.JobDiskMetadata {
-	if diskGB <= 0 && runtimeDiskGB <= 0 {
-		return nil
-	}
-	return &db.JobDiskMetadata{
+func buildDiskMetadata(diskGB, diskMaxGB, runtimeDiskGB int) *db.JobDiskMetadata {
+	meta := &db.JobDiskMetadata{
 		DiskGB:        diskGB,
+		DiskMaxGB:     diskMaxGB,
 		RuntimeDiskGB: runtimeDiskGB,
 	}
+	if meta.IsEmpty() {
+		return nil
+	}
+	return meta
 }

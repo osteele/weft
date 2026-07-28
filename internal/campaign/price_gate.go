@@ -239,9 +239,9 @@ func centsPerHourFloat(cents int) float64 {
 	return float64(cents) / 100.0
 }
 
-// priceGateJobIDs extracts the job IDs of an instance group for use in
-// PriceGateContext. Nil-safe; jobs without IDs (test fixtures) are skipped.
-func priceGateJobIDs(group InstanceGroup) []int64 {
+// groupJobIDs extracts the job IDs of an instance group. Nil-safe; jobs
+// without IDs (test fixtures) are skipped.
+func groupJobIDs(group InstanceGroup) []int64 {
 	ids := make([]int64, 0, len(group.Jobs))
 	for _, j := range group.Jobs {
 		if j == nil || j.ID == 0 {

@@ -552,3 +552,90 @@ func writeCachedUVManifest(t *testing.T, home, dir string, manifest *estimate.UV
 func int64Ptr(v int64) *int64 {
 	return &v
 }
+
+// A user-declared cap must be able to pull the request BELOW the estimator's
+// own floor, including below DefaultMinDiskGB. That is the whole point: disk
+// is the one estimated quantity that becomes a server-side placement predicate
+// (vast.ai disk_space>=N), so an over-estimate silently shrinks the offer pool.
+func TestEstimateGroupDisk_CapLowersBelowDefaultMin(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{{
+		ID:                   1,
+		Command:              "echo test",
+		CLIResourceOverrides: &db.CLIResourceOverrides{DiskMaxGB: intPtr(20)},
+	}}}
+	disk, _ := EstimateGroupDisk(group, nil, nil)
+	if disk != 20 {
+		t.Fatalf("disk = %d, want 20 (cap must override DefaultMinDiskGB=%d)", disk, DefaultMinDiskGB)
+	}
+}
+
+// A cap above the estimate is a no-op — it is a ceiling, not a request.
+func TestEstimateGroupDisk_CapAboveEstimateIsNoOp(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{{
+		ID:                   1,
+		Command:              "echo test",
+		CLIResourceOverrides: &db.CLIResourceOverrides{DiskMaxGB: intPtr(500)},
+	}}}
+	disk, _ := EstimateGroupDisk(group, nil, nil)
+	if disk != DefaultMinDiskGB {
+		t.Fatalf("disk = %d, want %d; a cap above the estimate must not raise it", disk, DefaultMinDiskGB)
+	}
+}
+
+// An explicit floor and an explicit cap are contradictory. The cap is applied
+// last and wins: it is the only knob that can lower the request, so letting the
+// floor win would make the cap unusable on exactly the jobs that declare both.
+func TestEstimateGroupDisk_CapBeatsExplicitFloor(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{{
+		ID:      1,
+		Command: "echo test",
+		CLIResourceOverrides: &db.CLIResourceOverrides{
+			DiskGB:    intPtr(300),
+			DiskMaxGB: intPtr(80),
+		},
+	}}}
+	disk, _ := EstimateGroupDisk(group, nil, nil)
+	if disk != 80 {
+		t.Fatalf("disk = %d, want 80 (cap applied after floor)", disk)
+	}
+}
+
+// Across a group the cap is the MINIMUM of the declared ceilings, because
+// honoring one job's ceiling means the shared instance cannot exceed it.
+// Jobs that declare no cap do not contribute.
+func TestEstimateGroupDisk_GroupCapIsMinOfDeclared(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{
+		{ID: 1, Command: "echo a", CLIResourceOverrides: &db.CLIResourceOverrides{DiskMaxGB: intPtr(120)}},
+		{ID: 2, Command: "echo b", CLIResourceOverrides: &db.CLIResourceOverrides{DiskMaxGB: intPtr(90)}},
+		{ID: 3, Command: "echo c"}, // no cap declared — must not contribute
+	}}
+	if got := groupDiskCapGB(group); got != 90 {
+		t.Fatalf("groupDiskCapGB = %d, want 90 (min across declared caps)", got)
+	}
+}
+
+// A group where nobody declares a cap must report 0 (no cap), not a spurious
+// minimum derived from the undeclared jobs.
+func TestEstimateGroupDisk_NoCapDeclared(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{
+		{ID: 1, Command: "echo a"},
+		{ID: 2, Command: "echo b"},
+	}}
+	if got := groupDiskCapGB(group); got != 0 {
+		t.Fatalf("groupDiskCapGB = %d, want 0 when no job declares a cap", got)
+	}
+}
+
+// Job metadata is the persisted form of the cap (set by --disk-max at submit),
+// and must be honored when no CLI override is present.
+func TestEstimateGroupDisk_CapFromJobMetadata(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{{
+		ID:       1,
+		Command:  "echo test",
+		Metadata: &db.JobMetadata{Disk: &db.JobDiskMetadata{DiskMaxGB: 30}},
+	}}}
+	disk, _ := EstimateGroupDisk(group, nil, nil)
+	if disk != 30 {
+		t.Fatalf("disk = %d, want 30 from job metadata", disk)
+	}
+}

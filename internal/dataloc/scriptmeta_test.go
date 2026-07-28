@@ -110,6 +110,17 @@ import torch
 			want: &ScriptMeta{DiskGB: 120, RuntimeDiskGB: 24},
 		},
 		{
+			// disk-max is a ceiling that can pull the estimate DOWN, unlike
+			// disk which only raises it. Both may be declared together.
+			name: "disk-max ceiling",
+			content: `# /// script
+# [tool.weft]
+# disk-max = "90GB"
+# ///
+`,
+			want: &ScriptMeta{DiskMaxGB: 90},
+		},
+		{
 			name:    "no metadata block",
 			content: `import torch\nprint("hello")\n`,
 			want:    nil,
@@ -487,6 +498,9 @@ import torch
 			}
 			if got.DiskGB != tt.want.DiskGB {
 				t.Errorf("DiskGB: got %d, want %d", got.DiskGB, tt.want.DiskGB)
+			}
+			if got.DiskMaxGB != tt.want.DiskMaxGB {
+				t.Errorf("DiskMaxGB: got %d, want %d", got.DiskMaxGB, tt.want.DiskMaxGB)
 			}
 			if got.RuntimeDiskGB != tt.want.RuntimeDiskGB {
 				t.Errorf("RuntimeDiskGB: got %d, want %d", got.RuntimeDiskGB, tt.want.RuntimeDiskGB)

@@ -175,6 +175,9 @@ rule GroupingCandidatesScoredUnderObjective {
         -- carries a disk floor derived from its own job set (see
         -- campaign-lifecycle.allium FreshRentalDiskEstimate), so no grouping
         -- is scored or offer-filtered against another grouping's disk need.
+        -- A user-declared disk ceiling derives from the same job set — an
+        -- alternative's ceiling is the minimum over its own jobs — so
+        -- absorbing a capped job into a merged candidate caps that candidate.
 }
 
 rule ReuseOnlyWhenItBeatsNewLaunch {
@@ -353,7 +356,10 @@ invariant LaunchAndRebalanceObjectivesAreDistinct {
 -- 5. Group disk is sized for the whole group's inputs for the instance's whole
 --    life; there is no per-phase disk / eviction model that would let
 --    sequential jobs on one instance reclaim space between phases. See
---    campaign-lifecycle.allium FreshRentalDiskEstimate.
+--    campaign-lifecycle.allium FreshRentalDiskEstimate. The user-declared
+--    disk ceiling is the only correction for this: it lets a user who knows
+--    the whole-life sizing overshoots stop that overshoot from shrinking the
+--    offer pool, at their own risk. There is no automatic correction.
 --
 -- 6. The amortization deferrals listed in campaign-lifecycle.allium § Queue
 --    re-balance under "Logistics intentionally deferred" (same-disk affinity

@@ -1602,10 +1602,11 @@ weft run -e BATCH_SIZE=32 -e LR=0.001 titan "python train.py"
 weft queue add -e TMPDIR=/mnt/data/tmp titan "python train.py"
 ```
 
-**Rental disk sizing (`--disk`, `--runtime-disk`)**:
+**Rental disk sizing (`--disk`, `--disk-max`, `--runtime-disk`)**:
 ```bash
 weft run --disk 120 --runtime-disk 24 --input hf:org/model "uv sync --project scripts/vllm-profiling && python bench.py"
 weft queue add --runtime-disk 16 titan "uv run python train.py"
+weft run --disk-max 90 --input hf:gpt2 "uv run bench.py"
 ```
 
 `--disk` sets the total rental instance disk floor. `--runtime-disk` adds
@@ -1615,6 +1616,18 @@ Runtime setup headroom is explicit; command text does not automatically add a
 runtime cache estimate. Weft combines explicit disk settings with HF input
 sizes, cached uv-lock estimates, Docker image overhead, and prior observed disk
 usage.
+
+`--disk-max` caps the result. It is the only disk knob that can lower the
+request, and it is applied last, overriding both the `--disk` floor and the
+built-in minimum. Use it when you know the estimate overshoots — most often
+because `--input hf:<model>` prices the whole repository including
+serialization formats your loader never fetches. `weft job disk-calibration
+--project <name> --rows` shows estimate-vs-actual peak per launch. Capping is
+an explicit acceptance of risk: a subsequent out-of-disk failure is
+attributable to the cap, and weft logs whenever one binds.
+
+Both are also available as `[tool.weft] disk` / `disk-max` script metadata, and
+on `weft restart` / `weft retry` (`--disk-max 0` clears).
 
 Secret values can be stored locally and attached by reference so tokens are not
 written into job rows or command output:

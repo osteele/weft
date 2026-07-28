@@ -164,6 +164,30 @@ declared inputs, cached uv-lock estimates, Docker image overhead, and prior
 observed disk peaks when available, but runtime setup caches are explicit:
 add `--runtime-disk` when command startup needs extra scratch space.
 
+Use `--disk-max N` to cap the request in the other direction. Every other knob
+can only raise the estimate; `--disk-max` is the only one that lowers it, and it
+is applied last — it overrides the `--disk` floor and the built-in minimum. This
+matters because disk is a hard placement filter: the estimate becomes a
+server-side `disk_space>=N` predicate in the offer search, so an over-estimate
+shrinks the offer pool and can empty it.
+
+The most common reason the estimate overshoots is `--input hf:<model>`, which
+prices the *whole repository* from HuggingFace's `usedStorage` — including every
+serialization format the repo ships (`.bin`, `.h5`, flax `.msgpack`,
+`.safetensors`, ONNX, Rust). If your loader only ever fetches one of those, the
+declared size can be several times what actually lands on disk. Check the real
+figure with `weft job disk-calibration --project <name> --rows`, which compares
+the current estimate against recorded peak disk per launch, then cap
+accordingly:
+
+```
+laptop$ weft run --disk-max 90 --input hf:gpt2 --input hf:gpt2-xl 'uv run bench.py'
+```
+
+Capping is an explicit acceptance of risk. If the job then runs out of disk, the
+failure is attributable to the cap rather than the estimator — weft logs the
+estimated size, the cap, and the affected jobs whenever a cap binds.
+
 The "prior observed disk peaks" path reads `disk_used_bytes` from
 `job_phase_timings` and the time-series peak from `job_timeseries`. The
 estimator rejects any historical sample above a 2 TB plausibility bound
@@ -304,6 +328,7 @@ Supported keys (all optional):
 | `cpu-cores` | int             | `--cpu-cores`       |
 | `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
 | `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |
+| `disk-max` / `disk-max-gb` | int or `"NGB"` | `--disk-max` |
 | `gpu-arch-max`   | string      | *(no CLI flag — overrides auto-inferred GPU arch upper bound; see below)* |
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |

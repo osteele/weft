@@ -204,6 +204,7 @@ var (
 	queueHFTokenFrom    string
 	queueSecretVars     []string
 	queueDiskGB         int
+	queueDiskMaxGB      int
 	queueRuntimeDiskGB  int
 	queueTags           []string
 	queueAfter          int64
@@ -305,6 +306,7 @@ func init() {
 	addSecretEnvFlags(queueAddCmd, &queueHFToken, &queueHFTokenFrom, &queueSecretVars)
 	queueAddCmd.Flags().IntVar(&queueDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	queueAddCmd.Flags().IntVar(&queueRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
+	queueAddCmd.Flags().IntVar(&queueDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB (may lower the request below the estimate)")
 	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark-isolation' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement; 'interruptible' allows interruptible cloud placement ('preemptible' is accepted as a synonym)")
 	queueAddCmd.Flags().StringVar(&queueAfterRaw, "after", "", "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().StringVar(&queueAfterRaw, "depends-on", "", "Alias for --after; start job after another job succeeds (job ID)")
@@ -401,7 +403,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueWait && queueDraft {
 		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
-	diskMeta := buildDiskMetadata(queueDiskGB, queueRuntimeDiskGB)
+	diskMeta := buildDiskMetadata(queueDiskGB, queueDiskMaxGB, queueRuntimeDiskGB)
 	cliOverrides := &db.CLIResourceOverrides{}
 	if strings.TrimSpace(host) != "" {
 		cliOverrides.Host = strings.TrimSpace(host)
@@ -413,6 +415,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("runtime-disk") {
 		runtimeDisk := queueRuntimeDiskGB
 		cliOverrides.RuntimeDiskGB = &runtimeDisk
+	}
+	if cmd.Flags().Changed("disk-max") {
+		diskMax := queueDiskMaxGB
+		cliOverrides.DiskMaxGB = &diskMax
 	}
 
 	var deps []queueDependency

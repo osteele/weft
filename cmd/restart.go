@@ -48,6 +48,7 @@ var (
 	restartProvider      string
 	restartGPUMem        int
 	restartDiskGB        int
+	restartDiskMaxGB     int
 	restartRuntimeDiskGB int
 	restartMinSurvival   float64
 	restartGPUMemStrict  bool
@@ -77,6 +78,8 @@ type restartOverrides struct {
 	DiskGB              *int
 	HasRuntimeDisk      bool
 	RuntimeDiskGB       *int
+	HasDiskMax          bool
+	DiskMaxGB           *int
 	HasMinSurvival      bool
 	MinSurvival         float64
 }
@@ -185,6 +188,7 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().IntVar(&restartGPUMem, "gpu-mem", 0, "GPU memory reservation override in GB per device (0 clears)")
 	command.Flags().IntVar(&restartDiskGB, "disk", 0, "Rental instance disk floor override in GB (0 clears)")
 	command.Flags().IntVar(&restartRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom override in GB (0 clears)")
+	command.Flags().IntVar(&restartDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB, lowering it below the estimate if needed (0 clears)")
 	command.Flags().Float64Var(&restartMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
@@ -235,6 +239,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	hasProvider := cmd.Flags().Changed("provider")
 	hasDisk := cmd.Flags().Changed("disk")
 	hasRuntimeDisk := cmd.Flags().Changed("runtime-disk")
+	hasDiskMax := cmd.Flags().Changed("disk-max")
 	hasMinSurvival := cmd.Flags().Changed("min-survival")
 	out.HasGPUMem = hasGPUMem
 	out.HasGPUMemStrict = hasGPUMemStrict
@@ -242,6 +247,7 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	out.HasProvider = hasProvider
 	out.HasDisk = hasDisk
 	out.HasRuntimeDisk = hasRuntimeDisk
+	out.HasDiskMax = hasDiskMax
 	out.HasMinSurvival = hasMinSurvival
 
 	if gpuValue != "" && gpuClassValue != "" {
@@ -289,6 +295,10 @@ func parseRestartOverrides(cmd *cobra.Command) (restartOverrides, error) {
 	if hasRuntimeDisk {
 		runtimeDisk := restartRuntimeDiskGB
 		out.RuntimeDiskGB = &runtimeDisk
+	}
+	if hasDiskMax {
+		diskMax := restartDiskMaxGB
+		out.DiskMaxGB = &diskMax
 	}
 	if hasMinSurvival {
 		if restartMinSurvival < 0 || restartMinSurvival > 1 {
@@ -393,8 +403,8 @@ func applyRestartOverrides(database restartExecer, job *db.Job, overrides restar
 			updates = append(updates, fmt.Sprintf("provider: %s", normalizedProvider))
 		}
 	}
-	if overrides.HasDisk || overrides.HasRuntimeDisk {
-		diskGB, runtimeDiskGB := currentJobDisk(job)
+	if overrides.HasDisk || overrides.HasRuntimeDisk || overrides.HasDiskMax {
+		diskGB, diskMaxGB, runtimeDiskGB := currentJobDisk(job)
 		if overrides.HasDisk {
 			diskGB = *overrides.DiskGB
 			if err := setJobCLIDiskOverride(database, job, overrides.DiskGB); err != nil {
@@ -417,7 +427,18 @@ func applyRestartOverrides(database restartExecer, job *db.Job, overrides restar
 				updates = append(updates, fmt.Sprintf("runtime-disk: %d GB", runtimeDiskGB))
 			}
 		}
-		if err := setJobDiskMetadata(database, job, buildDiskMetadata(diskGB, runtimeDiskGB)); err != nil {
+		if overrides.HasDiskMax {
+			diskMaxGB = *overrides.DiskMaxGB
+			if err := setJobCLIDiskMaxOverride(database, job, overrides.DiskMaxGB); err != nil {
+				return nil, fmt.Errorf("update disk-max override: %w", err)
+			}
+			if diskMaxGB == 0 {
+				updates = append(updates, "disk-max: cleared")
+			} else {
+				updates = append(updates, fmt.Sprintf("disk-max: %d GB", diskMaxGB))
+			}
+		}
+		if err := setJobDiskMetadata(database, job, buildDiskMetadata(diskGB, diskMaxGB, runtimeDiskGB)); err != nil {
 			return nil, fmt.Errorf("update disk metadata: %w", err)
 		}
 	}
@@ -605,8 +626,10 @@ func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, err
 	}
 
 	diskGB := 0
+	diskMaxGB := 0
 	runtimeDiskGB := 0
 	diskSet := false
+	diskMaxSet := false
 	runtimeDiskSet := false
 	if o := job.CLIResourceOverrides; o != nil {
 		if o.DiskGB != nil {
@@ -617,6 +640,10 @@ func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, err
 			runtimeDiskGB = *o.RuntimeDiskGB
 			runtimeDiskSet = true
 		}
+		if o.DiskMaxGB != nil {
+			diskMaxGB = *o.DiskMaxGB
+			diskMaxSet = true
+		}
 	}
 	if !diskSet && meta != nil && meta.DiskGB > 0 {
 		diskGB = meta.DiskGB
@@ -626,9 +653,13 @@ func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, err
 		runtimeDiskGB = meta.RuntimeDiskGB
 		runtimeDiskSet = true
 	}
+	if !diskMaxSet && meta != nil && meta.DiskMaxGB > 0 {
+		diskMaxGB = meta.DiskMaxGB
+		diskMaxSet = true
+	}
 
-	newDisk := buildDiskMetadata(diskGB, runtimeDiskGB)
-	if sameDiskMetadata(jobDiskMetadata(job), newDisk) {
+	newDisk := buildDiskMetadata(diskGB, diskMaxGB, runtimeDiskGB)
+	if jobDiskMetadata(job).Equal(newDisk) {
 		return nil, nil
 	}
 	if err := setJobDiskMetadata(database, job, newDisk); err != nil {
@@ -642,6 +673,9 @@ func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, err
 		if diskSet && diskGB > 0 {
 			updates = append(updates, fmt.Sprintf("disk: %d GB", diskGB))
 		}
+		if diskMaxSet && diskMaxGB > 0 {
+			updates = append(updates, fmt.Sprintf("disk-max: %d GB", diskMaxGB))
+		}
 		if runtimeDiskSet && runtimeDiskGB > 0 {
 			updates = append(updates, fmt.Sprintf("runtime-disk: %d GB", runtimeDiskGB))
 		}
@@ -649,12 +683,12 @@ func applyScriptDiskDefaults(database restartExecer, job *db.Job) ([]string, err
 	return updates, nil
 }
 
-func currentJobDisk(job *db.Job) (int, int) {
+func currentJobDisk(job *db.Job) (diskGB, diskMaxGB, runtimeDiskGB int) {
 	disk := jobDiskMetadata(job)
 	if disk == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
-	return disk.DiskGB, disk.RuntimeDiskGB
+	return disk.DiskGB, disk.DiskMaxGB, disk.RuntimeDiskGB
 }
 
 func jobDiskMetadata(job *db.Job) *db.JobDiskMetadata {
@@ -662,19 +696,6 @@ func jobDiskMetadata(job *db.Job) *db.JobDiskMetadata {
 		return nil
 	}
 	return job.Metadata.Disk
-}
-
-func sameDiskMetadata(a, b *db.JobDiskMetadata) bool {
-	if a == nil || (a.DiskGB <= 0 && a.RuntimeDiskGB <= 0) {
-		a = nil
-	}
-	if b == nil || (b.DiskGB <= 0 && b.RuntimeDiskGB <= 0) {
-		b = nil
-	}
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.DiskGB == b.DiskGB && a.RuntimeDiskGB == b.RuntimeDiskGB
 }
 
 func setJobDiskMetadata(database restartExecer, job *db.Job, disk *db.JobDiskMetadata) error {
@@ -722,7 +743,7 @@ func persistentAttemptMetadata(meta *db.JobMetadata) *db.JobMetadata {
 			out.Dependencies = deps
 		}
 	}
-	if meta.Disk != nil && (meta.Disk.DiskGB > 0 || meta.Disk.RuntimeDiskGB > 0) {
+	if !meta.Disk.IsEmpty() {
 		disk := *meta.Disk
 		out.Disk = &disk
 	}

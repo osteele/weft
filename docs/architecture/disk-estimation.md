@@ -26,10 +26,37 @@ mutable disk after previous jobs, caches, uploads, and cleanup.
 - empirical historical peak disk, when all jobs in the group have usable
   history;
 - explicit `--disk` / `[tool.weft] disk` as a hard floor;
-- `DefaultMinDiskGB` as the final minimum.
+- `DefaultMinDiskGB` as the final minimum;
+- explicit `--disk-max` / `[tool.weft] disk-max` as a hard ceiling, applied
+  last.
 
 Historical telemetry above the plausibility bound is rejected and surfaced as
 an anomaly instead of being clamped silently.
+
+## The disk ceiling (`--disk-max`)
+
+Every other input above can only push the estimate up. `--disk-max` is the one
+that can pull it down, and it is applied after all of them — including
+`DefaultMinDiskGB` and an explicit `--disk` floor. Declaring both a floor and a
+ceiling is contradictory; the ceiling wins, because letting the floor win would
+make the ceiling unusable on exactly the jobs that set both.
+
+This exists because disk is the only estimated quantity that acts as a *hard
+placement filter*: `MinDiskGB` becomes a server-side `disk_space>=N` predicate
+in the vast.ai offer search. A conservative over-estimate therefore does not
+just cost money — it shrinks the offer pool before scoring runs, and can empty
+it. A user who knows their real footprint (for example, one who constrains
+Hugging Face downloads with `allow_patterns` so the estimator's whole-repo
+`usedStorage` figure overstates what is actually fetched) needs a way to say so.
+
+The ceiling is always explicit and never inferred. When it binds, weft emits a
+`disk estimate capped by user-declared ceiling` warning recording the estimated
+size, the cap, and the affected job IDs, so a later `disk_full` on that instance
+is attributable to the cap rather than to the estimator.
+
+Across a group the effective ceiling is the *minimum* of the ceilings declared
+by its jobs — honoring one job's ceiling means the shared instance cannot exceed
+it. Jobs that declare no ceiling do not contribute.
 
 ## Reuse admission
 

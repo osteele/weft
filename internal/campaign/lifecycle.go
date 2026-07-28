@@ -1614,7 +1614,7 @@ func launchCampaignWithStager(
 			gateCtx := PriceGateContext{
 				GPUClass: group.GPUClass,
 				GPUMemGB: group.GPUMemGB,
-				JobIDs:   priceGateJobIDs(group),
+				JobIDs:   groupJobIDs(group),
 				DB:       database,
 			}
 			coverageExclusions := map[string]struct{}{}
@@ -2145,6 +2145,16 @@ func LaunchInstance(
 			"base_disk_gb", createOpts.DiskGB,
 			"group_disk_gb", group.DiskGB,
 			"estimated_disk_gb", estimatedDiskGB)
+	}
+	// createOpts.DiskGB is a provider default, not a user request, so a
+	// declared ceiling below it still binds. Applied after every floor above.
+	if capGB := groupDiskCapGB(group); capGB > 0 && capGB < requestedDiskGB {
+		slog.Info("lowered launch disk allocation to user-declared ceiling",
+			"component", "launch",
+			"gpu_spec", group.GPUSpec(),
+			"from_gb", requestedDiskGB,
+			"cap_gb", capGB)
+		requestedDiskGB = capGB
 	}
 	if len(diskAnomalies) > 0 {
 		recordDiskTelemetryAnomalies(database, []InstanceGroup{group}, diskAnomalies)

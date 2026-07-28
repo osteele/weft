@@ -369,6 +369,7 @@ type CLIResourceOverrides struct {
 	CPUMemGB        *int     `json:"cpu_mem_gb,omitempty"`
 	CPUMemStrict    *bool    `json:"cpu_mem_strict,omitempty"`
 	DiskGB          *int     `json:"disk_gb,omitempty"`
+	DiskMaxGB       *int     `json:"disk_max_gb,omitempty"`
 	RuntimeDiskGB   *int     `json:"runtime_disk_gb,omitempty"`
 	MinSurvival     *float64 `json:"min_survival,omitempty"`
 	MinCUDAVersion  string   `json:"min_cuda_version,omitempty"`
@@ -1489,7 +1490,7 @@ func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
-		o.DiskGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil &&
+		o.DiskGB == nil && o.DiskMaxGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil &&
 		o.MinCUDAVersion == "" && o.RunpodCloudType == ""
 }
 

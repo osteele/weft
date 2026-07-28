@@ -413,6 +413,16 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	if floor := groupDiskFloorGB(group); floor > diskGB {
 		diskGB = floor
 	}
+	// Applied last, so it overrides DefaultMinDiskGB and any explicit floor.
+	// See campaign-lifecycle.allium FreshRentalDiskEstimate.
+	if capGB := groupDiskCapGB(group); capGB > 0 && capGB < diskGB {
+		slog.Warn("disk estimate capped by user-declared ceiling",
+			"component", "disk",
+			"estimated_gb", diskGB,
+			"cap_gb", capGB,
+			"jobs", groupJobIDs(group))
+		diskGB = capGB
+	}
 	return diskGB, anomalies
 }
 

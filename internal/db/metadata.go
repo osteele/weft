@@ -18,13 +18,35 @@ type JobMetadata struct {
 }
 
 // JobDiskMetadata stores disk requirements for rental placement. DiskGB is a
-// total instance disk floor; RuntimeDiskGB is explicit scratch/cache headroom
-// beyond declared inputs and base overhead.
+// total instance disk floor; DiskMaxGB is a total instance disk ceiling;
+// RuntimeDiskGB is explicit scratch/cache headroom beyond declared inputs and
+// base overhead.
+// See campaign-lifecycle.allium FreshRentalDiskEstimate for how the floor and
+// the ceiling combine.
 type JobDiskMetadata struct {
 	DiskGB        int `json:"disk_gb,omitempty"`
+	DiskMaxGB     int `json:"disk_max_gb,omitempty"`
 	RuntimeDiskGB int `json:"runtime_disk_gb,omitempty"`
 	// EstimatedRuntimeDiskGB is kept for compatibility with older job rows.
 	EstimatedRuntimeDiskGB int `json:"estimated_runtime_disk_gb,omitempty"`
+}
+
+// IsEmpty reports whether no user-declared sizing is present. The derived
+// EstimatedRuntimeDiskGB is a cached estimate rather than user intent, so it
+// does not count.
+func (d *JobDiskMetadata) IsEmpty() bool {
+	return d == nil || (d.DiskGB <= 0 && d.DiskMaxGB <= 0 && d.RuntimeDiskGB <= 0)
+}
+
+// Equal reports whether two records declare the same sizing. Nil and empty
+// records are equivalent.
+func (d *JobDiskMetadata) Equal(other *JobDiskMetadata) bool {
+	if d.IsEmpty() || other.IsEmpty() {
+		return d.IsEmpty() && other.IsEmpty()
+	}
+	return d.DiskGB == other.DiskGB &&
+		d.DiskMaxGB == other.DiskMaxGB &&
+		d.RuntimeDiskGB == other.RuntimeDiskGB
 }
 
 // JobDependencyMetadata stores dependency semantics that cannot be encoded as

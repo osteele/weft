@@ -120,6 +120,7 @@ var (
 	runCPUMem          int
 	runCPUMemStrict    bool
 	runDiskGB          int
+	runDiskMaxGB       int
 	runRuntimeDiskGB   int
 	runGPUClass        string
 	runCUDADriverMin   string
@@ -440,6 +441,7 @@ func init() {
 	runCmd.Flags().BoolVar(&runCPUMemStrict, "cpu-mem-strict", false, "Use exact cpu-mem matching without default safety headroom")
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
+	runCmd.Flags().IntVar(&runDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB (may lower the request below the estimate)")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	runCmd.Flags().StringVar(&runCUDADriverMin, "cuda-driver-min", "", "Minimum NVIDIA driver CUDA support required (e.g., 12.4, 12.8, hopper, blackwell). Filters cloud offers by cuda_max_good; the parallel PEP 723 key is `min-cuda` / `cuda-driver-min`")
 	runCmd.Flags().StringVar(&runCUDADriverMin, "min-cuda", "", "Alias for --cuda-driver-min")
@@ -577,6 +579,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			if runRuntimeDiskGB == 0 {
 				runRuntimeDiskGB = fromJob.Metadata.Disk.RuntimeDiskGB
+			}
+			if runDiskMaxGB == 0 {
+				runDiskMaxGB = fromJob.Metadata.Disk.DiskMaxGB
 			}
 		}
 		if len(runEnvVars) == 0 {
@@ -729,6 +734,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		runtimeDisk := runRuntimeDiskGB
 		cliOverrides.RuntimeDiskGB = &runtimeDisk
 	}
+	if cmd.Flags().Changed("disk-max") {
+		diskMax := runDiskMaxGB
+		cliOverrides.DiskMaxGB = &diskMax
+	}
 	if runCUDADriverMin != "" {
 		canonical, parseErr := placement.ParseCUDADriverFloor(runCUDADriverMin)
 		if parseErr != nil {
@@ -790,6 +799,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("runtime-disk") && runRuntimeDiskGB == 0 && meta.RuntimeDiskGB > 0 {
 			runRuntimeDiskGB = meta.RuntimeDiskGB
 			applied = append(applied, fmt.Sprintf("runtime-disk=%dGB", meta.RuntimeDiskGB))
+		}
+		if !cmd.Flags().Changed("disk-max") && runDiskMaxGB == 0 && meta.DiskMaxGB > 0 {
+			runDiskMaxGB = meta.DiskMaxGB
+			applied = append(applied, fmt.Sprintf("disk-max=%dGB", meta.DiskMaxGB))
 		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
@@ -1074,7 +1087,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpuMemCfg = nil // Skip predictor shell-out; use explicit value or fallback.
 	}
 	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(gpuMemCfg, intPtrOrNil(runGPUMem), gpu, gpuClass, runGPUMemStrict || gpuMemHardwareFloor, host, projectName, command, oomFloor)
-	diskMeta := buildDiskMetadata(runDiskGB, runRuntimeDiskGB)
+	diskMeta := buildDiskMetadata(runDiskGB, runDiskMaxGB, runRuntimeDiskGB)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	gpuMemGB := 0
@@ -1700,6 +1713,9 @@ func printDiskPreview(w io.Writer, disk *db.JobDiskMetadata) {
 	}
 	if disk.DiskGB > 0 {
 		fmt.Fprintf(w, "  Disk floor: %dGB\n", disk.DiskGB)
+	}
+	if disk.DiskMaxGB > 0 {
+		fmt.Fprintf(w, "  Disk ceiling: %dGB (caps the estimate, overrides the floor)\n", disk.DiskMaxGB)
 	}
 	runtimeGB := disk.RuntimeDiskGB
 	label := "Runtime disk"

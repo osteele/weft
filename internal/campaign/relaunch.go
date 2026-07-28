@@ -385,6 +385,15 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		priorDisk := mostRecentDiskFullGB(cfg.Database, group)
 		if priorDisk > 0 {
 			floor := priorDisk + priorDisk/2 // 1.5x
+			if capGB := groupDiskCapGB(group); capGB > 0 && floor > capGB {
+				slog.Warn("disk_full bump limited by user-declared ceiling",
+					"component", "relaunch",
+					"gpu_spec", group.GPUSpec(),
+					"wanted_gb", floor,
+					"cap_gb", capGB,
+					"prior_disk_full_gb", priorDisk)
+				floor = capGB
+			}
 			if groups[i].DiskGB < floor {
 				slog.Info("raising disk allocation due to prior disk_full", "component", "relaunch", "gpu_spec", group.GPUSpec(), "from_gb", groups[i].DiskGB, "to_gb", floor, "prior_disk_full_gb", priorDisk)
 				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{

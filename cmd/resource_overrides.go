@@ -50,6 +50,10 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		v := *source.RuntimeDiskGB
 		clone.RuntimeDiskGB = &v
 	}
+	if source.DiskMaxGB != nil {
+		v := *source.DiskMaxGB
+		clone.DiskMaxGB = &v
+	}
 	if source.MinSurvival != nil {
 		v := *source.MinSurvival
 		clone.MinSurvival = &v
@@ -104,6 +108,12 @@ func setJobCLIGPUMemStrictOverride(database restartExecer, job *db.Job, strict b
 func setJobCLIDiskOverride(database restartExecer, job *db.Job, diskGB *int) error {
 	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
 		snap.DiskGB = cloneIntPtr(diskGB)
+	})
+}
+
+func setJobCLIDiskMaxOverride(database restartExecer, job *db.Job, diskMaxGB *int) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.DiskMaxGB = cloneIntPtr(diskMaxGB)
 	})
 }
 

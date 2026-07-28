@@ -23,6 +23,7 @@ type ScriptMeta struct {
 	CPUMemGB      int    // Minimum host/system RAM in GB (headroom may be applied by CLI)
 	CPUMemStrict  *bool  // Exact cpu-mem matching (no headroom), when explicitly set
 	DiskGB        int    // Total rental disk floor in GB
+	DiskMaxGB     int    // Total rental disk ceiling in GB; caps the estimator (see below)
 	RuntimeDiskGB int    // Extra scratch/cache disk headroom in GB
 	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
 	// values: a numeric cap ("9.0", "12.0"), a generation name ("ampere",
@@ -57,7 +58,7 @@ type ScriptMeta struct {
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
 		m.Interconnect == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
-		m.DiskGB == 0 && m.RuntimeDiskGB == 0 &&
+		m.DiskGB == 0 && m.DiskMaxGB == 0 && m.RuntimeDiskGB == 0 &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" && m.RunpodCloudType == "" &&
@@ -109,6 +110,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 				meta.CPUMemStrict = &v
 			}
 			meta.DiskGB = parseDiskGB(firstPresent(wt, "disk", "disk-gb", "disk_gb"))
+			meta.DiskMaxGB = parseDiskGB(firstPresent(wt, "disk-max", "disk-max-gb", "disk_max_gb"))
 			meta.RuntimeDiskGB = parseDiskGB(firstPresent(wt, "runtime-disk", "runtime-disk-gb", "runtime_disk_gb"))
 			if v, ok := wt.Get("gpu-arch-max").(string); ok {
 				meta.GPUArchMax = v

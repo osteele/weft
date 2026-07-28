@@ -61,6 +61,37 @@ func groupDiskFloorGB(group InstanceGroup) int {
 	return floor
 }
 
+// groupDiskCapGB returns the user-declared ceiling on the group's disk request,
+// or 0 when no job declares one. Unlike groupDiskFloorGB this takes the minimum
+// across the jobs that declare a ceiling; jobs that declare none do not
+// contribute. See campaign-lifecycle.allium FreshRentalDiskEstimate.
+func groupDiskCapGB(group InstanceGroup) int {
+	capGB := 0
+	for _, job := range group.Jobs {
+		if job == nil {
+			continue
+		}
+		diskMaxGB := 0
+		switch {
+		case job.CLIResourceOverrides != nil && job.CLIResourceOverrides.DiskMaxGB != nil:
+			diskMaxGB = max(0, *job.CLIResourceOverrides.DiskMaxGB)
+		case job.Metadata != nil && job.Metadata.Disk != nil && job.Metadata.Disk.DiskMaxGB > 0:
+			diskMaxGB = job.Metadata.Disk.DiskMaxGB
+		default:
+			if meta := scanJobScriptMeta(job); meta != nil && meta.DiskMaxGB > 0 {
+				diskMaxGB = meta.DiskMaxGB
+			}
+		}
+		if diskMaxGB <= 0 {
+			continue
+		}
+		if capGB == 0 || diskMaxGB < capGB {
+			capGB = diskMaxGB
+		}
+	}
+	return capGB
+}
+
 func scanJobScriptMeta(job *db.Job) *dataloc.ScriptMeta {
 	localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 	meta, err := dataloc.ScanScriptMeta(localDir, job.Command)

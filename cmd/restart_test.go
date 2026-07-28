@@ -1572,3 +1572,24 @@ import torch
 		t.Fatalf("GPUClass = %q, want ampere+ (preserved when script has only PEP 723 dependencies)", job.GPUClass)
 	}
 }
+
+// A ceiling declared only in PEP 723 metadata lives in Metadata.Disk with no
+// CLI override behind it. If the persistence predicate ignores DiskMaxGB, the
+// first restart drops it and the next placement runs uncapped.
+func TestPersistentAttemptMetadata_KeepsCeilingOnlyDisk(t *testing.T) {
+	meta := &db.JobMetadata{Disk: &db.JobDiskMetadata{DiskMaxGB: 90}}
+	out := persistentAttemptMetadata(meta)
+	if out == nil || out.Disk == nil {
+		t.Fatalf("persistentAttemptMetadata dropped a ceiling-only disk record: %+v", out)
+	}
+	if out.Disk.DiskMaxGB != 90 {
+		t.Fatalf("DiskMaxGB = %d, want 90", out.Disk.DiskMaxGB)
+	}
+}
+
+func TestPersistentAttemptMetadata_DropsDerivedOnlyDisk(t *testing.T) {
+	meta := &db.JobMetadata{Disk: &db.JobDiskMetadata{EstimatedRuntimeDiskGB: 24}}
+	if out := persistentAttemptMetadata(meta); out != nil {
+		t.Fatalf("persistentAttemptMetadata kept a derived-only disk record: %+v", out)
+	}
+}

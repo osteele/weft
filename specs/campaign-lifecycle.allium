@@ -1320,15 +1320,45 @@ rule FreshRentalDiskEstimate {
     when: BuildOfferSearchFilter(group)
        OR LaunchInstance(group, options)
 
+    -- estimate_gb is the size the estimator computes before the user's
+    -- ceiling is considered. Every input below can only RAISE it.
+    let estimate_gb = UncappedDiskEstimateGB(group)
+
+    -- ExplicitDiskCeilingGB is the ONLY input that can lower the request. It
+    -- is 0 unless the user declared one (--disk-max / [tool.weft] disk-max);
+    -- nothing infers a ceiling. A group's ceiling is the MINIMUM of the
+    -- ceilings its own jobs declare: honouring one job's ceiling means the
+    -- shared instance cannot exceed it. Jobs declaring none do not
+    -- contribute, so one capped job constrains its whole group.
+    let ceiling_gb =
+        if not group.jobs.any(j => ExplicitDiskCeilingGB(j) > 0): 0
+        else: min ExplicitDiskCeilingGB(j)
+                  over each j in group.jobs where ExplicitDiskCeilingGB(j) > 0
+
     ensures:
-        group.requested_disk_gb >= DefaultMinDiskGB
-        group.requested_disk_gb >= ExplicitDiskFloorGB(group)
-        group.requested_disk_gb >= EstimatedDeclaredAndObservedInputsGB(group)
+        estimate_gb >= DefaultMinDiskGB
+        estimate_gb >= ExplicitDiskFloorGB(group)
+        estimate_gb >= EstimatedDeclaredAndObservedInputsGB(group)
             + EstimatedUVSyncGB(group)
             + ImageAndSetupOverheadGB(group)
             + ExplicitRuntimeDiskGB(group)
         HistoricalDiskPeakUsable(group) implies
-            group.requested_disk_gb >= EmpiricalDiskRequirementGB(group)
+            estimate_gb >= EmpiricalDiskRequirementGB(group)
+
+    -- The ceiling is applied LAST, after every floor above including
+    -- DefaultMinDiskGB and an explicit --disk floor. A ceiling at or above
+    -- estimate_gb is a no-op: it is a ceiling, not a request.
+    ensures:
+        if ceiling_gb > 0 and ceiling_gb < estimate_gb:
+            group.requested_disk_gb = ceiling_gb
+            DiskEstimateCappedByCeiling(
+                group: group,
+                estimated_gb: estimate_gb,
+                ceiling_gb: ceiling_gb,
+                jobs: group.jobs
+            )
+        else:
+            group.requested_disk_gb = estimate_gb
 
     @guidance
         -- Fresh rental disk sizing combines declared inputs, observed
@@ -1343,6 +1373,46 @@ rule FreshRentalDiskEstimate {
         -- and surfaced as an anomaly instead of silently clamped.
         -- Implementation: internal/campaign/disk.go EstimateGroupDisk.
         --
+        -- Why a ceiling exists at all: disk is the only estimated quantity
+        -- that acts as a HARD PLACEMENT FILTER. requested_disk_gb becomes a
+        -- server-side `disk_space>=N` predicate in the provider offer search,
+        -- so a conservative over-estimate does not merely cost money — it
+        -- shrinks the offer pool before scoring and can empty it. The common
+        -- overshoot source is `--input hf:<model>`, which prices the whole
+        -- repository from HuggingFace `usedStorage`, including serialization
+        -- formats (.bin, .h5, flax .msgpack, ONNX) the loader never fetches.
+        -- A user who knows their real footprint needs a way to say so.
+        --
+        -- Declaring both a floor and a ceiling is contradictory and the
+        -- ceiling wins, because letting the floor win would make the ceiling
+        -- unusable on exactly the jobs that declare both.
+        --
+        -- Capping is an explicit acceptance of risk, so it must be
+        -- attributable: DiskEstimateCappedByCeiling records the estimated
+        -- size, the ceiling, and the affected job IDs whenever the ceiling
+        -- binds, so a later disk_full on that instance is attributable to the
+        -- ceiling rather than to the estimator.
+        --
+        -- Implementation: the ceiling is applied at the end of
+        -- internal/campaign/disk.go EstimateGroupDisk; the per-group minimum
+        -- is internal/campaign/runtime_disk.go groupDiskCapGB, which reads
+        -- CLIResourceOverrides.DiskMaxGB, then JobDiskMetadata.DiskMaxGB, then
+        -- PEP 723 [tool.weft] disk-max, in that order.
+        --
+        -- Two later paths also raise the request and so must re-apply the
+        -- ceiling, or it would bind the offer filter but not the instance the
+        -- user actually pays for. First, the provider create request starts
+        -- from CreateOpts.DiskGB (a 50GB provider default, not a user
+        -- request) and takes the max with the estimate, so a ceiling below
+        -- 50GB is re-applied in internal/campaign/lifecycle.go after that
+        -- max. Second, the automatic disk_full relaunch bump multiplies the
+        -- prior allocation by 1.5x; internal/campaign/relaunch.go clamps that
+        -- bump to the ceiling, which means a capped group stops being bumped
+        -- once it reaches its ceiling. That is the declared behaviour, not a
+        -- stalled repair loop: the user accepted disk_full risk when they
+        -- declared the ceiling, and the clamp is logged so the arrested bump
+        -- is attributable.
+        --
         -- These floors bind every group whose shape reaches an offer search,
         -- including planner-derived candidate groupings: a parallel (one job
         -- per instance) candidate uses that job's own floor (per-job floors
@@ -1352,7 +1422,10 @@ rule FreshRentalDiskEstimate {
         -- combined job set rather than taking the max of the source
         -- estimates (max under-counts disjoint inputs). This keeps the offer
         -- filter and the eventual create request on the same floor for the
-        -- same shape. Implementation: internal/campaign/campaign.go
+        -- same shape. The ceiling travels with the job set the same way: a
+        -- merged candidate takes the minimum ceiling over its combined jobs,
+        -- so absorbing a capped job caps the merged candidate.
+        -- Implementation: internal/campaign/campaign.go
         -- SplitToParallel / MergeCompatibleGroupsWithDisk.
 }
 
@@ -3369,6 +3442,11 @@ rule InstanceReuseDiskCheck {
         -- shared rental terminate with disk_full. Implementation:
         -- internal/campaign/reuse.go MatchJobToInstance and
         -- estimateReuseJobDiskNeedGB.
+        --
+        -- A user-declared disk ceiling (see FreshRentalDiskEstimate) does NOT
+        -- participate here: it bounds the fresh-launch request only, and
+        -- EstimatedReuseIncrementalDiskGB is unaffected by it. See the open
+        -- question on ceiling scope.
 }
 
 rule InstanceReuseQueueDepthIsObjectiveSignal {
@@ -4037,3 +4115,19 @@ invariant PausedAutopilotTakesNoActions {
         -- placement decisions and new instance creation, not queue
         -- dispatch to known destinations.
 }
+
+-- ==========================================================================
+-- Open Questions
+-- ==========================================================================
+
+open question "Scope of a user-declared disk ceiling: ExplicitDiskCeilingGB
+bounds the fresh-launch request (FreshRentalDiskEstimate) but is ignored by
+reuse admission (InstanceReuseDiskCheck), which sizes the job from
+EstimatedReuseIncrementalDiskGB. A ceiling is the user asserting their real
+footprint is smaller than the estimate, which is equally true on a reused
+instance — so a job may be capped to 90GB at launch yet rejected from a live
+instance with 100GB free because the uncapped incremental estimate says it
+needs more. Should the ceiling also bound EstimatedReuseIncrementalDiskGB, or
+is the stricter free-disk check on a shared mutable instance worth keeping
+uncapped so one user's optimism cannot terminate a co-tenant's job with
+disk_full?"
