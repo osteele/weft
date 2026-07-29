@@ -224,6 +224,35 @@ func KnownHardwareMemoryGB(class string, memGB int) bool {
 	return false
 }
 
+// NominalHardwareMemoryGB maps an observed per-GPU memory size to the marketing
+// capacity of the SKU it belongs to: the smallest catalogued size for the class
+// that is at least observedGB. Returns 0 when the class is not catalogued or
+// the observation exceeds every known size for it.
+//
+// Drivers report *usable* memory, which sits a few percent below the nominal
+// capacity after ECC and reserve — an A100 40GB reports 39GB, an RTX A5000 24GB
+// reports 22GB. Comparing a raw observation against a nominal figure therefore
+// reads every correctly-served card as a shortfall. Rounding up to the SKU
+// first distinguishes "this is the part you asked for, reported honestly" from
+// "this is a smaller part": 39GB is the 40GB SKU, not a shortfall against 40,
+// but still a shortfall against 80.
+func NominalHardwareMemoryGB(class string, observedGB int) int {
+	if observedGB <= 0 {
+		return 0
+	}
+	sizes, ok := hardwareMemSizes(class)
+	if !ok {
+		return 0
+	}
+	best := 0
+	for _, size := range sizes {
+		if size >= observedGB && (best == 0 || size < best) {
+			best = size
+		}
+	}
+	return best
+}
+
 // KnownLargeHardwareMemoryGB reports whether memGB is a catalogued per-GPU
 // hardware capacity large enough that users commonly mean "pick this VRAM
 // class" rather than "my workload needs exactly this many GB". This is used

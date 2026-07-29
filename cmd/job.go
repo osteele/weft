@@ -26,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -1368,7 +1369,16 @@ func printDeliveredGPU(database *sql.DB, job *db.Job) {
 // memory from a `>=NGB` predicate.
 func gpuMemorySuffixWarning(requestedClass string, deliveredGB int) string {
 	base, requestedGB := gpucatalog.SplitTrailingMemorySuffix(requestedClass)
-	if requestedGB == 0 || deliveredGB == 0 || deliveredGB >= requestedGB {
+	if requestedGB == 0 || deliveredGB == 0 {
+		return ""
+	}
+	// Compare SKUs, not raw sizes. Drivers report usable memory, so a
+	// correctly-served 40GB A100 reports 39GB and would otherwise warn.
+	deliveredSKU := deliveredGB
+	if nominal := vastai.NominalHardwareMemoryGB(base, deliveredGB); nominal > 0 {
+		deliveredSKU = nominal
+	}
+	if deliveredSKU >= requestedGB {
 		return ""
 	}
 	return fmt.Sprintf(

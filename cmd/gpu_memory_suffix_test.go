@@ -35,6 +35,14 @@ func TestGPUMemorySuffixWarning_Silent(t *testing.T) {
 		// Nothing known about the delivered hardware.
 		{"delivered unknown", "a100-sxm4-80gb", 0},
 		{"no class", "", 40},
+		// Drivers report usable memory, a few percent below the nominal SKU
+		// capacity. A correctly-served A100 40GB reports 39GB and an RTX A5000
+		// 24GB reports 22GB; neither is a substitution. Reported by a user
+		// after the first version warned on every such card, which would have
+		// trained people to ignore the warning.
+		{"usable below nominal, A100 40GB", "a100-sxm4-40gb", 39},
+		{"usable below nominal, A5000 24GB", "rtx-a5000-24gb", 22},
+		{"usable below nominal, A100 80GB", "a100-sxm4-80gb", 79},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,5 +50,19 @@ func TestGPUMemorySuffixWarning_Silent(t *testing.T) {
 				t.Errorf("want no warning, got %q", got)
 			}
 		})
+	}
+}
+
+// The SKU rounding that silences the usable-vs-nominal false positive must not
+// silence a real substitution reported the same way: wj5509 asked for 80GB and
+// was served an A100 SXM4 whose driver reported 39GB. 39 rounds to the 40GB
+// SKU, which is still a shortfall against 80.
+func TestGPUMemorySuffixWarning_UsableMemoryStillCatchesSubstitution(t *testing.T) {
+	got := gpuMemorySuffixWarning("a100-sxm4-80gb", 39)
+	if got == "" {
+		t.Fatal("want a warning: 39GB rounds to the 40GB SKU, short of the requested 80GB")
+	}
+	if !strings.Contains(got, `"a100-sxm4>=80GB"`) {
+		t.Errorf("warning = %q, want the binding remediation form", got)
 	}
 }
