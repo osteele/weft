@@ -358,20 +358,25 @@ func (j *Job) RequestedCPUMemGB() int {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
-	Host            string   `json:"host,omitempty"`
-	GPU             string   `json:"gpu,omitempty"`
-	GPUClass        string   `json:"gpu_class,omitempty"`
-	GPUCount        *int     `json:"gpu_count,omitempty"`
-	GPUMemGB        *int     `json:"gpu_mem_gb,omitempty"`
-	GPUMemStrict    *bool    `json:"gpu_mem_strict,omitempty"`
-	Interconnect    string   `json:"interconnect,omitempty"`
-	CPUCores        *int     `json:"cpu_cores,omitempty"`
-	CPUMemGB        *int     `json:"cpu_mem_gb,omitempty"`
-	CPUMemStrict    *bool    `json:"cpu_mem_strict,omitempty"`
-	DiskGB          *int     `json:"disk_gb,omitempty"`
-	DiskMaxGB       *int     `json:"disk_max_gb,omitempty"`
-	RuntimeDiskGB   *int     `json:"runtime_disk_gb,omitempty"`
-	MinSurvival     *float64 `json:"min_survival,omitempty"`
+	Host          string   `json:"host,omitempty"`
+	GPU           string   `json:"gpu,omitempty"`
+	GPUClass      string   `json:"gpu_class,omitempty"`
+	GPUCount      *int     `json:"gpu_count,omitempty"`
+	GPUMemGB      *int     `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict  *bool    `json:"gpu_mem_strict,omitempty"`
+	Interconnect  string   `json:"interconnect,omitempty"`
+	CPUCores      *int     `json:"cpu_cores,omitempty"`
+	CPUMemGB      *int     `json:"cpu_mem_gb,omitempty"`
+	CPUMemStrict  *bool    `json:"cpu_mem_strict,omitempty"`
+	DiskGB        *int     `json:"disk_gb,omitempty"`
+	DiskMaxGB     *int     `json:"disk_max_gb,omitempty"`
+	RuntimeDiskGB *int     `json:"runtime_disk_gb,omitempty"`
+	MinSurvival   *float64 `json:"min_survival,omitempty"`
+	// MachineAffinity pins the job to specific provider physical machines,
+	// stored as resolved machine refs. Carried on the job rather than on a
+	// launch because the need is "run this next to that earlier run", which the
+	// user expresses at submit time and which must survive until placement.
+	MachineAffinity []string `json:"machine_affinity,omitempty"`
 	MinCUDAVersion  string   `json:"min_cuda_version,omitempty"`
 	RunpodCloudType string   `json:"runpod_cloud_type,omitempty"`
 }
@@ -413,6 +418,33 @@ func RequestedMinSurvivalForJobs(jobs []*Job, defaultFloor float64) float64 {
 		}
 	}
 	return floor
+}
+
+// RequestedMachineAffinityForJobs returns the union of machine pins across a
+// group's jobs.
+//
+// Union, not intersection: each job names machines it will accept, so a group
+// can run anywhere one of its members accepts. An intersection would make two
+// jobs pinned to different machines unplaceable together, when the right
+// outcome is that they are placed separately — a grouping decision, not an
+// eligibility one.
+func RequestedMachineAffinityForJobs(jobs []*Job) map[string]struct{} {
+	var out map[string]struct{}
+	for _, job := range jobs {
+		if job == nil || job.CLIResourceOverrides == nil {
+			continue
+		}
+		for _, ref := range job.CLIResourceOverrides.MachineAffinity {
+			if ref == "" {
+				continue
+			}
+			if out == nil {
+				out = map[string]struct{}{}
+			}
+			out[ref] = struct{}{}
+		}
+	}
+	return out
 }
 
 func clampProbability(value float64) float64 {
@@ -1491,6 +1523,7 @@ func (o *CLIResourceOverrides) IsEmpty() bool {
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
 		o.DiskGB == nil && o.DiskMaxGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil &&
+		len(o.MachineAffinity) == 0 &&
 		o.MinCUDAVersion == "" && o.RunpodCloudType == ""
 }
 

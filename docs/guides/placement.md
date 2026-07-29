@@ -348,3 +348,39 @@ for the per-provider table. The differences that bite most often:
 An axis marked `NOT ENFORCED` is accepted from you and honoured by nobody. That
 is a known hole, distinct from `not applicable`, which means the provider has no
 such concept.
+
+## Pinning a job to a physical machine
+
+`--affinity` requires placement on a specific Vast.ai physical machine, named by
+machine ID, instance (`wi...`), or job (`wj...`):
+
+```bash
+weft run --affinity wj5504 'python probe.py'      # same machine as that job ran on
+weft run --affinity 49863 'python probe.py'       # named directly
+weft start instance --affinity wj789 --jobs wj790 # at launch time instead
+```
+
+The job form is usually what you want: retroactive investigation starts from a
+job whose result looked wrong, not from a machine number.
+
+Use it when the machine is the variable — re-probing hardware whose vendor specs
+are disputed, checking whether an anomalous benchmark row came from a noisy
+neighbour, or reproducing an environmental outlier. `launches.machine_id`
+records the machine for past runs, so "which physical machine produced this row"
+is answerable after the fact.
+
+Two things to expect:
+
+- **It may wait.** Vast.ai's offer search has no machine filter, so weft polls
+  and matches client-side. A machine that is currently rented, or simply absent
+  from the market, leaves the job unplaced until it reappears — the autopilot
+  carries the pin across planning ticks rather than failing once. Machines
+  rotate in and out over weeks, so a pinned job can sit for a long time. That is
+  the design, not a stall.
+- **A machine is not a GPU.** Pinning gets you the same physical box. If it
+  hosts several cards you may get a different one, and weft cannot tell you
+  which card produced an earlier run.
+
+`--affinity` on a job and on a launch intersect: each narrows the machines under
+consideration, so a job pinned outside its launch's set is unplaceable rather
+than silently honouring one of the two.

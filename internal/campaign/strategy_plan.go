@@ -2770,6 +2770,35 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 	return out
 }
 
+// effectiveMachineAffinity combines a launch-level pin with any the group's own
+// jobs carry.
+//
+// Intersection when both are present: a launch-level --affinity narrows the
+// machines under consideration, and a job's own pin narrows further. Taking the
+// union instead would let a launch-level pin be widened by a job, which is the
+// opposite of what either flag means. When only one side is set it governs
+// alone; when the two are disjoint the group is unplaceable, reported as
+// ErrMachineAffinityUnsatisfied rather than silently resolved to one side.
+func effectiveMachineAffinity(launchLevel map[string]struct{}, jobs []*db.Job) map[string]struct{} {
+	perJob := db.RequestedMachineAffinityForJobs(jobs)
+	switch {
+	case len(perJob) == 0:
+		return launchLevel
+	case len(launchLevel) == 0:
+		return perJob
+	}
+	both := map[string]struct{}{}
+	for ref := range perJob {
+		if _, ok := launchLevel[ref]; ok {
+			both[ref] = struct{}{}
+		}
+	}
+	if len(both) == 0 {
+		return map[string]struct{}{"\x00disjoint-machine-affinity": {}}
+	}
+	return both
+}
+
 func filterOffersByMachineAffinity(offers []cloud.Offer, machineAffinity map[string]struct{}) []cloud.Offer {
 	if len(machineAffinity) == 0 {
 		return offers

@@ -1159,6 +1159,7 @@ func SearchBestOfferForGroupWithProfileAndMachineExclusions(
 		}
 		offers = filtered
 	}
+	includeMachineKeys = effectiveMachineAffinity(includeMachineKeys, group.Jobs)
 	if len(includeMachineKeys) > 0 {
 		beforeMachineFilter := len(offers)
 		offers = filterOffersByMachineAffinity(offers, includeMachineKeys)
@@ -1647,8 +1648,9 @@ func RankGroupOffersWithProfileAndMachineExclusions(raw []GroupRawOffers, surviv
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		affinityOffers := filterOffersByMachineAffinity(r.Offers, machineAffinity)
-		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(machineAffinity) > 0 {
+		groupAffinity := effectiveMachineAffinity(machineAffinity, r.Group.Jobs)
+		affinityOffers := filterOffersByMachineAffinity(r.Offers, groupAffinity)
+		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(groupAffinity) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
 			continue
 		}

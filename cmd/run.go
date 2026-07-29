@@ -112,6 +112,7 @@ var (
 	runAfterAny        int64
 	runAfterAnyRaw     string
 	runGPU             string
+	runAffinity        []string
 	runGPUCount        int
 	runGPUMem          int
 	runGPUMemStrict    bool
@@ -429,6 +430,7 @@ func init() {
 	runCmd.Flags().StringVar(&runAfterRaw, "after", "", "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().StringVar(&runAfterRaw, "depends-on", "", "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().StringVar(&runAfterAnyRaw, "after-any", "", "Start job after another job completes, success or failure (implies --queue)")
+	runCmd.Flags().StringArrayVar(&runAffinity, "affinity", nil, "Pin this job to the Vast.ai physical machine of a machine ID, instance (wi...), or job (wj...); repeatable and comma-separated")
 	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
 	runCmd.Flags().IntVar(&runGPUCount, "gpus", 0, "Exact number of GPUs to expose on one host or rental instance")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
@@ -695,6 +697,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Capture CLI intent for resource flags BEFORE script defaults are merged in.
+	// Resolve at submit rather than at placement: the reference forms are wi/wj
+	// IDs whose machine is knowable now, and a job that names a machine weft
+	// cannot resolve should fail here rather than sit unplaceable later.
+	var affinityMachines []string
+	if len(runAffinity) > 0 {
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		resolved, warnings, err := db.ResolveAffinityMachineIDs(database, runAffinity)
+		database.Close()
+		if err != nil {
+			return fmt.Errorf("resolve --affinity: %w", err)
+		}
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		if len(resolved) == 0 {
+			return fmt.Errorf("--affinity did not resolve to any machine_id")
+		}
+		affinityMachines = resolved
+	}
+
 	// These overrides are persisted on the job so retries can replay the user's
 	// original submission intent against updated script metadata.
 	cliOverrides := &db.CLIResourceOverrides{}
@@ -733,6 +758,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("runtime-disk") {
 		runtimeDisk := runRuntimeDiskGB
 		cliOverrides.RuntimeDiskGB = &runtimeDisk
+	}
+	if len(affinityMachines) > 0 {
+		cliOverrides.MachineAffinity = affinityMachines
 	}
 	if cmd.Flags().Changed("disk-max") {
 		diskMax := runDiskMaxGB
