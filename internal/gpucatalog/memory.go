@@ -175,3 +175,27 @@ func NominalHardwareMemoryGB(class string, observedGB int) int {
 	}
 	return best
 }
+
+// MatchesSKUMemoryGB reports whether a device of the given class, observed to
+// have observedGB, is the SKU that requestedGB names — the memory axis of
+// specs/inventory-placement.allium rule MatchSKUMemory, whose three clauses
+// (no token, uncatalogued class, catalogued part) this implements in order.
+//
+// requestedGB of 0 means the class named no capacity; observedGB of 0 means the
+// device reported none. Both are unknown rather than wrong, so both pass.
+//
+// Every caller must come through here rather than compare sizes itself: the
+// rounding and the unknown-is-not-disqualifying rule are what two hand-rolled
+// copies previously disagreed about.
+func MatchesSKUMemoryGB(class string, requestedGB, observedGB int) bool {
+	if requestedGB <= 0 || observedGB <= 0 {
+		return true
+	}
+	if _, known := MemorySizesGB(class); !known {
+		return true
+	}
+	if nominal := NominalHardwareMemoryGB(class, observedGB); nominal > 0 {
+		return nominal == requestedGB
+	}
+	return observedGB == requestedGB
+}

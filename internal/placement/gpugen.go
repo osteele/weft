@@ -190,7 +190,7 @@ func generationOf(normalizedClass string) GPUGeneration {
 	if gen, ok := gpucatalog.GenerationForNormalizedClass(normalizedClass); ok {
 		return GPUGeneration(gen)
 	}
-	for _, alias := range gpuClassAliases[normalizedClass] {
+	for _, alias := range gpucatalog.NormalizedAliases(normalizedClass) {
 		if gen, ok := gpucatalog.GenerationForNormalizedClass(alias); ok {
 			return GPUGeneration(gen)
 		}
@@ -225,14 +225,13 @@ var familyCheckers = map[string]func(GPUGeneration) bool{
 	"apple":  GPUGeneration.isApple,
 }
 
-var gpuClassAliases = map[string][]string{
-	"a100sxm":  {"a100sxm4"},
-	"h100hbm3": {"h100sxm"},
-}
-
 // GPUConstraint represents a parsed --gpu-class value.
 type GPUConstraint struct {
-	mode       gpuConstraintMode
+	mode gpuConstraintMode
+	// skuMemGB is the capacity named inside the class ("a100-sxm4-80gb" -> 80),
+	// 0 when none was given. It is an identity axis, not a floor: a floor is
+	// spelled ">=NGB" and lands in Constraints.GPUMemGB instead.
+	skuMemGB   int
 	normalized string        // normalizeGPUClass of the base (without '+')
 	generation GPUGeneration // resolved generation (for gen/min-gen modes)
 }
@@ -273,7 +272,14 @@ func ParseGPUConstraint(s string) GPUConstraint {
 		}
 	}
 
-	// Fall back to exact model match ('+' on unknown model treated as exact)
+	// Fall back to exact model match ('+' on unknown model treated as exact).
+	// A memory token inside the class names a SKU rather than a floor, and the
+	// name axis cannot answer it (part names carry no capacity), so it is kept
+	// as its own axis and checked against the device's reported memory.
+	base, skuMemGB := gpucatalog.SplitTrailingMemorySuffix(s)
+	if skuMemGB > 0 {
+		return GPUConstraint{mode: constraintExactModel, normalized: normalizeGPUClass(base), skuMemGB: skuMemGB}
+	}
 	return GPUConstraint{mode: constraintExactModel, normalized: norm}
 }
 
@@ -372,13 +378,25 @@ func (c GPUConstraint) Subsumes(other GPUConstraint) bool {
 		}
 
 	case constraintExactModel:
-		// Exact model only subsumes itself.
+		// Exact model only subsumes itself, on both axes.
 		if other.mode == constraintExactModel {
-			return c.matchesExactNormalized(other.normalized)
+			return c.subsumesSKUMemory(other) && c.matchesExactNormalized(other.normalized)
 		}
 		return false
 	}
 	return false
+}
+
+// subsumesSKUMemory reports whether c's SKU axis is no narrower than other's. A
+// constraint that named no capacity accepts every SKU of the part; one that
+// named a capacity accepts only that SKU.
+//
+// This has to be asked separately now that the capacity lives outside the name:
+// "a100-sxm4-40gb" and "a100-sxm4-80gb" share a normalized name, so on the name
+// axis alone each subsumes the other, and jobs asking for different hardware
+// would merge into a single rental.
+func (c GPUConstraint) subsumesSKUMemory(other GPUConstraint) bool {
+	return c.skuMemGB == 0 || c.skuMemGB == other.skuMemGB
 }
 
 // MatchesGPUFullName returns true if a full nvidia-smi GPU name (e.g.
@@ -416,7 +434,7 @@ func (c GPUConstraint) matchesExactFullName(normFull string) bool {
 	}
 	bestClass := bestKnownGPUClassInFullName(normFull)
 	if bestClass == "" {
-		for _, norm := range gpuClassEquivalents(c.normalized) {
+		for _, norm := range gpucatalog.NormalizedEquivalents(c.normalized) {
 			if strings.Contains(normFull, norm) {
 				return true
 			}
@@ -426,7 +444,7 @@ func (c GPUConstraint) matchesExactFullName(normFull string) bool {
 	if c.matchesExactNormalized(bestClass) {
 		return true
 	}
-	for _, norm := range gpuClassEquivalents(c.normalized) {
+	for _, norm := range gpucatalog.NormalizedEquivalents(c.normalized) {
 		if strings.Contains(normFull, norm) && len(norm) > len(bestClass) {
 			return true
 		}
@@ -448,54 +466,15 @@ func bestKnownGPUClassInFullName(normFull string) string {
 }
 
 func (c GPUConstraint) matchesExactNormalized(candidate string) bool {
-	if c.normalized == "" || candidate == "" {
-		return false
-	}
-	for _, constraintNorm := range gpuClassEquivalents(c.normalized) {
-		for _, candidateNorm := range gpuClassEquivalents(candidate) {
-			if candidateNorm == constraintNorm {
-				return true
-			}
-			if strings.HasPrefix(candidateNorm, constraintNorm) {
-				suffix := candidateNorm[len(constraintNorm):]
-				if isKnownGPUVariantSuffix(suffix) {
-					return true
-				}
-			}
-			if strings.HasPrefix(candidateNorm, "rtx") && strings.TrimPrefix(candidateNorm, "rtx") == constraintNorm {
-				return true
-			}
-		}
-	}
-	return false
+	return gpucatalog.MatchesPartName(c.normalized, candidate)
 }
 
-func gpuClassEquivalents(norm string) []string {
-	equivalents := []string{norm}
-	for _, alias := range gpuClassAliases[norm] {
-		if alias != "" && alias != norm {
-			equivalents = append(equivalents, alias)
-		}
-	}
-	for alias, targets := range gpuClassAliases {
-		if alias == norm {
-			continue
-		}
-		for _, target := range targets {
-			if target == norm {
-				equivalents = append(equivalents, alias)
-				break
-			}
-		}
-	}
-	return equivalents
-}
-
-func isKnownGPUVariantSuffix(s string) bool {
-	switch s {
-	case "pcie", "sxm", "sxm2", "sxm4", "nvl", "superchip":
-		return true
-	default:
-		return false
-	}
+// matchesSKUMemory checks the identity axis a part name cannot carry. When the
+// constraint named a capacity inside the class ("a100-sxm4-80gb"), only that
+// part satisfies it — a 40GB A100 SXM4 is different hardware, not a smaller
+// instance of the same thing. The rounding and the unknown-is-not-disqualifying
+// rule live with the hardware facts so that this and the cloud offer filter
+// cannot drift apart on what a SKU match means.
+func (c GPUConstraint) matchesSKUMemory(deviceMemGB int) bool {
+	return gpucatalog.MatchesSKUMemoryGB(c.normalized, c.skuMemGB, deviceMemGB)
 }

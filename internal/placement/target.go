@@ -346,6 +346,9 @@ func deviceSatisfiesPerDeviceConstraints(d TargetDevice, gc GPUConstraint, c Con
 }
 
 func (d TargetDevice) matchesGPUConstraint(gc GPUConstraint) bool {
+	if !gc.matchesSKUMemory(d.MemoryGB) {
+		return false
+	}
 	if gc.mode == constraintFamily && d.Family == gc.normalized {
 		return true
 	}

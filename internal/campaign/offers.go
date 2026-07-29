@@ -618,12 +618,7 @@ func filterOffersBySKUMemory(offers []cloud.Offer, group InstanceGroup) (kept []
 	}
 	kept = make([]cloud.Offer, 0, len(offers))
 	for _, o := range offers {
-		observed := int(math.Round(o.GPUMemGB))
-		sku := observed
-		if nominal := gpucatalog.NominalHardwareMemoryGB(base, observed); nominal > 0 {
-			sku = nominal
-		}
-		if sku != requestedGB {
+		if !gpucatalog.MatchesSKUMemoryGB(base, requestedGB, int(math.Round(o.GPUMemGB))) {
 			removed++
 			continue
 		}
