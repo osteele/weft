@@ -328,11 +328,18 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
-	constraints := placement.ConstraintsFromJob(job)
 
+	// Ahead of ConstraintsFromJob: a pin rejects on a map lookup, while
+	// resolving constraints scans uv.lock and pyproject.toml uncached, and this
+	// runs per job×instance on every autopilot tick.
+	if ok, reason := matchMachineAffinityIntent(job, inst); !ok {
+		return false, reason
+	}
 	if ok, reason := matchProviderIntent(job, inst); !ok {
 		return false, reason
 	}
+
+	constraints := placement.ConstraintsFromJob(job)
 	if ok, reason := matchInstanceTypeIntent(job, inst); !ok {
 		return false, reason
 	}
@@ -398,6 +405,30 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("grace period too short: %s remaining", cap.GraceRemaining.Truncate(time.Second))
 	}
 
+	return true, ""
+}
+
+// matchMachineAffinityIntent rejects a reusable instance that is not on a
+// machine the job is pinned to. A pin is a property of the job, so it is checked
+// here with the job's other constraints rather than where instances happen to be
+// enumerated — the launch-level pin is filtered separately, in
+// filterReusableByMachineAffinity, and the two compose to an intersection.
+//
+// Unknown fails closed, as at the claim boundary; see
+// db.assertMachineAffinitySatisfied for why.
+func matchMachineAffinityIntent(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil || job.CLIResourceOverrides == nil ||
+		len(job.CLIResourceOverrides.MachineAffinity) == 0 {
+		return true, ""
+	}
+	pins := MachineRefKeys(job.CLIResourceOverrides.MachineAffinity)
+	key := db.ProviderMachineKey(string(inst.Provider), inst.MachineID)
+	if key == "" {
+		return false, "job is pinned to a machine but the instance reports none"
+	}
+	if _, ok := pins[key]; !ok {
+		return false, fmt.Sprintf("job is pinned to another machine: instance=%s", key)
+	}
 	return true, ""
 }
 

@@ -380,6 +380,11 @@ Two things to expect:
 - **A machine is not a GPU.** Pinning gets you the same physical box. If it
   hosts several cards you may get a different one, and weft cannot tell you
   which card produced an earlier run.
+- **An unidentified machine is skipped, not gambled on.** An offer or running
+  instance that reports no machine ID is not confirmed to be the pinned one, so
+  a pinned job passes it over. This mainly affects providers without per-offer
+  machine identity — a pinned job will not reuse a RunPod instance whose machine
+  weft cannot name, even when it otherwise fits.
 
 `--affinity` on a job and on a launch intersect: each narrows the machines under
 consideration, so a job pinned outside its launch's set is unplaceable rather

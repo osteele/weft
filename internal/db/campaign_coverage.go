@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 // ProviderMachineKey returns the offer-claim key for a provider machine.
@@ -15,6 +17,29 @@ func ProviderMachineKey(provider, machineID string) string {
 		return ""
 	}
 	return provider + "/" + machineID
+}
+
+// ParseMachineRef splits a stored machine reference into provider and machine
+// id. It is the inverse of formatMachineRef: pins are stored either as the user
+// typed them (a bare machine id) or provider-qualified (when resolved from a
+// wi/wj token), and a bare id means vast.ai — the only provider --affinity
+// accepts unqualified.
+func ParseMachineRef(ref string) (string, string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", ""
+	}
+	if provider, machineID, ok := strings.Cut(ref, "/"); ok {
+		return strings.TrimSpace(provider), strings.TrimSpace(machineID)
+	}
+	return string(cloud.ProviderVastai), ref
+}
+
+// MachineRefKey normalizes a stored machine reference to a ProviderMachineKey,
+// so a pin and a launch's provider/machine pair can be compared as strings.
+// Returns "" for a reference that names no machine.
+func MachineRefKey(ref string) string {
+	return ProviderMachineKey(ParseMachineRef(ref))
 }
 
 // CampaignCoveredMachineIDs returns provider-qualified machine IDs that have

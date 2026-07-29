@@ -1829,6 +1829,11 @@ func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64, allowSupersed
 		return err
 	}
 
+	if err := assertMachineAffinitySatisfied(tx, jobID, instanceID); err != nil {
+		tx.Rollback()
+		return err
+	}
+
 	if !allowSupersede {
 		// Reject if the job is already claimed by an active launch.
 		// Abandoned attempts no longer hold logical ownership, even when their
@@ -3902,4 +3907,59 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ErrJobPinnedToOtherMachine reports an attempt to bind a pinned job to a
+// launch on a different physical machine.
+var ErrJobPinnedToOtherMachine = errors.New("job is pinned to a different physical machine")
+
+// assertMachineAffinitySatisfied refuses to bind a pinned job to a launch on
+// the wrong machine.
+//
+// This is a backstop, not the primary mechanism: the ranking and reuse paths
+// already filter offers and instances by the pin, so it should never fire. It
+// earns its place because a silently-ignored pin is invisible — a pinned job is
+// *expected* to sit unplaced, so placing it anyway looks like success, and it
+// completes quickly on hardware nobody asked for. Every path that binds a job to
+// a cloud launch passes through here, so the invariant survives an upstream
+// filter that is missing or gets added later.
+//
+// Unknown fails closed: a launch whose machine cannot be identified is not
+// confirmed to be the pinned one. That follows the repo rule that
+// placement/eligibility decisions fail closed on unknown (see CLAUDE.md,
+// "Absence of Evidence Is Not Evidence of Absence") — waiting costs a delay,
+// guessing costs a measurement attributed to the wrong hardware, which is the
+// whole reason to pin a job.
+//
+// Note this covers cloud launches only; on-prem placement writes jobs.host and
+// never reaches this path.
+func assertMachineAffinitySatisfied(tx *sql.Tx, jobID, instanceID int64) error {
+	var overridesJSON sql.NullString
+	if err := tx.QueryRow(`SELECT cli_overrides FROM jobs WHERE id = ?`, jobID).Scan(&overridesJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	overrides := decodeCLIResourceOverrides(overridesJSON)
+	if overrides == nil || len(overrides.MachineAffinity) == 0 {
+		return nil
+	}
+
+	var provider, machineID sql.NullString
+	if err := tx.QueryRow(`SELECT provider, machine_id FROM launches WHERE id = ?`, instanceID).Scan(&provider, &machineID); err != nil {
+		return err
+	}
+	actual := ProviderMachineKey(provider.String, machineID.String)
+	for _, ref := range overrides.MachineAffinity {
+		if key := MachineRefKey(ref); key != "" && key == actual {
+			return nil
+		}
+	}
+	where := "reports no machine"
+	if actual != "" {
+		where = "is on " + actual
+	}
+	return fmt.Errorf("job %d pinned to %s but launch %d %s: %w",
+		jobID, strings.Join(overrides.MachineAffinity, ","), instanceID, where, ErrJobPinnedToOtherMachine)
 }

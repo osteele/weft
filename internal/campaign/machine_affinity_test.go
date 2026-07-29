@@ -121,3 +121,44 @@ func TestPinnedJobLandsOnMatchingMachine(t *testing.T) {
 		t.Fatalf("kept = %+v, want only the pinned machine", kept)
 	}
 }
+
+// Reuse is the third placement path, and the one filterReusableByMachineAffinity
+// does not cover: it consults the launch-level option only, never the job's own
+// pin.
+func TestReuseRejectsInstanceOnUnpinnedMachine(t *testing.T) {
+	job := jobPinnedTo(1, "49863")
+	inst := &db.Launch{ID: 6268, Provider: "vastai", MachineID: "140870", ResolvedGPUName: "RTX 2060"}
+	ok, reason := matchMachineAffinityIntent(job, inst)
+	if ok {
+		t.Fatal("reuse admitted an instance on a machine the job is not pinned to")
+	}
+	if reason == "" {
+		t.Error("want a reason naming the mismatch")
+	}
+}
+
+func TestReuseAdmitsInstanceOnPinnedMachine(t *testing.T) {
+	job := jobPinnedTo(1, "49863")
+	inst := &db.Launch{ID: 7000, Provider: "vastai", MachineID: "49863"}
+	if ok, reason := matchMachineAffinityIntent(job, inst); !ok {
+		t.Fatalf("reuse rejected the pinned machine: %s", reason)
+	}
+}
+
+// An instance whose machine weft cannot identify is not confirmed to be the
+// pinned one, so it fails closed.
+func TestReuseRejectsInstanceWithUnknownMachine(t *testing.T) {
+	job := jobPinnedTo(1, "49863")
+	inst := &db.Launch{ID: 7001, Provider: "runpod", MachineID: ""}
+	if ok, _ := matchMachineAffinityIntent(job, inst); ok {
+		t.Fatal("reuse admitted an instance with no reported machine for a pinned job")
+	}
+}
+
+// An unpinned job must be unaffected.
+func TestReuseUnaffectedWithoutPin(t *testing.T) {
+	inst := &db.Launch{ID: 7002, Provider: "vastai", MachineID: "140870"}
+	if ok, reason := matchMachineAffinityIntent(&db.Job{ID: 1}, inst); !ok {
+		t.Fatalf("rejected an unpinned job: %s", reason)
+	}
+}

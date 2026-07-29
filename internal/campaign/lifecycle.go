@@ -867,15 +867,7 @@ func distinctMachineExclusions(database *sql.DB, campaignID int64, avoidMachines
 }
 
 func parseMachineRef(ref string) (string, string) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", ""
-	}
-	provider, machineID, ok := strings.Cut(ref, "/")
-	if ok {
-		return strings.TrimSpace(provider), strings.TrimSpace(machineID)
-	}
-	return string(cloud.ProviderVastai), ref
+	return db.ParseMachineRef(ref)
 }
 
 func runpodDistinctMachineConflict(database *sql.DB, campaignID *int64, currentLaunchID int64, machineID string, avoidMachines []string, acceptedByMachine map[string]int64) (string, error) {

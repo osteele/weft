@@ -1110,6 +1110,12 @@ rule MachineAffinityOfferFilter {
         -- satisfy the job on a different physical machine. Providers without
         -- pre-launch machine_id support are rejected up front; v1 supports
         -- Vast.ai.
+        --
+        -- An offer or instance reporting no machine_id is not confirmed to be a
+        -- pinned machine, so it is excluded: this is a placement/eligibility
+        -- decision and fails closed on unknown. The invariant is additionally
+        -- enforced where a job is bound to a launch, so it holds even if an
+        -- upstream filter is missing.
 }
 
 -- The coverage exclusion that offer selection enforces before create when a
