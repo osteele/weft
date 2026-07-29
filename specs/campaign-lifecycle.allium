@@ -2900,6 +2900,59 @@ rule AssetOverlapLaunchGrouping {
         -- to BuildProfilePlansWithProgress.
 }
 
+-- Two jobs with DIFFERENT GPU class constraints may share an instance when
+-- one constraint subsumes the other. The merged group carries the NARROWER
+-- constraint — the supremum in the specificity order — so `h100` and
+-- `h100-nvl` merge to `h100-nvl`, and `ampere+` and `a100` merge to `a100`.
+-- Unconstrained (empty) is the bottom of the order and merges with
+-- anything. Incomparable constraints (`h100-pcie` and `h100-nvl`) do not
+-- merge; the grouping candidate is rejected as incompatible.
+--
+-- Taking the narrower constraint is what makes co-location safe: the group
+-- is offer-filtered against the supremum, so every instance it can land on
+-- satisfies the supremum, and the supremum implies each member's own
+-- constraint. Taking the BROADER constraint would be the defect — the
+-- `h100-nvl` job could then be served an H100 PCIe it never asked for.
+rule GroupGPUConstraintIsSupremum {
+    when: CandidateGroupingEvaluated(group)
+
+    let constraints = group.jobs.map(j => j.gpu_class)
+    let supremum = MostSpecific(constraints)
+
+    -- Every member constraint must be at least as broad as the supremum,
+    -- i.e. the supremum sits at or above all of them in the specificity
+    -- order. When no member constraint is comparable to all the others,
+    -- no supremum exists and the group is not a candidate.
+    requires: constraints.all(c => Subsumes(c, supremum))
+
+    ensures: group.gpu_class = supremum
+
+    @guidance
+        -- Implementation: internal/campaign/gpucompat.go gpuClassSupremum
+        -- folds two constraints via placement.GPUConstraint.Subsumes and
+        -- returns ok=false when neither subsumes the other, which rejects
+        -- the merge. Specificity order (broadest first): unconstrained,
+        -- family ("nvidia"), min_generation ("ampere+"), exact_generation
+        -- ("ampere"), exact_model ("a100"), variant ("a100-sxm4").
+}
+
+invariant MergedGroupNeverViolatesMemberConstraint {
+    -- Co-location must not weaken any member's request. Every instance a
+    -- merged group can be placed on satisfies the group constraint, and
+    -- the group constraint is at least as specific as each member's, so no
+    -- member can be served hardware outside its own request.
+    for group in LaunchGroups:
+        for job in group.jobs:
+            for target in group.eligible_targets:
+                MatchesConstraint(target, job.gpu_class)
+
+    @guidance
+        -- This covers the VARIANT axis only, which is the axis a GPU class
+        -- binds (see inventory-placement.allium ParseGPUConstraint). The
+        -- memory axis rides on the group's gpu_mem_gb floor, not on the
+        -- class string.
+}
+
 -- ==========================================================================
 -- Job explanation and inventory dispatch auto-replan
 -- ==========================================================================

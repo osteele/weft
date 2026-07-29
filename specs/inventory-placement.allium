@@ -90,7 +90,18 @@ entity ExecutionTarget {
     host: Host?
     instance: campaign/CloudInstance?
 
+    -- REQUESTED. The class constraint this target was selected against,
+    -- echoed from the job. It says what was asked for, not what arrived —
+    -- and because a class binds only the variant axis (see
+    -- ParseGPUConstraint), it may name a memory size the target does not
+    -- have.
     gpu_class: String?
+
+    -- DELIVERED. The hardware the target actually exposes:
+    -- resolved_gpu_name is the name of the part ("A100 PCIE"), gpu_mem_gb
+    -- its per-device memory, num_gpus its device count. Unknown until the
+    -- target is provisioned and its hardware reported (null / 0).
+    resolved_gpu_name: String?
     gpu_mem_gb: Integer
     num_gpus: Integer
 
@@ -191,10 +202,26 @@ rule ParseGPUConstraint {
     -- The "+" suffix is always generation-level: it never matches
     -- "this exact model or a newer submodel".
     --
-    -- Exact-model mode preserves known package / memory variant intent:
-    -- "h100" matches H100 PCIe, SXM/HBM3, and NVL variants; "h100-pcie"
-    -- matches only PCIe; "h100-sxm" and "h100-hbm3" match the H100
-    -- SXM/HBM3 class; "h100-nvl" matches only NVL.
+    -- Exact-model mode constrains the PACKAGE VARIANT axis, and only that
+    -- axis: "h100" matches H100 PCIe, SXM/HBM3, and NVL variants;
+    -- "h100-pcie" matches only PCIe; "h100-sxm" and "h100-hbm3" match the
+    -- H100 SXM/HBM3 class; "h100-nvl" matches only NVL.
+    --
+    -- Memory is a SEPARATE axis, and a GPU class does not bind it. A
+    -- trailing memory token inside a class name binds NOTHING: it is
+    -- stripped before matching, so "a100-sxm4-80gb" is the constraint
+    -- "a100-sxm4" plus a decorative token. The strip is forced by the
+    -- domain — the hardware names weft matches against carry no memory
+    -- component, and one "A100 SXM4" names both the 40GB and the 80GB
+    -- part, so there is nothing for "-80gb" to match against.
+    --
+    -- Memory binds only through the `>=NGB` predicate, which parses out of
+    -- the class string into Constraints.gpu_mem_gb and is enforced by
+    -- EvaluateEligibility clause 3. So:
+    --   "a100-sxm4-80gb"    -> variant bound, memory UNBOUND
+    --   "a100-sxm4>=80GB"   -> variant bound, memory bound
+    --   "a100>=80GB"        -> variant UNBOUND, memory bound
+    -- Only the middle form constrains both axes.
 
     ensures: GPUConstraintParsed(result)
 
@@ -202,6 +229,15 @@ rule ParseGPUConstraint {
         -- Implementation: internal/placement/gpugen.go
         -- ParseGPUConstraint. Cross-family comparisons under
         -- min_generation are rejected at match time, not parse time.
+        -- The memory-token strip is gpucatalog.trimTrailingMemorySuffix,
+        -- reached from MatchNormalizedNames when a class is resolved to
+        -- the provider hardware names it may match.
+        --
+        -- The unbound memory axis is silent by construction: nothing in a
+        -- job's own output states which part it ran on, so a class-only
+        -- request can be served a smaller card with no contradicting
+        -- signal. wj5504 requested "a100-pcie-80gb" and ran on an A100
+        -- PCIE 40GB. ReportDeliveredHardware exists to close that loop.
 }
 
 rule MatchGPU {
@@ -244,6 +280,82 @@ invariant FirstMatchWinsOnHost {
     -- host YAML is authoritative.
     for host in Hosts:
         first_match_is_deterministic(host.gpus)
+}
+
+-- -------------------------------------------------------------------------
+-- Delivered-hardware reporting
+-- -------------------------------------------------------------------------
+
+-- Because a GPU class binds only the variant axis, a request can be served
+-- hardware smaller than the user believed they had asked for, and nothing
+-- in the job's own output contradicts the request. `weft info` closes that
+-- loop: it reports the hardware the attempt actually ran on, and warns in
+-- the one case where the request carried a memory expectation the hardware
+-- demonstrably did not meet.
+rule ReportDeliveredHardware {
+    when: UserRunsJobInfo(job)
+
+    let target = LatestExecutionTarget(job)
+    -- The memory size the user appeared to ask for, read off the RAW class
+    -- string; null when the class carried no trailing memory token.
+    let requested_gb = TrailingMemoryTokenGB(job.gpu_class)
+
+    requires: target != null
+    requires: target.resolved_gpu_name != null
+
+    ensures: DeliveredHardwareReported(
+        job: job,
+        gpu_name: target.resolved_gpu_name,
+        gpu_mem_gb: target.gpu_mem_gb,
+        num_gpus: target.num_gpus
+    )
+
+    -- The warning is evidence-gated. All three must hold:
+    --   1. the class carried a trailing memory token — the user expressed
+    --      a memory expectation that parsing discarded;
+    --   2. the delivered memory is KNOWN. An unrecorded size is not
+    --      evidence of a shortfall and must stay silent;
+    --   3. the delivered memory is below the token.
+    -- A class with no memory token expresses no memory expectation:
+    -- `--gpu h100` served by an H100 NVL is legitimate variant
+    -- substitution and must not warn.
+    --
+    -- The warning must name the form that WOULD have bound both axes
+    -- (`--gpu "a100-pcie>=80GB"`). Reporting the mismatch alone tells the
+    -- reader their request was wrong without telling them what to write.
+    if requested_gb != null
+       and target.gpu_mem_gb > 0
+       and target.gpu_mem_gb < requested_gb:
+        ensures: MemoryTokenNotBindingWarned(
+            requested_class: job.gpu_class,
+            delivered_gb: target.gpu_mem_gb,
+            binding_form: BindingConstraintForm(job.gpu_class, requested_gb)
+        )
+
+    @guidance
+        -- Implementation: cmd/job.go printDeliveredGPU renders the
+        -- "Delivered:" line from db.Launch.DisplayGPUBrief()
+        -- (resolved_gpu_name + gpu_mem_gb + num_gpus);
+        -- cmd/job.go gpuMemorySuffixWarning applies the three-part gate and
+        -- builds the remediation string.
+        -- gpucatalog.SplitTrailingMemorySuffix returns both halves — the
+        -- variant base and the GB — from one split, so the display layer
+        -- never re-parses a GPU class to name the binding form. It reads the
+        -- raw class because normalization discards the separators that make
+        -- the token unambiguous ("a100sxm480gb" could be sxm4 + 80GB or
+        -- sxm + 480GB).
+        --
+        -- This is a locally derivable diagnostic in the sense of
+        -- job-lifecycle.allium's diagnostic-surface contract (DB only, no
+        -- SSH / R2 / provider call), so it belongs on the shared job-noun
+        -- renderer as `weft job status` and `weft list --show` grow to
+        -- match `weft job info`. It cannot live inside
+        -- printJobLocalDiagnostics as-is: that surface gates on
+        -- hasFailureSignal, and the motivating case is a job that SUCCEEDED
+        -- on a smaller card.
+        --
+        -- Regression tests: cmd/gpu_memory_suffix_test.go,
+        -- internal/gpucatalog/memory_suffix_test.go.
 }
 
 -- =========================================================================

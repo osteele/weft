@@ -322,6 +322,37 @@ func sortedByLenDesc[V any](m map[string]V) []string {
 	return keys
 }
 
+// SplitTrailingMemorySuffix splits a GPU class constraint at a trailing memory
+// token ("a100-sxm4-80gb" -> "a100-sxm4", 80), returning ("", 0) when there is
+// none.
+//
+// The suffix is decorative: provider gpu_name values carry no memory component
+// ("A100 SXM4" names both the 40GB and 80GB parts), so matching strips it —
+// see trimTrailingMemorySuffix. Callers use this to detect a request whose
+// delivered hardware does not satisfy the memory the user appeared to ask for,
+// and to name the binding form (`base>=NGB`) that would have bound both axes.
+//
+// This reads the raw constraint rather than a normalized one because
+// normalization discards the separators that make the token unambiguous:
+// "a100sxm480gb" could be sxm4 + 80GB or sxm + 480GB. The separator must also
+// have something before it: a bare "-80gb" names no variant to bind.
+func SplitTrailingMemorySuffix(class string) (string, int) {
+	s := strings.ToLower(strings.TrimSpace(class))
+	idx := strings.LastIndexAny(s, "-_ ")
+	if idx <= 0 {
+		return "", 0
+	}
+	token := s[idx+1:]
+	if !strings.HasSuffix(token, "gb") {
+		return "", 0
+	}
+	gb := inventory.ParseMemGB(token)
+	if gb == 0 {
+		return "", 0
+	}
+	return s[:idx], gb
+}
+
 func trimTrailingMemorySuffix(norm string) string {
 	if !strings.HasSuffix(norm, "gb") {
 		return norm

@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/explain"
+	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
@@ -1192,6 +1193,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		} else if job.GPUClass != "" {
 			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
 		}
+		printDeliveredGPU(database, job)
 		// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
 		// CPU-only job must not display an inert "Arch cap" that reads as
 		// the placement blocker.
@@ -1335,6 +1337,57 @@ func printJobLifecycleProof(database *sql.DB, job *db.Job) {
 		return
 	}
 	fmt.Printf("Lifecycle:   target_kind=%s\n", targetKind)
+}
+
+// printDeliveredGPU reports the hardware a rental actually provided, and warns
+// when it does not satisfy a memory size the requested class appeared to ask
+// for. A GPU class carries two independently-binding axes: the variant, which
+// filters provider gpu_name values, and memory, which binds only through a
+// `>=NGB` predicate. A trailing memory token in the class name binds neither —
+// it is stripped before matching — so `--gpu a100-sxm4-80gb` can be served by a
+// 40GB card with nothing in the job's own output contradicting the request.
+func printDeliveredGPU(database *sql.DB, job *db.Job) {
+	launch := jobLaunch(database, job)
+	if launch == nil {
+		return
+	}
+	delivered := launch.DisplayGPUBrief()
+	if delivered == "" {
+		return
+	}
+	fmt.Printf("Delivered:   %s\n", delivered)
+	if warning := gpuMemorySuffixWarning(job.GPUClass, launch.GPUMemGB); warning != "" {
+		fmt.Print(warning)
+	}
+}
+
+// gpuMemorySuffixWarning returns the warning block for a request whose trailing
+// memory token was not satisfied by the delivered hardware, or "" when the
+// request carries no such token, the delivered size is unknown, or it is
+// satisfied. The remediation names the binding form: variant from the class,
+// memory from a `>=NGB` predicate.
+func gpuMemorySuffixWarning(requestedClass string, deliveredGB int) string {
+	base, requestedGB := gpucatalog.SplitTrailingMemorySuffix(requestedClass)
+	if requestedGB == 0 || deliveredGB == 0 || deliveredGB >= requestedGB {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Warning:     requested %s but got %dGB — a memory suffix in a GPU class is not binding.\n"+
+			"             Use --gpu \"%s>=%dGB\" to bind both the variant and the memory.\n",
+		requestedClass, deliveredGB, base, requestedGB)
+}
+
+// jobLaunch returns the launch that ran (or is running) this job, or nil.
+func jobLaunch(database *sql.DB, job *db.Job) *db.Launch {
+	launchID := jobLifecycleLaunchID(database, job)
+	if launchID == nil {
+		return nil
+	}
+	launch, err := db.GetLaunch(database, *launchID)
+	if err != nil {
+		return nil
+	}
+	return launch
 }
 
 func jobLifecycleLaunchID(database *sql.DB, job *db.Job) *int64 {

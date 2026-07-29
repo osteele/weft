@@ -80,6 +80,38 @@ offers. Use `--gpu h100-pcie`, `--gpu h100-sxm`, `--gpu h100-hbm3`, or
 `--gpu h100-nvl` to pin the variant. `h100-hbm3` is an alias for the
 SXM/HBM3 class and excludes H100 PCIe offers.
 
+### Variant and memory are separate axes
+
+A GPU class constrains the **variant** — it filters the provider's `gpu_name`
+values, so `--gpu a100-sxm4` excludes A100 PCIe offers. It does **not**
+constrain memory, and a trailing memory token in the class name binds nothing:
+
+```bash
+weft run --gpu a100-sxm4-80gb 'python bench.py'   # SXM4, ANY memory (40 or 80GB)
+weft run --gpu 'a100-sxm4>=80GB' 'python bench.py' # SXM4 AND at least 80GB
+```
+
+The suffix is stripped before matching because provider `gpu_name` values carry
+no memory component — vast.ai calls both the 40GB and the 80GB part `A100
+SXM4`, so there is nothing for `-80gb` to match against. Memory can only be
+expressed as a `>=NGB` predicate, which becomes a `gpu_ram>=` filter.
+
+This matters when the GPU variant is itself an experimental variable: an
+unbound memory axis means a bandwidth or capacity sweep can silently receive
+the wrong part. `--gpu a100-sxm4-80gb` has been served by an A100 SXM4 40GB —
+2039 GB/s requested, 1555 GB/s delivered. Prefer `--gpu "family-variant>=NNGB"`
+whenever the hardware is the independent variable.
+
+`weft info` reports the hardware a rental actually provided on a `Delivered:`
+line, and warns when a class carried a memory suffix the delivered card does
+not satisfy.
+
+Note that `--gpu a100>=80GB` binds memory but *not* the variant, so it can
+return either A100 SXM4 80GB (2039 GB/s) or A100 PCIe 80GB (1935 GB/s). Name
+the variant too when the distinction matters.
+
+### Memory floors and headroom
+
 The `>=NGB` form on `--gpu` is a hardware capacity floor. For example,
 `--gpu a100>=80GB` matches 80GB A100 offers exactly; it does not add the
 `+2GB` workload headroom used by separate `--gpu-mem` reservations.
