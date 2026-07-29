@@ -8,6 +8,11 @@
 -- Excludes:
 --   - Job submission and placement (see job-lifecycle.allium)
 --   - Campaign/instance launch and termination (see campaign-lifecycle.allium)
+--   - The external-executor ownership boundary, adapter availability,
+--     observation classification, and staleness/non-guarantee rules
+--     (see external-executor.allium); this file owns only when external
+--     sync fires and what it writes
+
 --   - Output artifact collection and log caching
 --   - Queue dispatch policy details (except cloud dependency readiness signals)
 --
@@ -461,6 +466,15 @@ rule SyncTmuxJob {
 
 -- External-executor sync mirrors SkyPilot state into Weft's local database.
 -- It does not probe SSH, R2 markers, or cloud-provider instance state.
+--
+-- This rule owns what is written once an observation is in hand.
+-- external-executor.allium owns the other half: what an observation is,
+-- which conditions produce no observation (and are therefore UNKNOWN rather
+-- than terminal), the adapter availability model, and the non-guarantees
+-- that hold for these jobs. `QueryExternalExecutor` below is defined by
+-- external-executor.allium § ClassifyExternalObservation; the
+-- `not observation.available` branch is elaborated there as
+-- § ExternalObservationLeavesStateAlone.
 rule SyncExternalExecutorJob {
     when: SyncJobTriggered(job, mode)
     requires: job.backend = skypilot

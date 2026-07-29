@@ -327,6 +327,13 @@ entity JobAttempt {
 -- keeps Weft's job ID as the canonical local identity while preserving the
 -- external identifiers needed for status refresh, log passthrough, cancel, and
 -- links to the external UI.
+--
+-- The ownership boundary this binding sits on — what the external executor
+-- owns, what an observation may and may not conclude, the adapter's
+-- availability model, staleness, and the explicit non-guarantees for these
+-- jobs — is specified in external-executor.allium. Status refresh and cancel
+-- passthrough are in status-sync.allium § SyncExternalExecutorJob and
+-- § ExternalExecutorCancel.
 entity ExternalJobBinding {
     job: Job
     attempt: JobAttempt?
