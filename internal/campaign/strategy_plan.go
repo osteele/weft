@@ -1331,8 +1331,9 @@ func rankGroupOffersFromPredictionsWithMachineExclusions(
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		affinityOffers := filterOffersByMachineAffinity(r.Offers, machineAffinity)
-		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(machineAffinity) > 0 {
+		groupAffinity := effectiveMachineAffinity(machineAffinity, r.Group.Jobs)
+		affinityOffers := filterOffersByMachineAffinity(r.Offers, groupAffinity)
+		if len(r.Offers) > 0 && len(affinityOffers) == 0 && len(groupAffinity) > 0 {
 			results[i] = GroupOffer{Group: r.Group, Err: ErrMachineAffinityUnsatisfied}
 			continue
 		}
@@ -2780,7 +2781,13 @@ func filterOffersByClaim(offers []cloud.Offer, claimedMachines, claimedOffers ma
 // alone; when the two are disjoint the group is unplaceable, reported as
 // ErrMachineAffinityUnsatisfied rather than silently resolved to one side.
 func effectiveMachineAffinity(launchLevel map[string]struct{}, jobs []*db.Job) map[string]struct{} {
-	perJob := db.RequestedMachineAffinityForJobs(jobs)
+	// Job pins are stored as the user typed them — ResolveMachineIDs keys wi/wj
+	// tokens to provider/machine_id but keeps a raw machine id as provided —
+	// while filterOffersByMachineAffinity compares against provider-qualified
+	// keys. Key them here, as the launch-level path already does via
+	// VastAIMachineKeys. Without this a raw `--affinity 49863` matched no
+	// offer, which is a silent no-op rather than a visible failure.
+	perJob := MachineRefKeys(mapKeys(db.RequestedMachineAffinityForJobs(jobs)))
 	switch {
 	case len(perJob) == 0:
 		return launchLevel
@@ -2857,6 +2864,14 @@ func cloneStringSet(in map[string]struct{}) map[string]struct{} {
 	out := make(map[string]struct{}, len(in))
 	for key := range in {
 		out[key] = struct{}{}
+	}
+	return out
+}
+
+func mapKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
 	return out
 }

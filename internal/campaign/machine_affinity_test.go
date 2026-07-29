@@ -3,6 +3,7 @@ package campaign
 import (
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -70,5 +71,53 @@ func TestRequestedMachineAffinityForJobs_UnionsAcrossJobs(t *testing.T) {
 	})
 	if len(got) != 2 {
 		t.Fatalf("RequestedMachineAffinityForJobs = %v, want both pins", got)
+	}
+}
+
+// A raw machine id is stored as the user typed it — ResolveMachineIDs keys
+// wi/wj tokens but keeps a bare id as provided — while the offer filter
+// compares provider-qualified keys. Unkeyed, `--affinity 49863` matched no
+// offer, which on the planning path meant "no constraint" rather than "no
+// placement".
+func TestEffectiveMachineAffinity_KeysRawMachineIDs(t *testing.T) {
+	got := effectiveMachineAffinity(nil, []*db.Job{jobPinnedTo(1, "49863")})
+	if _, ok := got["vastai/49863"]; !ok {
+		t.Fatalf("effectiveMachineAffinity = %v, want a provider-qualified key", got)
+	}
+}
+
+// The test that was missing. The original suite asserted a pinned job CAN land
+// on a matching machine; it never asserted it CANNOT land elsewhere. The bug
+// passed the first and failed the second: wj5526 was pinned to 49863 and ran
+// on 41452, producing a GTX 1080 Ti measurement attributed to the wrong box.
+//
+// A pin that is accepted, persisted, and ignored is worse than one that is
+// rejected: a pinned job is expected to sit unplaced for a long time, so
+// "still queued" and "working" look identical, and completing quickly reads as
+// good news.
+func TestPinnedJobDoesNotLandOnNonMatchingMachine(t *testing.T) {
+	pinned := jobPinnedTo(1, "49863")
+	offers := []cloud.Offer{
+		{ProviderID: "a", Provider: cloud.ProviderVastai, MachineID: "41452", GPUName: "GTX 1080 Ti", GPUMemGB: 11, CostPerHour: 0.10},
+		{ProviderID: "b", Provider: cloud.ProviderVastai, MachineID: "99999", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.20},
+	}
+	affinity := effectiveMachineAffinity(nil, []*db.Job{pinned})
+	kept := filterOffersByMachineAffinity(offers, affinity)
+	if len(kept) != 0 {
+		t.Fatalf("kept %d offer(s) for a machine the job is not pinned to: %+v", len(kept), kept)
+	}
+}
+
+// And the positive case still holds, so the fix is not simply rejecting
+// everything.
+func TestPinnedJobLandsOnMatchingMachine(t *testing.T) {
+	pinned := jobPinnedTo(1, "49863")
+	offers := []cloud.Offer{
+		{ProviderID: "a", Provider: cloud.ProviderVastai, MachineID: "41452", GPUName: "GTX 1080 Ti"},
+		{ProviderID: "b", Provider: cloud.ProviderVastai, MachineID: "49863", GPUName: "RTX 5880 Ada"},
+	}
+	kept := filterOffersByMachineAffinity(offers, effectiveMachineAffinity(nil, []*db.Job{pinned}))
+	if len(kept) != 1 || kept[0].MachineID != "49863" {
+		t.Fatalf("kept = %+v, want only the pinned machine", kept)
 	}
 }

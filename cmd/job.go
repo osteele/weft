@@ -1194,6 +1194,13 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
 		}
 		printDeliveredGPU(database, job)
+		if job.CLIResourceOverrides != nil && len(job.CLIResourceOverrides.MachineAffinity) > 0 {
+			fmt.Printf("Pinned to:   %s (machine affinity)\n",
+				strings.Join(job.CLIResourceOverrides.MachineAffinity, ", "))
+			if job.EffectiveStatus() == db.StatusQueued {
+				fmt.Printf("             a pinned job waits for that machine to reappear; \"queued\" here is expected, not stuck\n")
+			}
+		}
 		// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
 		// CPU-only job must not display an inert "Arch cap" that reads as
 		// the placement blocker.
