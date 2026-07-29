@@ -175,6 +175,11 @@ func syncSkyBindings(ctx context.Context, database *sql.DB, project string) (upd
 	return updated, missing, nil
 }
 
+// skyDryRunTaskName stands in for the weft-wj<id> name a real submit assigns
+// after recording the job. A dry run has no job id because it deliberately
+// creates no ledger row.
+const skyDryRunTaskName = "weft-dry-run"
+
 func runSkySubmit(cmd *cobra.Command, args []string) error {
 	command := args[0]
 	gpuClass := firstNonEmptySkyFlag(skySubmitGPUClass, skySubmitGPU)
@@ -196,6 +201,32 @@ func runSkySubmit(cmd *cobra.Command, args []string) error {
 		EnvVars:                 skySubmitEnv,
 		Tags:                    skySubmitTags,
 	}
+	// A dry run renders the task and submits nothing, so it must not touch the
+	// ledger. The ledger-before-external ordering exists so a crash mid-submit
+	// leaves a recoverable record; there is nothing to recover from a render.
+	// Creating a row here left a durable backend=skypilot job with no binding,
+	// and SyncExternalExecutorJob is guarded on the binding existing, so it
+	// could never advance and sat queued forever.
+	if skySubmitDryRun != "" {
+		if _, _, err := skyClient.Submit(cmd.Context(), skypilot.SubmitOptions{
+			Name:       skyDryRunTaskName,
+			Command:    command,
+			WorkDir:    workingDir,
+			GPUClass:   gpuClass,
+			GPUCount:   skySubmitGPUCount,
+			GPUMemGB:   gpuMem,
+			EnvVars:    skySubmitEnv,
+			DryRunPath: skySubmitDryRun,
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"Wrote SkyPilot task to %s (dry run: nothing submitted, no job recorded).\n"+
+				"The task name is a placeholder; a real submit names it weft-wj<id> after recording the job.\n",
+			skySubmitDryRun)
+		return nil
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -207,23 +238,6 @@ func runSkySubmit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	name := fmt.Sprintf("weft-%s", ids.FormatJobID(jobID))
-	if skySubmitDryRun != "" {
-		_, _, err := skyClient.Submit(cmd.Context(), skypilot.SubmitOptions{
-			Name:       name,
-			Command:    command,
-			WorkDir:    workingDir,
-			GPUClass:   gpuClass,
-			GPUCount:   skySubmitGPUCount,
-			GPUMemGB:   gpuMem,
-			EnvVars:    skySubmitEnv,
-			DryRunPath: skySubmitDryRun,
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Recorded %s and wrote SkyPilot task to %s\n", ids.FormatJobID(jobID), skySubmitDryRun)
-		return nil
-	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 	defer cancel()

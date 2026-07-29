@@ -124,11 +124,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyOptimizeJobStatusLatestAttempt},
 		&goose.GoFunc{RunDB: dropOptimizeJobStatusLatestAttempt},
 	)
+	addExternalSyncWarning := goose.NewGoMigration(
+		35,
+		&goose.GoFunc{RunDB: applyAddExternalSyncWarningColumns},
+		&goose.GoFunc{RunDB: dropAddExternalSyncWarningColumns},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -877,4 +882,38 @@ func applyBaseline(ctx context.Context, db *sql.DB) error {
 // no meaningful down step; reset by deleting the database file.
 func dropBaseline(ctx context.Context, db *sql.DB) error {
 	return fmt.Errorf("the v1 baseline cannot be reverted; delete the database file to reset")
+}
+
+// applyAddExternalSyncWarningColumns gives weft's own observation failures a
+// channel separate from raw_status_message, which belongs to the executor. The
+// warning was previously written over that column, so a transport blip deleted
+// the most recent thing actually known about the job. See
+// external-executor.allium ExternalObservationLeavesStateAlone.
+func applyAddExternalSyncWarningColumns(ctx context.Context, db *sql.DB) error {
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{"sync_warning", `ALTER TABLE external_job_bindings ADD COLUMN sync_warning TEXT`},
+		{"sync_warning_at", `ALTER TABLE external_job_bindings ADD COLUMN sync_warning_at INTEGER`},
+	}
+	for _, col := range cols {
+		exists, err := columnExists(ctx, db, "external_job_bindings", col.name)
+		if err != nil {
+			return fmt.Errorf("inspect external_job_bindings.%s: %w", col.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("add external_job_bindings.%s: %w", col.name, err)
+		}
+	}
+	return nil
+}
+
+func dropAddExternalSyncWarningColumns(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning_at`)
+	return nil
 }

@@ -842,6 +842,17 @@ func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nex
 	if binding.RawStatusMessage != "" {
 		fmt.Printf("%s%s\n", nextPrefix, binding.RawStatusMessage)
 	}
+	// The executor's message and weft's own observation failure are separate
+	// channels: the status above is only as good as its last observation, and
+	// a stale one must not read as current.
+	if binding.SyncWarning != "" {
+		age := ""
+		if binding.LastObservedAt != nil {
+			age = fmt.Sprintf(" (status last confirmed %s ago)",
+				db.FormatDuration(time.Now().Unix()-*binding.LastObservedAt))
+		}
+		fmt.Printf("%sweft could not refresh this status%s: %s\n", nextPrefix, age, binding.SyncWarning)
+	}
 	if binding.DashboardURL != "" {
 		fmt.Printf("%s%s\n", nextPrefix, binding.DashboardURL)
 	}

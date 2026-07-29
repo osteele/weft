@@ -610,33 +610,43 @@ surface ExternalExecutorIntegration {
 -- Open Questions
 -- ==========================================================================
 
-open question "Exit codes for mirrored jobs: `sky jobs queue --output json`
-does not report a process exit code, but Weft's attempt rows carry one and
-its display and triage paths read it. The implementation currently
-synthesises 0 for completed and 1 for failed/dead. That makes an invented
-value indistinguishable from an observed one, which is the same
-absence-of-evidence failure this spec rules out elsewhere. Should exit_code
-stay null for external jobs (and every reader tolerate that), or should
-there be an explicit 'derived from status' marker distinguishing it from an
-observed code?"
+-- RESOLVED: exit_code stays null for external-executor jobs. SkyPilot's job
+-- queue reports a status, not a process exit code — skypilot.Job carries no
+-- such field and ParseJobsQueueJSON never populates one — so any value written
+-- would be derived from the status and indistinguishable from an observation.
+-- A reader seeing exit_code=1 would conclude the process exited 1, when it may
+-- have been killed at 137 or never have run. Every reader was checked and is
+-- nil-guarded; failure classification keys on status first and consults
+-- exit_code only to refine the completed case, so a failed external job still
+-- classifies as failed. Terminal outcome is carried by normalized status, the
+-- executor's own account by raw_status / raw_status_message.
+-- Implementation: internal/db/external_jobs.go insertExternalAttempt and
+-- updateExternalAttemptTx.
 
-open question "Multiple bindings per job: the idempotency key is unique, but
-nothing constrains a single Weft job to one binding, and the read path takes
-the highest-id row. If an external retry produces a new external job id for
-the same wj, is that a second binding on the same job, a second Weft
-attempt with its own binding, or a rebind of the existing one? The choice
-determines whether attempt history for external jobs is meaningful at all."
+-- RESOLVED for now: multiple bindings per job cannot arise today, so
+-- highest-id-wins is defensive rather than load-bearing. AttachExternalBinding
+-- has one call site and runs once per `weft sky submit`; import goes through
+-- the upsert keyed on external identity; and `weft restart` has no
+-- external-executor path at all. The question becomes live only if external
+-- retry is implemented, and the answer should be chosen then rather than
+-- inherited from the ORDER BY.
+--
+-- Note the adjacent gap this exposed: `weft restart` on a backend=skypilot job
+-- is unhandled rather than refused. It should either refuse with a clear
+-- message or route to the executor; falling through to the rental/on-prem path
+-- is not a third option.
 
-open question "Dry-run submission rows: `weft sky submit --dry-run-task`
-writes the local job row before discovering it will not submit, leaving a
-permanently unconfirmed job. Should dry run skip the ledger write entirely
-(losing the ability to show the exact wj id the task would carry), write a
-draft-status row, or keep today's behaviour and rely on
-UnconfirmedExternalSubmission to surface it?"
+-- RESOLVED: dry run skips the ledger write entirely. The ledger-before-external
+-- ordering exists so a crash mid-submit leaves a recoverable record; a render
+-- that submits nothing has nothing to recover, and the row it left behind had
+-- no binding, so SyncExternalExecutorJob (guarded on the binding) could never
+-- advance it. The task name in the rendered YAML is a documented placeholder,
+-- since no job id is allocated. Implementation: cmd/sky.go runSkySubmit returns
+-- before db.Open().
 
-open question "Staleness threshold: 10 minutes is a guess, chosen to be
-comfortably longer than the 60s TUI refresh tick so a single missed pass
-does not raise a warning. It has not been calibrated against how long a
-SkyPilot job can legitimately sit unlisted during managed-job recovery or
-cluster replacement. If recovery routinely exceeds it, the warning becomes
-noise on healthy jobs."
+-- RESOLVED by removing the threshold from the surface. The observation age is
+-- reported alongside a recorded sync warning rather than gated on a cutoff, so
+-- there is no value to calibrate and no threshold that can turn healthy
+-- managed-job recovery into noise. A threshold would only be needed if
+-- staleness ever drove an action; it must not, since an unrefreshed status is
+-- UNKNOWN, never terminal.

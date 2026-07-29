@@ -52,6 +52,13 @@ type ExternalJobBinding struct {
 	DashboardURL            string
 	CreatedAt               int64
 	LastObservedAt          *int64
+	// SyncWarning is weft's own record of a failed or inconclusive
+	// observation. It is deliberately separate from RawStatusMessage, which
+	// belongs to the executor: a transport failure must not overwrite the last
+	// thing the executor actually said. See external-executor.allium
+	// ExternalObservationLeavesStateAlone.
+	SyncWarning   string
+	SyncWarningAt *int64
 }
 
 func normalizeExternalObservation(obs ExternalJobObservation) ExternalJobObservation {
@@ -199,14 +206,17 @@ func insertExternalAttempt(execer dbExecer, jobID int64, obs ExternalJobObservat
 		startTime = now
 	}
 	var endTime any
+	// exitCode stays nil for external-executor jobs. SkyPilot's job queue
+	// reports a status, not a process exit code (skypilot.Job carries no such
+	// field and ParseJobsQueueJSON never populates one), so any value written
+	// here would be invented from the status and indistinguishable from an
+	// observation. A reader seeing exit_code=1 would conclude the process
+	// exited 1, when it may have been OOM-killed at 137 or never have run at
+	// all. Terminal outcome is carried by status; the executor's own account
+	// is in raw_status / raw_status_message.
 	var exitCode any
 	if IsTerminalStatus(status) {
 		endTime = now
-		if status == StatusCompleted {
-			exitCode = 0
-		} else if status == StatusFailed || status == StatusDead {
-			exitCode = 1
-		}
 	}
 	result, err := execer.Exec(`
 		INSERT INTO job_attempts (
@@ -246,7 +256,9 @@ func upsertExternalBindingTx(execer dbExecer, jobID int64, attemptID *int64, obs
 			submitted_from_working_dir = COALESCE(NULLIF(excluded.submitted_from_working_dir, ''), external_job_bindings.submitted_from_working_dir),
 			submitted_from_project = COALESCE(NULLIF(excluded.submitted_from_project, ''), external_job_bindings.submitted_from_project),
 			dashboard_url = excluded.dashboard_url,
-			last_observed_at = excluded.last_observed_at`,
+			last_observed_at = excluded.last_observed_at,
+			sync_warning = NULL,
+			sync_warning_at = NULL`,
 		jobID, attempt, obs.Executor, obs.ExternalJobID, obs.ExternalTaskID,
 		obs.ExternalClusterID, obs.ExternalClusterName, obs.RawStatus,
 		obs.RawStatusMessage, obs.NormalizedStatus, obs.SubmittedFromWorkingDir,
@@ -296,10 +308,23 @@ func MarkExternalSubmissionFailed(database *sql.DB, jobID int64, message string)
 func MarkExternalSyncWarning(database *sql.DB, jobID int64, message string) error {
 	_, err := database.Exec(`
 		UPDATE external_job_bindings
-		   SET raw_status_message = ?
+		   SET sync_warning = ?,
+		       sync_warning_at = ?
 		 WHERE job_id = ?`,
-		strings.TrimSpace(message), jobID,
+		strings.TrimSpace(message), time.Now().Unix(), jobID,
 	)
+	return err
+}
+
+// ClearExternalSyncWarning drops a recorded observation failure. A successful
+// observation means the channel recovered, so the stale warning must not keep
+// implying that weft is out of contact.
+func ClearExternalSyncWarning(database dbExecer, jobID int64) error {
+	_, err := database.Exec(`
+		UPDATE external_job_bindings
+		   SET sync_warning = NULL,
+		       sync_warning_at = NULL
+		 WHERE job_id = ?`, jobID)
 	return err
 }
 
@@ -339,14 +364,11 @@ func updateExternalAttemptTx(execer dbExecer, jobID int64, obs ExternalJobObserv
 	}
 	status := obs.NormalizedStatus
 	var endTime any
+	// See insertExternalAttempt: exit codes are not observable from SkyPilot,
+	// so none is synthesised here either.
 	var exitCode any
 	if IsTerminalStatus(status) {
 		endTime = now
-		if status == StatusCompleted {
-			exitCode = 0
-		} else if status == StatusFailed || status == StatusDead {
-			exitCode = 1
-		}
 	}
 	_, err = execer.Exec(`
 		UPDATE job_attempts
@@ -408,7 +430,8 @@ func FindExternalJobBinding(database *sql.DB, executor, externalJobID, externalT
 		SELECT id, job_id, attempt_id, executor, external_job_id, external_task_id,
 		       external_cluster_id, external_cluster_name, raw_status,
 		       raw_status_message, normalized_status, submitted_from_working_dir,
-		       submitted_from_project, dashboard_url, created_at, last_observed_at
+		       submitted_from_project, dashboard_url, created_at, last_observed_at,
+		       sync_warning, sync_warning_at
 		  FROM external_job_bindings
 		 WHERE executor = ? AND external_job_id = ? AND external_task_id = ?`,
 		executor, externalJobID, externalTaskID,
@@ -421,7 +444,8 @@ func GetExternalJobBindingByJobID(database *sql.DB, jobID int64) (*ExternalJobBi
 		SELECT id, job_id, attempt_id, executor, external_job_id, external_task_id,
 		       external_cluster_id, external_cluster_name, raw_status,
 		       raw_status_message, normalized_status, submitted_from_working_dir,
-		       submitted_from_project, dashboard_url, created_at, last_observed_at
+		       submitted_from_project, dashboard_url, created_at, last_observed_at,
+		       sync_warning, sync_warning_at
 		  FROM external_job_bindings
 		 WHERE job_id = ?
 		 ORDER BY id DESC LIMIT 1`, jobID)
@@ -433,7 +457,8 @@ func ListExternalJobBindings(database *sql.DB, executor, project string) ([]*Ext
 		SELECT b.id, b.job_id, b.attempt_id, b.executor, b.external_job_id, b.external_task_id,
 		       b.external_cluster_id, b.external_cluster_name, b.raw_status,
 		       b.raw_status_message, b.normalized_status, b.submitted_from_working_dir,
-		       b.submitted_from_project, b.dashboard_url, b.created_at, b.last_observed_at
+		       b.submitted_from_project, b.dashboard_url, b.created_at, b.last_observed_at,
+		       b.sync_warning, b.sync_warning_at
 		  FROM external_job_bindings b
 		  JOIN jobs j ON j.id = b.job_id
 		 WHERE b.executor = ? AND j.tombstoned = 0`
@@ -473,16 +498,22 @@ func scanExternalJobBinding(row externalBindingScanner) (*ExternalJobBinding, er
 
 func scanExternalJobBindingRows(row externalBindingScanner) (*ExternalJobBinding, error) {
 	var b ExternalJobBinding
-	var attemptID, lastObserved sql.NullInt64
-	var clusterID, clusterName, rawStatus, rawMessage, normalized, wd, project, dashboard sql.NullString
+	var attemptID, lastObserved, syncWarningAt sql.NullInt64
+	var clusterID, clusterName, rawStatus, rawMessage, normalized, wd, project, dashboard, syncWarning sql.NullString
 	err := row.Scan(&b.ID, &b.JobID, &attemptID, &b.Executor, &b.ExternalJobID, &b.ExternalTaskID,
 		&clusterID, &clusterName, &rawStatus, &rawMessage, &normalized, &wd, &project,
-		&dashboard, &b.CreatedAt, &lastObserved)
+		&dashboard, &b.CreatedAt, &lastObserved, &syncWarning, &syncWarningAt)
 	if err != nil {
 		return nil, err
 	}
 	if attemptID.Valid {
 		b.AttemptID = &attemptID.Int64
+	}
+	if syncWarning.Valid {
+		b.SyncWarning = syncWarning.String
+	}
+	if syncWarningAt.Valid {
+		b.SyncWarningAt = &syncWarningAt.Int64
 	}
 	if clusterID.Valid {
 		b.ExternalClusterID = clusterID.String
