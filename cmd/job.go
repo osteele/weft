@@ -26,7 +26,6 @@ import (
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
-	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -1375,7 +1374,7 @@ func gpuMemorySuffixWarning(requestedClass string, deliveredGB int) string {
 	// Compare SKUs, not raw sizes. Drivers report usable memory, so a
 	// correctly-served 40GB A100 reports 39GB and would otherwise warn.
 	deliveredSKU := deliveredGB
-	if nominal := vastai.NominalHardwareMemoryGB(base, deliveredGB); nominal > 0 {
+	if nominal := gpucatalog.NominalHardwareMemoryGB(base, deliveredGB); nominal > 0 {
 		deliveredSKU = nominal
 	}
 	if deliveredSKU >= requestedGB {

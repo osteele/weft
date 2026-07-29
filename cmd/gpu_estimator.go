@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 var loadPredictorConfig = config.Load
@@ -31,9 +31,9 @@ func resolveEffectiveGPUMemAndCeiling(cfg *config.Config, explicit *int, gpu str
 	// 20GB default that no T4 offer can satisfy. Try the dedicated class first,
 	// then the raw --gpu spec (a family/index/family+mem spec has no single
 	// ceiling and resolves to 0).
-	classCeilingGB, ok := vastai.MaxHardwareMemGB(gpuClass)
+	classCeilingGB, ok := gpucatalog.MaxHardwareMemGB(gpuClass)
 	if !ok {
-		classCeilingGB, _ = vastai.MaxHardwareMemGB(gpu)
+		classCeilingGB, _ = gpucatalog.MaxHardwareMemGB(gpu)
 	}
 	floor, _, predicted = predictor.ResolveGPUMem(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB, classCeilingGB)
 	if floor != nil {
@@ -56,7 +56,7 @@ func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host str
 //   - the value was not user-specified (e.g. a predicted floor),
 //   - strict mode is on,
 //   - the caller marks the value as already being a hardware floor, or
-//   - (class, memGB) names a known hardware ceiling (vastai.KnownHardwareMemoryGB) —
+//   - (class, memGB) names a known hardware ceiling (gpucatalog.KnownHardwareMemoryGB) —
 //     adding headroom to "A100 80GB" pushes the request above the hardware's
 //     own gpu_ram and excludes every matching offer. The filter-time
 //     EffectiveMemGB resolves the same condition for historical jobs, so
@@ -73,12 +73,12 @@ func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwa
 }
 
 func explicitGPUMemHardwareFloor(gpuClass string, memGB int) bool {
-	return vastai.KnownHardwareMemoryGB(gpuClass, memGB) || floatableHardwareMemoryFloor(gpuClass, memGB)
+	return gpucatalog.KnownHardwareMemoryGB(gpuClass, memGB) || floatableHardwareMemoryFloor(gpuClass, memGB)
 }
 
 func floatableHardwareMemoryFloor(gpuClass string, memGB int) bool {
 	if gpuClass == "" || memGB <= 0 {
 		return false
 	}
-	return placement.ParseGPUConstraint(gpuClass).IsFloatable() && vastai.KnownLargeHardwareMemoryGB(memGB)
+	return placement.ParseGPUConstraint(gpuClass).IsFloatable() && gpucatalog.KnownLargeHardwareMemoryGB(memGB)
 }

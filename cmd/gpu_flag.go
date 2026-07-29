@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/gpucatalog"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // parseGPUFlag parses a combined GPU flag value like "nvidia>=24GB" into
@@ -86,7 +85,7 @@ func validateGPUSKUMemory(gpuClass string) error {
 	if requestedGB == 0 {
 		return nil
 	}
-	sizes, known := vastai.HardwareMemorySizesGB(base)
+	sizes, known := gpucatalog.MemorySizesGB(base)
 	if !known {
 		return nil
 	}

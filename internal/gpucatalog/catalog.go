@@ -223,8 +223,19 @@ func NamesForGeneration(gen Generation, minMode bool) []string {
 	return names
 }
 
+// rtxCandidates returns the keys to try for a normalized class, in order.
+// Workstation and consumer parts are catalogued under their "rtx…" spelling,
+// but users write them bare ("a6000", "2080ti"), so a bare class gets a second
+// attempt with the prefix applied.
+func rtxCandidates(normalizedClass string) []string {
+	if strings.HasPrefix(normalizedClass, "rtx") {
+		return []string{normalizedClass}
+	}
+	return []string{normalizedClass, "rtx" + normalizedClass}
+}
+
 func GenerationForNormalizedClass(normalizedClass string) (Generation, bool) {
-	for _, key := range []string{normalizedClass, "rtx" + normalizedClass} {
+	for _, key := range rtxCandidates(normalizedClass) {
 		if entry, ok := normalizedToEntry[key]; ok {
 			return entry.Gen, true
 		}
@@ -232,9 +243,6 @@ func GenerationForNormalizedClass(normalizedClass string) (Generation, bool) {
 			if gen, ok := GenerationForName(names[0]); ok {
 				return gen, true
 			}
-		}
-		if strings.HasPrefix(key, "rtx") {
-			break
 		}
 	}
 	return GenUnknown, false

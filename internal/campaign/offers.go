@@ -20,7 +20,6 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // parseCUDAVersionFloat converts a CUDA major.minor string (e.g. "12.4") to
@@ -614,14 +613,14 @@ func filterOffersBySKUMemory(offers []cloud.Offer, group InstanceGroup) (kept []
 	if requestedGB == 0 || len(offers) == 0 {
 		return offers, 0, 0
 	}
-	if _, known := vastai.HardwareMemorySizesGB(base); !known {
+	if _, known := gpucatalog.MemorySizesGB(base); !known {
 		return offers, 0, 0
 	}
 	kept = make([]cloud.Offer, 0, len(offers))
 	for _, o := range offers {
 		observed := int(math.Round(o.GPUMemGB))
 		sku := observed
-		if nominal := vastai.NominalHardwareMemoryGB(base, observed); nominal > 0 {
+		if nominal := gpucatalog.NominalHardwareMemoryGB(base, observed); nominal > 0 {
 			sku = nominal
 		}
 		if sku != requestedGB {

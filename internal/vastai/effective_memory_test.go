@@ -150,69 +150,6 @@ func TestIntendedMemGB(t *testing.T) {
 	}
 }
 
-func TestKnownHardwareMemoryGB(t *testing.T) {
-	cases := []struct {
-		class string
-		mem   int
-		want  bool
-	}{
-		{"a100", 80, true},
-		{"A100 PCIE", 80, true},
-		{"A100 SXM4", 80, true},
-		{"a100", 40, true},
-		{"a100", 50, false},
-		{"a100", 82, false},
-		{"h100", 80, true},
-		{"H100 PCIe", 80, true},
-		{"", 80, false},
-		{"nvidia", 80, false},
-	}
-	for _, tc := range cases {
-		if got := KnownHardwareMemoryGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("KnownHardwareMemoryGB(%q, %d) = %v, want %v", tc.class, tc.mem, got, tc.want)
-		}
-	}
-}
-
-func TestKnownLargeHardwareMemoryGB(t *testing.T) {
-	cases := []struct {
-		mem  int
-		want bool
-	}{
-		{8, false},
-		{10, false},
-		{16, false},
-		{24, true},
-		{32, true},
-		{40, true},
-		{48, true},
-		{50, false},
-		{80, true},
-		{141, true},
-	}
-	for _, tc := range cases {
-		if got := KnownLargeHardwareMemoryGB(tc.mem); got != tc.want {
-			t.Errorf("KnownLargeHardwareMemoryGB(%d) = %v, want %v", tc.mem, got, tc.want)
-		}
-	}
-}
-
-// TestHardwareMemoryTableHasCorePinnedModels guards against accidental
-// table edits that drop the entries the rest of the codebase relies on.
-func TestHardwareMemoryTableHasCorePinnedModels(t *testing.T) {
-	required := []string{"a100", "h100", "h200", "rtx4090", "rtx5090"}
-	classes := hardwareMemoryClassesSorted()
-	have := make(map[string]bool, len(classes))
-	for _, c := range classes {
-		have[c] = true
-	}
-	for _, r := range required {
-		if !have[r] {
-			t.Errorf("hardwareMemoryByClass missing required class %q", r)
-		}
-	}
-}
-
 // TestEffectiveMemGB_T4Reachable is the regression for wj3135: the user-facing
 // class "t4" normalizes to "t4", but the table previously keyed the Tesla T4
 // only under "teslat4" (the gpu_name normalization), so its 16GB ceiling was
@@ -224,35 +161,5 @@ func TestEffectiveMemGB_T4Reachable(t *testing.T) {
 	}
 	if got := EffectiveMemGB("T4", 16); got != 16 {
 		t.Errorf("EffectiveMemGB(\"T4\", 16) = %d, want 16", got)
-	}
-	if !KnownHardwareMemoryGB("t4", 16) {
-		t.Error("KnownHardwareMemoryGB(\"t4\", 16) = false, want true")
-	}
-}
-
-// TestMaxHardwareMemGB covers the ceiling lookup used to clamp the blanket
-// default reservation down to a named card's real VRAM.
-func TestMaxHardwareMemGB(t *testing.T) {
-	cases := []struct {
-		class  string
-		wantGB int
-		wantOK bool
-	}{
-		{"t4", 16, true},   // single-size small card — the wj3135 case
-		{"T4", 16, true},   // case-insensitive
-		{"a100", 80, true}, // multi-size: max of {40,80}
-		{"rtx2080ti", 11, true},
-		{"a6000", 48, true},   // bare workstation class resolves via rtx-prefix retry
-		{"v100", 32, true},    // max of {16,32}
-		{"nvidia", 0, false},  // family — no single ceiling
-		{"ampere+", 0, false}, // generation — no single ceiling
-		{"", 0, false},
-		{"0,1", 0, false}, // device index, not a class
-	}
-	for _, tc := range cases {
-		gotGB, gotOK := MaxHardwareMemGB(tc.class)
-		if gotGB != tc.wantGB || gotOK != tc.wantOK {
-			t.Errorf("MaxHardwareMemGB(%q) = (%d, %v), want (%d, %v)", tc.class, gotGB, gotOK, tc.wantGB, tc.wantOK)
-		}
 	}
 }
