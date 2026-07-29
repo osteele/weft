@@ -2,6 +2,7 @@ package gpucatalog
 
 import (
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -10,94 +11,85 @@ import (
 // Per-part memory capacities. This is hardware fact, not provider policy, and
 // lives beside the names and generations it describes.
 
-// hardwareMemoryByClass maps a normalized GPU class name to the canonical
-// memory sizes (per GPU, in GB) that ship in that model. Keys are
-// inventory.NormalizeGPUClass results for the *user-facing* class spelling
-// (what reaches OfferConstraints.GPUClass), e.g. "a100", "h100", "rtx4090",
-// "t4" — rather than a provider's own gpu_name normalization ("teslat4"),
-// though a few of those are carried as aliases. Lookups go through
-// MemorySizesGB, which also retries with an "rtx" prefix so bare workstation
-// classes ("a6000", "2080ti") resolve to their "rtx…" keys.
+// MemorySizesGB returns the per-GPU capacities a class can resolve to, and
+// whether the class is catalogued at all.
 //
-// Coverage is curated, not exhaustive: entries are the parts weft has seen
-// offered by supported rental providers. An uncatalogued class is not an
-// error — see MemorySizesGB for what callers owe that case.
-var hardwareMemoryByClass = map[string][]int{
-	// Ampere
-	"a100":     {40, 80},
-	"a100pcie": {40, 80},
-	"a100sxm":  {40, 80},
-	"a100sxm4": {40, 80},
-	"a800":     {80},
-	"a40":      {48},
-	"a10":      {24},
-	"a10g":     {24},
-	"rtxa6000": {48},
-	"rtxa5000": {24},
-	"rtxa4000": {16},
-	"rtx3090":  {24},
-	"rtx3080":  {10, 12},
-	"rtx3070":  {8},
-	"rtx3060":  {8, 12},
-	// Hopper
-	"h100":     {80},
-	"h100pcie": {80},
-	"h100sxm":  {80},
-	"h100hbm3": {80},
-	"h200":     {141},
-	// Ada Lovelace
-	"rtx4090":     {24},
-	"rtx4080":     {16},
-	"rtx4070":     {12},
-	"rtx4060":     {8, 16},
-	"rtx6000ada":  {48},
-	"rtxpro6000s": {96},
-	"rtxpro6000":  {96},
-	"l40":         {48},
-	"l40s":        {48},
-	"l20":         {48},
-	"l4":          {24},
-	// Blackwell
-	"rtx5090":    {32},
-	"rtx5080":    {16},
-	"rtx5070":    {12},
-	"rtx5060":    {8, 16},
-	"b100":       {96},
-	"b200":       {180, 192},
-	"gb200":      {192},
-	"rtxpro5000": {48},
-	// Turing / older
-	"rtx2080ti": {11},
-	"rtx2080":   {8},
-	"rtx2070":   {8},
-	"t4":        {16},
-	"teslat4":   {16},
-	"v100":      {16, 32},
-}
-
-// MemorySizesGB returns the canonical per-GPU memory sizes (GB) for a
-// user-facing GPU class, and whether the class is catalogued at all. A
-// trailing "+" (min-mode) is stripped before lookup. (nil, false) covers an
-// empty class, a family ("nvidia"), a generation, and any single model the
-// table does not list.
+// The result is derived from the parts the class matches rather than stored
+// per class. A family or alias spelling ("a100", "h100hbm3") has no part row:
+// its capacities are the union over the parts it names, and storing that union
+// would be a second copy of a fact that then drifts from the first. Before
+// this was derived, "h100" carried a hand-maintained {80} while H100 NVL —
+// which "h100" legitimately matches — ships 94.
 //
-// The second return value is load-bearing. Callers that validate or filter on
-// an exact SKU need it to distinguish "this size is wrong for this part" from
-// "weft has never heard of this part" — refusing on the latter would make a
-// stale catalogue look like an empty market.
+// A class that matches only uncatalogued parts returns (nil, false): weft has
+// never heard of the capacity, which callers must distinguish from a part that
+// ships in one size.
 func MemorySizesGB(class string) ([]int, bool) {
 	norm := inventory.NormalizeGPUClass(strings.TrimSuffix(strings.TrimSpace(class), "+"))
 	if norm == "" {
 		return nil, false
 	}
-	for _, key := range rtxCandidates(norm) {
-		if sizes, ok := hardwareMemoryByClass[key]; ok {
-			// Clone: the table is package state, and callers sort the
-			// result for display.
+	if sizes, ok := memorySizesCache[norm]; ok {
+		return slices.Clone(sizes), true
+	}
+	// Bare workstation model numbers ("a6000", "2080ti") name rtx-prefixed
+	// parts. Mirrors the retry in resolveGPUFilter so the two agree on what a
+	// user's spelling resolves to.
+	if !strings.HasPrefix(norm, "rtx") {
+		if sizes, ok := memorySizesCache["rtx"+norm]; ok {
 			return slices.Clone(sizes), true
 		}
 	}
 	return nil, false
+}
+
+// memorySizesCache is the derivation, computed once. Lookup is on the hot path
+// for every offer in a search.
+var memorySizesCache = map[string][]int{}
+
+func buildMemorySizesCache() {
+	classes := map[string]bool{}
+	for _, e := range Entries {
+		classes[inventory.NormalizeGPUClass(e.Name)] = true
+	}
+	for _, alias := range knownClassSpellings() {
+		classes[alias] = true
+	}
+	for class := range classes {
+		seen := map[int]bool{}
+		var sizes []int
+		for _, e := range Entries {
+			if len(e.MemoryGB) == 0 {
+				continue
+			}
+			if !MatchesPartName(class, inventory.NormalizeGPUClass(e.Name)) {
+				continue
+			}
+			for _, size := range e.MemoryGB {
+				if !seen[size] {
+					seen[size] = true
+					sizes = append(sizes, size)
+				}
+			}
+		}
+		if len(sizes) == 0 {
+			continue
+		}
+		sort.Ints(sizes)
+		memorySizesCache[class] = sizes
+	}
+}
+
+// knownClassSpellings enumerates user-facing class strings that name a family
+// or an alias rather than a single part, so their derived capacities are
+// cached alongside the parts'.
+func knownClassSpellings() []string {
+	spellings := []string{"a100", "h100", "h200", "b200", "gh200", "v100", "t4"}
+	for alias := range classAliases {
+		spellings = append(spellings, alias)
+		spellings = append(spellings, classAliases[alias]...)
+	}
+	return spellings
 }
 
 // MaxHardwareMemGB returns the largest per-GPU VRAM (GB) shipped by a named GPU
@@ -139,7 +131,7 @@ func KnownLargeHardwareMemoryGB(memGB int) bool {
 	if memGB < 24 {
 		return false
 	}
-	for _, sizes := range hardwareMemoryByClass {
+	for _, sizes := range memorySizesCache {
 		if slices.Contains(sizes, memGB) {
 			return true
 		}

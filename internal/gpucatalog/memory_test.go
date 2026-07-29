@@ -56,12 +56,13 @@ func TestKnownLargeHardwareMemoryGB(t *testing.T) {
 }
 
 // TestHardwareMemoryTableHasCorePinnedModels guards against accidental
-// table edits that drop the entries the rest of the codebase relies on.
+// edits that drop capacities the rest of the codebase relies on. These are
+// now derived from Entries, so a dropped Entry.MemoryGB fails here too.
 func TestHardwareMemoryTableHasCorePinnedModels(t *testing.T) {
 	required := []string{"a100", "h100", "h200", "rtx4090", "rtx5090"}
 	for _, r := range required {
-		if _, ok := hardwareMemoryByClass[r]; !ok {
-			t.Errorf("hardwareMemoryByClass missing required class %q", r)
+		if _, ok := MemorySizesGB(r); !ok {
+			t.Errorf("no catalogued capacity for required class %q", r)
 		}
 	}
 }

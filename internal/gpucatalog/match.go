@@ -9,6 +9,13 @@ import "strings"
 var classAliases = map[string][]string{
 	"a100sxm":  {"a100sxm4"},
 	"h100hbm3": {"h100sxm"},
+	// Providers carry NVIDIA's marketing prefix on datacenter Teslas; users
+	// type the bare model. Without these, "--gpu t4" resolves to no part.
+	"t4":   {"teslat4"},
+	"v100": {"teslav100"},
+	// Spelling inherited from the pre-merge memory table; its exact provider
+	// meaning is unverified, so it aliases rather than inventing a part row.
+	"rtxpro6000s": {"rtxpro6000"},
 }
 
 // classEquivalents is classAliases closed over symmetry — if a names b then b
