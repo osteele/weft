@@ -177,7 +177,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_SplitOnlySkipsExpandedCandidat
 	splitRaw := []GroupRawOffers{{
 		Group: group,
 		Offers: []cloud.Offer{
-			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.40},
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.40},
 		},
 	}}
 
@@ -342,7 +342,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParall
 		switch len(groups) {
 		case 1:
 			// merged candidate
-			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.30}}
+			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.30}}
 		case 4:
 			// parallel candidate (fully launchable). Each sub-group gets a
 			// distinct ProviderID + MachineID so the in-pass exclusion
@@ -379,13 +379,13 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredChoosesParall
 		{
 			Group: groups[0],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.20},
+				{ProviderID: "split-a", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.20},
 			},
 		},
 		{
 			Group: groups[1],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.20},
+				{ProviderID: "split-b", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.20},
 			},
 		},
 	}
@@ -431,11 +431,11 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredFallsBackWhen
 		switch len(groups) {
 		case 1:
 			// merged candidate: valid and cheaper than split, so it should win non-parallel fallback.
-			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.10}}
+			raw[0].Offers = []cloud.Offer{{ProviderID: "merged", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.10}}
 		case 4:
 			// parallel candidate: one missing offer => incomplete => must not be selected.
 			for i := range raw {
-				raw[i].Offers = []cloud.Offer{{ProviderID: "parallel", GPUName: "RTX 4090", CostPerHour: 0.60}}
+				raw[i].Offers = []cloud.Offer{{ProviderID: "parallel", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.60}}
 			}
 			raw[0].Offers = nil
 		default:
@@ -460,13 +460,13 @@ func TestBuildProfilePlansFromSplitRawWithSession_ParallelPreferredFallsBackWhen
 		{
 			Group: groups[0],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.25},
+				{ProviderID: "split-a", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.25},
 			},
 		},
 		{
 			Group: groups[1],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.25},
+				{ProviderID: "split-b", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.25},
 			},
 		},
 	}
@@ -514,7 +514,7 @@ func TestBuildProfilePlansFromSplitRawWithSession_MergedPreferredUsesMergedCandi
 		return []GroupRawOffers{{
 			Group: groups[0],
 			Offers: []cloud.Offer{
-				{ProviderID: "merged", GPUName: "RTX 4090", CostPerHour: 0.60},
+				{ProviderID: "merged", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.60},
 			},
 		}}
 	}
@@ -535,13 +535,13 @@ func TestBuildProfilePlansFromSplitRawWithSession_MergedPreferredUsesMergedCandi
 		{
 			Group: groups[0],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-a", GPUName: "RTX 4090", CostPerHour: 0.40},
+				{ProviderID: "split-a", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.40},
 			},
 		},
 		{
 			Group: groups[1],
 			Offers: []cloud.Offer{
-				{ProviderID: "split-b", GPUName: "RTX 4090", CostPerHour: 0.40},
+				{ProviderID: "split-b", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.40},
 			},
 		},
 	}
@@ -775,7 +775,7 @@ func TestBuildProfilePlansFromSplitRaw_CachesSelectedOfferEstimatesAcrossProfile
 	splitRaw := []GroupRawOffers{{
 		Group: group,
 		Offers: []cloud.Offer{
-			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.40},
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.40},
 		},
 	}}
 
@@ -1556,7 +1556,7 @@ func TestRankGroupOffersForPlanning_UnknownOversizedVRAMStaysConservative(t *tes
 			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
 		},
 		Offers: []cloud.Offer{
-			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.30},
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.30},
 			{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.00},
 		},
 	}}
@@ -1622,7 +1622,7 @@ func TestRankGroupOffersForPlanning_MemoryCapacityCanJustifyLargerGPU(t *testing
 			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
 		},
 		Offers: []cloud.Offer{
-			{ProviderID: "rtx4090", GPUName: "RTX 4090", CostPerHour: 0.30},
+			{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.30},
 			{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.00},
 		},
 	}}

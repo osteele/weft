@@ -1743,43 +1743,8 @@ func rankOfferWithPredictedRuntime(
 		result.FilterStats = stats
 		return result, true
 	}
-	// Runtime-ranking path receives provider-filtered offers; treat all as
-	// VRAM-compatible for staged diagnostics parity with rankOfferWithProfile.
-	stats.AfterVRAM = len(offers)
-
-	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
-	if cudaFiltered > 0 {
-		stats.CUDAImage = imageRef
-		stats.CUDAImageVersion = imageCUDA
-		stats.CUDAMinRequired = minRequiredCUDA
-		stats.CUDAExampleGPU = exampleGPU
-	}
-	stats.AfterCUDA = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result, true
-	}
-	offers, providerCompatFiltered, providerCompatUnknown := filterOffersByProviderCompatibility(group, offers)
-	stats.UnknownCompatibility = providerCompatUnknown
-	stats.ProviderCompatibilityFiltered = providerCompatFiltered
-	stats.AfterProvider = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result, true
-	}
-
-	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
-		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
-		stats.TorchArchMinCap = group.MinComputeCap
-		stats.TorchArchMaxCap = group.MaxComputeCap
-		if archFiltered > 0 {
-			stats.TorchArchExampleGPU = exampleGPU
-			stats.TorchArchExampleCap = exampleCap
-		}
-		offers = archOffers
-	}
-	stats.AfterTorchArch = len(offers)
-	if len(offers) == 0 {
+	offers, ok := applyEligibilityFilters(group, offers, &stats)
+	if !ok {
 		result.FilterStats = stats
 		return result, true
 	}

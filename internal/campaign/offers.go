@@ -798,6 +798,127 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy.Profile(), minSurvival)
 }
 
+// applyEligibilityFilters runs every local re-check declared in
+// axisEnforcement, in order, recording each stage in st.
+//
+// Both ranking paths call this. They used to carry their own chains, and the
+// runtime-ranking path ran four of the nine filters while asserting
+// `stats.AfterVRAM = len(offers)` — "treat all as VRAM-compatible" — on the
+// strength of the offers being provider-filtered. That is the same assumption
+// that served 80GB requests with 40GB cards, and it made axisEnforcement's
+// claim that the SKU axis is "checkedLocally" true on one path and false on
+// the other. A shared chain makes the claim true by construction instead of by
+// convention: a filter cannot be skipped on one path without being removed
+// from both.
+//
+// Returns the surviving offers and whether any remain.
+func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *OfferFilterStats) ([]cloud.Offer, bool) {
+	if skuFiltered, removed, requestedGB := filterOffersBySKUMemory(offers, group); removed > 0 {
+		slog.Debug("filtered offers by exact SKU memory",
+			"gpu_class", group.GPUClass, "required_gb", requestedGB,
+			"filtered", removed, "remaining", len(skuFiltered))
+		st.SKUMemoryFiltered = removed
+		st.SKUMemoryRequestedGB = requestedGB
+		offers = skuFiltered
+	}
+	st.AfterSKUMemory = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	if vramFiltered, removed := filterOffersByVRAMReq(offers, group); removed > 0 {
+		slog.Debug("filtered offers by VRAM requirement",
+			"required_min_gb", group.GPUMemGB,
+			"filtered", removed, "remaining", len(vramFiltered))
+		offers = vramFiltered
+	}
+	st.AfterVRAM = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	if countFiltered, removed := filterOffersByGPUCount(offers, group); removed > 0 {
+		slog.Debug("filtered offers by GPU count requirement",
+			"required", requiredGPUCountForGroup(group),
+			"filtered", removed, "remaining", len(countFiltered))
+		st.GPUCountFiltered = removed
+		offers = countFiltered
+	}
+	st.AfterGPUCount = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	if ramFiltered, removed := filterOffersByHostRAM(offers, group); removed > 0 {
+		slog.Debug("filtered offers by host RAM requirement",
+			"required_min_gb", group.CPUMemGB,
+			"filtered", removed, "remaining", len(ramFiltered))
+		st.HostRAMFiltered = removed
+		offers = ramFiltered
+	}
+	st.AfterHostRAM = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	if topoFiltered, removed := filterOffersByInterconnect(offers, group); removed > 0 {
+		slog.Debug("filtered offers by interconnect requirement",
+			"interconnect", group.Interconnect,
+			"filtered", removed, "remaining", len(topoFiltered))
+		st.InterconnectFiltered = removed
+		st.InterconnectRequired = strings.TrimSpace(group.Interconnect)
+		offers = topoFiltered
+	}
+	st.AfterInterconnect = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
+	if cudaFiltered > 0 {
+		st.CUDAImage = imageRef
+		st.CUDAImageVersion = imageCUDA
+		st.CUDAMinRequired = minRequiredCUDA
+		st.CUDAExampleGPU = exampleGPU
+	}
+	st.AfterCUDA = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	offers, providerCompatFiltered, providerCompatUnknown := filterOffersByProviderCompatibility(group, offers)
+	if providerCompatFiltered > 0 {
+		slog.Debug("filtered offers by provider CUDA compatibility",
+			"filtered", providerCompatFiltered, "remaining", len(offers))
+	}
+	st.UnknownCompatibility = providerCompatUnknown
+	st.ProviderCompatibilityFiltered = providerCompatFiltered
+	st.AfterProvider = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	offers, forwardCompatFiltered, forwardCompatExampleGPU := filterOffersByForwardCompatDriver(group, offers)
+	if forwardCompatFiltered > 0 {
+		slog.Debug("filtered offers by Vast.ai datacenter forward-compat driver guard",
+			"filtered", forwardCompatFiltered, "remaining", len(offers), "example_gpu", forwardCompatExampleGPU)
+	}
+	st.ForwardCompatFiltered = forwardCompatFiltered
+	st.ForwardCompatExampleGPU = forwardCompatExampleGPU
+	st.AfterForward = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
+		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
+		st.TorchArchMinCap = group.MinComputeCap
+		st.TorchArchMaxCap = group.MaxComputeCap
+		if archFiltered > 0 {
+			st.TorchArchExampleGPU = exampleGPU
+			st.TorchArchExampleCap = exampleCap
+		}
+		offers = archOffers
+	}
+	st.AfterTorchArch = len(offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
+	return offers, true
+}
+
 func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
 	stats := OfferFilterStats{RawCount: len(offers)}
@@ -806,115 +927,8 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		result.FilterStats = stats
 		return result
 	}
-	if skuFiltered, removed, requestedGB := filterOffersBySKUMemory(offers, group); removed > 0 {
-		slog.Debug("filtered offers by exact SKU memory",
-			"gpu_class", group.GPUClass, "required_gb", requestedGB,
-			"filtered", removed, "remaining", len(skuFiltered))
-		stats.SKUMemoryFiltered = removed
-		stats.SKUMemoryRequestedGB = requestedGB
-		offers = skuFiltered
-	}
-	stats.AfterSKUMemory = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	if vramFiltered, removed := filterOffersByVRAMReq(offers, group); removed > 0 {
-		slog.Debug("filtered offers by VRAM requirement",
-			"required_min_gb", group.GPUMemGB,
-			"filtered", removed, "remaining", len(vramFiltered))
-		offers = vramFiltered
-	}
-	stats.AfterVRAM = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	if countFiltered, removed := filterOffersByGPUCount(offers, group); removed > 0 {
-		slog.Debug("filtered offers by GPU count requirement",
-			"required", requiredGPUCountForGroup(group),
-			"filtered", removed, "remaining", len(countFiltered))
-		stats.GPUCountFiltered = removed
-		offers = countFiltered
-	}
-	stats.AfterGPUCount = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	if ramFiltered, removed := filterOffersByHostRAM(offers, group); removed > 0 {
-		slog.Debug("filtered offers by host RAM requirement",
-			"required_min_gb", group.CPUMemGB,
-			"filtered", removed, "remaining", len(ramFiltered))
-		stats.HostRAMFiltered = removed
-		offers = ramFiltered
-	}
-	stats.AfterHostRAM = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	if topoFiltered, removed := filterOffersByInterconnect(offers, group); removed > 0 {
-		slog.Debug("filtered offers by interconnect requirement",
-			"interconnect", group.Interconnect,
-			"filtered", removed, "remaining", len(topoFiltered))
-		stats.InterconnectFiltered = removed
-		stats.InterconnectRequired = strings.TrimSpace(group.Interconnect)
-		offers = topoFiltered
-	}
-	stats.AfterInterconnect = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
-	if cudaFiltered > 0 {
-		stats.CUDAImage = imageRef
-		stats.CUDAImageVersion = imageCUDA
-		stats.CUDAMinRequired = minRequiredCUDA
-		stats.CUDAExampleGPU = exampleGPU
-	}
-	stats.AfterCUDA = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	offers, providerCompatFiltered, providerCompatUnknown := filterOffersByProviderCompatibility(group, offers)
-	if providerCompatFiltered > 0 {
-		slog.Debug("filtered offers by provider CUDA compatibility",
-			"filtered", providerCompatFiltered, "remaining", len(offers))
-	}
-	stats.UnknownCompatibility = providerCompatUnknown
-	stats.ProviderCompatibilityFiltered = providerCompatFiltered
-	stats.AfterProvider = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	offers, forwardCompatFiltered, forwardCompatExampleGPU := filterOffersByForwardCompatDriver(group, offers)
-	if forwardCompatFiltered > 0 {
-		slog.Debug("filtered offers by Vast.ai datacenter forward-compat driver guard",
-			"filtered", forwardCompatFiltered, "remaining", len(offers), "example_gpu", forwardCompatExampleGPU)
-	}
-	stats.ForwardCompatFiltered = forwardCompatFiltered
-	stats.ForwardCompatExampleGPU = forwardCompatExampleGPU
-	stats.AfterForward = len(offers)
-	if len(offers) == 0 {
-		result.FilterStats = stats
-		return result
-	}
-	if group.MinComputeCap != "" || group.MaxComputeCap != "" {
-		archOffers, archFiltered, exampleGPU, exampleCap := filterOffersByTorchArch(offers, group.MinComputeCap, group.MaxComputeCap)
-		stats.TorchArchMinCap = group.MinComputeCap
-		stats.TorchArchMaxCap = group.MaxComputeCap
-		if archFiltered > 0 {
-			stats.TorchArchExampleGPU = exampleGPU
-			stats.TorchArchExampleCap = exampleCap
-		}
-		offers = archOffers
-	}
-	stats.AfterTorchArch = len(offers)
-	if len(offers) == 0 {
+	offers, ok := applyEligibilityFilters(group, offers, &stats)
+	if !ok {
 		result.FilterStats = stats
 		return result
 	}
