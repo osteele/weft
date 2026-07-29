@@ -363,6 +363,8 @@ func filterStatsFingerprint(s OfferFilterStats) string {
 	switch {
 	case s.RawCount == 0:
 		return "vastai/search-offers/empty-result:no-offers"
+	case s.SKUMemoryFiltered > 0 && s.AfterSKUMemory == 0:
+		return "vastai/search-offers/empty-result:sku-memory"
 	case s.AfterVRAM == 0:
 		return "vastai/search-offers/empty-result:vram"
 	case s.AfterCUDA == 0:

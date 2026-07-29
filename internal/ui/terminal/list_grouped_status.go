@@ -641,6 +641,8 @@ func incidentDisplayReason(fingerprint, sample string) string {
 	switch {
 	case strings.HasSuffix(fingerprint, "/empty-result:no-offers"):
 		return "no matching rental offers from providers"
+	case strings.HasSuffix(fingerprint, "/empty-result:sku-memory"):
+		return "rental offers found, but none were the exact GPU SKU requested"
 	case strings.HasSuffix(fingerprint, "/empty-result:vram"):
 		return "rental offers found, but none had enough GPU memory"
 	case strings.HasSuffix(fingerprint, "/empty-result:cuda"):

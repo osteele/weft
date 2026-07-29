@@ -536,6 +536,11 @@ func applyScriptGPUDefaults(database restartExecer, job *db.Job, strictOverride 
 	if effGPUMemRaw > 0 {
 		effMemHardware = effMemHardware || explicitGPUMemHardwareFloor(effGPUClass, effGPUMemRaw)
 	}
+	// Validate the resolved class, not each source: a bad SKU in script
+	// metadata is not an error when the CLI overrides it.
+	if err := validateGPUSKUMemory(effGPUClass); err != nil {
+		return nil, err
+	}
 
 	var updates []string
 

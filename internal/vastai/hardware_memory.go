@@ -284,3 +284,18 @@ func hardwareMemoryClassesSorted() []string {
 	sort.Strings(out)
 	return out
 }
+
+// HardwareMemorySizesGB returns the catalogued per-GPU capacities for a class,
+// and whether the class is catalogued at all. Callers that validate or filter
+// on an exact SKU need the second return value to distinguish "this size is
+// wrong for this part" from "weft has never heard of this part" — refusing on
+// the latter would make a stale catalogue look like an empty market.
+func HardwareMemorySizesGB(class string) ([]int, bool) {
+	sizes, ok := hardwareMemSizes(class)
+	if !ok {
+		return nil, false
+	}
+	out := make([]int, len(sizes))
+	copy(out, sizes)
+	return out, true
+}

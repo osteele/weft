@@ -977,6 +977,11 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if editRetry && cmd.Flags().Changed("status") {
 		return fmt.Errorf("%w: cannot combine --retry with --status", errFlagConflict)
 	}
+	if gpuClassChanged {
+		if err := validateGPUSKUMemory(editGPUClass); err != nil {
+			return err
+		}
+	}
 	if minSurvivalChanged && (editMinSurvival < 0 || editMinSurvival > 1) {
 		return fmt.Errorf("--min-survival must be between 0 and 1")
 	}

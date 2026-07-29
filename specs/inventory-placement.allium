@@ -91,10 +91,11 @@ entity ExecutionTarget {
     instance: campaign/CloudInstance?
 
     -- REQUESTED. The class constraint this target was selected against,
-    -- echoed from the job. It says what was asked for, not what arrived —
-    -- and because a class binds only the variant axis (see
-    -- ParseGPUConstraint), it may name a memory size the target does not
-    -- have.
+    -- echoed from the job. It says what was asked for, not what arrived. A
+    -- memory size inside the class names an exact part (see
+    -- ParseGPUConstraint), but that identity is enforced only where
+    -- MatchSKUMemory runs, so a target selected on any other path may
+    -- still carry a class naming a memory size it does not have.
     gpu_class: String?
 
     -- DELIVERED. The hardware the target actually exposes:
@@ -207,21 +208,42 @@ rule ParseGPUConstraint {
     -- "h100-pcie" matches only PCIe; "h100-sxm" and "h100-hbm3" match the
     -- H100 SXM/HBM3 class; "h100-nvl" matches only NVL.
     --
-    -- Memory is a SEPARATE axis, and a GPU class does not bind it. A
-    -- trailing memory token inside a class name binds NOTHING: it is
-    -- stripped before matching, so "a100-sxm4-80gb" is the constraint
-    -- "a100-sxm4" plus a decorative token. The strip is forced by the
-    -- domain — the hardware names weft matches against carry no memory
-    -- component, and one "A100 SXM4" names both the 40GB and the 80GB
-    -- part, so there is nothing for "-80gb" to match against.
+    -- Memory is a separate axis, and it carries one of two ROLES,
+    -- distinguished by WHERE in the request it appears:
     --
-    -- Memory binds only through the `>=NGB` predicate, which parses out of
-    -- the class string into Constraints.gpu_mem_gb and is enforced by
-    -- EvaluateEligibility clause 3. So:
-    --   "a100-sxm4-80gb"    -> variant bound, memory UNBOUND
-    --   "a100-sxm4>=80GB"   -> variant bound, memory bound
-    --   "a100>=80GB"        -> variant UNBOUND, memory bound
-    -- Only the middle form constrains both axes.
+    --   * INSIDE the class name ("a100-sxm4-80gb") memory is part of the
+    --     SKU's IDENTITY. It selects that part and no other: exact match,
+    --     not a floor. "I want this part." This is the benchmarking case,
+    --     where the properties of one specific part are the point.
+    --   * As a SEPARATE parameter ("a100-sxm4>=80GB", --gpu-mem, --disk,
+    --     host RAM, or anything weft infers from projected resource
+    --     utilization) memory is a FLOOR. "At least this." This is the
+    --     common case: find the optimal target that can run a set of jobs.
+    --
+    -- The identity role exists because one marketing name spans different
+    -- hardware. An A100 runs at ~1555 GB/s at 40GB, ~1935 at 80GB PCIe and
+    -- ~2039 at 80GB SXM4. Neither "a100-80gb" nor "a100-sxm4" alone pins
+    -- the part; "a100-sxm4-80gb" does. Exposing bandwidth as its own
+    -- constraint parameter was considered and rejected: it makes
+    -- unmatchable specs easy to construct, and it makes the client
+    -- decompose a GPU into properties weft must then recompose, when the
+    -- SKU name is already the compact handle for that bundle.
+    --
+    -- So:
+    --   "a100-sxm4-80gb"    -> variant bound, memory bound EXACTLY
+    --   "a100-sxm4>=80GB"   -> variant bound, memory bound as a FLOOR
+    --   "a100>=80GB"        -> variant unbound, memory bound as a floor
+    --
+    -- ParseGPUConstraint itself binds only the variant axis: the memory
+    -- token is stripped before matching. That strip is forced by the domain
+    -- and is not a defect — the hardware names weft matches against carry
+    -- no memory component, and one "A100 SXM4" names both the 40GB and the
+    -- 80GB part, so there is nothing in a name for "-80gb" to match. The
+    -- exactness the strip removes is restored afterwards by MatchSKUMemory,
+    -- which reads memory from a separately reported field instead of out of
+    -- a name. The `>=NGB` floor parses out of the class string into
+    -- Constraints.gpu_mem_gb and is enforced by EvaluateEligibility
+    -- clause 3.
 
     ensures: GPUConstraintParsed(result)
 
@@ -233,11 +255,12 @@ rule ParseGPUConstraint {
         -- reached from MatchNormalizedNames when a class is resolved to
         -- the provider hardware names it may match.
         --
-        -- The unbound memory axis is silent by construction: nothing in a
-        -- job's own output states which part it ran on, so a class-only
-        -- request can be served a smaller card with no contradicting
-        -- signal. wj5504 requested "a100-pcie-80gb" and ran on an A100
-        -- PCIE 40GB. ReportDeliveredHardware exists to close that loop.
+        -- Wherever MatchSKUMemory does not run, the memory axis is silent
+        -- by construction: nothing in a job's own output states which part
+        -- it ran on, so a request can be served a smaller card with no
+        -- contradicting signal. wj5504 requested "a100-pcie-80gb" and ran
+        -- on an A100 PCIE 40GB. ReportDeliveredHardware closes that loop
+        -- after the fact.
 }
 
 rule MatchGPU {
@@ -271,6 +294,113 @@ rule MatchGPU {
         -- implementation detail. Implementation: MatchesGPU.
 }
 
+-- MatchSKUMemory enforces the identity role of memory carried inside a
+-- class name. It runs AFTER the provider search, because the memory in a
+-- class name is inexpressible in the provider's search vocabulary: provider
+-- gpu_name values carry no memory component (vast.ai calls both the 40GB and
+-- the 80GB part "A100 SXM4"), so MatchNormalizedNames strips the token
+-- before building a search term. Nothing restored the exactness afterwards,
+-- and fresh rentals over-delivered the smaller part: wj5503, wj5504 and
+-- wj5509 requested 80GB parts and received 40GB ones.
+--
+-- The check is possible after the search even though it was impossible
+-- during it, because an offer reports its memory as its OWN field rather
+-- than inside the name.
+rule MatchSKUMemory {
+    when: SKUMemoryChecked(gpu_class: String, delivered_mem_gb: Integer)
+
+    let base = SKUMemoryBase(gpu_class)          -- "a100-sxm4-80gb" -> "a100-sxm4"
+    let requested_gb = TrailingMemoryTokenGB(gpu_class)
+    let catalogued_sizes = CataloguedMemorySizesGB(base)
+
+    -- 1. No memory token: the class is a variant selector only, and every
+    --    memory size is admissible on this axis.
+    if requested_gb = null:
+        ensures: Matches = true
+
+    -- 2. A class the hardware catalogue does not know passes untouched.
+    --    Weft cannot validate a part it has never heard of, and refusing on
+    --    that basis would make a stale catalogue look like an empty market
+    --    or a bad request. This is the safe-default half of the rule, and
+    --    the half a later contributor is most likely to "tighten" by
+    --    mistake.
+    if requested_gb != null and catalogued_sizes = null:
+        ensures: Matches = true
+
+    -- 3. A catalogued part is compared SKU to SKU, not size to size.
+    --    Drivers report usable memory a few percent below the nominal
+    --    capacity (an 80GB card reports 79), so the observation is first
+    --    rounded up to the catalogued capacity it belongs to.
+    if requested_gb != null and catalogued_sizes != null:
+        ensures: Matches = (NominalMemoryGB(base, delivered_mem_gb) = requested_gb)
+
+    @guidance
+        -- Implementation: internal/campaign/offers.go
+        -- filterOffersBySKUMemory, running as the FIRST stage of the offer
+        -- filter pipeline, over cloud.Offer.GPUMemGB (the same field
+        -- targetDeviceFromCloudGPU threads into devices). Helpers:
+        -- gpucatalog.SplitTrailingMemorySuffix (base + GB from one split of
+        -- the RAW class), vastai.HardwareMemorySizesGB (sizes plus "is this
+        -- class catalogued at all" — the second return value is what
+        -- separates "wrong size for this part" from "never heard of this
+        -- part"), vastai.NominalHardwareMemoryGB (observation -> SKU).
+        --
+        -- The stage is attributable: OfferFilterStats.AfterSKUMemory /
+        -- SKUMemoryFiltered / SKUMemoryRequestedGB, and the
+        -- "vastai/search-offers/empty-result:sku-memory" fingerprint, so an
+        -- exact-SKU request that finds no matching part reads as "none were
+        -- the exact GPU SKU requested" rather than as an empty market. The
+        -- blocker names the `>=NGB` floor form as the alternative.
+        --
+        -- Enforcement scope today is FRESH cloud offer search only. On-prem
+        -- eligibility (EvaluateEligibility clause 2) and instance reuse
+        -- still bind only the variant axis, and reuse treats memory as a
+        -- floor (vastai.IntendedMemGB). ReportDeliveredHardware remains the
+        -- after-the-fact backstop on those paths.
+        --
+        -- Regression tests: internal/campaign/sku_memory_filter_test.go.
+}
+
+-- A memory token naming a size the part does not ship in
+-- ("a100-sxm4-64gb") can never match anything once the token is enforced
+-- exactly. At the blocker string an unmatchable spec is indistinguishable
+-- from a market that happens to be empty, so it must fail at submit, where
+-- the user can still fix it.
+rule ValidateGPUSKUMemory {
+    when: GPUConstraintSubmitted(gpu_class: String)
+
+    let base = SKUMemoryBase(gpu_class)
+    let requested_gb = TrailingMemoryTokenGB(gpu_class)
+    let catalogued_sizes = CataloguedMemorySizesGB(base)
+
+    requires: requested_gb != null
+    -- Uncatalogued classes pass, for the same reason as MatchSKUMemory
+    -- clause 2: a stale catalogue must not look like a bad request.
+    requires: catalogued_sizes != null
+    requires: requested_gb not in catalogued_sizes
+
+    -- The rejection names both the sizes the part does ship in and the
+    -- floor form, so the user can tell a typo from a role confusion.
+    ensures: GPUConstraintRejected(
+        gpu_class: gpu_class,
+        known_sizes: catalogued_sizes,
+        floor_form: FloorConstraintForm(gpu_class, requested_gb)
+    )
+
+    @guidance
+        -- Implementation: cmd/gpu_flag.go validateGPUSKUMemory, called from
+        -- cmd/run.go (weft run), cmd/queue.go runEdit (weft edit) and
+        -- cmd/restart.go.
+        --
+        -- Call-site subtlety: validation runs on the RESOLVED class, not on
+        -- each source. cmd/restart.go applies expandGPUFlag to script
+        -- metadata and to CLI overrides separately, before precedence merges
+        -- them, so validating inside that helper would reject a bad script
+        -- metadata value that the CLI legitimately overrides.
+        --
+        -- Regression tests: cmd/gpu_sku_validation_test.go.
+}
+
 -- When two candidate GPUs both match a constraint on the same host,
 -- the selector takes the first matching device in the host's GPU list.
 -- No explicit tie-breaking on model or memory.
@@ -286,12 +416,14 @@ invariant FirstMatchWinsOnHost {
 -- Delivered-hardware reporting
 -- -------------------------------------------------------------------------
 
--- Because a GPU class binds only the variant axis, a request can be served
--- hardware smaller than the user believed they had asked for, and nothing
--- in the job's own output contradicts the request. `weft info` closes that
--- loop: it reports the hardware the attempt actually ran on, and warns in
--- the one case where the request carried a memory expectation the hardware
--- demonstrably did not meet.
+-- Wherever MatchSKUMemory does not run — on-prem placement, instance reuse,
+-- uncatalogued classes, and every attempt that predates the filter — a
+-- request can still be served hardware smaller than the user believed they
+-- had asked for, and nothing in the job's own output contradicts the
+-- request. `weft info` closes that loop after the fact: it reports the
+-- hardware the attempt actually ran on, and warns in the one case where the
+-- request carried a memory expectation the hardware demonstrably did not
+-- meet.
 rule ReportDeliveredHardware {
     when: UserRunsJobInfo(job)
 
@@ -311,8 +443,8 @@ rule ReportDeliveredHardware {
     )
 
     -- The warning is evidence-gated. All three must hold:
-    --   1. the class carried a trailing memory token — the user expressed
-    --      a memory expectation that parsing discarded;
+    --   1. the class carried a trailing memory token — the user named an
+    --      exact part, and so expressed a memory expectation;
     --   2. the delivered memory is KNOWN. An unrecorded size is not
     --      evidence of a shortfall and must stay silent;
     --   3. the delivered memory is below the token.
@@ -320,16 +452,18 @@ rule ReportDeliveredHardware {
     -- `--gpu h100` served by an H100 NVL is legitimate variant
     -- substitution and must not warn.
     --
-    -- The warning must name the form that WOULD have bound both axes
-    -- (`--gpu "a100-pcie>=80GB"`). Reporting the mismatch alone tells the
-    -- reader their request was wrong without telling them what to write.
+    -- The warning must name the floor form (`--gpu "a100-pcie>=80GB"`).
+    -- Reporting the mismatch alone tells the reader their request was wrong
+    -- without telling them what to write, and the floor form is the one that
+    -- binds memory on every path, including those where SKU identity is not
+    -- enforced.
     if requested_gb != null
        and target.gpu_mem_gb > 0
        and target.gpu_mem_gb < requested_gb:
-        ensures: MemoryTokenNotBindingWarned(
+        ensures: DeliveredMemoryBelowSKUTokenWarned(
             requested_class: job.gpu_class,
             delivered_gb: target.gpu_mem_gb,
-            binding_form: BindingConstraintForm(job.gpu_class, requested_gb)
+            floor_form: FloorConstraintForm(job.gpu_class, requested_gb)
         )
 
     @guidance
@@ -340,7 +474,7 @@ rule ReportDeliveredHardware {
         -- builds the remediation string.
         -- gpucatalog.SplitTrailingMemorySuffix returns both halves — the
         -- variant base and the GB — from one split, so the display layer
-        -- never re-parses a GPU class to name the binding form. It reads the
+        -- never re-parses a GPU class to name the floor form. It reads the
         -- raw class because normalization discards the separators that make
         -- the token unambiguous ("a100sxm480gb" could be sxm4 + 80GB or
         -- sxm + 480GB).
@@ -634,6 +768,18 @@ rule EvaluateEligibility {
         -- the historical fork in internal/campaign/gpu_class_match.go while
         -- preserving cloud behavior by moving fuzzy provider compatibility
         -- into normalization instead of retaining a second matching path.
+        --
+        -- MatchSKUMemory is not a second class-matching path and does not
+        -- weaken that authority. It enforces the one axis ParseGPUConstraint
+        -- deliberately strips (memory carried inside the class name), it
+        -- reads a structured field the offer reports separately
+        -- (cloud.Offer.GPUMemGB) rather than a source-specific fuzzy name
+        -- string, and it runs before this predicate as the first
+        -- offer-filter stage rather than alongside it. Before it existed the
+        -- fresh-offer path contradicted the authority claim in the other
+        -- direction: the class a user wrote was enforced LESS strictly there
+        -- than anywhere else, because the provider search term could not
+        -- carry the memory at all.
         --
         -- Reasons for rejection are surfaced as human-readable strings
         -- collected on the Score.placement_reasons list, prefixed with the
@@ -1362,3 +1508,14 @@ invariant TargetSatisfiesRequestedGPUCount {
 -- (Online/Offline/Checking) and the TUI rendering of host metrics.
 -- This spec defines only the static capability model and the
 -- placement-time query interface.
+
+-- =========================================================================
+-- Open Questions
+-- =========================================================================
+
+open question "Client-side re-check of the class VARIANT on fresh offers:
+internal/campaign/offers.go builds placement.Constraints without GPUClass at
+all three EvaluateEligibility call sites (arch, VRAM, GPU count), so the
+variant half of a class constraint is still enforced only by the provider's
+own gpu_name filter. MatchSKUMemory closes the memory half. Whether the
+variant half should also be re-checked client-side is undecided."

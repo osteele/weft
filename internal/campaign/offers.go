@@ -16,9 +16,11 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/compat"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 // parseCUDAVersionFloat converts a CUDA major.minor string (e.g. "12.4") to
@@ -38,6 +40,7 @@ func parseCUDAVersionFloat(s string) float64 {
 // eliminated everything).
 type OfferFilterStats struct {
 	RawCount          int // offers returned by provider search
+	AfterSKUMemory    int // remaining after exact SKU memory filter
 	AfterVRAM         int // remaining after VRAM requirement filter
 	AfterGPUCount     int // remaining after GPU count requirement filter
 	AfterHostRAM      int // remaining after host/system RAM requirement filter
@@ -50,6 +53,8 @@ type OfferFilterStats struct {
 	// UnknownCompatibility tracks offers whose provider did not report
 	// CUDA/driver compatibility even though the group requires a floor.
 	UnknownCompatibility          int
+	SKUMemoryFiltered             int
+	SKUMemoryRequestedGB          int
 	GPUCountFiltered              int
 	HostRAMFiltered               int
 	InterconnectFiltered          int
@@ -123,6 +128,9 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		passedForward = passedProvider
 	}
 	switch {
+	case s.SKUMemoryFiltered > 0 && s.AfterSKUMemory == 0:
+		return fmt.Sprintf("%s, all filtered by exact SKU memory (%dGB): a memory size inside a GPU class names a specific part, so only that part matches. Use >=%dGB for a floor instead",
+			found, s.SKUMemoryRequestedGB, s.SKUMemoryRequestedGB)
 	case s.AfterVRAM == 0:
 		return fmt.Sprintf("%s, all filtered by VRAM requirement", found)
 	case s.GPUCountFiltered > 0 && s.AfterGPUCount == 0:
@@ -587,6 +595,44 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 	return compatible, filtered, exampleGPU, exampleCap
 }
 
+// filterOffersBySKUMemory restores the exactness a provider gpu_name filter
+// cannot express. A memory token inside a GPU class names a SKU rather than a
+// floor — `a100-sxm4-80gb` means "that part", not "SXM4 with at least 80GB" —
+// but provider gpu_name values carry no memory component, so the search term
+// sent upstream is only "A100 SXM4" and matches the 40GB part equally well.
+//
+// The offer does report memory separately (cloud.Offer.GPUMemGB), so the check
+// is possible here even though it was impossible in the search. Compare SKUs
+// rather than raw sizes: drivers report usable memory a few percent below the
+// nominal capacity, so an 80GB card reporting 79GB must still match 80.
+//
+// Classes the hardware catalogue does not know are left alone. Weft cannot
+// validate a SKU it has never heard of, and refusing offers on that basis
+// would make a stale catalogue look like an empty market.
+func filterOffersBySKUMemory(offers []cloud.Offer, group InstanceGroup) (kept []cloud.Offer, removed, requestedGB int) {
+	base, requestedGB := gpucatalog.SplitTrailingMemorySuffix(group.GPUClass)
+	if requestedGB == 0 || len(offers) == 0 {
+		return offers, 0, 0
+	}
+	if _, known := vastai.HardwareMemorySizesGB(base); !known {
+		return offers, 0, 0
+	}
+	kept = make([]cloud.Offer, 0, len(offers))
+	for _, o := range offers {
+		observed := int(math.Round(o.GPUMemGB))
+		sku := observed
+		if nominal := vastai.NominalHardwareMemoryGB(base, observed); nominal > 0 {
+			sku = nominal
+		}
+		if sku != requestedGB {
+			removed++
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept, removed, requestedGB
+}
+
 // filterOffersByVRAMReq applies a defensive local VRAM minimum filter.
 // We still rely on provider-side filtering, but this guards against provider
 // inconsistencies. Legacy GPU memory upper metadata is not enforced here.
@@ -703,6 +749,19 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	result := GroupOffer{Group: group}
 	stats := OfferFilterStats{RawCount: len(offers)}
 	minSurvival = db.RequestedMinSurvivalForJobs(group.Jobs, minSurvival)
+	if len(offers) == 0 {
+		result.FilterStats = stats
+		return result
+	}
+	if skuFiltered, removed, requestedGB := filterOffersBySKUMemory(offers, group); removed > 0 {
+		slog.Debug("filtered offers by exact SKU memory",
+			"gpu_class", group.GPUClass, "required_gb", requestedGB,
+			"filtered", removed, "remaining", len(skuFiltered))
+		stats.SKUMemoryFiltered = removed
+		stats.SKUMemoryRequestedGB = requestedGB
+		offers = skuFiltered
+	}
+	stats.AfterSKUMemory = len(offers)
 	if len(offers) == 0 {
 		result.FilterStats = stats
 		return result

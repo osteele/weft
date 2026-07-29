@@ -1016,6 +1016,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			gpuMemHardwareFloor = true
 		}
 	}
+	if err := validateGPUSKUMemory(runGPUClass); err != nil {
+		return err
+	}
 
 	// Auto-mirror --input asset:NAME entries into --needs so the existing
 	// staging path (cloudneeds.ResolveSpecs / ops.host_sync.collectPendingNeeds)
