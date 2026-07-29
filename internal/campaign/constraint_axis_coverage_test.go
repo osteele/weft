@@ -13,11 +13,50 @@ import (
 // axis, unrepresentable in vast.ai's gpu_name filter and unchecked locally, so
 // jobs requesting 80GB parts were served 40GB ones and reported "completed ok".
 func TestConstraintAxisCoverage(t *testing.T) {
+	if len(axisEnforcement) == 0 {
+		t.Fatal("no providers recorded")
+	}
+	for provider, byAxis := range axisEnforcement {
+		for _, axis := range cloud.AllConstraintAxes() {
+			if _, recorded := byAxis[axis]; !recorded {
+				t.Errorf("provider %q does not record who checks constraint axis %q.\n"+
+					"Add it with the filter that checks it, why the provider's own search "+
+					"covers it, or why the provider has no such concept. A union over "+
+					"providers is what let disk, cpu_cores, reliability and geo read as "+
+					"enforced when only Vast.ai enforced them.", provider, axis)
+			}
+		}
+	}
+}
+
+// Every provider weft can search must record its enforcement. A provider added
+// without a map entry would inherit nothing and be silently unchecked, which is
+// the failure this whole mechanism exists to make impossible.
+func TestEveryProviderRecordsEnforcement(t *testing.T) {
+	for _, provider := range []cloud.Provider{cloud.ProviderVastai, cloud.ProviderRunpod} {
+		if _, ok := axisEnforcement[provider]; !ok {
+			t.Errorf("provider %q has no axisEnforcement entry", provider)
+		}
+	}
+}
+
+// An axis no provider enforces and no local filter re-checks is the silent
+// gap. notApplicable is only legitimate when the provider has no such concept;
+// it must never be the answer everywhere at once, which would mean the
+// constraint is accepted from users and enforced by nobody.
+func TestNoAxisIsNotApplicableEverywhere(t *testing.T) {
 	for _, axis := range cloud.AllConstraintAxes() {
-		if _, recorded := axisEnforcement[axis]; !recorded {
-			t.Errorf("constraint axis %q is neither re-checked locally nor provider-enforced\n"+
-				"Add it to axisEnforcement, with the filter that checks it or with "+
-				"why weft cannot re-check it.", axis)
+		everywhere := true
+		for _, byAxis := range axisEnforcement {
+			if note, ok := byAxis[axis]; !ok || note.by != notApplicable {
+				everywhere = false
+				break
+			}
+		}
+		if everywhere {
+			t.Errorf("axis %q is notApplicable for every provider: it is accepted from "+
+				"users and enforced by nobody. Either some provider supports it, or it "+
+				"should not be in OfferConstraints.", axis)
 		}
 	}
 }

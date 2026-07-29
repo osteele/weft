@@ -598,12 +598,21 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 type axisChecker int
 
 const (
-	// checkedLocally: the offer-filter pipeline in rankOfferWithProfile verifies
-	// the axis against returned offers, whether or not the provider also did.
+	// checkedLocally: the shared eligibility chain verifies the axis against
+	// returned offers, whether or not the provider also did.
 	checkedLocally axisChecker = iota
 	// checkedByProvider: only the provider's own search enforces it, because
 	// weft has no independent signal for it on a returned offer.
 	checkedByProvider
+	// notApplicable: the provider has no such concept, so there is nothing to
+	// enforce and nothing to re-check. RunPod publishes no reliability score;
+	// a job asking for reliability>=0.85 there is not being served unreliable
+	// hardware, it is asking a question the provider cannot answer.
+	//
+	// This is the state a two-way model cannot express, and conflating it with
+	// checkedByProvider is what made the enforcement map a union over
+	// providers: an axis true of Vast.ai was recorded as true of everyone.
+	notApplicable
 )
 
 type axisEnforcementNote struct {
@@ -611,33 +620,54 @@ type axisEnforcementNote struct {
 	detail string // the filter that checks it, or why weft cannot
 }
 
-// axisEnforcement records who checks each constraint axis. Re-checking an axis
-// the provider already handled costs one comparison; failing to check one it
-// could not express ships the wrong hardware, so the pipeline errs toward
-// checking.
+// axisEnforcement records who checks each constraint axis, per provider.
 //
-// Every axis in cloud.AllConstraintAxes must appear here, and
+// It is per-provider because enforcement is: Vast.ai filters disk, CPU cores,
+// reliability and geo server-side and RunPod does not, so a single map claimed
+// coverage that held for one provider and silently failed for the other.
+//
+// Every axis in cloud.AllConstraintAxes must appear for every provider, and
 // TestConstraintAxisCoverage asserts it. Since that vocabulary is derived from
 // the OfferConstraints struct tags, a new constraint field cannot reach
-// placement until someone records who enforces it — the decision that went
-// unmade when an exact GPU capacity was left unchecked on the one path that
-// served the jobs.
-var axisEnforcement = map[cloud.ConstraintAxis]axisEnforcementNote{
-	cloud.AxisGPUSKU:       {checkedLocally, "filterOffersBySKUMemory"},
-	cloud.AxisGPUMemory:    {checkedLocally, "filterOffersByVRAMReq"},
-	cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
-	cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
-	cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
-	cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
-	cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility / ForwardCompatDriver"},
+// placement until someone records who enforces it — for each provider — which
+// is the decision that went unmade when an exact GPU capacity was left
+// unchecked on the one path that served the jobs.
+var axisEnforcement = map[cloud.Provider]map[cloud.ConstraintAxis]axisEnforcementNote{
+	cloud.ProviderVastai: {
+		cloud.AxisGPUSKU:       {checkedLocally, "filterOffersBySKUMemory"},
+		cloud.AxisGPUMemory:    {checkedLocally, "filterOffersByVRAMReq"},
+		cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
+		cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
+		cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
+		cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
+		cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility / ForwardCompatDriver"},
 
-	cloud.AxisGPUVariant:   {checkedByProvider, "provider gpu_name / GPU-type list filter"},
-	cloud.AxisDisk:         {checkedByProvider, "offers report no usable disk figure to re-check"},
-	cloud.AxisCPUCores:     {checkedByProvider, "provider search filter"},
-	cloud.AxisReliability:  {checkedByProvider, "provider search filter"},
-	cloud.AxisGeo:          {checkedByProvider, "provider search filter"},
-	cloud.AxisInstanceType: {checkedByProvider, "provider search filter"},
-	cloud.AxisCloudType:    {checkedByProvider, "RunPod GPU-type list filter"},
+		cloud.AxisGPUVariant:   {checkedByProvider, "gpu_name filter"},
+		cloud.AxisDisk:         {checkedByProvider, "disk_space>= filter; offers report no usable disk figure to re-check"},
+		cloud.AxisCPUCores:     {checkedByProvider, "cpu_cores_effective>= filter"},
+		cloud.AxisReliability:  {checkedByProvider, "reliability>= filter"},
+		cloud.AxisGeo:          {checkedByProvider, "geolocation exclusion in the query"},
+		cloud.AxisInstanceType: {checkedByProvider, "on-demand vs interruptible query"},
+		cloud.AxisCloudType:    {notApplicable, "Vast.ai has no cloud-type distinction"},
+	},
+	cloud.ProviderRunpod: {
+		cloud.AxisGPUSKU:       {checkedLocally, "filterOffersBySKUMemory"},
+		cloud.AxisGPUMemory:    {checkedLocally, "filterOffersByVRAMReq"},
+		cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
+		cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
+		cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
+		cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
+		cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility; RunPod exposes no driver on the type list, so compatibility is also probed after launch"},
+
+		cloud.AxisGPUVariant:   {checkedByProvider, "GPU-type list predicate"},
+		cloud.AxisCloudType:    {checkedByProvider, "community vs secure type filter"},
+		cloud.AxisInstanceType: {checkedByProvider, "on-demand vs interruptible selection"},
+
+		cloud.AxisDisk:        {notApplicable, "RunPod sizes container disk at creation rather than selecting on it"},
+		cloud.AxisCPUCores:    {notApplicable, "RunPod GPU types do not publish effective CPU cores"},
+		cloud.AxisReliability: {notApplicable, "RunPod publishes no reliability score"},
+		cloud.AxisGeo:         {notApplicable, "RunPod GPU types do not publish a datacenter country"},
+	},
 }
 
 // LocallyRecheckedAxes are the constraint axes the offer-filter pipeline in
@@ -645,9 +675,11 @@ var axisEnforcement = map[cloud.ConstraintAxis]axisEnforcementNote{
 // the provider already enforced them.
 func LocallyRecheckedAxes() cloud.AxisSet {
 	axes := cloud.AxisSet{}
-	for axis, note := range axisEnforcement {
-		if note.by == checkedLocally {
-			axes[axis] = true
+	for _, byAxis := range axisEnforcement {
+		for axis, note := range byAxis {
+			if note.by == checkedLocally {
+				axes[axis] = true
+			}
 		}
 	}
 	return axes
