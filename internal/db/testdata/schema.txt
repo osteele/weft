@@ -205,14 +205,6 @@ table host_syncs
   col 1 last_synced INTEGER notnull=1 default=<none> pk=0
   col 2 last_restart_check INTEGER notnull=0 default=0 pk=0
   unique-index (name) origin=pk partial=0
-table hosts
-  col 0 id INTEGER notnull=0 default=<none> pk=1
-  col 1 name TEXT notnull=1 default=<none> pk=0
-  col 2 provider TEXT notnull=0 default=<none> pk=0
-  col 3 provider_machine_id TEXT notnull=0 default=<none> pk=0
-  col 4 first_seen_at INTEGER notnull=1 default=<none> pk=0
-  unique-index (name) origin=u partial=0
-  unique-index (provider,provider_machine_id) origin=u partial=0
 table job_attempts
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 job_id INTEGER notnull=1 default=<none> pk=0
@@ -417,68 +409,66 @@ table launch_live_state
 table launches
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 campaign_id INTEGER notnull=0 default=<none> pk=0
-  col 2 host_id INTEGER notnull=0 default=<none> pk=0
-  col 3 status TEXT notnull=1 default='planned' pk=0
-  col 4 provider TEXT notnull=1 default='vastai' pk=0
-  col 5 gpu_spec TEXT notnull=0 default=<none> pk=0
-  col 6 gpu_class TEXT notnull=0 default=<none> pk=0
-  col 7 gpu_mem_gb INTEGER notnull=0 default=<none> pk=0
-  col 8 max_spend_cents INTEGER notnull=0 default=<none> pk=0
-  col 9 max_time_seconds INTEGER notnull=0 default=<none> pk=0
-  col 10 actual_spend_cents INTEGER notnull=0 default=<none> pk=0
-  col 11 created_at INTEGER notnull=1 default=<none> pk=0
-  col 12 ready_at INTEGER notnull=0 default=<none> pk=0
-  col 13 launched_at INTEGER notnull=0 default=<none> pk=0
-  col 14 ended_at INTEGER notnull=0 default=<none> pk=0
-  col 15 resolved_gpu_name TEXT notnull=0 default=<none> pk=0
-  col 16 cost_per_hour_cents INTEGER notnull=0 default=<none> pk=0
-  col 17 num_gpus INTEGER notnull=0 default=<none> pk=0
-  col 18 dl_perf REAL notnull=0 default=<none> pk=0
-  col 19 reliability REAL notnull=0 default=<none> pk=0
-  col 20 inet_down_mbps REAL notnull=0 default=<none> pk=0
-  col 21 inet_up_mbps REAL notnull=0 default=<none> pk=0
-  col 22 cuda_version REAL notnull=0 default=<none> pk=0
-  col 23 cpu_cores_effective INTEGER notnull=0 default=<none> pk=0
-  col 24 cpu_name TEXT notnull=0 default=<none> pk=0
-  col 25 ram_gb INTEGER notnull=0 default=<none> pk=0
-  col 26 provider_instance_id TEXT notnull=0 default=<none> pk=0
-  col 27 data_center TEXT notnull=0 default=<none> pk=0
-  col 28 instance_role TEXT notnull=0 default='worker' pk=0
-  col 29 donor_instance_id INTEGER notnull=0 default=<none> pk=0
-  col 30 seed_download_secs INTEGER notnull=0 default=<none> pk=0
-  col 31 seed_copy_secs INTEGER notnull=0 default=<none> pk=0
-  col 32 replaced_instance_id INTEGER notnull=0 default=<none> pk=0
-  col 33 grace_period_seconds INTEGER notnull=0 default=<none> pk=0
-  col 34 grace_started_at INTEGER notnull=0 default=<none> pk=0
-  col 35 grace_deadline INTEGER notnull=0 default=<none> pk=0
-  col 36 termination_reason TEXT notnull=0 default=<none> pk=0
-  col 37 termination_detail TEXT notnull=0 default=<none> pk=0
-  col 38 disk_gb INTEGER notnull=0 default=<none> pk=0
-  col 39 provisioned_inputs TEXT notnull=0 default=<none> pk=0
-  col 40 termination_requested_at INTEGER notnull=0 default=<none> pk=0
-  col 41 termination_intent_json TEXT notnull=0 default=<none> pk=0
-  col 42 results_verified INTEGER notnull=0 default=<none> pk=0
-  col 43 machine_id TEXT notnull=0 default='' pk=0
-  col 44 docker_image TEXT notnull=0 default=<none> pk=0
-  col 45 provider_running_at INTEGER notnull=0 default=<none> pk=0
-  col 46 oplog_synced_at INTEGER notnull=0 default=<none> pk=0
-  col 47 oplog_not_found INTEGER notnull=0 default=0 pk=0
-  col 48 oplog_timeout INTEGER notnull=0 default=0 pk=0
-  col 49 instance_type TEXT notnull=0 default=<none> pk=0
-  col 50 runpod_cloud_type TEXT notnull=0 default=<none> pk=0
-  col 51 max_bid_price_cents INTEGER notnull=0 default=<none> pk=0
-  col 52 on_demand_ref_cents INTEGER notnull=0 default=<none> pk=0
-  col 53 cordoned INTEGER notnull=0 default=0 pk=0
-  col 54 cordon_reason TEXT notnull=0 default=<none> pk=0
-  col 55 cordoned_at INTEGER notnull=0 default=<none> pk=0
-  col 56 bootstrap_deadline_unix INTEGER notnull=0 default=<none> pk=0
-  col 57 agent_ready_at_unix INTEGER notnull=0 default=<none> pk=0
-  col 58 target_id INTEGER notnull=0 default=<none> pk=0
-  col 59 hedge_cohort_id INTEGER notnull=0 default=<none> pk=0
-  col 60 first_onstart_probe_seen_unix INTEGER notnull=0 default=<none> pk=0
-  col 61 results_verify_detail TEXT notnull=0 default=<none> pk=0
+  col 2 status TEXT notnull=1 default='planned' pk=0
+  col 3 provider TEXT notnull=1 default='vastai' pk=0
+  col 4 gpu_spec TEXT notnull=0 default=<none> pk=0
+  col 5 gpu_class TEXT notnull=0 default=<none> pk=0
+  col 6 gpu_mem_gb INTEGER notnull=0 default=<none> pk=0
+  col 7 max_spend_cents INTEGER notnull=0 default=<none> pk=0
+  col 8 max_time_seconds INTEGER notnull=0 default=<none> pk=0
+  col 9 actual_spend_cents INTEGER notnull=0 default=<none> pk=0
+  col 10 created_at INTEGER notnull=1 default=<none> pk=0
+  col 11 ready_at INTEGER notnull=0 default=<none> pk=0
+  col 12 launched_at INTEGER notnull=0 default=<none> pk=0
+  col 13 ended_at INTEGER notnull=0 default=<none> pk=0
+  col 14 resolved_gpu_name TEXT notnull=0 default=<none> pk=0
+  col 15 cost_per_hour_cents INTEGER notnull=0 default=<none> pk=0
+  col 16 num_gpus INTEGER notnull=0 default=<none> pk=0
+  col 17 dl_perf REAL notnull=0 default=<none> pk=0
+  col 18 reliability REAL notnull=0 default=<none> pk=0
+  col 19 inet_down_mbps REAL notnull=0 default=<none> pk=0
+  col 20 inet_up_mbps REAL notnull=0 default=<none> pk=0
+  col 21 cuda_version REAL notnull=0 default=<none> pk=0
+  col 22 cpu_cores_effective INTEGER notnull=0 default=<none> pk=0
+  col 23 cpu_name TEXT notnull=0 default=<none> pk=0
+  col 24 ram_gb INTEGER notnull=0 default=<none> pk=0
+  col 25 provider_instance_id TEXT notnull=0 default=<none> pk=0
+  col 26 data_center TEXT notnull=0 default=<none> pk=0
+  col 27 instance_role TEXT notnull=0 default='worker' pk=0
+  col 28 donor_instance_id INTEGER notnull=0 default=<none> pk=0
+  col 29 seed_download_secs INTEGER notnull=0 default=<none> pk=0
+  col 30 seed_copy_secs INTEGER notnull=0 default=<none> pk=0
+  col 31 replaced_instance_id INTEGER notnull=0 default=<none> pk=0
+  col 32 grace_period_seconds INTEGER notnull=0 default=<none> pk=0
+  col 33 grace_started_at INTEGER notnull=0 default=<none> pk=0
+  col 34 grace_deadline INTEGER notnull=0 default=<none> pk=0
+  col 35 termination_reason TEXT notnull=0 default=<none> pk=0
+  col 36 termination_detail TEXT notnull=0 default=<none> pk=0
+  col 37 disk_gb INTEGER notnull=0 default=<none> pk=0
+  col 38 provisioned_inputs TEXT notnull=0 default=<none> pk=0
+  col 39 termination_requested_at INTEGER notnull=0 default=<none> pk=0
+  col 40 termination_intent_json TEXT notnull=0 default=<none> pk=0
+  col 41 results_verified INTEGER notnull=0 default=<none> pk=0
+  col 42 machine_id TEXT notnull=0 default='' pk=0
+  col 43 docker_image TEXT notnull=0 default=<none> pk=0
+  col 44 provider_running_at INTEGER notnull=0 default=<none> pk=0
+  col 45 oplog_synced_at INTEGER notnull=0 default=<none> pk=0
+  col 46 oplog_not_found INTEGER notnull=0 default=0 pk=0
+  col 47 oplog_timeout INTEGER notnull=0 default=0 pk=0
+  col 48 instance_type TEXT notnull=0 default=<none> pk=0
+  col 49 runpod_cloud_type TEXT notnull=0 default=<none> pk=0
+  col 50 max_bid_price_cents INTEGER notnull=0 default=<none> pk=0
+  col 51 on_demand_ref_cents INTEGER notnull=0 default=<none> pk=0
+  col 52 cordoned INTEGER notnull=0 default=0 pk=0
+  col 53 cordon_reason TEXT notnull=0 default=<none> pk=0
+  col 54 cordoned_at INTEGER notnull=0 default=<none> pk=0
+  col 55 bootstrap_deadline_unix INTEGER notnull=0 default=<none> pk=0
+  col 56 agent_ready_at_unix INTEGER notnull=0 default=<none> pk=0
+  col 57 target_id INTEGER notnull=0 default=<none> pk=0
+  col 58 hedge_cohort_id INTEGER notnull=0 default=<none> pk=0
+  col 59 first_onstart_probe_seen_unix INTEGER notnull=0 default=<none> pk=0
+  col 60 results_verify_detail TEXT notnull=0 default=<none> pk=0
   fk campaign_id -> campaigns(id) on_update=NO ACTION on_delete=NO ACTION
-  fk host_id -> hosts(id) on_update=NO ACTION on_delete=NO ACTION
   check (status IN ('planned', 'launching', 'running', 'paused', 'grace', 'completed', 'failed', 'canceled'))
   check (termination_reason IS NULL OR termination_reason IN ('completed', 'provider_failure', 'job_failure', 'disk_full', 'infra_failure', 'bootstrap_timeout', 'phase_stall', 'preempted', 'canceled', 'unknown', 'weft_bug', 'provider_timeout', 'upload_stall', 'account_credit_exhausted'))
 table lifecycle_events

@@ -129,11 +129,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddExternalSyncWarningColumns},
 		&goose.GoFunc{RunDB: dropAddExternalSyncWarningColumns},
 	)
+	dropSpeculativeHostRegistry := goose.NewGoMigration(
+		37,
+		&goose.GoFunc{RunDB: applyDropSpeculativeHostRegistry},
+		&goose.GoFunc{RunDB: undoDropSpeculativeHostRegistry},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -915,5 +920,51 @@ func applyAddExternalSyncWarningColumns(ctx context.Context, db *sql.DB) error {
 func dropAddExternalSyncWarningColumns(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning_at`)
+	return nil
+}
+
+// applyDropSpeculativeHostRegistry removes launches.host_id and the hosts
+// table. Both were speculative: never written, never read.
+//
+// launches.host_id held no value in 6,261 rows while machine_id beside it held
+// 5,648. That adjacency is the hazard — a user looking for machine identity
+// checked host_id, found it empty, and concluded weft did not record which
+// physical machine ran a job. It does.
+//
+// The hosts table (name, provider, provider_machine_id, first_seen_at) reads
+// as a machine registry, but weft already has two identity mechanisms and
+// needs no third: on-prem hosts are files under ~/.config/weft/hosts, and
+// cloud machines are launches.machine_id. What a registry would have added is
+// derivable — first-seen, last-seen and usage count come from one GROUP BY
+// over launches — and per-machine reliability already lives in the survival
+// model's MachineStats, keyed on the same id. If per-machine measurements ever
+// need storing, that table should be designed against the need rather than
+// inherited from this guess.
+func applyDropSpeculativeHostRegistry(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launches", "host_id")
+	if err != nil {
+		return fmt.Errorf("inspect launches.host_id: %w", err)
+	}
+	if exists {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN host_id`); err != nil {
+			return fmt.Errorf("drop launches.host_id: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS hosts`); err != nil {
+		return fmt.Errorf("drop hosts: %w", err)
+	}
+	return nil
+}
+
+func undoDropSpeculativeHostRegistry(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches ADD COLUMN host_id INTEGER`)
+	_, _ = db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS hosts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL UNIQUE,
+		provider TEXT,
+		provider_machine_id TEXT,
+		first_seen_at INTEGER NOT NULL,
+		UNIQUE(provider, provider_machine_id)
+	)`)
 	return nil
 }

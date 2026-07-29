@@ -17,7 +17,7 @@ import (
 )
 
 // launchSelectColumns is the column list for SELECT queries on launches.
-const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
+const launchSelectColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 		max_spend_cents, max_time_seconds, actual_spend_cents,
 		created_at, ready_at, launched_at, ended_at,
 		bootstrap_deadline_unix, agent_ready_at_unix,
@@ -2509,7 +2509,6 @@ type cloudInstanceScanner interface {
 func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var c Launch
 	var campaignID sql.NullInt64
-	var hostID sql.NullInt64
 	var gpuSpec, gpuClass sql.NullString
 	var gpuMemGB, maxSpend, maxTime, actualSpend sql.NullInt64
 	var readyAt, launchedAt, endedAt sql.NullInt64
@@ -2547,7 +2546,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var firstOnStartProbeSeen sql.NullInt64
 
 	err := s.Scan(
-		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
+		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
 		&maxSpend, &maxTime, &actualSpend,
 		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
 		&bootstrapDeadline, &agentReadyAt,
@@ -2567,7 +2566,6 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&cordoned, &cordonReason, &cordonedAt,
 		&hedgeCohortID, &firstOnStartProbeSeen,
 	)
-	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
 		return nil, err
 	}
