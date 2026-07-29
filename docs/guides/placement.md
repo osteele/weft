@@ -316,3 +316,35 @@ This guide is the operator view. The formal placement model lives in
 [`specs/inventory-placement.allium`](../../specs/inventory-placement.allium).
 Related behavior for job moves and status synchronization is covered by the
 Allium specs in [`specs/`](../../specs/).
+
+## Providers honour constraints differently
+
+The same job does not mean the same thing to every provider, and weft does not
+pretend otherwise — normalising the difference would mean inventing values it
+cannot observe. Run:
+
+```bash
+weft provider constraints
+```
+
+for the per-provider table. The differences that bite most often:
+
+- **Disk.** Vast.ai selects offers by available disk; RunPod sizes container
+  disk at creation, so a disk floor shapes provisioning rather than selection.
+- **Reliability.** Vast.ai publishes a 0-1 score. RunPod publishes none, but
+  distinguishes Secure Cloud (vetted datacenter partners) from Community Cloud
+  (peer hosts); weft translates that binary onto the same scale so a
+  `--reliability` floor still selects. The mapping is a deliberate
+  approximation — prefer the survival model for anything quantitative.
+- **Driver and CUDA.** Vast.ai publishes driver version, so a floor filters at
+  search. RunPod does not, so compatibility is probed *after* launch and an
+  incompatible instance is destroyed. A driver pin therefore narrows the pool
+  on Vast.ai and burns launch cycles on RunPod.
+- **Geo.** `--exclude-geo` is currently honoured on Vast.ai only. RunPod
+  publishes a datacenter id in a different form than weft parses, so the
+  constraint is accepted and **not** enforced there. The table marks this
+  `NOT ENFORCED` rather than hiding it.
+
+An axis marked `NOT ENFORCED` is accepted from you and honoured by nobody. That
+is a known hole, distinct from `not applicable`, which means the provider has no
+such concept.

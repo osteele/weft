@@ -65,6 +65,7 @@ type providerStatusView struct {
 func init() {
 	rootCmd.AddCommand(providerCmd)
 	providerCmd.AddCommand(providerListCmd)
+	providerCmd.AddCommand(providerConstraintsCmd)
 	providerCmd.AddCommand(providerEnableCmd)
 	providerCmd.AddCommand(providerDisableCmd)
 	providerCmd.AddCommand(providerResetCmd)

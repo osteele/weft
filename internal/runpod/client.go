@@ -987,6 +987,14 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 		if offerID == "" {
 			continue
 		}
+		secure := firstBool(row, "secureCloud", "verified")
+		reliability := CommunityCloudReliability
+		if secure {
+			reliability = SecureCloudReliability
+		}
+		if constraints.MinReliability > 0 && reliability < constraints.MinReliability {
+			continue
+		}
 		offers = append(offers, cloud.Offer{
 			ProviderID:  offerID,
 			Provider:    cloud.ProviderRunpod,
@@ -994,7 +1002,8 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 			NumGPUs:     numGPUs,
 			GPUMemGB:    float64(memGB),
 			CostPerHour: price,
-			Verified:    firstBool(row, "secureCloud", "verified"),
+			Verified:    secure,
+			Reliability: reliability,
 			DataCenter:  firstString(row, "dataCenterId", "dataCenter"),
 			DiskSpaceGB: firstFloat(row, "diskGb", "diskSpaceGb"),
 			StockStatus: firstString(row, "stockStatus"),
@@ -1141,3 +1150,18 @@ func encodeTemplateStartCommandArg(startCommand string) (string, error) {
 	}
 	return "bash,-lc," + script, nil
 }
+
+// RunPod publishes no reliability score. It does distinguish Secure Cloud —
+// vetted datacenter partners — from Community Cloud, where capacity comes from
+// peer hosts, and that distinction is the closest signal it offers.
+//
+// These map that binary onto the 0-1 scale weft's constraints are expressed
+// in, so a `--reliability` floor means something on RunPod instead of being
+// silently unmet. The values are a deliberate approximation, not a measurement:
+// they are chosen so the common Vast.ai default (0.95) selects Secure Cloud
+// while a relaxed floor admits Community. Weft's survival model measures actual
+// outcomes per provider and should be preferred for anything quantitative.
+const (
+	SecureCloudReliability    = 0.99
+	CommunityCloudReliability = 0.90
+)

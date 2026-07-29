@@ -613,6 +613,12 @@ const (
 	// checkedByProvider is what made the enforcement map a union over
 	// providers: an axis true of Vast.ai was recorded as true of everyone.
 	notApplicable
+	// unenforcedGap: the provider publishes enough to enforce the axis, but
+	// weft does not. This is a known hole, not a design decision, and it is
+	// spelled differently from notApplicable so the two are never conflated —
+	// "the provider has no such concept" and "we have not written the filter"
+	// argue for opposite fixes.
+	unenforcedGap
 )
 
 type axisEnforcementNote struct {
@@ -665,8 +671,8 @@ var axisEnforcement = map[cloud.Provider]map[cloud.ConstraintAxis]axisEnforcemen
 
 		cloud.AxisDisk:        {notApplicable, "RunPod sizes container disk at creation rather than selecting on it"},
 		cloud.AxisCPUCores:    {notApplicable, "RunPod GPU types do not publish effective CPU cores"},
-		cloud.AxisReliability: {notApplicable, "RunPod publishes no reliability score"},
-		cloud.AxisGeo:         {notApplicable, "RunPod GPU types do not publish a datacenter country"},
+		cloud.AxisReliability: {checkedByProvider, "no published score; Secure vs Community Cloud is translated onto the 0-1 scale (runpod.SecureCloudReliability) and filtered at fetch"},
+		cloud.AxisGeo:         {unenforcedGap, "RunPod publishes dataCenterId (US-OR-1), but it is not the \"City, Country\" form the country parser expects, so --exclude-geo is silently unmet on RunPod"},
 	},
 }
 
@@ -1973,4 +1979,72 @@ func MapEstimatesToSplitGroups(splitGroups []InstanceGroup, result CandidateResu
 		}
 	}
 	return mapped
+}
+
+// AxisEnforcementReport describes how one provider treats one constraint axis,
+// for `weft explain constraints` and diagnosis output.
+type AxisEnforcementReport struct {
+	Provider cloud.Provider
+	Axis     cloud.ConstraintAxis
+	Status   string // "weft re-checks", "provider filters", "not applicable", "NOT ENFORCED"
+	Detail   string
+}
+
+// ExplainAxisEnforcement reports how each provider treats each constraint axis.
+//
+// The same job does not mean the same thing to every provider, and weft does
+// not try to make it: RunPod sizes disk at creation rather than selecting on
+// it, publishes no reliability score, and exposes no driver version until the
+// instance is running. Papering over that would mean inventing values weft
+// cannot observe. Surfacing it means a user who asked for something a provider
+// cannot honour can see that, rather than inferring it from a result.
+func ExplainAxisEnforcement() []AxisEnforcementReport {
+	var out []AxisEnforcementReport
+	providers := make([]cloud.Provider, 0, len(axisEnforcement))
+	for provider := range axisEnforcement {
+		providers = append(providers, provider)
+	}
+	sort.Slice(providers, func(i, j int) bool { return providers[i] < providers[j] })
+	for _, provider := range providers {
+		byAxis := axisEnforcement[provider]
+		for _, axis := range cloud.AllConstraintAxes() {
+			note, ok := byAxis[axis]
+			if !ok {
+				continue
+			}
+			out = append(out, AxisEnforcementReport{
+				Provider: provider,
+				Axis:     axis,
+				Status:   axisStatusLabel(note.by),
+				Detail:   note.detail,
+			})
+		}
+	}
+	return out
+}
+
+func axisStatusLabel(by axisChecker) string {
+	switch by {
+	case checkedLocally:
+		return "weft re-checks"
+	case checkedByProvider:
+		return "provider filters"
+	case notApplicable:
+		return "not applicable"
+	case unenforcedGap:
+		return "NOT ENFORCED"
+	}
+	return "unknown"
+}
+
+// UnenforcedAxesFor returns the axes a provider accepts from users but does not
+// honour, so callers can warn at submission or explain an unexpected placement.
+func UnenforcedAxesFor(provider cloud.Provider) []AxisEnforcementReport {
+	var out []AxisEnforcementReport
+	for _, r := range ExplainAxisEnforcement() {
+		if r.Provider == provider && r.Status == "NOT ENFORCED" {
+			out = append(out, r)
+		}
+	}
+	return out
 }

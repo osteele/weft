@@ -70,3 +70,30 @@ func TestSKUAxisIsRecheckedLocally(t *testing.T) {
 		t.Error("the SKU axis is unenforceable upstream and must be re-checked locally")
 	}
 }
+
+// unenforcedGap is a known hole, so it must stay rare and visible. This test
+// pins the current set: closing one should update the list, and adding one
+// should be a deliberate act rather than a quiet regression.
+func TestKnownEnforcementGaps(t *testing.T) {
+	want := map[cloud.Provider]map[cloud.ConstraintAxis]bool{
+		cloud.ProviderRunpod: {cloud.AxisGeo: true},
+	}
+	for provider, byAxis := range axisEnforcement {
+		for axis, note := range byAxis {
+			if note.by != unenforcedGap {
+				continue
+			}
+			if !want[provider][axis] {
+				t.Errorf("new unenforced gap: provider %q does not enforce %q (%s).\n"+
+					"Either enforce it or add it to this list with a reason.",
+					provider, axis, note.detail)
+			}
+			delete(want[provider], axis)
+		}
+	}
+	for provider, axes := range want {
+		for axis := range axes {
+			t.Errorf("provider %q no longer has an unenforced gap for %q; remove it from this list", provider, axis)
+		}
+	}
+}

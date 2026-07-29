@@ -145,11 +145,17 @@ func TestRunSingleJob_AppendsPrewarmLogWithoutSkippingSetup(t *testing.T) {
 		t.Fatalf("write fake uv: %v", err)
 	}
 	cfg := SingleJobConfig{
-		JobID:           43,
-		Job:             opsqueue.CommandJob{Cmd: "echo run", Env: []string{"PATH=" + binDir + ":" + os.Getenv("PATH")}},
-		WorkingDir:      workDir,
-		LogDir:          t.TempDir(),
-		SetupTimeout:    time.Second,
+		JobID:      43,
+		Job:        opsqueue.CommandJob{Cmd: "echo run", Env: []string{"PATH=" + binDir + ":" + os.Getenv("PATH")}},
+		WorkingDir: workDir,
+		LogDir:     t.TempDir(),
+		// Generous because this shells out: the setup step forks a shell and
+		// runs the fake uv script above. Under `just check` the whole suite
+		// competes for CPU, and 1s was close enough to process-spawn latency
+		// that this test failed roughly one run in two — always with
+		// "setup command timed out after 1s", never with a wrong result. The
+		// timeout is here to catch a hang, not to assert a latency budget.
+		SetupTimeout:    30 * time.Second,
 		SetupPrewarmLog: prewarmLog,
 		SkipProbes:      true,
 	}
