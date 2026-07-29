@@ -145,21 +145,27 @@ type Instance struct {
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.
+//
+// The `axis` tag names the ConstraintAxis (or axes) a field constrains, and is
+// the source the axis vocabulary is derived from — see constraint_axes.go. A
+// field that constrains nothing carries `axis:"-"`. Every exported field needs
+// one or the other, so a new constraint cannot enter the struct without
+// someone deciding who enforces it.
 type OfferConstraints struct {
-	GPUClass             string   // e.g., "RTX_4090", "A100"
-	MinGPUMemGB          int      // minimum per-GPU memory
-	MaxGPUMemGB          int      // deprecated; ignored by placement
-	MinDiskGB            int      // minimum disk space
-	MinReliability       float64  // minimum reliability score (0-1)
-	MinDriverVersion     int      // minimum NVIDIA driver major version (0 = no floor)
-	MinCUDAVersion       string   // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
-	NumGPUs              int      // number of GPUs needed (default 1)
-	Interconnect         string   // required intra-host interconnect: any, pcie, nvlink
-	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
-	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
-	MinHostRAMGB         int      // minimum host/system RAM in GB (0 = no floor)
-	InstanceType         string   // desired rental type ("on-demand" or "interruptible")
-	RunpodCloudType      string   // RunPod cloud type ("community" or "secure")
+	GPUClass             string   `axis:"gpu_variant,gpu_sku"` // e.g., "RTX_4090", "A100"
+	MinGPUMemGB          int      `axis:"gpu_memory"`          // minimum per-GPU memory
+	MaxGPUMemGB          int      `axis:"-"`                   // deprecated; ignored by placement
+	MinDiskGB            int      `axis:"disk"`                // minimum disk space
+	MinReliability       float64  `axis:"reliability"`         // minimum reliability score (0-1)
+	MinDriverVersion     int      `axis:"driver"`              // minimum NVIDIA driver major version (0 = no floor)
+	MinCUDAVersion       string   `axis:"cuda"`                // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
+	NumGPUs              int      `axis:"num_gpus"`            // number of GPUs needed (default 1)
+	Interconnect         string   `axis:"interconnect"`        // required intra-host interconnect: any, pcie, nvlink
+	ExcludeGeos          []string `axis:"geo"`                 // two-letter country codes to exclude (e.g., ["CN"])
+	MinCPUCoresEffective int      `axis:"cpu_cores"`           // minimum effective CPU cores (e.g., for compute-intensive jobs)
+	MinHostRAMGB         int      `axis:"host_ram"`            // minimum host/system RAM in GB (0 = no floor)
+	InstanceType         string   `axis:"instance_type"`       // desired rental type ("on-demand" or "interruptible")
+	RunpodCloudType      string   `axis:"cloud_type"`          // RunPod cloud type ("community" or "secure")
 }
 
 // DefaultExcludeGeos lists countries excluded by default from cloud offers.

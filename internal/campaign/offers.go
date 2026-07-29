@@ -594,6 +594,65 @@ func filterOffersByTorchArch(offers []cloud.Offer, minCap, maxCap string) ([]clo
 	return compatible, filtered, exampleGPU, exampleCap
 }
 
+// axisChecker says who verifies a constraint axis.
+type axisChecker int
+
+const (
+	// checkedLocally: the offer-filter pipeline in rankOfferWithProfile verifies
+	// the axis against returned offers, whether or not the provider also did.
+	checkedLocally axisChecker = iota
+	// checkedByProvider: only the provider's own search enforces it, because
+	// weft has no independent signal for it on a returned offer.
+	checkedByProvider
+)
+
+type axisEnforcementNote struct {
+	by     axisChecker
+	detail string // the filter that checks it, or why weft cannot
+}
+
+// axisEnforcement records who checks each constraint axis. Re-checking an axis
+// the provider already handled costs one comparison; failing to check one it
+// could not express ships the wrong hardware, so the pipeline errs toward
+// checking.
+//
+// Every axis in cloud.AllConstraintAxes must appear here, and
+// TestConstraintAxisCoverage asserts it. Since that vocabulary is derived from
+// the OfferConstraints struct tags, a new constraint field cannot reach
+// placement until someone records who enforces it — the decision that went
+// unmade when an exact GPU capacity was left unchecked on the one path that
+// served the jobs.
+var axisEnforcement = map[cloud.ConstraintAxis]axisEnforcementNote{
+	cloud.AxisGPUSKU:       {checkedLocally, "filterOffersBySKUMemory"},
+	cloud.AxisGPUMemory:    {checkedLocally, "filterOffersByVRAMReq"},
+	cloud.AxisNumGPUs:      {checkedLocally, "filterOffersByGPUCount"},
+	cloud.AxisHostRAM:      {checkedLocally, "filterOffersByHostRAM"},
+	cloud.AxisInterconnect: {checkedLocally, "filterOffersByInterconnect"},
+	cloud.AxisCUDA:         {checkedLocally, "filterOffersByCUDACompat"},
+	cloud.AxisDriver:       {checkedLocally, "filterOffersByProviderCompatibility / ForwardCompatDriver"},
+
+	cloud.AxisGPUVariant:   {checkedByProvider, "provider gpu_name / GPU-type list filter"},
+	cloud.AxisDisk:         {checkedByProvider, "offers report no usable disk figure to re-check"},
+	cloud.AxisCPUCores:     {checkedByProvider, "provider search filter"},
+	cloud.AxisReliability:  {checkedByProvider, "provider search filter"},
+	cloud.AxisGeo:          {checkedByProvider, "provider search filter"},
+	cloud.AxisInstanceType: {checkedByProvider, "provider search filter"},
+	cloud.AxisCloudType:    {checkedByProvider, "RunPod GPU-type list filter"},
+}
+
+// LocallyRecheckedAxes are the constraint axes the offer-filter pipeline in
+// rankOfferWithProfile verifies against returned offers, regardless of whether
+// the provider already enforced them.
+func LocallyRecheckedAxes() cloud.AxisSet {
+	axes := cloud.AxisSet{}
+	for axis, note := range axisEnforcement {
+		if note.by == checkedLocally {
+			axes[axis] = true
+		}
+	}
+	return axes
+}
+
 // filterOffersBySKUMemory restores the exactness a provider gpu_name filter
 // cannot express. A memory token inside a GPU class names a SKU rather than a
 // floor — `a100-sxm4-80gb` means "that part", not "SXM4 with at least 80GB" —
