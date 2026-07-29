@@ -621,7 +621,10 @@ func LaunchNewForJob(
 	})
 }
 
-var executeMoveOptionForMove = executeMoveOption
+var (
+	executeMoveOptionForMove = executeMoveOption
+	launchCampaignForMove    = campaign.LaunchCampaign
+)
 
 func executeWithIntent(
 	ctx context.Context,
@@ -867,7 +870,7 @@ func executeMoveOption(
 	if err != nil {
 		return "", fmt.Errorf("create opts: %w", err)
 	}
-	result, err := campaign.LaunchCampaign(
+	result, err := launchCampaignForMove(
 		[]cloud.Client{client},
 		database,
 		[]campaign.InstanceGroup{group},
@@ -896,11 +899,27 @@ func executeMoveOption(
 	if err != nil {
 		return "", fmt.Errorf("launch: %w", err)
 	}
+	if err := moveToNewLaunchResultError(result); err != nil {
+		return "", err
+	}
 	desc := fmt.Sprintf("new %s instance", opt.GPUName)
 	if len(result.InstanceIDs) > 0 {
 		desc = fmt.Sprintf("new %s instance %s", opt.GPUName, ids.FormatInstanceID(result.InstanceIDs[0]))
 	}
 	return desc, nil
+}
+
+func moveToNewLaunchResultError(result *campaign.LaunchResult) error {
+	if result == nil {
+		return fmt.Errorf("launch returned no result")
+	}
+	if len(result.InstanceIDs) > 0 {
+		return nil
+	}
+	if len(result.Errors) == 0 {
+		return fmt.Errorf("no new instance launched")
+	}
+	return fmt.Errorf("no new instance launched: %w", errors.Join(result.Errors...))
 }
 
 // tryRestoreJobToSource re-attaches the job to its source launch if that

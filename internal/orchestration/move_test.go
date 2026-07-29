@@ -953,6 +953,55 @@ func TestLaunchNewForJob_ExecuteFailureResolvesIntentCanceled(t *testing.T) {
 	}
 }
 
+func TestLaunchNewForJob_ZeroInstanceLaunchResultIsFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	launchErr := errors.New("provider rejected offer")
+	restore := stubLaunchCampaignForMove(t, func(
+		[]cloud.Client,
+		*sql.DB,
+		[]campaign.InstanceGroup,
+		[]cloud.Offer,
+		[]campaign.CostEstimate,
+		*bidding.SurvivalModel,
+		campaign.LaunchOpts,
+		cloud.R2Config,
+		func(cloud.Provider) (cloud.CreateOpts, error),
+		func(campaign.LaunchEvent),
+		func(int64),
+		func(campaign.InstanceGroup, int64),
+	) (*campaign.LaunchResult, error) {
+		return &campaign.LaunchResult{Errors: []error{launchErr}}, nil
+	})
+	defer restore()
+
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "offer", Provider: cloud.ProviderVastai, GPUName: "A100", GPUMemGB: 40, CostPerHour: 1}}, nil
+		},
+	}
+
+	_, err = LaunchNewForJob(context.Background(), database, nil, config.DefaultConfig(), []cloud.Client{client}, jobID, bidding.StrategyFast)
+	if !errors.Is(err, launchErr) {
+		t.Fatalf("LaunchNewForJob err = %v, want %v", err, launchErr)
+	}
+	if !strings.Contains(err.Error(), "no new instance launched") {
+		t.Fatalf("LaunchNewForJob err = %v, want no-instance context", err)
+	}
+	var state string
+	if err := database.QueryRow(`SELECT state FROM move_intents WHERE job_id = ?`, jobID).Scan(&state); err != nil {
+		t.Fatalf("query move intent state: %v", err)
+	}
+	if db.MoveIntentState(state) != db.MoveIntentStateCanceled {
+		t.Fatalf("move intent state = %q, want %q", state, db.MoveIntentStateCanceled)
+	}
+}
+
 func TestExecuteOption_RentalToHostDispatchesAfterMoveIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
@@ -1066,6 +1115,15 @@ func stubExecuteMoveOptionForMove(t *testing.T, fn func(context.Context, *sql.DB
 	executeMoveOptionForMove = fn
 	return func() {
 		executeMoveOptionForMove = previous
+	}
+}
+
+func stubLaunchCampaignForMove(t *testing.T, fn func([]cloud.Client, *sql.DB, []campaign.InstanceGroup, []cloud.Offer, []campaign.CostEstimate, *bidding.SurvivalModel, campaign.LaunchOpts, cloud.R2Config, func(cloud.Provider) (cloud.CreateOpts, error), func(campaign.LaunchEvent), func(int64), func(campaign.InstanceGroup, int64)) (*campaign.LaunchResult, error)) func() {
+	t.Helper()
+	previous := launchCampaignForMove
+	launchCampaignForMove = fn
+	return func() {
+		launchCampaignForMove = previous
 	}
 }
 
