@@ -2254,6 +2254,7 @@ func LaunchInstance(
 	type moveClaim struct {
 		intentID  int64
 		attemptID int64
+		jobID     int64
 	}
 	moveClaims := make([]moveClaim, 0, len(group.Jobs))
 	rollbackMoveClaims := func(reason string) {
@@ -2297,7 +2298,7 @@ func LaunchInstance(
 				_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 				return instanceID, err
 			}
-			moveClaims = append(moveClaims, moveClaim{intentID: intent.ID, attemptID: attemptID})
+			moveClaims = append(moveClaims, moveClaim{intentID: intent.ID, attemptID: attemptID, jobID: job.ID})
 			copyJob := *job
 			copyJob.Host = ""
 			copyJob.LaunchID = &instanceID
@@ -2343,9 +2344,28 @@ func LaunchInstance(
 	group.Jobs = claimedJobs
 	resetLaunchJobsForFailure := func(outcome string, reason string) {
 		if opts.MoveTargetClaim {
-			rollbackMoveClaims(reason)
+			for _, claim := range moveClaims {
+				transition, err := db.HandleMoveTargetFailedBeforeStart(database, claim.jobID, instanceID, outcome)
+				if err != nil {
+					slog.Warn("restore failed move target",
+						"component", "launch", "job_id", claim.jobID, "launch_id", instanceID, "error", err)
+					continue
+				}
+				if transition.Handled {
+					continue
+				}
+				_ = db.AbandonMoveLoser(database, claim.intentID, claim.attemptID, db.AttemptAbandonedMoveDestinationInfraFailed)
+				_ = db.ResolveMoveIntent(database, claim.intentID, db.MoveIntentStateCanceled, reason)
+			}
 		}
 		_, _ = db.ResetLaunchJobs(database, instanceID, outcome)
+	}
+	failLaunchBeforeCreate := func(detail string, err error) (int64, error) {
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
+		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
+		return instanceID, err
 	}
 
 	if onInstanceRegistered != nil {
@@ -2362,25 +2382,21 @@ func LaunchInstance(
 	for _, job := range group.Jobs {
 		agentJob, err := newCloudAgentJob(job, remoteDirForLaunchAgentJob(group, job, localToRemote))
 		if err != nil {
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
-			return instanceID, fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
+			return failLaunchBeforeCreate("agent job payload failed", fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err))
 		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
-			return instanceID, err
+			return failLaunchBeforeCreate("cloud needs resolution failed", err)
 		}
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
 		if err != nil {
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
-			return instanceID, err
+			return failLaunchBeforeCreate("checkpoint needs resolution failed", err)
 		}
 		cloudNeeds = append(cloudNeeds, checkpointNeeds...)
 		var restagedOutputs bool
 		cloudNeeds, restagedOutputs, err = appendResumeCloudNeeds(ctx, database, r2Assets.Client, job, cloudNeeds)
 		if err != nil {
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance launch failed before destination acceptance")
-			return instanceID, err
+			return failLaunchBeforeCreate("resume needs resolution failed", err)
 		}
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter

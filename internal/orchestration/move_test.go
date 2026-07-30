@@ -1002,6 +1002,86 @@ func TestLaunchNewForJob_ZeroInstanceLaunchResultIsFailure(t *testing.T) {
 	}
 }
 
+func TestLaunchNewForJob_TargetLaunchFailureKeepsRetryableIntentOpen(t *testing.T) {
+	database := db.SetupTestDB(t)
+	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "launch now", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, sourceLaunch); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+
+	launchErr := errors.New("provider rejected offer")
+	restore := stubLaunchCampaignForMove(t, func(
+		_ []cloud.Client,
+		database *sql.DB,
+		groups []campaign.InstanceGroup,
+		_ []cloud.Offer,
+		_ []campaign.CostEstimate,
+		_ *bidding.SurvivalModel,
+		_ campaign.LaunchOpts,
+		_ cloud.R2Config,
+		_ func(cloud.Provider) (cloud.CreateOpts, error),
+		_ func(campaign.LaunchEvent),
+		_ func(int64),
+		_ func(campaign.InstanceGroup, int64),
+	) (*campaign.LaunchResult, error) {
+		targetLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "vastai"})
+		if err != nil {
+			return nil, err
+		}
+		intent, err := db.GetOpenMoveIntent(database, groups[0].Jobs[0].ID)
+		if err != nil {
+			return nil, err
+		}
+		if intent == nil {
+			return nil, errors.New("missing open move intent")
+		}
+		if _, err := db.CreateMoveTargetAttempt(database, intent.ID, groups[0].Jobs[0].ID, "", &targetLaunch, db.StatusQueued); err != nil {
+			return nil, err
+		}
+		if _, err := db.HandleMoveTargetFailedBeforeStart(database, groups[0].Jobs[0].ID, targetLaunch, db.AttemptOutcomeOrphaned); err != nil {
+			return nil, err
+		}
+		return &campaign.LaunchResult{Errors: []error{launchErr}}, nil
+	})
+	defer restore()
+
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{ProviderID: "offer", Provider: cloud.ProviderVastai, GPUName: "A100", GPUMemGB: 40, CostPerHour: 1}}, nil
+		},
+	}
+
+	_, err = LaunchNewForJob(context.Background(), database, nil, config.DefaultConfig(), []cloud.Client{client}, jobID, bidding.StrategyFast)
+	if !errors.Is(err, launchErr) {
+		t.Fatalf("LaunchNewForJob err = %v, want %v", err, launchErr)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != sourceLaunch {
+		t.Fatalf("job launch_id = %v, want source %d", job.LaunchID, sourceLaunch)
+	}
+	intent, err := db.GetOpenMoveIntent(database, jobID)
+	if err != nil {
+		t.Fatalf("GetOpenMoveIntent: %v", err)
+	}
+	if intent == nil {
+		t.Fatal("move intent = nil, want open retryable intent")
+	}
+	if intent.TargetLaunchID == nil || *intent.TargetLaunchID == sourceLaunch {
+		t.Fatalf("target_launch_id = %v, want failed target launch", intent.TargetLaunchID)
+	}
+}
+
 func TestExecuteOption_RentalToHostDispatchesAfterMoveIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 	sourceLaunch, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})

@@ -1718,8 +1718,8 @@ func TestLaunchInstanceMoveTargetClaimKeepsSourceAuthoritative(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMoveIntent after failed move launch: %v", err)
 	}
-	if gotIntent.State != db.MoveIntentStateCanceled {
-		t.Fatalf("move intent state = %q, want canceled", gotIntent.State)
+	if gotIntent.State != db.MoveIntentStateOpen {
+		t.Fatalf("move intent state = %q, want open", gotIntent.State)
 	}
 	// No cancel-attempts marker should be sent until the target has accepted
 	// the job. This launch failed before provider create succeeded.

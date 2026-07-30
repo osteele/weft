@@ -655,6 +655,19 @@ func executeWithIntent(
 
 	desc, err := executeMoveOptionForMove(ctx, database, r2Client, cfg, cloudClients, job, opt, intent)
 	if err != nil {
+		if opt.IsNew {
+			currentIntent, ierr := db.GetMoveIntent(database, intent.ID)
+			if ierr != nil {
+				slog.Warn("reload move intent after failed launch",
+					"component", "move", "intent_id", intent.ID, "error", ierr)
+			}
+			if currentIntent != nil &&
+				currentIntent.State == db.MoveIntentStateOpen &&
+				((currentIntent.TargetLaunchID != nil && *currentIntent.TargetLaunchID > 0) ||
+					(currentIntent.TargetAttemptID != nil && *currentIntent.TargetAttemptID > 0)) {
+				return "", err
+			}
+		}
 		// Best-effort: re-attach to source if it's still alive. Otherwise
 		// the job is left unplaced and the autopilot may pick it up on its
 		// next pass (the only state where it should).
