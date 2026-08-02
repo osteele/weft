@@ -1330,7 +1330,18 @@ rule ReconcilePass {
         and instance.ended_at > now - config.recently_terminal_window:
             ensures: TerminalInstanceVerified(instance)
 
-    -- Orphan sweep: destroy weft-labeled provider instances from non-active campaigns
+    -- Orphan sweep: destroy weft-labeled provider instances whose launch
+    -- row is gone or terminal. An instance whose provider ID matches no
+    -- launch row is NOT automatically an orphan: during a normal launch
+    -- there is a window between provider create and SetLaunchProviderID
+    -- recording the ID. The sweep cross-checks the weft label — for
+    -- weft/i<id> it defers while the labeled launch is live with no
+    -- provider ID recorded (create in flight) and reaps a live launch's
+    -- same-label duplicate bound to a different provider ID (abandoned
+    -- create retry); for weft/c<id> it defers while any launch in the
+    -- campaign is planned/launching with no provider ID. Deferred cases
+    -- re-evaluate on the next sweep. Implementation:
+    -- internal/campaign/orphan_sweep.go shouldDestroyUnrecordedWeftInstance.
     ensures: OrphanSweepCompleted()
 }
 

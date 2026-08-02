@@ -2455,9 +2455,11 @@ rule StalePlannedLaunchReap {
         -- (SweepStalePlannedLaunches), invoked alongside the orphan sweep
         -- in the reconcile loop. Counterpart to SweepOrphanedInstances:
         -- orphan sweep covers the case where a provider instance exists
-        -- but weft's DB row is gone or terminal; this reaper covers the
-        -- opposite case where weft has a DB row but no provider instance
-        -- was ever created. Surfaced as a dashboard alert ("X planned
+        -- but weft's DB row is gone or terminal (deferring the mid-create
+        -- state where both exist but the launch has not yet recorded its
+        -- provider ID — see status-sync.allium ReconcilePass); this
+        -- reaper covers the opposite case where weft has a DB row but no
+        -- provider instance was ever created. Surfaced as a dashboard alert ("X planned
         -- cloud launches stuck") via stalePlannedLaunches() in
         -- internal/ui/dashtabs/view_alerts.go.
 }

@@ -77,7 +77,7 @@ func TestSweepOrphanedInstances_UsesCleanupInventoryForRunPodExitedPods(t *testi
 				{
 					ProviderID: "pod-exited-123",
 					Status:     cloud.ProviderStatusExited,
-					Label:      "weft/i" + strconv.FormatInt(instanceID, 10),
+					Label:      labelForLaunch(instanceID),
 				},
 			}, nil
 		},
@@ -395,7 +395,7 @@ func TestSweepOrphanedInstances_DestroysNonCampaignWeftInstance(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "adhoc-555", Status: cloud.ProviderStatusExited, Label: "weft/i" + strconv.FormatInt(instanceID, 10)},
+				{ProviderID: "adhoc-555", Status: cloud.ProviderStatusExited, Label: labelForLaunch(instanceID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -438,7 +438,7 @@ func TestSweepOrphanedInstances_SkipsNonCampaignWeftInstanceStillRunning(t *test
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "active-777", Status: cloud.ProviderStatusRunning, Label: "weft/i" + strconv.FormatInt(instanceID, 10)},
+				{ProviderID: "active-777", Status: cloud.ProviderStatusRunning, Label: labelForLaunch(instanceID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -509,6 +509,10 @@ func TestSweepOrphanedInstances_DestroysTrackedTerminalInActiveCampaign(t *testi
 
 func labelForCampaign(id int64) string {
 	return "weft/c" + strconv.FormatInt(id, 10)
+}
+
+func labelForLaunch(id int64) string {
+	return "weft/i" + strconv.FormatInt(id, 10)
 }
 
 func TestSweepStalePlannedLaunches_ReapsOldPlanned(t *testing.T) {
@@ -627,5 +631,147 @@ func TestSweepStalePlannedLaunches_SkipsPlannedWithProviderID(t *testing.T) {
 	}
 	if reaped != 0 {
 		t.Fatalf("reaped = %d, want 0 (provider ID is set)", reaped)
+	}
+}
+
+// Regression for the create window: between CreateInstance returning at
+// the provider and SetLaunchProviderID recording the ID, a weft-labeled
+// instance exists with no matching provider ID in the DB. A concurrent
+// session's sweep must not destroy it while the labeled launch is live
+// with no provider ID recorded (the create is still in flight).
+func TestSweepOrphanedInstances_SkipsInstanceLabelCreateInFlight(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	destroyCalled := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "midcreate-1", Status: cloud.ProviderStatusRunning, Label: labelForLaunch(launchID)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyCalled = true
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 0 || destroyCalled {
+		t.Fatalf("destroyed = %d (called=%v), want 0 while the labeled launch's create is in flight", destroyed, destroyCalled)
+	}
+}
+
+// Once the labeled launch is bound to a different provider instance, an
+// unrecorded sibling with the same label is an abandoned duplicate from a
+// create retry and is reaped.
+func TestSweepOrphanedInstances_DestroysDuplicateFromCreateRetry(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, launchID, "kept-1"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "kept-1", Status: cloud.ProviderStatusRunning, Label: labelForLaunch(launchID)},
+				{ProviderID: "duplicate-2", Status: cloud.ProviderStatusRunning, Label: labelForLaunch(launchID)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 1 || destroyedID != "duplicate-2" {
+		t.Fatalf("destroyed = %d id=%q, want 1 duplicate-2 (kept-1 must survive)", destroyed, destroyedID)
+	}
+}
+
+// Campaign labels don't identify the owning launch, so the sweep defers
+// destroying an unrecorded campaign-labeled instance while ANY launch in
+// that campaign could still be mid-create (planned/launching with no
+// provider ID). Once no create is in flight, the destroy proceeds.
+func TestSweepOrphanedInstances_CampaignLabelDefersWhileCreateInFlight(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		CampaignID: &campaignID,
+		Status:     db.LaunchStatusLaunching,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+
+	var destroyedIDs []string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "campaign-ghost-1", Status: cloud.ProviderStatusRunning, Label: labelForCampaign(campaignID)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedIDs = append(destroyedIDs, id)
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 0 || len(destroyedIDs) != 0 {
+		t.Fatalf("destroyed = %d %v, want 0 while a campaign launch's create is in flight", destroyed, destroyedIDs)
+	}
+
+	// The in-flight launch records its provider ID — no create in flight
+	// remains, so the unrecorded instance is now a genuine orphan.
+	if err := db.SetLaunchProviderID(database, launchID, "recorded-1"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	destroyed, err = SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if destroyed != 1 || len(destroyedIDs) != 1 || destroyedIDs[0] != "campaign-ghost-1" {
+		t.Fatalf("destroyed = %d %v, want [campaign-ghost-1] once no create is in flight", destroyed, destroyedIDs)
 	}
 }
