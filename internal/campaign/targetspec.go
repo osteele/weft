@@ -16,7 +16,7 @@ import (
 // source-agnostic eligibility target.
 func TargetSpecFromOffer(offer cloud.Offer) placement.TargetSpec {
 	device := targetDeviceFromCloudGPU(offer.Provider, offer.GPUName, offer.GPUName, offer.GPUMemGB, offer.NumGPUs)
-	return placement.TargetSpec{
+	spec := placement.TargetSpec{
 		Name:                            offer.Key(),
 		Provider:                        string(offer.Provider),
 		Devices:                         []placement.TargetDevice{device},
@@ -24,6 +24,11 @@ func TargetSpecFromOffer(offer cloud.Offer) placement.TargetSpec {
 		MachineKey:                      offerMachineClaimKey(offer),
 		MaxComputeCapUnknownFailsClosed: true,
 	}
+	if version, major, ok := parseDriverMajor(offer.DriverVersion); ok {
+		spec.NVIDIADriverVersion = version
+		spec.NVIDIADriverMajor = major
+	}
+	return spec
 }
 
 // TargetSpecFromCloudInstance normalizes a running/reusable rental into an
@@ -31,7 +36,7 @@ func TargetSpecFromOffer(offer cloud.Offer) placement.TargetSpec {
 func TargetSpecFromCloudInstance(inst db.Launch) placement.TargetSpec {
 	provider := cloud.Provider(strings.TrimSpace(inst.Provider))
 	device := targetDeviceFromCloudGPU(provider, inst.GPUClass, inst.ResolvedGPUName, float64(inst.GPUMemGB), inst.NumGPUs)
-	return placement.TargetSpec{
+	spec := placement.TargetSpec{
 		Name:                            inst.ProviderInstanceID,
 		Provider:                        inst.Provider,
 		Devices:                         []placement.TargetDevice{device},
@@ -39,6 +44,11 @@ func TargetSpecFromCloudInstance(inst db.Launch) placement.TargetSpec {
 		MachineKey:                      db.ProviderMachineKey(inst.Provider, inst.MachineID),
 		MaxComputeCapUnknownFailsClosed: true,
 	}
+	if version, major, ok := parseDriverMajor(inst.DriverVersion); ok {
+		spec.NVIDIADriverVersion = version
+		spec.NVIDIADriverMajor = major
+	}
+	return spec
 }
 
 func targetDeviceFromCloudGPU(provider cloud.Provider, class, resolvedName string, memGB float64, count int) placement.TargetDevice {

@@ -198,3 +198,40 @@ func testLaunchOnMachine(t *testing.T, database *sql.DB, provider, machineID str
 	}
 	return launchID
 }
+
+// driver_version roundtrips through CreateLaunch and the shared scan so reuse
+// admission can read the fact back; empty stays empty (unknown, not "0").
+func TestLaunchDriverVersionRoundtrip(t *testing.T) {
+	database := setupTestDB(t)
+	for _, version := range []string{"550.90.07", ""} {
+		id, err := CreateLaunch(database, &Launch{
+			Status: LaunchStatusRunning, Provider: "vastai",
+			GPUSpec: "RTX_4090", DriverVersion: version,
+		})
+		if err != nil {
+			t.Fatalf("CreateLaunch: %v", err)
+		}
+		launch, err := GetLaunch(database, id)
+		if err != nil {
+			t.Fatalf("GetLaunch: %v", err)
+		}
+		if launch.DriverVersion != version {
+			t.Errorf("DriverVersion = %q, want %q", launch.DriverVersion, version)
+		}
+	}
+
+	id, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod", GPUSpec: "H100"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := UpdateLaunchDriverVersion(database, id, " 550.127.05\n"); err != nil {
+		t.Fatalf("UpdateLaunchDriverVersion: %v", err)
+	}
+	launch, err := GetLaunch(database, id)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if launch.DriverVersion != "550.127.05" {
+		t.Errorf("DriverVersion = %q, want probe write-back trimmed", launch.DriverVersion)
+	}
+}

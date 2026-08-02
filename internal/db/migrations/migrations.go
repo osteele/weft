@@ -134,11 +134,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyDropSpeculativeHostRegistry},
 		&goose.GoFunc{RunDB: undoDropSpeculativeHostRegistry},
 	)
+	addLaunchDriverVersion := goose.NewGoMigration(
+		39,
+		&goose.GoFunc{RunDB: applyAddLaunchDriverVersionColumn},
+		&goose.GoFunc{RunDB: dropAddLaunchDriverVersionColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -269,6 +274,30 @@ func applyAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error 
 
 func dropAddLaunchRunpodCloudTypeColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN runpod_cloud_type`)
+	return nil
+}
+
+// applyAddLaunchDriverVersionColumn adds launches.driver_version: the offer's
+// NVIDIA driver version (dotted string; "" = unknown), so reuse admission can
+// re-check a job's driver-major floor against the instance it would share.
+func applyAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launches", "driver_version")
+	if err != nil {
+		return fmt.Errorf("inspect launches.driver_version: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE launches ADD COLUMN driver_version TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return fmt.Errorf("add launches.driver_version: %w", err)
+	}
+	return nil
+}
+
+func dropAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN driver_version`)
 	return nil
 }
 
@@ -820,7 +849,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

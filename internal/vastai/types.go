@@ -23,11 +23,12 @@ type Offer struct {
 	DiskSpace         float64 `json:"disk_space"`   // GB available
 	CPUCores          float64 `json:"cpu_cores_effective"`
 	CPUName           string  `json:"cpu_name"`
-	CPURAMMB          float64 `json:"cpu_ram"`       // total system RAM in MB
-	CUDAVersion       float64 `json:"cuda_max_good"` // max supported CUDA version
-	DatacenterDriver  bool    `json:"datacenter"`    // Vast.ai datacenter/forward-compat driver stack
-	DLPerf            float64 `json:"dlperf"`        // deep learning perf score
-	Geolocation       string  `json:"geolocation"`   // data center location
+	CPURAMMB          float64 `json:"cpu_ram"`        // total system RAM in MB
+	CUDAVersion       float64 `json:"cuda_max_good"`  // max supported CUDA version
+	DriverVersion     string  `json:"driver_version"` // dotted NVIDIA driver version ("550.90.07")
+	DatacenterDriver  bool    `json:"datacenter"`     // Vast.ai datacenter/forward-compat driver stack
+	DLPerf            float64 `json:"dlperf"`         // deep learning perf score
+	Geolocation       string  `json:"geolocation"`    // data center location
 	Verified          bool    `json:"verified"`
 	MachineID         int     `json:"machine_id"`
 }

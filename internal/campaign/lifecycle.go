@@ -661,6 +661,7 @@ func runpodObservedBootstrapPhase(phase string) string {
 
 func runpodPostCreateDriverCompatibility(
 	ctx context.Context,
+	database *sql.DB,
 	r2Client *r2.Client,
 	client cloud.Client,
 	instanceID int64,
@@ -694,6 +695,14 @@ func runpodPostCreateDriverCompatibility(
 		slog.Warn("runpod driver probe returned unparseable output; deferring to agent preflight",
 			"component", "launch", "launch_id", instanceID, "provider_id", providerInstID, "output", strings.TrimSpace(out))
 		return nil
+	}
+	// Persist the observed driver whether or not it satisfies this group's
+	// floor: RunPod offers carry no driver at search, so the probe is the only
+	// source, and reuse admission needs the fact to re-check other jobs'
+	// floors against this instance.
+	if err := db.UpdateLaunchDriverVersion(database, instanceID, version); err != nil {
+		slog.Warn("persist probed driver version failed",
+			"component", "launch", "launch_id", instanceID, "error", err)
 	}
 	if major >= requiredMajor {
 		if progress != nil {
@@ -2177,6 +2186,7 @@ func LaunchInstance(
 		InetDownMbps:      offer.DownloadBandwidth,
 		InetUpMbps:        offer.UploadBandwidth,
 		CUDAVersion:       offer.CUDAVersion,
+		DriverVersion:     offer.DriverVersion,
 		CPUCores:          offer.CPUCores,
 		CPUName:           offer.CPUName,
 		RAMGB:             offer.RAMGB,
@@ -2723,6 +2733,7 @@ func LaunchInstance(
 
 	if err := runpodPostCreateDriverCompatibility(
 		ctx,
+		database,
 		r2Assets.Client,
 		client,
 		instanceID,

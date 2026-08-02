@@ -3595,10 +3595,15 @@ rule InstanceReuseHostAxes {
         -- capped, so an instance the full matcher would reject must not
         -- hold a slot a usable instance could take.
         --
-        -- The NVIDIA driver-major floor remains launch-time-only: launches
-        -- persist the offer's driver-supported CUDA (enforced at reuse via
-        -- the CUDA chain) but not the driver major, so that axis cannot be
-        -- re-checked here until launch records carry it.
+        -- The NVIDIA driver-major floor is re-checked against launches that
+        -- recorded a driver version (launches.driver_version: the Vast.ai
+        -- offer's driver_version at creation, or the RunPod post-create
+        -- probe's observation, persisted whether or not the probed group's
+        -- own floor passed). A launch with no recorded driver — RunPod
+        -- without a probe, rows predating the column — drops the floor
+        -- rather than failing closed: the instance already passed its
+        -- original group's launch-time filters, and refusing every legacy
+        -- row would strand reuse wholesale.
 }
 
 rule InstanceReuseQueueDepthIsObjectiveSignal {

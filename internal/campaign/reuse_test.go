@@ -2128,3 +2128,38 @@ func TestMatchJobToInstance_TagAndExplicitCoresCompose(t *testing.T) {
 		t.Fatalf("8 cores matched a cpu-intensive job; the tag floor (16) must still bind when --cpu-cores is lower (reason: %s)", reason)
 	}
 }
+
+// The driver-major floor is enforced against launches that recorded a driver
+// version, and dropped for launches that did not: a legacy or unprobed row is
+// not confirmed incompatible, and it already passed its original group's
+// launch-time driver filters.
+func TestMatchJobToInstance_DriverFloor(t *testing.T) {
+	tests := []struct {
+		name       string
+		instDriver string
+		want       bool
+	}{
+		{"older driver rejects", "535.154.05", false},
+		{"newer driver passes", "550.90.07", true},
+		{"equal major passes", "550.54.14", true},
+		{"unknown driver passes (launch-time enforcement only)", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// "--cuda-driver-min 12.4" derives driver-major floor 550 via
+			// RuntimeFloor.FinalizeDriver / imagereq.MinDriverForCUDA.
+			job := &db.Job{GPUClass: "nvidia", CLIResourceOverrides: &db.CLIResourceOverrides{MinCUDAVersion: "12.4"}}
+			cap := InstanceCapacity{
+				Instance: &db.Launch{
+					GPUClass: "nvidia", ResolvedGPUName: "RTX 4090", GPUMemGB: 24,
+					CUDAVersion: 12.6, DriverVersion: tt.instDriver,
+				},
+				DiskFreeGB: 100,
+			}
+			got, reason := MatchJobToInstance(job, cap)
+			if got != tt.want {
+				t.Errorf("MatchJobToInstance() = %v, want %v (reason: %s)", got, tt.want, reason)
+			}
+		})
+	}
+}

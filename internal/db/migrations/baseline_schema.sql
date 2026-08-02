@@ -647,6 +647,7 @@ CREATE TABLE IF NOT EXISTS "launches" (
 		target_id INTEGER,
 		hedge_cohort_id INTEGER,
 		first_onstart_probe_seen_unix INTEGER,
+		driver_version TEXT NOT NULL DEFAULT '',
 		CONSTRAINT launches_termination_reason_check CHECK (termination_reason IS NULL OR termination_reason IN ('completed', 'provider_failure', 'job_failure', 'disk_full', 'infra_failure', 'bootstrap_timeout', 'phase_stall', 'preempted', 'canceled', 'unknown', 'weft_bug')),
 		CONSTRAINT launches_status_check CHECK (status IN ('planned', 'launching', 'running', 'paused', 'grace', 'completed', 'failed', 'canceled'))
 	);

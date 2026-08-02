@@ -240,6 +240,7 @@ func offerToCloud(o Offer) cloud.Offer {
 		DataCenter:        o.Geolocation,
 		DatacenterDriver:  o.DatacenterDriver,
 		CUDAVersion:       o.CUDAVersion,
+		DriverVersion:     o.DriverVersion,
 		DiskSpaceGB:       o.DiskSpace,
 		CPUCores:          int(o.CPUCores),
 		CPUName:           o.CPUName,

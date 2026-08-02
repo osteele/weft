@@ -35,7 +35,7 @@ const launchSelectColumns = `id, campaign_id, status, provider, gpu_spec, gpu_cl
 		provider_running_at,
 		instance_type, runpod_cloud_type, max_bid_price_cents, on_demand_ref_cents,
 		cordoned, cordon_reason, cordoned_at,
-		hedge_cohort_id, first_onstart_probe_seen_unix`
+		hedge_cohort_id, first_onstart_probe_seen_unix, driver_version`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -254,9 +254,15 @@ type Launch struct {
 	InetDownMbps     float64
 	InetUpMbps       float64
 	CUDAVersion      float64
-	CPUCores         int
-	CPUName          string
-	RAMGB            int
+	// DriverVersion is the NVIDIA driver version the machine runs, as a dotted
+	// string ("550.90.07"). Recorded from the offer at launch (Vast.ai) or the
+	// post-create probe (RunPod). Empty means unknown: RunPod offers carry no
+	// driver at search, and rows predate the column — reuse then cannot
+	// re-check a driver-major floor and falls back to launch-time enforcement.
+	DriverVersion string
+	CPUCores      int
+	CPUName       string
+	RAMGB         int
 
 	// Provider machine identifier (for reliability tracking)
 	MachineID string
@@ -635,8 +641,8 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			 cpu_cores_effective, cpu_name, ram_gb,
 			 disk_gb, provisioned_inputs, machine_id, docker_image,
 			 instance_type, runpod_cloud_type, max_bid_price_cents, on_demand_ref_cents,
-			 grace_started_at, grace_deadline)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 grace_started_at, grace_deadline, driver_version)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
@@ -644,7 +650,7 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			c.CPUCores, c.CPUName, c.RAMGB,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
 			instanceType, runpodCloudType, maxBidPriceCents, onDemandRefCents,
-			c.GraceStartedAt, c.GraceDeadline,
+			c.GraceStartedAt, c.GraceDeadline, c.DriverVersion,
 		)
 		if err != nil {
 			return 0, err
@@ -2553,6 +2559,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var cordonedAt sql.NullInt64
 	var hedgeCohortID sql.NullInt64
 	var firstOnStartProbeSeen sql.NullInt64
+	var driverVersion sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -2573,7 +2580,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&providerRunningAt,
 		&instanceType, &runpodCloudType, &maxBidPriceCents, &onDemandRefCents,
 		&cordoned, &cordonReason, &cordonedAt,
-		&hedgeCohortID, &firstOnStartProbeSeen,
+		&hedgeCohortID, &firstOnStartProbeSeen, &driverVersion,
 	)
 	if err != nil {
 		return nil, err
@@ -2638,6 +2645,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if cudaVersion.Valid {
 		c.CUDAVersion = cudaVersion.Float64
+	}
+	if driverVersion.Valid {
+		c.DriverVersion = driverVersion.String
 	}
 	if cpuCores.Valid {
 		c.CPUCores = int(cpuCores.Int64)
@@ -3911,6 +3921,15 @@ func ListLaunchIDsNeedingOpslogSync(database *sql.DB, since time.Duration) ([]in
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// UpdateLaunchDriverVersion records the machine's observed NVIDIA driver
+// version (dotted string) on the launch row, so reuse admission can re-check
+// driver-major floors against it.
+func UpdateLaunchDriverVersion(database *sql.DB, launchID int64, version string) error {
+	_, err := database.Exec(`UPDATE launches SET driver_version = ? WHERE id = ?`,
+		strings.TrimSpace(version), launchID)
+	return err
 }
 
 // ErrJobPinnedToOtherMachine reports an attempt to bind a pinned job to a

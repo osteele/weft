@@ -558,20 +558,25 @@ func matchInstanceTargetEligibility(constraints placement.Constraints, inst *db.
 		return true, ""
 	}
 	evalConstraints := constraints
-	// Launches persist the offer's driver-supported CUDA (Launch.CUDAVersion)
-	// but not the NVIDIA driver major, so the CUDA floor is enforced here via
-	// the CUDA chain while the driver-major floor cannot be re-checked; it
-	// holds only through the launch-time provider filters and probe of the
-	// instance's original group. Zeroing VersionRequirements makes
-	// EvaluateEligibility regenerate the requirement set from the remaining
-	// scalar floors instead of failing closed on a driver fact no launch
-	// record carries.
-	evalConstraints.MinDriverVersion = 0
+	target := TargetSpecFromCloudInstance(*inst)
+	// The driver-major floor is enforced only against launches that recorded a
+	// driver version (Vast.ai offers at creation, the RunPod post-create probe
+	// when it ran). A launch with no recorded driver — RunPod without a probe,
+	// rows predating the column — drops the floor rather than failing closed:
+	// the instance already passed its original group's launch-time filters,
+	// and refusing every legacy row would strand reuse wholesale. The gate
+	// reads the spec's parsed major so it cannot diverge from the fact the
+	// evaluator sees. Zeroing VersionRequirements makes EvaluateEligibility
+	// regenerate the requirement set from the remaining scalar floors instead
+	// of failing closed on a driver fact the record does not carry.
+	if target.NVIDIADriverMajor == 0 {
+		evalConstraints.MinDriverVersion = 0
+	}
 	evalConstraints.VersionRequirements = nil
 	if evalConstraints.NumGPUs > 1 && inst.NumGPUs <= 0 {
 		evalConstraints.NumGPUs = 1
 	}
-	verdict := placement.EvaluateEligibility(evalConstraints, TargetSpecFromCloudInstance(*inst))
+	verdict := placement.EvaluateEligibility(evalConstraints, target)
 	if verdict.Eligible {
 		return true, ""
 	}

@@ -90,6 +90,7 @@ type Offer struct {
 	DataCenter        string  // e.g., "US-East"
 	DatacenterDriver  bool    // provider reports a datacenter/forward-compat driver stack
 	CUDAVersion       float64 // max supported CUDA version
+	DriverVersion     string  // NVIDIA driver version, dotted string ("550.90.07"); "" = provider does not report it at search
 	DiskSpaceGB       float64 // GB available
 	CPUCores          int     // effective CPU cores granted
 	CPUName           string  // CPU model name
