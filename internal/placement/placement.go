@@ -334,6 +334,40 @@ func RuntimeFloorForJob(j *db.Job) RuntimeFloor {
 	return rf
 }
 
+// hostGPUNameSignals concatenates a host's GPU names and classes for the
+// interconnect naming predicate.
+func hostGPUNameSignals(host inventory.HostSpec) string {
+	parts := make([]string, 0, len(host.GPUs)*2)
+	for _, gpu := range host.GPUs {
+		parts = append(parts, gpu.Name, gpu.Class)
+	}
+	return strings.Join(parts, " ")
+}
+
+// InterconnectSatisfied reports whether a target's naming signals satisfy an
+// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"/
+// "nvl" tokens in the target's GPU or datacenter naming; a name without those
+// tokens reads as PCIe. "nvl" covers the H100 NVL, an NVLink-bridged part —
+// note the bridge links card PAIRS, so a >2-GPU nvlink request served by NVL
+// cards gets pairwise NVLink only. The offer filter, the reuse matcher, and
+// on-prem host scoring all judge targets through this one predicate so they
+// cannot drift.
+func InterconnectSatisfied(req, nameSignals string) bool {
+	req = strings.ToLower(strings.TrimSpace(req))
+	if req == "" || req == "any" {
+		return true
+	}
+	name := strings.ToLower(nameSignals)
+	hasNVLinkSignal := strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
+	switch req {
+	case "nvlink":
+		return hasNVLinkSignal
+	case "pcie":
+		return !hasNVLinkSignal
+	}
+	return true
+}
+
 // NeedsGPU returns true if the constraints require GPU resources.
 func (c Constraints) NeedsGPU() bool {
 	return c.GPUClass != "" || c.GPUMemGB > 0 || c.NumGPUs > 1
@@ -827,6 +861,24 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			s.Reasons = append(s.Reasons, fmt.Sprintf("host RAM %dGB below required %dGB", hostMemGB, c.CPUMemGB))
 			return s
 		}
+	}
+
+	// Hard constraint: explicit CPU-cores floor (--cpu-cores). As with RAM,
+	// an inventory file that omits cpu_cores (0) does not disqualify the host.
+	if c.CPUCores > 0 && host.CPUCores > 0 && host.CPUCores < c.CPUCores {
+		s.Eligible = false
+		s.Reasons = append(s.Reasons, fmt.Sprintf("host CPU cores %d below required %d", host.CPUCores, c.CPUCores))
+		return s
+	}
+
+	// Hard constraint: interconnect (--interconnect), judged on the host's GPU
+	// naming through the same predicate the offer filter and reuse matcher use.
+	// The predicate handles the empty/"any" vacuous cases itself, so a
+	// rejection here always reflects a real requirement.
+	if !InterconnectSatisfied(c.Interconnect, hostGPUNameSignals(host)) {
+		s.Eligible = false
+		s.Reasons = append(s.Reasons, fmt.Sprintf("interconnect %s required; host GPU naming shows no match", strings.ToLower(strings.TrimSpace(c.Interconnect))))
+		return s
 	}
 
 	applyHistoricalFailureRisk(database, &s, host, c)

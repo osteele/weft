@@ -831,29 +831,6 @@ func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 	return filtered, removed
 }
 
-// interconnectSatisfied reports whether a target's naming signals satisfy an
-// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"/
-// "nvl" tokens in the target's GPU or datacenter naming; a name without those
-// tokens reads as PCIe. "nvl" covers the H100 NVL, an NVLink-bridged part —
-// note the bridge links card PAIRS, so a >2-GPU nvlink request served by NVL
-// cards gets pairwise NVLink only. Both the offer filter and the reuse
-// matcher judge targets through this one predicate so they cannot drift.
-func interconnectSatisfied(req, nameSignals string) bool {
-	req = strings.ToLower(strings.TrimSpace(req))
-	if req == "" || req == "any" {
-		return true
-	}
-	name := strings.ToLower(nameSignals)
-	hasNVLinkSignal := strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
-	switch req {
-	case "nvlink":
-		return hasNVLinkSignal
-	case "pcie":
-		return !hasNVLinkSignal
-	}
-	return true
-}
-
 func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	req := strings.ToLower(strings.TrimSpace(group.Interconnect))
 	if len(offers) == 0 || req == "" || req == "any" {
@@ -862,7 +839,7 @@ func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cl
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		if !interconnectSatisfied(req, o.GPUName+" "+o.DataCenter) {
+		if !placement.InterconnectSatisfied(req, o.GPUName+" "+o.DataCenter) {
 			removed++
 			continue
 		}

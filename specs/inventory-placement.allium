@@ -674,6 +674,20 @@ rule EvaluateEligibility {
         requires: target.machine_key != null
             and c.machine_affinity.any(ref => MachineRefKey(ref) == target.machine_key)
 
+    -- 1b. Host-axis floors. Declared host RAM (--cpu-mem, effective) and CPU
+    --     cores (--cpu-cores) are hard floors against inventory facts; an
+    --     inventory file omitting the fact (0) does not disqualify the host,
+    --     matching the cloud paths' unknown-RAM policy. Interconnect is
+    --     judged on the host's GPU naming through the same
+    --     InterconnectSatisfied predicate the offer filter and reuse matcher
+    --     use (nvlink/sxm/nvl tokens read as NVLink; absence reads as PCIe).
+    --     Implementation: placement.scoreHost, adjacent to this predicate.
+    requires: c.cpu_mem_gb == 0 or host.memory_gb == 0
+        or host.memory_gb >= c.cpu_mem_gb
+    requires: c.cpu_cores == 0 or host.cpu_cores == 0
+        or host.cpu_cores >= c.cpu_cores
+    requires: InterconnectSatisfied(c.interconnect, host.gpu_naming_signals)
+
     -- 2. GPU class match.
     if c.gpu_class != null:
         let gc = ParseGPUConstraint(c.gpu_class)

@@ -82,3 +82,44 @@ func TestSelectHostFromSnapshot_SkipsPinnedJob(t *testing.T) {
 		t.Fatalf("pinned job placed on-prem on %q; a pin names a provider machine no on-prem host is", host)
 	}
 }
+
+// On-prem hosts are judged on the same host axes the cloud paths enforce:
+// an explicit --cpu-cores floor against inventory cpu_cores (unknown does not
+// disqualify, matching the RAM floor), and --interconnect against GPU naming
+// through the shared InterconnectSatisfied predicate.
+func TestScoreHost_HostAxes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	host := func(cores int, gpuName string) inventory.HostSpec {
+		return inventory.HostSpec{
+			Name:     "host-alpha",
+			CPUCores: cores,
+			GPUs:     []inventory.GPUSpec{{Name: gpuName, Class: "nvidia", Memory: "80GB"}},
+		}
+	}
+	metrics := map[string]*HostMetrics{"host-alpha": {QueueDepth: 0}}
+	cases := []struct {
+		name        string
+		constraints Constraints
+		host        inventory.HostSpec
+		want        bool
+	}{
+		{"cores floor rejects insufficient", Constraints{CPUCores: 32}, host(16, "A100-SXM4-80GB"), false},
+		{"cores floor passes unknown", Constraints{CPUCores: 32}, host(0, "A100-SXM4-80GB"), true},
+		{"cores floor passes sufficient", Constraints{CPUCores: 32}, host(64, "A100-SXM4-80GB"), true},
+		{"nvlink rejects plain GPU naming", Constraints{Interconnect: "nvlink", GPUClass: "nvidia"}, host(64, "RTX 3090"), false},
+		{"nvlink accepts SXM naming", Constraints{Interconnect: "nvlink", GPUClass: "nvidia"}, host(64, "A100-SXM4-80GB"), true},
+		{"pcie rejects SXM naming", Constraints{Interconnect: "pcie", GPUClass: "nvidia"}, host(64, "A100-SXM4-80GB"), false},
+		{"no interconnect requirement passes", Constraints{GPUClass: "nvidia"}, host(64, "RTX 3090"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scores := ScoreHostListWithMetrics(database, []inventory.HostSpec{tc.host}, tc.constraints, metrics)
+			if len(scores) != 1 {
+				t.Fatalf("scores = %d, want 1", len(scores))
+			}
+			if scores[0].Eligible != tc.want {
+				t.Errorf("Eligible = %v, want %v (reasons: %v)", scores[0].Eligible, tc.want, scores[0].Reasons)
+			}
+		})
+	}
+}

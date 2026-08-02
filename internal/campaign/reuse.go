@@ -366,7 +366,7 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("host RAM insufficient: need=%dGB instance=%dGB", constraints.CPUMemGB, inst.RAMGB)
 	}
 
-	if !interconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
 		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", constraints.Interconnect, inst.DisplayGPUBrief())
 	}
 
@@ -442,8 +442,9 @@ func matchMachineAffinityIntent(job *db.Job, inst *db.Launch) (bool, string) {
 	return true, ""
 }
 
-// instanceInterconnectSignals returns the naming text interconnectSatisfied
-// judges an instance on: the same GPU-name-plus-datacenter pair the offer
+// instanceInterconnectSignals returns the naming text
+// placement.InterconnectSatisfied judges an instance on: the same
+// GPU-name-plus-datacenter pair the offer
 // filter reads, with the GPU class as fallback when no resolved name was
 // recorded.
 func instanceInterconnectSignals(inst *db.Launch) string {

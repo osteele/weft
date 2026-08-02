@@ -2012,7 +2012,7 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if !hostRAMSatisfied(constraints.CPUMemGB, inst.RAMGB) {
 		return false
 	}
-	if !interconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
 		return false
 	}
 	if constraints.GPUMemGB > 0 && inst.GPUMemGB <= 0 {
