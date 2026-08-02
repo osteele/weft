@@ -3534,6 +3534,13 @@ rule InstanceReuseDiskCheck {
         -- internal/campaign/reuse.go MatchJobToInstance and
         -- estimateReuseJobDiskNeedGB.
         --
+        -- The check applies against REMAINING capacity wherever multiple jobs
+        -- are assigned in one pass: every assignment site (direct autopilot
+        -- assignment, relaunch reuse passes, and SubmitJobsToInstance
+        -- validation) consumes each accepted job's estimated need via
+        -- consumeReuseJob before judging the next job, so N jobs cannot each
+        -- match the same free disk.
+        --
         -- A user-declared disk ceiling (see FreshRentalDiskEstimate) does NOT
         -- participate here: it bounds the fresh-launch request only, and
         -- EstimatedReuseIncrementalDiskGB is unaffected by it. See the open
