@@ -573,24 +573,30 @@ func maxGroupPriority(group InstanceGroup) int {
 	return maxPriority
 }
 
+// mergeMaxComputeCap keeps the more restrictive (lower) of two arch ceilings.
+// An empty side carries no ceiling and yields the other side: the capped jobs
+// still run on the combined instance, so the bound must survive.
 func mergeMaxComputeCap(a, b string) string {
-	if a == "" || b == "" {
-		return ""
-	}
-	if placement.CompareComputeCap(a, b) <= 0 {
-		return a
-	}
-	return b
+	return combineComputeCaps(a, b, true)
 }
 
+// mergeMinComputeCap keeps the more demanding (higher) of two arch floors.
 func mergeMinComputeCap(a, b string) string {
+	return combineComputeCaps(a, b, false)
+}
+
+// combineComputeCaps merges two compute-cap bounds with "" as the identity
+// (no bound on that side). keepLower selects ceiling semantics (the lower
+// bound wins); otherwise floor semantics (the higher bound wins).
+func combineComputeCaps(a, b string, keepLower bool) string {
 	if a == "" {
 		return b
 	}
 	if b == "" {
 		return a
 	}
-	if placement.CompareComputeCap(a, b) >= 0 {
+	cmp := placement.CompareComputeCap(a, b)
+	if (keepLower && cmp <= 0) || (!keepLower && cmp >= 0) {
 		return a
 	}
 	return b
@@ -1145,11 +1151,9 @@ func groupMaxComputeCap(database *sql.DB, jobs []*db.Job) string {
 			slog.Warn("max_compute_cap unresolved at launch; arch filter not applied for job",
 				"component", "campaign", "job_id", job.ID)
 		case cap == placement.MaxComputeCapAny:
-			return "" // group is explicitly unbounded
+			// "any" is scoped to the declaring job and contributes no cap.
 		default:
-			if minCap == "" || placement.CompareComputeCap(cap, minCap) < 0 {
-				minCap = cap
-			}
+			minCap = mergeMaxComputeCap(minCap, cap)
 		}
 	}
 	return minCap
@@ -1162,9 +1166,7 @@ func groupMinComputeCap(jobs []*db.Job) string {
 			continue
 		}
 		cap := placement.ResolveConstraintsFromJob(job).Constraints.MinComputeCap
-		if cap != "" && (maxMinCap == "" || placement.CompareComputeCap(cap, maxMinCap) > 0) {
-			maxMinCap = cap
-		}
+		maxMinCap = mergeMinComputeCap(maxMinCap, cap)
 	}
 	return maxMinCap
 }

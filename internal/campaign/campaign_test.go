@@ -1971,27 +1971,71 @@ func TestGroupMaxComputeCap_ReducesMinAcrossPersistedCaps(t *testing.T) {
 	}
 }
 
-func TestGroupMaxComputeCap_AnyMakesGroupUnbounded(t *testing.T) {
+// "any" is scoped to the job that declared it. The capped sibling still runs
+// on the shared instance, so letting one any-job unbound the group would buy
+// hardware the sibling's torch wheel has no kernels for ("no kernel image").
+func TestGroupMaxComputeCap_AnyIsScopedToItsJob(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 1, MaxComputeCap: "9.0"},
 		{ID: 2, MaxComputeCap: "any"},
 	}
 	got := groupMaxComputeCap(nil, jobs)
-	if got != "" {
-		t.Errorf("groupMaxComputeCap with explicit \"any\" = %q, want \"\" (unbounded)", got)
+	if got != "9.0" {
+		t.Errorf("groupMaxComputeCap = %q, want the capped sibling's 9.0; \"any\" must not strip it", got)
+	}
+}
+
+func TestGroupMaxComputeCap_AllAnyIsUnbounded(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, MaxComputeCap: "any"},
+		{ID: 2, MaxComputeCap: "any"},
+	}
+	if got := groupMaxComputeCap(nil, jobs); got != "" {
+		t.Errorf("groupMaxComputeCap = %q, want \"\" when no job carries a cap", got)
 	}
 }
 
 func TestGroupMaxComputeCap_LazyBackfillFromMissingTorchPin(t *testing.T) {
-	// No torch pin at the working dir → backfill resolves to "any", which
-	// makes the group unbounded.
+	// No torch pin at the working dir → job 2 backfills to "any" and
+	// contributes no cap; job 1's cap binds the group.
 	jobs := []*db.Job{
 		{ID: 1, MaxComputeCap: "10.0"},
 		{ID: 2, MaxComputeCap: "", WorkingDir: "/nonexistent/path", GPUClass: "nvidia"},
 	}
 	got := groupMaxComputeCap(nil, jobs)
-	if got != "" {
-		t.Errorf("groupMaxComputeCap = %q, want \"\" (job 2 backfills to \"any\" → group unbounded)", got)
+	if got != "10.0" {
+		t.Errorf("groupMaxComputeCap = %q, want 10.0 (job 2 backfills to \"any\" and contributes no cap)", got)
+	}
+}
+
+// A capped group absorbing (or absorbed by) an uncapped group keeps the cap,
+// because the capped jobs still run on the merged instance.
+func TestMergeMaxComputeCap_EmptySideKeepsTheCap(t *testing.T) {
+	cases := []struct{ a, b, want string }{
+		{"", "", ""},
+		{"9.0", "", "9.0"},
+		{"", "9.0", "9.0"},
+		{"8.6", "9.0", "8.6"},
+		{"9.0", "8.6", "8.6"},
+	}
+	for _, tc := range cases {
+		if got := mergeMaxComputeCap(tc.a, tc.b); got != tc.want {
+			t.Errorf("mergeMaxComputeCap(%q, %q) = %q, want %q", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestMergeCompatibleGroups_KeepsArchCapAcrossMerge(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 24, MaxComputeCap: "9.0", Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 24, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("merged into %d groups, want 1", len(merged))
+	}
+	if merged[0].MaxComputeCap != "9.0" {
+		t.Errorf("merged MaxComputeCap = %q, want 9.0 preserved for the capped job", merged[0].MaxComputeCap)
 	}
 }
 

@@ -2956,7 +2956,35 @@ invariant MergedGroupNeverViolatesMemberConstraint {
         -- This covers the VARIANT axis only, which is the axis a GPU class
         -- binds (see inventory-placement.allium ParseGPUConstraint). The
         -- memory axis rides on the group's gpu_mem_gb floor, not on the
-        -- class string.
+        -- class string. The arch-cap axis rides on the group's
+        -- max_compute_cap / min_compute_cap; see GroupArchCapIsMemberMin.
+}
+
+-- The arch-cap counterpart of GroupGPUConstraintIsSupremum: a group's
+-- max_compute_cap is the minimum over member caps that exist, because every
+-- member runs on the shared instance and the lowest cap binds it. A member
+-- whose cap is "any" (explicitly, or backfilled from a project without a
+-- torch pin) contributes no cap; "any" is scoped to the job that declared
+-- it and must not strip a cap a sibling still needs — an unbounded group
+-- can be served a card the capped sibling's torch wheel has no kernels
+-- for, which fails at runtime with "no kernel image". The same reduction
+-- applies when two groups merge: an empty side yields the other side, not
+-- an unbounded result. min_compute_cap reduces dually (maximum of member
+-- floors).
+rule GroupArchCapIsMemberMin {
+    when: CandidateGroupingEvaluated(group)
+
+    let caps = group.jobs.map(j => j.max_compute_cap).filter(c => c != null and c != "any")
+
+    ensures: caps empty implies group.max_compute_cap == null
+    ensures: caps not empty implies group.max_compute_cap == caps.min()
+
+    @guidance
+        -- Implementation: internal/campaign/campaign.go groupMaxComputeCap
+        -- (reduction over jobs; "any" is skipped, unresolved caps warn and
+        -- are skipped) and mergeMaxComputeCap / mergeMinComputeCap
+        -- (pairwise group merge in MergeCompatibleGroupsWithDisk; empty
+        -- side yields the other side).
 }
 
 -- ==========================================================================
