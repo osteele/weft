@@ -1114,8 +1114,12 @@ rule MachineAffinityOfferFilter {
         -- An offer or instance reporting no machine_id is not confirmed to be a
         -- pinned machine, so it is excluded: this is a placement/eligibility
         -- decision and fails closed on unknown. The invariant is additionally
-        -- enforced where a job is bound to a launch, so it holds even if an
-        -- upstream filter is missing.
+        -- enforced at every claim write that binds a job to a destination —
+        -- setJobLaunchIDOnce (ordinary and transfer claims),
+        -- CreateMoveTargetAttempt (move-target claims, cloud and host
+        -- destinations), and AssignJobHost (on-prem jobs.host) — so it holds
+        -- even if an upstream filter is missing. Attach writes that record an
+        -- already-observed binding are not claims and do not re-assert.
 }
 
 -- The coverage exclusion that offer selection enforces before create when a

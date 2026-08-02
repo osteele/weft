@@ -461,6 +461,18 @@ func CreateMoveTargetAttempt(database *sql.DB, intentID, jobID int64, host strin
 	if MoveIntentState(state) != MoveIntentStateOpen {
 		return 0, fmt.Errorf("move intent %d is %s, want open", intentID, state)
 	}
+	// A move-target attempt binds the job to its destination without passing
+	// setJobLaunchIDOnce, so it carries the same pin backstop; see
+	// assertMachineAffinitySatisfied. Any non-launch destination — an on-prem
+	// host, or no identity at all — can never satisfy a pin, so it fails
+	// closed for pinned jobs.
+	if cloudInstanceID != nil {
+		if err := assertMachineAffinitySatisfied(tx, jobID, *cloudInstanceID); err != nil {
+			return 0, err
+		}
+	} else if err := assertNoMachineAffinityForHost(tx, jobID, host); err != nil {
+		return 0, err
+	}
 	now := time.Now().Unix()
 	var endTime any
 	if IsTerminalStatus(status) {

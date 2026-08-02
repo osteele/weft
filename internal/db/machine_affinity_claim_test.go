@@ -97,6 +97,52 @@ func TestClaimUnaffectedWithoutPin(t *testing.T) {
 	}
 }
 
+// Move-target attempts bind a job to its destination without passing
+// setJobLaunchIDOnce, so CreateMoveTargetAttempt carries the same backstop —
+// otherwise a move was the one claim write a pinned job could slip through.
+func TestMoveTargetAttemptRefusesPinnedJobOnWrongMachine(t *testing.T) {
+	database := setupTestDB(t)
+	jobID := pinnedTestJob(t, database, `{"machine_affinity":["49863"]}`)
+	wrongLaunch := testLaunchOnMachine(t, database, "vastai", "140870")
+	intent := openMoveIntent(t, database, jobID)
+
+	if _, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &wrongLaunch, StatusQueued); !errors.Is(err, ErrJobPinnedToOtherMachine) {
+		t.Fatalf("err = %v, want ErrJobPinnedToOtherMachine", err)
+	}
+}
+
+func TestMoveTargetAttemptAllowsPinnedJobOnItsMachine(t *testing.T) {
+	database := setupTestDB(t)
+	jobID := pinnedTestJob(t, database, `{"machine_affinity":["49863"]}`)
+	rightLaunch := testLaunchOnMachine(t, database, "vastai", "49863")
+	intent := openMoveIntent(t, database, jobID)
+
+	if _, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &rightLaunch, StatusQueued); err != nil {
+		t.Fatalf("move to the pinned machine rejected: %v", err)
+	}
+}
+
+// A host destination can never satisfy a pin: a pin names a provider physical
+// machine, which no on-prem host is.
+func TestMoveTargetAttemptRefusesPinnedJobOnHostDestination(t *testing.T) {
+	database := setupTestDB(t)
+	jobID := pinnedTestJob(t, database, `{"machine_affinity":["49863"]}`)
+	intent := openMoveIntent(t, database, jobID)
+
+	if _, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "host-alpha", nil, StatusQueued); !errors.Is(err, ErrJobPinnedToOtherMachine) {
+		t.Fatalf("err = %v, want ErrJobPinnedToOtherMachine for an on-prem move destination", err)
+	}
+}
+
+func openMoveIntent(t *testing.T, database *sql.DB, jobID int64) *MoveIntent {
+	t.Helper()
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{JobID: jobID, TargetKind: MoveTargetNew})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	return intent
+}
+
 // A pin names a provider physical machine, which no on-prem host is. The
 // jobs.host write is the on-prem counterpart of the cloud claim boundary, so
 // it carries the same backstop: eligibility already rejects pinned jobs on

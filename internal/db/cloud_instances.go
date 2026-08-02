@@ -2074,18 +2074,8 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 		return false, nil
 	}
 
-	// Backstop, mirroring assertMachineAffinitySatisfied for cloud claims: a
-	// pin names a provider physical machine, which no on-prem host is, so a
-	// pinned job must never be bound to jobs.host. Placement eligibility
-	// already rejects these upstream; this survives an upstream filter that
-	// is missing or gets added later.
-	pins, err := jobMachineAffinityRefs(database, jobID)
-	if err != nil {
+	if err := assertNoMachineAffinityForHost(database, jobID, host); err != nil {
 		return false, err
-	}
-	if len(pins) > 0 {
-		return false, fmt.Errorf("job %d pinned to %s but host %q has no provider machine identity: %w",
-			jobID, strings.Join(pins, ","), host, ErrJobPinnedToOtherMachine)
 	}
 
 	// Check if an attempt exists. If not, create one (unplaced jobs have no
@@ -3934,9 +3924,12 @@ var ErrJobPinnedToOtherMachine = errors.New("job is pinned to a different physic
 // already filter offers and instances by the pin, so it should never fire. It
 // earns its place because a silently-ignored pin is invisible — a pinned job is
 // *expected* to sit unplaced, so placing it anyway looks like success, and it
-// completes quickly on hardware nobody asked for. Every path that binds a job to
-// a cloud launch passes through here, so the invariant survives an upstream
-// filter that is missing or gets added later.
+// completes quickly on hardware nobody asked for. Every claim write that binds
+// a job to a launch runs this assertion — setJobLaunchIDOnce for ordinary and
+// transfer claims, CreateMoveTargetAttempt for move-target claims — so the
+// invariant survives an upstream filter that is missing or gets added later.
+// Attach writes that record an already-observed binding (for example
+// AttachOpenAttemptToLaunch) are not claims and do not re-assert.
 //
 // Unknown fails closed: a launch whose machine cannot be identified is not
 // confirmed to be the pinned one. That follows the repo rule that
@@ -3945,8 +3938,8 @@ var ErrJobPinnedToOtherMachine = errors.New("job is pinned to a different physic
 // guessing costs a measurement attributed to the wrong hardware, which is the
 // whole reason to pin a job.
 //
-// This covers cloud launches; the on-prem jobs.host write carries the same
-// backstop in AssignJobHost.
+// This covers cloud launches; host destinations carry the same backstop via
+// assertNoMachineAffinityForHost.
 func assertMachineAffinitySatisfied(tx *sql.Tx, jobID, instanceID int64) error {
 	pins, err := jobMachineAffinityRefs(tx, jobID)
 	if err != nil {
@@ -3970,6 +3963,23 @@ func assertMachineAffinitySatisfied(tx *sql.Tx, jobID, instanceID int64) error {
 	}
 	return fmt.Errorf("job %d pinned to %s but launch %d %s: %w",
 		jobID, strings.Join(pins, ","), instanceID, where, ErrJobPinnedToOtherMachine)
+}
+
+// assertNoMachineAffinityForHost refuses to bind a pinned job to a non-launch
+// destination: a pin names a provider physical machine, which no on-prem host
+// is. It shares the backstop rationale of assertMachineAffinitySatisfied and
+// is the single implementation behind AssignJobHost and host-destination
+// move-target claims.
+func assertNoMachineAffinityForHost(q rowQuerier, jobID int64, host string) error {
+	pins, err := jobMachineAffinityRefs(q, jobID)
+	if err != nil {
+		return err
+	}
+	if len(pins) > 0 {
+		return fmt.Errorf("job %d pinned to %s but host %q has no provider machine identity: %w",
+			jobID, strings.Join(pins, ","), host, ErrJobPinnedToOtherMachine)
+	}
+	return nil
 }
 
 type rowQuerier interface {
