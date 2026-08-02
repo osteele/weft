@@ -1503,9 +1503,10 @@ func TestFormatOfferConstraints(t *testing.T) {
 		MinGPUMemGB:    40,
 		MinDiskGB:      60,
 		MinReliability: 0.95,
+		MinHostRAMGB:   128,
 	}
 	got := FormatOfferConstraints(c)
-	want := "gpu=ampere+ vram>=40GB disk>=60GB reliability>=0.95"
+	want := "gpu=ampere+ vram>=40GB disk>=60GB reliability>=0.95 ram>=128GB"
 	if got != want {
 		t.Fatalf("FormatOfferConstraints = %q, want %q", got, want)
 	}

@@ -221,6 +221,9 @@ func FormatOfferConstraints(c cloud.OfferConstraints) string {
 	if c.MinCPUCoresEffective > 0 {
 		parts = append(parts, fmt.Sprintf("cpu>=%d", c.MinCPUCoresEffective))
 	}
+	if c.MinHostRAMGB > 0 {
+		parts = append(parts, fmt.Sprintf("ram>=%dGB", c.MinHostRAMGB))
+	}
 	if c.MinDriverVersion > 0 {
 		parts = append(parts, fmt.Sprintf("driver>=%d", c.MinDriverVersion))
 	}
@@ -1349,12 +1352,28 @@ func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConst
 
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
+//
+// Every OfferConstraints field the provider search reads must appear here:
+// two groups that collide on this key share one search result, so a field
+// missing from the key lets one group's server-side predicate narrow the
+// market another group sees. MinHostRAMGB did exactly that (a cpu_ram>=
+// predicate on Vast.ai shared across groups differing only in --cpu-mem).
+// TestConstraintKeyCoversEveryConstraintField pins the coverage.
 func constraintKey(c cloud.OfferConstraints, provider cloud.Provider) string {
-	return fmt.Sprintf("%s/%d/%d/%d/%d/%s/%.2f/%d/%d/%s/%s/%s/%s",
-		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
+	return fmt.Sprintf("%s/%d/%d/%d/%s/%.2f/%d/%d/%d/%s/%s/%s/%s/%s",
+		c.GPUClass, c.MinGPUMemGB, c.MinDiskGB,
 		normalizedGPUCount(c.NumGPUs), c.Interconnect, c.MinReliability,
-		c.MinCPUCoresEffective, c.MinDriverVersion, c.MinCUDAVersion,
-		c.InstanceType, c.RunpodCloudType, provider)
+		c.MinCPUCoresEffective, c.MinHostRAMGB, c.MinDriverVersion, c.MinCUDAVersion,
+		c.InstanceType, c.RunpodCloudType, sortedGeos(c.ExcludeGeos), provider)
+}
+
+// sortedGeos returns the canonical comma-joined form of a geo exclusion list.
+// Sorting makes equal sets render identically regardless of spelling order, so
+// the cache key and the search diagnostics agree on what "the same search" is.
+func sortedGeos(geos []string) string {
+	s := append([]string(nil), geos...)
+	sort.Strings(s)
+	return strings.Join(s, ",")
 }
 
 // GroupRawOfferCacheKey returns the search-cache key for a planning group.
@@ -1407,9 +1426,7 @@ func formatProviderSearchConstraints(c cloud.OfferConstraints) string {
 		parts = append(parts, "interconnect="+c.Interconnect)
 	}
 	if len(c.ExcludeGeos) > 0 {
-		geos := append([]string(nil), c.ExcludeGeos...)
-		sort.Strings(geos)
-		parts = append(parts, "exclude_geos="+strings.Join(geos, ","))
+		parts = append(parts, "exclude_geos="+sortedGeos(c.ExcludeGeos))
 	}
 	// These provider-side defaults are always injected by Vast.ai search.
 	parts = append(parts, "direct_port_count>=1", "verified=true")
