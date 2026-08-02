@@ -2321,6 +2321,19 @@ rule HeartbeatStale {
         -- Triggered when heartbeat age exceeds config.heartbeat_stale_threshold
         -- and agent is unreachable. Combined with running_stall_timeout for
         -- phase-unchanged detection.
+        --
+        -- Ordering: the provider destroy MUST succeed before the launch
+        -- is marked failed and its jobs are requeued. A failed destroy
+        -- (provider API unreachable) leaves the instance possibly still
+        -- running its job; requeueing then risks a double run against
+        -- the abandoned attempt. On destroy failure the terminal
+        -- transition is deferred to a later reconcile pass, keeping the
+        -- accumulated probe-failure hysteresis so the retry does not
+        -- restart the confirmation window. This matches ExecuteAction's
+        -- destroy-before-mark discipline for all watchdog actions.
+        -- Implementation: internal/campaign/reconcile.go
+        -- reconcileStaleHeartbeat; internal/campaign/instance_check.go
+        -- ExecuteAction.
 }
 
 rule ProviderInstanceDied {

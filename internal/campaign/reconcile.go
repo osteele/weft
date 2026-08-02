@@ -818,6 +818,19 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		r.clearProbeFailure(ci.ID)
 	}
 
+	// Destroy must succeed before the launch is marked failed and its jobs
+	// requeued — a failed destroy leaves the instance possibly still running
+	// its job, and requeueing would risk a double run. On failure, defer to
+	// the next pass (probe-failure hysteresis state is kept). Mirrors
+	// ExecuteAction; see HeartbeatStale in specs/campaign-lifecycle.allium.
+	providerID := ci.EffectiveProviderID()
+	if providerID != "" {
+		if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
+			slog.Warn("failed to destroy stale-heartbeat instance, deferring failed status to next reconcile pass", "component", "reconcile", "instance", ci.ID, "error", destroyErr)
+			return false, false
+		}
+	}
+
 	reason := failureTerminationReasonFromR2(ctx, r2Client, ci.ID, db.TerminationReasonUnknown)
 
 	// Refine unknown failures using last heartbeat: low disk free → disk_full
@@ -829,13 +842,6 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 	}
 
 	slog.Warn("marking instance failed due to stale heartbeat", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "agent_alive", agentAlive, "probe_error", err, "reason", reason)
-
-	providerID := ci.EffectiveProviderID()
-	if providerID != "" {
-		if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-			slog.Warn("failed to destroy stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", destroyErr)
-		}
-	}
 
 	detail := fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason)
 	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason, detail); err != nil {

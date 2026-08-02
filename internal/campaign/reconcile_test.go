@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -1024,6 +1025,131 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 		if job.Status != db.StatusQueued {
 			t.Fatalf("job %d status = %q, want %q", jobID, job.Status, db.StatusQueued)
 		}
+	}
+}
+
+// Regression: when the stale-heartbeat path cannot destroy the provider
+// instance (provider API unreachable), the launch must NOT be marked
+// failed and its jobs must NOT be requeued — the instance may still be
+// running the job, and requeueing would double-run it against the
+// abandoned attempt. The terminal transition is deferred to a later pass
+// whose destroy succeeds, mirroring ExecuteAction.
+func TestReconcileLaunches_StaleHeartbeatDestroyFailure_DefersFailedStatus(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "stale-999"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusQueued); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
+
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	fetchReconcileHeartbeat = func(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	// Probe succeeds and reports the agent gone — positive evidence, so
+	// only the destroy failure holds the termination back.
+	probeCampaignAgent = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
+		return false, nil
+	}
+
+	destroyFails := true
+	destroyed := false
+	var destroyCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			status := cloud.ProviderStatusRunning
+			if destroyed {
+				status = cloud.ProviderStatusDestroyed
+			}
+			return &cloud.Instance{ProviderID: id, Status: status}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyCalls++
+			if destroyFails {
+				return errors.New("provider API unreachable")
+			}
+			destroyed = true
+			return nil
+		},
+	}
+
+	r := NewReconciler()
+
+	// Pass 1: destroy fails — launch must stay running, job must stay attached.
+	result, err := r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Fatalf("reconciled = %d, want 0 while destroy fails", result.Reconciled)
+	}
+	if destroyCalls != 1 {
+		t.Fatalf("destroy calls = %d, want 1", destroyCalls)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusRunning {
+		t.Fatalf("instance status = %q, want still %q after failed destroy", ci.Status, db.LaunchStatusRunning)
+	}
+	job, err := db.GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("job launch = %v, want still attached to launch %d after failed destroy", job.LaunchID, instanceID)
+	}
+
+	// Pass 2: destroy succeeds — now the launch fails and the job requeues.
+	destroyFails = false
+	result, err = r.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1 once destroy succeeds", result.Reconciled)
+	}
+	if destroyCalls != 2 {
+		t.Fatalf("destroy calls = %d, want 2 (retried on the later pass)", destroyCalls)
+	}
+	ci, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
+	}
+	job, err = db.GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch = %d, want detached after requeue", *job.LaunchID)
 	}
 }
 
