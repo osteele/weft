@@ -138,7 +138,7 @@ type Instance struct {
 	CostPerHour    float64
 	DiskGB         float64
 	DataCenter     string
-	Label          string // provider-assigned label/name (e.g., "weft/c42")
+	Label          string // provider-assigned label/name (e.g., "weft/i42")
 	CPUCores       int    // effective CPU cores granted
 	CPUName        string // CPU model name
 	RAMGB          int    // total system RAM in GB
@@ -185,7 +185,7 @@ type CreateOpts struct {
 	EnvVars          map[string]string // environment variables passed via provider's env mechanism
 	CapAdd           []string          // provider-specific Linux capabilities (currently used for Vast.ai --cap-add)
 	TemplateID       string            // provider template ID for startup-managed images
-	Label            string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
+	Label            string            // instance label/name visible in provider dashboard (e.g., "weft/i42")
 	InstanceType     string            // desired rental type ("on-demand" or "interruptible"), when provider supports it
 	MaxBidPrice      float64           // max bid/price for interruptible rentals, when provider supports it
 	MinCUDAVersion   string            // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")

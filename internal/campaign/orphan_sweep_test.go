@@ -775,3 +775,17 @@ func TestSweepOrphanedInstances_CampaignLabelDefersWhileCreateInFlight(t *testin
 		t.Fatalf("destroyed = %d %v, want [campaign-ghost-1] once no create is in flight", destroyed, destroyedIDs)
 	}
 }
+
+func TestLaunchProviderLabel_RoundTripsThroughExtractLaunchID(t *testing.T) {
+	label := launchProviderLabel(42)
+	if !isWeftInstance(label) {
+		t.Fatalf("label %q must carry the weft prefix the sweep filters on", label)
+	}
+	id, ok := extractLaunchID(label)
+	if !ok || id != 42 {
+		t.Fatalf("extractLaunchID(%q) = (%d, %v), want (42, true)", label, id, ok)
+	}
+	if _, ok := extractCampaignID(label); ok {
+		t.Fatalf("label %q must not parse as a campaign label", label)
+	}
+}

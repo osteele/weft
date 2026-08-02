@@ -172,6 +172,12 @@ func extractCampaignID(label string) (int64, bool) {
 	return extractWeftLabelID(label, "c")
 }
 
+// launchProviderLabel is the provider-side label/name stamped on every
+// weft instance at create time; extractLaunchID is its parser.
+func launchProviderLabel(launchID int64) string {
+	return fmt.Sprintf("weft/i%d", launchID)
+}
+
 // extractLaunchID parses a launch ID from a weft label/name.
 // Accepts "weft/i42" (Vast.ai label) or "weft-i42" (RunPod name).
 func extractLaunchID(label string) (int64, bool) {

@@ -1340,8 +1340,11 @@ rule ReconcilePass {
     -- same-label duplicate bound to a different provider ID (abandoned
     -- create retry); for weft/c<id> it defers while any launch in the
     -- campaign is planned/launching with no provider ID. Deferred cases
-    -- re-evaluate on the next sweep. Implementation:
-    -- internal/campaign/orphan_sweep.go shouldDestroyUnrecordedWeftInstance.
+    -- re-evaluate on the next sweep. All instances are created with the
+    -- per-launch weft/i<id> label (campaign or not); weft/c<id> is a
+    -- legacy form still parsed for instances created before that change.
+    -- Implementation: internal/campaign/orphan_sweep.go
+    -- shouldDestroyUnrecordedWeftInstance / launchProviderLabel.
     ensures: OrphanSweepCompleted()
 }
 

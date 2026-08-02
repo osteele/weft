@@ -1446,7 +1446,7 @@ func launchCampaignWithStager(
 						}
 					}
 					if donorCfg != nil {
-						donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
+						donorCreateOpts.Label = launchProviderLabel(donorInstanceID)
 						if onEvent != nil {
 							onEvent(LaunchEvent{
 								Kind:  LaunchEventCampaignStatus,
@@ -2496,12 +2496,13 @@ func LaunchInstance(
 	}
 
 	// Set instance label for provider dashboard visibility and orphan sweep.
-	// All weft instances must carry a weft/ prefix so the orphan sweep can identify them.
-	if campaignID != nil {
-		createOpts.Label = fmt.Sprintf("weft/c%d", *campaignID)
-	} else {
-		createOpts.Label = fmt.Sprintf("weft/i%d", instanceID)
-	}
+	// Always the per-launch weft/i<id> form, campaign or not: the sweep
+	// resolves it to the exact owning launch, so a mid-create instance is
+	// recognized and an abandoned create-retry duplicate is reaped
+	// precisely. Campaign-scoped weft/c<id> labels are legacy — still
+	// parsed by the sweep for instances created before this change, but
+	// no longer produced.
+	createOpts.Label = launchProviderLabel(instanceID)
 
 	campaignLogID := "nil"
 	if campaignID != nil {

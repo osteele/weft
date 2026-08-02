@@ -1996,3 +1996,53 @@ func TestLaunchInstanceProviderIDRecordFailureResetsJobs(t *testing.T) {
 		t.Fatalf("attempt outcome = %q, want %q", attempts[0].Outcome, db.AttemptOutcomeOrphaned)
 	}
 }
+
+// Campaign launches carry per-launch weft/i<id> labels, not campaign-scoped
+// ones: the orphan sweep resolves the label to the exact owning launch, so
+// mid-create instances are recognized and create-retry duplicates reaped
+// precisely (see shouldDestroyUnrecordedWeftInstance).
+func TestLaunchInstance_LabelsInstancePerLaunchEvenInCampaign(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	var gotLabel string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			gotLabel = opts.Label
+			return nil, errors.New("stop after label assignment")
+		},
+	}
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	job := &db.Job{ID: 101, Status: db.StatusQueued, Command: "python train.py"}
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, Jobs: []*db.Job{job}}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+
+	launchID, err := LaunchInstance(
+		mockClient, nil, database, &campaignID, group, offer,
+		LaunchOpts{},
+		cloud.R2Config{Bucket: "test", AccountID: "test"},
+		cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"},
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected create failure from mock")
+	}
+	if want := launchProviderLabel(launchID); gotLabel != want {
+		t.Fatalf("create label = %q, want %q", gotLabel, want)
+	}
+}
