@@ -2013,3 +2013,116 @@ func TestSubmitJobsToInstanceValidatesSourceBeforeClaiming(t *testing.T) {
 		t.Fatal("job was claimed onto the launch despite failing validation")
 	}
 }
+
+// The reuse matcher must enforce the same axes the offer chain enforces at
+// launch: a constraint checked on new instances and dropped on reuse is
+// silently unmet whenever a reusable instance happens to be available.
+// Interconnect, host RAM, and explicit --cpu-cores were exactly that.
+
+func TestMatchJobToInstance_Interconnect(t *testing.T) {
+	tests := []struct {
+		name         string
+		interconnect string
+		instResolved string
+		want         bool
+	}{
+		{"no requirement passes", "", "H100 PCIE", true},
+		{"any passes", "any", "H100 SXM", true},
+		{"nvlink accepts SXM name", "nvlink", "A100-SXM4-80GB", true},
+		{"nvlink accepts explicit NVLink name", "nvlink", "H100 NVLINK", true},
+		{"nvlink rejects a name with no signal", "nvlink", "RTX 4090", false},
+		{"pcie rejects an SXM name", "pcie", "A100 SXM4", false},
+		{"pcie accepts a plain name", "pcie", "A100 PCIE", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &db.Job{CLIResourceOverrides: &db.CLIResourceOverrides{Interconnect: tt.interconnect}}
+			cap := InstanceCapacity{
+				Instance:   &db.Launch{GPUClass: "nvidia", ResolvedGPUName: tt.instResolved, GPUMemGB: 80},
+				DiskFreeGB: 100,
+			}
+			got, reason := MatchJobToInstance(job, cap)
+			if got != tt.want {
+				t.Errorf("MatchJobToInstance() = %v, want %v (reason: %s)", got, tt.want, reason)
+			}
+		})
+	}
+}
+
+// Unknown instance RAM passes: RunPod launches record none, and a fresh
+// launch on the same axis would also accept the pod (filterOffersByHostRAM
+// keeps unknowns), so failing closed here would buy a new pod identical to
+// the reusable one. Known-insufficient fails.
+func TestMatchJobToInstance_HostRAMFloor(t *testing.T) {
+	strict := true
+	memReq := 100
+	tests := []struct {
+		name    string
+		instRAM int
+		want    bool
+	}{
+		{"insufficient RAM rejects", 64, false},
+		{"unknown RAM passes", 0, true},
+		{"sufficient RAM passes", 512, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &db.Job{CLIResourceOverrides: &db.CLIResourceOverrides{CPUMemGB: &memReq, CPUMemStrict: &strict}}
+			cap := InstanceCapacity{
+				Instance:   &db.Launch{GPUClass: "nvidia", GPUMemGB: 80, RAMGB: tt.instRAM},
+				DiskFreeGB: 100,
+			}
+			got, reason := MatchJobToInstance(job, cap)
+			if got != tt.want {
+				t.Errorf("MatchJobToInstance() = %v, want %v (reason: %s)", got, tt.want, reason)
+			}
+		})
+	}
+}
+
+// Unknown instance cores fail closed, mirroring the cpu-intensive tag floor:
+// an instance that cannot state its cores is not confirmed to satisfy a floor
+// the job explicitly asked for.
+func TestMatchJobToInstance_ExplicitCPUCoresFloor(t *testing.T) {
+	coresReq := 32
+	tests := []struct {
+		name      string
+		instCores int
+		want      bool
+	}{
+		{"insufficient cores rejects", 16, false},
+		{"unknown cores rejects", 0, false},
+		{"sufficient cores passes", 64, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &db.Job{CLIResourceOverrides: &db.CLIResourceOverrides{CPUCores: &coresReq}}
+			cap := InstanceCapacity{
+				Instance:   &db.Launch{GPUClass: "nvidia", GPUMemGB: 80, CPUCores: tt.instCores},
+				DiskFreeGB: 100,
+			}
+			got, reason := MatchJobToInstance(job, cap)
+			if got != tt.want {
+				t.Errorf("MatchJobToInstance() = %v, want %v (reason: %s)", got, tt.want, reason)
+			}
+		})
+	}
+}
+
+// The tag floor and an explicit --cpu-cores compose to the higher bound,
+// mirroring offerConstraintsForGroup at launch.
+func TestMatchJobToInstance_TagAndExplicitCoresCompose(t *testing.T) {
+	coresReq := 4 // below the cpu-intensive default floor of 16
+	job := &db.Job{
+		Tags:                 []string{db.TagCPUIntensive},
+		CLIResourceOverrides: &db.CLIResourceOverrides{CPUCores: &coresReq},
+	}
+	cap := InstanceCapacity{
+		Instance:   &db.Launch{GPUClass: "nvidia", GPUMemGB: 80, CPUCores: 8},
+		DiskFreeGB: 100,
+	}
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("8 cores matched a cpu-intensive job; the tag floor (16) must still bind when --cpu-cores is lower (reason: %s)", reason)
+	}
+}

@@ -3536,6 +3536,53 @@ rule InstanceReuseDiskCheck {
         -- question on ceiling scope.
 }
 
+-- Reuse must not be a hole in constraint enforcement: an axis the offer
+-- chain enforces at launch and the matcher ignores is silently unmet
+-- whenever a reusable instance happens to be available. Interconnect, host
+-- RAM, and the explicit CPU-cores floor shipped that way.
+rule InstanceReuseHostAxes {
+    when: MatchJobToInstance(job, instance)
+
+    -- CPU cores: the cpu-intensive tag floor and an explicit --cpu-cores
+    -- compose to the higher bound, mirroring the launch-time group
+    -- constraint. Unknown instance cores fail closed.
+    let cores_floor = max(job.cpu_cores,
+                          job.has_tag(cpu_intensive) ? ComputeCPUCoresFloor() : 0)
+    ensures:
+        cores_floor > 0 implies
+            instance.cpu_cores > 0 and instance.cpu_cores >= cores_floor
+
+    -- Host RAM (--cpu-mem, effective): known-insufficient fails; unknown
+    -- (instance.ram_gb == 0, every RunPod launch) passes, matching the
+    -- launch-time filter — reuse must not be stricter than a fresh launch
+    -- on the same axis, or a job buys a new pod identical to the reusable
+    -- one.
+    ensures:
+        job.cpu_mem_gb > 0 and instance.ram_gb > 0 implies
+            instance.ram_gb >= job.cpu_mem_gb
+
+    -- Interconnect: judged by the same naming-signal predicate the offer
+    -- filter uses (nvlink/sxm tokens read as NVLink; their absence reads
+    -- as PCIe), so the two paths cannot drift.
+    ensures:
+        InterconnectSatisfied(job.interconnect, instance.gpu_naming_signals)
+
+    @guidance
+        -- Implementation: internal/campaign/reuse.go matchJobToInstance,
+        -- through helpers in internal/campaign/offers.go shared with the
+        -- launch-time path: effectiveCPUCoresFloor (also offerConstraintsForGroup),
+        -- hostRAMSatisfied (also filterOffersByHostRAM), and
+        -- interconnectSatisfied (also filterOffersByInterconnect). The reuse
+        -- interconnect signals are the launch record's resolved GPU name
+        -- (GPU class when unresolved) plus datacenter, mirroring the offer
+        -- filter's GPU-name + datacenter pair.
+        --
+        -- The NVIDIA driver-major floor remains launch-time-only: launches
+        -- persist the offer's driver-supported CUDA (enforced at reuse via
+        -- the CUDA chain) but not the driver major, so that axis cannot be
+        -- re-checked here until launch records carry it.
+}
+
 rule InstanceReuseQueueDepthIsObjectiveSignal {
     when: MatchJobToInstance(job, instance)
 

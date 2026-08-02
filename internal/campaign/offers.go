@@ -350,12 +350,7 @@ func offerConstraintsForGroup(group InstanceGroup, minReliability float64) cloud
 		// Offer selection relies on cost/runtime scoring after the hard
 		// minimum compatibility filters.
 	}
-	if group.HasComputeIntensiveJob() {
-		c.MinCPUCoresEffective = computeCPUCoresFloor()
-	}
-	if group.CPUCores > c.MinCPUCoresEffective {
-		c.MinCPUCoresEffective = group.CPUCores
-	}
+	c.MinCPUCoresEffective = effectiveCPUCoresFloor(group.CPUCores, group.HasComputeIntensiveJob())
 	c.MinHostRAMGB = group.CPUMemGB
 	if group.HasPreemptibleJob() && !group.EscalateToOnDemand {
 		c.InstanceType = cloud.InstanceTypeInterruptible
@@ -367,6 +362,17 @@ const defaultComputeCPUCores = 16
 
 func computeCPUCoresFloor() int {
 	return intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", defaultComputeCPUCores)
+}
+
+// effectiveCPUCoresFloor composes an explicit --cpu-cores request with the
+// cpu-intensive tag floor: the higher bound wins; zero means no floor. Both
+// offer selection and the reuse matcher derive the floor through this one
+// function so they cannot drift.
+func effectiveCPUCoresFloor(explicit int, cpuIntensive bool) int {
+	if cpuIntensive {
+		return max(explicit, computeCPUCoresFloor())
+	}
+	return explicit
 }
 
 func intFromEnvOrDefault(key string, defaultVal int) int {
@@ -787,10 +793,18 @@ func filterOffersByGPUCount(offers []cloud.Offer, group InstanceGroup) ([]cloud.
 	return filtered, removed
 }
 
+// hostRAMSatisfied reports whether a target's host/system RAM satisfies a
+// --cpu-mem floor. Unknown RAM (haveGB == 0, e.g. every RunPod offer and
+// launch record, which carry no host-RAM field) passes: weft has no signal to
+// judge it on, so failing closed would drop a whole provider at launch or
+// buy a new pod identical to a reusable one. Both the offer filter and the
+// reuse matcher judge targets through this one predicate so they cannot drift.
+func hostRAMSatisfied(needGB, haveGB int) bool {
+	return needGB <= 0 || haveGB <= 0 || haveGB >= needGB
+}
+
 // filterOffersByHostRAM drops offers whose host/system RAM is below the group's
-// declared --cpu-mem floor. Offers with unknown host RAM (RAMGB == 0, e.g. every
-// RunPod offer, which carries no host-RAM field) are kept: weft has no signal to
-// judge them on, so excluding them would silently drop the whole provider.
+// declared --cpu-mem floor.
 func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	if len(offers) == 0 || group.CPUMemGB <= 0 {
 		return offers, 0
@@ -798,13 +812,34 @@ func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		if o.RAMGB > 0 && o.RAMGB < group.CPUMemGB {
+		if !hostRAMSatisfied(group.CPUMemGB, o.RAMGB) {
 			removed++
 			continue
 		}
 		filtered = append(filtered, o)
 	}
 	return filtered, removed
+}
+
+// interconnectSatisfied reports whether a target's naming signals satisfy an
+// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"
+// tokens in the target's GPU or datacenter naming; a name without those
+// tokens reads as PCIe. Both the offer filter and the reuse matcher judge
+// targets through this one predicate so they cannot drift.
+func interconnectSatisfied(req, nameSignals string) bool {
+	req = strings.ToLower(strings.TrimSpace(req))
+	if req == "" || req == "any" {
+		return true
+	}
+	name := strings.ToLower(nameSignals)
+	hasNVLinkSignal := strings.Contains(name, "nvlink") || strings.Contains(name, "sxm")
+	switch req {
+	case "nvlink":
+		return hasNVLinkSignal
+	case "pcie":
+		return !hasNVLinkSignal
+	}
+	return true
 }
 
 func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
@@ -815,19 +850,9 @@ func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cl
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		name := strings.ToLower(o.GPUName + " " + o.DataCenter)
-		hasNVLinkSignal := strings.Contains(name, "nvlink") || strings.Contains(name, "sxm")
-		switch req {
-		case "nvlink":
-			if !hasNVLinkSignal {
-				removed++
-				continue
-			}
-		case "pcie":
-			if hasNVLinkSignal {
-				removed++
-				continue
-			}
+		if !interconnectSatisfied(req, o.GPUName+" "+o.DataCenter) {
+			removed++
+			continue
 		}
 		filtered = append(filtered, o)
 	}

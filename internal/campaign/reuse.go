@@ -349,14 +349,33 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	if ok, reason := matchJobRequiredImage(job, inst); !ok {
 		return false, reason
 	}
-	if job.HasTag(db.TagCPUIntensive) {
-		floor := computeCPUCoresFloor()
+	// Host-axis floors, sharing the launch path's helpers so reuse cannot
+	// drift from a fresh launch on the same axis. Unknowns are asymmetric:
+	// cores fail closed (an instance that cannot state its cores is not
+	// confirmed to satisfy a floor the job asked for), RAM fails open via
+	// hostRAMSatisfied (RunPod launches record none).
+	coresFloor := effectiveCPUCoresFloor(constraints.CPUCores, job.HasTag(db.TagCPUIntensive))
+	if coresFloor > 0 {
 		if inst.CPUCores <= 0 {
-			return false, "CPU cores unknown for cpu-intensive"
+			return false, fmt.Sprintf("CPU cores unknown: need>=%d", coresFloor)
 		}
-		if inst.CPUCores < floor {
-			return false, fmt.Sprintf("CPU cores insufficient for cpu-intensive: need=%d instance=%d", floor, inst.CPUCores)
+		if inst.CPUCores < coresFloor {
+			return false, fmt.Sprintf("CPU cores insufficient: need=%d instance=%d", coresFloor, inst.CPUCores)
 		}
+	}
+
+	if !hostRAMSatisfied(constraints.CPUMemGB, inst.RAMGB) {
+		return false, fmt.Sprintf("host RAM insufficient: need=%dGB instance=%dGB", constraints.CPUMemGB, inst.RAMGB)
+	}
+
+	// Interconnect, judged on the same signal pair the offer filter reads:
+	// GPU name plus datacenter naming.
+	instGPUName := inst.ResolvedGPUName
+	if instGPUName == "" {
+		instGPUName = inst.GPUClass
+	}
+	if req := strings.ToLower(strings.TrimSpace(constraints.Interconnect)); !interconnectSatisfied(req, instGPUName+" "+inst.DataCenter) {
+		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", req, inst.DisplayGPUBrief())
 	}
 
 	if ok, reason := matchInstanceTargetEligibility(placement.Constraints{GPUClass: constraints.GPUClass}, inst, 0); !ok {
@@ -535,8 +554,14 @@ func matchInstanceTargetEligibility(constraints placement.Constraints, inst *db.
 		return true, ""
 	}
 	evalConstraints := constraints
-	// Reuse records do not currently persist NVIDIA driver major. Provider and
-	// image-specific driver checks stay in the cloud-offer/provider filters.
+	// Launches persist the offer's driver-supported CUDA (Launch.CUDAVersion)
+	// but not the NVIDIA driver major, so the CUDA floor is enforced here via
+	// the CUDA chain while the driver-major floor cannot be re-checked; it
+	// holds only through the launch-time provider filters and probe of the
+	// instance's original group. Zeroing VersionRequirements makes
+	// EvaluateEligibility regenerate the requirement set from the remaining
+	// scalar floors instead of failing closed on a driver fact no launch
+	// record carries.
 	evalConstraints.MinDriverVersion = 0
 	evalConstraints.VersionRequirements = nil
 	if evalConstraints.NumGPUs > 1 && inst.NumGPUs <= 0 {
