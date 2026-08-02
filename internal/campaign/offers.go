@@ -803,6 +803,16 @@ func hostRAMSatisfied(needGB, haveGB int) bool {
 	return needGB <= 0 || haveGB <= 0 || haveGB >= needGB
 }
 
+// hostCPUCoresSatisfied reports whether a target's CPU core count satisfies a
+// cores floor. Unlike hostRAMSatisfied, unknown cores (haveCores <= 0) fail
+// closed against a positive floor: an instance that cannot state its cores is
+// not confirmed to satisfy a floor the job asked for. Both the reuse matcher
+// and its prefilter judge targets through this one predicate so they cannot
+// drift.
+func hostCPUCoresSatisfied(floorCores, haveCores int) bool {
+	return floorCores <= 0 || haveCores >= floorCores
+}
+
 // filterOffersByHostRAM drops offers whose host/system RAM is below the group's
 // declared --cpu-mem floor.
 func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
@@ -822,17 +832,19 @@ func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 }
 
 // interconnectSatisfied reports whether a target's naming signals satisfy an
-// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"
-// tokens in the target's GPU or datacenter naming; a name without those
-// tokens reads as PCIe. Both the offer filter and the reuse matcher judge
-// targets through this one predicate so they cannot drift.
+// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"/
+// "nvl" tokens in the target's GPU or datacenter naming; a name without those
+// tokens reads as PCIe. "nvl" covers the H100 NVL, an NVLink-bridged part —
+// note the bridge links card PAIRS, so a >2-GPU nvlink request served by NVL
+// cards gets pairwise NVLink only. Both the offer filter and the reuse
+// matcher judge targets through this one predicate so they cannot drift.
 func interconnectSatisfied(req, nameSignals string) bool {
 	req = strings.ToLower(strings.TrimSpace(req))
 	if req == "" || req == "any" {
 		return true
 	}
 	name := strings.ToLower(nameSignals)
-	hasNVLinkSignal := strings.Contains(name, "nvlink") || strings.Contains(name, "sxm")
+	hasNVLinkSignal := strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
 	switch req {
 	case "nvlink":
 		return hasNVLinkSignal

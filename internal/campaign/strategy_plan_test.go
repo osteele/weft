@@ -689,6 +689,45 @@ func TestQuickReuseCompatible_RejectsInstanceBelowMinCUDA(t *testing.T) {
 	}
 }
 
+// The prefilter must reject on the same host axes the full matcher rejects
+// on: candidate slots are capped, so an incompatible instance holding a slot
+// can displace a usable one.
+func TestQuickReuseCompatible_HostAxes(t *testing.T) {
+	base := func() *db.Launch {
+		return &db.Launch{
+			Status:          db.LaunchStatusRunning,
+			GPUClass:        "NVIDIA",
+			ResolvedGPUName: "RTX 4090",
+			GPUMemGB:        24,
+		}
+	}
+	cases := []struct {
+		name  string
+		group InstanceGroup
+		tweak func(*db.Launch)
+		want  bool
+	}{
+		{"explicit cores floor rejects insufficient", InstanceGroup{GPUClass: "NVIDIA", CPUCores: 32}, func(l *db.Launch) { l.CPUCores = 16 }, false},
+		{"explicit cores floor rejects unknown", InstanceGroup{GPUClass: "NVIDIA", CPUCores: 32}, func(l *db.Launch) { l.CPUCores = 0 }, false},
+		{"explicit cores floor passes sufficient", InstanceGroup{GPUClass: "NVIDIA", CPUCores: 32}, func(l *db.Launch) { l.CPUCores = 64 }, true},
+		{"host RAM rejects insufficient", InstanceGroup{GPUClass: "NVIDIA", CPUMemGB: 256}, func(l *db.Launch) { l.RAMGB = 128 }, false},
+		{"host RAM passes unknown", InstanceGroup{GPUClass: "NVIDIA", CPUMemGB: 256}, func(l *db.Launch) { l.RAMGB = 0 }, true},
+		{"interconnect nvlink rejects plain GPU", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) {}, false},
+		{"interconnect nvlink accepts SXM name", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) { l.ResolvedGPUName = "A100 SXM4" }, true},
+		{"interconnect nvlink accepts H100 NVL", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) { l.ResolvedGPUName = "H100 NVL" }, true},
+		{"interconnect pcie rejects H100 NVL", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "pcie"}, func(l *db.Launch) { l.ResolvedGPUName = "H100 NVL" }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := base()
+			tc.tweak(inst)
+			if got := quickReuseCompatible(tc.group, InstanceCapacity{Instance: inst, DiskFreeGB: 100}); got != tc.want {
+				t.Errorf("quickReuseCompatible = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestQuickReuseCompatible_RejectsRequiredImageMismatch(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass: "NVIDIA",

@@ -2031,7 +2031,9 @@ func TestMatchJobToInstance_Interconnect(t *testing.T) {
 		{"nvlink accepts SXM name", "nvlink", "A100-SXM4-80GB", true},
 		{"nvlink accepts explicit NVLink name", "nvlink", "H100 NVLINK", true},
 		{"nvlink rejects a name with no signal", "nvlink", "RTX 4090", false},
+		{"nvlink accepts NVL-bridged name", "nvlink", "H100 NVL", true},
 		{"pcie rejects an SXM name", "pcie", "A100 SXM4", false},
+		{"pcie rejects NVL-bridged name", "pcie", "H100 NVL", false},
 		{"pcie accepts a plain name", "pcie", "A100 PCIE", true},
 	}
 	for _, tt := range tests {

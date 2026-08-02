@@ -3573,8 +3573,9 @@ rule InstanceReuseHostAxes {
             instance.ram_gb >= job.cpu_mem_gb
 
     -- Interconnect: judged by the same naming-signal predicate the offer
-    -- filter uses (nvlink/sxm tokens read as NVLink; their absence reads
-    -- as PCIe), so the two paths cannot drift.
+    -- filter uses (nvlink/sxm/nvl tokens read as NVLink; their absence
+    -- reads as PCIe — "nvl" covers the NVLink-bridged H100 NVL, whose
+    -- bridge links card pairs only), so the two paths cannot drift.
     ensures:
         InterconnectSatisfied(job.interconnect, instance.gpu_naming_signals)
 
@@ -3582,11 +3583,17 @@ rule InstanceReuseHostAxes {
         -- Implementation: internal/campaign/reuse.go matchJobToInstance,
         -- through helpers in internal/campaign/offers.go shared with the
         -- launch-time path: effectiveCPUCoresFloor (also offerConstraintsForGroup),
-        -- hostRAMSatisfied (also filterOffersByHostRAM), and
+        -- hostCPUCoresSatisfied, hostRAMSatisfied (also filterOffersByHostRAM), and
         -- interconnectSatisfied (also filterOffersByInterconnect). The reuse
         -- interconnect signals are the launch record's resolved GPU name
-        -- (GPU class when unresolved) plus datacenter, mirroring the offer
-        -- filter's GPU-name + datacenter pair.
+        -- (GPU class when unresolved) plus datacenter, via
+        -- instanceInterconnectSignals, mirroring the offer filter's
+        -- GPU-name + datacenter pair.
+        --
+        -- The quickReuseCompatible prefilter (strategy_plan.go) applies the
+        -- same three floors through the same helpers: candidate slots are
+        -- capped, so an instance the full matcher would reject must not
+        -- hold a slot a usable instance could take.
         --
         -- The NVIDIA driver-major floor remains launch-time-only: launches
         -- persist the offer's driver-supported CUDA (enforced at reuse via

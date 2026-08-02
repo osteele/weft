@@ -355,27 +355,19 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	// confirmed to satisfy a floor the job asked for), RAM fails open via
 	// hostRAMSatisfied (RunPod launches record none).
 	coresFloor := effectiveCPUCoresFloor(constraints.CPUCores, job.HasTag(db.TagCPUIntensive))
-	if coresFloor > 0 {
+	if !hostCPUCoresSatisfied(coresFloor, inst.CPUCores) {
 		if inst.CPUCores <= 0 {
 			return false, fmt.Sprintf("CPU cores unknown: need>=%d", coresFloor)
 		}
-		if inst.CPUCores < coresFloor {
-			return false, fmt.Sprintf("CPU cores insufficient: need=%d instance=%d", coresFloor, inst.CPUCores)
-		}
+		return false, fmt.Sprintf("CPU cores insufficient: need=%d instance=%d", coresFloor, inst.CPUCores)
 	}
 
 	if !hostRAMSatisfied(constraints.CPUMemGB, inst.RAMGB) {
 		return false, fmt.Sprintf("host RAM insufficient: need=%dGB instance=%dGB", constraints.CPUMemGB, inst.RAMGB)
 	}
 
-	// Interconnect, judged on the same signal pair the offer filter reads:
-	// GPU name plus datacenter naming.
-	instGPUName := inst.ResolvedGPUName
-	if instGPUName == "" {
-		instGPUName = inst.GPUClass
-	}
-	if req := strings.ToLower(strings.TrimSpace(constraints.Interconnect)); !interconnectSatisfied(req, instGPUName+" "+inst.DataCenter) {
-		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", req, inst.DisplayGPUBrief())
+	if !interconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", constraints.Interconnect, inst.DisplayGPUBrief())
 	}
 
 	if ok, reason := matchInstanceTargetEligibility(placement.Constraints{GPUClass: constraints.GPUClass}, inst, 0); !ok {
@@ -448,6 +440,18 @@ func matchMachineAffinityIntent(job *db.Job, inst *db.Launch) (bool, string) {
 		return false, fmt.Sprintf("job is pinned to another machine: instance=%s", key)
 	}
 	return true, ""
+}
+
+// instanceInterconnectSignals returns the naming text interconnectSatisfied
+// judges an instance on: the same GPU-name-plus-datacenter pair the offer
+// filter reads, with the GPU class as fallback when no resolved name was
+// recorded.
+func instanceInterconnectSignals(inst *db.Launch) string {
+	name := inst.ResolvedGPUName
+	if name == "" {
+		name = inst.GPUClass
+	}
+	return name + " " + inst.DataCenter
 }
 
 func matchProviderIntent(job *db.Job, inst *db.Launch) (bool, string) {

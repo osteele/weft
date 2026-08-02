@@ -1999,6 +1999,22 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 		return false
 	}
 	constraints := placementConstraintsFromGroup(group)
+	// Host-axis floors, through the same predicates matchJobToInstance
+	// applies: cores fail closed on unknown, RAM fails open, interconnect is
+	// judged on the shared naming signals. A prefilter that admits an
+	// instance the full matcher rejects only wastes a candidate slot, but
+	// the slots are capped, so a slot-holding incompatible instance can
+	// displace a usable one. Checked first: these read only scalar fields,
+	// while the per-job image match below resolves runtime config from disk.
+	if !hostCPUCoresSatisfied(effectiveCPUCoresFloor(constraints.CPUCores, group.HasComputeIntensiveJob()), inst.CPUCores) {
+		return false
+	}
+	if !hostRAMSatisfied(constraints.CPUMemGB, inst.RAMGB) {
+		return false
+	}
+	if !interconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+		return false
+	}
 	if constraints.GPUMemGB > 0 && inst.GPUMemGB <= 0 {
 		constraints.GPUMemGB = 0
 	}
@@ -2007,12 +2023,6 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	}
 	for _, job := range group.Jobs {
 		if ok, _ := matchJobRequiredImage(job, inst); !ok {
-			return false
-		}
-	}
-	if group.HasComputeIntensiveJob() {
-		floor := computeCPUCoresFloor()
-		if inst.CPUCores <= 0 || inst.CPUCores < floor {
 			return false
 		}
 	}
