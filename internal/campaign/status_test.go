@@ -676,10 +676,12 @@ func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 	}
 }
 
-func TestWatchInstance_InstanceNotFoundMarksTerminal(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping: requires 30s dead-confirmation hysteresis")
-	}
+// Not-found alone must not reap the launch, no matter how sustained:
+// vast.ai's per-instance lookup transiently reports not-found for
+// still-booting instances, so the watch path routes it to the
+// heartbeat/bootstrap watchdogs (which not-found does not defer — see
+// deferTerminationForUnknownStatus) instead of the provider-dead path.
+func TestWatchInstance_InstanceNotFoundDoesNotMarkTerminal(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
@@ -695,27 +697,31 @@ func TestWatchInstance_InstanceNotFoundMarksTerminal(t *testing.T) {
 		t.Fatalf("update provider_instance_id: %v", err)
 	}
 
+	var showCalls int
 	mockClient := &cloud.MockClient{
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			showCalls++
 			return nil, cloud.ErrInstanceNotFound
 		},
 	}
 
-	// Run long enough for the dead-confirmation hysteresis (minDeadConfirmTime = 30s)
-	// to elapse. The provider poll interval is short so we get many observations.
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	ch := WatchInstance(ctx, mockClient, database, instanceID, 100*time.Millisecond, 100*time.Millisecond)
+	ch := WatchInstance(ctx, mockClient, database, instanceID, 20*time.Millisecond, 20*time.Millisecond)
 	for range ch {
+	}
+
+	if showCalls == 0 {
+		t.Fatal("expected ShowInstance to be called at least once")
 	}
 
 	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if !IsInstanceTerminal(ci.Status) {
-		t.Errorf("instance status = %q, want terminal (failed or completed); ErrInstanceNotFound should trigger provider-dead detection", ci.Status)
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q; not-found is adjudicated by the heartbeat/bootstrap watchdogs, not the provider-dead path", ci.Status, db.LaunchStatusRunning)
 	}
 }
 

@@ -456,8 +456,10 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 	action := r.CheckInstance(params)
 
-	// Handle termination intent post-processing (mark destroy succeeded)
-	if action.Kind == ActionTerminationIntent && isProviderTerminalWithPolicy(inst, params.PauseTolerant) {
+	// Handle termination intent post-processing (mark destroy succeeded).
+	// Requires positive evidence the provider instance is gone; a
+	// never-polled nil must not be recorded as a confirmed destroy.
+	if action.Kind == ActionTerminationIntent && providerConfirmedTerminal(inst, providerErr, params.PauseTolerant) {
 		markTerminationIntentDestroyed(database, ci, now)
 	}
 
@@ -1202,9 +1204,34 @@ func isProviderTerminal(inst *cloud.Instance) bool {
 	return isProviderTerminalWithPolicy(inst, false)
 }
 
+// providerConfirmedTerminal reports whether there is positive provider
+// evidence that an *expected* destroy has landed: either an observed
+// terminal provider status, or a lookup that failed with the
+// confirmed-absence sentinel (cloud.ErrInstanceNotFound). It backs the
+// termination-intent post-processing, where the agent already declared
+// it is shutting down and not-found corroborates that the instance is
+// gone. It is NOT a license to initiate termination: rule 7
+// (provider-dead) requires an observed terminal instance, because
+// vast.ai's endpoints transiently report not-found for still-booting
+// instances (see TestReconcileLaunches_FallbackInstanceNotFound_DoesNotMarkDead).
+// A nil instance with any other error — or with no error at all,
+// meaning the launch was never polled this pass (no provider ID
+// recorded yet because the create call is still in flight, or no
+// client configured for its provider) — is unknown, not terminal.
+func providerConfirmedTerminal(inst *cloud.Instance, providerErr error, pauseTolerant bool) bool {
+	if inst != nil {
+		return isProviderTerminalWithPolicy(inst, pauseTolerant)
+	}
+	return errors.Is(providerErr, cloud.ErrInstanceNotFound)
+}
+
 func isProviderTerminalWithPolicy(inst *cloud.Instance, pauseTolerant bool) bool {
 	if inst == nil {
-		return true // instance not found = dead
+		// No observed instance: nothing to probe or destroy. This is NOT
+		// confirmed death — callers needing positive evidence of absence
+		// use providerConfirmedTerminal, and rule 7 requires a non-nil
+		// instance before calling here.
+		return true
 	}
 	switch inst.Status {
 	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead:

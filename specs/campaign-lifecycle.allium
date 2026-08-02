@@ -2344,11 +2344,30 @@ rule ProviderInstanceDied {
         -- the bulk list endpoint may transiently omit live instances.
         -- When the batch lookup misses an instance, reconcile falls back
         -- to a per-instance ShowInstance call to confirm; only an
-        -- explicit per-ID terminal status (or per-ID not-found) is
-        -- treated as provider-confirmed death. Liveness is otherwise
-        -- driven by HeartbeatStaleAfterReady, not by list absence.
-        -- Implementation: internal/campaign/reconcile.go and
-        -- internal/campaign/instance_check.go.
+        -- explicit per-ID terminal status — a non-nil instance in a
+        -- terminal state — is treated as provider-confirmed death.
+        -- Per-ID not-found is NOT sufficient to initiate termination:
+        -- the per-instance lookup transiently reports not-found for
+        -- still-booting instances, so confirmed-absence reaping falls to
+        -- the heartbeat/bootstrap watchdogs, which not-found does not
+        -- defer (contrast ProviderStatusUnknownDefersTermination).
+        -- Not-found does confirm an *expected* destroy: for a launch
+        -- carrying a termination intent, per-ID not-found marks the
+        -- destroy succeeded (providerConfirmedTerminal in
+        -- internal/campaign/reconcile.go); for a launch that is already
+        -- terminal, the safety-net sweep does the same (see
+        -- ReconcileOrphanedProviderInstance).
+        -- A launch that was never polled this pass — no provider ID
+        -- recorded yet because the create call is still in flight, or
+        -- no client configured for its provider in this session — is
+        -- unknown, never dead. Treating never-polled as dead reaped
+        -- launches mid-create (2026-05-15: 16 launches failed with
+        -- "provider returned no instance", no provider ID recorded).
+        -- Liveness is otherwise driven by HeartbeatStaleAfterReady, not
+        -- by list absence.
+        -- Implementation: internal/campaign/reconcile.go
+        -- (providerConfirmedTerminal) and
+        -- internal/campaign/instance_check.go rule 7.
 }
 
 rule ProviderInstancePaused {
@@ -3842,9 +3861,13 @@ rule ReconcileOrphanedProviderInstance {
         -- genuinely exist. Reconcile and instance-status readers MUST treat
         -- an empty bulk response as "no signal" and fall back to per-instance
         -- ShowInstance lookup before concluding that tracked instances were
-        -- destroyed. Only an explicit per-ID not-found (see
-        -- ProviderInstanceDied) is terminal.
-        -- Implementation: internal/campaign/lifecycle.go reconcile path;
+        -- destroyed. For this safety-net path — the launch is already
+        -- terminal, so the destroy is expected — an explicit per-ID
+        -- not-found confirms the provider resource is gone. For LIVE
+        -- launches, per-ID not-found never initiates termination (see
+        -- ProviderInstanceDied).
+        -- Implementation: internal/campaign/reconcile.go
+        -- (ReconcileLaunches recently-terminal safety-net sweep);
         -- internal/runpod/client.go ListInstances / ShowInstance.
 }
 

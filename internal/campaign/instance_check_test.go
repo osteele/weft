@@ -601,7 +601,13 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_ProviderDead_MissingLaunchedInstanceIsProviderFailure(t *testing.T) {
+// Not-found is non-authoritative for initiating termination: vast.ai
+// transiently reports not-found for still-booting instances (see
+// TestReconcileLaunches_FallbackInstanceNotFound_DoesNotMarkDead), so a
+// nil instance with the ErrInstanceNotFound sentinel must not enter the
+// provider-dead path. Confirmed-gone instances are reaped by the
+// heartbeat/bootstrap watchdogs, which not-found does not defer.
+func TestCheckInstance_ConfirmedNotFound_NotProviderDead(t *testing.T) {
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -619,16 +625,77 @@ func TestCheckInstance_ProviderDead_MissingLaunchedInstanceIsProviderFailure(t *
 			AgentReadyAtUnix:   &agentReadyAt,
 		},
 		ProviderInst: nil,
+		ProviderErr:  fmt.Errorf("provider instance test-123: %w", cloud.ErrInstanceNotFound),
 		Now:          time.Now(),
 	})
-	if action.Kind != ActionProviderDead {
-		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
+	if action.Kind == ActionProviderDead {
+		t.Fatalf("not-found must not enter the provider-dead path; got %v", action.Kind)
 	}
-	if action.TerminationReason != db.TerminationReasonProviderFailure {
-		t.Fatalf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonProviderFailure)
+	if action.TerminalStatus != "" {
+		t.Fatalf("not-found must not reach a terminal status; got %q", action.TerminalStatus)
 	}
-	if action.AttemptOutcome != db.AttemptOutcomeOrphaned {
-		t.Fatalf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeOrphaned)
+}
+
+// Regression for the never-polled nil: a nil ProviderInst with a nil
+// ProviderErr means no lookup happened this pass (no provider ID recorded
+// yet, or no client configured for the provider). Rule 7 must not read
+// that as provider-dead — doing so reaped launches mid-create (the
+// 2026-05-15 16-orphan incident) and healthy launches whose provider
+// client was absent from the session's client list.
+func TestCheckInstance_NeverPolled_NotProviderDead(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1, // disable hysteresis: a single pass would terminate
+	}
+	launchedAt := time.Now().Add(-10 * time.Minute).Unix()
+	agentReadyAt := time.Now().Add(-8 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123", // provider ID known, but no client polled it
+			LaunchedAt:         &launchedAt,
+			AgentReadyAtUnix:   &agentReadyAt,
+		},
+		ProviderInst: nil,
+		ProviderErr:  nil,
+		Now:          time.Now(),
+	})
+	if action.Kind == ActionProviderDead {
+		t.Fatalf("never-polled launch must not be provider-dead; got %v", action.Kind)
+	}
+	if action.TerminalStatus != "" {
+		t.Fatalf("never-polled launch must not reach a terminal status; got %q", action.TerminalStatus)
+	}
+}
+
+// Regression for the create window: a `launching` row has no provider ID
+// until CreateInstance returns and SetLaunchProviderID runs — a stretch
+// that can span minutes of create attempts and offer searches. During
+// that window the reconciler sees (nil, nil) and must leave the launch
+// alone; the launching-phase timeout (rule 4c) and the bootstrap
+// deadline (rule 5) are the adjudicators for a create that never lands.
+func TestCheckInstance_LaunchingWithoutProviderID_NotProviderDead(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:        1,
+			Status:    db.LaunchStatusLaunching,
+			CreatedAt: time.Now().Add(-2 * time.Minute).Unix(),
+		},
+		ProviderInst: nil,
+		ProviderErr:  nil,
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("launching row without provider ID: action.Kind = %v, want ActionNone", action.Kind)
 	}
 }
 

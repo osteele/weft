@@ -857,15 +857,22 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 7. Provider dead detection (with hysteresis)
+	// 7. Provider dead detection (with hysteresis). Requires a positively
+	// observed terminal provider status — a non-nil instance reporting
+	// exited/destroyed/etc. A nil instance never qualifies: nil with a nil
+	// error means the launch was not polled this pass (create still in
+	// flight, or no client configured for its provider); nil with
+	// ErrInstanceNotFound is non-authoritative because vast.ai transiently
+	// reports not-found for still-booting instances, so confirmed-absence
+	// reaping is left to the heartbeat/bootstrap watchdogs above (which
+	// not-found does not defer — see deferTerminationForUnknownStatus);
+	// nil with any other error is a failed poll. See
+	// providerConfirmedTerminal for the confirmation-path counterpart.
 	// Skip grace-period instances — a transient API failure shouldn't kill the session.
-	if p.ProviderErr == nil && isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
-		var instDescr string
-		if p.ProviderInst == nil {
-			instDescr = "<nil>"
-		} else {
-			instDescr = fmt.Sprintf("status=%q intended=%q providerID=%q", p.ProviderInst.Status, p.ProviderInst.IntendedStatus, p.ProviderInst.ProviderID)
-		}
+	providerObserved := p.ProviderErr == nil && p.ProviderInst != nil
+	providerTerminal := providerObserved && isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant)
+	if providerTerminal && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
+		instDescr := fmt.Sprintf("status=%q intended=%q providerID=%q", p.ProviderInst.Status, p.ProviderInst.IntendedStatus, p.ProviderInst.ProviderID)
 		slog.Debug("reconcile: entering provider_dead path", "component", "reconcile", "instance", ci.ID, "inst", instDescr, "ci_status", ci.Status)
 		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now, p.PauseTolerant)
 	}
@@ -874,7 +881,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	// stretch of dead observations rather than inheriting an old one. Without
 	// this, an instance that flickers (alive, dead, alive, dead) over
 	// confirmTime would be marked dead on the second dead observation.
-	if p.ProviderErr == nil && p.ProviderInst != nil && !isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
+	if providerObserved && !providerTerminal {
 		r.mu.Lock()
 		delete(r.firstDeadAt, ci.ID)
 		r.mu.Unlock()

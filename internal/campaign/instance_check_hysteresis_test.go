@@ -21,12 +21,11 @@ func TestCheckInstance_LiveObservationResetsDeadConfirmTimer(t *testing.T) {
 		Status: db.LaunchStatusRunning,
 	}
 
-	// 1) First pass: provider returns nil (instance not in list). Hysteresis
+	// 1) First pass: provider reports the instance terminal. Hysteresis
 	//    starts the dead-confirm timer; no terminal action yet.
 	action := r.CheckInstance(CheckInstanceParams{
 		CI:           ci,
-		ProviderInst: nil,
-		ProviderErr:  nil,
+		ProviderInst: &cloud.Instance{ProviderID: "abc", Status: cloud.ProviderStatusExited},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionNone {
@@ -66,7 +65,7 @@ func TestCheckInstance_FlickerDoesNotMarkDeadPrematurely(t *testing.T) {
 	t0 := time.Now()
 
 	// Dead observation at t=0
-	r.CheckInstance(CheckInstanceParams{CI: ci, ProviderInst: nil, Now: t0})
+	r.CheckInstance(CheckInstanceParams{CI: ci, ProviderInst: &cloud.Instance{ProviderID: "abc", Status: cloud.ProviderStatusExited}, Now: t0})
 	// Alive observation at t=20s — resets timer
 	r.CheckInstance(CheckInstanceParams{
 		CI:           ci,
@@ -75,7 +74,7 @@ func TestCheckInstance_FlickerDoesNotMarkDeadPrematurely(t *testing.T) {
 	})
 	// Dead again at t=40s. Since the timer was reset, this should be the
 	// first observation of a new dead stretch — not 40s into the old one.
-	action := r.CheckInstance(CheckInstanceParams{CI: ci, ProviderInst: nil, Now: t0.Add(40 * time.Second)})
+	action := r.CheckInstance(CheckInstanceParams{CI: ci, ProviderInst: &cloud.Instance{ProviderID: "abc", Status: cloud.ProviderStatusExited}, Now: t0.Add(40 * time.Second)})
 	if action.Kind == ActionProviderDead {
 		t.Fatalf("flicker (dead→alive→dead within 40s) should not mark instance dead; got %d", action.Kind)
 	}

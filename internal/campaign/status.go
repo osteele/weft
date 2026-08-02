@@ -513,13 +513,17 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						_ = db.RecordProviderStatus(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
 						lastProviderStatus = inst.Status
 					}
-				} else if errors.Is(showErr, cloud.ErrInstanceNotFound) {
-					// Instance gone from provider — clear cached state so
-					// CheckInstance sees nil (isProviderTerminal(nil) == true),
-					// matching the batch reconciler's behavior.
-					cachedInstance = nil
-					lastProviderErr = nil
 				} else {
+					if errors.Is(showErr, cloud.ErrInstanceNotFound) {
+						// Confirmed absent at the provider — drop the stale
+						// cached instance and keep the sentinel. Not-found is
+						// non-authoritative for termination (vast.ai
+						// transiently 404s still-booting instances), so rule 7
+						// leaves adjudication to the heartbeat/bootstrap
+						// watchdogs, matching the batch reconciler's not-found
+						// handling.
+						cachedInstance = nil
+					}
 					lastProviderErr = showErr
 				}
 				lastProviderPoll = time.Now()
