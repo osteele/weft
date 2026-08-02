@@ -2,8 +2,10 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
@@ -137,7 +139,7 @@ func TestTryPlaceOntoExistingInstances_NoopWhenR2Unconfigured(t *testing.T) {
 		Database: database,
 		// R2Cfg intentionally empty
 	}
-	got := tryPlaceOntoExistingInstances(cfg, []*db.Job{job})
+	got := tryPlaceOntoExistingInstances(cfg, []*db.Job{job}, DefaultMaxCloudAttempts)
 	if len(got) != 1 || got[0].ID != jobID {
 		t.Fatalf("expected the original job to be returned, got %v", got)
 	}
@@ -155,16 +157,7 @@ func TestTryPlaceOntoExistingInstances_PassesThroughWhenNoReuseCandidate(t *test
 
 	// Stub R2 config so we exercise the post-credential branch. The
 	// placement evaluator returns Unplaced when no instances exist.
-	cfg := RelaunchConfig{
-		Database: database,
-		R2Cfg: cloud.R2Config{
-			AccountID:       "stub",
-			AccessKeyID:     "stub",
-			SecretAccessKey: "stub",
-			Bucket:          "stub",
-		},
-	}
-	got := tryPlaceOntoExistingInstances(cfg, []*db.Job{job})
+	got := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{job}, DefaultMaxCloudAttempts)
 	if len(got) != 1 || got[0].ID != jobID {
 		t.Fatalf("expected job to fall through unchanged, got %v", got)
 	}
@@ -222,15 +215,7 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 		return "req-test", nil
 	}
 
-	remaining := tryPlaceOntoExistingInstances(RelaunchConfig{
-		Database: database,
-		R2Cfg: cloud.R2Config{
-			AccountID:       "stub",
-			AccessKeyID:     "stub",
-			SecretAccessKey: "stub",
-			Bucket:          "stub",
-		},
-	}, []*db.Job{consumer})
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{consumer}, DefaultMaxCloudAttempts)
 	if len(remaining) != 0 {
 		t.Fatalf("remaining = %v, want consumer placed on producer instance", remaining)
 	}
@@ -239,5 +224,138 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 	}
 	if len(gotPayload.Jobs[0].CloudAfter) != 1 || gotPayload.Jobs[0].CloudAfter[0].JobID != producerID {
 		t.Fatalf("cloud_after = %#v, want producer %d", gotPayload.Jobs[0].CloudAfter, producerID)
+	}
+}
+
+// reusePassRetryFixture builds a running reusable instance, a compatible
+// unplaced job with `attempts` prior started-and-orphaned cloud attempts
+// (the last one ending at lastEnd), and the submit stubs that record a
+// successful reuse placement. Returns the job and a pointer to the count
+// of jobs submitted to the instance.
+func reusePassRetryFixture(t *testing.T, database *sql.DB, attempts int, lastEnd time.Time) (*db.Job, *int) {
+	t.Helper()
+
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "nvidia",
+		ResolvedGPUName: "RTX 4090",
+		GPUMemGB:        24,
+		NumGPUs:         1,
+		DiskGB:          120,
+	}); err != nil {
+		t.Fatalf("create reusable launch: %v", err)
+	}
+
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create failed launch: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo retry", "retry", "nvidia")
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	for i := 0; i < attempts; i++ {
+		end := lastEnd.Unix()
+		start := end - 60
+		if _, err := database.Exec(
+			`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, cloud_outcome, queued_at, start_time, end_time)
+			 VALUES (?, ?, '', ?, ?, ?, ?, ?, ?)`,
+			jobID, i+1, failedID, db.StatusFailed, db.AttemptOutcomeOrphaned, start, start, end,
+		); err != nil {
+			t.Fatalf("insert attempt %d: %v", i+1, err)
+		}
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	prevResolveResume := resolveResumeCloudNeedsFunc
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+		resolveResumeCloudNeedsFunc = prevResolveResume
+	})
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
+		return "sources/test.tar.gz", nil
+	}
+	resolveResumeCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ *db.Job) ([]cloud.CloudNeed, error) {
+		return nil, nil
+	}
+	submitted := 0
+	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (string, error) {
+		submitted += len(payload.Jobs)
+		return "req-test", nil
+	}
+	return job, &submitted
+}
+
+func reusePassStubCfg(database *sql.DB) RelaunchConfig {
+	return RelaunchConfig{
+		Database: database,
+		R2Cfg: cloud.R2Config{
+			AccountID:       "stub",
+			AccessKeyID:     "stub",
+			SecretAccessKey: "stub",
+			Bucket:          "stub",
+		},
+	}
+}
+
+// Control: with attempts below the cap and backoff elapsed, the fixture
+// job IS reuse-placed. The two gating tests below differ only in attempt
+// count / recency, so this pins that their skips come from the gate, not
+// from a missing candidate.
+func TestTryPlaceOntoExistingInstances_PastBackoffPlaces(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job, submitted := reusePassRetryFixture(t, database, 1, time.Now().Add(-10*time.Minute))
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{job}, DefaultMaxCloudAttempts)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining = %v, want job placed onto the reusable instance", remaining)
+	}
+	if *submitted != 1 {
+		t.Fatalf("submitted = %d, want 1", *submitted)
+	}
+}
+
+// Regression: the reuse pass honors the per-job attempt cap. A job that
+// instances keep bouncing must not re-submit every autopilot pass after
+// the new-instance path has already given up on it (wj889-shape
+// non-convergent loop: the submit succeeds, the attempt orphans, and the
+// job re-enters the unplaced pool with nothing limiting the cycle).
+func TestTryPlaceOntoExistingInstances_MaxAttemptsSkipsReuse(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job, submitted := reusePassRetryFixture(t, database, DefaultMaxCloudAttempts, time.Now().Add(-10*time.Minute))
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{job}, DefaultMaxCloudAttempts)
+	if len(remaining) != 1 || remaining[0].ID != job.ID {
+		t.Fatalf("remaining = %v, want job passed through for the eligibility loop to record the skip", remaining)
+	}
+	if *submitted != 0 {
+		t.Fatalf("submitted = %d, want 0 at the attempt cap", *submitted)
+	}
+}
+
+// Regression: the reuse pass honors the retry backoff window. An attempt
+// that just orphaned must not be re-submitted on the very next pass.
+func TestTryPlaceOntoExistingInstances_BackoffSkipsReuse(t *testing.T) {
+	database := db.SetupTestDB(t)
+	job, submitted := reusePassRetryFixture(t, database, 1, time.Now())
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{job}, DefaultMaxCloudAttempts)
+	if len(remaining) != 1 || remaining[0].ID != job.ID {
+		t.Fatalf("remaining = %v, want job passed through while in backoff", remaining)
+	}
+	if *submitted != 0 {
+		t.Fatalf("submitted = %d, want 0 during backoff", *submitted)
 	}
 }

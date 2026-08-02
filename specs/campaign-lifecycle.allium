@@ -2565,6 +2565,27 @@ rule RelaunchAfterInfraFailure {
         -- replacement instance would silently re-provision capacity the
         -- user already declined. See CancelSurvivesInstanceTermination
         -- in specs/job-lifecycle.allium.
+        --
+        -- Retry limiters apply to EVERY automatic placement path. The
+        -- relaunch pass first tries to place orphaned jobs onto already
+        -- running instances (reuse) before creating fresh ones; the
+        -- per-job attempt cap and retry backoff gate both paths
+        -- identically, because a submit that succeeds is not evidence
+        -- the job will stick — an instance that keeps bouncing a job
+        -- would otherwise re-accept it every pass without bound (a
+        -- non-convergent repair loop). The runaway breaker is the ONE
+        -- limiter the reuse pass is exempt from: the breaker gates new
+        -- instance creation, and a tripped breaker must not strand a
+        -- consumer whose --needs producer is already running on a
+        -- paid-up instance.
+        -- Implementation: internal/campaign/relaunch.go
+        -- ReuseRetryBlocked (shared cap + backoff gate), used by
+        -- tryPlaceOntoExistingInstances and by the autopilot
+        -- reuse-assignment path
+        -- (internal/orchestration/autopilot.go
+        -- submitAutoPilotReuseAssignments); the eligibility loop in
+        -- RelaunchOrphanedJobs re-evaluates the same limits and records
+        -- the skip events.
 }
 
 -- ==========================================================================

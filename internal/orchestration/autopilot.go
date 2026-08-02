@@ -1800,6 +1800,16 @@ func submitAutoPilotReuseAssignments(ctx context.Context, database *sql.DB, r2Cl
 		if assignment.Job == nil || assignment.Instance.Instance == nil {
 			continue
 		}
+		// Launch-attempt cap and backoff. The reuseBackoffRemaining check
+		// below only tracks failed *submits*; a submit that succeeds and
+		// then orphans resets nothing there, so without this gate an
+		// instance that keeps bouncing a job would re-accept it every
+		// autopilot pass without bound.
+		if blocked, reason := campaign.ReuseRetryBlocked(database, assignment.Job.ID, 0, time.Now()); blocked {
+			addAutoPilotBlockedReason(reuseDiagnostics, assignment.Job.ID, reason)
+			recordReuse(assignment.Job.ID, assignment.Instance.Instance.ID, reason, "")
+			continue
+		}
 		if remaining, count := reuseBackoffRemaining(database, assignment.Job.ID, time.Now()); remaining > 0 {
 			detail := fmt.Sprintf("reuse backoff %s remaining (after %d failed submit(s))", remaining.Truncate(time.Second), count)
 			emitReuseBackoffEvent(database, assignment.Job.ID, count, detail)

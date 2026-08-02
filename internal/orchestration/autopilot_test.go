@@ -2868,3 +2868,64 @@ func TestEnrichPlaceholderWithLastAttempt(t *testing.T) {
 		}
 	})
 }
+
+// Regression: the autopilot reuse path honors the per-job launch-attempt
+// cap. reuseBackoffRemaining only tracks failed submits, so a job whose
+// submits succeed but whose attempts then orphan (an instance repeatedly
+// bouncing it) had no limiter on this path — it would be re-accepted
+// every autopilot pass without bound.
+func TestSubmitAutoPilotReuseAssignments_AttemptCapSkips(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	inst, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch failed predecessor: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	for i := 0; i < campaign.DefaultMaxCloudAttempts; i++ {
+		end := time.Now().Add(-10 * time.Minute).Unix()
+		if _, err := database.Exec(
+			`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, cloud_outcome, queued_at, start_time, end_time)
+			 VALUES (?, ?, '', ?, ?, ?, ?, ?, ?)`,
+			jobID, i+1, failedID, db.StatusFailed, db.AttemptOutcomeOrphaned, end-60, end-60, end,
+		); err != nil {
+			t.Fatalf("insert attempt %d: %v", i+1, err)
+		}
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	reuseDiagnostics := map[int64]string{}
+	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
+		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
+		reuseDiagnostics, map[int64]string{}, nil)
+
+	if placed != 0 {
+		t.Fatalf("placed = %d, want 0 at the attempt cap", placed)
+	}
+	if !strings.Contains(reuseDiagnostics[jobID], "max cloud attempts") {
+		t.Fatalf("reuseDiagnostics = %q, want max-attempts reason", reuseDiagnostics[jobID])
+	}
+}

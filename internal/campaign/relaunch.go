@@ -210,7 +210,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// strand jobs whose --needs producer is already running on a paid-up
 	// instance. After this pass, `unplaced` retains only jobs that still
 	// require a fresh instance.
-	unplaced = tryPlaceOntoExistingInstances(cfg, unplaced)
+	unplaced = tryPlaceOntoExistingInstances(cfg, unplaced, maxAttempts)
 
 	if cfg.RunawayPolicy != nil && cfg.RunawayPolicy.Enabled && !cfg.BypassRunawayBreaker {
 		if blocked, reason, err := evaluateRunawayBreaker(cfg.Database, cfg, unplaced, time.Now()); err != nil {
@@ -256,7 +256,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 			continue
 		}
 		if count > 0 {
-			if remaining := backoffRemaining(facts, count, time.Now()); remaining > 0 {
+			if remaining := backoffRemaining(facts, time.Now()); remaining > 0 {
 				detail := fmt.Sprintf("backoff %s remaining (after %d failure(s))", remaining.Truncate(time.Second), count)
 				slog.Debug("job in backoff window, skipping",
 					"component", "relaunch",
@@ -1918,14 +1918,14 @@ type relaunchAttemptFacts struct {
 }
 
 // backoffRemaining returns how long the caller must still wait before
-// re-launching this job, given count consecutive prior attempts. Zero means
-// the job is eligible (including when the last attempt's end time is
-// unknown — see retrypolicy.BackoffRemaining).
-func backoffRemaining(facts relaunchAttemptFacts, count int, now time.Time) time.Duration {
+// re-launching this job, given facts.Count consecutive prior attempts. Zero
+// means the job is eligible (including when there are no prior attempts or
+// the last attempt's end time is unknown — see retrypolicy.BackoffRemaining).
+func backoffRemaining(facts relaunchAttemptFacts, now time.Time) time.Duration {
 	if facts.LastAttemptEndTime == nil {
 		return 0
 	}
-	return retrypolicy.BackoffRemaining(count, time.Unix(*facts.LastAttemptEndTime, 0), now)
+	return retrypolicy.BackoffRemaining(facts.Count, time.Unix(*facts.LastAttemptEndTime, 0), now)
 }
 
 func attemptFactsForRelaunch(database *sql.DB, jobID int64) (relaunchAttemptFacts, error) {
@@ -2123,13 +2123,44 @@ func openRelaunchIntents(database *sql.DB, jobs []*db.Job) []int64 {
 	return out
 }
 
+// ReuseRetryBlocked reports whether a job's launch-attempt history blocks
+// an automatic reuse placement: the per-job attempt cap or the retry
+// backoff window. Shared by the relaunch reuse pass and the autopilot
+// reuse-assignment path so a job that instances repeatedly bounce (submit
+// succeeds, attempt orphans, job returns to unplaced) cannot cycle through
+// either path without bound. An attempt-lookup error blocks — placement
+// decisions fail closed on unknown. maxAttempts <= 0 uses
+// DefaultMaxCloudAttempts. The reason is a short human-readable cause for
+// diagnostics; callers that record their own reasons may ignore it.
+func ReuseRetryBlocked(database *sql.DB, jobID int64, maxAttempts int, now time.Time) (bool, string) {
+	if maxAttempts <= 0 {
+		maxAttempts = DefaultMaxCloudAttempts
+	}
+	facts, err := attemptFactsForRelaunch(database, jobID)
+	if err != nil {
+		return true, "attempt history unavailable: " + err.Error()
+	}
+	if facts.Count >= maxAttempts {
+		return true, fmt.Sprintf("max cloud attempts reached (%d)", facts.Count)
+	}
+	if remaining := backoffRemaining(facts, now); remaining > 0 {
+		return true, fmt.Sprintf("retry backoff %s remaining (after %d failure(s))", remaining.Truncate(time.Second), facts.Count)
+	}
+	return false, ""
+}
+
 // tryPlaceOntoExistingInstances attempts to place each unplaced cloud job
 // onto an already-running cloud instance via ReuseSource scoring. Returns
 // the subset of jobs that could not be placed (those still need a fresh
 // instance). Runs ahead of the runaway-breaker check so that consumers of
 // running producers ride the producer's instance even when the breaker
-// has paused new launches.
-func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job) []*db.Job {
+// has paused new launches. The breaker is the only limiter this pass is
+// exempt from: the per-job attempt cap and backoff apply here just as in
+// the new-instance path, so a job that instances repeatedly bounce
+// (submit succeeds, attempt orphans, job returns to unplaced) cannot
+// re-submit every pass without bound — a placement succeeding is not
+// evidence the job will stick.
+func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job, maxAttempts int) []*db.Job {
 	if cfg.Database == nil || len(jobs) == 0 {
 		return jobs
 	}
@@ -2157,6 +2188,13 @@ func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job) []*db.Job
 		}
 		if j.LaunchID != nil && *j.LaunchID != 0 {
 			continue // already placed
+		}
+		// Attempt cap and backoff: skip to `remaining`, where the
+		// new-instance eligibility loop re-evaluates the same limits and
+		// records the cap/backoff skip reason.
+		if blocked, _ := ReuseRetryBlocked(cfg.Database, j.ID, maxAttempts, time.Now()); blocked {
+			remaining = append(remaining, j)
+			continue
 		}
 		constraints := placement.ConstraintsFromJob(j)
 		// Bias scoring toward the live instance hosting any --needs producer

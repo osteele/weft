@@ -536,12 +536,12 @@ func TestBackoffRemaining(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var facts relaunchAttemptFacts
+			facts := relaunchAttemptFacts{Count: tt.count}
 			if tt.hasEnd {
 				end := now.Add(-tt.elapsed).Unix()
 				facts.LastAttemptEndTime = &end
 			}
-			got := backoffRemaining(facts, tt.count, now)
+			got := backoffRemaining(facts, now)
 			if tt.wantZero {
 				if got != 0 {
 					t.Fatalf("want 0, got %v", got)
