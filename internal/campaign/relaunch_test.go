@@ -1,6 +1,8 @@
 package campaign
 
 import (
+	"database/sql"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -552,5 +554,123 @@ func TestBackoffRemaining(t *testing.T) {
 				t.Fatalf("want %v..%v, got %v", tt.wantMin, tt.wantMax, got)
 			}
 		})
+	}
+}
+
+func countLifecycleEvents(t *testing.T, database *sql.DB, kind string) int {
+	t.Helper()
+	counts, err := db.CountLifecycleEventsByKind(database, db.LifecycleEventFilter{Kind: kind})
+	if err != nil {
+		t.Fatalf("count %s events: %v", kind, err)
+	}
+	total := 0
+	for _, c := range counts {
+		total += c.Count
+	}
+	return total
+}
+
+// Regression: a tripped breaker blocks every relaunch pass, but only the
+// first blocked pass per trip records a runaway_blocked event.
+func TestEvaluateRunawayBreaker_BlockedEventOncePerTrip(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Distinct project label keeps this test's dedup key unique despite the
+	// process-global emitted map.
+	project := fmt.Sprintf("runaway-dedup-%d", time.Now().UnixNano())
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchRunawayTripped,
+		Detail:    runawayScopeDetail(project, "test trip"),
+	}); err != nil {
+		t.Fatalf("insert tripped event: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	cfg := RelaunchConfig{
+		Database:      database,
+		ScopeProject:  project,
+		RunawayPolicy: &RunawayPolicy{Enabled: true, Window: time.Hour, ChainNoProgressLimit: 3},
+	}
+	for pass := 1; pass <= 3; pass++ {
+		blocked, _, err := evaluateRunawayBreaker(database, cfg, []*db.Job{job}, time.Now())
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if !blocked {
+			t.Fatalf("pass %d: blocked = false, want true while tripped", pass)
+		}
+	}
+	if got := countLifecycleEvents(t, database, db.EventRelaunchRunawayBlocked); got != 1 {
+		t.Fatalf("runaway_blocked events = %d, want 1 across 3 blocked passes", got)
+	}
+}
+
+// A pass that finds nothing eligible, launches nothing, skips nothing, and
+// errors nowhere writes no pass-summary event — per-pass no-op rows are
+// unbounded lifecycle_events growth at autopilot cadence.
+func TestRelaunchOrphanedJobs_NoopPassWritesNoSummary(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	if _, err := RelaunchOrphanedJobs(RelaunchConfig{Database: database}); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	if got := countLifecycleEvents(t, database, db.EventRelaunchPassSummary); got != 0 {
+		t.Fatalf("pass-summary events = %d, want 0 for a no-op pass", got)
+	}
+}
+
+// A pass with activity (here: a max-attempts skip) still writes the
+// summary, so "was anything attempted?" stays answerable from the DB.
+func TestRelaunchOrphanedJobs_ActivePassWritesSummary(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create failed launch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if err := db.AddJobTag(database, jobID, db.TagRental); err != nil {
+		t.Fatalf("tag job: %v", err)
+	}
+	for i := 0; i < DefaultMaxCloudAttempts; i++ {
+		if _, err := db.CreateAttempt(database, jobID, "", &failedID, db.StatusFailed); err != nil {
+			t.Fatalf("create attempt %d: %v", i+1, err)
+		}
+	}
+	end := time.Now().Add(-10 * time.Minute).Unix()
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET cloud_outcome = ?, start_time = ?, end_time = ? WHERE job_id = ? AND launch_id = ?`,
+		db.AttemptOutcomeOrphaned, end-60, end, jobID, failedID,
+	); err != nil {
+		t.Fatalf("update attempts: %v", err)
+	}
+
+	result, err := RelaunchOrphanedJobs(RelaunchConfig{Database: database})
+	if err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("skipped = %d, want 1 (max attempts)", result.Skipped)
+	}
+	if got := countLifecycleEvents(t, database, db.EventRelaunchPassSummary); got != 1 {
+		t.Fatalf("pass-summary events = %d, want 1 for an active pass", got)
 	}
 }

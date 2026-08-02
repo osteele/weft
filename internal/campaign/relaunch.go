@@ -38,6 +38,20 @@ var DefaultMaxCloudAttempts = retrypolicy.MaxPlacementAttempts()
 // per-pass autopilot loop emits at most one event per (job, count) pair.
 var backoffEventEmitted sync.Map
 
+// runawayBlockedKey identifies a runaway breaker scope for blocked-event
+// dedup.
+type runawayBlockedKey struct {
+	campaignID int64
+	project    string
+}
+
+// runawayBlockedEventEmitted maps each runaway scope to the trip timestamp
+// whose relaunch.runaway_blocked event has been recorded, so a tripped
+// breaker writes one row per trip rather than one per pass. Process-local,
+// like backoffEventEmitted: a restarted session re-emits once, which is
+// bounded and preserves the audit trail.
+var runawayBlockedEventEmitted sync.Map
+
 // RelaunchConfig configures automatic relaunch of orphaned cloud jobs.
 type RelaunchConfig struct {
 	Clients               []cloud.Client
@@ -147,9 +161,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 	// actually attempted this pass?" question is answerable from the DB.
 	// Without this, silent branches (e.g. groupOffers empty, or launch
 	// goroutines with a nil client) leave no trace beyond relaunch.eligible.
+	// No-op passes (nothing eligible, launched, skipped, or errored) write
+	// nothing: a per-pass row at autopilot cadence records no information.
 	var eligibleCount int
 	defer func() {
 		if rr == nil {
+			return
+		}
+		if eligibleCount == 0 && len(rr.InstanceIDs) == 0 && rr.Skipped == 0 && len(rr.Errors) == 0 {
 			return
 		}
 		_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
@@ -235,6 +254,8 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 		}
 		facts, err := attemptFactsForRelaunch(cfg.Database, j.ID)
 		if err != nil {
+			result.Skipped++
+			recordJobSkipReason(result, j.ID, 0, "attempt history unavailable: "+err.Error())
 			continue
 		}
 		count := facts.Count
@@ -1172,11 +1193,17 @@ func evaluateRunawayBreaker(database *sql.DB, cfg RelaunchConfig, unplaced []*db
 	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, campaignID, cfg.ScopeProject)
 	if trippedAt > resumedAt {
 		reason := runawayPausedReason
-		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
-			EventKind:  db.EventRelaunchRunawayBlocked,
-			CampaignID: campaignID,
-			Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
-		})
+		// One blocked event per (trip, scope), not one per pass — the
+		// breaker blocks every relaunch pass while tripped, and per-pass
+		// rows record no state change. See specs/campaign-lifecycle.allium.
+		key := runawayBlockedKey{campaignID: campaignID, project: runawayProjectLabel(cfg.ScopeProject)}
+		if prev, loaded := runawayBlockedEventEmitted.Swap(key, trippedAt); !loaded || prev.(int64) != trippedAt {
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind:  db.EventRelaunchRunawayBlocked,
+				CampaignID: campaignID,
+				Detail:     runawayScopeDetail(cfg.ScopeProject, reason),
+			})
+		}
 		return true, reason, nil
 	}
 

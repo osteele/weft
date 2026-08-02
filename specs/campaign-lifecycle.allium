@@ -2740,6 +2740,13 @@ rule RunawayBreakerTrips {
         -- next accounting window, so a reset gives fresh launches a real
         -- chance before the breaker can trip again.
         -- Recorded as lifecycle_event kind=relaunch.runaway_tripped.
+        -- Event volume: a blocked pass records relaunch.runaway_blocked
+        -- at most once per (trip, scope) per relaunch process (the dedup
+        -- registry is process-local), not once per pass — the breaker
+        -- blocks every autopilot pass while tripped, and per-pass rows
+        -- record no state change. Likewise the relaunch pass-summary
+        -- event is written only for passes with activity (eligible,
+        -- launched, skipped, or errored jobs), never for no-op passes.
         -- Implementation: internal/campaign/relaunch.go evaluateRunawayBreaker(),
         -- queryRunawayMetrics(), tryPlaceOntoExistingInstances(); infra-reason
         -- set in internal/db/cloud_instances.go IsInfrastructureTermination /
