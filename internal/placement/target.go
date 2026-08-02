@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/compat"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/gpucatalog"
 	"github.com/osteele/weft/internal/inventory"
 )
@@ -31,6 +32,14 @@ type TargetSpec struct {
 	NVIDIADriverVersion string
 	NVIDIADriverMajor   int
 	GLIBCXXVersion      string
+
+	// MachineKey is the provider-qualified physical machine identity
+	// (db.ProviderMachineKey form, e.g. "vastai/49863"). Empty means the
+	// target has no known machine identity: every on-prem host, and cloud
+	// targets whose provider did not report one. Pinned jobs fail closed
+	// against an empty key — a target that cannot be identified is not
+	// confirmed to be the pinned machine.
+	MachineKey string
 
 	// MaxComputeCapUnknownFailsClosed keeps source-specific uncertainty policy
 	// inside the unified predicate. Unknown max caps fail closed for placement:
@@ -82,6 +91,7 @@ const (
 	ReasonComputeCapMax   EligibilityReasonKind = "compute_cap_max"
 	ReasonComputeCapMin   EligibilityReasonKind = "compute_cap_min"
 	ReasonCUDAChain       EligibilityReasonKind = "cuda_chain"
+	ReasonMachinePin      EligibilityReasonKind = "machine_pin"
 )
 
 func (r EligibilityReason) String() string {
@@ -210,6 +220,9 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	if t.OptInOnly && !t.ExplicitlyNamed {
 		return fail(ReasonOptInOnly, "host is opt-in only (specify with --host)", 0, 0)
 	}
+	if reason, violated := machinePinViolation(c, t); violated {
+		return fail(ReasonMachinePin, reason, 0, 0)
+	}
 
 	if reason, ok := targetCompatibilityViolation(c, t); ok {
 		return fail(reason.Kind, reason.Message, 0, 0)
@@ -262,6 +275,22 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 
 	return v
+}
+
+// machinePinViolation rejects targets that are not a machine the job is
+// pinned to. Pins name provider physical machines, so a target with no
+// machine identity — every on-prem host — can never satisfy one; unknown
+// fails closed for the same reason db.assertMachineAffinitySatisfied does.
+func machinePinViolation(c Constraints, t TargetSpec) (string, bool) {
+	if len(c.MachineAffinity) == 0 || db.MachineRefsMatch(c.MachineAffinity, t.MachineKey) {
+		return "", false
+	}
+	where := "target has no provider machine identity"
+	if t.MachineKey != "" {
+		where = "target is " + t.MachineKey
+	}
+	return fmt.Sprintf("job is pinned to machine(s) %s; %s",
+		strings.Join(c.MachineAffinity, ", "), where), true
 }
 
 func targetCompatibilityViolation(c Constraints, t TargetSpec) (EligibilityReason, bool) {

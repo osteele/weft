@@ -21,6 +21,7 @@ func TargetSpecFromOffer(offer cloud.Offer) placement.TargetSpec {
 		Provider:                        string(offer.Provider),
 		Devices:                         []placement.TargetDevice{device},
 		CUDAVersion:                     strings.TrimSpace(formatCloudCUDAVersion(offer.CUDAVersion)),
+		MachineKey:                      offerMachineClaimKey(offer),
 		MaxComputeCapUnknownFailsClosed: true,
 	}
 }
@@ -35,6 +36,7 @@ func TargetSpecFromCloudInstance(inst db.Launch) placement.TargetSpec {
 		Provider:                        inst.Provider,
 		Devices:                         []placement.TargetDevice{device},
 		CUDAVersion:                     strings.TrimSpace(formatCloudCUDAVersion(inst.CUDAVersion)),
+		MachineKey:                      db.ProviderMachineKey(inst.Provider, inst.MachineID),
 		MaxComputeCapUnknownFailsClosed: true,
 	}
 }

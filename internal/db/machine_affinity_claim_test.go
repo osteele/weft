@@ -97,6 +97,34 @@ func TestClaimUnaffectedWithoutPin(t *testing.T) {
 	}
 }
 
+// A pin names a provider physical machine, which no on-prem host is. The
+// jobs.host write is the on-prem counterpart of the cloud claim boundary, so
+// it carries the same backstop: eligibility already rejects pinned jobs on
+// every host, and this survives an upstream filter that goes missing.
+func TestAssignJobHostRefusesPinnedJob(t *testing.T) {
+	database := setupTestDB(t)
+	jobID := pinnedTestJob(t, database, `{"machine_affinity":["49863"]}`)
+
+	assigned, err := AssignJobHost(database, jobID, "host-alpha")
+	if !errors.Is(err, ErrJobPinnedToOtherMachine) {
+		t.Fatalf("err = %v, want ErrJobPinnedToOtherMachine", err)
+	}
+	if assigned {
+		t.Fatal("AssignJobHost bound a pinned job to an on-prem host")
+	}
+}
+
+func TestAssignJobHostUnaffectedWithoutPin(t *testing.T) {
+	for _, overrides := range []string{"", "{}", `{"gpu":"a100"}`} {
+		database := setupTestDB(t)
+		jobID := pinnedTestJob(t, database, overrides)
+		assigned, err := AssignJobHost(database, jobID, "host-alpha")
+		if err != nil || !assigned {
+			t.Errorf("cli_overrides=%q: AssignJobHost = (%v, %v), want unpinned job assigned", overrides, assigned, err)
+		}
+	}
+}
+
 func pinnedTestJob(t *testing.T, database *sql.DB, overridesJSON string) int64 {
 	t.Helper()
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python probe.py", "cloud", "")

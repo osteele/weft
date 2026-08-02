@@ -42,6 +42,22 @@ func MachineRefKey(ref string) string {
 	return ProviderMachineKey(ParseMachineRef(ref))
 }
 
+// MachineRefsMatch reports whether any pin in refs names the machine with the
+// given ProviderMachineKey. An empty key never matches: a target whose machine
+// cannot be identified is not confirmed to be a pinned one, and eligibility
+// fails closed on unknown.
+func MachineRefsMatch(refs []string, key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, ref := range refs {
+		if MachineRefKey(ref) == key {
+			return true
+		}
+	}
+	return false
+}
+
 // CampaignCoveredMachineIDs returns provider-qualified machine IDs that have
 // already produced a completed datapoint for this campaign.
 func CampaignCoveredMachineIDs(database *sql.DB, campaignID int64) (map[string]struct{}, error) {

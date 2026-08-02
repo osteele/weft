@@ -2074,6 +2074,20 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 		return false, nil
 	}
 
+	// Backstop, mirroring assertMachineAffinitySatisfied for cloud claims: a
+	// pin names a provider physical machine, which no on-prem host is, so a
+	// pinned job must never be bound to jobs.host. Placement eligibility
+	// already rejects these upstream; this survives an upstream filter that
+	// is missing or gets added later.
+	pins, err := jobMachineAffinityRefs(database, jobID)
+	if err != nil {
+		return false, err
+	}
+	if len(pins) > 0 {
+		return false, fmt.Errorf("job %d pinned to %s but host %q has no provider machine identity: %w",
+			jobID, strings.Join(pins, ","), host, ErrJobPinnedToOtherMachine)
+	}
+
 	// Check if an attempt exists. If not, create one (unplaced jobs have no
 	// attempt until placement).
 	attemptID, err := GetLatestAttemptID(database, jobID)
@@ -3931,18 +3945,14 @@ var ErrJobPinnedToOtherMachine = errors.New("job is pinned to a different physic
 // guessing costs a measurement attributed to the wrong hardware, which is the
 // whole reason to pin a job.
 //
-// Note this covers cloud launches only; on-prem placement writes jobs.host and
-// never reaches this path.
+// This covers cloud launches; the on-prem jobs.host write carries the same
+// backstop in AssignJobHost.
 func assertMachineAffinitySatisfied(tx *sql.Tx, jobID, instanceID int64) error {
-	var overridesJSON sql.NullString
-	if err := tx.QueryRow(`SELECT cli_overrides FROM jobs WHERE id = ?`, jobID).Scan(&overridesJSON); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
+	pins, err := jobMachineAffinityRefs(tx, jobID)
+	if err != nil {
 		return err
 	}
-	overrides := decodeCLIResourceOverrides(overridesJSON)
-	if overrides == nil || len(overrides.MachineAffinity) == 0 {
+	if len(pins) == 0 {
 		return nil
 	}
 
@@ -3951,15 +3961,33 @@ func assertMachineAffinitySatisfied(tx *sql.Tx, jobID, instanceID int64) error {
 		return err
 	}
 	actual := ProviderMachineKey(provider.String, machineID.String)
-	for _, ref := range overrides.MachineAffinity {
-		if key := MachineRefKey(ref); key != "" && key == actual {
-			return nil
-		}
+	if MachineRefsMatch(pins, actual) {
+		return nil
 	}
 	where := "reports no machine"
 	if actual != "" {
 		where = "is on " + actual
 	}
 	return fmt.Errorf("job %d pinned to %s but launch %d %s: %w",
-		jobID, strings.Join(overrides.MachineAffinity, ","), instanceID, where, ErrJobPinnedToOtherMachine)
+		jobID, strings.Join(pins, ","), instanceID, where, ErrJobPinnedToOtherMachine)
+}
+
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// jobMachineAffinityRefs loads a job's machine pins from cli_overrides.
+// A missing row or absent overrides means no pins.
+func jobMachineAffinityRefs(q rowQuerier, jobID int64) ([]string, error) {
+	var overridesJSON sql.NullString
+	if err := q.QueryRow(`SELECT cli_overrides FROM jobs WHERE id = ?`, jobID).Scan(&overridesJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if overrides := decodeCLIResourceOverrides(overridesJSON); overrides != nil {
+		return overrides.MachineAffinity, nil
+	}
+	return nil, nil
 }

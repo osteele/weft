@@ -108,6 +108,12 @@ type Constraints struct {
 	// reservation so re-scoring a host the job is already targeted at does
 	// not count the job against itself.
 	SelfJobID int64
+
+	// MachineAffinity pins the job to specific provider physical machines
+	// (refs as stored on CLIResourceOverrides; a bare id means vast.ai).
+	// Non-empty pins make every target without a matching machine identity
+	// ineligible — including all on-prem hosts, which have none.
+	MachineAffinity []string
 }
 
 // ConstraintSource is the normalized input to placement constraint
@@ -163,6 +169,9 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		Tags:                 src.Tags,
 		PreferredInstanceIDs: src.PreferredInstanceIDs,
 		SelfJobID:            src.SelfJobID,
+	}
+	if src.CLIOverrides != nil {
+		c.MachineAffinity = slices.Clone(src.CLIOverrides.MachineAffinity)
 	}
 	if c.Provider == "" {
 		if provider, ok := db.RequestedProvider(src.Tags); ok {

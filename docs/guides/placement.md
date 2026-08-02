@@ -385,6 +385,10 @@ Two things to expect:
   a pinned job passes it over. This mainly affects providers without per-offer
   machine identity — a pinned job will not reuse a RunPod instance whose machine
   weft cannot name, even when it otherwise fits.
+- **On-prem hosts never satisfy a pin.** A pin names a provider physical
+  machine, which no inventory host is, so a pinned job is excluded from
+  on-prem placement even when its other constraints would fit an idle local
+  GPU. Drop the pin if you want the job to float back on-prem.
 
 `--affinity` on a job and on a launch intersect: each narrows the machines under
 consideration, so a job pinned outside its launch's set is unplaceable rather

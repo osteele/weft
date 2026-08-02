@@ -421,12 +421,11 @@ func matchMachineAffinityIntent(job *db.Job, inst *db.Launch) (bool, string) {
 		len(job.CLIResourceOverrides.MachineAffinity) == 0 {
 		return true, ""
 	}
-	pins := MachineRefKeys(job.CLIResourceOverrides.MachineAffinity)
 	key := db.ProviderMachineKey(string(inst.Provider), inst.MachineID)
 	if key == "" {
 		return false, "job is pinned to a machine but the instance reports none"
 	}
-	if _, ok := pins[key]; !ok {
+	if !db.MachineRefsMatch(job.CLIResourceOverrides.MachineAffinity, key) {
 		return false, fmt.Sprintf("job is pinned to another machine: instance=%s", key)
 	}
 	return true, ""
