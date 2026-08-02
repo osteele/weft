@@ -593,6 +593,36 @@ value Constraints {
                                 -- job against itself.
 }
 
+-- Every constraint axis a job can carry must be accounted for in every
+-- placement system that can bind the job to hardware: the cloud offer chain,
+-- the reuse matcher, on-prem host scoring, and the claim-time backstops. An
+-- axis some system neither checks nor declares out of scope is accepted at
+-- submit and silently unmet whenever that system serves the job — the
+-- machine-pin, interconnect, host-RAM, CPU-cores, and driver-floor bugs each
+-- shipped that way.
+contract ConstraintSystemCoverage {
+    for each axis in ConstraintAxes():
+        for each system in {offer_chain, reuse, on_prem, claim_backstop}:
+            EnforcementRecorded(system, axis)
+
+    @guidance
+        -- The axis vocabulary derives from `enforce` struct tags on
+        -- placement.Constraints, so a new constraint field cannot compile
+        -- into placement without naming its axis (or declaring itself a
+        -- non-constraint with `enforce:"-"`). campaign's
+        -- constraintSystemEnforcement table records who checks each axis in
+        -- each system; TestConstraintSystemCoverage fails on any missing
+        -- decision, and TestKnownConstraintSystemGaps pins the (currently
+        -- empty) list of deliberate holes. This is the cross-system
+        -- counterpart of the per-provider axisEnforcement table inside the
+        -- offer chain (TestConstraintAxisCoverage).
+        --
+        -- The claim backstop is deliberately narrow: it asserts only axes
+        -- whose violation reads as success (machine pins today). Axes that
+        -- fail loudly downstream are declared not-applicable there, with
+        -- SKU memory noted as the standing candidate for widening.
+}
+
 rule BuildConstraintsFromJob {
     when: PlacementEvaluationStarts(job)
 

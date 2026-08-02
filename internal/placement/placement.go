@@ -52,18 +52,25 @@ func LoadHostNames() ([]string, error) {
 }
 
 // Constraints describes hard requirements for a job placement.
+//
+// The `enforce` tag names the constraint axis a field carries (or `-` for
+// fields that are scoring inputs, shadows, or identifiers rather than hard
+// constraints). The axis vocabulary is derived from these tags, and
+// campaign's constraintSystemEnforcement table must record who checks each
+// axis in each placement system — so a new constraint field cannot be added
+// without deciding where it is enforced. See TestConstraintSystemCoverage.
 type Constraints struct {
-	GPUClass     string   // Required GPU class (e.g., "a100"); empty = no preference
-	Provider     string   // Requested rental provider (e.g., "vastai", "runpod"); empty = any
-	NumGPUs      int      // Exact number of GPUs requested on one host/rental (0/1 = one)
-	GPUMemGB     int      // Minimum GPU memory in GB; 0 = no minimum
-	CPUCores     int      // Minimum effective CPU cores/vCPUs
-	CPUMemGB     int      // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
-	Interconnect string   // Requested intra-host interconnect: any, pcie, nvlink
-	Inputs       []string // Asset refs the job reads (for locality scoring)
-	Command      string   // For predictor-based scoring; empty = skip
-	Project      string   // For predictor-based scoring; empty = skip
-	Tags         []string // Job tags; benchmark-isolation triggers idle-host requirement
+	GPUClass     string   `enforce:"gpu_class"`    // Required GPU class (e.g., "a100"); empty = no preference
+	Provider     string   `enforce:"provider"`     // Requested rental provider (e.g., "vastai", "runpod"); empty = any
+	NumGPUs      int      `enforce:"num_gpus"`     // Exact number of GPUs requested on one host/rental (0/1 = one)
+	GPUMemGB     int      `enforce:"gpu_memory"`   // Minimum GPU memory in GB; 0 = no minimum
+	CPUCores     int      `enforce:"cpu_cores"`    // Minimum effective CPU cores/vCPUs
+	CPUMemGB     int      `enforce:"host_ram"`     // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
+	Interconnect string   `enforce:"interconnect"` // Requested intra-host interconnect: any, pcie, nvlink
+	Inputs       []string `enforce:"-"`            // Asset refs the job reads (for locality scoring)
+	Command      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
+	Project      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
+	Tags         []string `enforce:"-"`            // Driving tags translate into other axes (cpu-intensive -> cpu_cores, interruptible -> instance routing, benchmark -> idle-host scoring)
 
 	// PreferredInstanceIDs is a soft preference toward reusing these specific
 	// rental instances. Used to co-locate a consumer on its --needs
@@ -72,48 +79,48 @@ type Constraints struct {
 	// tie-breaker / tip: if the preferred instance fails the GPU class /
 	// capacity / provider filters, placement falls through to the normal
 	// ranking.
-	PreferredInstanceIDs []int64
+	PreferredInstanceIDs []int64 `enforce:"-"`
 
 	// MaxComputeCap is the highest CUDA compute capability the job's
 	// installed PyTorch wheel can target ("9.0", "12.0", ...). Empty string
 	// disables this filter. Inferred from the project's uv.lock or
 	// pyproject.toml via dataloc.ScanTorchPin and TorchMaxComputeCap, or
 	// supplied explicitly via [tool.weft] gpu-arch-max.
-	MaxComputeCap string
+	MaxComputeCap string `enforce:"arch_cap_max"`
 
 	// MinComputeCap is the lowest CUDA compute capability the job's
 	// installed PyTorch wheel can target ("7.5", "8.0", ...). Empty string
 	// disables this filter. Inferred from the project's uv.lock or
 	// pyproject.toml.
-	MinComputeCap string
+	MinComputeCap string `enforce:"arch_cap_min"`
 
 	// Minimum NVIDIA runtime compatibility required by the job. These are
 	// compared against static on-prem host inventory (`cuda_version` and
 	// `nvidia_driver`). Empty/zero disables the corresponding filter.
-	MinCUDAVersion   string
-	MinDriverVersion int
+	MinCUDAVersion   string `enforce:"cuda_floor"`
+	MinDriverVersion int    `enforce:"driver_floor"`
 
 	// Minimum native userland compatibility required by the job. These apply
 	// to CPU and GPU jobs because on-prem execution uses the host userland.
-	MinGLIBCXXVersion string
-	GLIBCXXOrigin     string
+	MinGLIBCXXVersion string `enforce:"glibcxx_floor"`
+	GLIBCXXOrigin     string `enforce:"-"`
 
 	// VersionRequirements is the unified representation for scalar
 	// compatibility floors. Legacy scalar fields above remain synchronized as
 	// compatibility shadows during the migration.
-	VersionRequirements []compat.Requirement
+	VersionRequirements []compat.Requirement `enforce:"-"`
 
 	// SelfJobID identifies the persisted job these constraints were resolved
 	// from (0 = not job-derived). Free-GPU accounting skips this job's own
 	// reservation so re-scoring a host the job is already targeted at does
 	// not count the job against itself.
-	SelfJobID int64
+	SelfJobID int64 `enforce:"-"`
 
 	// MachineAffinity pins the job to specific provider physical machines
 	// (refs as stored on CLIResourceOverrides; a bare id means vast.ai).
 	// Non-empty pins make every target without a matching machine identity
 	// ineligible — including all on-prem hosts, which have none.
-	MachineAffinity []string
+	MachineAffinity []string `enforce:"machine_pin"`
 }
 
 // ConstraintSource is the normalized input to placement constraint

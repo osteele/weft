@@ -92,6 +92,7 @@ const (
 	ReasonComputeCapMin   EligibilityReasonKind = "compute_cap_min"
 	ReasonCUDAChain       EligibilityReasonKind = "cuda_chain"
 	ReasonMachinePin      EligibilityReasonKind = "machine_pin"
+	ReasonProvider        EligibilityReasonKind = "provider"
 )
 
 func (r EligibilityReason) String() string {
@@ -223,6 +224,9 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	if reason, violated := machinePinViolation(c, t); violated {
 		return fail(ReasonMachinePin, reason, 0, 0)
 	}
+	if reason, violated := providerViolation(c, t); violated {
+		return fail(ReasonProvider, reason, 0, 0)
+	}
 
 	if reason, ok := targetCompatibilityViolation(c, t); ok {
 		return fail(reason.Kind, reason.Message, 0, 0)
@@ -275,6 +279,26 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 
 	return v
+}
+
+// providerViolation rejects targets that cannot serve a requested rental
+// provider. A provider request is a routing constraint no other provider's
+// target — and no on-prem host, which has none — can satisfy. Like the
+// machine pin, it is checked in the shared eligibility predicate so every
+// system rejects it identically: the autopilot's on-prem passes guarded it,
+// the launch prefilter did not, and a --provider job without the rental tag
+// could be placed on-prem with the request silently ignored.
+func providerViolation(c Constraints, t TargetSpec) (string, bool) {
+	want := strings.TrimSpace(c.Provider)
+	have := strings.TrimSpace(t.Provider)
+	if want == "" || strings.EqualFold(have, want) {
+		return "", false
+	}
+	where := "target has no rental provider"
+	if have != "" {
+		where = "target is " + t.Provider
+	}
+	return fmt.Sprintf("job requests provider %s; %s", c.Provider, where), true
 }
 
 // machinePinViolation rejects targets that are not a machine the job is

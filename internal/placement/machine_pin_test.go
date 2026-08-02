@@ -123,3 +123,49 @@ func TestScoreHost_HostAxes(t *testing.T) {
 		})
 	}
 }
+
+// A provider request is a routing constraint: no on-prem host (no provider)
+// and no other provider's target can satisfy it. Checked in the shared
+// eligibility predicate so the launch prefilter cannot on-prem-place a
+// --provider job the autopilot passes would have skipped.
+func TestEvaluateEligibility_Provider(t *testing.T) {
+	cases := []struct {
+		name     string
+		req      string
+		target   string
+		eligible bool
+	}{
+		{"no request ignores provider", "", "", true},
+		{"request rejects providerless target", "vastai", "", false},
+		{"request rejects another provider", "vastai", "runpod", false},
+		{"request matches case-insensitively", "vastai", "Vastai", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verdict := EvaluateEligibility(
+				Constraints{Provider: tc.req},
+				TargetSpec{Name: "target", Provider: tc.target},
+			)
+			if verdict.Eligible != tc.eligible {
+				t.Fatalf("Eligible = %v, want %v (reasons: %v)", verdict.Eligible, tc.eligible, verdict.Messages())
+			}
+			if !tc.eligible && verdict.Reasons[0].Kind != ReasonProvider {
+				t.Errorf("reason kind = %q, want %q", verdict.Reasons[0].Kind, ReasonProvider)
+			}
+		})
+	}
+}
+
+func TestSelectHostFromSnapshot_SkipsProviderRequestedJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	hosts := []inventory.HostSpec{{
+		Name: "host-alpha",
+		GPUs: []inventory.GPUSpec{{Name: "RTX 3090", Class: "3090", Memory: "24GB"}},
+	}}
+	metrics := map[string]*HostMetrics{"host-alpha": {QueueDepth: 0}}
+
+	job := &db.Job{ID: 3, GPUClass: "nvidia", Tags: []string{"provider:vastai"}}
+	if host, ok := SelectHostFromSnapshot(database, hosts, metrics, job, nil, nil); ok {
+		t.Fatalf("provider-requesting job placed on-prem on %q", host)
+	}
+}
