@@ -2341,11 +2341,16 @@ rule HeartbeatStale {
         -- the abandoned attempt. On destroy failure the terminal
         -- transition is deferred to a later reconcile pass, keeping the
         -- accumulated probe-failure hysteresis so the retry does not
-        -- restart the confirmation window. This matches ExecuteAction's
-        -- destroy-before-mark discipline for all watchdog actions.
+        -- restart the confirmation window.
+        -- The termination executes through the same side-effect pipeline
+        -- as every other reconcile watchdog (ActionStaleHeartbeat via
+        -- executeReconcileAction): R2 job-completion sync before the jobs
+        -- are reset, ExecuteAction's destroy-before-mark, the oplog
+        -- entry, and disk-failure report processing when the reason
+        -- refines to disk_full.
         -- Implementation: internal/campaign/reconcile.go
-        -- reconcileStaleHeartbeat; internal/campaign/instance_check.go
-        -- ExecuteAction.
+        -- checkStaleHeartbeat / executeReconcileAction;
+        -- internal/campaign/instance_check.go ExecuteAction.
 }
 
 rule ProviderInstanceDied {

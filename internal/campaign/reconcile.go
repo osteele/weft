@@ -464,46 +464,61 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
-		slog.Debug("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
-
-		// Before executing a terminal action, sync per-job completions from R2.
-		// The agent writes .complete markers for each job; without this sync,
-		// jobs that completed successfully may be marked "dead" or re-queued.
-		if IsInstanceTerminal(action.TerminalStatus) && r2Client != nil {
-			syncJobCompletionsFromR2(database, r2Client, ci.ID)
-			// The per-job marker sync above can miss a job whose .complete
-			// marker is keyed by a run_id that no longer matches the DB's
-			// latest attempt, or that landed after the marker scan. For a
-			// completing launch the instance-level manifest is authoritative;
-			// credit its exit-0 jobs so CloseLaunchAttempts does not orphan
-			// and re-run work that already finished.
-			if action.TerminalStatus == db.LaunchStatusCompleted {
-				CreditManifestCompletions(database, r2Client, ci.ID)
-			}
-		}
-
-		reconciled, terminated := ExecuteAction(database, client, ci, action)
-		if terminated && r2Client != nil {
-			// Verify results for completed instances via the R2 completion manifest
-			if action.TerminalStatus == db.LaunchStatusCompleted {
-				verifyInstanceResults(database, r2Client, ci.ID)
-			}
-			// Extract undeclared HF models from disk-full failures
-			if action.TerminationReason == db.TerminationReasonDiskFull {
-				ProcessDiskFailureReport(r2Client, ci.ID, database)
-			}
-		}
+		reconciled, terminated := executeReconcileAction(database, client, r2Client, ci, action)
 		return reconciled, terminated, synced.JobsUpdated, bidRaised
 	}
 
 	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
 	if client != nil && !isProviderTerminal(inst) && ci.Status == db.LaunchStatusRunning && r2Client != nil {
-		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
-			return true, terminated, synced.JobsUpdated, bidRaised
+		if hbAction := r.checkStaleHeartbeat(r2Client, ci, inst); hbAction.Kind != ActionNone {
+			reconciled, terminated := executeReconcileAction(database, client, r2Client, ci, hbAction)
+			if reconciled {
+				r.clearProbeFailure(ci.ID)
+				return true, terminated, synced.JobsUpdated, bidRaised
+			}
 		}
 	}
 
 	return bidRaised, false, synced.JobsUpdated, bidRaised
+}
+
+// executeReconcileAction runs the shared side-effect pipeline for a
+// non-display reconcile action: pre-terminal completion sync from R2,
+// ExecuteAction (destroy before mark), then post-terminal result
+// verification and disk-failure report processing. Every path that
+// terminates a launch from a reconcile pass must go through here so no
+// watchdog silently skips these hooks.
+func executeReconcileAction(database *sql.DB, client cloud.Client, r2Client *r2.Client, ci *db.Launch, action InstanceAction) (bool, bool) {
+	slog.Debug("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
+
+	// Before executing a terminal action, sync per-job completions from R2.
+	// The agent writes .complete markers for each job; without this sync,
+	// jobs that completed successfully may be marked "dead" or re-queued.
+	if IsInstanceTerminal(action.TerminalStatus) && r2Client != nil {
+		syncJobCompletionsFromR2(database, r2Client, ci.ID)
+		// The per-job marker sync above can miss a job whose .complete
+		// marker is keyed by a run_id that no longer matches the DB's
+		// latest attempt, or that landed after the marker scan. For a
+		// completing launch the instance-level manifest is authoritative;
+		// credit its exit-0 jobs so CloseLaunchAttempts does not orphan
+		// and re-run work that already finished.
+		if action.TerminalStatus == db.LaunchStatusCompleted {
+			CreditManifestCompletions(database, r2Client, ci.ID)
+		}
+	}
+
+	reconciled, terminated := ExecuteAction(database, client, ci, action)
+	if terminated && r2Client != nil {
+		// Verify results for completed instances via the R2 completion manifest
+		if action.TerminalStatus == db.LaunchStatusCompleted {
+			verifyInstanceResults(database, r2Client, ci.ID)
+		}
+		// Extract undeclared HF models from disk-full failures
+		if action.TerminationReason == db.TerminationReasonDiskFull {
+			ProcessDiskFailureReport(r2Client, ci.ID, database)
+		}
+	}
+	return reconciled, terminated
 }
 
 func maybeRaiseInterruptibleBid(database *sql.DB, client cloud.Client, ci *db.Launch, inst *cloud.Instance) bool {
@@ -791,47 +806,40 @@ func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
 	return state
 }
 
-func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Client, r2Client *r2.Client, ci *db.Launch, inst *cloud.Instance) (bool, bool) {
+// checkStaleHeartbeat evaluates the reconciler-specific stale-heartbeat
+// watchdog: heartbeat stale past threshold, plus an SSH probe reporting the
+// agent gone (positive evidence) or unreachable past both hysteresis
+// minimums (see HeartbeatStale in specs/campaign-lifecycle.allium).
+// Returns ActionNone while the launch is healthy or the evidence is
+// insufficient. The caller executes the action through
+// executeReconcileAction so this watchdog shares the completion-sync,
+// destroy-before-mark, oplog, and disk-report pipeline; the caller clears
+// the probe-failure state only once the action actually executes, so a
+// deferred destroy retries without restarting the hysteresis window.
+func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, inst *cloud.Instance) InstanceAction {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	heartbeat, heartbeatAge := fetchReconcileHeartbeat(ctx, r2Client, ci.ID)
 	if heartbeatAge == 0 || heartbeatAge <= heartbeatStaleThreshold {
 		r.clearProbeFailure(ci.ID)
-		return false, false
+		return InstanceAction{Kind: ActionNone}
 	}
 
 	agentAlive, err := probeCampaignAgent(inst, 15*time.Second)
 	if err == nil && agentAlive {
 		r.clearProbeFailure(ci.ID)
-		return false, false
+		return InstanceAction{Kind: ActionNone}
 	}
 
 	if err != nil {
 		// A probe error is the unknown case; a probe that reaches the host
 		// and reports the agent gone is positive evidence, handled above.
-		// Terminating on unknown requires both hysteresis minimums; see
-		// HeartbeatStale in specs/campaign-lifecycle.allium.
 		state := r.noteProbeFailure(ci.ID)
 		elapsed := time.Since(state.FirstAt)
 		if state.Count < minProbeFailureAttempts || elapsed < minProbeFailureWindow {
 			slog.Debug("heartbeat stale and agent probe unreachable, waiting before termination", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "attempt", state.Count, "min_attempts", minProbeFailureAttempts, "elapsed", elapsed.Truncate(time.Second), "min_window", minProbeFailureWindow)
-			return false, false
-		}
-	} else {
-		r.clearProbeFailure(ci.ID)
-	}
-
-	// Destroy must succeed before the launch is marked failed and its jobs
-	// requeued — a failed destroy leaves the instance possibly still running
-	// its job, and requeueing would risk a double run. On failure, defer to
-	// the next pass (probe-failure hysteresis state is kept). Mirrors
-	// ExecuteAction; see HeartbeatStale in specs/campaign-lifecycle.allium.
-	providerID := ci.EffectiveProviderID()
-	if providerID != "" {
-		if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-			slog.Warn("failed to destroy stale-heartbeat instance, deferring failed status to next reconcile pass", "component", "reconcile", "instance", ci.ID, "error", destroyErr)
-			return false, false
+			return InstanceAction{Kind: ActionNone}
 		}
 	}
 
@@ -846,25 +854,15 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 	}
 
 	slog.Warn("marking instance failed due to stale heartbeat", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "agent_alive", agentAlive, "probe_error", err, "reason", reason)
-
-	detail := fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason)
-	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason, detail); err != nil {
-		slog.Warn("failed to update stale-heartbeat instance status", "component", "reconcile", "instance", ci.ID, "error", err)
-		return false, false
+	return InstanceAction{
+		Kind:              ActionStaleHeartbeat,
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: reason,
+		StallMessage:      fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason),
+		DestroyProvider:   true,
+		ResetJobs:         true,
+		AttemptOutcome:    db.AttemptOutcomeOrphaned,
 	}
-	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
-		EventKind: db.EventReconcileStaleHeartbeat,
-		LaunchID:  ci.ID,
-		GPUSpec:   ci.GPUSpec,
-		Detail:    detail,
-	})
-	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-		slog.Warn("failed to reset jobs for stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", err)
-	} else if resetCount > 0 {
-		slog.Debug("reset jobs from stale-heartbeat instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
-	}
-	r.clearProbeFailure(ci.ID)
-	return true, true
 }
 
 // ReconcileCampaigns checks active campaigns and marks them as completed or failed

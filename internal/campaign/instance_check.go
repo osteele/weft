@@ -38,6 +38,7 @@ const (
 	ActionResume                                   // previously paused launch resumed by provider -> launch=running
 	ActionHedgeCull                                // hedge cohort sibling reached ready first -> destroy this loser
 	ActionTerminalLivePhase                        // live phase reports running job that is already terminal in DB
+	ActionStaleHeartbeat                           // heartbeat stale + agent probe dead/unreachable -> fail (reconciler-only)
 )
 
 // graceShutdownTimeout is how long after the grace deadline Weft
@@ -1170,6 +1171,8 @@ func (k InstanceActionKind) String() string {
 		return "hedge_cull"
 	case ActionTerminalLivePhase:
 		return "terminal_live_phase"
+	case ActionStaleHeartbeat:
+		return "stale_heartbeat"
 	default:
 		return fmt.Sprintf("kind_%d", int(k))
 	}
@@ -1230,6 +1233,8 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileHedgeCull
 	case ActionTerminalLivePhase:
 		return db.EventReconcileRunningStall
+	case ActionStaleHeartbeat:
+		return db.EventReconcileStaleHeartbeat
 	default:
 		return ""
 	}

@@ -1026,6 +1026,10 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 			t.Fatalf("job %d status = %q, want %q", jobID, job.Status, db.StatusQueued)
 		}
 	}
+
+	if got := countLifecycleEvents(t, database, db.EventReconcileStaleHeartbeat); got != 1 {
+		t.Fatalf("stale-heartbeat lifecycle events = %d, want 1", got)
+	}
 }
 
 // Regression: when the stale-heartbeat path cannot destroy the provider
