@@ -1366,7 +1366,20 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 		}
 	}
 
+	// The attempt minimum alone is not enough: the next pass reaches
+	// minProbeFailureAttempts but the failure window has not elapsed.
 	result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile at attempt threshold: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Fatalf("reconcile at attempt threshold = %d, want 0 while window not elapsed", result.Reconciled)
+	}
+
+	// Backdate the failure-window start so both minimums are met.
+	backdateProbeFailureWindow(reconciler, instanceID)
+
+	result, err = reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile final attempt: %v", err)
 	}
@@ -1375,6 +1388,86 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 	}
 	if destroyCalls != 1 {
 		t.Fatalf("destroy calls = %d, want 1", destroyCalls)
+	}
+}
+
+// backdateProbeFailureWindow rewinds the recorded first-failure time so a
+// test can satisfy the minProbeFailureWindow elapsed-time minimum without
+// sleeping.
+func backdateProbeFailureWindow(r *Reconciler, instanceID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.probeFailures[instanceID]
+	state.FirstAt = state.FirstAt.Add(-(minProbeFailureWindow + time.Second))
+	r.probeFailures[instanceID] = state
+}
+
+// Regression: the elapsed window alone must not terminate either. Two probe
+// failures spaced one reconcile tick apart satisfy minProbeFailureWindow
+// (ticks run minutes apart in production) but not minProbeFailureAttempts —
+// an observer-side SSH flap across two ticks must not kill the instance.
+func TestReconcileLaunches_StaleHeartbeatProbeWindowAloneDoesNotTerminate(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "probe-window-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	fetchReconcileHeartbeat = func(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	probeCampaignAgent = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			t.Errorf("DestroyInstance must not be called before the attempt minimum is met")
+			return nil
+		},
+	}
+
+	reconciler := NewReconciler()
+	// First failure seeds the window; backdate it past minProbeFailureWindow
+	// so the second failure arrives with the window elapsed but the attempt
+	// count still below the minimum.
+	if _, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{}); err != nil {
+		t.Fatalf("reconcile first failure: %v", err)
+	}
+	backdateProbeFailureWindow(reconciler, instanceID)
+
+	result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile second failure: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Fatalf("reconciled = %d, want 0 with window elapsed but only 2 probe failures", result.Reconciled)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusRunning {
+		t.Fatalf("instance status = %q, want still %q", ci.Status, db.LaunchStatusRunning)
 	}
 }
 

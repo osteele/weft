@@ -2322,6 +2322,18 @@ rule HeartbeatStale {
         -- and agent is unreachable. Combined with running_stall_timeout for
         -- phase-unchanged detection.
         --
+        -- Probe evidence: an SSH probe that reaches the host and reports
+        -- the agent process gone is positive evidence and terminates
+        -- immediately. A probe ERROR (host unreachable) is unknown, and
+        -- termination on unknown requires BOTH hysteresis minimums:
+        -- at least min_probe_failure_attempts consecutive failed probes
+        -- AND at least min_probe_failure_window of elapsed time since
+        -- the first failure. Either minimum alone is insufficient — two
+        -- SSH blips one reconcile tick apart (an observer-side network
+        -- flap) satisfy the window but not the count, and rapid retries
+        -- satisfy the count but not the window. Any successful probe or
+        -- fresh heartbeat clears the accumulated failure state.
+        --
         -- Ordering: the provider destroy MUST succeed before the launch
         -- is marked failed and its jobs are requeued. A failed destroy
         -- (provider API unreachable) leaves the instance possibly still

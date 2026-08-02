@@ -808,10 +808,14 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 	}
 
 	if err != nil {
+		// A probe error is the unknown case; a probe that reaches the host
+		// and reports the agent gone is positive evidence, handled above.
+		// Terminating on unknown requires both hysteresis minimums; see
+		// HeartbeatStale in specs/campaign-lifecycle.allium.
 		state := r.noteProbeFailure(ci.ID)
 		elapsed := time.Since(state.FirstAt)
-		if state.Count < minProbeFailureAttempts && elapsed < minProbeFailureWindow {
-			slog.Debug("heartbeat stale and agent probe unreachable, waiting before termination", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "attempt", state.Count, "max_attempts", minProbeFailureAttempts, "elapsed", elapsed.Truncate(time.Second))
+		if state.Count < minProbeFailureAttempts || elapsed < minProbeFailureWindow {
+			slog.Debug("heartbeat stale and agent probe unreachable, waiting before termination", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "attempt", state.Count, "min_attempts", minProbeFailureAttempts, "elapsed", elapsed.Truncate(time.Second), "min_window", minProbeFailureWindow)
 			return false, false
 		}
 	} else {
