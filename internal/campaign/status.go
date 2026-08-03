@@ -419,6 +419,23 @@ func fallbackRunningPhase(jobStatuses map[int64]string, jobs []*db.Job) (phase s
 	return fmt.Sprintf("%s:%d", PhaseRunning, bestJobID), PhaseRunning
 }
 
+// providerPollInterval grows the watch loop's provider poll delay while
+// ShowInstance keeps returning not-found: doubling per consecutive
+// not-found, capped at 8x the base interval. A gone instance is reaped by
+// the heartbeat/bootstrap watchdogs, not by polling harder, and each
+// vast.ai lookup shells out to a full account listing. Any other poll
+// outcome resets to the base interval.
+func providerPollInterval(base time.Duration, notFoundStreak int) time.Duration {
+	if notFoundStreak <= 0 {
+		return base
+	}
+	shift := notFoundStreak
+	if shift > 3 {
+		shift = 3
+	}
+	return base << shift
+}
+
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
 // Closes the channel when the instance reaches a terminal state or ctx is cancelled.
 // r2Client may be nil, in which case bootstrap stage fetching is skipped.
@@ -433,6 +450,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 	go func() {
 		defer close(ch)
 		var lastProviderPoll time.Time
+		var notFoundStreak int
 		var cachedInstance *cloud.Instance
 		// lastProviderErr persists the most recent poll's transient failure
 		// across ticks (like cachedInstance), so CheckInstance keeps seeing
@@ -504,11 +522,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// client is available (e.g. config has no client for this
 			// provider) — DB-only updates still flow.
 			providerInstID := ci.EffectiveProviderID()
-			if client != nil && providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
+			if client != nil && providerInstID != "" && time.Since(lastProviderPoll) >= providerPollInterval(providerInterval, notFoundStreak) {
 				inst, showErr := client.ShowInstance(providerInstID)
 				if showErr == nil {
 					cachedInstance = inst
 					lastProviderErr = nil
+					notFoundStreak = 0
 					if inst.Status != lastProviderStatus {
 						_ = db.RecordProviderStatus(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
 						lastProviderStatus = inst.Status
@@ -523,6 +542,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						// watchdogs, matching the batch reconciler's not-found
 						// handling.
 						cachedInstance = nil
+						notFoundStreak++
 					}
 					lastProviderErr = showErr
 				}

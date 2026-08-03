@@ -715,6 +715,11 @@ func TestWatchInstance_InstanceNotFoundDoesNotMarkTerminal(t *testing.T) {
 	if showCalls == 0 {
 		t.Fatal("expected ShowInstance to be called at least once")
 	}
+	// Sustained not-found backs the poll off (providerPollInterval), so the
+	// call count stays well below one call per providerInterval tick.
+	if showCalls > 8 {
+		t.Errorf("ShowInstance calls = %d, want backoff to keep it <= 8 over the watch window", showCalls)
+	}
 
 	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
@@ -722,6 +727,25 @@ func TestWatchInstance_InstanceNotFoundDoesNotMarkTerminal(t *testing.T) {
 	}
 	if ci.Status != db.LaunchStatusRunning {
 		t.Errorf("instance status = %q, want %q; not-found is adjudicated by the heartbeat/bootstrap watchdogs, not the provider-dead path", ci.Status, db.LaunchStatusRunning)
+	}
+}
+
+func TestProviderPollInterval_NotFoundBackoff(t *testing.T) {
+	base := 10 * time.Second
+	for _, tt := range []struct {
+		streak int
+		want   time.Duration
+	}{
+		{0, base},
+		{1, 2 * base},
+		{2, 4 * base},
+		{3, 8 * base},
+		{4, 8 * base},  // capped
+		{50, 8 * base}, // capped
+	} {
+		if got := providerPollInterval(base, tt.streak); got != tt.want {
+			t.Errorf("providerPollInterval(base, %d) = %s, want %s", tt.streak, got, tt.want)
+		}
 	}
 }
 
