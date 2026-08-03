@@ -631,19 +631,7 @@ func resolveJobArtifacts(database *sql.DB, r2Client cloudOutputStore, job *db.Jo
 	if err != nil {
 		return jobArtifactResolution{}, err
 	}
-	resolved := make([]resolvedArtifact, 0, len(entries))
-	for i := range entries {
-		entry := entries[i]
-		resolved = append(resolved, resolvedArtifact{
-			Name:        entry.Name,
-			DisplayPath: entry.Path,
-			RelPath:     entry.Path,
-			SizeBytes:   entry.SizeBytes,
-			SHA256:      entry.SHA256,
-			Source:      artifactSourceCache,
-			cacheEntry:  &entry,
-		})
-	}
+	resolved := cacheResolvedRows(entries)
 
 	outputAssets, _ := listJobOutputAssets(database, job.ID)
 	assetPrefix := fmt.Sprintf("%d/", job.ID)
@@ -676,6 +664,24 @@ func resolveJobArtifacts(database *sql.DB, r2Client cloudOutputStore, job *db.Jo
 		}
 	}
 	return jobArtifactResolution{rows: resolved, r2ListErr: r2ListErr}, nil
+}
+
+// cacheResolvedRows materializes local artifact-cache entries as resolver rows.
+func cacheResolvedRows(entries []db.Artifact) []resolvedArtifact {
+	rows := make([]resolvedArtifact, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		rows = append(rows, resolvedArtifact{
+			Name:        entry.Name,
+			DisplayPath: entry.Path,
+			RelPath:     entry.Path,
+			SizeBytes:   entry.SizeBytes,
+			SHA256:      entry.SHA256,
+			Source:      artifactSourceCache,
+			cacheEntry:  &entry,
+		})
+	}
+	return rows
 }
 
 // matchesToken reports whether a user-supplied token names this row. This is
@@ -1045,6 +1051,10 @@ func downloadCloudOutputFiles(cmd *cobra.Command, r2Client cloudOutputStore, job
 	return downloaded, nil
 }
 
+// fetchAllArtifactsForJobs delivers every artifact `weft artifact list`
+// would print for each job, through the same resolver (contract:
+// ArtifactResolution / rule ArtifactListGetConsistency in
+// specs/job-lifecycle.allium), deduplicated per dedupeResolvedForAll.
 func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 	database, err := db.OpenForReading()
 	if err != nil {
@@ -1056,42 +1066,39 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 
 	var errorsList []string
 	for _, jobID := range jobIDs {
-		entries, err := db.ListArtifactsByJob(database, jobID)
-		if err != nil {
-			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
-			continue
-		}
-
 		job, jobErr := db.GetJobByID(database, jobID)
 		if jobErr != nil {
 			errorsList = append(errorsList, fmt.Sprintf("job %s: get job: %v", ids.FormatJobID(jobID), jobErr))
 			continue
 		}
-
-		cloudFiles, cloudListErr := cloudFilesNotCached(r2Client, job, entries)
-		if cloudListErr != nil {
-			// R2 listing failed: the cloud file set is incomplete, so `get --all`
-			// must not silently omit R2-only files and exit 0. Record the error
-			// (which forces a non-zero exit) but still deliver what did resolve.
-			errorsList = append(errorsList, fmt.Sprintf("job %s: R2 listing failed, some cloud artifacts may be missing: %v", ids.FormatJobID(jobID), cloudListErr))
+		resolution, resolveErr := resolveAllArtifactRows(database, r2Client, jobID, job)
+		if resolveErr != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), resolveErr))
+			continue
 		}
 
-		if len(entries)+len(cloudFiles) == 0 && job != nil && job.HasInventoryHost() {
-			// Nothing cached and nothing in R2: outputs may exist only on the
-			// job's host. Sync them into the cache, then re-read.
+		if job != nil && job.HasInventoryHost() && rowsNeedHostSync(resolution.rows) {
+			// Outputs may exist only on the job's host: sync at most once per
+			// job, then re-resolve so host-pointer rows become cache rows.
 			if _, syncErr := syncArtifactOnDemand(job, ""); syncErr != nil {
 				errorsList = append(errorsList, fmt.Sprintf("job %s: sync from %s: %v", ids.FormatJobID(jobID), job.Host, syncErr))
 				continue
 			}
-			if entries, err = db.ListArtifactsByJob(database, jobID); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
+			if resolution, resolveErr = resolveAllArtifactRows(database, r2Client, jobID, job); resolveErr != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), resolveErr))
 				continue
 			}
 		}
+		rows, r2ListErr := resolution.rows, resolution.r2ListErr
+		if r2ListErr != nil {
+			// R2 listing failed: the cloud file set is incomplete, so `get --all`
+			// must not silently omit R2-only files and exit 0. Record the error
+			// (which forces a non-zero exit) but still deliver what did resolve.
+			errorsList = append(errorsList, fmt.Sprintf("job %s: R2 listing failed, some cloud artifacts may be missing: %v", ids.FormatJobID(jobID), r2ListErr))
+		}
 
-		totalArtifacts := len(entries) + len(cloudFiles)
-		if totalArtifacts == 0 {
-			if cloudListErr != nil {
+		if len(rows) == 0 {
+			if r2ListErr != nil {
 				// Already recorded in errorsList; don't claim a confident "none".
 				fmt.Fprintf(cmd.OutOrStdout(), "Job %s: R2 listing failed; artifact availability could not be confirmed\n", ids.FormatJobID(jobID))
 			} else {
@@ -1100,30 +1107,24 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 			continue
 		}
 
-		for _, entry := range entries {
-			localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
-			if err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
+		multiple := len(rows) > 1 || len(jobIDs) > 1
+		var cloudFiles []runner.OutputFile
+		for _, art := range rows {
+			if art.Source == artifactSourceCloud {
+				cloudFiles = append(cloudFiles, *art.cloudFile)
 				continue
 			}
-			dest, err := resolveArtifactOutputPathForAll(entry.Path, artifactOutput, jobID, totalArtifacts > 1 || len(jobIDs) > 1)
-			if err != nil {
-				return err
+			dest, destErr := resolveArtifactOutputPathForAll(art.DisplayPath, artifactOutput, jobID, multiple)
+			if destErr != nil {
+				return destErr
 			}
-			if dest == "-" {
-				if err := copyToWriter(localPath, cmd.OutOrStdout()); err != nil {
-					errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
-				}
-				continue
+			destFor := func(string) (string, error) { return dest, nil }
+			if deliverErr := deliverResolvedArtifact(cmd, r2Client, job, art, destFor); deliverErr != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), art.DisplayPath, deliverErr))
 			}
-			if err := copyFile(localPath, dest); err != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %s artifact %q: %v", ids.FormatJobID(jobID), entry.Path, err))
-				continue
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 		}
 		if len(cloudFiles) > 0 {
-			if _, dlErr := downloadCloudOutputFiles(cmd, r2Client, job, cloudFiles, totalArtifacts > 1 || len(jobIDs) > 1); dlErr != nil {
+			if _, dlErr := downloadCloudOutputFiles(cmd, r2Client, job, cloudFiles, multiple); dlErr != nil {
 				errorsList = append(errorsList, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), dlErr))
 			}
 		}
@@ -1135,27 +1136,78 @@ func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
 	return nil
 }
 
-// cloudFilesNotCached lists a job's R2 output files, dropping any whose
-// canonical path (the "artifacts/" display prefix stripped) is already in the
-// local cache — cached entries came from the same R2 objects, so a prefix
-// spelling difference is not a different artifact.
-func cloudFilesNotCached(r2Client cloudOutputStore, job *db.Job, entries []db.Artifact) ([]runner.OutputFile, error) {
-	if job == nil || r2Client == nil {
-		return nil, nil
+// rowsNeedHostSync reports whether `get --all` should run the one-per-job
+// host output sync before delivering: nothing resolved at all, or some rows
+// are still host-pointer records without cached bytes.
+func rowsNeedHostSync(rows []resolvedArtifact) bool {
+	if len(rows) == 0 {
+		return true
 	}
-	seenPaths := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		seenPaths[canonicalArtifactRelPath(entry.Path)] = struct{}{}
+	for _, row := range rows {
+		if row.Source == artifactSourceHost {
+			return true
+		}
 	}
-	files, listErr := listCloudJobOutputFiles(r2Client, job)
-	var cloudFiles []runner.OutputFile
-	for _, f := range files {
-		if _, ok := seenPaths[canonicalArtifactRelPath(f.RelPath)]; ok {
+	return false
+}
+
+// resolveAllArtifactRows materializes the deduplicated row set `get --all`
+// delivers for one job. A nil job row still serves the local cache.
+func resolveAllArtifactRows(database *sql.DB, r2Client cloudOutputStore, jobID int64, job *db.Job) (jobArtifactResolution, error) {
+	if job == nil {
+		entries, err := db.ListArtifactsByJob(database, jobID)
+		if err != nil {
+			return jobArtifactResolution{}, err
+		}
+		return jobArtifactResolution{rows: cacheResolvedRows(entries)}, nil
+	}
+	resolution, err := resolveJobArtifacts(database, r2Client, job)
+	if err != nil {
+		return jobArtifactResolution{}, err
+	}
+	resolution.rows = dedupeResolvedForAll(job, resolution.rows)
+	return resolution, nil
+}
+
+// dedupeResolvedForAll keeps one row per canonical path, preferring the
+// local cache, then the cloud listing, then host-pointer records. Two
+// exceptions, per rule ArtifactListGetConsistency
+// (specs/job-lifecycle.allium): a terminal job's pre-end cache row yields
+// to its same-path cloud row (wb57), and same-source rows whose sizes
+// disagree are distinct objects and are all kept.
+func dedupeResolvedForAll(job *db.Job, rows []resolvedArtifact) []resolvedArtifact {
+	rank := func(row resolvedArtifact) int {
+		switch row.Source {
+		case artifactSourceCache:
+			if cachedArtifactMayPredateFinalUpload(row.cacheEntry, job) {
+				return 2
+			}
+			return 0
+		case artifactSourceCloud:
+			return 1
+		default:
+			return 3
+		}
+	}
+	bestIdx := make(map[string]int, len(rows))
+	out := make([]resolvedArtifact, 0, len(rows))
+	for _, row := range rows {
+		key := canonicalArtifactRelPath(row.RelPath)
+		i, ok := bestIdx[key]
+		if !ok {
+			bestIdx[key] = len(out)
+			out = append(out, row)
 			continue
 		}
-		cloudFiles = append(cloudFiles, f)
+		if row.Source == out[i].Source && row.SizeBytes != out[i].SizeBytes {
+			out = append(out, row)
+			continue
+		}
+		if rank(row) < rank(out[i]) {
+			out[i] = row
+		}
 	}
-	return cloudFiles, listErr
+	return out
 }
 
 func runArtifactCat(cmd *cobra.Command, args []string) error {

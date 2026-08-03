@@ -1884,3 +1884,149 @@ func TestSyncJobOutputsExcludesPostAttemptOverwrites(t *testing.T) {
 		t.Fatalf("warning = %q, want post-attempt exclusion notice", warning)
 	}
 }
+
+// TestDedupeResolvedForAll: one row per canonical path, cache > cloud > host,
+// except a terminal job's pre-end cache row yields to its same-path cloud row
+// (wb57) and same-source rows with differing sizes stay distinct (spec: rule
+// ArtifactListGetConsistency).
+func TestDedupeResolvedForAll(t *testing.T) {
+	endTime := int64(1000)
+	terminalJob := &db.Job{ID: 1, EndTime: &endTime}
+	cacheRow := func(path string, createdAt int64) resolvedArtifact {
+		return resolvedArtifact{
+			DisplayPath: path, RelPath: path, SizeBytes: 10,
+			Source:     artifactSourceCache,
+			cacheEntry: &db.Artifact{Path: path, SizeBytes: 10, CreatedAt: createdAt},
+		}
+	}
+	cloudRow := func(path string, size int64) resolvedArtifact {
+		return resolvedArtifact{
+			DisplayPath: path, RelPath: path, SizeBytes: size,
+			Source:    artifactSourceCloud,
+			cloudFile: &runner.OutputFile{RelPath: path, SizeBytes: size},
+		}
+	}
+	hostRow := func(path string) resolvedArtifact {
+		return resolvedArtifact{
+			DisplayPath: path, RelPath: path, SizeBytes: 10,
+			Source:    artifactSourceHost,
+			hostEntry: &dataloc.HostDataEntry{Path: path},
+		}
+	}
+
+	cases := []struct {
+		name        string
+		job         *db.Job
+		rows        []resolvedArtifact
+		wantSources []artifactSource
+	}{
+		{
+			name:        "fresh cache beats same-path cloud",
+			job:         terminalJob,
+			rows:        []resolvedArtifact{cacheRow("output/a", endTime+1), cloudRow("output/a", 10)},
+			wantSources: []artifactSource{artifactSourceCache},
+		},
+		{
+			name:        "pre-end cache yields to same-path cloud (wb57)",
+			job:         terminalJob,
+			rows:        []resolvedArtifact{cacheRow("output/a", endTime-1), cloudRow("output/a", 20)},
+			wantSources: []artifactSource{artifactSourceCloud},
+		},
+		{
+			name:        "cache beats host pointer",
+			job:         terminalJob,
+			rows:        []resolvedArtifact{hostRow("output/a"), cacheRow("output/a", endTime+1)},
+			wantSources: []artifactSource{artifactSourceCache},
+		},
+		{
+			name:        "same-source size disagreement keeps both spellings",
+			job:         terminalJob,
+			rows:        []resolvedArtifact{cloudRow("output/a", 10), cloudRow("artifacts/output/a", 20)},
+			wantSources: []artifactSource{artifactSourceCloud, artifactSourceCloud},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dedupeResolvedForAll(tc.job, tc.rows)
+			if len(got) != len(tc.wantSources) {
+				t.Fatalf("got %d rows, want %d", len(got), len(tc.wantSources))
+			}
+			for i, want := range tc.wantSources {
+				if got[i].Source != want {
+					t.Errorf("row %d source = %s, want %s", i, got[i].Source, want)
+				}
+			}
+		})
+	}
+}
+
+// TestFetchAllArtifactsDeliversHostPointerRows: get --all must deliver every
+// row `artifact list` prints, including host_data pointer records, not only
+// the cache and cloud sets (spec: rule ArtifactListGetConsistency).
+func TestFetchAllArtifactsDeliversHostPointerRows(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+	if err := dataloc.InitSchema(database); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := t.TempDir()
+	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
+	if !job.HasInventoryHost() {
+		t.Fatal("test job must target an inventory host")
+	}
+
+	// One cached artifact...
+	sourceDir := t.TempDir()
+	cachedSource := filepath.Join(sourceDir, "cached.txt")
+	if err := os.WriteFile(cachedSource, []byte("cached\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.StoreLocalArtifact(database, job.ID, "output/cached.txt", cachedSource); err != nil {
+		t.Fatal(err)
+	}
+	// ...plus a host_data pointer record with no cached bytes.
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host:      job.Host,
+		Asset:     dataloc.DataAsset{Kind: dataloc.AssetJobOutput, ID: fmt.Sprintf("%d/output/host-only.json", job.ID)},
+		Path:      "output/host-only.json",
+		SizeBytes: 4,
+		LastSeen:  time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The on-demand sync materializes the pointer row into the cache.
+	prevSync := syncArtifactsForJobFunc
+	t.Cleanup(func() { syncArtifactsForJobFunc = prevSync })
+	syncArtifactsForJobFunc = func(database *sql.DB, job *db.Job, _ *r2.Client, _ time.Duration) error {
+		hostSource := filepath.Join(sourceDir, "host-only.json")
+		if err := os.WriteFile(hostSource, []byte("host\n"), 0o644); err != nil {
+			return err
+		}
+		return artifacts.StoreLocalArtifact(database, job.ID, "output/host-only.json", hostSource)
+	}
+
+	oldOutput := artifactOutput
+	outputDir := t.TempDir()
+	artifactOutput = outputDir
+	t.Cleanup(func() { artifactOutput = oldOutput })
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := fetchAllArtifactsForJobs(cmd, []int64{job.ID}); err != nil {
+		t.Fatalf("fetchAllArtifactsForJobs: %v", err)
+	}
+
+	for name, want := range map[string]string{"cached.txt": "cached\n", "host-only.json": "host\n"} {
+		dest := filepath.Join(outputDir, ids.FormatJobID(job.ID), "output", name)
+		data, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("read %s: %v", dest, err)
+		}
+		if string(data) != want {
+			t.Fatalf("%s = %q, want %q", name, data, want)
+		}
+	}
+}

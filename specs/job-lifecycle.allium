@@ -1269,7 +1269,9 @@ rule ArtifactGetAllOutputPath {
 
 rule ArtifactListGetConsistency {
     when: UserRuns("weft artifact get" | "weft artifact cat", job, token)
-    requires: token names a row that "weft artifact list" prints for job
+          or UserRuns("weft artifact get --all", job)
+    requires: token names a row that "weft artifact list" prints for job,
+              or --all targets every such row
 
     ensures: retrieval succeeds via one of, in order:
         local artifact cache,
@@ -1288,15 +1290,27 @@ rule ArtifactListGetConsistency {
         -- with --r2-bucket upload to the same per-run prefixes as rentals,
         -- so the R2 fallback must not be gated on the job being a rental
         -- job (bug wb16: a cool-host job's declared output listed but was
-        -- not retrievable). Both sides now consume the shared resolver of
+        -- not retrievable). Both sides consume the shared resolver of
         -- contract ArtifactResolution: cmd/artifact.go resolveJobArtifacts
         -- materializes the union once, and deliverArtifactToken (used by
         -- fetchArtifactForJobs and runArtifactCat) retrieves through the
         -- same rows and matcher, with syncArtifactOnDemand as the final
-        -- host rung for outputs no listing source has recorded. Terminal
+        -- host rung for outputs no listing source has recorded.
+        -- `get --all` (fetchAllArtifactsForJobs) consumes the same
+        -- resolver rows, deduplicated by canonical path with the cache
+        -- preferred over cloud over host-pointer handles — a row set
+        -- assembled from only the cache and cloud listings would skip
+        -- host-pointer rows that list prints. The dedupe keeps same-source
+        -- rows whose sizes disagree: those are genuinely different objects
+        -- (e.g. a literal artifacts/ directory under output/), and each is
+        -- delivered to its own printed path. Host-pointer rows are
+        -- materialized by at most one whole-job sync per job, not one per
+        -- row. Terminal
         -- jobs prefer a same-path R2 row over a cache row written before
         -- job end, so repeated writes to an output path return the final
-        -- upload rather than an incremental snapshot (wb57). Design:
+        -- upload rather than an incremental snapshot (wb57); the --all
+        -- dedupe applies the same preference, demoting a pre-end cache row
+        -- below its same-path cloud row. Design:
         -- docs/design/artifacts.md § Intended invariants.
 }
 
