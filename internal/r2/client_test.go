@@ -5,10 +5,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smithy "github.com/aws/smithy-go"
 )
 
@@ -334,6 +342,138 @@ func TestCopyWithIdleTimeout_FailsWhenStalled(t *testing.T) {
 	if out.String() != "x" {
 		t.Fatalf("output = %q, want %q", out.String(), "x")
 	}
+}
+
+func TestDownloadObjectToFileWithIdleTimeout_WritesFullContent(t *testing.T) {
+	const key = "results/wj1/output.txt"
+	oldContent := []byte("existing artifact")
+	content := []byte("complete artifact contents")
+	requestStarted := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	client := newTestS3Client(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/test-bucket/"+key {
+			t.Errorf("path = %q, want %q", r.URL.Path, "/test-bucket/"+key)
+		}
+		close(requestStarted)
+		<-releaseResponse
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	localPath := filepath.Join(t.TempDir(), "nested", "output.txt")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("create destination dir: %v", err)
+	}
+	if err := os.WriteFile(localPath, oldContent, 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	type downloadResult struct {
+		n   int64
+		err error
+	}
+	resultCh := make(chan downloadResult, 1)
+	go func() {
+		n, err := client.DownloadObjectToFileWithIdleTimeout(context.Background(), key, localPath, time.Second)
+		resultCh <- downloadResult{n: n, err: err}
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for test S3 request")
+	}
+	gotBeforeRelease, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read destination during download: %v", err)
+	}
+	close(releaseResponse)
+
+	var result downloadResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for download")
+	}
+
+	if !bytes.Equal(gotBeforeRelease, oldContent) {
+		t.Fatalf("destination during download = %q, want %q", gotBeforeRelease, oldContent)
+	}
+	if result.err != nil {
+		t.Fatalf("DownloadObjectToFileWithIdleTimeout returned error: %v", result.err)
+	}
+	if result.n != int64(len(content)) {
+		t.Fatalf("downloaded bytes = %d, want %d", result.n, len(content))
+	}
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("local file = %q, want %q", got, content)
+	}
+}
+
+func TestDownloadObjectToFileWithIdleTimeout_MidDownloadFailureLeavesExistingFile(t *testing.T) {
+	const key = "results/wj1/output.txt"
+	oldContent := []byte("known good artifact")
+	fullContent := []byte("replacement artifact that never fully arrives")
+	partialContent := fullContent[:12]
+	client := newTestS3Client(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/test-bucket/"+key {
+			t.Errorf("path = %q, want %q", r.URL.Path, "/test-bucket/"+key)
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(fullContent)))
+		if _, err := w.Write(partialContent); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "output.txt")
+	if err := os.WriteFile(localPath, oldContent, 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	_, err := client.DownloadObjectToFileWithIdleTimeout(context.Background(), key, localPath, time.Second)
+	if err == nil {
+		t.Fatal("expected mid-download failure, got nil")
+	}
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+	if !bytes.Equal(got, oldContent) {
+		t.Fatalf("existing file = %q, want %q", got, oldContent)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read destination dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(localPath) {
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("destination dir entries = %v, want only %q", names, filepath.Base(localPath))
+	}
+}
+
+func newTestS3Client(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	s3Client := s3.NewFromConfig(aws.Config{
+		Region:      "auto",
+		Credentials: credentials.NewStaticCredentialsProvider("access", "secret", ""),
+	}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(server.URL)
+		o.UsePathStyle = true
+	})
+	return &Client{s3: s3Client, bucket: "test-bucket", endpoint: server.URL}
 }
 
 func TestIsPreconditionFailed(t *testing.T) {

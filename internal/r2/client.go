@@ -693,15 +693,50 @@ func (c *Client) DownloadObjectToWriterWithIdleTimeout(parent context.Context, k
 // DownloadObjectToFileWithIdleTimeout streams an object to localPath and only
 // fails when no transfer progress is made for idleTimeout.
 func (c *Client) DownloadObjectToFileWithIdleTimeout(parent context.Context, key string, localPath string, idleTimeout time.Duration) (int64, error) {
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	dir := filepath.Dir(localPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, err
 	}
-	f, err := os.Create(localPath)
+	f, err := createDownloadTempFile(dir, filepath.Base(localPath))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("write %s: %w", localPath, err)
 	}
-	defer f.Close()
-	return c.DownloadObjectToWriterWithIdleTimeout(parent, key, f, idleTimeout)
+	tmpPath := f.Name()
+	n, copyErr := c.DownloadObjectToWriterWithIdleTimeout(parent, key, f, idleTimeout)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		if closeErr != nil {
+			return n, errors.Join(copyErr, fmt.Errorf("write %s: %w", localPath, closeErr))
+		}
+		return n, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return n, fmt.Errorf("write %s: %w", localPath, closeErr)
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return n, fmt.Errorf("write %s: %w", localPath, err)
+	}
+	return n, nil
+}
+
+func createDownloadTempFile(dir, base string) (*os.File, error) {
+	var lastErr error
+	for i := range 100 {
+		name := "." + base + ".tmp." + strconv.Itoa(os.Getpid()) + "." + strconv.FormatInt(time.Now().UnixNano(), 36) + "." + strconv.Itoa(i)
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // DownloadResultsWithIdleTimeout downloads all files under prefix to localDir
