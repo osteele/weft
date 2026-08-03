@@ -577,6 +577,11 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 	return nil
 }
 
+// errR2NotConfigured marks absent R2 config: fall back to host-side sources
+// silently; any other R2 failure must be surfaced as a degradation warning
+// (spec: Attribution in specs/job-lifecycle.allium).
+var errR2NotConfigured = errors.New("R2 not configured")
+
 // artifactSource identifies which store a resolved artifact row came from.
 type artifactSource string
 
@@ -2250,11 +2255,16 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 // outputs), except when the job actually executed on this machine.
 func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error) {
 	if job.IsLaunchJob() {
-		return syncCloudJobOutputs(database, job)
+		return syncCloudJobOutputsFunc(database, job)
 	}
 
-	if result, err := syncCloudJobOutputs(database, job); err == nil && result.Added > 0 {
-		return result, nil
+	cloudResult, cloudErr := syncCloudJobOutputsFunc(database, job)
+	if cloudErr == nil && cloudResult.Added > 0 {
+		return cloudResult, nil
+	}
+	if cloudErr != nil && !errors.Is(cloudErr, errR2NotConfigured) {
+		syncOutputWarnf("warning: job %s: R2 output sync failed (%v); falling back to the host's working tree, which a later job may have overwritten\n",
+			ids.FormatJobID(job.ID), cloudErr)
 	}
 
 	if !job.HasInventoryHost() || job.WorkingDir == "" {
@@ -2391,7 +2401,7 @@ func syncCloudJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, e
 		return artifacts.SyncResult{}, fmt.Errorf("create R2 client: %w", err)
 	}
 	if r2Client == nil {
-		return artifacts.SyncResult{}, fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
+		return artifacts.SyncResult{}, fmt.Errorf("%w; cannot fetch cloud job outputs", errR2NotConfigured)
 	}
 
 	var lastErr error
@@ -2643,6 +2653,7 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 var (
 	syncLocalJobArtifacts            = artifacts.SyncJob
 	syncCloudJobArtifactsFunc        = syncCloudJobArtifacts
+	syncCloudJobOutputsFunc          = syncCloudJobOutputs
 	completionRecordFunc             = fetchCompletionRecord
 	discoverRemoteJobOutputFilesFunc = discoverRemoteJobOutputFiles
 	isLocalJobHostFunc               = srcsync.IsLocalHost

@@ -1189,14 +1189,19 @@ func stubSyncJobOutputsRemote(t *testing.T) {
 	prevIsLocal := isLocalJobHostFunc
 	prevSyncBack := syncOutputFilesBackFunc
 	prevWarnf := syncOutputWarnf
+	prevCloudOutputs := syncCloudJobOutputsFunc
 	t.Cleanup(func() {
 		completionRecordFunc = prevCompletion
 		discoverRemoteJobOutputFilesFunc = prevDiscover
 		isLocalJobHostFunc = prevIsLocal
 		syncOutputFilesBackFunc = prevSyncBack
 		syncOutputWarnf = prevWarnf
+		syncCloudJobOutputsFunc = prevCloudOutputs
 	})
 	isLocalJobHostFunc = func(string) bool { return false }
+	syncCloudJobOutputsFunc = func(*sql.DB, *db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, errR2NotConfigured
+	}
 	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
 		t.Fatal("remote discovery must not run in this scenario")
 		return nil, nil
@@ -2084,5 +2089,45 @@ func TestSyncCloudJobArtifactsStampsProbedRun(t *testing.T) {
 	}
 	if len(latestRows) != 0 {
 		t.Fatalf("latest-run rows = %+v, want none — bytes came from the superseded run", latestRows)
+	}
+}
+
+// TestSyncJobOutputsWarnsWhenR2SyncDegrades: an R2 failure on the preferred
+// per-run snapshot source must be surfaced before falling back to the host's
+// mutable working tree; only the benign not-configured case stays silent.
+func TestSyncJobOutputsWarnsWhenR2SyncDegrades(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	discoverRemoteJobOutputFilesFunc = func(*db.Job, time.Time, time.Time) ([]runner.OutputFile, error) {
+		return nil, nil
+	}
+	var warning string
+	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
+	syncCloudJobOutputsFunc = func(*sql.DB, *db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{}, errors.New("list outputs: connection reset")
+	}
+
+	if _, err := syncJobOutputs(database, job); err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if !strings.Contains(warning, "falling back to the host's working tree") {
+		t.Fatalf("warning = %q, want R2 degradation notice", warning)
+	}
+}
+
+// TestSyncCloudJobOutputsNotConfiguredSentinel: hosts without R2 config must
+// get the errR2NotConfigured sentinel so syncJobOutputs falls back silently.
+func TestSyncCloudJobOutputsNotConfiguredSentinel(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	job := syncJobOutputsTestJob(t, database, t.TempDir(), 0)
+	if _, err := syncCloudJobOutputs(database, job); !errors.Is(err, errR2NotConfigured) {
+		t.Fatalf("err = %v, want errR2NotConfigured", err)
 	}
 }
