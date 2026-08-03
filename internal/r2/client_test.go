@@ -309,21 +309,38 @@ func (r *stallingReader) Read(p []byte) (int, error) {
 func TestCopyWithIdleTimeout_AllowsSlowProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	src := &delayedChunkReader{
-		ctx:    ctx,
-		chunks: [][]byte{[]byte("a"), []byte("b"), []byte("c")},
-		delay:  25 * time.Millisecond,
+	// Two properties have to hold at once, and they pull in opposite
+	// directions. To prove progress RESETS the timer, the transfer must
+	// outlast the timeout (otherwise the copy finishes before the timer would
+	// fire and the test passes even with the reset removed). To survive a
+	// loaded machine, each per-chunk gap needs a wide margin under the
+	// timeout. So: many small chunks, total well past the timeout, each gap a
+	// small fraction of it.
+	//
+	// This is inherently wall-clock bound — copyWithIdleTimeout builds its own
+	// time.Timer, so removing real time would take a timer seam in production
+	// that exists only for the test. The margin here (100x per gap) is the
+	// cheaper answer.
+	const (
+		chunkDelay  = 5 * time.Millisecond
+		idleTimeout = 500 * time.Millisecond
+		chunkCount  = 120 // 600ms total > 500ms timeout: the reset is load-bearing
+	)
+	chunks := make([][]byte, chunkCount)
+	for i := range chunks {
+		chunks[i] = []byte("a")
 	}
+	src := &delayedChunkReader{ctx: ctx, chunks: chunks, delay: chunkDelay}
 	var out bytes.Buffer
-	n, err := copyWithIdleTimeout(ctx, cancel, src, &out, 100*time.Millisecond)
+	n, err := copyWithIdleTimeout(ctx, cancel, src, &out, idleTimeout)
 	if err != nil {
 		t.Fatalf("copyWithIdleTimeout returned error: %v", err)
 	}
-	if n != 3 {
-		t.Fatalf("copied bytes = %d, want 3", n)
+	if n != chunkCount {
+		t.Fatalf("copied bytes = %d, want %d", n, chunkCount)
 	}
-	if out.String() != "abc" {
-		t.Fatalf("output = %q, want %q", out.String(), "abc")
+	if out.String() != strings.Repeat("a", chunkCount) {
+		t.Fatalf("output = %q, want %d a's", out.String(), chunkCount)
 	}
 }
 
