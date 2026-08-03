@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -3012,6 +3013,35 @@ func copyCloudObjectToWriterWithIdleTimeout(store cloudArtifactObjectStore, key 
 	return n, nil
 }
 
+// downloadCloudObjectToPathAtomic streams an R2 object to dest via a .part
+// sibling, teeing into extra when non-nil; dest is renamed into place only
+// after a clean close (a failed close leaves incomplete bytes).
+func downloadCloudObjectToPathAtomic(store cloudArtifactObjectStore, key, dest string, extra io.Writer, idleTimeout time.Duration) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return 0, err
+	}
+	tmpDest := dest + ".part"
+	f, err := os.Create(tmpDest)
+	if err != nil {
+		return 0, err
+	}
+	var w io.Writer = f
+	if extra != nil {
+		w = io.MultiWriter(f, extra)
+	}
+	n, copyErr := copyCloudObjectToWriterWithIdleTimeout(store, key, w, idleTimeout)
+	closeErr := f.Close()
+	if err := cmp.Or(copyErr, closeErr); err != nil {
+		_ = os.Remove(tmpDest)
+		return 0, err
+	}
+	if err := os.Rename(tmpDest, dest); err != nil {
+		_ = os.Remove(tmpDest)
+		return 0, err
+	}
+	return n, nil
+}
+
 func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string, idleTimeout time.Duration) (int64, string, error) {
 	r2Key := filesPrefix + relPath
 	listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -3034,21 +3064,9 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 	}
 
 	if isFile {
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return 0, "", err
-		}
-		f, err := os.Create(localPath)
-		if err != nil {
-			return 0, "", err
-		}
 		h := sha256.New()
-		n, err := copyCloudObjectToWriterWithIdleTimeout(store, r2Key, io.MultiWriter(f, h), idleTimeout)
-		closeErr := f.Close()
+		n, err := downloadCloudObjectToPathAtomic(store, r2Key, localPath, h, idleTimeout)
 		if err != nil {
-			_ = os.Remove(localPath)
-			return 0, "", err
-		}
-		if closeErr != nil {
 			return 0, "", err
 		}
 		return n, fmt.Sprintf("%x", h.Sum(nil)), nil
@@ -3069,21 +3087,8 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 			continue
 		}
 		childPath := filepath.Join(localPath, relChild)
-		if err := os.MkdirAll(filepath.Dir(childPath), 0o755); err != nil {
-			return 0, "", err
-		}
-
-		f, err := os.Create(childPath)
+		n, err := downloadCloudObjectToPathAtomic(store, key, childPath, nil, idleTimeout)
 		if err != nil {
-			return 0, "", err
-		}
-		n, err := copyCloudObjectToWriterWithIdleTimeout(store, key, f, idleTimeout)
-		closeErr := f.Close()
-		if err != nil {
-			_ = os.Remove(childPath)
-			return 0, "", err
-		}
-		if closeErr != nil {
 			return 0, "", err
 		}
 		totalSize += n
