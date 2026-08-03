@@ -20,19 +20,27 @@ type SyncResult struct {
 	Skipped int
 }
 
+// manifestMissingSentinel is printed by the remote probe when the manifest
+// file is confirmed absent.
+const manifestMissingSentinel = "__WEFT_MANIFEST_MISSING__"
+
 // FetchManifest loads the artifact manifest from the remote host.
+// ErrManifestMissing is returned only on positive evidence of absence (the
+// remote probe printed the sentinel); an SSH timeout or transport failure
+// surfaces as its own error, because callers like `weft artifact add`
+// initialize (and overwrite) a fresh manifest on confirmed absence.
 func FetchManifest(host string, jobID int64, timeout time.Duration) (Manifest, error) {
 	manifestPath := RemoteManifestPath(jobID)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", manifestPath)
+	cmd := fmt.Sprintf("if [ -f %[1]s ]; then cat %[1]s; else echo %[2]s; fi", manifestPath, manifestMissingSentinel)
 	stdout, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
-		if strings.TrimSpace(stdout) == "" {
-			lower := strings.ToLower(stderr)
-			if strings.Contains(lower, "no such file") || strings.Contains(lower, "not found") || strings.TrimSpace(stderr) == "" {
-				return Manifest{}, ErrManifestMissing
-			}
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			err = fmt.Errorf("%s: %w", msg, err)
 		}
-		return Manifest{}, err
+		return Manifest{}, fmt.Errorf("fetch manifest from %s: %w", host, err)
+	}
+	if strings.TrimSpace(stdout) == manifestMissingSentinel {
+		return Manifest{}, ErrManifestMissing
 	}
 	return ParseManifest(stdout, jobID)
 }
