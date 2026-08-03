@@ -2205,3 +2205,65 @@ func TestMatchJobToInstance_DriverFloor(t *testing.T) {
 		})
 	}
 }
+
+// TestSubmitJobsToInstancePersistsResolvedCloudAfterPin pins the wiring
+// between manifest assembly and the pin the reconciler reads. Without the
+// persist call the reconciler has nothing to compare against and a producer
+// re-attempt strands the consumer silently.
+func TestSubmitJobsToInstancePersistsResolvedCloudAfterPin(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	producerID := recordCloudQueuedJob(t, database, instanceID, "python producer.py")
+	producer := mustJob(t, database, producerID)
+	if producer.LatestRunID == nil || *producer.LatestRunID <= 0 {
+		t.Fatalf("producer latest run = %v, want a live attempt", producer.LatestRunID)
+	}
+	wantRunID := *producer.LatestRunID
+
+	consumerID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python consumer.py", "consumer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{fmt.Sprintf("output/model.pt:%d", producerID)}); err != nil {
+		t.Fatalf("SetJobNeeds consumer: %v", err)
+	}
+	consumer := mustJob(t, database, consumerID)
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
+		return sourceDir + ".tar.gz", nil
+	}
+	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
+		return "req-test", nil
+	}
+
+	if err := SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{consumer}); err != nil {
+		t.Fatalf("SubmitJobsToInstance: %v", err)
+	}
+
+	reloaded := mustJob(t, database, consumerID)
+	if reloaded.Metadata == nil || reloaded.Metadata.Dependencies == nil {
+		t.Fatalf("consumer metadata = %+v, want persisted dependency metadata", reloaded.Metadata)
+	}
+	pins := reloaded.Metadata.Dependencies.ResolvedCloudAfter
+	if len(pins) != 1 {
+		t.Fatalf("resolved cloud-after pins = %v, want exactly one", pins)
+	}
+	if pins[0].JobID != producerID || pins[0].RunID != wantRunID {
+		t.Fatalf("pin = %+v, want {JobID:%d RunID:%d}", pins[0], producerID, wantRunID)
+	}
+}

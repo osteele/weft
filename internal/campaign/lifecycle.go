@@ -2398,6 +2398,9 @@ func LaunchInstance(
 		if err != nil {
 			return failLaunchBeforeCreate("cloud needs resolution failed", err)
 		}
+		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
+			return failLaunchBeforeCreate("cloud-after pin persistence failed", err)
+		}
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
 		if err != nil {
 			return failLaunchBeforeCreate("checkpoint needs resolution failed", err)

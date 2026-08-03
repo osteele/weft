@@ -753,6 +753,71 @@ rule DependencyGatesRentalLaunch {
         -- Deferred jobs are re-evaluated on the next launch pass.
 }
 
+rule StaleCloudAfterPinsAreReconciled {
+    when: AutoPilotTick(database)
+
+    for consumer in jobs:
+      requires: consumer.status = queued
+                and consumer.start_time = null
+                and consumer.launch_id != null
+                and consumer.metadata.dependencies.resolved_cloud_after != null
+      for pin in consumer.metadata.dependencies.resolved_cloud_after:
+        let producer = Job(pin.job_id)
+        if producer is readable
+           and (
+             producer.latest_run_id != null
+             and producer.latest_run_id != pin.run_id
+             or producer.launch_id != consumer.launch_id
+           ):
+          ensures: ResetJobToUnplaced(consumer)
+          ensures: next AutoPilotTick does not select the same consumer row
+
+    @guidance
+        -- wb59 recorded repeated cases where a same-instance `--needs`
+        -- consumer was classified into a CloudAfter ref with the producer's
+        -- then-current LatestRunID, then the producer attempt changed before
+        -- the consumer started. The agent probes exactly
+        -- r2keys.JobAttemptComplete(producer_job_id, pinned_run_id); when
+        -- the producer runs under a newer attempt, that old marker never
+        -- appears and the consumer skip-fails as cloud_after_incomplete.
+        --
+        -- Event-driven resets are still useful latency optimizations. The
+        -- move acceptance paths call ResetStrandedCloudAfterConsumers as soon
+        -- as a producer leaves the source instance. They are not sufficient
+        -- as the only correctness mechanism because they require every
+        -- producer run/placement churn site to remember the hook; wb59's
+        -- partial fix covered successful move churn but missed same-launch
+        -- orphan/retry churn.
+        --
+        -- Launch assembly must persist the resolved attempt pin separately
+        -- from submit-time dependency semantics:
+        --   * metadata.dependencies.cloud_after / cloud_needs describe the
+        --     user's logical dependency and are carried forward by
+        --     carryForwardDependencyMetadata so host sync and later attempts
+        --     still know the submission semantics.
+        --   * metadata.dependencies.resolved_cloud_after describes the
+        --     concrete producer attempt shipped to one agent manifest and is
+        --     not carried forward to a later attempt.
+        --
+        -- The reconciler may reset only on positive mismatch evidence. A
+        -- missing resolved pin, unreadable producer row, or producer with an
+        -- unknown current attempt is an unknown state, not evidence that the
+        -- consumer should be disrupted. A producer still running under the
+        -- pinned run on the same launch is current and must not be selected.
+        --
+        -- Convergence is mandatory: after ResetJobToUnplaced the consumer no
+        -- longer has the same launch-bound queued attempt, so the same
+        -- predicate is false on the next tick. The next placement pass
+        -- reclassifies against the producer's current run if co-location
+        -- still applies.
+        --
+        -- Implementation: internal/campaign/needs_classify.go builds
+        -- cloud.CloudAfterRef; internal/campaign/lifecycle.go and
+        -- internal/campaign/reuse.go persist resolved_cloud_after during
+        -- manifest assembly; internal/campaign/stranded_cloud_after.go
+        -- ReconcileStaleCloudAfterPins performs the autopilot backstop.
+}
+
 -- --------------------------------------------------------------------------
 -- Provider credit gate
 -- --------------------------------------------------------------------------

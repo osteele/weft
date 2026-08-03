@@ -1203,6 +1203,13 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			}
 			return err
 		}
+		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
+			rollbackErr := rollbackClaims()
+			if rollbackErr != nil {
+				return fmt.Errorf("%w (rollback: %v)", err, rollbackErr)
+			}
+			return err
+		}
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(opCtx, database, r2Client, job)
 		if err != nil {
 			rollbackErr := rollbackClaims()

@@ -63,6 +63,7 @@ var autoPilotRebalanceQueuedJobsAcrossInstances = RebalanceQueuedJobsAcrossInsta
 var autoPilotFillReusableInstances = fillReusableInstances
 var autoReplanUnplaceQueuedJob = ops.UnplaceQueuedJob
 var autoPilotPublishCheckpointToR2 = campaign.PublishCheckpointToR2
+var autoPilotReconcileStaleCloudAfterPins = campaign.ReconcileStaleCloudAfterPins
 
 // autoReplanConfigEnabled reports whether the autopilot should run
 // AutoReplanStuckInventoryDispatch this pass. Wrapped in a var so tests
@@ -312,6 +313,12 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		}
 		oplog.Log("auto_pilot.stale_cloud_host_requeued",
 			oplog.WithDetailf("actions=%d job_ids=%v", len(stale.Actions), jobIDs))
+	}
+	if reset, err := autoPilotReconcileStaleCloudAfterPins(database); err != nil {
+		oplog.Log("auto_pilot.cloud_after_pin_reconcile_error", oplog.WithError(err))
+	} else if len(reset.JobIDs) > 0 {
+		oplog.Log("auto_pilot.cloud_after_pin_reconciled",
+			oplog.WithDetailf("jobs=%d job_ids=%v", len(reset.JobIDs), reset.JobIDs))
 	}
 
 	// Lift wedge auto-cordons whose retest cooldown has elapsed so a host whose

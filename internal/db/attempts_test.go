@@ -822,8 +822,9 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 	insertTestJob(t, database, jobID, "echo stage", "/tmp", StatusQueued)
 	meta := &JobMetadata{
 		Dependencies: &JobDependencyMetadata{
-			CloudNeeds: []string{"output/model.pt:1046"},
-			CloudAfter: []JobDependencyRef{{JobID: 1046}},
+			CloudNeeds:         []string{"output/model.pt:1046"},
+			CloudAfter:         []JobDependencyRef{{JobID: 1046}},
+			ResolvedCloudAfter: []JobDependencyResolvedRef{{JobID: 1046, RunID: 2048}},
 		},
 	}
 	if err := SetJobMetadata(database, jobID, meta); err != nil {
@@ -850,6 +851,9 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 	}
 	if got := job.Metadata.Dependencies.CloudAfter; len(got) != 1 || got[0].JobID != 1046 {
 		t.Fatalf("cloud_after = %v", got)
+	}
+	if got := job.Metadata.Dependencies.ResolvedCloudAfter; len(got) != 0 {
+		t.Fatalf("resolved_cloud_after = %v, want not carried forward", got)
 	}
 }
 

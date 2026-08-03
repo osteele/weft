@@ -52,14 +52,22 @@ func (d *JobDiskMetadata) Equal(other *JobDiskMetadata) bool {
 // JobDependencyMetadata stores dependency semantics that cannot be encoded as
 // host-local queue-runner deps (e.g., rental/cloud upstream dependencies).
 type JobDependencyMetadata struct {
-	CloudAfter []JobDependencyRef `json:"cloud_after,omitempty"`
-	CloudNeeds []string           `json:"cloud_needs,omitempty"`
+	CloudAfter         []JobDependencyRef         `json:"cloud_after,omitempty"`
+	CloudNeeds         []string                   `json:"cloud_needs,omitempty"`
+	ResolvedCloudAfter []JobDependencyResolvedRef `json:"resolved_cloud_after,omitempty"`
 }
 
 // JobDependencyRef identifies a dependency on another logical job.
 type JobDependencyRef struct {
 	JobID        int64 `json:"job_id"`
 	AllowFailure bool  `json:"allow_failure,omitempty"`
+}
+
+// JobDependencyResolvedRef identifies the launch-time attempt pin shipped to a
+// same-instance cloud consumer.
+type JobDependencyResolvedRef struct {
+	JobID int64 `json:"job_id"`
+	RunID int64 `json:"run_id"`
 }
 
 // ResourceUsage stores resource consumption captured when a job completes.

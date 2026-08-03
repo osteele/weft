@@ -117,6 +117,58 @@ func TestClassifyNeedsForLaunch_RentalOtherLiveInstance_Fallback(t *testing.T) {
 	}
 }
 
+func TestClassifyNeedsForLaunch_MoveTargetAttemptHiddenBeforeAcceptance(t *testing.T) {
+	database := db.SetupTestDB(t)
+	sourceLaunchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	targetLaunchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusLaunching, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "echo p", "producer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, producerID, sourceLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID producer source: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:      producerID,
+		TargetKind: db.MoveTargetNew,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, producerID, "", &targetLaunchID, db.StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	consumer := &db.Job{ID: 999, Needs: []string{fmt.Sprintf("out/x.pkl:%d", producerID)}}
+
+	called := false
+	prev := resolveCloudNeedsFunc
+	t.Cleanup(func() { resolveCloudNeedsFunc = prev })
+	resolveCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, specs []string) ([]cloud.CloudNeed, error) {
+		called = true
+		return []cloud.CloudNeed{{Spec: specs[0], Path: "out/x.pkl", R2Key: "mock"}}, nil
+	}
+
+	cloudNeeds, cloudAfter, _, err := ClassifyNeedsForLaunch(context.Background(), database, nil, consumer, targetLaunchID)
+	if err != nil {
+		t.Fatalf("ClassifyNeedsForLaunch: %v", err)
+	}
+	if !called {
+		t.Fatal("expected resolver to be called because open move target is hidden")
+	}
+	if len(cloudNeeds) != 1 {
+		t.Fatalf("cloudNeeds = %v, want one fallback need", cloudNeeds)
+	}
+	if len(cloudAfter) != 0 {
+		t.Fatalf("cloudAfter = %v, want none while target attempt is hidden", cloudAfter)
+	}
+}
+
 func TestClassifyNeedsForLaunch_DeadProducerInstance_Fallback(t *testing.T) {
 	database := db.SetupTestDB(t)
 	deadInstance, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusCompleted, Provider: "vastai"})
