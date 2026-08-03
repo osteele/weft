@@ -1130,8 +1130,35 @@ rule OutputDiscoveryUsesAttemptStartCutoff {
              (Missing start_time on a completed attempt is itself a
              completion-sync bug; see internal/ops/sync.go
              BackfillStartTimeFromCompletionRecord.)
+    ensures: an attempt whose completion record could not be READ gets no
+             discovery-based attribution either. A record that is confirmed
+             absent (the host answered) leaves discovery free to run; a
+             record that could not be reached — SSH failure, timeout, parse
+             error — is an unknown, and the two must not collapse. Treating
+             unknown as absent discards the runner's authoritative
+             output_files list AND drops the end bound to zero when the DB
+             row has no end_time, so a VPN flap would silently widen
+             attribution to unbounded and write a sibling job's outputs
+             under this one. Same shape as the ErrManifestMissing sentinel
+             on the upload side.
 
     @guidance
+        -- The completion-record read distinguishes its three outcomes with a
+        -- remote sentinel rather than with the SSH error. internal/ssh does
+        -- capture the remote exit code (pool.go commandError) but does not
+        -- export it, so outside that package a remote non-zero exit and a
+        -- transport failure both surface as a bare err != nil and absence
+        -- cannot be inferred from the error alone. The probe is
+        -- `if [ -f <path> ]; then cat <path>; else echo <sentinel>; fi`, and
+        -- only a successful run printing the sentinel is confirmed absence
+        -- (cmd/artifact.go fetchCompletionRecord, errCompletionRecordMissing).
+        -- Exporting that exit-code distinction from internal/ssh would let
+        -- this read and artifacts.FetchManifest share one helper and drop
+        -- their sentinels; until then the sentinel is the portable form.
+        -- This path is inventory-host only — syncJobOutputs routes rental
+        -- jobs to cloud/R2 sync first — so refusing on unreachable does not
+        -- strand jobs whose cloud instance is permanently gone.
+        --
         -- Implementation: cmd/artifact.go outputSyncThreshold(job) computes
         -- StartTime − 1s and outputSyncUpperBound(job, rec) computes
         -- end_time + 2m; both feed discoverRemoteJobOutputFiles (host-side

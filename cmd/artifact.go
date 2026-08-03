@@ -2285,7 +2285,15 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return result, nil
 	}
 
-	rec := completionRecordFunc(job)
+	// A confirmed-absent record leaves rec nil and lets discovery run below;
+	// any other error is an unknown, and attributing on an unknown would drop
+	// the runner's output_files list and widen the window to unbounded.
+	rec, recErr := completionRecordFunc(job)
+	if recErr != nil && !errors.Is(recErr, errCompletionRecordMissing) {
+		syncOutputWarnf("warning: job %s: could not read completion record (%v); cannot attribute outputs by time window — skipping output discovery\n",
+			ids.FormatJobID(job.ID), recErr)
+		return artifacts.SyncResult{}, nil
+	}
 
 	// Backfill start_time from the host-side completion record when the DB
 	// row lacks it. Missing start_time on a completed attempt is itself a bug
@@ -2470,20 +2478,36 @@ func artifactRunIDCandidates(lister cloudOutputLister, job *db.Job) ([]int64, er
 	return runIDs, nil
 }
 
+var errCompletionRecordMissing = errors.New("completion record not found")
+
+// completionRecordMissingSentinel is printed by the remote probe when the
+// completion record is confirmed absent.
+const completionRecordMissingSentinel = "__WEFT_COMPLETION_RECORD_MISSING__"
+
 // fetchCompletionRecord reads the runner's completion record for a job from
-// its host. Returns nil when the record is missing or unreadable.
-func fetchCompletionRecord(job *db.Job) *runner.CompletionRecord {
+// its host. errCompletionRecordMissing means the host was reached and the
+// record is absent; any other error means the record could not be read at all
+// (unreachable host, timeout, malformed JSON) and its contents stay unknown.
+// The record is nil whenever the error is non-nil.
+func fetchCompletionRecord(job *db.Job) (*runner.CompletionRecord, error) {
 	completionPath := fmt.Sprintf("~/.cache/weft/logs/%d.completion.json", job.ID)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, fmt.Sprintf("cat %s 2>/dev/null", completionPath), NormalSyncTimeout)
+	cmd := fmt.Sprintf("if [ -f %[1]s ]; then cat %[1]s; else echo %[2]s; fi", completionPath, completionRecordMissingSentinel)
+	stdout, stderr, err := ssh.RunWithTimeout(job.Host, cmd, NormalSyncTimeout)
 	if err != nil {
-		return nil
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			err = fmt.Errorf("%s: %w", msg, err)
+		}
+		return nil, fmt.Errorf("fetch completion record from %s: %w", job.Host, err)
+	}
+	if strings.TrimSpace(stdout) == completionRecordMissingSentinel {
+		return nil, errCompletionRecordMissing
 	}
 
 	var rec runner.CompletionRecord
 	if err := json.Unmarshal([]byte(stdout), &rec); err != nil {
-		return nil
+		return nil, fmt.Errorf("parse completion record from %s: %w", job.Host, err)
 	}
-	return &rec
+	return &rec, nil
 }
 
 func outputFilePaths(files []runner.OutputFile) []string {

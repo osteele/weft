@@ -1132,8 +1132,8 @@ func TestSyncJobOutputsCachesDeclaredOutputDirectoryWithoutCompletionRecord(t *t
 		completionRecordFunc = prevCompletion
 		isLocalJobHostFunc = prevIsLocal
 	})
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
-		return nil
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return nil, nil
 	}
 	// Local discovery is only legitimate when the job executed on this
 	// machine (spec: Attribution).
@@ -1232,7 +1232,7 @@ func TestSyncJobOutputsSkipsDiscoveryWithoutStartTime(t *testing.T) {
 
 	job := syncJobOutputsTestJob(t, database, workDir, 0)
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) { return nil, nil }
 	var warning string
 	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
 
@@ -1273,7 +1273,7 @@ func TestSyncJobOutputsNeverRegistersSubmitterLocalFiles(t *testing.T) {
 
 	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) { return nil, nil }
 	// Remote discovery runs (there IS a window) but finds nothing on the host.
 	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
 		return nil, nil
@@ -1304,11 +1304,11 @@ func TestSyncJobOutputsSyncsCompletionRecordFiles(t *testing.T) {
 	workDir := t.TempDir()
 	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
 		return &runner.CompletionRecord{
 			ExitCode:    0,
 			OutputFiles: []runner.OutputFile{{RelPath: "output/result.json", SizeBytes: 2}},
-		}
+		}, nil
 	}
 	var syncedPaths []string
 	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
@@ -1351,8 +1351,8 @@ func TestSyncJobOutputsRemoteDiscoveryFallback(t *testing.T) {
 	end := start + 600
 	job := syncJobOutputsTestJob(t, database, workDir, start)
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
-		return &runner.CompletionRecord{ExitCode: 0, StartTime: start, EndTime: end}
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return &runner.CompletionRecord{ExitCode: 0, StartTime: start, EndTime: end}, nil
 	}
 	var gotLower, gotUpper time.Time
 	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
@@ -1393,6 +1393,90 @@ func TestSyncJobOutputsRemoteDiscoveryFallback(t *testing.T) {
 	}
 }
 
+func TestSyncJobOutputsCompletionRecordMissingFallsBackToDiscovery(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	start := time.Now().Add(-time.Hour).Unix()
+	job := syncJobOutputsTestJob(t, database, workDir, start)
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return nil, errCompletionRecordMissing
+	}
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		if lower.IsZero() {
+			t.Fatal("discovery lower bound is zero; want start-time-bounded discovery")
+		}
+		return []runner.OutputFile{{RelPath: "output/missing-record-found.json", SizeBytes: 2}}, nil
+	}
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		path := filepath.Join(localDir, "output", "missing-record-found.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("{}"), 0o644)
+	}
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+	if _, err := db.FindArtifactByNameOrPath(database, job.ID, "output/missing-record-found.json"); err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+}
+
+func TestSyncJobOutputsCompletionRecordFetchFailureSkipsDiscovery(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return nil, errors.New("fetch completion record from cool30: ssh: connect to host cool30 port 22: Operation timed out")
+	}
+	discovered := false
+	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		discovered = true
+		return []runner.OutputFile{{RelPath: "output/cross-attributed.json", SizeBytes: 2}}, nil
+	}
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		path := filepath.Join(localDir, "output", "cross-attributed.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("{}"), 0o644)
+	}
+	var warning string
+	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("Added = %d, want 0; SSH failure must not fall back to discovery", result.Added)
+	}
+	if discovered {
+		t.Fatal("remote discovery ran after completion-record fetch failure")
+	}
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("artifacts = %+v, want none", entries)
+	}
+	if !strings.Contains(warning, "could not read completion record") || !strings.Contains(warning, "skipping output discovery") {
+		t.Fatalf("warning = %q, want completion-record skip notice", warning)
+	}
+}
+
 // TestSyncJobOutputsBackfillsStartTimeFromCompletionRecord: a completed
 // attempt missing start_time in the DB (a completion-sync bug, see
 // internal/ops/sync.go) is repaired from the host's completion record, which
@@ -1405,8 +1489,8 @@ func TestSyncJobOutputsBackfillsStartTimeFromCompletionRecord(t *testing.T) {
 	start := time.Now().Add(-time.Hour).Unix()
 	job := syncJobOutputsTestJob(t, database, workDir, 0)
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
-		return &runner.CompletionRecord{ExitCode: 0, StartTime: start}
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return &runner.CompletionRecord{ExitCode: 0, StartTime: start}, nil
 	}
 	discoverCalled := false
 	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
@@ -1531,8 +1615,8 @@ func TestSyncArtifactsForJobFallsBackToDeclaredOutputFilesWhenManifestDirectoryS
 	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
 		return artifacts.SyncResult{}, errors.New("scp: output/artifact-smoke/: not a regular file")
 	}
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
-		return nil
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return nil, nil
 	}
 	isLocalJobHostFunc = func(string) bool { return true }
 
@@ -1855,7 +1939,7 @@ func TestSyncJobOutputsExcludesPostAttemptOverwrites(t *testing.T) {
 
 	job := syncJobOutputsTestJob(t, database, workDir, start.Unix())
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
 		return &runner.CompletionRecord{
 			StartTime: start.Unix(),
 			EndTime:   end.Unix(),
@@ -1863,7 +1947,7 @@ func TestSyncJobOutputsExcludesPostAttemptOverwrites(t *testing.T) {
 				{RelPath: "output/attempt.json"},
 				{RelPath: "output/overwritten.json"},
 			},
-		}
+		}, nil
 	}
 	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
 		return nil // the files above stand in for the synced copies
@@ -2102,7 +2186,7 @@ func TestSyncJobOutputsWarnsWhenR2SyncDegrades(t *testing.T) {
 	workDir := t.TempDir()
 	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
 	stubSyncJobOutputsRemote(t)
-	completionRecordFunc = func(*db.Job) *runner.CompletionRecord { return nil }
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) { return nil, nil }
 	discoverRemoteJobOutputFilesFunc = func(*db.Job, time.Time, time.Time) ([]runner.OutputFile, error) {
 		return nil, nil
 	}
