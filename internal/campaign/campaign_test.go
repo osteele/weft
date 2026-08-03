@@ -1930,6 +1930,66 @@ func TestPackSingleGPUJobsSkipsBenchmarkJobs(t *testing.T) {
 	}
 }
 
+func TestPackSingleGPUJobsSkipsIntraGroupNeedsProducer(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "A40",
+		NumGPUs:  1,
+		GPUMemGB: 48,
+		Jobs: []*db.Job{
+			{ID: 1},
+			{ID: 2, Needs: []string{"output/model.pt:1"}},
+		},
+	}}
+
+	packed := PackSingleGPUJobs(groups, nil)
+	if packed[0].SlotGPUs {
+		t.Fatal("same-instance producer/consumer jobs must stay on the sequential path")
+	}
+	if packed[0].NumGPUs != 1 {
+		t.Fatalf("NumGPUs = %d, want 1", packed[0].NumGPUs)
+	}
+}
+
+func TestPackSingleGPUJobsAllowsNeedsProducerOutsideGroup(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "A40",
+		NumGPUs:  1,
+		GPUMemGB: 48,
+		Jobs: []*db.Job{
+			{ID: 1},
+			{ID: 2, Needs: []string{"output/model.pt:99"}},
+		},
+	}}
+
+	packed := PackSingleGPUJobs(groups, nil)
+	if !packed[0].SlotGPUs {
+		t.Fatal("needs edges outside the packed group should not block GPU slots")
+	}
+	if packed[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", packed[0].NumGPUs)
+	}
+}
+
+func TestPackSingleGPUJobsAllowsNamedAssetNeeds(t *testing.T) {
+	groups := []InstanceGroup{{
+		GPUClass: "A40",
+		NumGPUs:  1,
+		GPUMemGB: 48,
+		Jobs: []*db.Job{
+			{ID: 1},
+			{ID: 2, Needs: []string{"asset:exp207-eval-llama8b"}},
+		},
+	}}
+
+	packed := PackSingleGPUJobs(groups, nil)
+	if !packed[0].SlotGPUs {
+		t.Fatal("named asset needs should not block GPU slots")
+	}
+	if packed[0].NumGPUs != 2 {
+		t.Fatalf("NumGPUs = %d, want 2", packed[0].NumGPUs)
+	}
+}
+
 func TestSplitToParallel_SingleJobGroup(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:      "RTX_3090",

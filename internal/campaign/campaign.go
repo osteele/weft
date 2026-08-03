@@ -18,6 +18,8 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/imagereq"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/queueblock"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -797,7 +799,57 @@ func groupCanUseGPUSlots(g InstanceGroup) bool {
 			return false
 		}
 	}
+	if groupHasIntraGroupNeedsEdge(g) || groupHasIntraGroupDepSpecEdge(g) {
+		return false
+	}
 	return true
+}
+
+func groupHasIntraGroupNeedsEdge(g InstanceGroup) bool {
+	jobIDs := make(map[int64]bool, len(g.Jobs))
+	for _, job := range g.Jobs {
+		if job != nil {
+			jobIDs[job.ID] = true
+		}
+	}
+	for _, job := range g.Jobs {
+		if job == nil {
+			continue
+		}
+		for _, spec := range job.Needs {
+			parsed, err := runner.ParseNeedsSpec(spec)
+			if err != nil {
+				return true
+			}
+			if parsed.IsAsset() {
+				continue
+			}
+			if jobIDs[parsed.Version] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func groupHasIntraGroupDepSpecEdge(g InstanceGroup) bool {
+	jobIDs := make(map[int64]bool, len(g.Jobs))
+	for _, job := range g.Jobs {
+		if job != nil {
+			jobIDs[job.ID] = true
+		}
+	}
+	for _, job := range g.Jobs {
+		if job == nil {
+			continue
+		}
+		for _, dep := range queueblock.ParseJobDependencies(job.DepSpec) {
+			if jobIDs[dep.JobID] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // FilterByGPUClass returns groups whose GPU constraint is within the requested

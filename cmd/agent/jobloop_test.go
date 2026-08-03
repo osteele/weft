@@ -161,6 +161,26 @@ func TestCanRunSlottedJobsConcurrentlyRequiresSlotFlag(t *testing.T) {
 	}
 }
 
+func TestCanRunSlottedJobsConcurrentlyRejectsCloudAfterPeer(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, SlotGPU: true, GPU: "0", GPUCount: 1},
+		{ID: 2, SlotGPU: true, GPU: "1", GPUCount: 1, CloudAfter: []cloud.CloudAfterRef{{JobID: 1, RunID: 101}}},
+	}
+	if canRunSlottedJobsConcurrently(jobs) {
+		t.Fatal("CloudAfter refs within the slot set must stay on the sequential path")
+	}
+}
+
+func TestCanRunSlottedJobsConcurrentlyAllowsCloudAfterOutsideSet(t *testing.T) {
+	jobs := []cloud.AgentJob{
+		{ID: 1, SlotGPU: true, GPU: "0", GPUCount: 1},
+		{ID: 2, SlotGPU: true, GPU: "1", GPUCount: 1, CloudAfter: []cloud.CloudAfterRef{{JobID: 99, RunID: 101}}},
+	}
+	if !canRunSlottedJobsConcurrently(jobs) {
+		t.Fatal("CloudAfter refs outside the slot set should not block concurrent slots")
+	}
+}
+
 func TestCollectCompletionManifestIncludesPriorGraceJob(t *testing.T) {
 	logDir := t.TempDir()
 	writeCompletionRecordForTest(t, logDir, 2002, runner.CompletionRecord{

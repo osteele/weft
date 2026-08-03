@@ -979,6 +979,8 @@ rule PackedSlotsUseIsolatedWorkdirs {
 
     ensures: every concurrently running slot has a distinct working_dir
     ensures: each slot's source tarball is extracted into that slot's working_dir
+    ensures: no concurrently running slot has a same-instance CloudAfter edge
+             to another slot in the same set
 
     @guidance
         -- The sequential SharedWorkdirUploadBarrierBeforeNextJob rule cannot
@@ -990,10 +992,31 @@ rule PackedSlotsUseIsolatedWorkdirs {
         -- but convention output discovery, uv sync, source refresh, and
         -- post-job uploads stay per-slot.
         --
+        -- Same-instance artifact dependencies are represented as CloudAfter
+        -- refs. They require the consumer to run after the producer has
+        -- written its completion marker, and they require the consumer to see
+        -- the producer's output through the shared project working directory.
+        -- Packed slots violate both requirements: slots run concurrently, and
+        -- each slot has an isolated working_dir. A same-instance CloudAfter
+        -- edge therefore disqualifies slot packing; the group must use the
+        -- ordinary sequential shared-workdir launch path instead.
+        --
+        -- `--after` / dep_spec consumers should normally not be present in
+        -- the same launch-selection group as their upstream producer because
+        -- launch and reuse paths defer them until the upstream terminates.
+        -- Packing still treats an intra-group dep_spec edge as ineligible so
+        -- stale manifests or alternate placement paths cannot schedule a
+        -- producer/consumer ordering constraint concurrently.
+        --
         -- Implementation: internal/campaign/lifecycle.go
         -- remoteDirForLaunchAgentJob gives SlotGPUs jobs a
         -- `<project>-job-<id>` remote directory, and
         -- sourceMappingsForLaunch emits one source mapping per slot.
+        -- internal/campaign/campaign.go groupCanUseGPUSlots rejects
+        -- intra-group --needs producer IDs and dep_spec refs before setting
+        -- SlotGPUs. cmd/agent/jobloop.go canRunSlottedJobsConcurrently
+        -- rejects manifests whose CloudAfter refs name another job in the
+        -- concurrent slot set.
 }
 
 -- A cloud agent job that fails BEFORE its user command starts — the

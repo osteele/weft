@@ -1062,6 +1062,10 @@ func canRunSlottedJobsConcurrently(jobs []cloud.AgentJob) bool {
 		return false
 	}
 	seen := map[string]bool{}
+	jobIDs := make(map[int64]bool, len(jobs))
+	for _, job := range jobs {
+		jobIDs[job.ID] = true
+	}
 	for _, job := range jobs {
 		if !job.SlotGPU {
 			return false
@@ -1086,6 +1090,11 @@ func canRunSlottedJobsConcurrently(jobs []cloud.AgentJob) bool {
 			return false
 		}
 		seen[gpu] = true
+		for _, ref := range job.CloudAfter {
+			if jobIDs[ref.JobID] {
+				return false
+			}
+		}
 	}
 	return true
 }
