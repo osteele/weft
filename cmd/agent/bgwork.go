@@ -122,11 +122,7 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 		if artifactResult.Status != "ok" {
 			m.recordError(pw.jobID, "upload-artifacts", fmt.Errorf("status=%s", artifactResult.Status))
 		}
-		uploadResult.FileCount += artifactResult.FileCount
-		uploadResult.Bytes += artifactResult.Bytes
-		if artifactResult.CompletedAtUnix > uploadResult.CompletedAtUnix {
-			uploadResult.CompletedAtUnix = artifactResult.CompletedAtUnix
-		}
+		mergeUploadResults(&uploadResult, &artifactResult)
 
 		patchCompletionUpload(pw.logSnapshot, pw.jobID, &uploadResult)
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -444,7 +445,20 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 	startedAt := time.Now()
 	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
 	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
-	if err != nil || len(manifest.Artifacts) == 0 {
+	if err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+		// An unreadable manifest fails the whole upload
+		// (spec: PerArtifactUploadOutcomeRecorded).
+		result := runner.OutputUploadResult{
+			Dirs: []runner.OutputDirUpload{{
+				Dir:    manifestPath,
+				Status: runner.UploadStatusFailed,
+				Error:  fmt.Sprintf("read artifact manifest: %v", err),
+			}},
+		}
+		finalizeUploadResult(&result, 1, 1, startedAt, 0)
+		return result
+	}
+	if len(manifest.Artifacts) == 0 {
 		return runner.OutputUploadResult{Status: runner.UploadStatusOK}
 	}
 
@@ -468,15 +482,23 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 		if strings.TrimSpace(spec.Path) == "" {
 			continue
 		}
+		attempted++
 		remotePath := artifacts.ResolveRemotePath(root, spec.Path)
 		remotePath = runner.ExpandTilde(remotePath)
 
 		info, statErr := os.Stat(remotePath)
 		if statErr != nil {
+			// A declared artifact absent from disk is a failed entry, not a
+			// skipped one (spec: PerArtifactUploadOutcomeRecorded).
 			fmt.Fprintf(os.Stderr, "artifact %q for job %d: %v\n", spec.Path, jobID, statErr)
+			failed++
+			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+				Dir:    spec.Path,
+				Status: runner.UploadStatusFailed,
+				Error:  statErr.Error(),
+			})
 			continue
 		}
-		attempted++
 		var (
 			src, dest, rcloneCmd string
 			fileCount            int
@@ -554,19 +576,48 @@ func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID, runID in
 
 // finalizeUploadResult sets status and timing fields on an OutputUploadResult.
 func finalizeUploadResult(result *runner.OutputUploadResult, attempted, failed int, startedAt time.Time, totalDuration time.Duration) {
-	switch {
-	case attempted == 0 || failed == 0:
-		result.Status = runner.UploadStatusOK
-	case failed == attempted:
-		result.Status = runner.UploadStatusFailed
-	default:
-		result.Status = runner.UploadStatusPartial
-	}
+	result.Status = uploadStatusFor(attempted, failed)
 	result.DurationMS = totalDuration.Milliseconds()
 	if attempted > 0 {
 		result.StartedAtUnix = startedAt.Unix()
 		result.CompletedAtUnix = time.Now().Unix()
 	}
+}
+
+func uploadStatusFor(attempted, failed int) string {
+	switch {
+	case attempted == 0 || failed == 0:
+		return runner.UploadStatusOK
+	case failed == attempted:
+		return runner.UploadStatusFailed
+	default:
+		return runner.UploadStatusPartial
+	}
+}
+
+// mergeUploadResults folds src into dst: per-entry outcomes, counters, timing,
+// and a combined status re-derived from the merged entries. Both producers
+// append exactly one Dirs entry per attempted upload
+// (spec: PerArtifactUploadOutcomeRecorded).
+func mergeUploadResults(dst, src *runner.OutputUploadResult) {
+	dst.Dirs = append(dst.Dirs, src.Dirs...)
+	dst.FileCount += src.FileCount
+	dst.Bytes += src.Bytes
+	dst.RetryCount += src.RetryCount
+	dst.DurationMS += src.DurationMS
+	if src.StartedAtUnix != 0 && (dst.StartedAtUnix == 0 || src.StartedAtUnix < dst.StartedAtUnix) {
+		dst.StartedAtUnix = src.StartedAtUnix
+	}
+	if src.CompletedAtUnix > dst.CompletedAtUnix {
+		dst.CompletedAtUnix = src.CompletedAtUnix
+	}
+	failed := 0
+	for _, d := range dst.Dirs {
+		if d.Status == runner.UploadStatusFailed {
+			failed++
+		}
+	}
+	dst.Status = uploadStatusFor(len(dst.Dirs), failed)
 }
 
 func measureUploadTree(root string) (files int, bytes int64, ok bool) {

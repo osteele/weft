@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/runner"
 )
 
 func TestTerminalOutcomeForSequence(t *testing.T) {
@@ -220,5 +222,130 @@ func TestMeasureUploadTreeSince_ExcludesPriorJobFiles(t *testing.T) {
 	files, _, ok = measureUploadTreeSince(dir, time.Time{})
 	if !ok || files != 2 {
 		t.Errorf("measureUploadTreeSince(zero) = %d files, want 2", files)
+	}
+}
+
+// fakeRcloneOK puts a no-op rclone on PATH so upload helpers can run without
+// touching R2.
+func fakeRcloneOK(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\ncat > /dev/null 2>/dev/null\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "rclone"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// writeRawArtifactManifest writes raw manifest bytes for malformed or empty
+// cases; well-formed manifests go through artifacts.WriteManifestFile.
+func writeRawArtifactManifest(t *testing.T, jobID int64, content string) {
+	t.Helper()
+	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Regression: a declared artifact missing from disk must yield a failed
+// per-entry outcome (spec: PerArtifactUploadOutcomeRecorded).
+func TestUploadArtifactManifestEntries_MissingArtifactRecordedAsFailed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(61))
+	err := artifacts.WriteManifestFile(manifestPath, artifacts.Manifest{
+		JobID:     61,
+		Artifacts: []artifacts.ArtifactSpec{{Path: "output/never-written.pt"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := uploadArtifactManifestEntries("bucket", 61, 1, workDir)
+
+	if result.Status != runner.UploadStatusFailed {
+		t.Fatalf("Status = %q, want failed", result.Status)
+	}
+	if len(result.Dirs) != 1 || result.Dirs[0].Dir != "output/never-written.pt" ||
+		result.Dirs[0].Status != runner.UploadStatusFailed || result.Dirs[0].Error == "" {
+		t.Fatalf("Dirs = %+v, want one failed entry for the missing artifact", result.Dirs)
+	}
+}
+
+// Regression: an unreadable manifest fails the upload rather than reporting a
+// clean empty one (spec: PerArtifactUploadOutcomeRecorded).
+func TestUploadArtifactManifestEntries_UnreadableManifestFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeRawArtifactManifest(t, 62, `{"job_id": 62, "artifacts": [`)
+
+	result := uploadArtifactManifestEntries("bucket", 62, 1, t.TempDir())
+
+	if result.Status != runner.UploadStatusFailed {
+		t.Fatalf("Status = %q, want failed", result.Status)
+	}
+	if len(result.Dirs) != 1 || result.Dirs[0].Error == "" {
+		t.Fatalf("Dirs = %+v, want one failed entry naming the manifest", result.Dirs)
+	}
+	if result.StartedAtUnix == 0 || result.CompletedAtUnix == 0 {
+		t.Fatalf("result = %+v, want timing fields set on the failed result", result)
+	}
+}
+
+func TestUploadArtifactManifestEntries_AbsentManifestIsOK(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	result := uploadArtifactManifestEntries("bucket", 63, 1, t.TempDir())
+
+	if result.Status != runner.UploadStatusOK || len(result.Dirs) != 0 {
+		t.Fatalf("result = %+v, want clean OK for a job that declared nothing", result)
+	}
+}
+
+// Regression: a manifest the job touched but left empty declares nothing —
+// that is the ErrManifestMissing sentinel, not an unreadable manifest.
+func TestUploadArtifactManifestEntries_EmptyManifestIsOK(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	writeRawArtifactManifest(t, 64, "\n")
+
+	result := uploadArtifactManifestEntries("bucket", 64, 1, t.TempDir())
+
+	if result.Status != runner.UploadStatusOK || len(result.Dirs) != 0 {
+		t.Fatalf("result = %+v, want clean OK for an empty manifest", result)
+	}
+}
+
+// Regression: the post-job merge must carry per-entry artifact outcomes and
+// re-derive the combined status, not just sum counters
+// (spec: PerArtifactUploadOutcomeRecorded).
+func TestMergeUploadResults_CarriesDirsAndCombinesStatus(t *testing.T) {
+	dst := runner.OutputUploadResult{
+		Status:          runner.UploadStatusOK,
+		FileCount:       2,
+		Bytes:           10,
+		StartedAtUnix:   100,
+		CompletedAtUnix: 110,
+		Dirs:            []runner.OutputDirUpload{{Dir: "output", Status: runner.UploadStatusOK}},
+	}
+	src := runner.OutputUploadResult{
+		Status:          runner.UploadStatusFailed,
+		StartedAtUnix:   90,
+		CompletedAtUnix: 120,
+		Dirs:            []runner.OutputDirUpload{{Dir: "output/model.pt", Status: runner.UploadStatusFailed, Error: "stat"}},
+	}
+
+	mergeUploadResults(&dst, &src)
+
+	if dst.Status != runner.UploadStatusPartial {
+		t.Errorf("Status = %q, want partial", dst.Status)
+	}
+	if len(dst.Dirs) != 2 || dst.Dirs[1].Dir != "output/model.pt" {
+		t.Errorf("Dirs = %+v, want both entries carried", dst.Dirs)
+	}
+	if dst.StartedAtUnix != 90 || dst.CompletedAtUnix != 120 {
+		t.Errorf("timing = %d..%d, want 90..120", dst.StartedAtUnix, dst.CompletedAtUnix)
 	}
 }

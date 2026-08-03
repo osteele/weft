@@ -915,6 +915,21 @@ rule PerArtifactUploadOutcomeRecorded {
         -- result. A failure on a single large file (e.g. a 500MB checkpoint
         -- whose upload timed out) must be visible per-path so users can see
         -- which artifact failed without inspecting agent logs.
+        --
+        -- A declared artifact that does not exist on disk is a failed
+        -- entry, not a skipped one: a job whose --produces contract went
+        -- unmet must not report a clean upload. Likewise an unreadable
+        -- manifest fails the whole upload — the declared set cannot be
+        -- enumerated, so absence from R2 is not evidence the job declared
+        -- nothing. A manifest that exists but declares nothing (the
+        -- ErrManifestMissing sentinel — empty file, blank lines) is a
+        -- confirmed-empty declaration and reports a clean upload; only a
+        -- read or parse failure is an unknown. The 60s mid-run ticker
+        -- discards its results (a pre-registered artifact legitimately
+        -- does not exist yet mid-run); only the post-job call's result
+        -- reaches the completion record — the post-job merge
+        -- (mergeUploadResults) must carry these per-entry outcomes and the
+        -- combined status into the record, not just byte/file counters.
         -- Implementation: cmd/agent/runinstance.go uploadArtifactManifestEntries
         -- appends one result.Dirs entry per artifact regardless of kind.
 }
