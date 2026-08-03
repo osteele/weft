@@ -14,6 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/placement"
@@ -625,6 +626,7 @@ func TestMatchJobToInstance_RejectsCUDAFloorFromPlacementConstraints(t *testing.
 			GPUClass:        "nvidia",
 			GPUMemGB:        80,
 			CUDAVersion:     12.4,
+			DriverVersion:   "570.86.15",
 			ResolvedGPUName: "A100",
 		},
 		DiskFreeGB: 100,
@@ -2171,30 +2173,31 @@ func TestMatchJobToInstance_TagAndExplicitCoresCompose(t *testing.T) {
 	}
 }
 
-// The driver-major floor is enforced against launches that recorded a driver
-// version, and dropped for launches that did not: a legacy or unprobed row is
-// not confirmed incompatible, and it already passed its original group's
-// launch-time driver filters.
+// The driver-major floor is enforced against recorded launch facts. A
+// derived floor can also be evidenced by the launch's recorded driver CUDA
+// capability; see specs/campaign-lifecycle.allium InstanceReuseHostAxes.
 func TestMatchJobToInstance_DriverFloor(t *testing.T) {
+	job := derivedDriverFloorJob(t)
 	tests := []struct {
 		name       string
+		instCUDA   float64
 		instDriver string
 		want       bool
+		wantReason string
 	}{
-		{"older driver rejects", "535.154.05", false},
-		{"newer driver passes", "550.90.07", true},
-		{"equal major passes", "550.54.14", true},
-		{"unknown driver passes (launch-time enforcement only)", "", true},
+		{"older driver rejects", 12.6, "520.61.05", false, "driver floor"},
+		{"newer driver passes", 12.6, "530.30.02", true, ""},
+		{"equal major passes", 12.6, "525.125.06", true, ""},
+		{"unknown driver passes with satisfying recorded CUDA", 12.6, "", true, ""},
+		{"unknown driver and unknown CUDA rejects", 0, "", false, "driver floor: no recorded NVIDIA driver"},
+		{"unknown driver with below-floor CUDA rejects on CUDA axis", 11.8, "", false, "CUDA compatibility insufficient"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// "--cuda-driver-min 12.4" derives driver-major floor 550 via
-			// RuntimeFloor.FinalizeDriver / imagereq.MinDriverForCUDA.
-			job := &db.Job{GPUClass: "nvidia", CLIResourceOverrides: &db.CLIResourceOverrides{MinCUDAVersion: "12.4"}}
 			cap := InstanceCapacity{
 				Instance: &db.Launch{
 					GPUClass: "nvidia", ResolvedGPUName: "RTX 4090", GPUMemGB: 24,
-					CUDAVersion: 12.6, DriverVersion: tt.instDriver,
+					CUDAVersion: tt.instCUDA, DriverVersion: tt.instDriver,
 				},
 				DiskFreeGB: 100,
 			}
@@ -2202,8 +2205,66 @@ func TestMatchJobToInstance_DriverFloor(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("MatchJobToInstance() = %v, want %v (reason: %s)", got, tt.want, reason)
 			}
+			if tt.wantReason != "" && !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("reason = %q, want to contain %q", reason, tt.wantReason)
+			}
 		})
 	}
+}
+
+func TestMatchJobToInstance_ExplicitDriverFloorRequiresRecordedDriver(t *testing.T) {
+	job := explicitDriverFloorJob(t)
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass: "nvidia", ResolvedGPUName: "RTX 4090", GPUMemGB: 24,
+			CUDAVersion: 12.6,
+		},
+		DiskFreeGB: 100,
+	}
+	got, reason := MatchJobToInstance(job, cap)
+	if got {
+		t.Fatalf("MatchJobToInstance() = true, want explicit driver floor to reject without recorded driver")
+	}
+	if !strings.Contains(reason, "driver floor: no recorded NVIDIA driver") {
+		t.Fatalf("reason = %q, want missing-driver rejection", reason)
+	}
+}
+
+func TestMatchJobToInstance_CUDADriverMinDerivedFloorUsesRecordedCUDA(t *testing.T) {
+	job := &db.Job{GPUClass: "nvidia", CLIResourceOverrides: &db.CLIResourceOverrides{MinCUDAVersion: "12.4"}}
+	cap := InstanceCapacity{
+		Instance: &db.Launch{
+			GPUClass: "nvidia", ResolvedGPUName: "RTX 4090", GPUMemGB: 24,
+			CUDAVersion: 12.6,
+		},
+		DiskFreeGB: 100,
+	}
+	got, reason := MatchJobToInstance(job, cap)
+	if !got {
+		t.Fatalf("MatchJobToInstance() = false, want cuda-driver-min-derived floor to use recorded CUDA (reason: %s)", reason)
+	}
+}
+
+func explicitDriverFloorJob(t *testing.T) *db.Job {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".weft.toml"), []byte("[cloud]\nmin_driver = \"525\"\n"), 0o644); err != nil {
+		t.Fatalf("write .weft.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+	return &db.Job{GPUClass: "nvidia", WorkingDir: dir, Command: "python train.py"}
+}
+
+func derivedDriverFloorJob(t *testing.T) *db.Job {
+	t.Helper()
+	dir := t.TempDir()
+	dataloc.WriteTestTorchPin(t, dir, "2.6.0", "cu128")
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte("import torch\n"), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+	return &db.Job{GPUClass: "nvidia", WorkingDir: dir, Command: "python train.py"}
 }
 
 // TestSubmitJobsToInstancePersistsResolvedCloudAfterPin pins the wiring

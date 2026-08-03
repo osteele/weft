@@ -206,6 +206,40 @@ func TestEvaluateEligibility_TorchNoGPUDriverFloorAllowsRecordedNVIDIAHost(t *te
 	}
 }
 
+func TestEvaluateEligibility_DerivedDriverFloorAllowsRecordedCUDAWithoutDriver(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	host := inventory.HostSpec{
+		Name:        "nvidia-compatible-cuda",
+		CUDAVersion: c.MinCUDAVersion,
+		GPUs: []inventory.GPUSpec{{
+			Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if !verdict.Eligible {
+		t.Fatalf("EvaluateEligibility rejected host with recorded CUDA compatibility and no driver: %v", verdict.Messages())
+	}
+}
+
+func TestEvaluateEligibility_DerivedDriverFloorRejectsMissingDriverAndCUDA(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	host := inventory.HostSpec{
+		Name: "nvidia-without-cuda-or-driver",
+		GPUs: []inventory.GPUSpec{{
+			Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if verdict.Eligible {
+		t.Fatal("EvaluateEligibility eligible, want fail-closed rejection for missing driver and CUDA compatibility")
+	}
+	if !hasReason(verdict, ReasonCompatibility) || !strings.Contains(strings.Join(verdict.Messages(), "; "), "driver floor: no recorded NVIDIA driver") {
+		t.Fatalf("reasons = %+v, want missing-driver compatibility rejection", verdict.Reasons)
+	}
+}
+
 func TestEvaluateEligibility_TorchNoGPUDriverAndCUDAFloorsAllowAppleMPSHost(t *testing.T) {
 	c := resolvedTorchNoGPUConstraints(t)
 	host := inventory.HostSpec{
@@ -318,6 +352,9 @@ func resolvedTorchNoGPUConstraints(t *testing.T) Constraints {
 	}
 	if c.MinDriverVersion == 0 || c.MinCUDAVersion == "" {
 		t.Fatalf("precondition: torch project did not resolve driver/CUDA floors: driver=%d cuda=%q", c.MinDriverVersion, c.MinCUDAVersion)
+	}
+	if !c.MinDriverVersionDerived {
+		t.Fatalf("precondition: driver floor should be derived from inferred CUDA floor: %+v", c)
 	}
 	if !hasVersionRequirement(c, compat.AxisNVIDIADriver) || !hasVersionRequirement(c, compat.AxisCUDA) {
 		t.Fatalf("precondition: resolved floors did not become enforceable requirements: %+v", c.VersionRequirements)

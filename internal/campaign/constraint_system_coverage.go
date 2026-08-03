@@ -98,7 +98,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"arch_cap_max":  {checkedInSystem, "matchInstanceTargetEligibility"},
 		"arch_cap_min":  {checkedInSystem, "matchInstanceTargetEligibility"},
 		"cuda_floor":    {checkedInSystem, "CUDA chain vs Launch.CUDAVersion"},
-		"driver_floor":  {checkedInSystem, "vs launches.driver_version when recorded; unrecorded drops the floor (see InstanceReuseHostAxes)"},
+		"driver_floor":  {checkedInSystem, "EvaluateEligibility vs launches.driver_version; floors derived from any CUDA floor accept recorded CUDA capability evidence, direct driver floors and both-facts-missing targets fail closed (see InstanceReuseHostAxes)"},
 		"glibcxx_floor": {notApplicableInSystem, containerUserlandNote},
 	},
 	SystemOnPrem: {
@@ -113,7 +113,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"arch_cap_max":  {checkedInSystem, "EvaluateEligibility compute-cap bounds"},
 		"arch_cap_min":  {checkedInSystem, "EvaluateEligibility compute-cap bounds"},
 		"cuda_floor":    {checkedInSystem, "targetCompatibilityViolation vs inventory cuda_version; missing fails closed for CUDA-capable or unknown-GPU targets, not applicable to confirmed non-CUDA targets"},
-		"driver_floor":  {checkedInSystem, "targetCompatibilityViolation vs inventory nvidia_driver; missing fails closed for CUDA-capable or unknown-GPU targets, not applicable to confirmed non-CUDA targets"},
+		"driver_floor":  {checkedInSystem, "targetCompatibilityViolation vs inventory nvidia_driver; floors derived from any CUDA floor accept recorded CUDA capability evidence, direct driver floors and both-facts-missing targets fail closed for CUDA-capable or unknown-GPU targets; not applicable to confirmed non-CUDA targets"},
 		"glibcxx_floor": {checkedInSystem, "targetCompatibilityViolation vs inventory glibcxx_max (missing fails open)"},
 	},
 	SystemClaimBackstop: {

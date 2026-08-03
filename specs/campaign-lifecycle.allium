@@ -560,9 +560,10 @@ contract CUDACompatibilityChain {
                                              -- image-label requirements
                                              -- (NVIDIA_REQUIRE_CUDA), and explicit
                                              -- cuda-driver-min overrides
-    min_driver_major: (job: Job) -> Integer? -- driver-major form of the floor
-                                             -- (explicit or back-filled from
-                                             -- cuda_floor via the toolkit table)
+    min_driver_major: (job: Job) -> Integer? -- driver-major form of the floor:
+                                             -- direct min-driver / min_driver,
+                                             -- or back-filled from cuda_floor
+                                             -- via the toolkit table
     image_toolkit: (job: Job) -> String?     -- CUDA toolkit version of the
                                              -- resolved Docker image tag
     driver_cuda: (target) -> String?         -- max CUDA the target's NVIDIA driver
@@ -579,8 +580,14 @@ contract CUDACompatibilityChain {
 
     @invariant FloorWithinDriverMajor
         -- min_driver_major(job) <= driver_major(target). Integer form of
-        -- the same floor, used where only the driver major is observable
-        -- (agent bootstrap probe; manifest.RequiredDriverMajor).
+        -- the same floor. If this floor was back-filled from cuda_floor,
+        -- regardless of how cuda_floor was set, a recorded driver_cuda(target)
+        -- fact covers the driver axis: a satisfying driver_cuda discharges the
+        -- derived driver-major floor, and a too-low driver_cuda violates
+        -- FloorWithinDriverCUDA instead. Direct user driver floors
+        -- (min-driver / min_driver) are never discharged this way. Where only
+        -- the driver major is observable, the integer check still binds
+        -- directly (agent bootstrap probe; manifest.RequiredDriverMajor).
 
     @invariant ImageToolkitWithinDriverMajor
         -- major(image_toolkit(job)) <= major(driver_cuda(target)). A
@@ -603,13 +610,17 @@ contract CUDACompatibilityChain {
         --      campaign.ResolveJobImageSettings / SplitGroupsByImage build
         --      cuda_floor; campaign.offerCompatibilityStatus validates it
         --      (plus image_toolkit) against each offer's cuda_max_good.
-        --   2. Instance reuse: campaign.instanceMeetsMinCUDAVersion
-        --      validates cuda_floor against the instance's recorded CUDA
-        --      (fail-closed when unrecorded).
+        --   2. Instance reuse: campaign.matchInstanceTargetEligibility calls
+        --      placement.EvaluateEligibility to validate cuda_floor and
+        --      min_driver_major against recorded launch facts. A derived
+        --      driver floor can be covered by the recorded CUDAVersion fact;
+        --      if neither driver_version nor CUDAVersion is recorded, or if
+        --      the floor is a direct driver-version floor, reuse fails closed.
         --   3. On-prem host eligibility: inventory-placement.allium
         --      EvaluateEligibility clauses 5a/5b (compat.Check on the same
-        --      CUDA/driver axes with the same comparator; fail-closed on
-        --      unrecorded host facts).
+        --      CUDA/driver axes with the same comparator and the same
+        --      derived-driver refinement; direct driver floors and both-facts-
+        --      missing targets fail closed).
         --   4. Agent bootstrap driver probe: cmd/agent checkDriverVersion
         --      validates min_driver_major against the probed driver major
         --      before accepting any job (prose below).
@@ -618,11 +629,12 @@ contract CUDACompatibilityChain {
         --      assigned device before the user command (prose below). It
         --      compares no versions; it is the ground-truth check the
         --      version links approximate.
-        -- Missing-value policy stays site-specific by design: on-prem
-        -- placement and instance reuse fail closed on unrecorded facts,
-        -- offer filtering routes unknown-compat providers through its
-        -- fallback, and the agent probes fail open when nvidia-smi is
-        -- unavailable (CPU instances).
+	        -- Missing-value policy stays site-specific by design: on-prem
+	        -- placement and instance reuse fail closed when the required fact is
+	        -- unrecorded and no recorded CUDA compatibility fact can cover a
+	        -- derived driver floor, offer filtering routes unknown-compat
+	        -- providers through its fallback, and the agent probes fail open
+	        -- when nvidia-smi is unavailable (CPU instances).
 }
 
 -- Defense in depth: the agent runs a driver probe at instance bootstrap,
@@ -3799,16 +3811,21 @@ rule InstanceReuseHostAxes {
         -- capped, so an instance the full matcher would reject must not
         -- hold a slot a usable instance could take.
         --
-        -- The NVIDIA driver-major floor is re-checked against launches that
-        -- recorded a driver version (launches.driver_version: the Vast.ai
-        -- offer's driver_version at creation, or the RunPod post-create
-        -- probe's observation, persisted whether or not the probed group's
-        -- own floor passed). A launch with no recorded driver — RunPod
-        -- without a probe, rows predating the column — drops the floor
-        -- rather than failing closed: the instance already passed its
-        -- original group's launch-time filters, and refusing every legacy
-        -- row would strand reuse wholesale.
-}
+    -- The NVIDIA driver-major floor is re-checked through
+    -- matchInstanceTargetEligibility / placement.EvaluateEligibility. A
+    -- recorded launches.driver_version binds directly: below-floor driver
+    -- majors reject even when launches.cuda_version is high enough. When the
+    -- driver floor was derived from the CUDA floor, regardless of whether that
+    -- CUDA floor came from torch, metadata, config, or CLI --cuda-driver-min, a
+    -- recorded launches.cuda_version fact covers the same driver capability
+    -- axis; a satisfying value admits the instance, and a below-floor value
+    -- rejects on the CUDA axis. A launch with neither recorded driver_version
+    -- nor recorded cuda_version — RunPod without a probe, rows predating both
+    -- facts — still fails closed. Direct user driver floors (min-driver /
+    -- min_driver) never use the CUDA fact as substitute evidence; a missing
+    -- driver remains a missing driver for those jobs. Jobs with no driver
+    -- floor remain unaffected.
+	}
 
 rule InstanceReuseQueueDepthIsObjectiveSignal {
     when: MatchJobToInstance(job, instance)

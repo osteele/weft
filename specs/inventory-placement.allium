@@ -575,11 +575,16 @@ value Constraints {
                                 -- tag is not by itself proof the job cannot
                                 -- run. Image-label requirements remain exact
                                 -- environment floors when labels are fetched.
-    min_driver_version: Integer? -- NVIDIA driver-major floor. Backfilled
-                                -- from min_cuda_version via the CUDA-toolkit
-                                -- driver table unless an explicit min-driver
-                                -- was given (explicit values are preserved,
-                                -- not raised).
+	    min_driver_version: Integer? -- NVIDIA driver-major floor. Backfilled
+	                                -- from min_cuda_version via the CUDA-toolkit
+	                                -- driver table unless an explicit min-driver
+	                                -- was given (explicit values are preserved,
+	                                -- not raised). cuda-driver-min sets a CUDA
+	                                -- floor, so its driver-major floor is still
+	                                -- derived.
+	    min_driver_version_derived: Boolean -- true only when min_driver_version
+	                                -- was back-filled from a CUDA
+	                                -- floor; provenance, not an enforced axis.
     provider: String?           -- rental provider name ("" = on-prem first)
     inputs: List<String>        -- asset refs (see Data locality below)
     tags: Set<Tag>              -- rental/inventory/benchmark_isolation/compute_intensive
@@ -645,11 +650,12 @@ rule BuildConstraintsFromJob {
         gpu_class: job.gpu_class,
         num_gpus: job.requested_gpu_count,
         gpu_mem_gb: job.gpu_mem_gb,
-        max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
-        min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
-        min_cuda_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_cuda_version : null,
-        min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
-        provider: provider,
+	        max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
+	        min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
+	        min_cuda_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_cuda_version : null,
+	        min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
+	        min_driver_version_derived: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version_derived : false,
+	        provider: provider,
         inputs: job.inputs,
         tags: tags,
         self_job: job
@@ -796,30 +802,41 @@ rule EvaluateEligibility {
             ComputeCapForGPU(g.class) != null
             and ComputeCapForGPU(g.class) >= c.min_compute_cap)
 
-    -- 5a. NVIDIA driver floor. The host's recorded driver major must meet
-    --     the floor; a host with NO recorded driver fails when a floor is
-    --     set (fail-closed — we cannot prove compatibility). For pip-wheel
-    --     torch pins the floor starts from the CUDA FAMILY floor (cu12x ->
-    --     driver >=525), not the wheel's exact toolkit version: pip wheels
-    --     usually run under CUDA minor-version compatibility on same-major
-    --     drivers. Curated operational floors may raise specific wheel lines
-    --     when runtime evidence shows the family floor is too low. Exact
-    --     toolkit floors also apply to library-dependency floors and
-    --     image-label requirements. These floors gate host/provider
-    --     compatibility; they are not a submit-time rejection solely because a
-    --     user-pinned image tag reports an older CUDA toolkit than a bundled
-    --     Python wheel dependency floor.
-    if c.min_driver_version != null:
-        requires: target.nvidia_driver_major != null
-            and target.nvidia_driver_major >= c.min_driver_version
+	    -- 5a. NVIDIA driver floor. The host's recorded driver major must meet a
+	    --     direct driver-version floor (min-driver / min_driver). If the floor
+	    --     was back-filled from the CUDA floor, regardless of how that CUDA
+	    --     floor was set, a recorded host.cuda_version fact covers the same
+	    --     driver capability axis: a satisfying value admits the host, and a
+	    --     below-floor value rejects through 5b. A host with neither recorded
+	    --     driver nor recorded CUDA compatibility fails when a floor is set
+	    --     (fail-closed — we cannot prove compatibility). For pip-wheel torch
+	    --     pins the floor starts from the CUDA FAMILY floor (cu12x -> driver
+	    --     >=525), not the wheel's exact toolkit version: pip wheels usually
+	    --     run under CUDA minor-version compatibility on same-major drivers.
+	    --     Curated operational floors may raise specific wheel lines when
+	    --     runtime evidence shows the family floor is too low. Exact toolkit
+	    --     floors also apply to library-dependency floors and image-label
+	    --     requirements. These floors gate host/provider compatibility; they
+	    --     are not a submit-time rejection solely because a user-pinned image
+	    --     tag reports an older CUDA toolkit than a bundled Python wheel
+	    --     dependency floor.
+	    if c.min_driver_version != null:
+	        requires:
+	            (target.nvidia_driver_major != null
+	                and target.nvidia_driver_major >= c.min_driver_version)
+	            or (c.min_driver_version_derived
+	                and target.cuda_version != null
+	                and target.cuda_version >= c.min_cuda_version)
 
     -- 5b. CUDA-compatibility floor. host.cuda_version is the MAX CUDA
-    --     compatibility reported by the host's NVIDIA driver (nvidia-smi
-    --     header), not an installed toolkit version. Fail-closed when
-    --     unrecorded, same rationale as 5a.
-    if c.min_cuda_version != null:
-        requires: target.cuda_version != null
-            and target.cuda_version >= c.min_cuda_version
+	    --     compatibility reported by the host's NVIDIA driver (nvidia-smi
+	    --     header), not an installed toolkit version. Fail-closed when
+	    --     unrecorded, same rationale as 5a. When this fact is present but
+	    --     below the floor, a derived driver floor is reported as this CUDA-
+	    --     axis failure rather than as an independent missing-driver failure.
+	    if c.min_cuda_version != null:
+	        requires: target.cuda_version != null
+	            and target.cuda_version >= c.min_cuda_version
 
     -- 6. Benchmark jobs must land on an idle host.
     if benchmark_isolation in c.tags:

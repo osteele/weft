@@ -360,6 +360,7 @@ func targetCompatibilityViolation(c Constraints, t TargetSpec) (EligibilityReaso
 	if t.GLIBCXXVersion != "" {
 		facts[compat.AxisGLIBCXX] = t.GLIBCXXVersion
 	}
+	reqs = filterDerivedDriverRequirementCoveredByCUDA(reqs, c, t)
 	if violations := compat.Check(reqs, facts); len(violations) > 0 {
 		return EligibilityReason{Kind: ReasonCompatibility, Message: compat.FormatViolation(violations[0])}, true
 	}
@@ -396,6 +397,22 @@ func filterCUDARequirements(reqs []compat.Requirement) []compat.Requirement {
 	filtered := make([]compat.Requirement, 0, len(reqs))
 	for _, req := range reqs {
 		if req.Axis == compat.AxisCUDA || req.Axis == compat.AxisNVIDIADriver {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+	return filtered
+}
+
+func filterDerivedDriverRequirementCoveredByCUDA(reqs []compat.Requirement, c Constraints, t TargetSpec) []compat.Requirement {
+	if !c.MinDriverVersionDerived || c.MinDriverVersion <= 0 || strings.TrimSpace(c.MinCUDAVersion) == "" ||
+		t.NVIDIADriverMajor > 0 || strings.TrimSpace(t.CUDAVersion) == "" {
+		return reqs
+	}
+	filtered := make([]compat.Requirement, 0, len(reqs))
+	driverFloor := strconv.Itoa(c.MinDriverVersion)
+	for _, req := range reqs {
+		if req.Axis == compat.AxisNVIDIADriver && strings.TrimSpace(req.Value) == driverFloor {
 			continue
 		}
 		filtered = append(filtered, req)

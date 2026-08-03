@@ -562,19 +562,8 @@ func matchInstanceTargetEligibility(constraints placement.Constraints, inst *db.
 	}
 	evalConstraints := constraints
 	target := TargetSpecFromCloudInstance(*inst)
-	// The driver-major floor is enforced only against launches that recorded a
-	// driver version (Vast.ai offers at creation, the RunPod post-create probe
-	// when it ran). A launch with no recorded driver — RunPod without a probe,
-	// rows predating the column — drops the floor rather than failing closed:
-	// the instance already passed its original group's launch-time filters,
-	// and refusing every legacy row would strand reuse wholesale. The gate
-	// reads the spec's parsed major so it cannot diverge from the fact the
-	// evaluator sees. Zeroing VersionRequirements makes EvaluateEligibility
-	// regenerate the requirement set from the remaining scalar floors instead
-	// of failing closed on a driver fact the record does not carry.
-	if target.NVIDIADriverMajor == 0 {
-		evalConstraints.MinDriverVersion = 0
-	}
+	// Driver floors use the launch's recorded CUDA/driver facts; see
+	// specs/campaign-lifecycle.allium rule InstanceReuseHostAxes.
 	evalConstraints.VersionRequirements = nil
 	if evalConstraints.NumGPUs > 1 && inst.NumGPUs <= 0 {
 		evalConstraints.NumGPUs = 1
@@ -613,7 +602,17 @@ func instanceEligibilityReason(verdict placement.Verdict, constraints placement.
 			return fmt.Sprintf("compute capability unknown: need>=%s", constraints.MinComputeCap)
 		}
 		return fmt.Sprintf("compute capability too old: job>=%s instance=%s", constraints.MinComputeCap, gpuCap)
-	case placement.ReasonCompatibility, placement.ReasonCUDAChain:
+	case placement.ReasonCompatibility:
+		if !strings.Contains(reason.Message, "CUDA floor:") {
+			return reason.Message
+		}
+		if constraints.MinCUDAVersion != "" {
+			if inst.CUDAVersion <= 0 {
+				return fmt.Sprintf("CUDA compatibility unknown: need>=%s", constraints.MinCUDAVersion)
+			}
+			return fmt.Sprintf("CUDA compatibility insufficient: need>=%s instance=%.1f", constraints.MinCUDAVersion, inst.CUDAVersion)
+		}
+	case placement.ReasonCUDAChain:
 		if constraints.MinCUDAVersion != "" {
 			if inst.CUDAVersion <= 0 {
 				return fmt.Sprintf("CUDA compatibility unknown: need>=%s", constraints.MinCUDAVersion)

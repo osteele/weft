@@ -99,6 +99,9 @@ type Constraints struct {
 	// `nvidia_driver`). Empty/zero disables the corresponding filter.
 	MinCUDAVersion   string `enforce:"cuda_floor"`
 	MinDriverVersion int    `enforce:"driver_floor"`
+	// MinDriverVersionDerived is provenance for the CUDACompatibilityChain
+	// contract in specs/campaign-lifecycle.allium, not an enforced axis.
+	MinDriverVersionDerived bool `enforce:"-"`
 
 	// Minimum native userland compatibility required by the job. These apply
 	// to CPU and GPU jobs because on-prem execution uses the host userland.
@@ -232,6 +235,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		}
 		c.MinCUDAVersion = rf.Req.MinCUDAVersion
 		c.MinDriverVersion = rf.Req.MinDriverVersion
+		c.MinDriverVersionDerived = rf.Req.MinDriverVersion > 0 && rf.Req.MinCUDAVersion != "" && !rf.DriverExplicit
 	}
 	if floor := ToolchainFloorForJob(src.LocalDir, src.Command); floor.GLIBCXXVersion != "" {
 		c.MinGLIBCXXVersion = floor.GLIBCXXVersion
