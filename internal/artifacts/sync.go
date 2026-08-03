@@ -183,9 +183,16 @@ func StoreRemoteArtifact(database *sql.DB, job *db.Job, relPath, remotePath stri
 	})
 }
 
-// StoreLocalArtifact copies a local file into the artifact cache and records it
-// in the artifact database.
+// StoreLocalArtifact copies a local file into the artifact cache and records
+// it in the artifact database, attributed to the job's latest run.
 func StoreLocalArtifact(database *sql.DB, jobID int64, relPath, sourcePath string) error {
+	return StoreLocalArtifactForRun(database, jobID, 0, relPath, sourcePath)
+}
+
+// StoreLocalArtifactForRun records the artifact under the run whose bytes were
+// fetched; a non-positive runID falls back to latest-run attribution
+// (spec: ArtifactRetrievalCoversAllRuns in specs/job-lifecycle.allium).
+func StoreLocalArtifactForRun(database *sql.DB, jobID, runID int64, relPath, sourcePath string) error {
 	if strings.TrimSpace(relPath) == "" {
 		return nil
 	}
@@ -208,6 +215,7 @@ func StoreLocalArtifact(database *sql.DB, jobID int64, relPath, sourcePath strin
 	}
 	return db.UpsertArtifact(database, db.Artifact{
 		JobID:      jobID,
+		JobRunID:   &runID,
 		Path:       relPath,
 		StoredPath: storedPath,
 		SizeBytes:  size,

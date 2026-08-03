@@ -24,6 +24,11 @@ func UpsertArtifact(db *sql.DB, art Artifact) error {
 	if art.CreatedAt == 0 {
 		art.CreatedAt = now
 	}
+	// A non-positive run id names no attempt row; fall back to latest-run
+	// attribution (spec: ArtifactRetrievalCoversAllRuns in job-lifecycle.allium).
+	if art.JobRunID != nil && *art.JobRunID <= 0 {
+		art.JobRunID = nil
+	}
 	if art.JobRunID == nil {
 		runID, err := latestRunIDForJob(db, art.JobID)
 		if err != nil {

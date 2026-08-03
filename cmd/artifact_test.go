@@ -2030,3 +2030,59 @@ func TestFetchAllArtifactsDeliversHostPointerRows(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncCloudJobArtifactsStampsProbedRun: bytes fetched from a superseded
+// run's R2 prefix are recorded under that run, not the current latest_run_id
+// (spec: ArtifactRetrievalCoversAllRuns — retrieval provenance must name the
+// run that uploaded the artifact).
+func TestSyncCloudJobArtifactsStampsProbedRun(t *testing.T) {
+	database, job := setupLaunchArtifactJobWithDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	supersededRun, err := db.CreateAttempt(database, job.ID, "", nil, db.StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	latestRun, err := db.CreateAttempt(database, job.ID, "", nil, db.StatusRunning)
+	if err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+	job, err = db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID != latestRun {
+		t.Fatalf("LatestRunID = %v, want %d", job.LatestRunID, latestRun)
+	}
+
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			r2keys.JobAttemptArtifactManifest(job.ID, supersededRun): []byte(
+				fmt.Sprintf(`{"job_id": %d, "artifacts": [{"path": "output/model.pt"}]}`, job.ID)),
+			r2keys.JobAttemptArtifactFilesPrefix(job.ID, supersededRun) + "output/model.pt": []byte("weights"),
+		},
+	}
+
+	result, err := syncCloudJobArtifactsWithStore(database, store, job)
+	if err != nil {
+		t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+
+	supersededRows, err := db.ListArtifactsByRun(database, supersededRun)
+	if err != nil {
+		t.Fatalf("ListArtifactsByRun(superseded): %v", err)
+	}
+	if len(supersededRows) != 1 || supersededRows[0].Path != "output/model.pt" {
+		t.Fatalf("superseded-run rows = %+v, want the synced artifact", supersededRows)
+	}
+	latestRows, err := db.ListArtifactsByRun(database, latestRun)
+	if err != nil {
+		t.Fatalf("ListArtifactsByRun(latest): %v", err)
+	}
+	if len(latestRows) != 0 {
+		t.Fatalf("latest-run rows = %+v, want none — bytes came from the superseded run", latestRows)
+	}
+}

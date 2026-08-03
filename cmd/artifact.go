@@ -2401,7 +2401,7 @@ func syncCloudJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, e
 			r2keys.JobAttemptOutputsPrefix(job.ID, runID),
 			r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID),
 		} {
-			added, err := downloadCloudPrefix(database, r2Client, prefix, localDir, job.ID)
+			added, err := downloadCloudPrefix(database, r2Client, prefix, localDir, job.ID, runID)
 			if err != nil {
 				lastErr = err
 				continue
@@ -2613,7 +2613,7 @@ func storeLocalOutputFiles(database *sql.DB, jobID int64, localDir string, files
 	return result, nil
 }
 
-func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir string, jobID int64) (int, error) {
+func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir string, jobID, runID int64) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	files, err := r2Client.ListObjects(ctx, prefix)
 	cancel()
@@ -2632,7 +2632,7 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 		if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), f.Key, localPath, artifactTimeout); err != nil {
 			return added, fmt.Errorf("download %s: %w", f.Key, err)
 		}
-		if err := artifacts.StoreLocalArtifact(database, jobID, relPath, localPath); err != nil {
+		if err := artifacts.StoreLocalArtifactForRun(database, jobID, runID, relPath, localPath); err != nil {
 			return added, err
 		}
 		added++
@@ -2926,8 +2926,11 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 			return result, fmt.Errorf("download artifact %s: %w", spec.Path, err)
 		}
 
+		// Stamp the run whose manifest was found, not latest_run_id
+		// (spec: ArtifactRetrievalCoversAllRuns in job-lifecycle.allium).
 		if err := db.UpsertArtifact(database, db.Artifact{
 			JobID:      job.ID,
+			JobRunID:   &runID,
 			Name:       spec.Name,
 			Path:       spec.Path,
 			StoredPath: storedPath,

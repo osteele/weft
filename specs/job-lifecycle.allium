@@ -1337,6 +1337,9 @@ rule ArtifactRetrievalCoversAllRuns {
 
     ensures: runs discovered under jobs/<id>/runs/ are probed before
              reporting nothing
+    ensures: a cache row written from a probed run's objects records that
+             run's id, not the current latest_run_id — provenance names the
+             attempt that uploaded the bytes
 
     @guidance
         -- A superseded or canceled attempt's uploads outlive latest_run_id
@@ -1345,6 +1348,11 @@ rule ArtifactRetrievalCoversAllRuns {
         -- than a private [latest, 0] reimplementation. Implementation:
         -- cmd/artifact.go listCloudJobOutputFiles fallback and
         -- artifactRunIDCandidates, both delegating to internal/r2resolve.
+        -- Run stamping: downloadCloudPrefix and
+        -- syncCloudJobArtifactsWithStore carry the probed run id into
+        -- db.UpsertArtifact (artifacts.StoreLocalArtifactForRun), which
+        -- normalizes a non-positive run id (the legacy run-zero prefix)
+        -- to latest-run attribution.
 }
 
 rule CompletedOutputsSurviveWorkdirReuse {
