@@ -879,9 +879,9 @@ rule EvaluateEligibility {
         --   "driver floor: NVIDIA driver 550.120 < required >=570" (fail on driver floor)
         --   "CUDA floor: host CUDA 12.0 < required 12.8" (fail on CUDA-compat floor)
         --   "not idle (2 jobs running)"  (fail on benchmark idleness)
-        -- Implementation: placement.scoreHost, applyResourceHardConstraints.
-        -- Defense-in-depth note: CheckHostGPUConstraints is a compatibility
-        -- wrapper over EvaluateEligibility.
+        -- Implementation: placement.EvaluateEligibility, reached by
+        -- placement.scoreHost and the CheckHostConstraints compatibility
+        -- wrapper.
         -- Compute-cap inference: dataloc.ScanTorchPin reads uv.lock /
         -- pyproject.toml, placement.TorchMaxComputeCap and TorchMinComputeCap
         -- map (version, cu-variant) to caps, placement.MaxComputeCapForJob /
@@ -1520,7 +1520,7 @@ invariant TargetSatisfiesRequestedGPUCount {
     -- Any ExecutionTarget selected for a job must expose at least the
     -- job's requested GPU count. This covers BOTH target kinds:
     --   * inventory_host — EvaluateEligibility clause 3a
-    --     (placement.scoreHost / CheckHostGPUConstraints wrapper), applied by every on-prem
+    --     (placement.scoreHost / CheckHostConstraints wrapper), applied by every on-prem
     --     scorer including the fast-submit path (see FastSubmitOnPremReuse).
     --   * rental_instance — cloud offer selection
     --     (campaign.filterOffersByGPUCount / validateOfferGPUCount) and

@@ -2291,7 +2291,7 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 		Name: "v100-host",
 		GPUs: []inventory.GPUSpec{{Name: "Tesla V100", Class: "v100", Memory: "32GB"}},
 	}
-	ok, reasons := CheckHostGPUConstraints(v100Host, Constraints{GPUClass: "nvidia", GPUMemGB: 24, MinComputeCap: "7.5"})
+	ok, reasons := checkHostConstraintResult(v100Host, Constraints{GPUClass: "nvidia", GPUMemGB: 24, MinComputeCap: "7.5"})
 	if ok {
 		t.Fatalf("V100 host should be ineligible for min cap 7.5")
 	}
@@ -2305,7 +2305,7 @@ func TestScoreHosts_MinComputeCap_Turing(t *testing.T) {
 		Name: "pascal-host",
 		GPUs: []inventory.GPUSpec{{Name: "GTX 1080 Ti", Class: "gtx1080ti", Memory: "11GB"}},
 	}
-	if ok, _ := CheckHostGPUConstraints(pascalHost, Constraints{GPUMemGB: 1, MinComputeCap: "7.5"}); ok {
+	if ok, _ := checkHostConstraintResult(pascalHost, Constraints{GPUMemGB: 1, MinComputeCap: "7.5"}); ok {
 		t.Fatalf("GTX 1080 Ti host should be ineligible for min cap 7.5 (sm_6.1 below floor)")
 	}
 }
@@ -2443,6 +2443,35 @@ wheels = [
 	}
 }
 
+func TestConstraintsFromJobAppliesPEP723HostAxes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(`# /// script
+# [tool.weft]
+# cpu-cores = 32
+# cpu-mem = 64
+# cpu-mem-strict = true
+# interconnect = "nvlink"
+# ///
+print("train")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	c := ConstraintsFromJob(&dbpkg.Job{
+		WorkingDir: dir,
+		Command:    "uv run train.py",
+	})
+	if c.CPUCores != 32 {
+		t.Fatalf("CPUCores = %d, want 32", c.CPUCores)
+	}
+	if c.CPUMemGB != 64 {
+		t.Fatalf("CPUMemGB = %d, want 64", c.CPUMemGB)
+	}
+	if c.Interconnect != "nvlink" {
+		t.Fatalf("Interconnect = %q, want nvlink", c.Interconnect)
+	}
+}
+
 func TestResolveConstraintsPrefersFreshConcreteMaxComputeCap(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
@@ -2522,7 +2551,7 @@ func TestConstraintsFromJob_ObservedGLIBCXXDiagnosisFloor(t *testing.T) {
 	}
 }
 
-func TestCheckHostGPUConstraints_GPUCount(t *testing.T) {
+func TestCheckHostConstraints_GPUCount(t *testing.T) {
 	// wb31/wb41 regression: a --gpus N job is eligible only on hosts that
 	// physically hold at least N devices matching the per-device constraints.
 	// Previously the check passed as soon as ONE device matched, and the
@@ -2573,7 +2602,7 @@ func TestCheckHostGPUConstraints_GPUCount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok, reasons := CheckHostGPUConstraints(host, tt.c)
+			ok, reasons := checkHostConstraintResult(host, tt.c)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v (reasons: %v)", ok, tt.wantOK, reasons)
 			}
@@ -2607,9 +2636,9 @@ func TestScoreHosts_GPUCountEligibility(t *testing.T) {
 	}
 }
 
-func TestCheckHostGPUConstraints_GLIBCXXFloorRejectsOldHostForCPUJob(t *testing.T) {
+func TestCheckHostConstraints_GLIBCXXFloorRejectsOldHostForCPUJob(t *testing.T) {
 	host := inventory.HostSpec{Name: "cool30", GLIBCXXMaxVersion: "3.4.28"}
-	ok, reasons := CheckHostGPUConstraints(host, Constraints{
+	ok, reasons := checkHostConstraintResult(host, Constraints{
 		MinGLIBCXXVersion: "3.4.30",
 		GLIBCXXOrigin:     "pysr",
 	})
@@ -2621,12 +2650,12 @@ func TestCheckHostGPUConstraints_GLIBCXXFloorRejectsOldHostForCPUJob(t *testing.
 	}
 }
 
-func TestCheckHostGPUConstraints_GLIBCXXFloorAllowsNewOrUnknownHost(t *testing.T) {
+func TestCheckHostConstraints_GLIBCXXFloorAllowsNewOrUnknownHost(t *testing.T) {
 	for _, host := range []inventory.HostSpec{
 		{Name: "studio", GLIBCXXMaxVersion: "3.4.30"},
 		{Name: "legacy-without-probe"},
 	} {
-		ok, reasons := CheckHostGPUConstraints(host, Constraints{MinGLIBCXXVersion: "3.4.30"})
+		ok, reasons := checkHostConstraintResult(host, Constraints{MinGLIBCXXVersion: "3.4.30"})
 		if !ok {
 			t.Fatalf("%s rejected: %v", host.Name, reasons)
 		}
@@ -2669,9 +2698,9 @@ func TestHasComputeIntensiveTag_CanonicalizesLegacySpelling(t *testing.T) {
 // Regression: torch-derived CUDA/driver floors and arch caps describe CUDA
 // runtime compatibility and must never reject a CPU-only host for a constraint
 // set with no GPU request — even when a caller populates them.
-func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
+func TestCheckHostConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
 	host := inventory.HostSpec{Name: "cpu-only"} // no GPUs, no driver recorded
-	ok, reasons := CheckHostGPUConstraints(host, Constraints{
+	ok, reasons := checkHostConstraintResult(host, Constraints{
 		MinDriverVersion: 570,
 		MinCUDAVersion:   "12.8",
 		MinComputeCap:    "7.5",
@@ -2682,7 +2711,7 @@ func TestCheckHostGPUConstraints_NonGPUJobIgnoresFloors(t *testing.T) {
 	}
 }
 
-func TestCheckHostGPUConstraints_NonGPUTorchJobAllowsAppleGPU(t *testing.T) {
+func TestCheckHostConstraints_NonGPUTorchJobAllowsAppleGPU(t *testing.T) {
 	// A torch job that does not request a GPU may carry CUDA arch bounds because
 	// it would opportunistically use CUDA on NVIDIA hosts. Those CUDA bounds do
 	// not apply to an Apple/MPS-only host, so the host remains eligible.
@@ -2698,12 +2727,12 @@ func TestCheckHostGPUConstraints_NonGPUTorchJobAllowsAppleGPU(t *testing.T) {
 			Name: "Apple M2 Max (38 cores)", Class: "m2max", Memory: "64GB", Indices: []int{0},
 		}},
 	}
-	if ok, reasons := CheckHostGPUConstraints(host, floor); !ok {
+	if ok, reasons := checkHostConstraintResult(host, floor); !ok {
 		t.Fatalf("Apple/MPS host rejected for CUDA arch-bound non-GPU job; want acceptance (reasons=%v)", reasons)
 	}
 }
 
-func TestCheckHostGPUConstraints_ArchFloorWithoutGPURequest(t *testing.T) {
+func TestCheckHostConstraints_ArchFloorWithoutGPURequest(t *testing.T) {
 	// A torch job carrying only an arch floor (no GPU request, resolved from its
 	// wheel) must still be filtered off a GPU host whose only card sits below the
 	// floor — torch would use that card and die with "no kernel image". Regression
@@ -2716,19 +2745,19 @@ func TestCheckHostGPUConstraints_ArchFloorWithoutGPURequest(t *testing.T) {
 	below := inventory.HostSpec{Name: "below", GPUs: []inventory.GPUSpec{{
 		Name: "NVIDIA GeForce GTX 1080 Ti", Class: "gtx1080ti", Memory: "11GB", Indices: []int{0},
 	}}}
-	if ok, reasons := CheckHostGPUConstraints(below, floor); ok {
+	if ok, reasons := checkHostConstraintResult(below, floor); ok {
 		t.Fatalf("sm_61 host accepted for sm_75-floor job; want rejection (reasons=%v)", reasons)
 	}
 
 	at := inventory.HostSpec{Name: "at", GPUs: []inventory.GPUSpec{{
 		Name: "NVIDIA GeForce RTX 2080 Ti", Class: "rtx2080ti", Memory: "11GB", Indices: []int{0},
 	}}}
-	if ok, reasons := CheckHostGPUConstraints(at, floor); !ok {
+	if ok, reasons := checkHostConstraintResult(at, floor); !ok {
 		t.Fatalf("sm_75 host rejected for sm_75-floor job; want acceptance (reasons=%v)", reasons)
 	}
 
 	// A GPU-less host runs the job on CPU, so the arch floor does not disqualify it.
-	if ok, reasons := CheckHostGPUConstraints(inventory.HostSpec{Name: "cpu-only"}, floor); !ok {
+	if ok, reasons := checkHostConstraintResult(inventory.HostSpec{Name: "cpu-only"}, floor); !ok {
 		t.Fatalf("CPU-only host rejected for arch-floor job; want acceptance (reasons=%v)", reasons)
 	}
 }

@@ -16,22 +16,26 @@ import (
 // Constructors normalize inventory hosts, cloud offers, and running rentals
 // into this form before constraints are evaluated.
 type TargetSpec struct {
-	Name                string
-	Provider            string
-	Devices             []TargetDevice
-	Cordoned            bool
-	CordonReason        string
-	OptInOnly           bool
-	ExplicitlyNamed     bool
-	LoadKnown           bool
-	LoadState           HostLoadState
-	LoadReason          string
-	Reservations        []GPUReservation
-	ReservationsKnown   bool
-	CUDAVersion         string
-	NVIDIADriverVersion string
-	NVIDIADriverMajor   int
-	GLIBCXXVersion      string
+	Name                  string
+	Provider              string
+	Devices               []TargetDevice
+	Cordoned              bool
+	CordonReason          string
+	OptInOnly             bool
+	ExplicitlyNamed       bool
+	LoadKnown             bool
+	LoadState             HostLoadState
+	LoadReason            string
+	Reservations          []GPUReservation
+	ReservationsKnown     bool
+	CPUCores              int
+	CPUMemGB              int
+	GPUNamingSignals      string
+	GPUNamingSignalsKnown bool
+	CUDAVersion           string
+	NVIDIADriverVersion   string
+	NVIDIADriverMajor     int
+	GLIBCXXVersion        string
 
 	// MachineKey is the provider-qualified physical machine identity
 	// (db.ProviderMachineKey form, e.g. "vastai/49863"). Empty means the
@@ -93,6 +97,9 @@ const (
 	ReasonCUDAChain       EligibilityReasonKind = "cuda_chain"
 	ReasonMachinePin      EligibilityReasonKind = "machine_pin"
 	ReasonProvider        EligibilityReasonKind = "provider"
+	ReasonCPUCores        EligibilityReasonKind = "cpu_cores"
+	ReasonHostRAM         EligibilityReasonKind = "host_ram"
+	ReasonInterconnect    EligibilityReasonKind = "interconnect"
 )
 
 func (r EligibilityReason) String() string {
@@ -115,6 +122,10 @@ func TargetSpecFromHostSpec(host inventory.HostSpec, metrics *HostMetrics, reser
 		Devices:                         make([]TargetDevice, 0, len(host.GPUs)),
 		Reservations:                    slices.Clone(reservations),
 		ReservationsKnown:               reservations != nil,
+		CPUCores:                        host.CPUCores,
+		CPUMemGB:                        inventory.ParseMemGB(host.Memory),
+		GPUNamingSignals:                hostGPUNameSignals(host),
+		GPUNamingSignalsKnown:           true,
 		CUDAVersion:                     strings.TrimSpace(host.CUDAVersion),
 		NVIDIADriverVersion:             strings.TrimSpace(host.NVIDIADriverVersion),
 		NVIDIADriverMajor:               driverMajor(host.NVIDIADriverVersion),
@@ -226,6 +237,16 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 	if reason, violated := providerViolation(c, t); violated {
 		return fail(ReasonProvider, reason, 0, 0)
+	}
+	if c.CPUMemGB > 0 && t.CPUMemGB > 0 && t.CPUMemGB < c.CPUMemGB {
+		return fail(ReasonHostRAM, fmt.Sprintf("host RAM %dGB below required %dGB", t.CPUMemGB, c.CPUMemGB), t.CPUMemGB, c.CPUMemGB)
+	}
+	if c.CPUCores > 0 && t.CPUCores > 0 && t.CPUCores < c.CPUCores {
+		return fail(ReasonCPUCores, fmt.Sprintf("host CPU cores %d below required %d", t.CPUCores, c.CPUCores), t.CPUCores, c.CPUCores)
+	}
+	if t.GPUNamingSignalsKnown && !InterconnectSatisfied(c.Interconnect, t.GPUNamingSignals) {
+		req := strings.ToLower(strings.TrimSpace(c.Interconnect))
+		return fail(ReasonInterconnect, fmt.Sprintf("interconnect %s required; host GPU naming shows no match", req), 0, 0)
 	}
 
 	if reason, ok := targetCompatibilityViolation(c, t); ok {

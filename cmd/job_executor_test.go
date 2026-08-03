@@ -3,9 +3,12 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 )
 
 func TestQueueJob_PersistsGPUMemMaxGB(t *testing.T) {
@@ -31,6 +34,33 @@ func TestQueueJob_PersistsGPUMemMaxGB(t *testing.T) {
 	}
 	if job.GPUMemMaxGB == nil || *job.GPUMemMaxGB != gpuMemMax {
 		t.Fatalf("GPUMemMaxGB = %v, want %d", job.GPUMemMaxGB, gpuMemMax)
+	}
+}
+
+func TestQueueJobPEP723HostAxisReachesPinnedHostGate(t *testing.T) {
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "train.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# [tool.weft]
+# cpu-cores = 32
+# ///
+print("train")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	_, err := queueJob(database, queueJobOptions{
+		Host:       "host-beta",
+		WorkingDir: dir,
+		Command:    "uv run train.py",
+	})
+	if err == nil {
+		t.Fatal("expected PEP 723 CPU floor to reject pinned host")
+	}
+	if got, want := err.Error(), "cpu gate: host CPU cores 16 below required 32"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 

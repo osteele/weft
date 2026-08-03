@@ -185,6 +185,22 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 			c.Provider = provider
 		}
 	}
+	if meta, err := dataloc.ScanScriptMeta(src.LocalDir, src.Command); err != nil {
+		if failOnRuntimeFloorError {
+			return ResolvedConstraints{Constraints: c}, err
+		}
+	} else if meta != nil {
+		if c.CPUCores == 0 && meta.CPUCores > 0 {
+			c.CPUCores = meta.CPUCores
+		}
+		if c.CPUMemGB == 0 && meta.CPUMemGB > 0 {
+			strict := meta.CPUMemStrict != nil && *meta.CPUMemStrict
+			c.CPUMemGB = db.EffectiveCPUMemGB(meta.CPUMemGB, strict)
+		}
+		if strings.TrimSpace(c.Interconnect) == "" && strings.TrimSpace(meta.Interconnect) != "" {
+			c.Interconnect = strings.ToLower(strings.TrimSpace(meta.Interconnect))
+		}
+	}
 
 	resolved := ResolvedConstraints{Constraints: c}
 	// Resolve torch arch/CUDA bounds for any torch project, not only jobs that
@@ -859,35 +875,6 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		}
 	}
 
-	// Hard constraint: declared host/system-RAM floor (--cpu-mem). Applies to
-	// CPU-only jobs too, so it lives outside the NeedsGPU() block. Unknown host
-	// RAM (0) does not disqualify.
-	if c.CPUMemGB > 0 {
-		if hostMemGB := inventory.ParseMemGB(host.Memory); hostMemGB > 0 && hostMemGB < c.CPUMemGB {
-			s.Eligible = false
-			s.Reasons = append(s.Reasons, fmt.Sprintf("host RAM %dGB below required %dGB", hostMemGB, c.CPUMemGB))
-			return s
-		}
-	}
-
-	// Hard constraint: explicit CPU-cores floor (--cpu-cores). As with RAM,
-	// an inventory file that omits cpu_cores (0) does not disqualify the host.
-	if c.CPUCores > 0 && host.CPUCores > 0 && host.CPUCores < c.CPUCores {
-		s.Eligible = false
-		s.Reasons = append(s.Reasons, fmt.Sprintf("host CPU cores %d below required %d", host.CPUCores, c.CPUCores))
-		return s
-	}
-
-	// Hard constraint: interconnect (--interconnect), judged on the host's GPU
-	// naming through the same predicate the offer filter and reuse matcher use.
-	// The predicate handles the empty/"any" vacuous cases itself, so a
-	// rejection here always reflects a real requirement.
-	if !InterconnectSatisfied(c.Interconnect, hostGPUNameSignals(host)) {
-		s.Eligible = false
-		s.Reasons = append(s.Reasons, fmt.Sprintf("interconnect %s required; host GPU naming shows no match", strings.ToLower(strings.TrimSpace(c.Interconnect))))
-		return s
-	}
-
 	applyHistoricalFailureRisk(database, &s, host, c)
 
 	// Hard constraint: benchmark-isolation jobs require an idle host.
@@ -1108,20 +1095,12 @@ func isNonTransportableInput(kind dataloc.AssetKind) bool {
 	return kind == dataloc.AssetCheckpoint || kind == dataloc.AssetCorpus
 }
 
-// CheckHostGPUConstraints applies shared hard compatibility constraints to a
-// single host. Toolchain floors apply to CPU and GPU jobs. GPU resource floors
-// (class, memory) apply only to jobs with a GPU request, while CUDA arch caps
-// apply to any job carrying GPU-runtime bounds on a CUDA-capable host —
-// including a torch job that resolved those bounds without requesting a GPU. A
-// CUDA-capable host is eligible only if one physical GPU satisfies the requested
-// class, memory floor, and compute-capability range; a CPU-only or non-CUDA GPU
-// host is eligible for an arch-only torch job, which runs without CUDA there.
-func CheckHostGPUConstraints(host inventory.HostSpec, c Constraints) (bool, []string) {
-	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
-	if !verdict.Eligible {
-		return false, verdict.Messages()
-	}
-	return true, hostGPUPassReasons(host, c)
+// CheckHostConstraints applies shared hard compatibility constraints to a
+// single inventory host. Host axes, toolchain floors, and GPU resource floors
+// all flow through EvaluateEligibility so pinned-host gates and placement
+// scoring enforce the same predicate.
+func CheckHostConstraints(host inventory.HostSpec, c Constraints) Verdict {
+	return EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
 }
 
 // activeGPUReservations derives the reservation slice consumed by

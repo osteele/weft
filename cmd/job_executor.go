@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
@@ -105,6 +106,9 @@ type queueJobOptions struct {
 	GPUMemGB         *int   // GPU memory reservation in GB per device
 	GPUMemStrict     bool   // Apply exact GPU memory floor when resolving from explicit GPUMemGB.
 	GPUMemMaxGB      *int   // Legacy GPU memory upper metadata; ignored by placement
+	CPUCores         int
+	CPUMemGB         int
+	Interconnect     string
 	Dependencies     []queueDependency
 	AutoStart        bool
 	Inputs           []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
@@ -116,6 +120,8 @@ type queueJobOptions struct {
 	CloudAfter       []db.JobDependencyRef
 	CloudNeeds       []string
 	Disk             *db.JobDiskMetadata
+	CLIOverrides     *db.CLIResourceOverrides
+	MaxComputeCap    string
 }
 
 type queueDependency struct {
@@ -189,6 +195,42 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if gpu == "" {
 		gpu = extractGPUFromEnvVars(opts.EnvVars)
 	}
+	localDir := workdir.ResolveLocal(opts.WorkingDir)
+	cpuCores := opts.CPUCores
+	cpuMemGB := opts.CPUMemGB
+	interconnect := strings.TrimSpace(opts.Interconnect)
+	cliOverrides := opts.CLIOverrides
+	scriptMeta, err := dataloc.ScanScriptMeta(localDir, opts.Command)
+	if err != nil {
+		return nil, err
+	}
+	if scriptMeta != nil {
+		if cpuCores == 0 && scriptMeta.CPUCores > 0 {
+			cpuCores = scriptMeta.CPUCores
+			cliOverrides = ensureQueueCLIOverrides(cliOverrides)
+			cores := scriptMeta.CPUCores
+			cliOverrides.CPUCores = &cores
+		}
+		if cpuMemGB == 0 && scriptMeta.CPUMemGB > 0 {
+			strict := scriptMeta.CPUMemStrict != nil && *scriptMeta.CPUMemStrict
+			cpuMemGB = db.EffectiveCPUMemGB(scriptMeta.CPUMemGB, strict)
+			cliOverrides = ensureQueueCLIOverrides(cliOverrides)
+			mem := scriptMeta.CPUMemGB
+			cliOverrides.CPUMemGB = &mem
+			if strict {
+				cliOverrides.CPUMemStrict = &strict
+			}
+		}
+		if interconnect == "" && scriptMeta.Interconnect != "" {
+			normalized, normalizeErr := normalizeInterconnect(scriptMeta.Interconnect)
+			if normalizeErr != nil {
+				return nil, normalizeErr
+			}
+			interconnect = normalized
+			cliOverrides = ensureQueueCLIOverrides(cliOverrides)
+			cliOverrides.Interconnect = interconnect
+		}
+	}
 	cfg, _ := loadPredictorConfig()
 	gpuMemGB, gpuMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, opts.GPUMemGB, gpu, opts.GPUClass, opts.GPUMemStrict, opts.Host, opts.Project, opts.Command, 0)
 	if opts.GPUMemMaxGB != nil {
@@ -199,13 +241,17 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		gpuMem = *gpuMemGB
 	}
 	resolvedConstraints, err := placement.ResolveConstraints(placement.ConstraintSource{
-		GPUClass: opts.GPUClass,
-		GPUMemGB: gpuMem,
-		Inputs:   opts.Inputs,
-		Command:  opts.Command,
-		Project:  opts.Project,
-		Tags:     opts.Tags,
-		LocalDir: workdir.ResolveLocal(opts.WorkingDir),
+		GPUClass:     opts.GPUClass,
+		GPUMemGB:     gpuMem,
+		CPUCores:     cpuCores,
+		CPUMemGB:     cpuMemGB,
+		Interconnect: interconnect,
+		Inputs:       opts.Inputs,
+		Command:      opts.Command,
+		Project:      opts.Project,
+		Tags:         opts.Tags,
+		LocalDir:     localDir,
+		CLIOverrides: cliOverrides,
 	})
 	if err != nil {
 		return nil, err
@@ -226,6 +272,8 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		GPUClass:         opts.GPUClass,
 		GPUMemGB:         gpuMemGB,
 		GPUMemMaxGB:      gpuMemMaxGB,
+		Interconnect:     interconnect,
+		CPUCores:         cpuCores,
 		DepSpec:          encodeQueueDependencies(opts.Dependencies),
 		Inputs:           opts.Inputs,
 		BestEffortInputs: opts.BestEffortInputs,
@@ -235,6 +283,8 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Needs:            opts.Needs,
 		Metadata:         buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
 		Disk:             opts.Disk,
+		CLIOverrides:     cliOverrides,
+		MaxComputeCap:    opts.MaxComputeCap,
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)
@@ -245,6 +295,13 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	return &queueJobResult{
 		JobID: jobID,
 	}, nil
+}
+
+func ensureQueueCLIOverrides(overrides *db.CLIResourceOverrides) *db.CLIResourceOverrides {
+	if overrides != nil {
+		return overrides
+	}
+	return &db.CLIResourceOverrides{}
 }
 
 func applyEnvMap(env map[string]string) []string {

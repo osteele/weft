@@ -30,28 +30,86 @@ func validatePinnedHostQueueGate(host string, constraints placement.Constraints)
 		return nil
 	}
 
-	if constraints.NeedsGPU() {
-		if len(spec.GPUs) == 0 {
-			return nil
-		}
-		knownClass := constraints.GPUClass == ""
-		knownMem := constraints.GPUMemGB <= 0
-		for _, gpu := range spec.GPUs {
-			knownClass = knownClass || gpu.Class != "" || gpu.Name != ""
-			knownMem = knownMem || inventory.ParseMemGB(gpu.Memory) > 0
-		}
-		if !knownClass || !knownMem {
+	verdict := placement.CheckHostConstraints(*spec, constraints)
+	if verdict.Eligible {
+		return nil
+	}
+	reasons := verdict.Reasons
+	if constraints.NeedsGPU() && hostGPUInventoryIncomplete(*spec, constraints) {
+		reasons = filterEligibilityReasons(reasons, func(reason placement.EligibilityReason) bool {
+			return !isGPUInventoryReason(reason.Kind)
+		})
+		if len(reasons) == 0 {
 			return nil
 		}
 	}
 
-	if ok, reasons := placement.CheckHostGPUConstraints(*spec, constraints); !ok {
-		if len(reasons) == 1 && constraints.GPUClass != "" && reasons[0] == fmt.Sprintf("no %s GPU", constraints.GPUClass) {
+	if len(reasons) == 1 {
+		if constraints.GPUClass != "" && reasons[0].Message == fmt.Sprintf("no %s GPU", constraints.GPUClass) {
 			return fmt.Errorf("gpu gate: no GPU matching class %s", constraints.GPUClass)
 		}
-		return fmt.Errorf("gpu gate: %s", strings.Join(reasons, "; "))
 	}
-	return nil
+	return fmt.Errorf("%s gate: %s", queueGateAxis(reasons), strings.Join(eligibilityMessages(reasons), "; "))
+}
+
+func hostGPUInventoryIncomplete(host inventory.HostSpec, constraints placement.Constraints) bool {
+	if len(host.GPUs) == 0 {
+		return true
+	}
+	knownClass := constraints.GPUClass == ""
+	knownMem := constraints.GPUMemGB <= 0
+	for _, gpu := range host.GPUs {
+		knownClass = knownClass || gpu.Class != "" || gpu.Name != ""
+		knownMem = knownMem || inventory.ParseMemGB(gpu.Memory) > 0
+	}
+	return !knownClass || !knownMem
+}
+
+func filterEligibilityReasons(reasons []placement.EligibilityReason, keep func(placement.EligibilityReason) bool) []placement.EligibilityReason {
+	out := reasons[:0]
+	for _, reason := range reasons {
+		if keep(reason) {
+			out = append(out, reason)
+		}
+	}
+	return out
+}
+
+func isGPUInventoryReason(kind placement.EligibilityReasonKind) bool {
+	switch kind {
+	case placement.ReasonGPUClass, placement.ReasonGPUMemory, placement.ReasonGPUCount,
+		placement.ReasonGPUAvailability, placement.ReasonComputeCapMax, placement.ReasonComputeCapMin:
+		return true
+	default:
+		return false
+	}
+}
+
+func queueGateAxis(reasons []placement.EligibilityReason) string {
+	if len(reasons) == 0 {
+		return "host"
+	}
+	switch reasons[0].Kind {
+	case placement.ReasonGPUClass, placement.ReasonGPUMemory, placement.ReasonGPUCount,
+		placement.ReasonGPUAvailability, placement.ReasonComputeCapMax, placement.ReasonComputeCapMin:
+		return "gpu"
+	case placement.ReasonCPUCores:
+		return "cpu"
+	case placement.ReasonHostRAM:
+		return "memory"
+	case placement.ReasonInterconnect:
+		return "interconnect"
+	default:
+		return "host"
+	}
+}
+
+func eligibilityMessages(reasons []placement.EligibilityReason) []string {
+	msgs := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		msgs = append(msgs, reason.Message)
+	}
+	return msgs
 }
 
 // mergeBlockedReasons returns the live blocked reason followed by any

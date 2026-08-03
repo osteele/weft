@@ -394,11 +394,11 @@ func TestMinRuntimeFloor_OnPremHostsEligibleUnderCu128Pin(t *testing.T) {
 	}
 
 	for _, host := range []inventory.HostSpec{cool30, cool100} {
-		if ok, reasons := CheckHostGPUConstraints(host, c); !ok {
+		if ok, reasons := checkHostConstraintResult(host, c); !ok {
 			t.Errorf("%s should be eligible under cu128 family floor: %v", host.Name, reasons)
 		}
 	}
-	if ok, _ := CheckHostGPUConstraints(old, c); ok {
+	if ok, _ := checkHostConstraintResult(old, c); ok {
 		t.Errorf("CUDA-11 host should be rejected under cu128 family floor")
 	}
 }
@@ -436,20 +436,20 @@ func TestMinRuntimeFloor_Torch291Cu128RejectsCool30(t *testing.T) {
 	}
 
 	for _, host := range []inventory.HostSpec{cool30, cool100} {
-		if ok, reasons := CheckHostGPUConstraints(host, c); ok {
+		if ok, reasons := checkHostConstraintResult(host, c); ok {
 			t.Errorf("%s should be rejected under torch 2.9.1 cu128 operational floor: %v", host.Name, reasons)
 		}
 	}
-	if ok, reasons := CheckHostGPUConstraints(newerDriver, c); !ok {
+	if ok, reasons := checkHostConstraintResult(newerDriver, c); !ok {
 		t.Errorf("newer driver host should be eligible under torch 2.9.1 cu128 operational floor: %v", reasons)
 	}
 }
 
-// TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU documents the
+// TestCheckHostConstraints_MaxCapFailsClosedOnUnknownGPU documents the
 // shared placement rule: max-cap constraints require a known device cap at or
 // below the bound. Unknown caps fail closed for inventory hosts and cloud
 // targets alike.
-func TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
+func TestCheckHostConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
 	c := Constraints{GPUClass: "nvidia", MaxComputeCap: "9.0"}
 
 	unknown := inventory.HostSpec{
@@ -458,7 +458,7 @@ func TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
 		CUDAVersion:         "12.8",
 		GPUs:                []inventory.GPUSpec{{Name: "NVIDIA Mystery Accelerator Z9", Memory: "24GB"}},
 	}
-	ok, reasons := CheckHostGPUConstraints(unknown, c)
+	ok, reasons := checkHostConstraintResult(unknown, c)
 	if ok {
 		t.Fatalf("uncatalogued GPU accepted under sm_9.0 cap; want fail-closed rejection")
 	}
@@ -473,7 +473,7 @@ func TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
 		CUDAVersion:         "12.4",
 		GPUs:                []inventory.GPUSpec{{Name: "H100 NVL", Class: "nvidia", Memory: "80GB"}},
 	}
-	if ok, reasons := CheckHostGPUConstraints(atCap, c); !ok {
+	if ok, reasons := checkHostConstraintResult(atCap, c); !ok {
 		t.Errorf("sm_9.0 GPU rejected under sm_9.0 cap; want acceptance: %v", reasons)
 	}
 
@@ -485,7 +485,7 @@ func TestCheckHostGPUConstraints_MaxCapFailsClosedOnUnknownGPU(t *testing.T) {
 		CUDAVersion:         "12.8",
 		GPUs:                []inventory.GPUSpec{{Name: "RTX 5090", Class: "nvidia", Memory: "32GB"}},
 	}
-	ok, reasons = CheckHostGPUConstraints(tooNew, c)
+	ok, reasons = checkHostConstraintResult(tooNew, c)
 	if ok {
 		t.Fatalf("sm_12.0 GPU accepted under sm_9.0 cap; want rejection")
 	}

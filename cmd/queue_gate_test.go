@@ -102,3 +102,74 @@ func TestValidatePinnedHostQueueGateRejectsRuntimeFloor(t *testing.T) {
 		t.Fatalf("error = %q, want driver floor rejection", got)
 	}
 }
+
+func TestValidatePinnedHostQueueGateRejectsHostAxes(t *testing.T) {
+	inventory.UseTestHosts(t)
+
+	tests := []struct {
+		name        string
+		constraints placement.Constraints
+		want        string
+	}{
+		{
+			name:        "cpu cores",
+			constraints: placement.Constraints{CPUCores: 32},
+			want:        "cpu gate: host CPU cores 16 below required 32",
+		},
+		{
+			name:        "host ram",
+			constraints: placement.Constraints{CPUMemGB: 128},
+			want:        "memory gate: host RAM 64GB below required 128GB",
+		},
+		{
+			name:        "interconnect",
+			constraints: placement.Constraints{GPUClass: "nvidia", Interconnect: "nvlink"},
+			want:        "interconnect gate: interconnect nvlink required; host GPU naming shows no match",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePinnedHostQueueGate("host-beta", tt.constraints)
+			if err == nil {
+				t.Fatal("expected pinned host gate rejection")
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("error = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidatePinnedHostQueueGateAllowsUnknownHostAxes(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{{Name: "unknown-host"}})
+	t.Cleanup(restore)
+
+	err := validatePinnedHostQueueGate("unknown-host", placement.Constraints{
+		GPUClass: "a100",
+		CPUCores: 64,
+		CPUMemGB: 512,
+	})
+	if err != nil {
+		t.Fatalf("expected unknown CPU/RAM and GPU data to pass, got %v", err)
+	}
+}
+
+func TestValidatePinnedHostQueueGateIncompleteGPUDataStillRejectsHostAxis(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{{
+		Name:     "partial",
+		CPUCores: 16,
+		GPUs:     []inventory.GPUSpec{{}},
+	}})
+	t.Cleanup(restore)
+
+	err := validatePinnedHostQueueGate("partial", placement.Constraints{
+		GPUClass: "a100",
+		CPUCores: 64,
+	})
+	if err == nil {
+		t.Fatal("expected CPU floor to reject despite incomplete GPU metadata")
+	}
+	if got, want := err.Error(), "cpu gate: host CPU cores 16 below required 64"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}

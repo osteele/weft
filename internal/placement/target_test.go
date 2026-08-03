@@ -8,7 +8,15 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 )
 
-func TestEvaluateEligibilityHostParityWithCheckHostGPUConstraints(t *testing.T) {
+func checkHostConstraintResult(host inventory.HostSpec, c Constraints) (bool, []string) {
+	verdict := CheckHostConstraints(host, c)
+	if !verdict.Eligible {
+		return false, verdict.Messages()
+	}
+	return true, hostGPUPassReasons(host, c)
+}
+
+func TestEvaluateEligibilityHostParityWithCheckHostConstraints(t *testing.T) {
 	inventory.UseTestHosts(t)
 	tests := []struct {
 		name string
@@ -30,14 +38,67 @@ func TestEvaluateEligibilityHostParityWithCheckHostGPUConstraints(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, host := range inventory.TestHosts() {
-				oldEligible, _ := CheckHostGPUConstraints(host, tt.c)
+				oldEligible, _ := checkHostConstraintResult(host, tt.c)
 				got := EvaluateEligibility(tt.c, TargetSpecFromHostSpec(host, nil, nil))
 				if got.Eligible != oldEligible {
-					t.Fatalf("%s: EvaluateEligibility = %v (%v), CheckHostGPUConstraints = %v",
+					t.Fatalf("%s: EvaluateEligibility = %v (%v), CheckHostConstraints = %v",
 						host.Name, got.Eligible, got.Messages(), oldEligible)
 				}
 			}
 		})
+	}
+}
+
+func TestEvaluateEligibilityHostAxes(t *testing.T) {
+	host := inventory.HostSpec{
+		Name:     "host-beta",
+		CPUCores: 16,
+		Memory:   "64GB",
+		GPUs: []inventory.GPUSpec{{
+			Name:   "RTX 3090",
+			Class:  "rtx3090",
+			Memory: "24GB",
+		}},
+	}
+	tests := []struct {
+		name        string
+		constraints Constraints
+		wantKind    EligibilityReasonKind
+	}{
+		{
+			name:        "cpu cores",
+			constraints: Constraints{CPUCores: 32},
+			wantKind:    ReasonCPUCores,
+		},
+		{
+			name:        "host ram",
+			constraints: Constraints{CPUMemGB: 128},
+			wantKind:    ReasonHostRAM,
+		},
+		{
+			name:        "interconnect",
+			constraints: Constraints{GPUClass: "nvidia", Interconnect: "nvlink"},
+			wantKind:    ReasonInterconnect,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			verdict := EvaluateEligibility(tt.constraints, TargetSpecFromHostSpec(host, nil, nil))
+			if verdict.Eligible {
+				t.Fatal("EvaluateEligibility eligible, want host-axis rejection")
+			}
+			if !hasReason(verdict, tt.wantKind) {
+				t.Fatalf("reasons = %+v, want %s", verdict.Reasons, tt.wantKind)
+			}
+		})
+	}
+}
+
+func TestEvaluateEligibilityHostAxisUnknownCoresAndRAMPass(t *testing.T) {
+	target := TargetSpecFromHostSpec(inventory.HostSpec{Name: "legacy"}, nil, nil)
+	verdict := EvaluateEligibility(Constraints{CPUCores: 32, CPUMemGB: 128}, target)
+	if !verdict.Eligible {
+		t.Fatalf("EvaluateEligibility = ineligible (%v), want unknown host cores/RAM accepted", verdict.Messages())
 	}
 }
 
@@ -125,8 +186,8 @@ func TestEvaluateEligibilityMaxComputeCapUnknownFailsClosed(t *testing.T) {
 	if !hasReason(verdict, ReasonComputeCapMax) {
 		t.Fatalf("reasons = %+v, want %s", verdict.Reasons, ReasonComputeCapMax)
 	}
-	if ok, _ := CheckHostGPUConstraints(host, c); ok {
-		t.Fatalf("CheckHostGPUConstraints = eligible, want wrapper to follow EvaluateEligibility")
+	if ok, _ := checkHostConstraintResult(host, c); ok {
+		t.Fatalf("CheckHostConstraints = eligible, want wrapper to follow EvaluateEligibility")
 	}
 }
 

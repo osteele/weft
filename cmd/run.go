@@ -1527,6 +1527,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUClass:         gpuClass,
 			GPUMemGB:         resolvedGPUMemGB,
 			GPUMemMaxGB:      resolvedGPUMemMaxGB,
+			CPUCores:         runCPUCores,
+			CPUMemGB:         db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
+			Interconnect:     runInterconnect,
 			Dependencies:     deps,
 			AutoStart:        true,
 			Inputs:           runInputs,
@@ -1538,6 +1541,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			CloudAfter:       cloudAfter,
 			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 			Disk:             diskMeta,
+			CLIOverrides:     cliOverrides,
+			MaxComputeCap:    persistMaxComputeCap,
 		})
 		endSubmit()
 		if err != nil {

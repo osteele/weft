@@ -95,6 +95,21 @@ func TestTargetSpecFromCloudInstancePreservesCloudGPUClassCompatibility(t *testi
 	}
 }
 
+func TestTargetSpecFromCloudInstanceInterconnectSignalsUnknownDoesNotReject(t *testing.T) {
+	inst := db.Launch{
+		Provider:           string(cloud.ProviderVastai),
+		ProviderInstanceID: "vastai:123",
+		GPUClass:           "A100",
+		GPUMemGB:           80,
+		NumGPUs:            1,
+	}
+	target := TargetSpecFromCloudInstance(inst)
+	c := placement.Constraints{GPUClass: "nvidia", GPUMemGB: 80, Interconnect: "nvlink"}
+	if got := placement.EvaluateEligibility(c, target); !got.Eligible {
+		t.Fatalf("EvaluateEligibility = ineligible (%v), want unknown cloud interconnect signals accepted", got.Messages())
+	}
+}
+
 func TestCloudNormalizationDocumentsRTX4080Fork(t *testing.T) {
 	requested := "rtx4080"
 	gpuName := "RTX 4080S"
@@ -106,7 +121,7 @@ func TestCloudNormalizationDocumentsRTX4080Fork(t *testing.T) {
 			Memory: "16GB",
 		}},
 	}
-	if ok, _ := placement.CheckHostGPUConstraints(host, placement.Constraints{GPUClass: requested}); ok {
+	if verdict := placement.CheckHostConstraints(host, placement.Constraints{GPUClass: requested}); verdict.Eligible {
 		t.Fatal("test precondition failed: on-prem structured matcher should reject exact RTX 4080 against RTX 4080S")
 	}
 	// Reconciliation: Phase 1 keeps structured matching as the predicate, but

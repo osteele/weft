@@ -420,6 +420,33 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		diskMax := queueDiskMaxGB
 		cliOverrides.DiskMaxGB = &diskMax
 	}
+	queueCPUCores := 0
+	queueCPUMemGB := 0
+	queueInterconnect := ""
+	if scriptMeta != nil {
+		if scriptMeta.CPUCores > 0 {
+			queueCPUCores = scriptMeta.CPUCores
+			cores := scriptMeta.CPUCores
+			cliOverrides.CPUCores = &cores
+		}
+		if scriptMeta.CPUMemGB > 0 {
+			strict := scriptMeta.CPUMemStrict != nil && *scriptMeta.CPUMemStrict
+			queueCPUMemGB = db.EffectiveCPUMemGB(scriptMeta.CPUMemGB, strict)
+			mem := scriptMeta.CPUMemGB
+			cliOverrides.CPUMemGB = &mem
+			if strict {
+				cliOverrides.CPUMemStrict = &strict
+			}
+		}
+		if scriptMeta.Interconnect != "" {
+			var normalizeErr error
+			queueInterconnect, normalizeErr = normalizeInterconnect(scriptMeta.Interconnect)
+			if normalizeErr != nil {
+				return normalizeErr
+			}
+			cliOverrides.Interconnect = queueInterconnect
+		}
+	}
 
 	var deps []queueDependency
 	var cloudAfter []db.JobDependencyRef
@@ -551,12 +578,16 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Project:      projectName,
 		EnvVars:      queueEnvVars,
 		Tags:         queueTags,
+		CPUCores:     queueCPUCores,
+		CPUMemGB:     queueCPUMemGB,
+		Interconnect: queueInterconnect,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
 		Inputs:       queueInputs,
 		OutputDirs:   outputDirs,
 		CloudAfter:   cloudAfter,
 		Disk:         diskMeta,
+		CLIOverrides: cliOverrides,
 	})
 	if err != nil {
 		return err
