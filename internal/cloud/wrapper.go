@@ -44,10 +44,11 @@ type CloudNeed struct {
 	ContentType string `json:"content_type,omitempty"`
 }
 
-// CloudAfterRef identifies a producer job whose success the consumer depends on,
-// evaluated by the agent when both jobs run on the same rental instance.
-// If the producer ran on this instance and failed (and AllowFailure is false),
-// the agent skips the consumer.
+// CloudAfterRef identifies a same-instance --needs producer attempt, evaluated
+// by the agent when both jobs run on the same rental instance. The submit-time
+// db.JobDependencyRef CloudAfter metadata is a separate --after/--after-any
+// ordering concept. AllowFailure is reserved on this wire type for manifest
+// compatibility; current same-instance --needs classification does not set it.
 type CloudAfterRef struct {
 	JobID        int64 `json:"job_id"`
 	RunID        int64 `json:"run_id,omitempty"`

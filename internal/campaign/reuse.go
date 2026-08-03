@@ -1326,6 +1326,10 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	if r2Client != nil && len(cancelByLaunch) > 0 {
 		for launchID, ids := range cancelByLaunch {
 			if err := sendGraceCancelAttempts(opCtx, r2Client, launchID, ids); err != nil {
+				if eventErr := RecordCancelAttemptsDeliveryFailure(database, launchID, ids, "reuse move source after target ready", err); eventErr != nil {
+					slog.Warn("record cancel-attempts delivery failure",
+						"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", eventErr)
+				}
 				slog.Warn("send cancel-attempts marker",
 					"component", "reuse", "source_launch_id", launchID, "attempt_ids", ids, "error", err)
 			}

@@ -783,6 +783,9 @@ func executeHostMoveWithIntent(
 		err := sendMoveCancelAttempts(cancelCtx, r2Client, sourceLaunchID, cancelAttemptIDs)
 		cancel()
 		if err != nil {
+			if eventErr := campaign.RecordCancelAttemptsDeliveryFailure(database, sourceLaunchID, cancelAttemptIDs, fmt.Sprintf("move source for %s", ids.FormatJobID(job.ID)), err); eventErr != nil {
+				slog.Warn("record cancel-attempts delivery failure", "component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "attempt_ids", cancelAttemptIDs, "error", eventErr)
+			}
 			slog.Warn("send source cancel-attempts marker", "component", "move", "job_id", job.ID, "source_launch_id", sourceLaunchID, "attempt_ids", cancelAttemptIDs, "error", err)
 		}
 	}

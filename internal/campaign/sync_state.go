@@ -522,6 +522,10 @@ func reconcileAbandonedMoveTargetAttempts(ctx context.Context, database *sql.DB,
 		return
 	}
 	if err := sendGraceCancelAttempts(ctx, r2Client, instanceID, attemptIDs); err != nil {
+		if eventErr := RecordCancelAttemptsDeliveryFailure(database, instanceID, attemptIDs, "abandoned move targets", err); eventErr != nil {
+			slog.Warn("record cancel-attempts delivery failure",
+				"component", "sync", "instance", instanceID, "attempt_ids", attemptIDs, "error", eventErr)
+		}
 		slog.Warn("send cancel-attempts for abandoned move targets",
 			"component", "sync", "instance", instanceID, "attempt_ids", attemptIDs, "error", err)
 	}
@@ -622,6 +626,10 @@ func stopMoveIntentSources(ctx context.Context, database *sql.DB, r2Client *r2.C
 	}
 	for launchID, attemptIDs := range cancelByLaunch {
 		if err := sendGraceCancelAttempts(ctx, r2Client, launchID, attemptIDs); err != nil {
+			if eventErr := RecordCancelAttemptsDeliveryFailure(database, launchID, attemptIDs, "move source after target ready", err); eventErr != nil {
+				slog.Warn("record cancel-attempts delivery failure",
+					"component", "sync", "source_launch_id", launchID, "attempt_ids", attemptIDs, "error", eventErr)
+			}
 			slog.Warn("send move source cancel-attempts after target ready",
 				"component", "sync", "source_launch_id", launchID, "attempt_ids", attemptIDs, "error", err)
 		}

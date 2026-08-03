@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -1784,5 +1785,63 @@ func TestReconcileAbandonedMoveTargetAttempts_SendsCancelMarkers(t *testing.T) {
 	reconcileAbandonedMoveTargetAttempts(context.Background(), database, nil, src)
 	if gotLaunch != 0 || len(gotAttempts) != 0 {
 		t.Fatalf("unexpected cancel send for source launch: launch=%d attempts=%v", gotLaunch, gotAttempts)
+	}
+}
+
+func TestReconcileAbandonedMoveTargetAttempts_RecordsCancelMarkerSendFailure(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, GPUSpec: "RTX_4090"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetExisting,
+		TargetLaunchID: &target,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	attemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.ResolveMoveIntent(database, intent.ID, db.MoveIntentStateCanceled, "launch reset; move abandoned"); err != nil {
+		t.Fatalf("ResolveMoveIntent: %v", err)
+	}
+
+	prevSendCancel := sendGraceCancelAttempts
+	t.Cleanup(func() { sendGraceCancelAttempts = prevSendCancel })
+	sendErr := errors.New("r2 put failed")
+	sendGraceCancelAttempts = func(context.Context, controlplane.GraceStore, int64, []int64) error {
+		return sendErr
+	}
+
+	reconcileAbandonedMoveTargetAttempts(context.Background(), database, nil, target)
+
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind:     db.EventGraceCancelAttemptsFailed,
+		LaunchID: target,
+	})
+	if err != nil {
+		t.Fatalf("ListLifecycleEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("cancel-attempt failure events = %d, want 1", len(events))
+	}
+	if events[0].JobCount != 1 {
+		t.Fatalf("event job_count = %d, want 1", events[0].JobCount)
+	}
+	if !strings.Contains(events[0].Detail, fmt.Sprintf("attempt_ids=[%d]", attemptID)) {
+		t.Fatalf("event detail = %q, want attempt id %d", events[0].Detail, attemptID)
+	}
+	if events[0].ErrorText != sendErr.Error() {
+		t.Fatalf("event error = %q, want %q", events[0].ErrorText, sendErr.Error())
 	}
 }

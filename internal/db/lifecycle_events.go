@@ -90,6 +90,11 @@ const (
 	EventReconcileProviderResumed   = "reconcile.provider_resumed"
 	EventReconcileHedgeCull         = "reconcile.hedge_cull"
 
+	// EventGraceCancelAttemptsFailed records a failed control-plane write of
+	// cancel-attempts markers. The source agent may still hold the superseded
+	// manifest, so this failure needs to be visible outside process logs.
+	EventGraceCancelAttemptsFailed = "grace.cancel_attempts_failed"
+
 	// Queue dispatch (host-sync push of queued jobs to remote queue runner).
 	// EventQueueDispatchFailed records a per-job failure during
 	// ensureQueuedJobsOnRemote (source sync, HF input staging, cloud artifact

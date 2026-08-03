@@ -799,6 +799,14 @@ rule StaleCloudAfterPinsAreReconciled {
         --     concrete producer attempt shipped to one agent manifest and is
         --     not carried forward to a later attempt.
         --
+        -- Be careful with the overloaded name "CloudAfter":
+        -- metadata.dependencies.cloud_after is the submit-time --after /
+        -- --after-any ordering gate, including AllowFailure for --after-any.
+        -- cloud.CloudAfterRef is the agent-manifest same-instance --needs
+        -- attempt pin. Current --needs syntax has no failure-tolerant variant,
+        -- so same-instance classification does not propagate the metadata
+        -- AllowFailure field.
+        --
         -- The reconciler may reset only on positive mismatch evidence. A
         -- missing resolved pin, unreadable producer row, or producer with an
         -- unknown current attempt is an unknown state, not evidence that the

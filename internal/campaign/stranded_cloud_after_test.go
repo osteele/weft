@@ -136,6 +136,43 @@ func TestReconcileStaleCloudAfterPins_SameLaunchReattempt(t *testing.T) {
 	}
 }
 
+func TestReconcileStaleCloudAfterPins_CompletedProducerThenRequeued(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, producerID, consumerID, pinnedRunID := recordPinnedCloudAfterPair(t, database)
+
+	if _, err := db.RecordCloudJobCompletion(database, producerID, 0, time.Now().Add(-2*time.Minute).Unix(), time.Now().Add(-time.Minute).Unix(), "", "", time.Time{}, pinnedRunID); err != nil {
+		t.Fatalf("RecordCloudJobCompletion producer: %v", err)
+	}
+	requeuedRunID, err := db.CreateAttempt(database, producerID, "", &launchID, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateAttempt requeue: %v", err)
+	}
+	if requeuedRunID == pinnedRunID {
+		t.Fatalf("requeued run ID = pinned run ID %d", pinnedRunID)
+	}
+
+	before := mustJob(t, database, consumerID)
+	oldConsumerRun := *before.LatestRunID
+	reset, err := ReconcileStaleCloudAfterPins(database)
+	if err != nil {
+		t.Fatalf("ReconcileStaleCloudAfterPins: %v", err)
+	}
+	if len(reset.JobIDs) != 1 || reset.JobIDs[0] != consumerID {
+		t.Fatalf("reset job IDs = %v, want [%d]", reset.JobIDs, consumerID)
+	}
+	if len(reset.AttemptIDs) != 1 || reset.AttemptIDs[0] != oldConsumerRun {
+		t.Fatalf("reset attempt IDs = %v, want [%d]", reset.AttemptIDs, oldConsumerRun)
+	}
+	consumer := mustJob(t, database, consumerID)
+	if consumer.LaunchID != nil {
+		t.Fatalf("consumer launch after reset = %v, want nil", *consumer.LaunchID)
+	}
+	wantReasonPart := fmt.Sprintf("producer wj%d run changed from %d to %d", producerID, pinnedRunID, requeuedRunID)
+	if got := strings.Join(consumer.PlacementReasons, "\n"); !strings.Contains(got, wantReasonPart) {
+		t.Fatalf("placement reasons = %q, want %q", got, wantReasonPart)
+	}
+}
+
 func TestReconcileStaleCloudAfterPins_ProducerMovedLaunch(t *testing.T) {
 	database := db.SetupTestDB(t)
 	_, producerID, consumerID, _ := recordPinnedCloudAfterPair(t, database)
