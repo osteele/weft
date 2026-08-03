@@ -81,6 +81,9 @@ type PostJobCapture struct {
 	WorkDir  string
 	LogDir   string
 	ExitCode int
+	// StartTime is the attempt's start (unix seconds); post-job output
+	// uploads window their walk to files modified at or after it.
+	StartTime int64
 }
 
 type PostJobManager interface {
@@ -918,7 +921,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		if len(dirs) == 0 {
 			dirs = config.DefaultOutputDirs
 		}
-		outputThreshold := time.Unix(startTime, 0).Add(-time.Second)
+		outputThreshold := AttemptOutputThreshold(startTime)
 		if discovered, err := DiscoverJobOutputsSince(runDir, dirs, rj.Data.Outputs, outputThreshold); err == nil && len(discovered) > 0 {
 			outputFiles = discovered
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
@@ -955,11 +958,12 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	}
 	if r.PostJobManager != nil {
 		r.PostJobManager.StartPostJob(PostJobCapture{
-			JobID:    jobID,
-			RunID:    rj.Data.RunID,
-			WorkDir:  runDir,
-			LogDir:   filepath.Dir(paths.Log),
-			ExitCode: ei.ExitCode,
+			JobID:     jobID,
+			RunID:     rj.Data.RunID,
+			WorkDir:   runDir,
+			LogDir:    filepath.Dir(paths.Log),
+			ExitCode:  ei.ExitCode,
+			StartTime: startTime,
 		})
 	}
 
@@ -1229,7 +1233,7 @@ func (r *Runner) discoverRecoveredOutputs(jobID int64, exitCode int, rs RunningJ
 	if len(dirs) == 0 {
 		dirs = config.DefaultOutputDirs
 	}
-	lower := time.Unix(rs.StartedAt, 0).Add(-time.Second)
+	lower := AttemptOutputThreshold(rs.StartedAt)
 	discovered, err := DiscoverJobOutputsSince(workDir, dirs, refs, lower)
 	if err != nil || len(discovered) == 0 {
 		return nil

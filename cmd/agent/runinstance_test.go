@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -169,5 +170,55 @@ func TestReadLogTail_EmptyFile(t *testing.T) {
 	got := readLogTail(path, 8192)
 	if got != "" {
 		t.Errorf("readLogTail() = %q, want empty string", got)
+	}
+}
+
+func TestOutputUploadRcloneArgs(t *testing.T) {
+	if got := outputUploadRcloneArgs(time.Time{}); len(got) != 1 || got[0] != "--update" {
+		t.Errorf("outputUploadRcloneArgs(zero) = %v, want [--update]", got)
+	}
+	windowStart := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	got := outputUploadRcloneArgs(windowStart)
+	want := []string{"--update", "--max-age", "2026-08-02T12:00:00Z"}
+	if len(got) != len(want) {
+		t.Fatalf("outputUploadRcloneArgs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("outputUploadRcloneArgs() = %v, want %v", got, want)
+		}
+	}
+}
+
+// Regression: the upload walk must not count (or upload) files that predate
+// the attempt — a prior same-workdir job's leftovers in output/ (spec:
+// invariant Attribution mechanism (d) in specs/job-lifecycle.allium).
+func TestMeasureUploadTreeSince_ExcludesPriorJobFiles(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "prior-job.json")
+	fresh := filepath.Join(dir, "this-job.json")
+	if err := os.WriteFile(stale, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fresh, []byte("new-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	files, bytes, ok := measureUploadTreeSince(dir, time.Now().Add(-time.Hour))
+	if !ok {
+		t.Fatal("measureUploadTreeSince() ok = false")
+	}
+	if files != 1 || bytes != int64(len("new-data")) {
+		t.Errorf("measureUploadTreeSince() = (%d files, %d bytes), want (1, %d)", files, bytes, len("new-data"))
+	}
+
+	// Zero threshold counts everything.
+	files, _, ok = measureUploadTreeSince(dir, time.Time{})
+	if !ok || files != 2 {
+		t.Errorf("measureUploadTreeSince(zero) = %d files, want 2", files)
 	}
 }

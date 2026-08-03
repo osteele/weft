@@ -1021,3 +1021,13 @@ func TestSetupPrewarmResult_ErrorIsSingleLine(t *testing.T) {
 		t.Errorf("combined stderr output should include the log tail label; got: %q", combined)
 	}
 }
+
+func TestOutputWindowStartForJob_RestagedDisablesWindow(t *testing.T) {
+	start := int64(1_700_000_000)
+	if got := outputWindowStartForJob(cloud.AgentJob{}, start); got != start {
+		t.Errorf("outputWindowStartForJob(plain) = %d, want %d", got, start)
+	}
+	if got := outputWindowStartForJob(cloud.AgentJob{RestagedOutputs: true}, start); got != 0 {
+		t.Errorf("outputWindowStartForJob(restaged) = %d, want 0 (window disabled)", got)
+	}
+}

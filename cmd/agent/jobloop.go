@@ -87,6 +87,17 @@ func appendAgentJobEnv(env []string, job cloud.AgentJob) []string {
 	return append(env, job.Env...)
 }
 
+// outputWindowStartForJob returns the attempt-start bound for the job's
+// convention-output uploads, or 0 when the job runs on restaged outputs —
+// restaged files carry prior-attempt mtimes and must remain uploadable
+// under this attempt (see uploadOutputDirs).
+func outputWindowStartForJob(job cloud.AgentJob, startUnix int64) int64 {
+	if job.RestagedOutputs {
+		return 0
+	}
+	return startUnix
+}
+
 func hasDeclaredHFInput(inputs []string) bool {
 	for _, input := range inputs {
 		if strings.HasPrefix(input, "hf:") || strings.HasPrefix(input, "hf-dataset:") {
@@ -810,7 +821,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		// Write .started marker to R2
-		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
+		attemptStartUnix := time.Now().Unix()
+		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", attemptStartUnix))
+		outputWindowStartUnix := outputWindowStartForJob(job, attemptStartUnix)
 		result.StartedJobCount++
 		paths := runner.NewJobPaths(cfg.LogDir, job.ID)
 		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Timeseries)
@@ -875,16 +888,17 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			}
 			uploadingPhase := fmt.Sprintf("uploading:%d", job.ID)
 			bgm.StartPostJobWork(postJobWork{
-				r2Bucket:          cfg.R2Bucket,
-				instanceID:        cfg.InstanceID,
-				jobID:             job.ID,
-				runID:             job.RunID,
-				exitCode:          prewarmExitCode,
-				workDir:           runner.ExpandTilde(workDir),
-				logSnapshot:       logSnapshot,
-				diskPath:          cfg.DiskPath,
-				phase:             uploadingPhase,
-				uploadStartedUnix: uploadStartedUnix,
+				r2Bucket:              cfg.R2Bucket,
+				instanceID:            cfg.InstanceID,
+				jobID:                 job.ID,
+				runID:                 job.RunID,
+				exitCode:              prewarmExitCode,
+				workDir:               runner.ExpandTilde(workDir),
+				logSnapshot:           logSnapshot,
+				diskPath:              cfg.DiskPath,
+				phase:                 uploadingPhase,
+				uploadStartedUnix:     uploadStartedUnix,
+				outputWindowStartUnix: outputWindowStartUnix,
 			})
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(uploadingPhase)
@@ -907,7 +921,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			}
 		}
 
-		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg)
+		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg, outputWindowStartUnix)
 		if job.UsesGPU {
 			gpuWarmedUp = true
 		}
@@ -989,16 +1003,17 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// === Background post-job work (uploads + workdir cleanup) ===
 		bgm.StartPostJobWork(postJobWork{
-			r2Bucket:          cfg.R2Bucket,
-			instanceID:        cfg.InstanceID,
-			jobID:             job.ID,
-			runID:             job.RunID,
-			exitCode:          exitCode,
-			workDir:           runner.ExpandTilde(workDir),
-			logSnapshot:       logSnapshot,
-			diskPath:          cfg.DiskPath,
-			phase:             uploadingPhase,
-			uploadStartedUnix: uploadStartedUnix,
+			r2Bucket:              cfg.R2Bucket,
+			instanceID:            cfg.InstanceID,
+			jobID:                 job.ID,
+			runID:                 job.RunID,
+			exitCode:              exitCode,
+			workDir:               runner.ExpandTilde(workDir),
+			logSnapshot:           logSnapshot,
+			diskPath:              cfg.DiskPath,
+			phase:                 uploadingPhase,
+			outputWindowStartUnix: outputWindowStartUnix,
+			uploadStartedUnix:     uploadStartedUnix,
 		})
 
 		if cfg.OnPhase != nil {

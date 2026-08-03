@@ -2425,10 +2425,10 @@ func outputFilePaths(files []runner.OutputFile) []string {
 }
 
 func outputSyncThreshold(job *db.Job) time.Time {
-	if job == nil || job.StartTime == 0 {
+	if job == nil {
 		return time.Time{}
 	}
-	return time.Unix(job.StartTime, 0).Add(-time.Second)
+	return runner.AttemptOutputThreshold(job.StartTime)
 }
 
 // outputSyncUpperBound returns the end-of-attempt cap for discovery-based

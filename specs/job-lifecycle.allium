@@ -1035,6 +1035,19 @@ invariant Attribution {
         --       (SharedWorkdirUploadBarrierBeforeNextJob), which prevents
         --       the next job in the same directory from writing into an
         --       output tree a prior job's upload walk is still reading.
+        --       The barrier covers only that leading direction; the
+        --       trailing direction — a later job's walk re-uploading a
+        --       PRIOR job's leftovers under the later job's prefix (the
+        --       workdir is deliberately not cleaned between sequential
+        --       same-workdir jobs) — is covered by (d).
+        --   (d) Attempt-window cutoff on the agent's upload walk:
+        --       uploadOutputDirs applies the attempt's start − 1s as an
+        --       rclone --max-age bound (cmd/agent/runinstance.go
+        --       outputUploadWindowStart), mirroring cutoff (a) on the
+        --       upload side. The window is disabled for restaged-output
+        --       attempts (cloud.AgentJob.RestagedOutputs), whose files
+        --       legitimately carry prior-attempt mtimes and must reach
+        --       the new attempt's prefix.
         --   (c) Remote corroboration for artifact sync: files found in the
         --       SUBMITTER'S local working tree are never attributable to a
         --       job — the local tree holds the user's own files and other

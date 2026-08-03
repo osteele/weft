@@ -122,6 +122,19 @@ func DiscoverJobOutputs(workDir string, dirs, refs []string) ([]OutputFile, erro
 	return deduped, nil
 }
 
+// AttemptOutputThreshold returns the attempt-window lower bound for
+// attributing output files to an attempt: start − 1s of mtime slack, or zero
+// time (no bound) when startUnix is unknown or the window is disabled (<= 0).
+// Every attempt-window cutoff — output discovery, artifact sync, and the
+// agent's upload walk — must share this boundary (spec: invariant Attribution
+// in specs/job-lifecycle.allium).
+func AttemptOutputThreshold(startUnix int64) time.Time {
+	if startUnix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(startUnix, 0).Add(-time.Second)
+}
+
 // DiscoverJobOutputsSince discovers job outputs and keeps only files modified
 // at or after threshold. Use for attempt-scoped completion records so stale
 // files in shared output directories are not attributed to a later job.

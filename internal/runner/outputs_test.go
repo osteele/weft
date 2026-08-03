@@ -271,3 +271,17 @@ func TestFilterOutputFilesUntilDropsFilesNewerThanBound(t *testing.T) {
 		t.Fatalf("zero bound filtered = %+v, want unchanged", got)
 	}
 }
+
+func TestAttemptOutputThreshold(t *testing.T) {
+	if got := AttemptOutputThreshold(0); !got.IsZero() {
+		t.Errorf("AttemptOutputThreshold(0) = %v, want zero", got)
+	}
+	if got := AttemptOutputThreshold(-5); !got.IsZero() {
+		t.Errorf("AttemptOutputThreshold(-5) = %v, want zero", got)
+	}
+	start := int64(1_700_000_000)
+	want := time.Unix(start-1, 0)
+	if got := AttemptOutputThreshold(start); !got.Equal(want) {
+		t.Errorf("AttemptOutputThreshold(%d) = %v, want %v (start − 1s)", start, got, want)
+	}
+}

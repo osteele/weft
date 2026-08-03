@@ -72,14 +72,15 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 		return
 	}
 	m.bgm.StartPostJobWork(postJobWork{
-		r2Bucket:          m.r2Bucket,
-		jobID:             capture.JobID,
-		runID:             capture.RunID,
-		exitCode:          capture.ExitCode,
-		workDir:           runner.ExpandTilde(capture.WorkDir),
-		logSnapshot:       logSnapshot,
-		phase:             fmt.Sprintf("inventory_uploading:%d", capture.JobID),
-		uploadStartedUnix: time.Now().Unix(),
+		r2Bucket:              m.r2Bucket,
+		jobID:                 capture.JobID,
+		runID:                 capture.RunID,
+		exitCode:              capture.ExitCode,
+		workDir:               runner.ExpandTilde(capture.WorkDir),
+		logSnapshot:           logSnapshot,
+		phase:                 fmt.Sprintf("inventory_uploading:%d", capture.JobID),
+		uploadStartedUnix:     time.Now().Unix(),
+		outputWindowStartUnix: capture.StartTime,
 	})
 }
 
