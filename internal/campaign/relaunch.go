@@ -2223,6 +2223,14 @@ func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job, maxAttemp
 			remaining = append(remaining, j)
 			continue
 		}
+		if reason, blocked := queueblock.WaitingOnJobDependencyReason(cfg.Database, j); blocked {
+			slog.Debug("reuse pass: job waiting on dependency, skipping",
+				"component", "relaunch",
+				"job_id", j.ID,
+				"reason", reason)
+			remaining = append(remaining, j)
+			continue
+		}
 		constraints := placement.ConstraintsFromJob(j)
 		// Bias scoring toward the live instance hosting any --needs producer
 		// so consumers co-locate with their producers (zero-wait estimate
@@ -2255,7 +2263,7 @@ func tryPlaceOntoExistingInstances(cfg RelaunchConfig, jobs []*db.Job, maxAttemp
 			continue
 		}
 		instanceID := pick.Reuse.InstanceID
-		if err := SubmitJobsToInstance(ctx, cfg.Database, r2Client, instanceID, []*db.Job{j}); err != nil {
+		if err := submitJobsToInstanceForReusePass(ctx, cfg.Database, r2Client, instanceID, []*db.Job{j}); err != nil {
 			slog.Warn("reuse pass submit failed",
 				"component", "relaunch", "job_id", j.ID, "instance", instanceID, "error", err)
 			remaining = append(remaining, j)

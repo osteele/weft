@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -224,6 +225,128 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 	}
 	if len(gotPayload.Jobs[0].CloudAfter) != 1 || gotPayload.Jobs[0].CloudAfter[0].JobID != producerID {
 		t.Fatalf("cloud_after = %#v, want producer %d", gotPayload.Jobs[0].CloudAfter, producerID)
+	}
+}
+
+func dependencyReusePassFixture(t *testing.T, database *sql.DB, depSpecSuffix string, finishProducer func(int64)) (*db.Job, *int) {
+	t.Helper()
+
+	if _, err := db.CreateLaunch(database, &db.Launch{
+		Status:          db.LaunchStatusRunning,
+		Provider:        "vastai",
+		GPUClass:        "nvidia",
+		ResolvedGPUName: "RTX 4090",
+		GPUMemGB:        24,
+		NumGPUs:         1,
+		DiskGB:          120,
+	}); err != nil {
+		t.Fatalf("create reusable launch: %v", err)
+	}
+
+	producerID, err := db.RecordJobStarting(database, "cool30", "/tmp", "echo producer", "producer")
+	if err != nil {
+		t.Fatalf("RecordJobStarting producer: %v", err)
+	}
+	if finishProducer != nil {
+		finishProducer(producerID)
+	}
+
+	consumerID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo consumer", "consumer", "nvidia")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobDepSpec(database, consumerID, strconv.FormatInt(producerID, 10)+depSpecSuffix); err != nil {
+		t.Fatalf("SetJobDepSpec consumer: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("GetJobByID consumer: %v", err)
+	}
+
+	prevSubmit := submitJobsToInstanceForReusePass
+	t.Cleanup(func() {
+		submitJobsToInstanceForReusePass = prevSubmit
+	})
+	submitted := 0
+	submitJobsToInstanceForReusePass = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ int64, jobs []*db.Job) error {
+		submitted += len(jobs)
+		return nil
+	}
+
+	return consumer, &submitted
+}
+
+func TestTryPlaceOntoExistingInstances_AfterDependencyRunningProducerSkipsReuse(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumer, submitted := dependencyReusePassFixture(t, database, "", nil)
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{consumer}, DefaultMaxCloudAttempts)
+	if *submitted != 0 {
+		t.Fatalf("submitted = %d, want 0 while dependency is running", *submitted)
+	}
+	if len(remaining) != 1 || remaining[0].ID != consumer.ID {
+		t.Fatalf("remaining = %v, want consumer passed through while dependency is running", remaining)
+	}
+	reloaded, err := db.GetJobByID(database, consumer.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload: %v", err)
+	}
+	if reloaded.LaunchID != nil {
+		t.Fatalf("LaunchID = %v, want nil while dependency is running", *reloaded.LaunchID)
+	}
+}
+
+func TestTryPlaceOntoExistingInstances_AfterDependencySuccessfulProducerPlaces(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumer, submitted := dependencyReusePassFixture(t, database, "", func(producerID int64) {
+		exitCode := 0
+		if err := db.CloseAttempt(database, producerID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+			t.Fatalf("CloseAttempt producer: %v", err)
+		}
+	})
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{consumer}, DefaultMaxCloudAttempts)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining = %v, want consumer placed after successful dependency", remaining)
+	}
+	if *submitted != 1 {
+		t.Fatalf("submitted = %d, want 1 after successful dependency", *submitted)
+	}
+}
+
+func TestTryPlaceOntoExistingInstances_StrictAfterFailedProducerSkipsReuse(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumer, submitted := dependencyReusePassFixture(t, database, "", func(producerID int64) {
+		exitCode := 1
+		if err := db.CloseAttempt(database, producerID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+			t.Fatalf("CloseAttempt producer: %v", err)
+		}
+	})
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{consumer}, DefaultMaxCloudAttempts)
+	if *submitted != 0 {
+		t.Fatalf("submitted = %d, want 0 after non-zero strict dependency", *submitted)
+	}
+	if len(remaining) != 1 || remaining[0].ID != consumer.ID {
+		t.Fatalf("remaining = %v, want strict consumer passed through after non-zero dependency", remaining)
+	}
+}
+
+func TestTryPlaceOntoExistingInstances_AfterAnyFailedProducerPlaces(t *testing.T) {
+	database := db.SetupTestDB(t)
+	consumer, submitted := dependencyReusePassFixture(t, database, ":any", func(producerID int64) {
+		exitCode := 1
+		if err := db.CloseAttempt(database, producerID, db.StatusFailed, &exitCode, time.Now().Unix()); err != nil {
+			t.Fatalf("CloseAttempt producer: %v", err)
+		}
+	})
+
+	remaining := tryPlaceOntoExistingInstances(reusePassStubCfg(database), []*db.Job{consumer}, DefaultMaxCloudAttempts)
+	if len(remaining) != 0 {
+		t.Fatalf("remaining = %v, want --after-any consumer placed after terminal dependency", remaining)
+	}
+	if *submitted != 1 {
+		t.Fatalf("submitted = %d, want 1 after terminal --after-any dependency", *submitted)
 	}
 }
 

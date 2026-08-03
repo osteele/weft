@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 	weftsync "github.com/osteele/weft/internal/sync"
@@ -29,10 +30,11 @@ import (
 )
 
 var (
-	sendGraceJobPayload      = controlplane.SendGraceJobPayload
-	sendGraceJobPayloadNoAck = controlplane.SendGraceJobPayloadNoAck
-	sendGraceCancelAttempts  = controlplane.SendGraceCancelAttempts
-	uploadSourceToR2         = weftsync.UploadSourceToR2ForInputs
+	sendGraceJobPayload              = controlplane.SendGraceJobPayload
+	sendGraceJobPayloadNoAck         = controlplane.SendGraceJobPayloadNoAck
+	sendGraceCancelAttempts          = controlplane.SendGraceCancelAttempts
+	uploadSourceToR2                 = weftsync.UploadSourceToR2ForInputs
+	submitJobsToInstanceForReusePass = SubmitJobsToInstance
 )
 
 // MinGraceRemaining is the minimum grace period remaining to consider an
@@ -1027,6 +1029,21 @@ func ValidateJobNeedsReadyForCloud(database *sql.DB, job *db.Job, targetInstance
 	return nil
 }
 
+// ValidateJobDependenciesReadyForCloud checks the --after / --after-any
+// placement gate before a job is submitted to a rental agent.
+func ValidateJobDependenciesReadyForCloud(database *sql.DB, job *db.Job) error {
+	if database == nil || job == nil {
+		return nil
+	}
+	if fresh, err := db.GetJobByID(database, job.ID); err == nil && fresh != nil {
+		job.DepSpec = fresh.DepSpec
+	}
+	if reason, blocked := queueblock.WaitingOnJobDependencyReason(database, job); blocked {
+		return fmt.Errorf("job %s dependency gate is not ready: %s", ids.FormatJobID(job.ID), reason)
+	}
+	return nil
+}
+
 func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job, transfer bool) error {
 	inst, err := db.GetLaunch(database, instanceID)
 	if err != nil {
@@ -1047,6 +1064,12 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			return err
 		}
 		if err := ValidateJobNeedsReadyForCloud(database, job, instanceID); err != nil {
+			return err
+		}
+		// The dependency gate applies to transfer moves too: the destination
+		// agent may start submitted work, and this check runs before any
+		// target claim is opened so a rejected move leaves the source claim.
+		if err := ValidateJobDependenciesReadyForCloud(database, job); err != nil {
 			return err
 		}
 	}

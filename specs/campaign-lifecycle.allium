@@ -737,8 +737,14 @@ rule DependencyGatesRentalLaunch {
                     else job is excluded from this launch pass
 
     @guidance
-        -- Implementation: cmd/campaign.go filterLaunchJobsByDependencies,
-        -- applied in runInstanceLaunch and refreshLaunchGroupsWithOnPrem.
+        -- Implementation: internal/queueblock/job_dependency.go
+        -- parses and evaluates jobs.dep_spec. Enforcement points are:
+        -- manual rental launch in cmd/instance_launch.go; relaunch
+        -- fresh-instance eligibility in internal/campaign/relaunch.go;
+        -- the relaunch reuse pass in internal/campaign/relaunch.go;
+        -- autopilot reuse-fill in internal/orchestration/autopilot.go;
+        -- and the pre-claim rental submission backstop in
+        -- internal/campaign/reuse.go.
         -- The per-host queue on on-prem instances honors dep_spec on its
         -- own; this rule is specifically about keeping unsatisfied
         -- dependencies out of the rental-launch selection set so they do

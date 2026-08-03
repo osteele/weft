@@ -1458,6 +1458,48 @@ func TestValidateJobNeedsReadyForCloud(t *testing.T) {
 	})
 }
 
+func TestSubmitJobsToInstanceRejectsUnsatisfiedJobDependencyBeforeClaim(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	producerID, err := db.RecordJobStarting(database, "cool30", testProjectDir(t), "echo producer", "producer")
+	if err != nil {
+		t.Fatalf("RecordJobStarting producer: %v", err)
+	}
+	consumerID, err := db.RecordQueuedWithGPU(database, "", testProjectDir(t), "python train.py", "consumer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobDepSpec(database, consumerID, fmt.Sprintf("%d", producerID)); err != nil {
+		t.Fatalf("SetJobDepSpec consumer: %v", err)
+	}
+	consumer, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("GetJobByID consumer: %v", err)
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{consumer})
+	if err == nil {
+		t.Fatal("expected unsatisfied dependency rejection")
+	}
+	if !strings.Contains(err.Error(), "dependency gate is not ready") {
+		t.Fatalf("error = %v, want dependency-gate rejection", err)
+	}
+	reloaded, err := db.GetJobByID(database, consumerID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload: %v", err)
+	}
+	if reloaded.LaunchID != nil {
+		t.Fatalf("LaunchID = %v, want nil after dependency-gate rejection", *reloaded.LaunchID)
+	}
+}
+
 func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
 	database := db.SetupTestDB(t)
 
