@@ -468,6 +468,50 @@ func TestJobIDsWithRecentFailedMoveIntents(t *testing.T) {
 	}
 }
 
+// Retry exhaustion is a real move failure and must reach the rebalance
+// cooldown. Move-to-new now retries inside one intent instead of cancelling a
+// fresh intent per failed launch, so a thrashing job reaches the cooldown
+// threshold through exhausted intents rather than through a run of cancels.
+// Both exhaustion paths must therefore stay outside the benign allowlist —
+// see QueueRebalanceFailureCooldownConverges in specs/job-move.allium, which
+// makes failure detection inverted precisely so a new resolution string
+// cannot silently bypass the cooldown.
+func TestJobIDsWithRecentFailedMoveIntents_CountsRetryExhaustion(t *testing.T) {
+	database := SetupTestDB(t)
+	insertTestJob(t, database, 100, "j1", "/tmp", StatusQueued)
+	target := mustCreateLaunch(t, database)
+	now := time.Now()
+
+	// Both strings the retry state machine writes when the budget runs out:
+	// the autopilot's exhaust branch, and the DB-side restore-to-source path.
+	exhaustionResolutions := []string{
+		"move-to-new exhausted 5 launch attempts",
+		"move target failed before start; restored to source",
+	}
+	for i, resolution := range exhaustionResolutions {
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID: 100, TargetKind: MoveTargetNew, TargetLaunchID: &target,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent(%d): %v", i, err)
+		}
+		if err := ResolveMoveIntent(database, intent.ID, MoveIntentStateCanceled, resolution); err != nil {
+			t.Fatalf("ResolveMoveIntent(%d): %v", i, err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET resolved_at = ? WHERE id = ?`, now.Unix(), intent.ID); err != nil {
+			t.Fatalf("set resolved_at: %v", err)
+		}
+	}
+
+	got, err := JobIDsWithRecentFailedMoveIntents(database, now.Add(-30*time.Minute), len(exhaustionResolutions))
+	if err != nil {
+		t.Fatalf("JobIDsWithRecentFailedMoveIntents: %v", err)
+	}
+	if _, ok := got[100]; !ok {
+		t.Errorf("retry-exhaustion resolutions did not count toward the rebalance cooldown")
+	}
+}
+
 func TestPruneMoveIntents(t *testing.T) {
 	t.Run("stale new target without launch", func(t *testing.T) {
 		database := SetupTestDB(t)
