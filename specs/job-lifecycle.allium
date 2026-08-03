@@ -1317,30 +1317,46 @@ rule CompletedOutputsSurviveWorkdirReuse {
 
     ensures: each declared filesystem output is copied to
              ~/.cache/weft/artifacts/<jobID>/<runID>/outputs/<relPath>
-             on the job's own host at completion time
+             on the job's own host when the terminal transition is observed
+    ensures: the snapshot is taken only when no file under the declared path
+             was modified after the attempt's end bound (end_time + the same
+             2m slack as OutputDiscoveryUsesAttemptStartCutoff)
     ensures: the recorded host_data job-output asset points at the snapshot
              path, not into the live working directory
     ensures: a later job reusing the same working directory cannot make the
-             completed job's declared outputs unretrievable
+             completed job's declared outputs unretrievable, and cannot have
+             its own bytes recorded as the completed job's
 
     @guidance
         -- Implemented (bug wb10; design: docs/design/artifacts.md
         -- § Decision). Rentals and R2-enabled inventory runners satisfy
         -- this via per-run R2 upload plus the
         -- SharedWorkdirUploadBarrierBeforeNextJob rule. Inventory hosts
-        -- without R2 get a completion-time host-local snapshot: when the
-        -- terminal transition is observed, internal/ops/artifacts.go
+        -- without R2 get a host-local snapshot: when the terminal
+        -- transition is observed, internal/ops/artifacts.go
         -- RecordJobOutputs enumerates the job's declared outputs — both
         -- --output local:/asset refs (job.outputs) and --produces manifest
         -- entries (job.produces, deduplicated against the outputs) — and
         -- snapshotRemoteJobOutput cp's each into the per-run snapshot
-        -- directory over SSH before recording the host_data asset. The
-        -- snapshot needs no R2 credentials; on snapshot failure the asset
-        -- is NOT recorded with a mutable working-dir path (a pointer into
-        -- the shared dir would just re-open the wb10 race). Convention
-        -- outputs that are not declared remain pointer-only until a lazy
-        -- sync; the size cap / GC from the design's revised baseline is
-        -- not yet implemented.
+        -- directory over SSH before recording the host_data asset.
+        --
+        -- Observation lags completion: the snapshot runs on the
+        -- submitter's next sync tick, and a same-directory successor may
+        -- start (and overwrite the declared path) inside that window.
+        -- The freshness probe closes the gap by refusing to copy when the
+        -- source holds post-attempt mtimes — the outputs are then reported
+        -- unretrievable rather than mis-attributed. Declared outputs are
+        -- exempt from the START cutoff (naming a path attributes it even
+        -- when the attempt did not rewrite it); only the end bound gates
+        -- the snapshot.
+        --
+        -- The snapshot needs no R2 credentials; on any snapshot failure
+        -- (including the freshness refusal) the asset is NOT recorded
+        -- with a mutable working-dir path (a pointer into the shared dir
+        -- would just re-open the wb10 race). Convention outputs that are
+        -- not declared remain pointer-only until a lazy sync; the size
+        -- cap / GC from the design's revised baseline is not yet
+        -- implemented.
 }
 
 -- ==========================================================================

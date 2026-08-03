@@ -1213,11 +1213,11 @@ func (r *Runner) refreshRunningJobs() {
 // Recovery can run long after the process actually exited, so the discovery
 // window is bounded on both sides: at attempt start − 1s (spec:
 // OutputDiscoveryUsesAttemptStartCutoff in specs/job-lifecycle.allium) and at
-// the status-file mtime + 2m (the wrapper writes the status file at process
-// exit), so files written later by sibling jobs sharing the output tree are
-// not attributed to this job. A job with no recorded start has no attribution
-// window and gets no discovery — matching everything would claim other jobs'
-// files.
+// the status-file mtime + artifacts.AttemptOutputEndSlack (the wrapper writes
+// the status file at process exit), so files written later by sibling jobs
+// sharing the output tree are not attributed to this job. A job with no
+// recorded start has no attribution window and gets no discovery — matching
+// everything would claim other jobs' files.
 func (r *Runner) discoverRecoveredOutputs(jobID int64, exitCode int, rs RunningJobState, paths JobPaths) []OutputFile {
 	if exitCode != 0 || rs.StartedAt == 0 {
 		return nil
@@ -1243,7 +1243,7 @@ func (r *Runner) discoverRecoveredOutputs(jobID int64, exitCode int, rs RunningJ
 		return nil
 	}
 	if info, statErr := os.Stat(paths.Status); statErr == nil {
-		discovered = FilterOutputFilesUntil(workDir, discovered, info.ModTime().Add(2*time.Minute))
+		discovered = FilterOutputFilesUntil(workDir, discovered, info.ModTime().Add(artifacts.AttemptOutputEndSlack))
 	}
 	if len(discovered) > 0 {
 		oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d (recovered)", len(discovered), TotalSizeMB(discovered)))

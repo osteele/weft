@@ -9,10 +9,18 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // RemoteArtifactsDir is the directory for artifact manifests on remote hosts.
 const RemoteArtifactsDir = "~/.cache/weft/artifacts"
+
+// AttemptOutputEndSlack is the mtime slack past an attempt's end inside which
+// an output file still counts as written by the attempt. Every end-of-attempt
+// cutoff — output discovery, artifact sync, and the output snapshot — shares
+// this bound (spec: OutputDiscoveryUsesAttemptStartCutoff in
+// specs/job-lifecycle.allium).
+const AttemptOutputEndSlack = 2 * time.Minute
 
 // RemoteManifestPath returns the remote manifest path for a job.
 func RemoteManifestPath(jobID int64) string {

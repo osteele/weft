@@ -2432,10 +2432,10 @@ func outputSyncThreshold(job *db.Job) time.Time {
 }
 
 // outputSyncUpperBound returns the end-of-attempt cap for discovery-based
-// output attribution: end_time + 2m when the attempt end is known, zero
-// (unbounded) otherwise. The cap narrows the cross-attribution window for
-// sibling jobs sharing an output directory (spec:
-// OutputDiscoveryUsesAttemptStartCutoff in specs/job-lifecycle.allium).
+// output attribution: end_time + artifacts.AttemptOutputEndSlack when the
+// attempt end is known, zero (unbounded) otherwise. The cap narrows the
+// cross-attribution window for sibling jobs sharing an output directory
+// (spec: OutputDiscoveryUsesAttemptStartCutoff in specs/job-lifecycle.allium).
 func outputSyncUpperBound(job *db.Job, rec *runner.CompletionRecord) time.Time {
 	var end int64
 	if rec != nil && rec.EndTime > 0 {
@@ -2447,7 +2447,7 @@ func outputSyncUpperBound(job *db.Job, rec *runner.CompletionRecord) time.Time {
 	if end == 0 {
 		return time.Time{}
 	}
-	return time.Unix(end, 0).Add(2 * time.Minute)
+	return time.Unix(end, 0).Add(artifacts.AttemptOutputEndSlack)
 }
 
 // jobOutputDiscoveryDirs returns the convention output directories for a job.

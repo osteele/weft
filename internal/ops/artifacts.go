@@ -129,9 +129,21 @@ func parseProducedOutputRef(jobID int64, raw string) (dataloc.DataAsset, string,
 	}, relPath, true
 }
 
+// snapshotStaleMarker is printed by the remote probe when a file under the
+// declared path was modified after the attempt's end bound (spec:
+// CompletedOutputsSurviveWorkdirReuse).
+const snapshotStaleMarker = "WEFT_SNAPSHOT_MODIFIED_AFTER_ATTEMPT"
+
+// snapshotMissingMarker is printed by the remote probe when the declared
+// path has no files to snapshot.
+const snapshotMissingMarker = "WEFT_SNAPSHOT_SOURCE_MISSING"
+
 func snapshotRemoteJobOutput(database *sql.DB, job *db.Job, relPath string, timeout time.Duration) (string, error) {
 	if job == nil || strings.TrimSpace(job.Host) == "" || strings.TrimSpace(job.WorkingDir) == "" {
 		return "", fmt.Errorf("job has no host or working directory")
+	}
+	if job.EndTime == nil || *job.EndTime <= 0 {
+		return "", fmt.Errorf("attempt end time unknown; cannot verify snapshot freshness")
 	}
 	relPath = filepath.ToSlash(filepath.Clean(strings.TrimSpace(relPath)))
 	if relPath == "" || relPath == "." || strings.HasPrefix(relPath, "../") || relPath == ".." || strings.HasPrefix(relPath, "/") {
@@ -149,15 +161,29 @@ func snapshotRemoteJobOutput(database *sql.DB, job *db.Job, relPath string, time
 	}
 	snapshotPath := path.Join(artifacts.RemoteArtifactsDir, fmt.Sprintf("%d", job.ID), fmt.Sprintf("%d", runID), "outputs", relPath)
 	sourcePath := remotePathJoin(job.WorkingDir, relPath)
+	upperUnix := *job.EndTime + int64(artifacts.AttemptOutputEndSlack/time.Second)
+	// The probe and copy share one remote invocation: the copy runs only when
+	// no file under the source has an mtime past the attempt's end bound
+	// (spec: CompletedOutputsSurviveWorkdirReuse). stat -c is GNU coreutils,
+	// stat -f the BSD/macOS spelling; find -exec ... + batches the calls.
 	cmd := fmt.Sprintf(
-		"src=%s; dst=%s; mkdir -p -- \"$(dirname -- \"$dst\")\" && if [ -d \"$src\" ]; then mkdir -p -- \"$dst\" && cp -a -- \"$src\"/. \"$dst\"/; else cp -p -- \"$src\" \"$dst\"; fi",
+		`src=%s; dst=%s; newest=$({ if [ -d "$src" ]; then find "$src" -type f -exec stat -c %%Y {} + 2>/dev/null || find "$src" -type f -exec stat -f %%m {} + 2>/dev/null; else stat -c %%Y "$src" 2>/dev/null || stat -f %%m "$src" 2>/dev/null; fi; } | sort -n | tail -1); if [ -z "$newest" ]; then echo %s >&2; exit 3; fi; if [ "$newest" -gt %d ]; then echo "%s newest=$newest" >&2; exit 4; fi; mkdir -p -- "$(dirname -- "$dst")" && if [ -d "$src" ]; then mkdir -p -- "$dst" && cp -a -- "$src"/. "$dst"/; else cp -p -- "$src" "$dst"; fi`,
 		shellQuoteRemotePath(sourcePath),
 		shellQuoteRemotePath(snapshotPath),
+		snapshotMissingMarker,
+		upperUnix,
+		snapshotStaleMarker,
 	)
 	_, stderr, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
 	if err != nil {
-		if strings.TrimSpace(stderr) != "" {
-			return "", fmt.Errorf("%s: %w", strings.TrimSpace(stderr), err)
+		trimmed := strings.TrimSpace(stderr)
+		switch {
+		case strings.Contains(trimmed, snapshotStaleMarker):
+			return "", fmt.Errorf("output %q on %s was modified after the attempt ended; not snapshotting another job's bytes", relPath, job.Host)
+		case strings.Contains(trimmed, snapshotMissingMarker):
+			return "", fmt.Errorf("output %q not found on %s", relPath, job.Host)
+		case trimmed != "":
+			return "", fmt.Errorf("%s: %w", trimmed, err)
 		}
 		return "", err
 	}

@@ -3,11 +3,15 @@ package ops
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 	_ "modernc.org/sqlite"
 )
 
@@ -284,5 +288,69 @@ func TestRecordJobOutputs_LocalOutputSnapshotFailureSkipsMutablePath(t *testing.
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no mutable host_data entry after snapshot failure, got %d", len(entries))
+	}
+}
+
+func snapshotTestJob(endUnix int64) *db.Job {
+	return &db.Job{
+		ID:          50,
+		Host:        "host-beta",
+		WorkingDir:  "~/code/project",
+		Status:      db.StatusCompleted,
+		ExitCode:    intPtr(0),
+		EndTime:     &endUnix,
+		LatestRunID: int64Ptr(3),
+	}
+}
+
+// Regression: the snapshot must refuse to copy a declared output whose mtime
+// postdates the attempt's end bound (spec: CompletedOutputsSurviveWorkdirReuse).
+func TestSnapshotRemoteJobOutput_RefusesPostAttemptOverwrite(t *testing.T) {
+	t.Cleanup(ssh.SetRunner(func(host, command string) (string, string, error) {
+		return "", snapshotStaleMarker + " newest=1700009999", errors.New("exit status 4")
+	}))
+
+	_, err := snapshotRemoteJobOutput(nil, snapshotTestJob(1_700_000_000), "output/result.json", time.Second)
+	if err == nil || !strings.Contains(err.Error(), "modified after the attempt ended") {
+		t.Fatalf("snapshotRemoteJobOutput() error = %v, want freshness refusal", err)
+	}
+}
+
+func TestSnapshotRemoteJobOutput_ProbeCarriesEndBound(t *testing.T) {
+	var gotCmd string
+	t.Cleanup(ssh.SetRunner(func(host, command string) (string, string, error) {
+		gotCmd = command
+		return "", "", nil
+	}))
+
+	end := int64(1_700_000_000)
+	snapshotPath, err := snapshotRemoteJobOutput(nil, snapshotTestJob(end), "output/result.json", time.Second)
+	if err != nil {
+		t.Fatalf("snapshotRemoteJobOutput() error = %v", err)
+	}
+	upper := fmt.Sprintf("%d", end+int64(artifacts.AttemptOutputEndSlack/time.Second))
+	if !strings.Contains(gotCmd, upper) {
+		t.Fatalf("remote probe %q does not carry the end bound %s", gotCmd, upper)
+	}
+	if !strings.Contains(snapshotPath, "50/3/outputs/output/result.json") {
+		t.Fatalf("snapshotPath = %q, want per-run snapshot path", snapshotPath)
+	}
+}
+
+func TestSnapshotRemoteJobOutput_UnknownEndTimeRefuses(t *testing.T) {
+	sshCalled := false
+	t.Cleanup(ssh.SetRunner(func(host, command string) (string, string, error) {
+		sshCalled = true
+		return "", "", nil
+	}))
+
+	job := snapshotTestJob(1_700_000_000)
+	job.EndTime = nil
+	_, err := snapshotRemoteJobOutput(nil, job, "output/result.json", time.Second)
+	if err == nil || !strings.Contains(err.Error(), "end time unknown") {
+		t.Fatalf("snapshotRemoteJobOutput() error = %v, want unknown-end refusal", err)
+	}
+	if sshCalled {
+		t.Fatal("snapshotRemoteJobOutput() probed the host without a verifiable window")
 	}
 }
