@@ -106,6 +106,59 @@ func TestPlacementStatusForJobs_OpenMoveIntentUsesReplacementLaunchTime(t *testi
 	}
 }
 
+func TestPlacementStatusForJobs_RetryableMoveToNewShowsRetryPhase(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	sourceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, sourceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	targetID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusFailed, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &targetID,
+		AttemptCount:   1,
+		MaxAttempts:    5,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &targetID, db.StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE id = ?`, db.StatusCanceled, now, targetAttemptID); err != nil {
+		t.Fatalf("cancel target attempt: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	got, err := PlacementStatusForJobs(database, []*db.Job{job}, time.Unix(10_000, 0))
+	if err != nil {
+		t.Fatalf("PlacementStatusForJobs: %v", err)
+	}
+	ps := got[jobID]
+	if ps.Move == nil {
+		t.Fatal("expected move display")
+	}
+	if ps.Move.Phase != "retrying with a new instance (attempt 2/5)" {
+		t.Fatalf("move phase = %q", ps.Move.Phase)
+	}
+}
+
 func TestPlacementStatusForJobs_LaunchingUntilTargetInstanceHasActiveJob(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "", "/tmp", "python train.py", "train")

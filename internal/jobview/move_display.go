@@ -79,7 +79,7 @@ func moveDisplayForJobs(database *sql.DB, jobs []*db.Job, now time.Time) (map[in
 			TargetAttemptID:  intent.TargetAttemptID,
 			SourceLabel:      moveEndpointLabel(intent.SourceAttemptID, intent.SourceLaunchID, "", byID),
 			TargetLabel:      moveTargetLabel(intent, byID),
-			Phase:            moveIntentPhase(intent),
+			Phase:            moveIntentPhase(intent, byID),
 			CreatedAt:        intent.CreatedAt,
 			ResolvedAt:       intent.ResolvedAt,
 			Resolution:       strings.TrimSpace(intent.Resolution),
@@ -272,13 +272,19 @@ func attemptTargetLabel(attempt db.JobAttempt) string {
 	return strings.TrimSpace(attempt.Host)
 }
 
-func moveIntentPhase(intent *db.MoveIntent) string {
+func moveIntentPhase(intent *db.MoveIntent, attempts map[int64]db.JobAttempt) string {
 	if intent == nil {
 		return ""
 	}
 	switch intent.State {
 	case db.MoveIntentStateOpen:
 		switch {
+		case moveIntentInTargetFailureRetryWindow(intent, attempts):
+			nextAttempt := intent.AttemptCount + 1
+			if nextAttempt > intent.MaxAttempts {
+				nextAttempt = intent.MaxAttempts
+			}
+			return fmt.Sprintf("retrying with a new instance (attempt %d/%d)", nextAttempt, intent.MaxAttempts)
 		case intent.TargetAttemptID != nil:
 			return "waiting for destination acceptance"
 		case intent.TargetRequestID != "":
@@ -297,4 +303,19 @@ func moveIntentPhase(intent *db.MoveIntent) string {
 	default:
 		return fmt.Sprintf("%s", intent.State)
 	}
+}
+
+func moveIntentInTargetFailureRetryWindow(intent *db.MoveIntent, attempts map[int64]db.JobAttempt) bool {
+	if intent == nil ||
+		intent.State != db.MoveIntentStateOpen ||
+		intent.TargetKind != db.MoveTargetNew ||
+		intent.TargetAttemptID == nil ||
+		intent.AttemptCount >= intent.MaxAttempts {
+		return false
+	}
+	attempt, ok := attempts[*intent.TargetAttemptID]
+	if !ok {
+		return false
+	}
+	return attempt.Status == db.StatusCanceled && attempt.EndTime != nil
 }
