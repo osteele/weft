@@ -112,8 +112,8 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"machine_pin":   {checkedInSystem, "machinePinViolation in EvaluateEligibility (hosts have no machine identity, fail closed)"},
 		"arch_cap_max":  {checkedInSystem, "EvaluateEligibility compute-cap bounds"},
 		"arch_cap_min":  {checkedInSystem, "EvaluateEligibility compute-cap bounds"},
-		"cuda_floor":    {checkedInSystem, "targetCompatibilityViolation CUDA chain vs host inventory"},
-		"driver_floor":  {checkedInSystem, "targetCompatibilityViolation vs inventory nvidia_driver"},
+		"cuda_floor":    {checkedInSystem, "targetCompatibilityViolation vs inventory cuda_version; missing fails closed for CUDA-capable or unknown-GPU targets, not applicable to confirmed non-CUDA targets"},
+		"driver_floor":  {checkedInSystem, "targetCompatibilityViolation vs inventory nvidia_driver; missing fails closed for CUDA-capable or unknown-GPU targets, not applicable to confirmed non-CUDA targets"},
 		"glibcxx_floor": {checkedInSystem, "targetCompatibilityViolation vs inventory glibcxx_max (missing fails open)"},
 	},
 	SystemClaimBackstop: {

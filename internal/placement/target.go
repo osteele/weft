@@ -16,20 +16,23 @@ import (
 // Constructors normalize inventory hosts, cloud offers, and running rentals
 // into this form before constraints are evaluated.
 type TargetSpec struct {
-	Name                  string
-	Provider              string
-	Devices               []TargetDevice
-	Cordoned              bool
-	CordonReason          string
-	OptInOnly             bool
-	ExplicitlyNamed       bool
-	LoadKnown             bool
-	LoadState             HostLoadState
-	LoadReason            string
-	Reservations          []GPUReservation
-	ReservationsKnown     bool
-	CPUCores              int
-	CPUMemGB              int
+	Name              string
+	Provider          string
+	Devices           []TargetDevice
+	Cordoned          bool
+	CordonReason      string
+	OptInOnly         bool
+	ExplicitlyNamed   bool
+	LoadKnown         bool
+	LoadState         HostLoadState
+	LoadReason        string
+	Reservations      []GPUReservation
+	ReservationsKnown bool
+	CPUCores          int
+	CPUMemGB          int
+	// GPUInventoryKnown means Devices is complete enough to confirm that a
+	// target has no CUDA-capable GPU.
+	GPUInventoryKnown     bool
 	GPUNamingSignals      string
 	GPUNamingSignalsKnown bool
 	CUDAVersion           string
@@ -124,6 +127,7 @@ func TargetSpecFromHostSpec(host inventory.HostSpec, metrics *HostMetrics, reser
 		ReservationsKnown:               reservations != nil,
 		CPUCores:                        host.CPUCores,
 		CPUMemGB:                        inventory.ParseMemGB(host.Memory),
+		GPUInventoryKnown:               true,
 		GPUNamingSignals:                hostGPUNameSignals(host),
 		GPUNamingSignalsKnown:           true,
 		CUDAVersion:                     strings.TrimSpace(host.CUDAVersion),
@@ -343,6 +347,9 @@ func targetCompatibilityViolation(c Constraints, t TargetSpec) (EligibilityReaso
 	if len(reqs) == 0 {
 		reqs = versionRequirementsFromConstraints(c)
 	}
+	if !cudaRuntimeCompatibilityAppliesToTarget(c, t) {
+		reqs = filterCUDARequirements(reqs)
+	}
 	facts := compat.FactSet{}
 	if t.CUDAVersion != "" {
 		facts[compat.AxisCUDA] = t.CUDAVersion
@@ -356,7 +363,7 @@ func targetCompatibilityViolation(c Constraints, t TargetSpec) (EligibilityReaso
 	if violations := compat.Check(reqs, facts); len(violations) > 0 {
 		return EligibilityReason{Kind: ReasonCompatibility, Message: compat.FormatViolation(violations[0])}, true
 	}
-	if c.NeedsGPU() || targetHasCUDACapableGPU(t) {
+	if cudaRuntimeCompatibilityAppliesToTarget(c, t) {
 		if v := compat.ValidateCUDAChain(compat.CUDAChain{
 			CUDAFloor:      strings.TrimSpace(c.MinCUDAVersion),
 			DriverCUDA:     strings.TrimSpace(t.CUDAVersion),
@@ -367,6 +374,33 @@ func targetCompatibilityViolation(c Constraints, t TargetSpec) (EligibilityReaso
 		}
 	}
 	return EligibilityReason{}, false
+}
+
+func cudaRuntimeCompatibilityAppliesToTarget(c Constraints, t TargetSpec) bool {
+	return c.NeedsGPU() || !targetConfirmedNoCUDACapableGPU(t)
+}
+
+func targetConfirmedNoCUDACapableGPU(t TargetSpec) bool {
+	if targetHasCUDACapableGPU(t) || !t.GPUInventoryKnown {
+		return false
+	}
+	for _, d := range t.Devices {
+		if d.Family != "apple" {
+			return false
+		}
+	}
+	return true
+}
+
+func filterCUDARequirements(reqs []compat.Requirement) []compat.Requirement {
+	filtered := make([]compat.Requirement, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Axis == compat.AxisCUDA || req.Axis == compat.AxisNVIDIADriver {
+			continue
+		}
+		filtered = append(filtered, req)
+	}
+	return filtered
 }
 
 func matchingDeviceCount(t TargetSpec, c Constraints) (matching int, classMatched bool, memMatched bool, maxMatched bool, minMatched bool, sawUnknownMax bool) {

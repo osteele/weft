@@ -288,23 +288,21 @@ func ConstraintsFromJob(j *db.Job) Constraints {
 
 func versionRequirementsFromConstraints(c Constraints) []compat.Requirement {
 	var reqs []compat.Requirement
-	if c.NeedsGPU() {
-		if c.MinDriverVersion > 0 {
-			reqs = append(reqs, compat.Requirement{
-				Axis:          compat.AxisNVIDIADriver,
-				Comparator:    compat.ComparatorVersionMin,
-				Value:         strconv.Itoa(c.MinDriverVersion),
-				MissingPolicy: compat.MissingFailClosed,
-			})
-		}
-		if c.MinCUDAVersion != "" {
-			reqs = append(reqs, compat.Requirement{
-				Axis:          compat.AxisCUDA,
-				Comparator:    compat.ComparatorVersionMin,
-				Value:         c.MinCUDAVersion,
-				MissingPolicy: compat.MissingFailClosed,
-			})
-		}
+	if c.MinDriverVersion > 0 {
+		reqs = append(reqs, compat.Requirement{
+			Axis:          compat.AxisNVIDIADriver,
+			Comparator:    compat.ComparatorVersionMin,
+			Value:         strconv.Itoa(c.MinDriverVersion),
+			MissingPolicy: compat.MissingFailClosed,
+		})
+	}
+	if c.MinCUDAVersion != "" {
+		reqs = append(reqs, compat.Requirement{
+			Axis:          compat.AxisCUDA,
+			Comparator:    compat.ComparatorVersionMin,
+			Value:         c.MinCUDAVersion,
+			MissingPolicy: compat.MissingFailClosed,
+		})
 	}
 	if c.MinGLIBCXXVersion != "" {
 		reqs = append(reqs, compat.Requirement{

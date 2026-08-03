@@ -1,7 +1,10 @@
 package placement
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/compat"
@@ -168,6 +171,85 @@ func TestEvaluateEligibilityCUDAChainUsesUnifiedValidator(t *testing.T) {
 	}
 }
 
+func TestEvaluateEligibility_TorchNoGPUDriverFloorFailsClosedOnUnknownNVIDIAHost(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	host := inventory.HostSpec{
+		Name: "nvidia-without-driver",
+		GPUs: []inventory.GPUSpec{{
+			Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if verdict.Eligible {
+		t.Fatal("EvaluateEligibility eligible, want fail-closed rejection for missing driver")
+	}
+	if !hasReason(verdict, ReasonCompatibility) || !strings.Contains(strings.Join(verdict.Messages(), "; "), "driver floor: no recorded NVIDIA driver") {
+		t.Fatalf("reasons = %+v, want missing-driver compatibility rejection", verdict.Reasons)
+	}
+}
+
+func TestEvaluateEligibility_TorchNoGPUDriverFloorAllowsRecordedNVIDIAHost(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	host := inventory.HostSpec{
+		Name:                "nvidia-compatible-driver",
+		NVIDIADriverVersion: "570.86.15",
+		CUDAVersion:         "12.8",
+		GPUs: []inventory.GPUSpec{{
+			Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if !verdict.Eligible {
+		t.Fatalf("EvaluateEligibility rejected compatible NVIDIA host: %v", verdict.Messages())
+	}
+}
+
+func TestEvaluateEligibility_TorchNoGPUDriverAndCUDAFloorsAllowAppleMPSHost(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	host := inventory.HostSpec{
+		Name: "mps-only",
+		OS:   "darwin",
+		Arch: "arm64",
+		GPUs: []inventory.GPUSpec{{
+			Name: "Apple M2 Max (38 cores)", Class: "m2max", Memory: "64GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if !verdict.Eligible {
+		t.Fatalf("EvaluateEligibility rejected Apple/MPS host for non-GPU torch job: %v", verdict.Messages())
+	}
+}
+
+func TestEvaluateEligibility_TorchNoGPUCUDAFloorFailsClosedOnUnknownNVIDIAHost(t *testing.T) {
+	c := resolvedTorchNoGPUConstraints(t)
+	c.MinDriverVersion = 0
+	c.VersionRequirements = nil
+	host := inventory.HostSpec{
+		Name:                "nvidia-without-cuda",
+		NVIDIADriverVersion: "570.86.15",
+		GPUs: []inventory.GPUSpec{{
+			Name: "NVIDIA GeForce RTX 3090", Class: "rtx3090", Memory: "24GB", Indices: []int{0},
+		}},
+	}
+
+	verdict := EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if verdict.Eligible {
+		t.Fatal("EvaluateEligibility eligible, want fail-closed rejection for missing CUDA compatibility")
+	}
+	if !hasReason(verdict, ReasonCompatibility) || !strings.Contains(strings.Join(verdict.Messages(), "; "), "CUDA floor: no recorded CUDA compatibility") {
+		t.Fatalf("reasons = %+v, want missing-CUDA compatibility rejection", verdict.Reasons)
+	}
+
+	host.CUDAVersion = "12.8"
+	verdict = EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
+	if !verdict.Eligible {
+		t.Fatalf("EvaluateEligibility rejected host with recorded CUDA compatibility: %v", verdict.Messages())
+	}
+}
+
 func TestEvaluateEligibilityMaxComputeCapUnknownFailsClosed(t *testing.T) {
 	host := inventory.HostSpec{
 		Name:        "future",
@@ -214,5 +296,37 @@ func TestEvaluateEligibilityMinComputeCapUnknownFailsClosed(t *testing.T) {
 func hasReason(v Verdict, kind EligibilityReasonKind) bool {
 	return slices.ContainsFunc(v.Reasons, func(r EligibilityReason) bool {
 		return r.Kind == kind
+	})
+}
+
+func resolvedTorchNoGPUConstraints(t *testing.T) Constraints {
+	t.Helper()
+	dir := writeTestUVLockCu128(t)
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte("import torch\n"), 0o644); err != nil {
+		t.Fatalf("write train.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\ndependencies = [\"torch==2.9.1\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	resolved, err := ResolveConstraints(ConstraintSource{LocalDir: dir, Command: "uv run train.py"})
+	if err != nil {
+		t.Fatalf("ResolveConstraints: %v", err)
+	}
+	c := resolved.Constraints
+	if c.NeedsGPU() {
+		t.Fatal("precondition: torch project should not request a GPU")
+	}
+	if c.MinDriverVersion == 0 || c.MinCUDAVersion == "" {
+		t.Fatalf("precondition: torch project did not resolve driver/CUDA floors: driver=%d cuda=%q", c.MinDriverVersion, c.MinCUDAVersion)
+	}
+	if !hasVersionRequirement(c, compat.AxisNVIDIADriver) || !hasVersionRequirement(c, compat.AxisCUDA) {
+		t.Fatalf("precondition: resolved floors did not become enforceable requirements: %+v", c.VersionRequirements)
+	}
+	return c
+}
+
+func hasVersionRequirement(c Constraints, axis compat.Axis) bool {
+	return slices.ContainsFunc(c.VersionRequirements, func(req compat.Requirement) bool {
+		return req.Axis == axis
 	})
 }
