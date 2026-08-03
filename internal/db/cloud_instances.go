@@ -1468,11 +1468,10 @@ func SetLaunchProviderID(db *sql.DB, id int64, providerID string) error {
 // Every column listed here is overwritten unconditionally, including with the
 // zero value. An empty replacement field is a genuine unknown, and retaining
 // the previous value would let the failed original offer's facts stand in for
-// a different physical machine. driver_version carries the sharpest version of
-// that hazard because reuse admission enforces the driver-major floor against
-// it. This is why the statement deliberately does not use the preserve-on-empty
-// CASE guards that UpdateLaunchInstanceMetadata applies to provider readback
-// fields, where an omitted field means the live instance did not report it.
+// a different physical machine. This is why the statement deliberately does
+// not use the preserve-on-empty CASE guards that UpdateLaunchInstanceMetadata
+// applies to provider readback fields, where an omitted field means the live
+// instance did not report it.
 func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) error {
 	_, err := database.Exec(
 		`UPDATE launches
@@ -1480,7 +1479,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		     resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
 		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?,
 		     cpu_cores_effective = ?, cpu_name = ?, ram_gb = ?,
-		     disk_gb = ?, gpu_mem_gb = ?, driver_version = ?
+		     disk_gb = ?, gpu_mem_gb = ?, driver_version = ?, machine_id = ?
 		 WHERE id = ?`,
 		string(offer.Provider),
 		offer.GPUName,
@@ -1497,6 +1496,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		int(offer.DiskSpaceGB),
 		int(math.Round(offer.GPUMemGB)),
 		offer.DriverVersion,
+		offer.MachineID,
 		id,
 	)
 	return err

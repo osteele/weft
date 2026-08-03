@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -388,6 +389,84 @@ func TestUpdateLaunchOfferMetadataRefreshesDriverVersion(t *testing.T) {
 				t.Fatalf("DriverVersion = %q, want %q", inst.DriverVersion, tc.wantDriverVersion)
 			}
 		})
+	}
+}
+
+func TestUpdateLaunchOfferMetadataRefreshesMachineID(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		initialMachineID string
+		replacementOffer cloud.Offer
+		wantMachineID    string
+	}{
+		{
+			name:             "updates reported replacement machine",
+			initialMachineID: "140870",
+			replacementOffer: cloud.Offer{
+				Provider:  "vastai",
+				MachineID: "49863",
+			},
+			wantMachineID: "49863",
+		},
+		{
+			name:             "clears unknown replacement machine",
+			initialMachineID: "49863",
+			replacementOffer: cloud.Offer{
+				Provider:  "vastai",
+				MachineID: "",
+			},
+			wantMachineID: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+			instanceID, err := CreateLaunch(database, &Launch{
+				Status:    LaunchStatusPlanned,
+				Provider:  "vastai",
+				GPUSpec:   "RTX_4090",
+				MachineID: tc.initialMachineID,
+			})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+
+			if err := UpdateLaunchOfferMetadata(database, instanceID, tc.replacementOffer); err != nil {
+				t.Fatalf("UpdateLaunchOfferMetadata: %v", err)
+			}
+
+			inst, err := GetLaunch(database, instanceID)
+			if err != nil {
+				t.Fatalf("GetLaunch: %v", err)
+			}
+			if inst.MachineID != tc.wantMachineID {
+				t.Fatalf("MachineID = %q, want %q", inst.MachineID, tc.wantMachineID)
+			}
+		})
+	}
+}
+
+func TestUpdateLaunchOfferMetadataRefreshesMachineIDBeforePinnedClaim(t *testing.T) {
+	database := setupTestDB(t)
+	jobID := pinnedTestJob(t, database, `{"machine_affinity":["140870"]}`)
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:    LaunchStatusPlanned,
+		Provider:  "vastai",
+		GPUSpec:   "RTX_4090",
+		MachineID: "140870",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	if err := UpdateLaunchOfferMetadata(database, instanceID, cloud.Offer{
+		Provider:  "vastai",
+		MachineID: "49863",
+	}); err != nil {
+		t.Fatalf("UpdateLaunchOfferMetadata: %v", err)
+	}
+
+	if err := SetJobLaunchID(database, jobID, instanceID); !errors.Is(err, ErrJobPinnedToOtherMachine) {
+		t.Fatalf("SetJobLaunchID err = %v, want ErrJobPinnedToOtherMachine", err)
 	}
 }
 
