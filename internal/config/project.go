@@ -76,8 +76,15 @@ var DefaultOutputDirs = []string{"output/", "outputs/"}
 
 // EffectiveDirs returns the configured output dirs or defaults.
 func (c *ProjectOutputsConfig) EffectiveDirs() []string {
-	if len(c.Dirs) > 0 {
-		return c.Dirs
+	return EffectiveOutputDirs(c.Dirs)
+}
+
+// EffectiveOutputDirs returns dirs, or DefaultOutputDirs when empty — the
+// single resolver for the empty-means-default convention (spec: § Artifact
+// uploads in specs/job-lifecycle.allium).
+func EffectiveOutputDirs(dirs []string) []string {
+	if len(dirs) > 0 {
+		return dirs
 	}
 	return DefaultOutputDirs
 }

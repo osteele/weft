@@ -57,6 +57,9 @@ type postJobWork struct {
 	// attempt (see uploadOutputDirs); 0 disables the window. Callers apply
 	// policy before setting it (e.g. restaged-output attempts pass 0).
 	outputWindowStartUnix int64
+	// outputDirs carries the job's configured convention output dirs;
+	// empty falls back to the defaults (see config.EffectiveOutputDirs).
+	outputDirs []string
 }
 
 type maintenanceReport struct {
@@ -110,7 +113,7 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 		defer m.wg.Done()
 		defer m.completeUpload(pw.workDir)
 
-		uploadResult := uploadOutputDirs(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir, pw.outputWindowStartUnix)
+		uploadResult := uploadOutputDirs(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir, pw.outputWindowStartUnix, pw.outputDirs)
 		if uploadResult.Status != "ok" {
 			m.recordError(pw.jobID, "upload-outputs", fmt.Errorf("status=%s", uploadResult.Status))
 		}

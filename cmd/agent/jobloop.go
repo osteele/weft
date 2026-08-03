@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -899,6 +898,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 				phase:                 uploadingPhase,
 				uploadStartedUnix:     uploadStartedUnix,
 				outputWindowStartUnix: outputWindowStartUnix,
+				outputDirs:            job.OutputDirs,
 			})
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(uploadingPhase)
@@ -1013,6 +1013,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			diskPath:              cfg.DiskPath,
 			phase:                 uploadingPhase,
 			outputWindowStartUnix: outputWindowStartUnix,
+			outputDirs:            job.OutputDirs,
 			uploadStartedUnix:     uploadStartedUnix,
 		})
 
@@ -1697,16 +1698,4 @@ func producerCompletionExitCode(bucket string, jobID, runID int64) (exitCode int
 		return 0, false, fmt.Errorf("parse completion marker for job %d run %d: %q: %w", jobID, runID, content, convErr)
 	}
 	return code, true, nil
-}
-
-func hasOutputDirs(workDir string) bool {
-	workDir = runner.ExpandTilde(workDir)
-	for _, dir := range config.DefaultOutputDirs {
-		dir = filepath.Clean(dir)
-		info, err := os.Stat(filepath.Join(workDir, dir))
-		if err == nil && info.IsDir() {
-			return true
-		}
-	}
-	return false
 }

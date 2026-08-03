@@ -361,7 +361,7 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 // upload a prior same-workdir job's leftovers under this job's keys (spec:
 // invariant Attribution in specs/job-lifecycle.allium). Pass 0 to disable
 // (restaged outputs, unknown start).
-func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUnix int64) runner.OutputUploadResult {
+func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUnix int64, outputDirs []string) runner.OutputUploadResult {
 	startedAt := time.Now()
 	var result runner.OutputUploadResult
 	var attempted int
@@ -370,7 +370,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 	workDir = runner.ExpandTilde(workDir)
 	windowStart := runner.AttemptOutputThreshold(sinceUnix)
 
-	for _, dir := range config.DefaultOutputDirs {
+	for _, dir := range config.EffectiveOutputDirs(outputDirs) {
 		dir = strings.TrimRight(dir, "/")
 		dirPath := filepath.Join(workDir, dir)
 		info, err := os.Stat(dirPath)
@@ -661,7 +661,7 @@ func runJobWithProgress(r2Bucket string, jobID, runID, instanceID int64, logDir 
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
 	stopProgress := startProgressReporter(r2Bucket, jobID, runID, logPath)
 	stopLogs := startLogUploader(r2Bucket, jobID, runID, logPath)
-	stopOutputs := startOutputUploader(r2Bucket, jobID, runID, cfg.WorkingDir, outputsSinceUnix)
+	stopOutputs := startOutputUploader(r2Bucket, jobID, runID, cfg.WorkingDir, outputsSinceUnix, cfg.Job.OutputDirs)
 	stopKillPoller := startKillPoller(r2Bucket, instanceID, jobID, logDir)
 	defer func() {
 		stopKillPoller()
@@ -890,9 +890,9 @@ func startTelemetryUploader(bucket string, jobID, runID int64, telemetryPath str
 
 // startOutputUploader periodically uploads changed output/checkpoint files for
 // resilience on interruptible instances. A final sync runs when stopped.
-// sinceUnix windows the convention-output walk to this attempt (see
-// uploadOutputDirs).
-func startOutputUploader(bucket string, jobID, runID int64, workDir string, sinceUnix int64) func() {
+// sinceUnix windows the convention-output walk to this attempt and outputDirs
+// carries the job's configured dirs (see uploadOutputDirs).
+func startOutputUploader(bucket string, jobID, runID int64, workDir string, sinceUnix int64, outputDirs []string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -903,7 +903,7 @@ func startOutputUploader(bucket string, jobID, runID int64, workDir string, sinc
 
 	workDir = runner.ExpandTilde(workDir)
 	upload := func() {
-		_ = uploadOutputDirs(bucket, jobID, runID, workDir, sinceUnix)
+		_ = uploadOutputDirs(bucket, jobID, runID, workDir, sinceUnix, outputDirs)
 		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir)
 	}
 

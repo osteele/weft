@@ -336,47 +336,6 @@ func TestRecordPrewarmFailureWritesMachineReason(t *testing.T) {
 	}
 }
 
-func TestHasOutputDirs(t *testing.T) {
-	t.Run("missing", func(t *testing.T) {
-		if hasOutputDirs(t.TempDir()) {
-			t.Fatal("hasOutputDirs() = true, want false")
-		}
-	})
-
-	t.Run("present", func(t *testing.T) {
-		workDir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(workDir, "output"), 0o755); err != nil {
-			t.Fatalf("mkdir output: %v", err)
-		}
-		if !hasOutputDirs(workDir) {
-			t.Fatal("hasOutputDirs() = false, want true")
-		}
-	})
-
-	t.Run("expands tilde workdir", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-		t.Run("home root", func(t *testing.T) {
-			if err := os.MkdirAll(filepath.Join(homeDir, "output"), 0o755); err != nil {
-				t.Fatalf("mkdir output: %v", err)
-			}
-			if !hasOutputDirs("~") {
-				t.Fatal("hasOutputDirs() = false, want true for ~")
-			}
-		})
-
-		t.Run("home subdir", func(t *testing.T) {
-			workDir := filepath.Join(homeDir, "project")
-			if err := os.MkdirAll(filepath.Join(workDir, "output"), 0o755); err != nil {
-				t.Fatalf("mkdir output: %v", err)
-			}
-			if !hasOutputDirs("~/project") {
-				t.Fatal("hasOutputDirs() = false, want true for ~/project")
-			}
-		})
-	})
-}
-
 func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
 	cfg := jobSequenceConfig{
 		R2Bucket:  "bucket",

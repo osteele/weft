@@ -81,6 +81,7 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 		phase:                 fmt.Sprintf("inventory_uploading:%d", capture.JobID),
 		uploadStartedUnix:     time.Now().Unix(),
 		outputWindowStartUnix: capture.StartTime,
+		outputDirs:            capture.OutputDirs,
 	})
 }
 

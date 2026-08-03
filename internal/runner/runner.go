@@ -84,6 +84,9 @@ type PostJobCapture struct {
 	// StartTime is the attempt's start (unix seconds); post-job output
 	// uploads window their walk to files modified at or after it.
 	StartTime int64
+	// OutputDirs carries the job's configured convention output dirs so
+	// post-job uploads walk the same dirs discovery attributes.
+	OutputDirs []string
 }
 
 type PostJobManager interface {
@@ -958,12 +961,13 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	}
 	if r.PostJobManager != nil {
 		r.PostJobManager.StartPostJob(PostJobCapture{
-			JobID:     jobID,
-			RunID:     rj.Data.RunID,
-			WorkDir:   runDir,
-			LogDir:    filepath.Dir(paths.Log),
-			ExitCode:  ei.ExitCode,
-			StartTime: startTime,
+			JobID:      jobID,
+			RunID:      rj.Data.RunID,
+			WorkDir:    runDir,
+			LogDir:     filepath.Dir(paths.Log),
+			ExitCode:   ei.ExitCode,
+			StartTime:  startTime,
+			OutputDirs: rj.Data.OutputDirs,
 		})
 	}
 

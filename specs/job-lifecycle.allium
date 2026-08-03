@@ -823,8 +823,12 @@ rule PreflightRejectionClosesAttempt {
 -- Artifact uploads (cloud agent)
 -- ==========================================================================
 -- The cloud agent uploads job outputs to R2 in two parallel ways:
---   1. Convention-based output directories (anything written under output/ or
---      outputs/ in the working dir) -- uploaded by uploadOutputDirs.
+--   1. Convention-based output directories (the job's configured output_dirs,
+--      defaulting to output/ and outputs/ in the working dir) -- uploaded by
+--      uploadOutputDirs. The uploader must walk exactly the dirs discovery
+--      attributes: a dir that discovery attributes but the upload skips
+--      leaves outputs listed in the completion record with no bytes in R2,
+--      lost at instance teardown.
 --   2. Declared --produces artifacts -- uploaded by uploadArtifactManifestEntries
 --      using the manifest at $WEFT_ARTIFACT_MANIFEST.
 -- Each runs on a 60-second ticker during the job, and once more in a final
@@ -1041,10 +1045,10 @@ invariant Attribution {
         --       workdir is deliberately not cleaned between sequential
         --       same-workdir jobs) — is covered by (d).
         --   (d) Attempt-window cutoff on the agent's upload walk:
-        --       uploadOutputDirs applies the attempt's start − 1s as an
-        --       rclone --max-age bound (cmd/agent/runinstance.go
-        --       outputUploadWindowStart), mirroring cutoff (a) on the
-        --       upload side. The window is disabled for restaged-output
+        --       uploadOutputDirs applies runner.AttemptOutputThreshold
+        --       (the attempt's start − 1s, shared with cutoff (a)) as an
+        --       absolute rclone --max-age bound
+        --       (cmd/agent/runinstance.go). The window is disabled for restaged-output
         --       attempts (cloud.AgentJob.RestagedOutputs), whose files
         --       legitimately carry prior-attempt mtimes and must reach
         --       the new attempt's prefix.
