@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -301,13 +302,12 @@ func (c *Client) DownloadResults(ctx context.Context, prefix string, localDir st
 
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			relPath := strings.TrimPrefix(key, prefix)
-			relPath = strings.TrimPrefix(relPath, "/")
-			if relPath == "" {
+			relPath, ok := relPathForKey(key, prefix)
+			if !ok {
 				continue
 			}
 
-			localPath := filepath.Join(localDir, relPath)
+			localPath := filepath.Join(localDir, filepath.FromSlash(relPath))
 			if err := c.downloadObject(ctx, key, localPath); err != nil {
 				return fmt.Errorf("download %s: %w", key, err)
 			}
@@ -315,6 +315,19 @@ func (c *Client) DownloadResults(ctx context.Context, prefix string, localDir st
 	}
 
 	return nil
+}
+
+// relPathForKey derives the local relative path for an object key under
+// prefix. Listing-derived paths must not escape the destination directory.
+func relPathForKey(key, prefix string) (string, bool) {
+	rel := strings.TrimPrefix(key, prefix)
+	rel = strings.TrimPrefix(rel, "/")
+	cleaned := path.Clean(rel)
+	if cleaned == "." || cleaned == ".." ||
+		strings.HasPrefix(cleaned, "/") || strings.HasPrefix(cleaned, "../") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 // GetObjectReader retrieves a single object body by key. The caller must close it.
@@ -708,12 +721,11 @@ func (c *Client) DownloadResultsWithIdleTimeout(ctx context.Context, prefix stri
 
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			relPath := strings.TrimPrefix(key, prefix)
-			relPath = strings.TrimPrefix(relPath, "/")
-			if relPath == "" {
+			relPath, ok := relPathForKey(key, prefix)
+			if !ok {
 				continue
 			}
-			localPath := filepath.Join(localDir, relPath)
+			localPath := filepath.Join(localDir, filepath.FromSlash(relPath))
 			if _, err := c.DownloadObjectToFileWithIdleTimeout(ctx, key, localPath, idleTimeout); err != nil {
 				return fmt.Errorf("download %s: %w", key, err)
 			}

@@ -614,7 +614,8 @@ func RemoteFileExistsWithTimeout(host, path string, timeout time.Duration) (bool
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(stdout, "EXISTS"), nil
+	// "NOTEXISTS" contains "EXISTS"; the marker must match exactly.
+	return strings.TrimSpace(stdout) == "EXISTS", nil
 }
 
 // GetTmuxPanePID gets the PID of the process running in a tmux pane

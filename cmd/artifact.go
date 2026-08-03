@@ -249,11 +249,14 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			if syncErr != nil {
 				if errors.Is(syncErr, artifacts.ErrManifestMissing) {
 					// No manifest in R2; try convention-based output sync
-					if outResult, outErr := syncJobOutputsFunc(database, job); outErr == nil {
+					outResult, outErr := syncJobOutputsFunc(database, job)
+					if outErr == nil {
 						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
 						continue
 					}
-					errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %s", ids.FormatJobID(jobID)))
+					// A missing manifest is expected for jobs without
+					// --produces declarations.
+					errorsList = append(errorsList, fmt.Sprintf("job %s: convention-based output sync failed: %v", ids.FormatJobID(jobID), outErr))
 					continue
 				}
 				errorsList = append(errorsList, fmt.Sprintf("job %s: sync cloud artifacts: %v", ids.FormatJobID(jobID), syncErr))
@@ -2633,12 +2636,14 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 
 	added := 0
 	for _, f := range files {
-		relPath := strings.TrimPrefix(f.Key, prefix)
-		relPath = strings.TrimPrefix(relPath, "/")
-		if relPath == "" {
+		rel := strings.TrimPrefix(f.Key, prefix)
+		rel = strings.TrimPrefix(rel, "/")
+		// Listing-derived paths must not escape localDir.
+		relPath, ok := normalizeLocalRelPath(rel)
+		if !ok {
 			continue
 		}
-		localPath := filepath.Join(localDir, relPath)
+		localPath := filepath.Join(localDir, filepath.FromSlash(relPath))
 		if _, err := r2Client.DownloadObjectToFileWithIdleTimeout(context.Background(), f.Key, localPath, artifactTimeout); err != nil {
 			return added, fmt.Errorf("download %s: %w", f.Key, err)
 		}
@@ -3096,11 +3101,12 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 
 	var totalSize int64
 	for _, key := range childKeys {
-		relChild := strings.TrimPrefix(key, dirPrefix)
-		if relChild == "" {
+		// Listing-derived paths must not escape localPath.
+		relChild, ok := normalizeLocalRelPath(strings.TrimPrefix(key, dirPrefix))
+		if !ok {
 			continue
 		}
-		childPath := filepath.Join(localPath, relChild)
+		childPath := filepath.Join(localPath, filepath.FromSlash(relChild))
 		n, err := downloadCloudObjectToPathAtomic(store, key, childPath, nil, idleTimeout)
 		if err != nil {
 			return 0, "", err
@@ -3227,25 +3233,4 @@ func dedupeArtifactSpellings(files []runner.OutputFile) []runner.OutputFile {
 		out = append(out, f)
 	}
 	return out
-}
-
-// recordJobOutputAssets records discovered output files as job-output assets in the host_data table.
-func recordJobOutputAssets(database *sql.DB, jobID int64, host string, files []runner.OutputFile) error {
-	for _, f := range files {
-		assetID := fmt.Sprintf("%d/%s", jobID, f.RelPath)
-		entry := dataloc.HostDataEntry{
-			Host: host,
-			Asset: dataloc.DataAsset{
-				Kind: dataloc.AssetJobOutput,
-				ID:   assetID,
-			},
-			Path:      f.RelPath,
-			SizeBytes: f.SizeBytes,
-			LastSeen:  time.Now(),
-		}
-		if err := dataloc.RecordAsset(database, entry); err != nil {
-			return err
-		}
-	}
-	return nil
 }

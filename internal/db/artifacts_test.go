@@ -1,6 +1,10 @@
 package db
 
-import "testing"
+import (
+	"database/sql"
+	"errors"
+	"testing"
+)
 
 func TestUpsertAndListArtifacts(t *testing.T) {
 	database := setupTestDB(t)
@@ -188,5 +192,33 @@ func TestArtifactsPreferLatestRun(t *testing.T) {
 	}
 	if art.StoredPath != "run2/model.bin" {
 		t.Fatalf("latest artifact stored_path = %q, want %q", art.StoredPath, "run2/model.bin")
+	}
+}
+
+// Regression: LIKE metacharacters in a token must match literally — a token
+// containing '_' or '%' must not act as a wildcard over other rows.
+func TestFindArtifactByNameOrPath_EscapesLikeMetacharacters(t *testing.T) {
+	database := setupTestDB(t)
+	jobID, err := RecordQueued(database, "host-alpha", "/tmp/p", "cmd", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"output/run_1.json", "output/runX1.json"} {
+		if err := UpsertArtifact(database, Artifact{JobID: jobID, Path: path, StoredPath: path}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	art, err := FindArtifactByNameOrPath(database, jobID, "run_1.json")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath: %v", err)
+	}
+	if art.Path != "output/run_1.json" {
+		t.Fatalf("path = %q, want the literal underscore match", art.Path)
+	}
+
+	// A token that matches only via wildcard interpretation must miss.
+	if _, err := FindArtifactByNameOrPath(database, jobID, "run%.json"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("wildcard token error = %v, want sql.ErrNoRows", err)
 	}
 }

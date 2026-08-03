@@ -348,3 +348,24 @@ func TestIsPreconditionFailed(t *testing.T) {
 		t.Fatalf("IsPreconditionFailed unrelated = true, want false")
 	}
 }
+
+// Listing-derived rel paths must not escape the destination directory.
+func TestRelPathForKey(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		want string
+		ok   bool
+	}{
+		{"results/wj1/out.json", "out.json", true},
+		{"results/wj1/sub/out.json", "sub/out.json", true},
+		{"results/wj1/", "", false},
+		{"results/wj1/../other/secret", "", false},
+		{"results/wj1//etc/passwd", "", false},
+		{"results/wj1/sub/../../escape", "", false},
+	} {
+		got, ok := relPathForKey(tc.key, "results/wj1")
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("relPathForKey(%q) = (%q, %v), want (%q, %v)", tc.key, got, ok, tc.want, tc.ok)
+		}
+	}
+}

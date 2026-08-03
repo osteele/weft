@@ -299,3 +299,30 @@ func TestRunWithContextUsesMockRunner(t *testing.T) {
 		t.Fatalf("stderr = %q, want empty", stderr)
 	}
 }
+
+// The probe marker must match exactly: "NOTEXISTS" contains "EXISTS".
+func TestRemoteFileExistsWithTimeout_NotExists(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stdout string
+		want   bool
+	}{
+		{"not exists", "NOTEXISTS\n", false},
+		{"exists", "EXISTS\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := SetRunner(func(host, command string) (string, string, error) {
+				return tc.stdout, "", nil
+			})
+			defer restore()
+
+			exists, err := RemoteFileExistsWithTimeout("host-alpha", "/tmp/probe", time.Second)
+			if err != nil {
+				t.Fatalf("RemoteFileExistsWithTimeout() error = %v", err)
+			}
+			if exists != tc.want {
+				t.Fatalf("RemoteFileExistsWithTimeout() = %v, want %v", exists, tc.want)
+			}
+		})
+	}
+}
