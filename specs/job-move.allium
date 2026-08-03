@@ -96,14 +96,31 @@ entity MoveIntent {
 value MoveTargetKind = existing | new
 
 -- State machine:
---                ┌──────┐
---   create  ───▶ │ open │ ───▶ confirmed         (success)
---                └──┬───┘
---                   │
---          ┌────────┼─────────┐
---      canceled            obsoleted
---      (failure /         (source completed
---       user cancel)       before confirm)
+--
+--                          ┌─────────────────────────┐
+--                          │  retryable move-to-new  │
+--                          │  target failure:        │
+--                          │  attempt_count++,       │
+--                          │  target launch/attempt  │
+--                          │  replaced               │
+--                          │  (MoveToNewRetryLoop)   │
+--                          └───┬─────────────────▲───┘
+--                              │                 │
+--                              ▼                 │
+--                          ┌───────────────────┬─┘
+--            create  ───▶  │       open        │
+--                          └─────────┬─────────┘
+--                                    │
+--              ┌─────────────────────┼─────────────────────┐
+--              ▼                     ▼                     ▼
+--          confirmed              canceled             obsoleted
+--          (success)          (failure / user      (source completed
+--                              cancel / retry       before confirm)
+--                              exhausted)
+--
+-- The open → open self-loop is bounded: it ends at max_attempts or
+-- MoveIntentRetryPruneAgeLimit, whichever comes first (see
+-- MoveToNewRetryLoop and StaleMoveIntentRepairConverges).
 --
 -- All non-`open` states are terminal.
 value MoveIntentState = open | confirmed | canceled | obsoleted
@@ -380,6 +397,43 @@ rule MoveToNewLaunchAttachesIntent {
           UpdateMoveIntentTargetLaunch(intent, instance_id)
 }
 
+rule MoveToNewRetryLoop {
+    -- A move-to-new intent can survive failed target launches. The failed
+    -- target attempt remains linked until the next retry opens a replacement
+    -- attempt; this lets later terminal resolution stamp the loser attempt
+    -- abandoned and keeps hidden-target view exclusion intact.
+    when: AutopilotPassStart()
+          and exists(MoveIntent { state = open, target_kind = new })
+          and TargetFailedBeforeJobStarted(intent)
+          and intent.source_launch != null
+          and intent.source_launch.status in {launching, running, paused, grace}
+
+    if intent.attempt_count < intent.max_attempts
+       and now - intent.created_at <= 2h:
+      ensures:
+          RestoreJobToLaunch(intent.job, intent.source_launch)
+          let replacement = LaunchReplacementTarget(intent)
+          intent.state = open
+          intent.attempt_count = intent.attempt_count + 1
+          intent.target_launch = replacement
+          intent.target_attempt = ReplacementAttemptFor(replacement)
+
+    if intent.attempt_count >= intent.max_attempts
+       or now - intent.created_at > 2h:
+      ensures:
+          ResolveMoveIntent(intent, canceled, "move-to-new retry exhausted")
+
+    @guidance
+        -- Implementation:
+        --   internal/orchestration/autopilot.go
+        --   fulfillOpenMoveToNewIntents / moveIntentRetryAction /
+        --   launchMoveIntentRetry. The two-hour bound is
+        --   db.MoveIntentRetryPruneAgeLimit: five attempts at roughly
+        --   15-20 minutes each can consume 75-100 minutes, so two hours
+        --   covers the intended budget while guaranteeing repair convergence
+        --   if the autopilot never runs.
+}
+
 rule ExistingRunningRentalMoveWaitsForTargetAck {
     -- The R2 grace request is a durable request, not acceptance. The
     -- coordinator records the request id and leaves the move open until
@@ -448,25 +502,50 @@ rule CancelMoveOnFailure {
     -- failed. The source's authority must be restored if the source is
     -- still alive; otherwise the job becomes legitimately unplaced and the
     -- autopilot may pick it up on its next pass (the only state where it
-    -- is allowed to).
+    -- is allowed to). Move-to-new has one retryable subcase: when the target
+    -- launch or bootstrap fails before the job starts, the source launch is
+    -- still live, and attempt_count < max_attempts, the move remains open
+    -- for the autopilot retry loop instead of resolving canceled.
     when: ExecuteMoveOption(job, target, intent) fails
     requires: intent.state = open
 
     ensures:
-        if intent.target_attempt != null:
-            AbandonAttempt(intent.target_attempt,
-                           reason = "move_destination_rejected",
-                           by_intent = intent)
-        if intent.source_launch != null
+        if intent.target_kind = new
+           and TargetFailedBeforeJobStarted(intent)
+           and intent.source_launch != null
            and intent.source_launch.status in {launching, running, paused, grace}
+           and intent.attempt_count < intent.max_attempts
         then
+            if intent.target_attempt != null:
+                MarkAttemptCanceled(intent.target_attempt,
+                                    outcome = infrastructure_failure)
             RestoreJobToLaunch(job, intent.source_launch)
-            ResolveMoveIntent(intent, canceled, "move failed; restored to source")
+            KeepMoveIntentOpen(intent)
         else
-            -- Source is gone (or the job had no source). Job is left
-            -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
-            -- the intent is canceled.
-            ResolveMoveIntent(intent, canceled, "move failed")
+            if intent.target_attempt != null:
+                AbandonAttempt(intent.target_attempt,
+                               reason = "move_destination_rejected",
+                               by_intent = intent)
+            if intent.source_launch != null
+               and intent.source_launch.status in {launching, running, paused, grace}
+            then
+                RestoreJobToLaunch(job, intent.source_launch)
+                ResolveMoveIntent(intent, canceled, "move failed; restored to source")
+            else
+                -- Source is gone (or the job had no source). Job is left
+                -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
+                -- the intent is canceled.
+                ResolveMoveIntent(intent, canceled, "move failed")
+
+    @guidance
+        -- Implementation:
+        --   internal/db/placement_transitions.go
+        --   HandleMoveTargetFailedBeforeStart closes the failed target
+        --   attempt, restores an open source attempt, and leaves the intent
+        --   open until attempt_count reaches max_attempts.
+        --   internal/orchestration/move.go executeWithIntent preserves that
+        --   open state for IsNew options so the autopilot retry path can
+        --   advance the intent to a replacement target.
 }
 
 rule RequeueAbandonsOpenMoveIntent {
@@ -901,12 +980,16 @@ invariant StaleMoveIntentRepairConverges {
     -- (PruneMoveIntents: run at DB open and each autopilot pass) can
     -- determine the intent's outcome from existing evidence:
     --   * no non-terminal target launch after the protection window
-    --     -> canceled (MoveIntentResolutionStale)
+    --     -> canceled (MoveIntentResolutionStale), except retryable
+    --     move-to-new intents younger than MoveIntentRetryPruneAgeLimit
     --   * the target attempt reached a job-owned terminal status
     --     (completed/failed) -> confirmed (mirrors the auto-confirm trigger)
     --   * the target attempt was canceled -> canceled, never confirmed: a
-    --     canceled destination did not win, something outside the move
-    --     (launch reset, job cancel) closed it
+    --     canceled destination did not win. Retryable move-to-new target
+    --     failures are the exception: HandleMoveTargetFailedBeforeStart
+    --     closes the target attempt from inside the move and keeps the
+    --     intent open until attempt_count reaches max_attempts or the intent
+    --     exceeds MoveIntentRetryPruneAgeLimit.
     --   * the source attempt reached a job-owned terminal status
     --     -> obsoleted (mirrors the auto-obsolete triggers); for legacy
     --     intents predating the constructor snapshot (source_attempt null,
@@ -914,6 +997,16 @@ invariant StaleMoveIntentRepairConverges {
     --     terminal non-target attempt on the source launch
     -- When both source-won and target-canceled evidence exist, source-won
     -- (obsoleted) takes precedence.
+    --
+    -- Retryable(intent) for repair purposes means:
+    --     intent.state = open
+    --     and intent.target_kind = new
+    --     and intent.attempt_count < intent.max_attempts
+    --     and now - intent.created_at <= MoveIntentRetryPruneAgeLimit
+    -- The age bound is part of convergence, not a display timeout. It is two
+    -- hours in the implementation: long enough for five real launch/bootstrap
+    -- attempts, but finite so an unattended CLI-only environment cannot leave
+    -- a hidden moving job open forever.
     --
     -- A repair pass over an open intent may resolve it only through
     -- ResolveMoveIntent / ConfirmMoveTargetAccepted / ObsoleteMove. It

@@ -500,6 +500,30 @@ func TestPruneMoveIntents(t *testing.T) {
 		}
 	})
 
+	t.Run("keeps retryable stale new target without launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:       100,
+			TargetKind:  MoveTargetNew,
+			MaxAttempts: 5,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-10*time.Minute).Unix(), intent.ID); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 0 {
+			t.Fatalf("pruned = %+v, want none", pruned)
+		}
+	})
+
 	t.Run("keeps fresh unlaunched move", func(t *testing.T) {
 		database := SetupTestDB(t)
 		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
@@ -553,7 +577,7 @@ func TestPruneMoveIntents(t *testing.T) {
 		}
 	})
 
-	t.Run("prunes terminal target launch", func(t *testing.T) {
+	t.Run("keeps retryable terminal target launch", func(t *testing.T) {
 		database := SetupTestDB(t)
 		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
 		target, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed})
@@ -577,8 +601,8 @@ func TestPruneMoveIntents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("PruneMoveIntents: %v", err)
 		}
-		if len(pruned) != 1 || pruned[0].ID != intent.ID {
-			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		if len(pruned) != 0 {
+			t.Fatalf("pruned = %+v, want none", pruned)
 		}
 	})
 
@@ -822,6 +846,109 @@ func TestPruneMoveIntents(t *testing.T) {
 			t.Fatalf("source abandoned reason = %q, want %q", reason, AttemptAbandonedMoveTargetAccepted)
 		}
 	})
+}
+
+func TestPruneMoveIntents_PreservesRetryableMoveToNewTargetFailure(t *testing.T) {
+	database := SetupTestDB(t)
+	source := mustCreateLaunch(t, database)
+	target, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	jobID, err := RecordQueued(database, "", t.TempDir(), "python train.py", "move")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    5,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	transition, err := HandleMoveTargetFailedBeforeStart(database, jobID, target, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("HandleMoveTargetFailedBeforeStart: %v", err)
+	}
+	if !transition.Handled || !transition.Retryable || transition.Exhausted {
+		t.Fatalf("transition = %+v, want handled retryable not exhausted", transition)
+	}
+
+	pruned, err := PruneMoveIntents(database, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PruneMoveIntents: %v", err)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("pruned retryable intent = %+v, want none", pruned)
+	}
+	got, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != MoveIntentStateOpen {
+		t.Fatalf("state = %s, want open", got.State)
+	}
+	if got.AttemptCount != 1 || got.MaxAttempts != 5 {
+		t.Fatalf("attempt budget = %d/%d, want 1/5", got.AttemptCount, got.MaxAttempts)
+	}
+}
+
+func TestPruneMoveIntents_ReapsMoveToNewRetryAfterBound(t *testing.T) {
+	database := SetupTestDB(t)
+	source := mustCreateLaunch(t, database)
+	target := mustCreateLaunch(t, database)
+	jobID, err := RecordQueued(database, "", t.TempDir(), "python train.py", "move")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    5,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	targetAttemptID, err := CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, StatusQueued)
+	if err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE id = ?`, StatusCanceled, now, targetAttemptID); err != nil {
+		t.Fatalf("cancel target attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE move_intents SET created_at = ? WHERE id = ?`, time.Now().Add(-2*time.Hour-time.Minute).Unix(), intent.ID); err != nil {
+		t.Fatalf("age intent: %v", err)
+	}
+
+	pruned, err := PruneMoveIntents(database, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PruneMoveIntents: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0].ID != intent.ID {
+		t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+	}
+	got, err := GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != MoveIntentStateCanceled {
+		t.Fatalf("state = %s, want canceled", got.State)
+	}
 }
 
 func TestRequeue_AbandonsOpenMoveIntent(t *testing.T) {

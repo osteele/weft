@@ -680,6 +680,12 @@ const MoveIntentResolutionStale = "stale: no non-terminal target launch (auto-pr
 // write sites and that query on these constants.
 const MoveIntentResolutionSuperseded = "superseded by explicit move"
 
+// MoveIntentRetryPruneAgeLimit bounds the move-to-new retry exemption in
+// PruneMoveIntents. Five launch attempts can consume roughly 75-100 minutes
+// when each one reaches its bootstrap timeout; two hours leaves room for the
+// full budget while guaranteeing abandoned retry intents converge.
+const MoveIntentRetryPruneAgeLimit = 2 * time.Hour
+
 // PruneMoveIntents cancels open move intents that no longer represent an
 // active move. A fresh intent is protected for protectionWindow so the
 // offer-search -> provider-create gap is not pruned prematurely.
@@ -687,12 +693,19 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 	if database == nil {
 		return nil, nil
 	}
-	cutoff := time.Now().Add(-protectionWindow).Unix()
+	now := time.Now()
+	cutoff := now.Add(-protectionWindow).Unix()
+	retryCutoff := now.Add(-MoveIntentRetryPruneAgeLimit).Unix()
 	const query = `
 		SELECT id, job_id, created_at
 		  FROM move_intents
 		 WHERE state = 'open'
 		   AND created_at < ?
+		   AND NOT (
+		         target_kind = ?
+		         AND attempt_count < max_attempts
+		         AND created_at >= ?
+		       )
 		   AND (
 		         target_launch_id IS NULL
 		         OR NOT EXISTS (
@@ -704,7 +717,7 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 		       )
 		 ORDER BY id`
 	repairsByID := map[int64]PrunedMoveIntent{}
-	rows, err := database.Query(query, cutoff)
+	rows, err := database.Query(query, cutoff, string(MoveTargetNew), retryCutoff)
 	if err != nil {
 		return nil, fmt.Errorf("prune stale move intents: %w", err)
 	}
@@ -728,7 +741,7 @@ func PruneMoveIntents(database *sql.DB, protectionWindow time.Duration) ([]Prune
 		return nil, err
 	}
 
-	outcomeRepairs, err := listOpenMoveIntentOutcomeRepairs(database)
+	outcomeRepairs, err := listOpenMoveIntentOutcomeRepairs(database, retryCutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -761,7 +774,7 @@ func moveSourceWonResolution(status string) string {
 // PruneMoveIntents collapses repairs per intent with last-writer-wins, so
 // when one intent matches several blocks the later block decides — source-won
 // (obsoleted) overrides both target outcomes.
-func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, error) {
+func listOpenMoveIntentOutcomeRepairs(database *sql.DB, retryCutoff int64) ([]PrunedMoveIntent, error) {
 	const targetQuery = `
 		SELECT mi.id, mi.job_id, mi.created_at, ta.status
 		  FROM move_intents mi
@@ -776,10 +789,8 @@ func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, err
 		return nil, err
 	}
 
-	// A canceled target attempt can never win: something outside the move
-	// (launch reset, job cancel) closed it, so the intent must resolve as
-	// canceled — never confirmed — or it hides the job from the autopilot
-	// forever (wj4620).
+	// Move-to-new owns canceled target attempts until the bounded retry budget
+	// is exhausted; see StaleMoveIntentRepairConverges in specs/job-move.allium.
 	const targetCanceledQuery = `
 		SELECT mi.id, mi.job_id, mi.created_at, ta.status
 		  FROM move_intents mi
@@ -787,9 +798,15 @@ func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, err
 		 WHERE mi.state = 'open'
 		   AND ta.end_time IS NOT NULL
 		   AND ta.status = 'canceled'
+		   AND NOT (
+		         mi.target_kind = ?
+		         AND mi.attempt_count < mi.max_attempts
+		         AND mi.created_at >= ?
+		       )
 		 ORDER BY mi.id`
 	targetCanceledRepairs, err := scanMoveIntentOutcomeRepairs(database, targetCanceledQuery, MoveIntentStateCanceled,
-		func(status string) string { return "target attempt " + status + " before the move completed" })
+		func(status string) string { return "target attempt " + status + " before the move completed" },
+		string(MoveTargetNew), retryCutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -835,8 +852,8 @@ func listOpenMoveIntentOutcomeRepairs(database *sql.DB) ([]PrunedMoveIntent, err
 	return repairs, nil
 }
 
-func scanMoveIntentOutcomeRepairs(database *sql.DB, query string, state MoveIntentState, resolution func(string) string) ([]PrunedMoveIntent, error) {
-	rows, err := database.Query(query)
+func scanMoveIntentOutcomeRepairs(database *sql.DB, query string, state MoveIntentState, resolution func(string) string, args ...any) ([]PrunedMoveIntent, error) {
+	rows, err := database.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
