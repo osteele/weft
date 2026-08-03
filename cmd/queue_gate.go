@@ -66,7 +66,7 @@ func hostGPUInventoryIncomplete(host inventory.HostSpec, constraints placement.C
 }
 
 func filterEligibilityReasons(reasons []placement.EligibilityReason, keep func(placement.EligibilityReason) bool) []placement.EligibilityReason {
-	out := reasons[:0]
+	out := make([]placement.EligibilityReason, 0, len(reasons))
 	for _, reason := range reasons {
 		if keep(reason) {
 			out = append(out, reason)
