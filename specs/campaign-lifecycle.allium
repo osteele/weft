@@ -3865,6 +3865,14 @@ rule InstanceReuseHostAxes {
     -- min_driver) never use the CUDA fact as substitute evidence; a missing
     -- driver remains a missing driver for those jobs. Jobs with no driver
     -- floor remain unaffected.
+    --
+    -- A replacement offer overwrites launches.driver_version
+    -- unconditionally, including with "" when the replacement provider
+    -- reports no driver: a launch created by create-retry must never carry
+    -- the failed original offer's driver, which describes a different
+    -- physical machine. Preserving the old value on an empty replacement
+    -- would let an unknown masquerade as a known fact and bind the floor
+    -- against hardware that was never rented (UpdateLaunchOfferMetadata).
 	}
 
 rule InstanceReuseQueueDepthIsObjectiveSignal {

@@ -333,6 +333,64 @@ func TestUpdateLaunchOfferMetadata_SwitchesProvider(t *testing.T) {
 	}
 }
 
+// TestUpdateLaunchOfferMetadataRefreshesDriverVersion covers both directions of
+// the unconditional driver refresh. Clearing the column when the replacement
+// offer reports no driver is intended, not a clobber: the retained value would
+// describe the failed original offer's machine rather than the one about to be
+// rented, and reuse admission enforces the driver-major floor against it.
+func TestUpdateLaunchOfferMetadataRefreshesDriverVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		initialVersion    string
+		replacementOffer  cloud.Offer
+		wantDriverVersion string
+	}{
+		{
+			name:           "updates reported driver",
+			initialVersion: "535.154.05",
+			replacementOffer: cloud.Offer{
+				Provider:      "vastai",
+				DriverVersion: "550.90.07",
+			},
+			wantDriverVersion: "550.90.07",
+		},
+		{
+			name:           "clears unknown replacement driver",
+			initialVersion: "550.90.07",
+			replacementOffer: cloud.Offer{
+				Provider:      "runpod",
+				DriverVersion: "",
+			},
+			wantDriverVersion: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+			instanceID, err := CreateLaunch(database, &Launch{
+				Status:        LaunchStatusPlanned,
+				Provider:      "vastai",
+				GPUSpec:       "RTX_4090",
+				DriverVersion: tc.initialVersion,
+			})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+
+			if err := UpdateLaunchOfferMetadata(database, instanceID, tc.replacementOffer); err != nil {
+				t.Fatalf("UpdateLaunchOfferMetadata: %v", err)
+			}
+
+			inst, err := GetLaunch(database, instanceID)
+			if err != nil {
+				t.Fatalf("GetLaunch: %v", err)
+			}
+			if inst.DriverVersion != tc.wantDriverVersion {
+				t.Fatalf("DriverVersion = %q, want %q", inst.DriverVersion, tc.wantDriverVersion)
+			}
+		})
+	}
+}
+
 // TestJobStatusView_CanceledAttemptOnLiveLaunch verifies that an attempt
 // closed with status='canceled' on a launch that's still running surfaces as
 // 'canceled' rather than the previous 'dead' fallthrough.
