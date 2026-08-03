@@ -2233,6 +2233,8 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		}
 	}
 
+	lower := outputSyncThreshold(job)
+	upper := outputSyncUpperBound(job, rec)
 	var outputFiles []runner.OutputFile
 	if rec != nil {
 		outputFiles = rec.OutputFiles
@@ -2245,8 +2247,6 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 			syncOutputWarnf("warning: job %s has no recorded start time; cannot attribute outputs by time window — skipping output discovery\n", ids.FormatJobID(job.ID))
 			return artifacts.SyncResult{}, nil
 		}
-		lower := outputSyncThreshold(job)
-		upper := outputSyncUpperBound(job, rec)
 		if isLocalJobHostFunc(job.Host) {
 			// The job executed on this machine: the local working tree IS the
 			// runner's working tree, so time-window discovery here is
@@ -2270,8 +2270,15 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 	if err := syncOutputFilesBackFunc(job.Host, job.WorkingDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
 		return artifacts.SyncResult{}, err
 	}
-	outputFiles = runner.FilterOutputFilesSince(localDir, outputFiles, outputSyncThreshold(job))
-	return storeLocalOutputFiles(database, job.ID, localDir, outputFiles)
+	// rsync -a preserves mtimes, so the synced copies carry the remote
+	// attempt-window timestamps (spec: OutputDiscoveryUsesAttemptStartCutoff).
+	sinceFiltered := runner.FilterOutputFilesSince(localDir, outputFiles, lower)
+	windowed := runner.FilterOutputFilesUntil(localDir, sinceFiltered, upper)
+	if dropped := len(sinceFiltered) - len(windowed); dropped > 0 {
+		syncOutputWarnf("warning: job %s: %d output file(s) were modified after the attempt ended (likely overwritten by a later job in the same directory) and were not attributed\n",
+			ids.FormatJobID(job.ID), dropped)
+	}
+	return storeLocalOutputFiles(database, job.ID, localDir, windowed)
 }
 
 func syncRecordedJobOutputAssets(database *sql.DB, job *db.Job) (artifacts.SyncResult, error) {

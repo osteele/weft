@@ -1070,7 +1070,9 @@ invariant Attribution {
 }
 
 rule OutputDiscoveryUsesAttemptStartCutoff {
-    when: convention-output discovery runs for job's latest attempt
+    when: output attribution runs for job's latest attempt — convention-output
+          discovery, or a completion-record output_files listing re-checked
+          against the synced copies' mtimes at artifact-sync time
     requires: job.working_dir may be shared with other jobs
 
     let cutoff = job.latest_attempt.start_time - 1.second
@@ -1100,6 +1102,12 @@ rule OutputDiscoveryUsesAttemptStartCutoff {
         -- the same window in waitForJob's completion discovery and in
         -- refreshRunningJobs' recovered-completion discovery
         -- (discoverRecoveredOutputs, upper bound = status-file mtime + 2m).
+        -- A completion-record output_files listing is attributed by the
+        -- runner, but the listed paths can be overwritten by a later job in
+        -- the same directory before artifact sync runs; syncJobOutputs
+        -- therefore re-applies both bounds to the synced copies' mtimes
+        -- (rsync -a preserves them) and warns about dropped files rather
+        -- than storing a successor's bytes under the earlier job.
         -- Declared outputs are exempt from the cutoff only insofar as the
         -- user explicitly named them; the convention-directory walk always
         -- applies it.

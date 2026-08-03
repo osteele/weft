@@ -1359,7 +1359,13 @@ func TestSyncJobOutputsRemoteDiscoveryFallback(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		return os.WriteFile(path, []byte("{}"), 0o644)
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			return err
+		}
+		// rsync -a preserves the remote mtime; the synced copy carries the
+		// attempt-window timestamp the post-sync filters check.
+		written := time.Unix(start+300, 0)
+		return os.Chtimes(path, written, written)
 	}
 
 	result, err := syncJobOutputs(database, job)
@@ -1810,5 +1816,71 @@ func TestArtifactNotFoundMessage_R2ListFailedIsUnknownNotAbsent(t *testing.T) {
 	}
 	if !strings.Contains(unknown, "could not be located") {
 		t.Fatalf("R2-list-failed message should avoid a confident 'not found': %q", unknown)
+	}
+}
+
+// TestSyncJobOutputsExcludesPostAttemptOverwrites: a completion-record-listed
+// file whose synced copy carries an mtime past the attempt's end bound is a
+// same-directory successor's overwrite and must not be stored under this job
+// (spec: OutputDiscoveryUsesAttemptStartCutoff).
+func TestSyncJobOutputsExcludesPostAttemptOverwrites(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	workDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workDir, "output"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	start := time.Now().Add(-2 * time.Hour)
+	end := time.Now().Add(-time.Hour)
+
+	inWindow := filepath.Join(workDir, "output", "attempt.json")
+	if err := os.WriteFile(inWindow, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	within := start.Add(30 * time.Minute)
+	if err := os.Chtimes(inWindow, within, within); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	// Written now — long past end + AttemptOutputEndSlack.
+	overwritten := filepath.Join(workDir, "output", "overwritten.json")
+	if err := os.WriteFile(overwritten, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	job := syncJobOutputsTestJob(t, database, workDir, start.Unix())
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) *runner.CompletionRecord {
+		return &runner.CompletionRecord{
+			StartTime: start.Unix(),
+			EndTime:   end.Unix(),
+			OutputFiles: []runner.OutputFile{
+				{RelPath: "output/attempt.json"},
+				{RelPath: "output/overwritten.json"},
+			},
+		}
+	}
+	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		return nil // the files above stand in for the synced copies
+	}
+	var warning string
+	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want only the in-window file", result.Added)
+	}
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Path != "output/attempt.json" {
+		t.Fatalf("artifacts = %+v, want only output/attempt.json", entries)
+	}
+	if !strings.Contains(warning, "modified after the attempt ended") {
+		t.Fatalf("warning = %q, want post-attempt exclusion notice", warning)
 	}
 }
