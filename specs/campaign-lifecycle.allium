@@ -818,6 +818,52 @@ rule StaleCloudAfterPinsAreReconciled {
         -- ReconcileStaleCloudAfterPins performs the autopilot backstop.
 }
 
+rule SameInstanceCloudAfterConstrainsManifestOrder {
+    when: a rental manifest or grace jobs request contains multiple jobs
+
+    for consumer in manifest.jobs:
+      for ref in consumer.cloud_after:
+        let producer = manifest.jobs.find(job.id = ref.job_id)
+        if producer exists and producer.id != consumer.id:
+          ensures: manifest.index(producer) < manifest.index(consumer)
+          ensures: priority ordering does not place consumer before producer
+
+    ensures: manifest order begins from the path's preferred scheduling order
+    ensures: only same-payload CloudAfter producer traversal can move one
+             payload job ahead of another payload job
+
+    @guidance
+        -- Same-instance `--needs` edges are shipped to the agent as
+        -- CloudAfter refs. The rental agent dispatches manifest jobs
+        -- sequentially in manifest order; cmd/agent/jobloop.go
+        -- checkCloudAfter probes the producer's R2 completion marker before
+        -- the consumer starts. A consumer that appears earlier than its
+        -- same-payload producer deterministically skip-fails with
+        -- cloud_after_incomplete even when the dependency would succeed if
+        -- the producer ran first.
+        --
+        -- Manifest assembly first applies the path's scheduling preference,
+        -- then applies a stable topological adjustment over only
+        -- same-payload CloudAfter refs. Reuse and move submission therefore
+        -- preserve db.SchedulingLess priority-descending order except where
+        -- a producer-before-consumer edge is present. Fresh launch preserves
+        -- its ID-ascending submission order, with the same adjustment making
+        -- the dependency invariant explicit.
+        --
+        -- Degenerate refs cannot repair dependency semantics by ordering:
+        -- refs to jobs outside this payload and self-refs impose no manifest
+        -- order; duplicate refs collapse to one edge. If same-payload refs
+        -- contain a cycle, there is no satisfying order. The dependency walk
+        -- emits each job once as traversal completes, so the manifest never
+        -- hangs or silently drops jobs.
+        --
+        -- Implementation: internal/campaign/manifest_order.go
+        -- orderAgentJobsForManifest performs the stable adjustment.
+        -- internal/campaign/reuse.go calls it before writing
+        -- controlplane.GraceJobsRequest. internal/campaign/lifecycle.go calls
+        -- it after the fresh-launch ID sort and before GPU slot assignment.
+}
+
 -- --------------------------------------------------------------------------
 -- Provider credit gate
 -- --------------------------------------------------------------------------

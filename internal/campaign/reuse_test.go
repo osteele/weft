@@ -2267,3 +2267,81 @@ func TestSubmitJobsToInstancePersistsResolvedCloudAfterPin(t *testing.T) {
 		t.Fatalf("pin = %+v, want {JobID:%d RunID:%d}", pins[0], producerID, wantRunID)
 	}
 }
+
+func TestSubmitJobsToInstanceForMoveOrdersSamePayloadCloudAfter(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	projectDir := testProjectDir(t)
+	producerID, err := db.RecordQueuedWithGPU(database, "", projectDir, "python producer.py", "producer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU producer: %v", err)
+	}
+	if err := db.SetJobPriority(database, producerID, 1); err != nil {
+		t.Fatalf("SetJobPriority producer: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, producerID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID producer: %v", err)
+	}
+
+	consumerID, err := db.RecordQueuedWithGPU(database, "", projectDir, "python consumer.py", "consumer", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU consumer: %v", err)
+	}
+	if err := db.SetJobPriority(database, consumerID, 10); err != nil {
+		t.Fatalf("SetJobPriority consumer: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, consumerID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID consumer: %v", err)
+	}
+	if err := db.SetJobNeeds(database, consumerID, []string{fmt.Sprintf("output/model.pt:%d", producerID)}); err != nil {
+		t.Fatalf("SetJobNeeds consumer: %v", err)
+	}
+
+	for _, jobID := range []int64{producerID, consumerID} {
+		if _, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+			JobID:          jobID,
+			TargetKind:     db.MoveTargetExisting,
+			TargetLaunchID: &instanceID,
+		}); err != nil {
+			t.Fatalf("CreateMoveIntent job %d: %v", jobID, err)
+		}
+	}
+
+	producer := mustJob(t, database, producerID)
+	consumer := mustJob(t, database, consumerID)
+
+	prevUpload := uploadSourceToR2
+	prevSendNoAck := sendGraceJobPayloadNoAck
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayloadNoAck = prevSendNoAck
+	})
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
+		return sourceDir + ".tar.gz", nil
+	}
+	var got controlplane.GraceJobsRequest
+	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (string, error) {
+		got = payload
+		return "req-test", nil
+	}
+
+	if err := SubmitJobsToInstanceForMove(context.Background(), database, nil, instanceID, []*db.Job{producer, consumer}); err != nil {
+		t.Fatalf("SubmitJobsToInstanceForMove: %v", err)
+	}
+
+	if gotIDs := agentJobIDs(got.Jobs); !reflect.DeepEqual(gotIDs, []int64{producerID, consumerID}) {
+		t.Fatalf("payload order = %v, want producer before high-priority consumer [%d %d]", gotIDs, producerID, consumerID)
+	}
+	if len(got.Jobs[1].CloudAfter) != 1 || got.Jobs[1].CloudAfter[0].JobID != producerID {
+		t.Fatalf("consumer cloud_after = %#v, want producer %d", got.Jobs[1].CloudAfter, producerID)
+	}
+}

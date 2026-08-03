@@ -1237,6 +1237,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			R2Key:     sourceR2Key,
 		})
 	}
+	orderAgentJobsForManifest(payload.Jobs)
 
 	inst, err = db.GetLaunch(database, instanceID)
 	if err != nil {

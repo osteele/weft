@@ -2421,6 +2421,7 @@ func LaunchInstance(
 	sort.Slice(agentJobs, func(i, j int) bool {
 		return agentJobs[i].ID < agentJobs[j].ID
 	})
+	orderAgentJobsForManifest(agentJobs)
 	assignAgentGPUSlots(group, agentJobs)
 
 	createOpts.DiskGB = requestedDiskGB
