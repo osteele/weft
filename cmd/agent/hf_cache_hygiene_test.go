@@ -73,12 +73,52 @@ func TestPurgeUndeclaredHFAssets_EmptyDeclared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// With no declared inputs, everything is "undeclared". This is intentional:
-	// callers gate on len(declaredInputs) > 0 in production.
+	// With no declared inputs, every HF Hub asset is undeclared.
 	purged, _ := purgeUndeclaredHFAssets(nil)
 	if purged != 1 {
 		t.Fatalf("with empty declared, purged=%d, want 1", purged)
 	}
+}
+
+func TestRunHFCacheHygieneAtStartup(t *testing.T) {
+	t.Run("empty manifest purges prior tenant assets", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		hubDir := filepath.Join(tmp, ".cache", "huggingface", "hub")
+		mustWriteHFCacheFile(t, hubDir, "models--Qwen--Qwen2.5-7B/snapshots/abc/blob", "x")
+		mustWriteHFCacheFile(t, hubDir, "datasets--openai--ih-challenge/snapshots/e/blob", "z")
+
+		purged, freed := runHFCacheHygieneAtStartup([]cloud.AgentJob{{ID: 1}})
+		if purged != 2 {
+			t.Fatalf("purged=%d, want 2", purged)
+		}
+		if freed <= 0 {
+			t.Fatalf("freed=%d, want >0", freed)
+		}
+		assertPathMissing(t, filepath.Join(hubDir, "models--Qwen--Qwen2.5-7B"))
+		assertPathMissing(t, filepath.Join(hubDir, "datasets--openai--ih-challenge"))
+	})
+
+	t.Run("preserves declared assets and purges undeclared assets", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		hubDir := filepath.Join(tmp, ".cache", "huggingface", "hub")
+		mustWriteHFCacheFile(t, hubDir, "models--Qwen--Qwen2.5-7B/snapshots/abc/blob", "x")
+		mustWriteHFCacheFile(t, hubDir, "models--EleutherAI--pythia-410m/snapshots/d/blob", "y")
+		mustWriteHFCacheFile(t, hubDir, ".locks/random-lockfile", "lock")
+
+		jobs := []cloud.AgentJob{{ID: 1, Inputs: []string{"hf:Qwen/Qwen2.5-7B"}}}
+		purged, freed := runHFCacheHygieneAtStartup(jobs)
+		if purged != 1 {
+			t.Fatalf("purged=%d, want 1", purged)
+		}
+		if freed <= 0 {
+			t.Fatalf("freed=%d, want >0", freed)
+		}
+		assertPathExists(t, filepath.Join(hubDir, "models--Qwen--Qwen2.5-7B"))
+		assertPathMissing(t, filepath.Join(hubDir, "models--EleutherAI--pythia-410m"))
+		assertPathExists(t, filepath.Join(hubDir, ".locks"))
+	})
 }
 
 func TestPurgeUndeclaredHFAssets_MissingDir(t *testing.T) {
@@ -106,5 +146,30 @@ func TestCollectDeclaredInputs(t *testing.T) {
 		if !want[in] {
 			t.Errorf("unexpected input %q", in)
 		}
+	}
+}
+
+func mustWriteHFCacheFile(t *testing.T, hubDir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(hubDir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPathExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("%s should exist: %v", path, err)
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("%s should be missing, stat err=%v", path, err)
 	}
 }

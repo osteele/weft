@@ -193,13 +193,7 @@ func runInstance(args []string) {
 	// Reclaim disk from prior tenants on instance reuse: drop any HF
 	// cache entries that aren't declared by the current manifest. Done
 	// before the disk-cap probe so the probe sees post-purge totals.
-	declaredInputs := collectDeclaredInputs(manifest.Jobs)
-	if len(declaredInputs) > 0 {
-		if purged, freed := purgeUndeclaredHFAssets(declaredInputs); purged > 0 {
-			fmt.Printf("hf cache hygiene: purged %d undeclared assets, freed %s\n",
-				purged, formatBytes(freed))
-		}
-	}
+	runHFCacheHygieneAtStartup(manifest.Jobs)
 
 	// Verify the provider actually allocated the container disk we asked
 	// for. Vast.ai (and others) can silently cap the request on a

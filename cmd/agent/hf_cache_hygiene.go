@@ -11,20 +11,9 @@ import (
 )
 
 // purgeUndeclaredHFAssets walks the HF Hub cache and deletes top-level
-// model/dataset directories whose asset_id is not in the current
-// workload's declared inputs. Returns the count of entries removed and
-// bytes freed.
-//
-// Rationale: when weft reuses a cloud instance for a new workload, the
-// HF cache from the prior workload remains on disk. Those assets
-// silently consume space against the new workload's disk budget and
-// distort the disk-failure report. Purging at startup keeps reuse
-// semantics predictable: each manifest's declared inputs define what
-// the agent is responsible for, and stale assets from prior tenants
-// are reclaimed.
-//
-// Returns nil-safe (no-op) if the cache directory is missing or
-// declared is empty.
+// model/dataset directories whose asset ref is not in the current
+// workload's declared inputs. Empty declared input sets purge every HF
+// Hub asset; see specs/campaign-lifecycle.allium rule HFCacheHygiene.
 func purgeUndeclaredHFAssets(declared []string) (purged int, freed int64) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -62,6 +51,16 @@ func purgeUndeclaredHFAssets(declared []string) (purged int, freed int64) {
 		freed += size
 		fmt.Printf("hf cache hygiene: purged %s (%s; not in current manifest)\n",
 			asset.Ref(), formatBytes(size))
+	}
+	return purged, freed
+}
+
+func runHFCacheHygieneAtStartup(jobs []cloud.AgentJob) (purged int, freed int64) {
+	declaredInputs := collectDeclaredInputs(jobs)
+	purged, freed = purgeUndeclaredHFAssets(declaredInputs)
+	if purged > 0 {
+		fmt.Printf("hf cache hygiene: purged %d undeclared assets, freed %s\n",
+			purged, formatBytes(freed))
 	}
 	return purged, freed
 }
