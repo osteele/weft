@@ -1508,9 +1508,6 @@ func moveIntentRetryAction(database *sql.DB, intent *db.MoveIntent) (moveIntentA
 		}
 		return moveIntentActionRetry, nil
 	}
-	if launch.AgentReadyAtUnix != nil {
-		return moveIntentActionConfirm, nil
-	}
 	started, err := moveIntentTargetStartedJob(database, intent.JobID, *intent.TargetLaunchID)
 	if err != nil {
 		return moveIntentActionWait, err
@@ -1519,6 +1516,9 @@ func moveIntentRetryAction(database *sql.DB, intent *db.MoveIntent) (moveIntentA
 		return moveIntentActionConfirm, nil
 	}
 	if !campaign.IsInstanceTerminal(launch.Status) {
+		if launch.AgentReadyAtUnix != nil {
+			return moveIntentActionConfirm, nil
+		}
 		return moveIntentActionWait, nil
 	}
 	transition, err := db.HandleMoveTargetFailedBeforeStart(database, intent.JobID, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned)

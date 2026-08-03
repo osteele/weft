@@ -2929,3 +2929,56 @@ func TestSubmitAutoPilotReuseAssignments_AttemptCapSkips(t *testing.T) {
 		t.Fatalf("reuseDiagnostics = %q, want max-attempts reason", reuseDiagnostics[jobID])
 	}
 }
+
+func TestMoveIntentRetryAction_ReadyTerminalTargetWithoutStartRetries(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "moving", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	source, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, db.StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.SetLaunchAgentReadyAtIfUnset(database, target, time.Now()); err != nil {
+		t.Fatalf("SetLaunchAgentReadyAtIfUnset: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, target, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus target: %v", err)
+	}
+
+	action, err := moveIntentRetryAction(database, intent)
+	if err != nil {
+		t.Fatalf("moveIntentRetryAction: %v", err)
+	}
+	if action != moveIntentActionRetry {
+		t.Fatalf("action = %v, want retry", action)
+	}
+	got, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != db.MoveIntentStateOpen {
+		t.Fatalf("intent state = %s, want open", got.State)
+	}
+}
