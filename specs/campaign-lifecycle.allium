@@ -1952,19 +1952,40 @@ rule BootstrapCompleteOverride {
 rule SelfDestructFailed {
     when: AllJobsTerminalButInstanceLingering(instance)
     requires: instance.status = running
+    requires: instance.has_started_job
 
     -- A superseded attempt (the job migrated to a newer attempt — e.g. a
     -- `weft edit --retry` requeue) is terminal-and-neutral for this launch:
     -- its outcome belongs to the new attempt elsewhere, so it satisfies
-    -- termination here and is excluded from the completed/failed verdict.
+    -- termination here and is excluded from the launch verdict.
     -- Without this, a launch whose only job was requeued away is believed to
     -- hold an active job forever and is never reaped (the idle rental runs to
     -- its own time/spend cap).
-    requires: instance.jobs.all(j => j.is_terminal or j.attempt_outcome = superseded)
+    requires: instance.jobs.all(j =>
+        j.is_terminal
+        or j.attempt_outcome in {completed, failed, canceled, orphaned, superseded})
 
     let deciding = instance.jobs.filter(j => j.attempt_outcome != superseded)
-    let terminal_status = if deciding.all(j => j.status = completed) then completed else failed
-    let reason = if terminal_status = completed then completed else job_failure
+    let all_completed = deciding.all(j =>
+        j.attempt_outcome = completed
+        or (j.attempt_outcome = null and j.status = completed))
+    let all_canceled = deciding.all(j =>
+        j.attempt_outcome = canceled
+        or (j.attempt_outcome = null and j.status = canceled))
+    let any_failed = deciding.any(j =>
+        j.attempt_outcome = failed
+        or (j.attempt_outcome = null and j.status in {failed, dead, killed}))
+    let any_orphaned = deciding.any(j => j.attempt_outcome = orphaned)
+    let terminal_status =
+        if all_completed then completed
+        else if all_canceled then canceled
+        else failed
+    let reason =
+        if all_completed then completed
+        else if all_canceled then canceled
+        else if any_failed then job_failure
+        else if any_orphaned then infra_failure
+        else job_failure
 
     ensures: instance.status = terminal_status
     ensures: instance.termination_reason = reason
@@ -1978,9 +1999,22 @@ rule SelfDestructFailed {
         -- self_destruct_unknown_end_fallback (3 min) as a conservative
         -- synthetic duration that exceeds the threshold, triggering
         -- immediate cleanup.
+        -- Requires has_started_job so terminal launch ownership is partitioned:
+        -- launches with no started job remain owned by the no-progress
+        -- watchdogs (idle-after-ready, bootstrap stall, and provider-status
+        -- unavailable) and get their accurate bootstrap_timeout, phase_stall,
+        -- or infra_failure reason instead of being reaped here. This also
+        -- preserves the vacuous completed case for launches that have actual
+        -- execution evidence before all deciding attempts disappear.
+        -- Outcome precedence matches TerminalLaunchStatus: all completed,
+        -- all canceled, any failed, any orphaned, then generic job_failure.
+        -- Canceled launches stay out of failure accounting and the runaway
+        -- breaker; orphan-only launches use infra_failure so retryability is
+        -- retained. A mixed failed+orphaned launch reports job_failure because
+        -- the job-failure branch wins first.
         -- Superseded attempts are dropped from `deciding`, so a launch whose
-        -- jobs all migrated off reaps as completed (empty deciding set ->
-        -- vacuously all-completed) rather than failed. Implementation:
+        -- started jobs all migrated off reaps as completed (empty deciding set
+        -- -> vacuously all-completed) rather than failed. Implementation:
         -- campaign.ComputeJobState / hasActiveLaunchJobs skip superseded
         -- attempts; TerminalLaunchStatus then yields completed.
 }
