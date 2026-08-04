@@ -568,6 +568,41 @@ func TestPruneMoveIntents(t *testing.T) {
 		}
 	})
 
+	t.Run("reaps old retryable stale new target without launch", func(t *testing.T) {
+		database := SetupTestDB(t)
+		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
+		intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+			JobID:        100,
+			TargetKind:   MoveTargetNew,
+			AttemptCount: 1,
+			MaxAttempts:  5,
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE move_intents SET created_at = ? WHERE id = ?`,
+			time.Now().Add(-MoveIntentRetryPruneAgeLimit-time.Minute).Unix(), intent.ID,
+		); err != nil {
+			t.Fatalf("age intent: %v", err)
+		}
+
+		pruned, err := PruneMoveIntents(database, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("PruneMoveIntents: %v", err)
+		}
+		if len(pruned) != 1 || pruned[0].ID != intent.ID {
+			t.Fatalf("pruned = %+v, want intent %d", pruned, intent.ID)
+		}
+		got, err := GetMoveIntent(database, intent.ID)
+		if err != nil {
+			t.Fatalf("GetMoveIntent: %v", err)
+		}
+		if got.State != MoveIntentStateCanceled || got.Resolution != MoveIntentResolutionStale {
+			t.Fatalf("intent = (%s, %q), want canceled stale", got.State, got.Resolution)
+		}
+	})
+
 	t.Run("keeps fresh unlaunched move", func(t *testing.T) {
 		database := SetupTestDB(t)
 		insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued)
