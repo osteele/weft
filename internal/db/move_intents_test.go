@@ -87,6 +87,29 @@ func TestCreateMoveIntent_NewWithoutTargetLaunch(t *testing.T) {
 	}
 }
 
+func TestCreateMoveIntent_NewIgnoresTerminalLaunchSourceAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+	src, err := CreateLaunch(database, &Launch{Status: LaunchStatusFailed})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	insertTestJob(t, database, 100, "echo hi", "/tmp", StatusQueued, withLaunch(src))
+
+	intent, err := CreateMoveIntent(database, CreateMoveIntentParams{
+		JobID:      100,
+		TargetKind: MoveTargetNew,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if intent.SourceLaunchID != nil {
+		t.Fatalf("source_launch_id = %v, want nil for terminal launch", intent.SourceLaunchID)
+	}
+	if intent.SourceAttemptID != nil {
+		t.Fatalf("source_attempt_id = %v, want nil for terminal launch", intent.SourceAttemptID)
+	}
+}
+
 func TestCreateMoveIntent_HostTarget(t *testing.T) {
 	database := SetupTestDB(t)
 	insertTestJob(t, database, 77, "echo hi", "/tmp", StatusQueued)

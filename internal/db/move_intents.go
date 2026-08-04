@@ -115,9 +115,14 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	if err := tx.QueryRow(`
 		SELECT ja.id, ja.launch_id
 		  FROM job_attempts ja
+		  LEFT JOIN launches l ON l.id = ja.launch_id
 		 WHERE ja.job_id = ?
 		   AND ja.end_time IS NULL
 		   AND ja.abandoned_at IS NULL
+		   AND (
+		       ja.launch_id IS NULL
+		       OR l.status IN ('running','launching','paused','grace')
+		   )
 		   AND NOT EXISTS (
 		       SELECT 1
 		         FROM move_intents mi
