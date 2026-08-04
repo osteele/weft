@@ -63,6 +63,70 @@ func TestCountJobFailedAttempts(t *testing.T) {
 	}
 }
 
+func TestListRecentFailedUndiagnosedIncludesDerivedFailedCompletion(t *testing.T) {
+	database := SetupTestDB(t)
+	now := time.Now().Unix()
+
+	cleanID, err := RecordQueued(database, "hostA", "/tmp", "echo clean", "clean")
+	if err != nil {
+		t.Fatalf("RecordQueued clean: %v", err)
+	}
+	if err := RecordCompletionByID(database, cleanID, 0, now); err != nil {
+		t.Fatalf("RecordCompletionByID clean: %v", err)
+	}
+	failedID, err := RecordQueued(database, "hostA", "/tmp", "echo failed", "failed")
+	if err != nil {
+		t.Fatalf("RecordQueued failed: %v", err)
+	}
+	if err := RecordCompletionByID(database, failedID, 1, now); err != nil {
+		t.Fatalf("RecordCompletionByID failed: %v", err)
+	}
+	failedJob, err := GetJobByID(database, failedID)
+	if err != nil {
+		t.Fatalf("GetJobByID failed: %v", err)
+	}
+	if failedJob.Status != StatusFailed {
+		t.Fatalf("failed completion status = %q, want %q", failedJob.Status, StatusFailed)
+	}
+	deadID, err := RecordQueued(database, "hostA", "/tmp", "echo dead", "dead")
+	if err != nil {
+		t.Fatalf("RecordQueued dead: %v", err)
+	}
+	if err := CloseAttempt(database, deadID, StatusDead, nil, now); err != nil {
+		t.Fatalf("CloseAttempt dead: %v", err)
+	}
+	diagnosedID, err := RecordQueued(database, "hostA", "/tmp", "echo diagnosed", "diagnosed")
+	if err != nil {
+		t.Fatalf("RecordQueued diagnosed: %v", err)
+	}
+	if err := RecordCompletionByID(database, diagnosedID, 1, now); err != nil {
+		t.Fatalf("RecordCompletionByID diagnosed: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET error_diagnosis = 'known' WHERE job_id = ?`, diagnosedID); err != nil {
+		t.Fatalf("mark diagnosed: %v", err)
+	}
+
+	jobs, err := ListRecentFailedUndiagnosed(database, 10)
+	if err != nil {
+		t.Fatalf("ListRecentFailedUndiagnosed: %v", err)
+	}
+	got := make(map[int64]struct{}, len(jobs))
+	for _, job := range jobs {
+		got[job.ID] = struct{}{}
+	}
+	if _, ok := got[failedID]; !ok {
+		t.Fatalf("jobs = %v, missing failed completion %d", got, failedID)
+	}
+	if _, ok := got[deadID]; !ok {
+		t.Fatalf("jobs = %v, missing dead job %d", got, deadID)
+	}
+	for _, id := range []int64{cleanID, diagnosedID} {
+		if _, ok := got[id]; ok {
+			t.Fatalf("jobs = %v, should not include %d", got, id)
+		}
+	}
+}
+
 func TestInsertAndListLifecycleEvents(t *testing.T) {
 	database := SetupTestDB(t)
 

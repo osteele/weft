@@ -49,14 +49,14 @@ func (r *Remediator) Start(ctx context.Context) {
 }
 
 // CheckFailedJobs scans for recently failed jobs and attempts diagnosis/remediation.
-func (r *Remediator) CheckFailedJobs() {
+func (r *Remediator) CheckFailedJobs() int {
 	jobs, err := db.ListRecentFailedUndiagnosed(r.database, 10)
 	if err != nil {
 		r.logger.Warn("failed to list failed jobs for remediation", "error", err)
-		return
+		return 0
 	}
 	if len(jobs) == 0 {
-		return
+		return 0
 	}
 
 	type jobLog struct {
@@ -82,6 +82,7 @@ func (r *Remediator) CheckFailedJobs() {
 		close(results)
 	}()
 
+	processed := 0
 	for jl := range results {
 		if jl.logContent == "" {
 			r.logger.Debug("no log content, skipping diagnosis", "job_id", jl.job.ID, "host", jl.job.Host)
@@ -100,6 +101,7 @@ func (r *Remediator) CheckFailedJobs() {
 		if result == nil {
 			continue
 		}
+		processed++
 
 		oplog.LogJob(oplog.OpCoordinatorDiagnosis, jl.job.ID, jl.job.Host,
 			oplog.WithDetailf("pattern=%s category=%s", result.Diagnosis.Pattern, result.Diagnosis.Category))
@@ -112,6 +114,7 @@ func (r *Remediator) CheckFailedJobs() {
 			r.logger.Info("diagnosed job", "job_id", jl.job.ID, "message", result.Diagnosis.Message, "action", result.Action)
 		}
 	}
+	return processed
 }
 
 // fetchJobLog retrieves the last 200 lines of a job's log from the remote host.

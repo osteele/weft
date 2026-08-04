@@ -380,11 +380,15 @@ func (m *Monitor) runSyncTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			go m.requestSync(false)
+			m.runSyncTickerPass()
 		case <-m.stop:
 			return
 		}
 	}
+}
+
+func (m *Monitor) runSyncTickerPass() {
+	go m.requestSync(false)
 }
 
 func (m *Monitor) runHostRefreshTicker() {
@@ -394,11 +398,15 @@ func (m *Monitor) runHostRefreshTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			m.refreshHostsForStatus()
+			m.runHostRefreshTickerPass()
 		case <-m.stop:
 			return
 		}
 	}
+}
+
+func (m *Monitor) runHostRefreshTickerPass() {
+	m.refreshHostsForStatus()
 }
 
 func (m *Monitor) runJobDetailTicker() {
@@ -408,12 +416,16 @@ func (m *Monitor) runJobDetailTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			m.fetchWatchedJobLog()
-			m.fetchWatchedProcessStats()
+			m.runJobDetailTickerPass()
 		case <-m.stop:
 			return
 		}
 	}
+}
+
+func (m *Monitor) runJobDetailTickerPass() {
+	m.fetchWatchedJobLog()
+	m.fetchWatchedProcessStats()
 }
 
 func (m *Monitor) fetchWatchedJobLog() {
@@ -718,6 +730,12 @@ func (m *Monitor) updateHostInfo(host *hostinfo.Host) {
 }
 
 func (m *Monitor) refreshHostsForStatus() {
+	for _, hostName := range m.hostStatusRefreshTargets() {
+		go m.refreshHostInfo(hostName)
+	}
+}
+
+func (m *Monitor) hostStatusRefreshTargets() []string {
 	m.mu.RLock()
 	hosts := append([]*hostinfo.Host(nil), m.hosts...)
 	queried := make(map[string]bool, len(m.hostsQueriedThisRun))
@@ -728,6 +746,7 @@ func (m *Monitor) refreshHostsForStatus() {
 
 	hostsWithRunningJobs := m.runningHosts()
 
+	targets := make([]string, 0, len(hosts))
 	for _, host := range hosts {
 		if host == nil {
 			continue
@@ -736,9 +755,10 @@ func (m *Monitor) refreshHostsForStatus() {
 		hasRunningJobs := hostsWithRunningJobs[host.Name]
 		isOnline := host.Status == hostinfo.HostStatusOnline
 		if needsRefresh || hasRunningJobs || isOnline {
-			go m.refreshHostInfo(host.Name)
+			targets = append(targets, host.Name)
 		}
 	}
+	return targets
 }
 
 func (m *Monitor) runningHosts() map[string]bool {

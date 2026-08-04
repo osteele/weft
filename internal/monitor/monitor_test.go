@@ -3,6 +3,10 @@ package monitor
 import (
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
 )
 
 func TestNaturalSortStrings(t *testing.T) {
@@ -167,5 +171,56 @@ func TestIsWatchedDBFile(t *testing.T) {
 				t.Errorf("isWatchedDBFile(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMonitorSyncTickerPassRunsSyncBody(t *testing.T) {
+	database := db.SetupTestDB(t)
+	m := New(database, Config{
+		SyncActiveInterval:  time.Second,
+		SyncIdleInterval:    time.Second,
+		HostRefreshInterval: time.Second,
+		HostCacheDuration:   time.Hour,
+		JobDetailInterval:   time.Second,
+	})
+	events := m.Events()
+
+	m.runSyncTickerPass()
+
+	select {
+	case event := <-events:
+		if event.Type != EventSyncCompleted {
+			t.Fatalf("event type = %v, want EventSyncCompleted", event.Type)
+		}
+		if event.Err != nil {
+			t.Fatalf("sync event err = %v", event.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sync ticker pass did not emit sync completion")
+	}
+}
+
+func TestMonitorHostRefreshTickerPassUsesStatusTargets(t *testing.T) {
+	m := New(db.SetupTestDB(t), DefaultConfig())
+	m.mu.Lock()
+	m.hosts = []*hostinfo.Host{
+		{Name: "cold", Status: hostinfo.HostStatusUnknown},
+		{Name: "queried", Status: hostinfo.HostStatusUnknown},
+		{Name: "online", Status: hostinfo.HostStatusOnline},
+	}
+	m.hostsQueriedThisRun["queried"] = true
+	m.hostsQueriedThisRun["online"] = true
+	m.jobs = []*db.Job{{Host: "queried", Status: db.StatusRunning}}
+	m.mu.Unlock()
+
+	got := m.hostStatusRefreshTargets()
+	want := []string{"cold", "queried", "online"}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("targets = %v, want %v", got, want)
+		}
 	}
 }

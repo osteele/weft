@@ -3732,19 +3732,23 @@ func UpdateRunErrorDiagnosis(db *sql.DB, runID int64, diagnosis string) error {
 }
 
 // ListRecentFailedUndiagnosed returns recently failed jobs that have not been diagnosed yet.
-// These are completed jobs with non-zero exit code, retry_count == 0, and no error_diagnosis.
+// These are failed/dead jobs, plus completed jobs with non-zero exit code,
+// retry_count == 0, and no error_diagnosis.
 func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
 	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		AND end_time > ?
-		AND status = ?
-		AND exit_code IS NOT NULL AND exit_code != 0
+		AND (
+			(status = ? AND exit_code IS NOT NULL AND exit_code != 0)
+			OR status = ?
+			OR status = ?
+		)
 		AND (retry_count IS NULL OR retry_count = 0)
 		AND (error_diagnosis IS NULL OR error_diagnosis = '')
 		ORDER BY end_time DESC
 		LIMIT ?`, jobSelectColumns)
-	return queryJobs(db, query, cutoff, StatusCompleted, limit)
+	return queryJobs(db, query, cutoff, StatusCompleted, StatusFailed, StatusDead, limit)
 }
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs
