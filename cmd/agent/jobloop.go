@@ -375,6 +375,8 @@ func setupWeight(job cloud.AgentJob) int {
 }
 
 func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobSequenceConfig) {
+	doneUsingSource := activeSourceWorkdirs.begin(job.ID, pw.workDir)
+	defer doneUsingSource()
 	result := runSetupPrewarm(job, cfg, pw.workDir, true)
 	pw.done <- result
 	close(pw.done)
@@ -791,15 +793,22 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		workDir := job.Dir
+		expandedWorkDir := runner.ExpandTilde(workDir)
+		// Every source root the job reads must be held, not just its working
+		// directory: a job with uv path deps has sibling mounts, and a source
+		// update to one of those while the job runs is the same hazard.
+		jobMounts := expandedSourceMountsForJob(job)
+		doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
 		// Recover from a missing/empty workdir (e.g. previous campaign-mid
 		// cleanup race, manual rm, or aborted source extract) by re-staging
 		// from the locally cached source tarball before stageCloudNeeds runs.
-		ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job))
+		ensureSourceFreshMounts(cfg.R2Bucket, jobMounts)
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
+			doneUsingSource()
 
 			// Mark job complete with failure even when command did not start.
 			exitCode := 1
@@ -838,7 +847,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		jobCfg := singleJobConfigForAgentJob(job, cfg, workDir, jobMaxTime)
 		prewarm := setupPrewarms.waitFor(job)
 		if !prewarm.ok && prewarm.err == nil && len(hfInputAssets(job.Inputs)) > 0 {
-			prewarm = runSetupPrewarm(job, cfg, runner.ExpandTilde(workDir), false)
+			prewarm = runSetupPrewarm(job, cfg, expandedWorkDir, false)
 		}
 		if prewarm.ok {
 			jobCfg.SetupPrewarmed = prewarm.setupRan
@@ -855,6 +864,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 			r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 			prewarmExitCode := recordPrewarmFailure(cfg, job, prewarm)
+			doneUsingSource()
 
 			// Setup/HF prewarm failures at this boundary happen before the
 			// user command starts. Timeouts and declared-HF input staging
@@ -893,7 +903,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 				jobID:                 job.ID,
 				runID:                 job.RunID,
 				exitCode:              prewarmExitCode,
-				workDir:               runner.ExpandTilde(workDir),
+				workDir:               expandedWorkDir,
 				logSnapshot:           logSnapshot,
 				diskPath:              cfg.DiskPath,
 				phase:                 uploadingPhase,
@@ -923,6 +933,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg, outputWindowStartUnix)
+		doneUsingSource()
 		if job.UsesGPU {
 			gpuWarmedUp = true
 		}

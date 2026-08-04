@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -243,6 +245,102 @@ func TestDrainGraceJobRequestsRejectsInvalidSourceUpdate(t *testing.T) {
 	}
 }
 
+func TestApplySourceUpdateSameKeyDoesNotReextract(t *testing.T) {
+	tarballDir := t.TempDir()
+	writeSourceTarball(t, tarballDir, "same.tar.gz", map[string]string{
+		"tracked.txt": "from tarball\n",
+	})
+	installFakeRcloneForSourceTarballs(t, tarballDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	upd := controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/same.tar.gz"}
+	if err := applySourceUpdate("test-bucket", upd); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+
+	trackedPath := filepath.Join(remoteDir, "tracked.txt")
+	if err := os.WriteFile(trackedPath, []byte("edited after extract\n"), 0o644); err != nil {
+		t.Fatalf("edit extracted file: %v", err)
+	}
+	if err := applySourceUpdate("test-bucket", upd); err != nil {
+		t.Fatalf("second applySourceUpdate: %v", err)
+	}
+	got, err := os.ReadFile(trackedPath)
+	if err != nil {
+		t.Fatalf("read tracked file: %v", err)
+	}
+	if string(got) != "edited after extract\n" {
+		t.Fatalf("tracked.txt = %q, want edited content to survive same-key update", got)
+	}
+}
+
+func TestApplySourceUpdateDifferentKeyCleansStaleFiles(t *testing.T) {
+	tarballDir := t.TempDir()
+	writeSourceTarball(t, tarballDir, "first.tar.gz", map[string]string{
+		"current.txt": "first\n",
+		"stale.txt":   "stale\n",
+	})
+	writeSourceTarball(t, tarballDir, "second.tar.gz", map[string]string{
+		"current.txt": "second\n",
+	})
+	installFakeRcloneForSourceTarballs(t, tarballDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/first.tar.gz"}); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/second.tar.gz"}); err != nil {
+		t.Fatalf("second applySourceUpdate: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(remoteDir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale.txt stat error = %v, want file absent after different-key update", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "current.txt"))
+	if err != nil {
+		t.Fatalf("read current file: %v", err)
+	}
+	if string(got) != "second\n" {
+		t.Fatalf("current.txt = %q, want second tarball content", got)
+	}
+}
+
+func TestApplySourceUpdateRejectsDifferentKeyForRunningJobWorkdir(t *testing.T) {
+	tarballDir := t.TempDir()
+	writeSourceTarball(t, tarballDir, "first.tar.gz", map[string]string{
+		"current.txt": "first\n",
+	})
+	writeSourceTarball(t, tarballDir, "second.tar.gz", map[string]string{
+		"current.txt": "second\n",
+	})
+	installFakeRcloneForSourceTarballs(t, tarballDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/first.tar.gz"}); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+	doneUsingSource := activeSourceWorkdirs.begin(4242, remoteDir)
+	defer doneUsingSource()
+
+	err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/second.tar.gz"})
+	if err == nil {
+		t.Fatal("applySourceUpdate returned nil, want running-job workdir rejection")
+	}
+	if !strings.Contains(err.Error(), "running job 4242") {
+		t.Fatalf("error = %q, want running job id", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(remoteDir, "current.txt"))
+	if readErr != nil {
+		t.Fatalf("read current file: %v", readErr)
+	}
+	if string(got) != "first\n" {
+		t.Fatalf("current.txt = %q, want original tree to remain", got)
+	}
+}
+
 func TestDrainGraceCancelAttemptRequestsAggregatesIDs(t *testing.T) {
 	instanceID := int64(99)
 	prefix := controlplane.GraceCancelAttemptsPrefix(instanceID)
@@ -279,5 +377,124 @@ func TestDrainGraceCancelAttemptRequestsAggregatesIDs(t *testing.T) {
 		if _, ok := got[want]; !ok {
 			t.Errorf("missing canceled attempt id %d in %v", want, got)
 		}
+	}
+}
+
+func resetSourceUpdateState(t *testing.T) {
+	t.Helper()
+	prevCacheDir := sourceCacheDirOverride
+	prevSources := sources
+	prevActive := activeSourceWorkdirs
+	sourceCacheDirOverride = filepath.Join(t.TempDir(), "source-cache")
+	sources = &sourceRegistry{latest: map[string]string{}}
+	activeSourceWorkdirs = &activeSourceWorkdirTracker{users: map[string]map[int64]int{}}
+	t.Cleanup(func() {
+		sourceCacheDirOverride = prevCacheDir
+		sources = prevSources
+		activeSourceWorkdirs = prevActive
+	})
+}
+
+func writeSourceTarball(t *testing.T, tarballDir, name string, files map[string]string) {
+	t.Helper()
+	srcDir := filepath.Join(t.TempDir(), "src")
+	for name, content := range files {
+		filePath := filepath.Join(srcDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			t.Fatalf("mkdir source parent: %v", err)
+		}
+		if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+			t.Fatalf("write source file: %v", err)
+		}
+	}
+	dest := filepath.Join(tarballDir, name)
+	cmd := exec.Command("tar", "czf", dest, "-C", srcDir, ".")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create source tarball %s: %v\n%s", name, err, output)
+	}
+}
+
+func installFakeRcloneForSourceTarballs(t *testing.T, tarballDir string) {
+	t.Helper()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	rclonePath := filepath.Join(binDir, "rclone")
+	rcloneScript := `#!/bin/sh
+set -eu
+if [ "$1" != "copyto" ]; then
+  echo "unexpected rclone command: $*" >&2
+  exit 1
+fi
+src="$2"
+dest="$3"
+base="${src##*/}"
+mkdir -p "$(dirname "$dest")"
+cp "$TARBALL_DIR/$base" "$dest"
+`
+	if err := os.WriteFile(rclonePath, []byte(rcloneScript), 0o755); err != nil {
+		t.Fatalf("write fake rclone: %v", err)
+	}
+	t.Setenv("TARBALL_DIR", tarballDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestApplySourceUpdateRejectsUpdateToSiblingMountOfRunningJob(t *testing.T) {
+	tarballDir := t.TempDir()
+	writeSourceTarball(t, tarballDir, "lib-first.tar.gz", map[string]string{
+		"lib.py": "first\n",
+	})
+	writeSourceTarball(t, tarballDir, "lib-second.tar.gz", map[string]string{
+		"lib.py": "second\n",
+	})
+	installFakeRcloneForSourceTarballs(t, tarballDir)
+	resetSourceUpdateState(t)
+
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	siblingDir := filepath.Join(root, "shared-lib")
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: siblingDir, R2Key: "sources/lib-first.tar.gz"}); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+
+	// The running job's working directory is projectDir; siblingDir is a uv
+	// path dep it imports from. Both must be held.
+	job := cloud.AgentJob{
+		ID:  7,
+		Dir: projectDir,
+		SourceMounts: []cloud.SourceMount{
+			{RemoteDir: projectDir},
+			{RemoteDir: siblingDir},
+		},
+	}
+	doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, expandedSourceMountsForJob(job))
+
+	err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: siblingDir, R2Key: "sources/lib-second.tar.gz"})
+	if err == nil {
+		t.Fatal("applySourceUpdate returned nil, want rejection for sibling mount of running job")
+	}
+	if !strings.Contains(err.Error(), "running job 7") {
+		t.Fatalf("error = %q, want running job id", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(siblingDir, "lib.py"))
+	if readErr != nil {
+		t.Fatalf("read sibling file: %v", readErr)
+	}
+	if string(got) != "first\n" {
+		t.Fatalf("lib.py = %q, want sibling tree to remain", got)
+	}
+
+	// After the job releases, the same update must succeed.
+	doneUsingSource()
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: siblingDir, R2Key: "sources/lib-second.tar.gz"}); err != nil {
+		t.Fatalf("applySourceUpdate after release: %v", err)
+	}
+	got, readErr = os.ReadFile(filepath.Join(siblingDir, "lib.py"))
+	if readErr != nil {
+		t.Fatalf("read sibling file after release: %v", readErr)
+	}
+	if string(got) != "second\n" {
+		t.Fatalf("lib.py = %q, want updated tree after release", got)
 	}
 }

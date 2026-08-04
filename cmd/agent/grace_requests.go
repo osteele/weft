@@ -96,8 +96,11 @@ func sourceUpdatePhase(jobID int64, fallback string) string {
 }
 
 func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
-	if err := os.MkdirAll(upd.RemoteDir, 0o755); err != nil {
-		return fmt.Errorf("create remote dir %s: %w", upd.RemoteDir, err)
+	if key, ok := sources.lookup(upd.RemoteDir); ok && key == upd.R2Key {
+		return nil
+	}
+	if jobID, ok := activeSourceWorkdirs.runningJob(upd.RemoteDir); ok {
+		return fmt.Errorf("source dir %s is in use by running job %d", upd.RemoteDir, jobID)
 	}
 
 	// Cache the tarball at a stable per-R2-key path so that ensureSourceFreshMounts
@@ -105,6 +108,13 @@ func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
 	cachePath := sourceCachePath(upd.R2Key)
 	if err := downloadSourceToCache(bucket, upd.R2Key, cachePath); err != nil {
 		return fmt.Errorf("download source tarball: %w", err)
+	}
+
+	if err := os.RemoveAll(upd.RemoteDir); err != nil {
+		return fmt.Errorf("clean remote dir %s: %w", upd.RemoteDir, err)
+	}
+	if err := os.MkdirAll(upd.RemoteDir, 0o755); err != nil {
+		return fmt.Errorf("create remote dir %s: %w", upd.RemoteDir, err)
 	}
 
 	tarCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

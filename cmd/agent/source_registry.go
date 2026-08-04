@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,90 @@ type sourceRegistry struct {
 }
 
 var sources = &sourceRegistry{latest: map[string]string{}}
+
+type activeSourceWorkdirTracker struct {
+	mu    sync.Mutex
+	users map[string]map[int64]int
+}
+
+var activeSourceWorkdirs = &activeSourceWorkdirTracker{users: map[string]map[int64]int{}}
+
+func (t *activeSourceWorkdirTracker) begin(jobID int64, workdir string) func() {
+	if strings.TrimSpace(workdir) == "" || jobID <= 0 {
+		return func() {}
+	}
+	dir := filepath.Clean(workdir)
+	t.mu.Lock()
+	if t.users == nil {
+		t.users = map[string]map[int64]int{}
+	}
+	jobs := t.users[dir]
+	if jobs == nil {
+		jobs = map[int64]int{}
+		t.users[dir] = jobs
+	}
+	jobs[jobID]++
+	t.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			jobs := t.users[dir]
+			if jobs == nil {
+				return
+			}
+			if jobs[jobID] <= 1 {
+				delete(jobs, jobID)
+			} else {
+				jobs[jobID]--
+			}
+			if len(jobs) == 0 {
+				delete(t.users, dir)
+			}
+		})
+	}
+}
+
+// beginMounts holds every source root a job reads. Returns one release that
+// frees all of them; a job with uv path deps reads sibling roots as well as
+// its working directory, and a source update to any of them mid-run is the
+// same hazard.
+func (t *activeSourceWorkdirTracker) beginMounts(jobID int64, mounts []cloud.SourceMount) func() {
+	releases := make([]func(), 0, len(mounts))
+	for _, mount := range mounts {
+		releases = append(releases, t.begin(jobID, mount.RemoteDir))
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for _, release := range releases {
+				release()
+			}
+		})
+	}
+}
+
+func (t *activeSourceWorkdirTracker) runningJob(workdir string) (int64, bool) {
+	if strings.TrimSpace(workdir) == "" {
+		return 0, false
+	}
+	dir := filepath.Clean(workdir)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	jobs := t.users[dir]
+	if len(jobs) == 0 {
+		return 0, false
+	}
+	var id int64
+	for jobID := range jobs {
+		if id == 0 || jobID < id {
+			id = jobID
+		}
+	}
+	return id, true
+}
 
 func (r *sourceRegistry) record(remoteDir, r2Key string) {
 	if remoteDir == "" || r2Key == "" {
