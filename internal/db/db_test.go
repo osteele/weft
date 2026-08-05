@@ -3552,9 +3552,12 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "test")
 		MarkQueuedJobRunning(db, jobID) // First transition to running
 
-		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
+		transitioned, err := RecordCompletionByIDWithTransition(db, jobID, 0, time.Now().Unix())
 		if err != nil {
 			t.Fatalf("RecordCompletionByID failed: %v", err)
+		}
+		if !transitioned {
+			t.Fatal("RecordCompletionByIDWithTransition transitioned = false, want true")
 		}
 
 		job, _ := GetJobByID(db, jobID)
@@ -3563,6 +3566,14 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 		}
 		if job.LastSyncedStatus != StatusCompleted {
 			t.Errorf("last_synced_status = %s, want %s", job.LastSyncedStatus, StatusCompleted)
+		}
+
+		transitioned, err = RecordCompletionByIDWithTransition(db, jobID, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("RecordCompletionByID repeat failed: %v", err)
+		}
+		if transitioned {
+			t.Fatal("RecordCompletionByIDWithTransition repeat transitioned = true, want false")
 		}
 	})
 

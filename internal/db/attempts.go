@@ -910,6 +910,39 @@ func UpdateAttemptCompletion(execer dbExecer, jobID int64, exitCode int, endTime
 	return err
 }
 
+// UpdateAttemptCompletionIfNonTerminal is the notification-safe counterpart to
+// UpdateAttemptCompletion. It performs the terminal write only while the
+// selected attempt is still non-terminal, so concurrent sync processes cannot
+// both claim the same terminal transition.
+func UpdateAttemptCompletionIfNonTerminal(execer dbExecer, jobID int64, exitCode int, endTime int64) (bool, error) {
+	cloudOutcome := AttemptOutcomeCompleted
+	if exitCode != 0 {
+		cloudOutcome = AttemptOutcomeFailed
+	}
+	res, err := execer.Exec(`
+		UPDATE job_attempts
+		SET status = ?, exit_code = ?, end_time = ?,
+		    last_synced_status = ?, pending_status = NULL, session_name = NULL,
+		    cloud_outcome = CASE
+		        WHEN launch_id IS NULL THEN cloud_outcome
+		        WHEN cloud_outcome IS NULL THEN ?
+		        ELSE cloud_outcome
+		    END
+		WHERE id = `+latestAttemptSubquery+`
+		  AND status NOT IN (?, ?, ?, ?, ?, ?)`,
+		StatusCompleted, exitCode, endTime, StatusCompleted, cloudOutcome, jobID,
+		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // UpdateAttemptDead marks the latest open attempt as failed (unexpected termination).
 func UpdateAttemptDead(execer dbExecer, jobID int64) error {
 	endTime := time.Now().Unix()

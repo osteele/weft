@@ -726,8 +726,7 @@ func syncCompletedJobAtRun(
 		}
 	}
 
-	wasTerminal := db.JobIsTerminal(database, jobID)
-	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
+	recordResult, err := db.RecordCloudJobCompletionWithTransition(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
 		if markRejectedCompletionProcessed(ctx, r2Client, jobID, runID, err) {
 			slog.Debug("marked permanently unrecordable cloud completion processed",
@@ -739,13 +738,14 @@ func syncCompletedJobAtRun(
 		os.RemoveAll(tmpDir)
 		return completedMarkerResult{}
 	}
+	updatedInstanceID := recordResult.LaunchID
 	result := completedMarkerResult{updatedInstanceID: updatedInstanceID, completed: true}
 
 	host := ""
 	if updatedInstanceID > 0 {
 		host = db.LaunchHost(updatedInstanceID)
 	}
-	if !wasTerminal {
+	if recordResult.Transitioned {
 		if *exitCode == 0 {
 			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
 			notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)

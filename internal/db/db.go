@@ -1418,10 +1418,29 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 // Note: Also accepts failed/dead status because a status file appearing is authoritative
 // evidence of completion, even if the job was previously marked as failed due to race conditions.
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
+	_, err := RecordCompletionByIDWithTransition(db, id, exitCode, endTime)
+	return err
+}
+
+// RecordCompletionByIDWithTransition is like RecordCompletionByID, and also
+// reports whether this call moved a non-terminal attempt into terminal state.
+// Notification senders must use this instead of a separate preflight status
+// read, because the preflight read races across concurrent sync processes.
+func RecordCompletionByIDWithTransition(db *sql.DB, id int64, exitCode int, endTime int64) (bool, error) {
 	if err := checkTransition(db, id, StatusCompleted, true, status.SourceSSHSync); err != nil {
-		return err
+		return false, err
 	}
-	return UpdateAttemptCompletion(db, id, exitCode, endTime)
+	transitioned, err := UpdateAttemptCompletionIfNonTerminal(db, id, exitCode, endTime)
+	if err != nil {
+		return false, err
+	}
+	if transitioned {
+		return true, nil
+	}
+	if err := checkTransition(db, id, StatusCompleted, true, status.SourceSSHSync); err != nil {
+		return false, err
+	}
+	return false, UpdateAttemptCompletion(db, id, exitCode, endTime)
 }
 
 // MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID.

@@ -58,6 +58,45 @@ func TestRecordCloudJobCompletion_RetriesTransientLock(t *testing.T) {
 	}
 }
 
+func TestRecordCloudJobCompletionWithTransitionReportsOnlyFirstTerminalWrite(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	result, err := RecordCloudJobCompletionWithTransition(database, jobID, 0, 100, 200, "", "", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletionWithTransition: %v", err)
+	}
+	if result.LaunchID != launchID {
+		t.Fatalf("launch id = %d, want %d", result.LaunchID, launchID)
+	}
+	if !result.Transitioned {
+		t.Fatal("transitioned = false, want true")
+	}
+
+	result, err = RecordCloudJobCompletionWithTransition(database, jobID, 0, 100, 200, "", "", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletionWithTransition repeat: %v", err)
+	}
+	if result.Transitioned {
+		t.Fatal("repeat transitioned = true, want false")
+	}
+}
+
 func TestNeedsCloudCompletionBackfill_TerminalIncomplete(t *testing.T) {
 	database := SetupTestDB(t)
 

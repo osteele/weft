@@ -205,8 +205,7 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 		}
 	}
 
-	wasTerminal := db.JobIsTerminal(database, jobID)
-	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
+	recordResult, err := db.RecordCloudJobCompletionWithTransition(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	if err != nil {
 		if MarkRejectedCompletionProcessed(ctx, r2c, jobID, runID, err) {
 			slog.Debug("marked permanently unrecordable cloud completion processed",
@@ -217,13 +216,14 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
 		return false
 	}
+	launchID := recordResult.LaunchID
 
 	// Log cloud job completion/failure to local ops log
 	host := ""
 	if launchID > 0 {
 		host = db.LaunchHost(launchID)
 	}
-	if !wasTerminal {
+	if recordResult.Transitioned {
 		if *exitCode == 0 {
 			oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
 			notify.JobTerminal(database, jobID, db.StatusCompleted, exitCode)
@@ -324,10 +324,10 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 		if manifest.CompletedAtUnix > 0 {
 			marker = time.Unix(manifest.CompletedAtUnix, 0)
 		}
-		wasTerminal := db.JobIsTerminal(database, summary.JobID)
 		// endTimeUnix == 0: leave last_synced_status NULL so the full sync
 		// pass can still backfill authoritative phase timings.
-		if _, err := db.RecordCloudJobCompletion(database, summary.JobID, 0, 0, 0, "", "", marker, runID); err != nil {
+		recordResult, err := db.RecordCloudJobCompletionWithTransition(database, summary.JobID, 0, 0, 0, "", "", marker, runID)
+		if err != nil {
 			if db.IsPermanentCloudCompletionNoop(err) {
 				slog.Debug("skipping permanently unrecordable manifest completion",
 					"component", "reconcile", "instance", instanceID,
@@ -339,7 +339,7 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 				"job_id", summary.JobID, "error", err)
 			continue
 		}
-		if !wasTerminal {
+		if recordResult.Transitioned {
 			oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
 				oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))
 			manifestExit := 0

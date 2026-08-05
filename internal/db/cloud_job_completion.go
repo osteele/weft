@@ -22,6 +22,12 @@ var (
 	ErrCloudCompletionAttemptAbandoned = errors.New("cloud completion attempt abandoned")
 )
 
+// CloudJobCompletionResult describes the DB effects of a cloud completion.
+type CloudJobCompletionResult struct {
+	LaunchID     int64
+	Transitioned bool
+}
+
 // IsPermanentCloudCompletionNoop reports whether a completion can never be recorded for its run.
 func IsPermanentCloudCompletionNoop(err error) bool {
 	return errors.Is(err, ErrCloudCompletionAttemptNotFound) || errors.Is(err, ErrCloudCompletionAttemptAbandoned)
@@ -55,17 +61,27 @@ func IsPermanentCloudCompletionNoop(err error) bool {
 // body is idempotent on re-entry: a partially-applied completion re-runs as a
 // same-status no-op (see checkTransition and the target-state UPDATEs below).
 func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (int64, error) {
-	return RetryOnDatabaseLockedValue(context.Background(), "record cloud job completion", func() (int64, error) {
+	result, err := RecordCloudJobCompletionWithTransition(database, jobID, exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
+	return result.LaunchID, err
+}
+
+// RecordCloudJobCompletionWithTransition is like RecordCloudJobCompletion, and
+// also reports whether this call moved a non-terminal attempt into terminal
+// state. Notification senders must use this result instead of a separate
+// preflight status read, because concurrent sync/reconcile processes can both
+// observe the old state before either writes.
+func RecordCloudJobCompletionWithTransition(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (CloudJobCompletionResult, error) {
+	return RetryOnDatabaseLockedValue(context.Background(), "record cloud job completion", func() (CloudJobCompletionResult, error) {
 		if recordCloudCompletionLockHook != nil {
 			if err := recordCloudCompletionLockHook(); err != nil {
-				return 0, err
+				return CloudJobCompletionResult{}, err
 			}
 		}
 		return recordCloudJobCompletion(database, jobID, exitCode, startTimeUnix, endTimeUnix, failureReason, killReason, markerLastModified, runID)
 	})
 }
 
-func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (int64, error) {
+func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (CloudJobCompletionResult, error) {
 	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
@@ -89,17 +105,17 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			runID, jobID,
 		).Scan(&cloudInstanceID, &abandonedAt)
 		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptNotFound, jobID, runID)
+			return CloudJobCompletionResult{}, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptNotFound, jobID, runID)
 		}
 		if err != nil {
-			return 0, err
+			return CloudJobCompletionResult{}, err
 		}
 		if abandonedAt.Valid {
-			return 0, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptAbandoned, jobID, runID)
+			return CloudJobCompletionResult{}, fmt.Errorf("%w: job %d run %d", ErrCloudCompletionAttemptAbandoned, jobID, runID)
 		}
 	}
 	if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
-		return 0, err
+		return CloudJobCompletionResult{}, err
 	}
 
 	// endTimeUnix == 0 means the completion JSON wasn't ingested. Prefer the
@@ -135,7 +151,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 
 	if runID == 0 {
 		if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
-			return 0, err
+			return CloudJobCompletionResult{}, err
 		}
 	}
 
@@ -147,33 +163,80 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			 LIMIT 1`,
 			jobID,
 		).Scan(&cloudInstanceID); err != nil && err != sql.ErrNoRows {
-			return 0, err
+			return CloudJobCompletionResult{}, err
 		}
 	}
+	transitioned := false
 	// Cloud completion is authoritative for the live owner attempt. Abandoned
 	// move attempts are audit rows and must not be revived by late source or
 	// destination completion metadata.
 	if runID > 0 {
-		if _, err := database.Exec(
+		res, err := database.Exec(
 			`UPDATE job_attempts
 			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
 			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 			     cloud_outcome = ?
-			 WHERE id = ? AND job_id = ? AND abandoned_at IS NULL`,
+			 WHERE id = ? AND job_id = ? AND abandoned_at IS NULL
+			   AND status NOT IN (?, ?, ?, ?, ?, ?)`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, runID, jobID,
-		); err != nil {
-			return 0, err
+			StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
+		)
+		if err != nil {
+			return CloudJobCompletionResult{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return CloudJobCompletionResult{}, err
+		}
+		transitioned = n > 0
+		if !transitioned {
+			if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
+				return CloudJobCompletionResult{}, err
+			}
+			if _, err := database.Exec(
+				`UPDATE job_attempts
+				 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+				     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+				     cloud_outcome = ?
+				 WHERE id = ? AND job_id = ? AND abandoned_at IS NULL`,
+				targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, runID, jobID,
+			); err != nil {
+				return CloudJobCompletionResult{}, err
+			}
 		}
 	} else {
-		if _, err := database.Exec(
+		res, err := database.Exec(
 			`UPDATE job_attempts
 			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
 			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 			     cloud_outcome = ?
-			 WHERE id = (SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+			 WHERE id = (SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)
+			   AND status NOT IN (?, ?, ?, ?, ?, ?)`,
 			targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
-		); err != nil {
-			return 0, err
+			StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
+		)
+		if err != nil {
+			return CloudJobCompletionResult{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return CloudJobCompletionResult{}, err
+		}
+		transitioned = n > 0
+		if !transitioned {
+			if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
+				return CloudJobCompletionResult{}, err
+			}
+			if _, err := database.Exec(
+				`UPDATE job_attempts
+				 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+				     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+				     cloud_outcome = ?
+				 WHERE id = (SELECT id FROM authoritative_job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
+				targetStatus, exitCode, startTimeArg, endTimeArg, lastSyncedStatusArg, failureReason, outcome, jobID,
+			); err != nil {
+				return CloudJobCompletionResult{}, err
+			}
 		}
 	}
 
@@ -196,7 +259,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			jobID, cloudInstanceID.Int64, runID, jobID,
 			StatusQueued, StatusStarting, StatusRunning,
 		); err != nil {
-			return 0, fmt.Errorf("finalize later same-launch attempts for job %d: %w", jobID, err)
+			return CloudJobCompletionResult{}, fmt.Errorf("finalize later same-launch attempts for job %d: %w", jobID, err)
 		}
 	}
 	if runID > 0 && exitCode == 0 {
@@ -219,7 +282,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 			jobID, runID, runID, jobID,
 			StatusQueued, StatusStarting, StatusRunning,
 		); err != nil {
-			return 0, fmt.Errorf("supersede later attempts after completed run for job %d: %w", jobID, err)
+			return CloudJobCompletionResult{}, fmt.Errorf("supersede later attempts after completed run for job %d: %w", jobID, err)
 		}
 	}
 
@@ -238,7 +301,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 					WHERE id = ? AND job_id = ? AND launch_id IS NULL AND abandoned_at IS NULL`,
 					inferredID, host, runID, jobID,
 				); err != nil {
-					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+					return CloudJobCompletionResult{}, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
 				}
 			} else {
 				if _, err := database.Exec(`
@@ -250,17 +313,17 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 					  AND abandoned_at IS NULL`,
 					inferredID, host, jobID,
 				); err != nil {
-					return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+					return CloudJobCompletionResult{}, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
 				}
 			}
-			return inferredID, nil
+			return CloudJobCompletionResult{LaunchID: inferredID, Transitioned: transitioned}, nil
 		}
 	}
 
 	if cloudInstanceID.Valid {
-		return cloudInstanceID.Int64, nil
+		return CloudJobCompletionResult{LaunchID: cloudInstanceID.Int64, Transitioned: transitioned}, nil
 	}
-	return 0, nil
+	return CloudJobCompletionResult{Transitioned: transitioned}, nil
 }
 
 // NeedsCloudCompletionBackfill reports whether the latest attempt for jobID is
