@@ -155,6 +155,37 @@ func (p *stringPromise) await() (string, error) {
 	return p.val, p.err
 }
 
+type sourceUploadPromise struct {
+	done chan struct{}
+	mu   sync.Mutex
+	val  weftsync.SourceUploadResult
+	err  error
+}
+
+func newSourceUploadPromise() *sourceUploadPromise {
+	return &sourceUploadPromise{done: make(chan struct{})}
+}
+
+func (p *sourceUploadPromise) resolve(val weftsync.SourceUploadResult, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	select {
+	case <-p.done:
+		return
+	default:
+		p.val = val
+		p.err = err
+		close(p.done)
+	}
+}
+
+func (p *sourceUploadPromise) await() (weftsync.SourceUploadResult, error) {
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.val, p.err
+}
+
 type AssetStageKind string
 
 const (
@@ -183,7 +214,7 @@ type R2AssetStager struct {
 
 	cancel         context.CancelFunc
 	agentKey       *stringPromise
-	sourcePromises map[string]*stringPromise
+	sourcePromises map[string]*sourceUploadPromise
 	reporter       AssetStageReporter
 
 	statusMu sync.RWMutex
@@ -298,7 +329,7 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		AgentVersion:   agentVersion,
 		cancel:         uploadCancel,
 		agentKey:       newStringPromise(),
-		sourcePromises: make(map[string]*stringPromise),
+		sourcePromises: make(map[string]*sourceUploadPromise),
 		reporter:       reporter,
 		statuses:       make(map[string]AssetStageStatus),
 	}
@@ -320,7 +351,7 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		}
 	}
 	for localDir := range allSourceDirs {
-		stager.sourcePromises[localDir] = newStringPromise()
+		stager.sourcePromises[localDir] = newSourceUploadPromise()
 		stager.setStatus(AssetStageStatus{
 			Key:   localDir,
 			Kind:  AssetStageKindSource,
@@ -377,7 +408,7 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()
-			key, err := weftsync.UploadSourceToR2WithProgressForInputs(uploadCtx, r2Client, localDir, inputs, func(phase string) {
+			result, err := weftsync.UploadSourceRootsToR2WithProgressForInputs(uploadCtx, r2Client, localDir, inputs, func(phase string) {
 				stager.setStatus(AssetStageStatus{
 					Key:   localDir,
 					Kind:  AssetStageKindSource,
@@ -398,10 +429,10 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 					Phase: "error",
 					Err:   err,
 				})
-				promise.resolve("", fmt.Errorf("upload source %s: %w", localDir, err))
+				promise.resolve(weftsync.SourceUploadResult{}, fmt.Errorf("upload source %s: %w", localDir, err))
 				return
 			}
-			promise.resolve(key, nil)
+			promise.resolve(result, nil)
 		}()
 	}
 
@@ -442,21 +473,25 @@ func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string, onProgress func(done, 
 	onProgress(done, total)
 
 	assets := R2Assets{
-		Client:       s.Client,
-		AgentVersion: s.AgentVersion,
-		AgentR2Key:   agentR2Key,
-		SourceR2Keys: make(map[string]string),
+		Client:          s.Client,
+		AgentVersion:    s.AgentVersion,
+		AgentR2Key:      agentR2Key,
+		SourceR2Keys:    make(map[string]string),
+		SourceManifests: make(map[string]weftsync.SourceManifest),
 	}
 	for _, localDir := range dirs {
 		promise, ok := s.sourcePromises[localDir]
 		if !ok {
 			continue
 		}
-		key, err := promise.await()
+		result, err := promise.await()
 		if err != nil {
 			return R2Assets{}, err
 		}
-		assets.SourceR2Keys[localDir] = key
+		assets.SourceManifests[localDir] = result.Manifest
+		for _, root := range result.Manifest.Roots {
+			assets.SourceR2Keys[root.LocalPath] = root.R2Key
+		}
 		done++
 		onProgress(done, total)
 	}
@@ -493,14 +528,15 @@ func (s *R2AssetStager) AwaitAllPerDir() (*R2Assets, map[string]error, error) {
 		return nil, nil, fmt.Errorf("upload agent to R2: %w", err)
 	}
 	assets := &R2Assets{
-		Client:       s.Client,
-		AgentVersion: s.AgentVersion,
-		AgentR2Key:   agentR2Key,
-		SourceR2Keys: make(map[string]string),
+		Client:          s.Client,
+		AgentVersion:    s.AgentVersion,
+		AgentR2Key:      agentR2Key,
+		SourceR2Keys:    make(map[string]string),
+		SourceManifests: make(map[string]weftsync.SourceManifest),
 	}
 	var perDirErr map[string]error
 	for localDir, promise := range s.sourcePromises {
-		key, err := promise.await()
+		result, err := promise.await()
 		if err != nil {
 			if perDirErr == nil {
 				perDirErr = make(map[string]error)
@@ -508,7 +544,10 @@ func (s *R2AssetStager) AwaitAllPerDir() (*R2Assets, map[string]error, error) {
 			perDirErr[localDir] = err
 			continue
 		}
-		assets.SourceR2Keys[localDir] = key
+		assets.SourceManifests[localDir] = result.Manifest
+		for _, root := range result.Manifest.Roots {
+			assets.SourceR2Keys[root.LocalPath] = root.R2Key
+		}
 	}
 	return assets, perDirErr, nil
 }
@@ -1373,13 +1412,13 @@ func launchCampaignWithStager(
 
 				var donorSources []SourceMapping
 				for _, localDir := range donorCfg.SourceDirs {
-					if r2Key, ok := donorAssets.SourceR2Keys[localDir]; ok {
-						donorSources = append(donorSources, SourceMapping{
-							R2Key:     r2Key,
-							RemoteDir: path.Join(cloud.ProjectRootDir, path.Base(localDir)),
-							LocalDir:  localDir,
-						})
-					}
+					donorSources = append(donorSources,
+						sourceMappingsForProjectDir(
+							localDir,
+							path.Join(cloud.ProjectRootDir, path.Base(localDir)),
+							donorAssets.SourceManifests,
+							donorAssets.SourceR2Keys,
+						)...)
 				}
 
 				donorCreateOpts := cloud.CreateOpts{}
@@ -2024,10 +2063,11 @@ func applyGroupCreateRequirements(createOpts *cloud.CreateOpts, group InstanceGr
 
 // R2Assets holds pre-staged R2 resources shared across instances in a campaign.
 type R2Assets struct {
-	Client       *r2.Client
-	AgentVersion string            // agent version string (jj commit hash)
-	AgentR2Key   string            // R2 key for the agent binary
-	SourceR2Keys map[string]string // localDir -> R2 key for source tarballs
+	Client          *r2.Client
+	AgentVersion    string                             // agent version string (jj commit hash)
+	AgentR2Key      string                             // R2 key for the agent binary
+	SourceR2Keys    map[string]string                  // local root dir -> R2 key for source tarballs
+	SourceManifests map[string]weftsync.SourceManifest // project localDir -> ordered source-root manifest
 }
 
 // runGroupLaunchWithReplan invokes launch up to maxReplans+1 times. The
@@ -2401,6 +2441,7 @@ func LaunchInstance(
 		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
 			return failLaunchBeforeCreate("cloud-after pin persistence failed", err)
 		}
+		agentJob.SourceMounts = sourceMountsForJob(group, job, localToRemote, r2Assets.SourceManifests)
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
 		if err != nil {
 			return failLaunchBeforeCreate("checkpoint needs resolution failed", err)
@@ -2777,7 +2818,7 @@ func LaunchInstance(
 
 	// Build source mappings for the bootstrap script
 	var sources []SourceMapping
-	sources = sourceMappingsForLaunch(group, localToRemote, r2Assets.SourceR2Keys)
+	sources = sourceMappingsForLaunch(group, localToRemote, r2Assets.SourceManifests, r2Assets.SourceR2Keys)
 
 	// Store grace period in DB if configured
 	if opts.GracePeriodSeconds > 0 {
@@ -2908,28 +2949,9 @@ func remoteDirForLaunchAgentJob(group InstanceGroup, job *db.Job, localToRemote 
 	return path.Join(path.Dir(base), fmt.Sprintf("%s-job-%d", path.Base(base), job.ID))
 }
 
-func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]string, sourceR2Keys map[string]string) []SourceMapping {
+func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]string, manifests map[string]weftsync.SourceManifest, sourceR2Keys map[string]string) []SourceMapping {
 	var sources []SourceMapping
 	seen := map[string]bool{}
-	add := func(localDir, remoteDir string) {
-		if localDir == "" || remoteDir == "" {
-			return
-		}
-		r2Key, ok := sourceR2Keys[localDir]
-		if !ok {
-			return
-		}
-		key := localDir + "\x00" + remoteDir
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		sources = append(sources, SourceMapping{
-			R2Key:     r2Key,
-			RemoteDir: remoteDir,
-			LocalDir:  localDir,
-		})
-	}
 	if group.SlotGPUs {
 		jobs := append([]*db.Job(nil), group.Jobs...)
 		sort.Slice(jobs, func(i, j int) bool {
@@ -2946,15 +2968,96 @@ func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]strin
 				continue
 			}
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			add(localDir, remoteDirForLaunchAgentJob(group, job, localToRemote))
+			for _, source := range sourceMappingsForProjectDir(localDir, remoteDirForLaunchAgentJob(group, job, localToRemote), manifests, sourceR2Keys) {
+				key := source.LocalDir + "\x00" + source.RemoteDir
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				sources = append(sources, source)
+			}
 		}
 		return sources
 	}
 	for localDir, remoteDir := range localToRemote {
-		add(localDir, remoteDir)
+		for _, source := range sourceMappingsForProjectDir(localDir, remoteDir, manifests, sourceR2Keys) {
+			key := source.LocalDir + "\x00" + source.RemoteDir
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			sources = append(sources, source)
+		}
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].RemoteDir < sources[j].RemoteDir })
 	return sources
+}
+
+func sourceMappingsForProjectDir(projectLocalDir, projectRemoteDir string, manifests map[string]weftsync.SourceManifest, sourceR2Keys map[string]string) []SourceMapping {
+	if projectLocalDir == "" || projectRemoteDir == "" {
+		return nil
+	}
+	manifest, ok := manifests[projectLocalDir]
+	if !ok || len(manifest.Roots) == 0 {
+		if r2Key := sourceR2Keys[projectLocalDir]; r2Key != "" {
+			return []SourceMapping{{
+				R2Key:     r2Key,
+				RemoteDir: projectRemoteDir,
+				LocalDir:  projectLocalDir,
+			}}
+		}
+		return nil
+	}
+	sources := make([]SourceMapping, 0, len(manifest.Roots))
+	sources = append(sources, SourceMapping{
+		R2Key:     manifest.Roots[0].R2Key,
+		RemoteDir: projectRemoteDir,
+		LocalDir:  manifest.Roots[0].LocalPath,
+	})
+	parent := path.Dir(projectRemoteDir)
+	for _, root := range manifest.Roots[1:] {
+		sources = append(sources, SourceMapping{
+			R2Key:     root.R2Key,
+			RemoteDir: path.Join(parent, root.MountBasename),
+			LocalDir:  root.LocalPath,
+		})
+	}
+	return sources
+}
+
+func sourceMountsForJob(group InstanceGroup, job *db.Job, localToRemote map[string]string, manifests map[string]weftsync.SourceManifest) []cloud.SourceMount {
+	if job == nil {
+		return nil
+	}
+	projectLocalDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	manifest, ok := manifests[projectLocalDir]
+	if !ok || len(manifest.Roots) == 0 {
+		return nil
+	}
+	projectRemoteDir := remoteDirForLaunchAgentJob(group, job, localToRemote)
+	return sourceMountsFromManifest(manifest, projectRemoteDir)
+}
+
+func sourceMountsFromManifest(manifest weftsync.SourceManifest, projectRemoteDir string) []cloud.SourceMount {
+	if len(manifest.Roots) == 0 || projectRemoteDir == "" {
+		return nil
+	}
+	parent := path.Dir(projectRemoteDir)
+	mounts := make([]cloud.SourceMount, 0, len(manifest.Roots))
+	for i, root := range manifest.Roots {
+		remoteDir := projectRemoteDir
+		if i > 0 {
+			remoteDir = path.Join(parent, root.MountBasename)
+		}
+		mounts = append(mounts, cloud.SourceMount{
+			R2Key:         root.R2Key,
+			RemoteDir:     remoteDir,
+			LocalDir:      root.LocalPath,
+			MountBasename: root.MountBasename,
+			Hash:          root.Hash,
+		})
+	}
+	return mounts
 }
 
 // destroyLeakedInstance attempts to destroy a provider instance that was created

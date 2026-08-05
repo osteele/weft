@@ -294,9 +294,9 @@ func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 	}
 
 	disk, _ := EstimateGroupDisk(group, nil, nil)
-	// BaseOverheadGB(6) + NonCUDAOverheadGB(3) + uv(45) = 54
-	if disk != 54 {
-		t.Fatalf("disk = %d, want 54", disk)
+	// BaseOverheadGB(6) + NonCUDAOverheadGB(3) + uv(45) + source(1) = 55
+	if disk != 55 {
+		t.Fatalf("disk = %d, want 55", disk)
 	}
 }
 

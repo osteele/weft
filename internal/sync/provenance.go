@@ -27,6 +27,18 @@ func PerJobSourceMarkerFile(jobID int64) string {
 // ComputeSourceSHA256 computes a deterministic SHA-256 fingerprint for the
 // source snapshot that SyncSources would send (same exclude rules).
 func ComputeSourceSHA256(localDir string) (string, error) {
+	roots, err := ResolveSourceRoots(localDir)
+	if err != nil {
+		return "", err
+	}
+	if len(roots) > 1 {
+		manifest, tmpPaths, err := BuildSourceManifest(localDir)
+		if err != nil {
+			return "", err
+		}
+		removeFiles(tmpPaths)
+		return manifest.Hash, nil
+	}
 	tarPath, sha256hex, err := CreateSourceTarball(localDir)
 	if err != nil {
 		return "", err

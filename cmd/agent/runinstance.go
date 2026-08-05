@@ -107,6 +107,9 @@ func runInstance(args []string) {
 		fmt.Fprintf(os.Stderr, "failed to parse manifest: %v\n", err)
 		os.Exit(1)
 	}
+	for _, job := range manifest.Jobs {
+		registerSourceMounts(job.SourceMounts)
+	}
 
 	// Export env vars from manifest
 	for k, v := range manifest.Env {

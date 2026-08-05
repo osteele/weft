@@ -30,6 +30,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	toml "github.com/pelletier/go-toml"
 	"github.com/spf13/cobra"
@@ -338,6 +339,7 @@ type draftRunParams struct {
 	Produces         []string
 	Needs            []string
 	Disk             *db.JobDiskMetadata
+	Source           *db.JobSourceMetadata
 }
 
 func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
@@ -387,8 +389,8 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 	if err := persistDraftArtifactFields(database, jobID, params.Inputs, params.Outputs, params.OutputDirs, params.Produces, params.Needs); err != nil {
 		return err
 	}
-	if params.Disk != nil || len(params.BestEffortInputs) > 0 {
-		meta := &db.JobMetadata{Disk: params.Disk}
+	if params.Disk != nil || params.Source != nil || len(params.BestEffortInputs) > 0 {
+		meta := &db.JobMetadata{Disk: params.Disk, Source: params.Source}
 		if len(params.BestEffortInputs) > 0 {
 			meta.BestEffortInputs = append([]string(nil), params.BestEffortInputs...)
 		}
@@ -663,6 +665,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Load output directories from .weft.toml for convention-based output collection
 	localDir := workdir.ResolveLocal(workingDir)
+	if localDir != "" {
+		if _, err := srcsync.ResolveSourceRoots(localDir); err != nil {
+			return err
+		}
+	}
 
 	// Fail fast when the command directly execs a local script that lacks the
 	// +x bit; otherwise the job dies at runtime with exit 126 "Permission denied".
@@ -901,6 +908,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--input: %w", err)
 	}
 	runEnvVars, err = applySecretEnv(runEnvVars, runInputs, runHFToken, runHFTokenFrom, runSecretVars)
+	if err != nil {
+		return err
+	}
+	sourceMeta, err := buildJobSourceMetadata(localDir, runInputs)
 	if err != nil {
 		return err
 	}
@@ -1197,6 +1208,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(w, "%s\t%.1f\t%s\t%s\t%s\n", s.Host, s.Total, eligible, online, strings.Join(s.Reasons, "; "))
 		}
 		w.Flush()
+		printSourceRootsPreview(cmd.OutOrStdout(), sourceMeta, remoteSourceRootForPreview(workingDir, ""))
 		return nil
 	}
 
@@ -1220,6 +1232,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
+			Metadata:         &db.JobMetadata{Source: sourceMeta},
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
 			SubmitToken:      submitToken,
@@ -1380,6 +1393,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(w, "  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
 		printDiskPreview(w, diskMeta)
+		printSourceRootsPreview(w, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 
 		// Push explicit-host jobs immediately. Auto-placed jobs intentionally
 		// leave dispatch to the daemon so submission avoids live SSH probes.
@@ -1430,6 +1444,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
+			Source:           sourceMeta,
 		})
 	}
 
@@ -1541,6 +1556,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			CloudAfter:       cloudAfter,
 			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 			Disk:             diskMeta,
+			Source:           sourceMeta,
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
 		})
@@ -1559,6 +1575,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
 		}
 		printDiskPreview(os.Stdout, diskMeta)
+		printSourceRootsPreview(os.Stdout, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 
 		syncHostWithProgress(database, host, runNoSync, rec)
@@ -1762,6 +1779,105 @@ func printDiskPreview(w io.Writer, disk *db.JobDiskMetadata) {
 	if runtimeGB > 0 {
 		fmt.Fprintf(w, "  %s: %dGB\n", label, runtimeGB)
 	}
+}
+
+func buildJobSourceMetadata(localDir string, inputs []string) (*db.JobSourceMetadata, error) {
+	if localDir == "" {
+		return nil, nil
+	}
+	manifest, tmpPaths, err := srcsync.BuildSourceManifestForInputs(localDir, inputs)
+	if err != nil {
+		return nil, err
+	}
+	for _, tmpPath := range tmpPaths {
+		_ = os.Remove(tmpPath)
+	}
+	roots := make([]db.JobSourceRootMetadata, 0, len(manifest.Roots))
+	for _, root := range manifest.Roots {
+		item := db.JobSourceRootMetadata{
+			LocalPath:     root.LocalPath,
+			MountBasename: root.MountBasename,
+			MountRel:      root.MountRel,
+			Hash:          root.Hash,
+			R2Key:         root.R2Key,
+			SizeBytes:     root.SizeBytes,
+		}
+		if root.VCS != nil {
+			item.VCS = &db.JobSourceVCSMetadata{
+				Type:     root.VCS.Type,
+				Revision: root.VCS.Revision,
+				ChangeID: root.VCS.ChangeID,
+				Dirty:    root.VCS.Dirty,
+			}
+		}
+		roots = append(roots, item)
+	}
+	return &db.JobSourceMetadata{Hash: manifest.Hash, Roots: roots}, nil
+}
+
+func remoteSourceRootForPreview(workingDir, host string) string {
+	if host == "" || db.IsLaunchHost(host) {
+		local := workdir.ResolveLocal(workingDir)
+		if local == "" {
+			return workingDir
+		}
+		return "/workspace/" + filepath.Base(local)
+	}
+	return workingDir
+}
+
+func printSourceRootsPreview(w io.Writer, source *db.JobSourceMetadata, projectRemoteRoot string) {
+	if source == nil || len(source.Roots) <= 1 {
+		return
+	}
+	fmt.Fprintln(w, "  Source roots:")
+	projectParent := filepath.Dir(projectRemoteRoot)
+	for i, root := range source.Roots {
+		rel := root.MountRel
+		remote := filepath.Join(projectParent, root.MountBasename)
+		if i == 0 {
+			rel = "."
+			remote = projectRemoteRoot
+		}
+		hash := root.Hash
+		if len(hash) > 8 {
+			hash = hash[:8]
+		}
+		fmt.Fprintf(w, "    %-18s -> %-32s %s\n", rel, remote, hash)
+	}
+}
+
+func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
+	if source == nil || len(source.Roots) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Source:      %s\n", shortHash(source.Hash))
+	for i, root := range source.Roots {
+		label := root.MountRel
+		if i == 0 {
+			label = "."
+		}
+		fmt.Fprintf(w, "             %s %s %s", label, root.LocalPath, shortHash(root.Hash))
+		if root.VCS != nil {
+			vcsID := shortHash(root.VCS.Revision)
+			if root.VCS.ChangeID != "" {
+				vcsID = root.VCS.ChangeID
+			}
+			dirty := ""
+			if root.VCS.Dirty {
+				dirty = " dirty"
+			}
+			fmt.Fprintf(w, " %s:%s%s", root.VCS.Type, vcsID, dirty)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+func shortHash(hash string) string {
+	if len(hash) <= 8 {
+		return hash
+	}
+	return hash[:8]
 }
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.

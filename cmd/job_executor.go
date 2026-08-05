@@ -120,6 +120,7 @@ type queueJobOptions struct {
 	CloudAfter       []db.JobDependencyRef
 	CloudNeeds       []string
 	Disk             *db.JobDiskMetadata
+	Source           *db.JobSourceMetadata
 	CLIOverrides     *db.CLIResourceOverrides
 	MaxComputeCap    string
 }
@@ -281,7 +282,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		OutputDirs:       opts.OutputDirs,
 		Produces:         opts.Produces,
 		Needs:            opts.Needs,
-		Metadata:         buildCloudDependencyMetadata(opts.CloudAfter, opts.CloudNeeds),
+		Metadata:         buildJobExecutorMetadata(opts.CloudAfter, opts.CloudNeeds, opts.Source),
 		Disk:             opts.Disk,
 		CLIOverrides:     cliOverrides,
 		MaxComputeCap:    opts.MaxComputeCap,
@@ -295,6 +296,18 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	return &queueJobResult{
 		JobID: jobID,
 	}, nil
+}
+
+func buildJobExecutorMetadata(cloudAfter []db.JobDependencyRef, cloudNeeds []string, source *db.JobSourceMetadata) *db.JobMetadata {
+	meta := buildCloudDependencyMetadata(cloudAfter, cloudNeeds)
+	if source == nil {
+		return meta
+	}
+	if meta == nil {
+		meta = &db.JobMetadata{}
+	}
+	meta.Source = source
+	return meta
 }
 
 func ensureQueueCLIOverrides(overrides *db.CLIResourceOverrides) *db.CLIResourceOverrides {

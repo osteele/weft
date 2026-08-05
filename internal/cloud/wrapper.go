@@ -31,8 +31,18 @@ type AgentJob struct {
 	CloudAfter       []CloudAfterRef `json:"cloud_after,omitempty"`
 	// RestagedOutputs is true when Weft restored this job's previous attempt
 	// outputs from R2 before starting the command on a fresh instance.
-	RestagedOutputs bool     `json:"restaged_outputs,omitempty"`
-	Env             []string `json:"env,omitempty"`
+	RestagedOutputs bool          `json:"restaged_outputs,omitempty"`
+	Env             []string      `json:"env,omitempty"`
+	SourceMounts    []SourceMount `json:"source_mounts,omitempty"`
+}
+
+// SourceMount describes one content-addressed source root mounted on a rental.
+type SourceMount struct {
+	R2Key         string `json:"r2_key"`
+	RemoteDir     string `json:"remote_dir"`
+	LocalDir      string `json:"local_dir,omitempty"`
+	MountBasename string `json:"mount_basename,omitempty"`
+	Hash          string `json:"hash,omitempty"`
 }
 
 // CloudNeed is a resolved cloud artifact dependency for an agent job.

@@ -11,6 +11,7 @@ func TestLoadProjectConfig_Found(t *testing.T) {
 	configPath := filepath.Join(dir, ProjectConfigFile)
 	content := `[sync]
 extra_paths = ["~/sources/vidur/data/profiling/compute/", "~/data/calibration/"]
+sibling_roots = ["../research-expkit"]
 exclude_dirs = ["data"]
 `
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
@@ -32,6 +33,9 @@ exclude_dirs = ["data"]
 	}
 	if len(cfg.Sync.ExcludeDirs) != 1 || cfg.Sync.ExcludeDirs[0] != "data" {
 		t.Errorf("exclude_dirs = %v, want [data]", cfg.Sync.ExcludeDirs)
+	}
+	if len(cfg.Sync.SiblingRoots) != 1 || cfg.Sync.SiblingRoots[0] != "../research-expkit" {
+		t.Errorf("sibling_roots = %v, want [../research-expkit]", cfg.Sync.SiblingRoots)
 	}
 }
 

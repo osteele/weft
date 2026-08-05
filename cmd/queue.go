@@ -356,6 +356,11 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	localDir := workdir.ResolveLocal(workingDir)
+	if localDir != "" {
+		if _, err := srcsync.ResolveSourceRoots(localDir); err != nil {
+			return err
+		}
+	}
 
 	if err := validatePEP723ScriptDependencyInvocation(localDir, command); err != nil {
 		return err
@@ -378,6 +383,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(autoDetectedInputs, ", "))
 	}
 	queueEnvVars, err = applySecretEnv(queueEnvVars, queueInputs, queueHFToken, queueHFTokenFrom, queueSecretVars)
+	if err != nil {
+		return err
+	}
+	sourceMeta, err := buildJobSourceMetadata(localDir, queueInputs)
 	if err != nil {
 		return err
 	}
@@ -530,8 +539,8 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft output dirs: %w", err)
 			}
 		}
-		if len(cloudAfter) > 0 || diskMeta != nil {
-			meta := &db.JobMetadata{Disk: diskMeta}
+		if len(cloudAfter) > 0 || diskMeta != nil || sourceMeta != nil {
+			meta := &db.JobMetadata{Disk: diskMeta, Source: sourceMeta}
 			if len(cloudAfter) > 0 {
 				meta.Dependencies = &db.JobDependencyMetadata{
 					CloudAfter: append([]db.JobDependencyRef(nil), cloudAfter...),
@@ -558,6 +567,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 		}
 		printDiskPreview(os.Stdout, diskMeta)
+		printSourceRootsPreview(os.Stdout, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 		if len(queueTags) > 0 {
 			fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 		}
@@ -587,6 +597,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		OutputDirs:   outputDirs,
 		CloudAfter:   cloudAfter,
 		Disk:         diskMeta,
+		Source:       sourceMeta,
 		CLIOverrides: cliOverrides,
 	})
 	if err != nil {
@@ -609,6 +620,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Env vars: %s\n", formatEnvVarsForDisplay(queueEnvVars))
 	}
 	printDiskPreview(os.Stdout, diskMeta)
+	printSourceRootsPreview(os.Stdout, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 	if len(queueTags) > 0 {
 		fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 	}

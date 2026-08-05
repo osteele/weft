@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -34,8 +35,26 @@ var (
 	sendGraceJobPayloadNoAck         = controlplane.SendGraceJobPayloadNoAck
 	sendGraceCancelAttempts          = controlplane.SendGraceCancelAttempts
 	uploadSourceToR2                 = weftsync.UploadSourceToR2ForInputs
+	uploadSourceRootsToR2            = uploadSourceRootsForReuse
 	submitJobsToInstanceForReusePass = SubmitJobsToInstance
 )
+
+func uploadSourceRootsForReuse(ctx context.Context, client *r2.Client, localDir string, inputs []string) (weftsync.SourceUploadResult, error) {
+	if len(config.ProjectSiblingRoots(localDir)) > 0 {
+		return weftsync.UploadSourceRootsToR2WithProgressForInputs(ctx, client, localDir, inputs, nil)
+	}
+	key, err := uploadSourceToR2(ctx, client, localDir, inputs)
+	if err != nil {
+		return weftsync.SourceUploadResult{}, err
+	}
+	return weftsync.SourceUploadResult{
+		Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{
+			LocalPath:     localDir,
+			MountBasename: path.Base(localDir),
+			R2Key:         key,
+		}}},
+	}, nil
+}
 
 // MinGraceRemaining is the minimum grace period remaining to consider an
 // instance for reuse. Instances with less time are auto-extended.
@@ -1174,7 +1193,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		// Upload fresh sources (content-addressed, so deduped)
 		slog.Debug("source upload: reuse path", "component", "reuse",
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
-		sourceR2Key, err := uploadSourceToR2(opCtx, r2Client, sourceDir, job.Inputs)
+		sourceUpload, err := uploadSourceRootsToR2(opCtx, r2Client, sourceDir, job.Inputs)
 		if err != nil {
 			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {
@@ -1230,11 +1249,14 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		agentJob.CloudNeeds = cloudNeeds
 		agentJob.CloudAfter = cloudAfter
 		agentJob.RestagedOutputs = restagedOutputs
+		agentJob.SourceMounts = sourceMountsFromManifest(sourceUpload.Manifest, remoteDir)
 		payload.Jobs = append(payload.Jobs, agentJob)
-		payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
-			RemoteDir: remoteDir,
-			R2Key:     sourceR2Key,
-		})
+		for _, mount := range agentJob.SourceMounts {
+			payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
+				RemoteDir: mount.RemoteDir,
+				R2Key:     mount.R2Key,
+			})
+		}
 	}
 	orderAgentJobsForManifest(payload.Jobs)
 

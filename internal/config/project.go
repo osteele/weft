@@ -94,6 +94,9 @@ type ProjectSyncConfig struct {
 	// ExtraPaths lists additional local paths to sync to remote hosts before
 	// job execution. These are typically out-of-tree data directories.
 	ExtraPaths []string `yaml:"extra_paths" toml:"extra_paths"`
+	// SiblingRoots lists true sibling source roots to mount adjacent to the
+	// project root on inventory hosts and rentals.
+	SiblingRoots []string `yaml:"sibling_roots" toml:"sibling_roots"`
 	// ExcludeDirs lists additional path-component patterns excluded from source
 	// sync and campaign tarballs for this project only.
 	ExcludeDirs []string `yaml:"exclude_dirs" toml:"exclude_dirs"`
@@ -157,6 +160,15 @@ func LoadProjectConfigWithPath(dir string) (*ProjectConfig, string, error) {
 func ProjectExtraPaths(localDir string) []string {
 	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
 		return cfg.Sync.ExtraPaths
+	}
+	return nil
+}
+
+// ProjectSiblingRoots returns the declared sibling roots from the project
+// config at localDir, or nil if no config is found.
+func ProjectSiblingRoots(localDir string) []string {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Sync.SiblingRoots
 	}
 	return nil
 }

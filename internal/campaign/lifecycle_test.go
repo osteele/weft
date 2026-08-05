@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/retrypolicy"
+	weftsync "github.com/osteele/weft/internal/sync"
 )
 
 // setupTestDB creates an in-memory SQLite database for testing.
@@ -144,7 +145,7 @@ func TestSlottedLaunchUsesPerJobRemoteDirsAndSources(t *testing.T) {
 		t.Fatalf("slotted jobs share remote dir %q", dir10)
 	}
 
-	sources := sourceMappingsForLaunch(group, localToRemote, map[string]string{local: "sources/src.tar.gz"})
+	sources := sourceMappingsForLaunch(group, localToRemote, nil, map[string]string{local: "sources/src.tar.gz"})
 	if len(sources) != 2 {
 		t.Fatalf("source mappings = %d, want 2", len(sources))
 	}
@@ -999,7 +1000,7 @@ func TestLaunchCampaign_AutoFailsOnFirstRegistrationTimeout(t *testing.T) {
 		Client:         &r2.Client{},
 		AgentVersion:   "test",
 		agentKey:       newStringPromise(),
-		sourcePromises: map[string]*stringPromise{},
+		sourcePromises: map[string]*sourceUploadPromise{},
 	}
 	var closeOnce sync.Once
 	stager.cancel = func() {
@@ -1733,16 +1734,16 @@ func TestAwaitAllPerDir_PartialSuccess(t *testing.T) {
 		Client:         &r2.Client{},
 		AgentVersion:   "test",
 		agentKey:       newStringPromise(),
-		sourcePromises: map[string]*stringPromise{},
+		sourcePromises: map[string]*sourceUploadPromise{},
 	}
 	defer stager.Close()
 	stager.agentKey.resolve("agent-r2-key", nil)
-	ok1 := newStringPromise()
-	ok1.resolve("source-key-1", nil)
-	ok2 := newStringPromise()
-	ok2.resolve("source-key-2", nil)
-	bad := newStringPromise()
-	bad.resolve("", errors.New("source directory exceeds 500 MB limit"))
+	ok1 := newSourceUploadPromise()
+	ok1.resolve(weftsync.SourceUploadResult{Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{LocalPath: "/projects/good-1", R2Key: "source-key-1"}}}}, nil)
+	ok2 := newSourceUploadPromise()
+	ok2.resolve(weftsync.SourceUploadResult{Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{LocalPath: "/projects/good-2", R2Key: "source-key-2"}}}}, nil)
+	bad := newSourceUploadPromise()
+	bad.resolve(weftsync.SourceUploadResult{}, errors.New("source directory exceeds 500 MB limit"))
 	stager.sourcePromises["/projects/good-1"] = ok1
 	stager.sourcePromises["/projects/good-2"] = ok2
 	stager.sourcePromises["/projects/too-big"] = bad
@@ -1779,12 +1780,12 @@ func TestAwaitAllPerDir_AgentFailureIsFatal(t *testing.T) {
 		Client:         &r2.Client{},
 		AgentVersion:   "test",
 		agentKey:       newStringPromise(),
-		sourcePromises: map[string]*stringPromise{},
+		sourcePromises: map[string]*sourceUploadPromise{},
 	}
 	defer stager.Close()
 	stager.agentKey.resolve("", errors.New("R2 network failure"))
-	ok := newStringPromise()
-	ok.resolve("source-key", nil)
+	ok := newSourceUploadPromise()
+	ok.resolve(weftsync.SourceUploadResult{Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{LocalPath: "/projects/foo", R2Key: "source-key"}}}}, nil)
 	stager.sourcePromises["/projects/foo"] = ok
 
 	assets, perDirErr, err := stager.AwaitAllPerDir()

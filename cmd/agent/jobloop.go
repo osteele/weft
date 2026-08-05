@@ -394,6 +394,7 @@ func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobS
 }
 
 func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool) setupPrewarmResult {
+	ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job))
 	logDir := filepath.Join(os.TempDir(), "weft-setup-prewarm", fmt.Sprintf("%d-%d", job.ID, job.RunID))
 	_ = os.RemoveAll(logDir)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -793,7 +794,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// Recover from a missing/empty workdir (e.g. previous campaign-mid
 		// cleanup race, manual rm, or aborted source extract) by re-staging
 		// from the locally cached source tarball before stageCloudNeeds runs.
-		ensureSourceFresh(cfg.R2Bucket, runner.ExpandTilde(workDir))
+		ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job))
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))

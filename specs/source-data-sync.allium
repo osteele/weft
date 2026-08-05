@@ -8,6 +8,9 @@
 --   - Source snapshotting: deterministic, content-addressed tarballs of the
 --     user's working directory with exclude rules for VCS, caches, build
 --     artifacts, and declared output dirs.
+--   - Multi-root source snapshots: declared sibling roots mounted adjacent
+--     to the project with one content-addressed tarball per root and one
+--     manifest hash for the complete source identity.
 --   - On-prem source sync: rsync over SSH to inventory hosts, with reuse of
 --     recently-synced snapshots.
 --   - Cloud source staging: R2 upload of the source tarball keyed by content
@@ -139,6 +142,7 @@ value TransferObservation {
 -- start a job whose declared inputs are not all resolvable.
 contract AgentStagingContract {
     source_tarball_present: (source_hash: String) -> Boolean
+	source_root_manifest_present: (manifest_hash: String) -> Boolean
     manifest_present: (instance_id: String) -> Boolean
     need_object_present: (r2_key: String) -> Boolean
 
@@ -147,6 +151,13 @@ contract AgentStagingContract {
         -- resolves to an object under the sources/ prefix whose content
         -- hashes to that value. The agent is entitled to reject mismatches
         -- as a hard failure.
+
+	@invariant SourceRootManifestMatchesObjects
+		-- Every root entry in the source_root_manifest resolves to an R2
+		-- object under the sources/ prefix whose content hashes to that
+		-- root's content_hash. The manifest hash is the source identity
+		-- for the whole job; the root hashes are the dedupe identity for
+		-- each mounted directory.
 
     @invariant NeedsResolvableBeforeStart
         -- Every CloudNeed entry in a job's manifest entry has an R2 key
@@ -187,6 +198,33 @@ entity SourceSnapshot {
     local_overlays: List<String>    -- relative paths that were overlaid
                                     -- back in (declared local_path inputs)
     built_at: Timestamp
+}
+
+-- One directory whose contents are part of a job's source identity. The
+-- project is root 0 and mounts at the job working directory. Declared
+-- sibling roots mount adjacent to it, preserving paths such as
+-- `../research-expkit` on laptops, inventory hosts, and rentals.
+entity SourceRoot {
+	project_working_dir: String
+	local_path: String
+	mount_basename: String
+	mount_relative_path: String     -- "." for root 0, "../<basename>" for siblings
+	snapshot: SourceSnapshot
+	vcs_type: String?
+	vcs_revision: String?
+	vcs_change_id: String?
+	vcs_dirty: Boolean?
+}
+
+-- Ordered source-root manifest for one submitted source state. The hash is
+-- over (mount_basename, content_hash, r2_key) for each root in order, so
+-- the job keeps one source identity while each root dedupes independently
+-- in R2.
+entity SourceRootManifest {
+	project_working_dir: String
+	roots: List<SourceRoot>
+	manifest_hash: String
+	built_at: Timestamp
 }
 
 -- SUPERSEDED by rsync incrementality (not implemented). HostSourceState was
@@ -283,6 +321,11 @@ config {
     hf_prewarm_max_attempts: Integer = 3
     hf_prewarm_backoff_after_first: Duration = 5.seconds
     hf_prewarm_backoff_later: Duration = 20.seconds
+
+	-- Project-level roots that must be synced adjacent to working_dir.
+	-- These are read from .weft.toml [sync].sibling_roots only; PEP 723
+	-- script metadata cannot change the project's source composition.
+	sibling_roots: List<String> = []
 }
 
 -- ==========================================================================
@@ -345,6 +388,145 @@ rule BuildSourceSnapshot {
         -- hashes are stable across rebuilds and across machines.
 }
 
+-- Resolve the project root plus any configured sibling roots before a job is
+-- queued. Sibling roots are deliberately narrower than general outside-root
+-- paths: the same `../<basename>` reference must resolve on the submitter,
+-- inventory hosts, and cloud rentals.
+rule ResolveSourceRoots {
+	when: BuildSourceRootManifestRequested(project_working_dir, inputs)
+
+	let project_root = Abs(project_working_dir)
+	let declared = ProjectConfig(project_root).sync.sibling_roots
+
+	ensures: SourceRoot.created(
+		project_working_dir: project_root,
+		local_path: project_root,
+		mount_basename: Basename(project_root),
+		mount_relative_path: ".",
+		snapshot: LatestSnapshotFor(project_root)
+	)
+
+	ensures:
+		for raw_root in declared:
+			let root = AbsRelativeTo(raw_root, project_root)
+			if not Exists(root):
+				SubmissionRejected(
+					working_dir: project_root,
+					reason: sibling_root_missing,
+					report: raw_root + " does not exist"
+				)
+			else if not IsDirectory(root):
+				SubmissionRejected(
+					working_dir: project_root,
+					reason: sibling_root_not_directory,
+					report: raw_root + " is not a directory"
+				)
+			else if Dirname(root) != Dirname(project_root):
+				SubmissionRejected(
+					working_dir: project_root,
+					reason: sibling_root_not_sibling,
+					report: raw_root + " is not a sibling of " + project_root
+				)
+			else if Basename(root) in MountBasenamesFor(project_root):
+				SubmissionRejected(
+					working_dir: project_root,
+					reason: sibling_root_basename_collision,
+					report: "source roots would both mount at " + Basename(root)
+				)
+			else:
+				SourceRoot.created(
+					project_working_dir: project_root,
+					local_path: root,
+					mount_basename: Basename(root),
+					mount_relative_path: "../" + Basename(root),
+					snapshot: BuildSourceSnapshot(root, no_overlays),
+					vcs_type: DetectVCSType(root),
+					vcs_revision: DetectVCSRevision(root),
+					vcs_change_id: DetectVCSChangeID(root),
+					vcs_dirty: DetectVCSDirty(root)
+				)
+
+	@guidance
+		-- Implementation anchor:
+		--   internal/config/project.go      — ProjectSyncConfig.SiblingRoots
+		--   internal/sync/source_roots.go   — ResolveSourceRoots,
+		--                                     BuildSourceManifestForInputs
+		--   internal/sync/vcs.go            — DetectVCSInfo
+		-- Sibling roots are a project-level sync declaration. Do not add a
+		-- [tool.weft] / PEP 723 surface unless a later spec revision changes
+		-- source composition semantics.
+}
+
+-- Build one content-addressed snapshot per resolved root and then hash the
+-- ordered manifest. Only root 0 receives local_path overlays, because those
+-- overlays are declared relative to the job working_dir.
+rule BuildSourceRootManifest {
+	when: BuildSourceRootManifestRequested(project_working_dir, inputs)
+
+	requires: exists SourceRoot{project_working_dir: Abs(project_working_dir),
+								mount_relative_path: "."}
+
+	ensures:
+		SourceRootManifest.created(
+			project_working_dir: Abs(project_working_dir),
+			roots: OrderedSourceRoots(Abs(project_working_dir)),
+			manifest_hash: HashManifest(
+				OrderedSourceRoots(Abs(project_working_dir))
+					.map(mount_basename, snapshot.content_hash, CloudR2Key(snapshot))
+			),
+			built_at: now
+		)
+
+	@guidance
+		-- Each root must go through the normal source snapshot path
+		-- (`sourceExcludes`, DefaultExcludes, and .gitignore), never
+		-- raw CopyPath, so sibling repos do not ship .git/.jj/.venv or
+		-- language caches.
+}
+
+-- Persist per-root provenance with the queued job so `weft info` can answer
+-- which project and sibling repository revisions the attempt used.
+rule RecordSourceRootProvenance {
+	when: JobQueued(job)
+
+	let manifest = LatestSourceRootManifestFor(job.working_dir)
+
+	ensures:
+		JobMetadata(job).source.manifest_hash = manifest.manifest_hash
+		for root in manifest.roots:
+			JobMetadata(job).source.roots includes {
+				local_path: root.local_path,
+				mount_basename: root.mount_basename,
+				mount_relative_path: root.mount_relative_path,
+				content_hash: root.snapshot.content_hash,
+				r2_key: CloudR2Key(root.snapshot),
+				size_bytes: root.snapshot.size_bytes,
+				vcs_type: root.vcs_type,
+				vcs_revision: root.vcs_revision,
+				vcs_change_id: root.vcs_change_id,
+				vcs_dirty: root.vcs_dirty
+			}
+}
+
+-- Submit and dry-run surfaces show every resolved root before launch so a
+-- user can see accidental large siblings or diagnose a later import failure.
+rule PrintResolvedSourceRoots {
+	when: SubmitOrDryRun(job)
+
+	let manifest = LatestSourceRootManifestFor(job.working_dir)
+
+	ensures:
+		if count(manifest.roots) > 1:
+			SubmitOutputIncludes(
+				heading: "Source roots:",
+				rows: manifest.roots.map(
+					mount_relative_path,
+					CloudSourceRootDirForSubmitPreview(job, root),
+					ShortSHA(root.snapshot.content_hash)
+				)
+			)
+}
+
 -- Reject a snapshot build when the non-excluded working dir would exceed
 -- the size limit. Emits a size report naming the largest contributors so
 -- the user can add them to .gitignore / .weftignore.
@@ -381,16 +563,18 @@ rule SyncSourceToOnPremHost {
     -- from a content-addressed tarball into a per-job dir on the runner side.
     requires: DispatchEntry{job: job}.source_r2_key = null
 
-    let snapshot = LatestSnapshotFor(job.working_dir)
+	let manifest = LatestSourceRootManifestFor(job.working_dir)
+	let snapshot = manifest.roots[0].snapshot
 
     ensures:
         if not HasRecentMatchingSnapshot(host, snapshot):
-            RsyncSourceToHost(
-                host: host,
-                local_dir: job.working_dir,
-                remote_dir: HostSourcesDir(host, job.working_dir),
-                excludes: snapshot.excludes
-            )
+			for root in manifest.roots:
+				RsyncSourceToHost(
+					host: host,
+					local_dir: root.local_path,
+					remote_dir: HostSourceRootDir(host, job.working_dir, root),
+					excludes: root.snapshot.excludes
+				)
             HostSourceState.created(
                 host: host,
                 working_dir: job.working_dir,
@@ -450,12 +634,16 @@ rule ResyncAfterRemediation {
     when: ForceSourceResync(host, working_dir)
     requires: working_dir != ""
 
-    ensures: RsyncSourceToHost(
-        host: host,
-        local_dir: working_dir,
-        remote_dir: HostSourcesDir(host, working_dir),
-        excludes: LatestSnapshotFor(working_dir).excludes
-    )
+	let manifest = LatestSourceRootManifestFor(working_dir)
+
+	ensures:
+		for root in manifest.roots:
+			RsyncSourceToHost(
+				host: host,
+				local_dir: root.local_path,
+				remote_dir: HostSourceRootDir(host, working_dir, root),
+				excludes: root.snapshot.excludes
+			)
     ensures:
         for state in HostSourceStates where host = host and working_dir = working_dir:
             state.synced_at = now
@@ -691,56 +879,86 @@ rule EscalateToR2IsolatedSource {
 -- Rules: cloud source staging
 -- ==========================================================================
 
--- Upload the source tarball for a job's snapshot to R2 under a
--- content-addressed key. Skipped when an object with that key already
--- exists, which is the common case for repeated submissions from an
--- unchanged working directory.
+-- Upload each source root tarball for a job's source-root manifest to R2
+-- under its own content-addressed key. Skipped when an object with that
+-- key already exists, which is the common case for repeated submissions
+-- from an unchanged sibling repo.
 rule UploadSourceToCloud {
     when: CloudStagingRequested(job)
     requires: job.working_dir != ""
 
-    let snapshot = LatestSnapshotFor(job.working_dir)
-    let key = "sources/" + snapshot.content_hash + ".tar.gz"
+	let manifest = LatestSourceRootManifestFor(job.working_dir)
 
     ensures:
-        if not R2ObjectExists(key):
-            R2Put(key: key, body: TarballFor(snapshot), content_type: "application/gzip")
-            CloudSourceObject.created(
-                snapshot: snapshot,
-                r2_key: key,
-                uploaded_at: now
-            )
-            RecordTransferObservation(
-                source: "local",
-                destination: "r2",
-                bytes: snapshot.size_bytes,
-                ok: true
-            )
+		for root in manifest.roots:
+			let key = "sources/" + root.snapshot.content_hash + ".tar.gz"
+			if not R2ObjectExists(key):
+				R2Put(key: key, body: TarballFor(root.snapshot), content_type: "application/gzip")
+				CloudSourceObject.created(
+					snapshot: root.snapshot,
+					r2_key: key,
+					uploaded_at: now
+				)
+				RecordTransferObservation(
+					source: "local",
+					destination: "r2",
+					bytes: root.snapshot.size_bytes,
+					ok: true
+				)
 
     @guidance
         -- Implementation anchor:
-        --   internal/sync/r2upload.go     — UploadSourceToR2WithProgressForInputs
+		--   internal/sync/r2upload.go     — UploadSourceRootsToR2WithProgressForInputs
         --   internal/dataplane/keys.go    — SourceTarball key helper
 }
 
 -- When a cloud instance reaches the sources_extracted bootstrap stage, the
--- agent has pulled sources/<hash>.tar.gz and expanded it at the expected
--- path. After that point, per-job dispatches on that instance reuse the
--- already-extracted tree and do not re-download the tarball.
+-- agent has pulled each sources/<hash>.tar.gz named in the manifest and
+-- expanded it into that root's mount directory. After that point, per-job
+-- dispatches on that instance reuse the already-extracted trees and repair
+-- any missing mount before setup or command execution.
 rule StageSourceOnCloudInstance {
     when: instance: cloud/Instance.bootstrap_stage
           transitions_to status_sync/sources_extracted
 
-    requires: instance.campaign_manifest.source_hash != null
+	requires: instance.campaign_manifest.source_root_manifest != null
 
-    ensures: InstanceSourceReady(
-        instance: instance,
-        source_hash: instance.campaign_manifest.source_hash
-    )
+	ensures:
+		for root in instance.campaign_manifest.source_root_manifest.roots:
+			InstanceSourceRootReady(
+				instance: instance,
+				source_hash: root.snapshot.content_hash,
+				remote_dir: CloudSourceRootDir(instance, root)
+			)
+
+	@guidance
+		-- The R2 keys the agent pulls are written by weft via
+		-- UploadSourceToCloud before the manifest is published; see
+		-- AgentStagingContract. The agent repair path must test every
+		-- mounted root, not only the project directory, because a wiped
+		-- sibling still leaves root 0 looking populated.
+}
+
+-- The cloud extraction primitive owns exactly one target directory and may
+-- remove it before untarring to avoid merging two stale trees. Therefore a
+-- source object must never contain both the project and its siblings rooted
+-- at their parent directory.
+rule SourceRootExtractTargetIsExclusive {
+	when: ExtractCloudSourceRoot(instance, root)
+
+	ensures: RemoveAllBeforeExtract(target_dir: CloudSourceRootDir(instance, root))
+	ensures: TarballFor(root.snapshot).contains_only_paths_beneath(".")
 
     @guidance
-        -- The R2 key the agent pulls is written by weft via UploadSourceToCloud
-        -- before the manifest is published; see AgentStagingContract.
+		-- A fused tarball rooted at the parent would contain both
+		-- mental-spaces/ and research-expkit/ and would need extraction at
+		-- /workspace. The existing safe extraction primitive removes the
+		-- target directory first; pointed at /workspace, that would delete
+		-- unrelated project trees on the rental. A fused tarball nested
+		-- under the project avoids deletion but changes uv paths from
+		-- ../research-expkit to .weft/siblings/research-expkit. Split
+		-- tarballs preserve both deletion scope and identical relative
+		-- paths across laptop, inventory host, and rental.
 }
 
 -- ==========================================================================
@@ -777,6 +995,12 @@ rule SyncExtraFilePaths {
     ensures:
         for input in extras:
             RsyncExtraPath(host: host, path: input.file_path)
+
+	@guidance
+		-- This rule remains on-prem-only for ad hoc outside-root local:
+		-- file inputs. Declared project sibling roots are not extras; they
+		-- are SourceRoot entries and reach cloud rentals via
+		-- UploadSourceToCloud.
 }
 
 -- Before dispatch to an on-prem host, transfer any HF-cache assets the job
@@ -1243,6 +1467,34 @@ invariant SourceHashDeterministic {
         implies s1.content_hash = s2.content_hash
 }
 
+-- Declared sibling roots must be true siblings of the project root. This is
+-- what makes `../<basename>` resolve the same way locally, on inventory
+-- hosts, and under /workspace on rentals.
+invariant SiblingRootsAreTrueSiblings {
+	for root in SourceRoots where root.mount_relative_path != ".":
+		Dirname(root.local_path) = Dirname(root.project_working_dir)
+		and root.mount_relative_path = "../" + root.mount_basename
+}
+
+-- Source-root mount basenames are unique within a manifest. A duplicate
+-- basename would mount two roots into the same remote directory; the
+-- second extract or rsync --delete would silently wipe the first.
+invariant SourceRootBasenamesUnique {
+	for manifest in SourceRootManifests:
+		Unique(manifest.roots.mount_basename)
+}
+
+-- The source-root manifest hash is the job-level source identity. It is a
+-- pure function of the ordered root mount basenames and each root's
+-- content-addressed R2 key.
+invariant SourceRootManifestHashDeterministic {
+	for manifest in SourceRootManifests:
+		manifest.manifest_hash =
+			HashManifest(manifest.roots.map(mount_basename,
+											snapshot.content_hash,
+											CloudR2Key(snapshot)))
+}
+
 -- The rolling marker flag on a HostSourceState must only be true after
 -- the corresponding rsync has returned success. Marker-before-success is
 -- a safety hazard: a subsequent dispatch would skip the sync while the
@@ -1311,6 +1563,16 @@ invariant R2SourceObjectsContentAddressed {
         obj.r2_key = "sources/" + obj.snapshot.content_hash + ".tar.gz"
 }
 
+-- Cloud source repair must inspect every mount in the job's source-root
+-- manifest. Seeing root 0 populated is not evidence that a sibling mount is
+-- present.
+invariant CloudSourceRepairChecksEveryMount {
+	for job in jobs/Jobs where job.target_kind = cloud_rental:
+		for root in LatestSourceRootManifestFor(job.working_dir).roots:
+			BeforeSetupOrCommand(job):
+				EnsureSourceRootFresh(job: job, root: root)
+}
+
 -- Every byte a job's command downloads from an HF-style source at runtime
 -- must correspond to some declared input on the job. Undeclared downloads
 -- break disk budgeting and make cloud instances susceptible to disk-full
@@ -1373,6 +1635,7 @@ invariant DeclaredInputStagedOrDispatchBlocked {
 -- Disk estimation for cloud placement must account for every disk
 -- consumer weft itself knows about before launch or reuse admission:
 --   * declared HF inputs (deduplicated across the instance's jobs),
+--   * every source root that weft syncs onto the instance,
 --   * the project environment (uv sync footprint from the manifest or
 --     lockfile),
 --   * isolated PEP-723 script environments — heavy ML frameworks declared
@@ -1385,12 +1648,15 @@ invariant DiskEstimateCoversDeclaredFootprint {
     for group in InstanceGroups:
         EstimatedDiskGB(group) >=
             DeclaredHFInputGB(group)
+			+ SourceRootGB(group)
             + ProjectEnvGB(group)
             + IsolatedScriptEnvGB(group)
 
     @guidance
         -- Implementation anchor (internal/campaign/):
         --   disk.go EstimateGroupDisk         — fresh-launch sizing
+		--   disk.go estimateGroupSourceRootBytes — project and sibling
+		--     source-root bytes
         --   disk.go heavyDepIncrementalEnvGB,
         --           commandDepIncrementalEnvGB — isolated PEP-723 env /
         --     wheel-clone overhead per heavy framework (torch, vllm,

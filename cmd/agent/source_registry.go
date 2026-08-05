@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 // sourceCacheDir returns the directory where the agent keeps the most recent
@@ -58,7 +60,7 @@ func resolveSourceCacheDir() string {
 // sourceRegistry maps a RemoteDir (the on-rental absolute path of a project's
 // working directory) to the R2 key of the most recently applied source
 // tarball for that directory. It is populated by applySourceUpdate and
-// consulted by ensureSourceFresh before each job runs.
+// consulted by ensureSourceFreshMounts before each job runs.
 //
 // The registry lets the agent recover from a missing/partial workdir without
 // requiring the controller to re-send the job request. The original failure
@@ -99,7 +101,7 @@ func sourceCachePath(r2Key string) string {
 }
 
 // hasSourceMarkers reports whether dir looks like a populated project
-// working directory. Used by ensureSourceFresh to decide whether re-extract
+// working directory. Used by ensureSourceFreshMounts to decide whether re-extract
 // is needed.
 //
 // "Populated" means either a recognized project manifest is present, or the
@@ -123,14 +125,53 @@ func hasSourceMarkers(dir string) bool {
 	return len(entries) > 0
 }
 
-// ensureSourceFresh re-extracts the cached source tarball for jobDir if the
-// directory has gone missing or empty since it was first staged. Returns nil
-// when no recovery is needed or when no cache entry exists for jobDir
-// (in which case the caller will see whatever state the disk is in).
+// ensureSourceFreshMounts re-extracts the cached source tarball for each of a
+// job's source mounts whose directory has gone missing or empty since it was
+// first staged. Every mount is tested, not just the project root: a populated
+// project root does not imply a populated sibling root, and a missing sibling
+// otherwise surfaces only as an import error inside the job (spec:
+// source-data-sync.allium § StageSourceOnCloudInstance).
 //
 // All failures are best-effort: re-extract is a recovery path, not a hard
 // dependency, so we log and return rather than blocking the job.
-func ensureSourceFresh(bucket, jobDir string) {
+func ensureSourceFreshMounts(bucket string, mounts []cloud.SourceMount) {
+	if len(mounts) == 0 {
+		return
+	}
+	for _, mount := range mounts {
+		ensureOneSourceFresh(bucket, mount.RemoteDir)
+	}
+}
+
+func registerSourceMounts(mounts []cloud.SourceMount) {
+	for _, mount := range mounts {
+		sources.record(mount.RemoteDir, mount.R2Key)
+	}
+}
+
+func expandedSourceMountsForJob(job cloud.AgentJob) []cloud.SourceMount {
+	if len(job.SourceMounts) > 0 {
+		mounts := append([]cloud.SourceMount(nil), job.SourceMounts...)
+		for i := range mounts {
+			mounts[i].RemoteDir = runnerExpandTilde(mounts[i].RemoteDir)
+		}
+		return mounts
+	}
+	if job.Dir == "" {
+		return nil
+	}
+	return []cloud.SourceMount{{RemoteDir: runnerExpandTilde(job.Dir)}}
+}
+
+func runnerExpandTilde(p string) string {
+	if len(p) > 1 && p[0] == '~' {
+		home, _ := os.UserHomeDir()
+		return home + p[1:]
+	}
+	return p
+}
+
+func ensureOneSourceFresh(bucket, jobDir string) {
 	if jobDir == "" {
 		return
 	}
@@ -179,7 +220,7 @@ func ensureSourceFresh(bucket, jobDir string) {
 // the runner can reject the attempt at preflight instead of silently running
 // against the wrong sources.
 //
-// Unlike ensureSourceFresh, this is a primary path (not a best-effort
+// Unlike ensureSourceFreshMounts, this is a primary path (not a best-effort
 // recovery), so errors are propagated rather than logged-and-swallowed. The
 // per-job dir is created if missing and the cached tarball is shared across
 // jobs that need the same R2 key (content-addressed).
@@ -215,7 +256,7 @@ func fetchSourceTarballToDir(bucket, r2Key, perJobDir string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("extract tarball: %w", err)
 	}
-	// Record the mapping so any subsequent ensureSourceFresh recovery (e.g.
+	// Record the mapping so any subsequent ensureSourceFreshMounts recovery (e.g.
 	// a kill+resubmit during a grace window) can find the tarball again.
 	sources.record(perJobDir, r2Key)
 	slog.Info("staged R2-isolated source", "component", "agent", "per_job_dir", perJobDir, "r2_key", r2Key)

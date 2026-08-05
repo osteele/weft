@@ -100,7 +100,7 @@ func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
 		return fmt.Errorf("create remote dir %s: %w", upd.RemoteDir, err)
 	}
 
-	// Cache the tarball at a stable per-R2-key path so that ensureSourceFresh
+	// Cache the tarball at a stable per-R2-key path so that ensureSourceFreshMounts
 	// can re-extract on demand if the workdir is later found empty/missing.
 	cachePath := sourceCachePath(upd.R2Key)
 	if err := downloadSourceToCache(bucket, upd.R2Key, cachePath); err != nil {

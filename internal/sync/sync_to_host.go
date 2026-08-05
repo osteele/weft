@@ -2,10 +2,13 @@ package sync
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	gosync "sync"
 	"time"
+
+	"github.com/osteele/weft/internal/config"
 )
 
 // SyncSourcesToHost syncs source files and extra paths to a remote host.
@@ -33,6 +36,18 @@ func syncSourcesToHost(host, localDir, remoteDir string, inputs []string, syncPr
 	}
 	if err := syncProject(); err != nil {
 		return err
+	}
+	if len(config.ProjectSiblingRoots(localDir)) > 0 {
+		roots, err := ResolveSourceRoots(localDir)
+		if err != nil {
+			return err
+		}
+		for _, root := range roots[1:] {
+			siblingRemoteDir := path.Join(path.Dir(strings.TrimRight(remoteDir, "/")), root.MountBasename)
+			if err := SyncSources(host, root.LocalPath, siblingRemoteDir); err != nil {
+				return err
+			}
+		}
 	}
 	overlays, err := LocalInputOverlays(localDir, inputs, SkipMissingLocalInput)
 	if err != nil {

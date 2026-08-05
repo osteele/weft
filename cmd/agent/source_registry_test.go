@@ -1,9 +1,14 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 func TestSourceRegistry_RecordAndLookup(t *testing.T) {
@@ -71,6 +76,77 @@ func TestSourceCachePath_Stable(t *testing.T) {
 	}
 	if filepath.Dir(a) != sourceCacheDir() {
 		t.Errorf("cache path not under sourceCacheDir: %q", a)
+	}
+}
+
+func TestEnsureSourceFreshMountsRepairsMissingSibling(t *testing.T) {
+	cacheDir := t.TempDir()
+	oldCacheDir := sourceCacheDirOverride
+	sourceCacheDirOverride = cacheDir
+	t.Cleanup(func() { sourceCacheDirOverride = oldCacheDir })
+
+	oldSources := sources
+	sources = &sourceRegistry{latest: map[string]string{}}
+	t.Cleanup(func() { sources = oldSources })
+
+	parent := t.TempDir()
+	projectDir := filepath.Join(parent, "project")
+	siblingDir := filepath.Join(parent, "research-expkit")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "pyproject.toml"), []byte("[project]\nname='project'\n"), 0o644); err != nil {
+		t.Fatalf("write project marker: %v", err)
+	}
+
+	projectKey := "sources/project.tar.gz"
+	siblingKey := "sources/research-expkit.tar.gz"
+	registerSourceMounts([]cloud.SourceMount{
+		{RemoteDir: projectDir, R2Key: projectKey},
+		{RemoteDir: siblingDir, R2Key: siblingKey},
+	})
+	writeTestTarGz(t, sourceCachePath(siblingKey), map[string]string{
+		"expkit/__init__.py": "VALUE = 1\n",
+	})
+
+	ensureSourceFreshMounts("bucket", []cloud.SourceMount{
+		{RemoteDir: projectDir, R2Key: projectKey},
+		{RemoteDir: siblingDir, R2Key: siblingKey},
+	})
+
+	if _, err := os.Stat(filepath.Join(siblingDir, "expkit", "__init__.py")); err != nil {
+		t.Fatalf("sibling root was not repaired: %v", err)
+	}
+}
+
+func writeTestTarGz(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir cache parent: %v", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create tarball: %v", err)
+	}
+	gw := gzip.NewWriter(f)
+	tw := tar.NewWriter(gw)
+	for name, content := range files {
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(content))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := io.WriteString(tw, content); err != nil {
+			t.Fatalf("write tar content: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close tarball: %v", err)
 	}
 }
 

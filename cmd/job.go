@@ -1155,6 +1155,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		if job.Metadata != nil {
 			printDiskPreview(os.Stdout, job.Metadata.Disk)
+			printJobSourceMetadata(os.Stdout, job.Metadata.Source)
 		}
 		if tags := job.DisplayTags(); len(tags) > 0 {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))

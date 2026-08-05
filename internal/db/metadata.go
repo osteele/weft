@@ -14,7 +14,33 @@ type JobMetadata struct {
 	Telemetry        *JobTelemetrySummary   `json:"telemetry,omitempty"`
 	Dependencies     *JobDependencyMetadata `json:"dependencies,omitempty"`
 	Disk             *JobDiskMetadata       `json:"disk,omitempty"`
+	Source           *JobSourceMetadata     `json:"source,omitempty"`
 	BestEffortInputs []string               `json:"best_effort_inputs,omitempty"`
+}
+
+// JobSourceMetadata records the ordered source-root identity for a job.
+type JobSourceMetadata struct {
+	Hash  string                  `json:"hash,omitempty"`
+	Roots []JobSourceRootMetadata `json:"roots,omitempty"`
+}
+
+// JobSourceRootMetadata records provenance for one synced source root.
+type JobSourceRootMetadata struct {
+	LocalPath     string                `json:"local_path,omitempty"`
+	MountBasename string                `json:"mount_basename,omitempty"`
+	MountRel      string                `json:"mount_rel,omitempty"`
+	Hash          string                `json:"hash,omitempty"`
+	R2Key         string                `json:"r2_key,omitempty"`
+	SizeBytes     int64                 `json:"size_bytes,omitempty"`
+	VCS           *JobSourceVCSMetadata `json:"vcs,omitempty"`
+}
+
+// JobSourceVCSMetadata records VCS provenance for one source root.
+type JobSourceVCSMetadata struct {
+	Type     string `json:"type,omitempty"`
+	Revision string `json:"revision,omitempty"`
+	ChangeID string `json:"change_id,omitempty"`
+	Dirty    bool   `json:"dirty,omitempty"`
 }
 
 // JobDiskMetadata stores disk requirements for rental placement. DiskGB is a

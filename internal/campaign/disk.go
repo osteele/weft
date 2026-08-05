@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -392,9 +393,11 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	}
 
 	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
+	sourceBytes := estimateGroupSourceRootBytes(group.SourceDirs())
 
 	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
+	inputDiskGB += int(math.Ceil(float64(sourceBytes) / 1e9))
 	inputDiskGB += overhead
 	inputDiskGB += cmdHeavyGB
 	inputDiskGB += groupRuntimeDiskGB(group)
@@ -424,6 +427,33 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 		diskGB = capGB
 	}
 	return diskGB, anomalies
+}
+
+func estimateGroupSourceRootBytes(sourceDirs []string) int64 {
+	seen := map[string]bool{}
+	var total int64
+	for _, sourceDir := range sourceDirs {
+		roots, err := weftsync.ResolveSourceRoots(sourceDir)
+		if err != nil {
+			slog.Warn("estimate source roots failed; source bytes omitted from disk estimate",
+				"component", "disk", "source_dir", sourceDir, "error", err)
+			continue
+		}
+		for _, root := range roots {
+			if seen[root.LocalPath] {
+				continue
+			}
+			seen[root.LocalPath] = true
+			size, err := weftsync.IncludedSourceBytes(root.LocalPath)
+			if err != nil {
+				slog.Warn("estimate source root size failed; source bytes omitted from disk estimate",
+					"component", "disk", "source_dir", root.LocalPath, "error", err)
+				continue
+			}
+			total += size
+		}
+	}
+	return total
 }
 
 // EstimateGroupDisks fills DiskGB for each group and JobDiskGB for jobs inside
