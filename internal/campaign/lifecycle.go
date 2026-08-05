@@ -342,12 +342,16 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 
 	allSourceDirs := make(map[string]bool)
 	sourceInputsByDir := make(map[string][]string)
+	sourceCommandsByDir := make(map[string][]string)
 	for _, g := range groups {
 		for _, d := range g.SourceDirs() {
 			allSourceDirs[d] = true
 		}
 		for d, inputs := range SourceInputsByDir(g.Jobs) {
 			sourceInputsByDir[d] = mergeStringSlices(sourceInputsByDir[d], inputs)
+		}
+		for d, commands := range SourceCommandsByDir(g.Jobs) {
+			sourceCommandsByDir[d] = mergeStringSlices(sourceCommandsByDir[d], commands)
 		}
 	}
 	for localDir := range allSourceDirs {
@@ -403,12 +407,13 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		localDir := localDir
 		promise := promise
 		inputs := sourceInputsByDir[localDir]
+		commands := sourceCommandsByDir[localDir]
 		slog.Debug("source upload: queuing", "component", "launch",
-			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs)
+			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs, "commandCount", len(commands))
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()
-			result, err := weftsync.UploadSourceRootsToR2WithProgressForInputs(uploadCtx, r2Client, localDir, inputs, func(phase string) {
+			result, err := weftsync.UploadSourceRootsToR2WithProgressForInputsAndCommands(uploadCtx, r2Client, localDir, inputs, commands, func(phase string) {
 				stager.setStatus(AssetStageStatus{
 					Key:   localDir,
 					Kind:  AssetStageKindSource,

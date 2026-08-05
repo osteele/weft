@@ -90,6 +90,11 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 	// Parse [tool.weft] settings.
 	if weftTree := tree.Get("tool.weft"); weftTree != nil {
 		if wt, ok := weftTree.(*toml.Tree); ok {
+			// Project source composition belongs in .weft.toml; see
+			// specs/source-data-sync.allium ResolveSourceRoots guidance.
+			if firstPresent(wt, "sibling-roots", "sibling_roots") != nil {
+				return nil, fmt.Errorf("sibling-roots in script metadata is not supported; move it to .weft.toml:\n\n    [sync]\n    sibling_roots = [\"../research-expkit\"]")
+			}
 			if v, ok := wt.Get("gpu").(string); ok {
 				meta.GPU = v
 			}

@@ -114,6 +114,8 @@ value ExcludePattern {
     origin: SourceExcludeOrigin
 }
 
+value SourceRootOrigin = project | explicit_config | derived_uv_sources
+
 -- Outcome of the runner's per-job preflight provenance check. Distinct from
 -- a runtime failure: the attempt never started, so there is no start_time,
 -- no exit_code, no log header, and no meta file.
@@ -209,6 +211,7 @@ entity SourceRoot {
 	local_path: String
 	mount_basename: String
 	mount_relative_path: String     -- "." for root 0, "../<basename>" for siblings
+	origins: List<SourceRootOrigin>
 	snapshot: SourceSnapshot
 	vcs_type: String?
 	vcs_revision: String?
@@ -323,8 +326,8 @@ config {
     hf_prewarm_backoff_later: Duration = 20.seconds
 
 	-- Project-level roots that must be synced adjacent to working_dir.
-	-- These are read from .weft.toml [sync].sibling_roots only; PEP 723
-	-- script metadata cannot change the project's source composition.
+	-- Explicit weft roots are read from .weft.toml [sync].sibling_roots
+	-- only; PEP 723 [tool.weft] cannot configure this list.
 	sibling_roots: List<String> = []
 }
 
@@ -389,20 +392,25 @@ rule BuildSourceSnapshot {
 }
 
 -- Resolve the project root plus any configured sibling roots before a job is
--- queued. Sibling roots are deliberately narrower than general outside-root
--- paths: the same `../<basename>` reference must resolve on the submitter,
+-- queued. Explicit sibling roots come from .weft.toml. Derived sibling roots
+-- come from [tool.uv.sources] path dependencies in the project's
+-- pyproject.toml and in PEP 723 script metadata for the submitted command.
+-- Sibling roots are deliberately narrower than general outside-root paths:
+-- the same `../<basename>` reference must resolve on the submitter,
 -- inventory hosts, and cloud rentals.
 rule ResolveSourceRoots {
 	when: BuildSourceRootManifestRequested(project_working_dir, inputs)
 
 	let project_root = Abs(project_working_dir)
 	let declared = ProjectConfig(project_root).sync.sibling_roots
+	let derived = UVPathSources(project_root, SubmittedCommandScripts(project_root))
 
 	ensures: SourceRoot.created(
 		project_working_dir: project_root,
 		local_path: project_root,
 		mount_basename: Basename(project_root),
 		mount_relative_path: ".",
+		origins: [project],
 		snapshot: LatestSnapshotFor(project_root)
 	)
 
@@ -439,6 +447,51 @@ rule ResolveSourceRoots {
 					local_path: root,
 					mount_basename: Basename(root),
 					mount_relative_path: "../" + Basename(root),
+					origins: [explicit_config],
+					snapshot: BuildSourceSnapshot(root, no_overlays),
+					vcs_type: DetectVCSType(root),
+					vcs_revision: DetectVCSRevision(root),
+					vcs_change_id: DetectVCSChangeID(root),
+					vcs_dirty: DetectVCSDirty(root)
+				)
+
+	ensures:
+		for dep in derived where PathEscapesProject(dep.path, project_root):
+			let root = AbsRelativeTo(dep.path, dep.base_dir)
+			if not Exists(root):
+				SubmitWarning(
+					working_dir: project_root,
+					reason: derived_sibling_root_missing,
+					report: dep.path + " from tool.uv.sources does not exist; it will not be synced"
+				)
+			else if not IsDirectory(root):
+				SubmitWarning(
+					working_dir: project_root,
+					reason: derived_sibling_root_not_directory,
+					report: dep.path + " from tool.uv.sources is not a directory; it will not be synced"
+				)
+			else if Dirname(root) != Dirname(project_root):
+				SubmitWarning(
+					working_dir: project_root,
+					reason: derived_sibling_root_not_sibling,
+					report: dep.path + " from tool.uv.sources is outside the project but is not a sibling; it will not be synced"
+				)
+			else if CanonicalPath(root) in CanonicalPaths(OrderedSourceRoots(project_root)):
+				AddSourceRootOrigin(root: ExistingRootByCanonicalPath(root),
+									origin: derived_uv_sources)
+			else if Basename(root) in MountBasenamesFor(project_root):
+				SubmitWarning(
+					working_dir: project_root,
+					reason: derived_sibling_root_basename_collision,
+					report: dep.path + " from tool.uv.sources collides with an existing source-root mount; it will not be synced"
+				)
+			else:
+				SourceRoot.created(
+					project_working_dir: project_root,
+					local_path: root,
+					mount_basename: Basename(root),
+					mount_relative_path: "../" + Basename(root),
+					origins: [derived_uv_sources],
 					snapshot: BuildSourceSnapshot(root, no_overlays),
 					vcs_type: DetectVCSType(root),
 					vcs_revision: DetectVCSRevision(root),
@@ -451,10 +504,39 @@ rule ResolveSourceRoots {
 		--   internal/config/project.go      — ProjectSyncConfig.SiblingRoots
 		--   internal/sync/source_roots.go   — ResolveSourceRoots,
 		--                                     BuildSourceManifestForInputs
+		--   internal/dataloc/uv_sources.go  — ScanUVPathSources
 		--   internal/sync/vcs.go            — DetectVCSInfo
-		-- Sibling roots are a project-level sync declaration. Do not add a
-		-- [tool.weft] / PEP 723 surface unless a later spec revision changes
-		-- source composition semantics.
+		-- Explicit .weft.toml sibling_roots are user requests to change the
+		-- project's source composition, so invalid explicit paths are hard
+		-- submit errors. Derived tool.uv.sources paths are dependency facts
+		-- that uv already understands; syncing true siblings prevents the
+		-- ModuleNotFoundError this feature addresses. Invalid derived paths
+		-- warn and continue because a warning degrades current behavior,
+		-- while an error would newly block submissions that used to be
+		-- accepted. A root that is both explicit and derived is one root
+		-- with both origins, deduped by canonical local path.
+}
+
+-- Reject attempts to configure sibling roots through PEP 723 [tool.weft].
+-- The correct weft configuration home is .weft.toml [sync].sibling_roots.
+rule RejectPEP723SiblingRootsConfig {
+	when: ParsePEP723ToolWeft(script)
+	requires: HasKey(script.tool.weft, "sibling-roots")
+			  or HasKey(script.tool.weft, "sibling_roots")
+
+	ensures: SubmissionRejected(
+		working_dir: script.project_working_dir,
+		reason: sibling_roots_in_script_metadata,
+		report: "sibling-roots in script metadata is not supported; move it to .weft.toml"
+	)
+
+	@guidance
+		-- sibling_roots defines what the project ships as source. A single
+		-- submitted script must not be able to change the project source
+		-- composition through [tool.weft]. [tool.uv.sources] is different:
+		-- uv itself expects path dependencies there, including for standalone
+		-- scripts, so weft derives sync roots from that dependency metadata
+		-- rather than asking the user to duplicate it.
 }
 
 -- Build one content-addressed snapshot per resolved root and then hash the
@@ -498,6 +580,7 @@ rule RecordSourceRootProvenance {
 				local_path: root.local_path,
 				mount_basename: root.mount_basename,
 				mount_relative_path: root.mount_relative_path,
+				origins: root.origins,
 				content_hash: root.snapshot.content_hash,
 				r2_key: CloudR2Key(root.snapshot),
 				size_bytes: root.snapshot.size_bytes,
@@ -522,9 +605,12 @@ rule PrintResolvedSourceRoots {
 				rows: manifest.roots.map(
 					mount_relative_path,
 					CloudSourceRootDirForSubmitPreview(job, root),
-					ShortSHA(root.snapshot.content_hash)
+					ShortSHA(root.snapshot.content_hash),
+					root.origins
 				)
 			)
+		for warning in SourceRootWarnings(job):
+			SubmitOutputIncludes(warning)
 }
 
 -- Reject a snapshot build when the non-excluded working dir would exceed
@@ -1482,6 +1568,15 @@ invariant SiblingRootsAreTrueSiblings {
 invariant SourceRootBasenamesUnique {
 	for manifest in SourceRootManifests:
 		Unique(manifest.roots.mount_basename)
+}
+
+-- Explicit and derived declarations of the same canonical local path are one
+-- source root with multiple origins, not a basename collision.
+invariant SourceRootsDedupeByCanonicalPath {
+	for manifest in SourceRootManifests:
+		Unique(manifest.roots.map(CanonicalPath(local_path)))
+		and for root in manifest.roots:
+			root.origins = AllOriginsForCanonicalPath(root.local_path)
 }
 
 -- The source-root manifest hash is the job-level source identity. It is a

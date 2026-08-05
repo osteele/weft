@@ -56,12 +56,18 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 // source root tarball and returns the ordered manifest for the whole source
 // state.
 func UploadSourceRootsToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Client, localDir string, inputs []string, onProgress UploadSourceProgressFunc) (SourceUploadResult, error) {
+	return UploadSourceRootsToR2WithProgressForInputsAndCommands(ctx, r2Client, localDir, inputs, nil, onProgress)
+}
+
+// UploadSourceRootsToR2WithProgressForInputsAndCommands uploads source roots
+// including project/script-derived uv path sources from commands.
+func UploadSourceRootsToR2WithProgressForInputsAndCommands(ctx context.Context, r2Client *r2.Client, localDir string, inputs []string, commands []string, onProgress UploadSourceProgressFunc) (SourceUploadResult, error) {
 	if onProgress == nil {
 		onProgress = func(string) {}
 	}
 
 	onProgress("hashing source")
-	manifest, tmpPaths, err := BuildSourceManifestForInputs(localDir, inputs)
+	manifest, tmpPaths, err := BuildSourceManifestForInputsAndCommands(localDir, inputs, commands)
 	if err != nil {
 		return SourceUploadResult{}, fmt.Errorf("create source manifest: %w", err)
 	}

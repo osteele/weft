@@ -39,9 +39,13 @@ var (
 	submitJobsToInstanceForReusePass = SubmitJobsToInstance
 )
 
-func uploadSourceRootsForReuse(ctx context.Context, client *r2.Client, localDir string, inputs []string) (weftsync.SourceUploadResult, error) {
-	if len(config.ProjectSiblingRoots(localDir)) > 0 {
-		return weftsync.UploadSourceRootsToR2WithProgressForInputs(ctx, client, localDir, inputs, nil)
+func uploadSourceRootsForReuse(ctx context.Context, client *r2.Client, localDir string, inputs []string, commands []string) (weftsync.SourceUploadResult, error) {
+	derived, err := dataloc.ScanUVPathSources(localDir, commands)
+	if err != nil {
+		return weftsync.SourceUploadResult{}, err
+	}
+	if len(config.ProjectSiblingRoots(localDir)) > 0 || len(derived) > 0 {
+		return weftsync.UploadSourceRootsToR2WithProgressForInputsAndCommands(ctx, client, localDir, inputs, commands, nil)
 	}
 	key, err := uploadSourceToR2(ctx, client, localDir, inputs)
 	if err != nil {
@@ -1193,7 +1197,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		// Upload fresh sources (content-addressed, so deduped)
 		slog.Debug("source upload: reuse path", "component", "reuse",
 			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
-		sourceUpload, err := uploadSourceRootsToR2(opCtx, r2Client, sourceDir, job.Inputs)
+		sourceUpload, err := uploadSourceRootsToR2(opCtx, r2Client, sourceDir, job.Inputs, []string{job.Command})
 		if err != nil {
 			rollbackErr := rollbackClaims()
 			if rollbackErr != nil {

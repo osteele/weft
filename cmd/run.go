@@ -665,11 +665,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Load output directories from .weft.toml for convention-based output collection
 	localDir := workdir.ResolveLocal(workingDir)
-	if localDir != "" {
-		if _, err := srcsync.ResolveSourceRoots(localDir); err != nil {
-			return err
-		}
-	}
 
 	// Fail fast when the command directly execs a local script that lacks the
 	// +x bit; otherwise the job dies at runtime with exit 126 "Permission denied".
@@ -911,7 +906,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	sourceMeta, err := buildJobSourceMetadata(localDir, runInputs)
+	sourceMeta, err := buildJobSourceMetadata(localDir, runInputs, []string{command})
 	if err != nil {
 		return err
 	}
@@ -1781,11 +1776,11 @@ func printDiskPreview(w io.Writer, disk *db.JobDiskMetadata) {
 	}
 }
 
-func buildJobSourceMetadata(localDir string, inputs []string) (*db.JobSourceMetadata, error) {
+func buildJobSourceMetadata(localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
 	if localDir == "" {
 		return nil, nil
 	}
-	manifest, tmpPaths, err := srcsync.BuildSourceManifestForInputs(localDir, inputs)
+	manifest, tmpPaths, err := srcsync.BuildSourceManifestForInputsAndCommands(localDir, inputs, commands)
 	if err != nil {
 		return nil, err
 	}
@@ -1798,6 +1793,7 @@ func buildJobSourceMetadata(localDir string, inputs []string) (*db.JobSourceMeta
 			LocalPath:     root.LocalPath,
 			MountBasename: root.MountBasename,
 			MountRel:      root.MountRel,
+			Origins:       root.Origins,
 			Hash:          root.Hash,
 			R2Key:         root.R2Key,
 			SizeBytes:     root.SizeBytes,
@@ -1812,7 +1808,13 @@ func buildJobSourceMetadata(localDir string, inputs []string) (*db.JobSourceMeta
 		}
 		roots = append(roots, item)
 	}
-	return &db.JobSourceMetadata{Hash: manifest.Hash, Roots: roots}, nil
+	warnings := make([]string, 0, len(manifest.Warnings))
+	for _, warning := range manifest.Warnings {
+		if warning.Message != "" {
+			warnings = append(warnings, warning.Message)
+		}
+	}
+	return &db.JobSourceMetadata{Hash: manifest.Hash, Roots: roots, Warnings: warnings}, nil
 }
 
 func remoteSourceRootForPreview(workingDir, host string) string {
@@ -1827,7 +1829,7 @@ func remoteSourceRootForPreview(workingDir, host string) string {
 }
 
 func printSourceRootsPreview(w io.Writer, source *db.JobSourceMetadata, projectRemoteRoot string) {
-	if source == nil || len(source.Roots) <= 1 {
+	if source == nil || (len(source.Roots) <= 1 && len(source.Warnings) == 0) {
 		return
 	}
 	fmt.Fprintln(w, "  Source roots:")
@@ -1843,8 +1845,26 @@ func printSourceRootsPreview(w io.Writer, source *db.JobSourceMetadata, projectR
 		if len(hash) > 8 {
 			hash = hash[:8]
 		}
-		fmt.Fprintf(w, "    %-18s -> %-32s %s\n", rel, remote, hash)
+		origin := sourceRootOriginLabel(root.Origins)
+		if origin != "" {
+			origin = "  (" + origin + ")"
+		}
+		fmt.Fprintf(w, "    %-18s -> %-32s %s%s\n", rel, remote, hash, origin)
 	}
+	for _, warning := range source.Warnings {
+		fmt.Fprintf(w, "    Warning: %s\n", warning)
+	}
+}
+
+func sourceRootOriginLabel(origins []string) string {
+	labels := make([]string, 0, len(origins))
+	for _, origin := range origins {
+		if origin == "" || origin == srcsync.SourceRootOriginProject {
+			continue
+		}
+		labels = append(labels, origin)
+	}
+	return strings.Join(labels, ", ")
 }
 
 func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
@@ -1857,7 +1877,11 @@ func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
 		if i == 0 {
 			label = "."
 		}
-		fmt.Fprintf(w, "             %s %s %s", label, root.LocalPath, shortHash(root.Hash))
+		origin := sourceRootOriginLabel(root.Origins)
+		if origin != "" {
+			origin = " (" + origin + ")"
+		}
+		fmt.Fprintf(w, "             %s %s %s%s", label, root.LocalPath, shortHash(root.Hash), origin)
 		if root.VCS != nil {
 			vcsID := shortHash(root.VCS.Revision)
 			if root.VCS.ChangeID != "" {
@@ -1870,6 +1894,9 @@ func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
 			fmt.Fprintf(w, " %s:%s%s", root.VCS.Type, vcsID, dirty)
 		}
 		fmt.Fprintln(w)
+	}
+	for _, warning := range source.Warnings {
+		fmt.Fprintf(w, "             Warning: %s\n", warning)
 	}
 }
 

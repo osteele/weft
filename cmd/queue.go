@@ -356,11 +356,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	localDir := workdir.ResolveLocal(workingDir)
-	if localDir != "" {
-		if _, err := srcsync.ResolveSourceRoots(localDir); err != nil {
-			return err
-		}
-	}
 
 	if err := validatePEP723ScriptDependencyInvocation(localDir, command); err != nil {
 		return err
@@ -386,7 +381,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	sourceMeta, err := buildJobSourceMetadata(localDir, queueInputs)
+	sourceMeta, err := buildJobSourceMetadata(localDir, queueInputs, []string{command})
 	if err != nil {
 		return err
 	}
@@ -1528,7 +1523,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if job.WorkingDir != "" && job.Host != "" {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
-			if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+			if err := srcsync.SyncSourcesToHostForCommands(job.Host, localDir, remoteDir, job.Inputs, []string{job.Command}); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: source sync failed: %v\n", err)
 			}
 		}

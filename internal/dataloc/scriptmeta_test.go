@@ -3,6 +3,7 @@ package dataloc
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -521,6 +522,23 @@ import torch
 				t.Errorf("PreInstall: got %q, want %q", got.PreInstall, tt.want.PreInstall)
 			}
 		})
+	}
+}
+
+func TestParseScriptMetaRejectsSiblingRoots(t *testing.T) {
+	content := `# /// script
+# [tool.weft]
+# sibling-roots = ["../research-expkit"]
+# ///
+`
+	_, err := ParseScriptMeta(content)
+	if err == nil {
+		t.Fatal("ParseScriptMeta err = nil, want sibling-roots rejection")
+	}
+	if got := err.Error(); !strings.Contains(got, "sibling-roots in script metadata is not supported") ||
+		!strings.Contains(got, "[sync]") ||
+		!strings.Contains(got, "sibling_roots") {
+		t.Fatalf("ParseScriptMeta err = %q, want relocation guidance", got)
 	}
 }
 

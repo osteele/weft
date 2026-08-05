@@ -43,11 +43,11 @@ func syncQueueJobSources(job *db.Job, timeout time.Duration) (string, error) {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	remoteDir := workdir.ToTildeRelative(job.WorkingDir)
 	sourceSHA256 := ""
-	hash, hashErr := srcsync.ComputeSourceSHA256(localDir)
+	hash, hashErr := srcsync.ComputeSourceSHA256ForCommands(localDir, []string{job.Command})
 	if hashErr == nil {
 		sourceSHA256 = hash
 	}
-	if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+	if err := srcsync.SyncSourcesToHostForCommands(job.Host, localDir, remoteDir, job.Inputs, []string{job.Command}); err != nil {
 		return "", fmt.Errorf("sync sources: %w", err)
 	}
 	if sourceSHA256 != "" {

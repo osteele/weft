@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 )
 
 // SyncSourcesToHost syncs source files and extra paths to a remote host.
@@ -16,18 +17,22 @@ import (
 // Skips syncing when the target host is the local machine (same hostname)
 // to avoid rsyncing a directory to itself, and returns nil.
 func SyncSourcesToHost(host, localDir, remoteDir string, inputs []string) error {
-	return syncSourcesToHost(host, localDir, remoteDir, inputs, func() error {
+	return SyncSourcesToHostForCommands(host, localDir, remoteDir, inputs, nil)
+}
+
+func SyncSourcesToHostForCommands(host, localDir, remoteDir string, inputs []string, commands []string) error {
+	return syncSourcesToHost(host, localDir, remoteDir, inputs, commands, func() error {
 		return SyncSources(host, localDir, remoteDir)
 	})
 }
 
 func SyncSourcesToHostWithTimeout(host, localDir, remoteDir string, inputs []string, timeout time.Duration) error {
-	return syncSourcesToHost(host, localDir, remoteDir, inputs, func() error {
+	return syncSourcesToHost(host, localDir, remoteDir, inputs, nil, func() error {
 		return SyncSourcesWithTimeout(host, localDir, remoteDir, timeout)
 	})
 }
 
-func syncSourcesToHost(host, localDir, remoteDir string, inputs []string, syncProject func() error) error {
+func syncSourcesToHost(host, localDir, remoteDir string, inputs []string, commands []string, syncProject func() error) error {
 	if localDir == "" {
 		return nil
 	}
@@ -37,11 +42,16 @@ func syncSourcesToHost(host, localDir, remoteDir string, inputs []string, syncPr
 	if err := syncProject(); err != nil {
 		return err
 	}
-	if len(config.ProjectSiblingRoots(localDir)) > 0 {
-		roots, err := ResolveSourceRoots(localDir)
+	derived, err := dataloc.ScanUVPathSources(localDir, commands)
+	if err != nil {
+		return err
+	}
+	if len(config.ProjectSiblingRoots(localDir)) > 0 || len(derived) > 0 {
+		roots, warnings, err := ResolveSourceRootsForCommands(localDir, commands)
 		if err != nil {
 			return err
 		}
+		_ = warnings
 		for _, root := range roots[1:] {
 			siblingRemoteDir := path.Join(path.Dir(strings.TrimRight(remoteDir, "/")), root.MountBasename)
 			if err := SyncSources(host, root.LocalPath, siblingRemoteDir); err != nil {

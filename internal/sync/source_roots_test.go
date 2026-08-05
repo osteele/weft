@@ -3,6 +3,7 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,83 @@ func TestResolveSourceRootsRejectsMissingSibling(t *testing.T) {
 	_, err := ResolveSourceRoots(project)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("ResolveSourceRoots err = %v, want missing-root error", err)
+	}
+}
+
+func TestResolveSourceRootsDerivedNonSiblingWarns(t *testing.T) {
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	other := filepath.Join(parent, "nested", "other")
+	mustMkdir(t, project)
+	mustMkdir(t, other)
+	mustWrite(t, filepath.Join(project, "pyproject.toml"), `[tool.uv.sources]
+other = { path = "../nested/other", editable = true }
+`)
+
+	roots, warnings, err := ResolveSourceRootsForCommands(project, nil)
+	if err != nil {
+		t.Fatalf("ResolveSourceRootsForCommands: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("roots = %d, want only project root", len(roots))
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "not a sibling") || !strings.Contains(warnings[0].Message, "will not be synced") {
+		t.Fatalf("warnings = %+v, want derived non-sibling warning", warnings)
+	}
+}
+
+func TestResolveSourceRootsDedupeExplicitAndDerived(t *testing.T) {
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	sibling := filepath.Join(parent, "research-expkit")
+	mustMkdir(t, project)
+	mustMkdir(t, sibling)
+	mustWrite(t, filepath.Join(project, ".weft.toml"), "[sync]\nsibling_roots = [\"../research-expkit\"]\n")
+	mustWrite(t, filepath.Join(project, "pyproject.toml"), `[tool.uv.sources]
+research-expkit = { path = "../research-expkit", editable = true }
+`)
+
+	roots, warnings, err := ResolveSourceRootsForCommands(project, nil)
+	if err != nil {
+		t.Fatalf("ResolveSourceRootsForCommands: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("roots = %d, want project + one sibling", len(roots))
+	}
+	got := roots[1].Origins
+	if !slices.Contains(got, SourceRootOriginExplicit) || !slices.Contains(got, SourceRootOriginDerived) {
+		t.Fatalf("origins = %v, want explicit and derived", got)
+	}
+}
+
+func TestResolveSourceRootsDerivesFromScriptUVSources(t *testing.T) {
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	sibling := filepath.Join(parent, "research-expkit")
+	mustMkdir(t, project)
+	mustMkdir(t, sibling)
+	mustWrite(t, filepath.Join(project, "train.py"), `# /// script
+# [tool.uv.sources]
+# research-expkit = { path = "../research-expkit", editable = true }
+# ///
+print("ok")
+`)
+
+	roots, warnings, err := ResolveSourceRootsForCommands(project, []string{"uv run train.py"})
+	if err != nil {
+		t.Fatalf("ResolveSourceRootsForCommands: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", warnings)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("roots = %d, want project + script-derived sibling", len(roots))
+	}
+	if got := roots[1].Origins; !slices.Contains(got, SourceRootOriginDerived) {
+		t.Fatalf("origins = %v, want derived", got)
 	}
 }
 

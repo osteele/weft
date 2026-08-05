@@ -20,8 +20,9 @@ type JobMetadata struct {
 
 // JobSourceMetadata records the ordered source-root identity for a job.
 type JobSourceMetadata struct {
-	Hash  string                  `json:"hash,omitempty"`
-	Roots []JobSourceRootMetadata `json:"roots,omitempty"`
+	Hash     string                  `json:"hash,omitempty"`
+	Roots    []JobSourceRootMetadata `json:"roots,omitempty"`
+	Warnings []string                `json:"warnings,omitempty"`
 }
 
 // JobSourceRootMetadata records provenance for one synced source root.
@@ -29,6 +30,7 @@ type JobSourceRootMetadata struct {
 	LocalPath     string                `json:"local_path,omitempty"`
 	MountBasename string                `json:"mount_basename,omitempty"`
 	MountRel      string                `json:"mount_rel,omitempty"`
+	Origins       []string              `json:"origins,omitempty"`
 	Hash          string                `json:"hash,omitempty"`
 	R2Key         string                `json:"r2_key,omitempty"`
 	SizeBytes     int64                 `json:"size_bytes,omitempty"`

@@ -393,7 +393,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	}
 
 	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
-	sourceBytes := estimateGroupSourceRootBytes(group.SourceDirs())
+	sourceBytes := estimateGroupSourceRootBytes(group)
 
 	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
@@ -429,15 +429,20 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	return diskGB, anomalies
 }
 
-func estimateGroupSourceRootBytes(sourceDirs []string) int64 {
+func estimateGroupSourceRootBytes(group InstanceGroup) int64 {
 	seen := map[string]bool{}
 	var total int64
-	for _, sourceDir := range sourceDirs {
-		roots, err := weftsync.ResolveSourceRoots(sourceDir)
+	commandsByDir := SourceCommandsByDir(group.Jobs)
+	for _, sourceDir := range group.SourceDirs() {
+		roots, warnings, err := weftsync.ResolveSourceRootsForCommands(sourceDir, commandsByDir[sourceDir])
 		if err != nil {
 			slog.Warn("estimate source roots failed; source bytes omitted from disk estimate",
 				"component", "disk", "source_dir", sourceDir, "error", err)
 			continue
+		}
+		for _, warning := range warnings {
+			slog.Warn("derived source root omitted from disk estimate",
+				"component", "disk", "source_dir", sourceDir, "warning", warning.Message)
 		}
 		for _, root := range roots {
 			if seen[root.LocalPath] {
