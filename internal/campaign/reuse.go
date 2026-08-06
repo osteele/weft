@@ -50,6 +50,18 @@ func uploadSourceRootsForReuse(ctx context.Context, client *r2.Client, localDir 
 	return uploadSourceToR2(ctx, client, localDir, inputs)
 }
 
+func sourceUploadForReuse(ctx context.Context, client *r2.Client, job *db.Job, localDir string) (weftsync.SourceUploadResult, bool, error) {
+	manifest, pinned, err := pinnedSourceManifest(job)
+	if err != nil {
+		return weftsync.SourceUploadResult{}, pinned, err
+	}
+	if pinned {
+		return weftsync.SourceUploadResult{Manifest: manifest}, true, nil
+	}
+	result, err := uploadSourceRootsToR2(ctx, client, localDir, job.Inputs, []string{job.Command})
+	return result, false, err
+}
+
 // MinGraceRemaining is the minimum grace period remaining to consider an
 // instance for reuse. Instances with less time are auto-extended.
 const MinGraceRemaining = 5 * time.Minute
@@ -1194,16 +1206,22 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			return err
 		}
 
-		// Upload fresh sources (content-addressed, so deduped)
-		slog.Debug("source upload: reuse path", "component", "reuse",
-			"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
-		sourceUpload, err := uploadSourceRootsToR2(opCtx, r2Client, sourceDir, job.Inputs, []string{job.Command})
+		sourceUpload, pinned, err := sourceUploadForReuse(opCtx, r2Client, job, sourceDir)
 		if err != nil {
 			rollbackErr := rollbackClaims()
-			if rollbackErr != nil {
-				return fmt.Errorf("upload source for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
+			operation := "upload source"
+			if pinned {
+				operation = "load pinned source"
 			}
-			return fmt.Errorf("upload source for job %s: %w", ids.FormatJobID(job.ID), err)
+			if rollbackErr != nil {
+				return fmt.Errorf("%s for job %s: %w (rollback: %v)", operation, ids.FormatJobID(job.ID), err, rollbackErr)
+			}
+			return fmt.Errorf("%s for job %s: %w", operation, ids.FormatJobID(job.ID), err)
+		}
+		if !pinned {
+			// Older rows have no submit-time pin and retain dispatch-time derivation.
+			slog.Debug("source upload: reuse fallback", "component", "reuse",
+				"jobID", job.ID, "sourceDir", sourceDir, "inputCount", len(job.Inputs), "inputs", job.Inputs)
 		}
 
 		// Compute remote working directory under the synced project root.

@@ -430,11 +430,31 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 }
 
 func estimateGroupSourceRootBytes(group InstanceGroup) int64 {
-	seen := map[string]bool{}
-	var total int64
-	commandsByDir := SourceCommandsByDir(group.Jobs)
-	for _, sourceDir := range group.SourceDirs() {
-		roots, warnings, err := weftsync.ResolveSourceRootsForCommands(sourceDir, commandsByDir[sourceDir])
+	sizeByRoot := make(map[string]int64)
+	commandsByDir := make(map[string][]string)
+	for _, job := range group.Jobs {
+		manifest, pinned, err := pinnedSourceManifest(job)
+		if err != nil {
+			slog.Warn("read pinned source size failed; source bytes omitted from disk estimate",
+				"component", "disk", "job_id", job.ID, "error", err)
+			continue
+		}
+		if pinned {
+			for _, root := range manifest.Roots {
+				if root.SizeBytes > sizeByRoot[root.LocalPath] {
+					sizeByRoot[root.LocalPath] = root.SizeBytes
+				}
+			}
+			continue
+		}
+		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if sourceDir == "" || workdir.IsContainerPath(sourceDir) {
+			continue
+		}
+		commandsByDir[sourceDir] = mergeStringSlices(commandsByDir[sourceDir], []string{job.Command})
+	}
+	for sourceDir, commands := range commandsByDir {
+		roots, warnings, err := weftsync.ResolveSourceRootsForCommands(sourceDir, commands)
 		if err != nil {
 			slog.Warn("estimate source roots failed; source bytes omitted from disk estimate",
 				"component", "disk", "source_dir", sourceDir, "error", err)
@@ -445,18 +465,20 @@ func estimateGroupSourceRootBytes(group InstanceGroup) int64 {
 				"component", "disk", "source_dir", sourceDir, "warning", warning.Message)
 		}
 		for _, root := range roots {
-			if seen[root.LocalPath] {
-				continue
-			}
-			seen[root.LocalPath] = true
 			size, err := weftsync.IncludedSourceBytes(root.LocalPath)
 			if err != nil {
 				slog.Warn("estimate source root size failed; source bytes omitted from disk estimate",
 					"component", "disk", "source_dir", root.LocalPath, "error", err)
 				continue
 			}
-			total += size
+			if size > sizeByRoot[root.LocalPath] {
+				sizeByRoot[root.LocalPath] = size
+			}
 		}
+	}
+	var total int64
+	for _, size := range sizeByRoot {
+		total += size
 	}
 	return total
 }

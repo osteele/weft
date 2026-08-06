@@ -63,7 +63,14 @@ func UploadSourceToR2WithProgressForInputs(ctx context.Context, r2Client *r2.Cli
 // UploadCloudSourceRootsToR2ForInputs uploads cloud source roots, diverting
 // large files into content-addressed blob objects.
 func UploadCloudSourceRootsToR2ForInputs(ctx context.Context, r2Client *r2.Client, localDir string, inputs []string) (SourceUploadResult, error) {
-	return uploadSourceRootsToR2(ctx, r2Client, localDir, inputs, nil, nil, true)
+	return UploadCloudSourceRootsToR2WithProgressForInputsAndCommands(ctx, r2Client, localDir, inputs, nil, nil)
+}
+
+// UploadCloudSourceRootsToR2WithProgressForInputsAndCommands uploads the
+// cloud snapshot for a submitted command, including command-derived sibling
+// roots and diverted large-file blobs.
+func UploadCloudSourceRootsToR2WithProgressForInputsAndCommands(ctx context.Context, r2Client *r2.Client, localDir string, inputs []string, commands []string, onProgress UploadSourceProgressFunc) (SourceUploadResult, error) {
+	return uploadSourceRootsToR2(ctx, r2Client, localDir, inputs, commands, onProgress, true)
 }
 
 // UploadSourceRootsToR2WithProgressForInputs uploads each content-addressed

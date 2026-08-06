@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -239,7 +240,7 @@ func ensureSourceFreshMounts(bucket string, mounts []cloud.SourceMount) error {
 		return nil
 	}
 	for _, mount := range mounts {
-		if err := ensureOneSourceFresh(bucket, mount.RemoteDir); err != nil {
+		if err := ensureOneSourceFresh(bucket, mount); err != nil {
 			return fmt.Errorf("restore source mount %s: %w", mount.RemoteDir, err)
 		}
 	}
@@ -274,16 +275,25 @@ func runnerExpandTilde(p string) string {
 	return p
 }
 
-func ensureOneSourceFresh(bucket, jobDir string) error {
+func ensureOneSourceFresh(bucket string, mount cloud.SourceMount) error {
+	jobDir := mount.RemoteDir
 	if jobDir == "" {
-		return nil
-	}
-	if hasSourceMarkers(jobDir) {
 		return nil
 	}
 	source, ok := sources.lookupSource(jobDir)
 	if !ok {
 		return fmt.Errorf("empty or missing source directory has no registered source payload")
+	}
+	blobsDiffer := mount.Blobs != nil && !slices.Equal(source.blobs, mount.Blobs)
+	if mount.R2Key != "" && (source.r2Key != mount.R2Key || blobsDiffer) {
+		return applySourceUpdate(bucket, controlplane.SourceUpdate{
+			RemoteDir: jobDir,
+			R2Key:     mount.R2Key,
+			Blobs:     mount.Blobs,
+		})
+	}
+	if hasSourceMarkers(jobDir) {
+		return nil
 	}
 
 	cachePath := sourceCachePath(source.r2Key)

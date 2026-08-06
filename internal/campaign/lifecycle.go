@@ -215,6 +215,7 @@ type R2AssetStager struct {
 	cancel         context.CancelFunc
 	agentKey       *stringPromise
 	sourcePromises map[string]*sourceUploadPromise
+	pinnedSources  map[int64]weftsync.SourceManifest
 	reporter       AssetStageReporter
 
 	statusMu sync.RWMutex
@@ -330,6 +331,7 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		cancel:         uploadCancel,
 		agentKey:       newStringPromise(),
 		sourcePromises: make(map[string]*sourceUploadPromise),
+		pinnedSources:  make(map[int64]weftsync.SourceManifest),
 		reporter:       reporter,
 		statuses:       make(map[string]AssetStageStatus),
 	}
@@ -340,21 +342,13 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 		Phase: "queued",
 	})
 
-	allSourceDirs := make(map[string]bool)
-	sourceInputsByDir := make(map[string][]string)
-	sourceCommandsByDir := make(map[string][]string)
-	for _, g := range groups {
-		for _, d := range g.SourceDirs() {
-			allSourceDirs[d] = true
-		}
-		for d, inputs := range SourceInputsByDir(g.Jobs) {
-			sourceInputsByDir[d] = mergeStringSlices(sourceInputsByDir[d], inputs)
-		}
-		for d, commands := range SourceCommandsByDir(g.Jobs) {
-			sourceCommandsByDir[d] = mergeStringSlices(sourceCommandsByDir[d], commands)
-		}
+	uploadSpecs, pinnedSources, err := planSourceStaging(groups)
+	if err != nil {
+		uploadCancel()
+		return nil, err
 	}
-	for localDir := range allSourceDirs {
+	stager.pinnedSources = pinnedSources
+	for localDir := range uploadSpecs {
 		stager.sourcePromises[localDir] = newSourceUploadPromise()
 		stager.setStatus(AssetStageStatus{
 			Key:   localDir,
@@ -406,8 +400,9 @@ func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGrou
 	for localDir, promise := range stager.sourcePromises {
 		localDir := localDir
 		promise := promise
-		inputs := sourceInputsByDir[localDir]
-		commands := sourceCommandsByDir[localDir]
+		spec := uploadSpecs[localDir]
+		inputs := spec.inputs
+		commands := spec.commands
 		slog.Debug("source upload: queuing", "component", "launch",
 			"localDir", localDir, "inputCount", len(inputs), "inputs", inputs, "commandCount", len(commands))
 		uploadWg.Add(1)
@@ -466,7 +461,12 @@ func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string, onProgress func(done, 
 	if onProgress == nil {
 		onProgress = func(int, int) {}
 	}
-	total := 1 + len(dirs) // agent + source dirs
+	total := 1 // agent + source dirs that still require dispatch-time upload
+	for _, dir := range dirs {
+		if _, ok := s.sourcePromises[dir]; ok {
+			total++
+		}
+	}
 	done := 0
 	onProgress(done, total)
 
@@ -478,11 +478,12 @@ func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string, onProgress func(done, 
 	onProgress(done, total)
 
 	assets := R2Assets{
-		Client:          s.Client,
-		AgentVersion:    s.AgentVersion,
-		AgentR2Key:      agentR2Key,
-		SourceR2Keys:    make(map[string]string),
-		SourceManifests: make(map[string]weftsync.SourceManifest),
+		Client:             s.Client,
+		AgentVersion:       s.AgentVersion,
+		AgentR2Key:         agentR2Key,
+		SourceR2Keys:       make(map[string]string),
+		SourceManifests:    make(map[string]weftsync.SourceManifest),
+		JobSourceManifests: cloneJobSourceManifests(s.pinnedSources),
 	}
 	for _, localDir := range dirs {
 		promise, ok := s.sourcePromises[localDir]
@@ -533,11 +534,12 @@ func (s *R2AssetStager) AwaitAllPerDir() (*R2Assets, map[string]error, error) {
 		return nil, nil, fmt.Errorf("upload agent to R2: %w", err)
 	}
 	assets := &R2Assets{
-		Client:          s.Client,
-		AgentVersion:    s.AgentVersion,
-		AgentR2Key:      agentR2Key,
-		SourceR2Keys:    make(map[string]string),
-		SourceManifests: make(map[string]weftsync.SourceManifest),
+		Client:             s.Client,
+		AgentVersion:       s.AgentVersion,
+		AgentR2Key:         agentR2Key,
+		SourceR2Keys:       make(map[string]string),
+		SourceManifests:    make(map[string]weftsync.SourceManifest),
+		JobSourceManifests: cloneJobSourceManifests(s.pinnedSources),
 	}
 	var perDirErr map[string]error
 	for localDir, promise := range s.sourcePromises {
@@ -2068,11 +2070,12 @@ func applyGroupCreateRequirements(createOpts *cloud.CreateOpts, group InstanceGr
 
 // R2Assets holds pre-staged R2 resources shared across instances in a campaign.
 type R2Assets struct {
-	Client          *r2.Client
-	AgentVersion    string                             // agent version string (jj commit hash)
-	AgentR2Key      string                             // R2 key for the agent binary
-	SourceR2Keys    map[string]string                  // local root dir -> R2 key for source tarballs
-	SourceManifests map[string]weftsync.SourceManifest // project localDir -> ordered source-root manifest
+	Client             *r2.Client
+	AgentVersion       string                             // agent version string (jj commit hash)
+	AgentR2Key         string                             // R2 key for the agent binary
+	SourceR2Keys       map[string]string                  // local root dir -> R2 key for source tarballs
+	SourceManifests    map[string]weftsync.SourceManifest // legacy project localDir -> dispatch-derived manifest
+	JobSourceManifests map[int64]weftsync.SourceManifest  // job ID -> submit-time pinned manifest
 }
 
 // runGroupLaunchWithReplan invokes launch up to maxReplans+1 times. The
@@ -2446,7 +2449,7 @@ func LaunchInstance(
 		if err := PersistResolvedCloudAfterPins(database, job, cloudAfter); err != nil {
 			return failLaunchBeforeCreate("cloud-after pin persistence failed", err)
 		}
-		agentJob.SourceMounts = sourceMountsForJob(group, job, localToRemote, r2Assets.SourceManifests)
+		agentJob.SourceMounts = sourceMountsForJob(group, job, localToRemote, r2Assets.JobSourceManifests, r2Assets.SourceManifests)
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
 		if err != nil {
 			return failLaunchBeforeCreate("checkpoint needs resolution failed", err)
@@ -2823,7 +2826,7 @@ func LaunchInstance(
 
 	// Build source mappings for the bootstrap script
 	var sources []SourceMapping
-	sources = sourceMappingsForLaunch(group, localToRemote, r2Assets.SourceManifests, r2Assets.SourceR2Keys)
+	sources = sourceMappingsForLaunch(group, localToRemote, r2Assets.JobSourceManifests, r2Assets.SourceManifests, r2Assets.SourceR2Keys)
 
 	// Store grace period in DB if configured
 	if opts.GracePeriodSeconds > 0 {
@@ -2954,39 +2957,31 @@ func remoteDirForLaunchAgentJob(group InstanceGroup, job *db.Job, localToRemote 
 	return path.Join(path.Dir(base), fmt.Sprintf("%s-job-%d", path.Base(base), job.ID))
 }
 
-func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]string, manifests map[string]weftsync.SourceManifest, sourceR2Keys map[string]string) []SourceMapping {
+func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]string, jobManifests map[int64]weftsync.SourceManifest, manifests map[string]weftsync.SourceManifest, sourceR2Keys map[string]string) []SourceMapping {
 	var sources []SourceMapping
 	seen := map[string]bool{}
-	if group.SlotGPUs {
-		jobs := append([]*db.Job(nil), group.Jobs...)
-		sort.Slice(jobs, func(i, j int) bool {
-			if jobs[i] == nil {
-				return false
-			}
-			if jobs[j] == nil {
-				return true
-			}
-			return jobs[i].ID < jobs[j].ID
-		})
-		for _, job := range jobs {
-			if job == nil {
-				continue
-			}
-			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-			for _, source := range sourceMappingsForProjectDir(localDir, remoteDirForLaunchAgentJob(group, job, localToRemote), manifests, sourceR2Keys) {
-				key := source.LocalDir + "\x00" + source.RemoteDir
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				sources = append(sources, source)
-			}
+	jobs := append([]*db.Job(nil), group.Jobs...)
+	sort.Slice(jobs, func(i, j int) bool {
+		if jobs[i] == nil {
+			return false
 		}
-		return sources
-	}
-	for localDir, remoteDir := range localToRemote {
-		for _, source := range sourceMappingsForProjectDir(localDir, remoteDir, manifests, sourceR2Keys) {
-			key := source.LocalDir + "\x00" + source.RemoteDir
+		if jobs[j] == nil {
+			return true
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		remoteDir := remoteDirForLaunchAgentJob(group, job, localToRemote)
+		jobSources := sourceMappingsForProjectDir(localDir, remoteDir, manifests, sourceR2Keys)
+		if manifest, ok := jobManifests[job.ID]; ok {
+			jobSources = sourceMappingsFromManifest(manifest, remoteDir)
+		}
+		for _, source := range jobSources {
+			key := source.R2Key + "\x00" + source.RemoteDir
 			if seen[key] {
 				continue
 			}
@@ -2994,7 +2989,6 @@ func sourceMappingsForLaunch(group InstanceGroup, localToRemote map[string]strin
 			sources = append(sources, source)
 		}
 	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].RemoteDir < sources[j].RemoteDir })
 	return sources
 }
 
@@ -3011,6 +3005,13 @@ func sourceMappingsForProjectDir(projectLocalDir, projectRemoteDir string, manif
 				LocalDir:  projectLocalDir,
 			}}
 		}
+		return nil
+	}
+	return sourceMappingsFromManifest(manifest, projectRemoteDir)
+}
+
+func sourceMappingsFromManifest(manifest weftsync.SourceManifest, projectRemoteDir string) []SourceMapping {
+	if len(manifest.Roots) == 0 || projectRemoteDir == "" {
 		return nil
 	}
 	sources := make([]SourceMapping, 0, len(manifest.Roots))
@@ -3032,12 +3033,15 @@ func sourceMappingsForProjectDir(projectLocalDir, projectRemoteDir string, manif
 	return sources
 }
 
-func sourceMountsForJob(group InstanceGroup, job *db.Job, localToRemote map[string]string, manifests map[string]weftsync.SourceManifest) []cloud.SourceMount {
+func sourceMountsForJob(group InstanceGroup, job *db.Job, localToRemote map[string]string, jobManifests map[int64]weftsync.SourceManifest, manifests map[string]weftsync.SourceManifest) []cloud.SourceMount {
 	if job == nil {
 		return nil
 	}
 	projectLocalDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-	manifest, ok := manifests[projectLocalDir]
+	manifest, ok := jobManifests[job.ID]
+	if !ok {
+		manifest, ok = manifests[projectLocalDir]
+	}
 	if !ok || len(manifest.Roots) == 0 {
 		return nil
 	}

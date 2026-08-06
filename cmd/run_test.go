@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -268,6 +269,179 @@ func TestRunRunPersistsAfterForUnplacedRentalJob(t *testing.T) {
 	if jobs[0].DepSpec != "123" {
 		t.Fatalf("DepSpec = %q, want 123", jobs[0].DepSpec)
 	}
+}
+
+func TestRunRunPinsSourceSnapshotAtSubmission(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	dir := t.TempDir()
+	tracked := filepath.Join(dir, "version.txt")
+	if err := os.WriteFile(tracked, []byte("job-a\n"), 0o644); err != nil {
+		t.Fatalf("write job A source: %v", err)
+	}
+	wantA := cloudSourceManifestHash(t, dir, "python train.py")
+
+	resetRunGlobals(t)
+	runDraft = true
+	runDir = dir
+	cmdA := newRunTestCommand()
+	var outA bytes.Buffer
+	cmdA.SetOut(&outA)
+	cmdA.SetErr(&outA)
+	if err := runRun(cmdA, []string{"python train.py"}); err != nil {
+		t.Fatalf("submit job A: %v\noutput:\n%s", err, outA.String())
+	}
+
+	if err := os.WriteFile(tracked, []byte("job-b\n"), 0o644); err != nil {
+		t.Fatalf("write job B source: %v", err)
+	}
+	wantB := cloudSourceManifestHash(t, dir, "python train.py")
+	cmdB := newRunTestCommand()
+	var outB bytes.Buffer
+	cmdB.SetOut(&outB)
+	cmdB.SetErr(&outB)
+	if err := runRun(cmdB, []string{"python train.py"}); err != nil {
+		t.Fatalf("submit job B: %v\noutput:\n%s", err, outB.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobA, err := db.GetJobByID(readDB, 1)
+	if err != nil {
+		t.Fatalf("load job A: %v", err)
+	}
+	jobB, err := db.GetJobByID(readDB, 2)
+	if err != nil {
+		t.Fatalf("load job B: %v", err)
+	}
+	if got := pinnedSourceHash(jobA); got != wantA {
+		t.Fatalf("job A pin = %q, want pre-edit manifest %q", got, wantA)
+	}
+	if got := pinnedSourceHash(jobB); got != wantB {
+		t.Fatalf("job B pin = %q, want post-edit manifest %q", got, wantB)
+	}
+	if wantA == wantB {
+		t.Fatalf("pre-edit and post-edit manifests are equal: %q", wantA)
+	}
+	if !strings.Contains(outA.String(), "pinning source snapshot") || !strings.Contains(outA.String(), "source ") {
+		t.Fatalf("submission output does not report timed source pinning:\n%s", outA.String())
+	}
+}
+
+func TestRunRunSubmitPathsPersistSourcePin(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, *sql.DB)
+	}{
+		{name: "ordinary placed", configure: func(t *testing.T, _ *sql.DB) {
+			inventory.UseTestHosts(t)
+			runHost = "host-alpha"
+			runNoSync = true
+		}},
+		{name: "ordinary unplaced", configure: func(_ *testing.T, _ *sql.DB) {
+			runTags = []string{db.TagRental}
+		}},
+		{name: "draft", configure: func(_ *testing.T, _ *sql.DB) {
+			runDraft = true
+		}},
+		{name: "dependency unplaced", configure: func(_ *testing.T, _ *sql.DB) {
+			runTags = []string{db.TagRental}
+			runAfterRaw = "123"
+		}},
+		{name: "dependency placed", configure: func(t *testing.T, database *sql.DB) {
+			inventory.UseTestHosts(t)
+			runHost = "host-alpha"
+			runNoSync = true
+			runAfterRaw = "123"
+			if err := db.RecordQueuedWithGPUAndID(database, 123, "host-alpha", "/tmp/upstream", "echo upstream", "", ""); err != nil {
+				t.Fatalf("record upstream: %v", err)
+			}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := db.SetupTestDB(t)
+			resetRunGlobals(t)
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "main.py"), []byte("print('pinned')\n"), 0o644); err != nil {
+				t.Fatalf("write source: %v", err)
+			}
+			runDir = dir
+			validateRentalJobImageFunc = func(context.Context, *config.Config, string, string) error { return nil }
+			originalRecord := recordQueuedJobMutationFunc
+			t.Cleanup(func() { recordQueuedJobMutationFunc = originalRecord })
+			recordQueuedJobMutationFunc = func(_ context.Context, database *sql.DB, params ops.QueueJobParams) (int64, error) {
+				return ops.RecordQueuedJob(database, params)
+			}
+			pinSnapshot := pinRunSourceSnapshotFunc
+			pinCalls := 0
+			pinRunSourceSnapshotFunc = func(ctx context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
+				pinCalls++
+				return pinSnapshot(ctx, localDir, inputs, commands)
+			}
+			tt.configure(t, database)
+			database.Close()
+
+			command := "echo submit-" + strings.ReplaceAll(tt.name, " ", "-")
+			cmd := newRunTestCommand()
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			if err := runRun(cmd, []string{command}); err != nil {
+				t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+			}
+			if pinCalls != 1 {
+				t.Fatalf("pin calls = %d, want 1", pinCalls)
+			}
+
+			readDB, err := db.Open()
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer readDB.Close()
+			jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 1000, 0, nil, "")
+			if err != nil {
+				t.Fatalf("list jobs: %v", err)
+			}
+			var submitted *db.Job
+			for _, job := range jobs {
+				if job.Command == command {
+					submitted = job
+					break
+				}
+			}
+			if submitted == nil {
+				t.Fatalf("submitted job with command %q not found", command)
+			}
+			if got := pinnedSourceHash(submitted); got == "" {
+				t.Fatalf("submitted job has no source pin: %#v", submitted.Metadata)
+			}
+		})
+	}
+}
+
+func cloudSourceManifestHash(t *testing.T, dir, command string) string {
+	t.Helper()
+	manifest, tmpPaths, err := srcsync.BuildCloudSourceManifestForInputsAndCommands(dir, nil, []string{command})
+	if err != nil {
+		t.Fatalf("build cloud source manifest: %v", err)
+	}
+	for _, tmpPath := range tmpPaths {
+		_ = os.Remove(tmpPath)
+	}
+	return manifest.Hash
+}
+
+func pinnedSourceHash(job *db.Job) string {
+	if job == nil || job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Pin == nil {
+		return ""
+	}
+	return job.Metadata.Source.Pin.Hash
 }
 
 func TestPathHasHomePrefix(t *testing.T) {
@@ -1200,6 +1374,18 @@ func newRunTestCommand() *cobra.Command {
 
 func resetRunGlobals(t *testing.T) {
 	t.Helper()
+	originalPinSource := pinRunSourceSnapshotFunc
+	t.Cleanup(func() { pinRunSourceSnapshotFunc = originalPinSource })
+	pinRunSourceSnapshotFunc = func(_ context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
+		manifest, tmpPaths, err := srcsync.BuildCloudSourceManifestForInputsAndCommands(localDir, inputs, commands)
+		if err != nil {
+			return nil, err
+		}
+		for _, tmpPath := range tmpPaths {
+			_ = os.Remove(tmpPath)
+		}
+		return jobSourceMetadataFromManifest(manifest, true), nil
+	}
 	runHost = ""
 	runDir = ""
 	runDescription = ""

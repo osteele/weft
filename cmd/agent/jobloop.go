@@ -375,8 +375,6 @@ func setupWeight(job cloud.AgentJob) int {
 }
 
 func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobSequenceConfig) {
-	doneUsingSource := activeSourceWorkdirs.begin(job.ID, pw.workDir)
-	defer doneUsingSource()
 	result := runSetupPrewarm(job, cfg, pw.workDir, true)
 	pw.done <- result
 	close(pw.done)
@@ -396,13 +394,16 @@ func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobS
 }
 
 func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool) setupPrewarmResult {
-	if err := ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job)); err != nil {
+	jobMounts := expandedSourceMountsForJob(job)
+	if err := ensureSourceFreshMounts(cfg.R2Bucket, jobMounts); err != nil {
 		return setupPrewarmResult{
 			err:           fmt.Errorf("source recovery failed: %w", err),
 			failureReason: sourceRecoveryFailureReason(err),
 			infraFailure:  true,
 		}
 	}
+	doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
+	defer doneUsingSource()
 	logDir := filepath.Join(os.TempDir(), "weft-setup-prewarm", fmt.Sprintf("%d-%d", job.ID, job.RunID))
 	_ = os.RemoveAll(logDir)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -804,7 +805,6 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// directory: a job with uv path deps has sibling mounts, and a source
 		// update to one of those while the job runs is the same hazard.
 		jobMounts := expandedSourceMountsForJob(job)
-		doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
 		// Recover every source root before any per-job staging or command work.
 		if err := ensureSourceFreshMounts(cfg.R2Bucket, jobMounts); err != nil {
 			reason := sourceRecoveryFailureReason(err)
@@ -813,10 +813,10 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.AnyFailed = true
 			result.AnyInfraFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
-			doneUsingSource()
 			recordEarlyJobFailure(cfg, job, reason, 1)
 			continue
 		}
+		doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))

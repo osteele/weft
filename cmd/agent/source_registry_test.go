@@ -192,6 +192,39 @@ func TestEnsureSourceFreshMountsRestoresBlobs(t *testing.T) {
 	}
 }
 
+func TestEnsureSourceFreshMountsSwitchesToJobPinnedSnapshot(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "job-a.tar.gz", map[string]string{"version.txt": "job A\n"})
+	writeSourceTarball(t, objectDir, "job-b.tar.gz", map[string]string{"version.txt": "job B\n"})
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{
+		RemoteDir: remoteDir,
+		R2Key:     "sources/job-b.tar.gz",
+	}); err != nil {
+		t.Fatalf("install dispatch-time current tree: %v", err)
+	}
+	if err := ensureSourceFreshMounts("test-bucket", []cloud.SourceMount{{
+		RemoteDir: remoteDir,
+		R2Key:     "sources/job-a.tar.gz",
+	}}); err != nil {
+		t.Fatalf("switch to job A pin: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "version.txt"))
+	if err != nil {
+		t.Fatalf("read switched source: %v", err)
+	}
+	if string(got) != "job A\n" {
+		t.Fatalf("version.txt = %q, want job A snapshot", got)
+	}
+	registered, ok := sources.lookupSource(remoteDir)
+	if !ok || registered.r2Key != "sources/job-a.tar.gz" {
+		t.Fatalf("registered source = %#v, ok=%v", registered, ok)
+	}
+}
+
 func countBlobBatchCopies(data []byte) int {
 	batchCopies := 0
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {

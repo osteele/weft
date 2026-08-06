@@ -42,11 +42,12 @@ Three consequences worth internalizing:
   or `jj restore` that moves files in or out of the working copy changes what
   the next sync captures. The git equivalents are `git checkout`,
   `git stash`, and `git restore`.
-- **Between two submissions, a VCS operation can change what gets synced.**
-  For inventory hosts, weft re-syncs on every job, so the second job can see a
-  different snapshot than the first. For cloud instances the tarball is built
-  once at instance launch, but a resubmission onto a freshly launched instance
-  picks up whatever the working tree contains *at resubmission time*.
+- **Each submission pins its own cloud snapshot.** Before recording a job,
+  `weft run` hashes the working tree, uploads missing content-addressed source
+  objects, and stores the manifest with the job. Editing the tree after job A
+  is queued does not change job A. A later job B receives a new manifest.
+  Inventory dispatch still uses its rsync path; the stored cloud pin does not
+  change on-prem source synchronization.
 
 The sync respects `.gitignore` (and `.weft.toml` `[sync] exclude_dirs`):
 ignored paths such as `cache/`, `build/`, `__pycache__/`, and `.venv/` are

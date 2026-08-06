@@ -128,7 +128,8 @@ recognised at filter time and rolled back automatically — no manual
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
 - `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; if the producer is on a live reusable rental, autopilot co-locates the consumer on that rental queue so it starts after the producer completes; otherwise rental/ephemeral producer artifacts are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
 - `--dry-run`: Show placement scores without submitting the job. For rental offer cost, survival, and memory-headroom previews, use `weft start instance --dry-run` or `weft instance new --dry-run` after the job is queued.
-- `--no-sync`: Skip source sync before submission
+- `--no-sync`: Skip immediate on-prem dispatch sync. Submit-time cloud source
+  pinning still runs.
 - `--wait`: Wait for the job to complete before returning
 
 **Script metadata:** Python scripts can declare resource requirements inline
@@ -154,10 +155,10 @@ background sync all dispatch queued jobs whose destination is already known.
 This still happens while autopilot is paused, because autopilot pause stops new
 placement decisions and instance creation, not sync dispatch to a known host.
 
-Draft jobs (`--draft`) stay entirely local. They’re useful for capturing a job
-definition you want to tweak later or to keep certain jobs from ever syncing to
-the host. When you’re ready to discard the draft, run `weft job draft <id>`
-to toggle the status (or do it from the TUI, described below).
+Draft job records (`--draft`) stay local and are not dispatched. Submission
+still uploads and records their source pin so later activation cannot pick up a
+different working tree. When you’re ready to discard the draft, run `weft job
+draft <id>` to toggle the status (or do it from the TUI, described below).
 
 **Examples:**
 ```bash

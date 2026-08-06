@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/osteele/weft/internal/dataplane"
 )
 
 // JobMetadata stores optional derived or cached metadata for a job.
@@ -23,6 +25,27 @@ type JobSourceMetadata struct {
 	Hash     string                  `json:"hash,omitempty"`
 	Roots    []JobSourceRootMetadata `json:"roots,omitempty"`
 	Warnings []string                `json:"warnings,omitempty"`
+	Pin      *JobSourcePinMetadata   `json:"pin,omitempty"`
+}
+
+// JobSourcePinMetadata is the immutable cloud source manifest captured before
+// a job row becomes visible to dispatchers. Its absence identifies jobs that
+// predate submit-time source pinning.
+type JobSourcePinMetadata struct {
+	Hash  string                     `json:"hash,omitempty"`
+	Roots []JobSourcePinRootMetadata `json:"roots,omitempty"`
+}
+
+// JobSourcePinRootMetadata contains everything cloud dispatch needs without
+// consulting the submitter's working tree.
+type JobSourcePinRootMetadata struct {
+	LocalPath     string                 `json:"local_path,omitempty"`
+	MountBasename string                 `json:"mount_basename,omitempty"`
+	MountRel      string                 `json:"mount_rel,omitempty"`
+	Hash          string                 `json:"hash,omitempty"`
+	R2Key         string                 `json:"r2_key,omitempty"`
+	SizeBytes     int64                  `json:"size_bytes,omitempty"`
+	Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
 }
 
 // JobSourceRootMetadata records provenance for one synced source root.

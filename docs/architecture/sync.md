@@ -19,7 +19,8 @@ Two transport paths share the same snapshot semantics:
   `.gitignore`/`.weftignore`. rsync's delta transfer makes re-syncing an
   unchanged tree near-free, so there is no DB-side "recently synced" skip
   cache (the spec's `HostSourceState` is documented as superseded).
-- **Cloud** (`internal/sync/r2upload.go`): after `local:` overlays are applied,
+- **Cloud** (`internal/sync/r2upload.go`): submission captures and uploads an
+  immutable source manifest before the job row becomes visible. After `local:` overlays are applied,
   regular files of at least 8 MiB are diverted into raw content-addressed
   `assets/<sha256>` objects. The residual tree becomes a deterministic gzip
   tarball (`tarball.go` — zeroed mtimes/uids so identical trees hash
@@ -28,6 +29,9 @@ Two transport paths share the same snapshot semantics:
   materialize each blob at its root-relative path, and verify its SHA-256.
   Symlinks remain in the tarball; extraction rejects tar-slip entries
   (absolute paths, `..` escapes, out-of-root symlink targets — `archive.go`).
+  Fresh launches and instance reuse consume the stored per-job manifest. Rows
+  created before submit-time pinning have no pin and retain dispatch-time
+  snapshot derivation.
 
 **Size cap**: `MaxSourceTarballBytes` (500 MiB) bounds the uncompressed
 residual tarball, after large-file diversion. Overflow errors

@@ -123,16 +123,21 @@ func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
 // RecordQueuedJobContext records a job like RecordQueuedJob, but honors ctx
 // while waiting for the SQLite writer lock.
 func RecordQueuedJobContext(ctx context.Context, database *sql.DB, params QueueJobParams) (int64, error) {
-	return recordQueuedJob(ctx, database, 0, params, false)
+	return recordQueuedJob(ctx, database, 0, params, false, false)
+}
+
+// RecordDraftJob records a job and all submit metadata atomically in draft status.
+func RecordDraftJob(database *sql.DB, params QueueJobParams) (int64, error) {
+	return recordQueuedJob(context.Background(), database, 0, params, false, true)
 }
 
 // MirrorQueuedJobWithID records or updates a queued job using an explicit ID.
 func MirrorQueuedJobWithID(database *sql.DB, jobID int64, params QueueJobParams) error {
-	_, err := recordQueuedJob(context.Background(), database, jobID, params, true)
+	_, err := recordQueuedJob(context.Background(), database, jobID, params, true, false)
 	return err
 }
 
-func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID bool) (int64, error) {
+func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID, draft bool) (int64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -186,7 +191,7 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 			}
 		}()
 
-		jobID, err := recordQueuedJobTx(tx, explicitJobID, params, explicitID, gpu, gpuMemGB, project, metadata, submitToken)
+		jobID, err := recordQueuedJobTx(tx, explicitJobID, params, explicitID, draft, gpu, gpuMemGB, project, metadata, submitToken)
 		if err != nil {
 			return 0, err
 		}
@@ -239,7 +244,7 @@ func validateNamedAssetRefs(database *sql.DB, inputs, needs []string) error {
 	return nil
 }
 
-func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata, submitToken string) (int64, error) {
+func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, explicitID, draft bool, gpu string, gpuMemGB *int, project string, metadata *db.JobMetadata, submitToken string) (int64, error) {
 	if submitToken != "" {
 		if jobID, ok, err := db.FindJobIDBySubmitToken(tx, submitToken); err != nil {
 			return 0, fmt.Errorf("lookup submit token: %w", err)
@@ -250,7 +255,16 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 
 	// Record job with queued status
 	var jobID int64
-	if explicitID {
+	if draft {
+		if explicitID {
+			return 0, fmt.Errorf("record draft job with explicit ID is not supported")
+		}
+		var err error
+		jobID, err = db.RecordDraftJobWithGPUTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
+		if err != nil {
+			return 0, fmt.Errorf("record draft job: %w", err)
+		}
+	} else if explicitID {
 		jobID = explicitJobID
 		if err := db.RecordQueuedWithGPUAndIDTx(tx, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu); err != nil {
 			return 0, fmt.Errorf("record job: %w", err)

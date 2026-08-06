@@ -145,7 +145,7 @@ func TestSlottedLaunchUsesPerJobRemoteDirsAndSources(t *testing.T) {
 		t.Fatalf("slotted jobs share remote dir %q", dir10)
 	}
 
-	sources := sourceMappingsForLaunch(group, localToRemote, nil, map[string]string{local: "sources/src.tar.gz"})
+	sources := sourceMappingsForLaunch(group, localToRemote, nil, nil, map[string]string{local: "sources/src.tar.gz"})
 	if len(sources) != 2 {
 		t.Fatalf("source mappings = %d, want 2", len(sources))
 	}

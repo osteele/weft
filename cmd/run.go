@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/localmutate"
@@ -151,6 +152,7 @@ const (
 )
 
 var validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+var pinRunSourceSnapshotFunc = pinRunSourceSnapshot
 
 type cloudReuseSubmitOutcome int
 
@@ -343,12 +345,32 @@ type draftRunParams struct {
 }
 
 func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
-	jobID, err := db.RecordDraftJobWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, params.GPU)
+	metadata := &db.JobMetadata{Source: params.Source}
+	jobID, err := ops.RecordDraftJob(database, ops.QueueJobParams{
+		Host:             params.Host,
+		WorkingDir:       params.WorkingDir,
+		Command:          params.Command,
+		Description:      params.Description,
+		Project:          params.ProjectName,
+		EnvVars:          params.EnvVars,
+		Tags:             params.Tags,
+		GPU:              params.GPU,
+		GPUClass:         params.GPUClass,
+		GPUMemGB:         params.GPUMemGB,
+		GPUMemMaxGB:      params.GPUMemMaxGB,
+		Inputs:           params.Inputs,
+		BestEffortInputs: params.BestEffortInputs,
+		Outputs:          params.Outputs,
+		OutputDirs:       params.OutputDirs,
+		Produces:         params.Produces,
+		Needs:            params.Needs,
+		Disk:             params.Disk,
+		Metadata:         metadata,
+		CLIOverrides:     params.CLIOverrides,
+		MaxComputeCap:    params.MaxComputeCap,
+	})
 	if err != nil {
 		return fmt.Errorf("record draft job: %w", err)
-	}
-	if err := db.SetJobCLIResourceOverrides(database, jobID, params.CLIOverrides); err != nil {
-		slog.Warn("failed to save cli overrides", "error", err)
 	}
 	backend := ""
 	if params.Config != nil && params.Host != "" {
@@ -356,47 +378,6 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 	}
 	if err := db.SetJobBackend(database, jobID, backend); err != nil {
 		return fmt.Errorf("set job backend: %w", err)
-	}
-	if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
-		return fmt.Errorf("set job tags: %w", err)
-	}
-	if params.GPUClass != "" {
-		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
-			return fmt.Errorf("set GPU class: %w", err)
-		}
-	}
-	if params.GPUMemGB != nil {
-		if err := db.SetJobGPUMemGB(database, jobID, params.GPUMemGB); err != nil {
-			return fmt.Errorf("set GPU memory: %w", err)
-		}
-	}
-	if params.GPUMemMaxGB != nil {
-		if err := db.SetJobGPUMemMaxGB(database, jobID, params.GPUMemMaxGB); err != nil {
-			return fmt.Errorf("set legacy GPU memory upper metadata: %w", err)
-		}
-	}
-	if err := db.SetJobMaxComputeCap(database, jobID, params.MaxComputeCap); err != nil {
-		slog.Warn("failed to save max_compute_cap", "job_id", jobID, "error", err)
-	}
-	if params.ProjectName != "" {
-		if err := db.SetJobProject(database, jobID, params.ProjectName); err != nil {
-			return fmt.Errorf("set project: %w", err)
-		}
-	}
-	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
-		return fmt.Errorf("set env vars: %w", err)
-	}
-	if err := persistDraftArtifactFields(database, jobID, params.Inputs, params.Outputs, params.OutputDirs, params.Produces, params.Needs); err != nil {
-		return err
-	}
-	if params.Disk != nil || params.Source != nil || len(params.BestEffortInputs) > 0 {
-		meta := &db.JobMetadata{Disk: params.Disk, Source: params.Source}
-		if len(params.BestEffortInputs) > 0 {
-			meta.BestEffortInputs = append([]string(nil), params.BestEffortInputs...)
-		}
-		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
-			return fmt.Errorf("set job metadata: %w", err)
-		}
 	}
 
 	w := cmd.OutOrStdout()
@@ -906,9 +887,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	sourceMeta, err := buildJobSourceMetadata(localDir, runInputs, []string{command})
-	if err != nil {
-		return err
+	var sourceMeta *db.JobSourceMetadata
+	if runDryRun {
+		sourceMeta, err = buildJobSourceMetadata(localDir, runInputs, []string{command})
+		if err != nil {
+			return err
+		}
 	}
 	// Warn when the job appears torch-using and cloud-bound but the lockfile
 	// has no torch pin to derive a driver floor from. Without a pin, weft
@@ -1205,6 +1189,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		w.Flush()
 		printSourceRootsPreview(cmd.OutOrStdout(), sourceMeta, remoteSourceRootForPreview(workingDir, ""))
 		return nil
+	}
+
+	endSourcePin := rec.Phase("source", "pinning source snapshot")
+	sourceMeta, err = pinRunSourceSnapshotFunc(context.Background(), localDir, runInputs, []string{command})
+	endSourcePin()
+	if err != nil {
+		return fmt.Errorf("pin source snapshot: %w", err)
 	}
 
 	buildRunQueueParams := func(targetHost string) ops.QueueJobParams {
@@ -1780,13 +1771,34 @@ func buildJobSourceMetadata(localDir string, inputs []string, commands []string)
 	if localDir == "" {
 		return nil, nil
 	}
-	manifest, tmpPaths, err := srcsync.BuildSourceManifestForInputsAndCommands(localDir, inputs, commands)
+	manifest, tmpPaths, err := srcsync.BuildCloudSourceManifestForInputsAndCommands(localDir, inputs, commands)
 	if err != nil {
 		return nil, err
 	}
 	for _, tmpPath := range tmpPaths {
 		_ = os.Remove(tmpPath)
 	}
+	return jobSourceMetadataFromManifest(manifest, false), nil
+}
+
+func pinRunSourceSnapshot(ctx context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
+	if localDir == "" {
+		return nil, fmt.Errorf("working directory cannot be resolved to a local source directory")
+	}
+	client, err := newR2ClientFromConfig()
+	if err != nil {
+		return nil, err
+	}
+	uploadCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	result, err := srcsync.UploadCloudSourceRootsToR2WithProgressForInputsAndCommands(uploadCtx, client, localDir, inputs, commands, nil)
+	if err != nil {
+		return nil, err
+	}
+	return jobSourceMetadataFromManifest(result.Manifest, true), nil
+}
+
+func jobSourceMetadataFromManifest(manifest srcsync.SourceManifest, pinned bool) *db.JobSourceMetadata {
 	roots := make([]db.JobSourceRootMetadata, 0, len(manifest.Roots))
 	for _, root := range manifest.Roots {
 		item := db.JobSourceRootMetadata{
@@ -1814,7 +1826,23 @@ func buildJobSourceMetadata(localDir string, inputs []string, commands []string)
 			warnings = append(warnings, warning.Message)
 		}
 	}
-	return &db.JobSourceMetadata{Hash: manifest.Hash, Roots: roots, Warnings: warnings}, nil
+	meta := &db.JobSourceMetadata{Hash: manifest.Hash, Roots: roots, Warnings: warnings}
+	if pinned {
+		pinRoots := make([]db.JobSourcePinRootMetadata, 0, len(manifest.Roots))
+		for _, root := range manifest.Roots {
+			pinRoots = append(pinRoots, db.JobSourcePinRootMetadata{
+				LocalPath:     root.LocalPath,
+				MountBasename: root.MountBasename,
+				MountRel:      root.MountRel,
+				Hash:          root.Hash,
+				R2Key:         root.R2Key,
+				SizeBytes:     root.SizeBytes,
+				Blobs:         append([]dataplane.SourceBlob(nil), root.Blobs...),
+			})
+		}
+		meta.Pin = &db.JobSourcePinMetadata{Hash: manifest.Hash, Roots: pinRoots}
+	}
+	return meta
 }
 
 func remoteSourceRootForPreview(workingDir, host string) string {

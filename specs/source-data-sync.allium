@@ -980,10 +980,10 @@ rule EscalateToR2IsolatedSource {
 -- Apply local overlays, divert each large regular file, then upload the
 -- residual tarball and missing blobs for every source root.
 rule UploadSourceToCloud {
-    when: CloudStagingRequested(job)
+    when: JobSubmissionRequested(job)
     requires: job.working_dir != ""
 
-	let manifest = LatestSourceRootManifestFor(job.working_dir)
+	let manifest = BuildSourceRootManifest(job.working_dir, job.inputs, job.command)
 
     ensures:
 		for root in manifest.roots:
@@ -1004,11 +1004,37 @@ rule UploadSourceToCloud {
 					bytes: root.snapshot.size_bytes,
 					ok: true
 				)
+		JobMetadata(job).source.pin = {
+			manifest_hash: manifest.manifest_hash,
+			roots: manifest.roots.map(local_path, mount_basename,
+				mount_relative_path, snapshot.content_hash, r2_key,
+				snapshot.size_bytes, blobs)
+		}
+		JobRowAndMetadataCommittedAtomically(job)
 
     @guidance
+		-- Source objects are uploaded before the job row is recorded.
+		-- QueueJobParams.Metadata writes the pin in the job-record transaction,
+		-- so dispatch cannot observe the job without its manifest.
         -- Implementation anchor:
-		--   internal/sync/r2upload.go     — UploadSourceRootsToR2WithProgressForInputs
+		--   cmd/run.go                    — pinRunSourceSnapshot
+		--   internal/sync/r2upload.go     — UploadCloudSourceRootsToR2WithProgressForInputsAndCommands
 		--   internal/dataplane/keys.go    — SourceTarball and NamedAsset key helpers
+}
+
+rule SelectCloudSourceManifestAtDispatch {
+	when: CloudDispatchRequested(job)
+
+	ensures:
+		if JobMetadata(job).source.pin != null:
+			DispatchSourceManifest(job) = JobMetadata(job).source.pin
+		else:
+			-- Rows recorded before submit-time pinning retain the old behavior.
+			DispatchSourceManifest(job) = BuildAndUploadCurrentSource(job.working_dir)
+
+	@guidance
+		-- Fresh launch: internal/campaign/lifecycle.go planSourceStaging.
+		-- Reuse: internal/campaign/reuse.go sourceUploadForReuse.
 }
 
 -- When a cloud instance reaches the sources_extracted bootstrap stage, the
@@ -1678,9 +1704,10 @@ invariant R2SourceObjectsContentAddressed {
 -- present.
 invariant CloudSourceRepairChecksEveryMount {
 	for job in jobs/Jobs where job.target_kind = cloud_rental:
-		for root in LatestSourceRootManifestFor(job.working_dir).roots:
+		for root in DispatchSourceManifest(job).roots:
 			BeforeSetupOrCommand(job):
 				EnsureSourceRootFresh(job: job, root: root)
+				and RegisteredSourceKey(root.remote_dir) = root.r2_key
 }
 
 -- Every byte a job's command downloads from an HF-style source at runtime

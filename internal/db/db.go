@@ -2228,6 +2228,15 @@ func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, g
 
 // RecordDraftJob records a job that should remain in draft locally, with optional dependency.
 func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
+	return recordDraftJob(db, host, workingDir, command, description, gpu, depSpec)
+}
+
+// RecordDraftJobWithGPUTx records a draft job inside tx.
+func RecordDraftJobWithGPUTx(tx *sql.Tx, host, workingDir, command, description, gpu string) (int64, error) {
+	return recordDraftJob(tx, host, workingDir, command, description, gpu, "")
+}
+
+func recordDraftJob(db dbExecer, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
