@@ -3018,6 +3018,7 @@ func sourceMappingsForProjectDir(projectLocalDir, projectRemoteDir string, manif
 		R2Key:     manifest.Roots[0].R2Key,
 		RemoteDir: projectRemoteDir,
 		LocalDir:  manifest.Roots[0].LocalPath,
+		Blobs:     manifest.Roots[0].Blobs,
 	})
 	parent := path.Dir(projectRemoteDir)
 	for _, root := range manifest.Roots[1:] {
@@ -3025,6 +3026,7 @@ func sourceMappingsForProjectDir(projectLocalDir, projectRemoteDir string, manif
 			R2Key:     root.R2Key,
 			RemoteDir: path.Join(parent, root.MountBasename),
 			LocalDir:  root.LocalPath,
+			Blobs:     root.Blobs,
 		})
 	}
 	return sources
@@ -3060,6 +3062,7 @@ func sourceMountsFromManifest(manifest weftsync.SourceManifest, projectRemoteDir
 			LocalDir:      root.LocalPath,
 			MountBasename: root.MountBasename,
 			Hash:          root.Hash,
+			Blobs:         root.Blobs,
 		})
 	}
 	return mounts

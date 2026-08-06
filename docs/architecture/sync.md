@@ -19,20 +19,22 @@ Two transport paths share the same snapshot semantics:
   `.gitignore`/`.weftignore`. rsync's delta transfer makes re-syncing an
   unchanged tree near-free, so there is no DB-side "recently synced" skip
   cache (the spec's `HostSourceState` is documented as superseded).
-- **Cloud** (`internal/sync/r2upload.go`): a deterministic gzip tarball
-  (`tarball.go` — zeroed mtimes/uids so identical trees hash identically),
-  content-addressed in R2 as `sources/<sha256>.tar.gz` and deduped by an
-  existence probe. Symlinks are shipped and re-created on extraction;
-  extraction rejects tar-slip entries (absolute paths, `..` escapes,
-  out-of-root symlink targets — `archive.go`).
+- **Cloud** (`internal/sync/r2upload.go`): after `local:` overlays are applied,
+  regular files of at least 8 MiB are diverted into raw content-addressed
+  `assets/<sha256>` objects. The residual tree becomes a deterministic gzip
+  tarball (`tarball.go` — zeroed mtimes/uids so identical trees hash
+  identically), stored as `sources/<sha256>.tar.gz`. Both object kinds are
+  deduped by existence probes. Bootstrap and agent refresh extract the tarball,
+  materialize each blob at its root-relative path, and verify its SHA-256.
+  Symlinks remain in the tarball; extraction rejects tar-slip entries
+  (absolute paths, `..` escapes, out-of-root symlink targets — `archive.go`).
 
 **Size cap**: `MaxSourceTarballBytes` (500 MiB) bounds the uncompressed
-snapshot. Overflow errors (`ErrSourceTooLarge`) are overlay-aware: a plain
-tree overflow advises `.gitignore`/`.weftignore`; an overflow caused by
-declared `local:` inputs names them and points at the asset store
-(`weft data publish` / `--input asset:`), because overlays deliberately
-bypass excludes. `EstimateSnapshotBytesWithInputs` provides the same answer
-without staging copies, used by the pre-claim validation in the reuse path.
+residual tarball, after large-file diversion. Overflow errors
+(`ErrSourceTooLarge`) are overlay-aware and explain that the remaining small
+files must be reduced; overlays deliberately bypass excludes.
+`EstimateCloudSourceTarballBytesWithInputs` provides the same residual answer
+without staging copies, used by pre-claim validation in the reuse path.
 
 **`local:` input overlays** (`extras.go`, `r2upload.go`): declared
 `local:path` inputs are staged into the snapshot even when gitignored, with

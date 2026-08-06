@@ -22,7 +22,7 @@ func ValidateJobSourceForCloud(job *db.Job) error {
 		return fmt.Errorf("job %s has no local source directory (working_dir=%q)",
 			ids.FormatJobID(job.ID), job.EffectiveWorkingDir())
 	}
-	total, overlays, err := weftsync.EstimateSnapshotBytesWithInputs(sourceDir, job.Inputs)
+	total, overlays, err := weftsync.EstimateCloudSourceTarballBytesWithInputs(sourceDir, job.Inputs)
 	if err != nil {
 		return fmt.Errorf("estimate source size for job %s: %w", ids.FormatJobID(job.ID), err)
 	}

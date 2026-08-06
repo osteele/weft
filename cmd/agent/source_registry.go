@@ -248,7 +248,7 @@ func ensureSourceFreshMounts(bucket string, mounts []cloud.SourceMount) error {
 
 func registerSourceMounts(mounts []cloud.SourceMount) {
 	for _, mount := range mounts {
-		sources.record(mount.RemoteDir, mount.R2Key)
+		sources.recordWithBlobs(mount.RemoteDir, mount.R2Key, mount.Blobs)
 	}
 }
 

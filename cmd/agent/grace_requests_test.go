@@ -700,9 +700,13 @@ func TestApplySourceUpdateBatchFailureNamesFailingBlob(t *testing.T) {
 	}
 }
 
-func TestApplySourceUpdateSameKeySkipsBlobWork(t *testing.T) {
+func TestApplySourceUpdateSamePayloadSkipsBlobWork(t *testing.T) {
 	objectDir := t.TempDir()
 	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"tracked.txt": "original\n"})
+	blobContent := "present blob\n"
+	blobHash := contentSHA256(blobContent)
+	blobKey := "assets/" + blobHash
+	writeFakeR2Object(t, objectDir, blobKey, blobContent)
 	invocationLog := filepath.Join(t.TempDir(), "rclone.log")
 	t.Setenv("RCLONE_INVOCATION_LOG", invocationLog)
 	installFakeRcloneForSourceTarballs(t, objectDir)
@@ -710,20 +714,18 @@ func TestApplySourceUpdateSameKeySkipsBlobWork(t *testing.T) {
 
 	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
 	sourceKey := "sources/source.tar.gz"
-	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: sourceKey}); err != nil {
+	blobs := []controlplane.SourceBlob{{R2Key: blobKey, RelPath: "data/blob.bin", SHA256: blobHash}}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: sourceKey, Blobs: blobs}); err != nil {
 		t.Fatalf("first applySourceUpdate: %v", err)
 	}
 	before, err := os.ReadFile(invocationLog)
 	if err != nil {
 		t.Fatalf("read first invocation log: %v", err)
 	}
-	missingHash := contentSHA256("not present")
 	err = applySourceUpdate("test-bucket", controlplane.SourceUpdate{
 		RemoteDir: remoteDir,
 		R2Key:     sourceKey,
-		Blobs: []controlplane.SourceBlob{{
-			R2Key: "assets/" + missingHash, RelPath: "data/missing.bin", SHA256: missingHash,
-		}},
+		Blobs:     blobs,
 	})
 	if err != nil {
 		t.Fatalf("same-key applySourceUpdate performed blob work: %v", err)
@@ -735,8 +737,43 @@ func TestApplySourceUpdateSameKeySkipsBlobWork(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatalf("rclone invocations changed on same-key update:\nbefore: %s\nafter: %s", before, after)
 	}
-	if _, err := os.Stat(filepath.Join(remoteDir, "data", "missing.bin")); !os.IsNotExist(err) {
-		t.Fatalf("missing blob stat error = %v, want no blob work", err)
+	if got, err := os.ReadFile(filepath.Join(remoteDir, "data", "blob.bin")); err != nil || string(got) != blobContent {
+		t.Fatalf("materialized blob = %q, %v; want %q", got, err, blobContent)
+	}
+}
+
+func TestApplySourceUpdateSameTarballRefreshesChangedBlob(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"main.py": "print('ok')\n"})
+	firstContent := "first blob\n"
+	secondContent := "second blob\n"
+	firstHash := contentSHA256(firstContent)
+	secondHash := contentSHA256(secondContent)
+	writeFakeR2Object(t, objectDir, "assets/"+firstHash, firstContent)
+	writeFakeR2Object(t, objectDir, "assets/"+secondHash, secondContent)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	sourceKey := "sources/source.tar.gz"
+	first := controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: sourceKey, Blobs: []controlplane.SourceBlob{{
+		R2Key: "assets/" + firstHash, RelPath: "data/blob.bin", SHA256: firstHash,
+	}}}
+	if err := applySourceUpdate("test-bucket", first); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+	second := controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: sourceKey, Blobs: []controlplane.SourceBlob{{
+		R2Key: "assets/" + secondHash, RelPath: "data/blob.bin", SHA256: secondHash,
+	}}}
+	if err := applySourceUpdate("test-bucket", second); err != nil {
+		t.Fatalf("second applySourceUpdate: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "data", "blob.bin"))
+	if err != nil {
+		t.Fatalf("read refreshed blob: %v", err)
+	}
+	if string(got) != secondContent {
+		t.Fatalf("refreshed blob = %q, want %q", got, secondContent)
 	}
 }
 

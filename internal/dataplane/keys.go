@@ -195,3 +195,11 @@ func SourceTarball(hash string) string {
 func NamedAsset(sha256Hex string) string {
 	return fmt.Sprintf("assets/%s", sha256Hex)
 }
+
+// SourceBlob describes a content-addressed file materialized relative to a
+// source root. RelPath always uses slash separators.
+type SourceBlob struct {
+	R2Key   string `json:"r2_key"`
+	RelPath string `json:"rel_path"`
+	SHA256  string `json:"sha256"`
+}

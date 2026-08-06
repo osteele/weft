@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/dataplane"
 )
 
 // BootstrapManifest describes everything an instance needs to self-start.
@@ -28,6 +29,7 @@ type SourceMapping struct {
 	R2Key     string // e.g. "sources/sha256abc.tar.gz"
 	RemoteDir string // e.g. "/workspace/my-project"
 	LocalDir  string // local source directory, used to read the project uv.lock
+	Blobs     []dataplane.SourceBlob
 }
 
 // writeStageMarker emits a bash command to write a bootstrap stage marker
@@ -108,6 +110,14 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 			"rclone copyto \"r2:$R2_BUCKET/%s\" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C %q && rm -f /tmp/src.tar.gz\n",
 			src.R2Key, src.RemoteDir,
 		))
+		for _, blob := range src.Blobs {
+			target := filepath.ToSlash(filepath.Join(src.RemoteDir, filepath.FromSlash(blob.RelPath)))
+			b.WriteString(fmt.Sprintf("mkdir -p %q\n", filepath.Dir(target)))
+			b.WriteString(fmt.Sprintf(
+				"rclone copyto \"r2:$R2_BUCKET/%s\" %q && printf '%%s  %%s\\n' %q %q | sha256sum -c -\n",
+				blob.R2Key, target, blob.SHA256, target,
+			))
+		}
 		writeStageMarker(&b, manifest.DBInstanceID, fmt.Sprintf("sources_extracting:%d/%d", i+1, sourceCount))
 	}
 	writeStageMarker(&b, manifest.DBInstanceID, "sources_extracted")

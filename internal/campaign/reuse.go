@@ -34,7 +34,7 @@ var (
 	sendGraceJobPayload              = controlplane.SendGraceJobPayload
 	sendGraceJobPayloadNoAck         = controlplane.SendGraceJobPayloadNoAck
 	sendGraceCancelAttempts          = controlplane.SendGraceCancelAttempts
-	uploadSourceToR2                 = weftsync.UploadSourceToR2ForInputs
+	uploadSourceToR2                 = weftsync.UploadCloudSourceRootsToR2ForInputs
 	uploadSourceRootsToR2            = uploadSourceRootsForReuse
 	submitJobsToInstanceForReusePass = SubmitJobsToInstance
 )
@@ -47,17 +47,7 @@ func uploadSourceRootsForReuse(ctx context.Context, client *r2.Client, localDir 
 	if len(config.ProjectSiblingRoots(localDir)) > 0 || len(derived) > 0 {
 		return weftsync.UploadSourceRootsToR2WithProgressForInputsAndCommands(ctx, client, localDir, inputs, commands, nil)
 	}
-	key, err := uploadSourceToR2(ctx, client, localDir, inputs)
-	if err != nil {
-		return weftsync.SourceUploadResult{}, err
-	}
-	return weftsync.SourceUploadResult{
-		Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{
-			LocalPath:     localDir,
-			MountBasename: path.Base(localDir),
-			R2Key:         key,
-		}}},
-	}, nil
+	return uploadSourceToR2(ctx, client, localDir, inputs)
 }
 
 // MinGraceRemaining is the minimum grace period remaining to consider an
@@ -1269,6 +1259,7 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			payload.Sources = append(payload.Sources, controlplane.SourceUpdate{
 				RemoteDir: mount.RemoteDir,
 				R2Key:     mount.R2Key,
+				Blobs:     mount.Blobs,
 			})
 		}
 	}

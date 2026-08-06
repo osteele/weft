@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/placement"
@@ -34,6 +35,12 @@ func testProjectDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func testSourceUploadResult(sourceDir, key string) weftsync.SourceUploadResult {
+	return weftsync.SourceUploadResult{Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{{
+		LocalPath: sourceDir, MountBasename: filepath.Base(sourceDir), R2Key: key,
+	}}}}
 }
 
 func writeSparseTestFile(t *testing.T, path string, size int64) {
@@ -1221,8 +1228,8 @@ func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 		sendGraceJobPayload = prevSend
 	})
 
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
-		return "sources/test.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/test.tar.gz"), nil
 	}
 	sendGraceJobPayload = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (*controlplane.GraceCommandAck, error) {
 		return nil, errors.New("ack timeout")
@@ -1316,9 +1323,14 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	})
 
 	var uploadedInputs []string
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, _ string, inputs []string) (string, error) {
+	projectBlobs := []dataplane.SourceBlob{{R2Key: "assets/project-blob", RelPath: "data/large.bin", SHA256: strings.Repeat("a", 64)}}
+	siblingBlobs := []dataplane.SourceBlob{{R2Key: "assets/sibling-blob", RelPath: "models/large.bin", SHA256: strings.Repeat("b", 64)}}
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, inputs []string) (weftsync.SourceUploadResult, error) {
 		uploadedInputs = append([]string(nil), inputs...)
-		return "sources/test.tar.gz", nil
+		return weftsync.SourceUploadResult{Manifest: weftsync.SourceManifest{Roots: []weftsync.SourceRoot{
+			{LocalPath: sourceDir, MountBasename: filepath.Base(sourceDir), R2Key: "sources/test.tar.gz", Blobs: projectBlobs},
+			{LocalPath: filepath.Join(filepath.Dir(sourceDir), "lib"), MountBasename: "lib", R2Key: "sources/lib.tar.gz", Blobs: siblingBlobs},
+		}}}, nil
 	}
 
 	var got controlplane.GraceJobsRequest
@@ -1359,14 +1371,23 @@ func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
 	}}) {
 		t.Fatalf("cloud needs = %v", got.Jobs[0].CloudNeeds)
 	}
-	if len(got.Sources) != 1 {
-		t.Fatalf("sources len = %d, want 1", len(got.Sources))
+	if len(got.Sources) != 2 {
+		t.Fatalf("sources len = %d, want 2", len(got.Sources))
 	}
 	if got.Sources[0].R2Key != "sources/test.tar.gz" {
 		t.Fatalf("source r2 key = %q", got.Sources[0].R2Key)
 	}
 	if got.Sources[0].RemoteDir != "/workspace/project" {
 		t.Fatalf("source remote dir = %q", got.Sources[0].RemoteDir)
+	}
+	if !reflect.DeepEqual(got.Sources[0].Blobs, projectBlobs) {
+		t.Fatalf("project source blobs = %+v, want %+v", got.Sources[0].Blobs, projectBlobs)
+	}
+	if got.Sources[1].RemoteDir != "/workspace/lib" || !reflect.DeepEqual(got.Sources[1].Blobs, siblingBlobs) {
+		t.Fatalf("sibling source = %+v, want /workspace/lib with %+v", got.Sources[1], siblingBlobs)
+	}
+	if !reflect.DeepEqual(got.Jobs[0].SourceMounts[0].Blobs, projectBlobs) || !reflect.DeepEqual(got.Jobs[0].SourceMounts[1].Blobs, siblingBlobs) {
+		t.Fatalf("source mount blobs = %+v, want project %+v and sibling %+v", got.Jobs[0].SourceMounts, projectBlobs, siblingBlobs)
 	}
 	if !reflect.DeepEqual(uploadedInputs, []string{"local:data/conllu/"}) {
 		t.Fatalf("uploaded inputs = %v", uploadedInputs)
@@ -1606,8 +1627,8 @@ func TestSubmitJobsToInstanceRollsBackAllClaimsOnNoAckFailure(t *testing.T) {
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
 
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
-		return sourceDir + ".tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, sourceDir+".tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		return "", errors.New("write failed")
@@ -1656,9 +1677,9 @@ func TestSubmitJobsToInstanceRejectsEmptySourceDirBeforeUpload(t *testing.T) {
 	prevUpload := uploadSourceToR2
 	t.Cleanup(func() { uploadSourceToR2 = prevUpload })
 	uploadCalled := false
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
+	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (weftsync.SourceUploadResult, error) {
 		uploadCalled = true
-		return "sources/unexpected.tar.gz", nil
+		return weftsync.SourceUploadResult{}, nil
 	}
 
 	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
@@ -1706,8 +1727,8 @@ func TestSubmitJobsToInstanceHonorsCanceledContextAfterClaim(t *testing.T) {
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(ctx context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
-		return "", ctx.Err()
+	uploadSourceToR2 = func(ctx context.Context, _ *r2.Client, _ string, _ []string) (weftsync.SourceUploadResult, error) {
+		return weftsync.SourceUploadResult{}, ctx.Err()
 	}
 	sendGraceJobPayloadNoAck = func(ctx context.Context, _ controlplane.GraceStore, _ int64, _ controlplane.GraceJobsRequest) (string, error) {
 		t.Fatal("grace payload should not be sent after canceled upload")
@@ -1785,8 +1806,8 @@ func TestSubmitJobsToInstanceForMove_SupersedesActiveSourceClaim(t *testing.T) {
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
-		return "sources/x.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/x.tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		return "req-test", nil
@@ -1880,8 +1901,8 @@ func TestSubmitJobsToInstanceForMove_RunningTargetWaitsForAckBeforeSourceCancel(
 		sendGraceJobPayloadNoAck = prevSendNoAck
 		sendGraceCancelAttempts = prevSendCancel
 	})
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
-		return "sources/x.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/x.tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		return "req-test", nil
@@ -1961,8 +1982,8 @@ func TestSubmitJobsToInstanceForMove_NoAckStatusFlipStillWaitsForAck(t *testing.
 		sendGraceJobPayloadNoAck = prevSendNoAck
 		sendGraceCancelAttempts = prevSendCancel
 	})
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
-		return "sources/x.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/x.tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		if err := db.SetLaunchGraceStarted(database, dst, time.Now().Add(5*time.Minute).Unix()); err != nil {
@@ -2043,8 +2064,8 @@ func TestSubmitJobsToInstanceForMove_PersistsRequestBeforeFinalCheckFailure(t *t
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(context.Context, *r2.Client, string, []string) (string, error) {
-		return "sources/x.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/x.tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		if err := db.SetLaunchAgentReadyAtIfUnset(database, dst, time.Now()); err != nil {
@@ -2077,8 +2098,10 @@ func TestSubmitJobsToInstanceValidatesSourceBeforeClaiming(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	dir := t.TempDir()
-	for i := range 5 {
-		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), weftsync.MaxSourceTarballBytes/4+1)
+	fileSize := int64(weftsync.LargeSourceBlobThresholdBytes - 1)
+	fileCount := int(weftsync.MaxSourceTarballBytes/fileSize) + 1
+	for i := range fileCount {
+		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("part%d.bin", i)), fileSize)
 	}
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
@@ -2123,6 +2146,15 @@ func TestSubmitJobsToInstanceValidatesSourceBeforeClaiming(t *testing.T) {
 	}
 	if refreshed.LaunchID != nil {
 		t.Fatal("job was claimed onto the launch despite failing validation")
+	}
+}
+
+func TestValidateJobSourceForCloudAppliesCapToResidualTarball(t *testing.T) {
+	dir := t.TempDir()
+	writeSparseTestFile(t, filepath.Join(dir, "diverted.bin"), weftsync.MaxSourceTarballBytes+1)
+	job := &db.Job{ID: 1, WorkingDir: dir}
+	if err := ValidateJobSourceForCloud(job); err != nil {
+		t.Fatalf("ValidateJobSourceForCloud rejected source whose residual tarball is empty: %v", err)
 	}
 }
 
@@ -2373,8 +2405,8 @@ func TestSubmitJobsToInstancePersistsResolvedCloudAfterPin(t *testing.T) {
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
-		return sourceDir + ".tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, sourceDir+".tar.gz"), nil
 	}
 	sendGraceJobPayloadNoAck = func(context.Context, controlplane.GraceStore, int64, controlplane.GraceJobsRequest) (string, error) {
 		return "req-test", nil
@@ -2454,8 +2486,8 @@ func TestSubmitJobsToInstanceForMoveOrdersSamePayloadCloudAfter(t *testing.T) {
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (string, error) {
-		return sourceDir + ".tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, sourceDir+".tar.gz"), nil
 	}
 	var got controlplane.GraceJobsRequest
 	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (string, error) {

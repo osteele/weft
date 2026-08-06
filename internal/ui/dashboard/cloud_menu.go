@@ -312,19 +312,23 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		}
 
 		sourceR2Keys := make(map[string]string)
+		sourceManifests := make(map[string]weftsync.SourceManifest)
 		inputsByDir := campaign.SourceInputsByDir(group.Jobs)
 		for _, d := range group.SourceDirs() {
-			key, err := weftsync.UploadSourceToR2ForInputs(ctx, r2Client, d, inputsByDir[d])
+			result, err := weftsync.UploadSourceRootsToR2WithProgressForInputs(ctx, r2Client, d, inputsByDir[d], nil)
 			if err != nil {
 				return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("upload source: %w", err)}
 			}
-			sourceR2Keys[d] = key
+			sourceManifests[d] = result.Manifest
+			for _, root := range result.Manifest.Roots {
+				sourceR2Keys[root.LocalPath] = root.R2Key
+			}
 		}
 
 		launchOpts := campaign.LaunchOpts{GPUWarmup: m.appConfig.Campaign.GPUWarmup}
 		campaignID, err := campaign.LaunchInstance(
 			client, nil, m.database, nil, group, offer, launchOpts, cloudR2, createOpts,
-			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
+			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys, SourceManifests: sourceManifests},
 			nil,
 			func(phase string) {
 				slog.Debug("cloud instance phase", "component", "tui", "job_id", job.ID, "phase", phase)

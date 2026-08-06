@@ -213,6 +213,7 @@ entity SourceRoot {
 	mount_relative_path: String     -- "." for root 0, "../<basename>" for siblings
 	origins: List<SourceRootOrigin>
 	snapshot: SourceSnapshot
+	blobs: List<CloudSourceBlob>
 	vcs_type: String?
 	vcs_revision: String?
 	vcs_change_id: String?
@@ -220,7 +221,7 @@ entity SourceRoot {
 }
 
 -- Ordered source-root manifest for one submitted source state. The hash is
--- over (mount_basename, content_hash, r2_key) for each root in order, so
+-- over (mount_basename, content_hash, r2_key, blob refs) for each root in order, so
 -- the job keeps one source identity while each root dedupes independently
 -- in R2.
 entity SourceRootManifest {
@@ -278,17 +279,28 @@ entity CloudSourceObject {
     uploaded_at: Timestamp
 }
 
+-- A regular source file diverted from a cloud tarball. The same raw bytes use
+-- the same object key as a file published by `weft data publish`.
+entity CloudSourceBlob {
+	r2_key: String                   -- assets/<sha256>
+	relative_path: String            -- slash-relative within one source root
+	content_hash: String             -- SHA-256 of the raw file bytes
+	size_bytes: Integer
+}
+
 -- ==========================================================================
 -- Config
 -- ==========================================================================
 
 config {
-    -- Size limit on an uncompressed source snapshot. Enforced before a
-    -- tarball is written so a runaway working directory fails fast with
-    -- a size report rather than filling up /tmp or R2.
+    -- Size limit on an uncompressed residual cloud source tarball, after
+    -- large-file diversion.
     -- 500 MiB (binary), matching MaxSourceTarballBytes = 500 * 1024 * 1024
     -- in internal/sync/tarball.go.
     max_source_bytes: Integer = 524_288_000     -- 500 MiB
+
+	-- Files at or above this size are raw content-addressed source blobs.
+	large_source_blob_bytes: Integer = 8_388_608  -- 8 MiB
 
     -- Per-rsync deadlines.
     rsync_connect_timeout: Duration = 15.seconds   -- ssh connection window
@@ -965,10 +977,8 @@ rule EscalateToR2IsolatedSource {
 -- Rules: cloud source staging
 -- ==========================================================================
 
--- Upload each source root tarball for a job's source-root manifest to R2
--- under its own content-addressed key. Skipped when an object with that
--- key already exists, which is the common case for repeated submissions
--- from an unchanged sibling repo.
+-- Apply local overlays, divert each large regular file, then upload the
+-- residual tarball and missing blobs for every source root.
 rule UploadSourceToCloud {
     when: CloudStagingRequested(job)
     requires: job.working_dir != ""
@@ -977,6 +987,9 @@ rule UploadSourceToCloud {
 
     ensures:
 		for root in manifest.roots:
+			for blob in root.blobs:
+				if not R2ObjectExists(blob.r2_key):
+					R2Put(key: blob.r2_key, body: RawFileBytes(blob), content_type: "application/octet-stream")
 			let key = "sources/" + root.snapshot.content_hash + ".tar.gz"
 			if not R2ObjectExists(key):
 				R2Put(key: key, body: TarballFor(root.snapshot), content_type: "application/gzip")
@@ -995,7 +1008,7 @@ rule UploadSourceToCloud {
     @guidance
         -- Implementation anchor:
 		--   internal/sync/r2upload.go     — UploadSourceRootsToR2WithProgressForInputs
-        --   internal/dataplane/keys.go    — SourceTarball key helper
+		--   internal/dataplane/keys.go    — SourceTarball and NamedAsset key helpers
 }
 
 -- When a cloud instance reaches the sources_extracted bootstrap stage, the
@@ -1011,6 +1024,8 @@ rule StageSourceOnCloudInstance {
 
 	ensures:
 		for root in instance.campaign_manifest.source_root_manifest.roots:
+			for blob in root.blobs:
+				MaterializeAndVerify(blob, CloudSourceRootDir(instance, root))
 			InstanceSourceRootReady(
 				instance: instance,
 				source_hash: root.snapshot.content_hash,

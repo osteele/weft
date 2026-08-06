@@ -40,13 +40,17 @@ func BuildSourceSnapshot(localDir string, inputs []string) (SnapshotResult, erro
 }
 
 func buildSourceSnapshotWithOverlays(localDir string, overlays []LocalOverlay) (string, func(), error) {
+	return buildSourceSnapshotWithOverlaysLimit(localDir, overlays, MaxSourceTarballBytes)
+}
+
+func buildSourceSnapshotWithOverlaysLimit(localDir string, overlays []LocalOverlay, maxBytes int64) (string, func(), error) {
 	stageDir, err := os.MkdirTemp("", "weft-source-stage-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("create staged source dir: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(stageDir) }
 
-	mainTarball, _, err := CreateSourceTarball(localDir)
+	mainTarball, _, err := createSourceTarball(localDir, sourceExcludes(localDir), nil, nil, maxBytes)
 	if err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("stage source snapshot: %w", err)

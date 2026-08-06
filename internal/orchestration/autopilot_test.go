@@ -2297,14 +2297,16 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.
 // Regression (wb18/wj2812): a job whose source deterministically cannot ship
 // to the cloud (over the size cap) must be skipped before any claim, with
 // the validation error recorded as the AUTHORITATIVE blocked reason so weft
-// info shows the real blocker (and the asset-store remedy) instead of a
+// info shows the real blocker instead of a
 // per-instance reuse diagnostic.
 func TestSubmitAutoPilotReuseAssignments_SourceTooLargeBlocksWithoutClaiming(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	dir := t.TempDir()
-	for i := range 5 {
-		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("big%d.bin", i)), weftsync.MaxSourceTarballBytes/4+1)
+	fileSize := int64(weftsync.LargeSourceBlobThresholdBytes - 1)
+	fileCount := int(weftsync.MaxSourceTarballBytes/fileSize) + 1
+	for i := range fileCount {
+		writeSparseTestFile(t, filepath.Join(dir, fmt.Sprintf("part%d.bin", i)), fileSize)
 	}
 
 	instanceID, err := db.CreateLaunch(database, &db.Launch{

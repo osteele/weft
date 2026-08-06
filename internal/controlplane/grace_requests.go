@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -95,11 +96,7 @@ type SourceUpdate struct {
 
 // SourceBlob describes a content-addressed file materialized relative to a
 // source update's RemoteDir.
-type SourceBlob struct {
-	R2Key   string `json:"r2_key"`
-	RelPath string `json:"rel_path"`
-	SHA256  string `json:"sha256"`
-}
+type SourceBlob = dataplane.SourceBlob
 
 // GraceJobsRequest is the typed payload written under grace/<id>/jobs/.
 // Sources are applied before jobs are enqueued on the instance.

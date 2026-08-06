@@ -4,7 +4,33 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/dataplane"
 )
+
+func TestBootstrapMaterializesSourceBlobsBeforeStartingAgent(t *testing.T) {
+	script := GenerateBootstrapScript(BootstrapManifest{
+		AgentR2Key: "agents/v2/linux-amd64",
+		Sources: []SourceMapping{{
+			R2Key: "sources/source.tar.gz", RemoteDir: "/workspace/project",
+			Blobs: []dataplane.SourceBlob{{
+				R2Key: "assets/abc123", RelPath: "data/training.pkl", SHA256: strings.Repeat("a", 64),
+			}},
+		}},
+	})
+	blobCopy := `rclone copyto "r2:$R2_BUCKET/assets/abc123" "/workspace/project/data/training.pkl"`
+	if !strings.Contains(script, blobCopy) {
+		t.Fatalf("bootstrap missing blob copy %q:\n%s", blobCopy, script)
+	}
+	if !strings.Contains(script, `sha256sum -c -`) {
+		t.Fatalf("bootstrap missing blob SHA-256 verification:\n%s", script)
+	}
+	copyAt := strings.Index(script, blobCopy)
+	startAt := strings.LastIndex(script, "weft-agent run-instance")
+	if copyAt < 0 || startAt < 0 || copyAt > startAt {
+		t.Fatalf("blob materialization must precede agent start (copy=%d start=%d)", copyAt, startAt)
+	}
+}
 
 // TestStageMarkersAreNonFatal asserts every stage-marker write routes through
 // _weft_mark_stage (retry + swallow) so a transient rcat failure cannot abort

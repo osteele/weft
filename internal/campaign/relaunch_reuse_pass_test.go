@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
 )
 
 func TestPreferredInstanceIDsFromNeeds_CollectsLiveProducerInstances(t *testing.T) {
@@ -207,8 +208,8 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 		uploadSourceToR2 = prevUpload
 		sendGraceJobPayloadNoAck = prevSendNoAck
 	})
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
-		return "sources/test.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/test.tar.gz"), nil
 	}
 	var gotPayload controlplane.GraceJobsRequest
 	sendGraceJobPayloadNoAck = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload controlplane.GraceJobsRequest) (string, error) {
@@ -407,8 +408,8 @@ func reusePassRetryFixture(t *testing.T, database *sql.DB, attempts int, lastEnd
 		sendGraceJobPayloadNoAck = prevSendNoAck
 		resolveResumeCloudNeedsFunc = prevResolveResume
 	})
-	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, _ string, _ []string) (string, error) {
-		return "sources/test.tar.gz", nil
+	uploadSourceToR2 = func(_ context.Context, _ *r2.Client, sourceDir string, _ []string) (weftsync.SourceUploadResult, error) {
+		return testSourceUploadResult(sourceDir, "sources/test.tar.gz"), nil
 	}
 	resolveResumeCloudNeedsFunc = func(_ context.Context, _ *sql.DB, _ *r2.Client, _ *db.Job) ([]cloud.CloudNeed, error) {
 		return nil, nil

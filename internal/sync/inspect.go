@@ -346,6 +346,16 @@ func InspectSnapshotWithInputs(localDir string, inputs []string, topFiles, topDi
 // over-limit answer must not cost an attempt row. Returns the total bytes
 // and the overlaid input names.
 func EstimateSnapshotBytesWithInputs(localDir string, inputs []string) (int64, []string, error) {
+	return estimateSnapshotBytesWithInputs(localDir, inputs, 0)
+}
+
+// EstimateCloudSourceTarballBytesWithInputs estimates only the residual
+// tarball bytes after large-file diversion.
+func EstimateCloudSourceTarballBytesWithInputs(localDir string, inputs []string) (int64, []string, error) {
+	return estimateSnapshotBytesWithInputs(localDir, inputs, LargeSourceBlobThresholdBytes)
+}
+
+func estimateSnapshotBytesWithInputs(localDir string, inputs []string, divertAtBytes int64) (int64, []string, error) {
 	resolvedDir, err := filepath.Abs(localDir)
 	if err != nil {
 		return 0, nil, fmt.Errorf("resolve %s: %w", localDir, err)
@@ -394,7 +404,7 @@ func EstimateSnapshotBytesWithInputs(localDir string, inputs []string) (int64, [
 			}
 			return nil
 		}
-		if info.Mode().IsRegular() {
+		if info.Mode().IsRegular() && (divertAtBytes <= 0 || info.Size() < divertAtBytes) {
 			total += info.Size()
 		}
 		return nil
@@ -404,7 +414,7 @@ func EstimateSnapshotBytesWithInputs(localDir string, inputs []string) (int64, [
 	}
 
 	for _, o := range overlays {
-		size, err := pathTreeBytes(o.Abs)
+		size, err := pathTreeBytesBelow(o.Abs, divertAtBytes)
 		if err != nil {
 			return 0, nil, fmt.Errorf("measure declared input %q: %w", o.Input, err)
 		}
@@ -427,12 +437,16 @@ func relUnderAny(rel string, roots []string) bool {
 // pathTreeBytes sums the regular-file bytes under path (or the file's size
 // when path is a regular file).
 func pathTreeBytes(path string) (int64, error) {
+	return pathTreeBytesBelow(path, 0)
+}
+
+func pathTreeBytesBelow(path string, divertAtBytes int64) (int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, err
 	}
 	if !info.IsDir() {
-		if info.Mode().IsRegular() {
+		if info.Mode().IsRegular() && (divertAtBytes <= 0 || info.Size() < divertAtBytes) {
 			return info.Size(), nil
 		}
 		return 0, nil
@@ -442,7 +456,7 @@ func pathTreeBytes(path string) (int64, error) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if info.Mode().IsRegular() {
+		if info.Mode().IsRegular() && (divertAtBytes <= 0 || info.Size() < divertAtBytes) {
 			total += info.Size()
 		}
 		return nil

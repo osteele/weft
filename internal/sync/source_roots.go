@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,14 +25,15 @@ const (
 // SourceRoot describes one local source directory and its adjacent mount.
 // See specs/source-data-sync.allium @guidance MultiRootSourceSnapshots.
 type SourceRoot struct {
-	LocalPath     string   `json:"local_path"`
-	MountBasename string   `json:"mount_basename"`
-	MountRel      string   `json:"mount_rel"`
-	Origins       []string `json:"origins,omitempty"`
-	Hash          string   `json:"hash,omitempty"`
-	R2Key         string   `json:"r2_key,omitempty"`
-	SizeBytes     int64    `json:"size_bytes,omitempty"`
-	VCS           *VCSInfo `json:"vcs,omitempty"`
+	LocalPath     string                 `json:"local_path"`
+	MountBasename string                 `json:"mount_basename"`
+	MountRel      string                 `json:"mount_rel"`
+	Origins       []string               `json:"origins,omitempty"`
+	Hash          string                 `json:"hash,omitempty"`
+	R2Key         string                 `json:"r2_key,omitempty"`
+	SizeBytes     int64                  `json:"size_bytes,omitempty"`
+	Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
+	VCS           *VCSInfo               `json:"vcs,omitempty"`
 }
 
 type SourceRootWarning struct {
@@ -252,19 +254,54 @@ func BuildSourceManifestForInputs(projectRoot string, inputs []string) (SourceMa
 }
 
 func BuildSourceManifestForInputsAndCommands(projectRoot string, inputs []string, commands []string) (SourceManifest, []string, error) {
-	roots, warnings, err := ResolveSourceRootsForCommands(projectRoot, commands)
+	build, err := buildSourceManifestForInputsAndCommands(projectRoot, inputs, commands, false)
 	if err != nil {
 		return SourceManifest{}, nil, err
 	}
+	build.cleanup()
+	return build.manifest, build.tarPaths, nil
+}
+
+// BuildCloudSourceManifestForInputsAndCommands builds the cloud snapshot
+// identity after diverting large files from each root's residual tarball.
+func BuildCloudSourceManifestForInputsAndCommands(projectRoot string, inputs []string, commands []string) (SourceManifest, []string, error) {
+	build, err := buildSourceManifestForInputsAndCommands(projectRoot, inputs, commands, true)
+	if err != nil {
+		return SourceManifest{}, nil, err
+	}
+	build.cleanup()
+	return build.manifest, build.tarPaths, nil
+}
+
+type sourceManifestBuild struct {
+	manifest  SourceManifest
+	tarPaths  []string
+	blobPaths [][]string
+	cleanup   func()
+}
+
+func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string, commands []string, divertLargeFiles bool) (sourceManifestBuild, error) {
+	roots, warnings, err := ResolveSourceRootsForCommands(projectRoot, commands)
+	if err != nil {
+		return sourceManifestBuild{}, err
+	}
 	tmpPaths := make([]string, 0, len(roots))
+	blobPaths := make([][]string, 0, len(roots))
 	cleanup := func() {}
 	sourceDir := roots[0].LocalPath
 	applyExcludes := true
 	var stagedOverlayInputs []string
 	if len(inputs) > 0 {
-		stagedDir, overlayInputs, cleanupFn, err := stageSourceDirWithLocalInputs(roots[0].LocalPath, inputs)
+		var stagedDir string
+		var overlayInputs []string
+		var cleanupFn func()
+		if divertLargeFiles {
+			stagedDir, overlayInputs, cleanupFn, err = stageSourceDirWithLocalInputsLimit(roots[0].LocalPath, inputs, 0)
+		} else {
+			stagedDir, overlayInputs, cleanupFn, err = stageSourceDirWithLocalInputs(roots[0].LocalPath, inputs)
+		}
 		if err != nil {
-			return SourceManifest{}, nil, err
+			return sourceManifestBuild{}, err
 		}
 		cleanup = cleanupFn
 		stagedOverlayInputs = overlayInputs
@@ -282,22 +319,38 @@ func BuildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 			tmpPath string
 			hash    string
 		)
+		excludes := sourceExcludes(rootSourceDir)
 		if i == 0 && !applyExcludes {
+			excludes = nil
+		}
+		var omittedPaths map[string]struct{}
+		var rootBlobPaths []string
+		if divertLargeFiles {
+			var blobs []dataplane.SourceBlob
+			blobs, rootBlobPaths, omittedPaths, err = findLargeSourceBlobs(rootSourceDir, excludes)
+			roots[i].Blobs = blobs
+		}
+		if err == nil && divertLargeFiles {
+			tmpPath, hash, err = createSourceTarball(rootSourceDir, excludes, stagedOverlayInputs, omittedPaths, MaxSourceTarballBytes)
+		} else if err == nil && i == 0 && !applyExcludes {
 			tmpPath, hash, err = createSourceTarballWithOverlays(rootSourceDir, nil, stagedOverlayInputs)
 		} else {
-			tmpPath, hash, err = CreateSourceTarball(rootSourceDir)
+			if err == nil {
+				tmpPath, hash, err = CreateSourceTarball(rootSourceDir)
+			}
 		}
 		if err != nil {
 			cleanup()
 			removeFiles(tmpPaths)
-			return SourceManifest{}, nil, fmt.Errorf("snapshot source root %s: %w", roots[i].LocalPath, err)
+			return sourceManifestBuild{}, fmt.Errorf("snapshot source root %s: %w", roots[i].LocalPath, err)
 		}
 		tmpPaths = append(tmpPaths, tmpPath)
-		sizeBytes, err := IncludedSourceBytes(roots[i].LocalPath)
+		blobPaths = append(blobPaths, rootBlobPaths)
+		sizeBytes, err := includedSourceBytes(rootSourceDir, excludes)
 		if err != nil {
 			cleanup()
 			removeFiles(tmpPaths)
-			return SourceManifest{}, nil, fmt.Errorf("measure source root %s: %w", roots[i].LocalPath, err)
+			return sourceManifestBuild{}, fmt.Errorf("measure source root %s: %w", roots[i].LocalPath, err)
 		}
 		roots[i].Hash = hash
 		roots[i].R2Key = dataplane.SourceTarball(hash)
@@ -310,17 +363,22 @@ func BuildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 	if err != nil {
 		cleanup()
 		removeFiles(tmpPaths)
-		return SourceManifest{}, nil, err
+		return sourceManifestBuild{}, err
 	}
-	cleanup()
-	return SourceManifest{Roots: roots, Hash: hash, Warnings: warnings}, tmpPaths, nil
+	return sourceManifestBuild{
+		manifest:  SourceManifest{Roots: roots, Hash: hash, Warnings: warnings},
+		tarPaths:  tmpPaths,
+		blobPaths: blobPaths,
+		cleanup:   cleanup,
+	}, nil
 }
 
 func manifestHash(roots []SourceRoot) (string, error) {
 	type rootIdentity struct {
-		MountBasename string `json:"mount_basename"`
-		Hash          string `json:"hash"`
-		R2Key         string `json:"r2_key"`
+		MountBasename string                 `json:"mount_basename"`
+		Hash          string                 `json:"hash"`
+		R2Key         string                 `json:"r2_key"`
+		Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
 	}
 	ids := make([]rootIdentity, 0, len(roots))
 	for _, root := range roots {
@@ -328,6 +386,7 @@ func manifestHash(roots []SourceRoot) (string, error) {
 			MountBasename: root.MountBasename,
 			Hash:          root.Hash,
 			R2Key:         root.R2Key,
+			Blobs:         root.Blobs,
 		})
 	}
 	data, err := json.Marshal(ids)
@@ -336,6 +395,63 @@ func manifestHash(roots []SourceRoot) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func findLargeSourceBlobs(localDir string, excludes []string) ([]dataplane.SourceBlob, []string, map[string]struct{}, error) {
+	var blobs []dataplane.SourceBlob
+	var paths []string
+	omitted := make(map[string]struct{})
+	err := filepath.Walk(localDir, func(filename string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if os.IsPermission(walkErr) {
+				if info != nil && info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			return walkErr
+		}
+		relPath, err := filepath.Rel(localDir, filename)
+		if err != nil {
+			return err
+		}
+		if shouldExclude(relPath, info, excludes) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() || info.Size() < LargeSourceBlobThresholdBytes {
+			return nil
+		}
+		f, err := os.Open(filename)
+		if err != nil {
+			return fmt.Errorf("open diverted source file %s: %w", relPath, err)
+		}
+		h := sha256.New()
+		_, copyErr := io.Copy(h, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return fmt.Errorf("hash diverted source file %s: %w", relPath, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close diverted source file %s: %w", relPath, closeErr)
+		}
+		hash := hex.EncodeToString(h.Sum(nil))
+		slashRelPath := filepath.ToSlash(relPath)
+		blobs = append(blobs, dataplane.SourceBlob{
+			R2Key:   dataplane.NamedAsset(hash),
+			RelPath: slashRelPath,
+			SHA256:  hash,
+		})
+		paths = append(paths, filename)
+		omitted[slashRelPath] = struct{}{}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("scan large source files in %s: %w", localDir, err)
+	}
+	return blobs, paths, omitted, nil
 }
 
 func removeFiles(paths []string) {
@@ -359,7 +475,10 @@ func TotalSourceRootBytes(manifest *SourceManifest) int64 {
 // IncludedSourceBytes returns the uncompressed bytes that source sync would
 // include for localDir.
 func IncludedSourceBytes(localDir string) (int64, error) {
-	excludes := sourceExcludes(localDir)
+	return includedSourceBytes(localDir, sourceExcludes(localDir))
+}
+
+func includedSourceBytes(localDir string, excludes []string) (int64, error) {
 	var total int64
 	err := filepath.Walk(localDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {

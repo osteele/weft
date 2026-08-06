@@ -1,5 +1,7 @@
 package cloud
 
+import "github.com/osteele/weft/internal/dataplane"
+
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-instance.
 type AgentJob struct {
 	ID           int64    `json:"id"`
@@ -38,11 +40,12 @@ type AgentJob struct {
 
 // SourceMount describes one content-addressed source root mounted on a rental.
 type SourceMount struct {
-	R2Key         string `json:"r2_key"`
-	RemoteDir     string `json:"remote_dir"`
-	LocalDir      string `json:"local_dir,omitempty"`
-	MountBasename string `json:"mount_basename,omitempty"`
-	Hash          string `json:"hash,omitempty"`
+	R2Key         string                 `json:"r2_key"`
+	RemoteDir     string                 `json:"remote_dir"`
+	LocalDir      string                 `json:"local_dir,omitempty"`
+	MountBasename string                 `json:"mount_basename,omitempty"`
+	Hash          string                 `json:"hash,omitempty"`
+	Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
 }
 
 // CloudNeed is a resolved cloud artifact dependency for an agent job.

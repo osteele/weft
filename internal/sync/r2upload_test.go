@@ -1,13 +1,40 @@
 package sync
 
 import (
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type countingSourceStore struct {
+	objects map[string][]byte
+	puts    map[string]int
+}
+
+func newCountingSourceStore() *countingSourceStore {
+	return &countingSourceStore{objects: make(map[string][]byte), puts: make(map[string]int)}
+}
+
+func (s *countingSourceStore) ObjectExists(_ context.Context, key string) (bool, error) {
+	_, ok := s.objects[key]
+	return ok, nil
+}
+
+func (s *countingSourceStore) PutObject(_ context.Context, key string, body io.Reader, _ string) error {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	s.objects[key] = data
+	s.puts[key]++
+	return nil
+}
 
 func writeSparseTestFile(t *testing.T, path string, size int64) {
 	t.Helper()
@@ -20,6 +47,173 @@ func writeSparseTestFile(t *testing.T, path string, size int64) {
 	}
 	if err := os.Truncate(path, size); err != nil {
 		t.Fatalf("truncate sparse file %s: %v", path, err)
+	}
+}
+
+func testFileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		t.Fatalf("hash %s: %v", path, err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func assertTarPathMissing(t *testing.T, tarPath, relPath string) {
+	t.Helper()
+	extractDir := t.TempDir()
+	if err := ExtractTarball(tarPath, extractDir); err != nil {
+		t.Fatalf("ExtractTarball: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(extractDir, filepath.FromSlash(relPath))); !os.IsNotExist(err) {
+		t.Fatalf("tar path %s stat error = %v, want absent", relPath, err)
+	}
+}
+
+func TestBuildCloudSourceManifestDivertsLargeFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	largePath := filepath.Join(dir, "data", "training.pkl")
+	if err := os.MkdirAll(filepath.Dir(largePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSparseTestFile(t, largePath, LargeSourceBlobThresholdBytes)
+	wantHash := testFileSHA256(t, largePath)
+
+	manifest, tarPaths, err := BuildCloudSourceManifestForInputsAndCommands(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildCloudSourceManifestForInputsAndCommands: %v", err)
+	}
+	defer removeFiles(tarPaths)
+	if len(manifest.Roots) != 1 || len(manifest.Roots[0].Blobs) != 1 {
+		t.Fatalf("manifest roots/blobs = %+v, want one root with one blob", manifest.Roots)
+	}
+	blob := manifest.Roots[0].Blobs[0]
+	if blob.RelPath != "data/training.pkl" || blob.SHA256 != wantHash || blob.R2Key != "assets/"+wantHash {
+		t.Fatalf("blob = %+v, want path data/training.pkl and hash/key %s", blob, wantHash)
+	}
+	assertTarPathMissing(t, tarPaths[0], blob.RelPath)
+}
+
+func TestBuildCloudSourceManifestDivertsLocalOverlay(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("data/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	largePath := filepath.Join(dir, "data", "overlay.bin")
+	if err := os.MkdirAll(filepath.Dir(largePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSparseTestFile(t, largePath, LargeSourceBlobThresholdBytes)
+
+	manifest, tarPaths, err := BuildCloudSourceManifestForInputsAndCommands(dir, []string{"local:data/overlay.bin"}, nil)
+	if err != nil {
+		t.Fatalf("BuildCloudSourceManifestForInputsAndCommands: %v", err)
+	}
+	defer removeFiles(tarPaths)
+	if len(manifest.Roots) != 1 || len(manifest.Roots[0].Blobs) != 1 {
+		t.Fatalf("manifest roots/blobs = %+v, want overlaid file diverted", manifest.Roots)
+	}
+	if got := manifest.Roots[0].Blobs[0].RelPath; got != "data/overlay.bin" {
+		t.Fatalf("blob rel_path = %q, want data/overlay.bin", got)
+	}
+	assertTarPathMissing(t, tarPaths[0], "data/overlay.bin")
+}
+
+func TestUploadCloudSourceReusesLargeBlob(t *testing.T) {
+	dir := t.TempDir()
+	largePath := filepath.Join(dir, "large.bin")
+	writeSparseTestFile(t, largePath, LargeSourceBlobThresholdBytes)
+	store := newCountingSourceStore()
+
+	first, err := uploadSourceRootsToR2(context.Background(), store, dir, nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("first uploadSourceRootsToR2: %v", err)
+	}
+	second, err := uploadSourceRootsToR2(context.Background(), store, dir, nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("second uploadSourceRootsToR2: %v", err)
+	}
+	blobKey := first.Manifest.Roots[0].Blobs[0].R2Key
+	if second.Manifest.Hash != first.Manifest.Hash {
+		t.Fatalf("manifest hash changed: %s -> %s", first.Manifest.Hash, second.Manifest.Hash)
+	}
+	if got := store.puts[blobKey]; got != 1 {
+		t.Fatalf("blob put count = %d, want 1 for %s", got, blobKey)
+	}
+}
+
+func TestCloudSourceManifestIdentityIncludesDivertedFile(t *testing.T) {
+	dir := t.TempDir()
+	largePath := filepath.Join(dir, "large.bin")
+	writeSparseTestFile(t, largePath, LargeSourceBlobThresholdBytes)
+	first, firstTarPaths, err := BuildCloudSourceManifestForInputsAndCommands(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("first manifest: %v", err)
+	}
+	defer removeFiles(firstTarPaths)
+	f, err := os.OpenFile(largePath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte{1}); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, secondTarPaths, err := BuildCloudSourceManifestForInputsAndCommands(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("second manifest: %v", err)
+	}
+	defer removeFiles(secondTarPaths)
+	if first.Roots[0].Hash != second.Roots[0].Hash {
+		t.Fatalf("residual tarball hashes differ: %s vs %s", first.Roots[0].Hash, second.Roots[0].Hash)
+	}
+	if first.Hash == second.Hash {
+		t.Fatalf("manifest hash = %s for two different diverted files", first.Hash)
+	}
+}
+
+func TestBuildCloudSourceManifestKeepsFileBelowThreshold(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "almost-large.bin")
+	writeSparseTestFile(t, filePath, LargeSourceBlobThresholdBytes-1)
+	manifest, tarPaths, err := BuildCloudSourceManifestForInputsAndCommands(dir, nil, nil)
+	if err != nil {
+		t.Fatalf("BuildCloudSourceManifestForInputsAndCommands: %v", err)
+	}
+	defer removeFiles(tarPaths)
+	if got := len(manifest.Roots[0].Blobs); got != 0 {
+		t.Fatalf("blob count = %d, want 0 below threshold", got)
+	}
+	extractDir := t.TempDir()
+	if err := ExtractTarball(tarPaths[0], extractDir); err != nil {
+		t.Fatalf("ExtractTarball: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(extractDir, "almost-large.bin")); err != nil {
+		t.Fatalf("below-threshold file missing from tarball: %v", err)
+	}
+}
+
+func TestCloudSourceResidualOverflowAdvice(t *testing.T) {
+	err := SourceSizeLimitError(MaxSourceTarballBytes+1, []string{"local:data"})
+	if !errors.Is(err, ErrSourceTooLarge) {
+		t.Fatalf("error = %v, want ErrSourceTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "diverted automatically") {
+		t.Fatalf("error does not explain residual size after automatic diversion: %v", err)
+	}
+	if strings.Contains(err.Error(), "weft data publish") {
+		t.Fatalf("error still recommends manual publishing for automatically diverted files: %v", err)
 	}
 }
 

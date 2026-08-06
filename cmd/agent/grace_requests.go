@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -96,7 +97,7 @@ func sourceUpdatePhase(jobID int64, fallback string) string {
 }
 
 func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
-	if key, ok := sources.lookup(upd.RemoteDir); ok && key == upd.R2Key {
+	if source, ok := sources.lookupSource(upd.RemoteDir); ok && source.r2Key == upd.R2Key && slices.Equal(source.blobs, upd.Blobs) {
 		return nil
 	}
 	if jobID, ok := activeSourceWorkdirs.runningJob(upd.RemoteDir); ok {

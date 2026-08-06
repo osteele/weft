@@ -20,6 +20,10 @@ import (
 // sweeping up large artifact directories or data files.
 const MaxSourceTarballBytes = 500 * 1024 * 1024 // 500 MB
 
+// LargeSourceBlobThresholdBytes is the minimum file size diverted from cloud
+// source tarballs into an individually content-addressed object.
+const LargeSourceBlobThresholdBytes = 8 * 1024 * 1024 // 8 MiB
+
 // CreateSourceTarball creates a gzip-compressed tarball of localDir, skipping
 // entries matching DefaultExcludes(). Returns the path to a temp file and the
 // hex-encoded SHA-256 hash of the tarball contents.
@@ -40,6 +44,12 @@ var ErrSourceTooLarge = errors.New("source exceeds size limit")
 // names) selects the size-limit advice: overlaid inputs cannot be excluded
 // via .gitignore/.weftignore, so the remedy is the asset store.
 func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []string) (tmpPath string, sha256hex string, err error) {
+	return createSourceTarball(localDir, excludes, overlayInputs, nil, MaxSourceTarballBytes)
+}
+
+// createSourceTarball writes a deterministic snapshot while omitting exact
+// slash-relative paths in omittedPaths. maxBytes <= 0 disables the size cap.
+func createSourceTarball(localDir string, excludes, overlayInputs []string, omittedPaths map[string]struct{}, maxBytes int64) (tmpPath string, sha256hex string, err error) {
 	tmpFile, err := os.CreateTemp("", "weft-source-*.tar.gz")
 	if err != nil {
 		return "", "", fmt.Errorf("create temp file: %w", err)
@@ -77,12 +87,16 @@ func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []
 		if err != nil {
 			return err
 		}
+		slashRelPath := filepath.ToSlash(relPath)
 
 		// Check excludes against each path component and the basename
 		if shouldExclude(relPath, info, excludes) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if _, omitted := omittedPaths[slashRelPath]; omitted {
 			return nil
 		}
 
@@ -104,7 +118,7 @@ func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []
 		if err != nil {
 			return fmt.Errorf("file info header for %s: %w", relPath, err)
 		}
-		header.Name = relPath
+		header.Name = slashRelPath
 		// Zero out timestamps/uid/gid for deterministic hashing —
 		// identical source content produces the same tarball hash
 		// regardless of when files were modified.
@@ -125,11 +139,11 @@ func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []
 		}
 
 		totalBytes += info.Size()
-		if totalBytes > MaxSourceTarballBytes {
-			report := collectSizeReport(localDir, excludes)
+		if maxBytes > 0 && totalBytes > maxBytes {
+			report := collectSizeReport(localDir, excludes, omittedPaths)
 			return fmt.Errorf("%w: source directory exceeds %s limit\n%s\n%s",
-				ErrSourceTooLarge, formatSize(MaxSourceTarballBytes), report,
-				sizeLimitAdvice(overlayInputs))
+				ErrSourceTooLarge, formatSize(maxBytes), report,
+				sizeLimitAdvice(overlayInputs, omittedPaths != nil))
 		}
 
 		f, err := os.Open(path)
@@ -163,7 +177,7 @@ func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []
 
 // collectSizeReport walks localDir (respecting excludes) and returns a
 // human-readable report of the largest directories and files.
-func collectSizeReport(localDir string, excludes []string) string {
+func collectSizeReport(localDir string, excludes []string, omittedPaths map[string]struct{}) string {
 	var files []SnapshotItem
 	topLevelBytes := map[string]int64{}
 	var totalBytes int64
@@ -186,6 +200,9 @@ func collectSizeReport(localDir string, excludes []string) string {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if _, omitted := omittedPaths[filepath.ToSlash(relPath)]; omitted {
 			return nil
 		}
 		if !info.Mode().IsRegular() {
@@ -223,15 +240,19 @@ func collectSizeReport(localDir string, excludes []string) string {
 	return b.String()
 }
 
-// sizeLimitAdvice returns the remediation line for a size-limit overflow.
-// A plain working tree can exclude large directories; a tree staged with
-// declared local: inputs cannot (the overlay deliberately bypasses
-// excludes), so the remedy is publishing them to the asset store.
-func sizeLimitAdvice(overlayInputs []string) string {
-	if len(overlayInputs) == 0 {
-		return "Add large directories to .gitignore or .weftignore to exclude them."
+// sizeLimitAdvice returns remediation for a residual tarball overflow.
+func sizeLimitAdvice(overlayInputs []string, largeFilesDiverted bool) string {
+	if !largeFilesDiverted {
+		if len(overlayInputs) == 0 {
+			return "Add large directories to .gitignore or .weftignore to exclude them."
+		}
+		return fmt.Sprintf("The staged source includes declared local: inputs (%s), which cannot be excluded via .gitignore/.weftignore. Publish large inputs to the asset store instead: `weft data publish <path> --name <name>`, then reference them with `--input asset:<name>`.",
+			strings.Join(overlayInputs, ", "))
 	}
-	return fmt.Sprintf("The staged source includes declared local: inputs (%s), which cannot be excluded via .gitignore/.weftignore. Publish large inputs to the asset store instead: `weft data publish <path> --name <name>`, then reference them with `--input asset:<name>`.",
+	if len(overlayInputs) == 0 {
+		return "The residual source tarball is still too large after files of 8 MiB or more were diverted automatically. Add generated or unnecessary directories to .gitignore or .weftignore."
+	}
+	return fmt.Sprintf("The residual source tarball is still too large after files of 8 MiB or more were diverted automatically. It includes declared local: inputs (%s), which cannot be excluded via .gitignore/.weftignore; split or remove unnecessary input files.",
 		strings.Join(overlayInputs, ", "))
 }
 
@@ -275,5 +296,5 @@ func shouldExclude(relPath string, info os.FileInfo, excludes []string) bool {
 func SourceSizeLimitError(totalBytes int64, overlayInputs []string) error {
 	return fmt.Errorf("%w: source snapshot is %s, over the %s cloud sync limit. %s",
 		ErrSourceTooLarge, formatSize(totalBytes), formatSize(MaxSourceTarballBytes),
-		sizeLimitAdvice(overlayInputs))
+		sizeLimitAdvice(overlayInputs, true))
 }
