@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
 	"github.com/osteele/weft/internal/ids"
@@ -788,6 +790,13 @@ func showJob(database *sql.DB, id int64) error {
 	}
 	if len(job.Inputs) > 0 {
 		fmt.Printf("Inputs:       %s\n", strings.Join(job.Inputs, ", "))
+		inputPaths, err := namedAssetInputPaths(database, job.Inputs)
+		if err != nil {
+			return err
+		}
+		if len(inputPaths) > 0 {
+			fmt.Printf("Input Paths:  %s\n", strings.Join(inputPaths, ", "))
+		}
 	}
 	if len(job.BestEffortInputs) > 0 {
 		fmt.Printf("Best Effort:  %s\n", strings.Join(job.BestEffortInputs, ", "))
@@ -814,6 +823,26 @@ func showJob(database *sql.DB, id int64) error {
 	printJobAttemptSummary(database, job)
 
 	return nil
+}
+
+func namedAssetInputPaths(database *sql.DB, inputs []string) ([]string, error) {
+	paths := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		asset, ok := dataloc.ParseAssetRef(input)
+		if !ok || asset.Kind != dataloc.AssetNamed {
+			continue
+		}
+		named, err := db.GetNamedAssetByName(database, asset.ID)
+		if errors.Is(err, db.ErrNamedAssetNotFound) {
+			paths = append(paths, input+" -> unavailable (not published)")
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve input %s target path: %w", input, err)
+		}
+		paths = append(paths, input+" -> "+named.TargetPath)
+	}
+	return paths, nil
 }
 
 func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nextPrefix string) {

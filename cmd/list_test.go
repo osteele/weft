@@ -870,9 +870,16 @@ func TestShowJob_ShowsDeclaredInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	inputs := []string{"hf:Qwen/Qwen2.5-0.5B", "hf:EleutherAI/pythia-160m"}
+	inputs := []string{"hf:Qwen/Qwen2.5-0.5B", "hf:EleutherAI/pythia-160m", "asset:eval-corpus"}
 	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
 		t.Fatalf("SetJobInputs: %v", err)
+	}
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "eval-corpus",
+		ContentHash: strings.Repeat("a", 64),
+		TargetPath:  "output/exp207/eval.jsonl",
+	}); err != nil {
+		t.Fatalf("UpsertNamedAsset: %v", err)
 	}
 	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
 		BestEffortInputs: []string{"hf:EleutherAI/pythia-160m"},
@@ -887,7 +894,8 @@ func TestShowJob_ShowsDeclaredInputs(t *testing.T) {
 	})
 
 	for _, want := range []string{
-		"Inputs:       hf:Qwen/Qwen2.5-0.5B, hf:EleutherAI/pythia-160m",
+		"Inputs:       hf:Qwen/Qwen2.5-0.5B, hf:EleutherAI/pythia-160m, asset:eval-corpus",
+		"Input Paths:  asset:eval-corpus -> output/exp207/eval.jsonl",
 		"Best Effort:  hf:EleutherAI/pythia-160m",
 	} {
 		if !strings.Contains(out, want) {

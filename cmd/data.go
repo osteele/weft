@@ -943,12 +943,16 @@ type dataPublishR2Client interface {
 // to the repo root, so a file at <repo>/output/X.pkl stages back to
 // output/X.pkl on the consumer. Outside a repo: just the basename.
 func derivePublishTargetPath(srcPath string) string {
-	root := workdir.DetectRepoRoot(srcPath)
+	absPath, err := filepath.Abs(srcPath)
+	if err != nil {
+		return filepath.Base(srcPath)
+	}
+	root := workdir.DetectRepoRoot(absPath)
 	if root == "" {
-		root = workdir.DetectRepoRoot(filepath.Dir(srcPath))
+		root = workdir.DetectRepoRoot(filepath.Dir(absPath))
 	}
 	if root != "" {
-		rel, err := filepath.Rel(root, srcPath)
+		rel, err := filepath.Rel(root, absPath)
 		if err == nil && !strings.HasPrefix(rel, "..") {
 			return filepath.ToSlash(rel)
 		}

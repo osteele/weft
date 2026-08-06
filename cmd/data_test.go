@@ -286,6 +286,37 @@ func TestDeriveCheckpointNameBasename(t *testing.T) {
 	}
 }
 
+func TestDerivePublishTargetPathFromRelativeRepoPath(t *testing.T) {
+	got := derivePublishTargetPath(filepath.Join("..", "testdata", "pytorch-training", "train.py"))
+	want := "testdata/pytorch-training/train.py"
+	if got != want {
+		t.Fatalf("target path = %q, want %q", got, want)
+	}
+}
+
+func TestRunDataPublishDefaultsToRelativeRepoPath(t *testing.T) {
+	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
+	setupDataPublishTest(t, r2Client)
+	dataPublishName = "training-script"
+
+	if err := runDataPublish(nil, []string{filepath.Join("..", "testdata", "pytorch-training", "train.py")}); err != nil {
+		t.Fatalf("runDataPublish: %v", err)
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	asset, err := db.GetNamedAssetByName(database, "training-script")
+	if err != nil {
+		t.Fatalf("GetNamedAssetByName: %v", err)
+	}
+	if asset.TargetPath != "testdata/pytorch-training/train.py" {
+		t.Fatalf("target path = %q, want repository-relative path", asset.TargetPath)
+	}
+}
+
 func TestRunDataWhereCheckpoint(t *testing.T) {
 	database := db.SetupTestDB(t)
 	now := time.Now().UTC().Truncate(time.Second)
