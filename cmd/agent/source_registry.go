@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 )
 
 // sourceCacheDir returns the directory where the agent keeps the most recent
@@ -59,9 +60,9 @@ func resolveSourceCacheDir() string {
 }
 
 // sourceRegistry maps a RemoteDir (the on-rental absolute path of a project's
-// working directory) to the R2 key of the most recently applied source
-// tarball for that directory. It is populated by applySourceUpdate and
-// consulted by ensureSourceFreshMounts before each job runs.
+// working directory) to the most recently applied source payload for that
+// directory. It is populated by applySourceUpdate and consulted by
+// ensureSourceFreshMounts before each job runs.
 //
 // The registry lets the agent recover from a missing/partial workdir without
 // requiring the controller to re-send the job request. The original failure
@@ -73,10 +74,15 @@ func resolveSourceCacheDir() string {
 // ModuleNotFoundError.
 type sourceRegistry struct {
 	mu     sync.Mutex
-	latest map[string]string // RemoteDir → R2 key
+	latest map[string]registeredSource // RemoteDir → source payload
 }
 
-var sources = &sourceRegistry{latest: map[string]string{}}
+type registeredSource struct {
+	r2Key string
+	blobs []controlplane.SourceBlob
+}
+
+var sources = &sourceRegistry{latest: map[string]registeredSource{}}
 
 type activeSourceWorkdirTracker struct {
 	mu    sync.Mutex
@@ -163,19 +169,32 @@ func (t *activeSourceWorkdirTracker) runningJob(workdir string) (int64, bool) {
 }
 
 func (r *sourceRegistry) record(remoteDir, r2Key string) {
+	r.recordWithBlobs(remoteDir, r2Key, nil)
+}
+
+func (r *sourceRegistry) recordWithBlobs(remoteDir, r2Key string, blobs []controlplane.SourceBlob) {
 	if remoteDir == "" || r2Key == "" {
 		return
 	}
 	r.mu.Lock()
-	r.latest[remoteDir] = r2Key
+	r.latest[remoteDir] = registeredSource{
+		r2Key: r2Key,
+		blobs: append([]controlplane.SourceBlob(nil), blobs...),
+	}
 	r.mu.Unlock()
 }
 
 func (r *sourceRegistry) lookup(remoteDir string) (string, bool) {
+	source, ok := r.lookupSource(remoteDir)
+	return source.r2Key, ok
+}
+
+func (r *sourceRegistry) lookupSource(remoteDir string) (registeredSource, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key, ok := r.latest[remoteDir]
-	return key, ok
+	source, ok := r.latest[remoteDir]
+	source.blobs = append([]controlplane.SourceBlob(nil), source.blobs...)
+	return source, ok
 }
 
 // sourceCachePath returns the stable on-disk path under sourceCacheDir for
@@ -210,22 +229,21 @@ func hasSourceMarkers(dir string) bool {
 	return len(entries) > 0
 }
 
-// ensureSourceFreshMounts re-extracts the cached source tarball for each of a
-// job's source mounts whose directory has gone missing or empty since it was
-// first staged. Every mount is tested, not just the project root: a populated
-// project root does not imply a populated sibling root, and a missing sibling
-// otherwise surfaces only as an import error inside the job (spec:
+// ensureSourceFreshMounts reconstructs each empty or missing source mount.
+// Every mount is tested, not just the project root: a populated project root
+// does not imply a populated sibling root, and a missing sibling otherwise
+// surfaces only as an import error inside the job (spec:
 // source-data-sync.allium § StageSourceOnCloudInstance).
-//
-// All failures are best-effort: re-extract is a recovery path, not a hard
-// dependency, so we log and return rather than blocking the job.
-func ensureSourceFreshMounts(bucket string, mounts []cloud.SourceMount) {
+func ensureSourceFreshMounts(bucket string, mounts []cloud.SourceMount) error {
 	if len(mounts) == 0 {
-		return
+		return nil
 	}
 	for _, mount := range mounts {
-		ensureOneSourceFresh(bucket, mount.RemoteDir)
+		if err := ensureOneSourceFresh(bucket, mount.RemoteDir); err != nil {
+			return fmt.Errorf("restore source mount %s: %w", mount.RemoteDir, err)
+		}
 	}
+	return nil
 }
 
 func registerSourceMounts(mounts []cloud.SourceMount) {
@@ -256,47 +274,53 @@ func runnerExpandTilde(p string) string {
 	return p
 }
 
-func ensureOneSourceFresh(bucket, jobDir string) {
+func ensureOneSourceFresh(bucket, jobDir string) error {
 	if jobDir == "" {
-		return
+		return nil
 	}
 	if hasSourceMarkers(jobDir) {
-		return
+		return nil
 	}
-	r2Key, ok := sources.lookup(jobDir)
+	source, ok := sources.lookupSource(jobDir)
 	if !ok {
-		slog.Warn("workdir is empty/missing and no source tarball is registered; job will run against bare disk",
-			"component", "agent", "workdir", jobDir)
-		return
+		return fmt.Errorf("empty or missing source directory has no registered source payload")
 	}
 
-	cachePath := sourceCachePath(r2Key)
+	cachePath := sourceCachePath(source.r2Key)
 	if _, err := os.Stat(cachePath); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect cached source tarball %s: %w", source.r2Key, err)
+		}
 		slog.Warn("workdir empty; re-downloading source tarball from R2",
-			"component", "agent", "workdir", jobDir, "r2_key", r2Key)
-		if err := downloadSourceToCache(bucket, r2Key, cachePath); err != nil {
-			slog.Warn("source re-download failed; continuing without recovery",
-				"component", "agent", "workdir", jobDir, "r2_key", r2Key, "error", err)
-			return
+			"component", "agent", "workdir", jobDir, "r2_key", source.r2Key)
+		if err := downloadSourceToCache(bucket, source.r2Key, cachePath); err != nil {
+			return fmt.Errorf("download source tarball %s: %w", source.r2Key, err)
 		}
 	} else {
 		slog.Warn("workdir empty; re-extracting cached source tarball",
-			"component", "agent", "workdir", jobDir, "r2_key", r2Key, "cache_path", cachePath)
+			"component", "agent", "workdir", jobDir, "r2_key", source.r2Key, "cache_path", cachePath)
+	}
+	if err := ensureSourceBlobsCached(bucket, source.blobs); err != nil {
+		return fmt.Errorf("restore source blobs: %w", err)
 	}
 
+	if err := os.RemoveAll(jobDir); err != nil {
+		return fmt.Errorf("clean source directory: %w", err)
+	}
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
-		slog.Warn("source re-stage: mkdir failed",
-			"component", "agent", "workdir", jobDir, "error", err)
-		return
+		return fmt.Errorf("create source directory: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "tar", "xzf", cachePath, "-C", jobDir)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		slog.Warn("source re-stage: extract failed",
-			"component", "agent", "workdir", jobDir, "cache_path", cachePath, "error", err)
+		return fmt.Errorf("extract source tarball %s: %w", source.r2Key, err)
 	}
+	if err := materializeSourceBlobs(jobDir, source.blobs); err != nil {
+		return fmt.Errorf("materialize restored source blobs: %w", err)
+	}
+	return nil
 }
 
 // fetchSourceTarballToDir downloads sources/<sha>.tar.gz from R2 (or reuses a
@@ -305,10 +329,8 @@ func ensureOneSourceFresh(bucket, jobDir string) {
 // the runner can reject the attempt at preflight instead of silently running
 // against the wrong sources.
 //
-// Unlike ensureSourceFreshMounts, this is a primary path (not a best-effort
-// recovery), so errors are propagated rather than logged-and-swallowed. The
-// per-job dir is created if missing and the cached tarball is shared across
-// jobs that need the same R2 key (content-addressed).
+// The per-job dir is created if missing and the cached tarball is shared
+// across jobs that need the same R2 key (content-addressed).
 func fetchSourceTarballToDir(bucket, r2Key, perJobDir string) error {
 	if bucket == "" {
 		return fmt.Errorf("no R2 bucket configured")

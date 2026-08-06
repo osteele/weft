@@ -6,13 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 )
 
 func TestSourceRegistry_RecordAndLookup(t *testing.T) {
-	r := &sourceRegistry{latest: map[string]string{}}
+	r := &sourceRegistry{latest: map[string]registeredSource{}}
 	r.record("/workspace/proj-a", "sources/abc.tar.gz")
 	r.record("/workspace/proj-b", "sources/def.tar.gz")
 
@@ -86,7 +88,7 @@ func TestEnsureSourceFreshMountsRepairsMissingSibling(t *testing.T) {
 	t.Cleanup(func() { sourceCacheDirOverride = oldCacheDir })
 
 	oldSources := sources
-	sources = &sourceRegistry{latest: map[string]string{}}
+	sources = &sourceRegistry{latest: map[string]registeredSource{}}
 	t.Cleanup(func() { sources = oldSources })
 
 	parent := t.TempDir()
@@ -109,13 +111,106 @@ func TestEnsureSourceFreshMountsRepairsMissingSibling(t *testing.T) {
 		"expkit/__init__.py": "VALUE = 1\n",
 	})
 
-	ensureSourceFreshMounts("bucket", []cloud.SourceMount{
+	if err := ensureSourceFreshMounts("bucket", []cloud.SourceMount{
 		{RemoteDir: projectDir, R2Key: projectKey},
 		{RemoteDir: siblingDir, R2Key: siblingKey},
-	})
+	}); err != nil {
+		t.Fatalf("ensureSourceFreshMounts: %v", err)
+	}
 
 	if _, err := os.Stat(filepath.Join(siblingDir, "expkit", "__init__.py")); err != nil {
 		t.Fatalf("sibling root was not repaired: %v", err)
+	}
+}
+
+func TestEnsureSourceFreshMountsRestoresBlobs(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"main.py": "print('ok')\n"})
+	blobContent := "restored data\n"
+	blobHash := contentSHA256(blobContent)
+	blobKey := "assets/" + blobHash
+	writeFakeR2Object(t, objectDir, blobKey, blobContent)
+	invocationLog := filepath.Join(t.TempDir(), "rclone.log")
+	t.Setenv("RCLONE_INVOCATION_LOG", invocationLog)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	update := controlplane.SourceUpdate{
+		RemoteDir: remoteDir,
+		R2Key:     "sources/source.tar.gz",
+		Blobs: []controlplane.SourceBlob{{
+			R2Key: blobKey, RelPath: "data/input.bin", SHA256: blobHash,
+		}},
+	}
+	if err := applySourceUpdate("test-bucket", update); err != nil {
+		t.Fatalf("applySourceUpdate: %v", err)
+	}
+	if err := os.RemoveAll(remoteDir); err != nil {
+		t.Fatalf("remove source tree: %v", err)
+	}
+	if err := ensureSourceFreshMounts("test-bucket", []cloud.SourceMount{{RemoteDir: remoteDir, R2Key: update.R2Key}}); err != nil {
+		t.Fatalf("ensureSourceFreshMounts: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "data", "input.bin"))
+	if err != nil {
+		t.Fatalf("read restored blob: %v", err)
+	}
+	if string(got) != blobContent {
+		t.Fatalf("restored blob = %q, want %q", got, blobContent)
+	}
+	data, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read rclone invocation log after cache hit: %v", err)
+	}
+	if batchCopies := countBlobBatchCopies(data); batchCopies != 1 {
+		t.Fatalf("blob batch download count after cache-hit recovery = %d, want 1; invocations:\n%s", batchCopies, data)
+	}
+
+	if err := os.RemoveAll(remoteDir); err != nil {
+		t.Fatalf("remove source tree before cache-miss recovery: %v", err)
+	}
+	if err := os.Remove(sourceBlobCachePath(blobHash)); err != nil {
+		t.Fatalf("remove cached blob: %v", err)
+	}
+	if err := ensureSourceFreshMounts("test-bucket", []cloud.SourceMount{{RemoteDir: remoteDir, R2Key: update.R2Key}}); err != nil {
+		t.Fatalf("ensureSourceFreshMounts after cache removal: %v", err)
+	}
+	got, err = os.ReadFile(filepath.Join(remoteDir, "data", "input.bin"))
+	if err != nil {
+		t.Fatalf("read re-downloaded blob: %v", err)
+	}
+	if string(got) != blobContent {
+		t.Fatalf("re-downloaded blob = %q, want %q", got, blobContent)
+	}
+	data, err = os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read rclone invocation log: %v", err)
+	}
+	if batchCopies := countBlobBatchCopies(data); batchCopies != 2 {
+		t.Fatalf("blob batch download count after cache-miss recovery = %d, want 2; invocations:\n%s", batchCopies, data)
+	}
+}
+
+func countBlobBatchCopies(data []byte) int {
+	batchCopies := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "copy ") {
+			batchCopies++
+		}
+	}
+	return batchCopies
+}
+
+func TestEnsureSourceFreshMountsWithoutRegistryIsHardError(t *testing.T) {
+	resetSourceUpdateState(t)
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "missing-project")
+	err := ensureSourceFreshMounts("test-bucket", []cloud.SourceMount{{RemoteDir: remoteDir, R2Key: "sources/source.tar.gz"}})
+	if err == nil {
+		t.Fatal("ensureSourceFreshMounts returned nil without registry state")
+	}
+	if !strings.Contains(err.Error(), remoteDir) || !strings.Contains(err.Error(), "no registered source payload") {
+		t.Fatalf("error = %q, want mount path and missing registry state", err)
 	}
 }
 

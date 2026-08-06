@@ -45,26 +45,7 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 		}
 		fmt.Printf("Job %d: cloud artifact staging attempt: %s\n", jobID, label)
 		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging attempt: %s", label))
-
-		targetPath := filepath.Join(expandedWorkDir, filepath.FromSlash(strings.TrimPrefix(need.Path, "/")))
-		if err := prepareCloudNeedTarget(targetPath, need.ContentType); err != nil {
-			return fmt.Errorf("prepare local staging path for %q: %w", label, err)
-		}
-		copyTarget := targetPath
-		if need.ContentType == "directory" {
-			copyTarget = targetPath + ".weft-archive.tar.gz"
-			defer os.Remove(copyTarget)
-		}
-		if err := copyCloudNeedFromR2Func(bucket, need.R2Key, copyTarget); err != nil {
-			oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging fail: %s", label), oplog.WithError(err))
-			return fmt.Errorf("cloud artifact staging failed for %q: %w", label, err)
-		}
-		if need.ContentType == "directory" {
-			if err := extractCloudNeedArchive(copyTarget, targetPath); err != nil {
-				return fmt.Errorf("extract cloud directory asset %q: %w", label, err)
-			}
-		}
-		if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
+		if err := stageOneCloudNeed(bucket, jobID, expandedWorkDir, need, label); err != nil {
 			return err
 		}
 
@@ -76,6 +57,31 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 	oplog.LogJob(oplog.OpJobSync, jobID, "",
 		oplog.WithDetailf("cloud artifact staging complete (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
 	)
+	return nil
+}
+
+func stageOneCloudNeed(bucket string, jobID int64, expandedWorkDir string, need cloud.CloudNeed, label string) error {
+	targetPath := filepath.Join(expandedWorkDir, filepath.FromSlash(strings.TrimPrefix(need.Path, "/")))
+	if err := prepareCloudNeedTarget(targetPath, need.ContentType); err != nil {
+		return fmt.Errorf("prepare local staging path for %q: %w", label, err)
+	}
+	copyTarget := targetPath
+	if need.ContentType == "directory" {
+		copyTarget = targetPath + ".weft-archive.tar.gz"
+		defer os.Remove(copyTarget)
+	}
+	if err := copyCloudNeedFromR2Func(bucket, need.R2Key, copyTarget); err != nil {
+		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging fail: %s", label), oplog.WithError(err))
+		return fmt.Errorf("cloud artifact staging failed for %q: %w", label, err)
+	}
+	if need.ContentType == "directory" {
+		if err := extractCloudNeedArchive(copyTarget, targetPath); err != nil {
+			return fmt.Errorf("extract cloud directory asset %q: %w", label, err)
+		}
+	}
+	if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
+		return err
+	}
 	return nil
 }
 

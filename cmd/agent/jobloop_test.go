@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -716,6 +717,77 @@ func TestRunSetupPrewarmBestEffortHFFailureWarnsAndContinues(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "weft: auto-detected input hf:org/auto failed to stage; continuing (best-effort)") {
 		t.Fatalf("missing best-effort warning:\n%s", string(data))
+	}
+}
+
+func TestRunSetupPrewarmFailsOnSourceRecoveryError(t *testing.T) {
+	objectDir := t.TempDir()
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	workDir := filepath.Join(t.TempDir(), "workspace", "project")
+	sourceKey := "sources/source.tar.gz"
+	writeTestTarGz(t, sourceCachePath(sourceKey), map[string]string{"main.py": "print('ok')\n"})
+	missingHash := contentSHA256("missing prewarm blob")
+	missingKey := "assets/" + missingHash
+	sources.recordWithBlobs(workDir, sourceKey, []controlplane.SourceBlob{{
+		R2Key: missingKey, RelPath: "data/prewarm.bin", SHA256: missingHash,
+	}})
+
+	result := runSetupPrewarm(cloud.AgentJob{
+		ID: 81, Dir: workDir, Command: "python main.py",
+	}, jobSequenceConfig{R2Bucket: "test-bucket"}, workDir, false)
+	if result.err == nil {
+		t.Fatal("runSetupPrewarm returned no error after source recovery failure")
+	}
+	if !result.infraFailure || !strings.Contains(result.failureReason, missingKey) || !strings.Contains(result.failureReason, "data/prewarm.bin") {
+		t.Fatalf("prewarm result = %+v, want attributable infrastructure failure", result)
+	}
+}
+
+func TestRunJobSequenceSourceRecoveryFailurePreventsCommand(t *testing.T) {
+	objectDir := t.TempDir()
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	workDir := filepath.Join(t.TempDir(), "workspace", "project")
+	sourceKey := "sources/source.tar.gz"
+	writeTestTarGz(t, sourceCachePath(sourceKey), map[string]string{"main.py": "print('ok')\n"})
+	missingHash := contentSHA256("missing job blob")
+	missingKey := "assets/" + missingHash
+	sources.recordWithBlobs(workDir, sourceKey, []controlplane.SourceBlob{{
+		R2Key: missingKey, RelPath: "data/job.bin", SHA256: missingHash,
+	}})
+
+	prevList := graceR2List
+	prevPut := r2PutForAgent
+	t.Cleanup(func() {
+		graceR2List = prevList
+		r2PutForAgent = prevPut
+	})
+	graceR2List = func(_ string, _ string) ([]string, error) { return nil, nil }
+	r2PutForAgent = func(_, _, _ string) error { return nil }
+
+	commandMarker := filepath.Join(t.TempDir(), "command-ran")
+	job := cloud.AgentJob{
+		ID: 82, RunID: 820, Dir: workDir,
+		Command:      fmt.Sprintf("printf ran > %q", commandMarker),
+		SourceMounts: []cloud.SourceMount{{RemoteDir: workDir, R2Key: sourceKey}},
+	}
+	logDir := t.TempDir()
+	result := runJobSequence([]cloud.AgentJob{job}, jobSequenceConfig{
+		R2Bucket: "",
+		LogDir:   logDir, StartTime: time.Now(), DisableJobPolling: true, SkipWorkdirDeletion: true,
+	})
+	if !result.AnyFailed || !result.AnyInfraFailed || result.StartedJobCount != 0 || !slices.Contains(result.FailedJobs, job.ID) {
+		t.Fatalf("job sequence result = %+v, want source recovery failure before start", result)
+	}
+	if _, err := os.Stat(commandMarker); !os.IsNotExist(err) {
+		t.Fatalf("command marker stat error = %v, want command not run", err)
+	}
+	reason := runner.ReadFailureReasonFile(runner.NewJobPaths(logDir, job.ID).FailureReason)
+	if !strings.Contains(reason, missingKey) || !strings.Contains(reason, "data/job.bin") {
+		t.Fatalf("failure reason = %q, want failing blob key and relative path", reason)
 	}
 }
 

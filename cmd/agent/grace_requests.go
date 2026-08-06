@@ -109,7 +109,9 @@ func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
 	if err := downloadSourceToCache(bucket, upd.R2Key, cachePath); err != nil {
 		return fmt.Errorf("download source tarball: %w", err)
 	}
-
+	if err := ensureSourceBlobsCached(bucket, upd.Blobs); err != nil {
+		return fmt.Errorf("cache source blobs: %w", err)
+	}
 	if err := os.RemoveAll(upd.RemoteDir); err != nil {
 		return fmt.Errorf("clean remote dir %s: %w", upd.RemoteDir, err)
 	}
@@ -124,7 +126,10 @@ func applySourceUpdate(bucket string, upd controlplane.SourceUpdate) error {
 	if err := tarCmd.Run(); err != nil {
 		return fmt.Errorf("extract source tarball: %w", err)
 	}
-	sources.record(upd.RemoteDir, upd.R2Key)
+	if err := materializeSourceBlobs(upd.RemoteDir, upd.Blobs); err != nil {
+		return fmt.Errorf("materialize source blobs: %w", err)
+	}
+	sources.recordWithBlobs(upd.RemoteDir, upd.R2Key, upd.Blobs)
 	return nil
 }
 

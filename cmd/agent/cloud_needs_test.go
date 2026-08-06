@@ -141,3 +141,41 @@ func TestStageCloudNeeds_Failure(t *testing.T) {
 		t.Fatal("expected staging error")
 	}
 }
+
+func TestStageCloudNeedsRemovesDirectoryArchiveBeforeNextNeed(t *testing.T) {
+	workDir := t.TempDir()
+	needs := []cloud.CloudNeed{
+		{Spec: "checkpoint:first", Path: "checkpoints/first", R2Key: "assets/first", ContentType: string(dataloc.ContentTypeDirectory)},
+		{Spec: "checkpoint:second", Path: "checkpoints/second", R2Key: "assets/second", ContentType: string(dataloc.ContentTypeDirectory)},
+	}
+
+	prev := copyCloudNeedFromR2Func
+	t.Cleanup(func() { copyCloudNeedFromR2Func = prev })
+	copyCount := 0
+	copyCloudNeedFromR2Func = func(_, _, targetPath string) error {
+		copyCount++
+		if copyCount == 2 {
+			firstArchive := filepath.Join(workDir, "checkpoints", "first") + ".weft-archive.tar.gz"
+			if _, err := os.Stat(firstArchive); !os.IsNotExist(err) {
+				t.Fatalf("first archive still present before second need: %v", err)
+			}
+		}
+		f, err := os.Create(targetPath)
+		if err != nil {
+			return err
+		}
+		sourceDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(sourceDir, "data.bin"), []byte("data"), 0o644); err != nil {
+			return err
+		}
+		err = dataloc.WriteDirectoryArchive(sourceDir, f)
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		return err
+	}
+
+	if err := stageCloudNeeds("bucket", 123, workDir, needs); err != nil {
+		t.Fatalf("stageCloudNeeds: %v", err)
+	}
+}

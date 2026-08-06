@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -386,7 +388,7 @@ func resetSourceUpdateState(t *testing.T) {
 	prevSources := sources
 	prevActive := activeSourceWorkdirs
 	sourceCacheDirOverride = filepath.Join(t.TempDir(), "source-cache")
-	sources = &sourceRegistry{latest: map[string]string{}}
+	sources = &sourceRegistry{latest: map[string]registeredSource{}}
 	activeSourceWorkdirs = &activeSourceWorkdirTracker{users: map[string]map[int64]int{}}
 	t.Cleanup(func() {
 		sourceCacheDirOverride = prevCacheDir
@@ -423,21 +425,358 @@ func installFakeRcloneForSourceTarballs(t *testing.T, tarballDir string) {
 	rclonePath := filepath.Join(binDir, "rclone")
 	rcloneScript := `#!/bin/sh
 set -eu
-if [ "$1" != "copyto" ]; then
-  echo "unexpected rclone command: $*" >&2
-  exit 1
+if [ -n "${RCLONE_INVOCATION_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$RCLONE_INVOCATION_LOG"
 fi
-src="$2"
-dest="$3"
-base="${src##*/}"
-mkdir -p "$(dirname "$dest")"
-cp "$TARBALL_DIR/$base" "$dest"
+source_for_key() {
+  key="$1"
+  source="$TARBALL_DIR/$key"
+  if [ ! -f "$source" ]; then
+    source="$TARBALL_DIR/${key##*/}"
+  fi
+  printf '%s\n' "$source"
+}
+copy_key() {
+  key="$1"
+  dest="$2"
+  if [ "${RCLONE_FAIL_KEY:-}" = "$key" ]; then
+    echo "forced failure for $key" >&2
+    return 1
+  fi
+  source="$(source_for_key "$key")"
+  mkdir -p "$(dirname "$dest")"
+  cp "$source" "$dest"
+}
+case "$1" in
+  copyto)
+    src="$2"
+    dest="$3"
+    key="${src#*/}"
+    copy_key "$key" "$dest"
+    ;;
+  copy)
+    if [ "${RCLONE_FAIL_BATCH:-}" = "1" ]; then
+      echo "forced batch failure" >&2
+      exit 1
+    fi
+    dest="$3"
+    if [ "$4" != "--files-from" ]; then
+      echo "missing --files-from: $*" >&2
+      exit 1
+    fi
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      copy_key "$key" "$dest/$key"
+    done < "$5"
+    ;;
+  *)
+    echo "unexpected rclone command: $*" >&2
+    exit 1
+    ;;
+esac
 `
 	if err := os.WriteFile(rclonePath, []byte(rcloneScript), 0o755); err != nil {
 		t.Fatalf("write fake rclone: %v", err)
 	}
 	t.Setenv("TARBALL_DIR", tarballDir)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeFakeR2Object(t *testing.T, objectDir, key, content string) {
+	t.Helper()
+	filename := filepath.Join(objectDir, filepath.FromSlash(key))
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		t.Fatalf("mkdir fake R2 object parent: %v", err)
+	}
+	if err := os.WriteFile(filename, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fake R2 object: %v", err)
+	}
+}
+
+func contentSHA256(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", sum)
+}
+
+func TestApplySourceUpdateMaterializesBlob(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"main.py": "print('ok')\n"})
+	blobContent := "large immutable input\n"
+	blobHash := contentSHA256(blobContent)
+	blobKey := "assets/" + blobHash
+	writeFakeR2Object(t, objectDir, blobKey, blobContent)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	upd := controlplane.SourceUpdate{
+		RemoteDir: remoteDir,
+		R2Key:     "sources/source.tar.gz",
+		Blobs: []controlplane.SourceBlob{{
+			R2Key:   blobKey,
+			RelPath: "data/training.bin",
+			SHA256:  blobHash,
+		}},
+	}
+	if err := applySourceUpdate("test-bucket", upd); err != nil {
+		t.Fatalf("applySourceUpdate: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "data", "training.bin"))
+	if err != nil {
+		t.Fatalf("read materialized blob: %v", err)
+	}
+	if string(got) != blobContent {
+		t.Fatalf("materialized blob = %q, want %q", got, blobContent)
+	}
+}
+
+func TestApplySourceUpdateReusesCachedBlobAcrossUpdates(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "first.tar.gz", map[string]string{"version.txt": "first\n"})
+	writeSourceTarball(t, objectDir, "second.tar.gz", map[string]string{"version.txt": "second\n"})
+	blobContent := "shared blob\n"
+	blobHash := contentSHA256(blobContent)
+	blobKey := "assets/" + blobHash
+	writeFakeR2Object(t, objectDir, blobKey, blobContent)
+	invocationLog := filepath.Join(t.TempDir(), "rclone.log")
+	t.Setenv("RCLONE_INVOCATION_LOG", invocationLog)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	blobs := []controlplane.SourceBlob{{R2Key: blobKey, RelPath: "data/shared.bin", SHA256: blobHash}}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/first.tar.gz", Blobs: blobs}); err != nil {
+		t.Fatalf("applySourceUpdate first source: %v", err)
+	}
+	materializedPath := filepath.Join(remoteDir, "data", "shared.bin")
+	if err := os.WriteFile(materializedPath, []byte("job mutated its input\n"), 0o644); err != nil {
+		t.Fatalf("mutate materialized blob: %v", err)
+	}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/second.tar.gz", Blobs: blobs}); err != nil {
+		t.Fatalf("applySourceUpdate second source: %v", err)
+	}
+	data, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read rclone invocation log: %v", err)
+	}
+	batchCopies := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "copy ") {
+			batchCopies++
+		}
+	}
+	if batchCopies != 1 {
+		t.Fatalf("blob batch download count = %d, want 1; invocations:\n%s", batchCopies, data)
+	}
+	got, err := os.ReadFile(materializedPath)
+	if err != nil {
+		t.Fatalf("read rematerialized blob: %v", err)
+	}
+	if string(got) != blobContent {
+		t.Fatalf("rematerialized blob = %q, want cached content %q", got, blobContent)
+	}
+}
+
+func TestApplySourceUpdateRefetchesCorruptedCachedBlob(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "first.tar.gz", map[string]string{"version.txt": "first\n"})
+	writeSourceTarball(t, objectDir, "second.tar.gz", map[string]string{"version.txt": "second\n"})
+	blobContent := "trusted blob\n"
+	blobHash := contentSHA256(blobContent)
+	blobKey := "assets/" + blobHash
+	writeFakeR2Object(t, objectDir, blobKey, blobContent)
+	invocationLog := filepath.Join(t.TempDir(), "rclone.log")
+	t.Setenv("RCLONE_INVOCATION_LOG", invocationLog)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	blobs := []controlplane.SourceBlob{{R2Key: blobKey, RelPath: "data/blob.bin", SHA256: blobHash}}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/first.tar.gz", Blobs: blobs}); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+	if err := os.WriteFile(sourceBlobCachePath(blobHash), []byte("corrupted cache\n"), 0o644); err != nil {
+		t.Fatalf("corrupt blob cache: %v", err)
+	}
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: "sources/second.tar.gz", Blobs: blobs}); err != nil {
+		t.Fatalf("second applySourceUpdate: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(remoteDir, "data", "blob.bin"))
+	if err != nil {
+		t.Fatalf("read rematerialized blob: %v", err)
+	}
+	if string(got) != blobContent {
+		t.Fatalf("rematerialized blob = %q, want %q", got, blobContent)
+	}
+	data, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read rclone invocation log: %v", err)
+	}
+	batchCopies := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "copy ") {
+			batchCopies++
+		}
+	}
+	if batchCopies != 2 {
+		t.Fatalf("blob batch download count = %d, want 2 after cache corruption; invocations:\n%s", batchCopies, data)
+	}
+}
+
+func TestDrainGraceJobRequestsRejectsBlobHashMismatch(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"main.py": "print('ok')\n"})
+	declaredHash := contentSHA256("expected bytes")
+	blobKey := "assets/" + declaredHash
+	writeFakeR2Object(t, objectDir, blobKey, "corrupted bytes")
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	instanceID := int64(58)
+	prefix := controlplane.GraceJobsPrefix(instanceID)
+	payload := controlplane.GraceJobsRequest{
+		Jobs: []cloud.AgentJob{{ID: 101, Command: "python main.py"}},
+		Sources: []controlplane.SourceUpdate{{
+			RemoteDir: filepath.Join(t.TempDir(), "workspace", "project"),
+			R2Key:     "sources/source.tar.gz",
+			Blobs: []controlplane.SourceBlob{{
+				R2Key: blobKey, RelPath: "data/input.bin", SHA256: declaredHash,
+			}},
+		}},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	objects := map[string]string{path.Join(prefix, "req-a.json"): string(data)}
+	var ack controlplane.GraceCommandAck
+	prevList, prevGet, prevPut, prevDelete := graceR2List, graceR2Get, graceR2Put, graceR2Delete
+	t.Cleanup(func() { graceR2List, graceR2Get, graceR2Put, graceR2Delete = prevList, prevGet, prevPut, prevDelete })
+	graceR2List = func(_ string, _ string) ([]string, error) { return []string{"req-a.json"}, nil }
+	graceR2Get = func(_ string, key string) (string, error) { return objects[key], nil }
+	graceR2Put = func(_ string, _ string, content string) error { return json.Unmarshal([]byte(content), &ack) }
+	graceR2Delete = func(_ string, _ string) error { return nil }
+
+	jobs, err := drainGraceJobRequests("test-bucket", instanceID, nil)
+	if err != nil {
+		t.Fatalf("drainGraceJobRequests: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs = %+v, want no runnable jobs after blob integrity failure", jobs)
+	}
+	if ack.Accepted || !strings.Contains(ack.Message, "has SHA-256") {
+		t.Fatalf("ack = %+v, want rejected hash-mismatch failure", ack)
+	}
+}
+
+func TestApplySourceUpdateBatchFailureNamesFailingBlob(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"main.py": "print('ok')\n"})
+	goodContent := "good\n"
+	goodHash := contentSHA256(goodContent)
+	goodKey := "assets/" + goodHash
+	badHash := contentSHA256("missing\n")
+	badKey := "assets/" + badHash
+	writeFakeR2Object(t, objectDir, goodKey, goodContent)
+	writeFakeR2Object(t, objectDir, badKey, "missing\n")
+	t.Setenv("RCLONE_FAIL_BATCH", "1")
+	t.Setenv("RCLONE_FAIL_KEY", badKey)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{
+		RemoteDir: filepath.Join(t.TempDir(), "workspace", "project"),
+		R2Key:     "sources/source.tar.gz",
+		Blobs: []controlplane.SourceBlob{
+			{R2Key: goodKey, RelPath: "data/good.bin", SHA256: goodHash},
+			{R2Key: badKey, RelPath: "data/failing.bin", SHA256: badHash},
+		},
+	})
+	if err == nil {
+		t.Fatal("applySourceUpdate returned nil, want blob download failure")
+	}
+	if !strings.Contains(err.Error(), badKey) || !strings.Contains(err.Error(), "data/failing.bin") {
+		t.Fatalf("error = %q, want failing blob key and relative path", err)
+	}
+}
+
+func TestApplySourceUpdateSameKeySkipsBlobWork(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "source.tar.gz", map[string]string{"tracked.txt": "original\n"})
+	invocationLog := filepath.Join(t.TempDir(), "rclone.log")
+	t.Setenv("RCLONE_INVOCATION_LOG", invocationLog)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	sourceKey := "sources/source.tar.gz"
+	if err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{RemoteDir: remoteDir, R2Key: sourceKey}); err != nil {
+		t.Fatalf("first applySourceUpdate: %v", err)
+	}
+	before, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read first invocation log: %v", err)
+	}
+	missingHash := contentSHA256("not present")
+	err = applySourceUpdate("test-bucket", controlplane.SourceUpdate{
+		RemoteDir: remoteDir,
+		R2Key:     sourceKey,
+		Blobs: []controlplane.SourceBlob{{
+			R2Key: "assets/" + missingHash, RelPath: "data/missing.bin", SHA256: missingHash,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("same-key applySourceUpdate performed blob work: %v", err)
+	}
+	after, err := os.ReadFile(invocationLog)
+	if err != nil {
+		t.Fatalf("read second invocation log: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rclone invocations changed on same-key update:\nbefore: %s\nafter: %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(remoteDir, "data", "missing.bin")); !os.IsNotExist(err) {
+		t.Fatalf("missing blob stat error = %v, want no blob work", err)
+	}
+}
+
+func TestApplySourceUpdateBlobFailurePreservesExistingTree(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "replacement.tar.gz", map[string]string{"replacement.txt": "new tree\n"})
+	missingHash := contentSHA256("missing blob")
+	missingKey := "assets/" + missingHash
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	remoteDir := filepath.Join(t.TempDir(), "workspace", "project")
+	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+		t.Fatalf("mkdir existing tree: %v", err)
+	}
+	existingPath := filepath.Join(remoteDir, "existing.txt")
+	if err := os.WriteFile(existingPath, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatalf("write existing tree: %v", err)
+	}
+
+	err := applySourceUpdate("test-bucket", controlplane.SourceUpdate{
+		RemoteDir: remoteDir,
+		R2Key:     "sources/replacement.tar.gz",
+		Blobs: []controlplane.SourceBlob{{
+			R2Key: missingKey, RelPath: "data/missing.bin", SHA256: missingHash,
+		}},
+	})
+	if err == nil {
+		t.Fatal("applySourceUpdate returned nil, want missing blob failure")
+	}
+	got, readErr := os.ReadFile(existingPath)
+	if readErr != nil {
+		t.Fatalf("existing tree was destroyed after blob failure: %v", readErr)
+	}
+	if string(got) != "keep me\n" {
+		t.Fatalf("existing tree content = %q, want preserved content", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(remoteDir, "replacement.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("replacement tree stat error = %v, want replacement not extracted", statErr)
+	}
 }
 
 func TestApplySourceUpdateRejectsUpdateToSiblingMountOfRunningJob(t *testing.T) {

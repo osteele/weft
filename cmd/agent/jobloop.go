@@ -396,7 +396,13 @@ func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobS
 }
 
 func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool) setupPrewarmResult {
-	ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job))
+	if err := ensureSourceFreshMounts(cfg.R2Bucket, expandedSourceMountsForJob(job)); err != nil {
+		return setupPrewarmResult{
+			err:           fmt.Errorf("source recovery failed: %w", err),
+			failureReason: sourceRecoveryFailureReason(err),
+			infraFailure:  true,
+		}
+	}
 	logDir := filepath.Join(os.TempDir(), "weft-setup-prewarm", fmt.Sprintf("%d-%d", job.ID, job.RunID))
 	_ = os.RemoveAll(logDir)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -799,10 +805,18 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// update to one of those while the job runs is the same hazard.
 		jobMounts := expandedSourceMountsForJob(job)
 		doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
-		// Recover from a missing/empty workdir (e.g. previous campaign-mid
-		// cleanup race, manual rm, or aborted source extract) by re-staging
-		// from the locally cached source tarball before stageCloudNeeds runs.
-		ensureSourceFreshMounts(cfg.R2Bucket, jobMounts)
+		// Recover every source root before any per-job staging or command work.
+		if err := ensureSourceFreshMounts(cfg.R2Bucket, jobMounts); err != nil {
+			reason := sourceRecoveryFailureReason(err)
+			fmt.Fprintf(os.Stderr, "source recovery failed for job %d: %v\n", job.ID, err)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetail(reason), oplog.WithError(err))
+			result.AnyFailed = true
+			result.AnyInfraFailed = true
+			result.FailedJobs = append(result.FailedJobs, job.ID)
+			doneUsingSource()
+			recordEarlyJobFailure(cfg, job, reason, 1)
+			continue
+		}
 		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
 			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
@@ -1304,6 +1318,10 @@ func recordEarlyJobFailure(cfg jobSequenceConfig, job cloud.AgentJob, reason str
 		}
 	}
 	_ = r2PutForAgent(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
+}
+
+func sourceRecoveryFailureReason(err error) string {
+	return fmt.Sprintf("source_restore_failed: %v", err)
 }
 
 func appendPrewarmLogForFailure(jobLog, prewarmLog string) {

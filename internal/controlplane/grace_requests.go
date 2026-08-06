@@ -88,8 +88,17 @@ type GraceStore interface {
 // SourceUpdate describes one source snapshot update to apply before running
 // jobs received through the grace/reuse control plane.
 type SourceUpdate struct {
-	RemoteDir string `json:"remote_dir"`
-	R2Key     string `json:"r2_key"`
+	RemoteDir string       `json:"remote_dir"`
+	R2Key     string       `json:"r2_key"`
+	Blobs     []SourceBlob `json:"blobs,omitempty"`
+}
+
+// SourceBlob describes a content-addressed file materialized relative to a
+// source update's RemoteDir.
+type SourceBlob struct {
+	R2Key   string `json:"r2_key"`
+	RelPath string `json:"rel_path"`
+	SHA256  string `json:"sha256"`
 }
 
 // GraceJobsRequest is the typed payload written under grace/<id>/jobs/.
