@@ -133,6 +133,7 @@ type HeartbeatSample struct {
 	AgentPID       int     `json:"agent_pid,omitempty"`
 	AgentAlive     *bool   `json:"agent_alive,omitempty"`
 	AgentFatal     string  `json:"agent_fatal,omitempty"`
+	AgentProtocol  int     `json:"agent_protocol"`
 }
 
 // InstanceUpdate is a snapshot of cloud instance + job state.

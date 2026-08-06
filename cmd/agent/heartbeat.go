@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -31,6 +32,7 @@ type HeartbeatSample struct {
 	AgentPID                 int     `json:"agent_pid,omitempty"`
 	AgentAlive               *bool   `json:"agent_alive,omitempty"`
 	AgentFatal               string  `json:"agent_fatal,omitempty"`
+	AgentProtocol            int     `json:"agent_protocol"`
 	OOMScoreAdj              int     `json:"oom_score_adj"`
 	R2PutFailuresConsecutive int     `json:"r2_put_failures_consecutive,omitempty"`
 	R2PutLastError           string  `json:"r2_put_last_error,omitempty"`
@@ -56,6 +58,7 @@ func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 		CPUCount:       runner.DetectCPUCount(),
 		DiskFreeBytes:  diskTotal - diskUsed,
 		DiskTotalBytes: diskTotal,
+		AgentProtocol:  controlplane.AgentProtocolVersion,
 	}
 }
 

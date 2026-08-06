@@ -139,11 +139,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddLaunchDriverVersionColumn},
 		&goose.GoFunc{RunDB: dropAddLaunchDriverVersionColumn},
 	)
+	addAgentProtocol := goose.NewGoMigration(
+		40,
+		&goose.GoFunc{RunDB: applyAddAgentProtocolColumn},
+		&goose.GoFunc{RunDB: dropAddAgentProtocolColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -298,6 +303,27 @@ func applyAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
 
 func dropAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN driver_version`)
+	return nil
+}
+
+func applyAddAgentProtocolColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launch_live_state", "agent_protocol")
+	if err != nil {
+		return fmt.Errorf("inspect launch_live_state.agent_protocol: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE launch_live_state ADD COLUMN agent_protocol INTEGER NOT NULL DEFAULT 0`,
+	); err != nil {
+		return fmt.Errorf("add launch_live_state.agent_protocol: %w", err)
+	}
+	return nil
+}
+
+func dropAddAgentProtocolColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launch_live_state DROP COLUMN agent_protocol`)
 	return nil
 }
 
@@ -849,7 +875,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39, 40}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

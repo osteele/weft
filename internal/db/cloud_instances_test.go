@@ -214,6 +214,7 @@ func TestSetLaunchLiveInstancePhasePreservesBootstrapState(t *testing.T) {
 		LaunchID:       launchID,
 		BootstrapStage: "agent_installed",
 		AgentVersion:   "abc123",
+		AgentProtocol:  7,
 	}); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)
 	}
@@ -238,6 +239,9 @@ func TestSetLaunchLiveInstancePhasePreservesBootstrapState(t *testing.T) {
 	}
 	if state.AgentVersion != "abc123" {
 		t.Fatalf("AgentVersion = %q, want preserved version", state.AgentVersion)
+	}
+	if state.AgentProtocol != 7 {
+		t.Fatalf("AgentProtocol = %d, want preserved protocol 7", state.AgentProtocol)
 	}
 }
 
@@ -2960,6 +2964,7 @@ func TestLaunchLiveState(t *testing.T) {
 		JobProgressID:    42,
 		JobProgressPhase: 3,
 		AgentVersion:     "abc123",
+		AgentProtocol:    7,
 	}
 	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)
@@ -2983,6 +2988,9 @@ func TestLaunchLiveState(t *testing.T) {
 	}
 	if got.AgentVersion != "abc123" {
 		t.Errorf("agent_version = %q, want %q", got.AgentVersion, "abc123")
+	}
+	if got.AgentProtocol != 7 {
+		t.Errorf("agent_protocol = %d, want 7", got.AgentProtocol)
 	}
 
 	// Upsert overwrites

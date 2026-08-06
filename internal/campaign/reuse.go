@@ -100,6 +100,10 @@ func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 }
 
 func instanceAcceptsReuseWithLiveState(inst *db.Launch, live *db.LaunchLiveState, now time.Time) (bool, string) {
+	return instanceAcceptsReuseWithLiveStateForProtocol(inst, live, now, controlplane.AgentProtocolVersion)
+}
+
+func instanceAcceptsReuseWithLiveStateForProtocol(inst *db.Launch, live *db.LaunchLiveState, now time.Time, requiredProtocol int) (bool, string) {
 	if ok, reason := instanceAcceptsReuse(inst); !ok {
 		return false, reason
 	}
@@ -113,6 +117,12 @@ func instanceAcceptsReuseWithLiveState(inst *db.Launch, live *db.LaunchLiveState
 	threshold := effectiveHeartbeatStaleThreshold(inst.AgentReadyAtUnix, now)
 	if age > threshold {
 		return false, fmt.Sprintf("instance %s heartbeat is stale (%s old)", ids.FormatInstanceID(inst.ID), age.Truncate(time.Second))
+	}
+	if live.AgentProtocol <= 0 {
+		return false, fmt.Sprintf("instance %s agent protocol version is unknown (required=%d)", ids.FormatInstanceID(inst.ID), requiredProtocol)
+	}
+	if live.AgentProtocol < requiredProtocol {
+		return false, fmt.Sprintf("instance %s agent protocol version %d is older than required version %d", ids.FormatInstanceID(inst.ID), live.AgentProtocol, requiredProtocol)
 	}
 	return true, ""
 }

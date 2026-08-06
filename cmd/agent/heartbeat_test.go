@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/controlplane"
 )
 
 func TestCollectHeartbeat(t *testing.T) {
@@ -20,6 +22,9 @@ func TestCollectHeartbeat(t *testing.T) {
 
 	if sample.Ts == 0 {
 		t.Error("Ts should be non-zero")
+	}
+	if sample.AgentProtocol != controlplane.AgentProtocolVersion {
+		t.Errorf("AgentProtocol = %d, want %d", sample.AgentProtocol, controlplane.AgentProtocolVersion)
 	}
 
 	now := time.Now().Unix()
@@ -61,6 +66,7 @@ func TestHeartbeatSampleJSON(t *testing.T) {
 		OOMScoreAdj:              500,
 		R2PutFailuresConsecutive: 3,
 		R2PutLastError:           "network unreachable",
+		AgentProtocol:            controlplane.AgentProtocolVersion,
 	}
 
 	data, err := json.Marshal(sample)
@@ -80,7 +86,7 @@ func TestHeartbeatSampleJSON(t *testing.T) {
 	// Verify JSON field names
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	for _, key := range []string{"ts", "phase", "gpu_util_pct", "gpu_mem_used_mib", "gpu_temp_c", "disk_free_bytes", "mem_available_kb", "oom_score_adj", "r2_put_failures_consecutive", "r2_put_last_error"} {
+	for _, key := range []string{"ts", "phase", "gpu_util_pct", "gpu_mem_used_mib", "gpu_temp_c", "disk_free_bytes", "mem_available_kb", "oom_score_adj", "r2_put_failures_consecutive", "r2_put_last_error", "agent_protocol"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("JSON missing expected key %q", key)
 		}

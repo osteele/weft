@@ -1031,14 +1031,16 @@ func TestFindReusableInstancesExcludesStaleAgentHeartbeat(t *testing.T) {
 		t.Fatalf("SetLaunchAgentReadyAtIfUnset(stale): %v", err)
 	}
 	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
-		LaunchID:    freshID,
-		HeartbeatTS: now.Add(-time.Minute).Unix(),
+		LaunchID:      freshID,
+		HeartbeatTS:   now.Add(-time.Minute).Unix(),
+		AgentProtocol: controlplane.AgentProtocolVersion,
 	}); err != nil {
 		t.Fatalf("UpsertLaunchLiveState(fresh): %v", err)
 	}
 	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
-		LaunchID:    staleID,
-		HeartbeatTS: now.Add(-25 * time.Minute).Unix(),
+		LaunchID:      staleID,
+		HeartbeatTS:   now.Add(-25 * time.Minute).Unix(),
+		AgentProtocol: controlplane.AgentProtocolVersion,
 	}); err != nil {
 		t.Fatalf("UpsertLaunchLiveState(stale): %v", err)
 	}
@@ -1052,6 +1054,72 @@ func TestFindReusableInstancesExcludesStaleAgentHeartbeat(t *testing.T) {
 	}
 	if instances[0].Instance.ID != freshID {
 		t.Fatalf("reusable instance id = %d, want %d", instances[0].Instance.ID, freshID)
+	}
+}
+
+func TestInstanceAcceptsReuseWithAgentProtocol(t *testing.T) {
+	now := time.Now()
+	readyAt := now.Add(-time.Hour).Unix()
+	freshHeartbeat := now.Add(-time.Minute).Unix()
+
+	tests := []struct {
+		name             string
+		inst             *db.Launch
+		live             *db.LaunchLiveState
+		requiredProtocol int
+		wantOK           bool
+		wantReason       []string
+	}{
+		{
+			name:             "current protocol accepted",
+			inst:             &db.Launch{ID: 41, Status: db.LaunchStatusRunning, AgentReadyAtUnix: &readyAt},
+			live:             &db.LaunchLiveState{HeartbeatTS: freshHeartbeat, AgentProtocol: controlplane.AgentProtocolVersion},
+			requiredProtocol: controlplane.AgentProtocolVersion,
+			wantOK:           true,
+		},
+		{
+			name:             "older protocol refused",
+			inst:             &db.Launch{ID: 42, Status: db.LaunchStatusRunning, AgentReadyAtUnix: &readyAt},
+			live:             &db.LaunchLiveState{HeartbeatTS: freshHeartbeat, AgentProtocol: controlplane.AgentProtocolVersion},
+			requiredProtocol: controlplane.AgentProtocolVersion + 1,
+			wantReason: []string{
+				fmt.Sprintf("version %d", controlplane.AgentProtocolVersion),
+				fmt.Sprintf("required version %d", controlplane.AgentProtocolVersion+1),
+			},
+		},
+		{
+			name:             "unknown protocol refused",
+			inst:             &db.Launch{ID: 43, Status: db.LaunchStatusRunning, AgentReadyAtUnix: &readyAt},
+			live:             &db.LaunchLiveState{HeartbeatTS: freshHeartbeat},
+			requiredProtocol: controlplane.AgentProtocolVersion,
+			wantReason:       []string{"unknown", fmt.Sprintf("required=%d", controlplane.AgentProtocolVersion)},
+		},
+		{
+			name:             "grace instance accepted before agent starts",
+			inst:             &db.Launch{ID: 44, Status: db.LaunchStatusGrace, AgentReadyAtUnix: &readyAt},
+			requiredProtocol: controlplane.AgentProtocolVersion,
+			wantOK:           true,
+		},
+		{
+			name:             "running instance accepted before agent ready",
+			inst:             &db.Launch{ID: 45, Status: db.LaunchStatusRunning},
+			requiredProtocol: controlplane.AgentProtocolVersion,
+			wantOK:           true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, reason := instanceAcceptsReuseWithLiveStateForProtocol(tt.inst, tt.live, now, tt.requiredProtocol)
+			if ok != tt.wantOK {
+				t.Fatalf("accepted = %v, want %v (reason=%q)", ok, tt.wantOK, reason)
+			}
+			for _, want := range tt.wantReason {
+				if !strings.Contains(reason, want) {
+					t.Errorf("reason = %q, want it to contain %q", reason, want)
+				}
+			}
+		})
 	}
 }
 

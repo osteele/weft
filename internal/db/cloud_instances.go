@@ -3595,6 +3595,7 @@ type LaunchLiveState struct {
 	JobProgressID    int64
 	JobProgressPhase int // 1-based phase number (0 = unknown/single-phase)
 	AgentVersion     string
+	AgentProtocol    int
 	PhaseChangedAt   *int64 // unix epoch when InstancePhase last changed
 	UpdatedAt        int64
 }
@@ -3619,8 +3620,9 @@ func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, err
 
 	_, err := database.Exec(`INSERT INTO launch_live_state
 		(launch_id, instance_phase, bootstrap_stage, heartbeat_json, heartbeat_ts,
-		 job_progress_pct, job_progress_id, job_progress_phase, agent_version, phase_changed_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 job_progress_pct, job_progress_id, job_progress_phase, agent_version, phase_changed_at, updated_at,
+		 agent_protocol)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(launch_id) DO UPDATE SET
 		 instance_phase=excluded.instance_phase, bootstrap_stage=excluded.bootstrap_stage,
 		 heartbeat_json=excluded.heartbeat_json, heartbeat_ts=excluded.heartbeat_ts,
@@ -3628,12 +3630,13 @@ func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, err
 		 job_progress_phase=excluded.job_progress_phase,
 		 agent_version=excluded.agent_version,
 		 phase_changed_at=excluded.phase_changed_at,
-		 updated_at=excluded.updated_at`,
+		 updated_at=excluded.updated_at,
+		 agent_protocol=excluded.agent_protocol`,
 		state.LaunchID, state.InstancePhase, state.BootstrapStage,
 		state.HeartbeatJSON, state.HeartbeatTS,
 		nullableProgressPct(state.JobProgressPct), state.JobProgressID,
 		state.JobProgressPhase,
-		state.AgentVersion, state.PhaseChangedAt, now,
+		state.AgentVersion, state.PhaseChangedAt, now, state.AgentProtocol,
 	)
 	if err != nil {
 		return state.PhaseChangedAt, err
@@ -3706,7 +3709,7 @@ func nullableProgressPct(pct int) any {
 func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, error) {
 	row := database.QueryRow(`SELECT launch_id, instance_phase, bootstrap_stage,
 		heartbeat_json, heartbeat_ts, job_progress_pct, job_progress_id,
-		job_progress_phase, agent_version, phase_changed_at, updated_at
+		job_progress_phase, agent_version, phase_changed_at, updated_at, agent_protocol
 		FROM launch_live_state WHERE launch_id = ?`, launchID)
 
 	var s LaunchLiveState
@@ -3717,7 +3720,8 @@ func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, err
 	var phaseChangedAt sql.NullInt64
 
 	err := row.Scan(&s.LaunchID, &phase, &bootstrap, &hbJSON, &hbTS,
-		&progressPct, &progressID, &progressPhase, &agentVer, &phaseChangedAt, &s.UpdatedAt)
+		&progressPct, &progressID, &progressPhase, &agentVer, &phaseChangedAt, &s.UpdatedAt,
+		&s.AgentProtocol)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -3765,7 +3769,7 @@ func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*Launch
 
 	query := `SELECT launch_id, instance_phase, bootstrap_stage,
 		heartbeat_json, heartbeat_ts, job_progress_pct, job_progress_id,
-		job_progress_phase, agent_version, phase_changed_at, updated_at
+		job_progress_phase, agent_version, phase_changed_at, updated_at, agent_protocol
 		FROM launch_live_state
 		WHERE launch_id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := database.Query(query, args...)
@@ -3783,7 +3787,8 @@ func GetLaunchLiveStates(database *sql.DB, launchIDs []int64) (map[int64]*Launch
 		var phaseChangedAt sql.NullInt64
 
 		if err := rows.Scan(&s.LaunchID, &phase, &bootstrap, &hbJSON, &hbTS,
-			&progressPct, &progressID, &progressPhase, &agentVer, &phaseChangedAt, &s.UpdatedAt); err != nil {
+			&progressPct, &progressID, &progressPhase, &agentVer, &phaseChangedAt, &s.UpdatedAt,
+			&s.AgentProtocol); err != nil {
 			return nil, err
 		}
 

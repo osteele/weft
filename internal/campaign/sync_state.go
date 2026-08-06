@@ -354,11 +354,16 @@ func SyncInstanceState(
 		hbTS = s.Heartbeat.Ts
 	}
 	previousBootstrapStage := ""
+	agentProtocol := 0
 	live, err := db.GetLaunchLiveState(database, ci.ID)
 	if err != nil {
 		slog.Warn("read launch live state", "component", "sync", "instance", instanceID, "error", err)
 	} else if live != nil {
 		previousBootstrapStage = strings.TrimSpace(live.BootstrapStage)
+		agentProtocol = live.AgentProtocol
+	}
+	if s.Heartbeat != nil {
+		agentProtocol = s.Heartbeat.AgentProtocol
 	}
 	s.BootstrapActivitySeen = previousBootstrapStage != "" || strings.TrimSpace(s.BootstrapStage) != ""
 	if !s.BootstrapActivitySeen {
@@ -384,6 +389,7 @@ func SyncInstanceState(
 			JobProgressID:    s.JobProgressID,
 			JobProgressPhase: s.JobProgressPhase,
 			AgentVersion:     s.AgentVersion,
+			AgentProtocol:    agentProtocol,
 		})
 		if phaseChangedAt != nil {
 			t := time.Unix(*phaseChangedAt, 0)

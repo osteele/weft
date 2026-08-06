@@ -1029,7 +1029,12 @@ func TestSyncInstanceState_PrefersFreshHeartbeatPhase(t *testing.T) {
 	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string { return "" }
 	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
 		alive := true
-		return &HeartbeatSample{Ts: time.Now().Unix(), Phase: "setup:1760", AgentAlive: &alive}, time.Second
+		return &HeartbeatSample{
+			Ts:            time.Now().Unix(),
+			Phase:         "setup:1760",
+			AgentAlive:    &alive,
+			AgentProtocol: controlplane.AgentProtocolVersion,
+		}, time.Second
 	}
 	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
 		return 0, -1, 0
@@ -1049,6 +1054,13 @@ func TestSyncInstanceState_PrefersFreshHeartbeatPhase(t *testing.T) {
 	}
 	if synced.InstancePhase != "setup:1760" {
 		t.Fatalf("InstancePhase = %q, want %q", synced.InstancePhase, "setup:1760")
+	}
+	live, err := db.GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if live == nil || live.AgentProtocol != controlplane.AgentProtocolVersion {
+		t.Fatalf("stored agent protocol = %v, want %d", live, controlplane.AgentProtocolVersion)
 	}
 }
 
