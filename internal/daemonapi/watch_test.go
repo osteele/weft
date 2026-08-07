@@ -145,6 +145,18 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 	insertWatchTestProjectJob(t, database, 301, "augur", db.StatusQueued)
 	insertWatchTestProjectJob(t, database, 302, "other", db.StatusQueued)
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUSpec:          "GPU",
+		ResolvedGPUName:  "RTX 4090",
+		GPUMemGB:         24,
+		NumGPUs:          1,
+		CostPerHourCents: 42,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -182,6 +194,13 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	}
 	if _, ok := event.Activity.Snapshot.Jobs[302]; ok {
 		t.Fatalf("activity snapshot included other project job: %+v", event.Activity.Snapshot.Jobs)
+	}
+	inst, ok := event.Activity.Snapshot.Instances[launchID]
+	if !ok {
+		t.Fatalf("activity snapshot missing launch %d: %+v", launchID, event.Activity.Snapshot.Instances)
+	}
+	if inst.GPUSpec != "GPU" || inst.GPUDisplay != "RTX 4090 24GB" {
+		t.Fatalf("activity instance GPU fields = (%q, %q), want constraint GPU and display RTX 4090 24GB", inst.GPUSpec, inst.GPUDisplay)
 	}
 	if event.Activity.StatusLine == nil || event.Activity.StatusLine.QueuedJobs != 1 {
 		t.Fatalf("status line = %+v, want one queued job", event.Activity.StatusLine)

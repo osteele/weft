@@ -53,6 +53,7 @@ type InstanceView struct {
 	Status            string `json:"status"`
 	Provider          string `json:"provider,omitempty"`
 	GPUSpec           string `json:"gpu_spec,omitempty"`
+	GPUDisplay        string `json:"gpu_display,omitempty"`
 	NumGPUs           int    `json:"num_gpus,omitempty"`
 	CostPerHourCents  int    `json:"cost_per_hour_cents,omitempty"`
 	CreatedAt         int64  `json:"created_at,omitempty"`
@@ -176,6 +177,7 @@ func instanceToView(c *db.Launch) InstanceView {
 		Status:            c.Status,
 		Provider:          c.Provider,
 		GPUSpec:           c.GPUSpec,
+		GPUDisplay:        c.DisplayGPUBrief(),
 		NumGPUs:           c.NumGPUs,
 		CostPerHourCents:  c.CostPerHourCents,
 		CreatedAt:         c.CreatedAt,

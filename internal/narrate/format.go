@@ -82,7 +82,7 @@ func FormatSnapshot(s *Snapshot) string {
 			CampaignID:        inst.CampaignID,
 			Status:            inst.Status,
 			Provider:          inst.Provider,
-			GPU:               inst.GPUSpec,
+			GPU:               instanceGPULabel(inst),
 			NumGPUs:           inst.NumGPUs,
 			AgeSeconds:        ageSeconds(inst.CreatedAt, now),
 			CostPerHourUSD:    centsToUSD(inst.CostPerHourCents),
@@ -156,7 +156,7 @@ func FormatDelta(d Delta) string {
 			TerminationReason: inst.TerminationReason,
 			TerminationDetail: inst.TerminationDetail,
 			Provider:          inst.Provider,
-			GPU:               inst.GPUSpec,
+			GPU:               instanceGPULabel(inst),
 		})
 	}
 	for _, j := range d.JobFinished {
@@ -207,6 +207,13 @@ func FormatDelta(d Delta) string {
 	}
 	b, _ := json.Marshal(out)
 	return string(b)
+}
+
+func instanceGPULabel(inst InstanceView) string {
+	if inst.GPUDisplay != "" {
+		return inst.GPUDisplay
+	}
+	return inst.GPUSpec
 }
 
 // FormatLifecycleEvents renders durable DB lifecycle events as compact JSON for
