@@ -519,6 +519,7 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 }
 
 func TestCheckInstance_TerminationIntentSucceededDoesNotDestroyProvider(t *testing.T) {
+	destroyedAt := time.Now().Add(-7 * time.Hour).Truncate(time.Second)
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
@@ -531,11 +532,11 @@ func TestCheckInstance_TerminationIntentSucceededDoesNotDestroyProvider(t *testi
 			TerminalStatus:         db.LaunchStatusFailed,
 			TerminationReason:      db.TerminationReasonJobFailure,
 			State:                  instanceintent.StateSucceeded,
-			DestroySucceededAtUnix: time.Now().Unix(),
-			DestroyStartedAtUnix:   time.Now().Add(-2 * time.Second).Unix(),
-			RequestedAtUnix:        time.Now().Add(-4 * time.Second).Unix(),
+			DestroySucceededAtUnix: destroyedAt.Unix(),
+			DestroyStartedAtUnix:   destroyedAt.Add(-2 * time.Second).Unix(),
+			RequestedAtUnix:        destroyedAt.Add(-4 * time.Second).Unix(),
 			DestroyAttempts:        1,
-			LastAttemptAtUnix:      time.Now().Add(-1 * time.Second).Unix(),
+			LastAttemptAtUnix:      destroyedAt.Add(-1 * time.Second).Unix(),
 		},
 		Now: time.Now(),
 	})
@@ -545,8 +546,47 @@ func TestCheckInstance_TerminationIntentSucceededDoesNotDestroyProvider(t *testi
 	if action.DestroyProvider {
 		t.Error("DestroyProvider should be false after the termination intent already recorded destroy success")
 	}
+	if !action.TerminalAt.Equal(destroyedAt) {
+		t.Errorf("TerminalAt = %s, want destroy success time %s", action.TerminalAt, destroyedAt)
+	}
 	if !action.ResetJobs {
 		t.Error("ResetJobs should remain true for failed termination")
+	}
+}
+
+func TestExecuteActionUsesTerminationIntentDestroyTime(t *testing.T) {
+	database := setupTestDB(t)
+	destroyedAt := time.Now().Add(-7 * time.Hour).Truncate(time.Second)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	reconciled, terminated := ExecuteAction(database, nil, launch, InstanceAction{
+		Kind:              ActionTerminationIntent,
+		TerminalStatus:    db.LaunchStatusCompleted,
+		TerminalAt:        destroyedAt,
+		TerminationReason: db.TerminationReasonCompleted,
+		AttemptOutcome:    db.AttemptOutcomeCompleted,
+	})
+	if !reconciled || !terminated {
+		t.Fatalf("ExecuteAction = (%v, %v), want (true, true)", reconciled, terminated)
+	}
+
+	launch, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch after ExecuteAction: %v", err)
+	}
+	if launch.EndedAt == nil || *launch.EndedAt != destroyedAt.Unix() {
+		t.Fatalf("EndedAt = %v, want %d", launch.EndedAt, destroyedAt.Unix())
 	}
 }
 

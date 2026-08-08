@@ -1193,7 +1193,23 @@ func ListLaunches(db *sql.DB) ([]*Launch, error) {
 // classifies why the instance ended (e.g. "provider_failure", "infra_failure"), and an
 // optional terminationDetail provides a human-readable explanation.
 func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...string) error {
-	now := time.Now().Unix()
+	return updateLaunchStatusAt(db, id, status, time.Now().Unix(), terminationInfo...)
+}
+
+// UpdateLaunchTerminalStatusAt records a terminal launch status at the time
+// established by an external lifecycle event, such as a provider-confirmed
+// destroy recorded in a termination intent.
+func UpdateLaunchTerminalStatusAt(db *sql.DB, id int64, status string, endedAt time.Time, terminationInfo ...string) error {
+	if !IsTerminalLaunchStatus(status) {
+		return fmt.Errorf("launch status %q is not terminal", status)
+	}
+	if endedAt.IsZero() {
+		return fmt.Errorf("terminal launch status requires an end time")
+	}
+	return updateLaunchStatusAt(db, id, status, endedAt.Unix(), terminationInfo...)
+}
+
+func updateLaunchStatusAt(db *sql.DB, id int64, status string, statusAt int64, terminationInfo ...string) error {
 	reason := ""
 	detail := ""
 	if len(terminationInfo) > 0 {
@@ -1212,7 +1228,7 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			// revive a row that already ended.
 			clause, terminalArgs := notTerminalLaunchClause()
 			res, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ? AND `+clause,
-				append([]any{status, now, id}, terminalArgs...)...)
+				append([]any{status, statusAt, id}, terminalArgs...)...)
 			if err != nil {
 				return err
 			}
@@ -1231,11 +1247,11 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 				}
 			}
 			if reason != "" && detail != "" {
-				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, now, reason, detail, id)
+				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, statusAt, reason, detail, id)
 				return err
 			}
 			if reason != "" {
-				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
+				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, reason, id)
 				return err
 			}
 			// Caller didn't specify a reason. Mirror the trigger's
@@ -1251,7 +1267,7 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 			case LaunchStatusCompleted:
 				derivedReason = TerminationReasonCompleted
 			}
-			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, derivedReason, id)
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, derivedReason, id)
 			return err
 		default:
 			// Terminal statuses are sticky against non-terminal writes

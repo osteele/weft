@@ -50,12 +50,13 @@ const graceShutdownTimeout = 2 * time.Minute
 // InstanceAction describes what reconciliation action to take for a cloud instance.
 type InstanceAction struct {
 	Kind              InstanceActionKind
-	TerminalStatus    string // db status to set (failed, completed, "")
-	TerminationReason string // reason string for DB
-	StallMessage      string // human-readable message
-	DestroyProvider   bool   // whether to destroy the provider instance
-	ResetJobs         bool   // whether to reset jobs to unplaced
-	AttemptOutcome    string // attempt outcome when resetting/closing
+	TerminalStatus    string    // db status to set (failed, completed, "")
+	TerminalAt        time.Time // authoritative terminal time; zero means execution time
+	TerminationReason string    // reason string for DB
+	StallMessage      string    // human-readable message
+	DestroyProvider   bool      // whether to destroy the provider instance
+	ResetJobs         bool      // whether to reset jobs to unplaced
+	AttemptOutcome    string    // attempt outcome when resetting/closing
 
 	// Provider-state snapshot at the time the action was decided. Carried
 	// through to the oplog at ExecuteAction time so post-mortems can see
@@ -895,8 +896,12 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 
 	reason := intent.TerminationReason
 	destroyProvider := !isProviderTerminalWithPolicy(inst, pauseTolerant)
+	var terminalAt time.Time
 	if intent.EffectiveState() == instanceintent.StateSucceeded {
 		destroyProvider = false
+		if intent.DestroySucceededAtUnix > 0 {
+			terminalAt = time.Unix(intent.DestroySucceededAtUnix, 0)
+		}
 	}
 	switch intent.TerminalStatus {
 	case db.LaunchStatusCompleted:
@@ -906,6 +911,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 		return InstanceAction{
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusCompleted,
+			TerminalAt:        terminalAt,
 			TerminationReason: reason,
 			DestroyProvider:   destroyProvider,
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
@@ -917,6 +923,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 		return InstanceAction{
 			Kind:              ActionTerminationIntent,
 			TerminalStatus:    db.LaunchStatusFailed,
+			TerminalAt:        terminalAt,
 			TerminationReason: reason,
 			DestroyProvider:   destroyProvider,
 			ResetJobs:         true,
@@ -1088,7 +1095,13 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	}
 
 	if action.TerminalStatus != "" {
-		if err := db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason, action.StallMessage); err != nil {
+		var err error
+		if action.TerminalAt.IsZero() {
+			err = db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason, action.StallMessage)
+		} else {
+			err = db.UpdateLaunchTerminalStatusAt(database, ci.ID, action.TerminalStatus, action.TerminalAt, action.TerminationReason, action.StallMessage)
+		}
+		if err != nil {
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", action.TerminalStatus, "error", err)
 			return false, false
 		}
