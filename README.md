@@ -150,6 +150,9 @@ unplaced jobs, launches cloud instances, and relaunches orphaned jobs within
 configured guardrails. See [Autopilot](docs/guides/autopilot.md) and
 [Campaigns](docs/guides/campaigns.md).
 
+For a native macOS menu bar and floating HUD view of current activity, see
+[Weft Status](https://github.com/osteele/weft-status).
+
 ## Cloud Bursting
 
 When local hosts cannot run a job, Weft can search cloud GPU providers, upload a
