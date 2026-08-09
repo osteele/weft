@@ -552,6 +552,70 @@ type UploadSummary struct {
 	Error           string `json:"error,omitempty"`
 }
 
+// Publication states are separate from command execution status. Unknown
+// means the observation failed; it is not evidence that publication is
+// pending, failed, or complete.
+const (
+	PublicationPending = "pending"
+	PublicationReady   = "ready"
+	PublicationFailed  = "failed"
+	PublicationUnknown = "unknown"
+
+	ExecutionPending  = "pending"
+	ExecutionComplete = "complete"
+	ExecutionUnknown  = "unknown"
+)
+
+// CompletionFacets records the attempt's independently observable command,
+// required-artifact, and background-drain boundaries.
+type CompletionFacets struct {
+	ExecutionState           string `json:"execution_state"`
+	ExecutionCompletedAtUnix *int64 `json:"execution_completed_at_unix,omitempty"`
+	RequiredArtifactsState   string `json:"required_artifacts_state"`
+	RequiredArtifactsReadyAt *int64 `json:"required_artifacts_ready_at_unix,omitempty"`
+	DrainState               string `json:"drain_state"`
+	DrainCompletedAtUnix     *int64 `json:"drain_completed_at_unix,omitempty"`
+	UnknownReason            string `json:"unknown_reason,omitempty"`
+	Detail                   string `json:"detail,omitempty"`
+}
+
+// PublicationSnapshot is a point-in-time view of deferred publication work.
+// Pointer-valued quantities preserve unknown rather than converting it to
+// zero. A non-nil pointer to zero means the quantity was measured and empty.
+type PublicationSnapshot struct {
+	QueuedItems       *int   `json:"queued_items,omitempty"`
+	QueuedBytes       *int64 `json:"queued_bytes,omitempty"`
+	InflightItems     *int   `json:"inflight_items,omitempty"`
+	InflightBytes     *int64 `json:"inflight_bytes,omitempty"`
+	OldestQueuedAgeMS *int64 `json:"oldest_queued_age_ms,omitempty"`
+	RetainedBytes     *int64 `json:"retained_bytes,omitempty"`
+	WorkerLimit       *int   `json:"worker_limit,omitempty"`
+	WorkersBusy       *int   `json:"workers_busy,omitempty"`
+	LastProgressAt    *int64 `json:"last_progress_at_unix,omitempty"`
+}
+
+// ArtifactPublication records the durable publication observation for one
+// logical artifact declared by --produces.
+type ArtifactPublication struct {
+	Name       string `json:"name"`
+	Path       string `json:"path,omitempty"`
+	State      string `json:"state"`
+	ReadyAt    *int64 `json:"ready_at_unix,omitempty"`
+	PayloadKey string `json:"payload_key,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+// PublicationReport is the attempt-scoped, monotonically sequenced record
+// written by the agent. Sequence starts at one and increases for every newer
+// snapshot for the same attempt.
+type PublicationReport struct {
+	Sequence       int64                 `json:"sequence"`
+	ObservedAtUnix int64                 `json:"observed_at_unix"`
+	Facets         CompletionFacets      `json:"facets"`
+	Snapshot       PublicationSnapshot   `json:"snapshot"`
+	Artifacts      []ArtifactPublication `json:"artifacts,omitempty"`
+}
+
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
 	RunID            int64               `json:"run_id,omitempty"`
@@ -574,6 +638,7 @@ type CompletionRecord struct {
 	OutputFiles      []OutputFile        `json:"output_files,omitempty"`
 	OutputUpload     *OutputUploadResult `json:"output_upload,omitempty"`
 	ResultsUpload    *UploadSummary      `json:"results_upload,omitempty"`
+	Publication      *PublicationReport  `json:"publication,omitempty"`
 }
 
 // InstanceCompletionManifest is the structured payload written to the R2

@@ -214,7 +214,7 @@ func TestOpen_DoesNotReportMigrationProgressForFreshDB(t *testing.T) {
 
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 	t.Helper()
-	if migrations.Target() != 41 {
+	if migrations.Target() != 42 {
 		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
 	}
 	setGooseVersionForTest(t, database, int(migrations.Target()-1))

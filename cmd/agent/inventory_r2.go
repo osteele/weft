@@ -56,12 +56,18 @@ type inventoryPostJobManager struct {
 func newInventoryPostJobManager(r2Bucket string) *inventoryPostJobManager {
 	return &inventoryPostJobManager{
 		r2Bucket: r2Bucket,
-		bgm:      newBGWorkManager(nil, true),
+		bgm: newBGWorkManagerForScope(
+			nil, true, defaultPublicationWorkers, defaultPublicationQueueCapacity, nil, "inventory",
+		),
 	}
 }
 
 func (m *inventoryPostJobManager) WaitForWorkdir(workdir string) {
 	m.bgm.WaitForUploadsInWorkdir(runner.ExpandTilde(workdir))
+}
+
+func (m *inventoryPostJobManager) WaitForAll() {
+	m.bgm.Barrier()
 }
 
 func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
@@ -82,6 +88,7 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 		uploadStartedUnix:     time.Now().Unix(),
 		outputWindowStartUnix: capture.StartTime,
 		outputDirs:            capture.OutputDirs,
+		cleanupDir:            capture.CleanupDir,
 	})
 }
 

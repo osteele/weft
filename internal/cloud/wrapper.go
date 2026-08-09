@@ -99,6 +99,15 @@ type CampaignManifest struct {
 	// Drain holds the upload-drain gate tunables. Zero fields fall back
 	// to the r2upload package defaults.
 	Drain DrainSettings `json:"drain,omitempty"`
+	// Publication bounds deferred post-job work on the agent. Zero fields use
+	// the agent defaults.
+	Publication PublicationSettings `json:"publication,omitempty"`
+}
+
+type PublicationSettings struct {
+	Workers          int   `json:"workers,omitempty"`
+	QueueCapacity    int   `json:"queue_capacity,omitempty"`
+	MaxRetainedBytes int64 `json:"max_retained_bytes,omitempty"`
 }
 
 // DrainSettings mirrors the user-facing config.CloudDrainConfig in a form

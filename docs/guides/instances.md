@@ -622,12 +622,32 @@ reconciliation owns success or rollback.
      preventing I/O interference with measurements. Benchmark jobs are not
      included in packed concurrent GPU-slot groups.
 4. **Result upload**: After each job, the wrapper uploads results (logs,
-   completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
+   completion record, timeseries, phases) to R2 under `jobs/<job-id>/`. Command
+   completion, required-artifact readiness, and final upload drain are tracked
+   separately; `weft info` and `weft job inspect --json` show these publication
+   facets without changing the job's execution status.
 5. **Sweep**: The local sync/autopilot sweep polls R2 for completed markers,
    downloads results, extracts phase timings and GPU stats into the
    `job_phase_timings` table, updates job statuses, and cleans up R2.
 6. **Teardown**: The instance self-destructs after the wrapper completes.
    Time/budget limits also trigger automatic destruction.
+
+Post-job publication uses one worker per agent by default, including packed GPU
+slots. The queue is bounded, preserves the same-workdir and benchmark barriers,
+and publishes declared artifacts before unrelated convention output. Optional
+limits are configured in `~/.config/weft/config.toml`:
+
+```toml
+[cloud.publication]
+workers = 1
+queue_capacity = 16
+# max_retained_bytes = 68719476736 # 64 GiB; zero/unset disables the byte bound
+```
+
+When `max_retained_bytes` is set, the agent waits before accumulating another
+post-job chain that would exceed the measured retained-source bound. It still
+allows one chain to make progress when its size is unknown or individually
+larger than the bound.
 
 ### Parallel operations
 

@@ -2,6 +2,7 @@ package cloudneeds
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -13,7 +14,65 @@ import (
 	"github.com/osteele/weft/internal/r2resolve"
 )
 
-func TestResolveSpecs_PrefersArtifactFilesKey(t *testing.T) {
+func TestResolveSpecs_ResolvesConventionOutputKey(t *testing.T) {
+	database := db.SetupTestDB(t)
+	producerID, err := db.RecordQueued(database, "", "/tmp/project", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+
+	relPath := "output/model.pt"
+	spec := fmt.Sprintf("%s:%d", relPath, producerID)
+	wantKey := r2keys.JobAttemptOutputsPrefix(producerID, 0) + relPath
+
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
+		return key == wantKey, nil
+	}
+
+	got, err := ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
+	if err != nil {
+		t.Fatalf("ResolveSpecs: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Path != relPath {
+		t.Fatalf("path = %q, want %q", got[0].Path, relPath)
+	}
+	if got[0].R2Key != wantKey {
+		t.Fatalf("r2 key = %q, want %q", got[0].R2Key, wantKey)
+	}
+}
+
+func TestResolveSpecs_NormalizesConventionOutputPath(t *testing.T) {
+	database := db.SetupTestDB(t)
+	producerID, err := db.RecordQueued(database, "", "/tmp/project", "produce", "producer")
+	if err != nil {
+		t.Fatalf("record producer: %v", err)
+	}
+
+	relPath := "./output/checkpoints/../model.pt"
+	spec := fmt.Sprintf("%s:%d", relPath, producerID)
+	wantKey := r2keys.JobAttemptOutputsPrefix(producerID, 0) + "output/model.pt"
+
+	prev := r2resolve.ObjectExistsFunc
+	t.Cleanup(func() { r2resolve.ObjectExistsFunc = prev })
+	r2resolve.ObjectExistsFunc = func(_ context.Context, _ r2resolve.Store, key string) (bool, error) {
+		return key == wantKey, nil
+	}
+
+	got, err := ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
+	if err != nil {
+		t.Fatalf("ResolveSpecs: %v", err)
+	}
+	if len(got) != 1 || got[0].R2Key != wantKey {
+		t.Fatalf("resolved = %+v, want normalized r2_key=%q", got, wantKey)
+	}
+}
+
+func TestResolveSpecs_FallsBackToLegacyArtifactFilesKey(t *testing.T) {
 	database := db.SetupTestDB(t)
 	producerID, err := db.RecordQueued(database, "", "/tmp/project", "produce", "producer")
 	if err != nil {
@@ -34,14 +93,8 @@ func TestResolveSpecs_PrefersArtifactFilesKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveSpecs: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("len(got) = %d, want 1", len(got))
-	}
-	if got[0].Path != relPath {
-		t.Fatalf("path = %q, want %q", got[0].Path, relPath)
-	}
-	if got[0].R2Key != wantKey {
-		t.Fatalf("r2 key = %q, want %q", got[0].R2Key, wantKey)
+	if len(got) != 1 || got[0].R2Key != wantKey {
+		t.Fatalf("resolved = %+v, want legacy r2_key=%q", got, wantKey)
 	}
 }
 
@@ -95,6 +148,34 @@ func TestResolveSpecs_ReturnsErrorWhenMissing(t *testing.T) {
 	_, err = ResolveSpecs(context.Background(), database, &r2.Client{}, []string{spec})
 	if err == nil {
 		t.Fatal("expected missing artifact error")
+	}
+	if !errors.Is(err, ErrArtifactPublicationUnknown) {
+		t.Fatalf("error = %v, want unknown publication", err)
+	}
+}
+
+func TestClassifyMissingArtifactUsesPerArtifactReadiness(t *testing.T) {
+	state := &db.AttemptPublicationState{
+		RequiredArtifactsState: db.PublicationStatePending,
+		Artifacts: []db.AttemptPublicationArtifact{{
+			Name: "model", Path: "./output/model.pt", State: db.PublicationStatePending,
+		}},
+	}
+	err := classifyMissingArtifact("output/model.pt:17", "output/model.pt", 17, state)
+	if !errors.Is(err, ErrArtifactPublicationPending) {
+		t.Fatalf("pending error = %v", err)
+	}
+
+	state.Artifacts[0].State = db.PublicationStateReady
+	err = classifyMissingArtifact("output/model.pt:17", "output/model.pt", 17, state)
+	if !errors.Is(err, ErrArtifactPublicationUnknown) {
+		t.Fatalf("ready-but-missing error = %v, want unknown", err)
+	}
+
+	state.Artifacts[0].State = db.PublicationStateFailed
+	err = classifyMissingArtifact("output/model.pt:17", "output/model.pt", 17, state)
+	if !errors.Is(err, ErrArtifactPublicationFailed) {
+		t.Fatalf("failed error = %v", err)
 	}
 }
 

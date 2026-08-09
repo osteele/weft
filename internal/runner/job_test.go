@@ -150,3 +150,40 @@ func TestCompletionRecordOutputUploadRoundTrip(t *testing.T) {
 		t.Fatalf("results upload mismatch: %#v != %#v", rec.ResultsUpload, decoded.ResultsUpload)
 	}
 }
+
+func TestCompletionRecordPublicationRoundTripPreservesUnknownQuantities(t *testing.T) {
+	zero := 0
+	completedAt := int64(1700000000)
+	rec := CompletionRecord{
+		ExitCode: 0,
+		EndTime:  completedAt,
+		Publication: &PublicationReport{
+			Sequence: 1, ObservedAtUnix: completedAt + 1,
+			Facets: CompletionFacets{
+				ExecutionState: ExecutionComplete, ExecutionCompletedAtUnix: &completedAt,
+				RequiredArtifactsState: PublicationUnknown,
+				DrainState:             PublicationPending,
+				UnknownReason:          "object lookup timed out",
+			},
+			Snapshot:  PublicationSnapshot{QueuedItems: &zero, QueuedBytes: nil},
+			Artifacts: []ArtifactPublication{{Name: "weights", State: PublicationUnknown}},
+		},
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded CompletionRecord
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Publication == nil || decoded.Publication.Sequence != 1 {
+		t.Fatalf("publication = %+v", decoded.Publication)
+	}
+	if decoded.Publication.Snapshot.QueuedItems == nil || *decoded.Publication.Snapshot.QueuedItems != 0 {
+		t.Fatalf("queued items = %v", decoded.Publication.Snapshot.QueuedItems)
+	}
+	if decoded.Publication.Snapshot.QueuedBytes != nil {
+		t.Fatalf("queued bytes = %v, want unknown", decoded.Publication.Snapshot.QueuedBytes)
+	}
+}

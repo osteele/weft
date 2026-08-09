@@ -90,6 +90,8 @@ func r2Delete(bucket, key string) error {
 	return nil
 }
 
+var r2DeleteForAgent = r2Delete
+
 // r2List returns file names under a prefix via rclone lsf. Missing prefixes are empty.
 func r2List(bucket, prefix string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)

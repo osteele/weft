@@ -158,6 +158,13 @@ func JobAttemptMaintenance(jobID, runID int64) string {
 	return JobAttemptResultsPrefix(jobID, runID) + "maintenance.json"
 }
 
+// JobAttemptPublicationReport is kept outside the results prefix because a
+// successful result sync deletes that prefix. The report remains available
+// for repair and late publication-state ingestion.
+func JobAttemptPublicationReport(jobID, runID int64) string {
+	return JobRunPrefix(jobID, runID) + "/publication.json"
+}
+
 // Instance artifact keys
 
 func InstanceOpslog(instanceID int64) string {

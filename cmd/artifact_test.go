@@ -855,7 +855,7 @@ func TestListCloudJobOutputFiles_DedupesArtifactSpelling(t *testing.T) {
 		t.Fatalf("listCloudJobOutputFiles: %v", err)
 	}
 	if len(files) != 1 {
-		t.Fatalf("files = %+v, want the dual upload collapsed to one row", files)
+		t.Fatalf("files = %+v, want the legacy dual representation collapsed to one row", files)
 	}
 	if files[0].RelPath != "output/train.pkl" {
 		t.Fatalf("RelPath = %q, want plain spelling preferred", files[0].RelPath)
@@ -951,6 +951,98 @@ func TestSyncCloudJobArtifactsWithStore_DirectoryArtifact(t *testing.T) {
 	}
 	if entries[0].SHA256 != "" {
 		t.Fatalf("directory artifact sha = %q, want empty", entries[0].SHA256)
+	}
+}
+
+func TestSyncCloudJobArtifactsWithStore_ConventionOutputBackingAndLegacyFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tests := []struct {
+		name      string
+		objectKey func(jobID, runID int64) string
+	}{
+		{
+			name: "canonical outputs object",
+			objectKey: func(jobID, runID int64) string {
+				return r2keys.JobAttemptOutputsPrefix(jobID, runID) + "output/model.pt"
+			},
+		},
+		{
+			name: "legacy artifact-files object",
+			objectKey: func(jobID, runID int64) string {
+				return r2keys.JobAttemptArtifactFilesPrefix(jobID, runID) + "output/model.pt"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database, job := setupLaunchArtifactJobWithDB(t)
+			runID := int64(0)
+			if job.LatestRunID != nil {
+				runID = *job.LatestRunID
+			}
+			store := &fakeCloudArtifactStore{objects: map[string][]byte{
+				r2keys.JobAttemptArtifactManifest(job.ID, runID): []byte(`{"artifacts":[{"name":"model","path":"output/model.pt"}]}`),
+				tc.objectKey(job.ID, runID):                      []byte("weights"),
+			}}
+
+			result, err := syncCloudJobArtifactsWithStore(database, store, job)
+			if err != nil {
+				t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+			}
+			if result.Added != 1 {
+				t.Fatalf("added = %d, want 1", result.Added)
+			}
+			entry, err := db.FindArtifactByNameOrPath(database, job.ID, "model")
+			if err != nil {
+				t.Fatalf("FindArtifactByNameOrPath: %v", err)
+			}
+			artifactRoot, err := artifacts.LocalArtifactsDir()
+			if err != nil {
+				t.Fatalf("LocalArtifactsDir: %v", err)
+			}
+			payload, err := os.ReadFile(filepath.Join(artifactRoot, entry.StoredPath))
+			if err != nil {
+				t.Fatalf("read cached artifact: %v", err)
+			}
+			if string(payload) != "weights" {
+				t.Fatalf("payload = %q, want weights", payload)
+			}
+		})
+	}
+}
+
+func TestSyncCloudJobArtifactsWithStore_PreservesAliasesForOneOutputObject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	database, job := setupLaunchArtifactJobWithDB(t)
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	store := &fakeCloudArtifactStore{objects: map[string][]byte{
+		r2keys.JobAttemptArtifactManifest(job.ID, runID):                  []byte(`{"artifacts":[{"name":"model","path":"output/model.pt"},{"name":"checkpoint","path":"./output/checkpoints/../model.pt"}]}`),
+		r2keys.JobAttemptOutputsPrefix(job.ID, runID) + "output/model.pt": []byte("weights"),
+	}}
+
+	result, err := syncCloudJobArtifactsWithStore(database, store, job)
+	if err != nil {
+		t.Fatalf("syncCloudJobArtifactsWithStore: %v", err)
+	}
+	if result.Added != 2 {
+		t.Fatalf("added = %d, want both logical aliases", result.Added)
+	}
+	entries, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByJob: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("artifacts = %+v, want two logical aliases", entries)
+	}
+	names := map[string]bool{}
+	for _, entry := range entries {
+		names[entry.Name] = true
+	}
+	if !names["model"] || !names["checkpoint"] {
+		t.Fatalf("artifact names = %v, want model and checkpoint", names)
 	}
 }
 

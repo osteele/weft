@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -265,7 +266,7 @@ func TestUploadArtifactManifestEntries_MissingArtifactRecordedAsFailed(t *testin
 		t.Fatal(err)
 	}
 
-	result := uploadArtifactManifestEntries("bucket", 61, 1, workDir)
+	result := uploadArtifactManifestEntries("bucket", 61, 1, workDir, nil)
 
 	if result.Status != runner.UploadStatusFailed {
 		t.Fatalf("Status = %q, want failed", result.Status)
@@ -282,7 +283,7 @@ func TestUploadArtifactManifestEntries_UnreadableManifestFails(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeRawArtifactManifest(t, 62, `{"job_id": 62, "artifacts": [`)
 
-	result := uploadArtifactManifestEntries("bucket", 62, 1, t.TempDir())
+	result := uploadArtifactManifestEntries("bucket", 62, 1, t.TempDir(), nil)
 
 	if result.Status != runner.UploadStatusFailed {
 		t.Fatalf("Status = %q, want failed", result.Status)
@@ -298,7 +299,7 @@ func TestUploadArtifactManifestEntries_UnreadableManifestFails(t *testing.T) {
 func TestUploadArtifactManifestEntries_AbsentManifestIsOK(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	result := uploadArtifactManifestEntries("bucket", 63, 1, t.TempDir())
+	result := uploadArtifactManifestEntries("bucket", 63, 1, t.TempDir(), nil)
 
 	if result.Status != runner.UploadStatusOK || len(result.Dirs) != 0 {
 		t.Fatalf("result = %+v, want clean OK for a job that declared nothing", result)
@@ -311,10 +312,154 @@ func TestUploadArtifactManifestEntries_EmptyManifestIsOK(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	writeRawArtifactManifest(t, 64, "\n")
 
-	result := uploadArtifactManifestEntries("bucket", 64, 1, t.TempDir())
+	result := uploadArtifactManifestEntries("bucket", 64, 1, t.TempDir(), nil)
 
 	if result.Status != runner.UploadStatusOK || len(result.Dirs) != 0 {
 		t.Fatalf("result = %+v, want clean OK for an empty manifest", result)
+	}
+}
+
+type artifactUploadCall struct {
+	src, dest, command, label string
+	bytes                     int64
+}
+
+func captureArtifactUploads(t *testing.T) *[]artifactUploadCall {
+	t.Helper()
+	var calls []artifactUploadCall
+	previous := uploadArtifactObject
+	uploadArtifactObject = func(_ string, src, dest, command string, _, _ int64, label string, bytes int64) error {
+		calls = append(calls, artifactUploadCall{src: src, dest: dest, command: command, label: label, bytes: bytes})
+		return nil
+	}
+	t.Cleanup(func() { uploadArtifactObject = previous })
+	return &calls
+}
+
+func TestUploadArtifactManifestEntries_ConventionOutputUsesCanonicalObject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	artifactPath := filepath.Join(workDir, "output", "model.pt")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The declared upload is intentionally not windowed by mtime. It must
+	// publish even when the convention bulk walk would reject a stale file.
+	stale := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(artifactPath, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(65)), artifacts.Manifest{
+		JobID: 65, Artifacts: []artifacts.ArtifactSpec{{Name: "model", Path: "./output/checkpoints/../model.pt"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := captureArtifactUploads(t)
+
+	result := uploadArtifactManifestEntries("bucket", 65, 7, workDir, nil)
+
+	if len(*calls) != 1 {
+		t.Fatalf("upload calls = %+v, want one", *calls)
+	}
+	wantDest := r2keys.JobAttemptOutputsPrefix(65, 7) + "output/model.pt"
+	if (*calls)[0].dest != wantDest || (*calls)[0].command != "copyto" {
+		t.Fatalf("upload = %+v, want copyto destination %q", (*calls)[0], wantDest)
+	}
+	if result.Status != runner.UploadStatusOK || result.Bytes != int64(len("weights")) {
+		t.Fatalf("result = %+v, want one successful payload", result)
+	}
+}
+
+func TestUploadArtifactManifestEntries_CustomAndOutsidePathsKeepArtifactObjects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	customRoot := t.TempDir()
+	absolutePath := filepath.Join(t.TempDir(), "absolute.pt")
+	for _, p := range []string{filepath.Join(workDir, "checkpoint.pt"), absolutePath, filepath.Join(customRoot, "output", "custom.pt")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := captureArtifactUploads(t)
+
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(66)), artifacts.Manifest{
+		JobID: 66, Artifacts: []artifacts.ArtifactSpec{{Path: "checkpoint.pt"}, {Path: absolutePath}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	uploadArtifactManifestEntries("bucket", 66, 3, workDir, nil)
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(67)), artifacts.Manifest{
+		JobID: 67, ArtifactRoot: customRoot, Artifacts: []artifacts.ArtifactSpec{{Path: "output/custom.pt"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	uploadArtifactManifestEntries("bucket", 67, 4, workDir, nil)
+
+	wants := []string{
+		r2keys.JobAttemptArtifactFilesPrefix(66, 3) + "checkpoint.pt",
+		r2keys.JobAttemptArtifactFilesPrefix(66, 3) + "absolute.pt",
+		r2keys.JobAttemptArtifactFilesPrefix(67, 4) + "output/custom.pt",
+	}
+	if len(*calls) != len(wants) {
+		t.Fatalf("upload calls = %+v, want %d", *calls, len(wants))
+	}
+	for i, want := range wants {
+		if (*calls)[i].dest != want {
+			t.Errorf("call %d destination = %q, want %q", i, (*calls)[i].dest, want)
+		}
+	}
+}
+
+func TestUploadArtifactManifestEntries_DedupesLexicalAndAncestorOverlap(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeRcloneOK(t)
+	workDir := t.TempDir()
+	dir := filepath.Join(workDir, "results", "bundle")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.bin"), []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifacts.WriteManifestFile(runner.ExpandTilde(artifacts.RemoteManifestPath(68)), artifacts.Manifest{
+		JobID: 68,
+		Artifacts: []artifacts.ArtifactSpec{
+			{Name: "child-first", Path: "results/bundle/a.bin"},
+			{Name: "directory", Path: "./results/bundle"},
+			{Name: "same-child", Path: "results/bundle/./a.bin"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := captureArtifactUploads(t)
+
+	result := uploadArtifactManifestEntries("bucket", 68, 9, workDir, []string{"results/"})
+
+	if len(*calls) != 1 {
+		t.Fatalf("upload calls = %+v, want one ancestor upload", *calls)
+	}
+	wantDest := r2keys.JobAttemptOutputsPrefix(68, 9) + "results/bundle/"
+	if (*calls)[0].dest != wantDest || (*calls)[0].command != "copy" {
+		t.Fatalf("upload = %+v, want directory copy to %q", (*calls)[0], wantDest)
+	}
+	if len(result.Dirs) != 3 {
+		t.Fatalf("logical outcomes = %+v, want all three declarations", result.Dirs)
+	}
+	for _, outcome := range result.Dirs {
+		if outcome.Status != runner.UploadStatusOK {
+			t.Errorf("outcome = %+v, want ok", outcome)
+		}
+	}
+	if result.FileCount != 1 || result.Bytes != int64(len("payload")) {
+		t.Fatalf("result accounting = %d files, %d bytes; want one payload", result.FileCount, result.Bytes)
 	}
 }
 

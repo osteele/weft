@@ -54,6 +54,9 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	).Scan(&currentStatus, &latestRunID, &launchID); err != nil {
 		return false
 	}
+	if latestRunID.Valid {
+		SyncAttemptPublicationReport(ctx, r2c, database, jobID, latestRunID.Int64)
+	}
 	allowAnyRunFallback := false
 	if db.IsTerminalStatus(currentStatus) {
 		needsBackfill, err := db.NeedsCloudCompletionBackfill(database, jobID)
@@ -135,6 +138,7 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 	// run_id that has a marker (cleanupStaleAttempts may have advanced
 	// latest_run_id past the run that actually wrote the marker).
 	completeKey := r2keys.JobAttemptComplete(jobID, runID)
+	SyncAttemptPublicationReport(ctx, r2c, database, jobID, runID)
 	markerData, markerLastModified, markerErr := r2c.GetObjectWithMeta(ctx, completeKey)
 	if markerErr != nil || len(markerData) == 0 {
 		if !allowAnyRunFallback {
@@ -145,6 +149,7 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 			return false
 		}
 		runID = altRunID
+		SyncAttemptPublicationReport(ctx, r2c, database, jobID, runID)
 		completeKey = r2keys.JobAttemptComplete(jobID, runID)
 		markerData, markerLastModified, markerErr = r2c.GetObjectWithMeta(ctx, completeKey)
 		if markerErr != nil || len(markerData) == 0 {
@@ -180,6 +185,10 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 		} else {
 			jobIDStr := strconv.FormatInt(jobID, 10)
 			exitCode, startTimeUnix, endTimeUnix, failureReason, killReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
+			if _, ingestErr := db.IngestCloudJobPublicationReport(database, tmpDir, jobIDStr, jobID, runID); ingestErr != nil {
+				slog.Warn("failed to ingest completion publication report",
+					"component", "reconcile", "job_id", jobID, "run_id", runID, "error", ingestErr)
+			}
 		}
 	}
 
@@ -239,6 +248,26 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 	slog.Debug("synced job completion", "component", "reconcile", "job_id", jobID,
 		"exit_code", *exitCode, "source", source)
 	return true
+}
+
+// SyncAttemptPublicationReport ingests the durable standalone publication
+// report. It is intentionally safe to call before or after completion-result
+// cleanup because the report key is outside the results prefix.
+func SyncAttemptPublicationReport(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID, runID int64) bool {
+	if r2c == nil || database == nil || runID <= 0 {
+		return false
+	}
+	data, err := r2c.GetObject(ctx, r2keys.JobAttemptPublicationReport(jobID, runID))
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	updated, err := db.IngestAttemptPublicationReport(database, data, jobID, runID)
+	if err != nil {
+		slog.Warn("failed to ingest publication report",
+			"component", "reconcile", "job_id", jobID, "run_id", runID, "error", err)
+		return false
+	}
+	return updated
 }
 
 // findAnyCompletedRunID scans R2 for any .complete marker under jobs/<jobID>/

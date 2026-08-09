@@ -571,8 +571,19 @@ type SSHConfig struct {
 
 // CloudConfig holds settings shared across cloud providers.
 type CloudConfig struct {
-	SSH   CloudSSHConfig   `yaml:"ssh" toml:"ssh"`
-	Drain CloudDrainConfig `yaml:"drain" toml:"drain"`
+	SSH         CloudSSHConfig         `yaml:"ssh" toml:"ssh"`
+	Drain       CloudDrainConfig       `yaml:"drain" toml:"drain"`
+	Publication CloudPublicationConfig `yaml:"publication" toml:"publication"`
+}
+
+// CloudPublicationConfig bounds deferred result and artifact publication on
+// each agent. Zero values use the agent defaults (one worker, queue capacity
+// sixteen). Queue capacity is an admission bound: execution waits when the
+// number of retained post-job chains reaches it.
+type CloudPublicationConfig struct {
+	Workers          int   `yaml:"workers" toml:"workers"`
+	QueueCapacity    int   `yaml:"queue_capacity" toml:"queue_capacity"`
+	MaxRetainedBytes int64 `yaml:"max_retained_bytes" toml:"max_retained_bytes"`
 }
 
 // CloudDrainConfig tunes the agent's upload-drain gate. All fields are

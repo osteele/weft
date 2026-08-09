@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -92,7 +93,7 @@ func NeedR2Key(ctx context.Context, client Store, jobID int64, latestRunID *int6
 		runIDs = append([]int64{*latestRunID}, runIDs...)
 	}
 	artifactRel := artifacts.LocalRelativePath(relPath)
-	outputRel := strings.TrimPrefix(relPath, "/")
+	outputRel := path.Clean(strings.TrimPrefix(relPath, "/"))
 
 	tryRun := func(runID int64) (string, bool, error) {
 		if _, seen := tried[runID]; seen {

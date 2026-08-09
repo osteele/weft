@@ -1,7 +1,9 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,4 +58,23 @@ func ParseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix,
 	}
 
 	return nil, 0, 0, "", ""
+}
+
+// IngestCloudJobPublicationReport imports a report embedded in the attempt's
+// completion record. Missing completion files and pre-publication completion
+// records are normal and return (false, nil).
+func IngestCloudJobPublicationReport(database *sql.DB, tmpDir, jobIDStr string, jobID, attemptID int64) (bool, error) {
+	completionPath := filepath.Join(tmpDir, jobIDStr+".completion.json")
+	data, err := os.ReadFile(completionPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	updated, err := IngestAttemptPublicationReport(database, data, jobID, attemptID)
+	if err != nil && strings.Contains(err.Error(), "publication report is absent") {
+		return false, nil
+	}
+	return updated, err
 }

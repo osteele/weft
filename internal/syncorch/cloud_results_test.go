@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/status"
 )
@@ -50,6 +51,105 @@ func TestListCloudAttemptSyncCandidates_AttemptScoped(t *testing.T) {
 		t.Fatalf("incomplete terminal job %d missing from candidates: %+v", incompleteCompletedJobID, candidates)
 	} else if c.RunID != incompleteCompletedRunID {
 		t.Fatalf("incomplete terminal run_id = %d, want %d", c.RunID, incompleteCompletedRunID)
+	}
+}
+
+func TestTerminalCompletionStillRefreshesStandalonePublication(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, runID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	setCloudAttemptTerminal(t, database, runID, db.StatusCompleted, true)
+
+	previous := syncAttemptPublicationReport
+	t.Cleanup(func() { syncAttemptPublicationReport = previous })
+	var gotJobID, gotRunID int64
+	syncAttemptPublicationReport = func(_ context.Context, _ *r2.Client, _ *sql.DB, observedJobID, observedRunID int64) bool {
+		gotJobID, gotRunID = observedJobID, observedRunID
+		state := &db.AttemptPublicationState{
+			AttemptID: observedRunID, JobID: observedJobID, Sequence: 1, ObservedAt: time.Now().Unix(),
+			ExecutionState:         db.PublicationExecutionComplete,
+			RequiredArtifactsState: db.PublicationStateReady,
+			DrainState:             db.PublicationStatePending,
+		}
+		if _, err := db.UpsertAttemptPublicationState(database, state); err != nil {
+			t.Fatalf("UpsertAttemptPublicationState: %v", err)
+		}
+		return true
+	}
+
+	syncOneCompletedJobMarker(context.Background(), database, nil, &r2.JobMarkers{}, jobID, fmt.Sprint(jobID), false)
+	if gotJobID != jobID || gotRunID != runID {
+		t.Fatalf("publication refresh = (%d, %d), want (%d, %d)", gotJobID, gotRunID, jobID, runID)
+	}
+}
+
+func TestTargetedSyncRefreshesStandalonePublicationIndependentlyOfCompletionMarker(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, runID := createPlacedCloudJob(t, database, db.LaunchStatusCompleted)
+	setCloudAttemptTerminal(t, database, runID, db.StatusCompleted, true)
+
+	previous := syncAttemptPublicationReport
+	t.Cleanup(func() { syncAttemptPublicationReport = previous })
+	var gotJobID, gotRunID int64
+	syncAttemptPublicationReport = func(_ context.Context, _ *r2.Client, _ *sql.DB, observedJobID, observedRunID int64) bool {
+		gotJobID, gotRunID = observedJobID, observedRunID
+		return true
+	}
+
+	syncTargetedAttemptPublication(context.Background(), nil, database, jobID)
+	if gotJobID != jobID || gotRunID != runID {
+		t.Fatalf("targeted publication refresh = (%d, %d), want (%d, %d)", gotJobID, gotRunID, jobID, runID)
+	}
+}
+
+func TestCompletionSettlementWaitsForObservedDrain(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, runID := createPlacedCloudJob(t, database, db.LaunchStatusRunning)
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.LaunchID == nil || *job.LaunchID <= 0 {
+		t.Fatalf("job launch ID = %v, want a positive ID", job.LaunchID)
+	}
+	launchID := sql.NullInt64{Int64: *job.LaunchID, Valid: true}
+
+	deferSettlement, err := shouldDeferCompletionSettlement(database, runID, launchID)
+	if err != nil || !deferSettlement {
+		t.Fatalf("running legacy attempt defer = %v, err=%v; want true", deferSettlement, err)
+	}
+
+	if err := db.UpdateLaunchStatus(database, launchID.Int64, db.LaunchStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	deferSettlement, err = shouldDeferCompletionSettlement(database, runID, launchID)
+	if err != nil || deferSettlement {
+		t.Fatalf("terminal legacy attempt defer = %v, err=%v; want false", deferSettlement, err)
+	}
+
+	pending := &db.AttemptPublicationState{
+		AttemptID: runID, JobID: jobID, Sequence: 1, ObservedAt: time.Now().Unix(),
+		ExecutionState:         db.PublicationExecutionComplete,
+		RequiredArtifactsState: db.PublicationStateReady,
+		DrainState:             db.PublicationStatePending,
+	}
+	if _, err := db.UpsertAttemptPublicationState(database, pending); err != nil {
+		t.Fatal(err)
+	}
+	deferSettlement, err = shouldDeferCompletionSettlement(database, runID, launchID)
+	if err != nil || !deferSettlement {
+		t.Fatalf("pending publication defer = %v, err=%v; want true", deferSettlement, err)
+	}
+
+	ready := *pending
+	ready.Sequence = 2
+	ready.ObservedAt++
+	ready.DrainState = db.PublicationStateReady
+	if _, err := db.UpsertAttemptPublicationState(database, &ready); err != nil {
+		t.Fatal(err)
+	}
+	deferSettlement, err = shouldDeferCompletionSettlement(database, runID, launchID)
+	if err != nil || deferSettlement {
+		t.Fatalf("ready publication defer = %v, err=%v; want false", deferSettlement, err)
 	}
 }
 

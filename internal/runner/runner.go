@@ -87,10 +87,16 @@ type PostJobCapture struct {
 	// OutputDirs carries the job's configured convention output dirs so
 	// post-job uploads walk the same dirs discovery attributes.
 	OutputDirs []string
+	// CleanupDir remains available to the post-job manager as an upload source
+	// and is removed only after publication finishes. This prevents an
+	// R2-isolated job's per-job source tree from disappearing while a bounded
+	// publication item is queued.
+	CleanupDir string
 }
 
 type PostJobManager interface {
 	WaitForWorkdir(workdir string)
+	WaitForAll()
 	StartPostJob(capture PostJobCapture)
 }
 
@@ -338,7 +344,11 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 	}
 
 	if waitForPostJob && r.PostJobManager != nil {
-		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+		if HasBenchmarkTag(rj) {
+			r.PostJobManager.WaitForAll()
+		} else {
+			r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+		}
 		decision.waitedForPostJob = true
 	}
 
@@ -486,7 +496,11 @@ func (r *Runner) applyPendingDecision(decision pendingStartDecision) {
 
 	// Wait for prior post-job uploads from this workdir before reusing it.
 	if r.PostJobManager != nil && !decision.waitedForPostJob {
-		r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+		if HasBenchmarkTag(rj) {
+			r.PostJobManager.WaitForAll()
+		} else {
+			r.PostJobManager.WaitForWorkdir(ExpandTilde(job.Dir))
+		}
 	}
 
 	r.startPendingJob(decision)
@@ -959,6 +973,10 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	if r.OnJobFinish != nil {
 		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
+	cleanupDir := ""
+	if rj.Data.SourceR2Key != "" && r.PostJobManager != nil {
+		cleanupDir = filepath.Dir(perJobSourceDir(jobID))
+	}
 	if r.PostJobManager != nil {
 		r.PostJobManager.StartPostJob(PostJobCapture{
 			JobID:      jobID,
@@ -968,6 +986,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			ExitCode:   ei.ExitCode,
 			StartTime:  startTime,
 			OutputDirs: rj.Data.OutputDirs,
+			CleanupDir: cleanupDir,
 		})
 	}
 
@@ -985,7 +1004,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	removePerJobSourceMarker(rj.Data.Dir, jobID)
 	// In R2-isolated mode the runtime source lives under a per-job dir we
 	// own; remove it now so ~/.cache/weft/jobs/ doesn't grow unbounded.
-	if rj.Data.SourceR2Key != "" {
+	if rj.Data.SourceR2Key != "" && cleanupDir == "" {
 		removePerJobSourceDir(jobID)
 	}
 

@@ -539,12 +539,18 @@ func targetedSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout, hostTimeout,
 	var rentalJobIDs []int64
 
 	for _, job := range jobs {
-		if job == nil || status.IsTerminal(job.Status) {
+		if job == nil {
 			continue
 		}
 		if job.IsRentalJob() {
+			// A forced display sync also refreshes the attempt-scoped
+			// publication report for terminal rentals. That report can advance
+			// after job completion and is independent of provider liveness.
 			needsRentalSync = true
 			rentalJobIDs = append(rentalJobIDs, job.ID)
+			continue
+		}
+		if status.IsTerminal(job.Status) {
 			continue
 		}
 		if !job.HasInventoryHost() {

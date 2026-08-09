@@ -210,6 +210,8 @@ func (m *recordingPostJobManager) WaitForWorkdir(workdir string) {
 	m.waitedWorkdir = workdir
 }
 
+func (m *recordingPostJobManager) WaitForAll() {}
+
 func (m *recordingPostJobManager) StartPostJob(capture PostJobCapture) {
 	m.captures = append(m.captures, capture)
 }

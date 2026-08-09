@@ -49,63 +49,65 @@ func init() {
 }
 
 type normalizedJobRecord struct {
-	ID                   string                   `json:"id"`
-	Status               string                   `json:"status,omitempty"`
-	Host                 string                   `json:"host,omitempty"`
-	LaunchID             string                   `json:"launch_id,omitempty"`
-	Project              string                   `json:"project,omitempty"`
-	WorkingDir           string                   `json:"working_dir,omitempty"`
-	Command              string                   `json:"command,omitempty"`
-	Description          string                   `json:"description,omitempty"`
-	Backend              string                   `json:"backend,omitempty"`
-	RemoteID             string                   `json:"remote_id,omitempty"`
-	RemoteState          string                   `json:"remote_state,omitempty"`
-	FailureReason        string                   `json:"failure_reason,omitempty"`
-	ErrorMessage         string                   `json:"error_message,omitempty"`
-	GPU                  string                   `json:"gpu,omitempty"`
-	GPUClass             string                   `json:"gpu_class,omitempty"`
-	GPUMemGB             *int                     `json:"gpu_mem_gb,omitempty"`
-	GPUMemMaxGB          *int                     `json:"gpu_mem_max_gb,omitempty"`
-	MaxComputeCap        string                   `json:"max_compute_cap,omitempty"`
-	CPUAllotment         *int                     `json:"cpu_allotment,omitempty"`
-	Priority             int                      `json:"priority,omitempty"`
-	Env                  []string                 `json:"env,omitempty"`
-	Tags                 []string                 `json:"tags,omitempty"`
-	Inputs               []string                 `json:"inputs,omitempty"`
-	ObservedInputs       []string                 `json:"observed_inputs,omitempty"`
-	Outputs              []string                 `json:"outputs,omitempty"`
-	OutputDirs           []string                 `json:"output_dirs,omitempty"`
-	Produces             []string                 `json:"produces,omitempty"`
-	Needs                []string                 `json:"needs,omitempty"`
-	DepSpec              string                   `json:"dep_spec,omitempty"`
-	PlacementReasons     []string                 `json:"placement_reasons,omitempty"`
-	PlacementMeta        *db.PlacementMeta        `json:"placement_meta,omitempty"`
-	CLIResourceOverrides *db.CLIResourceOverrides `json:"cli_overrides,omitempty"`
-	CreatedAt            int64                    `json:"created_at,omitempty"`
-	QueuedAt             int64                    `json:"queued_at,omitempty"`
-	StartTime            int64                    `json:"start_time,omitempty"`
-	EndTime              *int64                   `json:"end_time,omitempty"`
-	ExitCode             *int                     `json:"exit_code,omitempty"`
-	Cost                 *float64                 `json:"cost,omitempty"`
-	ErrorDiagnosis       string                   `json:"error_diagnosis,omitempty"`
-	RetryCount           int                      `json:"retry_count,omitempty"`
-	Attempts             []normalizedAttempt      `json:"attempts,omitempty"`
+	ID                   string                      `json:"id"`
+	Status               string                      `json:"status,omitempty"`
+	Host                 string                      `json:"host,omitempty"`
+	LaunchID             string                      `json:"launch_id,omitempty"`
+	Project              string                      `json:"project,omitempty"`
+	WorkingDir           string                      `json:"working_dir,omitempty"`
+	Command              string                      `json:"command,omitempty"`
+	Description          string                      `json:"description,omitempty"`
+	Backend              string                      `json:"backend,omitempty"`
+	RemoteID             string                      `json:"remote_id,omitempty"`
+	RemoteState          string                      `json:"remote_state,omitempty"`
+	FailureReason        string                      `json:"failure_reason,omitempty"`
+	ErrorMessage         string                      `json:"error_message,omitempty"`
+	GPU                  string                      `json:"gpu,omitempty"`
+	GPUClass             string                      `json:"gpu_class,omitempty"`
+	GPUMemGB             *int                        `json:"gpu_mem_gb,omitempty"`
+	GPUMemMaxGB          *int                        `json:"gpu_mem_max_gb,omitempty"`
+	MaxComputeCap        string                      `json:"max_compute_cap,omitempty"`
+	CPUAllotment         *int                        `json:"cpu_allotment,omitempty"`
+	Priority             int                         `json:"priority,omitempty"`
+	Env                  []string                    `json:"env,omitempty"`
+	Tags                 []string                    `json:"tags,omitempty"`
+	Inputs               []string                    `json:"inputs,omitempty"`
+	ObservedInputs       []string                    `json:"observed_inputs,omitempty"`
+	Outputs              []string                    `json:"outputs,omitempty"`
+	OutputDirs           []string                    `json:"output_dirs,omitempty"`
+	Produces             []string                    `json:"produces,omitempty"`
+	Needs                []string                    `json:"needs,omitempty"`
+	DepSpec              string                      `json:"dep_spec,omitempty"`
+	PlacementReasons     []string                    `json:"placement_reasons,omitempty"`
+	PlacementMeta        *db.PlacementMeta           `json:"placement_meta,omitempty"`
+	CLIResourceOverrides *db.CLIResourceOverrides    `json:"cli_overrides,omitempty"`
+	CreatedAt            int64                       `json:"created_at,omitempty"`
+	QueuedAt             int64                       `json:"queued_at,omitempty"`
+	StartTime            int64                       `json:"start_time,omitempty"`
+	EndTime              *int64                      `json:"end_time,omitempty"`
+	ExitCode             *int                        `json:"exit_code,omitempty"`
+	Cost                 *float64                    `json:"cost,omitempty"`
+	ErrorDiagnosis       string                      `json:"error_diagnosis,omitempty"`
+	RetryCount           int                         `json:"retry_count,omitempty"`
+	Attempts             []normalizedAttempt         `json:"attempts,omitempty"`
+	Publication          *db.AttemptPublicationState `json:"publication,omitempty"`
 }
 
 type normalizedAttempt struct {
-	ID            int64  `json:"id"`
-	Number        int    `json:"number"`
-	Host          string `json:"host,omitempty"`
-	LaunchID      string `json:"launch_id,omitempty"`
-	Status        string `json:"status,omitempty"`
-	QueuedAt      *int64 `json:"queued_at,omitempty"`
-	StartTime     *int64 `json:"start_time,omitempty"`
-	EndTime       *int64 `json:"end_time,omitempty"`
-	ExitCode      *int   `json:"exit_code,omitempty"`
-	ErrorMessage  string `json:"error_message,omitempty"`
-	FailureReason string `json:"failure_reason,omitempty"`
-	CloudOutcome  string `json:"cloud_outcome,omitempty"`
-	Backend       string `json:"backend,omitempty"`
+	ID            int64                       `json:"id"`
+	Number        int                         `json:"number"`
+	Host          string                      `json:"host,omitempty"`
+	LaunchID      string                      `json:"launch_id,omitempty"`
+	Status        string                      `json:"status,omitempty"`
+	QueuedAt      *int64                      `json:"queued_at,omitempty"`
+	StartTime     *int64                      `json:"start_time,omitempty"`
+	EndTime       *int64                      `json:"end_time,omitempty"`
+	ExitCode      *int                        `json:"exit_code,omitempty"`
+	ErrorMessage  string                      `json:"error_message,omitempty"`
+	FailureReason string                      `json:"failure_reason,omitempty"`
+	CloudOutcome  string                      `json:"cloud_outcome,omitempty"`
+	Backend       string                      `json:"backend,omitempty"`
+	Publication   *db.AttemptPublicationState `json:"publication,omitempty"`
 }
 
 type jobFieldDiff struct {
@@ -183,7 +185,18 @@ func loadNormalizedJobRecord(database *sql.DB, jobID int64) (*normalizedJobRecor
 	if err != nil {
 		return nil, err
 	}
-	return normalizeJobRecord(job, attempts), nil
+	rec := normalizeJobRecord(job, attempts)
+	for i := range rec.Attempts {
+		publication, err := db.GetAttemptPublicationState(database, rec.Attempts[i].ID)
+		if err != nil {
+			return nil, fmt.Errorf("get publication state for attempt %d: %w", rec.Attempts[i].ID, err)
+		}
+		rec.Attempts[i].Publication = publication
+		if job.LatestRunID != nil && rec.Attempts[i].ID == *job.LatestRunID {
+			rec.Publication = publication
+		}
+	}
+	return rec, nil
 }
 
 func normalizeJobRecord(job *db.Job, attempts []db.JobAttempt) *normalizedJobRecord {
@@ -296,6 +309,7 @@ func diffNormalizedJobs(a, b *normalizedJobRecord) jobDiffRecord {
 		{"error_diagnosis", a.ErrorDiagnosis, b.ErrorDiagnosis},
 		{"retry_count", a.RetryCount, b.RetryCount},
 		{"attempts", a.Attempts, b.Attempts},
+		{"publication", a.Publication, b.Publication},
 	}
 	out := jobDiffRecord{A: a.ID, B: b.ID}
 	for _, field := range fields {
@@ -352,6 +366,7 @@ func jobInspectLines(rec *normalizedJobRecord) []string {
 	add("needs", rec.Needs)
 	add("produces", rec.Produces)
 	add("placement_reasons", rec.PlacementReasons)
+	add("publication", rec.Publication)
 	add("attempts", rec.Attempts)
 	return lines
 }

@@ -84,11 +84,17 @@ of the current design:
 ```
 
 - **Cloud rentals and R2-enabled on-prem runners** snapshot at completion:
-  `uploadOutputDirs` walks the convention directories and
-  `uploadArtifactManifestEntries` uploads declared paths, both under per-run
-  R2 keys (`cmd/agent/runinstance.go`, wired for on-prem via
+  `uploadArtifactManifestEntries` publishes declared paths first, then
+  `uploadOutputDirs` walks the convention directories with `--update`, both
+  under per-run R2 keys (`cmd/agent/runinstance.go`, wired for on-prem via
   `cmd/agent/inventory_r2.go` when `run-queue` is started with
-  `--r2-bucket`). A per-workdir barrier
+  `--r2-bucket`). A declared workdir-relative path beneath an effective
+  convention output directory uses its `outputs/` key as its sole payload
+  object. Its manifest name and path remain logical references to that object.
+  Absolute paths, paths outside convention directories, and declarations with
+  a custom artifact root retain `artifacts/files/` backing. Lexical duplicates
+  and paths covered by a declared ancestor directory share one upload. A
+  per-workdir barrier
   (`SharedWorkdirUploadBarrierBeforeNextJob`) prevents the next job in the
   same directory from starting while the prior job's upload walk is still
   running.
@@ -228,7 +234,6 @@ here so spec rules and tests can be derived from them.
 |---|---|---|
 | Per-job durability | Undeclared convention-directory outputs on no-R2 hosts have no completion-time capture (declared outputs and `--produces` entries are snapshotted); the snapshot size cap / GC from the revised baseline is not implemented | wb10 (residual) |
 | Attribution | The shared-workdir barrier serializes only sequential jobs within one agent process; concurrent same-workdir jobs (multi-GPU hosts) can still cross-attribute uploads (recorded as an open question in `specs/job-lifecycle.allium`) | (spec `invariant Attribution`, wj2226 incident) |
-| — | Declared artifacts under `output/` upload twice (outputs prefix + artifact-files prefix). Listing and `get --all` now collapse the two spellings, but the agent still uploads the payload twice | wb20 (upload side) |
 
 Resolved (see the corresponding rules in `specs/job-lifecycle.allium`):
 retrievability (list and get/cat consume the shared resolver — contract
@@ -236,7 +241,9 @@ retrievability (list and get/cat consume the shared resolver — contract
 fall back to R2 for any job kind and to an on-demand host sync, and name
 every source checked on a miss); per-job durability for declared outputs
 (completion-time host-local snapshot —
-`CompletedOutputsSurviveWorkdirReuse`); error fidelity (transfer failures
+`CompletedOutputsSurviveWorkdirReuse`); single-backing publication for
+declared convention outputs (`DeclaredConventionOutputHasSingleBacking`);
+error fidelity (transfer failures
 propagate their real cause instead of "not found", and large single-file
 downloads show progress — `ArtifactRetrievalErrorFidelity`); run
 completeness (retrieval delegates to `r2resolve`, finding superseded-run

@@ -26,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -178,7 +179,8 @@ func runInstance(args []string) {
 	// an immediate first heartbeat and one on every phase transition).
 	stopHeartbeatSidecar := startHeartbeatSidecarProcess(r2Bucket, instanceIDInt, diskPath, phaseFile, fatalFile)
 	defer stopHeartbeatSidecar()
-	forceHeartbeat, stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
+	publication := &publicationState{}
+	forceHeartbeat, stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get, publication)
 	defer stopHeartbeat()
 	// onPhase wraps currentPhase.Set so each transition also forces an
 	// out-of-band heartbeat upload — a phase change is exactly when we
@@ -237,17 +239,21 @@ func runInstance(args []string) {
 					continue
 				}
 				_ = runJobSequence(newJobs, jobSequenceConfig{
-					R2Bucket:            r2Bucket,
-					InstanceID:          instanceIDInt,
-					PhaseKey:            phaseKey,
-					LogDir:              logDir,
-					DiskPath:            diskPath,
-					MaxTime:             maxTime,
-					StartTime:           startTime,
-					OnPhase:             onPhase,
-					SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
-					GPUWarmup:           manifest.GPUWarmup,
-					SelfDestructCmd:     manifest.SelfDestructCmd,
+					R2Bucket:                 r2Bucket,
+					InstanceID:               instanceIDInt,
+					PhaseKey:                 phaseKey,
+					LogDir:                   logDir,
+					DiskPath:                 diskPath,
+					MaxTime:                  maxTime,
+					StartTime:                startTime,
+					OnPhase:                  onPhase,
+					SkipWorkdirDeletion:      manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
+					GPUWarmup:                manifest.GPUWarmup,
+					SelfDestructCmd:          manifest.SelfDestructCmd,
+					PublicationState:         publication,
+					PublicationWorkers:       manifest.Publication.Workers,
+					PublicationQueueCapacity: manifest.Publication.QueueCapacity,
+					PublicationMaxRetained:   manifest.Publication.MaxRetainedBytes,
 				})
 				return
 			}
@@ -255,21 +261,25 @@ func runInstance(args []string) {
 	}
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
-		R2Bucket:            r2Bucket,
-		InstanceID:          instanceIDInt,
-		PhaseKey:            phaseKey,
-		LogDir:              logDir,
-		DiskPath:            diskPath,
-		MaxTime:             maxTime,
-		StartTime:           startTime,
-		OnPhase:             onPhase,
-		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
-		GPUWarmup:           manifest.GPUWarmup,
-		CostPerHourCents:    manifest.CostPerHourCents,
-		Provider:            manifest.Provider,
-		InstanceType:        manifest.InstanceType,
-		Resumed:             resumed,
-		SelfDestructCmd:     manifest.SelfDestructCmd,
+		R2Bucket:                 r2Bucket,
+		InstanceID:               instanceIDInt,
+		PhaseKey:                 phaseKey,
+		LogDir:                   logDir,
+		DiskPath:                 diskPath,
+		MaxTime:                  maxTime,
+		StartTime:                startTime,
+		OnPhase:                  onPhase,
+		SkipWorkdirDeletion:      manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
+		GPUWarmup:                manifest.GPUWarmup,
+		CostPerHourCents:         manifest.CostPerHourCents,
+		Provider:                 manifest.Provider,
+		InstanceType:             manifest.InstanceType,
+		Resumed:                  resumed,
+		SelfDestructCmd:          manifest.SelfDestructCmd,
+		PublicationState:         publication,
+		PublicationWorkers:       manifest.Publication.Workers,
+		PublicationQueueCapacity: manifest.Publication.QueueCapacity,
+		PublicationMaxRetained:   manifest.Publication.MaxRetainedBytes,
 	})
 	anyFailed = seqResult.AnyFailed
 
@@ -436,9 +446,12 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string, sinceUn
 }
 
 // uploadArtifactManifestEntries reads the WEFT_ARTIFACT_MANIFEST written by the
-// job script and uploads each declared artifact file (plus the manifest itself)
-// to R2 under the artifacts/ prefix for this job attempt.
-func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
+// job script and uploads each declared artifact file (plus the manifest
+// itself). Workdir-relative declarations beneath convention output dirs use
+// their canonical outputs/ object; other declarations use artifacts/files/.
+var uploadArtifactObject = rcloneUploadWithRetry
+
+func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir string, outputDirs []string) runner.OutputUploadResult {
 	startedAt := time.Now()
 	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
 	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
@@ -470,11 +483,24 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 	root := artifacts.ResolveArtifactRoot(manifest, workDir)
 	root = runner.ExpandTilde(root)
 	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(jobID, runID)
+	outputsPrefix := r2keys.JobAttemptOutputsPrefix(jobID, runID)
 
 	var result runner.OutputUploadResult
 	var attempted, failed int
 	var totalDuration time.Duration
-
+	type uploadEntry struct {
+		spec                 artifacts.ArtifactSpec
+		src, dest, rcloneCmd string
+		remotePath           string
+		fileCount            int
+		bytes                int64
+		info                 fs.FileInfo
+		statErr              error
+		coveredBy            int
+		status, errStr       string
+		duration             time.Duration
+	}
+	entries := make([]uploadEntry, 0, len(manifest.Artifacts))
 	for _, spec := range manifest.Artifacts {
 		if strings.TrimSpace(spec.Path) == "" {
 			continue
@@ -482,58 +508,106 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 		attempted++
 		remotePath := artifacts.ResolveRemotePath(root, spec.Path)
 		remotePath = runner.ExpandTilde(remotePath)
-
 		info, statErr := os.Stat(remotePath)
+		entry := uploadEntry{spec: spec, remotePath: remotePath, info: info, statErr: statErr, coveredBy: -1}
 		if statErr != nil {
-			// A declared artifact absent from disk is a failed entry, not a
-			// skipped one (spec: PerArtifactUploadOutcomeRecorded).
-			fmt.Fprintf(os.Stderr, "artifact %q for job %d: %v\n", spec.Path, jobID, statErr)
-			failed++
-			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
-				Dir:    spec.Path,
-				Status: runner.UploadStatusFailed,
-				Error:  statErr.Error(),
-			})
+			entries = append(entries, entry)
 			continue
 		}
-		var (
-			src, dest, rcloneCmd string
-			fileCount            int
-			bytes                int64
-		)
-		localRel := artifacts.LocalRelativePath(spec.Path)
+		localRel := filepath.ToSlash(artifacts.LocalRelativePath(spec.Path))
+		dest := filesPrefix + localRel
+		if outputRel, ok := r2resolve.ConventionOutputRelPath(manifest, spec.Path, outputDirs); ok {
+			dest = outputsPrefix + outputRel
+		}
 		if info.IsDir() {
 			var measured bool
-			fileCount, bytes, measured = measureUploadTree(remotePath)
+			entry.fileCount, entry.bytes, measured = measureUploadTree(remotePath)
 			if !measured {
-				bytes = -1
+				entry.bytes = -1
 			}
-			src, dest, rcloneCmd = remotePath+"/", filesPrefix+localRel+"/", "copy"
+			entry.src, entry.dest, entry.rcloneCmd = remotePath+"/", dest+"/", "copy"
 		} else {
-			fileCount, bytes = 1, info.Size()
-			src, dest, rcloneCmd = remotePath, filesPrefix+localRel, "copyto"
+			entry.fileCount, entry.bytes = 1, info.Size()
+			entry.src, entry.dest, entry.rcloneCmd = remotePath, dest, "copyto"
+		}
+		entries = append(entries, entry)
+	}
+
+	// Collapse lexical duplicates and declarations covered by an ancestor
+	// directory. All declarations remain in the manifest and receive a logical
+	// outcome below; only the payload owner invokes rclone.
+	for i := range entries {
+		if entries[i].statErr != nil {
+			continue
+		}
+		for j := range entries {
+			if i == j || entries[j].statErr != nil {
+				continue
+			}
+			sameObject := filepath.Clean(entries[i].remotePath) == filepath.Clean(entries[j].remotePath) &&
+				strings.TrimRight(entries[i].dest, "/") == strings.TrimRight(entries[j].dest, "/")
+			parentObject := entries[j].info.IsDir() && pathWithin(entries[j].remotePath, entries[i].remotePath) &&
+				keyWithin(entries[j].dest, entries[i].dest)
+			if (sameObject && j < i) || parentObject {
+				if entries[i].coveredBy < 0 || len(entries[j].dest) < len(entries[entries[i].coveredBy].dest) {
+					entries[i].coveredBy = j
+				}
+			}
+		}
+	}
+
+	for i := range entries {
+		entry := &entries[i]
+		if entry.statErr != nil {
+			fmt.Fprintf(os.Stderr, "artifact %q for job %d: %v\n", entry.spec.Path, jobID, entry.statErr)
+			entry.status, entry.errStr = runner.UploadStatusFailed, entry.statErr.Error()
+			failed++
+			continue
+		}
+		if entry.coveredBy >= 0 {
+			continue
 		}
 		start := time.Now()
-		uploadErr := rcloneUploadWithRetry(bucket, src, dest, rcloneCmd, jobID, runID, spec.Path, bytes)
-		duration := time.Since(start)
-		totalDuration += duration
-		status := runner.UploadStatusOK
-		var errStr string
+		uploadErr := uploadArtifactObject(bucket, entry.src, entry.dest, entry.rcloneCmd, jobID, runID, entry.spec.Path, entry.bytes)
+		entry.duration = time.Since(start)
+		totalDuration += entry.duration
+		entry.status = runner.UploadStatusOK
 		if uploadErr != nil {
 			failed++
-			status = runner.UploadStatusFailed
-			errStr = uploadErr.Error()
+			entry.status = runner.UploadStatusFailed
+			entry.errStr = uploadErr.Error()
+		}
+		result.FileCount += entry.fileCount
+		result.Bytes += entry.bytes
+	}
+	for i := range entries {
+		entry := &entries[i]
+		if entry.coveredBy >= 0 {
+			owner := &entries[entry.coveredBy]
+			entry.status, entry.errStr, entry.duration = owner.status, owner.errStr, owner.duration
+			if entry.status == runner.UploadStatusFailed {
+				failed++
+			}
 		}
 		result.Dirs = append(result.Dirs, runner.OutputDirUpload{
-			Dir: spec.Path, Status: status, Error: errStr,
-			FileCount: fileCount, Bytes: bytes, DurationMS: duration.Milliseconds(),
+			Dir: entry.spec.Path, Status: entry.status, Error: entry.errStr,
+			FileCount: entry.fileCount, Bytes: entry.bytes, DurationMS: entry.duration.Milliseconds(),
 		})
-		result.FileCount += fileCount
-		result.Bytes += bytes
 	}
 
 	finalizeUploadResult(&result, attempted, failed, startedAt, totalDuration)
 	return result
+}
+
+func pathWithin(parent, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func keyWithin(parent, child string) bool {
+	parent = strings.TrimRight(parent, "/")
+	child = strings.TrimRight(child, "/")
+	return child != parent && strings.HasPrefix(child, parent+"/")
 }
 
 // outputUploadRcloneArgs builds the rclone filter args for a convention-output
@@ -555,7 +629,7 @@ func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID, runID in
 	opts.Source = src
 	opts.DestRemote = "r2:" + bucket + "/" + r2Key
 	opts.Command = rcloneCmd
-	if rcloneCmd == "copy" {
+	if rcloneCmd == "copy" || rcloneCmd == "copyto" {
 		opts.Extra = []string{"--update"}
 	}
 	if sizeBytes < 0 {
@@ -834,10 +908,10 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 // out-of-band heartbeat (call this on phase transitions so phase changes
 // land on R2 within network-latency rather than within the 30-second
 // tick); `stop` halts the ticker.
-func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, getPhase func() string) (force func(), stop func()) {
+func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, getPhase func() string, publication *publicationState) (force func(), stop func()) {
 	heartbeatKey := r2keys.InstanceHeartbeat(instanceID)
 	emit := func() {
-		sample := collectHeartbeat(getPhase(), diskPath)
+		sample := collectHeartbeatWithPublication(getPhase(), diskPath, publication)
 		data, err := json.Marshal(sample)
 		if err != nil {
 			return
@@ -951,8 +1025,8 @@ func startOutputUploader(bucket string, jobID, runID int64, workDir string, sinc
 
 	workDir = runner.ExpandTilde(workDir)
 	upload := func() {
+		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir, outputDirs)
 		_ = uploadOutputDirs(bucket, jobID, runID, workDir, sinceUnix, outputDirs)
-		_ = uploadArtifactManifestEntries(bucket, jobID, runID, workDir)
 	}
 
 	fatalAgentGo("output-uploader", func() {

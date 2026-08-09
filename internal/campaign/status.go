@@ -134,6 +134,17 @@ type HeartbeatSample struct {
 	AgentAlive     *bool   `json:"agent_alive,omitempty"`
 	AgentFatal     string  `json:"agent_fatal,omitempty"`
 	AgentProtocol  int     `json:"agent_protocol"`
+	Publication    struct {
+		QueuedItems        int    `json:"queued_items"`
+		QueuedBytes        *int64 `json:"queued_bytes,omitempty"`
+		InflightItems      int    `json:"inflight_items"`
+		InflightBytes      *int64 `json:"inflight_bytes,omitempty"`
+		OldestQueuedAtUnix int64  `json:"oldest_queued_at_unix,omitempty"`
+		RetainedBytes      *int64 `json:"retained_bytes,omitempty"`
+		WorkerLimit        int    `json:"worker_limit"`
+		WorkersBusy        int    `json:"workers_busy"`
+		LastProgressAtUnix int64  `json:"last_progress_at_unix,omitempty"`
+	} `json:"publication"`
 }
 
 // InstanceUpdate is a snapshot of cloud instance + job state.

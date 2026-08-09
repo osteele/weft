@@ -138,6 +138,43 @@ func TestHasFailureSignal(t *testing.T) {
 	}
 }
 
+func TestJobPublicationDiagnosticLinesPreserveUnknownQuantities(t *testing.T) {
+	database := db.SetupTestDB(t)
+	const jobID = int64(4616)
+	if _, err := database.Exec(`INSERT INTO jobs (id, command, working_dir, created_at) VALUES (?, 'true', '/tmp', 1)`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	attemptID, err := db.CreateAttempt(database, jobID, "host-alpha", nil, db.StatusCompleted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	progress := int64(110)
+	if _, err := db.UpsertAttemptPublicationState(database, &db.AttemptPublicationState{
+		AttemptID: attemptID, JobID: jobID, Sequence: 1, ObservedAt: 120,
+		ExecutionState:         db.PublicationExecutionComplete,
+		RequiredArtifactsState: db.PublicationStateUnknown,
+		DrainState:             db.PublicationStatePending,
+		QueuedItems:            &zero, QueuedBytes: nil, LastProgressAt: &progress,
+		UnknownReason: "publication report lookup timed out",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Join(jobPublicationDiagnosticLines(database, job), "\n")
+	for _, want := range []string{"Execution: complete", "Artifacts: unknown", "Drain: pending", "0 item(s) remaining", "Publication unknown: publication report lookup timed out"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("diagnostics missing %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "0 B remaining") {
+		t.Fatalf("unknown bytes rendered as zero:\n%s", lines)
+	}
+}
+
 // Regression (wb18): weft info must show the constraint that actually
 // rejects hosts (the driver/CUDA floor) with its provenance, not just the
 // usually-inert arch cap.

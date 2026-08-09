@@ -89,6 +89,9 @@ func JobAttemptLiveTelemetry(jobID, runID int64) string {
 func JobAttemptMaintenance(jobID, runID int64) string {
 	return dataplane.JobAttemptMaintenance(jobID, runID)
 }
+func JobAttemptPublicationReport(jobID, runID int64) string {
+	return dataplane.JobAttemptPublicationReport(jobID, runID)
+}
 
 func GracePrefix(instanceID int64) string  { return controlplane.GracePrefix(instanceID) }
 func GraceStatus(instanceID int64) string  { return controlplane.GraceStatus(instanceID) }

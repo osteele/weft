@@ -55,6 +55,12 @@ type jobSequenceConfig struct {
 	// etc.) to terminate the rental and let Weft's reconciler
 	// retry the affected jobs on a fresh instance.
 	SelfDestructCmd string
+
+	PublicationState         *publicationState
+	PublicationWorkers       int
+	PublicationQueueCapacity int
+	PublicationMaxRetained   int64
+	BGWorkManager            *bgWorkManager
 }
 
 // agentRentalEnv builds the rental-context env vars set by the agent for
@@ -719,7 +725,21 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	}
 
 	var result jobSequenceResult
-	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
+	bgm := cfg.BGWorkManager
+	ownsBGWork := bgm == nil
+	if bgm == nil {
+		bgm = newBGWorkManagerForScope(
+			jobs,
+			cfg.SkipWorkdirDeletion,
+			cfg.PublicationWorkers,
+			cfg.PublicationQueueCapacity,
+			cfg.PublicationState,
+			fmt.Sprintf("instance-%d", cfg.InstanceID),
+		)
+		bgm.maxRetainedBytes = cfg.PublicationMaxRetained
+	} else {
+		bgm.RegisterNewJobs(jobs)
+	}
 	setupPrewarms := newSetupPrewarmManager()
 	gpuWarmedUp := false
 	canceledAttempts := map[int64]struct{}{}
@@ -1074,12 +1094,15 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	if newJobsPoller != nil {
 		newJobsPoller.Stop()
 	}
-	bgm.Barrier()
-	if lastPostJobID > 0 {
-		setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
+	if ownsBGWork {
+		bgm.Barrier()
+		if lastPostJobID > 0 {
+			setSequencePhase(cfg, fmt.Sprintf("post_job_uploads_drained:%d", lastPostJobID), lastPostJobID)
+		}
+		result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
+		bgm.CleanupWorkdirs()
+		bgm.Close()
 	}
-	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
-	bgm.CleanupWorkdirs()
 	return result
 }
 
@@ -1145,6 +1168,20 @@ func runSlottedJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequ
 		newJobsPoller = startJobRequestPoller(cfg.R2Bucket, cfg.InstanceID)
 	}
 
+	bgm := cfg.BGWorkManager
+	ownsBGWork := bgm == nil
+	if bgm == nil {
+		bgm = newBGWorkManagerForScope(
+			jobs,
+			cfg.SkipWorkdirDeletion,
+			cfg.PublicationWorkers,
+			cfg.PublicationQueueCapacity,
+			cfg.PublicationState,
+			fmt.Sprintf("instance-%d", cfg.InstanceID),
+		)
+		bgm.maxRetainedBytes = cfg.PublicationMaxRetained
+	}
+
 	type slotResult struct {
 		result jobSequenceResult
 	}
@@ -1156,15 +1193,15 @@ func runSlottedJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequ
 			slotCfg.DisableJobPolling = true
 			slotCfg.SkipWorkdirDeletion = true
 			slotCfg.ConcurrentSlot = true
+			slotCfg.BGWorkManager = bgm
 			ch <- slotResult{result: runJobSequence([]cloud.AgentJob{job}, slotCfg)}
 		})
 	}
 
 	var result jobSequenceResult
-	summaries := make([]runner.JobCompletionSummary, 0, len(jobs))
 	for range jobs {
 		r := (<-ch).result
-		mergeJobSequenceResult(&result, r, &summaries)
+		mergeJobSequenceResult(&result, r, nil)
 	}
 	if newJobsPoller != nil {
 		newJobs := newJobsPoller.Take(func(phase string) {
@@ -1177,14 +1214,20 @@ func runSlottedJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequ
 		newJobsPoller = nil
 		if len(newJobs) > 0 {
 			fmt.Printf("Picked up %d new job(s) after slotted jobs drained\n", len(newJobs))
-			followup := runJobSequence(newJobs, cfg)
-			mergeJobSequenceResult(&result, followup, &summaries)
+			followupCfg := cfg
+			followupCfg.BGWorkManager = bgm
+			followup := runJobSequence(newJobs, followupCfg)
+			mergeJobSequenceResult(&result, followup, nil)
 			jobs = append(jobs, newJobs...)
 		}
 	}
+	bgm.Barrier()
 	sort.Slice(result.FailedJobs, func(i, j int) bool { return result.FailedJobs[i] < result.FailedJobs[j] })
-	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, summaries...)
-	cleanupSlottedWorkdirs(jobs, cfg.SkipWorkdirDeletion)
+	result.CompletionManifest = collectCompletionManifest(cfg.LogDir, jobs, bgm.CompletionSummaries()...)
+	bgm.CleanupWorkdirs()
+	if ownsBGWork {
+		bgm.Close()
+	}
 	return result
 }
 
@@ -1194,7 +1237,7 @@ func mergeJobSequenceResult(dst *jobSequenceResult, src jobSequenceResult, summa
 	dst.AnyInfraFailed = dst.AnyInfraFailed || src.AnyInfraFailed
 	dst.AnyCanceled = dst.AnyCanceled || src.AnyCanceled
 	dst.StartedJobCount += src.StartedJobCount
-	if src.CompletionManifest != nil {
+	if summaries != nil && src.CompletionManifest != nil {
 		*summaries = append(*summaries, src.CompletionManifest.Jobs...)
 	}
 }

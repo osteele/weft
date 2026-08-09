@@ -1,0 +1,308 @@
+-- allium: 3
+-- background-work.allium
+--
+-- Scope: Deferred data-plane work owned by an agent after command execution.
+-- Includes: byte ownership, publication queue capacity, artifact readiness,
+--           drain completion, same-workdir barriers, and restart semantics.
+-- Excludes: job execution status, provider lifecycle, and placement policy.
+
+external entity Job {
+    id: Integer
+    working_dir: String
+    produces: List<String>
+    output_dirs: List<String>
+}
+
+external entity JobAttempt {
+    id: Integer
+    job: Job
+    run_id: Integer
+}
+
+external entity CloudInstance {
+    id: Integer
+}
+
+value BackgroundItemKind = diagnostic_results | required_artifact |
+			   convention_output | maintenance
+
+value BackgroundItemState = queued | running | succeeded | failed | canceled
+
+value ReadinessState = pending | ready | failed | unknown
+
+value BackgroundItem {
+    kind: BackgroundItemKind
+    job_id: Integer
+    run_id: Integer
+    instance_id: Integer?
+    source: String
+    destination: String
+    bytes_total: Integer?
+    bytes_completed: Integer
+    retained_local_bytes: Integer?
+    state: BackgroundItemState
+    enqueued_at: Timestamp
+    started_at: Timestamp?
+    completed_at: Timestamp?
+    readiness_condition: String?
+    dependent_job_ids: List<Integer>
+}
+
+value CompletionFacets {
+    execution_complete: Boolean
+    execution_completed_at: Timestamp?
+    required_artifacts: ReadinessState
+    required_artifacts_ready_at: Timestamp?
+    drain: ReadinessState
+    drain_completed_at: Timestamp?
+    detail: String?
+}
+
+value PublicationSnapshot {
+    queued_items: Integer
+    queued_bytes: Integer?
+    inflight_items: Integer
+    inflight_bytes: Integer?
+    oldest_queued_age: Duration?
+    retained_bytes: Integer?
+    worker_limit: Integer
+    workers_busy: Integer
+    last_progress_at: Timestamp?
+}
+
+entity PublicationManager {
+    instance: CloudInstance?
+    worker_limit: Integer
+    queue_capacity: Integer
+    items: List<BackgroundItem>
+}
+
+config {
+    publication_workers: Integer = 1
+    publication_queue_capacity: Integer = 16
+    publication_max_retained_bytes: Integer = 0
+}
+
+-- ==========================================================================
+-- Byte ownership and accounting
+-- ==========================================================================
+
+invariant EveryPayloadHasOneOwner {
+    for item in BackgroundItems:
+	item.kind != null
+	item.job_id > 0
+	item.run_id >= 0
+	item.source != ""
+	item.destination != ""
+}
+
+invariant ByteCountersAreThreeState {
+    for item in BackgroundItems:
+	item.bytes_total = null or item.bytes_total >= 0
+	item.retained_local_bytes = null or item.retained_local_bytes >= 0
+	item.bytes_completed >= 0
+	item.bytes_total != null implies item.bytes_completed <= item.bytes_total
+
+    @guidance
+	-- null means measurement was unavailable. It must not be serialized,
+	-- displayed, or scored as zero. A measured empty payload is zero.
+}
+
+invariant OnePayloadCopyForOverlappingDeclaration {
+    for attempt in JobAttempts:
+	for artifact in DeclaredArtifacts(attempt):
+	    when artifact.path is beneath EffectiveOutputDirs(attempt.job):
+		count(PayloadTransfers(attempt, artifact.path)) == 1
+
+    @guidance
+	-- The logical artifact name and the convention-output lookup may both
+	-- resolve to the one object. They do not require two object payloads.
+	-- Manifest and marker objects are metadata and are not payload copies.
+}
+
+rule LogicalReferencesMayShareOneObject {
+    when: a declared artifact is also a convention output
+
+    ensures: ArtifactLookup(artifact) resolves to the uploaded object
+    ensures: ConventionOutputLookup(artifact.path) resolves to the same bytes
+    ensures: DownstreamNeed(artifact) resolves to the same bytes
+}
+
+-- ==========================================================================
+-- Completion facets
+-- ==========================================================================
+
+invariant ExecutionStatusRemainsAuthoritative {
+    for attempt in JobAttempts:
+	attempt.job.status is not derived from attempt.completion_facets.required_artifacts
+	attempt.job.status is not derived from attempt.completion_facets.drain
+
+    @guidance
+	-- `completed` means command execution ended with a recorded outcome.
+	-- Publication state is stored or derived separately; display code must
+	-- not rewrite jobs.status because an upload is pending or failed.
+}
+
+rule ExecutionCompletionPrecedesDeferredPublication {
+    when: CommandOutcomeRecorded(attempt)
+
+    ensures: attempt.completion_facets.execution_complete = true
+    ensures: attempt.completion_facets.execution_completed_at != null
+    ensures: attempt.completion_facets.required_artifacts in {pending, ready, failed, unknown}
+    ensures: attempt.completion_facets.drain in {pending, ready, failed, unknown}
+}
+
+rule RequiredArtifactsBecomeReady {
+    when: every declared artifact payload for attempt is durably committed
+
+    ensures: attempt.completion_facets.required_artifacts = ready
+    ensures: attempt.completion_facets.required_artifacts_ready_at != null
+    ensures: RequiredArtifactsReadyMarker(attempt) exists
+}
+
+rule RequiredArtifactFailureIsExplicit {
+    when: a declared artifact is confirmed missing or its upload exhausts its bounded retry contract
+
+    ensures: attempt.completion_facets.required_artifacts = failed
+    ensures: attempt.completion_facets.detail names the failed artifact or upload
+    ensures: RequiredArtifactsReadyMarker(attempt) records failed
+}
+
+rule DrainBecomesComplete {
+    when: every background item owned by attempt is in {succeeded, failed, canceled}
+
+    ensures: attempt.completion_facets.drain in {ready, failed}
+    ensures: attempt.completion_facets.drain_completed_at != null
+    ensures: DrainCompleteMarker(attempt) exists
+}
+
+invariant UnknownDoesNotReleaseOrDestroy {
+    for attempt in JobAttempts:
+	attempt.completion_facets.required_artifacts = unknown implies
+	    CrossInstanceDependentsReleased(attempt) = false
+	attempt.completion_facets.drain = unknown implies
+	    DestructiveCleanupAuthorizedByDrain(attempt) = false
+}
+
+rule CrossInstanceNeedsWaitForReadyPayload {
+    when: consumer needs artifact from producer on another execution target
+
+    requires: ArtifactObject(producer, artifact) is confirmed present
+    ensures: consumer may start staging artifact
+
+    @guidance
+	-- A lookup error is unknown. A missing object is pending until a
+	-- failed/complete publication marker confirms that no later upload can
+	-- make it ready. Neither state is reported as "did not produce".
+}
+
+rule SameInstanceNeedsMayUseSharedWorkdir {
+    when: consumer needs artifact from producer on the same instance
+    requires: SharedWorkdirVisibilityGuaranteed(producer, consumer)
+    requires: producer command completed successfully
+
+    ensures: consumer need may be satisfied without an R2 ready marker
+}
+
+-- ==========================================================================
+-- Bounded publication
+-- ==========================================================================
+
+invariant WorkerLimitIsGlobalPerAgent {
+    for manager in PublicationManagers:
+	count(manager.items where state = running) <= manager.worker_limit
+
+    @guidance
+	-- Packed GPU slots share one manager. Constructing one manager per
+	-- slot would multiply the configured limit and violate this invariant.
+}
+
+invariant QueueCapacityIsExplicit {
+    for manager in PublicationManagers:
+	count(manager.items where state = queued) <= manager.queue_capacity
+}
+
+rule RetainedByteAdmissionBound {
+    when: publication_max_retained_bytes > 0
+
+    requires: retained bytes are positively measured
+    ensures: a new chain waits when admitting it would exceed the bound
+    ensures: one chain may run alone when its size is unknown or exceeds the bound
+
+    @guidance
+	-- Allowing one chain is the progress exception. Unknown retention does
+	-- not authorize accumulating a second chain, and no unknown observation
+	-- authorizes deletion, termination, or requeue.
+}
+
+rule QueueHighWaterAppliesBackpressure {
+    when: EnqueueRequested(manager) and QueuedCount(manager) = manager.queue_capacity
+
+    ensures: enqueue waits for capacity
+    ensures: no untracked goroutine is created to bypass capacity
+    ensures: no queued workdir or log snapshot is deleted
+}
+
+rule PublicationPriority {
+    when: a worker selects its next ready item
+
+    ensures: diagnostic_results precedes all other ready kinds
+    ensures: required_artifact precedes convention_output and maintenance
+    ensures: convention_output precedes maintenance
+
+    @guidance
+	-- FIFO breaks ties within a kind. Correctness barriers can make a
+	-- lower-priority item temporarily non-ready; priority does not bypass
+	-- dependency or same-workdir constraints.
+}
+
+invariant SnapshotReconcilesWithQueue {
+    for manager in PublicationManagers:
+	manager.snapshot.queued_items = count(manager.items where state = queued)
+	manager.snapshot.inflight_items = count(manager.items where state = running)
+	manager.snapshot.workers_busy <= manager.snapshot.worker_limit
+}
+
+rule SameWorkdirBarrier {
+    when: next job would use a workdir retained by an outstanding item
+
+    ensures: next job waits until those items are terminal
+}
+
+rule BenchmarkBarrier {
+    when: a benchmark-isolation job is ready to start
+
+    ensures: all earlier background items are terminal
+    ensures: manager.snapshot.queued_items = 0
+    ensures: manager.snapshot.inflight_items = 0
+}
+
+-- ==========================================================================
+-- Recovery
+-- ==========================================================================
+
+rule AgentRestartRecoversOutstandingPublication {
+    when: agent starts on a disk containing retained post-job snapshots
+
+    ensures: each recoverable snapshot becomes one queued item
+    ensures: already committed payload objects are not transferred again
+    ensures: incomplete objects are not marked ready
+}
+
+invariant TerminalMarkersAreCommitRecords {
+    for attempt in JobAttempts:
+	RequiredArtifactsReadyMarker(attempt) exists implies
+	    attempt.completion_facets.required_artifacts in {ready, failed}
+	DrainCompleteMarker(attempt) exists implies
+	    attempt.completion_facets.drain in {ready, failed}
+}
+
+-- Implementation anchors:
+--   cmd/agent/bgwork.go                 Publication manager and snapshots.
+--   cmd/agent/runinstance.go            Payload upload and byte accounting.
+--   cmd/agent/jobloop.go                execution/publication boundaries.
+--   cmd/agent/heartbeat.go              live backlog telemetry.
+--   internal/runner/job.go              durable completion facets.
+--   internal/r2resolve/resolve.go       three-state dependency resolution.
+--   internal/db/publication.go          authoritative attempt facet storage.
+--   cmd/job_diagnostics.go              operator-facing facet rendering.

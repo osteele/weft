@@ -186,6 +186,51 @@ func TestTargetedSyncJobsRunsTargetedCloudCompletionBeforeRentalSync(t *testing.
 	}
 }
 
+func TestTargetedSyncJobsRefreshesTerminalRentalPublication(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusCompleted, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "rental", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	exitCode := 0
+	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	origTargeted := syncTargetedCloudCompletionsFunc
+	origRental := syncRentalJobsStatusFunc
+	t.Cleanup(func() {
+		syncTargetedCloudCompletionsFunc = origTargeted
+		syncRentalJobsStatusFunc = origRental
+	})
+
+	var gotIDs []int64
+	syncTargetedCloudCompletionsFunc = func(_ *sql.DB, ids []int64, _ time.Duration) int {
+		gotIDs = append(gotIDs, ids...)
+		return 1
+	}
+	syncRentalJobsStatusFunc = func(_ *sql.DB, _ time.Duration) bool { return true }
+
+	targetedSyncJobs(database, []*db.Job{job}, 5*time.Second, time.Second, 7*time.Second)
+	if len(gotIDs) != 1 || gotIDs[0] != jobID {
+		t.Fatalf("targeted terminal rental IDs = %v, want [%d]", gotIDs, jobID)
+	}
+}
+
 func TestTargetedStaleDataNoteDistinguishesDeadlineAndError(t *testing.T) {
 	database := db.SetupTestDB(t)
 	now := time.Now()

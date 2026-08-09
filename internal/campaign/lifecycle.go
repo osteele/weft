@@ -2846,6 +2846,7 @@ func LaunchInstance(
 		RequestedDiskGB:     requestedDiskGB,
 		RequiredDriverMajor: group.MinDriverVersion,
 		Drain:               drainSettingsFromConfig(),
+		Publication:         publicationSettingsFromConfig(),
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
@@ -3106,5 +3107,18 @@ func drainSettingsFromConfig() cloud.DrainSettings {
 		MarkerTimeoutSeconds:       d.MarkerTimeoutSeconds,
 		PaceCheckAfterSeconds:      d.PaceCheckAfterSeconds,
 		MinThroughputFraction:      d.MinThroughputFraction,
+	}
+}
+
+func publicationSettingsFromConfig() cloud.PublicationSettings {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return cloud.PublicationSettings{}
+	}
+	p := cfg.Cloud.Publication
+	return cloud.PublicationSettings{
+		Workers:          p.Workers,
+		QueueCapacity:    p.QueueCapacity,
+		MaxRetainedBytes: p.MaxRetainedBytes,
 	}
 }

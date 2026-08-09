@@ -25,21 +25,26 @@ type HeartbeatSample struct {
 	// LoadAvg1 is the system 1-minute load average, used together with
 	// CPUCount by the dashboard/host-list TUI to render a CPU bar for
 	// cloud rentals. Zero values are treated as "unavailable".
-	LoadAvg1                 float64 `json:"load_avg_1,omitempty"`
-	CPUCount                 int     `json:"cpu_count,omitempty"`
-	DiskFreeBytes            int64   `json:"disk_free_bytes"`
-	DiskTotalBytes           int64   `json:"disk_total_bytes"`
-	AgentPID                 int     `json:"agent_pid,omitempty"`
-	AgentAlive               *bool   `json:"agent_alive,omitempty"`
-	AgentFatal               string  `json:"agent_fatal,omitempty"`
-	AgentProtocol            int     `json:"agent_protocol"`
-	OOMScoreAdj              int     `json:"oom_score_adj"`
-	R2PutFailuresConsecutive int     `json:"r2_put_failures_consecutive,omitempty"`
-	R2PutLastError           string  `json:"r2_put_last_error,omitempty"`
+	LoadAvg1                 float64             `json:"load_avg_1,omitempty"`
+	CPUCount                 int                 `json:"cpu_count,omitempty"`
+	DiskFreeBytes            int64               `json:"disk_free_bytes"`
+	DiskTotalBytes           int64               `json:"disk_total_bytes"`
+	AgentPID                 int                 `json:"agent_pid,omitempty"`
+	AgentAlive               *bool               `json:"agent_alive,omitempty"`
+	AgentFatal               string              `json:"agent_fatal,omitempty"`
+	AgentProtocol            int                 `json:"agent_protocol"`
+	OOMScoreAdj              int                 `json:"oom_score_adj"`
+	R2PutFailuresConsecutive int                 `json:"r2_put_failures_consecutive,omitempty"`
+	R2PutLastError           string              `json:"r2_put_last_error,omitempty"`
+	Publication              publicationSnapshot `json:"publication"`
 }
 
 // collectHeartbeat gathers host-level metrics and returns a HeartbeatSample.
 func collectHeartbeat(phase, diskPath string) HeartbeatSample {
+	return collectHeartbeatWithPublication(phase, diskPath, nil)
+}
+
+func collectHeartbeatWithPublication(phase, diskPath string, publication *publicationState) HeartbeatSample {
 	gpu := runner.HostGPUMetrics()
 	memTotal, memUsed, memAvailable := runner.HostMemoryStatsKB()
 	diskUsed, diskTotal := probeDiskUsageAtPath(diskPath)
@@ -59,6 +64,7 @@ func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 		DiskFreeBytes:  diskTotal - diskUsed,
 		DiskTotalBytes: diskTotal,
 		AgentProtocol:  controlplane.AgentProtocolVersion,
+		Publication:    publication.get(),
 	}
 }
 

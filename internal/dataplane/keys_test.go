@@ -13,3 +13,9 @@ func TestJobAttemptArtifactManifest(t *testing.T) {
 		t.Fatalf("JobAttemptArtifactManifest = %q", got)
 	}
 }
+
+func TestJobAttemptPublicationReport(t *testing.T) {
+	if got := JobAttemptPublicationReport(17, 23); got != "jobs/17/runs/23/publication.json" {
+		t.Fatalf("JobAttemptPublicationReport = %q", got)
+	}
+}

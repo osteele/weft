@@ -822,7 +822,7 @@ rule PreflightRejectionClosesAttempt {
 -- ==========================================================================
 -- Artifact uploads (cloud agent)
 -- ==========================================================================
--- The cloud agent uploads job outputs to R2 in two parallel ways:
+-- The cloud agent publishes job outputs to R2 through two logical paths:
 --   1. Convention-based output directories (the job's configured output_dirs,
 --      defaulting to output/ and outputs/ in the working dir) -- uploaded by
 --      uploadOutputDirs. The uploader must walk exactly the dirs discovery
@@ -831,7 +831,10 @@ rule PreflightRejectionClosesAttempt {
 --      lost at instance teardown.
 --   2. Declared --produces artifacts -- uploaded by uploadArtifactManifestEntries
 --      using the manifest at $WEFT_ARTIFACT_MANIFEST.
--- Each runs on a 60-second ticker during the job, and once more in a final
+-- Declared artifacts run first. A declaration beneath an effective convention
+-- output directory uses the outputs/ key as its sole payload backing; the
+-- following convention walk uses --update and does not transfer it again.
+-- Each path runs on a 60-second ticker during the job, and once more in a final
 -- flush after the script exits, then again as background post-job work
 -- before the agent self-destructs.
 
@@ -869,6 +872,34 @@ rule ArtifactUploadHasNoSizeCap {
         -- (checkpoints, representation tensors) being available, subject to
         -- the per-invocation timeout below and to disk available on the
         -- rental.
+}
+
+rule DeclaredConventionOutputHasSingleBacking {
+    when: cloud_agent uploads declared artifact
+    requires: artifact root is the job working directory
+    requires: artifact path is relative, lexically contained by an effective convention output directory
+
+    ensures: artifact payload is uploaded to its per-run outputs key before convention bulk copy
+    ensures: artifact payload is not uploaded under the per-run artifact-files prefix
+    ensures: convention bulk copy uses update semantics and does not transfer the payload again
+    ensures: artifact manifest retains every declared name and path
+    ensures: artifact list, get, cat, sync, and downstream needs resolve the outputs key
+
+    @guidance
+	-- The manifest remains the logical namespace; sharing a payload object
+	-- must not erase aliases. Lexically equivalent declarations and child
+	-- declarations covered by an existing declared directory upload share
+	-- the same transfer while retaining per-declaration outcomes.
+	--
+	-- A declared artifact upload is not subject to the attempt mtime
+	-- cutoff. This preserves an explicit --produces contract for a file
+	-- whose timestamp predates the attempt. Only the later convention walk
+	-- applies the cutoff.
+	--
+	-- Custom artifact roots, absolute paths, escaping paths, and relative
+	-- paths outside effective convention directories retain artifact-files
+	-- backing. Retrieval probes both representations for compatibility
+	-- with runs uploaded before this rule.
 }
 
 rule ArtifactUploadTimeoutScalesWithSize {

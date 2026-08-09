@@ -466,6 +466,11 @@ func SyncTargetedCloudJobResultsWithClient(ctx context.Context, database *sql.DB
 		if ctx.Err() != nil {
 			break
 		}
+		// Publication reports live outside the results prefix and can advance
+		// after the completion marker has been processed. Refresh the requested
+		// attempt independently of the completion-marker gate so diagnostics do
+		// not remain pinned to an earlier pending sequence.
+		syncTargetedAttemptPublication(ctx, r2Client, database, jobID)
 		markers, err := r2Client.ListJobMarkers(ctx, r2keys.JobPrefix(jobID)+"/")
 		if err != nil {
 			if verbose {
@@ -488,6 +493,17 @@ func SyncTargetedCloudJobResultsWithClient(ctx context.Context, database *sql.DB
 		updateInstanceTerminationReason(database, instanceID)
 	}
 	return updated
+}
+
+func syncTargetedAttemptPublication(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) {
+	var runID sql.NullInt64
+	if err := database.QueryRow(
+		`SELECT latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0`,
+		jobID,
+	).Scan(&runID); err != nil || !runID.Valid || runID.Int64 <= 0 {
+		return
+	}
+	syncAttemptPublicationReport(ctx, r2Client, database, jobID, runID.Int64)
 }
 
 func listCloudAttemptSyncCandidates(database *sql.DB) ([]cloudAttemptSyncCandidate, error) {
@@ -612,6 +628,9 @@ func syncOneCompletedJobMarker(
 		}
 		return completedMarkerResult{}
 	}
+	if latestRunID.Valid {
+		syncAttemptPublicationReport(ctx, r2Client, database, jobID, latestRunID.Int64)
+	}
 
 	needsBackfill := false
 	if db.IsTerminalStatus(currentStatus) {
@@ -622,14 +641,22 @@ func syncOneCompletedJobMarker(
 			return completedMarkerResult{}
 		}
 		if !needsBackfill {
+			if latestRunID.Valid {
+				deferSettlement, settleErr := shouldDeferCompletionSettlement(database, latestRunID.Int64, launchID)
+				if settleErr != nil || deferSettlement {
+					slog.Debug("leaving completion unprocessed until publication drain is observed",
+						"component", "sync", "job_id", jobID, "run_id", latestRunID.Int64, "error", settleErr)
+					return completedMarkerResult{}
+				}
+			}
 			slog.Debug("skipping cloud completion sync for terminal job with complete metadata",
 				"component", "sync", "job_id", jobID, "reason", "terminal_complete_skip")
-			// Mark every observed .complete marker for this job as processed
-			// at its own attempt key, so the per-attempt gate skips this job
-			// on future syncs. Using the paired key handles both per-attempt
-			// (cloud) and job-scoped (inventory) markers uniformly.
-			for completeKey := range markers.CompletedKeysForJob(jobID) {
-				_ = r2Client.PutMarker(ctx, r2.PairedProcessedKey(completeKey))
+			if latestRunID.Valid {
+				settleCompletedAttempt(ctx, r2Client, jobID, latestRunID.Int64, markers.CompletedKeysForJob(jobID))
+			} else {
+				for completeKey := range markers.CompletedKeysForJob(jobID) {
+					_ = r2Client.PutMarker(ctx, r2.PairedProcessedKey(completeKey))
+				}
 			}
 			return completedMarkerResult{}
 		}
@@ -676,6 +703,7 @@ func syncCompletedJobAtRun(
 	verbose bool,
 	observedCompleteKeys map[string]struct{},
 ) completedMarkerResult {
+	syncAttemptPublicationReport(ctx, r2Client, database, jobID, runID)
 	processed, err := r2Client.ObjectExists(ctx, r2keys.JobAttemptProcessed(jobID, runID))
 	if err != nil || processed {
 		return completedMarkerResult{}
@@ -705,6 +733,10 @@ func syncCompletedJobAtRun(
 		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err == nil {
 			haveDownload = true
 			exitCode, startTimeUnix, endTimeUnix, failureReason, killReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
+			if _, ingestErr := db.IngestCloudJobPublicationReport(database, tmpDir, jobIDStr, jobID, runID); ingestErr != nil {
+				slog.Warn("failed to ingest completion publication report",
+					"component", "sync", "job_id", jobID, "run_id", runID, "error", ingestErr)
+			}
 		}
 	}
 
@@ -792,27 +824,55 @@ func syncCompletedJobAtRun(
 	}
 
 	if source == campaign.SourceResults {
-		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
-		_ = r2Client.DeletePrefix(ctx, resultPrefix)
-		// Also mark any other observed .complete markers for this job
-		// as processed. Without this, a stale .complete for an earlier
-		// run that never got its .processed (e.g. agent crash mid-sync,
-		// or cleanupStaleAttempts advanced latest_run_id past it) would
-		// keep flipping HasUnprocessedComplete to true and trigger
-		// re-processing of the already-done canonical run on every
-		// subsequent sync tick.
-		canonicalProcessed := r2keys.JobAttemptProcessed(jobID, runID)
-		if observedCompleteKeys != nil {
-			for completeKey := range observedCompleteKeys {
-				otherProcessed := r2.PairedProcessedKey(completeKey)
-				if otherProcessed != canonicalProcessed {
-					_ = r2Client.PutMarker(ctx, otherProcessed)
-				}
-			}
+		deferSettlement, settleErr := shouldDeferCompletionSettlement(database, runID, sql.NullInt64{Int64: updatedInstanceID, Valid: updatedInstanceID > 0})
+		if settleErr != nil {
+			slog.Warn("failed to evaluate publication drain before completion cleanup",
+				"component", "sync", "job_id", jobID, "run_id", runID, "error", settleErr)
+			deferSettlement = true
+		}
+		if !deferSettlement {
+			settleCompletedAttempt(ctx, r2Client, jobID, runID, observedCompleteKeys)
 		}
 	}
 	os.RemoveAll(tmpDir)
 	return result
+}
+
+var syncAttemptPublicationReport = campaign.SyncAttemptPublicationReport
+
+func shouldDeferCompletionSettlement(database *sql.DB, runID int64, launchID sql.NullInt64) (bool, error) {
+	var drainState string
+	err := database.QueryRow(`SELECT drain_state FROM attempt_publication_state WHERE attempt_id = ?`, runID).Scan(&drainState)
+	if err == nil {
+		return drainState == db.PublicationStatePending, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return true, err
+	}
+	if !launchID.Valid || launchID.Int64 <= 0 {
+		return true, nil
+	}
+	launch, err := db.GetLaunch(database, launchID.Int64)
+	if err != nil {
+		return true, err
+	}
+	return !launch.IsTerminal(), nil
+}
+
+func settleCompletedAttempt(ctx context.Context, r2Client *r2.Client, jobID, runID int64, observedCompleteKeys map[string]struct{}) {
+	_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
+	_ = r2Client.DeletePrefix(ctx, r2keys.JobAttemptResultsPrefix(jobID, runID))
+
+	// Also mark any other observed .complete markers for this job as
+	// processed. Without this, an older attempt can keep the job in the full
+	// sync candidate set after the canonical attempt has settled.
+	canonicalProcessed := r2keys.JobAttemptProcessed(jobID, runID)
+	for completeKey := range observedCompleteKeys {
+		otherProcessed := r2.PairedProcessedKey(completeKey)
+		if otherProcessed != canonicalProcessed {
+			_ = r2Client.PutMarker(ctx, otherProcessed)
+		}
+	}
 }
 
 // recordCloudDownloadObservation derives effective HF download bandwidth from

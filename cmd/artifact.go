@@ -2950,6 +2950,7 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 	}
 
 	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
 	result := artifacts.SyncResult{}
 	for _, spec := range manifest.Artifacts {
 		if strings.TrimSpace(spec.Path) == "" {
@@ -2961,7 +2962,14 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		storedPath := artifacts.LocalStoredPath(job.ID, spec.Path)
 		localPath := filepath.Join(localRoot, storedPath)
 
-		size, sha, err := downloadCloudArtifact(store, filesPrefix, relPath, localPath, artifactTimeout)
+		objectKeys := make([]string, 0, 2)
+		if outputRel, ok := r2resolve.ConventionOutputRelPath(manifest, spec.Path, job.OutputDirs); ok {
+			objectKeys = append(objectKeys, outputsPrefix+outputRel)
+		}
+		// Keep the artifact-files key as a compatibility fallback for runs
+		// uploaded before convention-output declarations shared one backing.
+		objectKeys = append(objectKeys, filesPrefix+relPath)
+		size, sha, err := downloadCloudArtifactKeys(store, objectKeys, localPath, artifactTimeout)
 		if err != nil {
 			return result, fmt.Errorf("download artifact %s: %w", spec.Path, err)
 		}
@@ -3086,12 +3094,30 @@ func downloadCloudObjectToPathAtomic(store cloudArtifactObjectStore, key, dest s
 }
 
 func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string, idleTimeout time.Duration) (int64, string, error) {
-	r2Key := filesPrefix + relPath
+	return downloadCloudArtifactKeys(store, []string{filesPrefix + relPath}, localPath, idleTimeout)
+}
+
+func downloadCloudArtifactKeys(store cloudArtifactObjectStore, objectKeys []string, localPath string, idleTimeout time.Duration) (int64, string, error) {
+	var lastMissing error
+	for _, r2Key := range objectKeys {
+		size, sha, found, err := downloadCloudArtifactKey(store, r2Key, localPath, idleTimeout)
+		if err != nil {
+			return 0, "", err
+		}
+		if found {
+			return size, sha, nil
+		}
+		lastMissing = fmt.Errorf("%w: artifact object %s not found", r2resolve.ErrArtifactMissing, r2Key)
+	}
+	return 0, "", lastMissing
+}
+
+func downloadCloudArtifactKey(store cloudArtifactObjectStore, r2Key, localPath string, idleTimeout time.Duration) (int64, string, bool, error) {
 	listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	objects, err := store.ListObjects(listCtx, r2Key)
 	listCancel()
 	if err != nil {
-		return 0, "", err
+		return 0, "", false, err
 	}
 
 	dirPrefix := r2Key + "/"
@@ -3110,17 +3136,17 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 		h := sha256.New()
 		n, err := downloadCloudObjectToPathAtomic(store, r2Key, localPath, h, idleTimeout)
 		if err != nil {
-			return 0, "", err
+			return 0, "", false, err
 		}
-		return n, fmt.Sprintf("%x", h.Sum(nil)), nil
+		return n, fmt.Sprintf("%x", h.Sum(nil)), true, nil
 	}
 
 	if len(childKeys) == 0 {
-		return 0, "", fmt.Errorf("%w: artifact object %s not found", r2resolve.ErrArtifactMissing, r2Key)
+		return 0, "", false, nil
 	}
 
 	if err := os.MkdirAll(localPath, 0o755); err != nil {
-		return 0, "", err
+		return 0, "", false, err
 	}
 
 	var totalSize int64
@@ -3133,12 +3159,12 @@ func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath,
 		childPath := filepath.Join(localPath, filepath.FromSlash(relChild))
 		n, err := downloadCloudObjectToPathAtomic(store, key, childPath, nil, idleTimeout)
 		if err != nil {
-			return 0, "", err
+			return 0, "", false, err
 		}
 		totalSize += n
 	}
 
-	return totalSize, "", nil
+	return totalSize, "", true, nil
 }
 
 // listCloudJobOutputFiles lists output files for a job by checking R2 for
@@ -3230,10 +3256,11 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 	return result, errors.Join(listErrs...)
 }
 
-// dedupeArtifactSpellings collapses the dual upload of declared artifacts
-// that live under the convention output dirs: the same payload appears under
-// both the outputs prefix ("output/f") and the artifact-files prefix
-// (displayed "artifacts/output/f"). When sizes agree, keep one row,
+// dedupeArtifactSpellings collapses the legacy dual representation of
+// declared artifacts under convention output dirs. Runs uploaded before
+// single-backing publication may contain the same payload under the outputs
+// prefix ("output/f") and artifact-files prefix (displayed
+// "artifacts/output/f"). When sizes agree, keep one row,
 // preferring the plain spelling. Size disagreement means genuinely different
 // objects (e.g. a literal artifacts/ directory in the working dir), so both
 // rows are kept.

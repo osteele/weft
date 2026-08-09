@@ -622,6 +622,11 @@ floor_throughput_bytes_per_sec = 524288
 max_drain_seconds = 1200
 baseline_seconds = 90
 marker_timeout_seconds = 15
+
+[cloud.publication]
+workers = 2
+queue_capacity = 7
+max_retained_bytes = 1048576
 `
 	if err := os.WriteFile(tomlPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -655,5 +660,9 @@ marker_timeout_seconds = 15
 	}
 	if d.MarkerTimeoutSeconds != 15 {
 		t.Errorf("marker_timeout_seconds = %d, want 15", d.MarkerTimeoutSeconds)
+	}
+	p := cfg.Cloud.Publication
+	if p.Workers != 2 || p.QueueCapacity != 7 || p.MaxRetainedBytes != 1048576 {
+		t.Errorf("publication = %+v, want workers=2 queue_capacity=7 max_retained_bytes=1048576", p)
 	}
 }
