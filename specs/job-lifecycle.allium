@@ -1789,6 +1789,41 @@ rule DetectFailureReason {
 -- can be derived without network access SHOULD extend
 -- printJobLocalDiagnostics so all three verbs grow together.
 
+rule JobInfoQualifiesMutableRentalAccounting {
+    when: UserRunsJobInfo(job)
+
+    let attempt = job.latest_attempt
+    let rental = attempt.cloud_instance
+
+    requires: rental != null
+
+    if JobInfoDisplaysTiming(job):
+        ensures: JobInfoTimingQualifier(job) =
+            provisional if not IsTerminal(EffectiveStatus(job)) else final
+    if JobInfoDisplaysRentalCost(job):
+        ensures: JobInfoCostQualifier(job) =
+            provisional if rental.status not in {completed, failed, canceled} else final
+
+    @guidance
+        -- `Started` and `Elapsed`, when present, carry a provisional
+        -- qualifier while the job's effective status is nonterminal. The
+        -- completion record may reconcile the command start time, so these
+        -- live values are not stable enough to record as experiment results.
+        -- Once the job is terminal, its timing fields are rendered without
+        -- the provisional qualifier.
+        --
+        -- Rental cost has a separate finality boundary: it remains
+        -- provisional while the launch is nonterminal and is described as
+        -- an instance-total or shared setup-plus-run estimate "to date".
+        -- Teardown finalizes the rental cost. Therefore a completed job on
+        -- a still-live shared rental can have final timing and provisional
+        -- cost; job terminality alone must not finalize the cost label.
+        --
+        -- Implementation: cmd/job.go derives timing provisionality from
+        -- Job.EffectiveStatus; internal/estimate/cost.go derives cost
+        -- provisionality from Launch.IsTerminal.
+}
+
 -- ==========================================================================
 -- User actions
 -- ==========================================================================

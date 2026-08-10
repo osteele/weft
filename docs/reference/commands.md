@@ -682,6 +682,11 @@ rental-backed jobs, that line reports the lifecycle evidence Weft has recorded:
 teardown policy, and teardown start/completion timestamps. Use
 `weft instance audit <job-id>` when you also need a live provider cleanup check.
 
+For a running rental job, `Started` and `Elapsed` are marked provisional because
+the completion record can reconcile the command start time. Cost is marked
+provisional until rental teardown; a live instance-total or shared-job estimate
+is not the final job cost to record in an experiment.
+
 ### weft bug
 
 Record and inspect Weft bug reports. By default, `weft bug` uses GitHub issues

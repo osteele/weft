@@ -996,8 +996,8 @@ func TestRunJobInfoRentalDisplaysHostElapsedEstimateETAAndCost(t *testing.T) {
 	if !strings.Contains(out, "Host:        wi") {
 		t.Fatalf("missing wi host label, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Elapsed:") {
-		t.Fatalf("missing elapsed line, got:\n%s", out)
+	if !strings.Contains(out, "Elapsed:") || !strings.Contains(out, "provisional; start time may be reconciled") {
+		t.Fatalf("missing provisional elapsed line, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Est. Time:") {
 		t.Fatalf("missing estimate line, got:\n%s", out)
@@ -1005,8 +1005,11 @@ func TestRunJobInfoRentalDisplaysHostElapsedEstimateETAAndCost(t *testing.T) {
 	if !strings.Contains(out, "ETA:") {
 		t.Fatalf("missing ETA line, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "instance total") {
-		t.Fatalf("missing instance-total cost line, got:\n%s", out)
+	if !strings.Contains(out, "Started:") || !strings.Contains(out, "provisional; may be reconciled") {
+		t.Fatalf("missing provisional started line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "provisional; instance total to date, finalized after teardown") {
+		t.Fatalf("missing provisional instance-total cost line, got:\n%s", out)
 	}
 }
 
@@ -1219,22 +1222,27 @@ func TestRunJobInfoRentalSharedInstanceUsesSetupAndRunCostBasis(t *testing.T) {
 			t.Fatalf("runJobInfo: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "shared instance: setup + run") {
-		t.Fatalf("missing shared-cost basis line, got:\n%s", out)
+	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "provisional; shared instance: setup + run to date, finalized after teardown") {
+		t.Fatalf("missing provisional shared-cost basis line, got:\n%s", out)
 	}
 }
 
 func TestRunJobInfoCompletedQueuedIntentShowsCompletedAttemptTarget(t *testing.T) {
 	database := db.SetupTestDB(t)
+	endTime := time.Now().Unix()
+	launchedAt := endTime - 120
 
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "completed target", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 	instanceID, err := db.CreateLaunch(database, &db.Launch{
-		Status:   db.LaunchStatusCompleted,
-		Provider: "vastai",
-		GPUSpec:  "RTX_4090",
+		Status:           db.LaunchStatusCompleted,
+		Provider:         "vastai",
+		GPUSpec:          "RTX_4090",
+		CostPerHourCents: 100,
+		LaunchedAt:       &launchedAt,
+		EndedAt:          &endTime,
 	})
 	if err != nil {
 		t.Fatalf("CreateLaunch: %v", err)
@@ -1250,7 +1258,6 @@ func TestRunJobInfoCompletedQueuedIntentShowsCompletedAttemptTarget(t *testing.T
 		t.Fatalf("UpdateQueuedToRunning: %v", err)
 	}
 	exitCode := 0
-	endTime := time.Now().Unix()
 	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, endTime); err != nil {
 		t.Fatalf("CloseAttempt: %v", err)
 	}
@@ -1271,6 +1278,12 @@ func TestRunJobInfoCompletedQueuedIntentShowsCompletedAttemptTarget(t *testing.T
 	}
 	if !strings.Contains(out, fmt.Sprintf("Host:        wi%d", instanceID)) {
 		t.Fatalf("missing completed attempt target, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Cost:") || !strings.Contains(out, "instance total") {
+		t.Fatalf("missing final instance cost, got:\n%s", out)
+	}
+	if strings.Contains(out, "provisional") {
+		t.Fatalf("completed rental fields must not be provisional, got:\n%s", out)
 	}
 }
 

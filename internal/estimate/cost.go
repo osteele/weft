@@ -9,8 +9,9 @@ import (
 )
 
 type RentalCostInfo struct {
-	Cost  float64
-	Basis string
+	Cost        float64
+	Basis       string
+	Provisional bool
 }
 
 func LaunchCostSoFar(launch *db.Launch, now time.Time) float64 {
@@ -54,8 +55,9 @@ func RentalCostSummary(database *sql.DB, job *db.Job, now time.Time) (RentalCost
 
 	if isOnlyJob {
 		return RentalCostInfo{
-			Cost:  LaunchCostSoFar(launch, now),
-			Basis: "instance total",
+			Cost:        LaunchCostSoFar(launch, now),
+			Basis:       "instance total",
+			Provisional: !launch.IsTerminal(),
 		}, true
 	}
 
@@ -72,7 +74,8 @@ func RentalCostSummary(database *sql.DB, job *db.Job, now time.Time) (RentalCost
 	}
 	cost := math.Max(0, billable.Hours()*ratePerHour)
 	return RentalCostInfo{
-		Cost:  cost,
-		Basis: "shared instance: setup + run",
+		Cost:        cost,
+		Basis:       "shared instance: setup + run",
+		Provisional: !launch.IsTerminal(),
 	}, true
 }

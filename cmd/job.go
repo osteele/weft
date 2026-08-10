@@ -1161,9 +1161,14 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
 		}
 		now := time.Now()
+		liveRentalTiming := job.LaunchID != nil && !db.IsTerminalStatus(job.EffectiveStatus())
 		elapsed := estimate.JobElapsedDuration(job, now)
 		if elapsed > 0 {
-			fmt.Printf("Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
+			if liveRentalTiming {
+				fmt.Printf("Elapsed:     %s (provisional; start time may be reconciled)\n", db.FormatDuration(int64(elapsed.Seconds())))
+			} else {
+				fmt.Printf("Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
+			}
 		}
 		estimateTotal, hasEstimate := estimate.JobTimeEstimate(job, database, now)
 		if hasEstimate {
@@ -1224,7 +1229,11 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("%-12s %s\n", label+":", formatUnixTime(job.CreatedAt))
 		}
 		if job.StartTime > 0 {
-			fmt.Printf("Started:     %s\n", formatUnixTime(job.StartTime))
+			if liveRentalTiming {
+				fmt.Printf("Started:     %s (provisional; may be reconciled)\n", formatUnixTime(job.StartTime))
+			} else {
+				fmt.Printf("Started:     %s\n", formatUnixTime(job.StartTime))
+			}
 		}
 		if job.EndTime != nil {
 			fmt.Printf("Ended:       %s\n", formatUnixTime(*job.EndTime))
@@ -1252,7 +1261,11 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 		printJobLocalDiagnostics(database, job)
 		if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
-			fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
+			if rentalSummary.Provisional {
+				fmt.Printf("Cost:        $%.2f (provisional; %s to date, finalized after teardown)\n", rentalSummary.Cost, rentalSummary.Basis)
+			} else {
+				fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
+			}
 		}
 		if progress := jobProgressSummary(database, job); progress != "" {
 			fmt.Printf("Progress:    %s\n", progress)
