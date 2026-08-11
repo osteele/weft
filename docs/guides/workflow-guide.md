@@ -770,10 +770,10 @@ On restart (`weft job restart`), weft re-scans input/output metadata so updated
 See what's cached where:
 
 ```
-laptop$ weft data where hf:meta-llama/Llama-3-8B
+laptop$ weft data where hf:meta-llama/Meta-Llama-3-8B
 HOST     SIZE     LAST SEEN   PATH
-titan    15.2GB   3m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Llama-3-8B
-atlas    15.2GB   8m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Llama-3-8B
+titan    15.2GB   3m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B
+atlas    15.2GB   8m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B
 ```
 
 To refresh inventory from an existing cache:
@@ -785,19 +785,19 @@ laptop$ weft host data atlas --scan
 To request that a host download a model or dataset now:
 
 ```
-laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host atlas
+laptop$ weft data fetch hf:meta-llama/Meta-Llama-3-8B --host atlas
 # Request 17 completed
 
 laptop$ weft data requests --host atlas
 ID  HOST   ASSET                           REVISION  STATUS     REQUESTED  SIZE
-17  atlas  hf:meta-llama/Llama-3-8B       main      completed  0s ago     15.2GB
+17  atlas  hf:meta-llama/Meta-Llama-3-8B  main      completed  0s ago     15.2GB
 ```
 
 `localhost` is also supported as a fetch target when you want to populate the
 local machine's Hugging Face cache without going through SSH:
 
 ```
-laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host localhost
+laptop$ weft data fetch hf:meta-llama/Meta-Llama-3-8B --host localhost
 # Request 18 completed
 ```
 
@@ -1351,7 +1351,7 @@ When you don't specify a host, weft picks the best one. The scoring considers:
 ```
 laptop$ weft run \
   --gpu-class a100 \
-  --input hf:meta-llama/Llama-3-8B \
+  --input hf:meta-llama/Meta-Llama-3-8B \
   -m "Llama inference on A100" \
   'uv run python inference.py'
 # Auto-placed on atlas (gpu_class: a100, data: local, queue: 2 jobs)

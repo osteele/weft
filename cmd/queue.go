@@ -181,7 +181,7 @@ Examples:
   weft edit wj1595 --command "python eval.py"
   weft edit wj1595 --env FOO=bar --env BAZ=qux
   weft edit wj1595 --tag benchmark-isolation --tag exp-012
-  weft edit wj1595 --input hf:meta-llama/Llama-3-8B
+  weft edit wj1595 --input hf:EleutherAI/pythia-160m
   weft edit wj1595 --needs output/run/ckpt.pt:1778`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
@@ -1728,7 +1728,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringVar(&editRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure (use default/auto/none/clear to clear)")
-	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
+	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:EleutherAI/pythia-160m), can be repeated")
 	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
 	cmd.Flags().StringSliceVar(&editNeeds, "needs", nil, "Producer artifact dependency (e.g., output/foo.pt:1234), can be repeated; replaces existing --needs")
 	cmd.Flags().BoolVar(&editClearNeeds, "clear-needs", false, "Remove all --needs declarations")

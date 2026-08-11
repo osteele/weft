@@ -1191,7 +1191,7 @@ rule FastSubmitOnPremReuse {
 value AssetKind = hf_model | hf_dataset | checkpoint | job_output | corpus
 
 -- A data asset referenced by a job input. Assets have a kind and an ID;
--- the ID shape depends on kind (e.g. "meta-llama/Llama-3-8B" for
+-- the ID shape depends on kind (e.g. "meta-llama/Meta-Llama-3-8B" for
 -- hf_model, "output/model.pt:42" for job_output).
 value DataAsset {
     kind: AssetKind
@@ -1281,7 +1281,7 @@ rule ScanHFCache {
     -- line, and maps the directory name to an asset ID by replacing
     -- "--" with "/" after the kind prefix.
     --
-    --   models--meta-llama--Llama-3-8B   -> hf_model     "meta-llama/Llama-3-8B"
+    --   models--meta-llama--Meta-Llama-3-8B -> hf_model  "meta-llama/Meta-Llama-3-8B"
     --   datasets--allenai--c4            -> hf_dataset   "allenai/c4"
 
     ensures: for entry in scan_results:

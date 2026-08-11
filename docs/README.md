@@ -1,17 +1,16 @@
 # Weft Documentation
 
-This directory is organized by audience so readers can find the right level of
-detail quickly.
+The documentation is organized by audience and depth.
 
 ## Start Here
 
 - [Workflow Guide](guides/workflow-guide.md) for common end-to-end usage
-- [Dashboard](guides/dashboard.md) for `weft dashboard`, the tabbed at-a-glance view set
+- [Dashboard](guides/dashboard.md) for the tabbed `weft dashboard` views
 - [Cloud GPU Instances](guides/instances.md) for rental GPU workflows (launching, monitoring, grace periods, configuration)
 - [Campaigns](guides/campaigns.md) for the batching concept that groups instances launched together
 - [Placement](guides/placement.md) for automatic host selection, reserved placement tags, and score reasons
-- [Autopilot](guides/autopilot.md) for inspecting and unblocking the auto-placement / auto-launch engine
-- [Activity Narration](guides/narrate.md) for `weft narrate` — LLM-streamed commentary on job and instance transitions
+- [Autopilot](guides/autopilot.md) for inspecting and unblocking automatic placement and launches
+- [Activity Narration](guides/narrate.md) for LLM-streamed commentary from `weft narrate`
 - [LLM and Claude Integrations](guides/llm-integrations.md) for which features call Anthropic/OpenRouter or `claude -p`
 - [Claude Code Channels](guides/claude-code-channels.md) for sending Weft job events into Claude Code sessions
 - [Agent-Oriented Workflows](guides/agent-workflows.md) for CLI features designed for coding agents and unattended automation
@@ -21,15 +20,15 @@ detail quickly.
 
 ## Reference
 
-- [Command Reference](reference/commands.md) for the full CLI command reference
+- [Command Reference](reference/commands.md) for CLI syntax and behavior
 - [Job Plans](reference/job-plans.md) for YAML plan syntax and execution rules
 - [Logging and Progress](reference/logging-and-progress.md) for live log and progress formats
 - [Estimation and Modeling](reference/estimation.md) for runtime, resource, transfer, and cost estimation
 
-## Architecture And Design
+## Architecture and Design
 
 - [Architecture](design/architecture.md) for the main system layout
-- [Subsystem Architecture](architecture/) — deep dives: [placement](architecture/placement.md), [compatibility](architecture/compatibility.md), [disk estimation](architecture/disk-estimation.md), [sync](architecture/sync.md), [job lifecycle](architecture/job-lifecycle.md), [instance lifecycle](architecture/instance-lifecycle.md)
+- [Subsystem Architecture](architecture/) for [placement](architecture/placement.md), [compatibility](architecture/compatibility.md), [disk estimation](architecture/disk-estimation.md), [sync](architecture/sync.md), [job lifecycle](architecture/job-lifecycle.md), and [instance lifecycle](architecture/instance-lifecycle.md)
 - [Deprecated Coordinator Architecture](design/coordinator-architecture.md) for historical context only
 - [CLI, TUI, and Core Responsibilities](design/facade-core.md) for layering boundaries
 - [Comparison to SLURM](design/comparison-to-slurm.md) for scheduler tradeoffs

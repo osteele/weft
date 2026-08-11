@@ -186,7 +186,7 @@ If the coordinator is unreachable, the laptop falls back to local placement
 The laptop becomes an intent-writing client. A job submission looks like:
 
 ```
-weft run --gpu-class A100 --input hf:meta-llama/Llama-3-8B 'python train.py'
+weft run --gpu-class A100 --input hf:meta-llama/Meta-Llama-3-8B 'python train.py'
 ```
 
 This writes an intent record locally and syncs it to the coordinator:
@@ -202,7 +202,7 @@ This writes an intent record locally and syncs it to the coordinator:
     "desc": "Training run",
     "env": ["WANDB_PROJECT=myproject"],
     "inputs": [
-      {"kind": "hf-model", "id": "meta-llama/Llama-3-8B"}
+      {"kind": "hf-model", "id": "meta-llama/Meta-Llama-3-8B"}
     ],
     "outputs": [
       {"kind": "checkpoint", "id": "llama-ft-v1", "path": "checkpoints/"}
@@ -270,7 +270,7 @@ The system tracks what data exists on which hosts:
 
 | Asset Kind    | Example Identifier              | How Tracked                 |
 |---------------|--------------------------------|-----------------------------|
-| `hf-model`    | `meta-llama/Llama-3-8B`       | Scan `~/.cache/huggingface` |
+| `hf-model`    | `meta-llama/Meta-Llama-3-8B`  | Scan `~/.cache/huggingface` |
 | `hf-dataset`  | `wikitext`                     | Scan `~/.cache/huggingface` |
 | `checkpoint`  | `llama-ft-v1` (job-produced)   | Job artifact manifest       |
 | `artifact`    | `job-456:output.tar`           | Job artifact manifest       |
@@ -281,7 +281,7 @@ Assets are tracked in SQLite tables:
 CREATE TABLE data_assets (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,       -- "hf-model", "hf-dataset", "checkpoint"
-    identifier TEXT NOT NULL, -- "meta-llama/Llama-3-8B"
+    identifier TEXT NOT NULL, -- "meta-llama/Meta-Llama-3-8B"
     size_bytes INTEGER,
     UNIQUE(kind, identifier)
 );
@@ -302,7 +302,7 @@ Jobs declare what data they need and produce:
 
 ```
 weft run \
-  --input hf:meta-llama/Llama-3-8B \
+  --input hf:meta-llama/Meta-Llama-3-8B \
   --output checkpoint:llama-ft-v1:checkpoints/ \
   'python train.py'
 ```

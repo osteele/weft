@@ -248,7 +248,7 @@ entity Instance {
     -- consumers to overestimate capacity and retry on equally-undersized
     -- offers.
     disk_gb: Integer
-    provisioned_inputs: List<String>    -- e.g. "hf:meta-llama/Llama-3-8B"
+    provisioned_inputs: List<String>    -- e.g. "hf:meta-llama/Meta-Llama-3-8B"
 
     -- Grace period
     grace_period_seconds: Integer       -- configured duration (0 = disabled)

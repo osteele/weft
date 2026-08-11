@@ -1,9 +1,9 @@
 # Cloud GPU Instances
 
-Weft launches cloud GPU instances on Vast.ai (and RunPod) when local hosts
-can't satisfy a job's GPU requirements. This guide covers everything about
-launching, monitoring, and managing instances. For the batching concept that
-groups multiple instances launched together, see [Campaigns](campaigns.md).
+Weft launches cloud GPU instances on Vast.ai and RunPod when local hosts cannot
+satisfy a job's GPU requirements. The instance workflow covers launch,
+monitoring, and cleanup. [Campaigns](campaigns.md) describes the batch record
+that groups instances launched together.
 
 ## Terminology
 
@@ -30,16 +30,19 @@ weft provider list
 
 # 3. Queue jobs that need rental GPUs
 weft run --gpu hopper+ -m "Train on H100" 'python train.py'
-# Job accepted (unplaced — needs rental GPU)
+# Job accepted (unplaced; needs rental GPU)
 
-# 4. Launch instances
+# 4. Check whether autopilot already owns placement
+weft autopilot status
+
+# 5. Launch manually only when autopilot is idle
 weft start instance
 ```
 
 `weft start instance` (also `weft start instances` and `weft instance launch`)
-is the primary command for moving unplaced jobs onto cloud GPUs — but see
-[Coordinating with the autopilot](#coordinating-with-the-autopilot) first.
-You usually do not need to launch by hand.
+is the primary manual command for moving unplaced jobs onto cloud GPUs. Check
+[Coordinating with the autopilot](#coordinating-with-the-autopilot) first. You
+usually do not need to launch by hand.
 
 Provider discovery is automatic until you configure it explicitly. On a fresh
 config, Weft searches Vast.ai and leaves RunPod inactive. Once any provider has
@@ -97,7 +100,7 @@ weft autopilot status --json     # machine-readable
 weft autopilot status --quiet    # exit 0=idle, 10=running, 11=stale, 12=paused
 ```
 
-If `running`, just queue jobs and wait — the autopilot will pick them up. It
+If `running`, queue jobs and wait. The autopilot will pick them up. It
 may take some time before an instance appears (a launch pass runs at most
 once per autopilot cycle). **Launching manually is not faster than waiting
 for the autopilot's next pass**; it just gives you control over:
@@ -109,8 +112,8 @@ for the autopilot's next pass**; it just gives you control over:
 - *Offer selection*: review and pick offers in the TUI rather than letting
   the autopilot choose.
 
-If you do need to launch manually while the autopilot is running, pause it
-first to avoid double-launches:
+Manual launches require pausing a running autopilot first. This prevents
+double-launches:
 
 ```bash
 weft autopilot pause --reason "manual launch"
@@ -122,7 +125,7 @@ Pause is sticky across restarts; remember to resume.
 
 ## Launching instances
 
-If you've decided manual launch is the right call (see
+If manual launch is the right call (see
 [Coordinating with the autopilot](#coordinating-with-the-autopilot)), the
 following commands are how.
 
@@ -256,9 +259,9 @@ the "same hardware" control that benchmark analyses rely on.
 
 **Historical accounting.** Every launch records its `instance_type`
 (`on-demand` / `interruptible`), `max_bid_price_cents` (nil for on-demand),
-and `on_demand_ref_cents` — the cheapest concurrent on-demand ask for the
-same GPU class at launch time — so savings can be computed per-run rather
-than inferred from tag history.
+and `on_demand_ref_cents`, the cheapest concurrent on-demand ask for the
+same GPU class at launch time. This supports per-run savings calculations
+without inferring prices from tag history.
 
 **Pause time and relaunch chains.** Provider status transitions (every move
 into and out of `stopped`) are persisted in `provider_status_transitions`;
@@ -370,9 +373,9 @@ weft campaign cost
 ```
 
 `weft cost jobs` shows the instance each job ran on, how many jobs shared that
-instance, the instance's total cost, and the per-job overhead — useful for
-deciding how much of the instance cost to attribute to a given job, particularly
-when it was the only job on the instance.
+instance, the instance's total cost, and the per-job overhead. These values help
+attribute instance cost to each job, particularly when only one job ran on the
+instance.
 
 ### Unattended runaway protection
 
@@ -477,9 +480,9 @@ unplaced (queued with no host), and updates the instance status to
 
 ### Cordoning (drain without terminating)
 
-When you want an instance's current job to finish but no new jobs to land
-on it — for example, the instance is running an outdated agent build, or
-you want to take it out of rotation while you investigate — cordon it:
+Cordon an instance when its current job should finish but no new jobs should
+land on it. This is useful when the agent build is outdated or the instance
+needs investigation:
 
 ```bash
 weft instance cordon <instance-id> --reason "stale agent"
@@ -487,7 +490,7 @@ weft instance uncordon <instance-id>
 ```
 
 A cordoned instance keeps running, its active job continues to
-completion, and grace-period behaviour is unchanged. The autopilot and
+completion, and grace-period behavior is unchanged. The autopilot and
 explicit reuse paths simply skip it when assigning new jobs. Cordon
 state is shown in `weft instance list` (as `[cordoned]` next to the
 status), in `weft instance info`, and in the watch TUI.
@@ -540,9 +543,9 @@ weft instance release <instance-id>
 2. On failure, the wrapper invokes `weft-agent grace-wait` instead of
    self-destructing.
 3. The agent polls R2 for control messages under `grace/<INSTANCE_ID>/`:
-   - `jobs.json` — new job submission
-   - `extend` — extend the deadline
-   - `release` — clean shutdown
+   - `jobs.json`: new job submission
+   - `extend`: extend the deadline
+   - `release`: clean shutdown
 4. The CLI writes control messages to R2 when you run `instance submit`,
    `instance extend`, or `instance release`.
 5. If the grace period expires with no action, the instance self-destructs.

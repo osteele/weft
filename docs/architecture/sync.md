@@ -1,14 +1,14 @@
 # Sync Architecture
 
-How source trees, data inputs, and results move between the laptop, on-prem
-hosts, and cloud instances. Authoritative behavior lives in
+Source trees, data inputs, and results move between the laptop, on-prem hosts,
+and cloud instances. Authoritative behavior lives in
 `specs/source-data-sync.allium` (source snapshots, provenance, prestaging)
 and `specs/upload-drain.allium` (agent-side result uploads).
 
 ## Source sync: the working tree, not commits
 
-Weft ships the working directory's **filesystem state** — uncommitted edits
-are included; files that exist only in another git/jj revision are not. This
+Weft ships the working directory's **filesystem state**. Uncommitted edits are
+included; files that exist only in another git/jj revision are not. This
 is the single most common source of "works here, fails there" confusion; see
 `docs/guides/workflow-guide.md` § "Source sync".
 
@@ -23,12 +23,13 @@ Two transport paths share the same snapshot semantics:
   immutable source manifest before the job row becomes visible. After `local:` overlays are applied,
   regular files of at least 8 MiB are diverted into raw content-addressed
   `assets/<sha256>` objects. The residual tree becomes a deterministic gzip
-  tarball (`tarball.go` — zeroed mtimes/uids so identical trees hash
+  tarball (`tarball.go`, with zeroed mtimes/uids so identical trees hash
   identically), stored as `sources/<sha256>.tar.gz`. Both object kinds are
   deduped by existence probes. Bootstrap and agent refresh extract the tarball,
   materialize each blob at its root-relative path, and verify its SHA-256.
   Symlinks remain in the tarball; extraction rejects tar-slip entries
-  (absolute paths, `..` escapes, out-of-root symlink targets — `archive.go`).
+  (absolute paths, `..` escapes, and out-of-root symlink targets; see
+  `archive.go`).
   Fresh launches and instance reuse consume the stored per-job manifest. Rows
   created before submit-time pinning have no pin and retain dispatch-time
   snapshot derivation.
@@ -59,7 +60,7 @@ record what was synced (`provenance.go`):
 The queue runner's preflight (`internal/runner/runner.go`) verifies the
 per-job marker against the queued SHA before starting; persistent mismatch
 escalates the job to **R2-isolated dispatch** (the job runs from its own
-content-addressed tarball, skipping the shared rsync tree — see
+content-addressed tarball, skipping the shared rsync tree; see
 `EscalateToR2IsolatedSource` in the spec and `internal/ops/host_sync.go`).
 
 ## Data inputs

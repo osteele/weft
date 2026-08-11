@@ -121,9 +121,9 @@ past what the hardware reports. So `--gpu-class a100 --gpu-mem 80` and
 `--gpu a100>=80GB` produce the same `gpu_ram>=80` filter. Non-ceiling
 values like `--gpu-mem 60` still get the headroom (effective 62GB). The
 catalogued models live in `internal/vastai/hardware_memory.go`. Jobs
-persisted under the older behaviour (where the headroom was applied at
+persisted under the older behavior (where the headroom was applied at
 submit time, baking 82 into the DB for an A100 80GB request) are
-recognised at filter time and rolled back automatically — no manual
+recognized at filter time and rolled back automatically. No manual
 `weft restart` is required.
 - `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
 - `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`; if the producer is on a live reusable rental, autopilot co-locates the consumer on that rental queue so it starts after the producer completes; otherwise rental/ephemeral producer artifacts are staged from cloud artifact storage, including producers that completed hours or days earlier — no need to pre-fetch with `weft artifact get` and pass `--input local:`)
@@ -298,13 +298,13 @@ completed or failed.
 **Examples:**
 ```bash
 # Find where a model is currently cached
-weft data where hf:meta-llama/Llama-3-8B
+weft data where hf:EleutherAI/pythia-160m
 
 # Download a model to a specific host
-weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+weft data fetch hf:EleutherAI/pythia-160m --host cool100
 
 # Download a model onto the local machine
-weft data fetch hf:meta-llama/Llama-3-8B --host localhost
+weft data fetch hf:EleutherAI/pythia-160m --host localhost
 
 # Download a dataset revision to a host
 weft data fetch hf-dataset:HuggingFaceFW/fineweb --host cool30 --revision main
@@ -1640,7 +1640,7 @@ written into job rows or command output:
 
 ```bash
 weft secret set hf "$HF_TOKEN"
-weft run --hf-token --input hf:meta-llama/Llama-3-8B "python train.py"
+weft run --hf-token --input hf:meta-llama/Meta-Llama-3-8B "python train.py"
 weft run --hf-token-from env:HF_TOKEN --input hf-dataset:org/private-data "python train.py"
 weft run --secret WANDB_API_KEY=env:WANDB_API_KEY "python train.py"
 ```
@@ -1805,12 +1805,14 @@ weft host setup <host>
 ```
 
 The setup command:
-- Installs required host tools: `tmux`, `jq`, `rsync`, `rclone`, `curl`, and `uv`
-- Installs or verifies a Go toolchain when the agent is built natively on the host
-- Discovers CPU, memory, GPU model/memory, NVIDIA driver/CUDA compatibility, and cache information, then writes `~/.config/weft/hosts/<host>.yaml`
-- Deploys `weft-agent` to `~/.cache/weft/bin/weft-agent`
-- Deploys R2 and notification configuration when configured
-- Starts the queue runner unless `--no-runner` is set
+
+- Installs the required host tools: `tmux`, `jq`, `rsync`, `rclone`, `curl`, and `uv`.
+- Installs or verifies a Go toolchain when the agent is built natively on the host.
+- Discovers CPU, memory, GPU, NVIDIA driver, CUDA compatibility, and cache information.
+- Writes `~/.config/weft/hosts/<host>.yaml` from the discovered hardware.
+- Deploys `weft-agent` to `~/.cache/weft/bin/weft-agent`.
+- Deploys R2 and notification configuration when configured.
+- Starts the queue runner unless `--no-runner` is set.
 
 Examples:
 

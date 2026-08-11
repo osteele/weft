@@ -50,8 +50,8 @@ var dataCmd = &cobra.Command{
 request a download onto a specific on-prem host.
 
 Examples:
-  weft data where hf:meta-llama/Llama-3-8B
-  weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+  weft data where hf:EleutherAI/pythia-160m
+  weft data fetch hf:EleutherAI/pythia-160m --host cool100
   weft data fetch hf-dataset:HuggingFaceFW/fineweb --host cool30 --revision main
   weft data requests --host cool100`,
 }

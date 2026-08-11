@@ -50,7 +50,7 @@ formatted output.
 ```bash
 # Predict duration, RSS, GPU memory for a command on a given GPU
 weft estimate duration \
-  --command "python train.py --model meta-llama/Llama-3-8B" \
+  --command "python train.py --model meta-llama/Meta-Llama-3-8B" \
   --gpu "RTX 3090" \
   --gpu-mem 24GB
 
@@ -83,7 +83,7 @@ weft estimate scale-runtime \
 ```bash
 # Estimate transfer time for a model or dataset
 weft estimate transfer \
-  --source hf:meta-llama/Llama-3-8B \
+  --source hf:meta-llama/Meta-Llama-3-8B \
   --dest cool30
 
 # Output:
@@ -99,9 +99,9 @@ weft estimate transfer \
 ```bash
 # Estimate total cost for a job on a cloud GPU class
 weft estimate cloud-cost \
-  --command "python train.py --model meta-llama/Llama-3-8B" \
+  --command "python train.py --model meta-llama/Meta-Llama-3-8B" \
   --gpu "A100 80GB" \
-  --inputs hf:meta-llama/Llama-3-8B \
+  --inputs hf:meta-llama/Meta-Llama-3-8B \
   --rate-per-hour 1.20
 
 # Output:

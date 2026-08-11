@@ -1,8 +1,7 @@
 # Network Resilience
 
-Weft is built for workflows where laptops roam between Wi-Fi networks,
-SSH servers hiccup, and VPNs flap. This document explains the main techniques
-the CLI uses to keep jobs alive and observable despite unreliable links.
+Weft keeps jobs alive and observable while laptops change networks, SSH servers
+become temporarily unavailable, and VPN connections drop.
 
 ## Persistent execution
 
@@ -16,6 +15,10 @@ the job survives:
 Metadata, PID files, log files, and status files are written to
 `~/.cache/weft/logs/` on the host so that the CLI can reconstruct the job
 state even if it was restarted elsewhere.
+
+Cloud agents continue uploading results to R2 while the control machine is
+offline. On-prem outputs remain on the host and sync after the control machine
+reconnects.
 
 ## Connection-aware job submission
 

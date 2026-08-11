@@ -3,7 +3,7 @@
 Weft placement decides where a job should run when you omit the host:
 
 ```bash
-weft run --gpu a100 --input hf:meta-llama/Llama-3-8B 'python train.py'
+weft run --gpu a100 --input hf:meta-llama/Meta-Llama-3-8B 'python train.py'
 ```
 
 The placement engine uses hard constraints first, then ranks eligible
@@ -82,7 +82,7 @@ SXM/HBM3 class and excludes H100 PCIe offers.
 
 ### Variant and memory are separate axes
 
-A GPU class constrains the **variant** — it filters the provider's `gpu_name`
+A GPU class constrains the **variant** by filtering the provider's `gpu_name`
 values, so `--gpu a100-sxm4` excludes A100 PCIe offers. It does **not**
 constrain memory, and a trailing memory token in the class name binds nothing:
 
@@ -92,14 +92,14 @@ weft run --gpu 'a100-sxm4>=80GB' 'python bench.py' # SXM4 AND at least 80GB
 ```
 
 The suffix is stripped before matching because provider `gpu_name` values carry
-no memory component — vast.ai calls both the 40GB and the 80GB part `A100
-SXM4`, so there is nothing for `-80gb` to match against. Memory can only be
+no memory component. Vast.ai calls both the 40GB and the 80GB part `A100 SXM4`,
+so there is nothing for `-80gb` to match against. Memory can only be
 expressed as a `>=NGB` predicate, which becomes a `gpu_ram>=` filter.
 
 This matters when the GPU variant is itself an experimental variable: an
 unbound memory axis means a bandwidth or capacity sweep can silently receive
-the wrong part. `--gpu a100-sxm4-80gb` has been served by an A100 SXM4 40GB —
-2039 GB/s requested, 1555 GB/s delivered. Prefer `--gpu "family-variant>=NNGB"`
+the wrong part. `--gpu a100-sxm4-80gb` has been served by an A100 SXM4 40GB
+(2039 GB/s requested, 1555 GB/s delivered). Prefer `--gpu "family-variant>=NNGB"`
 whenever the hardware is the independent variable.
 
 `weft info` reports the hardware a rental actually provided on a `Delivered:`
@@ -120,11 +120,10 @@ The separate `--gpu-class` + `--gpu-mem` form **also skips the +2GB headroom
 when `--gpu-mem` matches the model's actual hardware ceiling**. So
 `--gpu-class a100 --gpu-mem 80` and `--gpu a100>=80GB` produce the same
 search (`gpu_ram>=80`) and match the same A100 80GB offers. Hardware
-ceilings are recognised per model — A100 40GB/80GB, H100 80GB, H200 141GB,
+ceilings are recognized per model, including A100 40GB/80GB, H100 80GB, H200 141GB,
 RTX 4090 24GB, RTX 3090 24GB, etc. (see `internal/vastai/hardware_memory.go`
 for the full table). For non-ceiling values like `--gpu-mem 60`, the +2GB
-headroom is still applied (effective floor 62GB) — the same behaviour as
-before.
+headroom is still applied (effective floor 62GB), as before.
 
 Use `--gpus N` when the job needs multiple GPUs visible on the same host or
 rental instance. The count is an exact single-host shape: `--gpus 4` searches
@@ -158,7 +157,7 @@ Use `--input` to declare data the job needs:
 ```bash
 weft run \
   --gpu a100 \
-  --input hf:meta-llama/Llama-3-8B \
+  --input hf:meta-llama/Meta-Llama-3-8B \
   --input hf-dataset:allenai/c4 \
   'python train.py'
 ```
@@ -211,8 +210,8 @@ already-running instances must meet the CPU floor. Existing rental instances
 with unknown CPU metadata are skipped for cpu-intensive reuse and rebalance.
 Set `WEFT_COMPUTE_CPU_CORES` to raise or lower the default 16-core floor.
 
-`cpu-intensive` does **not** exclude offers that have a GPU — Vast.ai is a
-GPU marketplace and every offer ships with at least one card. A CPU-only
+`cpu-intensive` does **not** exclude offers that have a GPU. Vast.ai is a
+GPU marketplace, and every offer ships with at least one card. A CPU-only
 script that lands on a rental still gets a GPU attached, and a script that
 auto-detects CUDA will use it. To pin a CPU-only script to CPU regardless
 of the rental's hardware, set `CUDA_VISIBLE_DEVICES = ""` in the script's
@@ -224,7 +223,7 @@ PEP 723 `[tool.weft.env]` (or pass `--env CUDA_VISIBLE_DEVICES=`). See
 Use `--dry-run` to inspect placement without creating a job:
 
 ```bash
-weft run --dry-run --gpu ampere+ --input hf:meta-llama/Llama-3-8B 'python train.py'
+weft run --dry-run --gpu ampere+ --input hf:meta-llama/Meta-Llama-3-8B 'python train.py'
 ```
 
 Placement reasons are short fragments attached to each candidate. Common
@@ -318,11 +317,11 @@ This guide is the operator view. The formal placement model lives in
 Related behavior for job moves and status synchronization is covered by the
 Allium specs in [`specs/`](../../specs/).
 
-## Providers honour constraints differently
+## Providers honor constraints differently
 
-The same job does not mean the same thing to every provider, and weft does not
-pretend otherwise — normalising the difference would mean inventing values it
-cannot observe. Run:
+The same job does not mean the same thing to every provider. Weft preserves
+those differences because normalizing them would require values it cannot
+observe. Run:
 
 ```bash
 weft provider constraints
@@ -336,17 +335,17 @@ for the per-provider table. The differences that bite most often:
   distinguishes Secure Cloud (vetted datacenter partners) from Community Cloud
   (peer hosts); weft translates that binary onto the same scale so a
   `--reliability` floor still selects. The mapping is a deliberate
-  approximation — prefer the survival model for anything quantitative.
+  approximation. Prefer the survival model for quantitative analysis.
 - **Driver and CUDA.** Vast.ai publishes driver version, so a floor filters at
   search. RunPod does not, so compatibility is probed *after* launch and an
   incompatible instance is destroyed. A driver pin therefore narrows the pool
   on Vast.ai and burns launch cycles on RunPod.
-- **Geo.** `--exclude-geo` is currently honoured on Vast.ai only. RunPod
+- **Geo.** `--exclude-geo` is currently honored on Vast.ai only. RunPod
   publishes a datacenter id in a different form than weft parses, so the
   constraint is accepted and **not** enforced there. The table marks this
   `NOT ENFORCED` rather than hiding it.
 
-An axis marked `NOT ENFORCED` is accepted from you and honoured by nobody. That
+An axis marked `NOT ENFORCED` is accepted from you and honored by nobody. That
 is a known hole, distinct from `not applicable`, which means the provider has no
 such concept.
 
@@ -364,9 +363,9 @@ weft start instance --affinity wj789 --jobs wj790 # at launch time instead
 The job form is usually what you want: retroactive investigation starts from a
 job whose result looked wrong, not from a machine number.
 
-Use it when the machine is the variable — re-probing hardware whose vendor specs
-are disputed, checking whether an anomalous benchmark row came from a noisy
-neighbour, or reproducing an environmental outlier. `launches.machine_id`
+Use it when the machine is the variable: re-probing disputed vendor specs,
+checking whether an anomalous benchmark row came from a noisy neighbor, or
+reproducing an environmental outlier. `launches.machine_id`
 records the machine for past runs, so "which physical machine produced this row"
 is answerable after the fact.
 
@@ -374,8 +373,8 @@ Two things to expect:
 
 - **It may wait.** Vast.ai's offer search has no machine filter, so weft polls
   and matches client-side. A machine that is currently rented, or simply absent
-  from the market, leaves the job unplaced until it reappears — the autopilot
-  carries the pin across planning ticks rather than failing once. Machines
+  from the market, leaves the job unplaced until it reappears. The autopilot
+  carries the pin across planning ticks instead of failing once. Machines
   rotate in and out over weeks, so a pinned job can sit for a long time. That is
   the design, not a stall.
 - **A machine is not a GPU.** Pinning gets you the same physical box. If it
@@ -384,7 +383,7 @@ Two things to expect:
 - **An unidentified machine is skipped, not gambled on.** An offer or running
   instance that reports no machine ID is not confirmed to be the pinned one, so
   a pinned job passes it over. This mainly affects providers without per-offer
-  machine identity — a pinned job will not reuse a RunPod instance whose machine
+  machine identity. A pinned job will not reuse a RunPod instance whose machine
   weft cannot name, even when it otherwise fits.
 - **On-prem hosts never satisfy a pin.** A pin names a provider physical
   machine, which no inventory host is, so a pinned job is excluded from
@@ -393,4 +392,4 @@ Two things to expect:
 
 `--affinity` on a job and on a launch intersect: each narrows the machines under
 consideration, so a job pinned outside its launch's set is unplaceable rather
-than silently honouring one of the two.
+than silently honoring one of the two.

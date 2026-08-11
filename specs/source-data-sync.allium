@@ -58,7 +58,7 @@ external entity DispatchEntry {
 -- by the dataloc subsystem; this spec only observes its presence.
 external entity DataAsset {
     kind: InputKind
-    id: String                      -- e.g. "meta-llama/Llama-3-8B"
+    id: String                      -- e.g. "meta-llama/Meta-Llama-3-8B"
     ref: String                     -- canonical serialised form, e.g. "hf:<id>"
 }
 

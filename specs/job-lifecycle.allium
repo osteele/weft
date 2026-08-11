@@ -52,7 +52,7 @@ entity Job {
     working_dir: String
     project: String
     description: String?
-    inputs: List<String>        -- data dependencies (e.g. "hf:meta-llama/Llama-3-8B")
+    inputs: List<String>        -- data dependencies (e.g. "hf:meta-llama/Meta-Llama-3-8B")
     outputs: List<String>       -- declared output assets
     output_dirs: List<String>   -- convention-based output directories
     produces: List<String>      -- artifact specs this job produces
