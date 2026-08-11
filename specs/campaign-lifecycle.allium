@@ -1016,6 +1016,62 @@ rule PriceAuthorizationGate {
         -- storage).
 }
 
+rule PerJobRentalPolicy {
+    when: RankGroupOffers(raw_offers) or LaunchInstance(group)
+
+    let hourly_ceiling = min(job.cli_overrides.max_hourly_rate_cents
+                             for job in group.jobs
+                             where the field is present)
+    let spend_ceiling = min(job.cli_overrides.max_spend_cents
+                            for job in group.jobs
+                            where the field is present)
+    let time_ceiling = min(job.cli_overrides.max_time_seconds
+                           for job in group.jobs
+                           where the field is present)
+    let survival_floor = max(job.cli_overrides.min_survival
+                             for job in group.jobs
+                             where the field is present)
+
+    ensures:
+        every selected offer.cost_per_hour_cents <= hourly_ceiling
+            when hourly_ceiling is present
+    ensures:
+        no hourly-rate-compatible offer implies every job in group remains queued
+        and each job's placement diagnosis identifies the hourly-rate cap
+    ensures:
+        instance.max_spend_cents <= spend_ceiling when spend_ceiling is present
+        and instance.max_time_seconds <= time_ceiling when time_ceiling is present
+    ensures:
+        every selected offer.reliability >= survival_floor
+            when survival_floor is present and survival_floor > 0
+    ensures:
+        instance.grace_period_seconds = group.jobs.first.cli_overrides.grace_period_seconds
+            when that field is present
+
+    @guidance
+        -- The hourly-rate filter runs after hardware compatibility and before
+        -- the survival filter and offer ranking. LaunchInstance checks the
+        -- selected offer again before provider create, including replacement
+        -- offers. A replacement that bypasses normal ranking fails closed
+        -- before its metadata is accepted or the provider create begins.
+        --
+        -- Jobs with different rental policy values or different field
+        -- presence never share or merge into one fresh launch group. This
+        -- preserves exact grace semantics and prevents one job's absent cap
+        -- from weakening another job's explicit authorization.
+        --
+        -- Launch-time application uses the stricter positive value when a
+        -- manual launch also supplies max-spend or max-time. An explicit job
+        -- grace period overrides the launch default, including zero. The
+        -- resulting values are persisted on the launch and passed through the
+        -- existing manifest and agent enforcement paths.
+        --
+        -- Implementation: internal/campaign/rental_policy.go,
+        -- internal/campaign/offers.go, internal/campaign/campaign.go,
+        -- internal/campaign/lifecycle.go, and
+        -- internal/campaign/strategy_plan.go.
+}
+
 invariant PriceAuthorizationDoesNotTripCircuitBreaker {
     -- The autopilot circuit breaker counts repeated infrastructure
     -- failures to detect runaway loops. A price-authorization block is
@@ -3122,7 +3178,9 @@ rule AssetOverlapLaunchGrouping {
     -- Candidate launch groupings are still constrained first by hard
     -- compatibility: GPU constraint/supremum, provider, VRAM tier,
     -- preemptibility, image compatibility, disk, compute-cap bounds, and
-    -- known CUDA/driver compatibility. Provider-unknown CUDA/driver
+    -- known CUDA/driver compatibility. Jobs must also have identical
+    -- per-job rental policies, including whether each field is absent.
+    -- Provider-unknown CUDA/driver
     -- compatibility is allowed only as a high-penalty fallback when no
     -- known-compatible offer is available.
     -- Among compatible candidates, the planner applies an additional
@@ -3943,17 +4001,33 @@ rule AutoPilotRunRateSubset {
     when: AutoPilotTick(unplaced_jobs)
     requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
 
+    let explicitly_rate_capped_groups = plan.launch_groups where
+        group.jobs.all(job => job.cli_overrides.max_hourly_rate_cents is present)
+        and group.offer.cost_per_hour_cents <=
+            min(job.cli_overrides.max_hourly_rate_cents for job in group.jobs)
+    let ordinary_groups = plan.launch_groups except explicitly_rate_capped_groups
+
     ensures:
         plan.reuse_assignments.any() implies
             plan.reuse_assignments.all(a => a.job.id not in plan.blocked_reasons.keys())
-        plan.launch_groups = GreedyFitByJobsPerCost(plan.launch_groups, plan.headroom)
+        plan.launch_groups = explicitly_rate_capped_groups
+                             union GreedyFitByJobsPerCost(ordinary_groups, plan.headroom)
         plan.blocked_reasons.keys().all(job_id => job_id not in plan.launch_job_ids)
 
     @guidance
         -- Reuse assignments are zero-launch-cost and are never run-rate gated.
+        -- A fully and explicitly rate-capped group is already authorized by
+        -- its jobs. It is retained even when headroom is zero and consumes no
+        -- global soft-target headroom. Its selected offer must still satisfy
+        -- every job cap. Mixed capped/uncapped groups receive no exemption.
         -- Launch groups are sorted by jobs-per-cost (tie: lower cost), then
-        -- accepted greedily while cumulative launch cost stays within headroom.
-        -- Rejected groups are blocked with per-group headroom reasons.
+        -- ordinary groups are accepted greedily while their cumulative launch
+        -- cost stays within headroom. Rejected ordinary groups are blocked
+        -- with per-group headroom reasons. Actual run rate, the daily cap, and
+        -- runaway-breaker accounting still include exempt launches.
+        -- Implementation: internal/orchestration/autopilot.go
+        -- selectLaunchGroupsWithinHeadroom and
+        -- internal/campaign/auto_planner.go LaunchGroup.RateCapAuthorized.
 }
 
 rule AutoPilotReusePreferredFallback {

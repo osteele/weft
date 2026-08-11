@@ -34,7 +34,7 @@ func parseCUDAVersionFloat(s string) float64 {
 
 // OfferFilterStats tracks how many offers survived each filtering stage.
 // Fields are evaluated in order: VRAM → GPU count → host RAM → interconnect →
-// CUDA → TorchArch → Survival. A zero value means either "all filtered out at
+// CUDA → TorchArch → hourly rate → Survival. A zero value means either "all filtered out at
 // this stage" or "stage not reached" (because an earlier stage already
 // eliminated everything).
 type OfferFilterStats struct {
@@ -48,6 +48,7 @@ type OfferFilterStats struct {
 	AfterProvider     int // remaining after provider CUDA/driver compatibility filter
 	AfterForward      int // remaining after Vast.ai forward-compat driver guard
 	AfterTorchArch    int // remaining after torch arch compute-cap filter
+	AfterHourlyRate   int // remaining after per-job hourly-rate cap
 	AfterSurvival     int // remaining after survival probability filter
 	// UnknownCompatibility tracks offers whose provider did not report
 	// CUDA/driver compatibility even though the group requires a floor.
@@ -71,6 +72,7 @@ type OfferFilterStats struct {
 	TorchArchMaxCap     string
 	TorchArchExampleCap string
 	TorchArchExampleGPU string
+	HourlyRateCapCents  int
 	// ProviderErrors records providers whose search failed while another
 	// provider returned offers. These errors are important context when the
 	// surviving offers are later filtered out.
@@ -169,10 +171,19 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 			return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s (e.g. %s sm_%s)", found, offerCount(passedForward), bounds, s.TorchArchExampleGPU, s.TorchArchExampleCap)
 		}
 		return fmt.Sprintf("%s, %s passed VRAM/CUDA but all filtered by torch arch %s", found, offerCount(passedForward), bounds)
-	case s.AfterSurvival == 0:
+	case s.HourlyRateCapCents > 0 && s.AfterHourlyRate == 0:
 		passed := passedForward
 		if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
 			passed = s.AfterTorchArch
+		}
+		return fmt.Sprintf("%s, %s passed hardware filters but all exceeded max-hourly-rate $%.2f/hr", found, offerCount(passed), float64(s.HourlyRateCapCents)/100)
+	case s.AfterSurvival == 0:
+		passed := s.AfterHourlyRate
+		if passed == 0 {
+			passed = passedForward
+			if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
+				passed = s.AfterTorchArch
+			}
 		}
 		return fmt.Sprintf("%s, %s passed filters but none met survival threshold", found, offerCount(passed))
 	default:
@@ -971,6 +982,10 @@ func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *Offe
 	if len(offers) == 0 {
 		return offers, false
 	}
+	offers = filterOffersByHourlyRateCap(group, offers, st)
+	if len(offers) == 0 {
+		return offers, false
+	}
 	return offers, true
 }
 
@@ -1006,6 +1021,29 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 	result.Alternatives = rankNeutralOfferAlternatives(group, filtered, survivalModel, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, best)
 	result.FilterStats = stats
 	return result
+}
+
+func filterOffersByHourlyRateCap(group InstanceGroup, offers []cloud.Offer, stats *OfferFilterStats) []cloud.Offer {
+	capCents, _ := db.RequestedMaxHourlyRateCentsForJobs(group.Jobs)
+	if stats != nil {
+		stats.HourlyRateCapCents = capCents
+	}
+	if capCents <= 0 {
+		if stats != nil {
+			stats.AfterHourlyRate = len(offers)
+		}
+		return offers
+	}
+	filtered := make([]cloud.Offer, 0, len(offers))
+	for _, offer := range offers {
+		if offer.CostPerHour*100 <= float64(capCents)+1e-9 {
+			filtered = append(filtered, offer)
+		}
+	}
+	if stats != nil {
+		stats.AfterHourlyRate = len(filtered)
+	}
+	return filtered
 }
 
 func bestOfferWithCompatibilityProfile(group InstanceGroup, model *bidding.SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile) (int, cloud.Offer) {

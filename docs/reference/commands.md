@@ -111,6 +111,17 @@ Use `start <job-id>` to start a queued job immediately.
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
 - `--provider vastai|runpod`: Restrict rental placement to one cloud provider. Use this for provider-specific testing; omit it for normal automatic provider selection.
 - `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
+- `--max-hourly-rate USD`: Reject rental offers above this hourly rate. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
+- `--max-spend USD`: Set a hard spend limit for the rental instance that runs this job.
+- `--max-time DURATION`: Set a hard lifetime for that rental instance (for example, `2h30m`).
+- `--min-survival FRACTION`: Set the minimum accepted rental-offer survival probability, from `0` to `1`; `0` disables the floor.
+- `--grace-period DURATION`: Override how long the instance remains available after a job failure; `0` disables the grace period.
+
+Use `0` to clear `--max-hourly-rate`, `--max-spend`, or `--max-time` when
+overriding values copied with `--from`. Use `default`, `clear`, or `auto` to
+remove a `--grace-period` override. If the hourly-rate or survival filters
+remove every offer, the job remains queued and `weft diagnose` reports the
+constraint.
 
 **Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
 specific model and `--gpu-mem` matches that model's actual capacity (A100
@@ -164,6 +175,11 @@ draft <id>` to toggle the status (or do it from the TUI, described below).
 ```bash
 # Queue a job (default behavior)
 weft run deepthought 'python train.py'
+
+# Let autopilot rent 8 H200s within explicit price and lifetime limits
+weft run --tag rental --gpu h200 --gpus 8 \
+  --max-hourly-rate 33.20 --max-spend 83 --max-time 2h30m \
+  --min-survival 0.9 --grace-period 0 'python train.py'
 
 # Start a queued job immediately
 weft start wj123
@@ -1886,7 +1902,11 @@ weft edit [flags] <job-id>
 - `--clear-depends`: Remove all dependencies from the job
 - `--provider vastai|runpod`: Change the job's rental provider preference
 - `--runpod-cloud-type community|secure`: Set the job's RunPod cloud type; use `default`, `auto`, `none`, or `clear` to remove the per-job override
+- `--max-hourly-rate USD`: Reject rental offers above this hourly rate; `0` clears the cap
+- `--max-spend USD`: Set the rental instance's hard spend limit; `0` clears the cap
+- `--max-time DURATION`: Set the rental instance's hard lifetime; `0`, `default`, `clear`, or `auto` clears the cap
 - `--min-survival FRACTION`: Set the job's rental offer survival floor; `0` disables the floor for this job
+- `--grace-period DURATION`: Set the post-failure instance grace period; `0` disables it, while `default`, `clear`, or `auto` removes the override
 - `--retry`: Requeue a terminal job and apply the requested edits in the same command
 
 IDs can also be suffixed with `+` or `:any` to mark them as completion-based dependencies, e.g. `--depends-on 101+` or `--depends-on 101:any`.
@@ -1899,6 +1919,7 @@ weft edit wj1700 --clear-depends
 weft edit wj1750 --tag benchmark-isolation --tag exp-012
 weft edit wj2428 --remove-tag benchmark-isolation
 weft edit wj1800 --command "python eval.py" -C ~/project -e FOO=bar
+weft edit wj1900 --max-hourly-rate 4.50 --max-spend 12 --max-time 3h
 ```
 
 `--tag` replaces the complete tag set. Use `--remove-tag` as the edit-form

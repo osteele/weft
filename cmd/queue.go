@@ -232,6 +232,10 @@ var (
 	editGPUClass        string
 	editGPUMem          int
 	editMinSurvival     float64
+	editMaxHourlyRate   string
+	editMaxSpend        string
+	editMaxTime         string
+	editGracePeriod     string
 	editProvider        string
 	editRunpodCloudType string
 	editInputs          []string
@@ -973,6 +977,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
+	rentalPolicyFlags, err := parseRentalPolicyFlags(
+		cmd, editMaxHourlyRate, editMaxSpend, editMaxTime, editGracePeriod, editMinSurvival,
+	)
+	if err != nil {
+		return err
+	}
 
 	statusChanged := cmd.Flags().Changed("status") || editRetry
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
@@ -980,16 +990,16 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	tagsChanged := cmd.Flags().Changed("tag") || cmd.Flags().Changed("remove-tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	gpuMemChanged := cmd.Flags().Changed("gpu-mem")
-	minSurvivalChanged := cmd.Flags().Changed("min-survival")
+	rentalPolicyChanged := rentalPolicyFlagsChanged(cmd)
 	providerChanged := cmd.Flags().Changed("provider")
 	runpodCloudTypeChanged := cmd.Flags().Changed("runpod-cloud-type")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	needsChanged := cmd.Flags().Changed("needs") || editClearNeeds
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || minSurvivalChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
 	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--gpu-mem/--min-survival/--provider/--input/--needs or dependency flags")
+		return usageErrorf("no changes specified; use metadata, dependency, resource, rental-policy, or status flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
@@ -1020,10 +1030,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if minSurvivalChanged && (editMinSurvival < 0 || editMinSurvival > 1) {
-		return fmt.Errorf("--min-survival must be between 0 and 1")
-	}
-
 	// Validate status flag if provided (--retry is equivalent to --status=queued)
 	if cmd.Flags().Changed("status") {
 		if editStatus != db.StatusQueued {
@@ -1268,15 +1274,13 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, fmt.Sprintf("GPU memory: %d GB", *gpuMem))
 		}
 	}
-	if minSurvivalChanged {
-		if err := setJobCLIMinSurvivalOverride(database, job, editMinSurvival); err != nil {
-			return fmt.Errorf("update min-survival override: %w", err)
+	if rentalPolicyChanged {
+		if err := updateJobCLIResourceOverrides(database, job, func(overrides *db.CLIResourceOverrides) {
+			applyRentalPolicyFlags(cmd, overrides, rentalPolicyFlags)
+		}); err != nil {
+			return fmt.Errorf("update rental policy: %w", err)
 		}
-		if editMinSurvival == 0 {
-			updates = append(updates, "min-survival: disabled")
-		} else {
-			updates = append(updates, fmt.Sprintf("min-survival: %.0f%%", editMinSurvival*100))
-		}
+		updates = append(updates, rentalPolicyUpdateMessages(cmd, rentalPolicyFlags)...)
 	}
 	if providerChanged {
 		normalizedProvider, providerErr := normalizeProviderFlag(editProvider)
@@ -1726,6 +1730,10 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	cmd.Flags().IntVar(&editGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (0 clears)")
 	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
+	cmd.Flags().StringVar(&editMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")
+	cmd.Flags().StringVar(&editMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
+	cmd.Flags().StringVar(&editMaxTime, "max-time", "", "Maximum rental lifetime; 0 clears")
+	cmd.Flags().StringVar(&editGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringVar(&editRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure (use default/auto/none/clear to clear)")
 	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:EleutherAI/pythia-160m), can be repeated")

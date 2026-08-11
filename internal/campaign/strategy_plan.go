@@ -1749,7 +1749,6 @@ func rankOfferWithPredictedRuntime(
 		result.FilterStats = stats
 		return result, true
 	}
-
 	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
 	result.RejectedGroups = rejected
 	stats.AfterSurvival = len(filtered)

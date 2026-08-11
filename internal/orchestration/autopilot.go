@@ -1948,8 +1948,8 @@ func mergeRelaunchReasonsIntoBlockedReasons(
 }
 
 func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom int) ([]campaign.LaunchGroup, []campaign.LaunchGroup, int) {
-	if len(groups) == 0 || headroom <= 0 {
-		return nil, append([]campaign.LaunchGroup(nil), groups...), 0
+	if len(groups) == 0 {
+		return nil, nil, 0
 	}
 	sorted := append([]campaign.LaunchGroup(nil), groups...)
 	sort.SliceStable(sorted, func(i, j int) bool {
@@ -1973,6 +1973,10 @@ func selectLaunchGroupsWithinHeadroom(groups []campaign.LaunchGroup, headroom in
 	rejected := make([]campaign.LaunchGroup, 0, len(sorted))
 	used := 0
 	for _, group := range sorted {
+		if group.RateCapAuthorized {
+			accepted = append(accepted, group)
+			continue
+		}
 		if group.CostPerHourCents <= 0 {
 			continue
 		}

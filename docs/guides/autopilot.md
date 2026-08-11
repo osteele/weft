@@ -165,6 +165,14 @@ This calls `campaign.ResetGlobalRunawayBreaker(db, "TUI")` and re-triggers
 an autopilot pass immediately. The footer hint reminds you of the binding:
 `set run-rate + daily cap (H/D clear; r resets breaker)`.
 
+The hourly target is a default authorization boundary, not a substitute for
+per-job price limits. A launch group may exceed the remaining hourly headroom
+when every job in the group has an explicit `--max-hourly-rate` and the
+selected offer is within all those caps. Such a group does not consume the
+soft-target headroom used to choose uncapped groups. It still contributes to
+recorded run rate and spend, and it remains subject to its job limits, the
+daily cap, and the runaway breaker.
+
 ## Running autopilot without a TUI
 
 ```bash

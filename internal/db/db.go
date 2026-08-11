@@ -358,20 +358,24 @@ func (j *Job) RequestedCPUMemGB() int {
 // a fresh `weft run`. Later edit/retry commands store the effective
 // reservation with GPUMemStrict set so the value is replayed exactly.
 type CLIResourceOverrides struct {
-	Host          string   `json:"host,omitempty"`
-	GPU           string   `json:"gpu,omitempty"`
-	GPUClass      string   `json:"gpu_class,omitempty"`
-	GPUCount      *int     `json:"gpu_count,omitempty"`
-	GPUMemGB      *int     `json:"gpu_mem_gb,omitempty"`
-	GPUMemStrict  *bool    `json:"gpu_mem_strict,omitempty"`
-	Interconnect  string   `json:"interconnect,omitempty"`
-	CPUCores      *int     `json:"cpu_cores,omitempty"`
-	CPUMemGB      *int     `json:"cpu_mem_gb,omitempty"`
-	CPUMemStrict  *bool    `json:"cpu_mem_strict,omitempty"`
-	DiskGB        *int     `json:"disk_gb,omitempty"`
-	DiskMaxGB     *int     `json:"disk_max_gb,omitempty"`
-	RuntimeDiskGB *int     `json:"runtime_disk_gb,omitempty"`
-	MinSurvival   *float64 `json:"min_survival,omitempty"`
+	Host               string   `json:"host,omitempty"`
+	GPU                string   `json:"gpu,omitempty"`
+	GPUClass           string   `json:"gpu_class,omitempty"`
+	GPUCount           *int     `json:"gpu_count,omitempty"`
+	GPUMemGB           *int     `json:"gpu_mem_gb,omitempty"`
+	GPUMemStrict       *bool    `json:"gpu_mem_strict,omitempty"`
+	Interconnect       string   `json:"interconnect,omitempty"`
+	CPUCores           *int     `json:"cpu_cores,omitempty"`
+	CPUMemGB           *int     `json:"cpu_mem_gb,omitempty"`
+	CPUMemStrict       *bool    `json:"cpu_mem_strict,omitempty"`
+	DiskGB             *int     `json:"disk_gb,omitempty"`
+	DiskMaxGB          *int     `json:"disk_max_gb,omitempty"`
+	RuntimeDiskGB      *int     `json:"runtime_disk_gb,omitempty"`
+	MaxHourlyRateCents *int     `json:"max_hourly_rate_cents,omitempty"`
+	MaxSpendCents      *int     `json:"max_spend_cents,omitempty"`
+	MaxTimeSeconds     *int     `json:"max_time_seconds,omitempty"`
+	GracePeriodSeconds *int     `json:"grace_period_seconds,omitempty"`
+	MinSurvival        *float64 `json:"min_survival,omitempty"`
 	// MachineAffinity pins the job to specific provider physical machines,
 	// stored as resolved machine refs. Carried on the job rather than on a
 	// launch because the need is "run this next to that earlier run", which the
@@ -418,6 +422,30 @@ func RequestedMinSurvivalForJobs(jobs []*Job, defaultFloor float64) float64 {
 		}
 	}
 	return floor
+}
+
+// RequestedMaxHourlyRateCentsForJobs returns the strictest explicit hourly
+// rate cap in a launch group. allExplicit is true only when every job carries
+// a positive cap, which authorizes the group to bypass the global run-rate
+// soft target after offer filtering has enforced that cap.
+func RequestedMaxHourlyRateCentsForJobs(jobs []*Job) (cap int, allExplicit bool) {
+	if len(jobs) == 0 {
+		return 0, false
+	}
+	allExplicit = true
+	for _, job := range jobs {
+		if job == nil || job.CLIResourceOverrides == nil ||
+			job.CLIResourceOverrides.MaxHourlyRateCents == nil ||
+			*job.CLIResourceOverrides.MaxHourlyRateCents <= 0 {
+			allExplicit = false
+			continue
+		}
+		value := *job.CLIResourceOverrides.MaxHourlyRateCents
+		if cap == 0 || value < cap {
+			cap = value
+		}
+	}
+	return cap, allExplicit
 }
 
 // RequestedMachineAffinityForJobs returns the union of machine pins across a
@@ -1541,7 +1569,9 @@ func (o *CLIResourceOverrides) IsEmpty() bool {
 	return o.Host == "" && o.GPU == "" && o.GPUClass == "" && o.GPUCount == nil &&
 		o.GPUMemGB == nil && o.GPUMemStrict == nil && o.Interconnect == "" && o.CPUCores == nil &&
 		o.CPUMemGB == nil && o.CPUMemStrict == nil &&
-		o.DiskGB == nil && o.DiskMaxGB == nil && o.RuntimeDiskGB == nil && o.MinSurvival == nil &&
+		o.DiskGB == nil && o.DiskMaxGB == nil && o.RuntimeDiskGB == nil &&
+		o.MaxHourlyRateCents == nil && o.MaxSpendCents == nil && o.MaxTimeSeconds == nil &&
+		o.GracePeriodSeconds == nil && o.MinSurvival == nil &&
 		len(o.MachineAffinity) == 0 &&
 		o.MinCUDAVersion == "" && o.RunpodCloudType == ""
 }

@@ -1061,6 +1061,9 @@ func createInstanceWithReplacement(
 	maxAttempts := retrypolicy.MaxCreateAttempts()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := validateOfferHourlyRateCap(group, currentOffer); err != nil {
+			return nil, currentOffer, client, err
+		}
 		if attempt == 1 {
 			progress("creating instance")
 		} else {
@@ -1110,6 +1113,9 @@ func createInstanceWithReplacement(
 		}
 		if nextOffer == nil {
 			return nil, currentOffer, client, fmt.Errorf("offer %s failed, no replacement found: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
+		}
+		if err := validateOfferHourlyRateCap(group, *nextOffer); err != nil {
+			return nil, currentOffer, client, err
 		}
 
 		// When the replacement offer comes from a different cloud provider,
@@ -2158,6 +2164,14 @@ func LaunchInstance(
 	}
 	if r2Assets.Client == nil {
 		return 0, ErrR2ClientRequired
+	}
+	var policyErr error
+	opts, policyErr = applyJobRentalPolicy(opts, group.Jobs)
+	if policyErr != nil {
+		return 0, policyErr
+	}
+	if err := validateOfferHourlyRateCap(group, offer); err != nil {
+		return 0, err
 	}
 
 	// Reject before spending: a job declaring a checkpoint:/corpus: input has

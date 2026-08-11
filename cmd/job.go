@@ -1207,6 +1207,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("             a pinned job waits for that machine to reappear; \"queued\" here is expected, not stuck\n")
 			}
 		}
+		if policy := formatJobRentalPolicy(job); policy != "" {
+			fmt.Printf("Rental policy: %s\n", policy)
+		}
 		// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
 		// CPU-only job must not display an inert "Arch cap" that reads as
 		// the placement blocker.

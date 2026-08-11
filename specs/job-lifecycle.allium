@@ -123,6 +123,10 @@ entity Job {
     -- passed at `weft run` time. Replayed on retry so that edits to the
     -- script's PEP 723 [tool.weft] block are reflected without losing
     -- explicit user overrides. Fields absent here were not set on the CLI.
+    -- Rental policy fields are max_hourly_rate_cents, max_spend_cents,
+    -- max_time_seconds, min_survival, and grace_period_seconds. A zero grace
+    -- period is an explicit request to disable grace; absent means use the
+    -- launch default.
     cli_overrides: CLIResourceOverrides?
 
     -- Post-execution
@@ -502,6 +506,7 @@ rule SubmitJob {
         tags: options.tags,
         env_vars: options.env_vars,
         dep_spec: options.dep_spec,
+        cli_overrides: options.cli_overrides,
         backend: options.backend,
         status: if options.draft then draft
                 else if options.host != null then queued
@@ -510,6 +515,29 @@ rule SubmitJob {
         created_at: now,
         retry_count: 0
     )
+}
+
+rule EditJobRentalPolicy {
+    when: EditJob(job, options)
+    requires: options changes any of {
+        max_hourly_rate_cents,
+        max_spend_cents,
+        max_time_seconds,
+        min_survival,
+        grace_period_seconds
+    }
+
+    ensures: job.cli_overrides preserves every unchanged field
+    ensures: job.cli_overrides stores each changed field
+    ensures: a cleared field is absent from job.cli_overrides
+
+    @guidance
+        -- `weft run --from` copies these fields before applying explicit
+        -- command-line changes. `weft edit` updates the same durable JSON
+        -- object, so retries and later autopilot passes retain the policy.
+        -- Dollar values are stored as integer cents and durations as integer
+        -- seconds. Implementation: cmd/rental_policy_flags.go,
+        -- cmd/run.go, cmd/queue.go, and internal/db.CLIResourceOverrides.
 }
 
 rule SubmitDraft {

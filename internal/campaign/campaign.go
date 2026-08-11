@@ -141,6 +141,7 @@ type jobPlacementIntent struct {
 	CPUMemGB        int
 	Interconnect    string
 	Preemptible     bool
+	RentalPolicy    rentalPolicyKey
 }
 
 func placementIntentForJob(job *db.Job) jobPlacementIntent {
@@ -162,6 +163,7 @@ func placementIntentForJob(job *db.Job) jobPlacementIntent {
 		CPUMemGB:        job.RequestedCPUMemGB(),
 		Interconnect:    strings.TrimSpace(job.RequestedInterconnect()),
 		Preemptible:     job.UsesPreemptiblePlacement(),
+		RentalPolicy:    rentalPolicyForJob(job),
 	}
 }
 
@@ -181,6 +183,9 @@ func (intent jobPlacementIntent) newGroup(job *db.Job) InstanceGroup {
 }
 
 func (intent jobPlacementIntent) matchesGroup(g InstanceGroup) bool {
+	if intent.RentalPolicy != groupRentalPolicy(g) {
+		return false
+	}
 	if g.Preemptible != intent.Preemptible {
 		return false
 	}
@@ -629,6 +634,9 @@ func MergeCompatibleGroupsWithDisk(groups []InstanceGroup, estimator func(Instan
 	for _, g := range groups {
 		found := false
 		for i := range merged {
+			if !rentalPoliciesMatch(merged[i], g) {
+				continue
+			}
 			gpuSup, gpuOK := gpuClassSupremum(merged[i].GPUClass, g.GPUClass)
 			if !gpuOK {
 				continue

@@ -53,6 +53,10 @@ type LaunchGroup struct {
 	CostPerHourCents int
 	Offer            *cloud.Offer
 	Priority         int
+	// RateCapAuthorized is true when every job in the group carries an
+	// explicit hourly-rate cap and the selected offer satisfies all caps.
+	// Such a group bypasses the global unattended run-rate soft target.
+	RateCapAuthorized bool
 }
 
 // AutoPlannerProfile returns the cost/time profile for unattended auto mode.
@@ -250,10 +254,11 @@ func buildLaunchGroups(candidate *CandidateResult, reused map[int64]struct{}) []
 			return db.SchedulingLess(jobByID(group.Jobs, jobIDs[i]), jobByID(group.Jobs, jobIDs[j]))
 		})
 		launchGroups = append(launchGroups, LaunchGroup{
-			JobIDs:           jobIDs,
-			CostPerHourCents: int(math.Round(groupOffer.Offer.CostPerHour * 100)),
-			Offer:            groupOffer.Offer,
-			Priority:         maxJobPriority(group.Jobs),
+			JobIDs:            jobIDs,
+			CostPerHourCents:  int(math.Round(groupOffer.Offer.CostPerHour * 100)),
+			Offer:             groupOffer.Offer,
+			Priority:          maxJobPriority(group.Jobs),
+			RateCapAuthorized: launchGroupHasAuthorizedRateCap(group, *groupOffer.Offer),
 		})
 	}
 	return launchGroups
@@ -375,6 +380,8 @@ func filterStatsFingerprint(s OfferFilterStats) string {
 		return "vastai/search-offers/empty-result:forward-compat-driver"
 	case (s.TorchArchMinCap != "" || s.TorchArchMaxCap != "") && s.AfterTorchArch == 0:
 		return "vastai/search-offers/empty-result:torch-arch"
+	case s.HourlyRateCapCents > 0 && s.AfterHourlyRate == 0:
+		return "vastai/search-offers/empty-result:hourly-rate-cap"
 	case s.AfterSurvival == 0:
 		return "vastai/search-offers/empty-result:survival"
 	}

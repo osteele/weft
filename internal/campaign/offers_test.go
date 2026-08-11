@@ -1031,6 +1031,38 @@ func TestRankOffer_UsesJobMinSurvivalOverride(t *testing.T) {
 	}
 }
 
+func TestRankOffer_FiltersByJobHourlyRateCap(t *testing.T) {
+	capCents := 150
+	group := InstanceGroup{
+		GPUClass: "A100",
+		Jobs: []*db.Job{{
+			ID:                   1,
+			CLIResourceOverrides: &db.CLIResourceOverrides{MaxHourlyRateCents: &capCents},
+		}},
+	}
+	offers := []cloud.Offer{
+		{ProviderID: "within-cap", GPUName: "A100", GPUMemGB: 80, CostPerHour: 1.50},
+		{ProviderID: "over-cap", GPUName: "A100", GPUMemGB: 80, CostPerHour: 1.51},
+	}
+
+	got := rankOffer(group, offers, nil, 1, bidding.ConstantSetup(0), bidding.StrategyFastest, 0)
+	if got.Offer == nil || got.Offer.ProviderID != "within-cap" {
+		t.Fatalf("offer = %+v, want within-cap", got.Offer)
+	}
+	if got.FilterStats.AfterHourlyRate != 1 || got.FilterStats.HourlyRateCapCents != capCents {
+		t.Fatalf("hourly-rate stats = %+v", got.FilterStats)
+	}
+
+	blocked := rankOffer(group, offers[1:], nil, 1, bidding.ConstantSetup(0), bidding.StrategyFastest, 0)
+	if blocked.Offer != nil {
+		t.Fatalf("offer = %+v, want none", blocked.Offer)
+	}
+	detail := blocked.FilterStats.NoOffersDetail("")
+	if !strings.Contains(detail, "exceeded max-hourly-rate $1.50/hr") {
+		t.Fatalf("detail = %q", detail)
+	}
+}
+
 func TestSplitToParallel_UsesOnlyPerJobMinimumMemory(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",

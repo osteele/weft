@@ -1020,6 +1020,29 @@ func TestSelectLaunchGroupsWithinHeadroom_PrefersPriorityGroup(t *testing.T) {
 	}
 }
 
+func TestSelectLaunchGroupsWithinHeadroom_ExemptsRateCappedGroup(t *testing.T) {
+	groups := []campaign.LaunchGroup{
+		{JobIDs: []int64{1}, CostPerHourCents: 3320, RateCapAuthorized: true},
+		{JobIDs: []int64{2}, CostPerHourCents: 80},
+	}
+
+	accepted, rejected, used := selectLaunchGroupsWithinHeadroom(groups, 100)
+	if len(accepted) != 2 {
+		t.Fatalf("accepted = %+v, want both groups", accepted)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("rejected = %+v, want none", rejected)
+	}
+	if used != 80 {
+		t.Fatalf("used headroom = %d, want 80 from uncapped group only", used)
+	}
+
+	accepted, rejected, used = selectLaunchGroupsWithinHeadroom(groups[:1], 0)
+	if len(accepted) != 1 || len(rejected) != 0 || used != 0 {
+		t.Fatalf("zero-headroom result = accepted %+v rejected %+v used %d", accepted, rejected, used)
+	}
+}
+
 func TestApplyAcceptedLaunchGroups_UpdatesLegacyLaunchFields(t *testing.T) {
 	plan := campaign.AutoPlacementPlan{
 		LaunchJobIDs: []int64{1, 2, 3},

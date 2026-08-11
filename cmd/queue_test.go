@@ -544,6 +544,57 @@ func TestRunEditUpdatesMinSurvivalOverride(t *testing.T) {
 	}
 }
 
+func TestRunEditUpdatesRentalPolicyCaps(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	for name, value := range map[string]string{
+		"max-hourly-rate": "33.20",
+		"max-spend":       "$83",
+		"max-time":        "2h30m",
+		"grace-period":    "0",
+	} {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set %s: %v", name, err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	for _, want := range []string{"max-hourly-rate: $33.20", "max-spend: $83.00", "max-time: 2h30m0s", "grace-period: disabled"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output %q missing %q", out, want)
+		}
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	o := job.CLIResourceOverrides
+	if o == nil || o.MaxHourlyRateCents == nil || *o.MaxHourlyRateCents != 3320 {
+		t.Fatalf("MaxHourlyRateCents = %+v, want 3320", o)
+	}
+	if o.MaxSpendCents == nil || *o.MaxSpendCents != 8300 {
+		t.Fatalf("MaxSpendCents = %+v, want 8300", o.MaxSpendCents)
+	}
+	if o.MaxTimeSeconds == nil || *o.MaxTimeSeconds != 9000 {
+		t.Fatalf("MaxTimeSeconds = %+v, want 9000", o.MaxTimeSeconds)
+	}
+	if o.GracePeriodSeconds == nil || *o.GracePeriodSeconds != 0 {
+		t.Fatalf("GracePeriodSeconds = %+v, want explicit 0", o.GracePeriodSeconds)
+	}
+}
+
 func TestRunEditUpdatesDraftLocally(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -741,6 +792,10 @@ func resetEditState() {
 	editGPUClass = ""
 	editGPUMem = 0
 	editMinSurvival = 0
+	editMaxHourlyRate = ""
+	editMaxSpend = ""
+	editMaxTime = ""
+	editGracePeriod = ""
 	editProvider = ""
 	editRunpodCloudType = ""
 	editInputs = nil

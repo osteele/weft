@@ -1111,6 +1111,47 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceWithReplacementRejectsReplacementAboveJobRateCap(t *testing.T) {
+	capCents := 110
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		Jobs: []*db.Job{{
+			CLIResourceOverrides: &db.CLIResourceOverrides{MaxHourlyRateCents: &capCents},
+		}},
+	}
+	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
+	replacement := cloud.Offer{ProviderID: "1001", Provider: cloud.ProviderVastai, CostPerHour: 1.20}
+	createCalls := 0
+	metadataUpdates := 0
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			createCalls++
+			return nil, fmt.Errorf("%w: unavailable", cloud.ErrOfferUnavailable)
+		},
+	}
+
+	_, _, _, err := createInstanceWithReplacement(
+		client,
+		nil,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		func(cloud.Offer) error { metadataUpdates++; return nil },
+		func(map[string]struct{}) (*cloud.Offer, error) { return &replacement, nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeds job max-hourly-rate") {
+		t.Fatalf("error = %v, want hourly-rate rejection", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("provider create calls = %d, want only the initial offer", createCalls)
+	}
+	if metadataUpdates != 0 {
+		t.Fatalf("replacement metadata updates = %d, want 0", metadataUpdates)
+	}
+}
+
 func TestCreateInstanceWithReplacementRetriesUnavailableRunpodOffer(t *testing.T) {
 	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
 	initialOffer := cloud.Offer{ProviderID: "RTX4090", Provider: cloud.ProviderRunpod, CostPerHour: 0.80}

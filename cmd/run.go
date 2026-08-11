@@ -129,6 +129,11 @@ var (
 	runCUDADriverMin   string
 	runProvider        string
 	runRunpodCloudType string
+	runMaxHourlyRate   string
+	runMaxSpend        string
+	runMaxTime         string
+	runGracePeriod     string
+	runMinSurvival     float64
 	runInputs          []string
 	runOutputs         []string
 	runProduces        []string
@@ -433,6 +438,11 @@ func init() {
 	_ = runCmd.Flags().MarkHidden("min-cuda")
 	runCmd.Flags().StringVar(&runProvider, "provider", "", "Cloud provider for rental placement (vastai or runpod)")
 	runCmd.Flags().StringVar(&runRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure")
+	runCmd.Flags().StringVar(&runMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")
+	runCmd.Flags().StringVar(&runMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
+	runCmd.Flags().StringVar(&runMaxTime, "max-time", "", "Maximum rental lifetime (for example, 3h); 0 clears")
+	runCmd.Flags().StringVar(&runGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
+	runCmd.Flags().Float64Var(&runMinSurvival, "min-survival", 0.4, "Minimum rental offer survival probability (0-1; 0 disables)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:EleutherAI/pythia-160m), can be repeated")
@@ -484,6 +494,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
+	rentalPolicyFlags, err := parseRentalPolicyFlags(
+		cmd, runMaxHourlyRate, runMaxSpend, runMaxTime, runGracePeriod, runMinSurvival,
+	)
+	if err != nil {
+		return err
+	}
 
 	// Open database early for --from support
 	database, err := db.Open()
@@ -500,9 +516,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// --host flag takes priority
 	host = runHost
 
+	var fromJob *db.Job
 	// Handle --from mode: copy settings from existing job
 	if runFrom > 0 {
-		fromJob, err := db.GetJobByID(database, runFrom)
+		fromJob, err = db.GetJobByID(database, runFrom)
 		if err != nil {
 			return fmt.Errorf("get job %s: %w", ids.FormatJobID(runFrom), err)
 		}
@@ -706,6 +723,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// These overrides are persisted on the job so retries can replay the user's
 	// original submission intent against updated script metadata.
 	cliOverrides := &db.CLIResourceOverrides{}
+	if fromJob != nil {
+		inheritRentalPolicyOverrides(cliOverrides, fromJob.CLIResourceOverrides)
+	}
+	applyRentalPolicyFlags(cmd, cliOverrides, rentalPolicyFlags)
 	if strings.TrimSpace(host) != "" {
 		cliOverrides.Host = strings.TrimSpace(host)
 	}

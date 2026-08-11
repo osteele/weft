@@ -488,6 +488,19 @@ func TestMergeCompatibleGroups_DifferentRunpodCloudTypesStaySeparate(t *testing.
 	}
 }
 
+func TestMergeCompatibleGroups_DifferentRentalPoliciesStaySeparate(t *testing.T) {
+	capA := 100
+	capB := 200
+	groups := []InstanceGroup{
+		{GPUClass: "A100", GPUMemGB: 40, Jobs: []*db.Job{{ID: 1, CLIResourceOverrides: &db.CLIResourceOverrides{MaxHourlyRateCents: &capA}}}},
+		{GPUClass: "A100", GPUMemGB: 40, Jobs: []*db.Job{{ID: 2, CLIResourceOverrides: &db.CLIResourceOverrides{MaxHourlyRateCents: &capB}}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 2 {
+		t.Fatalf("merged groups = %d, want 2 for different rental policies", len(merged))
+	}
+}
+
 func TestMergeCompatibleGroups_TakesMemorySupremum(t *testing.T) {
 	// Groups in the same VRAM tier merge and take the supremum
 	groups := []InstanceGroup{

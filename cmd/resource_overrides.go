@@ -58,6 +58,22 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		v := *source.MinSurvival
 		clone.MinSurvival = &v
 	}
+	if source.MaxHourlyRateCents != nil {
+		v := *source.MaxHourlyRateCents
+		clone.MaxHourlyRateCents = &v
+	}
+	if source.MaxSpendCents != nil {
+		v := *source.MaxSpendCents
+		clone.MaxSpendCents = &v
+	}
+	if source.MaxTimeSeconds != nil {
+		v := *source.MaxTimeSeconds
+		clone.MaxTimeSeconds = &v
+	}
+	if source.GracePeriodSeconds != nil {
+		v := *source.GracePeriodSeconds
+		clone.GracePeriodSeconds = &v
+	}
 	if source.CPUCores != nil {
 		v := *source.CPUCores
 		clone.CPUCores = &v

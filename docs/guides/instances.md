@@ -103,10 +103,29 @@ weft autopilot status --quiet    # exit 0=idle, 10=running, 11=stale, 12=paused
 If `running`, queue jobs and wait. The autopilot will pick them up. It
 may take some time before an instance appears (a launch pass runs at most
 once per autopilot cycle). **Launching manually is not faster than waiting
-for the autopilot's next pass**; it just gives you control over:
+for the autopilot's next pass**. Put persistent rental limits on the job:
 
-- *Cost*: explicit `--max-spend`, `--strategy cheap|fast|fastest`, or
-  `--min-survival` to override the autopilot's defaults.
+```bash
+weft run --tag rental --gpu h200 --gpus 8 \
+  --max-hourly-rate 33.20 --max-spend 83 --max-time 2h30m \
+  --min-survival 0.9 --grace-period 0 'python train.py'
+```
+
+The same flags work with `weft edit <job-id>`. `--max-hourly-rate` filters
+offers before ranking. If no offer satisfies the cap, the job stays queued
+and its diagnosis explains the constraint. `--max-spend` and `--max-time`
+become hard limits on the launched instance. `--grace-period 0` terminates
+the instance without a post-failure grace window.
+
+An explicit hourly cap also authorizes autopilot to exceed its global hourly
+soft target for that launch group. This exemption applies only when every job
+in the group has a cap and the selected offer satisfies all of them. The
+launch still counts toward actual spend and the runaway breaker.
+
+Launch manually when you need direct control over:
+
+- *Strategy*: select `--strategy cheap|fast|fastest` for this launch rather
+  than using the autopilot's configured objective.
 - *Parallelism*: pick a subset of jobs (`--jobs`) or split a large batch
   across separate launches.
 - *Offer selection*: review and pick offers in the TUI rather than letting
