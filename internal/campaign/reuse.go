@@ -403,7 +403,7 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("host RAM insufficient: need=%dGB instance=%dGB", constraints.CPUMemGB, inst.RAMGB)
 	}
 
-	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst), inst.NVLinkBandwidth) {
 		return false, fmt.Sprintf("interconnect mismatch: job requires %s, instance GPU is %q", constraints.Interconnect, inst.DisplayGPUBrief())
 	}
 

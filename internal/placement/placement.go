@@ -369,21 +369,28 @@ func hostGPUNameSignals(host inventory.HostSpec) string {
 	return strings.Join(parts, " ")
 }
 
-// InterconnectSatisfied reports whether a target's naming signals satisfy an
-// interconnect requirement. NVLink presence is inferred from "nvlink"/"sxm"/
+// InterconnectSatisfied reports whether a target's evidence satisfies an
+// interconnect requirement. A reported provider measurement is authoritative:
+// positive bandwidth means NVLink and zero means no measured NVLink. When the
+// measurement is unknown, NVLink presence is inferred from "nvlink"/"sxm"/
 // "nvl" tokens in the target's GPU or datacenter naming; a name without those
 // tokens reads as PCIe. "nvl" covers the H100 NVL, an NVLink-bridged part —
 // note the bridge links card PAIRS, so a >2-GPU nvlink request served by NVL
 // cards gets pairwise NVLink only. The offer filter, the reuse matcher, and
 // on-prem host scoring all judge targets through this one predicate so they
 // cannot drift.
-func InterconnectSatisfied(req, nameSignals string) bool {
+func InterconnectSatisfied(req, nameSignals string, nvlinkBandwidth *float64) bool {
 	req = strings.ToLower(strings.TrimSpace(req))
 	if req == "" || req == "any" {
 		return true
 	}
-	name := strings.ToLower(nameSignals)
-	hasNVLinkSignal := strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
+	hasNVLinkSignal := false
+	if nvlinkBandwidth != nil {
+		hasNVLinkSignal = *nvlinkBandwidth > 0
+	} else {
+		name := strings.ToLower(nameSignals)
+		hasNVLinkSignal = strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
+	}
 	switch req {
 	case "nvlink":
 		return hasNVLinkSignal

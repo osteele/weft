@@ -2233,6 +2233,7 @@ func LaunchInstance(
 		Reliability:       offer.Reliability,
 		InetDownMbps:      offer.DownloadBandwidth,
 		InetUpMbps:        offer.UploadBandwidth,
+		NVLinkBandwidth:   offer.NVLinkBandwidth,
 		CUDAVersion:       offer.CUDAVersion,
 		DriverVersion:     offer.DriverVersion,
 		CPUCores:          offer.CPUCores,

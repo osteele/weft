@@ -693,6 +693,8 @@ func TestQuickReuseCompatible_RejectsInstanceBelowMinCUDA(t *testing.T) {
 // on: candidate slots are capped, so an incompatible instance holding a slot
 // can displace a usable one.
 func TestQuickReuseCompatible_HostAxes(t *testing.T) {
+	positiveNVLinkBandwidth := 478.116
+	zeroNVLinkBandwidth := 0.0
 	base := func() *db.Launch {
 		return &db.Launch{
 			Status:          db.LaunchStatusRunning,
@@ -716,6 +718,14 @@ func TestQuickReuseCompatible_HostAxes(t *testing.T) {
 		{"interconnect nvlink accepts SXM name", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) { l.ResolvedGPUName = "A100 SXM4" }, true},
 		{"interconnect nvlink accepts H100 NVL", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) { l.ResolvedGPUName = "H100 NVL" }, true},
 		{"interconnect pcie rejects H100 NVL", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "pcie"}, func(l *db.Launch) { l.ResolvedGPUName = "H100 NVL" }, false},
+		{"interconnect nvlink accepts measured bare H200", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) {
+			l.ResolvedGPUName = "H200"
+			l.NVLinkBandwidth = &positiveNVLinkBandwidth
+		}, true},
+		{"interconnect nvlink rejects measured-zero SXM", InstanceGroup{GPUClass: "NVIDIA", Interconnect: "nvlink"}, func(l *db.Launch) {
+			l.ResolvedGPUName = "A100 SXM4"
+			l.NVLinkBandwidth = &zeroNVLinkBandwidth
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

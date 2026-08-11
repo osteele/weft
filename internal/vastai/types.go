@@ -10,27 +10,28 @@ import (
 
 // Offer represents a Vast.ai GPU rental offer from search results.
 type Offer struct {
-	ID                int     `json:"id"`
-	InstanceType      string  `json:"type"`
-	GPUName           string  `json:"gpu_name"`
-	NumGPUs           int     `json:"num_gpus"`
-	GPUMemMB          int     `json:"gpu_ram"` // per GPU, in MB
-	GPUMemGB          float64 // computed: GPUMemMB / 1024
-	CostPerHour       float64 `json:"dph_total"`    // $/hr for the whole instance
-	Reliability       float64 `json:"reliability2"` // 0-1
-	DownloadBandwidth float64 `json:"inet_down"`    // Mbps
-	UploadBandwidth   float64 `json:"inet_up"`      // Mbps
-	DiskSpace         float64 `json:"disk_space"`   // GB available
-	CPUCores          float64 `json:"cpu_cores_effective"`
-	CPUName           string  `json:"cpu_name"`
-	CPURAMMB          float64 `json:"cpu_ram"`        // total system RAM in MB
-	CUDAVersion       float64 `json:"cuda_max_good"`  // max supported CUDA version
-	DriverVersion     string  `json:"driver_version"` // dotted NVIDIA driver version ("550.90.07")
-	DatacenterDriver  bool    `json:"datacenter"`     // Vast.ai datacenter/forward-compat driver stack
-	DLPerf            float64 `json:"dlperf"`         // deep learning perf score
-	Geolocation       string  `json:"geolocation"`    // data center location
-	Verified          bool    `json:"verified"`
-	MachineID         int     `json:"machine_id"`
+	ID                int      `json:"id"`
+	InstanceType      string   `json:"type"`
+	GPUName           string   `json:"gpu_name"`
+	NumGPUs           int      `json:"num_gpus"`
+	GPUMemMB          int      `json:"gpu_ram"` // per GPU, in MB
+	GPUMemGB          float64  // computed: GPUMemMB / 1024
+	CostPerHour       float64  `json:"dph_total"`    // $/hr for the whole instance
+	Reliability       float64  `json:"reliability2"` // 0-1
+	DownloadBandwidth float64  `json:"inet_down"`    // Mbps
+	UploadBandwidth   float64  `json:"inet_up"`      // Mbps
+	NVLinkBandwidth   *float64 `json:"bw_nvlink"`    // GB/s measured NVLink bandwidth; nil = not reported
+	DiskSpace         float64  `json:"disk_space"`   // GB available
+	CPUCores          float64  `json:"cpu_cores_effective"`
+	CPUName           string   `json:"cpu_name"`
+	CPURAMMB          float64  `json:"cpu_ram"`        // total system RAM in MB
+	CUDAVersion       float64  `json:"cuda_max_good"`  // max supported CUDA version
+	DriverVersion     string   `json:"driver_version"` // dotted NVIDIA driver version ("550.90.07")
+	DatacenterDriver  bool     `json:"datacenter"`     // Vast.ai datacenter/forward-compat driver stack
+	DLPerf            float64  `json:"dlperf"`         // deep learning perf score
+	Geolocation       string   `json:"geolocation"`    // data center location
+	Verified          bool     `json:"verified"`
+	MachineID         int      `json:"machine_id"`
 }
 
 // Instance represents a running Vast.ai instance.

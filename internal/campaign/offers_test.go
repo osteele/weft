@@ -952,6 +952,31 @@ func TestRankOffer_FiltersPCIeInterconnect(t *testing.T) {
 	}
 }
 
+func TestRankOffer_UsesMeasuredNVLinkBandwidth(t *testing.T) {
+	positive := 478.116
+	zero := 0.0
+	offers := []cloud.Offer{
+		{ProviderID: "measured-nvlink", GPUName: "H200", GPUMemGB: 141, CostPerHour: 0.20, NVLinkBandwidth: &positive},
+		{ProviderID: "measured-pcie", GPUName: "H200", GPUMemGB: 141, CostPerHour: 0.10, NVLinkBandwidth: &zero},
+	}
+
+	nvlink := rankOffer(
+		InstanceGroup{GPUClass: "H200", GPUMemGB: 141, Interconnect: "nvlink", Jobs: []*db.Job{{ID: 1}}},
+		offers, nil, 1.0, bidding.ConstantSetup(0), bidding.StrategyCheap, 0,
+	)
+	if nvlink.Offer == nil || nvlink.Offer.ProviderID != "measured-nvlink" {
+		t.Fatalf("nvlink offer = %+v, want measured-nvlink", nvlink.Offer)
+	}
+
+	pcie := rankOffer(
+		InstanceGroup{GPUClass: "H200", GPUMemGB: 141, Interconnect: "pcie", Jobs: []*db.Job{{ID: 1}}},
+		offers, nil, 1.0, bidding.ConstantSetup(0), bidding.StrategyCheap, 0,
+	)
+	if pcie.Offer == nil || pcie.Offer.ProviderID != "measured-pcie" {
+		t.Fatalf("pcie offer = %+v, want measured-pcie", pcie.Offer)
+	}
+}
+
 func TestRankOffer_UsesJobMinSurvivalOverride(t *testing.T) {
 	minSurvivalZero := 0.0
 	lowSurvivalOffer := cloud.Offer{

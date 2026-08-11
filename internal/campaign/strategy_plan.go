@@ -2012,7 +2012,7 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 	if !hostRAMSatisfied(constraints.CPUMemGB, inst.RAMGB) {
 		return false
 	}
-	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst)) {
+	if !placement.InterconnectSatisfied(constraints.Interconnect, instanceInterconnectSignals(inst), inst.NVLinkBandwidth) {
 		return false
 	}
 	if constraints.GPUMemGB > 0 && inst.GPUMemGB <= 0 {
@@ -2388,6 +2388,7 @@ func reuseSyntheticOffer(cap InstanceCapacity) cloud.Offer {
 		RAMGB:             inst.RAMGB,
 		DownloadBandwidth: inst.InetDownMbps,
 		UploadBandwidth:   inst.InetUpMbps,
+		NVLinkBandwidth:   inst.NVLinkBandwidth,
 		DataCenter:        inst.DataCenter,
 		MachineID:         inst.MachineID,
 	}

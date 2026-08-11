@@ -144,11 +144,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddAgentProtocolColumn},
 		&goose.GoFunc{RunDB: dropAddAgentProtocolColumn},
 	)
+	addLaunchNVLinkBandwidth := goose.NewGoMigration(
+		43,
+		&goose.GoFunc{RunDB: applyAddLaunchNVLinkBandwidthColumn},
+		&goose.GoFunc{RunDB: dropAddLaunchNVLinkBandwidthColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -303,6 +308,29 @@ func applyAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
 
 func dropAddLaunchDriverVersionColumn(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN driver_version`)
+	return nil
+}
+
+// applyAddLaunchNVLinkBandwidthColumn preserves provider-measured topology
+// evidence for reuse. NULL is unknown; zero is a reported absence.
+func applyAddLaunchNVLinkBandwidthColumn(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "launches", "nvlink_bandwidth")
+	if err != nil {
+		return fmt.Errorf("inspect launches.nvlink_bandwidth: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE launches ADD COLUMN nvlink_bandwidth REAL`,
+	); err != nil {
+		return fmt.Errorf("add launches.nvlink_bandwidth: %w", err)
+	}
+	return nil
+}
+
+func dropAddLaunchNVLinkBandwidthColumn(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN nvlink_bandwidth`)
 	return nil
 }
 
@@ -875,7 +903,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39, 40}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39, 40, 43}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

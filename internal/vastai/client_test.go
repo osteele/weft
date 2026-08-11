@@ -26,6 +26,7 @@ const searchOffersJSON = `[
     "reliability2": 0.98,
     "inet_down": 500.0,
     "inet_up": 200.0,
+    "bw_nvlink": 478.116,
     "disk_space": 100.0,
     "cuda_max_good": 12.2,
     "datacenter": true,
@@ -41,6 +42,7 @@ const searchOffersJSON = `[
     "reliability2": 0.99,
     "inet_down": 1000.0,
     "inet_up": 500.0,
+    "bw_nvlink": 0.0,
     "disk_space": 200.0,
     "cuda_max_good": 12.2,
     "dlperf": 85.0,
@@ -100,6 +102,9 @@ func TestParseSearchOffers(t *testing.T) {
 	if !rtx.DatacenterDriver {
 		t.Errorf("offer[0].DatacenterDriver = false, want true")
 	}
+	if rtx.NVLinkBandwidth == nil || *rtx.NVLinkBandwidth != 478.116 {
+		t.Errorf("offer[0].NVLinkBandwidth = %v, want 478.116", rtx.NVLinkBandwidth)
+	}
 
 	a100 := offers[1]
 	if a100.GPUName != "A100 80GB" {
@@ -107,6 +112,9 @@ func TestParseSearchOffers(t *testing.T) {
 	}
 	if a100.CostPerHour != 1.20 {
 		t.Errorf("offer[1].CostPerHour = %f, want 1.20", a100.CostPerHour)
+	}
+	if a100.NVLinkBandwidth == nil || *a100.NVLinkBandwidth != 0 {
+		t.Errorf("offer[1].NVLinkBandwidth = %v, want reported zero", a100.NVLinkBandwidth)
 	}
 }
 

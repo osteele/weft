@@ -2164,27 +2164,32 @@ func TestValidateJobSourceForCloudAppliesCapToResidualTarball(t *testing.T) {
 // Interconnect, host RAM, and explicit --cpu-cores were exactly that.
 
 func TestMatchJobToInstance_Interconnect(t *testing.T) {
+	positive := 478.116
+	zero := 0.0
 	tests := []struct {
 		name         string
 		interconnect string
 		instResolved string
+		bandwidth    *float64
 		want         bool
 	}{
-		{"no requirement passes", "", "H100 PCIE", true},
-		{"any passes", "any", "H100 SXM", true},
-		{"nvlink accepts SXM name", "nvlink", "A100-SXM4-80GB", true},
-		{"nvlink accepts explicit NVLink name", "nvlink", "H100 NVLINK", true},
-		{"nvlink rejects a name with no signal", "nvlink", "RTX 4090", false},
-		{"nvlink accepts NVL-bridged name", "nvlink", "H100 NVL", true},
-		{"pcie rejects an SXM name", "pcie", "A100 SXM4", false},
-		{"pcie rejects NVL-bridged name", "pcie", "H100 NVL", false},
-		{"pcie accepts a plain name", "pcie", "A100 PCIE", true},
+		{"no requirement passes", "", "H100 PCIE", nil, true},
+		{"any passes", "any", "H100 SXM", nil, true},
+		{"nvlink accepts SXM name", "nvlink", "A100-SXM4-80GB", nil, true},
+		{"nvlink accepts explicit NVLink name", "nvlink", "H100 NVLINK", nil, true},
+		{"nvlink rejects a name with no signal", "nvlink", "RTX 4090", nil, false},
+		{"nvlink accepts NVL-bridged name", "nvlink", "H100 NVL", nil, true},
+		{"pcie rejects an SXM name", "pcie", "A100 SXM4", nil, false},
+		{"pcie rejects NVL-bridged name", "pcie", "H100 NVL", nil, false},
+		{"pcie accepts a plain name", "pcie", "A100 PCIE", nil, true},
+		{"measured NVLink overrides plain name", "nvlink", "H200", &positive, true},
+		{"reported zero overrides SXM name", "nvlink", "A100 SXM4", &zero, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			job := &db.Job{CLIResourceOverrides: &db.CLIResourceOverrides{Interconnect: tt.interconnect}}
 			cap := InstanceCapacity{
-				Instance:   &db.Launch{GPUClass: "nvidia", ResolvedGPUName: tt.instResolved, GPUMemGB: 80},
+				Instance:   &db.Launch{GPUClass: "nvidia", ResolvedGPUName: tt.instResolved, GPUMemGB: 80, NVLinkBandwidth: tt.bandwidth},
 				DiskFreeGB: 100,
 			}
 			got, reason := MatchJobToInstance(job, cap)

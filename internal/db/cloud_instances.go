@@ -22,7 +22,7 @@ const launchSelectColumns = `id, campaign_id, status, provider, gpu_spec, gpu_cl
 		created_at, ready_at, launched_at, ended_at,
 		bootstrap_deadline_unix, agent_ready_at_unix,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
-		inet_down_mbps, inet_up_mbps, cuda_version,
+		inet_down_mbps, inet_up_mbps, nvlink_bandwidth, cuda_version,
 		cpu_cores_effective, cpu_name, ram_gb,
 		provider_instance_id, data_center,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, replaced_instance_id,
@@ -253,7 +253,11 @@ type Launch struct {
 	Reliability      float64
 	InetDownMbps     float64
 	InetUpMbps       float64
-	CUDAVersion      float64
+	// NVLinkBandwidth is the provider-measured intra-host NVLink bandwidth.
+	// Nil means the provider did not report a measurement; zero is a reported
+	// absence and must remain distinct from unknown for topology matching.
+	NVLinkBandwidth *float64
+	CUDAVersion     float64
 	// DriverVersion is the NVIDIA driver version the machine runs, as a dotted
 	// string ("550.90.07"). Recorded from the offer at launch (Vast.ai) or the
 	// post-create probe (RunPod). Empty means unknown: RunPod offers carry no
@@ -637,16 +641,16 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 			`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 			 max_spend_cents, max_time_seconds, created_at,
 			 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
-			 inet_down_mbps, inet_up_mbps, cuda_version,
+				 inet_down_mbps, inet_up_mbps, nvlink_bandwidth, cuda_version,
 			 cpu_cores_effective, cpu_name, ram_gb,
 			 disk_gb, provisioned_inputs, machine_id, docker_image,
 			 instance_type, runpod_cloud_type, max_bid_price_cents, on_demand_ref_cents,
 			 grace_started_at, grace_deadline, driver_version)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 			c.MaxSpendCents, c.MaxTimeSeconds, now,
 			c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
-			c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
+			c.InetDownMbps, c.InetUpMbps, c.NVLinkBandwidth, c.CUDAVersion,
 			c.CPUCores, c.CPUName, c.RAMGB,
 			c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
 			instanceType, runpodCloudType, maxBidPriceCents, onDemandRefCents,
@@ -1493,7 +1497,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		`UPDATE launches
 		 SET provider = ?,
 		     resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
-		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?,
+		     inet_down_mbps = ?, inet_up_mbps = ?, nvlink_bandwidth = ?, cuda_version = ?,
 		     cpu_cores_effective = ?, cpu_name = ?, ram_gb = ?,
 		     disk_gb = ?, gpu_mem_gb = ?, driver_version = ?, machine_id = ?
 		 WHERE id = ?`,
@@ -1505,6 +1509,7 @@ func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) er
 		offer.Reliability,
 		offer.DownloadBandwidth,
 		offer.UploadBandwidth,
+		offer.NVLinkBandwidth,
 		offer.CUDAVersion,
 		offer.CPUCores,
 		offer.CPUName,
@@ -2556,7 +2561,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var bootstrapDeadline, agentReadyAt sql.NullInt64
 	var resolvedGPUName sql.NullString
 	var costPerHourCents, numGPUs sql.NullInt64
-	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
+	var dlPerf, reliability, inetDown, inetUp, nvlinkBandwidth, cudaVersion sql.NullFloat64
 	var cpuCores, ramGB sql.NullInt64
 	var cpuName sql.NullString
 	var providerInstanceID, dataCenter sql.NullString
@@ -2593,7 +2598,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
 		&bootstrapDeadline, &agentReadyAt,
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
-		&inetDown, &inetUp, &cudaVersion,
+		&inetDown, &inetUp, &nvlinkBandwidth, &cudaVersion,
 		&cpuCores, &cpuName, &ramGB,
 		&providerInstanceID, &dataCenter,
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs, &replacedInstanceID,
@@ -2668,6 +2673,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if inetUp.Valid {
 		c.InetUpMbps = inetUp.Float64
+	}
+	if nvlinkBandwidth.Valid {
+		c.NVLinkBandwidth = &nvlinkBandwidth.Float64
 	}
 	if cudaVersion.Valid {
 		c.CUDAVersion = cudaVersion.Float64

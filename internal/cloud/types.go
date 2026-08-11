@@ -83,20 +83,21 @@ type Offer struct {
 	InstanceType      string   // interruption mode (on-demand, interruptible), when known
 	GPUName           string   // e.g., "RTX_4090"
 	NumGPUs           int
-	GPUMemGB          float64 // per-GPU memory in GB
-	CostPerHour       float64 // $/hr for the whole instance
-	Reliability       float64 // 0-1
-	DLPerf            float64 // deep learning perf score
-	DataCenter        string  // e.g., "US-East"
-	DatacenterDriver  bool    // provider reports a datacenter/forward-compat driver stack
-	CUDAVersion       float64 // max supported CUDA version
-	DriverVersion     string  // NVIDIA driver version, dotted string ("550.90.07"); "" = provider does not report it at search
-	DiskSpaceGB       float64 // GB available
-	CPUCores          int     // effective CPU cores granted
-	CPUName           string  // CPU model name
-	RAMGB             int     // total system RAM in GB
-	DownloadBandwidth float64 // Mbps
-	UploadBandwidth   float64 // Mbps
+	GPUMemGB          float64  // per-GPU memory in GB
+	CostPerHour       float64  // $/hr for the whole instance
+	Reliability       float64  // 0-1
+	DLPerf            float64  // deep learning perf score
+	DataCenter        string   // e.g., "US-East"
+	DatacenterDriver  bool     // provider reports a datacenter/forward-compat driver stack
+	CUDAVersion       float64  // max supported CUDA version
+	DriverVersion     string   // NVIDIA driver version, dotted string ("550.90.07"); "" = provider does not report it at search
+	DiskSpaceGB       float64  // GB available
+	CPUCores          int      // effective CPU cores granted
+	CPUName           string   // CPU model name
+	RAMGB             int      // total system RAM in GB
+	DownloadBandwidth float64  // Mbps
+	UploadBandwidth   float64  // Mbps
+	NVLinkBandwidth   *float64 // GB/s, provider-measured (Vast bw_nvlink); nil = not reported
 	Verified          bool
 	MachineID         string // provider-specific physical machine identifier
 	StockStatus       string // provider-reported stock label when only aggregate stock is exposed

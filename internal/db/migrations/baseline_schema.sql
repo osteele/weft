@@ -608,6 +608,7 @@ CREATE TABLE IF NOT EXISTS "launches" (
 		reliability REAL,
 		inet_down_mbps REAL,
 		inet_up_mbps REAL,
+		nvlink_bandwidth REAL,
 		cuda_version REAL,
 		cpu_cores_effective INTEGER,
 		cpu_name TEXT,

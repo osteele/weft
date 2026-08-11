@@ -247,6 +247,7 @@ func offerToCloud(o Offer) cloud.Offer {
 		RAMGB:             (int(o.CPURAMMB) + 512) / 1024,
 		DownloadBandwidth: o.DownloadBandwidth,
 		UploadBandwidth:   o.UploadBandwidth,
+		NVLinkBandwidth:   o.NVLinkBandwidth,
 		Verified:          o.Verified,
 		MachineID:         machineIDToString(o.MachineID),
 	}

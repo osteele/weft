@@ -839,7 +839,7 @@ func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cl
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		if !placement.InterconnectSatisfied(req, o.GPUName+" "+o.DataCenter) {
+		if !placement.InterconnectSatisfied(req, o.GPUName+" "+o.DataCenter, o.NVLinkBandwidth) {
 			removed++
 			continue
 		}

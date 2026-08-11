@@ -714,15 +714,18 @@ rule EvaluateEligibility {
     --     cores (--cpu-cores) are hard floors against inventory facts; an
     --     inventory file omitting the fact (0) does not disqualify the host,
     --     matching the cloud paths' unknown-RAM policy. Interconnect is
-    --     judged on the host's GPU naming through the same
-    --     InterconnectSatisfied predicate the offer filter and reuse matcher
-    --     use (nvlink/sxm/nvl tokens read as NVLink; absence reads as PCIe).
-    --     Implementation: placement.scoreHost, adjacent to this predicate.
+    --     judged through the same measurement-first InterconnectSatisfied
+    --     predicate the offer filter and reuse matcher use. Inventory hosts
+    --     carry no provider bandwidth measurement, so they pass null and use
+    --     the naming fallback (nvlink/sxm/nvl tokens read as NVLink; absence
+    --     reads as PCIe). Implementation: placement.scoreHost.
     requires: c.cpu_mem_gb == 0 or host.memory_gb == 0
         or host.memory_gb >= c.cpu_mem_gb
     requires: c.cpu_cores == 0 or host.cpu_cores == 0
         or host.cpu_cores >= c.cpu_cores
-    requires: InterconnectSatisfied(c.interconnect, host.gpu_naming_signals)
+    requires: InterconnectSatisfied(c.interconnect,
+                                    host.gpu_naming_signals,
+                                    null)
 
     -- 2. GPU class match.
     if c.gpu_class != null:

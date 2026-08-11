@@ -2761,3 +2761,29 @@ func TestCheckHostConstraints_ArchFloorWithoutGPURequest(t *testing.T) {
 		t.Fatalf("CPU-only host rejected for arch-floor job; want acceptance (reasons=%v)", reasons)
 	}
 }
+
+func TestInterconnectSatisfiedMeasurementPrecedence(t *testing.T) {
+	positive := 478.116
+	zero := 0.0
+	tests := []struct {
+		name        string
+		requirement string
+		signals     string
+		bandwidth   *float64
+		want        bool
+	}{
+		{"positive measurement establishes NVLink", "nvlink", "H200", &positive, true},
+		{"positive measurement rejects PCIe", "pcie", "H200", &positive, false},
+		{"reported zero rejects NVLink despite SXM name", "nvlink", "A100 SXM4", &zero, false},
+		{"reported zero establishes PCIe despite SXM name", "pcie", "A100 SXM4", &zero, true},
+		{"missing measurement falls back to SXM name", "nvlink", "A100 SXM4", nil, true},
+		{"missing measurement falls back to plain name", "nvlink", "H200", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InterconnectSatisfied(tt.requirement, tt.signals, tt.bandwidth); got != tt.want {
+				t.Errorf("InterconnectSatisfied() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

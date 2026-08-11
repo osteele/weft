@@ -298,6 +298,50 @@ func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	}
 }
 
+func TestLaunchNVLinkBandwidthRoundTrip(t *testing.T) {
+	database := setupTestDB(t)
+	zero := 0.0
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:          LaunchStatusPlanned,
+		Provider:        "vastai",
+		NVLinkBandwidth: &zero,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	inst, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if inst.NVLinkBandwidth == nil || *inst.NVLinkBandwidth != 0 {
+		t.Fatalf("NVLinkBandwidth = %v, want reported zero", inst.NVLinkBandwidth)
+	}
+
+	positive := 478.116
+	if err := UpdateLaunchOfferMetadata(database, instanceID, cloud.Offer{NVLinkBandwidth: &positive}); err != nil {
+		t.Fatalf("UpdateLaunchOfferMetadata positive: %v", err)
+	}
+	inst, err = GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch positive: %v", err)
+	}
+	if inst.NVLinkBandwidth == nil || *inst.NVLinkBandwidth != positive {
+		t.Fatalf("NVLinkBandwidth = %v, want %v", inst.NVLinkBandwidth, positive)
+	}
+
+	if err := UpdateLaunchOfferMetadata(database, instanceID, cloud.Offer{}); err != nil {
+		t.Fatalf("UpdateLaunchOfferMetadata unknown: %v", err)
+	}
+	inst, err = GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch unknown: %v", err)
+	}
+	if inst.NVLinkBandwidth != nil {
+		t.Fatalf("NVLinkBandwidth = %v, want unknown", inst.NVLinkBandwidth)
+	}
+}
+
 // TestUpdateLaunchOfferMetadata_SwitchesProvider covers the cross-provider
 // retry case: a launch row created for one provider must be rewritten when
 // the retry chain pivots to a different provider's offer, so downstream

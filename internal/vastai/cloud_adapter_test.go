@@ -37,6 +37,7 @@ exit 0
 }
 
 func TestCloudClientSearchOffersMapsDatacenterDriver(t *testing.T) {
+	nvlinkBandwidth := 478.116
 	client := NewCloudClient(&MockClient{
 		SearchOffersFunc: func(c OfferConstraints) ([]Offer, error) {
 			return []Offer{{
@@ -46,6 +47,7 @@ func TestCloudClientSearchOffersMapsDatacenterDriver(t *testing.T) {
 				GPUMemGB:         24,
 				CostPerHour:      0.45,
 				DatacenterDriver: true,
+				NVLinkBandwidth:  &nvlinkBandwidth,
 			}}, nil
 		},
 	})
@@ -59,6 +61,9 @@ func TestCloudClientSearchOffersMapsDatacenterDriver(t *testing.T) {
 	}
 	if !offers[0].DatacenterDriver {
 		t.Fatalf("DatacenterDriver = false, want true")
+	}
+	if offers[0].NVLinkBandwidth == nil || *offers[0].NVLinkBandwidth != nvlinkBandwidth {
+		t.Fatalf("NVLinkBandwidth = %v, want %v", offers[0].NVLinkBandwidth, nvlinkBandwidth)
 	}
 }
 

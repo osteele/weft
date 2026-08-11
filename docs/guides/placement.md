@@ -145,12 +145,13 @@ weft run --gpu h100 --gpus 4 --interconnect nvlink 'python train.py'
 weft run --gpu h100 --gpus 4 --nvlink-required 'python train.py'
 ```
 
-`--interconnect any` is the default for multi-GPU requests. `nvlink` is a hard
-filter when provider metadata or the offer name contains an explicit NVLink/SXM
-signal; Weft does not assume that an unknown multi-GPU offer has NVLink. `pcie`
-rejects offers with explicit NVLink/SXM signals. Use `--cpu-cores N` to require
-a minimum effective CPU core/vCPU count on rental offers; `cpu-intensive` still
-uses `WEFT_COMPUTE_CPU_CORES` as its default floor.
+`--interconnect any` is the default for multi-GPU requests. Provider-measured
+NVLink bandwidth takes precedence when available: a positive value satisfies
+`nvlink`, while a reported zero satisfies `pcie`. If the provider reports no
+measurement, Weft falls back to explicit NVLink/SXM signals in the offer name;
+it does not assume that an unknown multi-GPU offer has NVLink. Use `--cpu-cores
+N` to require a minimum effective CPU core/vCPU count on rental offers;
+`cpu-intensive` still uses `WEFT_COMPUTE_CPU_CORES` as its default floor.
 
 Use `--input` to declare data the job needs:
 

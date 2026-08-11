@@ -49,6 +49,7 @@ value OfferSnapshot {
     disk_gb: Integer
     download_mbps: Decimal
     upload_mbps: Decimal
+    nvlink_bandwidth: Decimal?       -- null=not reported; zero=reported absence
     machine_id: String
 }
 
@@ -3807,6 +3808,44 @@ rule InstanceReuseDiskCheck {
 -- chain enforces at launch and the matcher ignores is silently unmet
 -- whenever a reusable instance happens to be available. Interconnect, host
 -- RAM, and the explicit CPU-cores floor shipped that way.
+rule InterconnectSatisfied {
+    when: EvaluateInterconnect(requirement, gpu_naming_signals,
+                               nvlink_bandwidth)
+
+    -- Provider measurements distinguish three states. A positive numeric
+    -- value confirms NVLink; a reported zero confirms no measured NVLink;
+    -- null means the provider supplied no measurement. Only the unknown case
+    -- falls back to naming signals.
+    if nvlink_bandwidth != null:
+        ensures:
+            requirement = nvlink implies result = (nvlink_bandwidth > 0)
+        ensures:
+            requirement = pcie implies result = (nvlink_bandwidth = 0)
+
+    if nvlink_bandwidth = null:
+        ensures:
+            requirement = nvlink implies
+                result = gpu_naming_signals contains_any [nvlink, sxm, nvl]
+        ensures:
+            requirement = pcie implies
+                result = not gpu_naming_signals contains_any [nvlink, sxm, nvl]
+
+    ensures:
+        requirement in [null, "", any] implies result = true
+}
+
+invariant LaunchPreservesInterconnectEvidence {
+    -- Reuse must evaluate the same evidence that admitted the selected offer.
+    -- Replacement offers overwrite the prior value, including with null, so
+    -- facts from a failed physical machine never stand in for its replacement.
+    invariant_holds:
+        LaunchCreatedFromOffer(launch, offer) implies
+            launch.offer.nvlink_bandwidth = offer.nvlink_bandwidth
+    invariant_holds:
+        LaunchOfferReplaced(launch, replacement) implies
+            launch.offer.nvlink_bandwidth = replacement.nvlink_bandwidth
+}
+
 rule InstanceReuseHostAxes {
     when: MatchJobToInstance(job, instance)
 
@@ -3828,23 +3867,24 @@ rule InstanceReuseHostAxes {
         job.cpu_mem_gb > 0 and instance.ram_gb > 0 implies
             instance.ram_gb >= job.cpu_mem_gb
 
-    -- Interconnect: judged by the same naming-signal predicate the offer
-    -- filter uses (nvlink/sxm/nvl tokens read as NVLink; their absence
-    -- reads as PCIe — "nvl" covers the NVLink-bridged H100 NVL, whose
-    -- bridge links card pairs only), so the two paths cannot drift.
+    -- Interconnect: judged by the same measurement-first predicate the offer
+    -- filter uses. With no measurement, nvlink/sxm/nvl naming tokens read as
+    -- NVLink and their absence reads as PCIe. "nvl" covers the NVLink-bridged
+    -- H100 NVL, whose bridge links card pairs only.
     ensures:
-        InterconnectSatisfied(job.interconnect, instance.gpu_naming_signals)
+        InterconnectSatisfied(job.interconnect,
+                              instance.gpu_naming_signals,
+                              instance.offer.nvlink_bandwidth)
 
     @guidance
         -- Implementation: internal/campaign/reuse.go matchJobToInstance,
         -- through helpers in internal/campaign/offers.go shared with the
         -- launch-time path: effectiveCPUCoresFloor (also offerConstraintsForGroup),
         -- hostCPUCoresSatisfied, hostRAMSatisfied (also filterOffersByHostRAM), and
-        -- interconnectSatisfied (also filterOffersByInterconnect). The reuse
-        -- interconnect signals are the launch record's resolved GPU name
-        -- (GPU class when unresolved) plus datacenter, via
-        -- instanceInterconnectSignals, mirroring the offer filter's
-        -- GPU-name + datacenter pair.
+        -- InterconnectSatisfied (also filterOffersByInterconnect). The reuse
+        -- evidence is the persisted provider bandwidth plus the launch
+        -- record's resolved GPU name (GPU class when unresolved) and
+        -- datacenter, mirroring the offer filter's evidence.
         --
         -- The quickReuseCompatible prefilter (strategy_plan.go) applies the
         -- same three floors through the same helpers: candidate slots are
