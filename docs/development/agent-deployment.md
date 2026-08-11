@@ -10,13 +10,13 @@ Always cross-compile on studio — it's ~5x faster than localhost:
 
 ```bash
 # 1. Sync sources to studio
-rsync -az --exclude .jj --exclude dist --exclude .git . studio:~/code/utils/weft/
+rsync -az --exclude .jj --exclude dist --exclude .git . studio:~/code/research-tools/weft/
 
 # 2. Cross-compile on studio
-ssh studio 'cd ~/code/utils/weft && GOOS=linux GOARCH=amd64 go build -o dist/weft-agent-linux-amd64 ./cmd/agent'
+ssh studio 'cd ~/code/research-tools/weft && GOOS=linux GOARCH=amd64 go build -o dist/weft-agent-linux-amd64 ./cmd/agent'
 
 # 3. Copy back locally (for EnsureBuilt cache) and/or deploy to target host
-scp studio:~/code/utils/weft/dist/weft-agent-linux-amd64 dist/weft-agent-linux-amd64
+scp studio:~/code/research-tools/weft/dist/weft-agent-linux-amd64 dist/weft-agent-linux-amd64
 scp dist/weft-agent-linux-amd64 titan:~/.cache/weft/bin/weft-agent
 ssh titan 'chmod +x ~/.cache/weft/bin/weft-agent'
 

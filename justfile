@@ -261,7 +261,7 @@ remote-build:
         echo "WEFT_BUILD_HOST not set. Add WEFT_BUILD_HOST=<host> to .env or environment."
         exit 1
     fi
-    REMOTE_DIR="~/code/utils/weft"
+    REMOTE_DIR="~/code/research-tools/weft"
 
     echo "==> Syncing sources to ${HOST}..."
     rsync -az --delete \
