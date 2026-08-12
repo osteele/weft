@@ -1729,7 +1729,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	cmd.Flags().IntVar(&editGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (0 clears)")
-	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
+	cmd.Flags().Float64Var(&editMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	cmd.Flags().StringVar(&editMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")
 	cmd.Flags().StringVar(&editMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
 	cmd.Flags().StringVar(&editMaxTime, "max-time", "", "Maximum rental lifetime; 0 clears")

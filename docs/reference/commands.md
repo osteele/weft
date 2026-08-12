@@ -114,7 +114,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--max-hourly-rate USD`: Reject rental offers whose total recurring rate, including storage for the requested disk size, exceeds this amount. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
 - `--max-spend USD`: Set a hard spend limit for the rental instance that runs this job.
 - `--max-time DURATION`: Set a hard lifetime for that rental instance (for example, `2h30m`).
-- `--min-survival FRACTION`: Set the minimum accepted rental-offer survival probability, from `0` to `1`; `0` disables the floor.
+- `--min-survival FRACTION`: Set the minimum accepted Weft learned end-to-end survival probability, from `0` to `1`; `0` disables the floor. This is distinct from the provider reliability score filtered by `[campaign] reliability` (default `0.95`).
 - `--grace-period DURATION`: Override how long the instance remains available after a job failure; `0` disables the grace period.
 
 Use `0` to clear `--max-hourly-rate`, `--max-spend`, or `--max-time` when
@@ -179,7 +179,7 @@ weft run deepthought 'python train.py'
 # Let autopilot rent 8 H200s within explicit price and lifetime limits
 weft run --tag rental --gpu h200 --gpus 8 \
   --max-hourly-rate 33.20 --max-spend 83 --max-time 2h30m \
-  --min-survival 0.9 --grace-period 0 'python train.py'
+  --min-survival 0.6 --grace-period 0 'python train.py'
 
 # Start a queued job immediately
 weft start wj123
@@ -1334,7 +1334,7 @@ preview without launching.
 - `--jobs IDS`: Comma-separated job IDs/ranges to consider
 - `--project NAME`: Restrict queued jobs to a project
 - `--strategy cheap|fast|fastest`: Offer selection strategy (default: `fastest`)
-- `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`)
+- `--min-survival FRACTION`: Minimum Weft learned end-to-end survival probability for offers (default: `0.4`; distinct from provider reliability)
 - `--dry-run`: Preview the selected anchor, job list, and offer without launching
 - `--yes`: Launch without interactive confirmation
 - `--wait`: Wait for `agent_ready` before confirming move intents (default: true)
@@ -1388,7 +1388,7 @@ selection with positional job IDs, `--project`, or `--all` (explicit form of
 - `--grace-period DURATION`: Grace period after failure (default: `5m`)
 - `--runpod-cloud-type community|secure`: Override RunPod cloud type for this launch. The default comes from `[runpod] cloud_type`, or `community` when unset.
 - `--strategy cheap|fast|fastest`: Offer selection strategy (default: `cheap`)
-- `--min-survival FRACTION`: Minimum survival probability for offers (default: `0.4`; `0` disables)
+- `--min-survival FRACTION`: Minimum Weft learned end-to-end survival probability for offers (default: `0.4`; `0` disables; distinct from provider reliability)
 - `--distinct-machines`: Place selected jobs on different provider physical machines. Vast.ai is filtered before create; RunPod is checked after pod create/readback.
 - `--avoid MACHINE|wiID|wjID`: Exclude a physical machine when using `--distinct-machines`; repeatable and comma-separated. Raw unqualified machine ids are Vast.ai-compatible; `runpod/<machine_id>` and instance/job ids use provider-qualified machine ids.
 - `--affinity MACHINE|wiID|wjID`: Require placement on the same Vast.ai physical machine; repeatable and comma-separated
@@ -1425,6 +1425,7 @@ weft instance ssh <instance-id>                         # SSH in
 weft instance terminate <instance-id>                   # Destroy a single instance
 weft instance cordon <instance-id> [--reason "..."]    # Stop new jobs from landing here
 weft instance uncordon <instance-id>                    # Clear the cordon flag
+weft instance mark-weft-bug <instance-id> --detail "…" # Exclude a confirmed Weft-caused termination from survival training
 ```
 
 `weft instance audit <job-id>` reports the rental rows associated with a job,
@@ -1448,6 +1449,15 @@ Use this after an incident where the provider destroyed running
 instances for non-payment. Weft has no programmatic signal that
 distinguishes those from generic provider failures at the moment of
 destruction, so the operator labels them retroactively.
+
+For a confirmed Weft-caused termination, use `weft instance mark-weft-bug`
+instead. It retains the lifecycle and cost record but changes the termination
+reason to `weft_bug`, which excludes the row from survival training:
+
+```bash
+weft instance mark-weft-bug wi42 \
+  --detail "false watchdog teardown; fixed in revision abc123"
+```
 
 ```bash
 # Auto-detect the most recent incident on any provider.
@@ -1905,7 +1915,7 @@ weft edit [flags] <job-id>
 - `--max-hourly-rate USD`: Reject rental offers above this hourly rate; `0` clears the cap
 - `--max-spend USD`: Set the rental instance's hard spend limit; `0` clears the cap
 - `--max-time DURATION`: Set the rental instance's hard lifetime; `0`, `default`, `clear`, or `auto` clears the cap
-- `--min-survival FRACTION`: Set the job's rental offer survival floor; `0` disables the floor for this job
+- `--min-survival FRACTION`: Set the job's Weft learned end-to-end survival floor; `0` disables the floor for this job. This is not the provider reliability score.
 - `--grace-period DURATION`: Set the post-failure instance grace period; `0` disables it, while `default`, `clear`, or `auto` removes the override
 - `--retry`: Requeue a terminal job and apply the requested edits in the same command
 

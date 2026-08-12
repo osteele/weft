@@ -108,7 +108,7 @@ for the autopilot's next pass**. Put persistent rental limits on the job:
 ```bash
 weft run --tag rental --gpu h200 --gpus 8 \
   --max-hourly-rate 33.20 --max-spend 83 --max-time 2h30m \
-  --min-survival 0.9 --grace-period 0 'python train.py'
+  --min-survival 0.6 --grace-period 0 'python train.py'
 ```
 
 The same flags work with `weft edit <job-id>`. `--max-hourly-rate` filters
@@ -117,6 +117,14 @@ the job's requested disk size. If no offer satisfies the cap, the job stays
 queued and its diagnosis explains the constraint. `--max-spend` and `--max-time`
 become hard limits on the launched instance. `--grace-period 0` terminates
 the instance without a post-failure grace window.
+
+`--min-survival` filters on Weft's learned end-to-end survival estimate, which
+combines GPU/price history with machine or geographic evidence. It is not a
+provider reliability score such as Vast.ai's `reliability2`; `[campaign]
+reliability` controls that separate provider-offer filter and defaults to
+`0.95`. Use `weft provider offers --min-survival <floor> ...` or `weft campaign
+survival --floor <floor>` to calibrate a learned floor before setting a strict
+per-job value.
 
 An explicit hourly cap also authorizes autopilot to exceed its global hourly
 soft target for that launch group. This exemption applies only when every job

@@ -442,7 +442,7 @@ func init() {
 	runCmd.Flags().StringVar(&runMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
 	runCmd.Flags().StringVar(&runMaxTime, "max-time", "", "Maximum rental lifetime (for example, 3h); 0 clears")
 	runCmd.Flags().StringVar(&runGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
-	runCmd.Flags().Float64Var(&runMinSurvival, "min-survival", 0.4, "Minimum rental offer survival probability (0-1; 0 disables)")
+	runCmd.Flags().Float64Var(&runMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:EleutherAI/pythia-160m), can be repeated")

@@ -189,7 +189,7 @@ func addRestartFlags(command *cobra.Command) {
 	command.Flags().IntVar(&restartDiskGB, "disk", 0, "Rental instance disk floor override in GB (0 clears)")
 	command.Flags().IntVar(&restartRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom override in GB (0 clears)")
 	command.Flags().IntVar(&restartDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB, lowering it below the estimate if needed (0 clears)")
-	command.Flags().Float64Var(&restartMinSurvival, "min-survival", 0.4, "Minimum survival probability for rental offers (0-1; 0 disables)")
+	command.Flags().Float64Var(&restartMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	command.Flags().BoolVar(&restartGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
 	command.Flags().BoolVar(&restartUnplaced, "unplaced", false, "Retry all queued unplaced jobs")
 	command.Flags().BoolVar(&restartFromScratch, "from-scratch", false, "Force a fresh attempt and ignore checkpoint/resume assumptions")

@@ -410,8 +410,9 @@ number of wins or failures.
 ### Machine-level penalty
 
 The survival model tracks per-machine reliability when the provider exposes a
-physical machine identifier (Vast.ai's `machine_id`). Once a machine has at
-least 3 observations, the model applies a multiplicative penalty:
+physical machine identifier (Vast.ai's `machine_id`). It applies a
+multiplicative penalty from the first observation, using a one-observation
+Beta prior centered on the provider-wide rate:
 
 ```text
 penalty = clamp(machine_survival_rate / global_survival_rate, 0, 1)
@@ -419,8 +420,9 @@ penalty = clamp(machine_survival_rate / global_survival_rate, 0, 1)
 
 Machines with a track record worse than the fleet average get a penalty below
 1.0, reducing their effective survival probability. Machines that outperform the
-average are capped at 1.0 (no bonus). Machines with too few observations use
-penalty 1.0 until enough data accumulates.
+average are capped at 1.0 (no bonus). `weft campaign survival` hides machines
+with fewer than three observations to keep its report readable, but those sparse
+observations still affect offer scoring through the prior.
 
 The penalty is applied to the group-level survival probability:
 
@@ -437,6 +439,12 @@ Offers with survival probability below a configurable floor are rejected before
 ranking. The default floor is 40% (`--min-survival 0.4`). This prevents weft
 from repeatedly selecting GPU classes or machines that consistently fail,
 regardless of price.
+
+This value is Weft's learned probability that an offer will survive long enough
+to run the workload. It is not the provider's advertised reliability score.
+The separate `[campaign] reliability` setting filters that provider score and
+defaults to 95%. Learned survival estimates are usually lower; inspect their
+scale before selecting a strict floor.
 
 When offers are rejected, the launch output shows a warning:
 

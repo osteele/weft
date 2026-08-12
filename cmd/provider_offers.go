@@ -92,7 +92,7 @@ func init() {
 	providerOffersCmd.Flags().IntVar(&providerOffersMinGPUMemGB, "min-gpu-mem", 0, "Minimum per-GPU memory in GB")
 	providerOffersCmd.Flags().IntVar(&providerOffersMinDiskGB, "min-disk", 0, "Minimum disk space in GB")
 	providerOffersCmd.Flags().Float64Var(&providerOffersMinReliability, "reliability", cloud.DefaultMinReliability, "Minimum provider reliability score (0-1)")
-	providerOffersCmd.Flags().Float64Var(&providerOffersMinSurvival, "min-survival", 0.4, "Minimum Weft survival probability (0-1)")
+	providerOffersCmd.Flags().Float64Var(&providerOffersMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; distinct from provider reliability)")
 	providerOffersCmd.Flags().IntVar(&providerOffersNumGPUs, "num-gpus", 1, "Number of GPUs per offer")
 	providerOffersCmd.Flags().IntVar(&providerOffersNeed, "need", 1, "Number of distinct machines/jobs the GPU type must satisfy")
 	providerOffersCmd.Flags().StringVar(&providerOffersInstanceType, "instance-type", "", "Instance type to search: on-demand or interruptible")

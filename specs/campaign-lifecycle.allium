@@ -1045,7 +1045,7 @@ rule PerJobRentalPolicy {
         instance.max_spend_cents <= spend_ceiling when spend_ceiling is present
         and instance.max_time_seconds <= time_ceiling when time_ceiling is present
     ensures:
-        every selected offer.reliability >= survival_floor
+        every EstimatedOfferSurvival(offer, survival_model) >= survival_floor
             when survival_floor is present and survival_floor > 0
     ensures:
         instance.grace_period_seconds = group.jobs.first.cli_overrides.grace_period_seconds
@@ -1074,10 +1074,30 @@ rule PerJobRentalPolicy {
         -- resulting values are persisted on the launch and passed through the
         -- existing manifest and agent enforcement paths.
         --
+        -- min_survival is the learned end-to-end probability produced by
+        -- SurvivalModel / MachinePenalty, not the provider-advertised
+        -- offer.reliability value. Provider reliability is a separate
+        -- offer-search constraint from config.campaign.reliability (default
+        -- 0.95). Strict learned floors should be calibrated against `weft
+        -- provider offers` or `weft campaign survival` rather than copied
+        -- from Vast reliability2.
+        --
         -- Implementation: internal/campaign/rental_policy.go,
         -- internal/campaign/offers.go, internal/campaign/campaign.go,
         -- internal/campaign/lifecycle.go, and
         -- internal/campaign/strategy_plan.go.
+}
+
+rule ReclassifyConfirmedWeftBugOutcome {
+    when: Operator runs `weft instance mark-weft-bug instance_id --detail evidence`
+    requires: instance.status in [failed, canceled]
+    requires: instance.termination_reason in [provider_failure, infra_failure, unknown, empty]
+
+    ensures: instance.termination_reason = weft_bug
+    ensures: evidence is prepended to instance.termination_detail
+    ensures: lifecycle, cost, attempt, and teardown evidence is preserved
+    ensures: instance is excluded from provider, GPU, region, country, and
+             machine survival training
 }
 
 invariant PriceAuthorizationDoesNotTripCircuitBreaker {

@@ -74,7 +74,7 @@ func addInstanceLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 	cmd.Flags().StringVar(&instanceLaunchRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for this launch: community or secure (default from config)")
 	cmd.Flags().StringVar(&instanceLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize expected completion time), or 'fastest' (minimize happy-path runtime)")
-	cmd.Flags().Float64Var(&instanceLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
+	cmd.Flags().Float64Var(&instanceLaunchMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	cmd.Flags().BoolVar(&instanceLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
 	cmd.Flags().StringVar(&instanceLaunchProject, "project", "", "Filter unplaced jobs by project name")
 	cmd.Flags().BoolVar(&instanceLaunchTUI, "tui", false, "Force interactive TUI mode")

@@ -214,6 +214,7 @@ func init() {
 	instanceCmd.AddCommand(instanceDiagnoseCmd)
 	instanceCmd.AddCommand(instanceDiskReportCmd)
 	instanceCmd.AddCommand(instanceMarkCreditExhaustedCmd)
+	instanceCmd.AddCommand(instanceMarkWeftBugCmd)
 
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
 	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")
@@ -378,7 +379,7 @@ func addInstanceNewFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&instanceNewJobs, "jobs", "", "Comma-separated job IDs/ranges to consider")
 	cmd.Flags().StringVar(&instanceNewProject, "project", "", "Restrict queued jobs to a project")
 	cmd.Flags().StringVar(&instanceNewStrategy, "strategy", "fastest", "Offer selection strategy: cheap, fast, or fastest")
-	cmd.Flags().Float64Var(&instanceNewMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped")
+	cmd.Flags().Float64Var(&instanceNewMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; distinct from provider reliability)")
 	cmd.Flags().BoolVar(&instanceNewDryRun, "dry-run", false, "Print the selected launch group without launching")
 	cmd.Flags().BoolVarP(&instanceNewYes, "yes", "y", false, "Run without interactive confirmation")
 	cmd.Flags().BoolVar(&instanceNewWait, "wait", true, "Wait for agent_ready before confirming move intents")
