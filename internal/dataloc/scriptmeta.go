@@ -236,6 +236,18 @@ func ScanScriptDependencies(dir, command string) []string {
 	return out
 }
 
+// ScriptHasPEP723Metadata reports whether a referenced script contains a PEP
+// 723 inline metadata block. command is used to resolve scripts after a leading
+// `cd`; script is the path token from that command.
+func ScriptHasPEP723Metadata(dir, command, script string) bool {
+	abs := resolveScriptPath(dir, command, script)
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return false
+	}
+	return extractPEP723Block(string(content)) != ""
+}
+
 func ScanScriptTorchRequirement(dir, command string) *TorchRequirement {
 	for _, tree := range scanScriptPEP723Trees(dir, command) {
 		if req := scriptTorchRequirementFromTree(tree); req != nil {

@@ -693,6 +693,28 @@ func TestScanScriptMetaNoScript(t *testing.T) {
 	}
 }
 
+func TestScriptHasPEP723MetadataWithoutDependencies(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "train.py"), []byte(`# /// script
+# requires-python = ">=3.12"
+# ///
+print("train")
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	command := "cd scripts && uv run python train.py"
+	if !ScriptHasPEP723Metadata(dir, command, "train.py") {
+		t.Fatal("expected PEP 723 metadata after resolving the leading cd")
+	}
+	if ScriptHasPEP723Metadata(dir, command, "missing.py") {
+		t.Fatal("missing script reported PEP 723 metadata")
+	}
+}
+
 func TestInjectUvArgs(t *testing.T) {
 	tests := []struct {
 		name    string

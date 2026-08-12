@@ -669,9 +669,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := dataloc.CheckBareScriptExecutable(localDir, command); err != nil {
 		return err
 	}
-	if err := validatePEP723ScriptDependencyInvocation(localDir, command); err != nil {
-		return err
-	}
+	warnPEP723ScriptEnvironmentMismatch(cmd.ErrOrStderr(), localDir, command)
 
 	outputDirs := config.ProjectOutputDirs(localDir)
 
@@ -2419,22 +2417,19 @@ func commandRecommendations(command, localDir string) []string {
 	return recommendations
 }
 
-func validatePEP723ScriptDependencyInvocation(localDir, command string) error {
-	if localDir == "" || !commandRunsUVPythonScript(command) {
-		return nil
+func warnPEP723ScriptEnvironmentMismatch(w io.Writer, localDir, command string) bool {
+	if localDir == "" {
+		return false
 	}
-	deps := dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(localDir, command))
-	if len(deps) == 0 {
-		return nil
+	script := uvRunPythonScript(command)
+	if script == "" || !dataloc.ScriptHasPEP723Metadata(localDir, command, script) {
+		return false
 	}
-	missing := depsNotProvidedByUVWith(command, deps)
-	if len(missing) == 0 {
-		return nil
-	}
-	return fmt.Errorf("PEP 723 dependencies are bypassed by `uv run python <script>`; run the script directly, e.g. `uv run script.py`, or provide the inline dependencies explicitly with `uv run --with <dep> python script.py` (missing: %s)", strings.Join(missing, ", "))
+	fmt.Fprintf(w, "Warning: `uv run python %s` uses the project environment and project uv.lock, not the script's PEP 723 dependency environment or adjacent script lock. Use `uv run %s` to use the script environment.\n", script, script)
+	return true
 }
 
-func commandRunsUVPythonScript(command string) bool {
+func uvRunPythonScript(command string) string {
 	tokens := strings.Fields(command)
 	for i := 0; i+1 < len(tokens); i++ {
 		if strings.Trim(tokens[i], `"'`) != "uv" || strings.Trim(tokens[i+1], `"'`) != "run" {
@@ -2460,42 +2455,21 @@ func commandRunsUVPythonScript(command string) bool {
 				if strings.HasPrefix(next, "-") {
 					continue
 				}
-				return strings.HasSuffix(next, ".py")
+				if strings.HasSuffix(next, ".py") {
+					return next
+				}
+				break
 			}
 			break
 		}
 	}
-	return false
+	return ""
 }
 
 func isPythonExecTokenForCommandHint(token string) bool {
 	base := filepath.Base(token)
 	return base == "python" || base == "python2" || base == "python3" ||
 		strings.HasPrefix(base, "python2.") || strings.HasPrefix(base, "python3.")
-}
-
-func depsNotProvidedByUVWith(command string, deps []dataloc.DepSpec) []string {
-	provided := map[string]struct{}{}
-	for _, dep := range dataloc.ScanUVRunWith(command) {
-		provided[strings.ToLower(dep.Name)] = struct{}{}
-	}
-	var missing []string
-	seen := map[string]struct{}{}
-	for _, dep := range deps {
-		name := strings.ToLower(dep.Name)
-		if name == "" {
-			continue
-		}
-		if _, ok := provided[name]; ok {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		missing = append(missing, dep.Name)
-	}
-	return missing
 }
 
 func needsFrameworkRuntimeTip(command, localDir, name string) bool {

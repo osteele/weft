@@ -829,7 +829,7 @@ print("hello")
 	}
 }
 
-func TestValidatePEP723ScriptDependencyInvocationRejectsUVRunPython(t *testing.T) {
+func TestWarnPEP723ScriptEnvironmentMismatchForUVRunPython(t *testing.T) {
 	dir := t.TempDir()
 	content := `# /// script
 # dependencies = ["torch>=2.5", "transformers>=4.44"]
@@ -840,16 +840,16 @@ print("train")
 		t.Fatalf("write script: %v", err)
 	}
 
-	err := validatePEP723ScriptDependencyInvocation(dir, "uv run python train.py --epochs 1")
-	if err == nil {
-		t.Fatal("expected uv run python to reject PEP 723 dependency bypass")
+	var out bytes.Buffer
+	if !warnPEP723ScriptEnvironmentMismatch(&out, dir, "uv run python train.py --epochs 1") {
+		t.Fatal("expected uv run python to warn about the environment mismatch")
 	}
-	if !strings.Contains(err.Error(), "PEP 723 dependencies are bypassed") || !strings.Contains(err.Error(), "torch") {
-		t.Fatalf("unexpected error: %v", err)
+	if got := out.String(); !strings.Contains(got, "project uv.lock") || !strings.Contains(got, "uv run train.py") {
+		t.Fatalf("unexpected warning: %q", got)
 	}
 }
 
-func TestValidatePEP723ScriptDependencyInvocationAllowsUVRunScript(t *testing.T) {
+func TestWarnPEP723ScriptEnvironmentMismatchAllowsUVRunScript(t *testing.T) {
 	dir := t.TempDir()
 	content := `# /// script
 # dependencies = ["torch>=2.5"]
@@ -860,12 +860,13 @@ print("train")
 		t.Fatalf("write script: %v", err)
 	}
 
-	if err := validatePEP723ScriptDependencyInvocation(dir, "uv run train.py --epochs 1"); err != nil {
-		t.Fatalf("validatePEP723ScriptDependencyInvocation: %v", err)
+	var out bytes.Buffer
+	if warnPEP723ScriptEnvironmentMismatch(&out, dir, "uv run train.py --epochs 1") {
+		t.Fatalf("unexpected warning: %q", out.String())
 	}
 }
 
-func TestValidatePEP723ScriptDependencyInvocationAllowsExplicitUVWith(t *testing.T) {
+func TestWarnPEP723ScriptEnvironmentMismatchEvenWithExplicitUVWith(t *testing.T) {
 	dir := t.TempDir()
 	content := `# /// script
 # dependencies = ["torch>=2.5", "transformers>=4.44"]
@@ -877,8 +878,41 @@ print("train")
 	}
 
 	command := "uv run --with 'torch>=2.5' --with transformers>=4.44 python train.py"
-	if err := validatePEP723ScriptDependencyInvocation(dir, command); err != nil {
-		t.Fatalf("validatePEP723ScriptDependencyInvocation: %v", err)
+	var out bytes.Buffer
+	if !warnPEP723ScriptEnvironmentMismatch(&out, dir, command) {
+		t.Fatal("expected warning because --with does not select the script lock")
+	}
+	if !strings.Contains(out.String(), "adjacent script lock") {
+		t.Fatalf("unexpected warning: %q", out.String())
+	}
+}
+
+func TestWarnPEP723ScriptEnvironmentMismatchWithoutDependencies(t *testing.T) {
+	dir := t.TempDir()
+	content := `# /// script
+# requires-python = ">=3.12"
+# ///
+print("train")
+`
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	var out bytes.Buffer
+	if !warnPEP723ScriptEnvironmentMismatch(&out, dir, "uv run python -u train.py") {
+		t.Fatal("expected warning for a PEP 723 block without dependencies")
+	}
+}
+
+func TestWarnPEP723ScriptEnvironmentMismatchIgnoresPlainScript(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte("print(\"train\")\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	var out bytes.Buffer
+	if warnPEP723ScriptEnvironmentMismatch(&out, dir, "uv run python train.py") {
+		t.Fatalf("unexpected warning: %q", out.String())
 	}
 }
 

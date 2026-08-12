@@ -458,9 +458,12 @@ Transformers versions matched. This pin set is known to work on CUDA 12.4:
 ```
 
 Invoke PEP 723 scripts as `uv run script.py`, not `uv run python script.py`.
-The latter runs Python without installing the script's inline dependencies, so
-console scripts such as `vllm` may be missing even though they are declared in
-the script metadata.
+The direct form selects the script's dependency environment and adjacent script
+lock. The form with an extra `python` runs in the project environment and uses
+the project `uv.lock` instead. Weft warns before submission because the nearly
+identical commands can therefore resolve different dependency graphs. Console
+scripts such as `vllm` may also be missing even though they are declared in the
+script metadata.
 
 For SGLang, use the project runtime image path unless you have a known-good
 custom image. Weft infers this image for commands whose script name clearly

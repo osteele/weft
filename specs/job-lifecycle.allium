@@ -517,6 +517,26 @@ rule SubmitJob {
     )
 }
 
+rule WarnWhenUVPythonBypassesPEP723Environment {
+    when: SubmitJob(command, working_dir, options)
+    requires: command invokes script as `uv run python <script.py>`
+    requires: script contains a PEP 723 inline metadata block
+
+    ensures: SubmitOutputIncludes(
+        warning: "the command uses the project environment and project uv.lock, not the script dependency environment or adjacent script lock",
+        remedy: "run `uv run <script.py>` to use the script environment"
+    )
+    ensures: SubmissionContinues
+
+    @guidance
+        -- The warning is based on the presence of the metadata block, not on
+        -- whether its dependency names happen to be repeated with `--with`.
+        -- Matching package names do not prove that uv selected the same lock
+        -- or resolved the same dependency graph. Implementation:
+        -- warnPEP723ScriptEnvironmentMismatch in cmd/run.go, called by both
+        -- `weft run` and `weft queue add`.
+}
+
 rule EditJobRentalPolicy {
     when: EditJob(job, options)
     requires: options changes any of {
