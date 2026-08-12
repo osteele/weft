@@ -120,6 +120,8 @@ type Server struct {
 	shutdown   func()
 	mutate     MutationHandler
 	writer     *WriteExecutor
+
+	budgetCentsPerHour int
 }
 
 type DaemonInfo struct {
@@ -135,6 +137,8 @@ type ServerOptions struct {
 	Shutdown func()
 	Mutate   MutationHandler
 	Writer   *WriteExecutor
+
+	BudgetCentsPerHour int
 }
 
 type MutationHandler func(context.Context, *sql.DB, MutationRequest) (json.RawMessage, error)
@@ -166,6 +170,8 @@ func StartServerWithOptions(ctx context.Context, database *sql.DB, socketPath st
 		shutdown:   opts.Shutdown,
 		mutate:     opts.Mutate,
 		writer:     opts.Writer,
+
+		budgetCentsPerHour: opts.BudgetCentsPerHour,
 	}
 	if s.writer == nil {
 		s.writer = NewWriteExecutor(ctx, database)
@@ -246,7 +252,7 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	case RequestMutate:
 		s.mutateRequest(reqCtx, database, encoder, req)
 	case RequestSubscribe:
-		subscribe(ctx, database, encoder, req)
+		subscribe(ctx, database, encoder, req, s.budgetCentsPerHour)
 	case RequestWatchJobs:
 		watchJobs(ctx, database, encoder, req)
 	default:
@@ -309,7 +315,7 @@ func (s *Server) submitJob(ctx context.Context, database *sql.DB, encoder *json.
 	})
 }
 
-func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request) {
+func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request, budgetCentsPerHour int) {
 	sub := req.Subscribe
 	if sub == nil {
 		sub = &SubscriptionRequest{
@@ -344,7 +350,7 @@ func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, 
 	case ResourceProjectWatch:
 		subscribeProjectWatch(parent, database, encoder, id, *sub)
 	case ResourceActivity:
-		subscribeActivity(parent, database, encoder, id, *sub)
+		subscribeActivity(parent, database, encoder, id, *sub, budgetCentsPerHour)
 	}
 }
 
@@ -397,8 +403,8 @@ func subscribeProjectWatch(parent context.Context, database *sql.DB, encoder *js
 	})
 }
 
-func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest) {
-	runActivitySubscriptionLoop(parent, database, encoder, id, sub)
+func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int) {
+	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour)
 }
 
 type subscriptionStep func(now time.Time) (*watchevents.SnapshotEvent, bool, error)
@@ -486,7 +492,7 @@ func projectWatchJobs(database *sql.DB, project string, recentWindow time.Durati
 	return watchevents.DedupeJobsByID(activeJobs, recentJobs), len(activeJobs) > 0, nil
 }
 
-func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest) {
+func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int) {
 	ctx := parent
 	cancel := func() {}
 	if sub.TimeoutSeconds > 0 {
@@ -505,7 +511,7 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	var prev *narrate.Snapshot
 	lastKey := ""
 	for {
-		payload, active, err := buildActivityPayload(database, sub, prev, includeStatus)
+		payload, active, err := buildActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour)
 		if err != nil {
 			_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, SubscriptionID: id, Error: err.Error()})
 			return
@@ -540,7 +546,7 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	}
 }
 
-func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool) (*ActivityPayload, bool, error) {
+func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int) (*ActivityPayload, bool, error) {
 	snap, err := narrate.BuildSnapshot(database, narrate.SnapshotOptions{Project: sub.Project})
 	if err != nil {
 		return nil, false, err
@@ -572,7 +578,7 @@ func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narra
 		if err != nil {
 			return nil, false, fmt.Errorf("list unprocessed jobs: %w", err)
 		}
-		statusLine := narrate.BuildStatusLine(snap, 0, unprocessed)
+		statusLine := narrate.BuildStatusLine(snap, budgetCentsPerHour, unprocessed)
 		payload.StatusLine = &statusLine
 		payload.Unprocessed = unprocessed
 		payload.UnprocessedJobs = unprocessedJobs

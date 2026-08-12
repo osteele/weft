@@ -158,6 +158,8 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		Shutdown: stop,
 		Mutate:   localmutate.Handler,
 		Writer:   writeExecutor,
+
+		BudgetCentsPerHour: cfg.AutoRunRateSoftTargetCentsPerHour(),
 	})
 	if err != nil {
 		return fmt.Errorf("start daemon watch socket: %w", err)

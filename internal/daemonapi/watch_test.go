@@ -162,7 +162,9 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	defer cancel()
 	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
 	t.Cleanup(func() { _ = os.Remove(socketPath) })
-	server, err := StartServer(ctx, database, socketPath)
+	server, err := StartServerWithOptions(ctx, database, socketPath, ServerOptions{
+		BudgetCentsPerHour: 275,
+	})
 	if err != nil {
 		t.Fatalf("StartServer: %v", err)
 	}
@@ -204,6 +206,9 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	}
 	if event.Activity.StatusLine == nil || event.Activity.StatusLine.QueuedJobs != 1 {
 		t.Fatalf("status line = %+v, want one queued job", event.Activity.StatusLine)
+	}
+	if got := event.Activity.StatusLine.BudgetUSDPerHour; got != 2.75 {
+		t.Fatalf("status line budget = %v, want 2.75", got)
 	}
 	if event.Activity.Delta == nil || len(event.Activity.Delta.JobAdded) != 1 {
 		t.Fatalf("delta = %+v, want one added job", event.Activity.Delta)
@@ -266,7 +271,7 @@ func TestBuildActivityPayloadIncludesFastTerminalJobs(t *testing.T) {
 		Resource:     ResourceActivity,
 		Project:      "quick-project",
 		IncludeDelta: true,
-	}, prev, false)
+	}, prev, false, 0)
 	if err != nil {
 		t.Fatalf("buildActivityPayload: %v", err)
 	}
@@ -302,7 +307,7 @@ func TestBuildActivityPayloadIncludesUnprocessedJobDetails(t *testing.T) {
 		Resource:      ResourceActivity,
 		Project:       "done-project",
 		IncludeStatus: true,
-	}, nil, true)
+	}, nil, true, 0)
 	if err != nil {
 		t.Fatalf("buildActivityPayload: %v", err)
 	}
