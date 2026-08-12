@@ -91,6 +91,20 @@ The TUI scans the tail of each job’s log and surfaces the most recent progress
 line both in the list view (status column) and the details pane (progress bar
 plus step counts).
 
+Structured progress is also the semantic signal for the rental task-stall
+watchdog. Once a running job has reported progress, Weft records when its
+`(job, phase, percent)` tuple last changed. Reprinting the same value, growing a
+log, consuming CPU, or sending an agent heartbeat does not reset that clock.
+Weft warns after 20 minutes without a change and terminates the rental after 60
+minutes so the job can retry. Jobs that never report structured progress do not
+enter this watchdog; bound them explicitly with `--max-time` and `--max-spend`.
+
+Emit a new value only after meaningful work completes. For an opaque child
+process, translate real milestones (for example, checkpoint shards loaded,
+compilation completed, and service ready) into monotonic `Progress:` values and
+give the child its own bounded no-milestone timeout. Log byte growth is useful
+diagnostic activity, but it is not task progress.
+
 ### Examples
 
 **Shell**

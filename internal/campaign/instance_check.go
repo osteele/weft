@@ -194,6 +194,13 @@ type CheckInstanceParams struct {
 	// Nil means unknown (phase stall check is skipped).
 	PhaseChangedAt *time.Time
 
+	// Structured job progress is a semantic task-progress signal emitted by
+	// the job. ChangedAt advances only when the (job, phase, percent) tuple
+	// changes; repeated reports of the same value do not prove progress.
+	JobProgressID        int64
+	JobProgressPct       int
+	JobProgressChangedAt *time.Time
+
 	// LastProviderStatusChangeAt is the time of the most recent
 	// provider_status_transitions row for this launch. Used to anchor
 	// rule 4b's pre-running timeout on time-since-status-went-non-running
@@ -428,41 +435,6 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
 				}
-			}
-		}
-	}
-
-	// 4a. Stale-agent watchdog. Heartbeat-first liveness: an agent that
-	// reached ready and then stopped writing heartbeats is functionally
-	// dead. Provider liveness is handled by separate rules because provider
-	// list results can be stale or temporarily incomplete.
-	//
-	// Cases not covered here:
-	//   - Bootstrap-never-completed (no agent_ready_at_unix ever set):
-	//     caught by the bootstrap-deadline watchdog (rule 5).
-	//   - Provider explicitly reports terminal status (exited, destroyed,
-	//     etc.): caught by rule 7 (provider_dead with hysteresis).
-	if ci.Status == db.LaunchStatusRunning && ci.AgentReadyAtUnix != nil &&
-		p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) {
-		// Yield to rule 4a-pause only when the provider status is expected to
-		// resume. Vast "offline" is resumable for interruptible placements, but
-		// for on-demand placements it is provider-dead evidence and should not
-		// mask a stale heartbeat.
-		if p.ProviderInst == nil || !isRecoverablePausedProviderStatus(p.ProviderInst.Status, p.PauseTolerant) {
-			// An outbid interruptible instance also stops heartbeating; if
-			// status polling is failing, a nil ProviderInst here reflects the
-			// failed poll, not a dead instance — defer rather than destroy.
-			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("agent heartbeat stale for %s", p.HeartbeatAge.Truncate(time.Second))); ok {
-				return action
-			}
-			return InstanceAction{
-				Kind:              ActionEmptyStatusTimeout,
-				TerminalStatus:    db.LaunchStatusFailed,
-				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      fmt.Sprintf("agent heartbeat stale for %s — terminating", p.HeartbeatAge.Truncate(time.Second)),
-				DestroyProvider:   true,
-				ResetJobs:         true,
-				AttemptOutcome:    db.AttemptOutcomeOrphaned,
 			}
 		}
 	}
@@ -792,35 +764,34 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 5c. Running phase stall: heartbeat stale while in running phase.
-	// A running job with a dead agent (stale heartbeat) should be terminated.
-	// This does NOT check GPU utilization — jobs may legitimately not use the GPU.
-	if ci.Status == db.LaunchStatusRunning && p.HeartbeatAge > effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, p.Now) {
-		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
-		if verb == PhaseRunning {
-			phaseAge := p.HeartbeatAge
-			if p.PhaseChangedAt != nil {
-				phaseAge = p.Now.Sub(*p.PhaseChangedAt)
-			}
-			if phaseAge >= runningStaleTerminate {
-				if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("running phase stalled for %s with stale heartbeat", phaseAge.Truncate(time.Second))); ok {
+	// 5c. Running task stall: structured progress has not changed. Agent
+	// heartbeat is deliberately irrelevant here: it proves the control plane is
+	// alive, not that the user's task is advancing. Uninstrumented jobs do not
+	// enter this watchdog; their explicit runtime and spend limits remain the
+	// bound.
+	if ci.Status == db.LaunchStatusRunning && p.JobProgressChangedAt != nil {
+		verb, phaseJobID, ok := ParsePhaseJobID(p.InstancePhase)
+		if ok && verb == PhaseRunning && phaseJobID == p.JobProgressID && p.JobProgressPct >= 0 {
+			progressAge := p.Now.Sub(*p.JobProgressChangedAt)
+			if progressAge >= runningStaleTerminate {
+				if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("structured job progress unchanged for %s", progressAge.Truncate(time.Second))); ok {
 					return action
 				}
 				return InstanceAction{
 					Kind:              ActionRunningStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: db.TerminationReasonPhaseStall,
-					StallMessage:      fmt.Sprintf("running phase stalled for %s with stale heartbeat — terminating instance", phaseAge.Truncate(time.Second)),
+					StallMessage:      fmt.Sprintf("structured job progress unchanged for %s — terminating instance", progressAge.Truncate(time.Second)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
 				}
 			}
-			if phaseAge >= runningStaleWarn {
-				remaining := runningStaleTerminate - phaseAge
+			if progressAge >= runningStaleWarn {
+				remaining := runningStaleTerminate - progressAge
 				return InstanceAction{
 					Kind:         ActionDisplayOnly,
-					StallMessage: fmt.Sprintf("running phase stalled for %s with stale heartbeat (terminating in %s)", phaseAge.Truncate(time.Second), remaining.Truncate(time.Second)),
+					StallMessage: fmt.Sprintf("structured job progress unchanged for %s (terminating in %s)", progressAge.Truncate(time.Second), remaining.Truncate(time.Second)),
 				}
 			}
 		}

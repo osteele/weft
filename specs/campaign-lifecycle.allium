@@ -41,7 +41,7 @@ value OfferSnapshot {
     gpu_name: String
     num_gpus: Integer
     gpu_mem_gb: Decimal
-    cost_per_hour_cents: Integer
+    cost_per_hour_cents: Integer       -- total recurring rate at disk_gb, not a provider default disk size
     reliability: Decimal            -- 0.0–1.0
     dl_perf: Decimal
     data_center: String
@@ -386,8 +386,8 @@ config {
     -- likely to stall the sidecar's R2 PUTs.
     heartbeat_stale_threshold_early_life: Duration = 8.minutes
     heartbeat_early_life_window: Duration = 15.minutes
-    -- Running-phase stall terminate threshold: trigger when the heartbeat
-    -- is stale AND the running phase has been unchanged for this long.
+    -- Running-task stall terminate threshold: trigger after an instrumented
+    -- job's structured progress tuple has been unchanged for this long.
     -- Matches runningStaleTerminate in internal/campaign/status.go.
     running_stall_timeout: Duration = 60.minutes
 
@@ -1036,6 +1036,9 @@ rule PerJobRentalPolicy {
         every selected offer.cost_per_hour_cents <= hourly_ceiling
             when hourly_ceiling is present
     ensures:
+        every selected offer.cost_per_hour_cents includes the provider's
+            recurring storage charge for group.disk_gb
+    ensures:
         no hourly-rate-compatible offer implies every job in group remains queued
         and each job's placement diagnosis identifies the hourly-rate cap
     ensures:
@@ -1054,6 +1057,11 @@ rule PerJobRentalPolicy {
         -- selected offer again before provider create, including replacement
         -- offers. A replacement that bypasses normal ranking fails closed
         -- before its metadata is accepted or the provider create begins.
+        -- Vast computes dph_total from the storage amount supplied to its
+        -- search command. SearchOffers must pass `--storage group.disk_gb`;
+        -- Vast's 5 GiB CLI default is not an admissible price for a job that
+        -- requests more disk. The storage-inclusive rate feeds ranking, the
+        -- per-job cap, persisted launch cost, and RateCapAuthorized.
         --
         -- Jobs with different rental policy values or different field
         -- presence never share or merge into one fresh launch group. This
@@ -2444,23 +2452,48 @@ rule OnStartChainWatchdog {
         -- persists FirstOnStartProbeSeenUnix set-once on first probe sighting.
 }
 
-rule HeartbeatStaleAfterReady {
+rule StructuredJobProgressStalls {
+    when: instance: Instance.status = running
+            and instance.phase = running(job)
+            and instance.live_state.active_job = job
+            and instance.live_state.job_progress != null
+            and instance.live_state.job_progress_changed_at != null
+            and now - instance.live_state.job_progress_changed_at
+                >= config.running_stall_timeout
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = phase_stall
+    ensures: instance.ended_at = now
+    ensures: job.status = queued
+
+    @guidance
+        -- The progress timestamp changes only when the structured
+        -- (job, phase, percent) tuple changes. Repeated Progress lines with
+        -- the same value, log growth, CPU/GPU activity, and agent heartbeats
+        -- do not reset it. A fresh heartbeat therefore does not suppress a
+        -- confirmed task stall.
+        --
+        -- The rule is opt-in through instrumentation: no Progress report
+        -- means unknown task progress, not confirmed absence. Such jobs stay
+        -- bounded by their explicit max-time and max-spend controls.
+        -- Implementation: launch_live_state.job_progress_changed_at and
+        -- internal/campaign/instance_check.go rule 5c.
+}
+
+rule HeartbeatStaleWarningAfterReady {
     when: instance: Instance.status = running
             and instance.agent_ready_at != null
             and HeartbeatAge(instance) > config.heartbeat_stale_threshold
             and not (instance.provider_instance != null
                      and instance.provider_instance.status in {stopped, offline})
 
-    ensures: instance.status = failed
-    ensures: instance.termination_reason = infra_failure
-    ensures: instance.ended_at = now
+    ensures: StaleHeartbeatWarningShown(instance)
+    ensures: AgentLivenessProbeScheduled(instance)
 
     @guidance
-        -- Heartbeat-first liveness watchdog. Once an agent has reached
-        -- ready (agent_ready_at set), its R2 heartbeat is the primary
-        -- liveness signal. A stale heartbeat after the agent ever showed
-        -- liveness means the container is functionally dead, regardless
-        -- of what the provider's bulk list endpoint reports.
+        -- Heartbeat is a control-plane liveness signal, not proof that the
+        -- user's task is advancing. Age alone is display-only and schedules
+        -- the reconciler's SSH probe; it never authorizes teardown.
         --
         -- Yields to ProviderInstancePaused when the provider reports
         -- stopped/offline: a paused container stops writing heartbeats,
@@ -2553,8 +2586,8 @@ rule HeartbeatStale {
 
     @guidance
         -- Triggered when heartbeat age exceeds config.heartbeat_stale_threshold
-        -- and agent is unreachable. Combined with running_stall_timeout for
-        -- phase-unchanged detection.
+        -- and agent is unreachable. This proves agent loss only; it is
+        -- independent of structured task-progress stall detection.
         --
         -- Probe evidence: an SSH probe that reaches the host and reports
         -- the agent process gone is positive evidence and terminates
@@ -2567,6 +2600,12 @@ rule HeartbeatStale {
         -- flap) satisfy the window but not the count, and rapid retries
         -- satisfy the count but not the window. Any successful probe or
         -- fresh heartbeat clears the accumulated failure state.
+        -- CheckInstance may surface stale heartbeat as display-only, but it
+        -- must not return a destructive action from heartbeat age alone. The
+        -- reconciler-specific probe path is the sole authority to initiate
+        -- stale-heartbeat teardown. The wi6900 report exposed that direct
+        -- decision branch, but neither a successful probe nor an advancing
+        -- log would have established semantic task progress.
         --
         -- Ordering: the provider destroy MUST succeed before the launch
         -- is marked failed and its jobs are requeued. A failed destroy
@@ -2627,8 +2666,8 @@ rule ProviderInstanceDied {
         -- unknown, never dead. Treating never-polled as dead reaped
         -- launches mid-create (2026-05-15: 16 launches failed with
         -- "provider returned no instance", no provider ID recorded).
-        -- Liveness is otherwise driven by HeartbeatStaleAfterReady, not
-        -- by list absence.
+        -- Agent liveness is otherwise checked by HeartbeatStale, not by list
+        -- absence. Task progress is evaluated separately.
         -- Implementation: internal/campaign/reconcile.go
         -- (providerConfirmedTerminal) and
         -- internal/campaign/instance_check.go rule 7.

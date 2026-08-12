@@ -112,8 +112,9 @@ weft run --tag rental --gpu h200 --gpus 8 \
 ```
 
 The same flags work with `weft edit <job-id>`. `--max-hourly-rate` filters
-offers before ranking. If no offer satisfies the cap, the job stays queued
-and its diagnosis explains the constraint. `--max-spend` and `--max-time`
+offers before ranking, using the total recurring rate including storage for
+the job's requested disk size. If no offer satisfies the cap, the job stays
+queued and its diagnosis explains the constraint. `--max-spend` and `--max-time`
 become hard limits on the launched instance. `--grace-period 0` terminates
 the instance without a post-failure grace window.
 
@@ -701,8 +702,15 @@ instances:
   historical setup durations for the same command and workspace, falling
   back to workspace-level or all-jobs data when per-command samples are
   insufficient (< 20). Default: warn at 15m, terminate at 25m.
-- **Heartbeat stale**: Agent heartbeat is older than 3 minutes. Display-only
-  warning; the reconciler's SSH probe logic handles actual termination.
+- **Structured task-progress stall**: After a running job first emits a
+  recognized `Progress:` value, warn when that value has not changed for 20
+  minutes and terminate after 60 minutes. Repeated values and ordinary log
+  growth do not count as progress. Uninstrumented jobs remain bounded by their
+  explicit runtime and spend ceilings.
+- **Heartbeat stale**: Agent heartbeat is older than 5 minutes (8 minutes in
+  the early-life window). This is a control-plane liveness warning, not a claim
+  that the task is stalled. The reconciler's SSH probe logic handles actual
+  agent-loss termination.
 
 Terminated instances have their jobs reset to queued for automatic retry.
 

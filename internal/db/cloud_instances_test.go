@@ -3036,9 +3036,37 @@ func TestLaunchLiveState(t *testing.T) {
 	if got.AgentProtocol != 7 {
 		t.Errorf("agent_protocol = %d, want 7", got.AgentProtocol)
 	}
+	if got.JobProgressChangedAt == nil {
+		t.Fatal("structured progress timestamp was not recorded")
+	}
+	firstProgressAt := *got.JobProgressChangedAt
+
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("repeat UpsertLaunchLiveState: %v", err)
+	}
+	got, err = GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState after repeat: %v", err)
+	}
+	if got == nil || got.JobProgressChangedAt == nil || *got.JobProgressChangedAt != firstProgressAt {
+		t.Fatal("repeating the same structured progress reset its timestamp")
+	}
+
+	state.JobProgressPct = -1
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("unavailable-progress UpsertLaunchLiveState: %v", err)
+	}
+	got, err = GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState after unavailable progress: %v", err)
+	}
+	if got == nil || got.JobProgressPct != 75 || got.JobProgressChangedAt == nil || *got.JobProgressChangedAt != firstProgressAt {
+		t.Fatal("an unavailable progress observation erased the last confirmed tuple")
+	}
 
 	// Upsert overwrites
 	state.InstancePhase = "running:43"
+	state.JobProgressID = 43
 	state.JobProgressPct = -1
 	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)

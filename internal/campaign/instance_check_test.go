@@ -1093,11 +1093,10 @@ func TestCheckInstance_ProviderStatusUnavailableWaitsBeforeTimeout(t *testing.T)
 	}
 }
 
-// TestCheckInstance_StaleAgentHeartbeatTimesOutFast verifies the
-// heartbeat-first kill path: an agent that reached ready and then
-// stopped writing heartbeats is killed promptly, regardless of what
-// the provider list says. No 25-minute lifecycle gate.
-func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
+// TestCheckInstance_StaleAgentHeartbeatRequiresProbe verifies that the pure
+// decision layer only displays heartbeat staleness. The reconciler performs
+// the SSH probe and evidence/hysteresis checks before it may terminate.
+func TestCheckInstance_StaleAgentHeartbeatRequiresProbe(t *testing.T) {
 	// Agent is past the early-life window so the steady-state threshold
 	// applies; heartbeat age exceeds it.
 	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
@@ -1111,18 +1110,19 @@ func TestCheckInstance_StaleAgentHeartbeatTimesOutFast(t *testing.T) {
 			AgentReadyAtUnix:   &agentReady,
 			ProviderInstanceID: "test-123",
 		},
-		// Provider returns "alive" — we still kill on stale heartbeat.
+		// Provider liveness cannot prove the agent is dead, and heartbeat
+		// silence can be an R2 path failure rather than a workload failure.
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "running:531",
 		HeartbeatAge:  heartbeatStaleThreshold + time.Minute,
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})
-	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d) — stale heartbeat should fire watchdog", action.Kind, ActionEmptyStatusTimeout)
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d) — stale heartbeat requires a probe", action.Kind, ActionDisplayOnly)
 	}
-	if !action.ResetJobs {
-		t.Error("expected ResetJobs to be true")
+	if action.DestroyProvider || action.ResetJobs || action.TerminalStatus != "" {
+		t.Fatalf("stale heartbeat display action is destructive: %+v", action)
 	}
 }
 
@@ -2125,7 +2125,7 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 
 func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 	launchedAt := time.Now().Add(-90 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-65 * time.Minute)
+	progressChangedAt := time.Now().Add(-65 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -2138,12 +2138,14 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		InstancePhase:  "running:531",
-		PhaseChangedAt: &phaseStart,
-		HeartbeatAge:   10 * time.Minute, // stale
-		JobState:       JobState{HasStartedJob: true},
-		Now:            time.Now(),
+		ProviderInst:         &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:        "running:531",
+		HeartbeatAge:         30 * time.Second, // liveness does not prove task progress
+		JobProgressID:        531,
+		JobProgressPct:       25,
+		JobProgressChangedAt: &progressChangedAt,
+		JobState:             JobState{HasStartedJob: true},
+		Now:                  time.Now(),
 	})
 	if action.Kind != ActionRunningStalled {
 		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
@@ -2161,7 +2163,7 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 
 func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
 	launchedAt := time.Now().Add(-45 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-25 * time.Minute) // past warn threshold, before terminate
+	progressChangedAt := time.Now().Add(-25 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -2174,12 +2176,13 @@ func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		InstancePhase:  "running:531",
-		PhaseChangedAt: &phaseStart,
-		HeartbeatAge:   10 * time.Minute, // stale
-		JobState:       JobState{HasStartedJob: true},
-		Now:            time.Now(),
+		ProviderInst:         &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:        "running:531",
+		JobProgressID:        531,
+		JobProgressPct:       25,
+		JobProgressChangedAt: &progressChangedAt,
+		JobState:             JobState{HasStartedJob: true},
+		Now:                  time.Now(),
 	})
 	if action.Kind != ActionDisplayOnly {
 		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d) for warn phase", action.Kind, ActionDisplayOnly)
@@ -2189,7 +2192,7 @@ func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_RunningStall_MissingPhaseChangedAtUsesHeartbeatAge(t *testing.T) {
+func TestCheckInstance_RunningStall_NoStructuredProgressNoAction(t *testing.T) {
 	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -2209,17 +2212,14 @@ func TestCheckInstance_RunningStall_MissingPhaseChangedAtUsesHeartbeatAge(t *tes
 		JobState:      JobState{HasStartedJob: true},
 		Now:           time.Now(),
 	})
-	if action.Kind != ActionRunningStalled {
-		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
-	}
-	if !action.ResetJobs {
-		t.Fatal("expected ResetJobs = true")
+	if action.Kind == ActionRunningStalled {
+		t.Fatal("activity/liveness evidence alone must not trigger a task-progress stall")
 	}
 }
 
-func TestCheckInstance_RunningStall_FreshHeartbeatNoAction(t *testing.T) {
+func TestCheckInstance_RunningStall_FreshStructuredProgressNoAction(t *testing.T) {
 	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-35 * time.Minute) // past terminate threshold
+	progressChangedAt := time.Now().Add(-5 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -2232,16 +2232,17 @@ func TestCheckInstance_RunningStall_FreshHeartbeatNoAction(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		InstancePhase:  "running:531",
-		PhaseChangedAt: &phaseStart,
-		HeartbeatAge:   30 * time.Second, // fresh — agent is alive
-		JobState:       JobState{HasStartedJob: true},
-		Now:            time.Now(),
+		ProviderInst:         &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:        "running:531",
+		HeartbeatAge:         70 * time.Minute,
+		JobProgressID:        531,
+		JobProgressPct:       26,
+		JobProgressChangedAt: &progressChangedAt,
+		JobState:             JobState{HasStartedJob: true},
+		Now:                  time.Now(),
 	})
-	// Fresh heartbeat means the agent is alive — do NOT terminate even with old phase
 	if action.Kind == ActionRunningStalled {
-		t.Fatal("should not trigger running stall when heartbeat is fresh")
+		t.Fatal("should not trigger running stall when structured progress is fresh")
 	}
 }
 
@@ -2278,9 +2279,8 @@ func TestCheckInstance_AgentExitedHeartbeatTerminates(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_RunningStall_ZeroHeartbeatAgeNoAction(t *testing.T) {
+func TestCheckInstance_RunningStall_RepeatedActivityWithoutProgressNoActionWhenUninstrumented(t *testing.T) {
 	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
-	phaseStart := time.Now().Add(-35 * time.Minute)
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
 		probeFailures:      make(map[int64]probeFailureState),
@@ -2293,15 +2293,14 @@ func TestCheckInstance_RunningStall_ZeroHeartbeatAgeNoAction(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		InstancePhase:  "running:531",
-		PhaseChangedAt: &phaseStart,
-		HeartbeatAge:   0, // no heartbeat data yet
-		JobState:       JobState{HasStartedJob: true},
-		Now:            time.Now(),
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase: "running:531",
+		HeartbeatAge:  0,
+		JobState:      JobState{HasStartedJob: true},
+		Now:           time.Now(),
 	})
 	if action.Kind == ActionRunningStalled {
-		t.Fatal("should not trigger running stall when heartbeat age is 0 (unknown)")
+		t.Fatal("uninstrumented jobs should remain bounded by runtime/spend limits")
 	}
 }
 
@@ -2572,31 +2571,31 @@ func TestCheckInstance_UnknownStatus_InterruptibleStaleHeartbeatDefers(t *testin
 	if action.Kind != ActionDisplayOnly {
 		t.Fatalf("action.Kind = %v, want ActionDisplayOnly (defer) — got message %q", action.Kind, action.StallMessage)
 	}
-	if !strings.Contains(action.StallMessage, "provider status unknown") || !strings.Contains(action.StallMessage, "deferring termination") {
-		t.Errorf("StallMessage = %q, want it to explain the unknown-status deferral", action.StallMessage)
+	if action.StallMessage != "heartbeat stale" {
+		t.Errorf("StallMessage = %q, want heartbeat stale", action.StallMessage)
 	}
 }
 
-func TestCheckInstance_UnknownStatus_OnDemandStaleHeartbeatTerminates(t *testing.T) {
+func TestCheckInstance_UnknownStatus_OnDemandStaleHeartbeatRequiresProbe(t *testing.T) {
 	for _, instanceType := range []string{cloud.InstanceTypeOnDemand, ""} {
 		t.Run("type="+instanceType, func(t *testing.T) {
 			r := NewReconciler()
 			action := r.CheckInstance(unknownStatusStaleHeartbeatParams(instanceType, 5*time.Minute))
-			if action.Kind != ActionEmptyStatusTimeout {
-				t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — non-interruptible launches keep current behavior", action.Kind)
+			if action.Kind != ActionDisplayOnly {
+				t.Fatalf("action.Kind = %v, want ActionDisplayOnly — heartbeat silence alone is not terminal evidence", action.Kind)
 			}
-			if !action.ResetJobs {
-				t.Error("expected ResetJobs to be true")
+			if action.DestroyProvider || action.ResetJobs || action.TerminalStatus != "" {
+				t.Fatalf("stale heartbeat display action is destructive: %+v", action)
 			}
 		})
 	}
 }
 
-func TestCheckInstance_UnknownStatus_InterruptibleTerminatesPastBound(t *testing.T) {
+func TestCheckInstance_UnknownStatus_InterruptibleStillRequiresProbePastBound(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, stalePauseTimeout+time.Minute))
-	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — deferral is bounded by stalePauseTimeout", action.Kind)
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %v, want ActionDisplayOnly — heartbeat silence remains non-terminal evidence", action.Kind)
 	}
 }
 
@@ -2608,8 +2607,8 @@ func TestCheckInstance_NotFoundStatus_InterruptibleTerminates(t *testing.T) {
 	params := unknownStatusStaleHeartbeatParams(cloud.InstanceTypeInterruptible, 5*time.Minute)
 	params.ProviderErr = fmt.Errorf("provider instance test-123: %w", cloud.ErrInstanceNotFound)
 	action := r.CheckInstance(params)
-	if action.Kind != ActionEmptyStatusTimeout {
-		t.Fatalf("action.Kind = %v, want ActionEmptyStatusTimeout — not-found must not defer", action.Kind)
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %v, want ActionDisplayOnly — transient not-found plus heartbeat silence is not terminal evidence", action.Kind)
 	}
 }
 

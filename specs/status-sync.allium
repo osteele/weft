@@ -168,6 +168,9 @@ entity InstanceLiveState {
     heartbeat_age: Duration?
     phase_changed_at: Timestamp?
     job_progress: Integer?
+    -- Set when the structured (active_job, phase, job_progress) tuple changes;
+    -- repeated publication of the same tuple preserves the timestamp.
+    job_progress_changed_at: Timestamp?
     -- The job currently making progress on the instance, as reported by the
     -- agent's R2 progress writes. Null while the agent is still starting up
     -- and has not yet pulled a job from its queue.
@@ -197,7 +200,8 @@ config {
     heartbeat_stale_threshold: Duration = 5.minutes
     heartbeat_stale_threshold_early_life: Duration = 8.minutes
     heartbeat_early_life_window: Duration = 15.minutes
-    -- Matches runningStaleTerminate in internal/campaign/status.go.
+    -- Applies only after a job has emitted structured progress. Matches
+    -- runningStaleTerminate in internal/campaign/status.go.
     running_stall_timeout: Duration = 60.minutes
 
     -- Reconcile safety-net window

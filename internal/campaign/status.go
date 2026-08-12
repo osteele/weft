@@ -107,10 +107,9 @@ func effectiveHeartbeatStaleThreshold(agentReadyAtUnix *int64, now time.Time) ti
 	return heartbeatStaleThreshold
 }
 
-// Running-phase stall thresholds: trigger when heartbeat is stale AND
-// the running phase has been unchanged for this long. This catches hung
-// jobs where the agent has died but the provider still reports "running".
-// NOT based on GPU utilization — jobs may legitimately not use the GPU.
+// Running-task stall thresholds: trigger when a job's structured progress
+// tuple has remained unchanged for this long. Heartbeat and GPU utilization
+// are liveness/activity signals, not evidence of semantic task progress.
 const (
 	runningStaleWarn      = 20 * time.Minute
 	runningStaleTerminate = 60 * time.Minute

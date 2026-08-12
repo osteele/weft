@@ -51,6 +51,7 @@ type SyncedState struct {
 	JobProgress           int // 0-100, or -1 if unavailable
 	JobProgressID         int64
 	JobProgressPhase      int // 1-based phase number (0 = unknown)
+	JobProgressChangedAt  *time.Time
 	TerminationIntent     *instanceintent.Marker
 	AgentVersion          string
 	PhaseChangedAt        *time.Time
@@ -395,6 +396,12 @@ func SyncInstanceState(
 			t := time.Unix(*phaseChangedAt, 0)
 			s.PhaseChangedAt = &t
 		}
+		if live, err := db.GetLaunchLiveState(database, instanceID); err == nil && live != nil && live.JobProgressChangedAt != nil {
+			t := time.Unix(*live.JobProgressChangedAt, 0)
+			s.JobProgressChangedAt = &t
+		} else if err != nil {
+			slog.Warn("read structured progress timestamp", "component", "sync", "instance", instanceID, "error", err)
+		}
 	}
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
 
@@ -729,6 +736,9 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		Now:                   now,
 		TerminationIntent:     s.TerminationIntent,
 		PhaseChangedAt:        s.PhaseChangedAt,
+		JobProgressID:         s.JobProgressID,
+		JobProgressPct:        s.JobProgress,
+		JobProgressChangedAt:  s.JobProgressChangedAt,
 		BootstrapActivitySeen: s.BootstrapActivitySeen,
 		OnStartProbePresent:   s.OnStartProbePresent,
 		OnStartStage:          s.OnStartStage,

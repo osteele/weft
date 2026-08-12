@@ -1032,6 +1032,85 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 	}
 }
 
+// Regression for wi6900: the shared decision layer used to destroy a running
+// instance from heartbeat age before the reconciler could perform its SSH
+// probe. A successful probe is positive evidence that the agent is alive and
+// must prevent teardown even when the R2 heartbeat is stale.
+func TestReconcileLaunches_StaleHeartbeatWithLiveAgentDoesNotTerminate(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	agentReady := time.Now().Add(-25 * time.Minute).Unix()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:           db.LaunchStatusRunning,
+		Provider:         "vastai",
+		GPUSpec:          "H200",
+		AgentReadyAtUnix: &agentReady,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "live-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
+
+	origSyncFetchHeartbeat := syncFetchHeartbeat
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		syncFetchHeartbeat = origSyncFetchHeartbeat
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	agentAlive := true
+	staleSample := &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix(), AgentAlive: &agentAlive}
+	syncFetchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return staleSample, 10 * time.Minute
+	}
+	fetchReconcileHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return staleSample, 10 * time.Minute
+	}
+	probeCampaignAgent = func(*cloud.Instance, time.Duration) (bool, error) {
+		return true, nil
+	}
+
+	var destroyCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
+		},
+		DestroyInstanceFunc: func(string) error {
+			destroyCalls++
+			return nil
+		},
+	}
+
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Fatalf("reconciled = %d, want 0 while agent probe is alive", result.Reconciled)
+	}
+	if destroyCalls != 0 {
+		t.Fatalf("destroy calls = %d, want 0 while agent probe is alive", destroyCalls)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusRunning {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+}
+
 // Regression: when the stale-heartbeat path cannot destroy the provider
 // instance (provider API unreachable), the launch must NOT be marked
 // failed and its jobs must NOT be requeued — the instance may still be
