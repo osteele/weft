@@ -118,6 +118,34 @@ func TestParseSearchOffers(t *testing.T) {
 	}
 }
 
+func TestSearchOffersPricesRequestedStorage(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	argsPath := filepath.Join(dir, "args")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$VAST_ARGS_FILE"
+printf '[]\n'
+`
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	t.Setenv("VAST_ARGS_FILE", argsPath)
+
+	c := &Client{CLIPath: stub}
+	if _, err := c.SearchOffers(OfferConstraints{MinDiskGB: 1200}); err != nil {
+		t.Fatalf("SearchOffers: %v", err)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--storage 1200") {
+		t.Fatalf("SearchOffers args = %q, want requested storage pricing", joined)
+	}
+}
+
 func TestParseShowInstances(t *testing.T) {
 	var instances []Instance
 	if err := json.Unmarshal([]byte(showInstancesJSON), &instances); err != nil {

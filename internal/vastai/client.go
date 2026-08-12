@@ -226,6 +226,13 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	if constraints.InstanceType == cloud.InstanceTypeInterruptible {
 		args = append(args, "--type", "bid")
 	}
+	if constraints.MinDiskGB > 0 {
+		// Vast computes dph_total using the --storage amount. Its CLI default
+		// is only 5 GiB, so omitting this for a large-disk job makes ranking,
+		// rate caps, and spend authorization use a rate below the one charged
+		// after instance creation.
+		args = append(args, "--storage", strconv.Itoa(constraints.MinDiskGB))
+	}
 	if filter != "" {
 		args = append(args, filter)
 	}

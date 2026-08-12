@@ -111,7 +111,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
 - `--provider vastai|runpod`: Restrict rental placement to one cloud provider. Use this for provider-specific testing; omit it for normal automatic provider selection.
 - `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
-- `--max-hourly-rate USD`: Reject rental offers above this hourly rate. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
+- `--max-hourly-rate USD`: Reject rental offers whose total recurring rate, including storage for the requested disk size, exceeds this amount. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
 - `--max-spend USD`: Set a hard spend limit for the rental instance that runs this job.
 - `--max-time DURATION`: Set a hard lifetime for that rental instance (for example, `2h30m`).
 - `--min-survival FRACTION`: Set the minimum accepted rental-offer survival probability, from `0` to `1`; `0` disables the floor.
