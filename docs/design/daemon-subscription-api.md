@@ -21,8 +21,40 @@ Weft keeps separate boundaries for separate responsibilities:
    state local to Bubble Tea models.
 
 SQLite remains an internal source of truth, not an integration contract.
-External projects should use CLI JSON/JSONL today or a daemon-backed bridge
-once one exists.
+External local projects should use CLI JSON/JSONL or the versioned daemon
+subscription described below. Remote clients should use an authenticated
+bridge rather than access SQLite or the Unix socket directly.
+
+## Canonical read-only job feed
+
+Local GUI consumers should use the versioned `activity` subscription rather
+than query SQLite or repeatedly spawn `weft job list`. The canonical request
+is one newline-terminated JSON object sent to `~/.cache/weft/daemon.sock`:
+
+```json
+{
+  "type": "subscribe",
+  "client_pid": 12345,
+  "subscribe": {
+    "resource": "activity",
+    "follow": true,
+    "include_delta": true,
+    "include_status_line": true
+  }
+}
+```
+
+This is a cached/no-sync read: handling the subscription reads local database
+state and does not contact hosts or providers. The first
+`subscription_snapshot` is a complete initial snapshot. Later snapshots carry
+the complete current active-job map plus an optional delta. The
+`unprocessed_jobs` array carries the bounded terminal-job inbox (at most the
+last 14 days), including jobs that finished before the client connected.
+Consumers that only need one project may add `"project": "<name>"`.
+
+The feed is naturally bounded by active jobs, active instances, and the
+14-day unprocessed inbox. Clients should reconnect after daemon restart and
+replace their local model from the new initial snapshot.
 
 ## Transport
 
@@ -250,6 +282,43 @@ resource without recreating DB queries in the command process.
 The daemon refreshes runaway-breaker state at most once every five seconds and
 shares that result across activity subscribers. This bounds the lifecycle-event
 query cost while keeping trip and reset notifications prompt.
+
+### Activity job schema (API v1)
+
+Both `activity.snapshot.jobs` and `activity.unprocessed_jobs` use the same job
+object. Snapshot jobs are keyed by numeric ID; each object also contains `id`.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable numeric logical-job ID. Display it as `wj<id>`. |
+| `status` | Status stored in SQLite. This is retained for audit and compatibility. |
+| `effective_status` | Status clients should render; applies the documented pending-intent/unplaced refinement from `Job.EffectiveStatus()`. |
+| `project` | Stored project label. |
+| `host` | Current host target, when assigned. |
+| `instance_id` | Numeric rental-instance ID, when assigned. |
+| `description` | Effective description: user text, generated text, then command fallback. |
+| `command` | Compatibility command summary, capped at 200 bytes. |
+| `command_full` | Complete effective command; new consumers should prefer this field. |
+| `tags` | Stored job tags. |
+| `gpu` | Assigned device indices when known, otherwise the requested GPU class. |
+| `gpu_class`, `gpu_mem_gb` | Structured requested GPU constraints. |
+| `exit_code` | Process exit code when known. |
+| `start_time` | Unix seconds at authoritative execution start. It is never a placement or queue timestamp. |
+| `end_time` | Unix seconds at terminal completion when known. |
+| `placement_bucket` | Current semantic display bucket (`running`, `paused`, `placing`, `launching`, `queued`, `unplaced`, `completions`, `failures`, or `killed_canceled`). |
+| `placement_at` | Unix seconds at the start of the current placement condition. Omitted outside a timestamped placement condition. |
+| `state_since` | Best authoritative Unix timestamp for the current `placement_bucket`: execution start for `running`, placement/queue epoch for placement buckets, and end time for terminal buckets. Omitted when Weft did not record a matching transition timestamp (notably some paused/legacy rows). |
+| `source` | Bounded source provenance: working directory, source identity and pinned-snapshot hashes, source roots, and VCS revision/change ID/dirty flag. Blob manifests and storage keys are intentionally excluded. |
+
+Durations are intentionally absent. Clients calculate elapsed or state age from
+the snapshot's RFC3339 `time` and the applicable Unix timestamp. In particular,
+clients must not treat `placement_at` as execution start: use `start_time` for
+execution elapsed time and `state_since` for the age of the current display
+bucket.
+
+All fields added to API v1 are additive. Clients must continue ignoring unknown
+fields. A field with unknown evidence is omitted rather than populated from a
+timestamp with different semantics.
 
 ## Compatibility
 

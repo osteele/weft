@@ -1943,6 +1943,54 @@ rule DBAsSharedBus {
         -- periodic tick as a backstop.
 }
 
+-- Versioned cached job feed for local GUI clients. This is a read-side view
+-- over SQLite: opening or advancing the subscription must not trigger host,
+-- provider, or object-store synchronization.
+rule ActivitySubscriptionJobFeed {
+    when: DaemonSubscriptionRequested(
+        resource = "activity",
+        follow = true,
+        include_delta = true,
+        include_status_line = true,
+    )
+
+    ensures: FirstEventAfterReadyIsCompleteSnapshot()
+    ensures: SnapshotContainsAllActiveJobs()
+    ensures: SnapshotContainsUnprocessedTerminalJobs(max_age = 14.days)
+    ensures: LaterEventsContainCompleteCurrentSnapshot()
+    ensures: NoRemoteSyncTriggered()
+
+    -- Job timing fields carry distinct semantics. Missing evidence remains
+    -- unknown; one timestamp must never be substituted for another merely so
+    -- a field is populated.
+    for row in ActivityJobRows:
+        ensures: row.status = row.job.stored_status
+        ensures: row.effective_status = EffectiveStatus(row.job)
+        ensures: row.start_time = row.job.authoritative_execution_start
+
+        -- placement_at and state_since are optional when their matching
+        -- transition timestamp was not recorded. The functions below return
+        -- null in that case.
+        ensures: row.placement_at = StartOfCurrentPlacementCondition(row.job)
+        ensures: row.state_since = StartOfPlacementBucket(row.job)
+
+        if row.placement_bucket = running:
+            ensures: row.state_since = row.start_time
+
+        if row.placement_bucket in {completions, failures, killed_canceled}:
+            ensures: row.state_since = row.end_time
+
+        -- No duration string is serialized. Consumers calculate durations
+        -- against snapshot.time using the timestamp with matching semantics.
+        ensures: not exists row.duration
+
+    -- legacy annotation: @guidance
+        -- The canonical socket request and the API-v1 field table live in
+        -- docs/design/daemon-subscription-api.md. Implementation:
+        -- internal/daemonapi/watch.go resource=activity and
+        -- internal/narrate/snapshot.go JobView.
+}
+
 -- Principle: DB as source of truth (read-side discipline).
 --
 -- DBAsSharedBus above covers the multi-process sense (all processes share

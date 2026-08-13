@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/ops"
 )
@@ -442,6 +443,15 @@ func TestBuildActivityPayloadIncludesUnprocessedJobDetails(t *testing.T) {
 	got := payload.UnprocessedJobs[0]
 	if got.ID != jobID || got.Status != db.StatusCompleted || got.Project != "done-project" {
 		t.Fatalf("unprocessed row = %+v, want completed job %d in done-project", got, jobID)
+	}
+	if got.EffectiveStatus != db.StatusCompleted || got.Description != "done" || got.CommandFull != "echo ok" {
+		t.Fatalf("unprocessed stable fields = %+v", got)
+	}
+	if got.Source == nil || got.Source.WorkingDir != "/tmp/done" {
+		t.Fatalf("unprocessed source provenance = %+v", got.Source)
+	}
+	if got.PlacementBucket != string(jobview.BucketCompletions) || got.EndTime == nil || got.StateSince != *got.EndTime {
+		t.Fatalf("unprocessed timing = bucket:%q end:%v state_since:%d", got.PlacementBucket, got.EndTime, got.StateSince)
 	}
 }
 

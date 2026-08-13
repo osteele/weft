@@ -21,29 +21,65 @@ type Snapshot struct {
 	Autopilot AutopilotView          `json:"autopilot"`
 }
 
-// JobView holds the fields a narrator cares about. We deliberately drop
-// columns that don't affect transitions to keep prompts small.
+// JobView is the bounded job projection shared by activity subscriptions and
+// the operations narrator. Large blob manifests and storage keys stay out of
+// this view so subscription snapshots and prompts remain bounded.
 type JobView struct {
-	ID                 int64    `json:"id"`
-	Status             string   `json:"status"`
-	Host               string   `json:"host,omitempty"`
-	Project            string   `json:"project,omitempty"`
-	Command            string   `json:"command,omitempty"`
-	ExitCode           *int     `json:"exit_code,omitempty"`
-	StartTime          int64    `json:"start_time,omitempty"`
-	EndTime            *int64   `json:"end_time,omitempty"`
-	LaunchID           *int64   `json:"instance_id,omitempty"`
-	Tags               []string `json:"tags,omitempty"`
-	PlacementBucket    string   `json:"placement_bucket,omitempty"`
-	PlacementAt        int64    `json:"placement_at,omitempty"`
-	PlacementReasons   []string `json:"placement_reasons,omitempty"`    // why this job is currently unplaced (if any)
-	QueueBlockedReason string   `json:"queue_blocked_reason,omitempty"` // transient queue-gate reason
-	Explanation        string   `json:"explanation,omitempty"`          // normalized current-state explanation
-	SuggestedAction    string   `json:"suggested_action,omitempty"`     // wait/replan/retry/etc. when known
-	FailureReason      string   `json:"failure_reason,omitempty"`       // normalized failure reason (e.g. "timeout", "oom")
-	ErrorMessage       string   `json:"error_message,omitempty"`
-	ProgressPct        int      `json:"progress_pct,omitempty"`   // 0-100, -1 if unavailable
-	ProgressPhase      int      `json:"progress_phase,omitempty"` // 1-based phase number, 0 if unknown/single-phase
+	ID                 int64          `json:"id"`
+	Status             string         `json:"status"` // stored database status
+	EffectiveStatus    string         `json:"effective_status"`
+	Host               string         `json:"host,omitempty"`
+	Project            string         `json:"project,omitempty"`
+	Description        string         `json:"description,omitempty"`
+	Command            string         `json:"command,omitempty"`      // compatibility summary, capped at 200 bytes
+	CommandFull        string         `json:"command_full,omitempty"` // complete effective command
+	ExitCode           *int           `json:"exit_code,omitempty"`
+	StartTime          int64          `json:"start_time,omitempty"` // authoritative execution-start time
+	EndTime            *int64         `json:"end_time,omitempty"`
+	StateSince         int64          `json:"state_since,omitempty"`
+	LaunchID           *int64         `json:"instance_id,omitempty"`
+	Tags               []string       `json:"tags,omitempty"`
+	GPU                string         `json:"gpu,omitempty"`
+	GPUClass           string         `json:"gpu_class,omitempty"`
+	GPUMemGB           *int           `json:"gpu_mem_gb,omitempty"`
+	Source             *JobSourceView `json:"source,omitempty"`
+	PlacementBucket    string         `json:"placement_bucket,omitempty"`
+	PlacementAt        int64          `json:"placement_at,omitempty"`         // start of the current placement condition only
+	PlacementReasons   []string       `json:"placement_reasons,omitempty"`    // why this job is currently unplaced (if any)
+	QueueBlockedReason string         `json:"queue_blocked_reason,omitempty"` // transient queue-gate reason
+	Explanation        string         `json:"explanation,omitempty"`          // normalized current-state explanation
+	SuggestedAction    string         `json:"suggested_action,omitempty"`     // wait/replan/retry/etc. when known
+	FailureReason      string         `json:"failure_reason,omitempty"`       // normalized failure reason (e.g. "timeout", "oom")
+	ErrorMessage       string         `json:"error_message,omitempty"`
+	ProgressPct        int            `json:"progress_pct,omitempty"`   // 0-100, -1 if unavailable
+	ProgressPhase      int            `json:"progress_phase,omitempty"` // 1-based phase number, 0 if unknown/single-phase
+}
+
+// JobSourceView is the bounded source-provenance projection exposed by the
+// activity API. It intentionally omits source blob manifests and storage keys.
+type JobSourceView struct {
+	WorkingDir         string              `json:"working_dir,omitempty"`
+	IdentityHash       string              `json:"identity_hash,omitempty"`
+	PinnedSnapshotHash string              `json:"pinned_snapshot_hash,omitempty"`
+	Roots              []JobSourceRootView `json:"roots,omitempty"`
+}
+
+// JobSourceRootView records bounded identity and VCS provenance for one root.
+type JobSourceRootView struct {
+	LocalPath     string      `json:"local_path,omitempty"`
+	MountBasename string      `json:"mount_basename,omitempty"`
+	MountRel      string      `json:"mount_rel,omitempty"`
+	Origins       []string    `json:"origins,omitempty"`
+	Hash          string      `json:"hash,omitempty"`
+	VCS           *JobVCSView `json:"vcs,omitempty"`
+}
+
+// JobVCSView records the source revision associated with one source root.
+type JobVCSView struct {
+	Type     string `json:"type,omitempty"`
+	Revision string `json:"revision,omitempty"`
+	ChangeID string `json:"change_id,omitempty"`
+	Dirty    bool   `json:"dirty,omitempty"`
 }
 
 // InstanceView is the trimmed Launch.
@@ -139,18 +175,30 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 }
 
 func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiveState, placementStatus jobview.PlacementStatus) JobView {
+	bucket := placementStatus.Bucket
+	if bucket == "" {
+		bucket = jobview.ClassifyBucket(j, jobview.ClassifyInput{})
+	}
 	view := JobView{
 		ID:                 j.ID,
 		Status:             j.Status,
+		EffectiveStatus:    j.EffectiveStatus(),
 		Host:               j.Host,
 		Project:            j.Project,
+		Description:        j.EffectiveDescription(),
 		Command:            truncateCommand(j.Command),
+		CommandFull:        j.EffectiveCommand(),
 		ExitCode:           j.ExitCode,
 		StartTime:          j.StartTime,
 		EndTime:            j.EndTime,
+		StateSince:         jobStateSince(j, bucket, placementStatus.DisplayAt),
 		LaunchID:           j.LaunchID,
 		Tags:               append([]string(nil), j.Tags...),
-		PlacementBucket:    string(placementStatus.Bucket),
+		GPU:                jobGPUDisplay(j),
+		GPUClass:           j.GPUClass,
+		GPUMemGB:           cloneIntPtr(j.GPUMemGB),
+		Source:             jobSourceView(j),
+		PlacementBucket:    string(bucket),
 		PlacementAt:        placementStatus.DisplayAt,
 		PlacementReasons:   append([]string(nil), j.PlacementReasons...),
 		QueueBlockedReason: j.QueueBlockedReason,
@@ -168,6 +216,85 @@ func jobToView(database *sql.DB, j *db.Job, liveByLaunch map[int64]*db.LaunchLiv
 		}
 	}
 	return view
+}
+
+func jobGPUDisplay(j *db.Job) string {
+	if j == nil {
+		return ""
+	}
+	if devices := j.GPUDevice(); devices != "" {
+		return devices
+	}
+	return j.GPUClass
+}
+
+func jobSourceView(j *db.Job) *JobSourceView {
+	if j == nil {
+		return nil
+	}
+	view := &JobSourceView{WorkingDir: j.EffectiveWorkingDir()}
+	if j.Metadata == nil || j.Metadata.Source == nil {
+		if view.WorkingDir == "" {
+			return nil
+		}
+		return view
+	}
+	source := j.Metadata.Source
+	view.IdentityHash = source.Hash
+	if source.Pin != nil {
+		view.PinnedSnapshotHash = source.Pin.Hash
+	}
+	view.Roots = make([]JobSourceRootView, 0, len(source.Roots))
+	for _, root := range source.Roots {
+		out := JobSourceRootView{
+			LocalPath:     root.LocalPath,
+			MountBasename: root.MountBasename,
+			MountRel:      root.MountRel,
+			Origins:       append([]string(nil), root.Origins...),
+			Hash:          root.Hash,
+		}
+		if root.VCS != nil {
+			out.VCS = &JobVCSView{
+				Type:     root.VCS.Type,
+				Revision: root.VCS.Revision,
+				ChangeID: root.VCS.ChangeID,
+				Dirty:    root.VCS.Dirty,
+			}
+		}
+		view.Roots = append(view.Roots, out)
+	}
+	return view
+}
+
+// jobStateSince returns the best authoritative timestamp for the current
+// placement bucket. Unknown transition times stay omitted instead of being
+// inferred from a timestamp with different semantics.
+func jobStateSince(j *db.Job, bucket jobview.Bucket, placementAt int64) int64 {
+	if j == nil {
+		return 0
+	}
+	switch bucket {
+	case jobview.BucketRunning:
+		return j.StartTime
+	case jobview.BucketPlacing, jobview.BucketLaunching, jobview.BucketQueued, jobview.BucketUnplaced:
+		if placementAt > 0 {
+			return placementAt
+		}
+		return j.QueuedAt
+	case jobview.BucketCompletions, jobview.BucketFailures, jobview.BucketKilledCanceled:
+		if j.EndTime != nil {
+			return *j.EndTime
+		}
+	}
+	return 0
+}
+
+func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
 }
 
 func instanceToView(c *db.Launch) InstanceView {
