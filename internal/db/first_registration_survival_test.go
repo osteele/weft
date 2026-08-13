@@ -55,6 +55,9 @@ func TestComputeFirstRegistrationSurvival_EmptyUsesDefaults(t *testing.T) {
 	if s.TerminateAfter != 12*time.Minute {
 		t.Fatalf("terminate = %v, want 12m", s.TerminateAfter)
 	}
+	if s.WarnLearned || s.TerminateLearned {
+		t.Fatalf("empty history marked thresholds learned: %+v", s)
+	}
 }
 
 func TestComputeFirstRegistrationSurvival_ScopeFallback(t *testing.T) {

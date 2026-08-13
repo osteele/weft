@@ -22,7 +22,7 @@ var instanceDiagnoseCmd = &cobra.Command{
 	Long: `Shows a detailed diagnostic report for a single cloud instance, including:
 - Root cause analysis
 - Chronological timeline of all events (as offsets from launch)
-- Bootstrap and setup survival analysis with adaptive thresholds
+- Bootstrap and setup survival analysis with learned/default threshold provenance
 - Per-job diagnosis with phase durations and GPU metrics`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runInstanceDiagnose,
@@ -482,16 +482,12 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 	b.WriteString("Survival Analysis:\n")
 
 	if bs != nil {
-		adaptive := bs.SampleSize >= 20
-		thresholdType := "default"
-		if adaptive {
-			thresholdType = "adaptive"
-		}
-		fmt.Fprintf(&b, "  Bootstrap: n=%d, warn after %s, terminate after %s (%s)\n",
+		fmt.Fprintf(&b, "  Bootstrap: n=%d, warn after %s (%s), terminate after %s (%s)\n",
 			bs.SampleSize,
 			bs.WarnAfter.Truncate(time.Second),
+			survivalThresholdProvenance(bs.WarnLearned),
 			bs.TerminateAfter.Truncate(time.Second),
-			thresholdType)
+			survivalThresholdProvenance(bs.TerminateLearned))
 
 		// Compare this instance's bootstrap duration against thresholds.
 		if inst.LaunchedAt != nil {
@@ -522,16 +518,12 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 	}
 
 	if ss != nil {
-		adaptive := ss.SampleSize >= 20
-		thresholdType := "default"
-		if adaptive {
-			thresholdType = "adaptive"
-		}
-		fmt.Fprintf(&b, "  Setup: n=%d, warn after %s, terminate after %s (%s)\n",
+		fmt.Fprintf(&b, "  Setup: n=%d, warn after %s (%s), terminate after %s (%s)\n",
 			ss.SampleSize,
 			ss.WarnAfter.Truncate(time.Second),
+			survivalThresholdProvenance(ss.WarnLearned),
 			ss.TerminateAfter.Truncate(time.Second),
-			thresholdType)
+			survivalThresholdProvenance(ss.TerminateLearned))
 
 		// Find setup duration for this instance (iterate jobs for stable order).
 		for _, j := range report.Jobs {
@@ -555,6 +547,13 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 	}
 
 	return b.String()
+}
+
+func survivalThresholdProvenance(learned bool) string {
+	if learned {
+		return "learned"
+	}
+	return "default"
 }
 
 // compareThreshold returns a comparison string like "(within warn threshold)"

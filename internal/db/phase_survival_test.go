@@ -25,6 +25,9 @@ func TestComputeSetupSurvival_Empty(t *testing.T) {
 	if s.TerminateAfter != 25*time.Minute {
 		t.Errorf("terminate = %v, want 25m (default)", s.TerminateAfter)
 	}
+	if s.WarnLearned || s.TerminateLearned {
+		t.Fatalf("empty history marked thresholds learned: %+v", s)
+	}
 }
 
 func insertSetupJob(t *testing.T, database *sql.DB, jobID, launchID int64, command, workingDir string, setupStart, setupEnd int64) {
@@ -101,6 +104,38 @@ func TestComputeSetupSurvival_SufficientData(t *testing.T) {
 	if s.TerminateAfter <= s.WarnAfter {
 		t.Errorf("terminate (%v) should be after warn (%v)", s.TerminateAfter, s.WarnAfter)
 	}
+	if !s.WarnLearned {
+		t.Error("warn threshold should be marked learned")
+	}
+	if !s.TerminateLearned {
+		t.Error("terminate threshold should be marked learned")
+	}
+}
+
+// TestComputeSetupSurvival_SufficientAllSuccessUsesDefaults is the historical
+// shape behind wi7023: a large sample count alone does not make thresholds
+// learned when every observation succeeds before either cutoff is crossed.
+func TestComputeSetupSurvival_SufficientAllSuccessUsesDefaults(t *testing.T) {
+	database := SetupTestDB(t)
+	defer database.Close()
+
+	base := int64(1_000_000)
+	for i := int64(1); i <= 25; i++ {
+		setupDuration := int64(60 + i*10)
+		insertBootstrapLaunch(t, database, i, "runpod", base, base+setupDuration+100, "completed")
+		insertSetupJob(t, database, i*10, i, "uv run experiment.py", "/tmp/project", base+5, base+5+setupDuration)
+	}
+
+	s, err := ComputeSetupSurvival(database, "uv run experiment.py", "/tmp/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.SampleSize != 25 {
+		t.Fatalf("sample size = %d, want 25", s.SampleSize)
+	}
+	if s.WarnLearned || s.TerminateLearned {
+		t.Fatalf("all-success history marked configured defaults learned: %+v", s)
+	}
 }
 
 func TestComputeSetupSurvival_FallbackToAllJobs(t *testing.T) {
@@ -149,6 +184,9 @@ func TestComputeSetupSurvival_InsufficientData(t *testing.T) {
 	}
 	if s.TerminateAfter != 25*time.Minute {
 		t.Errorf("terminate = %v, want 25m (default)", s.TerminateAfter)
+	}
+	if s.WarnLearned || s.TerminateLearned {
+		t.Fatalf("insufficient history marked thresholds learned: %+v", s)
 	}
 }
 

@@ -194,8 +194,11 @@ terminated the instance after a timeout.
 **Timeouts:**
 - Empty provider status: 1 minute (`maxEmptyStatusTime`)
 - Stuck in pre-running provider status (`created`, `loading`, etc.): 5 minutes (`maxPreRunningStatusTime`)
-- Bootstrap stalled (running but no progress): adaptive, default 15 minutes
-- Setup phase stalled (`uv sync`, etc.): adaptive, default 15m warn / 25m terminate
+- Bootstrap stalled (running but no progress): learned from history when the
+  survival curve crosses the cutoff; otherwise the configured default applies
+- Setup phase stalled (`uv sync`, etc.): independently learned warn/terminate
+  thresholds when their cutoffs are crossed; otherwise defaults of 15m warn /
+  25m terminate
 
 **Action:** These are retried automatically. If retries are exhausted
 (default: 3 attempts per job), try `weft instance launch` again or use
@@ -445,7 +448,7 @@ truncation) to estimate:
 
 - conditional success probability `P(register eventually | not yet by elapsed)`
 - median remaining time from the truncated successful tail
-- adaptive warn/terminate thresholds
+- warn/terminate thresholds, each labeled as learned or default
 
 Scope selection is:
 
@@ -456,8 +459,9 @@ Scope selection is:
 When a narrower scope has too little data, weft falls back automatically.
 
 By default, this detection is enforced during launch: if elapsed reaches the
-learned terminate threshold with zero worker registrations, the launch path
-auto-fails the campaign.
+terminate threshold with zero worker registrations, the launch path auto-fails
+the campaign. The threshold may be learned from history or may be the configured
+default; diagnostics report that provenance explicitly.
 
 **Action:** Inspect provider/API health and cloud offer availability; if this
 repeats in one region, force a different region/provider and re-launch.
@@ -468,14 +472,16 @@ The agent started the setup phase (e.g., `uv sync`) for a job but
 never transitioned to the running phase. The reconciler detects this
 via the R2 instance phase marker and phase timing data.
 
-Thresholds are **adaptive**: learned from historical setup durations
-for the same command and workspace using survival analysis, with
-fallback to all-jobs statistics when per-command data is insufficient
-(< 20 samples). Default thresholds: warn at 15 minutes, terminate at
-25 minutes.
+Thresholds use historical setup durations for the same command and workspace,
+with fallback to all-jobs statistics when per-command data is insufficient
+(< 20 samples). Each warning or termination threshold is learned only when the
+survival curve crosses its cutoff; otherwise it retains the default of 15 or
+25 minutes. Diagnosis labels each threshold `learned` or `default` separately.
+Destructive setup-stall handling also requires a recorded setup-phase start;
+launch time is never substituted when that timestamp is unknown.
 
-**Action:** The instance is auto-terminated and jobs are reset to
-queued for retry. If setup stalls recur for a specific project,
+**Action:** Once the recorded setup duration crosses the termination threshold,
+the instance is auto-terminated and jobs are reset to queued for retry. If setup stalls recur for a specific project,
 investigate the setup command (e.g., network issues during package
 installation, pip/uv resolution hangs).
 

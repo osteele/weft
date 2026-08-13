@@ -3862,6 +3862,12 @@ func upsertLaunchLiveState(database dbExecer, state LaunchLiveState, now int64) 
 			state.PhaseChangedAt = &now
 		} else if oldPhaseChangedAt.Valid {
 			state.PhaseChangedAt = &oldPhaseChangedAt.Int64
+		} else if strings.TrimSpace(state.InstancePhase) != "" {
+			// A legacy row may have recorded the phase without its transition
+			// time. The current observation is a conservative lower bound: it
+			// never overstates phase age, while allowing bounded watchdog action
+			// after a full threshold has elapsed from confirmed observation.
+			state.PhaseChangedAt = &now
 		}
 	} else {
 		err := database.QueryRow(`SELECT bootstrap_stage, job_progress_pct,

@@ -1057,20 +1057,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Auto-mirror --input asset:NAME entries into --needs so the existing
-	// staging path (cloudneeds.ResolveSpecs / ops.host_sync.collectPendingNeeds)
-	// stages the asset onto the chosen host before the job runs. --input
-	// alone only feeds placement scoring; --needs is what triggers staging.
-	for _, in := range runInputs {
-		ref := dataloc.ParseInputRef(in)
-		if !ref.IsAsset() || ref.Asset.Kind != dataloc.AssetNamed {
-			continue
-		}
-		mirrored := "asset:" + ref.Asset.ID
-		if !slices.Contains(runNeeds, mirrored) {
-			runNeeds = append(runNeeds, mirrored)
-		}
-	}
+	// --input participates in placement, while --needs drives staging.
+	runNeeds = appendNamedAssetInputNeeds(runInputs, runNeeds)
 
 	// Validate --needs entries have valid path:version or asset:NAME format
 	if err := runner.ValidateNeedsSpecs(runNeeds); err != nil {

@@ -145,6 +145,39 @@ func TestFormatGPUMetrics(t *testing.T) {
 	})
 }
 
+// TestFormatSurvivalSectionReportsThresholdProvenance is the regression test
+// for large sample counts being labeled adaptive even when the survival curve
+// never crossed a cutoff and the configured default remained in force.
+func TestFormatSurvivalSectionReportsThresholdProvenance(t *testing.T) {
+	report := &instanceDiagnoseReport{
+		Instance: &db.Launch{},
+		BootstrapSurvival: &db.BootstrapSurvival{
+			SampleSize:       40,
+			WarnAfter:        5 * time.Minute,
+			WarnLearned:      true,
+			TerminateAfter:   20 * time.Minute,
+			TerminateLearned: false,
+		},
+		SetupSurvival: &db.SetupSurvival{
+			SampleSize:       249,
+			WarnAfter:        15 * time.Minute,
+			WarnLearned:      false,
+			TerminateAfter:   25 * time.Minute,
+			TerminateLearned: false,
+		},
+	}
+
+	got := formatSurvivalSection(report)
+	for _, want := range []string{
+		"Bootstrap: n=40, warn after 5m0s (learned), terminate after 20m0s (default)",
+		"Setup: n=249, warn after 15m0s (default), terminate after 25m0s (default)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("survival section missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildTimeline(t *testing.T) {
 	launchedAt := int64(1000)
 	endedAt := int64(1900)

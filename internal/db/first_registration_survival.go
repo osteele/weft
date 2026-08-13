@@ -19,16 +19,18 @@ type FirstRegistrationScope struct {
 	DataCenter string
 }
 
-// FirstRegistrationSurvival holds learned thresholds and conditional estimates
-// for time-to-first-worker-registration from campaign creation.
+// FirstRegistrationSurvival holds historical/default thresholds and conditional
+// estimates for time-to-first-worker-registration from campaign creation.
 type FirstRegistrationSurvival struct {
-	ScopeLevel     string
-	Provider       string
-	DataCenter     string
-	SampleSize     int
-	WarnAfter      time.Duration
-	TerminateAfter time.Duration
-	Durations      BootstrapDurations
+	ScopeLevel       string
+	Provider         string
+	DataCenter       string
+	SampleSize       int
+	WarnAfter        time.Duration
+	WarnLearned      bool
+	TerminateAfter   time.Duration
+	TerminateLearned bool
+	Durations        BootstrapDurations
 
 	observations []survivalObservation
 }
@@ -100,8 +102,10 @@ var firstRegistrationConfig = firstRegistrationSurvivalConfig{
 	DefaultTermSec: 12 * 60,
 }
 
-// ComputeFirstRegistrationSurvival computes adaptive warn/terminate thresholds
-// for "time from campaign creation to first worker launch registration".
+// ComputeFirstRegistrationSurvival computes warn/terminate thresholds for
+// "time from campaign creation to first worker launch registration". Each
+// threshold records whether it came from the survival curve or its configured
+// default.
 //
 // It attempts scopes in order:
 //  1. provider + data center
@@ -174,9 +178,11 @@ func ComputeFirstRegistrationSurvival(database *sql.DB, scope FirstRegistrationS
 	})
 	if warnSecs > 0 {
 		result.WarnAfter = time.Duration(warnSecs) * time.Second
+		result.WarnLearned = true
 	}
 	if termSecs > 0 {
 		result.TerminateAfter = time.Duration(termSecs) * time.Second
+		result.TerminateLearned = true
 	}
 
 	durations := make(BootstrapDurations, 0, len(selectedObs))

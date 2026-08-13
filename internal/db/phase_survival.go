@@ -5,15 +5,18 @@ import (
 	"time"
 )
 
-// SetupSurvival holds learned setup-phase timeout thresholds derived from
-// historical job data using survival analysis. At each time T, it computes
+// SetupSurvival holds setup-phase timeout thresholds derived from historical
+// job data using survival analysis, plus whether each threshold was learned
+// or retained its configured default. At each time T, it computes
 // the fraction of jobs whose setup was still running at T that eventually
 // completed setup. The warn and terminate thresholds are the times at which
 // this probability drops below configured cutoffs.
 type SetupSurvival struct {
-	SampleSize     int
-	WarnAfter      time.Duration
-	TerminateAfter time.Duration
+	SampleSize       int
+	WarnAfter        time.Duration
+	WarnLearned      bool
+	TerminateAfter   time.Duration
+	TerminateLearned bool
 }
 
 // setupSurvivalConfig is the configuration for setup-phase stall detection.
@@ -74,9 +77,11 @@ func ComputeSetupSurvival(database *sql.DB, command, workingDir string) (*SetupS
 	warnSecs, termSecs := computeSurvivalThresholds(obs, cfg)
 	if warnSecs > 0 {
 		result.WarnAfter = time.Duration(warnSecs) * time.Second
+		result.WarnLearned = true
 	}
 	if termSecs > 0 {
 		result.TerminateAfter = time.Duration(termSecs) * time.Second
+		result.TerminateLearned = true
 	}
 
 	return result, nil

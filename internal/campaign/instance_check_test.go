@@ -677,6 +677,25 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 	}
 }
 
+// TestCheckInstance_TerminationIntent_PreservesFailureDetail is the regression
+// test for driver-preflight failures being reduced to a generic infrastructure
+// diagnosis after the agent self-destructs successfully.
+func TestCheckInstance_TerminationIntent_PreservesFailureDetail(t *testing.T) {
+	ci := &db.Launch{ID: 42, Status: db.LaunchStatusRunning}
+	intent := &instanceintent.Marker{
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonInfraFailure,
+		Phase:             phaseDriverTooOld,
+		Detail:            "host driver 550.67 (major 550) is below required major 560; terminating before workloads run",
+		State:             instanceintent.StateSucceeded,
+	}
+
+	action := (&Reconciler{}).checkTerminationIntent(ci, nil, intent, false)
+	if got, want := action.StallMessage, intent.Detail; got != want {
+		t.Fatalf("StallMessage = %q, want %q", got, want)
+	}
+}
+
 func TestCheckInstance_TerminationIntent_UnknownProviderStillRequiresDestroy(t *testing.T) {
 	action := NewReconciler().CheckInstance(CheckInstanceParams{
 		CI: &db.Launch{
@@ -2312,7 +2331,10 @@ func TestCheckInstance_SetupStall_NonSetupPhase(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_SetupStall_NilPhaseChangedAt_UsesLifecycleFallback(t *testing.T) {
+// TestCheckInstance_SetupStall_NilPhaseChangedAt_DoesNotTerminate is the
+// regression test for wi7023: launch age is not setup age, so an unknown setup
+// start cannot support a destructive phase-stall decision.
+func TestCheckInstance_SetupStall_NilPhaseChangedAt_DoesNotTerminate(t *testing.T) {
 	launchedAt := time.Now().Add(-50 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -2328,12 +2350,12 @@ func TestCheckInstance_SetupStall_NilPhaseChangedAt_UsesLifecycleFallback(t *tes
 		},
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "setup:459",
-		// PhaseChangedAt is nil — should fall back to instance lifecycle start.
+		// PhaseChangedAt is nil: launch time must not substitute for setup start.
 		JobState: JobState{HasStartedJob: true},
 		Now:      time.Now(),
 	})
-	if action.Kind != ActionSetupStalled {
-		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d)", action.Kind, ActionSetupStalled)
+	if action.Kind == ActionSetupStalled {
+		t.Fatal("unknown setup start must not trigger destructive setup-stall handling")
 	}
 }
 
@@ -2363,7 +2385,7 @@ func TestCheckInstance_SetupStall_StaleR2SetupButDBRunning_DoesNotTerminate(t *t
 	}
 }
 
-func TestCheckInstance_SetupStall_QueuedJobNoPhaseChangedAt_Terminates(t *testing.T) {
+func TestCheckInstance_SetupStall_QueuedJobNoPhaseChangedAt_DoesNotTerminate(t *testing.T) {
 	launchedAt := time.Now().Add(-50 * time.Minute).Unix()
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -2379,12 +2401,12 @@ func TestCheckInstance_SetupStall_QueuedJobNoPhaseChangedAt_Terminates(t *testin
 		},
 		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "setup:1189",
-		// PhaseChangedAt intentionally missing; should use lifecycle fallback.
+		// PhaseChangedAt intentionally missing; queued state supplies no timing evidence.
 		JobState: JobState{HasStartedJob: false},
 		Now:      time.Now(),
 	})
-	if action.Kind != ActionSetupStalled {
-		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d)", action.Kind, ActionSetupStalled)
+	if action.Kind == ActionSetupStalled {
+		t.Fatal("unknown setup start must not trigger destructive setup-stall handling")
 	}
 }
 

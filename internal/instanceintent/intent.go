@@ -29,9 +29,12 @@ type Marker struct {
 	// ProviderInstanceID is populated when provider creation succeeded but
 	// the launch's ordinary provider-ID column could not be written. It makes
 	// the write-ahead intent independently sufficient for crash recovery.
-	ProviderInstanceID     string `json:"provider_instance_id,omitempty"`
-	Phase                  string `json:"phase,omitempty"`
-	JobID                  int64  `json:"job_id,omitempty"`
+	ProviderInstanceID string `json:"provider_instance_id,omitempty"`
+	Phase              string `json:"phase,omitempty"`
+	JobID              int64  `json:"job_id,omitempty"`
+	// Detail is the durable cause of the terminal decision. Unlike LastError,
+	// it is not cleared after a successful provider-destroy attempt.
+	Detail                 string `json:"detail,omitempty"`
 	State                  State  `json:"state,omitempty"`
 	RequestedAtUnix        int64  `json:"requested_at_unix"`
 	DestroyStartedAtUnix   int64  `json:"destroy_started_at_unix,omitempty"`

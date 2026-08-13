@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/db"
+)
 
 func TestParseDriverMajor(t *testing.T) {
 	cases := []struct {
@@ -65,5 +70,25 @@ func TestParseDriverMajor(t *testing.T) {
 				t.Errorf("major = %d, want %d", major, tc.wantMajor)
 			}
 		})
+	}
+}
+
+// TestNewFailureTerminationIntent_PreservesDiagnosticDetail pins the durable
+// half of driver-preflight diagnosis: destroy attempts may clear LastError,
+// but the terminal cause must remain available to the reconciler.
+func TestNewFailureTerminationIntent_PreservesDiagnosticDetail(t *testing.T) {
+	requestedAt := time.Unix(1234, 0)
+	marker := newFailureTerminationIntent(
+		phaseDriverTooOld,
+		0,
+		db.TerminationReasonInfraFailure,
+		"host driver 550.67 is below required major 560",
+		requestedAt,
+	)
+	if got, want := marker.Detail, "host driver 550.67 is below required major 560"; got != want {
+		t.Fatalf("Detail = %q, want %q", got, want)
+	}
+	if got := marker.RequestedAtUnix; got != requestedAt.Unix() {
+		t.Fatalf("RequestedAtUnix = %d, want %d", got, requestedAt.Unix())
 	}
 }

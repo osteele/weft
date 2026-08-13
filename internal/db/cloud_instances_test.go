@@ -246,6 +246,34 @@ func TestSetLaunchLiveInstancePhasePreservesBootstrapState(t *testing.T) {
 	}
 }
 
+// TestUpsertLaunchLiveStateRepairsMissingPhaseTimestamp is the regression test
+// for legacy live-state rows that recorded setup but not when it began. A
+// current observation supplies a conservative lower bound; leaving it null
+// forever would disable bounded setup-stall handling.
+func TestUpsertLaunchLiveStateRepairsMissingPhaseTimestamp(t *testing.T) {
+	database := setupTestDB(t)
+	launchID, err := CreateLaunch(database, &Launch{Status: LaunchStatusRunning, Provider: "runpod"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO launch_live_state
+		(launch_id, instance_phase, updated_at) VALUES (?, 'setup:42', ?)`, launchID, int64(100)); err != nil {
+		t.Fatalf("insert legacy live state: %v", err)
+	}
+
+	const observedAt = int64(1_234)
+	changedAt, err := upsertLaunchLiveState(database, LaunchLiveState{
+		LaunchID:      launchID,
+		InstancePhase: "setup:42",
+	}, observedAt)
+	if err != nil {
+		t.Fatalf("upsertLaunchLiveState: %v", err)
+	}
+	if changedAt == nil || *changedAt != observedAt {
+		t.Fatalf("phase_changed_at = %v, want conservative observation time %d", changedAt, observedAt)
+	}
+}
+
 func TestUpdateLaunchOfferMetadata(t *testing.T) {
 	database := setupTestDB(t)
 

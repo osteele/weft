@@ -56,6 +56,9 @@ func TestComputeBootstrapSurvival_Empty(t *testing.T) {
 	if s.TerminateAfter != 20*time.Minute {
 		t.Errorf("terminate = %v, want 20m (default)", s.TerminateAfter)
 	}
+	if s.WarnLearned || s.TerminateLearned {
+		t.Fatalf("empty history marked thresholds learned: %+v", s)
+	}
 }
 
 func TestTotalBootstrapPercentile(t *testing.T) {
@@ -237,6 +240,9 @@ func TestComputeBootstrapSurvival_LearnedThresholds(t *testing.T) {
 	// Terminate should be less than the old default of 20m given this data
 	if s.TerminateAfter >= 20*time.Minute {
 		t.Errorf("terminate = %v, should be less than 20m with this data", s.TerminateAfter)
+	}
+	if !s.WarnLearned || !s.TerminateLearned {
+		t.Fatalf("learned distribution did not mark both thresholds learned: %+v", s)
 	}
 }
 

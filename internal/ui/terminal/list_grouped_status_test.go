@@ -2685,30 +2685,33 @@ func TestAppendRecentFailedInstanceRows_OutcomesClusterAndCost(t *testing.T) {
 	failures := &recentFailedInstances{
 		items: []*db.Launch{
 			{
-				ID:                300,
-				Status:            db.LaunchStatusFailed,
-				Provider:          "vastai",
-				TerminationReason: db.TerminationReasonInfraFailure,
-				TerminationDetail: "provider instance stuck in loading",
-				EndedAt:           testInt64Ptr(9_700),
-				ActualSpendCents:  11,
+				ID:                 300,
+				Status:             db.LaunchStatusFailed,
+				Provider:           "vastai",
+				ProviderInstanceID: "provider-300",
+				TerminationReason:  db.TerminationReasonInfraFailure,
+				TerminationDetail:  "provider instance stuck in loading",
+				EndedAt:            testInt64Ptr(9_700),
+				ActualSpendCents:   11,
 			},
 			{
-				ID:                301,
-				Status:            db.LaunchStatusFailed,
-				Provider:          "vastai",
-				TerminationReason: db.TerminationReasonInfraFailure,
-				TerminationDetail: "dud provider: no agent activity",
-				EndedAt:           testInt64Ptr(9_600),
-				ActualSpendCents:  20,
+				ID:                 301,
+				Status:             db.LaunchStatusFailed,
+				Provider:           "vastai",
+				ProviderInstanceID: "provider-301",
+				TerminationReason:  db.TerminationReasonInfraFailure,
+				TerminationDetail:  "dud provider: no agent activity",
+				EndedAt:            testInt64Ptr(9_600),
+				ActualSpendCents:   20,
 			},
 			{
-				ID:                302,
-				Status:            db.LaunchStatusFailed,
-				Provider:          "vastai",
-				TerminationReason: db.TerminationReasonProviderFailure,
-				TerminationDetail: "container exit 1",
-				EndedAt:           testInt64Ptr(9_500),
+				ID:                 302,
+				Status:             db.LaunchStatusFailed,
+				Provider:           "vastai",
+				ProviderInstanceID: "provider-302",
+				TerminationReason:  db.TerminationReasonProviderFailure,
+				TerminationDetail:  "container exit 1",
+				EndedAt:            testInt64Ptr(9_500),
 			},
 		},
 		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
@@ -2793,9 +2796,9 @@ func TestBuildInstanceHealthFooter(t *testing.T) {
 	t.Run("clustered is one line with no warning icon", func(t *testing.T) {
 		failures := &recentFailedInstances{
 			items: []*db.Launch{
-				{ID: 1, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "a", EndedAt: testInt64Ptr(9_700), ActualSpendCents: 11},
-				{ID: 2, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "b", EndedAt: testInt64Ptr(9_600), ActualSpendCents: 20},
-				{ID: 3, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "c", EndedAt: testInt64Ptr(9_500)},
+				{ID: 1, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-1", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "a", EndedAt: testInt64Ptr(9_700), ActualSpendCents: 11},
+				{ID: 2, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-2", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "b", EndedAt: testInt64Ptr(9_600), ActualSpendCents: 20},
+				{ID: 3, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-3", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "c", EndedAt: testInt64Ptr(9_500)},
 			},
 			jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
 				1: {JobID: 1, Status: db.StatusFailed},
@@ -2903,6 +2906,33 @@ func TestAppendRecentFailedInstanceRows_ProviderTimeoutDoesNotCluster(t *testing
 	}
 }
 
+// TestAppendRecentFailedInstanceRows_PreProviderFailuresDoNotCluster ensures
+// launch bookkeeping rows created before provider creation do not masquerade
+// as evidence of a provider-wide instance failure.
+func TestAppendRecentFailedInstanceRows_PreProviderFailuresDoNotCluster(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	failures := &recentFailedInstances{
+		items: []*db.Launch{
+			{ID: 600, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "cloud needs resolution failed", EndedAt: testInt64Ptr(9_700)},
+			{ID: 601, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "cloud needs resolution failed", EndedAt: testInt64Ptr(9_650)},
+			{ID: 602, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonInfraFailure, TerminationDetail: "cloud needs resolution failed", EndedAt: testInt64Ptr(9_600)},
+		},
+		jobOutcomeByLaunchID: map[int64]db.LaunchJobOutcome{
+			600: {JobID: 1, Status: db.StatusQueued},
+			601: {JobID: 1, Status: db.StatusQueued},
+			602: {JobID: 1, Status: db.StatusQueued},
+		},
+	}
+
+	out := stripANSI(renderJobListGroupedStatusPlainAt(nil, 0, nil, nil, nil, nil, failures, now))
+	if !strings.Contains(out, "Recent failed instances") {
+		t.Fatalf("pre-provider failures must remain visible in the failure history:\n%s", out)
+	}
+	if strings.Contains(out, "clustered failures") {
+		t.Fatalf("pre-provider failures must not drive a provider cluster:\n%s", out)
+	}
+}
+
 // TestAppendRecentFailedInstanceRows_RealFailuresStillClusterWhenMixedWithTimeouts
 // confirms the filter is narrow: a mix of provider_timeout and real
 // infra_failure rows should still surface a cluster on the genuine failures
@@ -2913,9 +2943,9 @@ func TestAppendRecentFailedInstanceRows_RealFailuresStillClusterWhenMixedWithTim
 	failures := &recentFailedInstances{
 		items: []*db.Launch{
 			// 3 real infra failures on vastai → should cluster.
-			{ID: 500, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_700)},
-			{ID: 501, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_650)},
-			{ID: 502, Status: db.LaunchStatusFailed, Provider: "vastai", TerminationReason: db.TerminationReasonProviderFailure, EndedAt: testInt64Ptr(9_600)},
+			{ID: 500, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-500", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_700)},
+			{ID: 501, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-501", TerminationReason: db.TerminationReasonInfraFailure, EndedAt: testInt64Ptr(9_650)},
+			{ID: 502, Status: db.LaunchStatusFailed, Provider: "vastai", ProviderInstanceID: "provider-502", TerminationReason: db.TerminationReasonProviderFailure, EndedAt: testInt64Ptr(9_600)},
 			// 2 timeouts mixed in — must not dilute the cluster.
 			{ID: 503, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonProviderTimeout, EndedAt: testInt64Ptr(9_550)},
 			{ID: 504, Status: db.LaunchStatusFailed, Provider: "runpod", TerminationReason: db.TerminationReasonProviderTimeout, EndedAt: testInt64Ptr(9_500)},

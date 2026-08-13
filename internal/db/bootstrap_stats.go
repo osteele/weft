@@ -252,18 +252,21 @@ func (d BootstrapDurations) ConditionalMedian(elapsed time.Duration) (remaining 
 	return rem, true
 }
 
-// BootstrapSurvival holds learned bootstrap timeout thresholds derived from
-// historical instance data using survival analysis. At each time T, it
+// BootstrapSurvival holds bootstrap timeout thresholds derived from historical
+// instance data using survival analysis, plus whether each threshold was
+// learned or retained its configured default. At each time T, it
 // computes the fraction of instances that were alive at T (without having
 // succeeded) that eventually did bootstrap. The warn and terminate
 // thresholds are the times at which this probability drops below configured
 // cutoffs.
 type BootstrapSurvival struct {
-	Provider       string
-	SampleSize     int
-	WarnAfter      time.Duration      // time at which P(success) < warnCutoff
-	TerminateAfter time.Duration      // time at which P(success) < terminateCutoff
-	Durations      BootstrapDurations // sorted successful bootstrap durations for conditional estimates
+	Provider         string
+	SampleSize       int
+	WarnAfter        time.Duration      // time at which P(success) < warnCutoff
+	WarnLearned      bool               // true when WarnAfter came from the observed survival curve
+	TerminateAfter   time.Duration      // time at which P(success) < terminateCutoff
+	TerminateLearned bool               // true when TerminateAfter came from the observed survival curve
+	Durations        BootstrapDurations // sorted successful bootstrap durations for conditional estimates
 }
 
 // survivalConfig holds tunable parameters for a survival analysis.
@@ -326,9 +329,11 @@ func ComputeBootstrapSurvival(database *sql.DB, provider string) (*BootstrapSurv
 	warnSecs, termSecs := computeSurvivalThresholds(obs, cfg)
 	if warnSecs > 0 {
 		result.WarnAfter = time.Duration(warnSecs) * time.Second
+		result.WarnLearned = true
 	}
 	if termSecs > 0 {
 		result.TerminateAfter = time.Duration(termSecs) * time.Second
+		result.TerminateLearned = true
 	}
 
 	// Extract successful durations for conditional median estimates.

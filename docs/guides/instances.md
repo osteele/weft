@@ -703,13 +703,16 @@ The reconciler monitors instance progress and auto-terminates stuck
 instances:
 
 - **Bootstrap stall**: Instance is running but the agent never started a
-  job. Uses adaptive thresholds learned from historical bootstrap durations
-  per provider (survival analysis). Default: warn at 15m, terminate at 20m.
+  job. Uses historical bootstrap durations per provider. Each threshold is
+  learned only if the survival curve crosses its cutoff; otherwise the default
+  remains in force. Default: warn at 15m, terminate at 20m.
 - **Setup phase stall**: Agent started the setup phase (e.g., `uv sync`)
-  but never transitioned to running. Uses adaptive thresholds learned from
-  historical setup durations for the same command and workspace, falling
+  but never transitioned to running. Uses historical setup durations for the
+  same command and workspace, falling
   back to workspace-level or all-jobs data when per-command samples are
-  insufficient (< 20). Default: warn at 15m, terminate at 25m.
+  insufficient (< 20). Each threshold may be learned or remain at its default
+  (warn at 15m, terminate at 25m). Termination requires a recorded setup start;
+  unknown phase timing is not replaced with launch age.
 - **Structured task-progress stall**: After a running job first emits a
   recognized `Progress:` value, warn when that value has not changed for 20
   minutes and terminate after 60 minutes. Repeated values and ordinary log

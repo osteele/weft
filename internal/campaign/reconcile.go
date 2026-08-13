@@ -33,8 +33,8 @@ type ReconcileResult struct {
 // reconciliation (rather than treating as dead), a shorter window is safe.
 const minDeadConfirmTime = 30 * time.Second
 
-// survivalCacheTTL controls how often adaptive survival thresholds (bootstrap,
-// setup phase) are recomputed from historical data. The underlying statistics
+// survivalCacheTTL controls how often historical/default survival thresholds
+// (bootstrap, setup phase) are recomputed. The underlying statistics
 // change slowly (only when instances complete or fail), so recomputing every
 // 5 minutes is sufficient.
 const survivalCacheTTL = 5 * time.Minute
@@ -49,12 +49,12 @@ type Reconciler struct {
 	lastProviderStatus map[int64]string    // last observed provider status per instance
 	deadConfirmTime    time.Duration       // 0 uses minDeadConfirmTime
 
-	// bootstrapTimeouts caches adaptive bootstrap thresholds per provider,
+	// bootstrapTimeouts caches historical/default bootstrap thresholds per provider,
 	// recomputed at most once per survivalCacheTTL.
 	bootstrapTimeouts   map[string]*db.BootstrapSurvival
 	bootstrapTimeoutsAt time.Time // when the cache was last populated
 
-	// setupSurvivalCache caches adaptive setup-phase thresholds keyed by
+	// setupSurvivalCache caches historical/default setup-phase thresholds keyed by
 	// "command\x00workingDir", recomputed at most once per survivalCacheTTL.
 	setupSurvivalCache   map[string]*db.SetupSurvival
 	setupSurvivalCacheAt time.Time

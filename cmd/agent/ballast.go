@@ -254,18 +254,23 @@ func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCm
 	terminateInstanceWithReason(bucket, instanceID, selfDestructCmd, phase, jobID, db.TerminationReasonDiskFull, "")
 }
 
-func terminateInstanceWithReason(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64, reason, lastError string) {
-	marker := &instanceintent.Marker{
+func terminateInstanceWithReason(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64, reason, detail string) {
+	marker := newFailureTerminationIntent(phase, jobID, reason, detail, time.Now())
+	writeTerminationIntent(bucket, instanceID, *marker)
+	executeSelfDestruct(bucket, instanceID, selfDestructCmd, marker)
+}
+
+func newFailureTerminationIntent(phase string, jobID int64, reason, detail string, requestedAt time.Time) *instanceintent.Marker {
+	return &instanceintent.Marker{
 		TerminalStatus:    db.LaunchStatusFailed,
 		TerminationReason: reason,
 		Phase:             phase,
 		JobID:             jobID,
+		Detail:            detail,
 		State:             instanceintent.StateOpen,
-		RequestedAtUnix:   time.Now().Unix(),
-		LastError:         lastError,
+		RequestedAtUnix:   requestedAt.Unix(),
+		LastError:         detail,
 	}
-	writeTerminationIntent(bucket, instanceID, *marker)
-	executeSelfDestruct(bucket, instanceID, selfDestructCmd, marker)
 }
 
 func formatBytes(n int64) string {

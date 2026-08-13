@@ -2279,14 +2279,19 @@ rule LaunchingPhaseTimeout {
 rule SetupStall {
     when: SetupPhaseStalled(instance)
     requires: instance.status = running
+    requires: SetupPhaseStartedAt(instance) != null
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = phase_stall
     ensures: instance.ended_at = now
 
     -- legacy annotation: @guidance
-        -- Triggered when setup phase exceeds config.setup_stall_timeout
-        -- with no progress (adaptive threshold per command).
+		-- Triggered when setup phase exceeds config.setup_stall_timeout
+		-- with no progress. The phase-specific start timestamp is required:
+		-- launch time and provider-ready time are not evidence of setup age,
+		-- so a legacy row with unknown phase timing cannot be terminated by
+		-- this rule. Thresholds may be learned per command or retain their
+		-- configured defaults when the survival curve never crosses a cutoff.
 }
 
 rule HedgeCohortCull {

@@ -189,8 +189,9 @@ type CheckInstanceParams struct {
 	// TerminationIntent from R2 or DB (pre-fetched by caller)
 	TerminationIntent *instanceintent.Marker
 
-	// BootstrapSurvival holds adaptive bootstrap thresholds from historical
-	// survival analysis. Nil means use package defaults.
+	// BootstrapSurvival holds bootstrap thresholds from historical survival
+	// analysis. Individual thresholds may remain configured defaults when the
+	// observed curve does not cross their cutoff. Nil uses package defaults.
 	BootstrapSurvival *db.BootstrapSurvival
 
 	// PhaseChangedAt is when the current InstancePhase was first observed.
@@ -212,8 +213,9 @@ type CheckInstanceParams struct {
 	// Nil means unknown — falls back to lifecycle start.
 	LastProviderStatusChangeAt *time.Time
 
-	// SetupSurvival holds adaptive setup-phase thresholds from historical
-	// survival analysis. Nil means use package defaults.
+	// SetupSurvival holds setup-phase thresholds from historical survival
+	// analysis. Individual thresholds may remain configured defaults when the
+	// observed curve does not cross their cutoff. Nil uses package defaults.
 	SetupSurvival *db.SetupSurvival
 
 	// HedgeCohortHasReadySibling reports whether another launch in this
@@ -761,10 +763,9 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
 		if verb == PhaseSetup || verb == PhaseGPUWarmup {
 			phaseStart := p.PhaseChangedAt
-			if phaseStart == nil {
-				// Fallback for legacy rows where phase_changed_at was never recorded.
-				phaseStart = cloudInstanceLifecycleStart(ci)
-			}
+			// Launch age is not setup age. Legacy rows may lack a phase timestamp;
+			// that absence is unknown timing evidence and cannot justify a
+			// destructive setup-stall decision.
 			if phaseStart != nil {
 				phaseAge := p.Now.Sub(*phaseStart)
 
@@ -934,6 +935,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			TerminalStatus:    db.LaunchStatusFailed,
 			TerminalAt:        terminalAt,
 			TerminationReason: reason,
+			StallMessage:      strings.TrimSpace(intent.Detail),
 			DestroyProvider:   destroyProvider,
 			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeOrphaned,

@@ -1687,6 +1687,13 @@ func failureClusterFactor(items []*db.Launch) string {
 		if db.IsTransientInstanceTermination(f.TerminationReason) {
 			continue
 		}
+		// A launch row is created before provider provisioning so failures can
+		// be audited and jobs reset transactionally. Without a provider ID,
+		// however, it is not evidence about a provider instance and must not
+		// contribute to provider/machine/GPU failure clustering.
+		if strings.TrimSpace(f.EffectiveProviderID()) == "" {
+			continue
+		}
 		clusterItems = append(clusterItems, f)
 	}
 	if len(clusterItems) < 3 {

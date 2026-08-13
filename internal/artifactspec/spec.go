@@ -49,6 +49,9 @@ func ParseNeedsSpec(spec string) (ArtifactSpec, error) {
 	if version <= 0 {
 		return ArtifactSpec{}, fmt.Errorf("needs spec %q has invalid version %d: must be positive", spec, version)
 	}
+	if strings.HasSuffix(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"), "/") {
+		return ArtifactSpec{}, fmt.Errorf("needs spec %q names a directory; --needs requires a single file", spec)
+	}
 	return ArtifactSpec{Path: path, Version: version}, nil
 }
 

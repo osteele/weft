@@ -1327,11 +1327,35 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	previousInputs := append([]string(nil), job.Inputs...)
+	newInputs := job.Inputs
 	if inputsChanged {
-		var newInputs []string
 		if !editClearInputs {
 			newInputs = editInputs
 		}
+	}
+
+	newNeeds := job.Needs
+	if needsChanged {
+		if !editClearNeeds {
+			newNeeds = editNeeds
+		}
+	}
+	if inputsChanged {
+		if needsChanged {
+			// Explicit --needs values remain authoritative; add only the staging
+			// needs required by the replacement input set.
+			newNeeds = appendNamedAssetInputNeeds(newInputs, newNeeds)
+		} else {
+			newNeeds = reconcileEditedNamedAssetNeeds(previousInputs, newInputs, newNeeds)
+		}
+	}
+	if needsChanged || inputsChanged {
+		if err := artifactspec.ValidateNeedsSpecs(newNeeds); err != nil {
+			return fmt.Errorf("--needs: %w", err)
+		}
+	}
+	if inputsChanged {
 		if err := db.SetJobInputs(database, jobID, newInputs); err != nil {
 			return fmt.Errorf("update inputs: %w", err)
 		}
@@ -1342,15 +1366,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, fmt.Sprintf("inputs: %s", strings.Join(newInputs, ", ")))
 		}
 	}
-
-	if needsChanged {
-		var newNeeds []string
-		if !editClearNeeds {
-			newNeeds = editNeeds
-			if err := artifactspec.ValidateNeedsSpecs(newNeeds); err != nil {
-				return fmt.Errorf("--needs: %w", err)
-			}
-		}
+	if needsChanged || inputsChanged {
 		if err := db.SetJobNeeds(database, jobID, newNeeds); err != nil {
 			return fmt.Errorf("update needs: %w", err)
 		}

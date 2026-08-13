@@ -43,6 +43,7 @@ func TestParseNeedsSpec(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid", "output/model.pt:100", "output/model.pt", 100, false},
+		{"directory target", "output/checkpoints/:100", "", 0, true},
 		{"no version", "output/model.pt", "", 0, true},
 		{"invalid version", "output/model.pt:abc", "", 0, true},
 		{"zero version", "output/model.pt:0", "", 0, true},
@@ -66,6 +67,20 @@ func TestParseNeedsSpec(t *testing.T) {
 				t.Errorf("IsAsset() = true for non-asset spec %q", tt.spec)
 			}
 		})
+	}
+}
+
+// TestValidateNeedsSpecsRejectsDirectoryTarget is the regression test for
+// directory needs entering the cloud staging retry loop. Downstream staging
+// resolves one concrete object, so accepting a trailing slash here creates a
+// launch record that can never reach provider creation.
+func TestValidateNeedsSpecsRejectsDirectoryTarget(t *testing.T) {
+	err := ValidateNeedsSpecs([]string{"output/exp_154/:6156"})
+	if err == nil {
+		t.Fatal("expected directory needs target to be rejected")
+	}
+	if got, want := err.Error(), `needs spec "output/exp_154/:6156" names a directory; --needs requires a single file`; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 

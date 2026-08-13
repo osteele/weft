@@ -50,7 +50,9 @@ type startupSurvivalView struct {
 	Scope                 string  `json:"scope"`
 	Samples               int     `json:"samples"`
 	WarnAfterSeconds      int64   `json:"warn_after_seconds"`
+	WarnThresholdSource   string  `json:"warn_threshold_source"`
 	TerminateAfterSeconds int64   `json:"terminate_after_seconds"`
+	TerminateSource       string  `json:"terminate_threshold_source"`
 	ConditionalSuccess    *string `json:"conditional_success,omitempty"`
 	RemainingMedian       *string `json:"remaining_median,omitempty"`
 }
@@ -150,7 +152,7 @@ func buildProviderStartupDiagnosis(database *sql.DB, provider cloud.Provider, pr
 		report.Notes = append(report.Notes, "provider lookup failed; recommendation uses historical Weft data only")
 	}
 	if elapsed <= 0 {
-		report.Notes = append(report.Notes, "pass --elapsed to compare this instance against learned startup thresholds")
+		report.Notes = append(report.Notes, "pass --elapsed to compare this instance against startup thresholds")
 	}
 	if dataCenter == "" {
 		report.Notes = append(report.Notes, "no data center supplied by provider; first-registration history used provider/global fallback")
@@ -160,13 +162,15 @@ func buildProviderStartupDiagnosis(database *sql.DB, provider cloud.Provider, pr
 
 func bootstrapStartupView(s *db.BootstrapSurvival, elapsed time.Duration) startupSurvivalView {
 	if s == nil {
-		return startupSurvivalView{Scope: "provider"}
+		return startupSurvivalView{Scope: "provider", WarnThresholdSource: "default", TerminateSource: "default"}
 	}
 	view := startupSurvivalView{
 		Scope:                 s.Provider,
 		Samples:               s.SampleSize,
 		WarnAfterSeconds:      int64(s.WarnAfter / time.Second),
+		WarnThresholdSource:   survivalThresholdProvenance(s.WarnLearned),
 		TerminateAfterSeconds: int64(s.TerminateAfter / time.Second),
+		TerminateSource:       survivalThresholdProvenance(s.TerminateLearned),
 	}
 	if elapsed > 0 {
 		if remaining, ok := s.Durations.ConditionalMedian(elapsed); ok {
@@ -179,13 +183,15 @@ func bootstrapStartupView(s *db.BootstrapSurvival, elapsed time.Duration) startu
 
 func firstRegistrationStartupView(s *db.FirstRegistrationSurvival, elapsed time.Duration) startupSurvivalView {
 	if s == nil {
-		return startupSurvivalView{Scope: db.FirstRegistrationScopeGlobal}
+		return startupSurvivalView{Scope: db.FirstRegistrationScopeGlobal, WarnThresholdSource: "default", TerminateSource: "default"}
 	}
 	view := startupSurvivalView{
 		Scope:                 s.ScopeDescription(),
 		Samples:               s.SampleSize,
 		WarnAfterSeconds:      int64(s.WarnAfter / time.Second),
+		WarnThresholdSource:   survivalThresholdProvenance(s.WarnLearned),
 		TerminateAfterSeconds: int64(s.TerminateAfter / time.Second),
+		TerminateSource:       survivalThresholdProvenance(s.TerminateLearned),
 	}
 	if elapsed > 0 {
 		if p, ok := s.ConditionalSuccess(elapsed); ok {
@@ -215,12 +221,12 @@ func startupRecommendation(elapsed time.Duration, bootstrap *db.BootstrapSurviva
 		warn = maxDuration(warn, firstReg.WarnAfter)
 	}
 	if terminate > 0 && elapsed >= terminate {
-		return "terminate or replace: elapsed time exceeds learned startup terminate threshold"
+		return "terminate or replace: elapsed time exceeds startup terminate threshold"
 	}
 	if warn > 0 && elapsed >= warn {
-		return "watch closely: elapsed time exceeds learned startup warning threshold"
+		return "watch closely: elapsed time exceeds startup warning threshold"
 	}
-	return "wait: elapsed time is within learned startup thresholds"
+	return "wait: elapsed time is within startup thresholds"
 }
 
 func maxDuration(a, b time.Duration) time.Duration {
@@ -266,12 +272,14 @@ func formatProviderStartupDiagnosis(report providerStartupDiagnosis) string {
 }
 
 func formatStartupView(b *strings.Builder, label string, view startupSurvivalView) {
-	fmt.Fprintf(b, "  %s: n=%d, scope=%s, warn after %s, terminate after %s\n",
+	fmt.Fprintf(b, "  %s: n=%d, scope=%s, warn after %s (%s), terminate after %s (%s)\n",
 		label,
 		view.Samples,
 		view.Scope,
 		(time.Duration(view.WarnAfterSeconds) * time.Second).String(),
+		view.WarnThresholdSource,
 		(time.Duration(view.TerminateAfterSeconds) * time.Second).String(),
+		view.TerminateSource,
 	)
 	if view.ConditionalSuccess != nil {
 		fmt.Fprintf(b, "    Conditional success: %s\n", *view.ConditionalSuccess)

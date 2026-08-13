@@ -837,6 +837,43 @@ func TestRunEditRejectsMalformedNeeds(t *testing.T) {
 	}
 }
 
+// TestRunEditMirrorsNamedAssetInputsIntoNeeds is the regression test for
+// `weft edit --input asset:...` updating placement metadata without updating
+// the staging metadata consumed by cloud launches.
+func TestRunEditMirrorsNamedAssetInputsIntoNeeds(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "python consume.py", "consumer")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobInputs(database, jobID, []string{"asset:old-checkpoint"}); err != nil {
+		t.Fatalf("set original inputs: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"output/config.json:123", "asset:old-checkpoint"}); err != nil {
+		t.Fatalf("set original needs: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("input", "hf:gpt2,asset:new-checkpoint"); err != nil {
+		t.Fatalf("set input flag: %v", err)
+	}
+	if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+		t.Fatalf("runEdit: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if got, want := strings.Join(job.Inputs, ","), "hf:gpt2,asset:new-checkpoint"; got != want {
+		t.Fatalf("inputs = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(job.Needs, ","), "output/config.json:123,asset:new-checkpoint"; got != want {
+		t.Fatalf("needs = %q, want %q", got, want)
+	}
+}
+
 func newEditTestCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "edit <job-id>"}
 	addEditFlags(cmd)

@@ -30,6 +30,9 @@ func TestBuildProviderStartupDiagnosisDirectInstance(t *testing.T) {
 	if report.Bootstrap.TerminateAfterSeconds == 0 {
 		t.Fatal("bootstrap terminate threshold should be populated")
 	}
+	if report.Bootstrap.WarnThresholdSource != "default" || report.Bootstrap.TerminateSource != "default" {
+		t.Fatalf("empty-history bootstrap provenance = %+v, want defaults", report.Bootstrap)
+	}
 	if report.FirstRegistration.Scope != "global" {
 		t.Fatalf("FirstRegistration.Scope = %q, want global fallback without samples", report.FirstRegistration.Scope)
 	}
@@ -43,7 +46,7 @@ func TestBuildProviderStartupDiagnosisDirectInstance(t *testing.T) {
 		"Status:     creating",
 		"Location:   US-KS-2",
 		"Historical Startup:",
-		"Bootstrap:",
+		"Bootstrap: n=0, scope=runpod, warn after 15m0s (default), terminate after 20m0s (default)",
 		"First registration:",
 	} {
 		if !strings.Contains(out, want) {
