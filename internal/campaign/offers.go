@@ -55,6 +55,9 @@ type OfferFilterStats struct {
 	UnknownCompatibility          int
 	SKUMemoryFiltered             int
 	SKUMemoryRequestedGB          int
+	VRAMFiltered                  int
+	VRAMRequestedGB               int
+	BestRejectedVRAMGB            float64
 	GPUCountFiltered              int
 	HostRAMFiltered               int
 	InterconnectFiltered          int
@@ -67,12 +70,25 @@ type OfferFilterStats struct {
 	CUDAImageVersion float64
 	CUDAMinRequired  float64
 	CUDAExampleGPU   string
+	CUDAFiltered     int
 	// Torch arch filter diagnostics (set when arch filtering removed offers).
-	TorchArchMinCap     string
-	TorchArchMaxCap     string
-	TorchArchExampleCap string
-	TorchArchExampleGPU string
-	HourlyRateCapCents  int
+	TorchArchMinCap      string
+	TorchArchMaxCap      string
+	TorchArchExampleCap  string
+	TorchArchExampleGPU  string
+	TorchArchFiltered    int
+	HourlyRateCapCents   int
+	HourlyRateFiltered   int
+	CheapestRejectedRate float64
+	// Survival filter diagnostics. BestRejectedSurvival is the highest
+	// predicted survival among otherwise-eligible offers that fit the hourly
+	// rate cap. CheapestSurvivalPassingRate is the lowest hourly rate among
+	// offers that met the survival threshold but exceeded the rate cap.
+	SurvivalThreshold           float64
+	SurvivalRejected            int
+	BestRejectedSurvival        float64
+	SurvivalPassingOverRate     int
+	CheapestSurvivalPassingRate float64
 	// ProviderErrors records providers whose search failed while another
 	// provider returned offers. These errors are important context when the
 	// surviving offers are later filtered out.
@@ -127,6 +143,9 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 	passedForward := s.AfterForward
 	if passedForward == 0 {
 		passedForward = passedProvider
+	}
+	if details := s.rejectionStageDetails(); len(details) > 1 {
+		return fmt.Sprintf("%s; none met all requirements: %s", found, strings.Join(details, "; "))
 	}
 	switch {
 	case s.SKUMemoryFiltered > 0 && s.AfterSKUMemory == 0:
@@ -185,11 +204,60 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 				passed = s.AfterTorchArch
 			}
 		}
-		return fmt.Sprintf("%s, %s passed filters but none met survival threshold", found, offerCount(passed))
+		if s.SurvivalThreshold > 0 {
+			if passed == 1 {
+				return fmt.Sprintf("1 offer rejected (predicted survival %.0f%% < required %.0f%%)", s.BestRejectedSurvival*100, s.SurvivalThreshold*100)
+			}
+			return fmt.Sprintf("%s rejected (best predicted survival %.0f%% < required %.0f%%)", offerCount(passed), s.BestRejectedSurvival*100, s.SurvivalThreshold*100)
+		}
+		return fmt.Sprintf("%s rejected by survival threshold", offerCount(passed))
 	default:
 		// Defensive: all stages passed but no offer was selected.
 		return fmt.Sprintf("%s, none met all criteria", found)
 	}
+}
+
+func (s OfferFilterStats) rejectionStageDetails() []string {
+	var details []string
+	appendDetail := func(count int, reason string) {
+		if count > 0 {
+			details = append(details, fmt.Sprintf("%s rejected by %s", offerCount(count), reason))
+		}
+	}
+	appendDetail(s.SKUMemoryFiltered, fmt.Sprintf("exact SKU memory %dGB", s.SKUMemoryRequestedGB))
+	if s.VRAMFiltered > 0 && s.BestRejectedVRAMGB > 0 && s.VRAMRequestedGB > 0 {
+		appendDetail(s.VRAMFiltered, fmt.Sprintf("VRAM (best %.0fGB < required %dGB)", s.BestRejectedVRAMGB, s.VRAMRequestedGB))
+	} else {
+		appendDetail(s.VRAMFiltered, "VRAM requirement")
+	}
+	appendDetail(s.GPUCountFiltered, "GPU count requirement")
+	appendDetail(s.HostRAMFiltered, "host RAM requirement")
+	if s.InterconnectRequired != "" {
+		appendDetail(s.InterconnectFiltered, "interconnect requirement "+s.InterconnectRequired)
+	} else {
+		appendDetail(s.InterconnectFiltered, "interconnect requirement")
+	}
+	appendDetail(s.CUDAFiltered, "CUDA compatibility")
+	appendDetail(s.ProviderCompatibilityFiltered, "provider CUDA/driver compatibility")
+	appendDetail(s.ForwardCompatFiltered, "forward-compatible driver guard")
+	if s.TorchArchMinCap != "" || s.TorchArchMaxCap != "" {
+		appendDetail(s.TorchArchFiltered, "torch arch "+formatTorchArchBounds(s.TorchArchMinCap, s.TorchArchMaxCap))
+	} else {
+		appendDetail(s.TorchArchFiltered, "torch arch requirement")
+	}
+	if s.HourlyRateFiltered > 0 && s.SurvivalPassingOverRate > 0 {
+		appendDetail(s.HourlyRateFiltered, fmt.Sprintf("max-hourly-rate (cheapest meeting survival $%.2f/hr > $%.2f/hr)", s.CheapestSurvivalPassingRate, float64(s.HourlyRateCapCents)/100))
+	} else if s.HourlyRateFiltered > 0 && s.CheapestRejectedRate > 0 {
+		appendDetail(s.HourlyRateFiltered, fmt.Sprintf("max-hourly-rate (cheapest $%.2f/hr > $%.2f/hr)", s.CheapestRejectedRate, float64(s.HourlyRateCapCents)/100))
+	} else if s.HourlyRateCapCents > 0 {
+		appendDetail(s.HourlyRateFiltered, fmt.Sprintf("max-hourly-rate $%.2f/hr", float64(s.HourlyRateCapCents)/100))
+	}
+	if s.SurvivalRejected > 0 && s.SurvivalThreshold > 0 {
+		appendDetail(s.SurvivalRejected, fmt.Sprintf("survival (best %.0f%% < required %.0f%%)", s.BestRejectedSurvival*100, s.SurvivalThreshold*100))
+	} else {
+		appendDetail(s.SurvivalRejected, "survival threshold")
+	}
+	return details
 }
 
 func formatTorchArchBounds(minCap, maxCap string) string {
@@ -878,7 +946,7 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 // from both.
 //
 // Returns the surviving offers and whether any remain.
-func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *OfferFilterStats) ([]cloud.Offer, bool) {
+func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *OfferFilterStats, survivalModel *bidding.SurvivalModel, minSurvival float64) ([]cloud.Offer, bool) {
 	if skuFiltered, removed, requestedGB := filterOffersBySKUMemory(offers, group); removed > 0 {
 		slog.Debug("filtered offers by exact SKU memory",
 			"gpu_class", group.GPUClass, "required_gb", requestedGB,
@@ -895,6 +963,14 @@ func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *Offe
 		slog.Debug("filtered offers by VRAM requirement",
 			"required_min_gb", group.GPUMemGB,
 			"filtered", removed, "remaining", len(vramFiltered))
+		st.VRAMFiltered = removed
+		st.VRAMRequestedGB = group.GPUMemGB
+		constraints := placement.Constraints{GPUMemGB: group.GPUMemGB}
+		for _, offer := range offers {
+			if !placement.EvaluateEligibility(constraints, TargetSpecFromOffer(offer)).Eligible && offer.GPUMemGB > st.BestRejectedVRAMGB {
+				st.BestRejectedVRAMGB = offer.GPUMemGB
+			}
+		}
 		offers = vramFiltered
 	}
 	st.AfterVRAM = len(offers)
@@ -936,6 +1012,7 @@ func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *Offe
 		return offers, false
 	}
 	offers, cudaFiltered, imageCUDA, minRequiredCUDA, exampleGPU, imageRef := filterOffersByCUDACompat(offers, group.Image)
+	st.CUDAFiltered = cudaFiltered
 	if cudaFiltered > 0 {
 		st.CUDAImage = imageRef
 		st.CUDAImageVersion = imageCUDA
@@ -973,6 +1050,7 @@ func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *Offe
 		st.TorchArchMinCap = group.MinComputeCap
 		st.TorchArchMaxCap = group.MaxComputeCap
 		if archFiltered > 0 {
+			st.TorchArchFiltered = archFiltered
 			st.TorchArchExampleGPU = exampleGPU
 			st.TorchArchExampleCap = exampleCap
 		}
@@ -982,6 +1060,7 @@ func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *Offe
 	if len(offers) == 0 {
 		return offers, false
 	}
+	recordSurvivalConstraintDiagnostics(group, offers, survivalModel, minSurvival, st)
 	offers = filterOffersByHourlyRateCap(group, offers, st)
 	if len(offers) == 0 {
 		return offers, false
@@ -997,7 +1076,7 @@ func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalMod
 		result.FilterStats = stats
 		return result
 	}
-	offers, ok := applyEligibilityFilters(group, offers, &stats)
+	offers, ok := applyEligibilityFilters(group, offers, &stats, survivalModel, minSurvival)
 	if !ok {
 		result.FilterStats = stats
 		return result
@@ -1038,12 +1117,43 @@ func filterOffersByHourlyRateCap(group InstanceGroup, offers []cloud.Offer, stat
 	for _, offer := range offers {
 		if offer.CostPerHour*100 <= float64(capCents)+1e-9 {
 			filtered = append(filtered, offer)
+			continue
+		}
+		if stats != nil {
+			stats.HourlyRateFiltered++
+			if stats.HourlyRateFiltered == 1 || offer.CostPerHour < stats.CheapestRejectedRate {
+				stats.CheapestRejectedRate = offer.CostPerHour
+			}
 		}
 	}
 	if stats != nil {
 		stats.AfterHourlyRate = len(filtered)
 	}
 	return filtered
+}
+
+func recordSurvivalConstraintDiagnostics(group InstanceGroup, offers []cloud.Offer, model *bidding.SurvivalModel, minSurvival float64, stats *OfferFilterStats) {
+	if stats == nil || model == nil || minSurvival <= 0 {
+		return
+	}
+	stats.SurvivalThreshold = minSurvival
+	capCents, _ := db.RequestedMaxHourlyRateCentsForJobs(group.Jobs)
+	for _, offer := range offers {
+		survival := model.OfferSurvival(offer)
+		withinRateCap := capCents <= 0 || offer.CostPerHour*100 <= float64(capCents)+1e-9
+		switch {
+		case withinRateCap && survival < minSurvival:
+			stats.SurvivalRejected++
+			if stats.SurvivalRejected == 1 || survival > stats.BestRejectedSurvival {
+				stats.BestRejectedSurvival = survival
+			}
+		case !withinRateCap && survival >= minSurvival:
+			stats.SurvivalPassingOverRate++
+			if stats.SurvivalPassingOverRate == 1 || offer.CostPerHour < stats.CheapestSurvivalPassingRate {
+				stats.CheapestSurvivalPassingRate = offer.CostPerHour
+			}
+		}
+	}
 }
 
 func bestOfferWithCompatibilityProfile(group InstanceGroup, model *bidding.SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile) (int, cloud.Offer) {

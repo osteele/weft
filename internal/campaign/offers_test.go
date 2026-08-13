@@ -1063,6 +1063,71 @@ func TestRankOffer_FiltersByJobHourlyRateCap(t *testing.T) {
 	}
 }
 
+func TestRankOffer_ReportsRateSurvivalTradeoff(t *testing.T) {
+	now := time.Now()
+	lowOffer := cloud.Offer{
+		ProviderID: "cheap-low-survival", Provider: cloud.ProviderVastai,
+		GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 0.10,
+		Reliability: 0.5, MachineID: "machine-low",
+	}
+	highOffer := cloud.Offer{
+		ProviderID: "costly-high-survival", Provider: cloud.ProviderVastai,
+		GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 1.00,
+		Reliability: 0.99, MachineID: "machine-high",
+	}
+	var outcomes []bidding.InstanceOutcome
+	for range 40 {
+		outcomes = append(outcomes,
+			bidding.InstanceOutcome{
+				Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonInfraFailure,
+				ResolvedGPUName: lowOffer.GPUName, GPUMemGB: 80, CostPerHourCents: 10,
+				Reliability: lowOffer.Reliability, MachineID: lowOffer.MachineID, EndedAtUnix: now.Unix(),
+			},
+			bidding.InstanceOutcome{
+				Provider: cloud.ProviderVastai, TerminationReason: db.TerminationReasonCompleted,
+				ResolvedGPUName: highOffer.GPUName, GPUMemGB: 80, CostPerHourCents: 100,
+				Reliability: highOffer.Reliability, MachineID: highOffer.MachineID, EndedAtUnix: now.Unix(),
+			},
+		)
+	}
+	model := bidding.BuildSurvivalModelAt(outcomes, now)
+	lowSurvival := model.OfferSurvival(lowOffer)
+	highSurvival := model.OfferSurvival(highOffer)
+	if highSurvival <= lowSurvival {
+		t.Fatalf("test model did not separate offer survival: low=%v high=%v", lowSurvival, highSurvival)
+	}
+	minSurvival := (lowSurvival + highSurvival) / 2
+	capCents := 50
+	group := InstanceGroup{
+		GPUClass: "A100", GPUMemGB: 80,
+		Jobs: []*db.Job{{
+			ID: 1,
+			CLIResourceOverrides: &db.CLIResourceOverrides{
+				MaxHourlyRateCents: &capCents,
+			},
+		}},
+	}
+
+	got := rankOffer(group, []cloud.Offer{lowOffer, highOffer}, model, 1, bidding.ConstantSetup(0), bidding.StrategyCheap, minSurvival)
+	if got.Offer != nil {
+		t.Fatalf("offer = %+v, want none because no offer meets both constraints", got.Offer)
+	}
+	stats := got.FilterStats
+	if stats.HourlyRateFiltered != 1 || stats.SurvivalRejected != 1 || stats.SurvivalPassingOverRate != 1 {
+		t.Fatalf("tradeoff stats = %+v, want one rejection on each side", stats)
+	}
+	detail := stats.NoOffersDetail("")
+	for _, want := range []string{
+		"2 offers found; none met all requirements",
+		"1 offer rejected by max-hourly-rate (cheapest meeting survival $1.00/hr > $0.50/hr)",
+		fmt.Sprintf("1 offer rejected by survival (best %.0f%% < required %.0f%%)", lowSurvival*100, minSurvival*100),
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail = %q, want substring %q", detail, want)
+		}
+	}
+}
+
 func TestSplitToParallel_UsesOnlyPerJobMinimumMemory(t *testing.T) {
 	group := InstanceGroup{
 		GPUClass:    "NVIDIA",
@@ -1204,12 +1269,26 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
 		{"unknown provider compatibility", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 0, UnknownCompatibility: 5, ProviderCompatibilityFiltered: 5}, "12 offers found, 5 offers passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility"},
 		{"forward compat driver", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 5, ForwardCompatFiltered: 5, AfterForward: 0, ForwardCompatExampleGPU: "RTX 3090"}, "12 offers found, 5 offers passed provider compatibility but all filtered by Vast.ai datacenter forward-compat driver guard on consumer GPUs (e.g. RTX 3090)"},
-		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5}, "12 offers found, 5 offers passed filters but none met survival threshold"},
+		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, SurvivalThreshold: 0.8, SurvivalRejected: 5, BestRejectedSurvival: 0.43}, "5 offers rejected (best predicted survival 43% < required 80%)"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
 		{"singular cuda", OfferFilterStats{RawCount: 1, AfterVRAM: 1}, "1 offer found, 1 offer passed interconnect/topology filters but all filtered by CUDA compatibility"},
 		{"singular torch arch", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, TorchArchMaxCap: "sm_89"}, "1 offer found, 1 offer passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
-		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1}, "1 offer found, 1 offer passed filters but none met survival threshold"},
+		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, SurvivalThreshold: 0.8, SurvivalRejected: 1, BestRejectedSurvival: 0.43}, "1 offer rejected (predicted survival 43% < required 80%)"},
+		{"multiple near misses", OfferFilterStats{
+			RawCount:                    3,
+			VRAMFiltered:                1,
+			VRAMRequestedGB:             24,
+			BestRejectedVRAMGB:          16,
+			HourlyRateCapCents:          150,
+			HourlyRateFiltered:          1,
+			CheapestRejectedRate:        2.10,
+			SurvivalPassingOverRate:     1,
+			CheapestSurvivalPassingRate: 2.10,
+			SurvivalThreshold:           0.8,
+			SurvivalRejected:            1,
+			BestRejectedSurvival:        0.43,
+		}, "3 offers found; none met all requirements: 1 offer rejected by VRAM (best 16GB < required 24GB); 1 offer rejected by max-hourly-rate (cheapest meeting survival $2.10/hr > $1.50/hr); 1 offer rejected by survival (best 43% < required 80%)"},
 		{"singular defensive fallback", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, AfterSurvival: 1}, "1 offer found, none met all criteria"},
 	}
 	for _, tc := range cases {

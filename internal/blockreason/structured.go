@@ -54,14 +54,8 @@ type Structured struct {
 	// here lets weft info/explain show the on-prem avenue after a daemon
 	// restart — previously it lived only in the oplog.
 	OnPrem string `json:"onprem,omitempty"`
-	// LastAttempt carries positive-evidence context for the launch avenue:
-	// when the job's most recent instance terminated for a retryable
-	// infra-side reason (bootstrap stall, provider failure, preemption) and
-	// reset the job to the unplaced queue, this note says so. It explains why
-	// the launch avenue shows the "no launch path determined" placeholder —
-	// the planner has not yet emitted a fresh relaunch decision, not because
-	// the constraint is unsatisfiable. Empty when the last attempt was not an
-	// infra-side failure (or there was no prior attempt).
+	// LastAttempt carries optional positive-evidence context about the most
+	// recent instance. Empty when no caller has authoritative attempt context.
 	LastAttempt string `json:"last_attempt,omitempty"`
 }
 

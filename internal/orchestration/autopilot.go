@@ -727,11 +727,6 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	}
 	rentalScope := make([]int64, 0, len(remaining))
 	allCandidates := make([]int64, 0, len(remaining))
-	launchScope := make(map[int64]struct{}, len(plan.LaunchJobIDs))
-	for _, jobID := range plan.LaunchJobIDs {
-		launchScope[jobID] = struct{}{}
-	}
-	plannerMadeDecisions := len(plan.LaunchJobIDs) > 0 || len(plan.BlockedReasons) > 0
 	remainingByID := make(map[int64]*db.Job, len(remaining))
 	for _, job := range remaining {
 		if job != nil {
@@ -755,49 +750,17 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			continue
 		}
 		allCandidates = append(allCandidates, job.ID)
-		if len(launchScope) == 0 {
-			if plannerMadeDecisions {
-				continue
-			}
-			rentalScope = append(rentalScope, job.ID)
+		if _, blocked := blockedReasons[job.ID]; blocked {
 			continue
 		}
-		if _, ok := launchScope[job.ID]; ok {
-			rentalScope = append(rentalScope, job.ID)
-		}
+		// The job may have been selected for reuse earlier in this pass and
+		// rejected at submit time. Once it is still unplaced and has no
+		// concrete blocker, fresh rental is the remaining placement avenue.
+		rentalScope = append(rentalScope, job.ID)
 	}
 	if len(rentalScope) == 0 {
-		// Detail capture: when launchScope > 0 but rentalScope drops to 0, the
-		// planner picked jobs that the rentalScope filter rejected — log enough
-		// state to identify which filter (remaining/launchScope/scoped/moving)
-		// is responsible without re-running the pass.
-		if len(launchScope) > 0 {
-			remainingIDs := make([]int64, 0, len(remaining))
-			for _, j := range remaining {
-				if j != nil {
-					remainingIDs = append(remainingIDs, j.ID)
-				}
-			}
-			launchScopeIDs := make([]int64, 0, len(launchScope))
-			for id := range launchScope {
-				launchScopeIDs = append(launchScopeIDs, id)
-			}
-			sort.Slice(launchScopeIDs, func(i, j int) bool { return launchScopeIDs[i] < launchScopeIDs[j] })
-			scopedIDs := make([]int64, 0, len(scoped))
-			for id := range scoped {
-				scopedIDs = append(scopedIDs, id)
-			}
-			sort.Slice(scopedIDs, func(i, j int) bool { return scopedIDs[i] < scopedIDs[j] })
-			movingIDs := make([]int64, 0, len(movingJobs))
-			for id := range movingJobs {
-				movingIDs = append(movingIDs, id)
-			}
-			oplog.Log("auto_pilot.no_rental_scope.detail",
-				oplog.WithDetailf("remaining=%v launch_scope_ids=%v scoped_ids=%v moving_ids=%v all_candidates=%v",
-					remainingIDs, launchScopeIDs, scopedIDs, movingIDs, allCandidates))
-		}
 		oplog.Log("auto_pilot.no_rental_scope",
-			oplog.WithDetailf("launch_scope=%d blocked=%d", len(launchScope), len(blockedReasons)))
+			oplog.WithDetailf("candidates=%d blocked=%d", len(allCandidates), len(blockedReasons)))
 		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
 		return &GroupedAutoPilotResult{
 			Placed:            placed,
@@ -879,9 +842,8 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			LaunchedClass:     "",
 			BlockedReasons:    blockedReasons,
 			StructuredBlocked: structuredBlocked,
-		}, nil
+		}, fmt.Errorf("autopilot relaunch returned no result for jobs %v", rentalScope)
 	}
-	placedAfterLaunchBlock := map[int64]struct{}{}
 	if result.BlockedReason != "" {
 		for _, jobID := range rentalScope {
 			blockedReasons[jobID] = result.BlockedReason
@@ -901,7 +863,6 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 					for _, assignment := range retryPlan.ReuseAssignments {
 						if assignment.Job != nil {
 							delete(blockedReasons, assignment.Job.ID)
-							placedAfterLaunchBlock[assignment.Job.ID] = struct{}{}
 						}
 					}
 					oplog.Log("auto_pilot.reuse_after_launch_block",
@@ -918,9 +879,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	// Use per-job queue-floor (QueuedAt/CreatedAt) rather than a single
 	// passStartedAt floor: skip events are often logged on a prior pass
 	// (e.g. retry-budget cooldown), but remain the authoritative reason
-	// while the job is still queued. Filtering by passStartedAt dropped
-	// those recent-but-not-current-pass reasons, leaving the generic
-	// "no offers available" fallback as the only surfaced reason.
+	// while the job is still queued.
 	floorByJob := make(map[int64]int64, len(rentalScope))
 	for _, jobID := range rentalScope {
 		if j, ok := remainingByID[jobID]; ok && j != nil {
@@ -945,18 +904,41 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			delete(blockedReasons, jobID)
 		}
 	}
-	if len(result.InstanceIDs) == 0 {
-		for _, jobID := range rentalScope {
-			if _, placed := placedAfterLaunchBlock[jobID]; placed {
-				continue
-			}
-			if _, exists := blockedReasons[jobID]; !exists {
-				blockedReasons[jobID] = "no offers available"
-			}
+	currentUnplaced, listErr := db.ListUnplacedJobs(database)
+	if listErr != nil {
+		return nil, fmt.Errorf("verify autopilot rental outcomes: %w", listErr)
+	}
+	rentalSet := make(map[int64]struct{}, len(rentalScope))
+	for _, jobID := range rentalScope {
+		rentalSet[jobID] = struct{}{}
+	}
+	var unclassified []int64
+	for _, job := range currentUnplaced {
+		if job == nil {
+			continue
+		}
+		if _, inScope := rentalSet[job.ID]; !inScope {
+			continue
+		}
+		if _, blocked := blockedReasons[job.ID]; !blocked {
+			unclassified = append(unclassified, job.ID)
 		}
 	}
 	recordLaunchDecisions(database, result.InstanceIDs, "autopilot_launch", "no reusable instance matched; launched a new instance")
 	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
+	if len(unclassified) > 0 {
+		return &GroupedAutoPilotResult{
+			Placed:            placed,
+			Rebalanced:        rebalanced,
+			Launched:          moveRetryLaunches + len(result.InstanceIDs),
+			AutoReplanned:     autoReplanned,
+			ReuseFilled:       reuseFilled,
+			OverloadMoved:     overloadMoved,
+			LaunchedClass:     launchedClassFromResult(database, result.InstanceIDs),
+			BlockedReasons:    blockedReasons,
+			StructuredBlocked: structuredBlocked,
+		}, fmt.Errorf("autopilot rental path left queued jobs unclassified: %v", unclassified)
+	}
 
 	return &GroupedAutoPilotResult{
 		Placed:            placed,
@@ -1158,11 +1140,10 @@ func persistBlockedReasonsForUnplaced(database *sql.DB, blockedReasons map[int64
 	}
 }
 
-// finalizeUnplacedBlockedReasons settles the blocked reason for every
-// still-unplaced candidate, then persists. It guarantees each candidate carries
-// an authoritative launch-path reason before appending reuse-rejection
-// diagnostics as detail — opportunistic reuse failures are never the primary
-// reason and never mask why a job could not be launched. See
+// finalizeUnplacedBlockedReasons persists concrete blocked reasons and appends
+// reuse-rejection diagnostics as secondary detail. Classification is enforced
+// by the planner and rental path before this function; it never manufactures a
+// reason for an unclassified job. See
 // specs/campaign-lifecycle.allium § AutoPilotBlockedReasonIsAuthoritative.
 func finalizeUnplacedBlockedReasons(
 	database *sql.DB,
@@ -1176,23 +1157,6 @@ func finalizeUnplacedBlockedReasons(
 	capacities []campaign.InstanceCapacity,
 	r2Client *r2.Client,
 ) {
-	// Safety net: a candidate the planner classified as neither launch nor
-	// blocked (e.g. a failed reuse assignment) would otherwise end the tick
-	// with no reason. Give it an authoritative launch-path reason.
-	for _, jobID := range candidateIDs {
-		job, ok := remainingByID[jobID]
-		if !ok || job == nil {
-			continue
-		}
-		if _, has := blockedReasons[jobID]; has {
-			continue
-		}
-		s := placementFailureStructured(job, capacities, r2Client, unclassifiedLaunchReason)
-		blockedReasons[jobID] = s.Flat()
-		if structuredBlocked != nil && s.IsPlacementFailure() {
-			structuredBlocked[jobID] = s
-		}
-	}
 	// Append reuse-rejection diagnostics after the authoritative reason.
 	for jobID, diag := range reuseDiagnostics {
 		if _, ok := remainingByID[jobID]; !ok {
@@ -1203,27 +1167,21 @@ func finalizeUnplacedBlockedReasons(
 		}
 		addAutoPilotBlockedReason(blockedReasons, jobID, diag)
 	}
-	// Attach the structured launch/reuse breakdown to any still-unplaced job
-	// whose authoritative reason was settled by an earlier path as a
-	// placeholder (no-rental-headroom or unclassified) without having the
-	// structured form attached.
+	// Attach the structured launch/reuse breakdown to a run-rate-headroom
+	// blocker that was settled before reuse diagnostics were collected.
 	if structuredBlocked != nil {
 		for jobID, flat := range blockedReasons {
 			if _, done := structuredBlocked[jobID]; done {
 				continue
 			}
-			if !isPlaceholderLaunchReason(flat) {
+			if !strings.HasPrefix(flat, noRentalHeadroomLaunchReason) {
 				continue
 			}
 			job, ok := remainingByID[jobID]
 			if !ok || job == nil {
 				continue
 			}
-			launch := noRentalHeadroomLaunchReason
-			if strings.HasPrefix(flat, unclassifiedLaunchReason) {
-				launch = unclassifiedLaunchReason
-			}
-			if s := placementFailureStructured(job, capacities, r2Client, launch); s.IsPlacementFailure() {
+			if s := placementFailureStructured(job, capacities, r2Client, noRentalHeadroomLaunchReason); s.IsPlacementFailure() {
 				structuredBlocked[jobID] = s
 			}
 		}
@@ -1258,14 +1216,30 @@ func finalizeUnplacedBlockedReasons(
 			}
 		}
 	}
-	// Attach positive-evidence "last attempt" context to jobs still showing
-	// the unclassified launch placeholder because their most recent instance
-	// failed for a retryable infra-side reason and reset them to the queue.
-	// This keeps the bare "no launch path determined" headline from reading as
-	// "constraint unsatisfiable" when the real story is "instance died in
-	// bootstrap; awaiting relaunch". See specs/campaign-lifecycle.allium §
-	// AutoPilotBlockedReasonIsAuthoritative.
-	enrichPlaceholderWithLastAttempt(database, blockedReasons, structuredBlocked, remainingByID, candidateIDs)
+	// Relaunch-path blockers also need the structured launch/reuse form when
+	// this pass observed a reuse failure. Unlike planner blockers, these do not
+	// arrive with a prebuilt Structured value.
+	if structuredBlocked != nil {
+		for jobID, flat := range blockedReasons {
+			if _, done := structuredBlocked[jobID]; done {
+				continue
+			}
+			if reuseDiagnostics[jobID] == "" && len(recordedReuse[jobID]) == 0 && onPremDetails[jobID] == "" {
+				continue
+			}
+			job, ok := remainingByID[jobID]
+			if !ok || job == nil {
+				continue
+			}
+			launch := blockreason.StripReuseDiagnostics(flat)
+			if launch == "" {
+				launch = flat
+			}
+			s := placementFailureStructured(job, capacities, r2Client, launch)
+			s.Summary = flat
+			structuredBlocked[jobID] = s
+		}
+	}
 	// Overlay observed outcomes on the structured breakdowns before they
 	// persist: recorded reuse failures beat re-probed entries, and the
 	// per-host on-prem rejection detail (previously oplog-only) rides along
@@ -1282,77 +1256,6 @@ func finalizeUnplacedBlockedReasons(
 		}
 	}
 	persistBlockedReasonsForUnplaced(database, blockedReasons, structuredBlocked)
-}
-
-// enrichPlaceholderWithLastAttempt adds a "last attempt" note to every
-// still-unplaced candidate whose flat reason is the unclassified launch
-// placeholder ("no launch path determined") and whose most recent instance
-// terminated for a retryable infra-side reason. The note is positive evidence
-// only: a nil launch, an unfetchable launch, or a non-infra outcome yields no
-// note, so the enrichment never fabricates a relaunch story the DB can't back.
-func enrichPlaceholderWithLastAttempt(
-	database *sql.DB,
-	blockedReasons map[int64]string,
-	structuredBlocked map[int64]*blockreason.Structured,
-	remainingByID map[int64]*db.Job,
-	candidateIDs []int64,
-) {
-	if database == nil || blockedReasons == nil {
-		return
-	}
-	launchIDByJob := make(map[int64]int64)
-	launchIDs := make([]int64, 0, len(candidateIDs))
-	for _, jobID := range candidateIDs {
-		if !strings.HasPrefix(blockedReasons[jobID], unclassifiedLaunchReason) {
-			continue
-		}
-		job, ok := remainingByID[jobID]
-		if !ok || job == nil || job.LaunchID == nil || *job.LaunchID <= 0 {
-			continue
-		}
-		launchIDByJob[jobID] = *job.LaunchID
-		launchIDs = append(launchIDs, *job.LaunchID)
-	}
-	if len(launchIDs) == 0 {
-		return
-	}
-	launches, err := db.GetLaunchesByIDs(database, launchIDs)
-	if err != nil {
-		// Fail closed on the note: without the launch record we cannot
-		// confirm the last attempt was an infra failure, so we say nothing
-		// rather than guess. The placeholder reason still persists.
-		return
-	}
-	for jobID, launchID := range launchIDByJob {
-		note := lastAttemptRelaunchNote(launches[launchID])
-		if note == "" {
-			continue
-		}
-		addAutoPilotBlockedReason(blockedReasons, jobID, note)
-		if structuredBlocked != nil {
-			if s := structuredBlocked[jobID]; s != nil {
-				s.LastAttempt = note
-			}
-		}
-	}
-}
-
-// lastAttemptRelaunchNote returns a positive-evidence note for a job's most
-// recent instance when that instance terminated for a retryable infra-side
-// reason — the same set db.IsRetryableTermination auto-relaunches on, so
-// "awaiting relaunch" is what the autopilot will actually do. It is empty for
-// job-level failures, cancellations, completions, or a nil launch, where that
-// framing would misstate what happened.
-func lastAttemptRelaunchNote(launch *db.Launch) string {
-	if launch == nil || !db.IsRetryableTermination(launch) {
-		return ""
-	}
-	reason := db.HumanizeTerminationReason(launch.TerminationReason)
-	if reason == "" {
-		reason = "infrastructure failure"
-	}
-	return fmt.Sprintf("last instance %s terminated (%s) — job requeued, awaiting relaunch",
-		ids.FormatInstanceID(launch.ID), reason)
 }
 
 func remainingLaunchCandidates(database *sql.DB, launchJobIDs []int64) (map[int64]*db.Job, []int64) {
@@ -2053,16 +1956,9 @@ func minLaunchGroupJobID(group campaign.LaunchGroup) int64 {
 	return minID
 }
 
-// Launch-side reasons used to compose the launch+reuse breakdown. The
-// run-rate gate path (autopilot.go run-rate-exceeded fallback) is the only
-// caller for which "no rental headroom" is the literal truth — it's the
-// budget verdict. The safety-net path uses unclassifiedLaunchReason because
-// the planner produced no launch decision for the candidate at all, which is
-// almost never a budget verdict; calling it "no rental headroom" misleads
-// users when the status bar shows full headroom and zero running instances.
+// Launch-side reasons used to compose the launch+reuse breakdown.
 const (
 	noRentalHeadroomLaunchReason  = "no rental headroom"
-	unclassifiedLaunchReason      = "no launch path determined"
 	reuseRejectedHeadlineFragment = "running instances couldn't accept this job"
 )
 
@@ -2071,14 +1967,6 @@ const (
 // accept this job".
 func blockReasonBase(launch string) string {
 	return launch + "; " + reuseRejectedHeadlineFragment
-}
-
-// isPlaceholderLaunchReason reports whether a launch-side string is one of the
-// safety-net placeholders this file produces. finalizeUnplacedBlockedReasons
-// keys structured-detail reattachment off these prefixes.
-func isPlaceholderLaunchReason(s string) bool {
-	return strings.HasPrefix(s, noRentalHeadroomLaunchReason) ||
-		strings.HasPrefix(s, unclassifiedLaunchReason)
 }
 
 // isRunRateBudgetReason reports whether a flat blocked reason is the run-rate
@@ -2101,8 +1989,7 @@ func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity,
 // placementFailureStructured builds the full launch/reuse breakdown for a job
 // the autopilot could neither launch a new instance for nor reuse onto a
 // running one. Launch is the authoritative primary reason (supplied by the
-// caller — "no rental headroom" for the run-rate gate, a placeholder for the
-// safety-net catch-all); each running instance that refused the job
+// caller — "no rental headroom" for the run-rate gate); each running instance that refused the job
 // contributes a secondary reuse-rejection entry. When any running instance is
 // compatible, the launch reason is the whole story and no reuse detail is
 // attached.

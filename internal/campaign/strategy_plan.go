@@ -1744,7 +1744,7 @@ func rankOfferWithPredictedRuntime(
 		result.FilterStats = stats
 		return result, true
 	}
-	offers, ok := applyEligibilityFilters(group, offers, &stats)
+	offers, ok := applyEligibilityFilters(group, offers, &stats, survivalModel, minSurvival)
 	if !ok {
 		result.FilterStats = stats
 		return result, true

@@ -294,8 +294,8 @@ func TestMergeRecordedReuse(t *testing.T) {
 
 func TestStructuredLastAttemptSurfaces(t *testing.T) {
 	s := &Structured{
-		Summary:     "no launch path determined; running instances couldn't accept this job",
-		Launch:      "no launch path determined",
+		Summary:     "provider launch failed; running instances couldn't accept this job",
+		Launch:      "provider launch failed",
 		LastAttempt: "last instance wi5099 terminated (infrastructure failure) — job requeued, awaiting relaunch",
 	}
 	if !s.IsPlacementFailure() {

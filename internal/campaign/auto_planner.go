@@ -137,7 +137,7 @@ func BuildAutoPlacementPlanWithOptions(
 	ApplyBidLossEscalation(database, groups)
 	groups = EstimateGroupDisks(groups, database, nil)
 	if len(groups) == 0 {
-		return plan, nil
+		return plan, fmt.Errorf("auto planner produced no groups for %d queued jobs", len(jobs))
 	}
 
 	profile := AutoPlannerProfile(cfg)
@@ -185,20 +185,16 @@ func BuildAutoPlacementPlanWithOptions(
 		applyGroupOffer(&plan, group, offer, reused, minReliability)
 	}
 	plan.LaunchGroups = buildLaunchGroups(strategyPlan.NewCandidate, reused)
-	// Safety pass: every non-reused job that did not end up in a LaunchGroup
-	// AND did not receive a per-group BlockedReason above must carry a
-	// planner-layer reason. Without this, the autopilot's downstream safety
-	// net stamps a misleading "no rental headroom" / "no launch path
-	// determined" label on jobs whose offer path produced no diagnostic — the
-	// catch-all sees no entry and assumes a placement gate fired when no gate
-	// ran. Anchor on the strategy plan: if the planner classified the job
-	// neither as reuse nor as launch, surface that explicitly.
+	// Every job must leave the planner classified as reuse, launch, or blocked
+	// by a concrete offer/capacity reason. A missing classification is an
+	// internal planner defect, not a user-facing placement reason.
 	launchedIDs := make(map[int64]struct{}, 16)
 	for _, lg := range plan.LaunchGroups {
 		for _, id := range lg.JobIDs {
 			launchedIDs[id] = struct{}{}
 		}
 	}
+	var unclassified []int64
 	for _, job := range jobs {
 		if job == nil {
 			continue
@@ -212,7 +208,10 @@ func BuildAutoPlacementPlanWithOptions(
 		if _, ok := plan.BlockedReasons[job.ID]; ok {
 			continue
 		}
-		plan.BlockedReasons[job.ID] = "planner: no launch candidate available; no compatible offer or capacity surfaced"
+		unclassified = append(unclassified, job.ID)
+	}
+	if len(unclassified) > 0 {
+		return plan, fmt.Errorf("auto planner left queued jobs unclassified: %v", unclassified)
 	}
 	plan.LaunchRateCentsPerHour = 0
 	for _, group := range plan.LaunchGroups {

@@ -29,6 +29,14 @@ type groupedAutoPilotPassTestOptions struct {
 	placeInventory            func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)
 }
 
+func blockedRelaunchResult(scope []int64, reason string) *campaign.RelaunchResult {
+	reasons := make(map[int64]string, len(scope))
+	for _, jobID := range scope {
+		reasons[jobID] = reason
+	}
+	return &campaign.RelaunchResult{JobReasons: reasons}
+}
+
 func TestUniqueAutoPilotOfferSnapshotGroupsMatchesPlannerDerivedDiskKeys(t *testing.T) {
 	groups := []campaign.InstanceGroup{{
 		GPUClass:  "A40",
@@ -329,8 +337,8 @@ func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
 		return campaign.AutoPlacementPlan{}, nil
 	}
-	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 	unplaceCalls := 0
 	autoReplanUnplaceQueuedJob = func(database *sql.DB, job *db.Job, _ ops.ExecuteOptions) (ops.Result, error) {
@@ -890,8 +898,8 @@ func TestRunGroupedAutoPilotPass_SkipsComputeIntensiveReuseBelowCPUFloor(t *test
 		submitCalls++
 		return nil
 	}
-	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
@@ -939,7 +947,7 @@ func TestRunGroupedAutoPilotPass_FallbackRelaunchesWhenPlannerReturnsNoDecisions
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
 		relaunchCalls++
 		gotScope = append([]int64(nil), scope...)
-		return &campaign.RelaunchResult{}, nil
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
@@ -1237,7 +1245,7 @@ func TestRunGroupedAutoPilotPass_RunRateAllFitLeavesLaunchScope(t *testing.T) {
 	var gotScope []int64
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
 		gotScope = append([]int64(nil), scope...)
-		return &campaign.RelaunchResult{}, nil
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
@@ -1595,7 +1603,7 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenMoveIntent(t *testing.T) {
 	var relaunchScope []int64
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
 		relaunchScope = append([]int64(nil), scope...)
-		return &campaign.RelaunchResult{}, nil
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	if _, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil); err != nil {
@@ -1689,8 +1697,8 @@ func TestRunGroupedAutoPilotPass_RetriesOpenMoveIntentAfterNoStartLaunchFailure(
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
 		return campaign.AutoPlacementPlan{}, nil
 	}
-	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
@@ -2060,9 +2068,9 @@ func TestRunGroupedAutoPilotPass_ReuseDiagnosticAppendedNotMasking(t *testing.T)
 			BlockedReasons: map[int64]string{},
 		}, nil
 	}
-	// The launch attempt places nothing.
+	constraintReason := "12 offers found, but none passed the 80GB VRAM requirement"
 	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+		return &campaign.RelaunchResult{JobReasons: map[int64]string{jobID: constraintReason}}, nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil, withRealFillReusableInstances)
@@ -2073,7 +2081,7 @@ func TestRunGroupedAutoPilotPass_ReuseDiagnosticAppendedNotMasking(t *testing.T)
 	if reason == "" {
 		t.Fatalf("blocked reason empty, want an authoritative launch reason")
 	}
-	if !strings.HasPrefix(reason, "no offers available") {
+	if !strings.HasPrefix(reason, constraintReason) {
 		t.Fatalf("blocked reason = %q, want it to lead with the launch-path reason", reason)
 	}
 	if !strings.Contains(reason, "could not reuse") {
@@ -2081,11 +2089,10 @@ func TestRunGroupedAutoPilotPass_ReuseDiagnosticAppendedNotMasking(t *testing.T)
 	}
 }
 
-func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *testing.T) {
-	// Regression: a job the planner classified as neither launch nor blocked
-	// (here, an incompatible reuse assignment) must still end the tick with an
-	// authoritative primary reason — never silently dropped, never left with
-	// only a reuse diagnostic.
+func TestRunGroupedAutoPilotPass_FailedReuseFallsBackToRentalReason(t *testing.T) {
+	// Regression: when a reuse assignment fails in a mixed planner pass, the
+	// job must enter the fresh-rental scope and receive that path's concrete
+	// reason. A reuse failure alone is never a blocker.
 	inventory.UseTestHosts(t)
 	database := db.SetupTestDB(t)
 
@@ -2133,10 +2140,9 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
 		return jobs, 0
 	}
-	// The job under test appears only as an (incompatible) reuse assignment.
-	// A blocked reason for an unrelated job id makes the planner count as
-	// having made decisions, which keeps the job under test out of the rental
-	// scope — exercising the non-rental-scope safety net.
+	// The job under test appears only as an incompatible reuse assignment,
+	// alongside an unrelated planner decision. This was the shape that used
+	// to drop the job from fresh-rental fallback.
 	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
 		return campaign.AutoPlacementPlan{
 			ReuseAssignments: []campaign.ReuseAssignment{{
@@ -2151,8 +2157,11 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 		submitCalls++
 		return nil
 	}
-	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+	var relaunchScope []int64
+	constraintReason := "7 offers found, but none passed the 80GB VRAM requirement"
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		relaunchScope = append([]int64(nil), scope...)
+		return &campaign.RelaunchResult{JobReasons: map[int64]string{jobID: constraintReason}}, nil
 	}
 
 	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
@@ -2166,27 +2175,20 @@ func TestRunGroupedAutoPilotPass_NonRentalScopeJobGetsAuthoritativeReason(t *tes
 	if reason == "" {
 		t.Fatalf("job left with no blocked reason")
 	}
-	if strings.HasPrefix(reason, "could not reuse") {
-		t.Fatalf("blocked reason = %q, want an authoritative reason before the reuse detail", reason)
+	if len(relaunchScope) != 1 || relaunchScope[0] != jobID {
+		t.Fatalf("relaunch scope = %v, want [%d]", relaunchScope, jobID)
 	}
-	// Regression: the safety-net catch-all used to label this as "no rental
-	// headroom" even when the run-rate gate had not fired and the real reason
-	// was that the planner produced no launch decision for the candidate. The
-	// honest catch-all is "no launch path determined" so the user is not
-	// misdirected toward a budget verdict that didn't happen.
-	if !strings.Contains(reason, unclassifiedLaunchReason) {
-		t.Fatalf("blocked reason = %q, want unclassified-launch placeholder", reason)
+	if !strings.HasPrefix(reason, constraintReason) {
+		t.Fatalf("blocked reason = %q, want concrete rental reason first", reason)
 	}
-	if strings.Contains(reason, noRentalHeadroomLaunchReason) {
-		t.Fatalf("blocked reason = %q, must not assert no-rental-headroom for a safety-net fallback", reason)
+	if !strings.Contains(reason, "CPU cores insufficient") {
+		t.Fatalf("blocked reason = %q, want reuse rejection as secondary detail", reason)
 	}
 }
 
 func TestRunGroupedAutoPilotPass_DoesNotBlockJobCreatedAfterPlannerSnapshot(t *testing.T) {
-	// Regression: a job that appears after the planner snapshot was getting
-	// swept into the fresh "remaining unplaced" scan and stamped with the
-	// safety-net "no launch path determined" reason, even though the current
-	// plan never considered it.
+	// Regression: a job that appears after the planner snapshot must not be
+	// swept into this pass's fresh-rental scope or inherit one of its reasons.
 	inventory.UseTestHosts(t)
 	database := db.SetupTestDB(t)
 
@@ -2299,8 +2301,8 @@ func TestRunGroupedAutoPilotPass_ExcludesJobsWithOpenPlacementIntent(t *testing.
 		}
 		return campaign.AutoPlacementPlan{}, nil
 	}
-	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
-		return &campaign.RelaunchResult{}, nil
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return blockedRelaunchResult(scope, "test rental blocker"), nil
 	}
 
 	if _, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil); err != nil {
@@ -2523,7 +2525,8 @@ func TestFinalizeUnplacedBlockedReasons_PersistsRecordedReuseAndOnPrem(t *testin
 	}
 
 	instLabel := ids.FormatInstanceID(instanceID)
-	blockedReasons := map[int64]string{}
+	launchReason := "provider launch failed: test outage"
+	blockedReasons := map[int64]string{jobID: launchReason}
 	structuredBlocked := map[int64]*blockreason.Structured{}
 	recordedReuse := map[int64][]blockreason.ReuseRejection{
 		jobID: {{Instance: instLabel, Reason: "submit failed: upload source: connection reset", Detail: "full error text"}},
@@ -2845,116 +2848,6 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedCompatibleInstanceStaysBud
 	if refreshed.PlacementBlockedJSON != "" {
 		t.Fatalf("placement_blocked = %q, want empty (budget-only blocker)", refreshed.PlacementBlockedJSON)
 	}
-}
-
-func TestLastAttemptRelaunchNote(t *testing.T) {
-	tests := []struct {
-		name   string
-		launch *db.Launch
-		want   string // "" => no note; otherwise a required substring
-	}{
-		{name: "nil", launch: nil, want: ""},
-		{name: "infra failure", launch: &db.Launch{ID: 5099, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonInfraFailure}, want: "infrastructure failure"},
-		{name: "bootstrap timeout", launch: &db.Launch{ID: 12, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonBootstrapTimeout}, want: "bootstrap timeout"},
-		{name: "preempted", launch: &db.Launch{ID: 13, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonPreempted}, want: "preempted"},
-		{name: "job failure excluded", launch: &db.Launch{ID: 3, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure}, want: ""},
-		{name: "disk full excluded", launch: &db.Launch{ID: 9, Status: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonDiskFull}, want: ""},
-		{name: "canceled excluded", launch: &db.Launch{ID: 4, Status: db.LaunchStatusCancelled, TerminationReason: db.TerminationReasonCancelled}, want: ""},
-		{name: "completed excluded", launch: &db.Launch{ID: 6, Status: db.LaunchStatusCompleted, TerminationReason: db.TerminationReasonCompleted}, want: ""},
-		{name: "running not terminal", launch: &db.Launch{ID: 7, Status: db.LaunchStatusRunning}, want: ""},
-		{name: "empty reason humanized", launch: &db.Launch{ID: 8, Status: db.LaunchStatusFailed, TerminationReason: ""}, want: "infrastructure failure"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := lastAttemptRelaunchNote(tc.launch)
-			if tc.want == "" {
-				if got != "" {
-					t.Fatalf("note = %q, want empty", got)
-				}
-				return
-			}
-			if !strings.Contains(got, tc.want) {
-				t.Fatalf("note = %q, want substring %q", got, tc.want)
-			}
-			if !strings.Contains(got, "awaiting relaunch") {
-				t.Fatalf("note = %q, want 'awaiting relaunch'", got)
-			}
-		})
-	}
-}
-
-// TestEnrichPlaceholderWithLastAttempt verifies the unclassified placeholder is
-// enriched with a last-attempt note when the job's most recent instance failed
-// for an infra-side reason, and left untouched for a job-level failure.
-func TestEnrichPlaceholderWithLastAttempt(t *testing.T) {
-	newQueuedJobOnFailedInstance := func(t *testing.T, database *sql.DB, reason string) (int64, int64, *db.Job) {
-		t.Helper()
-		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
-			WorkingDir: t.TempDir(),
-			Command:    "python train.py",
-			GPUClass:   "nvidia",
-		})
-		if err != nil {
-			t.Fatalf("RecordQueuedJob: %v", err)
-		}
-		instanceID, err := db.CreateLaunch(database, &db.Launch{
-			Status:   db.LaunchStatusLaunching,
-			Provider: "vastai",
-		})
-		if err != nil {
-			t.Fatalf("CreateLaunch: %v", err)
-		}
-		status := db.LaunchStatusFailed
-		if reason == db.TerminationReasonCancelled {
-			status = db.LaunchStatusCancelled
-		}
-		if err := db.UpdateLaunchStatus(database, instanceID, status, reason); err != nil {
-			t.Fatalf("UpdateLaunchStatus: %v", err)
-		}
-		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
-			t.Fatalf("SetJobLaunchID: %v", err)
-		}
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil {
-			t.Fatalf("GetJobByID: %v", err)
-		}
-		return jobID, instanceID, job
-	}
-
-	t.Run("infra failure enriches", func(t *testing.T) {
-		database := db.SetupTestDB(t)
-		jobID, instanceID, job := newQueuedJobOnFailedInstance(t, database, db.TerminationReasonInfraFailure)
-		base := blockReasonBase(unclassifiedLaunchReason)
-		blockedReasons := map[int64]string{jobID: base}
-		structured := map[int64]*blockreason.Structured{jobID: {Summary: base, Launch: unclassifiedLaunchReason}}
-
-		enrichPlaceholderWithLastAttempt(database, blockedReasons, structured, map[int64]*db.Job{jobID: job}, []int64{jobID})
-
-		inst := ids.FormatInstanceID(instanceID)
-		if !strings.Contains(blockedReasons[jobID], "awaiting relaunch") || !strings.Contains(blockedReasons[jobID], inst) {
-			t.Fatalf("flat reason not enriched: %q", blockedReasons[jobID])
-		}
-		if structured[jobID].LastAttempt == "" || !strings.Contains(structured[jobID].LastAttempt, inst) {
-			t.Fatalf("structured LastAttempt not set: %+v", structured[jobID])
-		}
-	})
-
-	t.Run("job failure leaves placeholder untouched", func(t *testing.T) {
-		database := db.SetupTestDB(t)
-		jobID, _, job := newQueuedJobOnFailedInstance(t, database, db.TerminationReasonJobFailure)
-		base := blockReasonBase(unclassifiedLaunchReason)
-		blockedReasons := map[int64]string{jobID: base}
-		structured := map[int64]*blockreason.Structured{jobID: {Summary: base, Launch: unclassifiedLaunchReason}}
-
-		enrichPlaceholderWithLastAttempt(database, blockedReasons, structured, map[int64]*db.Job{jobID: job}, []int64{jobID})
-
-		if blockedReasons[jobID] != base {
-			t.Fatalf("flat reason changed for job-level failure: %q", blockedReasons[jobID])
-		}
-		if structured[jobID].LastAttempt != "" {
-			t.Fatalf("LastAttempt set for job-level failure: %q", structured[jobID].LastAttempt)
-		}
-	})
 }
 
 // Regression: the autopilot reuse path honors the per-job launch-attempt

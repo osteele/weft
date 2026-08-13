@@ -713,6 +713,21 @@ contract CUDACompatibilityChain {
 --   * relaunch.skipped.offer_error — provider call itself failed
 -- Implementation: internal/campaign/relaunch.go (Err checked before Offer).
 
+-- A non-empty provider result that becomes empty after local filtering must
+-- report the concrete rejecting constraint(s), not merely say that offers
+-- passed filters or that no launch path was found. When different offers are
+-- eliminated at different stages, the reason reports that no offer met all
+-- requirements and summarizes every stage that rejected a candidate (for
+-- example VRAM, hourly-rate cap, and survival floor). Threshold diagnostics
+-- include the closest rejected value where available.
+--
+-- This analysis stays within the candidate set returned for the requested
+-- InstanceGroup. It must not relax GPU family, provider, geography, topology,
+-- or other identity constraints to cite unrelated market inventory as a near
+-- miss. An L4 request therefore never cites an H100 merely because the H100
+-- satisfies a rate or survival threshold.
+-- Implementation: internal/campaign/offers.go OfferFilterStats.NoOffersDetail.
+
 -- R2 source-tarball upload failures must be isolated per-group, not
 -- bubbled as a single error that fails the whole relaunch pass. Each
 -- InstanceGroup has its own source directory; one project exceeding the
@@ -4200,46 +4215,34 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- ahead of the launch path, the launch path's "set reason only if
         -- absent" guards would skip — masking the real reason.
         --
-        -- finalizeUnplacedBlockedReasons settles every still-unplaced
-        -- candidate from the pass's planner input: it first guarantees an
-        -- authoritative launch-path reason (including for jobs the planner
-        -- classified as neither launch nor blocked, via
-        -- placementFailureStructured with the unclassifiedLaunchReason
-        -- placeholder), then appends the reuse diagnostic as trailing detail.
+        -- BuildAutoPlacementPlan must classify every candidate as reuse,
+        -- launch, or blocked with a concrete offer/capacity reason. Missing
+        -- classification is an internal invariant failure, not a user-facing
+        -- blocked reason.
+        --
+        -- After reuse assignments execute, every selected job that remains
+        -- unplaced and has no concrete blocker enters rental_scope. This is
+        -- true even in a mixed pass where other jobs received launch or block
+        -- decisions: a failed opportunistic reuse must devolve to the fresh
+        -- rental path rather than disappear from launch consideration.
+        -- RelaunchOrphanedJobs must then either assign the job or return a
+        -- per-job reason (offer filter, provider failure, retry cooldown,
+        -- dependency, budget, or another concrete gate). A still-unplaced job
+        -- with neither outcome is an orchestration invariant failure.
+        --
+        -- finalizeUnplacedBlockedReasons only persists these concrete reasons
+        -- and appends reuse diagnostics as trailing detail; it never invents
+        -- a launch-side explanation.
         -- Jobs that become unplaced after the planner snapshot wait for the
-        -- next pass instead of inheriting this pass's safety-net reason.
+        -- next pass instead of inheriting this pass's reason.
         -- Reuse diagnostics are also recorded
         -- to the oplog (auto_pilot.reuse_fill_blocked / reuse_skipped /
         -- reuse_failed). Implementation: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass, finalizeUnplacedBlockedReasons.
         --
-        -- Two distinct launch-side placeholders:
-        --   * "no rental headroom" — used only by the run-rate gate path
-        --     (AutoPilotReusePreferredFallback) where the budget verdict is
-        --     the literal cause.
-        --   * "no launch path determined" — used by the safety-net
-        --     catch-all when the planner produced no launch decision for a
-        --     candidate and no other gate fired. Distinguishing the two
-        --     stops the TUI from misdirecting the user toward a budget
-        --     verdict when the actual cause is, say, an upstream offer
-        --     search failure or a planner classification gap.
-        --
-        -- Last-attempt enrichment: when a candidate still carries the
-        -- "no launch path determined" placeholder AND its most recent
-        -- instance (job.LaunchID) terminated for a retryable infra-side
-        -- reason (the db.IsRetryableTermination set: bootstrap stall,
-        -- provider failure, phase stall, preemption, provider timeout),
-        -- enrichPlaceholderWithLastAttempt appends a positive-evidence note
-        -- ("last instance wiN terminated (<reason>) — job requeued, awaiting
-        -- relaunch") to the flat reason and records it on
-        -- Structured.LastAttempt. This keeps the bare placeholder from
-        -- reading as "constraint unsatisfiable" when the real story is
-        -- "the instance we launched died in bootstrap and we will relaunch".
-        -- It is positive evidence only: a nil/unfetchable launch or a
-        -- non-infra outcome (job failure, cancellation, completion) yields
-        -- no note, so the enrichment never fabricates a relaunch story the
-        -- DB cannot back. It never replaces the authoritative launch reason;
-        -- it is trailing context, like the reuse diagnostics.
+        -- "no rental headroom" remains valid only in the run-rate gate path
+        -- (AutoPilotReusePreferredFallback), where it names the literal
+        -- budget verdict. It is not a general safety-net placeholder.
         --
         -- Structured form: a job blocked because no placement avenue is
         -- available (no new instance could be launched AND no running

@@ -1055,7 +1055,7 @@ func TestBuildGroupedStatusRows_SharedNoOffersFingerprintRendersOnceHuman(t *tes
 	fingerprint := "vastai/search-offers/empty-result:no-offers"
 	jobs := []*db.Job{
 		mkJob(4152, "planner: no offers from providers for gpu=A40"),
-		mkJob(4154, "1 offer found, 1 offer passed filters but none met survival threshold"),
+		mkJob(4154, "1 offer rejected (predicted survival 43% < required 80%)"),
 	}
 	detail := map[int64]*blockreason.Structured{
 		4152: {Launch: "planner: no offers from providers for gpu=A40 vram>=20GB disk>=186GB", Fingerprint: fingerprint},
@@ -1090,7 +1090,7 @@ func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *test
 		}
 	}
 	jobs := []*db.Job{
-		mkJob(4154, "1 offer found, 1 offer passed filters but none met survival threshold"),
+		mkJob(4154, "1 offer rejected (predicted survival 43% < required 80%)"),
 		mkJob(4152, "planner: no offers from providers for gpu=A40"),
 		mkJob(4166, "planner: no offers from providers for gpu=RTX-2080-TI"),
 	}
@@ -1104,7 +1104,7 @@ func TestBuildGroupedStatusRows_HoistedSubsetRowsPrecedeUnrelatedBuckets(t *test
 	}))
 
 	hoist := "launch blocked for 2 of 3: no matching rental offers from providers"
-	otherBucket := "blocked: 1 offer found, 1 offer passed filters but none met survival threshold"
+	otherBucket := "blocked: 1 offer rejected (predicted survival 43% < required 80%)"
 	job4152 := "▸ -   wj4152"
 	job4166 := "▸ -   wj4166"
 	job4154 := "-   wj4154"
