@@ -2,12 +2,12 @@ package vastai
 
 import "testing"
 
-// TestEffectiveMemGB_HardwareCeilingExact is the regression for wj2265 and
+// TestStoredMemFloorGB_HardwareCeilingExact is the regression for wj2265 and
 // peers: a user request for "A100 80GB" must produce a filter of
 // `gpu_ram>=80` (matches the hardware's reported 80GB), not `>=82` (which
 // excludes the exact GPU they asked for). Submission-time headroom is
 // skipped when the request hits a known ceiling.
-func TestEffectiveMemGB_HardwareCeilingExact(t *testing.T) {
+func TestStoredMemFloorGB_HardwareCeilingExact(t *testing.T) {
 	cases := []struct {
 		class string
 		mem   int
@@ -26,19 +26,19 @@ func TestEffectiveMemGB_HardwareCeilingExact(t *testing.T) {
 		{"a800", 80, 80},
 	}
 	for _, tc := range cases {
-		if got := EffectiveMemGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("EffectiveMemGB(%q, %d) = %d, want %d (exact ceiling)", tc.class, tc.mem, got, tc.want)
+		if got := StoredMemFloorGB(tc.class, tc.mem); got != tc.want {
+			t.Errorf("StoredMemFloorGB(%q, %d) = %d, want %d (exact ceiling)", tc.class, tc.mem, got, tc.want)
 		}
 	}
 }
 
-// TestEffectiveMemGB_RollbackPostHeadroom is the back-compat path for jobs
-// persisted before the headroom moved to filter time: a stored value of
+// TestStoredMemFloorGB_RollbackPostHeadroom is the back-compat path for jobs
+// persisted before hardware-ceiling headroom was skipped: a stored value of
 // (ceiling + defaultHeadroomGB) is recognized as the user's intent of
 // `ceiling`. Without this, wj2265 (stored 82 from --gpu-class=a100
 // --gpu-mem=80) would never find A100 80GB offers even after a fix to
 // submission, because the DB value already had the headroom baked in.
-func TestEffectiveMemGB_RollbackPostHeadroom(t *testing.T) {
+func TestStoredMemFloorGB_RollbackPostHeadroom(t *testing.T) {
 	cases := []struct {
 		class string
 		mem   int
@@ -56,110 +56,69 @@ func TestEffectiveMemGB_RollbackPostHeadroom(t *testing.T) {
 		{"a40", 50, 48},
 	}
 	for _, tc := range cases {
-		if got := EffectiveMemGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("EffectiveMemGB(%q, %d) = %d, want %d (rollback)", tc.class, tc.mem, got, tc.want)
+		if got := StoredMemFloorGB(tc.class, tc.mem); got != tc.want {
+			t.Errorf("StoredMemFloorGB(%q, %d) = %d, want %d (rollback)", tc.class, tc.mem, got, tc.want)
 		}
 	}
 }
 
-// TestEffectiveMemGB_NonCeilingAppliesHeadroom verifies that values which
-// are neither a known ceiling nor `ceiling+headroom` still get the +2GB
-// headroom — these are user-supplied minima, not hardware ceilings.
-func TestEffectiveMemGB_NonCeilingAppliesHeadroom(t *testing.T) {
+// TestStoredMemFloorGB_EffectiveFloorPassesThrough verifies that stored
+// effective floors do not receive a second round of headroom.
+func TestStoredMemFloorGB_EffectiveFloorPassesThrough(t *testing.T) {
 	cases := []struct {
 		class string
 		mem   int
 		want  int
 	}{
-		// A100 ceilings are 40 and 80; values not at or just above either
-		// must get the +2GB headroom applied at filter time.
-		{"a100", 50, 52},
-		{"a100", 60, 62},
-		{"a100", 100, 102},
-		// rtx4090 ceiling is 24; 20GB request → 22GB filter.
-		{"rtx4090", 20, 22},
+		{"a100", 52, 52},
+		{"a100", 62, 62},
+		{"a100", 102, 102},
+		{"l4", 22, 22},
 	}
 	for _, tc := range cases {
-		if got := EffectiveMemGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("EffectiveMemGB(%q, %d) = %d, want %d (apply headroom)", tc.class, tc.mem, got, tc.want)
+		if got := StoredMemFloorGB(tc.class, tc.mem); got != tc.want {
+			t.Errorf("StoredMemFloorGB(%q, %d) = %d, want %d", tc.class, tc.mem, got, tc.want)
 		}
 	}
 }
 
-// TestEffectiveMemGB_UnknownClassFallsBackToHeadroom verifies the safe
-// default: when the GPU class is empty or not in the table (broad family
-// like "nvidia", or a model we haven't catalogued), the +2GB headroom is
-// applied just as the submit-time path used to.
-func TestEffectiveMemGB_UnknownClassFallsBackToHeadroom(t *testing.T) {
+// TestStoredMemFloorGB_UnknownClassPassesThrough verifies that effective
+// floors remain stable even when the class cannot support ceiling rollback.
+func TestStoredMemFloorGB_UnknownClassPassesThrough(t *testing.T) {
 	cases := []struct {
 		class string
 		mem   int
 		want  int
 	}{
-		{"", 24, 26},
-		{"nvidia", 24, 26},
-		{"unknown-model", 24, 26},
+		{"", 26, 26},
+		{"nvidia", 26, 26},
+		{"unknown-model", 26, 26},
 	}
 	for _, tc := range cases {
-		if got := EffectiveMemGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("EffectiveMemGB(%q, %d) = %d, want %d (unknown class)", tc.class, tc.mem, got, tc.want)
+		if got := StoredMemFloorGB(tc.class, tc.mem); got != tc.want {
+			t.Errorf("StoredMemFloorGB(%q, %d) = %d, want %d", tc.class, tc.mem, got, tc.want)
 		}
 	}
 }
 
-// TestEffectiveMemGB_NonPositiveIsPassthrough verifies that 0 and negative
+// TestStoredMemFloorGB_NonPositiveIsPassthrough verifies that 0 and negative
 // values aren't perturbed — they're a no-constraint signal upstream.
-func TestEffectiveMemGB_NonPositiveIsPassthrough(t *testing.T) {
-	if got := EffectiveMemGB("a100", 0); got != 0 {
-		t.Errorf("EffectiveMemGB(a100, 0) = %d, want 0", got)
+func TestStoredMemFloorGB_NonPositiveIsPassthrough(t *testing.T) {
+	if got := StoredMemFloorGB("a100", 0); got != 0 {
+		t.Errorf("StoredMemFloorGB(a100, 0) = %d, want 0", got)
 	}
 }
 
-// TestIntendedMemGB verifies the consumer-side resolution path: only the
-// post-headroom rollback fires; no +2GB cushion is added. Used by the reuse
-// compatibility check against a known instance capacity.
-func TestIntendedMemGB(t *testing.T) {
-	cases := []struct {
-		class string
-		mem   int
-		want  int
-	}{
-		// Rollback fires for recognizable post-headroom values.
-		{"a100", 82, 80},
-		{"h100", 82, 80},
-		{"rtx4090", 26, 24},
-		// Exact ceilings pass through.
-		{"a100", 80, 80},
-		{"A100 PCIE", 80, 80},
-		{"rtx4090", 24, 24},
-		// Non-ceiling values pass through WITHOUT adding headroom — that's
-		// the difference from EffectiveMemGB. A job stored as 50GB on an
-		// A100 must NOT be inflated to 52GB when checking instance fit.
-		{"a100", 50, 50},
-		{"rtx4090", 20, 20},
-		// Unknown class — pure passthrough.
-		{"", 24, 24},
-		{"nvidia", 24, 24},
-		// Zero / negative passthrough.
-		{"a100", 0, 0},
-	}
-	for _, tc := range cases {
-		if got := IntendedMemGB(tc.class, tc.mem); got != tc.want {
-			t.Errorf("IntendedMemGB(%q, %d) = %d, want %d", tc.class, tc.mem, got, tc.want)
-		}
-	}
-}
-
-// TestEffectiveMemGB_T4Reachable is the regression for wj3135: the user-facing
+// TestStoredMemFloorGB_T4Reachable is the regression for wj3135: the user-facing
 // class "t4" normalizes to "t4", but the table previously keyed the Tesla T4
 // only under "teslat4" (the gpu_name normalization), so its 16GB ceiling was
 // invisible. A request for a 16GB T4 must filter `gpu_ram>=16`, not `>=18`
 // (16+headroom), or no T4 offer — every T4 ships 16GB — can ever match.
-func TestEffectiveMemGB_T4Reachable(t *testing.T) {
-	if got := EffectiveMemGB("t4", 16); got != 16 {
-		t.Errorf("EffectiveMemGB(\"t4\", 16) = %d, want 16 (exact ceiling, no headroom)", got)
+func TestStoredMemFloorGB_T4Reachable(t *testing.T) {
+	if got := StoredMemFloorGB("t4", 16); got != 16 {
+		t.Errorf("StoredMemFloorGB(\"t4\", 16) = %d, want 16 (exact ceiling, no headroom)", got)
 	}
-	if got := EffectiveMemGB("T4", 16); got != 16 {
-		t.Errorf("EffectiveMemGB(\"T4\", 16) = %d, want 16", got)
+	if got := StoredMemFloorGB("T4", 16); got != 16 {
+		t.Errorf("StoredMemFloorGB(\"T4\", 16) = %d, want 16", got)
 	}
 }

@@ -602,7 +602,7 @@ func TestMatchJobToInstance_GPUMemory(t *testing.T) {
 // TestMatchJobToInstance_GPUMemoryRollsBackPostHeadroom is the wj2265
 // regression: a job persisted with the submit-time +2GB headroom baked in
 // (gpu_class=a100, gpu_mem_gb=82) must still match an A100 80GB instance
-// reporting 80GB capacity. IntendedMemGB rolls 82 back to 80 before the
+// reporting 80GB capacity. StoredMemFloorGB rolls 82 back to 80 before the
 // "job <= instance" comparison runs.
 func TestMatchJobToInstance_GPUMemoryRollsBackPostHeadroom(t *testing.T) {
 	mem82 := 82

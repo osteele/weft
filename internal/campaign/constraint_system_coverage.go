@@ -90,7 +90,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"gpu_class":     {checkedInSystem, "matchInstanceTargetEligibility"},
 		"provider":      {checkedInSystem, "matchProviderIntent + providerViolation in EvaluateEligibility"},
 		"num_gpus":      {checkedInSystem, "matchInstanceTargetEligibility (unknown instance count relaxes to 1 — fail-open)"},
-		"gpu_memory":    {checkedInSystem, "matchInstanceTargetEligibility with IntendedMemGB rollback"},
+		"gpu_memory":    {checkedInSystem, "matchInstanceTargetEligibility with StoredMemFloorGB rollback"},
 		"cpu_cores":     {checkedInSystem, "hostCPUCoresSatisfied (unknown fails closed, matching the tag floor)"},
 		"host_ram":      {checkedInSystem, "hostRAMSatisfied (unknown passes, matching launch)"},
 		"interconnect":  {checkedInSystem, "placement.InterconnectSatisfied over instanceInterconnectSignals"},

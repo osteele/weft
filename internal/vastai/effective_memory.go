@@ -3,59 +3,24 @@ package vastai
 import "github.com/osteele/weft/internal/gpucatalog"
 
 // defaultHeadroomGB mirrors cmd/gpu_estimator.go's defaultGPUMemHeadroomGB.
-// Kept private to vastai so the filter-time effective-memory resolution
-// can roll back submit-time-applied headroom when matching against a known
-// hardware ceiling. Submission flow and filter flow MUST use the same value
-// for the rollback math to work.
+// It is used only to recognize historical rows that persisted headroom above
+// a known hardware ceiling. Current jobs.gpu_mem_gb values are already
+// effective placement floors and must not receive headroom again here.
 const defaultHeadroomGB = 2
 
-// EffectiveMemGB resolves a stored gpu_mem_gb request to the value that
-// should be used as a vast.ai search filter floor (`gpu_ram>=N`). The
-// transformation is:
-//
-//  1. If (class, requested) names a known hardware ceiling exactly, return
-//     requested unchanged (the user is naming the exact hardware; the
-//     +2GB safety headroom would push the filter above the hardware's own
-//     gpu_ram and exclude every matching offer).
-//  2. If (class, requested - defaultHeadroomGB) names a known hardware
-//     ceiling, return that ceiling (the requested value was persisted with
-//     submit-time headroom already applied; roll it back so the filter
-//     doesn't double-headroom and exclude the hardware the user asked
-//     for).
-//  3. Otherwise return requested + defaultHeadroomGB — the value is not a
-//     recognizable hardware ceiling and is presumably a user-supplied
-//     minimum; the search filter wants a 2GB cushion so we don't bid for
-//     hardware with no room for the framework/runtime overhead.
-//
-// When class is empty or is not catalogued in gpucatalog, only step (3)
-// applies. Use IntendedMemGB at consumer boundaries (reuse compatibility
-// checks against a known instance capacity) where the +2GB cushion does not
-// belong.
-func EffectiveMemGB(class string, requested int) int {
-	if requested <= 0 {
-		return requested
-	}
-	if resolved, ok := rollbackToHardwareCeiling(class, requested); ok {
-		return resolved
-	}
-	return requested + defaultHeadroomGB
-}
-
-// IntendedMemGB resolves the stored gpu_mem_gb to the user's original
-// intent — applying only the post-headroom rollback when the stored value
-// is recognizably (ceiling + defaultHeadroomGB) for a known hardware
-// model. Unlike EffectiveMemGB, it does NOT add headroom for non-ceiling
-// requests; the caller (e.g. reuse compatibility) is comparing against a
-// known instance capacity where a 2GB cushion would falsely reject a
-// rental that perfectly satisfies the request.
+// StoredMemFloorGB resolves a stored gpu_mem_gb value to the placement floor
+// consumers should enforce. Submission has already applied any requested
+// safety headroom, so non-ceiling values pass through unchanged. The only
+// transformation is the historical rollback for a stored value recognizable
+// as (hardware ceiling + defaultHeadroomGB).
 //
 // Examples:
 //
-//	IntendedMemGB("a100", 82) == 80   // rollback recognized
-//	IntendedMemGB("a100", 80) == 80   // exact ceiling
-//	IntendedMemGB("",     24) == 24   // unknown class — passthrough, no headroom
-//	IntendedMemGB("a100", 50) == 50   // not a known ceiling — passthrough
-func IntendedMemGB(class string, requested int) int {
+//	StoredMemFloorGB("a100", 82) == 80 // rollback recognized
+//	StoredMemFloorGB("a100", 80) == 80 // exact ceiling
+//	StoredMemFloorGB("l4", 22) == 22   // effective floor, no second headroom
+//	StoredMemFloorGB("", 24) == 24     // unknown class, passthrough
+func StoredMemFloorGB(class string, requested int) int {
 	if requested <= 0 {
 		return requested
 	}

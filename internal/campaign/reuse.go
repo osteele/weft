@@ -414,7 +414,7 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, fmt.Sprintf("broad NVIDIA job should not reuse premium accelerator: job=%s instance=%s", constraints.GPUClass, inst.DisplayGPUBrief())
 	}
 
-	// GPU memory check. IntendedMemGB resolves the persisted gpu_mem_gb
+	// GPU memory check. StoredMemFloorGB resolves the persisted gpu_mem_gb
 	// to the user's original intent — rolling back the +2GB submit-time
 	// headroom only when the stored value is recognizably (ceiling +
 	// defaultHeadroom) for a known model. A job stored as "82" for "A100
@@ -423,7 +423,7 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 	// (no spurious +2GB cushion at the capacity comparison boundary).
 	jobMemGB := 0
 	if constraints.GPUMemGB > 0 {
-		jobMemGB = vastai.IntendedMemGB(constraints.GPUClass, constraints.GPUMemGB)
+		jobMemGB = vastai.StoredMemFloorGB(constraints.GPUClass, constraints.GPUMemGB)
 	}
 	reuseConstraints := constraints
 	if jobMemGB > 0 {

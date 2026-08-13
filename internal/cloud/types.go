@@ -155,7 +155,7 @@ type Instance struct {
 // someone deciding who enforces it.
 type OfferConstraints struct {
 	GPUClass             string   `axis:"gpu_variant,gpu_sku"` // e.g., "RTX_4090", "A100"
-	MinGPUMemGB          int      `axis:"gpu_memory"`          // minimum per-GPU memory
+	MinGPUMemGB          int      `axis:"gpu_memory"`          // effective per-GPU memory floor; headroom is already applied
 	MaxGPUMemGB          int      `axis:"-"`                   // deprecated; ignored by placement
 	MinDiskGB            int      `axis:"disk"`                // minimum disk space
 	MinReliability       float64  `axis:"reliability"`         // minimum reliability score (0-1)

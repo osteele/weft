@@ -58,8 +58,8 @@ func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host str
 //   - the caller marks the value as already being a hardware floor, or
 //   - (class, memGB) names a known hardware ceiling (gpucatalog.KnownHardwareMemoryGB) —
 //     adding headroom to "A100 80GB" pushes the request above the hardware's
-//     own gpu_ram and excludes every matching offer. The filter-time
-//     EffectiveMemGB resolves the same condition for historical jobs, so
+//     own gpu_ram and excludes every matching offer. The provider-side
+//     StoredMemFloorGB resolves the same condition for historical jobs, so
 //     persisted values are sanitized regardless of which code path created
 //     them.
 func applyGPUMemHeadroom(memGB int, hasExplicitRequest bool, strict bool, hardwareFloor bool, gpuClass string) int {
