@@ -24,8 +24,12 @@ const (
 // authoritative for the lifecycle phase; the timestamps are kept for
 // audit / observability and remain populated by the reconciler.
 type Marker struct {
-	TerminalStatus         string `json:"terminal_status"`
-	TerminationReason      string `json:"termination_reason,omitempty"`
+	TerminalStatus    string `json:"terminal_status"`
+	TerminationReason string `json:"termination_reason,omitempty"`
+	// ProviderInstanceID is populated when provider creation succeeded but
+	// the launch's ordinary provider-ID column could not be written. It makes
+	// the write-ahead intent independently sufficient for crash recovery.
+	ProviderInstanceID     string `json:"provider_instance_id,omitempty"`
 	Phase                  string `json:"phase,omitempty"`
 	JobID                  int64  `json:"job_id,omitempty"`
 	State                  State  `json:"state,omitempty"`

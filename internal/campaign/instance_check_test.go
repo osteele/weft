@@ -1,8 +1,10 @@
 package campaign
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +12,163 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 )
+
+// A reconciler terminal action is one local state transition. If attempt/job
+// cleanup fails, the launch status and execution-target projection must roll
+// back with it.
+func TestExecuteAction_LocalFailureRollsBackTerminalTransition(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "provider-atomicity"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(fmt.Sprintf(`
+		CREATE TRIGGER fail_reconcile_job_reset
+		BEFORE UPDATE ON jobs
+		WHEN OLD.id = %d
+		BEGIN
+			SELECT RAISE(ABORT, 'injected reconcile reset failure');
+		END`, jobID)); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	var destroyCalls atomic.Int32
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		DestroyInstanceFunc: func(string) error {
+			if destroyCalls.Add(1) == 1 {
+				return nil
+			}
+			return cloud.ErrInstanceNotFound
+		},
+	}
+	action := InstanceAction{
+		Kind:              ActionProviderDead,
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonProviderFailure,
+		DestroyProvider:   true,
+		ResetJobs:         true,
+		AttemptOutcome:    db.AttemptOutcomeOrphaned,
+	}
+	reconciled, terminated := ExecuteAction(database, client, launch, action)
+	if reconciled || terminated {
+		t.Fatalf("ExecuteAction = (%v, %v), want rollback result (false, false)", reconciled, terminated)
+	}
+
+	launch, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch after ExecuteAction: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Errorf("launch status = %q, want rollback to %q", launch.Status, db.LaunchStatusRunning)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Errorf("job launch = %v, want rollback to %d", job.LaunchID, instanceID)
+	}
+
+	if _, err := database.Exec(`DROP TRIGGER fail_reconcile_job_reset`); err != nil {
+		t.Fatalf("drop failure trigger: %v", err)
+	}
+	reconciled, terminated = ExecuteAction(database, client, launch, action)
+	if !reconciled || !terminated {
+		t.Fatalf("ExecuteAction retry = (%v, %v), want confirmed absence to finalize", reconciled, terminated)
+	}
+}
+
+func TestExecuteAction_DestroyRequiredWithoutProviderClientFailsClosed(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "runpod",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "pod-unobservable"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	reconciled, terminated := ExecuteAction(database, nil, launch, InstanceAction{
+		Kind:              ActionRunningStalled,
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonInfraFailure,
+		DestroyProvider:   true,
+		ResetJobs:         true,
+		AttemptOutcome:    db.AttemptOutcomeOrphaned,
+	})
+	if reconciled || terminated {
+		t.Fatalf("ExecuteAction = (%v, %v), want no terminal transition without a provider client", reconciled, terminated)
+	}
+	launch, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch after ExecuteAction: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q", launch.Status, db.LaunchStatusRunning)
+	}
+}
+
+func TestExecuteAction_DestroyRequiredWithoutProviderIDFailsClosed(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	reconciled, terminated := ExecuteAction(database, &cloud.MockClient{ProviderVal: cloud.ProviderVastai}, launch, InstanceAction{
+		Kind:              ActionRunningStalled,
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonInfraFailure,
+		DestroyProvider:   true,
+		ResetJobs:         true,
+		AttemptOutcome:    db.AttemptOutcomeOrphaned,
+	})
+	if reconciled || terminated {
+		t.Fatalf("ExecuteAction = (%v, %v), want no terminal transition without a provider instance ID", reconciled, terminated)
+	}
+	launch, err = db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch after ExecuteAction: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q", launch.Status, db.LaunchStatusRunning)
+	}
+}
 
 func TestCheckInstance_GraceExpired_ForceDestroyAfterTimeout(t *testing.T) {
 	// Grace expired well past the shutdown timeout — no termination intent from agent.
@@ -515,6 +674,123 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Error("ResetJobs should be true for failed termination")
+	}
+}
+
+func TestCheckInstance_TerminationIntent_UnknownProviderStillRequiresDestroy(t *testing.T) {
+	action := NewReconciler().CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderErr: errors.New("provider API unavailable"),
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonDiskFull,
+		},
+		Now: time.Now(),
+	})
+
+	if action.Kind != ActionTerminationIntent {
+		t.Fatalf("action.Kind = %v, want ActionTerminationIntent", action.Kind)
+	}
+	if !action.DestroyProvider {
+		t.Fatal("unknown provider state was treated as already destroyed")
+	}
+}
+
+func TestCheckInstance_TerminationIntent_BillableTerminalProviderStillRequiresDestroy(t *testing.T) {
+	for _, status := range []string{cloud.ProviderStatusExited, cloud.ProviderStatusStopped, cloud.ProviderStatusError} {
+		t.Run(status, func(t *testing.T) {
+			action := NewReconciler().CheckInstance(CheckInstanceParams{
+				CI:           &db.Launch{ID: 1, Status: db.LaunchStatusRunning, ProviderInstanceID: "billable-1"},
+				ProviderInst: &cloud.Instance{ProviderID: "billable-1", Status: status},
+				TerminationIntent: &instanceintent.Marker{
+					TerminalStatus: db.LaunchStatusFailed,
+				},
+				Now: time.Now(),
+			})
+			if action.Kind != ActionTerminationIntent || !action.DestroyProvider {
+				t.Fatalf("action = %+v, want termination intent with provider destroy", action)
+			}
+		})
+	}
+}
+
+func TestExecuteAction_BillableTerminalProviderDestroyedBeforeLocalTransition(t *testing.T) {
+	for _, status := range []string{cloud.ProviderStatusExited, cloud.ProviderStatusError} {
+		t.Run(status, func(t *testing.T) {
+			database := setupTestDB(t)
+			launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+			if err != nil {
+				t.Fatalf("CreateLaunch: %v", err)
+			}
+			if err := db.SetLaunchProviderID(database, launchID, "billable-1"); err != nil {
+				t.Fatalf("SetLaunchProviderID: %v", err)
+			}
+			jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+			if err != nil {
+				t.Fatalf("RecordQueuedWithGPU: %v", err)
+			}
+			if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+				t.Fatalf("SetJobLaunchID: %v", err)
+			}
+			ci, _ := db.GetLaunch(database, launchID)
+			action := NewReconciler().CheckInstance(CheckInstanceParams{
+				CI:           ci,
+				ProviderInst: &cloud.Instance{ProviderID: "billable-1", Status: status},
+				TerminationIntent: &instanceintent.Marker{
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonInfraFailure,
+				},
+				Now: time.Now(),
+			})
+			destroyed := false
+			client := &cloud.MockClient{
+				ProviderVal: cloud.ProviderVastai,
+				DestroyInstanceFunc: func(string) error {
+					before, getErr := db.GetLaunch(database, launchID)
+					if getErr != nil {
+						t.Fatalf("GetLaunch during destroy: %v", getErr)
+					}
+					if before.Status != db.LaunchStatusRunning {
+						t.Fatalf("launch status during provider destroy = %q, want running", before.Status)
+					}
+					destroyed = true
+					return nil
+				},
+			}
+			ExecuteAction(database, client, ci, action)
+			if !destroyed {
+				t.Fatal("DestroyInstance was not called for billable terminal provider state")
+			}
+			after, _ := db.GetLaunch(database, launchID)
+			if after.Status != db.LaunchStatusFailed {
+				t.Fatalf("launch status after destroy = %q, want failed", after.Status)
+			}
+			job, _ := db.GetJobByID(database, jobID)
+			if job.Status != db.StatusQueued || job.LaunchID != nil {
+				t.Fatalf("job after transition = status %q launch %v, want queued/unassigned", job.Status, job.LaunchID)
+			}
+		})
+	}
+}
+
+func TestCheckInstance_DudProvider_UnknownMarkerObservationsDoNotProveAbsence(t *testing.T) {
+	launchedAt := time.Now().Add(-dudVastTimeout - time.Minute).Unix()
+	for _, mutate := range []func(*CheckInstanceParams){
+		func(p *CheckInstanceParams) { p.InstancePhaseUnknown = true },
+		func(p *CheckInstanceParams) { p.BootstrapStageUnknown = true },
+	} {
+		params := CheckInstanceParams{
+			CI:  &db.Launch{ID: 1, Status: db.LaunchStatusRunning, LaunchedAt: &launchedAt},
+			Now: time.Now(),
+		}
+		mutate(&params)
+		if action := NewReconciler().CheckInstance(params); action.Kind != ActionNone {
+			t.Fatalf("unknown marker observation produced destructive action: %+v", action)
+		}
 	}
 }
 
@@ -1201,6 +1477,27 @@ func TestCheckInstance_DudProvider_QuietWhenProbeLanded(t *testing.T) {
 	})
 	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
 		t.Fatalf("dud watchdog fired despite probe present: %q", action.StallMessage)
+	}
+}
+
+func TestCheckInstance_DudProvider_QuietWhenHeartbeatTimestampIsCurrent(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	action := NewReconciler().CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-heartbeat",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		Heartbeat:    &HeartbeatSample{Ts: now.Unix()},
+		HeartbeatAge: 0,
+		Now:          now,
+	})
+
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("dud watchdog fired despite a present current-second heartbeat: %q", action.StallMessage)
 	}
 }
 
@@ -2158,6 +2455,86 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 	}
 	if !action.ResetJobs {
 		t.Fatal("expected ResetJobs = true")
+	}
+}
+
+func TestCheckInstance_ProviderUnknownDefersEveryDestructiveLivenessAction(t *testing.T) {
+	kinds := []InstanceActionKind{
+		ActionEmptyStatusTimeout,
+		ActionBootstrapStalled,
+		ActionSetupStalled,
+		ActionRunningStalled,
+		ActionIdleAfterReadyTimeout,
+		ActionTerminalLivePhase,
+		ActionStaleHeartbeat,
+	}
+	providerErr := errors.New("provider status unavailable")
+	for _, kind := range kinds {
+		t.Run(fmt.Sprint(kind), func(t *testing.T) {
+			params := CheckInstanceParams{
+				CI:                       &db.Launch{InstanceType: cloud.InstanceTypeInterruptible},
+				ProviderErr:              providerErr,
+				ProviderStatusUnknownFor: time.Hour,
+			}
+			if !isDestructiveLivenessAction(kind) {
+				t.Fatalf("kind %v missing from destructive liveness policy", kind)
+			}
+			deferred, ok := deferTerminationForUnknownStatus(params, "test watchdog")
+			if !ok || deferred.Kind != ActionDisplayOnly {
+				t.Fatalf("kind %v deferral = (%+v, %v), want display-only", kind, deferred, ok)
+			}
+
+			params.CI.InstanceType = cloud.InstanceTypeOnDemand
+			if _, ok := deferTerminationForUnknownStatus(params, "test watchdog"); ok {
+				t.Fatalf("kind %v deferred for on-demand launch", kind)
+			}
+			params.CI.InstanceType = cloud.InstanceTypeInterruptible
+			params.ProviderStatusUnknownFor = stalePauseTimeout
+			if _, ok := deferTerminationForUnknownStatus(params, "test watchdog"); ok {
+				t.Fatalf("kind %v deferred after bounded unknown window", kind)
+			}
+		})
+	}
+
+	for _, kind := range []InstanceActionKind{ActionTerminationIntent, ActionProviderDead, ActionSelfDestructFailed, ActionGraceExpired, ActionDonorComplete, ActionHedgeCull} {
+		if isDestructiveLivenessAction(kind) {
+			t.Fatalf("positive/non-liveness action %v incorrectly classified as liveness-derived", kind)
+		}
+	}
+}
+
+func TestCheckInstance_ProviderUnknownDefersSetupStallUntilBound(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-2 * time.Hour).Unix()
+	phaseChangedAt := now.Add(-90 * time.Minute)
+	providerErr := errors.New("provider status unavailable")
+	params := CheckInstanceParams{
+		CI: &db.Launch{
+			ID:           1,
+			Status:       db.LaunchStatusRunning,
+			InstanceType: cloud.InstanceTypeInterruptible,
+			LaunchedAt:   &launchedAt,
+		},
+		ProviderErr:              providerErr,
+		ProviderStatusUnknownFor: time.Hour,
+		InstancePhase:            "setup:531",
+		PhaseChangedAt:           &phaseChangedAt,
+		JobState:                 JobState{HasStartedJob: true},
+		Now:                      now,
+	}
+	if action := NewReconciler().CheckInstance(params); action.Kind != ActionDisplayOnly {
+		t.Fatalf("interruptible action = %+v, want bounded display-only deferral", action)
+	}
+
+	params.CI.InstanceType = cloud.InstanceTypeOnDemand
+	if action := NewReconciler().CheckInstance(params); action.Kind != ActionSetupStalled {
+		t.Fatalf("on-demand action = %+v, want setup-stalled adjudication", action)
+	}
+
+	params.CI.InstanceType = cloud.InstanceTypeInterruptible
+	params.ProviderStatusUnknownFor = stalePauseTimeout
+	if action := NewReconciler().CheckInstance(params); action.Kind != ActionSetupStalled {
+		t.Fatalf("bounded interruptible action = %+v, want setup-stalled adjudication", action)
 	}
 }
 

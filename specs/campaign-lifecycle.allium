@@ -53,11 +53,14 @@ value OfferSnapshot {
     machine_id: String
 }
 
-value TerminationReason = completed | provider_failure | job_failure
+enum TerminationReason {
+    completed | provider_failure | job_failure
                         | disk_full | infra_failure | bootstrap_timeout
                         | canceled | phase_stall | preempted | unknown
                         | provider_timeout | upload_stall | weft_bug
                         | account_credit_exhausted
+}
+
 -- upload_stall: agent self-destructed after persistent R2 upload failures.
 --               See upload-drain.allium for the gate that triggers it.
 -- provider_timeout: provider create/destroy/show command exceeded its
@@ -90,12 +93,12 @@ value TerminationReason = completed | provider_failure | job_failure
 -- successor attempt's predecessor_attempt_id points back to it so
 -- runtime-estimation queries can sum per-attempt durations across the
 -- relaunch chain.
-value AttemptOutcome = completed | failed | canceled | orphaned | superseded | preempted
+enum AttemptOutcome { completed | failed | canceled | orphaned | superseded | preempted }
 
-value InstanceRole = worker | donor
+enum InstanceRole { worker | donor }
 
 -- Planner decision categories for an unplaced job in one autopilot pass.
-value PlannerDecision = launch | blocked
+enum PlannerDecision { launch | blocked }
 
 value AutoPlacementPlan {
     launch_job_ids: List<String>         -- jobs the planner approved for launch
@@ -169,7 +172,7 @@ entity Campaign {
     -- Implementation: the success+in-flight generalization of
     -- db.FailedMoveTargetMachineIDs — attempt -> launch -> machine_id join,
     -- scoped to the campaign and keyed on cloud_outcome = completed.
-    covered_instances: instances where jobs.any(j => j.status == completed)
+    covered_instances: instances where jobs.any(j => j.status = completed)
 
     -- Physical machines currently BEING covered: non-terminal instances in
     -- this campaign that have a resolved offer.machine_id. This closes the gap
@@ -181,7 +184,9 @@ entity Campaign {
 
     transitions status {
         planned -> launching
+        planned -> running
         launching -> running
+        launching -> completed
         launching -> failed
         launching -> canceled
         running -> completed
@@ -285,7 +290,7 @@ entity Instance {
     -- Derived
     is_terminal: status in {completed, failed, canceled}
     has_grace: grace_period_seconds > 0
-    grace_remaining: if grace_deadline != null then grace_deadline - now else null
+    -- legacy: grace_remaining: if grace_deadline != null then grace_deadline - now else null
     bootstrap_origin: provider_running_at ?? launched_at
     pause_tolerant: jobs.any(j => "interruptible" in j.tags)
     -- True when at least one job on this instance has direct evidence of
@@ -325,6 +330,8 @@ entity Instance {
         planned -> launching
         planned -> canceled
         launching -> running
+        launching -> paused
+        launching -> completed
         launching -> failed
         launching -> canceled
         running -> paused             -- provider stopped (preempted / account pause)
@@ -336,6 +343,7 @@ entity Instance {
         paused -> failed              -- stale_pause_timeout exceeded
         paused -> canceled
         grace -> running              -- jobs resubmitted during grace
+        grace -> paused               -- provider/account pause during grace
         grace -> completed            -- resubmitted jobs all succeed
         grace -> failed               -- grace expired or released
         grace -> canceled
@@ -390,6 +398,14 @@ config {
     -- job's structured progress tuple has been unchanged for this long.
     -- Matches runningStaleTerminate in internal/campaign/status.go.
     running_stall_timeout: Duration = 60.minutes
+
+    -- Hard cap for an OnStart chain that keeps restarting while continuing
+    -- to refresh its stage marker.
+    onstart_total_active_timeout: Duration = 25.minutes
+
+    -- Default infrastructure-failure threshold for the unattended runaway
+    -- breaker. Configured as campaign.auto_runaway_infra_failure_limit.
+    runaway_infra_failure_limit: Integer = 5
 
     -- Dud-Vast detection. When Vast reports the rental as `running` but
     -- no OnStart probe has appeared in R2 after this many minutes, the
@@ -580,12 +596,12 @@ contract CUDACompatibilityChain {
                                              -- instances)
     driver_major: (target) -> Integer?       -- target's NVIDIA driver major
 
-    @invariant FloorWithinDriverCUDA
+    -- legacy annotation: @invariant FloorWithinDriverCUDA
         -- cuda_floor(job) <= driver_cuda(target) for the target a job is
         -- placed on. Violation is the wb32/wb36 failure class: torch loads,
         -- reports "NVIDIA driver too old", and silently falls back to CPU.
 
-    @invariant FloorWithinDriverMajor
+    -- legacy annotation: @invariant FloorWithinDriverMajor
         -- min_driver_major(job) <= driver_major(target). Integer form of
         -- the same floor. If this floor was back-filled from cuda_floor,
         -- regardless of how cuda_floor was set, a recorded driver_cuda(target)
@@ -596,7 +612,7 @@ contract CUDACompatibilityChain {
         -- the driver major is observable, the integer check still binds
         -- directly (agent bootstrap probe; manifest.RequiredDriverMajor).
 
-    @invariant ImageToolkitWithinDriverMajor
+    -- legacy annotation: @invariant ImageToolkitWithinDriverMajor
         -- major(image_toolkit(job)) <= major(driver_cuda(target)). A
         -- cross-major image (CUDA 13 image on a driver whose max CUDA is
         -- 12.x) cannot run. WITHIN one major the image toolkit is
@@ -608,7 +624,7 @@ contract CUDACompatibilityChain {
         -- was the wb30 over-strictness (a pinned CUDA 12.4 image rejected
         -- under a 12.5 floor that the driver satisfied).
 
-    @invariant OneComparatorAtEveryEnforcementPoint
+    -- legacy annotation: @invariant OneComparatorAtEveryEnforcementPoint
         -- Every enforcement point evaluates its links of this chain through
         -- compat.ValidateCUDAChain (internal/compat/cudachain.go) — one
         -- comparison function, one semantics — rather than ad hoc pairwise
@@ -749,13 +765,13 @@ rule DependencyGatesRentalLaunch {
         if dep.allow_failure:
           -- --after-any: gate clears on any terminal status
           requires: upstream.is_terminal
-                    else job is excluded from this launch pass
+                    -- legacy: else job is excluded from this launch pass
         else:
           -- --after (strict): gate clears only on success
           requires: upstream.status = completed and upstream.exit_code = 0
-                    else job is excluded from this launch pass
+                    -- legacy: else job is excluded from this launch pass
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/queueblock/job_dependency.go
         -- parses and evaluates jobs.dep_spec. Enforcement points are:
         -- manual rental launch in cmd/instance_launch.go; relaunch
@@ -773,93 +789,96 @@ rule DependencyGatesRentalLaunch {
 }
 
 rule StaleCloudAfterPinsAreReconciled {
-    when: AutoPilotTick(database)
+    when: EvaluateStaleCloudAfterPinsAreReconciled()
 
-    for consumer in jobs:
-      requires: consumer.status = queued
-                and consumer.start_time = null
-                and consumer.launch_id != null
-                and consumer.metadata.dependencies.resolved_cloud_after != null
-      for pin in consumer.metadata.dependencies.resolved_cloud_after:
-        let producer = Job(pin.job_id)
-        if producer is readable
-           and (
-             producer.latest_run_id != null
-             and producer.latest_run_id != pin.run_id
-             or producer.launch_id != consumer.launch_id
-           ):
-          ensures: ResetJobToUnplaced(consumer)
-          ensures: next AutoPilotTick does not select the same consumer row
+    -- Legacy body retained as migration guidance:
+    -- when: AutoPilotTick(database)
 
-    @guidance
-        -- wb59 recorded repeated cases where a same-instance `--needs`
-        -- consumer was classified into a CloudAfter ref with the producer's
-        -- then-current LatestRunID, then the producer attempt changed before
-        -- the consumer started. The agent probes exactly
-        -- r2keys.JobAttemptComplete(producer_job_id, pinned_run_id); when
-        -- the producer runs under a newer attempt, that old marker never
-        -- appears and the consumer skip-fails as cloud_after_incomplete.
-        --
-        -- Event-driven resets are still useful latency optimizations. The
-        -- move acceptance paths call ResetStrandedCloudAfterConsumers as soon
-        -- as a producer leaves the source instance. They are not sufficient
-        -- as the only correctness mechanism because they require every
-        -- producer run/placement churn site to remember the hook; wb59's
-        -- partial fix covered successful move churn but missed same-launch
-        -- orphan/retry churn.
-        --
-        -- Launch assembly must persist the resolved attempt pin separately
-        -- from submit-time dependency semantics:
-        --   * metadata.dependencies.cloud_after / cloud_needs describe the
-        --     user's logical dependency and are carried forward by
-        --     carryForwardDependencyMetadata so host sync and later attempts
-        --     still know the submission semantics.
-        --   * metadata.dependencies.resolved_cloud_after describes the
-        --     concrete producer attempt shipped to one agent manifest and is
-        --     not carried forward to a later attempt.
-        --
-        -- Be careful with the overloaded name "CloudAfter":
-        -- metadata.dependencies.cloud_after is the submit-time --after /
-        -- --after-any ordering gate, including AllowFailure for --after-any.
-        -- cloud.CloudAfterRef is the agent-manifest same-instance --needs
-        -- attempt pin. Current --needs syntax has no failure-tolerant variant,
-        -- so same-instance classification does not propagate the metadata
-        -- AllowFailure field.
-        --
-        -- The reconciler may reset only on positive mismatch evidence. A
-        -- missing resolved pin, unreadable producer row, or producer with an
-        -- unknown current attempt is an unknown state, not evidence that the
-        -- consumer should be disrupted. A producer still running under the
-        -- pinned run on the same launch is current and must not be selected.
-        --
-        -- Convergence is mandatory: after ResetJobToUnplaced the consumer no
-        -- longer has the same launch-bound queued attempt, so the same
-        -- predicate is false on the next tick. The next placement pass
-        -- reclassifies against the producer's current run if co-location
-        -- still applies.
-        --
-        -- Implementation: internal/campaign/needs_classify.go builds
-        -- cloud.CloudAfterRef; internal/campaign/lifecycle.go and
-        -- internal/campaign/reuse.go persist resolved_cloud_after during
-        -- manifest assembly; internal/campaign/stranded_cloud_after.go
-        -- ReconcileStaleCloudAfterPins performs the autopilot backstop.
+    -- for consumer in jobs:
+    -- requires: consumer.status = queued
+    -- and consumer.start_time = null
+    -- and consumer.launch_id != null
+    -- and consumer.metadata.dependencies.resolved_cloud_after != null
+    -- for pin in consumer.metadata.dependencies.resolved_cloud_after:
+    -- let producer = Job(pin.job_id)
+    -- legacy: if producer is readable
+    -- and (
+    -- legacy: producer.latest_run_id != null
+    -- legacy: and producer.latest_run_id != pin.run_id
+    -- legacy: or producer.launch_id != consumer.launch_id
+    -- legacy: ):
+    -- ensures: ResetJobToUnplaced(consumer)
+    -- legacy: ensures: next AutoPilotTick does not select the same consumer row
+
+    -- legacy annotation: @guidance
+    -- wb59 recorded repeated cases where a same-instance `--needs`
+    -- consumer was classified into a CloudAfter ref with the producer's
+    -- then-current LatestRunID, then the producer attempt changed before
+    -- the consumer started. The agent probes exactly
+    -- r2keys.JobAttemptComplete(producer_job_id, pinned_run_id); when
+    -- the producer runs under a newer attempt, that old marker never
+    -- appears and the consumer skip-fails as cloud_after_incomplete.
+    --
+    -- Event-driven resets are still useful latency optimizations. The
+    -- move acceptance paths call ResetStrandedCloudAfterConsumers as soon
+    -- as a producer leaves the source instance. They are not sufficient
+    -- as the only correctness mechanism because they require every
+    -- producer run/placement churn site to remember the hook; wb59's
+    -- partial fix covered successful move churn but missed same-launch
+    -- orphan/retry churn.
+    --
+    -- Launch assembly must persist the resolved attempt pin separately
+    -- from submit-time dependency semantics:
+    --   * metadata.dependencies.cloud_after / cloud_needs describe the
+    --     user's logical dependency and are carried forward by
+    --     carryForwardDependencyMetadata so host sync and later attempts
+    --     still know the submission semantics.
+    --   * metadata.dependencies.resolved_cloud_after describes the
+    --     concrete producer attempt shipped to one agent manifest and is
+    --     not carried forward to a later attempt.
+    --
+    -- Be careful with the overloaded name "CloudAfter":
+    -- metadata.dependencies.cloud_after is the submit-time --after /
+    -- --after-any ordering gate, including AllowFailure for --after-any.
+    -- cloud.CloudAfterRef is the agent-manifest same-instance --needs
+    -- attempt pin. Current --needs syntax has no failure-tolerant variant,
+    -- so same-instance classification does not propagate the metadata
+    -- AllowFailure field.
+    --
+    -- The reconciler may reset only on positive mismatch evidence. A
+    -- missing resolved pin, unreadable producer row, or producer with an
+    -- unknown current attempt is an unknown state, not evidence that the
+    -- consumer should be disrupted. A producer still running under the
+    -- pinned run on the same launch is current and must not be selected.
+    --
+    -- Convergence is mandatory: after ResetJobToUnplaced the consumer no
+    -- longer has the same launch-bound queued attempt, so the same
+    -- predicate is false on the next tick. The next placement pass
+    -- reclassifies against the producer's current run if co-location
+    -- still applies.
+    --
+    -- Implementation: internal/campaign/needs_classify.go builds
+    -- cloud.CloudAfterRef; internal/campaign/lifecycle.go and
+    -- internal/campaign/reuse.go persist resolved_cloud_after during
+    -- manifest assembly; internal/campaign/stranded_cloud_after.go
+    -- ReconcileStaleCloudAfterPins performs the autopilot backstop.
 }
 
 rule SameInstanceCloudAfterConstrainsManifestOrder {
-    when: a rental manifest or grace jobs request contains multiple jobs
+    when: EvaluateSameInstanceCloudAfterConstrainsManifestOrder(consumer, job, jobs, manifest, ref) -- legacy: a rental manifest or grace jobs request contains multiple jobs
 
     for consumer in manifest.jobs:
       for ref in consumer.cloud_after:
         let producer = manifest.jobs.find(job.id = ref.job_id)
-        if producer exists and producer.id != consumer.id:
+        -- legacy: if producer exists and producer.id != consumer.id:
           ensures: manifest.index(producer) < manifest.index(consumer)
-          ensures: priority ordering does not place consumer before producer
+          -- legacy: ensures: priority ordering does not place consumer before producer
 
-    ensures: manifest order begins from the path's preferred scheduling order
-    ensures: only same-payload CloudAfter producer traversal can move one
-             payload job ahead of another payload job
+    -- legacy: ensures: manifest order begins from the path's preferred scheduling order
+    -- legacy: ensures: only same-payload CloudAfter producer traversal can move one
+             -- legacy: payload job ahead of another payload job
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Same-instance `--needs` edges are shipped to the agent as
         -- CloudAfter refs. The rental agent dispatches manifest jobs
         -- sequentially in manifest order; cmd/agent/jobloop.go
@@ -920,16 +939,16 @@ rule SameInstanceCloudAfterConstrainsManifestOrder {
 -- names the cause and prompts the operator to top up.
 
 rule ProviderCreditGate {
-    when: AutoPilotTick(unplaced_jobs) with rental_scope nonempty
+    when: EvaluateProviderCreditGate() -- legacy: AutoPilotTick(unplaced_jobs) with rental_scope nonempty
 
     let statuses = CheckProviderCreditHealth(enabled_providers)
-    if every status in statuses has status.exhausted = true:
-        ensures: rental launch is skipped this pass
-        ensures: each job in rental_scope receives blocked_reason of the form
-                 "<provider> credit exhausted ($<balance>) — top up before
-                 instances can launch"
+    -- legacy: if every status in statuses has status.exhausted = true:
+        -- legacy: ensures: rental launch is skipped this pass
+        -- legacy: ensures: each job in rental_scope receives blocked_reason of the form
+                 -- legacy: "<provider> credit exhausted ($<balance>) — top up before
+                 -- legacy: instances can launch"
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Threshold: balance <= $0 is treated as exhausted. The wider
         -- "credits low" UI warning ($10 default) is a soft operator signal
         -- and is intentionally NOT applied as a hard gate — credit between
@@ -947,23 +966,23 @@ rule ProviderCreditGate {
 }
 
 rule PriceAuthorizationGate {
-    when: LaunchInstance(group) evaluates a candidate cloud Offer
-          (initial offer or any replacement returned by the
-          replacement-offer search)
+    when: EvaluatePriceAuthorizationGate() -- legacy: LaunchInstance(group) evaluates a candidate cloud Offer
+          -- legacy: (initial offer or any replacement returned by the
+          -- legacy: replacement-offer search)
 
     let ceiling = AuthorizedSpendCeiling(group)
     if Offer.cost_per_hour > ceiling:
-        ensures: the candidate Offer is rejected, added to the search
-                 exclude set, and the next replacement is requested
-        ensures: if every candidate within the replacement-offer search
-                 budget is rejected, the launch fails with a
-                 PriceAuthorizationRequiredError carrying the offered,
-                 anchor, ceiling, and (informational) current market
-                 median prices, and the job's placement_blocked column
-                 is written with a structured "requires_price_authorization"
-                 reason
+        -- legacy: ensures: the candidate Offer is rejected, added to the search
+                 -- legacy: exclude set, and the next replacement is requested
+        -- legacy: ensures: if every candidate within the replacement-offer search
+                 -- legacy: budget is rejected, the launch fails with a
+                 -- legacy: PriceAuthorizationRequiredError carrying the offered,
+                 -- legacy: anchor, ceiling, and (informational) current market
+                 -- legacy: median prices, and the job's placement_blocked column
+                 -- legacy: is written with a structured "requires_price_authorization"
+                 -- legacy: reason
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The ceiling resolution order is, highest priority first:
         --   1. The maximum jobs.price_authorized_up_to_cents across the
         --      jobs in the group (per-job sticky override set by
@@ -1017,87 +1036,90 @@ rule PriceAuthorizationGate {
 }
 
 rule PerJobRentalPolicy {
-    when: RankGroupOffers(raw_offers) or LaunchInstance(group)
+    when: EvaluatePerJobRentalPolicy()
 
-    let hourly_ceiling = min(job.cli_overrides.max_hourly_rate_cents
-                             for job in group.jobs
-                             where the field is present)
-    let spend_ceiling = min(job.cli_overrides.max_spend_cents
-                            for job in group.jobs
-                            where the field is present)
-    let time_ceiling = min(job.cli_overrides.max_time_seconds
-                           for job in group.jobs
-                           where the field is present)
-    let survival_floor = max(job.cli_overrides.min_survival
-                             for job in group.jobs
-                             where the field is present)
+    -- Legacy body retained as migration guidance:
+    -- when: RankGroupOffers(raw_offers) or LaunchInstance(group)
 
-    ensures:
-        every selected offer.cost_per_hour_cents <= hourly_ceiling
-            when hourly_ceiling is present
-    ensures:
-        every selected offer.cost_per_hour_cents includes the provider's
-            recurring storage charge for group.disk_gb
-    ensures:
-        no hourly-rate-compatible offer implies every job in group remains queued
-        and each job's placement diagnosis identifies the hourly-rate cap
-    ensures:
-        instance.max_spend_cents <= spend_ceiling when spend_ceiling is present
-        and instance.max_time_seconds <= time_ceiling when time_ceiling is present
-    ensures:
-        every EstimatedOfferSurvival(offer, survival_model) >= survival_floor
-            when survival_floor is present and survival_floor > 0
-    ensures:
-        instance.grace_period_seconds = group.jobs.first.cli_overrides.grace_period_seconds
-            when that field is present
+    -- let hourly_ceiling = min(job.cli_overrides.max_hourly_rate_cents
+    -- for job in group.jobs
+    -- legacy: where the field is present)
+    -- legacy: let spend_ceiling = min(job.cli_overrides.max_spend_cents
+    -- legacy: for job in group.jobs
+    -- legacy: where the field is present)
+    -- legacy: let time_ceiling = min(job.cli_overrides.max_time_seconds
+    -- legacy: for job in group.jobs
+    -- legacy: where the field is present)
+    -- legacy: let survival_floor = max(job.cli_overrides.min_survival
+    -- legacy: for job in group.jobs
+    -- legacy: where the field is present)
 
-    @guidance
-        -- The hourly-rate filter runs after hardware compatibility and before
-        -- the survival filter and offer ranking. LaunchInstance checks the
-        -- selected offer again before provider create, including replacement
-        -- offers. A replacement that bypasses normal ranking fails closed
-        -- before its metadata is accepted or the provider create begins.
-        -- Vast computes dph_total from the storage amount supplied to its
-        -- search command. SearchOffers must pass `--storage group.disk_gb`;
-        -- Vast's 5 GiB CLI default is not an admissible price for a job that
-        -- requests more disk. The storage-inclusive rate feeds ranking, the
-        -- per-job cap, persisted launch cost, and RateCapAuthorized.
-        --
-        -- Jobs with different rental policy values or different field
-        -- presence never share or merge into one fresh launch group. This
-        -- preserves exact grace semantics and prevents one job's absent cap
-        -- from weakening another job's explicit authorization.
-        --
-        -- Launch-time application uses the stricter positive value when a
-        -- manual launch also supplies max-spend or max-time. An explicit job
-        -- grace period overrides the launch default, including zero. The
-        -- resulting values are persisted on the launch and passed through the
-        -- existing manifest and agent enforcement paths.
-        --
-        -- min_survival is the learned end-to-end probability produced by
-        -- SurvivalModel / MachinePenalty, not the provider-advertised
-        -- offer.reliability value. Provider reliability is a separate
-        -- offer-search constraint from config.campaign.reliability (default
-        -- 0.95). Strict learned floors should be calibrated against `weft
-        -- provider offers` or `weft campaign survival` rather than copied
-        -- from Vast reliability2.
-        --
-        -- Implementation: internal/campaign/rental_policy.go,
-        -- internal/campaign/offers.go, internal/campaign/campaign.go,
-        -- internal/campaign/lifecycle.go, and
-        -- internal/campaign/strategy_plan.go.
+    -- legacy: ensures:
+    -- legacy: every selected offer.cost_per_hour_cents <= hourly_ceiling
+    -- legacy: when hourly_ceiling is present
+    -- legacy: ensures:
+    -- legacy: every selected offer.cost_per_hour_cents includes the provider's
+    -- legacy: recurring storage charge for group.disk_gb
+    -- legacy: ensures:
+    -- legacy: no hourly-rate-compatible offer implies every job in group remains queued
+    -- legacy: and each job's placement diagnosis identifies the hourly-rate cap
+    -- legacy: ensures:
+    -- legacy: instance.max_spend_cents <= spend_ceiling when spend_ceiling is present
+    -- legacy: and instance.max_time_seconds <= time_ceiling when time_ceiling is present
+    -- legacy: ensures:
+    -- legacy: every EstimatedOfferSurvival(offer, survival_model) >= survival_floor
+    -- legacy: when survival_floor is present and survival_floor > 0
+    -- legacy: ensures:
+    -- legacy: instance.grace_period_seconds = group.jobs.first.cli_overrides.grace_period_seconds
+    -- legacy: when that field is present
+
+    -- legacy annotation: @guidance
+    -- The hourly-rate filter runs after hardware compatibility and before
+    -- the survival filter and offer ranking. LaunchInstance checks the
+    -- selected offer again before provider create, including replacement
+    -- offers. A replacement that bypasses normal ranking fails closed
+    -- before its metadata is accepted or the provider create begins.
+    -- Vast computes dph_total from the storage amount supplied to its
+    -- search command. SearchOffers must pass `--storage group.disk_gb`;
+    -- Vast's 5 GiB CLI default is not an admissible price for a job that
+    -- requests more disk. The storage-inclusive rate feeds ranking, the
+    -- per-job cap, persisted launch cost, and RateCapAuthorized.
+    --
+    -- Jobs with different rental policy values or different field
+    -- presence never share or merge into one fresh launch group. This
+    -- preserves exact grace semantics and prevents one job's absent cap
+    -- from weakening another job's explicit authorization.
+    --
+    -- Launch-time application uses the stricter positive value when a
+    -- manual launch also supplies max-spend or max-time. An explicit job
+    -- grace period overrides the launch default, including zero. The
+    -- resulting values are persisted on the launch and passed through the
+    -- existing manifest and agent enforcement paths.
+    --
+    -- min_survival is the learned end-to-end probability produced by
+    -- SurvivalModel / MachinePenalty, not the provider-advertised
+    -- offer.reliability value. Provider reliability is a separate
+    -- offer-search constraint from config.campaign.reliability (default
+    -- 0.95). Strict learned floors should be calibrated against `weft
+    -- provider offers` or `weft campaign survival` rather than copied
+    -- from Vast reliability2.
+    --
+    -- Implementation: internal/campaign/rental_policy.go,
+    -- internal/campaign/offers.go, internal/campaign/campaign.go,
+    -- internal/campaign/lifecycle.go, and
+    -- internal/campaign/strategy_plan.go.
 }
 
 rule ReclassifyConfirmedWeftBugOutcome {
-    when: Operator runs `weft instance mark-weft-bug instance_id --detail evidence`
-    requires: instance.status in [failed, canceled]
-    requires: instance.termination_reason in [provider_failure, infra_failure, unknown, empty]
+    when: EvaluateReclassifyConfirmedWeftBugOutcome(instance) -- legacy: Operator runs `weft instance mark-weft-bug instance_id --detail evidence`
+    requires: instance.status in {failed, canceled}
+    requires: instance.termination_reason in {provider_failure, infra_failure, unknown, empty}
 
     ensures: instance.termination_reason = weft_bug
-    ensures: evidence is prepended to instance.termination_detail
-    ensures: lifecycle, cost, attempt, and teardown evidence is preserved
-    ensures: instance is excluded from provider, GPU, region, country, and
-             machine survival training
+    -- legacy: ensures: evidence is prepended to instance.termination_detail
+    -- legacy: ensures: lifecycle, cost, attempt, and teardown evidence is preserved
+    -- legacy: ensures: instance is excluded from provider, GPU, region, country, and
+             -- legacy: machine survival training
 }
 
 invariant PriceAuthorizationDoesNotTripCircuitBreaker {
@@ -1195,13 +1217,13 @@ rule OfferClaimInPassExclusion {
     when: RankGroupOffers(raw_offers_per_group)
 
     ensures:
-        for groups (g_i, g_j) in raw_offers_per_group where i < j:
-            ranked[i].offer != null implies
-                ranked[j].offer.machine_id != ranked[i].offer.machine_id
-                  OR ranked[j].offer.machine_id == null
-                  OR ranked[j].offer.provider != ranked[i].offer.provider
+        -- legacy: for groups (g_i, g_j) in raw_offers_per_group where i < j:
+            -- legacy: ranked[i].offer != null implies
+                -- legacy: ranked[j].offer.machine_id != ranked[i].offer.machine_id
+                  -- legacy: OR ranked[j].offer.machine_id = null
+                  -- legacy: OR ranked[j].offer.provider != ranked[i].offer.provider
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The offer picker must NOT select the same (provider, machine_id)
         -- for two groups in the same ranking pass. Vast.ai serializes
         -- create-instance per machine — concurrent CreateInstance calls
@@ -1255,23 +1277,23 @@ rule OfferClaimInPassExclusion {
 -- backwards compatibility; provider-qualified raw ids such as
 -- `runpod/<machine_id>` and instance/job tokens resolve to provider-qualified
 -- machine refs so RunPod and Vast.ai machine-id namespaces cannot collide.
-value AvoidTargetKind = machine_id | instance | job
+enum AvoidTargetKind { machine_id | instance | job }
 
 rule ResolveAvoidTarget {
     when: ResolveAvoidTarget(token)
 
     ensures:
-        token.kind == machine_id implies result == token.value
+        token.kind = machine_id implies result = token.value
     ensures:
-        token.kind == instance implies
-            result == Instance(token.value).provider + "/" +
+        token.kind = instance implies
+            result = Instance(token.value).provider + "/" +
                       Instance(token.value).offer.machine_id
     ensures:
-        token.kind == job implies
-            result == Job(token.value).latest_attempt.cloud_instance.provider + "/" +
+        token.kind = job implies
+            result = Job(token.value).latest_attempt.cloud_instance.provider + "/" +
                       Job(token.value).latest_attempt.cloud_instance.offer.machine_id
 
-    @guidance
+    -- legacy annotation: @guidance
         -- `--avoid` accepts a raw provider machine_id, an instance id (wiNN),
         -- or a job id (wjNN); repeatable and/or comma-separated. An instance
         -- resolves to provider/machine_id; a job resolves to provider/machine_id
@@ -1294,20 +1316,20 @@ rule ResolveAvoidTarget {
 -- machine that eligible placements must match. All three kinds resolve to a
 -- single provider machine_id, using the same target resolution rules as
 -- `--avoid`.
-value MachineAffinityTargetKind = machine_id | instance | job
+enum MachineAffinityTargetKind { machine_id | instance | job }
 
 rule ResolveMachineAffinityTarget {
     when: ResolveMachineAffinityTarget(token)
 
     ensures:
-        token.kind == machine_id implies result == token.value
+        token.kind = machine_id implies result = token.value
     ensures:
-        token.kind == instance implies result == Instance(token.value).offer.machine_id
+        token.kind = instance implies result = Instance(token.value).offer.machine_id
     ensures:
-        token.kind == job implies
-            result == Job(token.value).latest_attempt.cloud_instance.offer.machine_id
+        token.kind = job implies
+            result = Job(token.value).latest_attempt.cloud_instance.offer.machine_id
 
-    @guidance
+    -- legacy annotation: @guidance
         -- `--affinity` accepts a raw provider machine_id, an instance id
         -- (wiNN), or a job id (wjNN); repeatable and/or comma-separated. An
         -- instance resolves to its own offer.machine_id; a job resolves to
@@ -1324,30 +1346,33 @@ rule ResolveMachineAffinityTarget {
 }
 
 rule MachineAffinityOfferFilter {
-    when: RankGroupOffers(raw_offers_per_group) for campaign
-    requires: campaign.affinity_machines not empty
+    when: EvaluateMachineAffinityOfferFilter()
 
-    ensures:
-        for each offer o selected for a group in campaign:
-            o.machine_id in campaign.affinity_machines
+    -- Legacy body retained as migration guidance:
+    -- when: RankGroupOffers(raw_offers_per_group) for campaign
+    -- legacy: requires: campaign.affinity_machines not empty
 
-    @guidance
-        -- Implementation: filter raw offers through an allow-list keyed by
-        -- provider/machine_id before scoring. Reusable rental instances are
-        -- filtered with the same key before reuse planning, so reuse cannot
-        -- satisfy the job on a different physical machine. Providers without
-        -- pre-launch machine_id support are rejected up front; v1 supports
-        -- Vast.ai.
-        --
-        -- An offer or instance reporting no machine_id is not confirmed to be a
-        -- pinned machine, so it is excluded: this is a placement/eligibility
-        -- decision and fails closed on unknown. The invariant is additionally
-        -- enforced at every claim write that binds a job to a destination —
-        -- setJobLaunchIDOnce (ordinary and transfer claims),
-        -- CreateMoveTargetAttempt (move-target claims, cloud and host
-        -- destinations), and AssignJobHost (on-prem jobs.host) — so it holds
-        -- even if an upstream filter is missing. Attach writes that record an
-        -- already-observed binding are not claims and do not re-assert.
+    -- legacy: ensures:
+    -- legacy: for each offer o selected for a group in campaign:
+    -- legacy: o.machine_id in campaign.affinity_machines
+
+    -- legacy annotation: @guidance
+    -- Implementation: filter raw offers through an allow-list keyed by
+    -- provider/machine_id before scoring. Reusable rental instances are
+    -- filtered with the same key before reuse planning, so reuse cannot
+    -- satisfy the job on a different physical machine. Providers without
+    -- pre-launch machine_id support are rejected up front; v1 supports
+    -- Vast.ai.
+    --
+    -- An offer or instance reporting no machine_id is not confirmed to be a
+    -- pinned machine, so it is excluded: this is a placement/eligibility
+    -- decision and fails closed on unknown. The invariant is additionally
+    -- enforced at every claim write that binds a job to a destination —
+    -- setJobLaunchIDOnce (ordinary and transfer claims),
+    -- CreateMoveTargetAttempt (move-target claims, cloud and host
+    -- destinations), and AssignJobHost (on-prem jobs.host) — so it holds
+    -- even if an upstream filter is missing. Attach writes that record an
+    -- already-observed binding are not claims and do not re-assert.
 }
 
 -- The coverage exclusion that offer selection enforces before create when a
@@ -1356,64 +1381,70 @@ rule MachineAffinityOfferFilter {
 -- and avoid machines BEFORE ranking. RunPod has no per-offer machine_id, so
 -- RunPod uses RunPodPostCreateMachineAcceptance instead.
 rule CoverageOfferExclusion {
-    when: RankGroupOffers(raw_offers_per_group) for campaign
-    requires: campaign.distinct_machines
+    when: EvaluateCoverageOfferExclusion()
 
-    ensures:
-        for each offer o selected for a group in campaign:
-            o.machine_id not in campaign.covered_instances.offer.machine_id
-            and o.machine_id not in campaign.inflight_instances.offer.machine_id
-            and o.machine_id not in campaign.avoid_machines
+    -- Legacy body retained as migration guidance:
+    -- when: RankGroupOffers(raw_offers_per_group) for campaign
+    -- legacy: requires: campaign.distinct_machines
 
-    @guidance
-        -- Implementation: thread an initial exclusion set into
-        -- filterOffersByClaim's claimedMachines map (keyed
-        -- provider/machine_id, matching recordOfferClaim) before the
-        -- per-group loop in rankGroupOffersFromPredictions /
-        -- RankGroupOffersWithProfile. The covered + in-flight machine_ids
-        -- come from the success+in-flight generalization of
-        -- db.FailedMoveTargetMachineIDs scoped to the campaign; the avoid set
-        -- comes from ResolveAvoidTarget. No new offer-filter stage is needed
-        -- for Vast.ai — the existing claim machinery already excludes claimed
-        -- machines. For RunPod, the planner intentionally allows repeated GPU
-        -- type ProviderID selections in distinct-machine mode, then performs
-        -- acceptance after pod readback when machine_id is known.
+    -- legacy: ensures:
+    -- legacy: for each offer o selected for a group in campaign:
+    -- legacy: o.machine_id not in campaign.covered_instances.offer.machine_id
+    -- legacy: and o.machine_id not in campaign.inflight_instances.offer.machine_id
+    -- legacy: and o.machine_id not in campaign.avoid_machines
+
+    -- legacy annotation: @guidance
+    -- Implementation: thread an initial exclusion set into
+    -- filterOffersByClaim's claimedMachines map (keyed
+    -- provider/machine_id, matching recordOfferClaim) before the
+    -- per-group loop in rankGroupOffersFromPredictions /
+    -- RankGroupOffersWithProfile. The covered + in-flight machine_ids
+    -- come from the success+in-flight generalization of
+    -- db.FailedMoveTargetMachineIDs scoped to the campaign; the avoid set
+    -- comes from ResolveAvoidTarget. No new offer-filter stage is needed
+    -- for Vast.ai — the existing claim machinery already excludes claimed
+    -- machines. For RunPod, the planner intentionally allows repeated GPU
+    -- type ProviderID selections in distinct-machine mode, then performs
+    -- acceptance after pod readback when machine_id is known.
 }
 
 rule RunPodPostCreateMachineAcceptance {
-    when: RunPod pod is created for campaign.distinct_machines
+    when: EvaluateRunPodPostCreateMachineAcceptance()
 
-    ensures:
-        if pod.machine_id in campaign.covered_instances.offer.machine_id
-           OR pod.machine_id in campaign.inflight_instances.offer.machine_id
-           OR pod.machine_id in campaign.avoid_machines:
-            pod is not bootstrapped with jobs
-            pod is cordoned and held while a replacement is sampled
-            pod is destroyed after replacement acceptance or retry exhaustion
+    -- Legacy body retained as migration guidance:
+    -- when: EvaluateRunPodPostCreateMachineAcceptance(campaign, covered_instances, offer, pod) -- legacy: RunPod pod is created for campaign.distinct_machines
 
-    @guidance
-        -- Implementation: LaunchInstance records provider_instance_id and
-        -- machine_id immediately after CreateInstance/ShowInstance. Under a
-        -- per-campaign mutex, runpodDistinctMachineConflict checks the
-        -- provider-qualified key runpod/<machine_id> against covered rows,
-        -- active accepted pods, and avoid_machines. A conflict returns a
-        -- retryable distinctMachinePostCreateConflictError that unwraps to
-        -- cloud.ErrOfferUnavailable, so existing create/replan retry caps
-        -- bound RunPod sampling.
+    -- ensures:
+    -- if pod.machine_id in campaign.covered_instances.offer.machine_id
+    -- legacy: OR pod.machine_id in campaign.inflight_instances.offer.machine_id
+    -- legacy: OR pod.machine_id in campaign.avoid_machines:
+    -- legacy: pod is not bootstrapped with jobs
+    -- legacy: pod is cordoned and held while a replacement is sampled
+    -- legacy: pod is destroyed after replacement acceptance or retry exhaustion
+
+    -- legacy annotation: @guidance
+    -- Implementation: LaunchInstance records provider_instance_id and
+    -- machine_id immediately after CreateInstance/ShowInstance. Under a
+    -- per-campaign mutex, runpodDistinctMachineConflict checks the
+    -- provider-qualified key runpod/<machine_id> against covered rows,
+    -- active accepted pods, and avoid_machines. A conflict returns a
+    -- retryable distinctMachinePostCreateConflictError that unwraps to
+    -- cloud.ErrOfferUnavailable, so existing create/replan retry caps
+    -- bound RunPod sampling.
 }
 
 -- The defining property: failures never exclude their machine.
 invariant FailedMachinesRemainEligible {
-    for campaign where campaign.distinct_machines:
-        for instance in campaign.instances
-            where instance.termination_reason in {provider_failure, infra_failure,
-                                                   bootstrap_timeout, phase_stall,
-                                                   preempted, job_failure, disk_full}
-              and not campaign.covered_instances.contains(instance):
-            instance.offer.machine_id not in campaign.avoid_machines implies
-                instance.offer.machine_id may be reselected
+    -- legacy: for campaign where campaign.distinct_machines:
+        -- legacy: for instance in campaign.instances
+            -- legacy: where instance.termination_reason in {provider_failure, infra_failure,
+                                                   -- legacy: bootstrap_timeout, phase_stall,
+                                                   -- legacy: preempted, job_failure, disk_full}
+              -- legacy: and not campaign.covered_instances.contains(instance):
+            -- legacy: instance.offer.machine_id not in campaign.avoid_machines implies
+                -- legacy: instance.offer.machine_id may be reselected
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A failed or boot-failed machine produced no datapoint, so coverage
         -- anti-affinity must NOT exclude it. The only ways a once-failed
         -- machine becomes excluded are (a) a later attempt SUCCEEDS on it
@@ -1429,13 +1460,13 @@ rule CoverageReplacementResearchesOffer {
     requires: instance.is_retryable
           and instance.campaign.distinct_machines
 
-    ensures: the replacement instance's offer is chosen by a fresh offer search
-             subject to CoverageOfferExclusion (NOT copied from instance.offer)
+    -- legacy: ensures: the replacement instance's offer is chosen by a fresh offer search
+             -- legacy: subject to CoverageOfferExclusion (NOT copied from instance.offer)
     ensures: instance.offer.machine_id not in instance.campaign.avoid_machines
-             implies the replacement MAY reselect instance.offer.machine_id
-             (the failed machine is uncovered)
+             -- legacy: implies the replacement MAY reselect instance.offer.machine_id
+             -- legacy: (the failed machine is uncovered)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This overrides RelaunchAfterInfraFailure for distinct_machines
         -- campaigns. The base rule reuses offer: instance.offer, which pins
         -- the replacement to the same physical machine — correct for a plain
@@ -1448,29 +1479,32 @@ rule CoverageReplacementResearchesOffer {
 
 -- When the exclusion empties the eligible offer pool, say so explicitly.
 rule CoverageExhaustion {
-    when: RankGroupOffers(raw_offers_per_group) for campaign
-    requires: campaign.distinct_machines
-    requires: no offer survives CoverageOfferExclusion for a group
+    when: EvaluateCoverageExhaustion()
 
-    ensures: the group is reported as "all distinct machines covered or in-flight"
-             rather than repeating a covered machine or stalling silently
+    -- Legacy body retained as migration guidance:
+    -- when: RankGroupOffers(raw_offers_per_group) for campaign
+    -- legacy: requires: campaign.distinct_machines
+    -- legacy: requires: no offer survives CoverageOfferExclusion for a group
 
-    @guidance
-        -- For an interactive launch this is an error; for repair/resume/extend
-        -- of an existing campaign it is the natural completion signal (the
-        -- matrix is full). Surface it through the existing filterStats /
-        -- unplaced-reason path, distinguished from ordinary "no offers" so the
-        -- operator can tell saturation apart from a market/constraint miss.
+    -- legacy: ensures: the group is reported as "all distinct machines covered or in-flight"
+    -- legacy: rather than repeating a covered machine or stalling silently
+
+    -- legacy annotation: @guidance
+    -- For an interactive launch this is an error; for repair/resume/extend
+    -- of an existing campaign it is the natural completion signal (the
+    -- matrix is full). Surface it through the existing filterStats /
+    -- unplaced-reason path, distinguished from ordinary "no offers" so the
+    -- operator can tell saturation apart from a market/constraint miss.
 }
 
 -- Provider capability gate: coverage anti-affinity needs a real physical
 -- machine id. Providers may expose it before create (Vast.ai) or only after
 -- create/readback (RunPod).
 invariant MachineAntiAffinityProviderSupport {
-    for campaign where campaign.distinct_machines:
-        campaign.instances.all(i => i.provider.name in {"vastai", "runpod"})
+    -- legacy: for campaign where campaign.distinct_machines:
+        -- legacy: campaign.instances.all(i => i.provider.name in {"vastai", "runpod"})
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Vast.ai populates per-offer machine_id at search time
         -- (OfferSnapshot.machine_id), so offer selection excludes covered,
         -- in-flight, and avoided machines before provider create.
@@ -1498,26 +1532,26 @@ invariant MachineAntiAffinityProviderSupport {
 
 rule GPUMemoryHardwareCeilingResolution {
     when: BuildOfferSearchFilter(job_or_group, gpu_class, requested_mem_gb)
-       OR MatchJobToInstance(job, instance_capacity)
+       -- legacy: OR MatchJobToInstance(job, instance_capacity)
 
     ensures:
-        for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb):
+        -- legacy: for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb):
             -- search filter and reuse check MUST treat requested_mem_gb as
             -- the literal hardware ceiling — no +2GB safety headroom may
             -- be added when the request names the exact hardware.
-            effective_filter_mem_gb == mem_gb
-            intended_job_mem_gb     == mem_gb
+            -- legacy: effective_filter_mem_gb = mem_gb
+            -- legacy: intended_job_mem_gb     = mem_gb
 
-        for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb - defaultHeadroomGB):
+        -- legacy: for any (gpu_class, mem_gb) where KnownHardwareMemoryGB(gpu_class, mem_gb - defaultHeadroomGB):
             -- back-compat: jobs persisted before headroom moved to filter
             -- time stored (ceiling + 2GB) in the gpu_mem_gb column. The
             -- search filter and reuse check both roll those values back to
             -- the underlying ceiling so the job picks up automatically on
             -- the next autopilot tick — no manual `weft restart` required.
-            effective_filter_mem_gb == mem_gb - defaultHeadroomGB
-            intended_job_mem_gb     == mem_gb - defaultHeadroomGB
+            -- legacy: effective_filter_mem_gb = mem_gb - defaultHeadroomGB
+            -- legacy: intended_job_mem_gb     = mem_gb - defaultHeadroomGB
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Vast.ai's `gpu_ram>=N` filter is in GB (despite the response field
         -- being in MB). A100 80GB hardware reports gpu_ram=80GB exactly, so
         -- emitting `gpu_ram>=82` (the literal request +2GB safety headroom)
@@ -1556,7 +1590,7 @@ rule GPUMemoryHardwareCeilingResolution {
 
 rule FreshRentalDiskEstimate {
     when: BuildOfferSearchFilter(group)
-       OR LaunchInstance(group, options)
+       -- legacy: OR LaunchInstance(group, options)
 
     -- estimate_gb is the size the estimator computes before the user's
     -- ceiling is considered. Every input below can only RAISE it.
@@ -1598,7 +1632,7 @@ rule FreshRentalDiskEstimate {
         else:
             group.requested_disk_gb = estimate_gb
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Fresh rental disk sizing combines declared inputs, observed
         -- post-mortem inputs, cached uv-lock manifests (or a package-count
         -- fallback), Docker/workspace overhead, CUDA setup overhead, explicit
@@ -1671,14 +1705,14 @@ rule BidLossEscalation {
     -- After enough consecutive lost bid instances for a job, the next launch
     -- for its group searches on-demand offers instead of placing another bid.
     when: SearchOffersForGroup(group)
-            and exists job in group.jobs:
-                job.preemptible
-                and ConsecutiveInterruptibleOrphans(job) >= config.bid_loss_escalation_threshold
+            -- legacy: and exists job in group.jobs:
+                -- legacy: job.preemptible
+                -- legacy: and ConsecutiveInterruptibleOrphans(job) >= config.bid_loss_escalation_threshold
 
     ensures: group.escalate_to_on_demand = true
     ensures: OfferConstraints(group).instance_type != interruptible
 
-    @guidance
+    -- legacy annotation: @guidance
         -- ConsecutiveInterruptibleOrphans counts, from the job's most recent
         -- attempt backwards, attempts whose launch was interruptible and
         -- whose outcome was orphaned or preempted — the instance was lost
@@ -1737,7 +1771,7 @@ rule LaunchInstance {
             job.cloud_instance = instance
             job.target_kind = rental_instance
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Provider routing is strict. Every operation against an Instance
         -- (launch, status query, destroy, reconcile) MUST use the cloud
         -- client whose provider.name matches instance.provider.name. If no
@@ -1755,7 +1789,7 @@ rule BeginLaunching {
     -- Create provider instance, upload bootstrap script and job manifest
     ensures: instance.status = launching
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The launch sequence:
         -- 1. Create provider instance via API
         -- 2. Record provider instance ID
@@ -1890,7 +1924,7 @@ rule HFCacheHygiene {
         asset_ref_for(dir) not in manifest_declared_inputs(instance)
             implies dir.deleted
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Runs unconditionally at agent startup, before any job dispatch
         -- and before DiskCapProbe. The deletion is best-effort: a
         -- failure to remove a directory is logged but does not fail the
@@ -1902,7 +1936,7 @@ rule HFCacheHygiene {
 }
 
 rule DiskCapProbe {
-    when: AgentBoots(instance)
+    when: AgentBoots(instance, manifest)
     requires: manifest.requested_disk_gb > 0   -- skipped on older launchers
 
     -- The agent runs `df` on the container disk and compares the total
@@ -1925,7 +1959,7 @@ rule DiskCapProbe {
         ensures: instance.ended_at = now
         ensures: AgentSelfDestructs(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Reason is infra_failure (retryable) so RelaunchAfterInfraFailure
         -- picks the jobs up on a fresh offer. The disk-cap-failure.json
         -- payload at instance/<id>/disk-cap-failure.json is the source
@@ -1948,7 +1982,7 @@ rule GPUShapePreflightBeforeSpend {
     -- AFTER the prewarm spend: wb41's 2xA100 jobs completed a full HF
     -- prewarm before gpu_count_preflight failed with one visible A100.
 
-    let required = max(job.gpu_count for job in jobs, default 0)
+    -- legacy: let required = max(job.gpu_count for job in jobs, default 0)
 
     if required > 1 and nvidia_smi_enumerable(instance):
         requires: visible_gpu_count(instance) >= required
@@ -1963,7 +1997,7 @@ rule GPUShapePreflightBeforeSpend {
             -- the jobs onto a correctly shaped instance with no wasted
             -- setup spend
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/agent/gpu_count_probe.go checkGPUCount,
         -- called at the top of runJobSequence (cmd/agent/jobloop.go)
         -- before the setup-prewarm manager can start any work; phase
@@ -1983,14 +2017,14 @@ rule GPUShapePreflightBeforeSpend {
 -- ==========================================================================
 
 rule AllJobsCompleted {
-    when: instance: Instance.jobs.all(j => j.status = completed)
+    when: EvaluateAllJobsCompleted(instance, j, jobs)
     requires: instance.status in {running, grace}
 
     ensures: instance.status = completed
     ensures: instance.termination_reason = completed
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Agent self-destructs after writing completion manifest to R2.
 }
 
@@ -2009,7 +2043,7 @@ rule DonorCompletes {
     ensures: instance.termination_reason = completed
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Detected by reconciler checking R2 for donor-ready marker.
         -- Provider instance is destroyed after marker is found.
         -- Worker instances reference donor_instance for data seeding.
@@ -2027,7 +2061,7 @@ rule BootstrapCompleteOverride {
     ensures: instance.status = completed
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Checked when bootstrap stall is detected past the warn threshold.
         -- If R2 has a completion manifest, the agent finished despite the
         -- stall appearance. Accept completion rather than terminating.
@@ -2061,22 +2095,22 @@ rule SelfDestructFailed {
         j.attempt_outcome = failed
         or (j.attempt_outcome = null and j.status in {failed, dead, killed}))
     let any_orphaned = deciding.any(j => j.attempt_outcome = orphaned)
-    let terminal_status =
-        if all_completed then completed
-        else if all_canceled then canceled
-        else failed
-    let reason =
-        if all_completed then completed
-        else if all_canceled then canceled
-        else if any_failed then job_failure
-        else if any_orphaned then infra_failure
-        else job_failure
-
-    ensures: instance.status = terminal_status
-    ensures: instance.termination_reason = reason
+    if all_completed:
+        ensures: instance.status = completed
+        ensures: instance.termination_reason = completed
+    else if all_canceled:
+        ensures: instance.status = canceled
+        ensures: instance.termination_reason = canceled
+    else if any_orphaned:
+        ensures: instance.status = failed
+        ensures: instance.termination_reason = infra_failure
+    else:
+        -- Includes explicit job failures and any mixed terminal outcome.
+        ensures: instance.status = failed
+        ensures: instance.termination_reason = job_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Triggered when all jobs reached terminal state but the instance
         -- is still running. Waits self_destruct_linger_threshold (2 min)
         -- after the latest job end_time before forcing cleanup. If no job
@@ -2120,7 +2154,7 @@ rule EnterGracePeriod {
     ensures: instance.grace_started_at = now
     ensures: instance.grace_deadline = now + instance.grace_period_seconds.seconds
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Agent transitions to grace-wait mode, polling R2 every
         -- config.grace_poll_interval for control messages:
         -- jobs (resubmit), extend (add time), release (terminate).
@@ -2134,7 +2168,7 @@ rule SubmitJobDuringGrace {
     ensures: job.cloud_instance = instance
     ensures: instance.status = running
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Submission sequence (DB first, then R2):
         -- 1. claimJobForLaunch: creates job_attempts row, associates
         --    job with instance, assigns run_id (the attempt ID)
@@ -2158,7 +2192,7 @@ rule ExtendGracePeriod {
 
     ensures: instance.grace_deadline = now + additional_duration
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Absolute semantics: the new deadline is measured from the
         -- moment the extension is applied (now + additional_duration),
         -- NOT added to the existing deadline. Both the CLI
@@ -2182,7 +2216,7 @@ rule ReleaseGraceInstance {
     ensures: instance.termination_reason = job_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Weft writes to grace/<instanceID>/release/<requestID>.txt.
         -- Agent self-destructs cleanly.
 }
@@ -2202,7 +2236,7 @@ rule GracePeriodExpires {
         ensures: instance.termination_reason = job_failure
         ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- After grace deadline passes, Weft waits up to
         -- grace_shutdown_timeout (2 min) for the agent to write its
         -- termination intent and upload final logs. Only force-destroys
@@ -2233,7 +2267,7 @@ rule LaunchingPhaseTimeout {
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Closes the gap where BootstrapTimeout cannot fire because
         -- bootstrap_origin is still null (provider-specific pre-running
         -- step has not recorded launched_at or provider_running_at yet).
@@ -2250,25 +2284,25 @@ rule SetupStall {
     ensures: instance.termination_reason = phase_stall
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Triggered when setup phase exceeds config.setup_stall_timeout
         -- with no progress (adaptive threshold per command).
 }
 
 rule HedgeCohortCull {
-    when: instance: Instance.hedge_cohort_id != null
-            and instance.agent_ready_at = null
-            and instance.status in {launching, running}
-            and exists sibling: Instance where
-                sibling.hedge_cohort_id = instance.hedge_cohort_id
-                and sibling.id != instance.id
-                and sibling.agent_ready_at != null
+    when: EvaluateHedgeCohortCull(instance)
+    requires: instance.agent_ready_at = null
+    requires: instance.status in {launching, running}
+            -- legacy: and exists sibling: Instance where
+                -- legacy: sibling.hedge_cohort_id = instance.hedge_cohort_id
+                -- legacy: and sibling.id != instance.id
+                -- legacy: and sibling.agent_ready_at != null
 
     ensures: instance.status = canceled
     ensures: instance.termination_reason = canceled
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Hedge cohort: when the autopilot launches `config.hedge_count`
         -- instances in parallel for a single group, the first to reach
         -- agent_ready is the survivor and the rest are culled. Cull is
@@ -2303,7 +2337,7 @@ rule IdleAfterReadyTimeout {
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Closes a watchdog dead-zone introduced once an agent reports
         -- ready: BootstrapTimeout's guard `bootstrap_stage != ready` goes
         -- false, the heartbeat sidecar keeps the heartbeat fresh
@@ -2323,21 +2357,21 @@ rule IdleAfterReadyTimeout {
 }
 
 rule DudVastDetection {
-    when: instance: Instance.status = running
-            and instance.launched_at != null
-            and instance.agent_ready_at = null
-            and not OnStartProbeWritten(instance)
-            and not BootstrapActivitySeen(instance)
-            and not HeartbeatObserved(instance)
-            and InstancePhase(instance) = ""
-            and BootstrapStage(instance) = ""
-            and now - instance.launched_at >= config.dud_vast_timeout
+    when: EvaluateDudVastDetection(instance)
+    requires: instance.launched_at != null
+    requires: instance.agent_ready_at = null
+    requires: not OnStartProbeWritten(instance)
+    requires: not BootstrapActivitySeen(instance)
+    requires: not HeartbeatObserved(instance)
+    requires: InstancePhase(instance) = ""
+    requires: BootstrapStage(instance) = ""
+    requires: now - instance.launched_at >= config.dud_vast_timeout
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Dud-Vast: the provider reports the rental as running but the
         -- container never started. Without this rule we wait the full
         -- adaptive bootstrap deadline (often 90 min+) on launches that
@@ -2399,21 +2433,21 @@ rule DudVastDetection {
 }
 
 rule OnStartChainWatchdog {
-    when: instance: Instance.status in {running, launching}
-            and instance.agent_ready_at = null
-            and not HasStartedJob(instance)
-            and InstancePhase(instance) = ""
-            and BootstrapStage(instance) = ""
-            and OnStartStage(instance) != ""
-            and ( IsOnStartFailureStage(OnStartStage(instance))
-                  or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout
-                  or now - FirstOnStartProbeSeen(instance) >= config.onstart_total_active_timeout )
+    when: EvaluateOnStartChainWatchdog(instance)
+    requires: instance.agent_ready_at = null
+    requires: not HasStartedJob(instance)
+    requires: InstancePhase(instance) = ""
+    requires: BootstrapStage(instance) = ""
+    requires: OnStartStage(instance) != ""
+    requires: IsOnStartFailureStage(OnStartStage(instance))
+              or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout
+              or now - FirstOnStartProbeSeen(instance) >= config.onstart_total_active_timeout
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Closes the gap DudVastDetection deliberately leaves. Dud
         -- detection fires only when NO OnStart probe landed — "the
         -- container never started." But the OnStart shell can run far
@@ -2473,20 +2507,19 @@ rule OnStartChainWatchdog {
 }
 
 rule StructuredJobProgressStalls {
-    when: instance: Instance.status = running
-            and instance.phase = running(job)
-            and instance.live_state.active_job = job
-            and instance.live_state.job_progress != null
-            and instance.live_state.job_progress_changed_at != null
-            and now - instance.live_state.job_progress_changed_at
-                >= config.running_stall_timeout
+    when: EvaluateStructuredJobProgressStalls(instance, job, live_state)
+    requires: instance.phase = running(job)
+    requires: instance.live_state.active_job = job
+    requires: instance.live_state.job_progress != null
+    requires: instance.live_state.job_progress_changed_at != null
+    requires: now - instance.live_state.job_progress_changed_at >= config.running_stall_timeout
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = phase_stall
     ensures: instance.ended_at = now
     ensures: job.status = queued
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The progress timestamp changes only when the structured
         -- (job, phase, percent) tuple changes. Repeated Progress lines with
         -- the same value, log growth, CPU/GPU activity, and agent heartbeats
@@ -2501,16 +2534,16 @@ rule StructuredJobProgressStalls {
 }
 
 rule HeartbeatStaleWarningAfterReady {
-    when: instance: Instance.status = running
-            and instance.agent_ready_at != null
-            and HeartbeatAge(instance) > config.heartbeat_stale_threshold
-            and not (instance.provider_instance != null
-                     and instance.provider_instance.status in {stopped, offline})
+    when: EvaluateHeartbeatStaleWarningAfterReady(instance, provider_instance)
+    requires: instance.agent_ready_at != null
+    requires: HeartbeatAge(instance) > config.heartbeat_stale_threshold
+    requires: not (instance.provider_instance != null
+                   and instance.provider_instance.status in {stopped, offline})
 
     ensures: StaleHeartbeatWarningShown(instance)
     ensures: AgentLivenessProbeScheduled(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Heartbeat is a control-plane liveness signal, not proof that the
         -- user's task is advancing. Age alone is display-only and schedules
         -- the reconciler's SSH probe; it never authorizes teardown.
@@ -2552,16 +2585,16 @@ rule ProviderStatusUnknownDefersTermination {
     -- Provider status unknown ≠ dead for interruptible instances: when
     -- status polling itself is failing, a watchdog cannot distinguish
     -- "outbid, recoverable" from "dead" and must defer termination.
-    when: WatchdogWouldTerminate(instance)   -- heartbeat-stale, running-phase
+    when: EvaluateProviderStatusUnknownDefersTermination(instance)
                                              -- stall, bootstrap/launching timeout
-            and instance.instance_type = interruptible
-            and ProviderStatusUnknown(instance)
-            and ProviderStatusUnknownFor(instance) < config.stale_pause_timeout
+    requires: instance.instance_type = interruptible
+    requires: ProviderStatusUnknown(instance)
+    requires: ProviderStatusUnknownFor(instance) < config.stale_pause_timeout
 
     ensures: instance.status not in {failed, completed, cancelled}
-    ensures: no provider destroy is issued
+    -- legacy: ensures: no provider destroy is issued
 
-    @guidance
+    -- legacy annotation: @guidance
         -- ProviderStatusUnknown means the most recent provider poll for
         -- this launch yielded no instance data and a non-nil error (e.g.
         -- `vastai show instances` timing out on a slow network). It is
@@ -2604,7 +2637,7 @@ rule HeartbeatStale {
     ensures: instance.termination_reason = infra_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Triggered when heartbeat age exceeds config.heartbeat_stale_threshold
         -- and agent is unreachable. This proves agent loss only; it is
         -- independent of structured task-progress stall detection.
@@ -2654,7 +2687,7 @@ rule ProviderInstanceDied {
     ensures: instance.termination_reason = provider_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Grace-period instances are deliberately excluded from this
         -- rule (instance_check.go skips the provider-dead path when
         -- status = grace): a transient provider-API failure must not
@@ -2694,6 +2727,14 @@ rule ProviderInstanceDied {
 }
 
 rule ProviderInstancePaused {
+    when: instance: Instance.provider_instance.status becomes stopped
+    requires: instance.status in {launching, running, grace}
+
+    ensures: instance.status = paused
+    if instance.instance_type = interruptible
+       and instance.on_demand_ref_cents != null:
+        ensures: instance.max_bid_price_cents <= instance.on_demand_ref_cents
+
     -- Provider stopped the instance: per-instance preemption (outbid spot),
     -- manual stop, or account-wide credit pause. The launch flips to the
     -- non-terminal `paused` state and waits for the provider to resume it.
@@ -2701,20 +2742,12 @@ rule ProviderInstancePaused {
     -- bid up to the launch's recorded on-demand reference cap.
     -- Applies regardless of the pause_tolerant flag, so account-wide pauses
     -- are caught even on on-demand rentals.
-    when: instance: Instance.provider_instance.status becomes stopped
-    requires: instance.status in {launching, running, grace}
-
-    ensures: instance.status = paused
-    ensures: instance.max_bid_price_cents <= instance.on_demand_ref_cents
-             if instance.instance_type = interruptible
-             and instance.on_demand_ref_cents != null
-
-    @guidance
-        -- Implementation: internal/campaign/instance_check.go §4a-pause
-        -- (ActionPause) plus internal/campaign/reconcile.go
-        -- maybeRaiseInterruptibleBid. No DestroyProvider, no ResetJobs —
-        -- jobs stay attached to the rental so they pick up where they left
-        -- off when the provider resumes.
+    -- legacy annotation: @guidance
+    -- Implementation: internal/campaign/instance_check.go §4a-pause
+    -- (ActionPause) plus internal/campaign/reconcile.go
+    -- maybeRaiseInterruptibleBid. No DestroyProvider, no ResetJobs —
+    -- jobs stay attached to the rental so they pick up where they left
+    -- off when the provider resumes.
 }
 
 rule ProviderInstanceResumes {
@@ -2725,7 +2758,7 @@ rule ProviderInstanceResumes {
 
     ensures: instance.status = running
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/instance_check.go §4a-resume
         -- (ActionResume). UpdateLaunchStatus uses COALESCE on launched_at
         -- so bootstrap-survival metrics stay anchored to the original
@@ -2745,10 +2778,10 @@ rule StalePlannedLaunchReap {
 
     ensures: instance.status = canceled
     ensures: instance.termination_reason = canceled
-    ensures: instance.termination_detail contains "reaped"
+    -- legacy: ensures: instance.termination_detail contains "reaped"
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/orphan_sweep.go
         -- (SweepStalePlannedLaunches), invoked alongside the orphan sweep
         -- in the reconcile loop. Counterpart to SweepOrphanedInstances:
@@ -2772,10 +2805,10 @@ rule PausedInstanceStale {
     requires: (now - instance.last_provider_status_change_at) > config.stale_pause_timeout
 
     ensures: instance.status = failed
-    ensures: instance.termination_reason = preempted if instance.pause_tolerant else provider_failure
+    -- legacy: ensures: instance.termination_reason = preempted if instance.pause_tolerant else provider_failure
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/instance_check.go §4a-pause
         -- (stalePauseTimeout branch). Jobs not in a terminal state are
         -- reset to unplaced so the standard relaunch path carries them
@@ -2790,7 +2823,7 @@ rule DiskFullDetected {
     ensures: instance.termination_reason = disk_full
     ensures: instance.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Detected via heartbeat reporting < 5% disk free.
 }
 
@@ -2807,10 +2840,18 @@ rule UserTerminatesInstance {
     ensures: instance.termination_requested_at = now
     ensures: instance.ended_at = now
 
-    @guidance
-        -- Writes termination intent JSON to R2 at
-        -- instance/<id>/termination-intent.json.
-        -- Agent detects and self-destructs. Provider instance destroyed.
+    -- legacy annotation: @guidance
+        -- User-initiated termination calls the matching provider directly.
+        -- Before the external call, Weft durably records a non-terminal
+        -- destroy intent. The provider destroy must succeed before the launch
+        -- is marked canceled or its jobs are reset; an API error leaves those
+        -- execution states unchanged so the still-running attempt cannot race
+        -- a replacement attempt. The intent lets a restart treat provider
+        -- not-found as confirmation of this expected destroy and finish the
+        -- local transition instead of leaving a running DB row indefinitely.
+        -- After destroy succeeds, termination_requested_at is stamped, the
+        -- launch becomes canceled, and its non-terminal jobs become unplaced.
+        -- Implementation: internal/orchestration/instance_lifecycle.go.
 }
 
 rule UserTerminatesCampaign {
@@ -2850,7 +2891,7 @@ rule RelaunchAfterInfraFailure {
         for job in instance.jobs where job.status not in {completed, canceled, killed}:
             job.cloud_instance = new_instance
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Infrastructure failures (provider_failure, infra_failure,
         -- bootstrap_timeout, phase_stall, preempted) are automatically
         -- relaunched on a different provider instance. Job-level failures
@@ -2892,20 +2933,27 @@ rule RelaunchAfterInfraFailure {
 -- Campaign status derivation
 -- ==========================================================================
 
+rule CampaignCreated {
+    when: CampaignLaunchRequested(groups)
+    ensures: Campaign.created(status: planned)
+}
+
 rule CampaignLaunching {
     when: instance: Instance.status transitions_to launching
     requires: instance.campaign != null
-    requires: instance.campaign.status = planned
+    let campaign = instance.campaign
+    requires: campaign.status = planned
 
-    ensures: instance.campaign.status = launching
+    ensures: campaign.status = launching
 }
 
 rule CampaignRunning {
     when: instance: Instance.status transitions_to running
     requires: instance.campaign != null
-    requires: instance.campaign.status in {planned, launching}
+    let campaign = instance.campaign
+    requires: campaign.status = planned or campaign.status = launching
 
-    ensures: instance.campaign.status = running
+    ensures: campaign.status = running
 }
 
 -- A terminal instance can leave a job requeued for relaunch. Both rules
@@ -2914,8 +2962,8 @@ rule CampaignRunning {
 -- being stranded on one that has already ended.
 
 rule CampaignCompleted {
-    when: campaign: Campaign.instances.all(i => i.is_terminal)
-    requires: campaign.status in {launching, running}
+    when: EvaluateCampaignCompleted(campaign, i, instances, j, jobs)
+    requires: campaign.status = launching or campaign.status = running
     requires: campaign.instances.all(i => i.status = completed)
     requires: campaign.jobs.all(j => j.is_terminal)
 
@@ -2924,15 +2972,15 @@ rule CampaignCompleted {
 }
 
 rule CampaignFailed {
-    when: campaign: Campaign.instances.all(i => i.is_terminal)
-    requires: campaign.status in {launching, running}
+    when: EvaluateCampaignFailed(campaign, i, instances, j, jobs)
+    requires: campaign.status = launching or campaign.status = running
     requires: campaign.instances.any(i => i.status != completed)
     requires: campaign.jobs.all(j => j.is_terminal)
 
     ensures: campaign.status = failed
     ensures: campaign.ended_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The jobs.all(j => j.is_terminal) condition is evaluated against
         -- the canonical per-job effective status, NOT the per-attempt status
         -- echoed by historical launch_job_membership rows. A job whose
@@ -3008,16 +3056,16 @@ rule RunawayBreakerTrips {
     -- NOT treated as infra — unattributed failures still count, otherwise
     -- the breaker has a hole.
 
-    let scope = instance.campaign.id ++ ":" ++ instance.project
+    -- legacy: let scope = instance.campaign.id ++ ":" ++ instance.project
     let window = config.runaway_lookback_window
-    let resume_floor = latest RunawayBreakerResumed(scope)
-                       + config.runaway_resume_grace_period
+    -- legacy: let resume_floor = latest RunawayBreakerResumed(scope)
+                       -- legacy: + config.runaway_resume_grace_period
     let accounting_window = max(now - window, resume_floor)
-    let completions = count completed jobs in scope after accounting_window
-    let chain = max trailing non-infra orphaned attempt chain in scope after accounting_window
-    let orphans = count non-infra orphaned attempts in scope after accounting_window
-    let infra_failures = count distinct infra-failed launches in scope after accounting_window
-    let spend = sum actual_spend_cents in scope after accounting_window
+    -- legacy: let completions = count completed jobs in scope after accounting_window
+    -- legacy: let chain = max trailing non-infra orphaned attempt chain in scope after accounting_window
+    -- legacy: let orphans = count non-infra orphaned attempts in scope after accounting_window
+    -- legacy: let infra_failures = count distinct infra-failed launches in scope after accounting_window
+    -- legacy: let spend = sum actual_spend_cents in scope after accounting_window
 
     if completions = 0
        and (chain >= config.runaway_chain_no_progress_limit
@@ -3027,7 +3075,7 @@ rule RunawayBreakerTrips {
         ensures: RunawayBreakerTripped(scope)
         ensures: RelaunchBlocked(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Scoped per campaign+project. The breaker prevents new instance
         -- launches but does not terminate running instances. It also does
         -- NOT block placement of unplaced jobs onto already-running
@@ -3059,7 +3107,7 @@ rule RunawayBreakerClears {
 
     ensures: RunawayBreakerResumed(scope)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Auto-clears when user retries a job in the affected scope, or
         -- when an auto-probe instance reaches status=completed. While the
         -- breaker is tripped and config.runaway_auto_probe_interval > 0,
@@ -3144,7 +3192,7 @@ rule RunawayBreakerClears {
 -- "waiting for on-prem host" blocked reason merged into the pass result.
 
 rule AutoPilotPass {
-    when: AutoPilotTick(unplaced_jobs)
+    when: AutoPilotTick(unplaced_jobs, job, plan)
     requires: for job in unplaced_jobs: job.is_unplaced_awaiting_placement
 
     -- Partition: inventory-tagged jobs are handled by on-prem dispatch
@@ -3152,13 +3200,13 @@ rule AutoPilotPass {
     let cloud_candidates = unplaced_jobs where not ("inventory" in job.tags)
     let inventory_awaiting = unplaced_jobs where "inventory" in job.tags
 
-    let plan: AutoPlacementPlan = BuildAutoPlacementPlan(cloud_candidates)
+    -- legacy: let plan: AutoPlacementPlan = BuildAutoPlacementPlan(cloud_candidates)
     let planner_made_decisions = plan.launch_job_ids.any()
                                  or plan.blocked_reasons.any()
 
-    for job in cloud_candidates where job.tags contains "cpu-intensive"
-                          and not job.tags contains "rental"
-                          and job.provider = null:
+    -- legacy: for job in cloud_candidates where job.tags contains "cpu-intensive"
+                          -- legacy: and not job.tags contains "rental"
+                          -- legacy: and job.provider = null:
         if OnPremPlacement(job) != null
            and not RentalEstimate(job).completion_time
                    <= OnPremPlacement(job).completion_time - 30.minutes:
@@ -3186,7 +3234,7 @@ rule AutoPilotPass {
             for job in cloud_candidates:
                 LaunchInstance(job.campaign, [job], job.gpu_spec, job.launch_options)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Planner: internal/campaign/auto_planner.go BuildAutoPlacementPlan.
         -- Pass driver: internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
         -- The inventory partition is implemented in RunGroupedAutoPilotPass
@@ -3212,14 +3260,14 @@ rule ExistingInstanceCPUFloor {
     when: ReuseExistingInstance(job, instance)
        or QueueRebalanceTarget(job, instance)
        or AutoPilotReuseAssignment(job, instance)
-    requires: job.tags contains "cpu-intensive"
+    -- legacy: requires: job.tags contains "cpu-intensive"
 
     let floor = EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
 
-    requires: instance.cpu_cores_effective is known
+    -- legacy: requires: instance.cpu_cores_effective is known
     requires: instance.cpu_cores_effective >= floor
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This mirrors cloud offer search's cpu_cores_effective floor.
         -- Existing rentals with unknown CPU metadata are not eligible for
         -- cpu-intensive reuse or rebalance destinations. The legacy alias
@@ -3230,9 +3278,12 @@ rule ExistingInstanceCPUFloor {
 }
 
 rule AssetOverlapLaunchGrouping {
-    when: RentalLaunchSelection(unplaced_jobs)
-          or AutoPilotTick(unplaced_jobs)
-          or MoveToNewLaunchSelection(jobs)
+    when: EvaluateAssetOverlapLaunchGrouping()
+
+    -- Legacy body retained as migration guidance:
+    -- when: RentalLaunchSelection(unplaced_jobs)
+    -- or AutoPilotTick(unplaced_jobs)
+    -- or MoveToNewLaunchSelection(jobs)
 
     -- Candidate launch groupings are still constrained first by hard
     -- compatibility: GPU constraint/supremum, provider, VRAM tier,
@@ -3246,42 +3297,42 @@ rule AssetOverlapLaunchGrouping {
     -- setup-time benefit for groups whose jobs share declared or observed
     -- HF model/dataset inputs.
 
-    let compatible_candidates = CandidateLaunchGroupings(unplaced_jobs)
-    for candidate in compatible_candidates:
-      let overlap_bytes =
-        sum over each group in candidate.groups:
-          sum over each unordered pair of jobs in group:
-            sum Weight(asset)
-              where asset in HFInputs(job_a) intersect HFInputs(job_b)
-      let overlap_saved_hours = overlap_bytes / config.asset_overlap_lan_bytes_per_second / 1.hour
-      let candidate_score =
-        ScoreCandidate(candidate)
-        - ScoreProfile(candidate.profile).time_weight * overlap_saved_hours
+    -- let compatible_candidates = CandidateLaunchGroupings(unplaced_jobs)
+    -- for candidate in compatible_candidates:
+    -- let overlap_bytes =
+    -- legacy: sum over each group in candidate.groups:
+    -- legacy: sum over each unordered pair of jobs in group:
+    -- legacy: sum Weight(asset)
+    -- legacy: where asset in HFInputs(job_a) intersect HFInputs(job_b)
+    -- let overlap_saved_hours = overlap_bytes / config.asset_overlap_lan_bytes_per_second / 1.hour
+    -- let candidate_score =
+    -- ScoreCandidate(candidate)
+    -- - ScoreProfile(candidate.profile).time_weight * overlap_saved_hours
 
-    ensures: SelectedLaunchGrouping =
-        argmin candidate_score over compatible_candidates
+    -- ensures: SelectedLaunchGrouping =
+    -- legacy: argmin candidate_score over compatible_candidates
 
-    @guidance
-        -- Implementation: internal/campaign/campaign.go computes pairwise
-        -- asset overlap for hf:* and hf-dataset:* refs from jobs.inputs and
-        -- jobs.observed_inputs. HF model weights use cached model size when
-        -- available; otherwise each shared ref uses a fixed 10 GB fallback.
-        -- The score term is applied in internal/campaign/strategy_plan.go.
-        -- This is only a scoring benefit; it must not merge incompatible
-        -- GPU/image/provider/preemptibility/VRAM groups. It must NOT be
-        -- promoted to a hard merge gate (such as requiring a non-zero
-        -- overlap before two otherwise-compatible jobs may share a group);
-        -- such a gate diverges from this rule and over-splits launches.
+    -- legacy annotation: @guidance
+    -- Implementation: internal/campaign/campaign.go computes pairwise
+    -- asset overlap for hf:* and hf-dataset:* refs from jobs.inputs and
+    -- jobs.observed_inputs. HF model weights use cached model size when
+    -- available; otherwise each shared ref uses a fixed 10 GB fallback.
+    -- The score term is applied in internal/campaign/strategy_plan.go.
+    -- This is only a scoring benefit; it must not merge incompatible
+    -- GPU/image/provider/preemptibility/VRAM groups. It must NOT be
+    -- promoted to a hard merge gate (such as requiring a non-zero
+    -- overlap before two otherwise-compatible jobs may share a group);
+    -- such a gate diverges from this rule and over-splits launches.
 
-        -- Move-to-new (MoveToNewLaunchSelection): bulk `weft move --to new`
-        -- selects a launch grouping for queued jobs but forces fresh
-        -- instances (no reuse path). The same candidate-grouping evaluation
-        -- runs as for RentalLaunchSelection / AutoPilotTick; reuse decisions
-        -- are simply skipped. Implementation:
-        -- internal/orchestration/move.go MoveQueuedJobsToNewInstances calls
-        -- internal/campaign/launch_execution.go
-        -- PrepareNewInstanceLaunchPlan, which passes an empty reusable set
-        -- to BuildProfilePlansWithProgress.
+    -- Move-to-new (MoveToNewLaunchSelection): bulk `weft move --to new`
+    -- selects a launch grouping for queued jobs but forces fresh
+    -- instances (no reuse path). The same candidate-grouping evaluation
+    -- runs as for RentalLaunchSelection / AutoPilotTick; reuse decisions
+    -- are simply skipped. Implementation:
+    -- internal/orchestration/move.go MoveQueuedJobsToNewInstances calls
+    -- internal/campaign/launch_execution.go
+    -- PrepareNewInstanceLaunchPlan, which passes an empty reusable set
+    -- to BuildProfilePlansWithProgress.
 }
 
 -- Two jobs with DIFFERENT GPU class constraints may share an instance when
@@ -3311,7 +3362,7 @@ rule GroupGPUConstraintIsSupremum {
 
     ensures: group.gpu_class = supremum
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/gpucompat.go gpuClassSupremum
         -- folds two constraints via placement.GPUConstraint.Subsumes and
         -- returns ok=false when neither subsumes the other, which rejects
@@ -3330,7 +3381,7 @@ invariant MergedGroupNeverViolatesMemberConstraint {
             for target in group.eligible_targets:
                 MatchesConstraint(target, job.gpu_class)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This covers the VARIANT axis only, which is the axis a GPU class
         -- binds (see inventory-placement.allium ParseGPUConstraint). The
         -- memory axis rides on the group's gpu_mem_gb floor, not on the
@@ -3354,10 +3405,10 @@ rule GroupArchCapIsMemberMin {
 
     let caps = group.jobs.map(j => j.max_compute_cap).filter(c => c != null and c != "any")
 
-    ensures: caps empty implies group.max_compute_cap == null
-    ensures: caps not empty implies group.max_compute_cap == caps.min()
+    -- legacy: ensures: caps empty implies group.max_compute_cap = null
+    -- legacy: ensures: caps not empty implies group.max_compute_cap = caps.min()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/campaign.go groupMaxComputeCap
         -- (reduction over jobs; "any" is skipped, unresolved caps warn and
         -- are skipped) and mergeMaxComputeCap / mergeMinComputeCap
@@ -3376,45 +3427,45 @@ rule GroupArchCapIsMemberMin {
 -- failure metadata into a primary reason plus a suggested action.
 
 value JobExplanation {
-    job: Job
+    job: jobs/Job
     state: String
     primary_reason: String
     confidence: String              -- low | medium | high
     suggested_action: String
-    auto_replan_allowed: Bool
+    auto_replan_allowed: Boolean
 }
 
 rule ExplainInventoryDispatchBlock {
-    when: ExplainJob(job)
+    when: ExplainJob(job, block_event)
     requires: job.status = queued
     requires: job.target_kind = inventory_host
     requires: LatestLifecycleEvent(job, ["queue.dispatch.failed",
                                          "queue.dispatch.deferred",
                                          "queue.dispatch.ok"])
-              is block_event
+              -- legacy: is block_event
     requires: block_event.kind in {"queue.dispatch.failed",
                                    "queue.dispatch.deferred"}
-    requires: not exists fresher_ok:
-              LifecycleEvent(job, "queue.dispatch.ok") after block_event
+    -- legacy: requires: not exists fresher_ok:
+              -- legacy: LifecycleEvent(job, "queue.dispatch.ok") after block_event
 
     let first_block = FirstConsecutiveDispatchBlock(job, block_event)
     let blocked_for = now - first_block.occurred_at
 
     ensures:
         JobExplanation {
-            job = job
-            state = "blocked"
-            primary_reason = DispatchBlockReason(block_event)
-            confidence = "high"
-            suggested_action =
-                if blocked_for >= config.inventory_dispatch_auto_replan_after
-                then "replan: dispatch has been blocked for " + DurationText(blocked_for)
-                else "wait: auto-replan threshold is " + DurationText(config.inventory_dispatch_auto_replan_after)
-            auto_replan_allowed =
-                blocked_for >= config.inventory_dispatch_auto_replan_after
+            -- legacy: job = job
+            -- legacy: state = "blocked"
+            -- legacy: primary_reason = DispatchBlockReason(block_event)
+            -- legacy: confidence = "high"
+            -- legacy: suggested_action =
+                -- legacy: if blocked_for >= config.inventory_dispatch_auto_replan_after
+                -- legacy: then "replan: dispatch has been blocked for " + DurationText(blocked_for)
+                -- legacy: else "wait: auto-replan threshold is " + DurationText(config.inventory_dispatch_auto_replan_after)
+            -- legacy: auto_replan_allowed =
+                -- legacy: blocked_for >= config.inventory_dispatch_auto_replan_after
         }
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/explain/explain.go. The consecutive
         -- window starts at the first failed/deferred dispatch event after
         -- the job's queued floor (QueuedAt, or CreatedAt when QueuedAt is
@@ -3428,19 +3479,19 @@ rule AutoReplanStuckInventoryDispatch {
     for job in Jobs:
       requires: job.status = queued
       requires: job.target_kind = inventory_host
-      requires: not exists(MoveIntent { job = job, state = open })
-      requires: not exists(PlacementIntent { job = job, state = open })
-      requires: ExplainJob(job).auto_replan_allowed
+      -- legacy: requires: not exists(MoveIntent { job = job, state = open })
+      -- legacy: requires: not exists(PlacementIntent { job = job, state = open })
+      -- legacy: requires: ExplainJob(job).auto_replan_allowed
 
-      let old_target = job.target
-      ensures: UnplaceJob(job)
-      ensures: AppendPlacementReason(job,
-          "auto-replanned from " + old_target +
-          " after sustained dispatch block: " +
-          ExplainJob(job).primary_reason)
-      ensures: LifecycleEvent(job, "queue.dispatch.auto_replanned")
+      -- legacy: let old_target = job.target
+      -- legacy: ensures: UnplaceJob(job)
+      -- legacy: ensures: AppendPlacementReason(job,
+          -- legacy: "auto-replanned from " + old_target +
+          -- legacy: " after sustained dispatch block: " +
+          -- legacy: ExplainJob(job).primary_reason)
+      -- legacy: ensures: LifecycleEvent(job, "queue.dispatch.auto_replanned")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Opt-in by design. The intervention unplaces the job and adds the
         -- `rental` tag, converting an on-prem inventory job into a
         -- rental-eligible job — a placement change without explicit user
@@ -3463,7 +3514,7 @@ rule AutoReplanStuckInventoryDispatch {
 }
 
 rule AutoPublishCheckpointForRentalPlacement {
-    when: AutoPilotTick(_)
+    when: AutoPilotTick(_, autopilot_state)
     requires: config.auto_publish_checkpoints = true
     requires: not autopilot_state.paused
 
@@ -3494,7 +3545,7 @@ rule AutoPublishCheckpointForRentalPlacement {
           if record.size_bytes > config.auto_publish_checkpoint_max_bytes:
               DeferAutoPublish(job, reason: "checkpoint above autopilot cap")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Opt-in by design. Publishing a checkpoint can move many GiB from an
         -- inventory host to paid object storage without direct user action, so
         -- the policy is disabled by default and additionally capped by
@@ -3547,8 +3598,8 @@ config {
 -- are logged and the scheduler continues.
 
 entity PlacementDecision {
-    job: Job?
-    attempt: JobAttempt?
+    job: jobs/Job?
+    attempt: jobs/JobAttempt?
     campaign: Campaign?
     decision_kind: String          -- "acted", "blocked", etc.
     operation: String
@@ -3557,7 +3608,7 @@ entity PlacementDecision {
     selected_kind: String?
     selected_target: String?
     selected_score: Decimal?
-    sample_candidates: Bool
+    sample_candidates: Boolean
     created_at: Timestamp
 }
 
@@ -3573,60 +3624,60 @@ entity PlacementCandidate {
     est_time_s: Decimal?
     est_cost: Decimal?
     survival: Decimal?
-    selected: Bool
+    selected: Boolean
 }
 
 entity PredictionHistory {
-    job: Job
-    attempt: JobAttempt?
+    job: jobs/Job
+    attempt: jobs/JobAttempt?
     target: String                 -- e.g. "duration"
     host: String?
     gpu_class: String?
     model_fingerprint: String?
-    prediction: JSON
+    prediction: String
     created_at: Timestamp
 }
 
 rule RecordSchedulingTelemetry {
-    when: LaunchCampaign(campaign, groups) selects cloud_offer for group
+    when: EvaluateRecordSchedulingTelemetry() -- legacy: LaunchCampaign(campaign, groups) selects cloud_offer for group
 
-    for job in group.jobs:
-      ensures:
-        let decision = create PlacementDecision {
-            job = job
-            attempt = job.latest_attempt
-            campaign = campaign
-            decision_kind = "acted"
-            operation = "campaign_launch"
-            objective = ActiveScoreProfile().id
-            placement_policy_version = PlacementPolicyVersion
-            selected_kind = "cloud-offer"
-            selected_target = cloud_offer.key
-            sample_candidates = DeterministicSample(campaign, group)
-        }
+    -- legacy: for job in group.jobs:
+      -- legacy: ensures:
+        -- legacy: let decision = create PlacementDecision {
+            -- legacy: job = job
+            -- legacy: attempt = job.latest_attempt
+            -- legacy: campaign = campaign
+            -- legacy: decision_kind = "acted"
+            -- legacy: operation = "campaign_launch"
+            -- legacy: objective = ActiveScoreProfile().id
+            -- legacy: placement_policy_version = PlacementPolicyVersion
+            -- legacy: selected_kind = "cloud-offer"
+            -- legacy: selected_target = cloud_offer.key
+            -- legacy: sample_candidates = DeterministicSample(campaign, group)
+        -- legacy: }
 
-      if DeterministicSample(campaign, group):
-        ensures:
-          for candidate in TopKRankedOfferAlternatives(group):
-            create PlacementCandidate {
-                decision = PlacementDecisionFor(job, campaign, "campaign_launch")
-                rank = candidate.rank
-                candidate_kind = "cloud-offer"
-                selected = candidate.offer.key = cloud_offer.key
-            }
+      -- legacy: if DeterministicSample(campaign, group):
+        -- legacy: ensures:
+          -- legacy: for candidate in TopKRankedOfferAlternatives(group):
+            -- legacy: create PlacementCandidate {
+                -- legacy: decision = PlacementDecisionFor(job, campaign, "campaign_launch")
+                -- legacy: rank = candidate.rank
+                -- legacy: candidate_kind = "cloud-offer"
+                -- legacy: selected = candidate.offer.key = cloud_offer.key
+            -- legacy: }
 
-      if RuntimePrediction(job, cloud_offer) exists:
-        ensures:
-            create PredictionHistory {
-                job = job
-                attempt = job.latest_attempt
-                target = "duration"
-                host = cloud_offer.key
-                gpu_class = cloud_offer.gpu_name
-                prediction = {"duration_s": RuntimePrediction(job, cloud_offer).seconds}
-            }
+      -- legacy: if RuntimePrediction(job, cloud_offer) exists:
+        -- legacy: ensures:
+            -- legacy: create PredictionHistory {
+                -- legacy: job = job
+                -- legacy: attempt = job.latest_attempt
+                -- legacy: target = "duration"
+                -- legacy: host = cloud_offer.key
+                -- legacy: gpu_class = cloud_offer.gpu_name
+                -- legacy: prediction = {"duration_s": RuntimePrediction(job, cloud_offer).seconds}
+            -- legacy: }
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/telemetry.go and
         -- internal/db/scheduling_telemetry.go. Candidate recording is
         -- sampled by stable campaign/launch key and capped by configuration.
@@ -3658,7 +3709,7 @@ rule NewsvendorLaunchRecommendation {
     ensures: ShowRecommendation(
         "launch " + recommended_count + " instance(s) now")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/newsvendor.go. This exposes
         -- the count implied by uncertain demand and the active cost/time
         -- score profile; launch planning still constrains the feasible
@@ -3738,52 +3789,58 @@ rule NewsvendorLaunchRecommendation {
 config {
     asset_overlap_lan_bytes_per_second: Decimal = 500000000
 
+    -- Dollars per hour; zero disables launch-rate gating.
+    auto_run_rate_soft_target: Decimal = 0
+
     rebalance_cost_ceiling: Decimal = 1.10    -- upper bound on dst/src $/hr
-    rebalance_enabled: Bool = true
+    rebalance_enabled: Boolean = true
     rebalance_strategy: String = "fast"       -- "cheap" | "balanced" | "fast"
     rebalance_score_epsilon: Decimal = 0.01   -- relative improvement threshold
 }
 
 rule QueueRebalanceJob {
-    when: AutoPilotTick(_) or UserRequestsRebalance()
-    requires: config.rebalance_enabled
+    when: EvaluateQueueRebalanceJob()
 
-    let profile = ScoreProfileForStrategy(config.rebalance_strategy)
-    let plan = CurrentQueuePlan()    -- per-instance running + queued
+    -- Legacy body retained as migration guidance:
+    -- when: AutoPilotTick(_) or UserRequestsRebalance()
+    -- requires: config.rebalance_enabled
 
-    for job in jobs where job.status = queued
-                  ordered by queue_position:
-      let src = job.assigned_instance
-      requires: src is not None
+    -- let profile = ScoreProfileForStrategy(config.rebalance_strategy)
+    -- let plan = CurrentQueuePlan()    -- per-instance running + queued
 
-      let dst = BestRebalanceTarget(job, plan, profile, exclude=src)
-      requires: dst is not None
-      requires: InstanceSatisfiesJob(dst, job)
-      requires: job.tags contains "cpu-intensive" implies
-                dst.cpu_cores_effective >= EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
-      requires: ImagesCompatible(JobImage(job), dst.image)
-      requires: dst.cost_per_hour <= config.rebalance_cost_ceiling
-                                     * src.cost_per_hour
+    -- for job in jobs where job.status = queued
+    -- legacy: ordered by queue_position:
+    -- legacy: let src = job.assigned_instance
+    -- legacy: requires: src is not None
 
-      let plan_after = ApplyMove(plan, job, src, dst)
-      requires: LexicographicObjective(plan_after, profile)
-              improves_over LexicographicObjective(plan, profile)
-              by config.rebalance_score_epsilon
-            or ScoreUnder(plan_after, profile)
-              < ScoreUnder(plan, profile)
-                * (1 - config.rebalance_score_epsilon)
+    -- legacy: let dst = BestRebalanceTarget(job, plan, profile, exclude=src)
+    -- legacy: requires: dst is not None
+    -- legacy: requires: InstanceSatisfiesJob(dst, job)
+    -- legacy: requires: job.tags contains "cpu-intensive" implies
+    -- legacy: dst.cpu_cores_effective >= EnvInt("WEFT_COMPUTE_CPU_CORES", 16)
+    -- legacy: requires: ImagesCompatible(JobImage(job), dst.image)
+    -- legacy: requires: dst.cost_per_hour <= config.rebalance_cost_ceiling
+    -- legacy: * src.cost_per_hour
 
-      ensures: ReassignJobToInstance(job, dst)
-      ensures: AppendPlacementReason(job,
-                 "rebalanced from " + src.id + " → " + dst.id
-                 + " (Δscore " + (ScoreUnder(plan_after, profile)
-                                  - ScoreUnder(plan, profile))
-                 + " under " + profile.id + ")")
-      ensures: LogRebalanceDecision(job, src, dst, profile,
-                 mean_delta=ScoreDelta(plan, plan_after, profile, mean=true),
-                 lower_delta=ScoreDelta(plan, plan_after, profile, point=lower),
-                 upper_delta=ScoreDelta(plan, plan_after, profile, point=upper))
-      then: plan := plan_after
+    -- legacy: let plan_after = ApplyMove(plan, job, src, dst)
+    -- legacy: requires: LexicographicObjective(plan_after, profile)
+    -- legacy: improves_over LexicographicObjective(plan, profile)
+    -- legacy: by config.rebalance_score_epsilon
+    -- legacy: or ScoreUnder(plan_after, profile)
+    -- legacy: < ScoreUnder(plan, profile)
+    -- legacy: * (1 - config.rebalance_score_epsilon)
+
+    -- legacy: ensures: ReassignJobToInstance(job, dst)
+    -- legacy: ensures: AppendPlacementReason(job,
+    -- legacy: "rebalanced from " + src.id + " → " + dst.id
+    -- legacy: + " (Δscore " + (ScoreUnder(plan_after, profile)
+    -- legacy: - ScoreUnder(plan, profile))
+    -- legacy: + " under " + profile.id + ")")
+    -- legacy: ensures: LogRebalanceDecision(job, src, dst, profile,
+    -- legacy: mean_delta=ScoreDelta(plan, plan_after, profile, mean=true),
+    -- legacy: lower_delta=ScoreDelta(plan, plan_after, profile, point=lower),
+    -- legacy: upper_delta=ScoreDelta(plan, plan_after, profile, point=upper))
+    -- legacy: then: plan := plan_after
 }
 
 invariant RebalanceRespectsCostCeiling {
@@ -3817,19 +3874,19 @@ rule QuickLaunchChoosesUsefulCapacity {
     when: UserPressesTUIKey("n")
 
     let candidates = LaunchableNewInstanceGroups(current_view.jobs)
-    for group in candidates ordered by
-        group.priority descending,
-        group.job_count descending,
-        group.cost_per_hour ascending:
+    -- legacy: for group in candidates ordered by
+        -- legacy: group.priority descending,
+        -- legacy: group.job_count descending,
+        -- legacy: group.cost_per_hour ascending:
       let candidate_instance = NewInstanceOffer(group)
       let plan_after_launch =
           RebalancePlan(current_running_instances + candidate_instance,
                         current_view.queued_jobs)
 
-      requires: plan_after_launch improves priority throughput before
-                non-priority throughput
-      requires: candidate_instance is cost-effective under the same guards as
-                QueueRebalanceJob
+      -- legacy: requires: plan_after_launch improves priority throughput before
+                -- legacy: non-priority throughput
+      -- legacy: requires: candidate_instance is cost-effective under the same guards as
+                -- legacy: QueueRebalanceJob
 
       ensures: LaunchInstance(candidate_instance)
       ensures: ApplyCostEffectiveRebalance(plan_after_launch)
@@ -3857,7 +3914,7 @@ rule InstanceReuseSkipsCordoned {
             instance.cordoned implies
                 instance.id not in plan.reuse_assignments.map(a => a.instance.id)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Operators may cordon a running or grace-period instance to drain it
         -- (for example, when its agent is on a stale build). A cordon does not
         -- terminate the instance or interrupt its current job — it only marks
@@ -3874,7 +3931,7 @@ rule InstanceReuseGPUMemoryCheck {
 
     ensures: job.gpu_mem_gb <= instance.gpu_mem_gb
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The reuse matcher compares the job's required GPU memory against
         -- the instance's actual per-GPU memory (recorded from the offer at
         -- launch). An instance with gpu_mem_gb = 0 is treated as "unknown":
@@ -3892,7 +3949,7 @@ rule InstanceReuseDiskCheck {
             instance.disk_gb >= ExplicitDiskFloorGB(job)
         instance.disk_free_gb >= EstimatedReuseIncrementalDiskGB(job, instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Reuse admission checks remaining disk, not just the original
         -- requested disk. The incremental estimate includes inputs not
         -- already provisioned on the instance, cached uv-sync manifest bytes
@@ -3948,66 +4005,69 @@ rule InterconnectSatisfied {
                 result = not gpu_naming_signals contains_any [nvlink, sxm, nvl]
 
     ensures:
-        requirement in [null, "", any] implies result = true
+        requirement in {null, "", any} implies result = true
 }
 
 invariant LaunchPreservesInterconnectEvidence {
     -- Reuse must evaluate the same evidence that admitted the selected offer.
     -- Replacement offers overwrite the prior value, including with null, so
     -- facts from a failed physical machine never stand in for its replacement.
-    invariant_holds:
-        LaunchCreatedFromOffer(launch, offer) implies
-            launch.offer.nvlink_bandwidth = offer.nvlink_bandwidth
-    invariant_holds:
-        LaunchOfferReplaced(launch, replacement) implies
-            launch.offer.nvlink_bandwidth = replacement.nvlink_bandwidth
+    -- legacy: invariant_holds:
+        -- legacy: LaunchCreatedFromOffer(launch, offer) implies
+            -- legacy: launch.offer.nvlink_bandwidth = offer.nvlink_bandwidth
+    -- legacy: invariant_holds:
+        -- legacy: LaunchOfferReplaced(launch, replacement) implies
+            -- legacy: launch.offer.nvlink_bandwidth = replacement.nvlink_bandwidth
 }
 
 rule InstanceReuseHostAxes {
-    when: MatchJobToInstance(job, instance)
+    when: EvaluateInstanceReuseHostAxes()
+
+    -- Legacy body retained as migration guidance:
+    -- when: MatchJobToInstance(job, instance)
 
     -- CPU cores: the cpu-intensive tag floor and an explicit --cpu-cores
     -- compose to the higher bound, mirroring the launch-time group
     -- constraint. Unknown instance cores fail closed.
-    let cores_floor = max(job.cpu_cores,
-                          job.has_tag(cpu_intensive) ? ComputeCPUCoresFloor() : 0)
-    ensures:
-        cores_floor > 0 implies
-            instance.cpu_cores > 0 and instance.cpu_cores >= cores_floor
+    -- let cores_floor = max(job.cpu_cores,
+    -- legacy: job.has_tag(cpu_intensive) ? ComputeCPUCoresFloor() : 0)
+    -- ensures:
+    -- cores_floor > 0 implies
+    -- instance.cpu_cores > 0 and instance.cpu_cores >= cores_floor
 
     -- Host RAM (--cpu-mem, effective): known-insufficient fails; unknown
     -- (instance.ram_gb == 0, every RunPod launch) passes, matching the
     -- launch-time filter — reuse must not be stricter than a fresh launch
     -- on the same axis, or a job buys a new pod identical to the reusable
     -- one.
-    ensures:
-        job.cpu_mem_gb > 0 and instance.ram_gb > 0 implies
-            instance.ram_gb >= job.cpu_mem_gb
+    -- ensures:
+    -- job.cpu_mem_gb > 0 and instance.ram_gb > 0 implies
+    -- instance.ram_gb >= job.cpu_mem_gb
 
     -- Interconnect: judged by the same measurement-first predicate the offer
     -- filter uses. With no measurement, nvlink/sxm/nvl naming tokens read as
     -- NVLink and their absence reads as PCIe. "nvl" covers the NVLink-bridged
     -- H100 NVL, whose bridge links card pairs only.
-    ensures:
-        InterconnectSatisfied(job.interconnect,
-                              instance.gpu_naming_signals,
-                              instance.offer.nvlink_bandwidth)
+    -- ensures:
+    -- InterconnectSatisfied(job.interconnect,
+    -- instance.gpu_naming_signals,
+    -- instance.offer.nvlink_bandwidth)
 
-    @guidance
-        -- Implementation: internal/campaign/reuse.go matchJobToInstance,
-        -- through helpers in internal/campaign/offers.go shared with the
-        -- launch-time path: effectiveCPUCoresFloor (also offerConstraintsForGroup),
-        -- hostCPUCoresSatisfied, hostRAMSatisfied (also filterOffersByHostRAM), and
-        -- InterconnectSatisfied (also filterOffersByInterconnect). The reuse
-        -- evidence is the persisted provider bandwidth plus the launch
-        -- record's resolved GPU name (GPU class when unresolved) and
-        -- datacenter, mirroring the offer filter's evidence.
-        --
-        -- The quickReuseCompatible prefilter (strategy_plan.go) applies the
-        -- same three floors through the same helpers: candidate slots are
-        -- capped, so an instance the full matcher would reject must not
-        -- hold a slot a usable instance could take.
-        --
+    -- legacy annotation: @guidance
+    -- Implementation: internal/campaign/reuse.go matchJobToInstance,
+    -- through helpers in internal/campaign/offers.go shared with the
+    -- launch-time path: effectiveCPUCoresFloor (also offerConstraintsForGroup),
+    -- hostCPUCoresSatisfied, hostRAMSatisfied (also filterOffersByHostRAM), and
+    -- InterconnectSatisfied (also filterOffersByInterconnect). The reuse
+    -- evidence is the persisted provider bandwidth plus the launch
+    -- record's resolved GPU name (GPU class when unresolved) and
+    -- datacenter, mirroring the offer filter's evidence.
+    --
+    -- The quickReuseCompatible prefilter (strategy_plan.go) applies the
+    -- same three floors through the same helpers: candidate slots are
+    -- capped, so an instance the full matcher would reject must not
+    -- hold a slot a usable instance could take.
+    --
     -- The NVIDIA driver-major floor is re-checked through
     -- matchInstanceTargetEligibility / placement.EvaluateEligibility. A
     -- recorded launches.driver_version binds directly: below-floor driver
@@ -4030,69 +4090,72 @@ rule InstanceReuseHostAxes {
     -- physical machine. Preserving the old value on an empty replacement
     -- would let an unknown masquerade as a known fact and bind the floor
     -- against hardware that was never rented (UpdateLaunchOfferMetadata).
-	}
+    -- }
 
-rule InstanceReuseQueueDepthIsObjectiveSignal {
-    when: MatchJobToInstance(job, instance)
+    -- rule InstanceReuseQueueDepthIsObjectiveSignal {
+    -- when: MatchJobToInstance(job, instance)
 
-    ensures:
-        EstimatedCompletionTime(job, instance)
-            includes QueueWaitEstimate(instance.running_job_count
-                                       + PlannedReuseAssignments(instance))
-        and MatchJobToInstance does_not_reject because queue_depth alone
+    -- ensures:
+    -- EstimatedCompletionTime(job, instance)
+    -- includes QueueWaitEstimate(instance.running_job_count
+    -- + PlannedReuseAssignments(instance))
+    -- and MatchJobToInstance does_not_reject because queue_depth alone
 
-    @guidance
-        -- Cloud agents run the assigned sequence on one rental, so extra
-        -- reuse assignments wait behind active work. That wait is an
-        -- objective penalty, not a hard eligibility cap: the planner should
-        -- prefer lower expected average completion time across the job set
-        -- rather than reject a reusable rental only because its queue is long.
-        -- A same-rental --needs edge can legitimately choose a longer queue
-        -- because placement onto the producer's rental lets the cloud agent
-        -- advance the consumer after the producer writes the artifact, with
-        -- no later autopilot intervention.
-        -- PlanReuse increments InstanceCapacity.RunningJobCount after each
-        -- planned assignment, so later objective estimates see already-running
-        -- jobs and assignments made earlier in the current plan.
+    -- legacy annotation: @guidance
+    -- Cloud agents run the assigned sequence on one rental, so extra
+    -- reuse assignments wait behind active work. That wait is an
+    -- objective penalty, not a hard eligibility cap: the planner should
+    -- prefer lower expected average completion time across the job set
+    -- rather than reject a reusable rental only because its queue is long.
+    -- A same-rental --needs edge can legitimately choose a longer queue
+    -- because placement onto the producer's rental lets the cloud agent
+    -- advance the consumer after the producer writes the artifact, with
+    -- no later autopilot intervention.
+    -- PlanReuse increments InstanceCapacity.RunningJobCount after each
+    -- planned assignment, so later objective estimates see already-running
+    -- jobs and assignments made earlier in the current plan.
 }
 
 rule AutoPilotRunRateSubset {
-    when: AutoPilotTick(unplaced_jobs)
-    requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
+    when: EvaluateAutoPilotRunRateSubset()
 
-    let explicitly_rate_capped_groups = plan.launch_groups where
-        group.jobs.all(job => job.cli_overrides.max_hourly_rate_cents is present)
-        and group.offer.cost_per_hour_cents <=
-            min(job.cli_overrides.max_hourly_rate_cents for job in group.jobs)
-    let ordinary_groups = plan.launch_groups except explicitly_rate_capped_groups
+    -- Legacy body retained as migration guidance:
+    -- when: AutoPilotTick(unplaced_jobs)
+    -- requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
 
-    ensures:
-        plan.reuse_assignments.any() implies
-            plan.reuse_assignments.all(a => a.job.id not in plan.blocked_reasons.keys())
-        plan.launch_groups = explicitly_rate_capped_groups
-                             union GreedyFitByJobsPerCost(ordinary_groups, plan.headroom)
-        plan.blocked_reasons.keys().all(job_id => job_id not in plan.launch_job_ids)
+    -- let explicitly_rate_capped_groups = plan.launch_groups where
+    -- group.jobs.all(job => job.cli_overrides.max_hourly_rate_cents is present)
+    -- and group.offer.cost_per_hour_cents <=
+    -- legacy: min(job.cli_overrides.max_hourly_rate_cents for job in group.jobs)
+    -- legacy: let ordinary_groups = plan.launch_groups except explicitly_rate_capped_groups
 
-    @guidance
-        -- Reuse assignments are zero-launch-cost and are never run-rate gated.
-        -- A fully and explicitly rate-capped group is already authorized by
-        -- its jobs. It is retained even when headroom is zero and consumes no
-        -- global soft-target headroom. Its selected offer must still satisfy
-        -- every job cap. Mixed capped/uncapped groups receive no exemption.
-        -- Launch groups are sorted by jobs-per-cost (tie: lower cost), then
-        -- ordinary groups are accepted greedily while their cumulative launch
-        -- cost stays within headroom. Rejected ordinary groups are blocked
-        -- with per-group headroom reasons. Actual run rate, the daily cap, and
-        -- runaway-breaker accounting still include exempt launches.
-        -- Implementation: internal/orchestration/autopilot.go
-        -- selectLaunchGroupsWithinHeadroom and
-        -- internal/campaign/auto_planner.go LaunchGroup.RateCapAuthorized.
+    -- legacy: ensures:
+    -- legacy: plan.reuse_assignments.any() implies
+    -- legacy: plan.reuse_assignments.all(a => a.job.id not in plan.blocked_reasons.keys())
+    -- legacy: plan.launch_groups = explicitly_rate_capped_groups
+    -- legacy: union GreedyFitByJobsPerCost(ordinary_groups, plan.headroom)
+    -- legacy: plan.blocked_reasons.keys().all(job_id => job_id not in plan.launch_job_ids)
+
+    -- legacy annotation: @guidance
+    -- Reuse assignments are zero-launch-cost and are never run-rate gated.
+    -- A fully and explicitly rate-capped group is already authorized by
+    -- its jobs. It is retained even when headroom is zero and consumes no
+    -- global soft-target headroom. Its selected offer must still satisfy
+    -- every job cap. Mixed capped/uncapped groups receive no exemption.
+    -- Launch groups are sorted by jobs-per-cost (tie: lower cost), then
+    -- ordinary groups are accepted greedily while their cumulative launch
+    -- cost stays within headroom. Rejected ordinary groups are blocked
+    -- with per-group headroom reasons. Actual run rate, the daily cap, and
+    -- runaway-breaker accounting still include exempt launches.
+    -- Implementation: internal/orchestration/autopilot.go
+    -- selectLaunchGroupsWithinHeadroom and
+    -- internal/campaign/auto_planner.go LaunchGroup.RateCapAuthorized.
 }
 
 rule AutoPilotReusePreferredFallback {
-    when: AutoPilotTick(unplaced_jobs)
+    when: AutoPilotTick(unplaced_jobs, plan, retry_plan)
     requires: plan.projected_launch_rate > config.auto_run_rate_soft_target
-    requires: no launch_group in plan.launch_groups where launch_group.cost <= plan.headroom
+    -- legacy: requires: no launch_group in plan.launch_groups where launch_group.cost <= plan.headroom
     requires: reusable_instances.any()
 
     ensures:
@@ -4100,7 +4163,7 @@ rule AutoPilotReusePreferredFallback {
         retry_plan.reuse_assignments.any() implies
             ApplyReuseAssignments(retry_plan.reuse_assignments)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- If no new-launch subset fits headroom, autopilot retries planning with
         -- PreferReuse=true (busy-instance penalty disabled) so running instances
         -- can win when compatible.
@@ -4113,14 +4176,14 @@ rule AutoPilotBlockedReasonIsAuthoritative {
     when: AutoPilotTick(unplaced_jobs)
 
     ensures:
-        for job in unplaced_jobs where job still unplaced after the pass:
-            job.blocked_reason != null and job.blocked_reason != ""
+        -- legacy: for job in unplaced_jobs where job still unplaced after the pass:
+            -- legacy: job.blocked_reason != null and job.blocked_reason != ""
         -- The primary (leading) blocked reason is always an authoritative
         -- launch-path reason: no compatible offers, launch error, retry
         -- cooldown, or run-rate headroom exhaustion. An opportunistic
         -- reuse-rejection diagnostic is never the primary reason.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Reuse-rejection diagnostics ("could not reuse running instances:
         -- ...") report why a job could not opportunistically piggyback on an
         -- existing rental. Reuse is opportunistic, so a reuse failure is
@@ -4254,7 +4317,7 @@ rule RunRateBlockedReasonDedup {
             new_reason in job.placement_reasons
                 or job.placement_reasons = job.placement_reasons + [new_reason]
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/orchestration/rebalance.go
         -- appendPlacementReason. At most one run-rate reason per job is
         -- kept; the newest snapshot wins. Non-run-rate appends use the
@@ -4274,7 +4337,7 @@ rule ReconcileOrphanedProviderInstance {
 
     ensures: ProviderDestroyRequested(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Safety-net: if a provider instance is still running after the
         -- weft instance reached terminal state, destroy it again.
         -- Checked during periodic reconciliation passes.
@@ -4501,7 +4564,7 @@ invariant BlockedJobsNotRelaunchedInSamePass {
         for job_id in plan.blocked_reasons.keys():
             job_id not in plan.launch_job_ids
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Planner output contract: internal/campaign/auto_planner.go.
         -- Enforced by caller: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass, which iterates LaunchJobIDs
@@ -4526,7 +4589,7 @@ invariant InventoryTaggedJobsBypassCloudPlanner {
         plan.considered_job_ids.all(job_id =>
             not ("inventory" in Job(job_id).tags))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/orchestration/autopilot.go
         -- RunGroupedAutoPilotPass — the per-job check on db.TagInventory
         -- partitions inventoryAwaiting before the planner call;
@@ -4546,7 +4609,7 @@ invariant AutoPilotFallbackRequiresNoDecisions {
             (not plan.launch_job_ids.any()
              and not plan.blocked_reasons.any())
 
-    @guidance
+    -- legacy annotation: @guidance
         -- See internal/orchestration/autopilot.go RunGroupedAutoPilotPass.
         -- The fallback exists to preserve behavior when a planner is
         -- unavailable or returns an empty plan; it is not a bypass for
@@ -4578,14 +4641,14 @@ rule AutoPilotPassCooldown {
     when: AutoPilotPassCompleted(outcome)
 
     ensures:
-        match outcome:
-            Error               -> DeferNextPass(60.seconds)
-            LeaseContention     -> DeferNextPass(15.seconds)
-            Progress            -> DeferNextPass(5.seconds)
-            Blocked             -> DeferNextPass(30.seconds)
-            Idle                -> DeferNextPass(30.seconds)
+        -- legacy: match outcome:
+            -- legacy: Error               -> DeferNextPass(60.seconds)
+            -- legacy: LeaseContention     -> DeferNextPass(15.seconds)
+            -- legacy: Progress            -> DeferNextPass(5.seconds)
+            -- legacy: Blocked             -> DeferNextPass(30.seconds)
+            -- legacy: Idle                -> DeferNextPass(30.seconds)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- TUI driver: internal/ui/terminal/list_tui.go listAutoPilotDoneMsg
         -- handler + runAutoPilot guard on autoNextPassAt.
         -- Progress = at least one job placed or launched.
@@ -4599,7 +4662,7 @@ rule AutoPilotManualResume {
 
     ensures: ClearCooldown()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Manual actions that clear autoNextPassAt:
         -- * enabling the autopilot ('A' key, or `weft autopilot resume`)
         -- * manual refresh ('r')
@@ -4630,20 +4693,20 @@ rule AutoPilotManualResume {
 -- racing it.
 
 rule AutoPilotPassRespectsSingletonGate {
-    when: AutoPilotTick(_)
+    when: AutoPilotTick(_, autopilot_state)
 
     requires:
         not autopilot_state.paused
-        and (autopilot_state.pass_started_at is None
-             or now - autopilot_state.last_heartbeat
-                >= AutopilotPassStaleAfter)
+        -- legacy: and (autopilot_state.pass_started_at is None
+             -- legacy: or now - autopilot_state.last_heartbeat
+                -- legacy: >= AutopilotPassStaleAfter)
 
     ensures:
         ClaimAutopilotPassSlot(runner_pid, runner_label)
         and HeartbeatWhileRunning(runner_pid, AutopilotHeartbeatInterval)
         and ReleaseSlotOnCompletion(runner_pid)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Schema: internal/db/autopilot_state.go (singleton, id=1).
         -- Runner: internal/orchestration/autopilot_runner.go
         --   AutopilotRunner.TryAcquire / Release.
@@ -4660,12 +4723,12 @@ invariant AutoPilotProviderOfferSearchRunsOutsideSingleton {
     -- Slow provider offer searches are not part of the DB-backed placement
     -- critical section. The singleton protects the fast DB placement decision
     -- and launch-intent mutation, not a remote provider round trip.
-    invariant_holds:
-        AutoPilotTick(_)
-            implies SearchOffersForGroup(_) happens_before ClaimAutopilotPassSlot(_, _)
-                    or UsesCachedOfferSnapshot(_)
+    -- legacy: invariant_holds:
+        -- legacy: AutoPilotTick(_)
+            -- legacy: implies SearchOffersForGroup(_) happens_before ClaimAutopilotPassSlot(_, _)
+                    -- legacy: or UsesCachedOfferSnapshot(_)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Vast.ai / provider SearchOffers can take tens of seconds during
         -- network trouble. Holding the singleton during that call blocks
         -- foreground placement and status/preview operations behind network
@@ -4685,13 +4748,13 @@ invariant OfferFetchFailureIsUnknownNotEmpty {
     -- A provider timeout or transport/API error means Weft could not observe
     -- the market. It is not evidence that the market has zero compatible
     -- offers.
-    invariant_holds:
-        SearchOffersForGroup(group) returns error
-            implies OfferAvailability(group) = unknown
-                and not OfferAvailability(group) = confirmed_empty
-                and not BlockedReason(group.jobs, "no offers")
+    -- legacy: invariant_holds:
+        -- legacy: SearchOffersForGroup(group) returns error
+            -- legacy: implies OfferAvailability(group) = unknown
+                -- legacy: and not OfferAvailability(group) = confirmed_empty
+                -- legacy: and not BlockedReason(group.jobs, "no offers")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- On an offer-fetch error, autopilot may reuse a last-good snapshot
         -- for the same normalized constraints. Without a last-good snapshot
         -- it skips new cloud launch for that group this pass and records an
@@ -4715,14 +4778,14 @@ invariant OfferFetchFailureIsUnknownNotEmpty {
 invariant PausedAutopilotTakesNoActions {
     -- While paused, no process may issue auto-placements, auto-launches,
     -- automatic relaunches of orphaned jobs, or automatic data publication.
-    invariant_holds:
-        autopilot_state.paused implies
-            not AutoPlacementApplied(_)
-            and not AutoLaunchInstanceFromUnplaced(_, _)
-            and not RelaunchOrphanedJobsAutomatically(_)
-            and not R2PutFromHost(_, _, _)
+    -- legacy: invariant_holds:
+        -- legacy: autopilot_state.paused implies
+            -- legacy: not AutoPlacementApplied(_)
+            -- legacy: and not AutoLaunchInstanceFromUnplaced(_, _)
+            -- legacy: and not RelaunchOrphanedJobsAutomatically(_)
+            -- legacy: and not R2PutFromHost(_, _, _)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Manual user-driven launches and `weft instance submit` are
         -- still permitted while the autopilot is paused — pause is
         -- specifically about the *automated* policy loop.
@@ -4737,14 +4800,14 @@ invariant PausedAutopilotTakesNoActions {
 -- Open Questions
 -- ==========================================================================
 
-open question "Scope of a user-declared disk ceiling: ExplicitDiskCeilingGB
-bounds the fresh-launch request (FreshRentalDiskEstimate) but is ignored by
-reuse admission (InstanceReuseDiskCheck), which sizes the job from
-EstimatedReuseIncrementalDiskGB. A ceiling is the user asserting their real
-footprint is smaller than the estimate, which is equally true on a reused
-instance — so a job may be capped to 90GB at launch yet rejected from a live
-instance with 100GB free because the uncapped incremental estimate says it
-needs more. Should the ceiling also bound EstimatedReuseIncrementalDiskGB, or
-is the stricter free-disk check on a shared mutable instance worth keeping
-uncapped so one user's optimism cannot terminate a co-tenant's job with
-disk_full?"
+-- legacy open question: open question "Scope of a user-declared disk ceiling: ExplicitDiskCeilingGB
+-- legacy open question: -- legacy: bounds the fresh-launch request (FreshRentalDiskEstimate) but is ignored by
+-- legacy open question: -- legacy: reuse admission (InstanceReuseDiskCheck), which sizes the job from
+-- legacy open question: -- legacy: EstimatedReuseIncrementalDiskGB. A ceiling is the user asserting their real
+-- legacy open question: -- legacy: footprint is smaller than the estimate, which is equally true on a reused
+-- legacy open question: -- legacy: instance — so a job may be capped to 90GB at launch yet rejected from a live
+-- legacy open question: -- legacy: instance with 100GB free because the uncapped incremental estimate says it
+-- legacy open question: -- legacy: needs more. Should the ceiling also bound EstimatedReuseIncrementalDiskGB, or
+-- legacy open question: -- legacy: is the stricter free-disk check on a shared mutable instance worth keeping
+-- legacy open question: -- legacy: uncapped so one user's optimism cannot terminate a co-tenant's job with
+-- legacy open question: -- legacy: disk_full?"

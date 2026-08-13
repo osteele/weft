@@ -181,6 +181,9 @@ type CheckInstanceParams struct {
 	OnStartStageChangedAt *time.Time
 	HeartbeatAge          time.Duration
 	Heartbeat             *HeartbeatSample
+	HeartbeatUnknown      bool
+	InstancePhaseUnknown  bool
+	BootstrapStageUnknown bool
 	Now                   time.Time
 
 	// TerminationIntent from R2 or DB (pre-fetched by caller)
@@ -283,7 +286,33 @@ func deferTerminationForUnknownStatus(p CheckInstanceParams, context string) (In
 //
 // Hysteresis state (dead confirmation, probe failures) is tracked on the
 // Reconciler. For WatchInstance, use a per-goroutine Reconciler.
-func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction) {
+func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
+	action := r.checkInstance(p)
+	if !isDestructiveLivenessAction(action.Kind) {
+		return action
+	}
+	context := action.StallMessage
+	if context == "" {
+		context = "liveness watchdog would terminate instance"
+	}
+	if deferred, ok := deferTerminationForUnknownStatus(p, context); ok {
+		return deferred
+	}
+	return action
+}
+
+func isDestructiveLivenessAction(kind InstanceActionKind) bool {
+	switch kind {
+	case ActionEmptyStatusTimeout, ActionBootstrapStalled, ActionSetupStalled,
+		ActionRunningStalled, ActionIdleAfterReadyTimeout, ActionTerminalLivePhase,
+		ActionStaleHeartbeat:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction) {
 	ci := p.CI
 	if ci == nil {
 		return InstanceAction{Kind: ActionNone}
@@ -544,6 +573,10 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 		ci.AgentReadyAtUnix == nil &&
 		!p.OnStartProbePresent &&
 		!p.BootstrapActivitySeen &&
+		!p.HeartbeatUnknown &&
+		!p.InstancePhaseUnknown &&
+		!p.BootstrapStageUnknown &&
+		p.Heartbeat == nil &&
 		p.HeartbeatAge == 0 &&
 		p.InstancePhase == "" &&
 		p.BootstrapStage == "" {
@@ -860,13 +893,18 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) (action InstanceAction
 	return InstanceAction{Kind: ActionNone}
 }
 
-func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance, intent *instanceintent.Marker, pauseTolerant bool) InstanceAction {
+func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance, intent *instanceintent.Marker, _ bool) InstanceAction {
 	if intent == nil {
 		return InstanceAction{Kind: ActionNone}
 	}
 
 	reason := intent.TerminationReason
-	destroyProvider := !isProviderTerminalWithPolicy(inst, pauseTolerant)
+	// A missing provider observation is unknown, not proof that the expected
+	// destroy already happened. Keep the destroy requirement until either the
+	// provider is confirmed gone or the durable intent records success. An
+	// exited/stopped/error instance is terminal for execution but may remain
+	// billable, so it still requires DestroyInstance.
+	destroyProvider := inst == nil || needsProviderDestroy(inst)
 	var terminalAt time.Time
 	if intent.EffectiveState() == instanceintent.StateSucceeded {
 		destroyProvider = false
@@ -900,6 +938,19 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeOrphaned,
 		}
+	case db.LaunchStatusCancelled:
+		if reason == "" {
+			reason = db.TerminationReasonCancelled
+		}
+		return InstanceAction{
+			Kind:              ActionTerminationIntent,
+			TerminalStatus:    db.LaunchStatusCancelled,
+			TerminalAt:        terminalAt,
+			TerminationReason: reason,
+			DestroyProvider:   destroyProvider,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeCancelled,
+		}
 	default:
 		return InstanceAction{Kind: ActionNone}
 	}
@@ -918,6 +969,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: db.TerminationReasonCompleted,
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
+			DestroyProvider:   needsProviderDestroy(inst),
 		}
 	}
 
@@ -961,6 +1013,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 			Kind:              ActionProviderDead,
 			TerminalStatus:    terminalStatus,
 			TerminationReason: reason,
+			DestroyProvider:   needsProviderDestroy(inst),
 		}
 	}
 
@@ -991,6 +1044,7 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 		StallMessage:      detail,
 		ResetJobs:         true,
 		AttemptOutcome:    outcome,
+		DestroyProvider:   needsProviderDestroy(inst),
 	}
 }
 
@@ -1057,24 +1111,47 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	}
 
 	providerID := ci.EffectiveProviderID()
+	var destroyIntent *instanceintent.Marker
 
-	if action.DestroyProvider && providerID != "" && client != nil {
-		if err := client.DestroyInstance(providerID); err != nil {
+	if action.DestroyProvider {
+		if providerID == "" {
+			slog.Warn("cannot destroy instance without provider instance ID; deferring terminal status", "component", "reconcile", "instance", ci.ID, "provider", ci.Provider)
+			return false, false
+		}
+		if client == nil {
+			slog.Warn("cannot destroy instance without provider client; deferring terminal status", "component", "reconcile", "instance", ci.ID, "provider", ci.Provider)
+			return false, false
+		}
+		var err error
+		destroyIntent, err = db.RecordLaunchDestroyIntent(database, ci.ID, action.TerminalStatus, action.TerminationReason)
+		if err != nil {
+			slog.Warn("failed to record provider destroy intent; deferring destroy", "component", "reconcile", "instance", ci.ID, "error", err)
+			return false, false
+		}
+		if err := client.DestroyInstance(providerID); err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
 			slog.Warn("failed to destroy instance, deferring terminal status to next reconcile pass", "component", "reconcile", "instance", ci.ID, "provider", providerID, "error", err)
 			return false, false
 		}
+		destroyIntent.State = instanceintent.StateSucceeded
+		destroyIntent.DestroySucceededAtUnix = time.Now().Unix()
 	}
 
 	if action.TerminalStatus != "" {
-		var err error
-		if action.TerminalAt.IsZero() {
-			err = db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason, action.StallMessage)
-		} else {
-			err = db.UpdateLaunchTerminalStatusAt(database, ci.ID, action.TerminalStatus, action.TerminalAt, action.TerminationReason, action.StallMessage)
-		}
+		resetCount, err := db.ApplyLaunchTerminalTransition(database, ci.ID, db.LaunchTerminalTransition{
+			Status:            action.TerminalStatus,
+			EndedAt:           action.TerminalAt,
+			TerminationReason: action.TerminationReason,
+			TerminationDetail: action.StallMessage,
+			ResetJobs:         action.ResetJobs,
+			AttemptOutcome:    action.AttemptOutcome,
+			TerminationIntent: destroyIntent,
+		})
 		if err != nil {
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", action.TerminalStatus, "error", err)
 			return false, false
+		}
+		if resetCount > 0 {
+			slog.Debug("reset jobs from instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
 		}
 		op := oplog.OpLaunchTerminated
 		if action.TerminalStatus == db.LaunchStatusFailed {
@@ -1088,18 +1165,6 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 				GPUSpec:   ci.GPUSpec,
 				Detail:    action.StallMessage,
 			})
-		}
-	}
-
-	if action.ResetJobs {
-		if resetCount, err := db.ResetLaunchJobs(database, ci.ID, action.AttemptOutcome); err != nil {
-			slog.Warn("failed to reset jobs for instance", "component", "reconcile", "instance", ci.ID, "error", err)
-		} else if resetCount > 0 {
-			slog.Debug("reset jobs from instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
-		}
-	} else if action.AttemptOutcome != "" {
-		if err := db.CloseLaunchAttempts(database, ci.ID, action.AttemptOutcome); err != nil {
-			slog.Warn("failed to close attempts for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		}
 	}
 

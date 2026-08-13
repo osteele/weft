@@ -529,6 +529,9 @@ func resolveLaunchSSH(database *sql.DB, job *db.Job) (*cloud.Instance, error) {
 	}
 
 	client := cloudClientForDBInstance(ci.Provider)
+	if client == nil {
+		return nil, fmt.Errorf("unsupported cloud provider %q for instance %s", ci.Provider, ids.FormatInstanceID(*job.LaunchID))
+	}
 	inst, err := client.ShowInstance(providerID)
 	if err != nil {
 		return nil, fmt.Errorf("show instance: %w", err)

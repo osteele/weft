@@ -1032,6 +1032,30 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 	}
 }
 
+func TestCheckStaleHeartbeat_UnknownObservationDoesNotProbe(t *testing.T) {
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	fetchReconcileHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{observationUnknown: true}, 10 * time.Minute
+	}
+	probeCampaignAgent = func(*cloud.Instance, time.Duration) (bool, error) {
+		t.Fatal("SSH probe must not run when a liveness source is unreadable")
+		return false, nil
+	}
+	action := NewReconciler().checkStaleHeartbeat(
+		&r2.Client{},
+		&db.Launch{ID: 1, Status: db.LaunchStatusRunning},
+		&cloud.Instance{ProviderID: "provider-1", Status: cloud.ProviderStatusRunning},
+	)
+	if action.Kind != ActionNone {
+		t.Fatalf("action = %+v, want none for unknown liveness observation", action)
+	}
+}
+
 // Regression for wi6900: the shared decision layer used to destroy a running
 // instance from heartbeat age before the reconciler could perform its SSH
 // probe. A successful probe is positive evidence that the agent is alive and
@@ -1298,8 +1322,8 @@ func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if result.Reconciled != 2 {
-		t.Fatalf("reconciled = %d, want 2", result.Reconciled)
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want one terminal transition", result.Reconciled)
 	}
 	if destroyedID != "intent-123" {
 		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "intent-123")
@@ -1328,6 +1352,126 @@ func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T
 	}
 	if job.Status != db.StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
+	}
+}
+
+func TestReconcileLaunches_RecoversCancelledDestroyIntentAfterCrash(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "cancel-crash-recovery"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("assign job: %v", err)
+	}
+	if _, err := db.RecordLaunchDestroyIntent(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
+		t.Fatalf("seed write-ahead destroy intent: %v", err)
+	}
+
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(string) (*cloud.Instance, error) {
+			return nil, cloud.ErrInstanceNotFound
+		},
+		DestroyInstanceFunc: func(string) error {
+			return cloud.ErrInstanceNotFound
+		},
+	}
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{client}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want recovered terminal transition", result.Reconciled)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusCancelled || launch.TerminationIntent == nil || launch.TerminationIntent.EffectiveState() != instanceintent.StateSucceeded {
+		t.Fatalf("recovered launch = status %q, intent %+v; want cancelled/succeeded", launch.Status, launch.TerminationIntent)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch = %v, want detached after recovered cancellation", job.LaunchID)
+	}
+}
+
+func TestReconcileLaunches_RecoversDestroyIntentProviderIDFallbackAfterCrash(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusLaunching, Provider: "vastai", GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("assign job: %v", err)
+	}
+	intent, err := db.RecordLaunchDestroyIntentWithProviderID(
+		database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "unrecorded-provider-1",
+	)
+	if err != nil {
+		t.Fatalf("seed provider-ID fallback intent: %v", err)
+	}
+	if intent.ProviderInstanceID != "unrecorded-provider-1" {
+		t.Fatalf("intent provider ID = %q", intent.ProviderInstanceID)
+	}
+
+	var shownID string
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			shownID = id
+			return nil, cloud.ErrInstanceNotFound
+		},
+	}
+	result, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{client}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if shownID != "unrecorded-provider-1" {
+		t.Fatalf("provider lookup ID = %q, want fallback ID", shownID)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want recovered terminal transition", result.Reconciled)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if launch.ProviderInstanceID != "" {
+		t.Fatalf("ordinary provider ID = %q, want empty to exercise fallback", launch.ProviderInstanceID)
+	}
+	if launch.Status != db.LaunchStatusFailed || launch.TerminationIntent == nil || launch.TerminationIntent.EffectiveState() != instanceintent.StateSucceeded {
+		t.Fatalf("recovered launch = status %q, intent %+v; want failed/succeeded", launch.Status, launch.TerminationIntent)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LaunchID != nil {
+		t.Fatalf("job launch = %v, want detached after recovered post-create failure", job.LaunchID)
 	}
 }
 
@@ -1471,6 +1615,225 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 	}
 	if destroyCalls != 1 {
 		t.Fatalf("destroy calls = %d, want 1", destroyCalls)
+	}
+}
+
+func TestCheckStaleHeartbeat_UsesEarlyLifeThreshold(t *testing.T) {
+	now := time.Now()
+	readyAt := now.Add(-time.Minute).Unix()
+	ci := &db.Launch{
+		ID:               42,
+		Status:           db.LaunchStatusRunning,
+		AgentReadyAtUnix: &readyAt,
+	}
+
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	fetchReconcileHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: now.Add(-6 * time.Minute).Unix()}, 6 * time.Minute
+	}
+	probeCalls := 0
+	probeCampaignAgent = func(*cloud.Instance, time.Duration) (bool, error) {
+		probeCalls++
+		return false, nil
+	}
+
+	action := NewReconciler().checkStaleHeartbeat(&r2.Client{}, ci, &cloud.Instance{})
+	if action.Kind != ActionNone {
+		t.Fatalf("action = %+v, want no stale-heartbeat action inside the 8-minute early-life threshold", action)
+	}
+	if probeCalls != 0 {
+		t.Fatalf("agent probe calls = %d, want 0 before early-life heartbeat is stale", probeCalls)
+	}
+}
+
+func TestReconcileLaunches_StaleHeartbeatDoesNotProbeWithoutProviderSnapshot(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:       db.LaunchStatusRunning,
+		Provider:     "vastai",
+		GPUSpec:      "RTX_4090",
+		InstanceType: cloud.InstanceTypeInterruptible,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "poll-unavailable-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	origSyncHeartbeat := syncFetchHeartbeat
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		syncFetchHeartbeat = origSyncHeartbeat
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+	staleHeartbeat := func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	syncFetchHeartbeat = staleHeartbeat
+	fetchReconcileHeartbeat = staleHeartbeat
+	probeCalls := 0
+	probeCampaignAgent = func(*cloud.Instance, time.Duration) (bool, error) {
+		probeCalls++
+		return false, context.DeadlineExceeded
+	}
+
+	providerErr := errors.New("provider API unavailable")
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return nil, providerErr
+		},
+		ShowInstanceFunc: func(string) (*cloud.Instance, error) {
+			return nil, providerErr
+		},
+	}
+	if _, err := NewReconciler().ReconcileLaunches(context.Background(), database, []cloud.Client{client}, &r2.Client{}); err != nil {
+		t.Fatalf("ReconcileLaunches: %v", err)
+	}
+	if probeCalls != 0 {
+		t.Fatalf("agent probe calls = %d, want 0 without a provider instance snapshot", probeCalls)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q while provider observation is unknown", launch.Status, db.LaunchStatusRunning)
+	}
+}
+
+func TestReconcileLaunches_StaleHeartbeatProviderUnknownBounded(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:       db.LaunchStatusRunning,
+		Provider:     "vastai",
+		GPUSpec:      "RTX_4090",
+		InstanceType: cloud.InstanceTypeInterruptible,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "poll-unavailable-bounded"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	origSyncHeartbeat := syncFetchHeartbeat
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	t.Cleanup(func() {
+		syncFetchHeartbeat = origSyncHeartbeat
+		fetchReconcileHeartbeat = origFetchHeartbeat
+	})
+	staleHeartbeat := func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	syncFetchHeartbeat = staleHeartbeat
+	fetchReconcileHeartbeat = staleHeartbeat
+
+	providerErr := errors.New("provider API unavailable")
+	destroyCalls := 0
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return nil, providerErr
+		},
+		ShowInstanceFunc: func(string) (*cloud.Instance, error) {
+			return nil, providerErr
+		},
+		DestroyInstanceFunc: func(string) error {
+			destroyCalls++
+			return nil
+		},
+	}
+	reconciler := NewReconciler()
+	if _, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{client}, &r2.Client{}); err != nil {
+		t.Fatalf("seed provider-unknown window: %v", err)
+	}
+	reconciler.mu.Lock()
+	reconciler.firstUnknownAt[instanceID] = time.Now().Add(-stalePauseTimeout - time.Minute)
+	reconciler.probeFailures[instanceID] = probeFailureState{
+		FirstAt: time.Now().Add(-minProbeFailureWindow - time.Second),
+		Count:   minProbeFailureAttempts - 1,
+	}
+	reconciler.mu.Unlock()
+
+	result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{client}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("bounded provider-unknown reconcile: %v", err)
+	}
+	if result.Reconciled != 1 || destroyCalls != 1 {
+		t.Fatalf("bounded reconcile = %d, destroy calls = %d; want one positively destroyed transition", result.Reconciled, destroyCalls)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if launch.Status != db.LaunchStatusFailed {
+		t.Fatalf("launch status = %q, want failed after bounded unknown window and successful destroy", launch.Status)
+	}
+}
+
+func TestReconcileLaunches_StaleHeartbeatProviderUnknownOnDemandNotDeferred(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:       db.LaunchStatusRunning,
+		Provider:     "vastai",
+		GPUSpec:      "RTX_4090",
+		InstanceType: cloud.InstanceTypeOnDemand,
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "poll-unavailable-ondemand"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	origSyncHeartbeat := syncFetchHeartbeat
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	t.Cleanup(func() {
+		syncFetchHeartbeat = origSyncHeartbeat
+		fetchReconcileHeartbeat = origFetchHeartbeat
+	})
+	staleHeartbeat := func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	syncFetchHeartbeat = staleHeartbeat
+	fetchReconcileHeartbeat = staleHeartbeat
+
+	providerErr := errors.New("provider API unavailable")
+	destroyCalls := 0
+	client := &cloud.MockClient{
+		ProviderVal:          cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) { return nil, providerErr },
+		ShowInstanceFunc:     func(string) (*cloud.Instance, error) { return nil, providerErr },
+		DestroyInstanceFunc: func(string) error {
+			destroyCalls++
+			return nil
+		},
+	}
+	reconciler := NewReconciler()
+	reconciler.probeFailures[instanceID] = probeFailureState{
+		FirstAt: time.Now().Add(-minProbeFailureWindow - time.Second),
+		Count:   minProbeFailureAttempts - 1,
+	}
+	result, err := reconciler.ReconcileLaunches(context.Background(), database, []cloud.Client{client}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 || destroyCalls != 1 {
+		t.Fatalf("on-demand reconcile = %d, destroy calls = %d; want immediate watchdog adjudication", result.Reconciled, destroyCalls)
 	}
 }
 

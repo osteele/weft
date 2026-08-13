@@ -130,9 +130,40 @@ test-all:
 test-verbose:
     cgo-test -short -v ./...
 
-# Run race-detector coverage for daemon/local mutation boundaries and shared DB writers
+# Run race-detector coverage for daemon/local mutation boundaries and shared DB writers.
+# This is intentionally separate from the ordinary test/check loop.
 test-race:
-    cgo-test -race ./internal/daemonapi ./internal/localmutate ./internal/db ./internal/orchestration
+	#!/usr/bin/env bash
+	set -uo pipefail
+	just test-race-db &
+	db_pid=$!
+	status=0
+	if ! cgo-test -race ./internal/daemonapi ./internal/localmutate ./internal/orchestration; then
+		status=1
+	fi
+	if ! wait "${db_pid}"; then
+		status=1
+	fi
+	exit "${status}"
+
+# Run the large DB race suite in isolated processes. Package globals such as
+# dbPath and startupRepairFn make in-process t.Parallel unsafe, while separate
+# processes retain isolation and keep each shard below Go's package timeout.
+test-race-db:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	pids=()
+	for shard in '^Test[A-F]' '^Test[G-N]' '^Test[O-R]' '^Test[S-Z]'; do
+		cgo-test -race ./internal/db -run "${shard}" -count=1 &
+		pids+=("$!")
+	done
+	status=0
+	for pid in "${pids[@]}"; do
+		if ! wait "${pid}"; then
+			status=1
+		fi
+	done
+	exit "${status}"
 
 # Regenerate internal/db/testdata/schema.txt, the table-schema golden the
 # schema-guard test compares against. Run after a goose migration intentionally
@@ -178,8 +209,12 @@ format:
 lint:
     go vet ./...
 
-# Check: format, lint, test
-check: format lint test
+# Validate executable behavioral specifications
+check-specs:
+    bash scripts/check-allium-specs.sh
+
+# Check: format, lint, specs, test
+check: format lint check-specs test
 
 # Build and push the cloud bootstrap base image (rclone+uv+apt deps pre-baked)
 # to ghcr.io. Requires Docker daemon running and `docker login ghcr.io` for

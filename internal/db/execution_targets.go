@@ -266,7 +266,7 @@ func SyncExecutionTargets(database *sql.DB) error {
 	return refreshExecutionTargetOccupancy(database)
 }
 
-func refreshExecutionTargetOccupancy(database *sql.DB) error {
+func refreshExecutionTargetOccupancy(database dbExecer) error {
 	if ok, err := relationExists(database, "job_status"); err != nil || !ok {
 		return err
 	}
@@ -308,7 +308,7 @@ func refreshExecutionTargetOccupancy(database *sql.DB) error {
 	return err
 }
 
-func relationExists(database *sql.DB, name string) (bool, error) {
+func relationExists(database dbExecer, name string) (bool, error) {
 	var count int
 	err := database.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE name = ? AND type IN ('table','view')`,
@@ -337,6 +337,10 @@ func EnsureRentalExecutionTarget(database *sql.DB, launchID int64) error {
 	if database == nil || launchID <= 0 {
 		return nil
 	}
+	return ensureRentalExecutionTarget(database, launchID)
+}
+
+func ensureRentalExecutionTarget(database dbExecer, launchID int64) error {
 	_, err := database.Exec(`
 		INSERT INTO execution_targets
 			(kind, host, launch_id, status, gpu_class, gpu_mem_gb, num_gpus, cordoned, cordon_reason, cordoned_at,

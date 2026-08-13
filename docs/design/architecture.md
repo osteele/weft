@@ -340,6 +340,15 @@ counters (`Epoch 3/10`). The tracker feeds both the job list (status column
 shows `● 42%`) and the detail pane (progress bar plus `step/total`) without
 constantly re-downloading entire logs from the host.
 
+Resource use, process activity, and task progress are separate signals. CPU or
+GPU utilization—even when sustained—does not prove that a job is advancing.
+New stdout/stderr bytes or writes beneath a configured output directory prove
+process activity and reset the agent's silence/idle watchdogs, but they still do
+not reset the semantic task-progress clock. Only a changed structured progress
+tuple for the active `(job, phase, percent)` does that; jobs without such
+instrumentation have unknown semantic progress and rely on explicit runtime or
+spend bounds.
+
 For multi-phase jobs (where progress resets from 100% back to 0%), a
 `PhaseTracker` detects restarts and the display layer estimates total phases
 using a truncated Poisson prior. Multi-phase progress is shown with an `≈`

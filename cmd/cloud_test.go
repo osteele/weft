@@ -19,3 +19,9 @@ func TestCloudWatchCommandsRegistered(t *testing.T) {
 		t.Fatalf("root watch resolved to %q, want watchCmd", cmd.Name())
 	}
 }
+
+func TestCloudClientForDBInstanceRejectsUnknownProvider(t *testing.T) {
+	if client := cloudClientForDBInstance("future-cloud"); client != nil {
+		t.Fatalf("cloudClientForDBInstance returned %T, want nil for unknown provider", client)
+	}
+}

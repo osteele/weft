@@ -2,19 +2,28 @@ package orchestration
 
 import (
 	"database/sql"
+	stderrors "errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/vastai"
 )
 
 // TerminateInstancesParallel terminates multiple cloud instances in parallel.
 func TerminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []error) {
+	return terminateInstancesParallel(database, instanceIDs, newCloudClientForStoredProvider)
+}
+
+type storedProviderClientFactory func(string) (cloud.Client, error)
+
+func terminateInstancesParallel(database *sql.DB, instanceIDs []int64, clientForProvider storedProviderClientFactory) (int, []error) {
 	var mu sync.Mutex
 	var terminated int
 	var errors []error
@@ -43,32 +52,45 @@ func TerminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []e
 			}
 
 			providerInstID := ci.EffectiveProviderID()
-			if providerInstID != "" {
-				client := cloudClientForDBInstance(ci.Provider)
-				if err := client.DestroyInstance(providerInstID); err != nil {
-					mu.Lock()
-					errors = append(errors, fmt.Errorf("destroy %s instance %s: %w", ci.Provider, providerInstID, err))
-					mu.Unlock()
-				}
-			}
-
-			// Stamp the user's termination request time (spec:
-			// UserTerminatesInstance) before flipping status.
-			if err := db.SetLaunchTerminationRequested(database, instanceID); err != nil {
+			if providerInstID == "" {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("record termination request for instance %s: %w", ids.FormatInstanceID(instanceID), err))
-				mu.Unlock()
-			}
-
-			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
-				mu.Lock()
-				errors = append(errors, fmt.Errorf("update instance %s status: %w", ids.FormatInstanceID(instanceID), err))
+				errors = append(errors, fmt.Errorf("destroy instance %s: provider instance ID is unknown", ids.FormatInstanceID(instanceID)))
 				mu.Unlock()
 				return
 			}
-			if _, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled); err != nil {
+			client, err := clientForProvider(ci.Provider)
+			if err != nil {
 				mu.Lock()
-				errors = append(errors, fmt.Errorf("reset jobs for instance %s: %w", ids.FormatInstanceID(instanceID), err))
+				errors = append(errors, fmt.Errorf("resolve provider for instance %s: %w", ids.FormatInstanceID(instanceID), err))
+				mu.Unlock()
+				return
+			}
+			intent, err := db.RecordLaunchDestroyIntent(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled)
+			if err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("record destroy intent for instance %s: %w", ids.FormatInstanceID(instanceID), err))
+				mu.Unlock()
+				return
+			}
+			if err := client.DestroyInstance(providerInstID); err != nil && !stderrors.Is(err, cloud.ErrInstanceNotFound) {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("destroy %s instance %s: %w", ci.Provider, providerInstID, err))
+				mu.Unlock()
+				return
+			}
+			intent.State = instanceintent.StateSucceeded
+			intent.DestroySucceededAtUnix = time.Now().Unix()
+
+			if _, err := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+				Status:               db.LaunchStatusCancelled,
+				TerminationReason:    db.TerminationReasonCancelled,
+				ResetJobs:            true,
+				AttemptOutcome:       db.AttemptOutcomeCancelled,
+				TerminationRequested: true,
+				TerminationIntent:    intent,
+			}); err != nil {
+				mu.Lock()
+				errors = append(errors, fmt.Errorf("record terminated instance %s: %w", ids.FormatInstanceID(instanceID), err))
 				mu.Unlock()
 				return
 			}
@@ -82,13 +104,13 @@ func TerminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []e
 	return terminated, errors
 }
 
-func cloudClientForDBInstance(provider string) cloud.Client {
+func newCloudClientForStoredProvider(provider string) (cloud.Client, error) {
 	switch cloud.Provider(provider) {
 	case cloud.ProviderVastai:
-		return vastai.NewCloudClient(vastai.NewClient())
+		return vastai.NewCloudClient(vastai.NewClient()), nil
 	case cloud.ProviderRunpod:
-		return runpod.NewCloudClient()
+		return runpod.NewCloudClient(), nil
 	default:
-		return vastai.NewCloudClient(vastai.NewClient())
+		return nil, fmt.Errorf("unsupported cloud provider %q", provider)
 	}
 }

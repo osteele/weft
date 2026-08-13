@@ -117,23 +117,24 @@ const (
 
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
-	Ts             int64   `json:"ts"`
-	Phase          string  `json:"phase"`
-	GPUUtilPct     int     `json:"gpu_util_pct"`
-	GPUMemUsedMiB  int     `json:"gpu_mem_used_mib"`
-	GPUMemTotalMiB int     `json:"gpu_mem_total_mib"`
-	GPUTempC       int     `json:"gpu_temp_c"`
-	HostRSSKB      int64   `json:"host_rss_kb"`
-	HostMemTotalKB int64   `json:"host_mem_total_kb"`
-	LoadAvg1       float64 `json:"load_avg_1,omitempty"`
-	CPUCount       int     `json:"cpu_count,omitempty"`
-	DiskFreeBytes  int64   `json:"disk_free_bytes"`
-	DiskTotalBytes int64   `json:"disk_total_bytes"`
-	AgentPID       int     `json:"agent_pid,omitempty"`
-	AgentAlive     *bool   `json:"agent_alive,omitempty"`
-	AgentFatal     string  `json:"agent_fatal,omitempty"`
-	AgentProtocol  int     `json:"agent_protocol"`
-	Publication    struct {
+	observationUnknown bool
+	Ts                 int64   `json:"ts"`
+	Phase              string  `json:"phase"`
+	GPUUtilPct         int     `json:"gpu_util_pct"`
+	GPUMemUsedMiB      int     `json:"gpu_mem_used_mib"`
+	GPUMemTotalMiB     int     `json:"gpu_mem_total_mib"`
+	GPUTempC           int     `json:"gpu_temp_c"`
+	HostRSSKB          int64   `json:"host_rss_kb"`
+	HostMemTotalKB     int64   `json:"host_mem_total_kb"`
+	LoadAvg1           float64 `json:"load_avg_1,omitempty"`
+	CPUCount           int     `json:"cpu_count,omitempty"`
+	DiskFreeBytes      int64   `json:"disk_free_bytes"`
+	DiskTotalBytes     int64   `json:"disk_total_bytes"`
+	AgentPID           int     `json:"agent_pid,omitempty"`
+	AgentAlive         *bool   `json:"agent_alive,omitempty"`
+	AgentFatal         string  `json:"agent_fatal,omitempty"`
+	AgentProtocol      int     `json:"agent_protocol"`
+	Publication        struct {
 		QueuedItems        int    `json:"queued_items"`
 		QueuedBytes        *int64 `json:"queued_bytes,omitempty"`
 		InflightItems      int    `json:"inflight_items"`
@@ -544,6 +545,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						lastProviderStatus = inst.Status
 					}
 				} else {
+					// The latest provider observation is unknown. Keep no
+					// actionable snapshot: CheckInstance must not interpret a
+					// stale successful poll as current evidence after the API
+					// starts failing. Presentation layers can retain their own
+					// explicitly last-known snapshot if needed.
+					cachedInstance = nil
 					if errors.Is(showErr, cloud.ErrInstanceNotFound) {
 						// Confirmed absent at the provider — drop the stale
 						// cached instance and keep the sentinel. Not-found is
@@ -552,7 +559,6 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						// leaves adjudication to the heartbeat/bootstrap
 						// watchdogs, matching the batch reconciler's not-found
 						// handling.
-						cachedInstance = nil
 						notFoundStreak++
 					}
 					lastProviderErr = showErr
@@ -711,28 +717,79 @@ func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value 
 // collection, so it stays fresh even if nvidia-smi or another metric probe
 // hangs.
 func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
-	data, found, err := fetchR2Marker(ctx, r2Client, r2keys.InstanceHeartbeat(instanceID))
-	if err != nil || !found || data == "" {
-		return nil, 0
-	}
-	var sample HeartbeatSample
-	if err := json.Unmarshal([]byte(data), &sample); err != nil {
-		return nil, 0
-	}
-	age := time.Since(time.Unix(sample.Ts, 0))
-	if lastSeen, found, err := fetchR2Marker(ctx, r2Client, r2keys.InstanceLastSeen(instanceID)); err == nil && found && lastSeen != "" {
-		if ts, err := strconv.ParseInt(lastSeen, 10, 64); err == nil && ts > 0 {
-			if alt := time.Since(time.Unix(ts, 0)); alt < age {
-				age = alt
-			}
+	return fetchHeartbeatFromMarkers(ctx, instanceID, time.Now(), func(ctx context.Context, key string) (string, bool, error) {
+		return fetchR2Marker(ctx, r2Client, key)
+	})
+}
+
+type heartbeatMarkerFetcher func(context.Context, string) (string, bool, error)
+
+func fetchHeartbeatFromMarkers(ctx context.Context, instanceID int64, now time.Time, fetch heartbeatMarkerFetcher) (*HeartbeatSample, time.Duration) {
+	var (
+		sample      *HeartbeatSample
+		livenessAge time.Duration
+		hasLiveness bool
+		unknown     bool
+	)
+
+	data, found, err := fetch(ctx, r2keys.InstanceHeartbeat(instanceID))
+	if err != nil {
+		unknown = true
+	} else if found && data != "" {
+		var parsed HeartbeatSample
+		if err := json.Unmarshal([]byte(data), &parsed); err == nil {
+			sample = &parsed
+			livenessAge = now.Sub(time.Unix(parsed.Ts, 0))
+			hasLiveness = true
+		} else {
+			unknown = true
 		}
 	}
-	return &sample, age
+
+	lastSeen, found, err := fetch(ctx, r2keys.InstanceLastSeen(instanceID))
+	if err != nil {
+		unknown = true
+	} else if found && lastSeen != "" {
+		if ts, err := strconv.ParseInt(lastSeen, 10, 64); err == nil && ts > 0 {
+			age := now.Sub(time.Unix(ts, 0))
+			if !hasLiveness || age < livenessAge {
+				livenessAge = age
+			}
+			hasLiveness = true
+		} else {
+			unknown = true
+		}
+	}
+	if !hasLiveness {
+		if unknown {
+			return &HeartbeatSample{observationUnknown: true}, 0
+		}
+		return sample, 0
+	}
+	// The known marker gives only an upper bound on liveness age when the
+	// other marker could not be read. A stale known marker therefore cannot
+	// support teardown: the unread marker may be fresh. A marker fresh enough
+	// for every watchdog is independently sufficient positive liveness.
+	if unknown && livenessAge > heartbeatStaleThreshold {
+		if sample == nil {
+			sample = &HeartbeatSample{}
+		}
+		sample.observationUnknown = true
+	}
+	// Zero is the public sentinel for "no liveness marker fetched". Marker
+	// timestamps have one-second precision, so a valid marker written in the
+	// current second naturally has age zero; keep it distinguishable from
+	// absence for watchdog conjunctions.
+	if livenessAge <= 0 {
+		livenessAge = time.Nanosecond
+	}
+	return sample, livenessAge
 }
 
 // fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
 func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	value, _, _ := fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
+	value, _, err := fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
+	recordMarkerObservationError(ctx, err)
 	return value
 }
 
@@ -769,7 +826,8 @@ func fetchOnStartStage(ctx context.Context, r2Client *r2.Client, instanceID int6
 
 // fetchInstancePhase reads the instance phase marker from R2.
 func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	value, _, _ := fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
+	value, _, err := fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
+	recordMarkerObservationError(ctx, err)
 	return value
 }
 

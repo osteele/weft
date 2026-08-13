@@ -33,7 +33,8 @@ The documentation is organized by audience and depth.
 - [CLI, TUI, and Core Responsibilities](design/facade-core.md) for layering boundaries
 - [Comparison to SLURM](design/comparison-to-slurm.md) for scheduler tradeoffs
 - [Placement Telemetry](design/placement-telemetry.md) for decision logging and offline analysis
-- [Allium Specs](../specs/) for executable behavioral specifications of placement, job moves, and status sync
+- [Allium Specs](../specs/README.md) for executable behavioral specifications
+  and validator setup
 
 ## Development
 

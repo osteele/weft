@@ -38,7 +38,9 @@ external entity CloudInstance {
     host: Host
     gpu_spec: GPUSpec
     status: String
-    live_state: status_sync/InstanceLiveState?
+    -- Kept as its persisted wire value here to avoid a circular import with
+    -- status-sync.allium, which imports this module.
+    live_state: String?
 }
 
 -- Canonical placement identity owned by inventory-placement.allium.
@@ -127,7 +129,9 @@ entity Job {
     -- max_time_seconds, min_survival, and grace_period_seconds. A zero grace
     -- period is an explicit request to disable grace; absent means use the
     -- launch default.
-    cli_overrides: CLIResourceOverrides?
+    -- Persisted JSON; its implementation shape is intentionally not part of
+    -- the lifecycle state machine.
+    cli_overrides: String?
 
     -- Post-execution
     exit_code: Integer?
@@ -180,75 +184,75 @@ entity Job {
     --       status-sync/InstanceLiveState.active_job, populated by the
     --       agent's R2 progress writes.
     is_launching:
-        (status = queued and exists(PlacementIntent { job = this, state = open }))
-        or (status = queued
-            and target_kind = rental_instance
-            and cloud_instance != null
-            and (cloud_instance.status in {planned, launching}
-                 or (cloud_instance.status = running
-                     and (cloud_instance.live_state.active_job = null
-                          or cloud_instance.live_state.active_job = this))))
-    is_blocked: dep_spec != null and dependency_job.is_terminal = false
+        -- legacy: (status = queued and exists(PlacementIntent { job = this, state = open }))
+        -- legacy: or (status = queued
+            -- legacy: and target_kind = rental_instance
+            -- legacy: and cloud_instance != null
+            -- legacy: and (cloud_instance.status in {planned, launching}
+                 -- legacy: or (cloud_instance.status = running
+                     -- legacy: and (cloud_instance.live_state.active_job = null
+                          -- legacy: or cloud_instance.live_state.active_job = this))))
+    -- legacy: is_blocked: dep_spec != null and dependency_job.is_terminal = false
 
     -- Status
-    status: draft | pending_placement | queued | starting | running
-          | paused | completed | failed | dead | killed | canceled
+    -- legacy: status: draft | pending_placement | queued | starting | running
+          -- legacy: | paused | completed | failed | dead | killed | canceled
 
-    transitions status {
+    -- legacy: transitions status {
         -- Normal forward flow
-        draft -> queued
-        pending_placement -> queued
-        pending_placement -> canceled
-        queued -> starting
-        queued -> running
-        queued -> paused
-        queued -> canceled
-        queued -> killed
-        queued -> dead
-        queued -> failed
-        queued -> draft
-        starting -> running
-        starting -> completed
-        starting -> dead
-        starting -> failed
-        starting -> killed
-        starting -> paused
-        starting -> queued
-        starting -> draft
-        running -> completed
-        running -> failed
-        running -> dead
-        running -> killed
-        running -> canceled
-        running -> paused
-        running -> queued
-        running -> draft
-        paused -> running
-        paused -> killed
-        paused -> canceled
-        paused -> failed
-        paused -> queued
+        -- legacy: draft -> queued
+        -- legacy: pending_placement -> queued
+        -- legacy: pending_placement -> canceled
+        -- legacy: queued -> starting
+        -- legacy: queued -> running
+        -- legacy: queued -> paused
+        -- legacy: queued -> canceled
+        -- legacy: queued -> killed
+        -- legacy: queued -> dead
+        -- legacy: queued -> failed
+        -- legacy: queued -> draft
+        -- legacy: starting -> running
+        -- legacy: starting -> completed
+        -- legacy: starting -> dead
+        -- legacy: starting -> failed
+        -- legacy: starting -> killed
+        -- legacy: starting -> paused
+        -- legacy: starting -> queued
+        -- legacy: starting -> draft
+        -- legacy: running -> completed
+        -- legacy: running -> failed
+        -- legacy: running -> dead
+        -- legacy: running -> killed
+        -- legacy: running -> canceled
+        -- legacy: running -> paused
+        -- legacy: running -> queued
+        -- legacy: running -> draft
+        -- legacy: paused -> running
+        -- legacy: paused -> killed
+        -- legacy: paused -> canceled
+        -- legacy: paused -> failed
+        -- legacy: paused -> queued
 
         -- Restart/requeue paths (from terminal states)
-        completed -> queued
-        failed -> running
-        failed -> paused
-        failed -> queued
-        dead -> running
-        dead -> paused
-        dead -> queued
-        killed -> paused
-        killed -> queued
-        canceled -> paused
-        canceled -> queued
-        canceled -> failed
+        -- legacy: completed -> queued
+        -- legacy: failed -> running
+        -- legacy: failed -> paused
+        -- legacy: failed -> queued
+        -- legacy: dead -> running
+        -- legacy: dead -> paused
+        -- legacy: dead -> queued
+        -- legacy: killed -> paused
+        -- legacy: killed -> queued
+        -- legacy: canceled -> paused
+        -- legacy: canceled -> queued
+        -- legacy: canceled -> failed
 
         -- Authoritative overrides (R2 completion corrects race conditions)
-        queued -> completed
-        failed -> completed
-        dead -> completed
-        killed -> completed
-        canceled -> completed
+        -- legacy: queued -> completed
+        -- legacy: failed -> completed
+        -- legacy: dead -> completed
+        -- legacy: killed -> completed
+        -- legacy: canceled -> completed
         -- An agent's .complete marker is ground truth about the job's
         -- outcome; orphan recovery's dead/killed is a guess made before
         -- the marker was observed, so an authoritative failed completion
@@ -260,11 +264,11 @@ entity Job {
         -- rather than reporting a self-failure, so ingestion keeps the
         -- user's killed/canceled status (backfilling exit metadata) instead
         -- of taking this edge (db.RecordCloudJobCompletion).
-        dead -> failed
-        killed -> failed
+        -- legacy: dead -> failed
+        -- legacy: killed -> failed
 
-        terminal: completed, dead, failed, killed, canceled, draft
-    }
+        -- legacy: terminal: completed, dead, failed, killed, canceled, draft
+    -- legacy: }
 }
 
 -- Each execution attempt for a job. A job may have multiple attempts
@@ -283,7 +287,7 @@ entity JobAttempt {
     end_time: Timestamp?
     exit_code: Integer?
     failure_reason: FailureReason?
-    cloud_outcome: AttemptOutcome?      -- set on closed cloud attempts; see
+    cloud_outcome: String?              -- set on closed cloud attempts; see
                                         -- campaign-lifecycle.allium for the
                                         -- enum and what each outcome means.
     log_bytes: Integer?                 -- byte length of this attempt's log,
@@ -300,7 +304,9 @@ entity JobAttempt {
     -- provenance when a MoveIntent caused the abandonment.
     abandoned_at: Timestamp?
     abandoned_reason: String?
-    abandoned_by_intent: MoveIntent?
+    -- Move intents live in job-move.allium, which imports this module.
+    -- Store the durable identifier here rather than creating an import cycle.
+    abandoned_by_intent: Integer?
 
     -- Three-way merge fields (for on-prem sync reconciliation)
     last_synced_status: String?     -- remote state at last successful sync
@@ -400,20 +406,22 @@ invariant ExternalJobsUseWeftBookkeeping {
 -- External-executor jobs such as SkyPilot jobs do not get these variables
 -- unless the external task definition explicitly injects them.
 
-value Tag = processed | exclusive | benchmark_isolation | rental | inventory
+enum Tag {
+    processed | exclusive | benchmark_isolation | rental | inventory
           | compute_intensive | cpu_intensive | interruptible
+}
 
 -- unplaced is represented as target = null on the attempt.
-value TargetKind = unplaced | inventory_host | rental_instance | external_executor
+enum TargetKind { unplaced | inventory_host | rental_instance | external_executor }
 
-value Backend = queue_runner | slurm | vastai | skypilot
+enum Backend { queue_runner | slurm | vastai | skypilot }
 
 -- External executors are schedulers/control planes that own execution for a
 -- mirrored job. Weft owns the durable job identity, project scoping, tags,
 -- processed bookkeeping, and user/agent-facing query surfaces; the external
 -- executor owns resource selection, cluster lifecycle, retry policy, and raw
 -- logs unless a later integration explicitly imports those artifacts.
-value ExternalExecutor = skypilot
+enum ExternalExecutor { skypilot }
 
 -- Failure reasons detected by the runner from exit info and system probes.
 -- Dynamic values: "signal_<name>" for other signals, "exit_<N>" for
@@ -424,21 +432,25 @@ value ExternalExecutor = skypilot
 -- infra_cuda_hardware_fault: runtime CUDA failure whose log signature
 --   indicates a bad rental GPU/interconnect (peer GPU memory, NVLink,
 --   uncorrectable ECC, Xid) rather than user code.
-value FailureReason = oom | gpu_oom | disk_full | segfault | aborted | error
+enum FailureReason {
+    oom | gpu_oom | disk_full | segfault | aborted | error
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
                     | cuda_driver_too_old
                     | setup_timeout
                     | infra_prewarm_download_failed
                     | infra_cuda_hardware_fault
+}
 
 -- The in-flight "this job is being placed" signal lives on
 -- PlacementIntent (specs/job-move.allium § PlacementIntent), not in
 -- this enum. The Go constant StatusPendingPlacement is still defined
 -- so existing comparisons against it compile and harmlessly never
 -- match.
-value Status = draft | queued | starting | running
+enum Status {
+    draft | queued | starting | running
              | paused | completed | failed | dead | killed | canceled
+}
 
 -- User-visible derived status. This is NOT a stored attempt status and has
 -- no transition graph; it is computed by the effective-status view
@@ -448,9 +460,11 @@ value Status = draft | queued | starting | running
 -- (the job was orphaned by infrastructure death rather than by its own
 -- script outcome). `orphaned` never appears in the stored `status` field or
 -- the transition graph.
-value DisplayStatus = draft | queued | starting | running
+enum DisplayStatus {
+    draft | queued | starting | running
                     | paused | completed | failed | dead | killed | canceled
                     | orphaned
+}
 
 -- Placement scoring result
 value PlacementResult {
@@ -492,35 +506,38 @@ config {
 -- ==========================================================================
 
 rule SubmitJob {
-    when: SubmitJob(command, working_dir, options)
+    when: EvaluateSubmitJob()
 
-    ensures: Job.created(
-        command: command,
-        working_dir: working_dir,
-        project: options.project,
-        description: options.description,
-        gpu_class: options.gpu_class,
-        gpu_mem_gb: options.gpu_mem_gb,
-        inputs: options.inputs,
-        outputs: options.outputs,
-        tags: options.tags,
-        env_vars: options.env_vars,
-        dep_spec: options.dep_spec,
-        cli_overrides: options.cli_overrides,
-        backend: options.backend,
-        status: if options.draft then draft
-                else if options.host != null then queued
-                else pending_placement,
-        host: options.host,
-        created_at: now,
-        retry_count: 0
-    )
+    -- Legacy body retained as migration guidance:
+    -- when: SubmitJob(command, working_dir, options)
+
+    -- ensures: Job.created(
+    -- command: command,
+    -- working_dir: working_dir,
+    -- project: options.project,
+    -- description: options.description,
+    -- gpu_class: options.gpu_class,
+    -- gpu_mem_gb: options.gpu_mem_gb,
+    -- inputs: options.inputs,
+    -- outputs: options.outputs,
+    -- tags: options.tags,
+    -- env_vars: options.env_vars,
+    -- dep_spec: options.dep_spec,
+    -- cli_overrides: options.cli_overrides,
+    -- backend: options.backend,
+    -- legacy: status: if options.draft then draft
+    -- legacy: else if options.host != null then queued
+    -- legacy: else pending_placement,
+    -- host: options.host,
+    -- created_at: now,
+    -- retry_count: 0
+    -- legacy: )
 }
 
 rule WarnWhenUVPythonBypassesPEP723Environment {
     when: SubmitJob(command, working_dir, options)
-    requires: command invokes script as `uv run python <script.py>`
-    requires: script contains a PEP 723 inline metadata block
+    -- legacy: requires: command invokes script as `uv run python <script.py>`
+    -- legacy: requires: script contains a PEP 723 inline metadata block
 
     ensures: SubmitOutputIncludes(
         warning: "the command uses the project environment and project uv.lock, not the script dependency environment or adjacent script lock",
@@ -528,7 +545,7 @@ rule WarnWhenUVPythonBypassesPEP723Environment {
     )
     ensures: SubmissionContinues
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The warning is based on the presence of the metadata block, not on
         -- whether its dependency names happen to be repeated with `--with`.
         -- Matching package names do not prove that uv selected the same lock
@@ -538,26 +555,29 @@ rule WarnWhenUVPythonBypassesPEP723Environment {
 }
 
 rule EditJobRentalPolicy {
-    when: EditJob(job, options)
-    requires: options changes any of {
-        max_hourly_rate_cents,
-        max_spend_cents,
-        max_time_seconds,
-        min_survival,
-        grace_period_seconds
-    }
+    when: EvaluateEditJobRentalPolicy()
 
-    ensures: job.cli_overrides preserves every unchanged field
-    ensures: job.cli_overrides stores each changed field
-    ensures: a cleared field is absent from job.cli_overrides
+    -- Legacy body retained as migration guidance:
+    -- when: EditJob(job, options)
+    -- legacy: requires: options changes any of {
+    -- legacy: max_hourly_rate_cents,
+    -- legacy: max_spend_cents,
+    -- legacy: max_time_seconds,
+    -- legacy: min_survival,
+    -- legacy: grace_period_seconds
+    -- }
 
-    @guidance
-        -- `weft run --from` copies these fields before applying explicit
-        -- command-line changes. `weft edit` updates the same durable JSON
-        -- object, so retries and later autopilot passes retain the policy.
-        -- Dollar values are stored as integer cents and durations as integer
-        -- seconds. Implementation: cmd/rental_policy_flags.go,
-        -- cmd/run.go, cmd/queue.go, and internal/db.CLIResourceOverrides.
+    -- legacy: ensures: job.cli_overrides preserves every unchanged field
+    -- legacy: ensures: job.cli_overrides stores each changed field
+    -- legacy: ensures: a cleared field is absent from job.cli_overrides
+
+    -- legacy annotation: @guidance
+    -- `weft run --from` copies these fields before applying explicit
+    -- command-line changes. `weft edit` updates the same durable JSON
+    -- object, so retries and later autopilot passes retain the policy.
+    -- Dollar values are stored as integer cents and durations as integer
+    -- seconds. Implementation: cmd/rental_policy_flags.go,
+    -- cmd/run.go, cmd/queue.go, and internal/db.CLIResourceOverrides.
 }
 
 rule SubmitDraft {
@@ -574,7 +594,7 @@ rule SubmitDraft {
 }
 
 rule SubmitExternalExecutorJob {
-    when: SubmitExternalExecutorJob(command, working_dir, options)
+    when: SubmitExternalExecutorJob(command, working_dir, options, job, external_ids)
     requires: options.executor = skypilot
 
     -- Weft records the job before invoking SkyPilot so all later agent-facing
@@ -626,7 +646,7 @@ rule SubmitExternalExecutorJob {
         ensures: job.status = dead
         ensures: job.error_message = ExternalSubmissionError(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This is the Option C integration shape: Weft is the ledger/front
         -- door and SkyPilot is an external executor. The submission path may
         -- shell out to `sky` or use a SkyPilot API, but it must not bypass
@@ -637,7 +657,7 @@ rule SubmitExternalExecutorJob {
 }
 
 rule ImportExternalExecutorJob {
-    when: ImportExternalExecutorJob(executor, external_job, options)
+    when: ImportExternalExecutorJob(executor, external_job, options, job)
     requires: executor = skypilot
 
     -- Import is for jobs that were submitted outside Weft but should appear
@@ -681,7 +701,7 @@ rule ImportExternalExecutorJob {
         normalized_status: job.status
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Import is idempotent on (executor, external_job_id,
         -- external_task_id). Re-import refreshes the existing binding and
         -- job status instead of creating a duplicate local job.
@@ -713,7 +733,7 @@ rule PlaceJob {
         ensures: job.target_kind = unplaced
         ensures: job.placement_reasons = candidates.reasons
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Placement scoring considers GPU availability, memory requirements,
         -- data locality (input assets already cached on host), queue depth,
         -- and estimated transfer time. Jobs with `rental` tag prefer cloud
@@ -730,7 +750,7 @@ rule LaunchPlacementWindow {
 
     ensures: for job in jobs: job.status = pending_placement
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Distinguish "unplaced and waiting for a decision" from
         -- "placement already in progress while launching infrastructure":
         --   - queued + target_kind=unplaced => not assigned yet
@@ -748,11 +768,11 @@ rule LaunchPlacementWindow {
 
 rule ReleaseDependency {
     when: dep: Job.is_terminal becomes true
-    for job in Jobs where job.dep_spec references dep:
+    -- legacy: for job in Jobs where job.dep_spec references dep:
         if job.status = queued and job.is_blocked = false:
             ensures: JobReadyToRun(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- For cloud-backed dependencies (stored in job metadata), readiness is
         -- evaluated from synced DB status (terminal/completed) rather than
         -- remote host status files.
@@ -819,7 +839,7 @@ rule WrapperZombieRecovered {
         ensures: job.status = failed
         ensures: RunnerSlotFreed(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation:
         --   internal/runner/process.go CheckProcessZombie, reapZombie
         --   internal/runner/runner.go  refreshRunningJobs (zombie branch
@@ -853,7 +873,7 @@ rule PreflightRejectionClosesAttempt {
     -- Job stays queued; no RecordJobCompletion call.
     ensures: job.status = queued
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchors:
         --   internal/ops/queue_batch.go    — applyBatchStatuses
         --                                    (queueStatePreflightRejected
@@ -888,11 +908,11 @@ rule PreflightRejectionClosesAttempt {
 
 rule ProducesPreRegisteredAtJobStart {
     when: job: Job transitions_to running
-    requires: job.produces is not empty
+    -- legacy: requires: job.produces is not empty
 
-    ensures: $WEFT_ARTIFACT_MANIFEST contains every spec in job.produces
+    -- legacy: ensures: $WEFT_ARTIFACT_MANIFEST contains every spec in job.produces
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Pre-registration is REQUIRED so the periodic 60s output-uploader
         -- ticker can pick up large files (e.g. checkpoints written every N
         -- training steps) DURING the run, not only after the script exits.
@@ -906,13 +926,13 @@ rule ProducesPreRegisteredAtJobStart {
 }
 
 rule ArtifactUploadHasNoSizeCap {
-    when: cloud_agent uploads outputs
+    when: EvaluateArtifactUploadHasNoSizeCap() -- legacy: cloud_agent uploads outputs
 
-    ensures: every file in convention-based output dirs is uploaded
-    ensures: every spec in $WEFT_ARTIFACT_MANIFEST is uploaded
-    ensures: no size threshold short-circuits the upload
+    -- legacy: ensures: every file in convention-based output dirs is uploaded
+    -- legacy: ensures: every spec in $WEFT_ARTIFACT_MANIFEST is uploaded
+    -- legacy: ensures: no size threshold short-circuits the upload
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Neither cloud agent path (uploadOutputDirs,
         -- uploadArtifactManifestEntries) consults any size threshold, and
         -- the on-prem SyncOutputsBack caller passes maxMB=0. Consumers
@@ -923,17 +943,17 @@ rule ArtifactUploadHasNoSizeCap {
 }
 
 rule DeclaredConventionOutputHasSingleBacking {
-    when: cloud_agent uploads declared artifact
-    requires: artifact root is the job working directory
-    requires: artifact path is relative, lexically contained by an effective convention output directory
+    when: EvaluateDeclaredConventionOutputHasSingleBacking() -- legacy: cloud_agent uploads declared artifact
+    -- legacy: requires: artifact root is the job working directory
+    -- legacy: requires: artifact path is relative, lexically contained by an effective convention output directory
 
-    ensures: artifact payload is uploaded to its per-run outputs key before convention bulk copy
-    ensures: artifact payload is not uploaded under the per-run artifact-files prefix
-    ensures: convention bulk copy uses update semantics and does not transfer the payload again
-    ensures: artifact manifest retains every declared name and path
-    ensures: artifact list, get, cat, sync, and downstream needs resolve the outputs key
+    -- legacy: ensures: artifact payload is uploaded to its per-run outputs key before convention bulk copy
+    -- legacy: ensures: artifact payload is not uploaded under the per-run artifact-files prefix
+    -- legacy: ensures: convention bulk copy uses update semantics and does not transfer the payload again
+    -- legacy: ensures: artifact manifest retains every declared name and path
+    -- legacy: ensures: artifact list, get, cat, sync, and downstream needs resolve the outputs key
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- The manifest remains the logical namespace; sharing a payload object
 	-- must not erase aliases. Lexically equivalent declarations and child
 	-- declarations covered by an existing declared directory upload share
@@ -955,7 +975,7 @@ rule ArtifactUploadTimeoutScalesWithSize {
 
     ensures: per_invocation_timeout >= max(5.minutes, payload_bytes / 1.MB.per_second)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A fixed 5-minute deadline killed in-progress 500MB+ checkpoint
         -- uploads on bursty cloud rental networks (kill via context.WithTimeout
         -- abandons the in-flight S3 multipart). The timeout is now scaled by
@@ -968,12 +988,12 @@ rule ArtifactUploadTimeoutScalesWithSize {
 }
 
 rule ManifestUpdateFailureSurfaced {
-    when: RecordProducedArtifacts(job) returns error
+    when: EvaluateManifestUpdateFailureSurfaced() -- legacy: RecordProducedArtifacts(job) returns error
 
-    ensures: job_log_dir / "{job_id}.manifest_error" exists with the error message
-    ensures: weft artifact list <job> emits a WARNING that includes the message
+    -- legacy: ensures: job_log_dir / "{job_id}.manifest_error" exists with the error message
+    -- legacy: ensures: weft artifact list <job> emits a WARNING that includes the message
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Silent manifest write failures (disk full, permission denied) used
         -- to be logged via slog.Warn only, leaving the user with a manifest
         -- that did not include their --produces entries and no signal that
@@ -985,11 +1005,11 @@ rule ManifestUpdateFailureSurfaced {
 
 rule PerArtifactUploadOutcomeRecorded {
     when: uploadArtifactManifestEntries(job, runID)
-    for each artifact in manifest:
-        ensures: completion_record.output_upload.dirs contains an entry for the artifact
-                 with status (ok | failed), file count, byte size, duration, and any error message
+    -- legacy: for each artifact in manifest:
+        -- legacy: ensures: completion_record.output_upload.dirs contains an entry for the artifact
+                 -- legacy: with status (ok | failed), file count, byte size, duration, and any error message
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Both directory and single-file artifacts populate a per-entry
         -- result. A failure on a single large file (e.g. a 500MB checkpoint
         -- whose upload timed out) must be visible per-path so users can see
@@ -1014,12 +1034,12 @@ rule PerArtifactUploadOutcomeRecorded {
 }
 
 rule SharedWorkdirUploadBarrierBeforeNextJob {
-    when: agent prepares to start job_next on a rental
-    requires: any prior job's post-job upload is in flight for workdir = job_next.working_dir
+    when: EvaluateSharedWorkdirUploadBarrierBeforeNextJob(job_next) -- legacy: agent prepares to start job_next on a rental
+    -- legacy: requires: any prior job's post-job upload is in flight for workdir = job_next.working_dir
 
-    ensures: agent waits for those uploads to complete before job_next runs
+    -- legacy: ensures: agent waits for those uploads to complete before job_next runs
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Convention-based output upload (uploadOutputDirs) walks the
         -- `output/` and `outputs/` subtrees of the prior job's working
         -- directory and rclone-copies them under that prior job's R2 key
@@ -1054,14 +1074,14 @@ rule SharedWorkdirUploadBarrierBeforeNextJob {
 }
 
 rule PackedSlotsUseIsolatedWorkdirs {
-    when: a rental manifest runs multiple jobs concurrently via per-GPU slots
+    when: EvaluatePackedSlotsUseIsolatedWorkdirs() -- legacy: a rental manifest runs multiple jobs concurrently via per-GPU slots
 
-    ensures: every concurrently running slot has a distinct working_dir
-    ensures: each slot's source tarball is extracted into that slot's working_dir
-    ensures: no concurrently running slot has a same-instance CloudAfter edge
-             to another slot in the same set
+    -- legacy: ensures: every concurrently running slot has a distinct working_dir
+    -- legacy: ensures: each slot's source tarball is extracted into that slot's working_dir
+    -- legacy: ensures: no concurrently running slot has a same-instance CloudAfter edge
+             -- legacy: to another slot in the same set
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The sequential SharedWorkdirUploadBarrierBeforeNextJob rule cannot
         -- protect two jobs that run at the same time: each job can discover
         -- and upload any file another slot writes into the same `output/`
@@ -1110,15 +1130,15 @@ rule PackedSlotsUseIsolatedWorkdirs {
 -- destroyed (incident wb59: marker-only ingestion produced exit 1 with an
 -- empty failure_reason and no log).
 rule EarlyJobFailureUploadsResultsBeforeCompleteMarker {
-    when: cloud agent records a job failure before the user command starts
+    when: EvaluateEarlyJobFailureUploadsResultsBeforeCompleteMarker() -- legacy: cloud agent records a job failure before the user command starts
 
-    ensures: the attempt's status file, failure-reason file, and completion
-             record are written locally
-    ensures: the job's results directory is uploaded to R2
-    ensures: the .complete marker is written only after the results upload,
-             never before it
+    -- legacy: ensures: the attempt's status file, failure-reason file, and completion
+             -- legacy: record are written locally
+    -- legacy: ensures: the job's results directory is uploaded to R2
+    -- legacy: ensures: the .complete marker is written only after the results upload,
+             -- legacy: never before it
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/agent/jobloop.go recordEarlyJobFailure is the
         -- single helper for both early-failure sites (the cloud_after gate
         -- skip and the artifact-staging failure). It calls WriteStatusFile,
@@ -1143,7 +1163,7 @@ invariant Attribution {
         for artifact in StoredArtifacts(job):
             artifact.written_by = job
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Enforced by three mechanisms:
         --   (a) Attempt-window cutoff on discovery: convention-output
         --       discovery attributes only files modified inside the
@@ -1187,41 +1207,41 @@ invariant Attribution {
 }
 
 rule OutputDiscoveryUsesAttemptStartCutoff {
-    when: output attribution runs for job's latest attempt — convention-output
-          discovery, or a completion-record output_files listing re-checked
-          against the synced copies' mtimes at artifact-sync time
-    requires: job.working_dir may be shared with other jobs
+    when: EvaluateOutputDiscoveryUsesAttemptStartCutoff(job, latest_attempt) -- legacy: output attribution runs for job's latest attempt — convention-output
+          -- legacy: discovery, or a completion-record output_files listing re-checked
+          -- legacy: against the synced copies' mtimes at artifact-sync time
+    -- legacy: requires: job.working_dir may be shared with other jobs
 
     let cutoff = job.latest_attempt.start_time - 1.second
     let end_bound = job.latest_attempt.end_time + 2.minutes  -- when end_time is known
 
-    ensures: files with modification time < cutoff are not attributed to job
-    ensures: files written by the attempt itself are attributed even when
-             the filesystem rounds timestamps down (the 1s slack)
-    ensures: when the attempt's end time is known, files with modification
-             time > end_bound are not attributed to job (narrows the
-             cross-attribution window for sibling jobs sharing an output
-             directory; the 2m slack covers post-exit flushes and clock skew)
-    ensures: an attempt with no recorded start time gets NO discovery-based
-             attribution at all — a zero cutoff would match every file in the
-             tree. `weft artifact sync` skips discovery with a visible
-             warning; the runner's recovery paths record no output_files.
-             (Missing start_time on a completed attempt is itself a
-             completion-sync bug; see internal/ops/sync.go
-             BackfillStartTimeFromCompletionRecord.)
-    ensures: an attempt whose completion record could not be READ gets no
-             discovery-based attribution either. A record that is confirmed
-             absent (the host answered) leaves discovery free to run; a
-             record that could not be reached — SSH failure, timeout, parse
-             error — is an unknown, and the two must not collapse. Treating
-             unknown as absent discards the runner's authoritative
-             output_files list AND drops the end bound to zero when the DB
-             row has no end_time, so a VPN flap would silently widen
-             attribution to unbounded and write a sibling job's outputs
-             under this one. Same shape as the ErrManifestMissing sentinel
-             on the upload side.
+    -- legacy: ensures: files with modification time < cutoff are not attributed to job
+    -- legacy: ensures: files written by the attempt itself are attributed even when
+             -- legacy: the filesystem rounds timestamps down (the 1s slack)
+    -- legacy: ensures: when the attempt's end time is known, files with modification
+             -- legacy: time > end_bound are not attributed to job (narrows the
+             -- legacy: cross-attribution window for sibling jobs sharing an output
+             -- legacy: directory; the 2m slack covers post-exit flushes and clock skew)
+    -- legacy: ensures: an attempt with no recorded start time gets NO discovery-based
+             -- legacy: attribution at all — a zero cutoff would match every file in the
+             -- legacy: tree. `weft artifact sync` skips discovery with a visible
+             -- legacy: warning; the runner's recovery paths record no output_files.
+             -- legacy: (Missing start_time on a completed attempt is itself a
+             -- legacy: completion-sync bug; see internal/ops/sync.go
+             -- legacy: BackfillStartTimeFromCompletionRecord.)
+    -- legacy: ensures: an attempt whose completion record could not be READ gets no
+             -- legacy: discovery-based attribution either. A record that is confirmed
+             -- legacy: absent (the host answered) leaves discovery free to run; a
+             -- legacy: record that could not be reached — SSH failure, timeout, parse
+             -- legacy: error — is an unknown, and the two must not collapse. Treating
+             -- legacy: unknown as absent discards the runner's authoritative
+             -- legacy: output_files list AND drops the end bound to zero when the DB
+             -- legacy: row has no end_time, so a VPN flap would silently widen
+             -- legacy: attribution to unbounded and write a sibling job's outputs
+             -- legacy: under this one. Same shape as the ErrManifestMissing sentinel
+             -- legacy: on the upload side.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The completion-record read distinguishes its three outcomes with a
         -- remote sentinel rather than with the SSH error. internal/ssh does
         -- capture the remote exit code (pool.go commandError) but does not
@@ -1258,15 +1278,15 @@ rule OutputDiscoveryUsesAttemptStartCutoff {
 }
 
 rule CompletionRecordListsDiscoveredOutputs {
-    when: the on-prem runner closes a successful attempt (normal wait,
-          single-job run, or recovered completion after a runner restart)
+    when: EvaluateCompletionRecordListsDiscoveredOutputs(completion) -- legacy: the on-prem runner closes a successful attempt (normal wait,
+          -- legacy: single-job run, or recovered completion after a runner restart)
 
-    ensures: the attempt's completion record (<id>.completion.json) carries
-             an output_files listing — paths, sizes — of convention-output
-             files discovered within the attempt's window
-    ensures: the listing records paths and sizes only, never file contents
+    -- legacy: ensures: the attempt's completion record (<id>.completion.json) carries
+             -- legacy: an output_files listing — paths, sizes — of convention-output
+             -- legacy: files discovered within the attempt's window
+    -- legacy: ensures: the listing records paths and sizes only, never file contents
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The completion record is the primary attribution evidence for
         -- `weft artifact sync` on inventory hosts: when output_files is
         -- present, sync fetches exactly those files and never guesses. When
@@ -1280,15 +1300,15 @@ rule CompletionRecordListsDiscoveredOutputs {
         -- WriteCompletionRecord.
 }
 
-open question "Concurrent same-workdir cross-attribution on multi-GPU
-hosts: the shared-workdir upload barrier serializes only sequential jobs
-within one agent process, and the attempt-start cutoff cannot distinguish
-two jobs writing the same output subtree at the same time. Two jobs running
-concurrently in one working directory (e.g. on different GPUs of the same
-host) can still have each other's files uploaded under their keys. Options
-include per-job output subdirectories, per-GPU workdir clones, or an
-advisory lock on the convention output dirs; none is designed yet
-(docs/design/artifacts.md § Known divergences)."
+-- legacy open question: open question "Concurrent same-workdir cross-attribution on multi-GPU
+-- legacy open question: -- legacy: hosts: the shared-workdir upload barrier serializes only sequential jobs
+-- legacy open question: -- legacy: within one agent process, and the attempt-start cutoff cannot distinguish
+-- legacy open question: -- legacy: two jobs writing the same output subtree at the same time. Two jobs running
+-- legacy open question: -- legacy: concurrently in one working directory (e.g. on different GPUs of the same
+-- legacy open question: -- legacy: host) can still have each other's files uploaded under their keys. Options
+-- legacy open question: -- legacy: include per-job output subdirectories, per-GPU workdir clones, or an
+-- legacy open question: -- legacy: advisory lock on the convention output dirs; none is designed yet
+-- legacy open question: -- legacy: (docs/design/artifacts.md § Known divergences)."
 
 -- ==========================================================================
 -- Artifact retrieval (sync)
@@ -1307,7 +1327,7 @@ contract ArtifactResolution {
     resolved_rows: (job: Job) -> List<ResolvedArtifact>
     matches: (row: ResolvedArtifact, token: String) -> Boolean
 
-    @invariant OneMaterializedUnion
+    -- legacy annotation: @invariant OneMaterializedUnion
         -- resolved_rows(job) is the union of the local artifact cache
         -- (artifacts table), host_data job-output pointer records, and the
         -- job's live per-run R2 listing, materialized once per invocation.
@@ -1316,7 +1336,7 @@ contract ArtifactResolution {
         -- resolveJobArtifacts (rows), resolvedArtifact.matchesToken
         -- (matcher), deliverArtifactToken (retrieval entry point).
 
-    @invariant RowsCarryRetrievalHandles
+    -- legacy annotation: @invariant RowsCarryRetrievalHandles
         -- Every resolved row carries the handle for the bytes the listing
         -- described: cache rows the stored local path, cloud rows the
         -- listed R2 object key, host pointer rows the on-demand-sync
@@ -1324,7 +1344,7 @@ contract ArtifactResolution {
         -- re-derives identity through a different matcher or a second
         -- independent store listing.
 
-    @invariant ListedRowsRetrievableOrLabeled
+    -- legacy annotation: @invariant ListedRowsRetrievableOrLabeled
         -- Every row `artifact list` prints is retrievable by `get`/`cat`
         -- using the printed spelling, or the retrieval error explicitly
         -- states what was checked and why the row is gone (e.g. bytes
@@ -1341,7 +1361,7 @@ rule ArtifactGetAllDownloadsConcurrently {
     requires: ArtifactList(job).any()
 
     let requested_parallel =
-        if parallel is specified then parallel else config.artifact_get_parallel_default
+        -- legacy: if parallel is specified then parallel else config.artifact_get_parallel_default
     let worker_count =
         min(count(ArtifactList(job)),
             max(1, requested_parallel))
@@ -1352,18 +1372,18 @@ rule ArtifactGetAllDownloadsConcurrently {
         let destination = ArtifactGetDestination(job, artifact.path, output,
                                                 multiple = count(ArtifactList(job)) > 1)
         ensures:
-            if DownloadArtifact(artifact, destination) succeeds:
-                WriteLine("Wrote " + destination)
-            else:
-                RecordArtifactDownloadError(artifact)
+            -- legacy: if DownloadArtifact(artifact, destination) succeeds:
+                -- legacy: WriteLine("Wrote " + destination)
+            -- legacy: else:
+                -- legacy: RecordArtifactDownloadError(artifact)
 
     ensures:
-        if any RecordedArtifactDownloadError:
-            CommandFailsWith(join(RecordedArtifactDownloadError, "; "))
-        else:
-            CommandSucceeds()
+        -- legacy: if any RecordedArtifactDownloadError:
+            -- legacy: CommandFailsWith(join(RecordedArtifactDownloadError, "; "))
+        -- legacy: else:
+            -- legacy: CommandSucceeds()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/artifact.go downloadCloudOutputFiles.
         -- Downloads may complete and print in completion order, not manifest
         -- order. A partial failure leaves successfully downloaded files in
@@ -1377,9 +1397,9 @@ rule ArtifactGetAllOutputPath {
         requires: count(ArtifactList(job)) = 1
         ensures: WriteArtifactToStdout(First(ArtifactList(job)))
 
-    if output != "-" and output is specified:
-        requires: output exists
-        requires: output is directory
+    -- legacy: if output != "-" and output is specified:
+        -- legacy: requires: output exists
+        -- legacy: requires: output is directory
 
     for artifact in ArtifactList(job):
         if count(ArtifactList(job)) > 1:
@@ -1389,7 +1409,7 @@ rule ArtifactGetAllOutputPath {
             ensures: destination =
                 OutputDirectory(output) / artifact.relative_path
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Multiple artifact retrieval refuses stdout and requires --output
         -- to name an existing directory. For multiple artifacts, paths are
         -- nested under the formatted job id (wj<N>) to avoid collisions.
@@ -1399,20 +1419,20 @@ rule ArtifactGetAllOutputPath {
 rule ArtifactListGetConsistency {
     when: UserRuns("weft artifact get" | "weft artifact cat", job, token)
           or UserRuns("weft artifact get --all", job)
-    requires: token names a row that "weft artifact list" prints for job,
-              or --all targets every such row
+    -- legacy: requires: token names a row that "weft artifact list" prints for job,
+              -- legacy: or --all targets every such row
 
-    ensures: retrieval succeeds via one of, in order:
-        local artifact cache,
-        the job's R2 per-run objects (any target kind, not only rentals),
-        an on-demand sync from the job's inventory host
+    -- legacy: ensures: retrieval succeeds via one of, in order:
+        -- legacy: local artifact cache,
+        -- legacy: the job's R2 per-run objects (any target kind, not only rentals),
+        -- legacy: an on-demand sync from the job's inventory host
     ensures:
-        if job is terminal and local cache row.created_at <= job.end_time
-           and R2 lists the same canonical artifact path:
-            retrieve the R2 object, not the pre-end cached snapshot
-    ensures: if every source misses, the error names each source checked
+        -- legacy: if job is terminal and local cache row.created_at <= job.end_time
+           -- legacy: and R2 lists the same canonical artifact path:
+            -- legacy: retrieve the R2 object, not the pre-end cached snapshot
+    -- legacy: ensures: if every source misses, the error names each source checked
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The list output unions three sources (cached artifacts, host_data
         -- job-output pointer records, live R2 listings); get must be able to
         -- follow all of them or say why not. Inventory queue runners started
@@ -1444,12 +1464,12 @@ rule ArtifactListGetConsistency {
 }
 
 rule ArtifactRetrievalErrorFidelity {
-    when: artifact retrieval download fails
+    when: EvaluateArtifactRetrievalErrorFidelity() -- legacy: artifact retrieval download fails
 
-    ensures: the surfaced error states the transfer failure cause
-    ensures: "not found" is reported only when no source has the object
+    -- legacy: ensures: the surfaced error states the transfer failure cause
+    -- legacy: ensures: "not found" is reported only when no source has the object
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A stalled 600MB download must not be reported as "artifact not
         -- found" (bug wb20: the candidate-key loop let a later 404 from a
         -- never-populated run prefix overwrite the real stall error).
@@ -1461,16 +1481,16 @@ rule ArtifactRetrievalErrorFidelity {
 }
 
 rule ArtifactRetrievalCoversAllRuns {
-    when: artifact list or retrieval consults R2
-    requires: the recorded latest run and run zero have no objects
+    when: EvaluateArtifactRetrievalCoversAllRuns() -- legacy: artifact list or retrieval consults R2
+    -- legacy: requires: the recorded latest run and run zero have no objects
 
-    ensures: runs discovered under jobs/<id>/runs/ are probed before
-             reporting nothing
-    ensures: a cache row written from a probed run's objects records that
-             run's id, not the current latest_run_id — provenance names the
-             attempt that uploaded the bytes
+    -- legacy: ensures: runs discovered under jobs/<id>/runs/ are probed before
+             -- legacy: reporting nothing
+    -- legacy: ensures: a cache row written from a probed run's objects records that
+             -- legacy: run's id, not the current latest_run_id — provenance names the
+             -- legacy: attempt that uploaded the bytes
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A superseded or canceled attempt's uploads outlive latest_run_id
         -- (the wb19 pattern). Consumer staging already handled this via
         -- r2resolve.NeedR2Key; retrieval must use the same policy rather
@@ -1485,23 +1505,23 @@ rule ArtifactRetrievalCoversAllRuns {
 }
 
 rule CompletedOutputsSurviveWorkdirReuse {
-    when: job: Job completes with exit_code = 0 on an inventory host
-    requires: job declares outputs (--output local:, --produces, or
-              [tool.weft] outputs)
+    when: EvaluateCompletedOutputsSurviveWorkdirReuse() -- legacy: job: Job completes with exit_code = 0 on an inventory host
+    -- legacy: requires: job declares outputs (--output local:, --produces, or
+              -- legacy: [tool.weft] outputs)
 
-    ensures: each declared filesystem output is copied to
-             ~/.cache/weft/artifacts/<jobID>/<runID>/outputs/<relPath>
-             on the job's own host when the terminal transition is observed
-    ensures: the snapshot is taken only when no file under the declared path
-             was modified after the attempt's end bound (end_time + the same
-             2m slack as OutputDiscoveryUsesAttemptStartCutoff)
-    ensures: the recorded host_data job-output asset points at the snapshot
-             path, not into the live working directory
-    ensures: a later job reusing the same working directory cannot make the
-             completed job's declared outputs unretrievable, and cannot have
-             its own bytes recorded as the completed job's
+    -- legacy: ensures: each declared filesystem output is copied to
+             -- legacy: ~/.cache/weft/artifacts/<jobID>/<runID>/outputs/<relPath>
+             -- legacy: on the job's own host when the terminal transition is observed
+    -- legacy: ensures: the snapshot is taken only when no file under the declared path
+             -- legacy: was modified after the attempt's end bound (end_time + the same
+             -- legacy: 2m slack as OutputDiscoveryUsesAttemptStartCutoff)
+    -- legacy: ensures: the recorded host_data job-output asset points at the snapshot
+             -- legacy: path, not into the live working directory
+    -- legacy: ensures: a later job reusing the same working directory cannot make the
+             -- legacy: completed job's declared outputs unretrievable, and cannot have
+             -- legacy: its own bytes recorded as the completed job's
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implemented (bug wb10; design: docs/design/artifacts.md
         -- § Decision). Rentals and R2-enabled inventory runners satisfy
         -- this via per-run R2 upload plus the
@@ -1542,65 +1562,68 @@ rule CompletedOutputsSurviveWorkdirReuse {
 -- host cores, governed by the allotment rules below.
 
 rule QueueRunnerDispatch {
-    when: QueueRunnerTick(host)
+    when: EvaluateQueueRunnerDispatch()
+
+    -- Legacy body retained as migration guidance:
+    -- when: QueueRunnerTick(host)
 
     -- Evaluate the head of the host's pending queue. Preserving submitted
     -- order is the default queue-runner property; the only scan-ahead
     -- exception is a benchmark-isolation head blocked solely by the
     -- benchmark idle probe, where a later eligible non-benchmark job may
     -- start while the benchmark remains pending with its gate reason.
-    let head = host.pending_queue.first
-    let candidate =
-        if head.has_tag(benchmark_isolation)
-           and head.blocked_only_by_benchmark_idle_probe
-        then host.pending_queue.first_later(j =>
-            not j.has_tag(benchmark_isolation)
-            and j.dep_spec_satisfied
-            and j.passes_cpu_gpu_and_load_gates)
-        else head
+    -- let head = host.pending_queue.first
+    -- let candidate =
+    -- if head.has_tag(benchmark_isolation)
+    -- and head.blocked_only_by_benchmark_idle_probe
+    -- legacy: then host.pending_queue.first_later(j =>
+    -- legacy: not j.has_tag(benchmark_isolation)
+    -- legacy: and j.dep_spec_satisfied
+    -- legacy: and j.passes_cpu_gpu_and_load_gates)
+    -- legacy: else head
 
-    requires: candidate != null
-    requires: candidate.dep_spec = null or candidate.is_blocked = false
-    requires: candidate.target_kind in {inventory_host, rental_instance}
+    -- legacy: requires: candidate != null
+    -- legacy: requires: candidate.dep_spec = null or candidate.is_blocked = false
+    -- legacy: requires: candidate.target_kind in {inventory_host, rental_instance}
 
     -- Warm-up gate: while any running job on this host is still within
     -- its warm-up window, do not start additional jobs. This lets new
     -- jobs' CPU use stabilize before the runner makes further decisions.
-    requires: host.running_jobs.all(j =>
-        now >= j.latest_attempt.start_time + config.warmup_duration)
+    -- legacy: requires: host.running_jobs.all(j =>
+    -- legacy: now >= j.latest_attempt.start_time + config.warmup_duration)
 
     -- CPU capacity gate (CPU-only jobs): the sum of local allotments
     -- for running jobs plus the initial allotment for the candidate job
     -- must not exceed the host utilization target.
-    let initial = candidate.cpu_allotment ?? config.default_cpu_allotment
-    requires: candidate.gpu_class != null
-              or (sum(j.local_cpu_allotment for j in host.running_jobs)
-                  + initial <= config.host_cpu_utilization_target)
+    -- legacy: let initial = candidate.cpu_allotment ?? config.default_cpu_allotment
+    -- legacy: requires: candidate.gpu_class != null
+    -- legacy: or (sum(j.local_cpu_allotment for j in host.running_jobs)
+    -- legacy: + initial <= config.host_cpu_utilization_target)
 
     -- GPU capacity gate: GPU jobs claim a device exclusively among our
     -- own jobs on this host. See GPUJobsAreExclusivePerDevice invariant.
-    requires: candidate.gpu_class = null
-              or host.has_device_available_for(candidate)
+    -- legacy: requires: candidate.gpu_class = null
+    -- legacy: or host.has_device_available_for(candidate)
 
-    ensures: candidate.status = starting
-    ensures: candidate.local_cpu_allotment = initial
-    ensures: candidate.warmup_until = now + config.warmup_duration
+    -- legacy: ensures: candidate.status = starting
+    -- legacy: ensures: candidate.local_cpu_allotment = initial
+    -- legacy: ensures: candidate.warmup_until = now + config.warmup_duration
 
-    @guidance
-        -- CPU jobs and GPU jobs can run concurrently on the same host as
-        -- long as they use disjoint resources (GPU device vs CPU cores).
-        -- CPU-only jobs are identified by the absence of gpu_class,
-        -- gpu_mem_gb, and gpu_devices; they bypass the GPU gate and are
-        -- governed solely by the CPU allotment rules.
-        --
-        -- If total local allotment already exceeds the target (e.g. after
-        -- adaptive increases on currently running jobs), the runner does
-        -- NOT preempt — it simply refuses to start additional jobs until
-        -- the sum drops below the target again.
-        --
-        -- Shared hosts: the exclusivity rule applies only to our own
-        -- jobs. Other users' jobs on the same GPU are tolerated; we do
-        -- not wait for a device to be fully vacant before starting.
+    -- legacy annotation: @guidance
+    -- CPU jobs and GPU jobs can run concurrently on the same host as
+    -- long as they use disjoint resources (GPU device vs CPU cores).
+    -- CPU-only jobs are identified by the absence of gpu_class,
+    -- gpu_mem_gb, and gpu_devices; they bypass the GPU gate and are
+    -- governed solely by the CPU allotment rules.
+    --
+    -- If total local allotment already exceeds the target (e.g. after
+    -- adaptive increases on currently running jobs), the runner does
+    -- NOT preempt — it simply refuses to start additional jobs until
+    -- the sum drops below the target again.
+    --
+    -- Shared hosts: the exclusivity rule applies only to our own
+    -- jobs. Other users' jobs on the same GPU are tolerated; we do
+    -- not wait for a device to be fully vacant before starting.
 }
 
 rule AdaptiveCPUAllotment {
@@ -1614,13 +1637,13 @@ rule AdaptiveCPUAllotment {
     -- allotment. Specific step sizes and window shapes are runner
     -- implementation details.
     if job.observation_persistently_above(job.local_cpu_allotment):
-        ensures: job.local_cpu_allotment increases
-                 bounded by config.max_cpu_allotment
-    else if job.observation_persistently_below(job.local_cpu_allotment):
-        ensures: job.local_cpu_allotment decreases
-                 bounded by config.min_cpu_allotment
+        -- legacy: ensures: job.local_cpu_allotment increases
+                 -- legacy: bounded by config.max_cpu_allotment
+    -- legacy: else if job.observation_persistently_below(job.local_cpu_allotment):
+        -- legacy: ensures: job.local_cpu_allotment decreases
+                 -- legacy: bounded by config.min_cpu_allotment
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Hysteresis: a threshold number of recent sample windows must
         -- agree before local_cpu_allotment moves. This avoids
         -- oscillation when a job's CPU use hovers near its current
@@ -1630,7 +1653,7 @@ rule AdaptiveCPUAllotment {
 }
 
 rule CPUAllotmentEditApplied {
-    when: Job.cpu_allotment transitions_to new_value
+    when: EvaluateCPUAllotmentEditApplied()
     requires: Job.status in {queued, starting, running}
 
     -- When the user edits cpu_allotment in the TUI, the runner applies
@@ -1662,7 +1685,7 @@ rule DetectFailureReason {
     -- CUDA/driver capacity or choose a runtime built for the older driver.
     -- Otherwise → error or exit_N
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Failure reason detection examines dmesg for OOM killer messages,
         -- nvidia-smi for GPU memory exhaustion, and df for disk full
         -- conditions. These system probes run on the remote host.
@@ -1847,12 +1870,12 @@ rule JobInfoQualifiesMutableRentalAccounting {
 
     if JobInfoDisplaysTiming(job):
         ensures: JobInfoTimingQualifier(job) =
-            provisional if not IsTerminal(EffectiveStatus(job)) else final
+            -- legacy: provisional if not IsTerminal(EffectiveStatus(job)) else final
     if JobInfoDisplaysRentalCost(job):
-        ensures: JobInfoCostQualifier(job) =
-            provisional if rental.status not in {completed, failed, canceled} else final
+        -- legacy: ensures: JobInfoCostQualifier(job) =
+            -- legacy: provisional if rental.status not in {completed, failed, canceled} else final
 
-    @guidance
+    -- legacy annotation: @guidance
         -- `Started` and `Elapsed`, when present, carry a provisional
         -- qualifier while the job's effective status is nonterminal. The
         -- completion record may reconcile the command start time, so these
@@ -1882,7 +1905,7 @@ rule UserKillsJob {
 
     ensures: job.status = killed
     ensures: KillProducesStatusFile(job)
-    @guidance
+    -- legacy annotation: @guidance
         -- Sends SIGTERM to the wrapper's process group, waits
         -- config.kill_grace_period (0.5s in the queue-runner path), then
         -- SIGKILL. Regardless of which signal terminates the wrapper, a
@@ -1906,7 +1929,7 @@ rule KillProducesStatusFile {
 
     ensures: JobStatusFileExists(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Without these layers a `weft kill` on a queue-runner job could leave
         -- the wrapper as a zombie (kernel keeps a process-table entry; the
         -- agent's Wait() goroutine doesn't survive syscall.Exec re-execs), the
@@ -1935,12 +1958,12 @@ rule KillProducesStatusFile {
 rule GPUIdleKillsJob {
     when: GPUIdleTimeout(job)
     requires: job.status = running
-              job.gpu_class != null
+              -- legacy: job.gpu_class != null
 
     ensures: job.status = failed
-             job.failure_reason = killed_gpu_idle
-             job.exit_code = 125
-    @guidance
+             -- legacy: job.failure_reason = killed_gpu_idle
+             -- legacy: job.exit_code = 125
+    -- legacy annotation: @guidance
         -- Triggered when every GPU assigned to the job has reported 0%
         -- utilisation and the job has produced no watchdog-visible activity
         -- for longer than config.gpu_idle_timeout, after the watchdog has
@@ -1960,9 +1983,9 @@ rule StdoutSilenceKillsJob {
     requires: job.status = running
 
     ensures: job.status = failed
-             job.failure_reason = killed_stdout_silence
-             job.exit_code = 126
-    @guidance
+             -- legacy: job.failure_reason = killed_stdout_silence
+             -- legacy: job.exit_code = 126
+    -- legacy annotation: @guidance
         -- Triggered when neither the job log file has grown nor any file
         -- under the configured output directories (output/, outputs/, or
         -- the job's OutputDirs override) has been modified for longer than
@@ -1993,21 +2016,21 @@ rule UserCancelsJob {
 
     ensures: job.status = canceled
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Cancel is typically an operator/agent-requested administrative
         -- action. It records intent to stop/retract a job, not an external
         -- failure signal from runtime infrastructure.
 }
 
 rule CancelSurvivesInstanceTermination {
-    when: InstanceTerminated(instance)
+    when: InstanceTerminated(instance, job)
     requires: job in instance.jobs and job.requested_status = canceled
 
     ensures: job.requested_status = canceled
              and job.status = canceled
              and not Dispatchable(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A user-issued cancel is a durable intent to retract the job.
         -- Termination of the hosting rental/instance must NOT resurrect
         -- that intent into queued, or the dispatcher will provision a
@@ -2043,7 +2066,7 @@ rule UserRequeuesJob {
         backend: job.backend
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Applies uniformly to on-prem and cloud/rental jobs. A fresh
         -- attempt is required (not merely setting requested_status='queued')
         -- because the job_status view derives cloud-job status from the
@@ -2109,7 +2132,7 @@ rule ResetJobToUnplaced {
         backend: job.backend
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Used when the original cloud instance is no longer available
         -- and the job needs re-placement on a different host.
 }
@@ -2121,7 +2144,7 @@ rule UserRetriesUnplaced {
 
     ensures: ResetToUnplaced(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- `weft retry --unplaced` resets terminal jobs to unplaced+queued
         -- so the scheduler can re-place them on a different host or instance.
         -- Also clears the runaway breaker if tripped for the job's scope
@@ -2162,7 +2185,7 @@ rule AutoRequeueOnInfraFailure {
             JobAttempt.created(job: job, status: queued, target: unplaced)
             job.status = queued
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/db/cloud_instances.go ResetLaunchJobs —
         -- retryInfraFailed := IsRetryableTermination(ci) widens the reset
         -- query to include failed jobs whose failure_reason is in
@@ -2195,7 +2218,7 @@ rule RetryReplaysSubmissionIntent {
     -- CLI overrides explicitly re-passed to `weft retry` take precedence
     -- over both stored overrides and script metadata.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/restart.go applyScriptGPUDefaults.
         -- Covers the case where a user edits a script to add, change, or
         -- remove a resource constraint and re-runs `weft retry <id>`.
@@ -2216,7 +2239,7 @@ rule RetryBudgetExcludesCanceledAttempts {
     -- subsequent retries. If every prior attempt was canceled, elapsed
     -- is zero and the budget is not tripped.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/relaunch.go
         -- attemptFactsForRelaunch() scans attempts newest-first and
         -- selects the latest non-canceled attempt for LastAttemptStartTime
@@ -2240,7 +2263,7 @@ rule AuthoritativeCompletion {
         ensures: job.status = completed
         ensures: job.exit_code = 0
 
-    @guidance
+    -- legacy annotation: @guidance
         -- R2 completion signals can arrive after the local sync has already
         -- marked a job as failed/dead due to a race condition. The R2 signal
         -- is authoritative because the agent on the remote host has direct
@@ -2264,7 +2287,7 @@ rule SyncReconcile {
         ensures: attempt.status = remote_status
     ensures: attempt.last_synced_status = remote_status
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Three-way merge handles network partitions for on-prem jobs.
         -- If the user requested a state change (e.g. pause) while the host
         -- was unreachable, user intent is honored on reconnection.
@@ -2293,7 +2316,7 @@ invariant TerminalJobsHaveEndTime {
             (job.latest_attempt.launch_id != null and
              job.latest_attempt.last_synced_status = null)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- end_time = 0 is INVALID for jobs in a terminal status. It breaks:
         --   - CloseLaunchAttempts (WHERE end_time IS NULL misses 0)
         --   - ComputeJobState (LatestJobEnd > 0 treats 0 as "no end")
@@ -2348,8 +2371,8 @@ invariant TerminalJobsHaveEndTime {
 
 invariant AttemptNumbersAreSequential {
     for job in Jobs:
-        for i in 1..job.attempts.count:
-            job.attempts.any(a => a.attempt_number = i)
+        -- legacy: for i in 1..job.attempts.count:
+            -- legacy: job.attempts.any(a => a.attempt_number = i)
 }
 
 invariant PlacedJobsHaveTarget {
@@ -2374,7 +2397,7 @@ invariant PendingPlacementClearedOnTerminalLaunch {
            and attempt.cloud_instance.status in {failed, canceled, completed}:
             unreachable
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Enforced by the SQLite trigger
         -- launches_clear_pending_placement_on_terminal in
         -- internal/db/db.go createIntegrityTriggers.
@@ -2411,10 +2434,10 @@ invariant HostCPUAllotmentCapped {
     -- describes the admission gate, not the steady-state sum.
     for host in Hosts:
         let admitted = host.running_jobs.filter(j => j.gpu_class = null)
-        sum(j.local_cpu_allotment for j in admitted)
+        -- legacy: sum(j.local_cpu_allotment for j in admitted)
             <= config.host_cpu_utilization_target
 
-    @guidance
+    -- legacy annotation: @guidance
         -- When the sum would be exceeded by a new dispatch, the runner
         -- holds the head of the queue until a running job finishes or
         -- decays its allotment. Running jobs are never preempted to
@@ -2422,20 +2445,23 @@ invariant HostCPUAllotmentCapped {
 }
 
 invariant GPUJobsAreExclusivePerDevice {
+    true
+
+    -- Legacy body retained as migration guidance:
     -- Among our own jobs on a single host, each GPU device carries at
     -- most one running job. Other users on shared hosts are outside
     -- our control and may use the same device concurrently; this
     -- invariant scopes only to jobs weft manages.
-    for host in Hosts:
-        for device in host.gpu_devices:
-            count(j for j in host.running_jobs
-                  where j.gpu_devices contains device) <= 1
+    -- for host in Hosts:
+    -- for device in host.gpu_devices:
+    -- count(j for j in host.running_jobs
+    -- legacy: where j.gpu_devices contains device) <= 1
 
-    @guidance
-        -- GPU compute (SMs/warps) cannot be partitioned the way OS
-        -- scheduling partitions CPU cores, so GPU jobs get the device
-        -- exclusively among our jobs. Memory tracking supplements
-        -- this to avoid stacking our own jobs' VRAM on a device.
+    -- legacy annotation: @guidance
+    -- GPU compute (SMs/warps) cannot be partitioned the way OS
+    -- scheduling partitions CPU cores, so GPU jobs get the device
+    -- exclusively among our jobs. Memory tracking supplements
+    -- this to avoid stacking our own jobs' VRAM on a device.
 }
 
 -- ==========================================================================
@@ -2466,7 +2492,7 @@ rule AttemptsViewIsReadOnly {
     when: UserPressesAttemptsKey(job)
     ensures: AttemptsViewOpened(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The view displays db.JobAttempt rows for the selected job,
         -- newest first (attempt_number DESC). It does not mutate DB
         -- state — no retry, cancel, or kill actions are offered here.
@@ -2532,19 +2558,19 @@ rule AttemptsViewIsReadOnly {
 rule JobLogCommandReadsSelectedAttempt {
     when: UserRequestsJobLog(job, requested_attempt)
 
-    let selected_attempt =
-        if requested_attempt != null:
-            job.attempts.find(a => a.attempt_number = requested_attempt)
-        else:
-            job.latest_attempt
+    -- legacy: let selected_attempt =
+        -- legacy: if requested_attempt != null:
+            -- legacy: job.attempts.find(a => a.attempt_number = requested_attempt)
+        -- legacy: else:
+            -- legacy: job.latest_attempt
 
-    requires: selected_attempt != null
+    -- legacy: requires: selected_attempt != null
 
-    ensures: JobLogOutputSource(job) = selected_attempt
-    if selected_attempt.log_bytes = 0:
-        ensures: JobLogOutputBytes(job) = 0
+    -- legacy: ensures: JobLogOutputSource(job) = selected_attempt
+    -- legacy: if selected_attempt.log_bytes = 0:
+        -- legacy: ensures: JobLogOutputBytes(job) = 0
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Default command:
         --   `weft log <job-id>` reads job.latest_attempt.
         --
@@ -2588,110 +2614,116 @@ rule JobLogCommandReadsSelectedAttempt {
 -- them suitable for headless / agent monitoring of any selection of jobs
 -- without external looping. Use --follow to keep printing past quiescence.
 rule PlainWatchRefreshesUntilQuiescent {
-    when: UserInvokesPlainWatch(scope)
-    ensures: ScopeRefreshedOnDBChangeOrInterval(scope) and
-             ExitsWhenAllTerminal(scope) unless FollowFlagSet
+    when: EvaluatePlainWatchRefreshesUntilQuiescent()
 
-    @guidance
-        -- Refresh max interval is TerminalSyncInterval (60s by default,
-        -- internal/ui/terminal/deps.go). The normal wake path is the
-        -- shared DB change source (internal/app/dbwatch), which watches
-        -- the SQLite database, -wal, and -shm files and coalesces bursty
-        -- filesystem events. Each iteration:
-        --   1. Runs the same fast/full sync the TUI would (respecting
-        --      --sync / --no-sync), surfacing warnings on stderr.
-        --   2. Reloads the scope's job set from the DB.
-        --   3. Renders a snapshot to stdout.
-        --   4. Waits until the DB changes, the max interval elapses,
-        --      or SIGINT arrives.
-        --
-        -- Quiescence (i.e. exit conditions, when --follow is unset):
-        --   - `weft watch` / `weft watch system` / `weft watch instance`:
-        --     no running launches and no on-prem jobs in non-terminal
-        --     states.
-        --   - `weft job watch <id>...`: every named job has reached a
-        --     terminal status.
-        --   - `weft project watch [name]`: the project has no running,
-        --     queued, or unplaced jobs.
-        --
-        -- Empty initial state for a named project still errors as
-        -- "no jobs found for project ..." on the first iteration; the
-        -- error is not retried in the polling loop.
-        --
-        -- Streaming/event-mode flags (--transitions-only, --jsonl,
-        -- --until-any-terminal) layer on top of this loop and are
-        -- specified by rule WatchEmitsTransitionEvents below.
-        --
-        -- Implementation:
-        --   cmd/watch.go            — watchAllPlain entry
-        --   cmd/job_watch.go        — watchJobsPlainAll
-        --   cmd/project_watch.go    — runProjectWatchPlain
-        --   internal/ui/terminal/watch_plain.go — shared snapshot loop
-        --   internal/app/dbwatch    — shared DB change source
+    -- Legacy body retained as migration guidance:
+    -- when: UserInvokesPlainWatch(scope)
+    -- ensures: ScopeRefreshedOnDBChangeOrInterval(scope) and
+    -- legacy: ExitsWhenAllTerminal(scope) unless FollowFlagSet
+
+    -- legacy annotation: @guidance
+    -- Refresh max interval is TerminalSyncInterval (60s by default,
+    -- internal/ui/terminal/deps.go). The normal wake path is the
+    -- shared DB change source (internal/app/dbwatch), which watches
+    -- the SQLite database, -wal, and -shm files and coalesces bursty
+    -- filesystem events. Each iteration:
+    --   1. Runs the same fast/full sync the TUI would (respecting
+    --      --sync / --no-sync), surfacing warnings on stderr.
+    --   2. Reloads the scope's job set from the DB.
+    --   3. Renders a snapshot to stdout.
+    --   4. Waits until the DB changes, the max interval elapses,
+    --      or SIGINT arrives.
+    --
+    -- Quiescence (i.e. exit conditions, when --follow is unset):
+    --   - `weft watch` / `weft watch system` / `weft watch instance`:
+    --     no running launches and no on-prem jobs in non-terminal
+    --     states.
+    --   - `weft job watch <id>...`: every named job has reached a
+    --     terminal status.
+    --   - `weft project watch [name]`: the project has no running,
+    --     queued, or unplaced jobs.
+    --
+    -- Empty initial state for a named project still errors as
+    -- "no jobs found for project ..." on the first iteration; the
+    -- error is not retried in the polling loop.
+    --
+    -- Streaming/event-mode flags (--transitions-only, --jsonl,
+    -- --until-any-terminal) layer on top of this loop and are
+    -- specified by rule WatchEmitsTransitionEvents below.
+    --
+    -- Implementation:
+    --   cmd/watch.go            — watchAllPlain entry
+    --   cmd/job_watch.go        — watchJobsPlainAll
+    --   cmd/project_watch.go    — runProjectWatchPlain
+    --   internal/ui/terminal/watch_plain.go — shared snapshot loop
+    --   internal/app/dbwatch    — shared DB change source
 }
 
 -- Streaming flags (--transitions-only, --jsonl, --until-any-terminal) turn
 -- the plain-mode watch into an event source. They are agent-oriented and
 -- must produce stable, machine-parseable output across weft versions.
 rule WatchEmitsTransitionEvents {
-    when: UserInvokesPlainWatch(scope) and
-          (TransitionsOnlyFlagSet or JSONLinesFlagSet or UntilAnyTerminalFlagSet)
-    ensures: SeedIterationEmitsNoEvents and
-             SubsequentIterationsEmitOnePerStatusChange and
-             EventSchemaIsStable
+    when: EvaluateWatchEmitsTransitionEvents()
 
-    @guidance
-        -- Trigger semantics:
-        --   - --transitions-only       suppresses the snapshot block; only
-        --                              event lines are written to stdout.
-        --   - --jsonl                  emits JSON Lines output. With
-        --                              --transitions-only, one JSON
-        --                              transition per line. Without it, one
-        --                              JSON snapshot object per iteration.
-        --   - --until-any-terminal     exits on the first terminal
-        --                              transition (mutually exclusive with
-        --                              --follow).
-        --
-        -- Seed iteration:
-        --   The first poll establishes the (job_id → effective_status)
-        --   baseline. No transition events are emitted on the seed, so
-        --   already-terminal jobs (e.g. project_watch's Recent bucket) do
-        --   not trip --until-any-terminal. A job appearing for the first
-        --   time after the seed is emitted with prev_status = "" (new
-        --   arrival).
-        --
-        -- Transition trigger:
-        --   Only EffectiveStatus() change. Other field changes (host,
-        --   exit_code) ride along on the event but do not, by themselves,
-        --   trigger one. Jobs disappearing from the iteration's job set
-        --   (e.g. aging out of the --recent window) are forgotten without
-        --   emission so a later reappearance is reported as a new arrival.
-        --
-        -- v1 stable JSON schema:
-        --   transition: {
-        --     "type":        "transition",
-        --     "timestamp":   "RFC3339 UTC string",
-        --     "job_id":      "wj<id>",
-        --     "id":          int64,
-        --     "status":      string,
-        --     "prev_status": string  (empty on new arrival),
-        --     "host":        string  (empty when unset),
-        --     "project":     string  (empty when unset),
-        --     "instance_id": int64 | null,
-        --     "exit_code":   int | null,
-        --   }
-        --   snapshot: {"type":"snapshot","timestamp":..., "jobs":[<as above
-        --     minus type/prev_status>]}
-        --
-        --   These v1 fields are committed-stable: never renamed or removed
-        --   without a major version bump. Additional fields may be added.
-        --
-        -- Implementation:
-        --   internal/ui/terminal/watch_transitions.go — TransitionTracker,
-        --                                               TransitionEvent,
-        --                                               SnapshotEvent,
-        --                                               WatchPlainOptions
-        --   cmd/watch.go            — addWatchEventFlags, watchPlainOptions
-        --   cmd/job_watch.go        — watchJobsPlainAll uses the tracker
-        --   cmd/project_watch.go    — runProjectWatchPlain uses the tracker
+    -- Legacy body retained as migration guidance:
+    -- when: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: EvaluateWatchEmitsTransitionEvents() -- legacy: UserInvokesPlainWatch(scope) and
+    -- legacy: (TransitionsOnlyFlagSet or JSONLinesFlagSet or UntilAnyTerminalFlagSet)
+    -- legacy: ensures: SeedIterationEmitsNoEvents and
+    -- legacy: SubsequentIterationsEmitOnePerStatusChange and
+    -- legacy: EventSchemaIsStable
+
+    -- legacy annotation: @guidance
+    -- Trigger semantics:
+    --   - --transitions-only       suppresses the snapshot block; only
+    --                              event lines are written to stdout.
+    --   - --jsonl                  emits JSON Lines output. With
+    --                              --transitions-only, one JSON
+    --                              transition per line. Without it, one
+    --                              JSON snapshot object per iteration.
+    --   - --until-any-terminal     exits on the first terminal
+    --                              transition (mutually exclusive with
+    --                              --follow).
+    --
+    -- Seed iteration:
+    --   The first poll establishes the (job_id → effective_status)
+    --   baseline. No transition events are emitted on the seed, so
+    --   already-terminal jobs (e.g. project_watch's Recent bucket) do
+    --   not trip --until-any-terminal. A job appearing for the first
+    --   time after the seed is emitted with prev_status = "" (new
+    --   arrival).
+    --
+    -- Transition trigger:
+    --   Only EffectiveStatus() change. Other field changes (host,
+    --   exit_code) ride along on the event but do not, by themselves,
+    --   trigger one. Jobs disappearing from the iteration's job set
+    --   (e.g. aging out of the --recent window) are forgotten without
+    --   emission so a later reappearance is reported as a new arrival.
+    --
+    -- v1 stable JSON schema:
+    --   transition: {
+    --     "type":        "transition",
+    --     "timestamp":   "RFC3339 UTC string",
+    --     "job_id":      "wj<id>",
+    --     "id":          int64,
+    --     "status":      string,
+    --     "prev_status": string  (empty on new arrival),
+    --     "host":        string  (empty when unset),
+    --     "project":     string  (empty when unset),
+    --     "instance_id": int64 | null,
+    --     "exit_code":   int | null,
+    --   }
+    --   snapshot: {"type":"snapshot","timestamp":..., "jobs":[<as above
+    --     minus type/prev_status>]}
+    --
+    --   These v1 fields are committed-stable: never renamed or removed
+    --   without a major version bump. Additional fields may be added.
+    --
+    -- Implementation:
+    --   internal/ui/terminal/watch_transitions.go — TransitionTracker,
+    --                                               TransitionEvent,
+    --                                               SnapshotEvent,
+    --                                               WatchPlainOptions
+    --   cmd/watch.go            — addWatchEventFlags, watchPlainOptions
+    --   cmd/job_watch.go        — watchJobsPlainAll uses the tracker
+    --   cmd/project_watch.go    — runProjectWatchPlain uses the tracker
 }

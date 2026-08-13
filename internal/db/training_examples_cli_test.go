@@ -1,8 +1,8 @@
 package db
 
 import (
-	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,23 +12,10 @@ func TestTrainingExamplesViewParsesInSystemSQLiteCLI(t *testing.T) {
 		t.Skip("sqlite3 not installed")
 	}
 
-	tmpFile, err := os.CreateTemp("", "weft-db-cli-*.db")
-	if err != nil {
-		t.Fatalf("create temp file: %v", err)
-	}
-	tmpFile.Close()
-	defer os.Remove(tmpFile.Name())
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, dbFile)
 
-	cleanup := SetDBPath(tmpFile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	database.Close()
-
-	schemaCmd := exec.Command("sqlite3", tmpFile.Name(), ".schema training_examples")
+	schemaCmd := exec.Command("sqlite3", dbFile, ".schema training_examples")
 	schemaOut, err := schemaCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("sqlite3 .schema training_examples failed: %v\n%s", err, schemaOut)
@@ -37,7 +24,7 @@ func TestTrainingExamplesViewParsesInSystemSQLiteCLI(t *testing.T) {
 		t.Fatalf("sqlite3 .schema training_examples output missing view definition:\n%s", schemaOut)
 	}
 
-	queryCmd := exec.Command("sqlite3", tmpFile.Name(), "SELECT COUNT(*) FROM training_examples;")
+	queryCmd := exec.Command("sqlite3", dbFile, "SELECT COUNT(*) FROM training_examples;")
 	queryOut, err := queryCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("sqlite3 SELECT COUNT(*) FROM training_examples failed: %v\n%s", err, queryOut)

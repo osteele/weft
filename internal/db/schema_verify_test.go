@@ -49,20 +49,12 @@ func TestVerifySchemaVersion_PassesOnFreshDB(t *testing.T) {
 }
 
 func TestVerifySchemaVersion_DetectsBinaryNewerThanDB(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "jobs.db")
-	cleanup := SetDBPath(dbFile)
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer database.Close()
+	database := SetupTestDB(t)
 
 	// Remove goose's version record: the DB now looks unmigrated.
 	setGooseVersionForTest(t, database, 0)
 
-	err = verifySchemaVersion(database)
+	err := verifySchemaVersion(database)
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
 		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
@@ -76,20 +68,12 @@ func TestVerifySchemaVersion_DetectsBinaryNewerThanDB(t *testing.T) {
 }
 
 func TestVerifySchemaVersion_DetectsDBNewerThanBinary(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "jobs.db")
-	cleanup := SetDBPath(dbFile)
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer database.Close()
+	database := SetupTestDB(t)
 
 	// Record a migration version far beyond what this binary knows.
 	setGooseVersionForTest(t, database, 999)
 
-	err = verifySchemaVersion(database)
+	err := verifySchemaVersion(database)
 	var e *ErrSchemaMismatch
 	if !errors.As(err, &e) {
 		t.Fatalf("expected ErrSchemaMismatch, got %T: %v", err, err)
@@ -104,6 +88,7 @@ func TestVerifySchemaVersion_DetectsDBNewerThanBinary(t *testing.T) {
 
 func TestOpenForReading_RefusesStaleSchema(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, dbFile)
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 
@@ -125,6 +110,7 @@ func TestOpenForReading_RefusesStaleSchema(t *testing.T) {
 
 func TestOpenForReading_PreservesOpenNonLockError(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedPendingMigrationTestDBFile(t, dbFile)
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 

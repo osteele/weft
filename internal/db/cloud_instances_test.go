@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -3039,7 +3040,11 @@ func TestLaunchLiveState(t *testing.T) {
 	if got.JobProgressChangedAt == nil {
 		t.Fatal("structured progress timestamp was not recorded")
 	}
+	if got.PhaseChangedAt == nil {
+		t.Fatal("phase timestamp was not recorded")
+	}
 	firstProgressAt := *got.JobProgressChangedAt
+	firstPhaseAt := *got.PhaseChangedAt
 
 	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("repeat UpsertLaunchLiveState: %v", err)
@@ -3050,6 +3055,9 @@ func TestLaunchLiveState(t *testing.T) {
 	}
 	if got == nil || got.JobProgressChangedAt == nil || *got.JobProgressChangedAt != firstProgressAt {
 		t.Fatal("repeating the same structured progress reset its timestamp")
+	}
+	if got.PhaseChangedAt == nil || *got.PhaseChangedAt != firstPhaseAt {
+		t.Fatal("repeating the same instance phase cleared or reset its timestamp")
 	}
 
 	state.JobProgressPct = -1
@@ -3121,6 +3129,109 @@ func TestLaunchLiveStateBootstrapTransitions(t *testing.T) {
 	}
 	if enteredAt <= 0 {
 		t.Fatal("agent_starting entered_at was not recorded")
+	}
+}
+
+func TestLaunchLiveStateBootstrapTransitionFailureRollsBackCache(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := UpsertLaunchLiveState(database, LaunchLiveState{
+		LaunchID:       launchID,
+		BootstrapStage: "deps_installing",
+	}); err != nil {
+		t.Fatalf("seed UpsertLaunchLiveState: %v", err)
+	}
+	if _, err := database.Exec(`
+		CREATE TRIGGER fail_bootstrap_transition
+		BEFORE INSERT ON bootstrap_transitions
+		WHEN NEW.launch_id = ` + fmt.Sprint(launchID) + `
+		BEGIN
+			SELECT RAISE(ABORT, 'injected bootstrap transition failure');
+		END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if _, err := UpsertLaunchLiveState(database, LaunchLiveState{
+		LaunchID:       launchID,
+		BootstrapStage: "agent_starting",
+	}); err == nil {
+		t.Fatal("UpsertLaunchLiveState succeeded despite injected transition failure")
+	}
+
+	live, err := GetLaunchLiveState(database, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if live == nil || live.BootstrapStage != "deps_installing" {
+		t.Fatalf("bootstrap cache = %+v, want rollback to deps_installing", live)
+	}
+	var count int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM bootstrap_transitions WHERE launch_id = ?`,
+		launchID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count bootstrap transitions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("bootstrap transition count = %d, want original transition only", count)
+	}
+}
+
+func TestApplyLaunchTerminalTransition_StaleWriterDoesNotResetCompletedLaunchJobs(t *testing.T) {
+	database := setupTestDB(t)
+
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := RecordQueued(database, "", t.TempDir(), "echo test", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := UpdateLaunchStatus(database, launchID, LaunchStatusCompleted, TerminationReasonCompleted); err != nil {
+		t.Fatalf("record winning completed transition: %v", err)
+	}
+
+	reset, err := ApplyLaunchTerminalTransition(database, launchID, LaunchTerminalTransition{
+		Status:            LaunchStatusFailed,
+		TerminationReason: TerminationReasonProviderFailure,
+		ResetJobs:         true,
+		AttemptOutcome:    AttemptOutcomeOrphaned,
+	})
+	if err != nil {
+		t.Fatalf("ApplyLaunchTerminalTransition: %v", err)
+	}
+	if reset != 0 {
+		t.Fatalf("reset jobs = %d, want 0 from stale terminal writer", reset)
+	}
+	launch, err := GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if launch.Status != LaunchStatusCompleted || launch.TerminationReason != TerminationReasonCompleted {
+		t.Fatalf("launch disposition = (%q, %q), want completed winner", launch.Status, launch.TerminationReason)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != launchID {
+		t.Fatalf("job launch = %v, want winning completed launch %d", job.LaunchID, launchID)
 	}
 }
 

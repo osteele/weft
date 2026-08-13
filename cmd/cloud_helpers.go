@@ -46,8 +46,7 @@ func cloudClientForDBInstance(provider string) cloud.Client {
 	case cloud.ProviderRunpod:
 		return runpod.NewCloudClient()
 	default:
-		// Default to vastai for legacy records
-		return vastai.NewCloudClient(vastai.NewClient())
+		return nil
 	}
 }
 

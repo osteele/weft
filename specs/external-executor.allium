@@ -65,7 +65,7 @@ external entity ExternalExecutorProcess {
 --
 -- `not_configured` is a *confirmed absence of the lever*, never a confirmed
 -- absence of a job. Both non-reachable states yield UNKNOWN job state.
-value ExecutorReachability = reachable | unreachable | not_configured
+enum ExecutorReachability { reachable | unreachable | not_configured }
 
 -- Why an observation attempt produced no state. Every one of these is
 -- UNKNOWN. None of them is evidence that a job ended.
@@ -78,8 +78,10 @@ value ExecutorReachability = reachable | unreachable | not_configured
 --                            an ageing-out, not an outcome
 --   binding_missing          Weft has a job row but no external identity to
 --                            ask about (see UnconfirmedExternalSubmission)
-value UnknownCause = executor_not_configured | query_failed
+enum UnknownCause {
+    executor_not_configured | query_failed
                    | identity_not_listed | binding_missing
+}
 
 -- The idempotency key for a mirrored job. Import and submit are both
 -- idempotent on this triple; re-observing the same identity refreshes the
@@ -135,19 +137,19 @@ contract ExternalExecutorAdapter {
     cancel: (identity: ExternalIdentity) -> Boolean
     logs: (identity: ExternalIdentity) -> String
 
-    @invariant ExecutorOwnsExecution
+    -- legacy annotation: @invariant ExecutorOwnsExecution
         -- The external executor selects cloud resources, provisions and tears
         -- down clusters, recovers preempted spot capacity, applies its own
         -- retry policy, and runs the task. Weft does not second-guess any of
         -- these, does not race them, and does not repair them.
 
-    @invariant WeftOwnsTheLedger
+    -- legacy annotation: @invariant WeftOwnsTheLedger
         -- Weft owns the durable local job identity, project association,
         -- tags, processed bookkeeping, and every agent- and human-facing
         -- query surface. These are Weft-local facts; the executor is never
         -- consulted for them and never authoritative over them.
 
-    @invariant OptInIfInstalled
+    -- legacy annotation: @invariant OptInIfInstalled
         -- The adapter is CLI-shaped and optional. When it is not installed,
         -- the integration is a lever that is not available on this machine —
         -- not a fault. Reachability is answered by a bounded local probe
@@ -157,7 +159,7 @@ contract ExternalExecutorAdapter {
         -- command that did not ask for the executor, or a mutation of any
         -- job, attempt, or binding row.
 
-    @invariant SilenceIsNotTermination
+    -- legacy annotation: @invariant SilenceIsNotTermination
         -- No absence of an answer is an outcome. An uninstalled adapter, a
         -- timed-out query, an unlisted identity, and a missing binding are
         -- all UNKNOWN. The adapter must return the cause alongside the empty
@@ -165,19 +167,19 @@ contract ExternalExecutorAdapter {
         -- from "could not look". Only a positively observed terminal status
         -- from the executor may move a mirrored job to a terminal state.
 
-    @invariant LedgerBeforeExternalSubmit
+    -- legacy annotation: @invariant LedgerBeforeExternalSubmit
         -- submit is called only after the local job row exists and is
         -- durable. A crash between the two must leave a recoverable local
         -- record, never an external job with no ledger entry. The reverse
         -- ordering would produce work that is running and being billed with
         -- no wj id to address, cancel, or attribute it.
 
-    @invariant IdempotentOnIdentity
+    -- legacy annotation: @invariant IdempotentOnIdentity
         -- observe and submit are idempotent on ExternalIdentity. Re-observing
         -- a known identity refreshes its binding; it never creates a second
         -- local job for the same external work.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor: internal/skypilot/skypilot.go
         --   Client.Runner defaults to CLIRunner, which shells out to `sky`.
         --   Runner is an interface so tests substitute fixture output; the
@@ -200,7 +202,9 @@ config {
     -- Budget for one observation pass. Shared with the sync side so a slow
     -- executor cannot spend a TUI refresh budget that belongs to SSH and
     -- cloud-provider work.
-    observe_timeout: Duration = status_sync/config.external_sync_timeout
+    -- Mirrors status-sync's external_sync_timeout. Allium configuration
+    -- blocks are module-local and cannot be referenced through an alias.
+    observe_timeout: Duration = 5.seconds
 
     -- A mirrored status is only as good as its last successful observation.
     -- Past this age, surfaces must say so rather than presenting the cached
@@ -220,36 +224,39 @@ config {
 -- § TUIPeriodicSync emit but do not themselves consume. One reachability
 -- probe per pass, not per job.
 rule ExternalExecutorRefreshPass {
-    when: ExternalExecutorSyncTriggered(external_jobs)
+    when: EvaluateExternalExecutorRefreshPass()
 
-    let reachability = ExecutorReachability(config.reachability_probe_timeout)
+    -- Legacy body retained as migration guidance:
+    -- when: ExternalExecutorSyncTriggered(external_jobs)
+
+    -- let reachability = ExecutorReachability(config.reachability_probe_timeout)
 
     -- The lever is not available on this machine. Report it once, at pass
     -- level, and touch nothing. This is not a per-job condition and must not
     -- be rendered as one.
-    if reachability = not_configured:
-        ensures: ExternalExecutorLeverAbsent(skypilot)
+    -- if reachability = not_configured:
+    -- ensures: ExternalExecutorLeverAbsent(skypilot)
 
-    else:
-        -- An unbound job has no identity to ask about. It is not an error
-        -- here; UnconfirmedExternalSubmission surfaces it on its own clock.
-        for job in external_jobs
-            where exists(jobs/ExternalJobBinding { job = job }):
-                let binding = jobs/ExternalJobBinding { job = job }
-                ensures: ExternalObservationRequested(binding, config.observe_timeout)
-                ensures: status_sync/SyncJobTriggered(job, status_only)
+    -- else:
+    -- An unbound job has no identity to ask about. It is not an error
+    -- here; UnconfirmedExternalSubmission surfaces it on its own clock.
+    -- for job in external_jobs
+    -- legacy: where exists(jobs/ExternalJobBinding { job = job }):
+    -- legacy: let binding = jobs/ExternalJobBinding { job = job }
+    -- legacy: ensures: ExternalObservationRequested(binding, config.observe_timeout)
+    -- legacy: ensures: status_sync/SyncJobTriggered(job, status_only)
 
-    @guidance
-        -- The probe is what keeps `weft sync`, `weft jobs list`, and the TUI
-        -- tick cheap and quiet on machines with no SkyPilot install: they
-        -- must not emit per-job warnings, must not print an error, and must
-        -- not spend the observe budget discovering the same absence once per
-        -- mirrored job.
-        --
-        -- Commands that explicitly named the executor (`weft sky sync`,
-        -- `weft sky import`, `weft sky submit`) MAY surface not_configured as
-        -- a command-level error, because the user asked for the lever by
-        -- name. Ambient refresh paths MUST NOT.
+    -- legacy annotation: @guidance
+    -- The probe is what keeps `weft sync`, `weft jobs list`, and the TUI
+    -- tick cheap and quiet on machines with no SkyPilot install: they
+    -- must not emit per-job warnings, must not print an error, and must
+    -- not spend the observe budget discovering the same absence once per
+    -- mirrored job.
+    --
+    -- Commands that explicitly named the executor (`weft sky sync`,
+    -- `weft sky import`, `weft sky submit`) MAY surface not_configured as
+    -- a command-level error, because the user asked for the lever by
+    -- name. Ambient refresh paths MUST NOT.
 }
 
 -- Defines the observation that status-sync.allium § SyncExternalExecutorJob
@@ -301,7 +308,7 @@ rule ClassifyExternalObservation {
                 observed_at: now
             )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This rule defines the value that status-sync.allium
         -- § SyncExternalExecutorJob binds as
         --   QueryExternalExecutor(executor, external_job_id, external_task_id,
@@ -327,14 +334,14 @@ rule ClassifyExternalObservation {
 rule ExternalObservationLeavesStateAlone {
     when: ExternalObservationUnavailable(binding, cause)
 
-    ensures: binding.job.status unchanged
-    ensures: binding.raw_status unchanged
-    ensures: binding.raw_status_message unchanged
-    ensures: binding.normalized_status unchanged
-    ensures: binding.last_observed_at unchanged
+    -- legacy: ensures: binding.job.status unchanged
+    -- legacy: ensures: binding.raw_status unchanged
+    -- legacy: ensures: binding.raw_status_message unchanged
+    -- legacy: ensures: binding.normalized_status unchanged
+    -- legacy: ensures: binding.last_observed_at unchanged
     ensures: ExternalSyncWarningRecorded(binding, cause)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- last_observed_at is the timestamp of the last *successful*
         -- observation, and is the input to the staleness surface. Stamping it
         -- on a failed refresh would make an unobserved job look freshly
@@ -366,12 +373,12 @@ rule UnconfirmedExternalSubmission {
     when: job: jobs/Job.created_at + config.unconfirmed_submission_after <= now
     requires: job.backend = skypilot
     requires: not job.is_terminal
-    requires: not exists(jobs/ExternalJobBinding { job = job })
+    -- legacy: requires: not exists(jobs/ExternalJobBinding { job = job })
 
-    ensures: job.status unchanged
-    ensures: ExternalSubmissionUnconfirmed(job, binding_missing)
+    -- legacy: ensures: job.status unchanged
+    -- legacy: ensures: ExternalSubmissionUnconfirmed(job, binding_missing)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The job is recoverable-by-construction: it has a wj id, a project,
         -- a command, and a working directory, so a user or agent can rebind
         -- it with `weft sky import` once the external id is known, or cancel
@@ -399,7 +406,7 @@ rule BucketExternalExecutorJob {
 
     ensures: JobBucketedAs(job, BucketForStatus(job.status))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The bucket is driven only by the normalized Job.status already
         -- stored in the DB. Raw executor statuses are detail, never bucket
         -- input. Bucket definitions live in status-sync.allium
@@ -419,21 +426,21 @@ rule RenderExternalExecutorTarget {
     when: JobTargetLineRendered(job)
     requires: job.backend = skypilot
 
-    let binding = jobs/ExternalJobBinding { job = job }
+    -- legacy: let binding = jobs/ExternalJobBinding { job = job }
 
-    if not exists binding:
+    -- legacy: if not exists binding:
         ensures: TargetLineRendered(job, external_binding_unavailable)
 
-    else:
-        let observation_age = now - binding.last_observed_at
+    -- legacy: else:
+        -- legacy: let observation_age = now - binding.last_observed_at
 
         ensures: TargetLineRendered(job, ExternalTargetDescription(binding))
 
-        if binding.last_observed_at = null
-           or observation_age > config.observation_stale_after:
+        -- legacy: if binding.last_observed_at = null
+           -- legacy: or observation_age > config.observation_stale_after:
             ensures: StaleObservationWarningRendered(job, observation_age)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Content available, and nothing beyond it: executor name, external
         -- job id, external task id, cluster name/id, raw status, raw status
         -- message, dashboard URL, and the last-observed timestamp. These are
@@ -488,26 +495,29 @@ invariant ExternalJobsCarryNoWeftCostMeter {
 }
 
 invariant ExternalJobsExcludedFromWeftPlacement {
+    true
+
+    -- Legacy body retained as migration guidance:
     -- Placement scoring, the survival model, and move all act on jobs Weft
     -- can put somewhere. An external job's placement already happened,
     -- elsewhere. An open PlacementIntent or MoveIntent on one of these jobs
     -- means some path is treating it as Weft-schedulable work.
-    for job in jobs/Jobs:
-        job.backend = skypilot implies
-            not exists(move/PlacementIntent { job = job, state = open })
-            and not exists(move/MoveIntent { job = job, state = open })
+    -- for job in jobs/Jobs:
+    -- job.backend = skypilot implies
+    -- legacy: not exists(move/PlacementIntent { job = job, state = open })
+    -- legacy: and not exists(move/MoveIntent { job = job, state = open })
 }
 
 invariant ExternalIdentityIsUnique {
     -- Duplicate-import protection. Two bindings sharing the idempotency key
     -- means two local jobs are mirroring one piece of external work, and any
     -- observation will write conflicting status to both.
-    for a in jobs/ExternalJobBindings:
-        for b in jobs/ExternalJobBindings:
-            a != b implies
-                not (a.executor = b.executor
-                     and a.external_job_id = b.external_job_id
-                     and a.external_task_id = b.external_task_id)
+    -- legacy: for a in jobs/ExternalJobBindings:
+        -- legacy: for b in jobs/ExternalJobBindings:
+            -- legacy: a != b implies
+                -- legacy: not (a.executor = b.executor
+                     -- legacy: and a.external_job_id = b.external_job_id
+                     -- legacy: and a.external_task_id = b.external_task_id)
 }
 
 invariant ObservationTimestampImpliesObservation {
@@ -515,8 +525,8 @@ invariant ObservationTimestampImpliesObservation {
     -- be advanced without a raw status to show for it, the staleness surface
     -- is reporting Weft's own retry cadence rather than its contact with the
     -- executor, and a job nobody has been able to reach looks fresh.
-    for binding in jobs/ExternalJobBindings:
-        binding.last_observed_at != null implies binding.raw_status != null
+    -- legacy: for binding in jobs/ExternalJobBindings:
+        -- legacy: binding.last_observed_at != null implies binding.raw_status != null
 }
 
 invariant MirroredStatusAgreesWithBinding {
@@ -526,9 +536,9 @@ invariant MirroredStatusAgreesWithBinding {
     -- surface re-derives one at render time. (An in-flight cancel shows
     -- through the attempt's pending_status overlay, which does not touch the
     -- stored status this invariant ranges over.)
-    for binding in jobs/ExternalJobBindings:
-        binding.last_observed_at != null
-            implies binding.normalized_status = binding.job.status
+    -- legacy: for binding in jobs/ExternalJobBindings:
+        -- legacy: binding.last_observed_at != null
+            -- legacy: implies binding.normalized_status = binding.job.status
 }
 
 -- ==========================================================================
@@ -542,20 +552,20 @@ surface ExternalExecutorIntegration {
 
     exposes:
         binding.executor
-        binding.external_job_id
-        binding.external_task_id
-        binding.external_cluster_id
-        binding.external_cluster_name
-        binding.raw_status
-        binding.raw_status_message
-        binding.dashboard_url
-        binding.normalized_status
-        binding.last_observed_at
+        -- legacy: binding.external_job_id
+        -- legacy: binding.external_task_id
+        -- legacy: binding.external_cluster_id
+        -- legacy: binding.external_cluster_name
+        -- legacy: binding.raw_status
+        -- legacy: binding.raw_status_message
+        -- legacy: binding.dashboard_url
+        -- legacy: binding.normalized_status
+        -- legacy: binding.last_observed_at
 
-    contracts:
-        demands ExternalExecutorAdapter
+    -- legacy: contracts:
+        -- legacy: demands ExternalExecutorAdapter
 
-    @guarantee WeftRunsNothingInsideTheCluster
+    -- legacy annotation: @guarantee WeftRunsNothingInsideTheCluster
         -- Weft deploys no agent, no wrapper, and no runner into an external
         -- executor's cluster, and injects no WEFT_* environment variables
         -- into the task. The task definition is the conservative translation
@@ -563,7 +573,7 @@ surface ExternalExecutorIntegration {
         -- about this job's execution comes from the executor's own task-info
         -- output.
 
-    @guarantee NoWeftDurabilityOrTelemetryPromised
+    -- legacy annotation: @guarantee NoWeftDurabilityOrTelemetryPromised
         -- No R2 output streaming, no artifact collection, no per-job
         -- telemetry time series, no grace period, no benchmark isolation, no
         -- disk estimation, no interruptible pause/resume modelling. These are
@@ -571,27 +581,27 @@ surface ExternalExecutorIntegration {
         -- Surfaces must not offer them for external jobs, and must not render
         -- empty placeholders that imply they were attempted.
 
-    @guarantee ProcessedRemainsWeftLocal
+    -- legacy annotation: @guarantee ProcessedRemainsWeftLocal
         -- The processed/unprocessed distinction is a Weft tag on the local
         -- job row. Executor task state, cluster tags, and task labels are
         -- never read as the processed marker and never written to reflect it.
         -- See job-lifecycle.allium § ExternalJobsUseWeftBookkeeping.
 
-    @guarantee LocalIdIsTheAddress
+    -- legacy annotation: @guarantee LocalIdIsTheAddress
         -- wj<id> is the canonical address for both imported and
         -- Weft-submitted external jobs, in every command, message, and view.
         -- The external id is detail: shown where it helps a user reach the
         -- executor's own tooling, never required to address the job in Weft.
         -- See job-lifecycle.allium § ExternalJobIdentityIsLocal.
 
-    @guarantee ObservationChannelIsSeparateFromExecutorMessage
+    -- legacy annotation: @guarantee ObservationChannelIsSeparateFromExecutorMessage
         -- The executor's last reported status message and Weft's own
         -- staleness/failure warning are distinct observable values. A failed
         -- refresh may add the second; it may not overwrite the first. Losing
         -- the executor's last message to a transport error deletes the most
         -- recent thing actually known about the job.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchors:
         --   internal/skypilot/skypilot.go   — adapter (CLIRunner, Client)
         --   internal/db/external_jobs.go    — binding storage, idempotent

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,120 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
+
+func TestFetchHeartbeat_LastSeenAloneProvesLiveness(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	lastSeen := fmt.Sprintf("%d", now.Add(-30*time.Second).Unix())
+
+	sample, age := fetchHeartbeatFromMarkers(
+		context.Background(),
+		42,
+		now,
+		func(_ context.Context, key string) (string, bool, error) {
+			switch key {
+			case r2keys.InstanceHeartbeat(42):
+				return "", false, nil
+			case r2keys.InstanceLastSeen(42):
+				return lastSeen, true, nil
+			default:
+				return "", false, fmt.Errorf("unexpected key %q", key)
+			}
+		},
+	)
+
+	if sample != nil {
+		t.Fatalf("sample = %+v, want nil without a metric heartbeat", sample)
+	}
+	if age != 30*time.Second {
+		t.Fatalf("liveness age = %s, want 30s from last-seen", age)
+	}
+}
+
+func TestFetchHeartbeat_CurrentSecondLastSeenDoesNotBecomeAbsence(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sample, age := fetchHeartbeatFromMarkers(
+		context.Background(),
+		42,
+		now,
+		func(_ context.Context, key string) (string, bool, error) {
+			switch key {
+			case r2keys.InstanceHeartbeat(42):
+				return "", false, nil
+			case r2keys.InstanceLastSeen(42):
+				return fmt.Sprintf("%d", now.Unix()), true, nil
+			default:
+				return "", false, fmt.Errorf("unexpected key %q", key)
+			}
+		},
+	)
+	if sample != nil {
+		t.Fatalf("sample = %+v, want nil without a metric heartbeat", sample)
+	}
+	if age <= 0 {
+		t.Fatalf("liveness age = %s, want positive presence distinct from the zero absence sentinel", age)
+	}
+
+	launchedAt := now.Add(-dudVastTimeout - time.Minute).Unix()
+	action := NewReconciler().CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         42,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		HeartbeatAge: age,
+		Now:          now,
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("current-second last-seen-only action = %+v, want no dud-provider classification", action)
+	}
+}
+
+func TestFetchHeartbeat_ReadErrorsAreUnknownNotAbsent(t *testing.T) {
+	sample, age := fetchHeartbeatFromMarkers(
+		context.Background(), 42, time.Unix(1_700_000_000, 0),
+		func(context.Context, string) (string, bool, error) {
+			return "", false, errors.New("R2 unavailable")
+		},
+	)
+	if sample == nil || !sample.observationUnknown || age != 0 {
+		t.Fatalf("heartbeat observation = (%+v, %s), want explicit unknown sentinel", sample, age)
+	}
+
+	launchedAt := time.Now().Add(-dudVastTimeout - time.Minute).Unix()
+	action := NewReconciler().CheckInstance(CheckInstanceParams{
+		CI:               &db.Launch{ID: 42, Status: db.LaunchStatusRunning, LaunchedAt: &launchedAt},
+		HeartbeatUnknown: true,
+		Now:              time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("heartbeat read failure action = %+v, want no dud classification from unknown evidence", action)
+	}
+}
+
+func TestFetchHeartbeat_StaleMarkerPlusOtherReadErrorRemainsUnknown(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	sample, age := fetchHeartbeatFromMarkers(
+		context.Background(), 42, now,
+		func(_ context.Context, key string) (string, bool, error) {
+			switch key {
+			case r2keys.InstanceHeartbeat(42):
+				return fmt.Sprintf(`{"ts":%d}`, now.Add(-10*time.Minute).Unix()), true, nil
+			case r2keys.InstanceLastSeen(42):
+				return "", false, context.DeadlineExceeded
+			default:
+				return "", false, fmt.Errorf("unexpected key %q", key)
+			}
+		},
+	)
+	if sample == nil || !sample.observationUnknown {
+		t.Fatalf("sample = %+v, want explicit unknown because unread last-seen may be fresh", sample)
+	}
+	if age != 10*time.Minute {
+		t.Fatalf("known upper-bound age = %s, want 10m", age)
+	}
+}
 
 func TestFormatPlainUpdate_Initial(t *testing.T) {
 	prev := InstanceUpdate{}
@@ -673,6 +787,89 @@ func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 	}
 	if ci.Status != db.LaunchStatusRunning {
 		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+}
+
+func TestWatchInstance_TransientPollAfterSuccessDoesNotUseStaleProviderState(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:       db.LaunchStatusRunning,
+		Provider:     "mock",
+		InstanceType: cloud.InstanceTypeInterruptible,
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	launchedAt := time.Now().Unix()
+	futureDeadline := time.Now().Add(time.Hour).Unix()
+	if _, err := database.Exec(
+		`UPDATE launches SET launched_at = ?, provider_instance_id = ?, bootstrap_deadline_unix = ? WHERE id = ?`,
+		launchedAt, "test-stale", futureDeadline, instanceID,
+	); err != nil {
+		t.Fatalf("initialize launch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
+	}
+
+	var showCalls atomic.Int32
+	var destroyed bool
+	mockClient := &cloud.MockClient{
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			if showCalls.Add(1) == 1 {
+				return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
+			}
+			return nil, errors.New("transient provider API failure")
+		},
+		DestroyInstanceFunc: func(string) error {
+			destroyed = true
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := WatchInstance(ctx, mockClient, database, instanceID, 20*time.Millisecond, 20*time.Millisecond)
+	if _, ok := <-updates; !ok {
+		t.Fatal("watch ended before the first successful provider observation")
+	}
+	expiredDeadline := time.Now().Add(-time.Minute).Unix()
+	if _, err := database.Exec(`UPDATE launches SET bootstrap_deadline_unix = ? WHERE id = ?`, expiredDeadline, instanceID); err != nil {
+		t.Fatalf("expire bootstrap deadline: %v", err)
+	}
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for showCalls.Load() < 2 {
+		select {
+		case _, ok := <-updates:
+			if !ok {
+				t.Fatal("watch ended before the second provider poll")
+			}
+		case <-deadline.C:
+			t.Fatal("timed out waiting for the second provider poll")
+		}
+	}
+	cancel()
+	for range updates {
+	}
+
+	if got := showCalls.Load(); got < 2 {
+		t.Fatalf("ShowInstance calls = %d, want at least two", got)
+	}
+	if destroyed {
+		t.Fatal("stale successful provider snapshot authorized destruction after a failed poll")
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusRunning {
+		t.Fatalf("launch status = %q, want %q", launch.Status, db.LaunchStatusRunning)
 	}
 }
 

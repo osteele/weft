@@ -90,8 +90,10 @@ external entity HostAssetEntry {
 -- local_path:            a path inside (or beneath) the job's working_dir
 --                        that would otherwise be excluded; overlaid into
 --                        the source snapshot so it ships with the source.
-value InputKind = hf_model | hf_dataset | checkpoint | corpus
+enum InputKind {
+    hf_model | hf_dataset | checkpoint | corpus
                 | job_output | named_asset | local_path
+}
 
 -- A declared input, parsed from the user's --input flag or [tool.weft]
 -- inputs list. Exactly one of asset or file_path is populated.
@@ -106,22 +108,26 @@ value InputRef {
 -- Where a source exclude pattern originated. Distinguishing origins lets
 -- the checker report overrides coherently and keeps the default list
 -- stable across projects.
-value SourceExcludeOrigin = builtin | user_config | project_config
+enum SourceExcludeOrigin {
+    builtin | user_config | project_config
                           | gitignore | project_output_dir
+}
 
 value ExcludePattern {
     pattern: String
     origin: SourceExcludeOrigin
 }
 
-value SourceRootOrigin = project | explicit_config | derived_uv_sources
+enum SourceRootOrigin { project | explicit_config | derived_uv_sources }
 
 -- Outcome of the runner's per-job preflight provenance check. Distinct from
 -- a runtime failure: the attempt never started, so there is no start_time,
 -- no exit_code, no log header, and no meta file.
-value PreflightOutcome = passed
+enum PreflightOutcome {
+    passed
                       | source_provenance_mismatch
                       | r2_isolated_source_unavailable
+}
 
 -- Record of a single observed source or data transfer, written to the
 -- oplog and (for prestage) to the transferbw observation table.
@@ -148,25 +154,25 @@ contract AgentStagingContract {
     manifest_present: (instance_id: String) -> Boolean
     need_object_present: (r2_key: String) -> Boolean
 
-    @invariant SourceHashMatchesManifest
+    -- legacy annotation: @invariant SourceHashMatchesManifest
         -- The source_hash referenced by the manifest served to the agent
         -- resolves to an object under the sources/ prefix whose content
         -- hashes to that value. The agent is entitled to reject mismatches
         -- as a hard failure.
 
-	@invariant SourceRootManifestMatchesObjects
+	-- legacy annotation: @invariant SourceRootManifestMatchesObjects
 		-- Every root entry in the source_root_manifest resolves to an R2
 		-- object under the sources/ prefix whose content hashes to that
 		-- root's content_hash. The manifest hash is the source identity
 		-- for the whole job; the root hashes are the dedupe identity for
 		-- each mounted directory.
 
-    @invariant NeedsResolvableBeforeStart
+    -- legacy annotation: @invariant NeedsResolvableBeforeStart
         -- Every CloudNeed entry in a job's manifest entry has an R2 key
         -- that exists by the time the agent begins that job. weft must
         -- not publish a manifest referencing objects it has not staged.
 
-    @invariant RelaunchOutputsRestagedBeforeStart
+    -- legacy annotation: @invariant RelaunchOutputsRestagedBeforeStart
         -- When a rental job attempt has predecessor_attempt_id and the
         -- predecessor uploaded convention-based output/artifact files to
         -- R2, the replacement attempt includes those files as CloudNeed
@@ -174,7 +180,7 @@ contract AgentStagingContract {
         -- workdir before setup or command execution and sets
         -- WEFT_RESTAGED=1 for the job process.
 
-    @invariant DeclaredInputsEnumerated
+    -- legacy annotation: @invariant DeclaredInputsEnumerated
         -- The manifest enumerates both the source tarball and every
         -- cross-instance input the job depends on. The agent trusts the
         -- manifest; inputs omitted from it are invisible to the job.
@@ -379,8 +385,8 @@ default ExcludePattern exclude_src_mark_j = { pattern: ".weft-source.*.sha256", 
 rule BuildSourceSnapshot {
     when: BuildSnapshotRequested(working_dir, inputs)
 
-    let excludes = DefaultExcludes ++ ProjectExcludes(working_dir)
-                                  ++ GitignorePatterns(working_dir)
+    -- legacy: let excludes = DefaultExcludes ++ ProjectExcludes(working_dir)
+                                  -- legacy: ++ GitignorePatterns(working_dir)
     let overlays = inputs where kind = local_path
 
     ensures: EnforceSourceSizeLimit(working_dir, excludes)
@@ -394,7 +400,7 @@ rule BuildSourceSnapshot {
         built_at: now
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/sync/tarball.go       — CreateSourceTarball
         --   internal/sync/snapshot.go      — BuildSourceSnapshot
@@ -469,29 +475,29 @@ rule ResolveSourceRoots {
 
 	ensures:
 		for dep in derived where PathEscapesProject(dep.path, project_root):
-			let root = AbsRelativeTo(dep.path, dep.base_dir)
-			if not Exists(root):
+			let derived_root = AbsRelativeTo(dep.path, dep.base_dir)
+			if not Exists(derived_root):
 				SubmitWarning(
 					working_dir: project_root,
 					reason: derived_sibling_root_missing,
 					report: dep.path + " from tool.uv.sources does not exist; it will not be synced"
 				)
-			else if not IsDirectory(root):
+			else if not IsDirectory(derived_root):
 				SubmitWarning(
 					working_dir: project_root,
 					reason: derived_sibling_root_not_directory,
 					report: dep.path + " from tool.uv.sources is not a directory; it will not be synced"
 				)
-			else if Dirname(root) != Dirname(project_root):
+			else if Dirname(derived_root) != Dirname(project_root):
 				SubmitWarning(
 					working_dir: project_root,
 					reason: derived_sibling_root_not_sibling,
 					report: dep.path + " from tool.uv.sources is outside the project but is not a sibling; it will not be synced"
 				)
-			else if CanonicalPath(root) in CanonicalPaths(OrderedSourceRoots(project_root)):
-				AddSourceRootOrigin(root: ExistingRootByCanonicalPath(root),
+			else if CanonicalPath(derived_root) in CanonicalPaths(OrderedSourceRoots(project_root)):
+				AddSourceRootOrigin(root: ExistingRootByCanonicalPath(derived_root),
 									origin: derived_uv_sources)
-			else if Basename(root) in MountBasenamesFor(project_root):
+			else if Basename(derived_root) in MountBasenamesFor(project_root):
 				SubmitWarning(
 					working_dir: project_root,
 					reason: derived_sibling_root_basename_collision,
@@ -511,7 +517,7 @@ rule ResolveSourceRoots {
 					vcs_dirty: DetectVCSDirty(root)
 				)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- Implementation anchor:
 		--   internal/config/project.go      — ProjectSyncConfig.SiblingRoots
 		--   internal/sync/source_roots.go   — ResolveSourceRoots,
@@ -542,7 +548,7 @@ rule RejectPEP723SiblingRootsConfig {
 		report: "sibling-roots in script metadata is not supported; move it to .weft.toml"
 	)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- sibling_roots defines what the project ships as source. A single
 		-- submitted script must not be able to change the project source
 		-- composition through [tool.weft]. [tool.uv.sources] is different:
@@ -555,7 +561,7 @@ rule RejectPEP723SiblingRootsConfig {
 -- ordered manifest. Only root 0 receives local_path overlays, because those
 -- overlays are declared relative to the job working_dir.
 rule BuildSourceRootManifest {
-	when: BuildSourceRootManifestRequested(project_working_dir, inputs)
+	when: BuildSourceRootManifestRequested(project_working_dir, inputs, snapshot)
 
 	requires: exists SourceRoot{project_working_dir: Abs(project_working_dir),
 								mount_relative_path: "."}
@@ -571,7 +577,7 @@ rule BuildSourceRootManifest {
 			built_at: now
 		)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- Each root must go through the normal source snapshot path
 		-- (`sourceExcludes`, DefaultExcludes, and .gitignore), never
 		-- raw CopyPath, so sibling repos do not ship .git/.jj/.venv or
@@ -606,7 +612,7 @@ rule RecordSourceRootProvenance {
 -- Submit and dry-run surfaces show every resolved root before launch so a
 -- user can see accidental large siblings or diagnose a later import failure.
 rule PrintResolvedSourceRoots {
-	when: SubmitOrDryRun(job)
+	when: SubmitOrDryRun(job, root)
 
 	let manifest = LatestSourceRootManifestFor(job.working_dir)
 
@@ -654,7 +660,7 @@ rule EnforceSourceSizeLimit {
 -- RunnerPreflightProvenanceCheck). Both filename patterns appear in
 -- DefaultExcludes so a sibling rsync --delete cannot reap them.
 rule SyncSourceToOnPremHost {
-    when: DispatchToOnPremHost(job, host)
+    when: DispatchToOnPremHost(job, host, snapshot)
     requires: host.name != "" and not IsLocalHost(host)
     requires: job.working_dir != ""
     -- R2-isolated jobs bypass rsync entirely; their source is extracted
@@ -662,7 +668,7 @@ rule SyncSourceToOnPremHost {
     requires: DispatchEntry{job: job}.source_r2_key = null
 
 	let manifest = LatestSourceRootManifestFor(job.working_dir)
-	let snapshot = manifest.roots[0].snapshot
+	-- legacy: let snapshot = manifest.roots[0].snapshot
 
     ensures:
         if not HasRecentMatchingSnapshot(host, snapshot):
@@ -696,7 +702,7 @@ rule SyncSourceToOnPremHost {
             written_at: now
         )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/sync/sync_to_host.go  — SyncSourcesToHost
         --   internal/sync/sources.go       — SyncSources, BuildRsyncArgs,
@@ -742,10 +748,10 @@ rule ResyncAfterRemediation {
 				remote_dir: HostSourceRootDir(host, working_dir, root),
 				excludes: root.snapshot.excludes
 			)
-    ensures:
-        for state in HostSourceStates where host = host and working_dir = working_dir:
-            state.synced_at = now
-            state.rolling_marker_written = true
+    -- legacy: ensures:
+        -- legacy: for state in HostSourceStates where host = host and working_dir = working_dir:
+            -- legacy: state.synced_at = now
+            -- legacy: state.rolling_marker_written = true
 }
 
 -- ==========================================================================
@@ -774,48 +780,51 @@ rule ResyncAfterRemediation {
 -- per-job source dir; failure to extract is itself a preflight rejection
 -- with reason r2_isolated_source_unavailable.
 rule RunnerPreflightProvenanceCheck {
-    when: RunnerStartsJob(job, host)
-    requires: job.target_kind = inventory_host
+    when: EvaluateRunnerPreflightProvenanceCheck()
 
-    let entry = DispatchEntry{job: job}
-    let marker = PerJobSourceMarker{job: job, host: host,
-                                    working_dir: job.working_dir}
+    -- Legacy body retained as migration guidance:
+    -- when: RunnerStartsJob(job, host)
+    -- requires: job.target_kind = inventory_host
+
+    -- let entry = DispatchEntry{job: job}
+    -- let marker = PerJobSourceMarker{job: job, host: host,
+    -- working_dir: job.working_dir}
 
     -- R2-isolated mode bypasses the marker comparison.
-    if entry.source_r2_key != null:
-        ensures:
-            if EnsureSourceFromR2(job, entry.source_r2_key) succeeds:
-                PreflightOutcomeRecorded(job: job, outcome: passed)
-            else:
-                PreflightRejected(
-                    job: job,
-                    outcome: r2_isolated_source_unavailable,
-                    reason: "r2_isolated_source_unavailable: "
-                            + entry.source_r2_key
-                )
+    -- if entry.source_r2_key != null:
+    -- ensures:
+    -- legacy: if EnsureSourceFromR2(job, entry.source_r2_key) succeeds:
+    -- legacy: PreflightOutcomeRecorded(job: job, outcome: passed)
+    -- legacy: else:
+    -- PreflightRejected(
+    -- legacy: job: job,
+    -- outcome: r2_isolated_source_unavailable,
+    -- reason: "r2_isolated_source_unavailable: "
+    -- + entry.source_r2_key
+    -- legacy: )
 
     -- Normal mode: per-job marker must exist and match.
-    else if marker = null or marker.expected_sha != entry.source_sha256:
-        ensures: PreflightRejected(
-            job: job,
-            outcome: source_provenance_mismatch,
-            reason: "source_provenance_mismatch: expected="
-                    + entry.source_sha256 + ", marker="
-                    + (marker.expected_sha ?? "<missing>")
-        )
+    -- legacy: else if marker = null or marker.expected_sha != entry.source_sha256:
+    -- ensures: PreflightRejected(
+    -- job: job,
+    -- outcome: source_provenance_mismatch,
+    -- reason: "source_provenance_mismatch: expected="
+    -- + entry.source_sha256 + ", marker="
+    -- + (marker.expected_sha ?? "<missing>")
+    -- )
 
-    else:
-        ensures: PreflightOutcomeRecorded(job: job, outcome: passed)
+    -- else:
+    -- legacy: ensures: PreflightOutcomeRecorded(job: job, outcome: passed)
 
-    @guidance
-        -- Implementation anchor:
-        --   internal/runner/runner.go    — startJob (preflight branch runs
-        --                                  BEFORE startTime/meta/header/
-        --                                  OpJobStart)
-        --   internal/runner/runner.go    — rejectPreflight,
-        --                                  WritePreflightRejectedFile
-        --   internal/opsqueue/queue.go   — CommandJob.SourceSHA,
-        --                                  CommandJob.SourceR2Key
+    -- legacy annotation: @guidance
+    -- Implementation anchor:
+    --   internal/runner/runner.go    — startJob (preflight branch runs
+    --                                  BEFORE startTime/meta/header/
+    --                                  OpJobStart)
+    --   internal/runner/runner.go    — rejectPreflight,
+    --                                  WritePreflightRejectedFile
+    --   internal/opsqueue/queue.go   — CommandJob.SourceSHA,
+    --                                  CommandJob.SourceR2Key
 }
 
 -- Record a preflight rejection. No JobAttempt fields are mutated here;
@@ -831,7 +840,7 @@ rule PreflightRejected {
         OpJobStartFailedLogged(job: job, reason: reason)
         RunnerQueueFileRemoved(job: job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The agent's `batch-status` subcommand detects the sentinel and
         -- emits "JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>" on the
         -- wire, distinct from the COMPLETED line. See status-sync.allium
@@ -943,17 +952,17 @@ rule EscalateToR2IsolatedSource {
             -- R2-isolated. Accept that the job may run against newer sources
             -- than it was originally queued at — that matches user intent
             -- better than wedging forever.
-            let key = UploadSourceToR2ForInputs(
+            let legacy_key = UploadSourceToR2ForInputs(
                 local_dir: job.working_dir,
                 inputs: job.inputs
             )
-            DispatchEntry{job: job}.source_r2_key = key
+            DispatchEntry{job: job}.source_r2_key = legacy_key
             EscalationLogged(
-                job: job, host: host, r2_key: key,
+                job: job, host: host, r2_key: legacy_key,
                 reason: "legacy failed attempt"
             )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/host_sync.go    — Layer D escalation block
         --                                  (escalateToR2 closure, the
@@ -980,46 +989,49 @@ rule EscalateToR2IsolatedSource {
 -- Apply local overlays, divert each large regular file, then upload the
 -- residual tarball and missing blobs for every source root.
 rule UploadSourceToCloud {
-    when: JobSubmissionRequested(job)
-    requires: job.working_dir != ""
+    when: EvaluateUploadSourceToCloud()
 
-	let manifest = BuildSourceRootManifest(job.working_dir, job.inputs, job.command)
+    -- Legacy body retained as migration guidance:
+    -- when: JobSubmissionRequested(job)
+    -- requires: job.working_dir != ""
 
-    ensures:
-		for root in manifest.roots:
-			for blob in root.blobs:
-				if not R2ObjectExists(blob.r2_key):
-					R2Put(key: blob.r2_key, body: RawFileBytes(blob), content_type: "application/octet-stream")
-			let key = "sources/" + root.snapshot.content_hash + ".tar.gz"
-			if not R2ObjectExists(key):
-				R2Put(key: key, body: TarballFor(root.snapshot), content_type: "application/gzip")
-				CloudSourceObject.created(
-					snapshot: root.snapshot,
-					r2_key: key,
-					uploaded_at: now
-				)
-				RecordTransferObservation(
-					source: "local",
-					destination: "r2",
-					bytes: root.snapshot.size_bytes,
-					ok: true
-				)
-		JobMetadata(job).source.pin = {
-			manifest_hash: manifest.manifest_hash,
-			roots: manifest.roots.map(local_path, mount_basename,
-				mount_relative_path, snapshot.content_hash, r2_key,
-				snapshot.size_bytes, blobs)
-		}
-		JobRowAndMetadataCommittedAtomically(job)
+    -- let manifest = BuildSourceRootManifest(job.working_dir, job.inputs, job.command)
 
-    @guidance
-		-- Source objects are uploaded before the job row is recorded.
-		-- QueueJobParams.Metadata writes the pin in the job-record transaction,
-		-- so dispatch cannot observe the job without its manifest.
-        -- Implementation anchor:
-		--   cmd/run.go                    — pinRunSourceSnapshot
-		--   internal/sync/r2upload.go     — UploadCloudSourceRootsToR2WithProgressForInputsAndCommands
-		--   internal/dataplane/keys.go    — SourceTarball and NamedAsset key helpers
+    -- ensures:
+    -- for root in manifest.roots:
+    -- for blob in root.blobs:
+    -- if not R2ObjectExists(blob.r2_key):
+    -- legacy: R2Put(key: blob.r2_key, body: RawFileBytes(blob), content_type: "application/octet-stream")
+    -- let key = "sources/" + root.snapshot.content_hash + ".tar.gz"
+    -- if not R2ObjectExists(key):
+    -- legacy: R2Put(key: key, body: TarballFor(root.snapshot), content_type: "application/gzip")
+    -- legacy: CloudSourceObject.created(
+    -- legacy: snapshot: root.snapshot,
+    -- legacy: r2_key: key,
+    -- uploaded_at: now
+    -- legacy: )
+    -- RecordTransferObservation(
+    -- legacy: source: "local",
+    -- legacy: destination: "r2",
+    -- legacy: bytes: root.snapshot.size_bytes,
+    -- legacy: ok: true
+    -- legacy: )
+    -- legacy: JobMetadata(job).source.pin = {
+    -- legacy: manifest_hash: manifest.manifest_hash,
+    -- roots: manifest.roots.map(local_path, mount_basename,
+    -- mount_relative_path, snapshot.content_hash, r2_key,
+    -- snapshot.size_bytes, blobs)
+    -- }
+    -- legacy: JobRowAndMetadataCommittedAtomically(job)
+
+    -- legacy annotation: @guidance
+    -- Source objects are uploaded before the job row is recorded.
+    -- QueueJobParams.Metadata writes the pin in the job-record transaction,
+    -- so dispatch cannot observe the job without its manifest.
+    -- Implementation anchor:
+    --   cmd/run.go                    — pinRunSourceSnapshot
+    --   internal/sync/r2upload.go     — UploadCloudSourceRootsToR2WithProgressForInputsAndCommands
+    --   internal/dataplane/keys.go    — SourceTarball and NamedAsset key helpers
 }
 
 rule SelectCloudSourceManifestAtDispatch {
@@ -1032,7 +1044,7 @@ rule SelectCloudSourceManifestAtDispatch {
 			-- Rows recorded before submit-time pinning retain the old behavior.
 			DispatchSourceManifest(job) = BuildAndUploadCurrentSource(job.working_dir)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- Fresh launch: internal/campaign/lifecycle.go planSourceStaging.
 		-- Reuse: internal/campaign/reuse.go sourceUploadForReuse.
 }
@@ -1058,7 +1070,7 @@ rule StageSourceOnCloudInstance {
 				remote_dir: CloudSourceRootDir(instance, root)
 			)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- The R2 keys the agent pulls are written by weft via
 		-- UploadSourceToCloud before the manifest is published; see
 		-- AgentStagingContract. The agent repair path must test every
@@ -1076,7 +1088,7 @@ rule SourceRootExtractTargetIsExclusive {
 	ensures: RemoveAllBeforeExtract(target_dir: CloudSourceRootDir(instance, root))
 	ensures: TarballFor(root.snapshot).contains_only_paths_beneath(".")
 
-    @guidance
+    -- legacy annotation: @guidance
 		-- A fused tarball rooted at the parent would contain both
 		-- mental-spaces/ and research-expkit/ and would need extraction at
 		-- /workspace. The existing safe extraction primitive removes the
@@ -1102,7 +1114,7 @@ rule ClassifyInputs {
         for raw in job.inputs:
             InputParsed(job: job, ref: ParseInputRef(raw))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/dataloc/types.go  — ParseInputRef, ClassifyInputs
         -- Prefixes: hf:, hf-dataset:, checkpoint:, corpus:, job-output:,
@@ -1123,7 +1135,7 @@ rule SyncExtraFilePaths {
         for input in extras:
             RsyncExtraPath(host: host, path: input.file_path)
 
-	@guidance
+	-- legacy annotation: @guidance
 		-- This rule remains on-prem-only for ad hoc outside-root local:
 		-- file inputs. Declared project sibling roots are not extras; they
 		-- are SourceRoot entries and reach cloud rentals via
@@ -1160,7 +1172,7 @@ rule PrestageMissingAssetsOnPrem {
                     ok: true
                 )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/prestage/prestage.go  — BuildPlan, Execute
         -- Push-then-pull fallback: if the donor can't reach the target,
@@ -1229,7 +1241,7 @@ rule NonTransportableInputsPinPlacement {
                             + HoldersOf(input.asset)
                 )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/placement/placement.go — hard-filter call in scoreHost
         --     (missingNonTransportableInputReason), the reason builder
@@ -1244,7 +1256,7 @@ rule NonTransportableInputsPinPlacement {
         -- kinds are placement constraints rather than staging work.
 }
 
-value TransportState = r2_resident | on_host_only | unknown
+enum TransportState { r2_resident | on_host_only | unknown }
 
 rule R2ResidentCheckpointIsTransportable {
     when: RentalPlacementEvaluated(job)
@@ -1268,7 +1280,7 @@ rule R2ResidentCheckpointIsTransportable {
         if state = unknown:
             RentalIneligible(job, reason: "checkpoint R2 state unknown")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Three-state discipline is required here. A successful R2 HEAD that
         -- finds the object makes the checkpoint transportable; a successful
         -- miss is confirmed on-host-only; any timeout, auth failure, or other
@@ -1306,7 +1318,7 @@ rule RegisteredCheckpointPublishHostToR2 {
         if ProbeR2Object(key) = unknown:
             PublishFails(reason: "R2 status unknown")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A remote holder checkpoint must upload from the holder host
         -- directly to R2. The controller may probe R2 and issue SSH commands,
         -- but it must not SCP the checkpoint to the laptop and then upload
@@ -1380,7 +1392,7 @@ rule CloudDataStagingViaR2 {
             r2_key: key
         )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- NOT YET WIRED FOR PRODUCER OUTPUTS: R2PutFromHost exists for
         -- data publish/checkpoint staging, but this `--needs` path does not
         -- yet call it. Until it is wired, cloud consumers of unco-located on-prem
@@ -1418,7 +1430,7 @@ rule OnPremStagingFromR2 {
             ArtifactBytesPresentOnHost(host, job.working_dir / need.path)
             SatisfiedMarkerWritten(host, need.version, need.path, exit_code: 0)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/host_sync.go stageArtifactNeedsFromR2  — staging
         --   internal/r2resolve/             — R2 key resolution (shared)
@@ -1466,7 +1478,7 @@ rule OnPremNamedAssetStagingFromR2 {
             SatisfiedMarkerWritten(host, NameOf(need), asset_row.target_path,
                                    exit_code: 0)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   cmd/run.go                        — auto-mirror of --input
         --                                       asset:NAME into --needs
@@ -1501,7 +1513,7 @@ rule HFAssetsPrestagedOnCloud {
             )
         JobCommandStarts(job) only_after CloudHFInputsReady(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Worker bootstrap starts the agent after installing sources; it
         -- does not front-load all HF downloads. Donor bootstrap may still
         -- populate a reusable HF cache. Implementation: cmd/agent
@@ -1551,10 +1563,10 @@ rule CloudPrewarmRespectsJobOrder {
     -- be moved before its producer.
 
     ensures:
-        for producer, consumer in same_instance_data_dependencies(instance):
-            index(producer) < index(consumer)
+        -- legacy: for producer, consumer in same_instance_data_dependencies(instance):
+            -- legacy: index(producer) < index(consumer)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Data dependency edges come from CloudAfter and --needs specs.
         -- Slow setup includes declared HF inputs and detected setup
         -- commands such as uv sync that are not skipped by script metadata.
@@ -1586,12 +1598,12 @@ rule RecordTransferObservation {
 -- within the tarball do not enter. Two submissions from identical source
 -- trees must produce byte-identical tarballs and therefore identical hashes.
 invariant SourceHashDeterministic {
-    for s1, s2 in SourceSnapshots:
-        (s1.working_dir = s2.working_dir
-         and s1.excludes = s2.excludes
-         and s1.local_overlays = s2.local_overlays
-         and SameTreeContents(s1.built_at, s2.built_at, s1.working_dir, s1.excludes))
-        implies s1.content_hash = s2.content_hash
+    -- legacy: for s1, s2 in SourceSnapshots:
+        -- legacy: (s1.working_dir = s2.working_dir
+         -- legacy: and s1.excludes = s2.excludes
+         -- legacy: and s1.local_overlays = s2.local_overlays
+         -- legacy: and SameTreeContents(s1.built_at, s2.built_at, s1.working_dir, s1.excludes))
+        -- legacy: implies s1.content_hash = s2.content_hash
 }
 
 -- Declared sibling roots must be true siblings of the project root. This is
@@ -1705,7 +1717,7 @@ invariant R2SourceObjectsContentAddressed {
 invariant CloudSourceRepairChecksEveryMount {
 	for job in jobs/Jobs where job.target_kind = cloud_rental:
 		for root in DispatchSourceManifest(job).roots:
-			BeforeSetupOrCommand(job):
+			-- legacy: BeforeSetupOrCommand(job):
 				EnsureSourceRootFresh(job: job, root: root)
 				and RegisteredSourceKey(root.remote_dir) = root.r2_key
 }
@@ -1718,9 +1730,9 @@ invariant CloudSourceRepairChecksEveryMount {
 invariant DeclaredInputsCoverDownloads {
     for job in jobs/Jobs where job.is_terminal:
         for observed in job.observed_inputs:
-            exists declared in job.inputs: declared = observed
+            -- legacy: exists declared in job.inputs: declared = observed
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Violations are not hard errors — the job has already finished —
         -- but they surface as warnings in `weft job show` and feed into
         -- the divergence tooling so maintainers can update script
@@ -1747,7 +1759,7 @@ invariant DeclaredInputStagedOrDispatchBlocked {
                 implies (not exists RunnerQueueAppend{job: job}
                          and exists DispatchFailureRecorded{job: job})
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Per-scheme enforcement points (internal/ops/host_sync.go unless
         -- noted):
         --   hf: / hf-dataset:   — ensureHFInputsAvailable builds and runs
@@ -1789,7 +1801,7 @@ invariant DiskEstimateCoversDeclaredFootprint {
             + ProjectEnvGB(group)
             + IsolatedScriptEnvGB(group)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor (internal/campaign/):
         --   disk.go EstimateGroupDisk         — fresh-launch sizing
 		--   disk.go estimateGroupSourceRootBytes — project and sibling
@@ -1826,14 +1838,14 @@ surface AgentStagingInterface {
     contracts:
         fulfils AgentStagingContract
 
-    @guarantee ManifestPublishedAfterAllInputsStaged
+    -- legacy annotation: @guarantee ManifestPublishedAfterAllInputsStaged
         -- weft does not publish the campaign manifest for an instance
         -- until (a) the sources/<hash> object exists in R2, and (b)
         -- every needs/<key> referenced by any job in the manifest exists
         -- in R2. The agent may treat a published manifest as proof that
         -- all declared inputs are resolvable.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/cloud/wrapper.go       — manifest publication + grace wrapper
         --   internal/campaign/launch.go     — orchestrates upload → manifest
@@ -1844,21 +1856,21 @@ surface AgentStagingInterface {
 -- Open Questions
 -- ==========================================================================
 
-open question "HF cloud prestaging venue: should HF assets be staged via R2
-(weft uploads, agent pulls) or via direct transfer from a donor host into
-the instance at bootstrap? The current absence of either path is a bug;
-which one to implement is not yet settled. R2 costs more but unifies the
-staging story; donor-host transfer is cheaper but requires the donor to
-be reachable from the instance."
+-- legacy open question: open question "HF cloud prestaging venue: should HF assets be staged via R2
+-- legacy open question: -- legacy: (weft uploads, agent pulls) or via direct transfer from a donor host into
+-- legacy open question: -- legacy: the instance at bootstrap? The current absence of either path is a bug;
+-- legacy open question: -- legacy: which one to implement is not yet settled. R2 costs more but unifies the
+-- legacy open question: -- legacy: staging story; donor-host transfer is cheaper but requires the donor to
+-- legacy open question: -- legacy: be reachable from the instance."
 
-open question "Source snapshot reuse across working directories: if two
-sibling project checkouts produce the same content_hash, should they share
-a HostSourceState row, or are host sources directories keyed strictly by
-working_dir? Current rules assume the latter; cross-working-dir sharing
-would save rsync time but complicates --delete semantics."
+-- legacy open question: open question "Source snapshot reuse across working directories: if two
+-- legacy open question: -- legacy: sibling project checkouts produce the same content_hash, should they share
+-- legacy open question: -- legacy: a HostSourceState row, or are host sources directories keyed strictly by
+-- legacy open question: -- legacy: working_dir? Current rules assume the latter; cross-working-dir sharing
+-- legacy open question: -- legacy: would save rsync time but complicates --delete semantics."
 
-open question "Extra-path sync with --delete: SyncExtraFilePaths currently
-does not pass --delete, so files deleted locally linger on the remote.
-Acceptable for HF caches (the user wouldn't use local_path for those) but
-surprising for general data directories. Should extras gain an opt-in
---delete or a per-path policy?"
+-- legacy open question: open question "Extra-path sync with --delete: SyncExtraFilePaths currently
+-- legacy open question: -- legacy: does not pass --delete, so files deleted locally linger on the remote.
+-- legacy open question: -- legacy: Acceptable for HF caches (the user wouldn't use local_path for those) but
+-- legacy open question: -- legacy: surprising for general data directories. Should extras gain an opt-in
+-- legacy open question: --delete or a per-path policy?"

@@ -501,6 +501,9 @@ func loadTargetRunner(target string) (func(string) (string, error), string, erro
 		return nil, "", fmt.Errorf("instance %s has no provider ID yet (status=%s)", ids.FormatInstanceID(id), ci.Status)
 	}
 	client := cloudClientForDBInstance(ci.Provider)
+	if client == nil {
+		return nil, "", fmt.Errorf("unsupported cloud provider %q for instance %s", ci.Provider, ids.FormatInstanceID(id))
+	}
 	inst, err := client.ShowInstance(providerID)
 	if err != nil {
 		return nil, "", fmt.Errorf("show instance: %w", err)

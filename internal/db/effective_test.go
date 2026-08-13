@@ -1,7 +1,7 @@
 package db
 
 import (
-	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -107,21 +107,7 @@ func TestFilterJobsByIDSet(t *testing.T) {
 }
 
 func TestProjectHasAnyJobs(t *testing.T) {
-	tmpfile, err := os.CreateTemp("", "project-has-any-*.db")
-	if err != nil {
-		t.Fatalf("create temp db: %v", err)
-	}
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	cleanup := SetDBPath(tmpfile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer database.Close()
+	database := SetupTestDB(t)
 
 	jobID, err := RecordJobStarting(database, "test-host", "/home/user/alpha", "echo hi", "")
 	if err != nil {
@@ -157,21 +143,7 @@ func TestProjectHasAnyJobs(t *testing.T) {
 }
 
 func TestSetJobProjectRoundtrip(t *testing.T) {
-	tmpfile, err := os.CreateTemp("", "project-roundtrip-*.db")
-	if err != nil {
-		t.Fatalf("create temp db: %v", err)
-	}
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	cleanup := SetDBPath(tmpfile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer database.Close()
+	database := SetupTestDB(t)
 
 	jobID, err := RecordJobStarting(database, "test-host", "/home/user/my-project", "echo hi", "")
 	if err != nil {
@@ -191,21 +163,16 @@ func TestSetJobProjectRoundtrip(t *testing.T) {
 	}
 }
 
-func TestOpenRepairsPlaceholderProjects(t *testing.T) {
-	tmpfile, err := os.CreateTemp("", "project-repair-*.db")
-	if err != nil {
-		t.Fatalf("create temp db: %v", err)
-	}
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	cleanup := SetDBPath(tmpfile.Name())
-	defer cleanup()
-
+func TestStartupRepairRepairsPlaceholderProjects(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, dbFile)
+	cleanup := SetDBPath(dbFile)
+	t.Cleanup(cleanup)
 	database, err := Open()
 	if err != nil {
-		t.Fatalf("open database: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { database.Close() })
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/Users/osteele/code/research/adaptive-escalation", "uv run python scripts/run_backtracking_search.py --resume", "retry", "")
 	if err != nil {
@@ -217,7 +184,6 @@ func TestOpenRepairsPlaceholderProjects(t *testing.T) {
 	if _, err := database.Exec(`UPDATE jobs SET project = '.' WHERE id = ?`, jobID); err != nil {
 		t.Fatalf("seed placeholder job project: %v", err)
 	}
-	defer database.Close()
 	if err := startupRepair(database); err != nil {
 		t.Fatalf("startup repair: %v", err)
 	}
@@ -232,21 +198,7 @@ func TestOpenRepairsPlaceholderProjects(t *testing.T) {
 }
 
 func TestEffectiveDescriptionFromDB(t *testing.T) {
-	tmpfile, err := os.CreateTemp("", "effective-desc-*.db")
-	if err != nil {
-		t.Fatalf("create temp db: %v", err)
-	}
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	cleanup := SetDBPath(tmpfile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer database.Close()
+	database := SetupTestDB(t)
 
 	jobID, err := RecordJobStarting(database, "test-host", "~/project", "cd ~/project && python train.py", "")
 	if err != nil {

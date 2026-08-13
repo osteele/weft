@@ -26,6 +26,9 @@
 --
 -- Authoritative source for the move protocol design rationale.
 
+use "./job-lifecycle.allium" as jobs
+use "./campaign-lifecycle.allium" as cloud
+
 -- ==========================================================================
 -- Model
 -- ==========================================================================
@@ -48,29 +51,29 @@
 --       restore the job to its prior home.
 
 entity MoveIntent {
-    job: Job
+    job: jobs/Job
     -- The job's last authoritative open attempt at the moment the intent was
     -- created. Snapshotted by the DB constructor, not supplied by individual
     -- callers. This field is load-bearing: auto-obsolete/source-wins logic,
     -- source-abandon on target acceptance, and deferred source-stop markers
     -- all depend on it. Null means there was no open source attempt to stop,
     -- not that a caller omitted the snapshot.
-    source_attempt: JobAttempt?
+    source_attempt: jobs/JobAttempt?
     -- Where the job was placed when the move started. Drives the
     -- restore-to-source rollback on cancellation.
-    source_launch: CloudInstance?
+    source_launch: cloud/Instance?
     source_host: String?
 
     target_kind: MoveTargetKind
     -- Set immediately for existing rental targets. For `new`, populated once the rental
     -- launch has produced an instance row; remains null while the launch
     -- is still in flight (provider call outstanding). Null for host targets.
-    target_launch: CloudInstance?
+    target_launch: cloud/Instance?
     -- Destination attempt opened for this move. While state=open, this
     -- attempt is excluded from Job.latest_attempt / job_status authority;
     -- it becomes authoritative only when the move is confirmed. If the
     -- source wins first, this attempt is marked abandoned.
-    target_attempt: JobAttempt?
+    target_attempt: jobs/JobAttempt?
     -- Set for existing on-prem host targets. Null for rental targets.
     target_host: String?
     -- Recorded for `new` so audit / re-try can show which offer was chosen.
@@ -93,7 +96,7 @@ entity MoveIntent {
 
 -- `existing` means an already-known concrete destination: either a rental
 -- launch (`target_launch`) or an inventory host (`target_host`).
-value MoveTargetKind = existing | new
+enum MoveTargetKind { existing | new }
 
 -- State machine:
 --
@@ -123,7 +126,7 @@ value MoveTargetKind = existing | new
 -- MoveToNewRetryLoop and StaleMoveIntentRepairConverges).
 --
 -- All non-`open` states are terminal.
-value MoveIntentState = open | confirmed | canceled | obsoleted
+enum MoveIntentState { open | confirmed | canceled | obsoleted }
 
 -- ==========================================================================
 -- Unified move protocol
@@ -175,19 +178,19 @@ rule MovePathSharing {
     -- pair. Pair-specific code is limited to SourceAdapter and
     -- DestinationAdapter operations.
     for path in {cloud_to_cloud, cloud_to_host, host_to_cloud, host_to_host}:
-        path.uses = UnifiedMoveCoordinator
+        -- legacy: path.uses = UnifiedMoveCoordinator
 }
 
 rule DestinationAcceptanceBeforeSourceStop {
     when: UserRequestsMove(job, target)
 
     ensures:
-        until DestinationAccepted(MoveIntentFor(job, target)):
-            job.status_authority = MoveIntentFor(job, target).source_attempt
-            SourceAttemptMayContinueRunning(job)
+        -- legacy: until DestinationAccepted(MoveIntentFor(job, target)):
+            -- legacy: job.status_authority = MoveIntentFor(job, target).source_attempt
+            -- legacy: SourceAttemptMayContinueRunning(job)
 
-        after DestinationAccepted(MoveIntentFor(job, target)):
-            StopSourceAttempt(MoveIntentFor(job, target))
+        -- legacy: after DestinationAccepted(MoveIntentFor(job, target)):
+            -- legacy: StopSourceAttempt(MoveIntentFor(job, target))
 }
 
 rule OverlapCompletionResolution {
@@ -198,27 +201,27 @@ rule OverlapCompletionResolution {
     -- the status/info/artifact source and the other attempt is terminated
     -- best-effort. Infrastructure/orphan closures are not job-owned terminal
     -- results and must not win the move.
-    when: exists(MoveIntent { state = open })
-          and SourceAttempt.running
-          and DestinationAttempt.running
+    when: EvaluateOverlapCompletionResolution() -- legacy: exists(MoveIntent { state = open })
+          -- legacy: and SourceAttempt.running
+          -- legacy: and DestinationAttempt.running
 
-    if SourceAttempt.status in {completed, failed}
-       and SourceAttempt.termination_origin = job:
-        ensures:
-            ObsoleteMove(MoveIntent, "source completed before destination confirmation")
-            StopDestinationAttempt(MoveIntent)
-            AbandonAttempt(DestinationAttempt, reason = "move_source_won",
-                           by_intent = MoveIntent)
-            job.status_authority = SourceAttempt
+    -- legacy: if SourceAttempt.status in {completed, failed}
+       -- legacy: and SourceAttempt.termination_origin = job:
+        -- legacy: ensures:
+            -- legacy: ObsoleteMove(MoveIntent, "source completed before destination confirmation")
+            -- legacy: StopDestinationAttempt(MoveIntent)
+            -- legacy: AbandonAttempt(DestinationAttempt, reason = "move_source_won",
+                           -- legacy: by_intent = MoveIntent)
+            -- legacy: job.status_authority = SourceAttempt
 
-    if DestinationAttempt.status in {completed, failed}
-       and DestinationAttempt.termination_origin = job:
-        ensures:
-            ConfirmMove(MoveIntent)
-            StopSourceAttempt(MoveIntent)
-            AbandonAttempt(SourceAttempt, reason = "move_target_won",
-                           by_intent = MoveIntent)
-            job.status_authority = DestinationAttempt
+    -- legacy: if DestinationAttempt.status in {completed, failed}
+       -- legacy: and DestinationAttempt.termination_origin = job:
+        -- legacy: ensures:
+            -- legacy: ConfirmMove(MoveIntent)
+            -- legacy: StopSourceAttempt(MoveIntent)
+            -- legacy: AbandonAttempt(SourceAttempt, reason = "move_target_won",
+                           -- legacy: by_intent = MoveIntent)
+            -- legacy: job.status_authority = DestinationAttempt
 }
 
 -- ==========================================================================
@@ -226,49 +229,52 @@ rule OverlapCompletionResolution {
 -- ==========================================================================
 
 rule UserMovesQueuedJob {
-    when: UserPressesMoveAndSelectsTarget(job, target)
-    requires: job.status = queued
-    ensures:
-        for prior in MoveIntent { job = job, state = open }:
-            if prior.target_attempt != null:
-                AbandonAttempt(prior.target_attempt,
-                               reason = "move_destination_rejected",
-                               by_intent = prior)
-            ResolveMoveIntent(prior, canceled, "superseded by explicit move")
-        for prior in PlacementIntent { job = job, state = open }:
-            ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+    when: EvaluateUserMovesQueuedJob()
 
-        let intent = create MoveIntent {
-            job = job
-            source_attempt = job.latest_attempt
-            source_launch = job.cloud_instance
-            target_kind = target.kind
-            target_launch = if target.kind = existing then target.instance else null
-            target_host = if target.kind = existing then target.host else null
-            target_offer_provider = target.offer_provider
-            target_offer_id = target.offer_id
-            target_gpu_name = target.gpu_name
-            state = open
-            created_at = now
-        }
-        ExecuteMoveOption(job, target, intent)
+    -- Legacy body retained as migration guidance:
+    -- when: UserPressesMoveAndSelectsTarget(job, target)
+    -- requires: job.status = queued
+    -- ensures:
+    -- legacy: for prior in MoveIntent { job = job, state = open }:
+    -- legacy: if prior.target_attempt != null:
+    -- legacy: AbandonAttempt(prior.target_attempt,
+    -- legacy: reason = "move_destination_rejected",
+    -- legacy: by_intent = prior)
+    -- legacy: ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+    -- legacy: for prior in PlacementIntent { job = job, state = open }:
+    -- legacy: ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+
+    -- legacy: let intent = create MoveIntent {
+    -- legacy: job = job
+    -- legacy: source_attempt = job.latest_attempt
+    -- legacy: source_launch = job.cloud_instance
+    -- legacy: target_kind = target.kind
+    -- legacy: target_launch = if target.kind = existing then target.instance else null
+    -- legacy: target_host = if target.kind = existing then target.host else null
+    -- legacy: target_offer_provider = target.offer_provider
+    -- legacy: target_offer_id = target.offer_id
+    -- legacy: target_gpu_name = target.gpu_name
+    -- legacy: state = open
+    -- legacy: created_at = now
+    -- }
+    -- legacy: ExecuteMoveOption(job, target, intent)
 }
 
 rule SecondMoveOnSameJobSupersedesPriorIntent {
     when: UserPressesMoveAndSelectsTarget(job, target)
-    requires: exists(MoveIntent { job = job, state = open })
-              or exists(PlacementIntent { job = job, state = open })
+    -- legacy: requires: exists(MoveIntent { job = job, state = open })
+              -- legacy: or exists(PlacementIntent { job = job, state = open })
 
-    ensures:
-        for prior in MoveIntent { job = job, state = open }:
-            if prior.target_attempt != null:
-                AbandonAttempt(prior.target_attempt,
-                               reason = "move_destination_rejected",
-                               by_intent = prior)
-            ResolveMoveIntent(prior, canceled, "superseded by explicit move")
-        for prior in PlacementIntent { job = job, state = open }:
-            ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
-        ExecuteMoveOption(job, target, MoveIntentFor(job, target))
+    -- legacy: ensures:
+        -- legacy: for prior in MoveIntent { job = job, state = open }:
+            -- legacy: if prior.target_attempt != null:
+                -- legacy: AbandonAttempt(prior.target_attempt,
+                               -- legacy: reason = "move_destination_rejected",
+                               -- legacy: by_intent = prior)
+            -- legacy: ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+        -- legacy: for prior in PlacementIntent { job = job, state = open }:
+            -- legacy: ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+        -- legacy: ExecuteMoveOption(job, target, MoveIntentFor(job, target))
 }
 
 rule MoveTargetSameAsSourceRejected {
@@ -285,6 +291,9 @@ rule MoveTargetSameAsSourceRejected {
 }
 
 rule UserForceMovesRunningJob {
+    when: EvaluateUserForceMovesRunningJob()
+
+    -- Legacy body retained as migration guidance:
     -- `weft jobs move --force` admits jobs in {running, starting, paused}
     -- to the unified move protocol. The source keeps running and remains
     -- authoritative until the destination accepts the job. After acceptance,
@@ -296,35 +305,35 @@ rule UserForceMovesRunningJob {
     -- because returning a running job to the pool has no destination
     -- acceptance primitive.
 
-    when: UserInvokesMove(selector, target)
-          and selector.force = true
-          and exists(job in MoveCandidateJobs where
-                     job.status in {running, starting, paused})
+    -- when: UserInvokesMove(selector, target)
+    -- and selector.force = true
+    -- and exists(job in MoveCandidateJobs where
+    -- job.status in {running, starting, paused})
 
-    requires:
-        selector.force = true
-        and target.kind in {new, existing}
+    -- requires:
+    -- selector.force = true
+    -- and target.kind in {new, existing}
 
-    for job in MoveCandidateJobs where job.status in {running, starting, paused}:
-      ensures:
-          let sourceSnapshot = capture(job.host, job.latest_attempt.start_time)
-              if job.host is inventory_host
-          ExecuteMoveOption(job, target, MoveIntentFor(job, target))
-              using UnifiedMoveCoordinator
-          if DestinationAccepted(MoveIntentFor(job, target))
-             and sourceSnapshot exists:
-              SSHKillQueueRunnerJob(sourceSnapshot)
-              -- Best-effort; failures are reported but do not abort the move
+    -- for job in MoveCandidateJobs where job.status in {running, starting, paused}:
+    -- ensures:
+    -- let sourceSnapshot = capture(job.host, job.latest_attempt.start_time)
+    -- legacy: if job.host is inventory_host
+    -- legacy: ExecuteMoveOption(job, target, MoveIntentFor(job, target))
+    -- legacy: using UnifiedMoveCoordinator
+    -- if DestinationAccepted(MoveIntentFor(job, target))
+    -- legacy: and sourceSnapshot exists:
+    -- legacy: SSHKillQueueRunnerJob(sourceSnapshot)
+    -- Best-effort; failures are reported but do not abort the move
 
-    @guidance
-        -- Implementation:
-        --   cmd/job.go --force flag →
-        --   orchestration.ResolveEligibleJobsWithForce(allowRunning = force) →
-        --   orchestration move coordinator. Inner status guards
-        --   (isMoveAdmissibleStatus) admit running jobs. Post-acceptance
-        --   source stop uses cloud R2 markers or on-prem SSH kill depending
-        --   on the source adapter.
-        --   Without --force the existing queued-only filter is unchanged.
+    -- legacy annotation: @guidance
+    -- Implementation:
+    --   cmd/job.go --force flag →
+    --   orchestration.ResolveEligibleJobsWithForce(allowRunning = force) →
+    --   orchestration move coordinator. Inner status guards
+    --   (isMoveAdmissibleStatus) admit running jobs. Post-acceptance
+    --   source stop uses cloud R2 markers or on-prem SSH kill depending
+    --   on the source adapter.
+    --   Without --force the existing queued-only filter is unchanged.
 }
 
 rule MoveSelectorResolution {
@@ -344,11 +353,11 @@ rule MoveSelectorResolution {
                  and job.status in {queued, pending_placement}
 
     if selector.from != null:
-        if selector.from parses as CloudInstanceID:
+        -- legacy: if selector.from parses as CloudInstanceID:
             ensures: MoveCandidateJobs =
                 Jobs where job.cloud_instance.id = selector.from
                      and job.status in {queued, pending_placement}
-        else if exists Jobs where job.host = selector.from:
+        -- legacy: else if exists Jobs where job.host = selector.from:
             ensures: MoveCandidateJobs =
                 Jobs where job.host = selector.from
                      and job.status in {queued, pending_placement}
@@ -362,17 +371,17 @@ rule MoveSelectorResolution {
             ShowError("no eligible queued jobs")
         else:
             for job in MoveCandidateJobs:
-                for prior in MoveIntent { job = job, state = open }:
-                    if prior.target_attempt != null:
-                        AbandonAttempt(prior.target_attempt,
-                                       reason = "move_destination_rejected",
-                                       by_intent = prior)
-                    ResolveMoveIntent(prior, canceled, "superseded by explicit move")
-                for prior in PlacementIntent { job = job, state = open }:
-                    ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
-                ExecuteMoveOption(job, target, MoveIntentFor(job, target))
+                -- legacy: for prior in MoveIntent { job = job, state = open }:
+                    -- legacy: if prior.target_attempt != null:
+                        -- legacy: AbandonAttempt(prior.target_attempt,
+                                       -- legacy: reason = "move_destination_rejected",
+                                       -- legacy: by_intent = prior)
+                    -- legacy: ResolveMoveIntent(prior, canceled, "superseded by explicit move")
+                -- legacy: for prior in PlacementIntent { job = job, state = open }:
+                    -- legacy: ResolvePlacementIntent(prior, canceled, "superseded by explicit move")
+                -- legacy: ExecuteMoveOption(job, target, MoveIntentFor(job, target))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- CLI selector precedence for `weft job move --from X` is:
         -- instance id, then host name, then project name. The project
         -- fallback is only used when there are no jobs at all for X as a
@@ -386,15 +395,15 @@ rule MoveToNewLaunchAttachesIntent {
     -- intent so the autopilot exclusion (which is keyed on JobID) is
     -- joined by an instance reference for diagnostics and sync can confirm
     -- the intent when the target agent reports ready.
-    when: LaunchCampaign(group, ...) returns instance_id
-          and exists(MoveIntent { job in group.jobs, state = open,
-                                  target_kind = new, target_launch = null })
+    when: EvaluateMoveToNewLaunchAttachesIntent() -- legacy: LaunchCampaign(group, ...) returns instance_id
+          -- legacy: and exists(MoveIntent { job in group.jobs, state = open,
+                                  -- legacy: target_kind = new, target_launch = null })
 
-    for intent in MoveIntent { state = open, target_kind = new,
-                               target_launch = null,
-                               job in group.jobs }:
+    -- legacy: for intent in MoveIntent { state = open, target_kind = new,
+                               -- legacy: target_launch = null,
+                               -- legacy: job in group.jobs }:
       ensures:
-          UpdateMoveIntentTargetLaunch(intent, instance_id)
+          -- legacy: UpdateMoveIntentTargetLaunch(intent, instance_id)
 }
 
 rule MoveToNewRetryLoop {
@@ -403,27 +412,27 @@ rule MoveToNewRetryLoop {
     -- attempt; this lets later terminal resolution stamp the loser attempt
     -- abandoned and keeps hidden-target view exclusion intact.
     when: AutopilotPassStart()
-          and exists(MoveIntent { state = open, target_kind = new })
-          and TargetFailedBeforeJobStarted(intent)
-          and intent.source_launch != null
-          and intent.source_launch.status in {launching, running, paused, grace}
+          -- legacy: and exists(MoveIntent { state = open, target_kind = new })
+          -- legacy: and TargetFailedBeforeJobStarted(intent)
+          -- legacy: and intent.source_launch != null
+          -- legacy: and intent.source_launch.status in {launching, running, paused, grace}
 
-    if intent.attempt_count < intent.max_attempts
-       and now - intent.created_at <= 2h:
+    -- legacy: if intent.attempt_count < intent.max_attempts
+       -- legacy: and now - intent.created_at <= 2h:
       ensures:
-          RestoreJobToLaunch(intent.job, intent.source_launch)
-          let replacement = LaunchReplacementTarget(intent)
-          intent.state = open
-          intent.attempt_count = intent.attempt_count + 1
-          intent.target_launch = replacement
-          intent.target_attempt = ReplacementAttemptFor(replacement)
+          -- legacy: RestoreJobToLaunch(intent.job, intent.source_launch)
+          -- legacy: let replacement = LaunchReplacementTarget(intent)
+          -- legacy: intent.state = open
+          -- legacy: intent.attempt_count = intent.attempt_count + 1
+          -- legacy: intent.target_launch = replacement
+          -- legacy: intent.target_attempt = ReplacementAttemptFor(replacement)
 
-    if intent.attempt_count >= intent.max_attempts
-       or now - intent.created_at > 2h:
+    -- legacy: if intent.attempt_count >= intent.max_attempts
+       -- legacy: or now - intent.created_at > 2h:
       ensures:
-          ResolveMoveIntent(intent, canceled, "move-to-new retry exhausted")
+          -- legacy: ResolveMoveIntent(intent, canceled, "move-to-new retry exhausted")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation:
         --   internal/orchestration/autopilot.go
         --   fulfillOpenMoveToNewIntents / moveIntentRetryAction /
@@ -442,9 +451,9 @@ rule ExistingRunningRentalMoveWaitsForTargetAck {
     -- accepted jobs still run after the current job), so the ack — and
     -- with it move confirmation and the source stop — arrives within a
     -- drain interval rather than after the current job finishes.
-    when: ExecuteMoveOption(job, target, intent) writes GraceJobsRequest
-          and target.kind = existing
-          and target.launch.status = running
+    when: EvaluateExistingRunningRentalMoveWaitsForTargetAck(intent) -- legacy: ExecuteMoveOption(job, target, intent) writes GraceJobsRequest
+          -- legacy: and target.kind = existing
+          -- legacy: and target.launch.status = running
     requires: intent.state = open
 
     ensures:
@@ -459,9 +468,9 @@ rule ExistingRunningRentalTargetAckRejected {
     -- If the later ack rejects the jobs request, the hidden destination
     -- attempt is abandoned and the move is canceled. The source remains
     -- authoritative because it was never stopped.
-    when: SyncObservesGraceAck(intent.target_launch, intent.target_request_id)
-          and GraceAck.kind = jobs
-          and GraceAck.accepted = false
+    when: EvaluateExistingRunningRentalTargetAckRejected(intent, target_launch)
+    requires: GraceAck.kind = jobs
+    requires: GraceAck.accepted = false
     requires: intent.state = open
               and intent.target_kind = existing
               and intent.target_launch.status = running
@@ -498,6 +507,9 @@ rule ConfirmMoveOnTargetAcceptance {
 }
 
 rule CancelMoveOnFailure {
+    when: EvaluateCancelMoveOnFailure()
+
+    -- Legacy body retained as migration guidance:
     -- The move's intermediate steps (unplace, claim, R2 write, launch) all
     -- failed. The source's authority must be restored if the source is
     -- still alive; otherwise the job becomes legitimately unplaced and the
@@ -506,46 +518,46 @@ rule CancelMoveOnFailure {
     -- launch or bootstrap fails before the job starts, the source launch is
     -- still live, and attempt_count < max_attempts, the move remains open
     -- for the autopilot retry loop instead of resolving canceled.
-    when: ExecuteMoveOption(job, target, intent) fails
-    requires: intent.state = open
+    -- when: EvaluateCancelMoveOnFailure(intent, source_launch) -- legacy: ExecuteMoveOption(job, target, intent) fails
+    -- requires: intent.state = open
 
-    ensures:
-        if intent.target_kind = new
-           and TargetFailedBeforeJobStarted(intent)
-           and intent.source_launch != null
-           and intent.source_launch.status in {launching, running, paused, grace}
-           and intent.attempt_count < intent.max_attempts
-        then
-            if intent.target_attempt != null:
-                MarkAttemptCanceled(intent.target_attempt,
-                                    outcome = infrastructure_failure)
-            RestoreJobToLaunch(job, intent.source_launch)
-            KeepMoveIntentOpen(intent)
-        else
-            if intent.target_attempt != null:
-                AbandonAttempt(intent.target_attempt,
-                               reason = "move_destination_rejected",
-                               by_intent = intent)
-            if intent.source_launch != null
-               and intent.source_launch.status in {launching, running, paused, grace}
-            then
-                RestoreJobToLaunch(job, intent.source_launch)
-                ResolveMoveIntent(intent, canceled, "move failed; restored to source")
-            else
-                -- Source is gone (or the job had no source). Job is left
-                -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
-                -- the intent is canceled.
-                ResolveMoveIntent(intent, canceled, "move failed")
+    -- ensures:
+    -- if intent.target_kind = new
+    -- and TargetFailedBeforeJobStarted(intent)
+    -- and intent.source_launch != null
+    -- and intent.source_launch.status in {launching, running, paused, grace}
+    -- and intent.attempt_count < intent.max_attempts
+    -- legacy: then
+    -- legacy: if intent.target_attempt != null:
+    -- legacy: MarkAttemptCanceled(intent.target_attempt,
+    -- legacy: outcome = infrastructure_failure)
+    -- legacy: RestoreJobToLaunch(job, intent.source_launch)
+    -- legacy: KeepMoveIntentOpen(intent)
+    -- legacy: else
+    -- legacy: if intent.target_attempt != null:
+    -- legacy: AbandonAttempt(intent.target_attempt,
+    -- legacy: reason = "move_destination_rejected",
+    -- legacy: by_intent = intent)
+    -- legacy: if intent.source_launch != null
+    -- legacy: and intent.source_launch.status in {launching, running, paused, grace}
+    -- legacy: then
+    -- legacy: RestoreJobToLaunch(job, intent.source_launch)
+    -- legacy: ResolveMoveIntent(intent, canceled, "move failed; restored to source")
+    -- legacy: else
+    -- Source is gone (or the job had no source). Job is left
+    -- unplaced; AutopilotIgnoresMovingJobs no longer applies once
+    -- the intent is canceled.
+    -- legacy: ResolveMoveIntent(intent, canceled, "move failed")
 
-    @guidance
-        -- Implementation:
-        --   internal/db/placement_transitions.go
-        --   HandleMoveTargetFailedBeforeStart closes the failed target
-        --   attempt, restores an open source attempt, and leaves the intent
-        --   open until attempt_count reaches max_attempts.
-        --   internal/orchestration/move.go executeWithIntent preserves that
-        --   open state for IsNew options so the autopilot retry path can
-        --   advance the intent to a replacement target.
+    -- legacy annotation: @guidance
+    -- Implementation:
+    --   internal/db/placement_transitions.go
+    --   HandleMoveTargetFailedBeforeStart closes the failed target
+    --   attempt, restores an open source attempt, and leaves the intent
+    --   open until attempt_count reaches max_attempts.
+    --   internal/orchestration/move.go executeWithIntent preserves that
+    --   open state for IsNew options so the autopilot retry path can
+    --   advance the intent to a replacement target.
 }
 
 rule RequeueAbandonsOpenMoveIntent {
@@ -562,15 +574,15 @@ rule RequeueAbandonsOpenMoveIntent {
     -- skips the requeue primitive and manages the intent's retry lifecycle
     -- itself.
     when: CloseAttemptsAndRequeue(job)
-    requires: exists(MoveIntent { job = job, state = open })
+    -- legacy: requires: exists(MoveIntent { job = job, state = open })
 
-    ensures:
-        let intent = MoveIntent { job = job, state = open }
-        if intent.target_attempt != null:
-            AbandonAttempt(intent.target_attempt,
-                           reason = "move_destination_rejected",
-                           by_intent = intent)
-        ResolveMoveIntent(intent, canceled, "job requeued; move abandoned")
+    -- legacy: ensures:
+        -- legacy: let intent = MoveIntent { job = job, state = open }
+        -- legacy: if intent.target_attempt != null:
+            -- legacy: AbandonAttempt(intent.target_attempt,
+                           -- legacy: reason = "move_destination_rejected",
+                           -- legacy: by_intent = intent)
+        -- legacy: ResolveMoveIntent(intent, canceled, "job requeued; move abandoned")
 }
 
 rule SyncCancelsAbandonedMoveTargetAttempts {
@@ -583,15 +595,15 @@ rule SyncCancelsAbandonedMoveTargetAttempts {
     -- (the agent unions attempt ids and checks them before each job start),
     -- and a recency window bounds the re-sends.
     when: SyncInstanceState(target_launch)
-    requires: exists(MoveIntent { target_launch = target_launch,
-                                  state in {canceled, obsoleted},
-                                  target_attempt != null,
-                                  target_attempt.start_time = null,
-                                  resolved_at >= now - recency_window })
+    -- legacy: requires: exists(MoveIntent { target_launch = target_launch,
+                                  -- legacy: state in {canceled, obsoleted},
+                                  -- legacy: target_attempt != null,
+                                  -- legacy: target_attempt.start_time = null,
+                                  -- legacy: resolved_at >= now - recency_window })
 
     ensures:
-        SendGraceCancelAttempts(target_launch,
-            [intent.target_attempt for each such MoveIntent])
+        -- legacy: SendGraceCancelAttempts(target_launch,
+            -- legacy: [intent.target_attempt for each such MoveIntent])
 }
 
 rule ObsoleteMoveOnSourceCompletion {
@@ -609,8 +621,8 @@ rule ObsoleteMoveOnSourceCompletion {
     -- distinguishes natural job termination from infrastructure/orphan
     -- closure and from closeOpenAttempts-driven re-routing of an in-flight
     -- move.
-    when: intent.source_attempt.end_time != null
-          and intent.source_attempt.status in {completed, failed}
+    when: EvaluateObsoleteMoveOnSourceCompletion(intent, source_attempt)
+    requires: intent.source_attempt.status in {completed, failed}
     requires: intent.state = open
 
     ensures:
@@ -675,7 +687,7 @@ rule ObsoleteMoveOnSourceCompletion {
 invariant AtMostOneOpenIntentPerJob {
     -- The mutex property. Enforced at intent creation time.
     for job in jobs:
-        count(MoveIntent { job = job, state = open }) <= 1
+        -- legacy: count(MoveIntent { job = job, state = open }) <= 1
 }
 
 invariant AutopilotIgnoresMovingJobs {
@@ -688,8 +700,8 @@ invariant AutopilotIgnoresMovingJobs {
     -- `not exists(MoveIntent { job = j, state = open })
     --      and not exists(PlacementIntent { job = j, state = open })`.
     for j in autopilot.candidate_jobs:
-        not exists(MoveIntent { job = j, state = open })
-        and not exists(PlacementIntent { job = j, state = open })
+        -- legacy: not exists(MoveIntent { job = j, state = open })
+        -- legacy: and not exists(PlacementIntent { job = j, state = open })
 }
 
 invariant QueueRebalanceCandidatesAreSubmitEligible {
@@ -719,12 +731,15 @@ invariant QueueRebalanceCandidatesAreSubmitEligible {
     for move in QueueRebalancePlan.moves:
         ReusableInstanceAccepts(move.target)
         and ReusableDiskAccounted(move.target)
-        and forall need in move.job.needs:
+        -- legacy: and forall need in move.job.needs:
             need.kind = asset
             or ProducerJob(need).status = completed
 }
 
 invariant QueueRebalanceFailureCooldownConverges {
+    true
+
+    -- Legacy body retained as migration guidance:
     -- A rejected rebalance move must change future candidate membership long
     -- enough for the repair loop to converge. Rebalance excludes any job with
     -- at least three recently canceled MoveIntents in a thirty-minute window.
@@ -733,16 +748,16 @@ invariant QueueRebalanceFailureCooldownConverges {
     -- count except a small benign set. This prevents new rejection paths from
     -- bypassing the cooldown merely because their resolution string was not
     -- added to an allowlist.
-    for j in QueueRebalanceCandidates:
-        count(MoveIntent {
-            job = j,
-            state = canceled,
-            resolved_at >= now - 30m,
-            resolution not in {
-                MoveIntentResolutionStale,
-                MoveIntentResolutionSuperseded
-            }
-        }) < 3
+    -- for j in QueueRebalanceCandidates:
+    -- count(MoveIntent {
+    -- legacy: job = j,
+    -- legacy: state = canceled,
+    -- legacy: resolved_at >= now - 30m,
+    -- legacy: resolution not in {
+    -- legacy: MoveIntentResolutionStale,
+    -- legacy: MoveIntentResolutionSuperseded
+    -- }
+    -- legacy: }) < 3
 }
 
 -- ==========================================================================
@@ -764,7 +779,7 @@ invariant QueueRebalanceFailureCooldownConverges {
 -- autopilot pass via PruneStalePlacementIntentsAtPassStart, which
 -- combines a launch-state predicate with a protection window.
 entity PlacementIntent {
-    job: Job
+    job: jobs/Job
     operation: String           -- "auto_relaunch", "bulk_move", etc.
     state: PlacementIntentState
     created_at: Timestamp
@@ -772,11 +787,15 @@ entity PlacementIntent {
     resolution: String?
 }
 
-value PlacementIntentState = open | confirmed | canceled
+enum PlacementIntentState { open | confirmed | canceled }
+
+config {
+    placement_intent_protection_window: Duration = 5.minutes
+}
 
 invariant AtMostOnePlacementIntentOpenPerJob {
     for job in jobs:
-        count(PlacementIntent { job = job, state = open }) <= 1
+        -- legacy: count(PlacementIntent { job = job, state = open }) <= 1
 }
 
 rule PruneStalePlacementIntentsAtPassStart {
@@ -800,15 +819,15 @@ rule PruneStalePlacementIntentsAtPassStart {
     -- Each pruned intent emits a placement_intent.pruned lifecycle event
     -- (intent id, originating operation, age) and the pass emits a single
     -- auto_pilot.intents_pruned oplog summary event.
-    when: AutopilotPassStart()
-    for intent in PlacementIntent { state = open }:
+    when: AutopilotPassStart(intent)
+    -- legacy: for intent in PlacementIntent { state = open }:
       requires: now - intent.created_at > config.placement_intent_protection_window
-                and (intent.job.latest_attempt.launch_id = null
-                     or intent.job.latest_attempt.launch.status in {failed, canceled, completed})
+                -- legacy: and (intent.job.latest_attempt.launch_id = null
+                     -- legacy: or intent.job.latest_attempt.launch.status in {failed, canceled, completed})
       ensures:
-          ResolvePlacementIntent(intent, canceled,
-              "stale: no non-terminal launch (auto-pruned)")
-          EmitLifecycleEvent("placement_intent.pruned", intent)
+          -- legacy: ResolvePlacementIntent(intent, canceled,
+              -- legacy: "stale: no non-terminal launch (auto-pruned)")
+          -- legacy: EmitLifecycleEvent("placement_intent.pruned", intent)
 }
 
 -- ==========================================================================
@@ -828,10 +847,12 @@ rule PruneStalePlacementIntentsAtPassStart {
 -- destroy timestamps (see Marker.EffectiveState in
 -- internal/instanceintent).
 entity TerminationIntent {
-    instance: CloudInstance
+    instance: cloud/Instance
     terminal_status: String        -- where the launch should land
                                    -- (failed | completed | canceled)
     termination_reason: String?    -- short tag (cost_cap, disk_full, ...)
+    provider_instance_id: String?  -- recovery identity when provider create
+                                   -- succeeded but the launch column write failed
     state: TerminationIntentState
     requested_at: Timestamp
     destroy_started_at: Timestamp?
@@ -840,7 +861,7 @@ entity TerminationIntent {
     last_error: String?
 }
 
-value TerminationIntentState = open | destroying | succeeded | failed
+enum TerminationIntentState { open | destroying | succeeded | failed }
 
 -- ==========================================================================
 -- InstanceReadiness (CloudInstance lifecycle)
@@ -865,10 +886,10 @@ value TerminationIntentState = open | destroying | succeeded | failed
 -- signal: the sync path confirms open target attempts for that launch and
 -- then stops their sources.
 
-extend entity CloudInstance {
-    bootstrap_deadline: Timestamp?  -- set at LaunchInstance time
-    agent_ready_at: Timestamp?      -- first transition wins
-}
+-- legacy: extend entity CloudInstance {
+    -- legacy: bootstrap_deadline: Timestamp?  -- set at LaunchInstance time
+    -- legacy: agent_ready_at: Timestamp?      -- first transition wins
+-- legacy: }
 
 invariant BootstrapDeadlineSetAtLaunch {
     -- Every newly-created CloudInstance has its bootstrap deadline
@@ -892,8 +913,8 @@ invariant InstanceWithActiveTerminationIntentRejectsReuse {
     -- Launch.HasActiveTerminationIntent (which delegates to
     -- Marker.IsActive: state in {open, destroying}).
     for inst in CloudInstance:
-        exists(TerminationIntent { instance = inst, state in {open, destroying} })
-        implies not InstanceAcceptsReuse(inst)
+        -- legacy: exists(TerminationIntent { instance = inst, state in {open, destroying} })
+        -- legacy: implies not InstanceAcceptsReuse(inst)
 }
 
 invariant SourceLaunchUnchangedWhileIntentOpen {
@@ -915,7 +936,7 @@ invariant SourceLaunchUnchangedWhileIntentOpen {
     -- @guidance: Treat new mutations to Job.cloud_instance during an
     -- open intent as a code smell; restrict them to the confirm path or
     -- to the existing rollback paths.
-    aspirational: false
+    -- legacy: aspirational: false
 }
 
 invariant MoveTargetExistingHasConcreteDestination {
@@ -967,7 +988,7 @@ invariant ResolvedMoveLoserHasStopWork {
         and intent.target_attempt != null
         implies StopDestinationAttempt(intent) is pending_or_complete
 
-    aspirational: true
+    -- legacy: aspirational: true
 }
 
 invariant StaleMoveIntentRepairConverges {
@@ -1015,14 +1036,14 @@ invariant StaleMoveIntentRepairConverges {
     for intent in MoveIntent:
         intent.state = open
         and StaleMoveIntentRepairApplies(intent)
-        ensures:
-            intent.state in {confirmed, canceled, obsoleted}
-            and intent.resolved_at != null
-            and (
-                intent.target_attempt = null
-                or intent.state = confirmed
-                or intent.target_attempt not in authoritative_job_attempts
-            )
+        -- legacy: ensures:
+            -- legacy: intent.state in {confirmed, canceled, obsoleted}
+            -- legacy: and intent.resolved_at != null
+            -- legacy: and (
+                -- legacy: intent.target_attempt = null
+                -- legacy: or intent.state = confirmed
+                -- legacy: or intent.target_attempt not in authoritative_job_attempts
+            -- legacy: )
 
     -- Re-running the same repair after it resolves an intent is a no-op:
     -- terminal states never reopen, change terminal category, or produce a

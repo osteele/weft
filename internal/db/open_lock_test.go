@@ -4,19 +4,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestOpen_StartupRepairDatabaseLockedIsDeferred(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-open-lock-*.db")
-	if err != nil {
-		t.Fatalf("create temp db path: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
+	tmpPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedPendingMigrationTestDBFile(t, tmpPath)
 
 	restorePath := SetDBPath(tmpPath)
 	t.Cleanup(restorePath)
@@ -38,13 +33,8 @@ func TestOpen_StartupRepairDatabaseLockedIsDeferred(t *testing.T) {
 }
 
 func TestOpen_StartupRepairNonLockStillFails(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-open-repair-*.db")
-	if err != nil {
-		t.Fatalf("create temp db path: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
+	tmpPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedPendingMigrationTestDBFile(t, tmpPath)
 
 	restorePath := SetDBPath(tmpPath)
 	t.Cleanup(restorePath)
@@ -71,13 +61,8 @@ func TestOpen_StartupRepairNonLockStillFails(t *testing.T) {
 }
 
 func TestOpen_StartupRepairReadOnlyIsDeferred(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-open-readonly-*.db")
-	if err != nil {
-		t.Fatalf("create temp db path: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
+	tmpPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedPendingMigrationTestDBFile(t, tmpPath)
 
 	restorePath := SetDBPath(tmpPath)
 	t.Cleanup(restorePath)
@@ -99,16 +84,8 @@ func TestOpen_StartupRepairReadOnlyIsDeferred(t *testing.T) {
 }
 
 func TestOpen_CurrentSchemaSkipsStartupRepair(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-open-current-*.db")
-	if err != nil {
-		t.Fatalf("create temp db path: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
-	if err := os.WriteFile(tmpPath, testDBTemplate(t), 0o600); err != nil {
-		t.Fatalf("seed current schema database: %v", err)
-	}
+	tmpPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, tmpPath)
 
 	restorePath := SetDBPath(tmpPath)
 	t.Cleanup(restorePath)
@@ -132,16 +109,8 @@ func TestOpen_CurrentSchemaSkipsStartupRepair(t *testing.T) {
 }
 
 func TestOpenForReading_CurrentSchemaSkipsWritableStartupPath(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-open-read-current-*.db")
-	if err != nil {
-		t.Fatalf("create temp db path: %v", err)
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
-	if err := os.WriteFile(tmpPath, testDBTemplate(t), 0o600); err != nil {
-		t.Fatalf("seed current schema database: %v", err)
-	}
+	tmpPath := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, tmpPath)
 
 	restorePath := SetDBPath(tmpPath)
 	t.Cleanup(restorePath)

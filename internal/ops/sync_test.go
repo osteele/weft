@@ -445,6 +445,114 @@ func TestProbeRemoteStatusIgnoresStaleCompletionRunID(t *testing.T) {
 	}
 }
 
+func TestProbeQueueRunnerJobStatusRequiresCompleteAbsenceEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		job    *db.Job
+		remote mockQueueRemote
+		want   string
+	}{
+		{
+			name: "one negative probe with all others unknown preserves queued",
+			job:  &db.Job{ID: 1, Host: "queue-host", Status: db.StatusQueued},
+			remote: mockQueueRemote{
+				statusOption: None[bool](),
+				paused:       None[bool](),
+				current:      None[bool](),
+				inQueue:      Some(false),
+				process:      None[bool](),
+			},
+			want: db.StatusQueued,
+		},
+		{
+			name: "all probes negative declares running job dead",
+			job:  &db.Job{ID: 2, Host: "queue-host", Status: db.StatusRunning},
+			remote: mockQueueRemote{
+				statusOption: Some(false),
+				paused:       Some(false),
+				current:      Some(false),
+				inQueue:      Some(false),
+				process:      Some(false),
+			},
+			want: db.StatusDead,
+		},
+		{
+			name: "all probes negative preserves active queued job for redispatch",
+			job:  &db.Job{ID: 3, Host: "queue-host", Status: db.StatusQueued},
+			remote: mockQueueRemote{
+				statusOption: Some(false),
+				paused:       Some(false),
+				current:      Some(false),
+				inQueue:      Some(false),
+				process:      Some(false),
+			},
+			want: db.StatusQueued,
+		},
+		{
+			name: "nonzero completion is failed",
+			job:  &db.Job{ID: 4, Host: "queue-host", Status: db.StatusRunning},
+			remote: mockQueueRemote{
+				statusExitCode: 7,
+				statusOption:   Some(true),
+			},
+			want: db.StatusFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			restore := setQueueRemoteClientForTesting(tt.remote)
+			defer restore()
+
+			got, err := probeQueueRunnerJobStatus(tt.job, time.Second)
+			if err != nil {
+				t.Fatalf("probeQueueRunnerJobStatus: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("status = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProbeQueueRunnerJobStatus_UnknownNeverProvesDeath(t *testing.T) {
+	states := []Option[bool]{None[bool](), Some(false)}
+	for statusIndex, status := range states {
+		for pausedIndex, paused := range states {
+			for currentIndex, current := range states {
+				for queuedIndex, queued := range states {
+					for processIndex, process := range states {
+						if status.IsSome() && paused.IsSome() && current.IsSome() && queued.IsSome() && process.IsSome() {
+							continue // complete confirmed absence may declare death
+						}
+						name := fmt.Sprintf("%d%d%d%d%d", statusIndex, pausedIndex, currentIndex, queuedIndex, processIndex)
+						t.Run(name, func(t *testing.T) {
+							restore := setQueueRemoteClientForTesting(mockQueueRemote{
+								statusOption: status,
+								paused:       paused,
+								current:      current,
+								inQueue:      queued,
+								process:      process,
+							})
+							got, err := probeQueueRunnerJobStatus(
+								&db.Job{ID: 1, Host: "queue-host", Status: db.StatusRunning},
+								time.Second,
+							)
+							restore()
+							if err != nil {
+								t.Fatalf("probeQueueRunnerJobStatus: %v", err)
+							}
+							if got == db.StatusDead {
+								t.Fatal("an unknown remote probe contributed to a dead classification")
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestSyncJobWithQueueNameAndSessionName tests that a queued job with a SessionName
 // (from a previous start_now action that was killed) can still complete correctly
 // when the job re-runs via queue runner and creates a status file with a new timestamp.

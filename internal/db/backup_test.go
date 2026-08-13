@@ -112,10 +112,11 @@ func TestPruneSnapshots_KeepsNewestN(t *testing.T) {
 
 func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, dbFile)
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 
-	// First Open creates the schema and records the goose version.
+	// Open the cached current schema without replaying its migration history.
 	database, err := Open()
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
@@ -151,6 +152,7 @@ func TestOpen_TakesMigrationBackupOnUpgrade(t *testing.T) {
 
 func TestOpen_ReportsMigrationProgressBeforeBackup(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "jobs.db")
+	seedCurrentTestDBFile(t, dbFile)
 	cleanup := SetDBPath(dbFile)
 	defer cleanup()
 
@@ -210,6 +212,13 @@ func TestOpen_DoesNotReportMigrationProgressForFreshDB(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("fresh DB migration progress events = %#v, want none", events)
 	}
+	snaps, err := ListSnapshots()
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(snaps) != 0 {
+		t.Fatalf("fresh DB snapshots = %d, want none: %v", len(snaps), snaps)
+	}
 }
 
 func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
@@ -218,23 +227,6 @@ func preparePreviousMigrationVersionForTest(t *testing.T, database *sql.DB) {
 		t.Fatalf("update backup migration fixture for target version %d", migrations.Target())
 	}
 	setGooseVersionForTest(t, database, int(migrations.Target()-1))
-}
-
-func TestOpen_NoMigrationBackupOnFreshDB(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "jobs.db")
-	cleanup := SetDBPath(dbFile)
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer database.Close()
-
-	snaps, _ := ListSnapshots()
-	if len(snaps) != 0 {
-		t.Fatalf("expected no snapshots on fresh DB; got %d: %v", len(snaps), snaps)
-	}
 }
 
 func setupBackupTestDB(t *testing.T) *sql.DB {

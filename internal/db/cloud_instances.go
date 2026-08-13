@@ -446,7 +446,7 @@ var ErrLaunchTerminal = errors.New("launch already in terminal status")
 // (correctly) skipped and ErrLaunchTerminal is returned so callers can notice
 // the launch already ended. A missing row remains a silent no-op, matching
 // the previous unguarded behavior.
-func errIfTerminalSkipped(db *sql.DB, id int64, res sql.Result) error {
+func errIfTerminalSkipped(db dbExecer, id int64, res sql.Result) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return err
@@ -541,6 +541,9 @@ func (c *Launch) HasActiveTerminationIntent() bool {
 func (c *Launch) EffectiveProviderID() string {
 	if c.ProviderInstanceID != "" {
 		return c.ProviderInstanceID
+	}
+	if c.TerminationIntent != nil && c.TerminationIntent.ProviderInstanceID != "" {
+		return c.TerminationIntent.ProviderInstanceID
 	}
 	return c.VastaiInstanceID
 }
@@ -1214,6 +1217,18 @@ func UpdateLaunchTerminalStatusAt(db *sql.DB, id int64, status string, endedAt t
 }
 
 func updateLaunchStatusAt(db *sql.DB, id int64, status string, statusAt int64, terminationInfo ...string) error {
+	err := RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
+		return updateLaunchStatusWithExecer(db, id, status, statusAt, terminationInfo...)
+	})
+	if err != nil {
+		return err
+	}
+	return EnsureRentalExecutionTarget(db, id)
+}
+
+// updateLaunchStatusWithExecer is the transaction-compatible implementation
+// behind the public launch status writers.
+func updateLaunchStatusWithExecer(db dbExecer, id int64, status string, statusAt int64, terminationInfo ...string) error {
 	reason := ""
 	detail := ""
 	if len(terminationInfo) > 0 {
@@ -1222,73 +1237,83 @@ func updateLaunchStatusAt(db *sql.DB, id int64, status string, statusAt int64, t
 	if len(terminationInfo) > 1 {
 		detail = terminationInfo[1]
 	}
-	err := RetryOnDatabaseLocked(context.Background(), "update launch status", func() error {
-		switch status {
-		case LaunchStatusRunning:
-			// COALESCE preserves launched_at on resume from paused/grace, so
-			// bootstrap-survival metrics anchor to the original launch.
-			// Terminal statuses are sticky: a late "running" write (e.g.
-			// LaunchInstance finishing after a user terminate) must not
-			// revive a row that already ended.
-			clause, terminalArgs := notTerminalLaunchClause()
-			res, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ? AND `+clause,
-				append([]any{status, statusAt, id}, terminalArgs...)...)
-			if err != nil {
-				return err
-			}
-			return errIfTerminalSkipped(db, id, res)
-		case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
-			// Don't overwrite an already-terminal instance that has a SPECIFIC
-			// termination reason set (e.g., bootstrap_timeout → job_failure on
-			// next pass). 'unknown' is the placeholder set by the auto-derive
-			// trigger (00007) when a launch was inserted/transitioned to
-			// terminal without a reason — treat it as overridable so callers
-			// that DO know the specific reason can still record it.
-			var currentStatus, currentReason string
-			if err := db.QueryRow(`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`, id).Scan(&currentStatus, &currentReason); err == nil {
-				if IsTerminalLaunchStatus(currentStatus) && currentReason != "" && currentReason != TerminationReasonUnknown {
-					return nil
-				}
-			}
-			if reason != "" && detail != "" {
-				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, statusAt, reason, detail, id)
-				return err
-			}
-			if reason != "" {
-				_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, reason, id)
-				return err
-			}
-			// Caller didn't specify a reason. Mirror the trigger's
-			// derivation (00007 launches_terminal_auto_derive_reason*) at the
-			// call site so the row's reason matches its status the moment
-			// the writer commits, not after a follow-up trigger fires.
-			// 'unknown' is the documented sentinel for "writer didn't know"
-			// and is treated as overridable by the skip-check above.
-			derivedReason := TerminationReasonUnknown
-			switch status {
-			case LaunchStatusCancelled:
-				derivedReason = TerminationReasonCancelled
-			case LaunchStatusCompleted:
-				derivedReason = TerminationReasonCompleted
-			}
-			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, derivedReason, id)
+	switch status {
+	case LaunchStatusRunning:
+		// COALESCE preserves launched_at on resume from paused/grace, so
+		// bootstrap-survival metrics anchor to the original launch.
+		// Terminal statuses are sticky: a late "running" write (e.g.
+		// LaunchInstance finishing after a user terminate) must not
+		// revive a row that already ended.
+		clause, terminalArgs := notTerminalLaunchClause()
+		res, err := db.Exec(`UPDATE launches SET status = ?, launched_at = COALESCE(launched_at, ?) WHERE id = ? AND `+clause,
+			append([]any{status, statusAt, id}, terminalArgs...)...)
+		if err != nil {
 			return err
-		default:
-			// Terminal statuses are sticky against non-terminal writes
-			// (launching, paused, grace, ...).
-			clause, terminalArgs := notTerminalLaunchClause()
-			res, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ? AND `+clause,
-				append([]any{status, id}, terminalArgs...)...)
-			if err != nil {
-				return err
-			}
-			return errIfTerminalSkipped(db, id, res)
 		}
-	})
-	if err != nil {
+		return errIfTerminalSkipped(db, id, res)
+	case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
+		// Don't overwrite an already-terminal instance that has a SPECIFIC
+		// termination reason set (e.g., bootstrap_timeout → job_failure on
+		// next pass). 'unknown' is the placeholder set by the auto-derive
+		// trigger (00007) when a launch was inserted/transitioned to
+		// terminal without a reason — treat it as overridable so callers
+		// that DO know the specific reason can still record it.
+		final, err := launchHasSpecificTerminalDisposition(db, id)
+		if err != nil {
+			return err
+		}
+		if final {
+			return nil
+		}
+		if reason != "" && detail != "" {
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, statusAt, reason, detail, id)
+			return err
+		}
+		if reason != "" {
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, reason, id)
+			return err
+		}
+		// Caller didn't specify a reason. Mirror the trigger's
+		// derivation (00007 launches_terminal_auto_derive_reason*) at the
+		// call site so the row's reason matches its status the moment
+		// the writer commits, not after a follow-up trigger fires.
+		// 'unknown' is the documented sentinel for "writer didn't know"
+		// and is treated as overridable by the skip-check above.
+		derivedReason := TerminationReasonUnknown
+		switch status {
+		case LaunchStatusCancelled:
+			derivedReason = TerminationReasonCancelled
+		case LaunchStatusCompleted:
+			derivedReason = TerminationReasonCompleted
+		}
+		_, err = db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, statusAt, derivedReason, id)
 		return err
+	default:
+		// Terminal statuses are sticky against non-terminal writes
+		// (launching, paused, grace, ...).
+		clause, terminalArgs := notTerminalLaunchClause()
+		res, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ? AND `+clause,
+			append([]any{status, id}, terminalArgs...)...)
+		if err != nil {
+			return err
+		}
+		return errIfTerminalSkipped(db, id, res)
 	}
-	return EnsureRentalExecutionTarget(db, id)
+}
+
+func launchHasSpecificTerminalDisposition(db dbExecer, id int64) (bool, error) {
+	var status, reason string
+	err := db.QueryRow(
+		`SELECT status, COALESCE(termination_reason, '') FROM launches WHERE id = ?`,
+		id,
+	).Scan(&status, &reason)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return IsTerminalLaunchStatus(status) && reason != "" && reason != TerminationReasonUnknown, nil
 }
 
 // UpdateLaunchDockerImage sets the Docker image used for a launch.
@@ -2160,9 +2185,177 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	if err != nil {
 		return 0, err
 	}
+	n, err := resetLaunchJobsTx(tx, instanceID, outcome)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// LaunchTerminalTransition describes the local state changes caused by one
+// confirmed terminal instance transition.
+type LaunchTerminalTransition struct {
+	Status               string
+	EndedAt              time.Time
+	TerminationReason    string
+	TerminationDetail    string
+	ResetJobs            bool
+	AttemptOutcome       string
+	TerminationRequested bool
+	TerminationIntent    *instanceintent.Marker
+}
+
+// RecordLaunchDestroyIntent durably records the expected provider destroy
+// before the external API call. If the process exits after the provider acts
+// but before the terminal transaction commits, reconciliation can use this
+// intent plus confirmed provider absence to finish the transition safely.
+func RecordLaunchDestroyIntent(database *sql.DB, instanceID int64, status, reason string) (*instanceintent.Marker, error) {
+	return RecordLaunchDestroyIntentWithProviderID(database, instanceID, status, reason, "")
+}
+
+// RecordLaunchDestroyIntentWithProviderID is the recovery form used when a
+// provider resource exists but the launch's provider-ID column could not be
+// updated. The intent JSON is a separate durable path and carries enough
+// identity for reconciliation to retry or confirm the expected destroy.
+func RecordLaunchDestroyIntentWithProviderID(database *sql.DB, instanceID int64, status, reason, providerID string) (*instanceintent.Marker, error) {
+	var recorded *instanceintent.Marker
+	err := RetryOnDatabaseLocked(context.Background(), "record launch destroy intent", func() error {
+		tx, err := database.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		launch, err := scanLaunchFrom(tx.QueryRow(`SELECT `+launchSelectColumns+` FROM launches WHERE id = ?`, instanceID))
+		if err != nil {
+			return err
+		}
+		if IsTerminalLaunchStatus(launch.Status) {
+			return ErrLaunchTerminal
+		}
+		now := time.Now().Unix()
+		marker := instanceintent.Marker{}
+		if launch.TerminationIntent != nil {
+			marker = *launch.TerminationIntent
+		}
+		marker.TerminalStatus = status
+		marker.TerminationReason = reason
+		if providerID != "" {
+			marker.ProviderInstanceID = providerID
+		}
+		marker.State = instanceintent.StateDestroying
+		if marker.RequestedAtUnix == 0 {
+			marker.RequestedAtUnix = now
+		}
+		if marker.DestroyStartedAtUnix == 0 {
+			marker.DestroyStartedAtUnix = now
+		}
+		marker.LastAttemptAtUnix = now
+		marker.DestroyAttempts++
+		marker.LastError = ""
+		data, err := json.Marshal(&marker)
+		if err != nil {
+			return err
+		}
+		clause, terminalArgs := notTerminalLaunchClause()
+		res, err := tx.Exec(
+			`UPDATE launches SET termination_requested_at = COALESCE(termination_requested_at, ?), termination_intent_json = ? WHERE id = ? AND `+clause,
+			append([]any{marker.RequestedAtUnix, string(data), instanceID}, terminalArgs...)...,
+		)
+		if err != nil {
+			return err
+		}
+		if err := errIfTerminalSkipped(tx, instanceID, res); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		recorded = &marker
+		return nil
+	})
+	return recorded, err
+}
+
+// ApplyLaunchTerminalTransition commits the launch row, job/attempt state, and
+// execution-target projection as one SQLite transaction. Provider destruction
+// is external and must complete before callers apply this local transition.
+func ApplyLaunchTerminalTransition(database *sql.DB, instanceID int64, transition LaunchTerminalTransition) (int64, error) {
+	if !IsTerminalLaunchStatus(transition.Status) {
+		return 0, fmt.Errorf("launch status %q is not terminal", transition.Status)
+	}
+	var resetCount int64
+	err := RetryOnDatabaseLocked(context.Background(), "apply launch terminal transition", func() error {
+		tx, err := database.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		final, err := launchHasSpecificTerminalDisposition(tx, instanceID)
+		if err != nil {
+			return err
+		}
+		if final {
+			return tx.Commit()
+		}
+
+		statusAt := time.Now().Unix()
+		if !transition.EndedAt.IsZero() {
+			statusAt = transition.EndedAt.Unix()
+		}
+		if transition.TerminationRequested {
+			if _, err := tx.Exec(
+				`UPDATE launches SET termination_requested_at = COALESCE(termination_requested_at, ?) WHERE id = ?`,
+				statusAt, instanceID,
+			); err != nil {
+				return err
+			}
+		}
+		if transition.TerminationIntent != nil {
+			intentJSON, err := json.Marshal(transition.TerminationIntent)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(
+				`UPDATE launches SET termination_requested_at = COALESCE(termination_requested_at, ?), termination_intent_json = ? WHERE id = ?`,
+				transition.TerminationIntent.RequestedAtUnix, string(intentJSON), instanceID,
+			); err != nil {
+				return err
+			}
+		}
+		if err := updateLaunchStatusWithExecer(
+			tx, instanceID, transition.Status, statusAt,
+			transition.TerminationReason, transition.TerminationDetail,
+		); err != nil {
+			return err
+		}
+		if transition.ResetJobs {
+			resetCount, err = resetLaunchJobsTx(tx, instanceID, transition.AttemptOutcome)
+			if err != nil {
+				return err
+			}
+		} else if transition.AttemptOutcome != "" {
+			if err := closeLaunchAttemptsTx(tx, instanceID, transition.AttemptOutcome); err != nil {
+				return err
+			}
+		}
+		if err := ensureRentalExecutionTarget(tx, instanceID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return 0, err
+	}
+	return resetCount, nil
+}
+
+func resetLaunchJobsTx(tx *sql.Tx, instanceID int64, outcome string) (int64, error) {
 	ci, err := scanLaunchFrom(tx.QueryRow(`SELECT `+launchSelectColumns+` FROM launches WHERE id = ?`, instanceID))
 	if err != nil && err != sql.ErrNoRows {
-		tx.Rollback()
 		return 0, err
 	}
 	placementReasons := encodeStringSlice(launchResetPlacementReasons(ci, outcome))
@@ -2215,15 +2408,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 		queryArgs...,
 	)
 	if err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	if len(jobs) == 0 {
 		if err := markCappedTorchPreflightFailuresTx(tx, instanceID); err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-		if err := tx.Commit(); err != nil {
 			return 0, err
 		}
 		return 0, nil
@@ -2241,7 +2429,6 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 		jobID := job.ID
 		transition, err := handleMoveTargetFailedBeforeStartTx(tx, jobID, instanceID, now, outcome)
 		if err != nil {
-			tx.Rollback()
 			return 0, fmt.Errorf("restore failed move target for job %d: %w", jobID, err)
 		}
 		if transition.Handled {
@@ -2249,12 +2436,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			continue
 		}
 		if err := closeAttemptsAndRequeueWithOutcome(tx, jobID, now, outcome); err != nil {
-			tx.Rollback()
 			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
 		}
 		if retryInfraFailed && job.Status == StatusFailed && IsInfraFailureReason(job.FailureReason) {
 			if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
-				tx.Rollback()
 				return 0, fmt.Errorf("create retry attempt for infra-failed job %d: %w", jobID, err)
 			}
 		}
@@ -2264,7 +2449,6 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			if _, err := tx.Exec(
 				`UPDATE job_attempts SET start_time = NULL WHERE job_id = ? AND end_time = ? AND cloud_outcome = ?`,
 				jobID, now, AttemptOutcomeOrphaned); err != nil {
-				tx.Rollback()
 				return 0, fmt.Errorf("clear start_time for orphaned job %d: %w", jobID, err)
 			}
 		}
@@ -2285,12 +2469,10 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			placementArgs...,
 		)
 		if err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 		n, err = result.RowsAffected()
 		if err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 	}
@@ -2300,19 +2482,14 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 			encodeStringSlice([]string{fmt.Sprintf("move target instance %d failed before start; job restored to source queue", instanceID)}),
 			jobID,
 		); err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 		n++
 	}
 	if err := markCappedTorchPreflightFailuresTx(tx, instanceID); err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return n, nil
 }
 
@@ -2868,8 +3045,20 @@ func CloseLaunchAttempt(database *sql.DB, jobID int64, outcome string) error {
 // completion sync is the only path that can mark an attempt successful, so any
 // still-open attempts are returned to the queue as orphaned work.
 func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	if err := closeLaunchAttemptsTx(tx, instanceID, outcome); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func closeLaunchAttemptsTx(tx *sql.Tx, instanceID int64, outcome string) error {
 	if outcome == AttemptOutcomeCompleted {
-		if _, err := database.Exec(
+		if _, err := tx.Exec(
 			`UPDATE job_attempts
 			    SET end_time = NULL
 			  WHERE launch_id = ?
@@ -2880,7 +3069,7 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 		); err != nil {
 			return err
 		}
-		_, err := ResetLaunchJobs(database, instanceID, AttemptOutcomeOrphaned)
+		_, err := resetLaunchJobsTx(tx, instanceID, AttemptOutcomeOrphaned)
 		return err
 	}
 
@@ -2892,7 +3081,7 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 		attemptStatus = StatusFailed
 	}
 	now := time.Now().Unix()
-	if _, err := database.Exec(
+	if _, err := tx.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?), pending_status = NULL
 		 WHERE launch_id = ? AND (end_time IS NULL OR end_time = 0)`,
@@ -2907,7 +3096,7 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 	// job permanently non-terminal and re-selected by every repair pass.
 	// Stamp the launch's disposition onto such attempts when they are still
 	// the job's latest authoritative attempt.
-	_, err := database.Exec(
+	_, err := tx.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, pending_status = NULL
 		 WHERE launch_id = ?
@@ -3632,28 +3821,58 @@ type LaunchLiveState struct {
 // the previously stored value, preserved otherwise. Returns the resolved
 // PhaseChangedAt so callers don't need a separate read.
 func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, error) {
-	now := time.Now().Unix()
+	var phaseChangedAt *int64
+	err := RetryOnDatabaseLocked(context.Background(), "upsert launch live state", func() error {
+		tx, err := database.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		resolved, err := upsertLaunchLiveState(tx, state, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		phaseChangedAt = resolved
+		return nil
+	})
+	return phaseChangedAt, err
+}
+
+func upsertLaunchLiveState(database dbExecer, state LaunchLiveState, now int64) (*int64, error) {
 
 	// Detect phase change to auto-set PhaseChangedAt.
 	var oldPhase, oldBootstrap sql.NullString
+	var oldPhaseChangedAt sql.NullInt64
 	var oldProgressPct, oldProgressID, oldProgressPhase, oldProgressChangedAt sql.NullInt64
 	if state.PhaseChangedAt == nil {
-		_ = database.QueryRow(`SELECT instance_phase, bootstrap_stage, job_progress_pct,
-			job_progress_id, job_progress_phase, job_progress_changed_at
+		err := database.QueryRow(`SELECT instance_phase, bootstrap_stage, job_progress_pct,
+			job_progress_id, job_progress_phase, job_progress_changed_at, phase_changed_at
 			FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(
 			&oldPhase, &oldBootstrap, &oldProgressPct, &oldProgressID,
-			&oldProgressPhase, &oldProgressChangedAt,
+			&oldProgressPhase, &oldProgressChangedAt, &oldPhaseChangedAt,
 		)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 		if state.InstancePhase != oldPhase.String {
 			state.PhaseChangedAt = &now
+		} else if oldPhaseChangedAt.Valid {
+			state.PhaseChangedAt = &oldPhaseChangedAt.Int64
 		}
 	} else {
-		_ = database.QueryRow(`SELECT bootstrap_stage, job_progress_pct,
+		err := database.QueryRow(`SELECT bootstrap_stage, job_progress_pct,
 			job_progress_id, job_progress_phase, job_progress_changed_at
 			FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(
 			&oldBootstrap, &oldProgressPct, &oldProgressID,
 			&oldProgressPhase, &oldProgressChangedAt,
 		)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
 	}
 
 	if state.JobProgressChangedAt == nil && state.JobProgressID > 0 && state.JobProgressPct < 0 &&
@@ -3720,7 +3939,7 @@ func shouldRecordBootstrapTransition(oldStage sql.NullString, newStage string) b
 	return !oldStage.Valid || strings.TrimSpace(oldStage.String) != newStage
 }
 
-func recordBootstrapTransition(database *sql.DB, launchID int64, stage string, enteredAt int64) error {
+func recordBootstrapTransition(database dbExecer, launchID int64, stage string, enteredAt int64) error {
 	_, err := database.Exec(`
 		INSERT OR IGNORE INTO bootstrap_transitions (launch_id, stage, entered_at)
 		VALUES (?, ?, ?)`,

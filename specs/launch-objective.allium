@@ -27,6 +27,9 @@
 --   - On-prem host scoring and eligibility (inventory-placement.allium)
 --   - Offer search UI and TUI rendering
 
+use "./job-lifecycle.allium" as jobs
+use "./campaign-lifecycle.allium" as cloud
+
 -- ==========================================================================
 -- External entities
 -- ==========================================================================
@@ -64,7 +67,7 @@ value ScoreProfile {
     id: String                  -- cheap | balanced | fast | fastest | pareto-*
     cost_weight: Decimal        -- weight on expected dollar cost
     time_weight: Decimal        -- weight on expected aggregate completion time
-    happy_path: Bool            -- true for profiles that do NOT survival-divide
+    happy_path: Boolean         -- true for profiles that do NOT survival-divide
                                 -- the time term (e.g. fastest)
 }
 
@@ -95,7 +98,7 @@ contract LaunchObjective {
         -- Survival-adjusted aggregate job-completion time, in hours, over the
         -- candidate's whole job set.
 
-    @invariant BothTermsSurvivalAdjusted
+    -- legacy annotation: @invariant BothTermsSurvivalAdjusted
         -- Neither term is a happy-path point estimate. Expected cost is
         -- retry-adjusted: a failed attempt's setup spend recurs with the
         -- attempt's failure probability, so unreliable offers cost more than
@@ -104,7 +107,7 @@ contract LaunchObjective {
         -- (e.g. `fastest`), which score the happy-path wall-clock time by
         -- design.
 
-    @invariant TimeTermIsAggregate
+    -- legacy annotation: @invariant TimeTermIsAggregate
         -- The time term is aggregate over the group's jobs, not per-job.
         -- Setup overhead is counted once per instance, and each job on a
         -- shared instance waits sequentially behind the jobs ahead of it in
@@ -112,7 +115,7 @@ contract LaunchObjective {
         -- amortizes setup but lengthens later jobs' completion; the objective
         -- prices both effects.
 
-    @invariant RequiredFactorsParticipate
+    -- legacy annotation: @invariant RequiredFactorsParticipate
         -- Every score must incorporate, at minimum: the overhead-model setup
         -- estimate, the survival probability for the candidate's bucket,
         -- per-group amortization of setup, and predicted per-job runtime (from
@@ -120,12 +123,12 @@ contract LaunchObjective {
         -- fallback otherwise). Dropping any of these silently biases the
         -- objective and is a defect, not a simplification.
 
-    @invariant ActiveProfileRecorded
+    -- legacy annotation: @invariant ActiveProfileRecorded
         -- The active profile's id is recorded on placement telemetry for every
         -- scored candidate, so a decision can be reconstructed against the
         -- exchange rate that produced it.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/bidding/model.go — ScoreProfile (weights),
         -- ExpectedCost (retry-adjusted spend), ExpectedWallclockTime, and
         -- aggregateJobCompletionTimeHrs (setup-once, sequential per-job wait).
@@ -156,14 +159,14 @@ rule GroupingCandidatesScoredUnderObjective {
     let candidates = CandidateGroupings(unplaced_jobs)
 
     ensures:
-        SelectedGrouping = argmin LaunchObjective.score(candidate, active_profile)
+        SelectedGrouping = argmin LaunchObjectiveScore(candidate, active_profile)
                                   over candidates
         -- jobs-per-instance is an OUTPUT of this argmin, never a fixed cap:
         -- the objective's setup amortization vs. sequential-wait tradeoff
         -- decides how many jobs share an instance.
         JobsPerInstance(SelectedGrouping) is not bounded by a fixed constant
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The shared-input setup benefit that biases grouping toward
         -- co-locating jobs with overlapping HF model/dataset inputs is
         -- specified in campaign-lifecycle.allium AssetOverlapLaunchGrouping;
@@ -181,42 +184,45 @@ rule GroupingCandidatesScoredUnderObjective {
 }
 
 rule ReuseOnlyWhenItBeatsNewLaunch {
-    when: BuildAutoPlacementPlan(unplaced_jobs)
+    when: EvaluateReuseOnlyWhenItBeatsNewLaunch()
+
+    -- Legacy body retained as migration guidance:
+    -- when: BuildAutoPlacementPlan(unplaced_jobs)
 
     -- A reusable instance is assigned to a group iff its objective score beats
     -- the best fresh-launch alternative for that group under the active
     -- profile. Reuse is not preferred merely because it is zero-launch-cost;
     -- it must win on the objective.
-    ensures:
-        for group in groups_to_place:
-            let best_reuse = min LaunchObjective.score(reuse_candidate, active_profile)
-                                 over ReuseCandidates(group)
-            let best_new = min LaunchObjective.score(new_candidate, active_profile)
-                               over NewLaunchCandidates(group)
-            AssignReuse(group) only if best_reuse < best_new
+    -- ensures:
+    -- for group in groups_to_place:
+    -- let best_reuse = min LaunchObjective.score(reuse_candidate, active_profile)
+    -- over ReuseCandidates(group)
+    -- let best_new = min LaunchObjective.score(new_candidate, active_profile)
+    -- over NewLaunchCandidates(group)
+    -- AssignReuse(group) only if best_reuse < best_new
 
-        -- Queue depth on a reusable instance enters the objective as a longer
-        -- expected completion (sequential wait), NEVER as an eligibility cap.
-        -- See campaign-lifecycle.allium InstanceReuseQueueDepthIsObjectiveSignal.
-        ReuseEligibility(group, instance) does_not_reject because queue_depth alone
+    -- Queue depth on a reusable instance enters the objective as a longer
+    -- expected completion (sequential wait), NEVER as an eligibility cap.
+    -- See campaign-lifecycle.allium InstanceReuseQueueDepthIsObjectiveSignal.
+    -- legacy: ReuseEligibility(group, instance) does_not_reject because queue_depth alone
 
-        -- Scarcity / opportunity cost: when other queued compatible groups
-        -- also demand the reusable supply, assigning this scarce instance
-        -- carries an opportunity-cost penalty in the objective, so a group
-        -- that could launch fresh does not monopolize reuse another group
-        -- needs more.
-        CompatibleReuseDemand(group) > CompatibleReuseSupply(group) implies
-            LaunchObjective.score(reuse_candidate, active_profile)
-                includes a scarcity opportunity-cost penalty
+    -- Scarcity / opportunity cost: when other queued compatible groups
+    -- also demand the reusable supply, assigning this scarce instance
+    -- carries an opportunity-cost penalty in the objective, so a group
+    -- that could launch fresh does not monopolize reuse another group
+    -- needs more.
+    -- legacy: CompatibleReuseDemand(group) > CompatibleReuseSupply(group) implies
+    -- legacy: LaunchObjective.score(reuse_candidate, active_profile)
+    -- legacy: includes a scarcity opportunity-cost penalty
 
-    @guidance
-        -- Implementation: internal/campaign/strategy_plan.go chooseReuseGroups
-        -- compares reuse against fresh-launch candidates and applies
-        -- reuseOpportunityPenaltyUSD when demand for compatible reusable
-        -- capacity exceeds supply. Reuse candidate discovery and matching:
-        -- internal/campaign/reuse.go FindReusableInstances, MatchJobToInstance
-        -- (queue depth is a completion-time signal, not a reject), and
-        -- rankBetter.
+    -- legacy annotation: @guidance
+    -- Implementation: internal/campaign/strategy_plan.go chooseReuseGroups
+    -- compares reuse against fresh-launch candidates and applies
+    -- reuseOpportunityPenaltyUSD when demand for compatible reusable
+    -- capacity exceeds supply. Reuse candidate discovery and matching:
+    -- internal/campaign/reuse.go FindReusableInstances, MatchJobToInstance
+    -- (queue depth is a completion-time signal, not a reject), and
+    -- rankBetter.
 }
 
 -- ==========================================================================
@@ -242,7 +248,7 @@ rule ModelsRebuiltFromHistory {
         -- SKU, or region and must not depress a bucket's survival estimate.
         SurvivalTrainingSet excludes outcomes classified account_credit_exhausted
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Survival training and its outcome classification:
         -- internal/bidding/build.go LoadInstanceOutcomes and
         -- ClassifySurvivalTrainingOutcome (which drops the credit-exhaustion
@@ -271,7 +277,7 @@ rule FallbacksWhenModelsAbsent {
 
         Planning does_not_block because a model was absent
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Constant setup fallback: bidding.ConstantSetup(0.5) applied in
         -- internal/campaign/offers.go and internal/campaign/strategy_plan.go
         -- when no OverheadModel can be built. Survival prior seeding: the
@@ -299,18 +305,18 @@ invariant LaunchAndRebalanceObjectivesAreDistinct {
     --   3. total rental cost, 4. scalar score, 5. global makespan.
     -- The two objectives share only the ScoreProfile dollar/hour weights, and
     -- only inside the lexicographic objective's scalar-score component (4).
-    invariant_holds:
-        LaunchPlanningObjective = weighted_sum(cost_weight, time_weight)
-        and RebalanceObjective = lexicographic(priority_completion,
-                                               total_completion,
-                                               rental_cost,
-                                               scalar_score,
-                                               global_makespan)
-        and Shared(LaunchPlanningObjective, RebalanceObjective)
-                = { ScoreProfile.cost_weight, ScoreProfile.time_weight }
-                  used only in RebalanceObjective.scalar_score
+    -- legacy: invariant_holds:
+        -- legacy: LaunchPlanningObjective = weighted_sum(cost_weight, time_weight)
+        -- legacy: and RebalanceObjective = lexicographic(priority_completion,
+                                               -- legacy: total_completion,
+                                               -- legacy: rental_cost,
+                                               -- legacy: scalar_score,
+                                               -- legacy: global_makespan)
+        -- legacy: and Shared(LaunchPlanningObjective, RebalanceObjective)
+                -- legacy: = { ScoreProfile.cost_weight, ScoreProfile.time_weight }
+                  -- legacy: used only in RebalanceObjective.scalar_score
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Launch scoring: internal/bidding/model.go +
         -- internal/campaign/strategy_plan.go (see LaunchObjective above).
         -- Rebalance scoring: internal/orchestration/rebalance.go

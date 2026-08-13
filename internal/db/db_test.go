@@ -3805,20 +3805,7 @@ func TestJobInputsOutputsEmptyByDefault(t *testing.T) {
 // failed launch. This prevents the bug where a blank replacement attempt
 // loses the launch association.
 func TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-cleanup-terminal-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	cleanup := SetDBPath(tmpFile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatal(err)
-	}
+	database := SetupTestDB(t)
 
 	// Create a failed launch.
 	launchID, err := CreateLaunch(database, &Launch{
@@ -3845,18 +3832,13 @@ func TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Count attempts before re-open.
+	// Count attempts before repair.
 	var countBefore int
 	database.QueryRow("SELECT COUNT(*) FROM job_attempts WHERE job_id = ?", jobID).Scan(&countBefore)
 
-	database.Close()
-
-	// Re-open triggers cleanupStaleAttempts.
-	database, err = Open()
-	if err != nil {
-		t.Fatal(err)
+	if err := cleanupStaleAttempts(database); err != nil {
+		t.Fatalf("cleanupStaleAttempts: %v", err)
 	}
-	defer database.Close()
 
 	// Should NOT have created a new blank attempt.
 	var countAfter int
@@ -3877,20 +3859,7 @@ func TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt(t *testing.T) {
 }
 
 func TestStartupRepair_FixesCompletedCloudAttemptsMissingExitCode(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-completed-repair-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	cleanup := SetDBPath(tmpFile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatal(err)
-	}
+	database := SetupTestDB(t)
 
 	launchID, err := CreateLaunch(database, &Launch{
 		Status:   LaunchStatusCompleted,
@@ -3960,20 +3929,7 @@ func TestStartupRepair_FixesCompletedCloudAttemptsMissingExitCode(t *testing.T) 
 // correctly associates orphaned completed attempts with the correct launch
 // by finding a sibling launch that ran other jobs from the same original launch.
 func TestRepairOrphanedCompletedAttempts(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "weft-repair-test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	cleanup := SetDBPath(tmpFile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatal(err)
-	}
+	database := SetupTestDB(t)
 
 	// Create a failed launch (the original assignment that triggered cleanup).
 	failedLaunchID, err := CreateLaunch(database, &Launch{
@@ -4062,21 +4018,7 @@ func TestRepairOrphanedCompletedAttempts(t *testing.T) {
 // cleanupStaleAttempts does not create replacement attempts for jobs on
 // completed instances. These jobs should be finalized by R2 result sync.
 func TestCleanupStaleAttempts_SkipsCompletedInstances(t *testing.T) {
-	// Use a file-backed DB so we can close and re-open (triggering cleanup).
-	tmpFile, err := os.CreateTemp("", "weft-cleanup-test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpFile.Close()
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	cleanup := SetDBPath(tmpFile.Name())
-	defer cleanup()
-
-	database, err := Open()
-	if err != nil {
-		t.Fatal(err)
-	}
+	database := SetupTestDB(t)
 
 	// Create a completed instance with an open (unfinalized) job attempt.
 	instanceID, err := CreateLaunch(database, &Launch{
@@ -4102,14 +4044,9 @@ func TestCleanupStaleAttempts_SkipsCompletedInstances(t *testing.T) {
 	}
 	origRunID := job.LatestRunID
 
-	database.Close()
-
-	// Re-open the DB, which triggers cleanupStaleAttempts.
-	database, err = Open()
-	if err != nil {
-		t.Fatal(err)
+	if err := cleanupStaleAttempts(database); err != nil {
+		t.Fatalf("cleanupStaleAttempts: %v", err)
 	}
-	defer database.Close()
 
 	// The attempt should NOT have been replaced — still the same run ID.
 	job, err = GetJobByID(database, jobID)

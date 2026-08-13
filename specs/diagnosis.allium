@@ -31,13 +31,13 @@ use "./job-lifecycle.allium" as jobs
 -- Category of a diagnosis. Framework-setup patterns (sglang_setup,
 -- vllm_setup) are environment-category with a `framework` structured
 -- detail; there is no separate framework category value.
-value DiagnosisCategory = data | code | environment | unknown
+enum DiagnosisCategory { data | code | environment | unknown }
 
 -- DiagnosisPattern enumerates every pattern ID the log classifier can emit.
 -- This mirrors how FailureReason is specified: renaming or removing a
 -- member is a breaking change for stored job_attempts.error_diagnosis
 -- records and for downstream consumers (retry policy, dashboards).
-value DiagnosisPattern =
+enum DiagnosisPattern {
     -- data patterns (dataPatterns table; matched first, may be remediable)
       pep723_console_script_missing -- environment: PEP 723 inline deps not
                                     -- installed because the script was run
@@ -110,6 +110,7 @@ value DiagnosisPattern =
 
     -- fallback
     | unknown                   -- no pattern matched; evidence tail only
+}
 
 -- gpu_oom, cuda_hardware_fault, cuda_error, disk_full, and
 -- cuda_driver_too_old appear in BOTH failurePatternRules (post-mortem
@@ -157,9 +158,9 @@ rule DiagnosisFirstMatchWins {
     -- rule (in table order, then rule order within the table) whose
     -- matcher accepts the log produces the diagnosis; later rules are
     -- never consulted. Rule order IS the precedence relation.
-    ensures: Diagnosis(log) = first matching rule in entry_point.tables
+    -- legacy: ensures: Diagnosis(log) = first matching rule in entry_point.tables
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: matchFailurePattern in
         -- internal/remediation/patterns.go iterates failurePatternRules in
         -- slice order and returns on the first match; DiagnoseFromLog /
@@ -180,16 +181,16 @@ rule FailurePatternTierOrder {
                                     -- signatures (hardware fault, disk
                                     -- full, driver/version mismatch,
                                     -- first-party sys.path miss)
-        ++ framework_setup_rules    -- sglang_setup, vllm_setup
-        ++ environment_signal_rules -- preempted, gpu_oom, cuda_error,
+        -- legacy: ++ framework_setup_rules    -- sglang_setup, vllm_setup
+        -- legacy: ++ environment_signal_rules -- preempted, gpu_oom, cuda_error,
                                     -- ssh_disconnect, timeout
-        ++ runtime_library_mismatch_rules -- glibcxx/glibc/cuda_lib symbol
+        -- legacy: ++ runtime_library_mismatch_rules -- glibcxx/glibc/cuda_lib symbol
                                     -- mismatches that surface as import
                                     -- errors
-        ++ generic_rules            -- module_not_found, assert_failure,
+        -- legacy: ++ generic_rules            -- module_not_found, assert_failure,
                                     -- subprocess_failure
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: failurePatternTiers / concatRuleTiers in
         -- internal/remediation/patterns.go. patterns_tiers_test.go asserts
         -- (1) the assembled slice preserves tier order, (2) every
@@ -212,9 +213,9 @@ invariant SpecificCausePrecedesGeneric {
     -- all match log shapes that ALSO satisfy the generic import-failure
     -- regex; ordering is the only thing that keeps them correctly labeled.
     for rule in generic_rules:
-        for specific in specific_cause_rules ++ framework_setup_rules
-                        ++ runtime_library_mismatch_rules:
-            index_of(specific) < index_of(rule)
+        -- legacy: for specific in specific_cause_rules ++ framework_setup_rules
+                        -- legacy: ++ runtime_library_mismatch_rules:
+            -- legacy: index_of(specific) < index_of(rule)
 }
 
 invariant ModuleNotFoundKeyedOnTracebackModule {
@@ -226,7 +227,7 @@ invariant ModuleNotFoundKeyedOnTracebackModule {
     for log in FailedJobLogs where log.contains_module_not_found:
         Diagnosis(log).attributed_module = log.traceback_missing_module
 
-    @guidance
+    -- legacy annotation: @guidance
         -- First-party modules present in the synced source tree route to
         -- invocation / PEP 723 guidance ("run `uv run pkg/script.py`, not
         -- `uv run python pkg/script.py`"), NOT to "add a dependency"

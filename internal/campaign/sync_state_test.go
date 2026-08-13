@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -696,42 +697,50 @@ func TestSyncInstanceState_FetchesInParallel(t *testing.T) {
 	})
 
 	const delay = 150 * time.Millisecond
-	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	delayed := func() {
+		n := active.Add(1)
+		for {
+			current := maxActive.Load()
+			if n <= current || maxActive.CompareAndSwap(current, n) {
+				break
+			}
+		}
 		time.Sleep(delay)
+		active.Add(-1)
+	}
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		delayed()
 		return "running:1"
 	}
 	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
-		time.Sleep(delay)
+		delayed()
 		return ""
 	}
 	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
-		time.Sleep(delay)
+		delayed()
 		return nil, 0
 	}
 	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
-		time.Sleep(delay)
+		delayed()
 		return 0, -1, 0
 	}
 	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
-		time.Sleep(delay)
+		delayed()
 		return nil, nil
 	}
 	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
 
 	// AgentVersionFetched skips the third wave-1 fetch (agent version), so the
 	// observed waves run: {termIntent, phase} then {jobProgress, heartbeat}.
-	start := time.Now()
 	SyncInstanceState(
 		context.Background(), database, ci, &r2.Client{}, nil,
 		JobState{HasStartedJob: true},
 		SyncInstanceStateOpts{AgentVersionFetched: true},
 	)
-	elapsed := time.Since(start)
-
-	// Serial would be ~4*delay (600ms). Parallel should be ~2*delay (300ms).
-	// Allow generous headroom for CI jitter.
-	if elapsed >= 3*delay {
-		t.Fatalf("SyncInstanceState took %v; expected < %v (3*delay). R2 fetches are not running in parallel.", elapsed, 3*delay)
+	if got := maxActive.Load(); got < 2 {
+		t.Fatalf("maximum concurrent R2 fetches = %d, want at least 2", got)
 	}
 }
 
@@ -1474,6 +1483,78 @@ func TestSyncInstanceState_HeartbeatFetchedInDudWindow(t *testing.T) {
 	}
 }
 
+func TestSyncInstanceState_LiveStateWriteFailureUsesCurrentObservationTime(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "echo test", "test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("attach job: %v", err)
+	}
+	if _, err := database.Exec(fmt.Sprintf(`
+		CREATE TRIGGER fail_live_state_write
+		BEFORE INSERT ON launch_live_state
+		WHEN NEW.launch_id = %d
+		BEGIN
+			SELECT RAISE(ABORT, 'injected live-state write failure');
+		END`, instanceID)); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	jobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID)
+	if err != nil {
+		t.Fatalf("get launch jobs: %v", err)
+	}
+
+	origPhase := syncFetchInstancePhase
+	origHeartbeat := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchHeartbeat = origHeartbeat
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+	syncFetchInstancePhase = func(context.Context, *r2.Client, int64) string {
+		return fmt.Sprintf("setup:%d", jobID)
+	}
+	syncFetchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
+		return jobID, -1, 0
+	}
+	syncFetchTermIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	started := time.Now()
+	synced := SyncInstanceState(
+		context.Background(), database, ci, &r2.Client{}, jobs, JobState{},
+		SyncInstanceStateOpts{AgentVersionFetched: true},
+	)
+	if synced.PhaseChangedAt == nil {
+		t.Fatal("phase changed time is unknown after a current phase observation whose cache write failed")
+	}
+	if synced.PhaseChangedAt.Before(started.Add(-time.Second)) {
+		t.Fatalf("phase changed time = %s, want current observation time", synced.PhaseChangedAt)
+	}
+}
+
 // TestDudWatchdogSurvivesFlakyR2: cross-cutting fault-injection regression
 // for EXP-021. A /3-cycle flaky R2 on a healthy instance must not false-fire
 // rule 4d across 60 sync+check ticks.
@@ -1505,10 +1586,9 @@ func TestDudWatchdogSurvivesFlakyR2(t *testing.T) {
 	// path. Using a counter rather than rand keeps the test reproducible
 	// across CI runs.
 	const flakeEvery = 3 // ~33% failure rate
-	calls := 0
+	var calls atomic.Int64
 	flake := func() bool {
-		calls++
-		return calls%flakeEvery == 0
+		return calls.Add(1)%flakeEvery == 0
 	}
 
 	origPhase := syncFetchInstancePhase
@@ -1525,14 +1605,16 @@ func TestDudWatchdogSurvivesFlakyR2(t *testing.T) {
 		syncFetchTermIntent = origIntent
 		syncCheckOnStartProbe = origProbe
 	})
-	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+	syncFetchInstancePhase = func(ctx context.Context, _ *r2.Client, _ int64) string {
 		if flake() {
+			recordMarkerObservationError(ctx, context.DeadlineExceeded)
 			return ""
 		}
 		return ""
 	}
-	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+	syncFetchBootstrapStage = func(ctx context.Context, _ *r2.Client, _ int64) string {
 		if flake() {
+			recordMarkerObservationError(ctx, context.DeadlineExceeded)
 			return ""
 		}
 		return healthyStage

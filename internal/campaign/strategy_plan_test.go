@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,10 +224,13 @@ func TestBuildProfilePlans_ParallelCandidateUsesPerJobDisk(t *testing.T) {
 		},
 	}
 	queriedDisks := map[int]int{}
+	var queriedDisksMu sync.Mutex
 	client := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		SearchOffersFunc: func(c cloud.OfferConstraints) ([]cloud.Offer, error) {
+			queriedDisksMu.Lock()
 			queriedDisks[c.MinDiskGB]++
+			queriedDisksMu.Unlock()
 			if c.MinDiskGB > 72 {
 				return nil, nil
 			}
@@ -266,6 +270,8 @@ func TestBuildProfilePlans_ParallelCandidateUsesPerJobDisk(t *testing.T) {
 	if len(plan.NewCandidate.Groups) != 2 {
 		t.Fatalf("parallel groups = %d, want 2", len(plan.NewCandidate.Groups))
 	}
+	queriedDisksMu.Lock()
+	defer queriedDisksMu.Unlock()
 	if queriedDisks[141] == 0 || queriedDisks[70] == 0 || queriedDisks[72] == 0 {
 		t.Fatalf("queried disks = %v, want combined and per-job disk searches", queriedDisks)
 	}

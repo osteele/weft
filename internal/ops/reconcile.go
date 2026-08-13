@@ -614,8 +614,10 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	// Check if job is completed (has status file)
 	exitCode, _, found := queueRemoteClient.StatusFile(job.Host, job.ID, job.LatestRunID, timeout)
 	if found.IsSome() && found.Unwrap() {
-		_ = exitCode // Exit code available if needed
-		return db.StatusCompleted, nil
+		if exitCode == 0 {
+			return db.StatusCompleted, nil
+		}
+		return db.StatusFailed, nil
 	}
 
 	paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
@@ -641,28 +643,37 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 		return db.StatusRunning, nil
 	}
 
-	// Job is locally queued but not found in remote queue, not running, no status file
-	// This means it's orphaned (was removed from queue or never made it there)
-	if job.Status == db.StatusQueued && queued.IsSome() && !queued.Unwrap() {
-		// If job has pending cancel/kill/draft status, return that instead of dead
-		// This allows clean cancellation or draft transition when the queue runner isn't running
-		if job.PendingStatus != nil {
-			switch *job.PendingStatus {
-			case db.StatusCanceled:
-				return db.StatusCanceled, nil
-			case db.StatusKilled, db.StatusDead:
-				return db.StatusKilled, nil
-			case db.StatusDraft:
-				return db.StatusDraft, nil
-			case db.StatusRunning:
-				return db.StatusQueued, nil
-			}
-		}
-		return db.StatusDead, nil
+	allDefinitelyAbsent := found.IsSome() && !found.Unwrap() &&
+		paused.IsSome() && !paused.Unwrap() &&
+		current.IsSome() && !current.Unwrap() &&
+		queued.IsSome() && !queued.Unwrap() &&
+		running.IsSome() && !running.Unwrap()
+	if !allDefinitelyAbsent {
+		// A failed or incomplete lookup is unknown, not evidence that the job
+		// disappeared. Preserve the local status until every independent probe
+		// confirms absence.
+		return job.Status, nil
 	}
 
-	// Unable to determine - return current status
-	return job.Status, nil
+	// If job has pending cancel/kill/draft status and no remote state, honor it.
+	if job.PendingStatus != nil {
+		switch *job.PendingStatus {
+		case db.StatusCanceled:
+			return db.StatusCanceled, nil
+		case db.StatusKilled, db.StatusDead:
+			return db.StatusKilled, nil
+		case db.StatusDraft:
+			return db.StatusDraft, nil
+		case db.StatusRunning:
+			return db.StatusQueued, nil
+		}
+	}
+	if isQueuedAndActive(job) {
+		// Queue dispatch and runner state publication are not atomic. Keep the
+		// durable target queued so the host-sync redispatch path can converge it.
+		return db.StatusQueued, nil
+	}
+	return db.StatusDead, nil
 }
 
 // SyncAndReconcile probes remote state and reconciles with local state.

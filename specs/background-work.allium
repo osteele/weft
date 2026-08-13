@@ -1,5 +1,7 @@
 -- allium: 3
 -- background-work.allium
+
+use "./job-lifecycle.allium" as jobs
 --
 -- Scope: Deferred data-plane work owned by an agent after command execution.
 -- Includes: byte ownership, publication queue capacity, artifact readiness,
@@ -23,12 +25,14 @@ external entity CloudInstance {
     id: Integer
 }
 
-value BackgroundItemKind = diagnostic_results | required_artifact |
+enum BackgroundItemKind {
+    diagnostic_results | required_artifact |
 			   convention_output | maintenance
+}
 
-value BackgroundItemState = queued | running | succeeded | failed | canceled
+enum BackgroundItemState { queued | running | succeeded | failed | canceled }
 
-value ReadinessState = pending | ready | failed | unknown
+enum ReadinessState { pending | ready | failed | unknown }
 
 value BackgroundItem {
     kind: BackgroundItemKind
@@ -103,7 +107,7 @@ invariant ByteCountersAreThreeState {
 	item.bytes_completed >= 0
 	item.bytes_total != null implies item.bytes_completed <= item.bytes_total
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- null means measurement was unavailable. It must not be serialized,
 	-- displayed, or scored as zero. A measured empty payload is zero.
 }
@@ -111,21 +115,21 @@ invariant ByteCountersAreThreeState {
 invariant OnePayloadCopyForOverlappingDeclaration {
     for attempt in JobAttempts:
 	for artifact in DeclaredArtifacts(attempt):
-	    when artifact.path is beneath EffectiveOutputDirs(attempt.job):
-		count(PayloadTransfers(attempt, artifact.path)) == 1
+	    -- legacy: when artifact.path is beneath EffectiveOutputDirs(attempt.job):
+		count(PayloadTransfers(attempt, artifact.path)) = 1
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- The logical artifact name and the convention-output lookup may both
 	-- resolve to the one object. They do not require two object payloads.
 	-- Manifest and marker objects are metadata and are not payload copies.
 }
 
 rule LogicalReferencesMayShareOneObject {
-    when: a declared artifact is also a convention output
+    when: EvaluateLogicalReferencesMayShareOneObject() -- legacy: a declared artifact is also a convention output
 
-    ensures: ArtifactLookup(artifact) resolves to the uploaded object
-    ensures: ConventionOutputLookup(artifact.path) resolves to the same bytes
-    ensures: DownstreamNeed(artifact) resolves to the same bytes
+    -- legacy: ensures: ArtifactLookup(artifact) resolves to the uploaded object
+    -- legacy: ensures: ConventionOutputLookup(artifact.path) resolves to the same bytes
+    -- legacy: ensures: DownstreamNeed(artifact) resolves to the same bytes
 }
 
 -- ==========================================================================
@@ -137,7 +141,7 @@ invariant ExecutionStatusRemainsAuthoritative {
 	attempt.job.status is not derived from attempt.completion_facets.required_artifacts
 	attempt.job.status is not derived from attempt.completion_facets.drain
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- `completed` means command execution ended with a recorded outcome.
 	-- Publication state is stored or derived separately; display code must
 	-- not rewrite jobs.status because an upload is pending or failed.
@@ -153,27 +157,27 @@ rule ExecutionCompletionPrecedesDeferredPublication {
 }
 
 rule RequiredArtifactsBecomeReady {
-    when: every declared artifact payload for attempt is durably committed
+    when: EvaluateRequiredArtifactsBecomeReady(attempt, completion_facets) -- legacy: every declared artifact payload for attempt is durably committed
 
     ensures: attempt.completion_facets.required_artifacts = ready
     ensures: attempt.completion_facets.required_artifacts_ready_at != null
-    ensures: RequiredArtifactsReadyMarker(attempt) exists
+    -- legacy: ensures: RequiredArtifactsReadyMarker(attempt) exists
 }
 
 rule RequiredArtifactFailureIsExplicit {
-    when: a declared artifact is confirmed missing or its upload exhausts its bounded retry contract
+    when: EvaluateRequiredArtifactFailureIsExplicit(attempt, completion_facets) -- legacy: a declared artifact is confirmed missing or its upload exhausts its bounded retry contract
 
     ensures: attempt.completion_facets.required_artifacts = failed
-    ensures: attempt.completion_facets.detail names the failed artifact or upload
-    ensures: RequiredArtifactsReadyMarker(attempt) records failed
+    -- legacy: ensures: attempt.completion_facets.detail names the failed artifact or upload
+    -- legacy: ensures: RequiredArtifactsReadyMarker(attempt) records failed
 }
 
 rule DrainBecomesComplete {
-    when: every background item owned by attempt is in {succeeded, failed, canceled}
+    when: EvaluateDrainBecomesComplete(attempt, completion_facets) -- legacy: every background item owned by attempt is in {succeeded, failed, canceled}
 
-    ensures: attempt.completion_facets.drain in {ready, failed}
-    ensures: attempt.completion_facets.drain_completed_at != null
-    ensures: DrainCompleteMarker(attempt) exists
+    -- legacy: ensures: attempt.completion_facets.drain in {ready, failed}
+    -- legacy: ensures: attempt.completion_facets.drain_completed_at != null
+    -- legacy: ensures: DrainCompleteMarker(attempt) exists
 }
 
 invariant UnknownDoesNotReleaseOrDestroy {
@@ -185,23 +189,23 @@ invariant UnknownDoesNotReleaseOrDestroy {
 }
 
 rule CrossInstanceNeedsWaitForReadyPayload {
-    when: consumer needs artifact from producer on another execution target
+    when: EvaluateCrossInstanceNeedsWaitForReadyPayload() -- legacy: consumer needs artifact from producer on another execution target
 
-    requires: ArtifactObject(producer, artifact) is confirmed present
-    ensures: consumer may start staging artifact
+    -- legacy: requires: ArtifactObject(producer, artifact) is confirmed present
+    -- legacy: ensures: consumer may start staging artifact
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- A lookup error is unknown. A missing object is pending until a
 	-- failed/complete publication marker confirms that no later upload can
 	-- make it ready. Neither state is reported as "did not produce".
 }
 
 rule SameInstanceNeedsMayUseSharedWorkdir {
-    when: consumer needs artifact from producer on the same instance
+    when: EvaluateSameInstanceNeedsMayUseSharedWorkdir() -- legacy: consumer needs artifact from producer on the same instance
     requires: SharedWorkdirVisibilityGuaranteed(producer, consumer)
-    requires: producer command completed successfully
+    -- legacy: requires: producer command completed successfully
 
-    ensures: consumer need may be satisfied without an R2 ready marker
+    -- legacy: ensures: consumer need may be satisfied without an R2 ready marker
 }
 
 -- ==========================================================================
@@ -212,7 +216,7 @@ invariant WorkerLimitIsGlobalPerAgent {
     for manager in PublicationManagers:
 	count(manager.items where state = running) <= manager.worker_limit
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- Packed GPU slots share one manager. Constructing one manager per
 	-- slot would multiply the configured limit and violate this invariant.
 }
@@ -223,34 +227,34 @@ invariant QueueCapacityIsExplicit {
 }
 
 rule RetainedByteAdmissionBound {
-    when: publication_max_retained_bytes > 0
+    when: EvaluateRetainedByteAdmissionBound()
 
-    requires: retained bytes are positively measured
-    ensures: a new chain waits when admitting it would exceed the bound
-    ensures: one chain may run alone when its size is unknown or exceeds the bound
+    -- legacy: requires: retained bytes are positively measured
+    -- legacy: ensures: a new chain waits when admitting it would exceed the bound
+    -- legacy: ensures: one chain may run alone when its size is unknown or exceeds the bound
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- Allowing one chain is the progress exception. Unknown retention does
 	-- not authorize accumulating a second chain, and no unknown observation
 	-- authorizes deletion, termination, or requeue.
 }
 
 rule QueueHighWaterAppliesBackpressure {
-    when: EnqueueRequested(manager) and QueuedCount(manager) = manager.queue_capacity
+    when: EvaluateQueueHighWaterAppliesBackpressure(manager)
 
-    ensures: enqueue waits for capacity
-    ensures: no untracked goroutine is created to bypass capacity
-    ensures: no queued workdir or log snapshot is deleted
+    -- legacy: ensures: enqueue waits for capacity
+    -- legacy: ensures: no untracked goroutine is created to bypass capacity
+    -- legacy: ensures: no queued workdir or log snapshot is deleted
 }
 
 rule PublicationPriority {
-    when: a worker selects its next ready item
+    when: EvaluatePublicationPriority() -- legacy: a worker selects its next ready item
 
-    ensures: diagnostic_results precedes all other ready kinds
-    ensures: required_artifact precedes convention_output and maintenance
-    ensures: convention_output precedes maintenance
+    -- legacy: ensures: diagnostic_results precedes all other ready kinds
+    -- legacy: ensures: required_artifact precedes convention_output and maintenance
+    -- legacy: ensures: convention_output precedes maintenance
 
-    @guidance
+    -- legacy annotation: @guidance
 	-- FIFO breaks ties within a kind. Correctness barriers can make a
 	-- lower-priority item temporarily non-ready; priority does not bypass
 	-- dependency or same-workdir constraints.
@@ -264,15 +268,15 @@ invariant SnapshotReconcilesWithQueue {
 }
 
 rule SameWorkdirBarrier {
-    when: next job would use a workdir retained by an outstanding item
+    when: EvaluateSameWorkdirBarrier() -- legacy: next job would use a workdir retained by an outstanding item
 
-    ensures: next job waits until those items are terminal
+    -- legacy: ensures: next job waits until those items are terminal
 }
 
 rule BenchmarkBarrier {
-    when: a benchmark-isolation job is ready to start
+    when: EvaluateBenchmarkBarrier(manager, snapshot) -- legacy: a benchmark-isolation job is ready to start
 
-    ensures: all earlier background items are terminal
+    -- legacy: ensures: all earlier background items are terminal
     ensures: manager.snapshot.queued_items = 0
     ensures: manager.snapshot.inflight_items = 0
 }
@@ -282,11 +286,11 @@ rule BenchmarkBarrier {
 -- ==========================================================================
 
 rule AgentRestartRecoversOutstandingPublication {
-    when: agent starts on a disk containing retained post-job snapshots
+    when: EvaluateAgentRestartRecoversOutstandingPublication() -- legacy: agent starts on a disk containing retained post-job snapshots
 
-    ensures: each recoverable snapshot becomes one queued item
-    ensures: already committed payload objects are not transferred again
-    ensures: incomplete objects are not marked ready
+    -- legacy: ensures: each recoverable snapshot becomes one queued item
+    -- legacy: ensures: already committed payload objects are not transferred again
+    -- legacy: ensures: incomplete objects are not marked ready
 }
 
 invariant TerminalMarkersAreCommitRecords {

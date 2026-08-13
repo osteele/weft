@@ -26,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
@@ -2677,15 +2678,32 @@ func LaunchInstance(
 	}
 
 	providerInstID := inst.ProviderID
-	// failLaunchInfra performs the shared post-create failure ritual: destroy
-	// the leaked provider instance, mark the launch failed with an
-	// infra_failure detail, orphan the claimed jobs, and log the failure.
-	failLaunchInfra := func(detail string, err error) {
-		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
-		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
+	// failLaunchInfra performs the shared post-create failure transition. The
+	// write-ahead intent closes the process-crash window between provider
+	// destruction and the atomic launch/job transition.
+	failLaunchInfra := func(detail string, cause error) error {
+		intent, err := db.RecordLaunchDestroyIntent(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		if err != nil {
+			return fmt.Errorf("record post-create destroy intent: %w", err)
+		}
+		if err := client.DestroyInstance(providerInstID); err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
+			return fmt.Errorf("destroy post-create provider instance: %w", err)
+		}
+		intent.State = instanceintent.StateSucceeded
+		intent.DestroySucceededAtUnix = time.Now().Unix()
+		if _, err := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+			Status:            db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			TerminationDetail: detail + ": " + cause.Error(),
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			TerminationIntent: intent,
+		}); err != nil {
+			return fmt.Errorf("commit post-create terminal transition: %w", err)
+		}
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
+			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, cause))
+		return nil
 	}
 	oplog.Log(oplog.OpLaunchLaunchCreated, oplog.WithDetailf(
 		"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
@@ -2701,7 +2719,33 @@ func LaunchInstance(
 	// a held blocker pod remains visible and controllable while replacement
 	// sampling continues.
 	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
-		failLaunchInfra("provider ID recording failed", err)
+		// Persist the provider identity in the write-ahead intent before cleanup.
+		// This independent JSON path lets restart recovery confirm or retry the
+		// destroy even though the ordinary provider-ID column write failed.
+		intent, intentErr := db.RecordLaunchDestroyIntentWithProviderID(
+			database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, providerInstID,
+		)
+		if intentErr != nil {
+			return instanceID, errors.Join(fmt.Errorf("record provider instance ID: %w", err), fmt.Errorf("record provider recovery intent: %w", intentErr))
+		}
+		destroyErr := client.DestroyInstance(providerInstID)
+		if destroyErr == nil || errors.Is(destroyErr, cloud.ErrInstanceNotFound) {
+			intent.State = instanceintent.StateSucceeded
+			intent.DestroySucceededAtUnix = time.Now().Unix()
+			_, transitionErr := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+				Status:            db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				TerminationDetail: "provider ID recording failed: " + err.Error(),
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				TerminationIntent: intent,
+			})
+			if transitionErr != nil {
+				return instanceID, errors.Join(fmt.Errorf("record provider instance ID: %w", err), transitionErr)
+			}
+		} else {
+			return instanceID, errors.Join(fmt.Errorf("record provider instance ID: %w", err), fmt.Errorf("destroy unrecorded provider instance: %w", destroyErr))
+		}
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
 	if err := db.UpdateLaunchInstanceMetadata(database, instanceID, inst); err != nil {
@@ -2760,7 +2804,9 @@ func LaunchInstance(
 			if opts.distinctAcceptMu != nil {
 				opts.distinctAcceptMu.Unlock()
 			}
-			failLaunchInfra("distinct machine check failed", err)
+			if cleanupErr := failLaunchInfra("distinct machine check failed", err); cleanupErr != nil {
+				return instanceID, errors.Join(fmt.Errorf("distinct machine check: %w", err), cleanupErr)
+			}
 			return instanceID, fmt.Errorf("distinct machine check: %w", err)
 		}
 		if conflict != "" {
@@ -2784,14 +2830,11 @@ func LaunchInstance(
 				}
 				return instanceID, err
 			}
-			destroyLeakedInstance(client, providerInstID, instanceID)
-			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, conflict)
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance missing RunPod machine identity before destination acceptance")
-			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-				"launch_id=%d provider=%s provider_instance_id=%s reason=missing_machine_id",
-				instanceID, client.Provider(), providerInstID))
 			if opts.distinctAcceptMu != nil {
 				opts.distinctAcceptMu.Unlock()
+			}
+			if cleanupErr := failLaunchInfra("missing RunPod machine identity before destination acceptance", err); cleanupErr != nil {
+				return instanceID, errors.Join(err, cleanupErr)
 			}
 			return instanceID, err
 		}
@@ -2825,7 +2868,9 @@ func LaunchInstance(
 			return instanceID, err
 		}
 		_, _ = db.SetLaunchLiveInstancePhase(database, instanceID, phaseDriverTooOld)
-		failLaunchInfra("driver compatibility rejected", err)
+		if cleanupErr := failLaunchInfra("driver compatibility rejected", err); cleanupErr != nil {
+			return instanceID, errors.Join(err, cleanupErr)
+		}
 		return instanceID, err
 	}
 
@@ -2865,13 +2910,17 @@ func LaunchInstance(
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
-		failLaunchInfra("manifest generation failed", err)
+		if cleanupErr := failLaunchInfra("manifest generation failed", err); cleanupErr != nil {
+			return instanceID, errors.Join(fmt.Errorf("generate campaign manifest: %w", err), cleanupErr)
+		}
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
-		failLaunchInfra("manifest upload failed", err)
+		if cleanupErr := failLaunchInfra("manifest upload failed", err); cleanupErr != nil {
+			return instanceID, errors.Join(fmt.Errorf("upload campaign manifest: %w", err), cleanupErr)
+		}
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
 
@@ -2894,7 +2943,9 @@ func LaunchInstance(
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
-		failLaunchInfra("bootstrap upload failed", err)
+		if cleanupErr := failLaunchInfra("bootstrap upload failed", err); cleanupErr != nil {
+			return instanceID, errors.Join(fmt.Errorf("upload bootstrap script: %w", err), cleanupErr)
+		}
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
@@ -2907,12 +2958,10 @@ func LaunchInstance(
 		}
 		bootstrapper, ok := client.(runpodBootstrapper)
 		if !ok {
-			destroyLeakedInstance(client, providerInstID, instanceID)
 			err := fmt.Errorf("runpod client does not support SSH bootstrap")
-			_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, err.Error())
-			resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance runpod bootstrap unsupported before destination acceptance")
-			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-				"launch_id=%d reason=infra_failure detail=%s", instanceID, err))
+			if cleanupErr := failLaunchInfra("runpod bootstrap unsupported", err); cleanupErr != nil {
+				return instanceID, errors.Join(err, cleanupErr)
+			}
 			return instanceID, err
 		}
 		emitProgress("runpod ssh bootstrap")
@@ -2925,7 +2974,9 @@ func LaunchInstance(
 			err = bootstrapper.BootstrapFromR2(sshCtx, providerInstID, r2Cfg.Bucket, bootstrapKey)
 		}
 		if err != nil {
-			failLaunchInfra("runpod ssh bootstrap failed", err)
+			if cleanupErr := failLaunchInfra("runpod ssh bootstrap failed", err); cleanupErr != nil {
+				return instanceID, errors.Join(fmt.Errorf("runpod ssh bootstrap: %w", err), cleanupErr)
+			}
 			return instanceID, fmt.Errorf("runpod ssh bootstrap: %w", err)
 		}
 	}

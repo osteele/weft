@@ -25,11 +25,11 @@ use "./campaign-lifecycle.allium" as cloud
 -- Value types
 -- ==========================================================================
 
-value DrainStatus = ok | stalled | ceiling | error
+enum DrainStatus { ok | stalled | ceiling | error }
 
 -- KilledBy distinguishes who terminated the rclone subprocess. Empty
 -- when rclone exited on its own (success or its own error).
-value KilledBy = stall | ceiling | canceled | slow_pace
+enum KilledBy { stall | ceiling | canceled | slow_pace }
 
 -- StallKind discriminates which gate fired. Populated only when
 -- DrainStatus == stalled. The marker writer surfaces this to the
@@ -37,7 +37,7 @@ value KilledBy = stall | ceiling | canceled | slow_pace
 -- problems (never_started) from transient network blips (mid_transfer)
 -- from sustained underperformance (slow_pace) from process hangs
 -- (heartbeat).
-value StallKind = never_started | mid_transfer | heartbeat | slow_pace
+enum StallKind { never_started | mid_transfer | heartbeat | slow_pace }
 
 -- Outcome of one Drain call. Returned to the caller; serialized to
 -- the upload-failure marker when status != ok.
@@ -154,7 +154,7 @@ invariant ByteCounterMonotonic {
 -- or double-write the failure marker; zero would leave rclone running.
 invariant FinalizeCalledOnce {
     for drain in DrainInvocations:
-        count(FinalizeCalled(drain)) == 1
+        count(FinalizeCalled(drain)) = 1
 }
 
 -- DrainResult.stall_kind is populated if and only if status == stalled.
@@ -162,7 +162,7 @@ invariant FinalizeCalledOnce {
 -- of a kind on a stalled result is a bug.
 invariant StallKindMatchesStatus {
     for result in DrainResults:
-        (result.status == stalled) == (result.stall_kind != null)
+        (result.status = stalled) = (result.stall_kind != null)
 }
 
 -- ==========================================================================
@@ -174,13 +174,12 @@ invariant StallKindMatchesStatus {
 -- conflating them with "no bytes flowing yet". This gate runs
 -- independently of byte progress and is checked first on every tick.
 rule HeartbeatStallFires {
-    when:
-        HeartbeatElapsed(drain) > config.heartbeat_timeout
-
+    when: EvaluateHeartbeatStallFires(drain, result)
+    requires: HeartbeatElapsed(drain) > config.heartbeat_timeout
     ensures:
-        drain.result.status == stalled
-        drain.result.killed_by == stall
-        drain.result.stall_kind == heartbeat
+        drain.result.status = stalled
+        drain.result.killed_by = stall
+        drain.result.stall_kind = heartbeat
 }
 
 -- Mid-transfer stall: bytes were flowing, then stopped. Catches
@@ -188,15 +187,14 @@ rule HeartbeatStallFires {
 -- upload has started moving data. The tight 30s threshold is acceptable
 -- here because rclone has already proved it can talk to R2.
 rule MidTransferStallFires {
-    when:
-        drain.bytes_uploaded > 0
-        StallElapsed(drain) > config.stall_timeout
-        HeartbeatElapsed(drain) <= config.heartbeat_timeout
-
+    when: EvaluateMidTransferStallFires(drain, result)
+    requires: drain.bytes_uploaded > 0
+    requires: StallElapsed(drain) > config.stall_timeout
+    requires: HeartbeatElapsed(drain) <= config.heartbeat_timeout
     ensures:
-        drain.result.status == stalled
-        drain.result.killed_by == stall
-        drain.result.stall_kind == mid_transfer
+        drain.result.status = stalled
+        drain.result.killed_by = stall
+        drain.result.stall_kind = mid_transfer
 }
 
 -- Initial stall: no first byte yet, generous window. Without this gate
@@ -206,16 +204,15 @@ rule MidTransferStallFires {
 -- worst case where every operation in setup makes one transatlantic
 -- round-trip.
 rule InitialStallFires {
-    when:
-        drain.bytes_uploaded == 0
-        StallElapsed(drain) > config.initial_stall_timeout
-        HeartbeatElapsed(drain) <= config.heartbeat_timeout
-
+    when: EvaluateInitialStallFires(drain, result)
+    requires: drain.bytes_uploaded = 0
+    requires: StallElapsed(drain) > config.initial_stall_timeout
+    requires: HeartbeatElapsed(drain) <= config.heartbeat_timeout
     ensures:
-        drain.result.status == stalled
-        drain.result.killed_by == stall
-        drain.result.stall_kind == never_started
-        drain.result.bytes_uploaded == 0
+        drain.result.status = stalled
+        drain.result.killed_by = stall
+        drain.result.stall_kind = never_started
+        drain.result.bytes_uploaded = 0
 }
 
 -- Slow pace: bytes are flowing but the sustained average is so far
@@ -226,19 +223,18 @@ rule InitialStallFires {
 -- non-positive — on-prem hosts where the operator pays no per-hour cost
 -- typically disable this.
 rule SlowPaceFires {
-    when:
-        drain.bytes_uploaded > 0
-        ElapsedSinceStart(drain) > config.pace_check_after
-        config.pace_check_after > 0
-        config.min_throughput_fraction > 0
-        AvgThroughputBps(drain) < config.min_throughput_fraction * config.floor_throughput_bps
-        not HeartbeatStallFires(drain)
-        not MidTransferStallFires(drain)
-
+    when: EvaluateSlowPaceFires(drain, result)
+    requires: drain.bytes_uploaded > 0
+    requires: ElapsedSinceStart(drain) > config.pace_check_after
+    requires: config.pace_check_after > 0
+    requires: config.min_throughput_fraction > 0
+    requires: AvgThroughputBps(drain) < config.min_throughput_fraction * config.floor_throughput_bps
+    requires: not HeartbeatStallFires(drain)
+    requires: not MidTransferStallFires(drain)
     ensures:
-        drain.result.status == stalled
-        drain.result.killed_by == slow_pace
-        drain.result.stall_kind == slow_pace
+        drain.result.status = stalled
+        drain.result.killed_by = slow_pace
+        drain.result.stall_kind = slow_pace
 }
 
 -- Ceiling: absolute time cap = drain_baseline + bytes_total / floor,
@@ -247,41 +243,37 @@ rule SlowPaceFires {
 -- Distinct DrainStatus (not stalled) because it indicates "this upload
 -- ran to its budget", not "rclone misbehaved".
 rule CeilingFires {
-    when:
-        ElapsedSinceStart(drain) > drain.computed_ceiling
-
+    when: EvaluateCeilingFires(drain, result)
+    requires: ElapsedSinceStart(drain) > drain.computed_ceiling
     ensures:
-        drain.result.status == ceiling
-        drain.result.killed_by == ceiling
-        drain.result.stall_kind == null
+        drain.result.status = ceiling
+        drain.result.killed_by = ceiling
+        drain.result.stall_kind = null
 }
 
 -- Happy path: rclone exits with code 0 before any gate fires.
 rule DrainSucceeds {
-    when:
-        RcloneExitsCleanly(drain)
-        not HeartbeatStallFires(drain)
-        not MidTransferStallFires(drain)
-        not InitialStallFires(drain)
-        not SlowPaceFires(drain)
-        not CeilingFires(drain)
-
+    when: EvaluateDrainSucceeds(drain, result)
+    requires: RcloneExitsCleanly(drain)
+    requires: not HeartbeatStallFires(drain)
+    requires: not MidTransferStallFires(drain)
+    requires: not InitialStallFires(drain)
+    requires: not SlowPaceFires(drain)
+    requires: not CeilingFires(drain)
     ensures:
-        drain.result.status == ok
-        drain.result.killed_by == null
-        drain.result.stall_kind == null
+        drain.result.status = ok
+        drain.result.killed_by = null
+        drain.result.stall_kind = null
 }
 
 -- Context cancellation (parent gave up). Bookkeeping only — not a
 -- judgment about rclone's health, so it does not interact with
 -- UploadHealth.
 rule ContextCanceled {
-    when:
-        DrainContextDone(drain)
-
+    when: DrainContextDone(drain)
     ensures:
-        drain.result.status == error
-        drain.result.killed_by == canceled
+        drain.result.status = error
+        drain.result.killed_by = canceled
 }
 
 -- ==========================================================================
@@ -294,15 +286,14 @@ rule ContextCanceled {
 -- short bounded context so it cannot recurse into another long drain
 -- at self-destruct time.
 rule FailureMarkerWritten {
-    when:
-        drain.result.status != ok
-        drain.target.is_known     -- skip when caller didn't identify a target
-
+    when: EvaluateFailureMarkerWritten(drain, result, target)
+    requires: drain.result.status != ok
+    requires: drain.target.is_known
     ensures:
         R2FailureMarkerExists(drain.target, drain.result.stall_kind)
         MarkerWriteBoundedBy(config.marker_write_timeout)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor: cmd/agent/upload_drain.go
         --   drainAndMark / drainAndMarkWithRetry → recordDrainOutcome
         --   r2upload.WriteFailureMarker
@@ -329,17 +320,16 @@ rule FailureMarkerWritten {
 --   - A long idle period with no uploads (the job hasn't produced any
 --     output yet) shouldn't either (covered by min_stalls).
 rule SelfDestructOnPersistentStalls {
-    when:
-        drain.result.killed_by in [stall, slow_pace]
-        upload_health.consecutive_stalls >= config.self_destruct_min_stalls
-        TimeSince(upload_health.last_success_at) >= config.self_destruct_min_since_success
-        not upload_health.self_destruct_fired
-
+    when: EvaluateSelfDestructOnPersistentStalls(drain, result, upload_health)
+    requires: drain.result.killed_by in {stall, slow_pace}
+    requires: upload_health.consecutive_stalls >= config.self_destruct_min_stalls
+    requires: TimeSince(upload_health.last_success_at) >= config.self_destruct_min_since_success
+    requires: not upload_health.self_destruct_fired
     ensures:
-        upload_health.self_destruct_fired == true
+        upload_health.self_destruct_fired = true
         AgentTerminatesSelf(upload_health.instance, cloud/upload_stall)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor: cmd/agent/upload_drain.go
         --   uploadHealthTracker.recordStall / recordSuccess
         --   triggerUploadStallSelfDestruct
@@ -350,12 +340,11 @@ rule SelfDestructOnPersistentStalls {
 -- a long-running job that uploads once an hour would accumulate
 -- "consecutive stalls" across unrelated transient blips.
 rule UploadSuccessResetsTracker {
-    when:
-        drain.result.status == ok
-
+    when: EvaluateUploadSuccessResetsTracker(drain, result, upload_health)
+    requires: drain.result.status = ok
     ensures:
-        upload_health.consecutive_stalls == 0
-        upload_health.last_success_at == Now
+        upload_health.consecutive_stalls = 0
+        upload_health.last_success_at = Now
 }
 
 -- Slow_pace kills are semantically distinct from a true stall (bytes
@@ -365,7 +354,7 @@ rule UploadSuccessResetsTracker {
 -- the only post-mortem indicator of which kind triggered termination.
 invariant SlowPaceCountsAsStall {
     for drain in DrainInvocations:
-        drain.result.killed_by == slow_pace
+        drain.result.killed_by = slow_pace
             implies UploadHealthRecordedAsStall(drain)
 }
 

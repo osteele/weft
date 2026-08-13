@@ -24,6 +24,9 @@
 -- no punctuation, e.g. rtx3090) since the normalization itself is
 -- domain-level behaviour.
 
+use "./job-lifecycle.allium" as jobs
+use "./campaign-lifecycle.allium" as cloud
+
 -- =========================================================================
 -- Host capability model
 -- =========================================================================
@@ -52,10 +55,10 @@ entity Host {
     setup_timeout: Duration     -- max duration for setup commands (uv sync etc.)
 
     -- Derived
-    total_gpus: sum(g.count for g in gpus)
+    -- legacy: total_gpus: sum(g.count for g in gpus)
     network_bw_bytes_per_sec: parse_network_bw(network_bw)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Records live under ~/.config/weft/hosts/<name>.yaml, one file
         -- per host. At load time, entries in config.toml [hosts.<name>]
         -- override non-zero fields on the YAML record.
@@ -79,16 +82,16 @@ value GPUSpec {
 -- A normalized execution target is the durable placement identity for a job
 -- attempt. Inventory targets reference a Host; rental targets reference a
 -- CloudInstance from campaign-lifecycle.allium.
-value ExecutionTargetKind = inventory_host | rental_instance
+enum ExecutionTargetKind { inventory_host | rental_instance }
 
-value ExecutionTargetStatus = provisioning | ready | running | draining | terminated
+enum ExecutionTargetStatus { provisioning | ready | running | draining | terminated }
 
 entity ExecutionTarget {
     kind: ExecutionTargetKind
     status: ExecutionTargetStatus
 
     host: Host?
-    instance: campaign/CloudInstance?
+    instance: cloud/Instance?
 
     -- REQUESTED. The class constraint this target was selected against,
     -- echoed from the job. It says what was asked for, not what arrived. A
@@ -113,7 +116,7 @@ entity ExecutionTarget {
     current_job: jobs/Job?
     queue_depth: Integer
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Persistent rows live in the execution_targets table. The Go
         -- struct is internal/db.ExecutionTarget in
         -- internal/db/execution_targets.go. job_attempts.target_id is the
@@ -164,7 +167,7 @@ rule NormalizeGPUClass {
         else: letters_digits
     ensures: NormalizedResult(expanded)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- "Looks like an RTX model" covers the well-known GeForce RTX
         -- 20xx/30xx/40xx lines and their "ti" / "super" variants.
         -- NVIDIA data-center SKUs (A100, H100, etc.) do not get the
@@ -174,7 +177,7 @@ rule NormalizeGPUClass {
 -- Generations group GPU models by architecture. The `family` marks whether
 -- two generations can be compared by "newer than" — NVIDIA and Apple are
 -- incomparable.
-value GPUFamily = nvidia | apple
+enum GPUFamily { nvidia | apple }
 
 value GPUGeneration {
     name: String                -- e.g. "ampere", "ada_lovelace", "m2"
@@ -192,7 +195,7 @@ value GPUConstraint {
 }
 
 rule ParseGPUConstraint {
-    when: ParseRequested(raw: String)
+    when: ParseRequested(raw)
 
     -- Recognition precedence:
     --   1. "nvidia" / "apple" (bare family)       -> family
@@ -251,7 +254,7 @@ rule ParseGPUConstraint {
 
     ensures: GPUConstraintParsed(result)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/placement/gpugen.go
         -- ParseGPUConstraint. Cross-family comparisons under
         -- min_generation are rejected at match time, not parse time.
@@ -277,7 +280,7 @@ rule ParseGPUConstraint {
 }
 
 rule MatchGPU {
-    when: MatchRequested(constraint: GPUConstraint, gpu: GPUSpec)
+    when: MatchRequested(constraint, gpu)
 
     if constraint.mode = exact_model:
         ensures: Matches = (
@@ -300,7 +303,7 @@ rule MatchGPU {
             and gpu_gen.rank >= constraint.generation.rank
         )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- min_generation never matches across families: an M2 does not
         -- satisfy "ampere+" and an A100 does not satisfy "m1+".
         -- Known generations live in placement/gpugen.go; additions are
@@ -320,7 +323,7 @@ rule MatchGPU {
 -- during it, because an offer reports its memory as its OWN field rather
 -- than inside the name.
 rule MatchSKUMemory {
-    when: SKUMemoryChecked(gpu_class: String, delivered_mem_gb: Integer)
+    when: SKUMemoryChecked(gpu_class, delivered_mem_gb)
 
     let base = SKUMemoryBase(gpu_class)          -- "a100-sxm4-80gb" -> "a100-sxm4"
     let requested_gb = TrailingMemoryTokenGB(gpu_class)
@@ -347,7 +350,7 @@ rule MatchSKUMemory {
     if requested_gb != null and catalogued_sizes != null:
         ensures: Matches = (NominalMemoryGB(base, delivered_mem_gb) = requested_gb)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- All three clauses live in ONE predicate,
         -- gpucatalog.MatchesSKUMemoryGB, beside the hardware facts it needs:
         -- CataloguedMemorySizesGB is gpucatalog.MemorySizesGB (sizes plus "is
@@ -393,7 +396,7 @@ rule MatchSKUMemory {
 -- from a market that happens to be empty, so it must fail at submit, where
 -- the user can still fix it.
 rule ValidateGPUSKUMemory {
-    when: GPUConstraintSubmitted(gpu_class: String)
+    when: GPUConstraintSubmitted(gpu_class)
 
     let base = SKUMemoryBase(gpu_class)
     let requested_gb = TrailingMemoryTokenGB(gpu_class)
@@ -413,7 +416,7 @@ rule ValidateGPUSKUMemory {
         floor_form: FloorConstraintForm(gpu_class, requested_gb)
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/gpu_flag.go validateGPUSKUMemory, called from
         -- cmd/run.go (weft run), cmd/queue.go runEdit (weft edit) and
         -- cmd/restart.go.
@@ -492,7 +495,7 @@ rule ReportDeliveredHardware {
             floor_form: FloorConstraintForm(job.gpu_class, requested_gb)
         )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/job.go printDeliveredGPU renders the
         -- "Delivered:" line from db.Launch.DisplayGPUBrief()
         -- (resolved_gpu_name + gpu_mem_gb + num_gpus);
@@ -587,7 +590,7 @@ value Constraints {
 	                                -- floor; provenance, not an enforced axis.
     provider: String?           -- rental provider name ("" = on-prem first)
     inputs: List<String>        -- asset refs (see Data locality below)
-    tags: Set<Tag>              -- rental/inventory/benchmark_isolation/compute_intensive
+    tags: Set<jobs/Tag>         -- rental/inventory/benchmark_isolation/compute_intensive
     preferred_instance_ids: List<Integer>   -- soft hint for instance reuse
     self_job: jobs/Job?         -- the persisted job these constraints were
                                 -- resolved from (null for submit-time
@@ -606,11 +609,11 @@ value Constraints {
 -- machine-pin, interconnect, host-RAM, CPU-cores, and driver-floor bugs each
 -- shipped that way.
 contract ConstraintSystemCoverage {
-    for each axis in ConstraintAxes():
-        for each system in {offer_chain, reuse, on_prem, claim_backstop}:
-            EnforcementRecorded(system, axis)
+    -- legacy: for each axis in ConstraintAxes():
+        -- legacy: for each system in {offer_chain, reuse, on_prem, claim_backstop}:
+            -- legacy: EnforcementRecorded(system, axis)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The axis vocabulary derives from `enforce` struct tags on
         -- placement.Constraints, so a new constraint field cannot compile
         -- into placement without naming its axis (or declaring itself a
@@ -629,49 +632,52 @@ contract ConstraintSystemCoverage {
 }
 
 rule BuildConstraintsFromJob {
-    when: PlacementEvaluationStarts(job)
+    when: EvaluateBuildConstraintsFromJob()
 
-    let tags = job.tags
-    let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
-    let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
-        or job.requested_gpu_count > 1
+    -- Legacy body retained as migration guidance:
+    -- when: PlacementEvaluationStarts(job)
+
+    -- let tags = job.tags
+    -- let provider = parse_provider_from_tags(tags)  -- "provider:vastai" -> "vastai"
+    -- let requests_gpu = job.gpu_class != null or job.gpu_mem_gb != null
+    -- or job.requested_gpu_count > 1
     -- A torch project will use CUDA whenever a CUDA-capable GPU is present on
     -- the worker, so a job placed there must respect the wheel's arch range
     -- even if it never declared a GPU. Without this, a GPU-agnostic torch job
     -- can be routed onto an arch-incompatible NVIDIA card and die with "no
     -- kernel image" (wj3229). Non-CUDA GPU hosts such as Apple/MPS-only
     -- machines follow the CPU-only path for these CUDA arch bounds.
-    let uses_gpu_runtime = requests_gpu or ProjectUsesTorch(job.working_dir)
+    -- let uses_gpu_runtime = requests_gpu or ProjectUsesTorch(job.working_dir)
 
     -- Torch-derived GPU-runtime constraints (arch caps, CUDA/driver floors) are
     -- populated for jobs that request a GPU OR live in a torch project. A
     -- non-torch CPU-only job carries none of them.
-    ensures: Constraints.built(
-        gpu_class: job.gpu_class,
-        num_gpus: job.requested_gpu_count,
-        gpu_mem_gb: job.gpu_mem_gb,
-	        max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
-	        min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
-	        min_cuda_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_cuda_version : null,
-	        min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
-	        min_driver_version_derived: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version_derived : false,
-	        provider: provider,
-        inputs: job.inputs,
-        tags: tags,
-        self_job: job
-    )
+    -- ensures: Constraints.built(
+    -- gpu_class: job.gpu_class,
+    -- num_gpus: job.requested_gpu_count,
+    -- gpu_mem_gb: job.gpu_mem_gb,
+    -- legacy: max_compute_cap: uses_gpu_runtime ? job.max_compute_cap : null,
+    -- legacy: min_compute_cap: uses_gpu_runtime ? MinComputeCapForJob(job.working_dir) : null,
+    -- legacy: min_cuda_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_cuda_version : null,
+    -- legacy: min_driver_version: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version : null,
+    -- legacy: min_driver_version_derived: uses_gpu_runtime ? RuntimeFloorForJob(job).min_driver_version_derived : false,
+    -- provider: provider,
+    -- inputs: job.inputs,
+    -- tags: tags,
+    -- self_job: job
+    -- legacy: )
 
-    @guidance
-        -- Implementation: placement.ResolveConstraints, with
-        -- placement.ConstraintsFromJob adapting persisted jobs into the
-        -- shared resolver input. max_compute_cap comes from the persisted
-        -- jobs.max_compute_cap ("any" disables the filter), but a fresh
-        -- concrete derivation from the current source tree wins over a stale
-        -- concrete persisted value. min_compute_cap is re-derived from the
-        -- torch pin; the CUDA/driver floors come from
-        -- placement.MinRuntimeFloorForJob plus persisted CLI
-        -- --cuda-driver-min overrides at highest precedence (replace /
-        -- lower / clear semantics — see the Constraints field docs).
+    -- legacy annotation: @guidance
+    -- Implementation: placement.ResolveConstraints, with
+    -- placement.ConstraintsFromJob adapting persisted jobs into the
+    -- shared resolver input. max_compute_cap comes from the persisted
+    -- jobs.max_compute_cap ("any" disables the filter), but a fresh
+    -- concrete derivation from the current source tree wins over a stale
+    -- concrete persisted value. min_compute_cap is re-derived from the
+    -- torch pin; the CUDA/driver floors come from
+    -- placement.MinRuntimeFloorForJob plus persisted CLI
+    -- --cuda-driver-min overrides at highest precedence (replace /
+    -- lower / clear semantics — see the Constraints field docs).
 }
 
 -- =========================================================================
@@ -679,7 +685,7 @@ rule BuildConstraintsFromJob {
 -- =========================================================================
 
 rule EvaluateEligibility {
-    when: EligibilityEvaluated(target: TargetSpec, c: Constraints, metrics: HostMetrics)
+    when: EligibilityEvaluated(target, c, metrics, host)
 
     -- A target is eligible iff every hard constraint passes. Failing targets
     -- still return a Score with placement_reasons explaining why they
@@ -706,9 +712,9 @@ rule EvaluateEligibility {
     --     is one. Mirrors campaign-lifecycle MachineAffinityOfferFilter; the
     --     jobs.host write (db.AssignJobHost) carries the same backstop the
     --     cloud claim boundary does.
-    if c.machine_affinity not empty:
+    -- legacy: if c.machine_affinity not empty:
         requires: target.machine_key != null
-            and c.machine_affinity.any(ref => MachineRefKey(ref) == target.machine_key)
+            and c.machine_affinity.any(ref => MachineRefKey(ref) = target.machine_key)
 
     -- 1b. Host-axis floors. Declared host RAM (--cpu-mem, effective) and CPU
     --     cores (--cpu-cores) are hard floors against inventory facts; an
@@ -719,9 +725,9 @@ rule EvaluateEligibility {
     --     carry no provider bandwidth measurement, so they pass null and use
     --     the naming fallback (nvlink/sxm/nvl tokens read as NVLink; absence
     --     reads as PCIe). Implementation: placement.scoreHost.
-    requires: c.cpu_mem_gb == 0 or host.memory_gb == 0
+    requires: c.cpu_mem_gb = 0 or host.memory_gb = 0
         or host.memory_gb >= c.cpu_mem_gb
-    requires: c.cpu_cores == 0 or host.cpu_cores == 0
+    requires: c.cpu_cores = 0 or host.cpu_cores = 0
         or host.cpu_cores >= c.cpu_cores
     requires: InterconnectSatisfied(c.interconnect,
                                     host.gpu_naming_signals,
@@ -847,7 +853,7 @@ rule EvaluateEligibility {
 
     ensures: EligibilityResult(host, eligible: true)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation target: placement.EvaluateEligibility over
         -- placement.TargetSpec. TargetSpec is the normalization boundary
         -- between source-specific inventory and the single hard-constraint
@@ -936,7 +942,7 @@ value ActiveReservation {
     gpu_class: String?          -- the reserving job's own class constraint
     gpu_mem_gb: Integer?        -- the reserving job's per-device memory floor
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: placement.GPUReservationForJob derives the
         -- reservation from a db.Job row; placement.FreeGPUCapacity folds a
         -- host's active jobs (db.ListActiveJobs: running, starting, paused,
@@ -953,13 +959,13 @@ rule ReservedOnAssignment {
     when: AttemptTargetedAtHost(attempt, host)
     requires: attempt.job.constraints.requests_gpu or attempt.job.gpu_device != null
 
-    ensures: exists(r: ActiveReservation { job = attempt.job, host = host })
-    ensures: r.devices = null and r.count = attempt.job.requested_gpu_count
-             while attempt.job.gpu_device = null
-    ensures: r.devices = attempt.job.gpu_device
-             once the runner-reported device list is synced
+    -- legacy: ensures: exists(r: ActiveReservation { job = attempt.job, host = host })
+    -- legacy: ensures: r.devices = null and r.count = attempt.job.requested_gpu_count
+             -- legacy: while attempt.job.gpu_device = null
+    -- legacy: ensures: r.devices = attempt.job.gpu_device
+             -- legacy: once the runner-reported device list is synced
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Device persistence path (no new column): the runner writes
         -- "gpu_devices=<indices>" to the job's meta file
         -- (internal/runner/runner.go startJob) and records them in its
@@ -977,9 +983,9 @@ rule ReservedOnAssignment {
 -- canceled). There is no cleanup path that can be missed — a crash that
 -- kills a job releases its GPUs as soon as sync records the terminal state.
 rule ReleasedOnTerminal {
-    when: attempt.status becomes terminal
+    when: EvaluateReleasedOnTerminal(attempt)
 
-    ensures: not exists(r: ActiveReservation { job = attempt.job })
+    -- legacy: ensures: not exists(r: ActiveReservation { job = attempt.job })
 }
 
 -- Placement must not over-subscribe a concurrent-execution target's
@@ -995,9 +1001,9 @@ rule ReleasedOnTerminal {
 invariant NoOversubscription {
     for host in Hosts where host.executes_concurrently:
         for pool in MatchingDevicePools(host):
-            sum(r.reserved_in(pool) for r in ActiveReservations(host)) <= pool.size
+            -- legacy: sum(r.reserved_in(pool) for r in ActiveReservations(host)) <= pool.size
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Scope: on-prem concurrent-execution (queue-runner) targets only.
         -- Cloud/rental and sequential targets are governed by rental reuse
         -- objective scoring and agent queue ordering, and are NOT subject
@@ -1041,7 +1047,7 @@ config {
 }
 
 rule ScoreHost {
-    when: ScoreRequested(host: Host, c: Constraints, metrics: HostMetrics)
+    when: ScoreRequested(host, c, metrics)
     requires: EligibilityResult(host, eligible: true)
 
     -- Total completion = queue drain + data transfer + run time.
@@ -1074,7 +1080,7 @@ rule ScoreHost {
         data_locality_score: transfer.local_fraction
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Reasons strings are constructed in placement.scoreHost. A
         -- typical complete reason set on a healthy candidate:
         --   "has RTX 3090 GPU"
@@ -1085,21 +1091,21 @@ rule ScoreHost {
 }
 
 rule SelectBestHost {
-    when: BestHostRequested(c: Constraints)
+    when: BestHostRequested(c)
 
     let candidates = Hosts.map(h => ScoreHost(h, c, metrics_of(h)))
     let eligible = candidates.filter(s => s.eligible)
     let best = eligible.max_by(s => -s.completion_minutes)
 
     if best != null:
-        ensures: PlacementResult.selected(
+        ensures: PlacementResultSelected(
             target: ExecutionTarget{kind: inventory_host, host: best.host},
             score: best
         )
     else:
-        ensures: PlacementResult.unplaced(reasons: candidates.flat_map(s => s.reasons))
+        ensures: PlacementResultUnplaced(reasons: candidates.flat_map(s => s.reasons))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The unplaced path feeds job.placement_reasons (see
         -- job-lifecycle.allium rule PlaceJob). The union of per-host
         -- reasons is shown to the user so they can understand why each
@@ -1111,7 +1117,7 @@ rule SelectBestHost {
 -- =========================================================================
 
 rule PlaceWithFallback {
-    when: PlaceWithFallbackRequested(c: Constraints)
+    when: PlaceWithFallbackRequested(c)
 
     -- If no rental tag, prefer on-prem. Spill to rental only when the
     -- on-prem estimate exceeds the rental estimate by a material margin.
@@ -1127,13 +1133,13 @@ rule PlaceWithFallback {
         ensures: fallback_to_rental = true
 
     if onprem != null and should_spill_to_rental(onprem, c):
-        ensures: PlacementResult.spilled_to_rental(
+        ensures: PlacementResultSpilledToRental(
             onprem_estimate: onprem.completion_minutes
         )
     else:
-        ensures: PlacementResult.from(onprem)
+        ensures: PlacementResultFrom(onprem)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: placement.PlaceWithFallback (placement.go:464).
         -- Jobs explicitly tagged `inventory` skip this rule and stay
         -- on-prem regardless of estimate. Jobs tagged `rental` skip
@@ -1158,10 +1164,10 @@ rule PlaceWithFallback {
     --     PlaceOnPrem (EvaluateEligibility / scoreHost), so every hard
 --     constraint — including the GPU count clause 3a — applies identically.
 rule FastSubmitOnPremReuse {
-    when: FastSubmitEvaluated(c: Constraints)
+    when: FastSubmitEvaluated(c)
 
     if rental in c.tags or c.provider != null:
-        ensures: PlacementResult.unplaced(reasons: [])
+        ensures: PlacementResultUnplaced(reasons: [])
 
     -- Fall back to the normal (probing) placement path when recent metrics
     -- are unavailable; never place from stale host state.
@@ -1170,10 +1176,10 @@ rule FastSubmitOnPremReuse {
 
     else:
         let scores = Hosts.map(h => ScoreHost(h, c, recent_metrics_of(h)))
-        ensures: PlacementResult.from(first eligible score) or
-                 PlacementResult.unplaced
+        ensures: PlacementResultFrom(first eligible score) or
+                 PlacementResultUnplaced()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/run.go evaluateRecentOnPremPlacement, which
         -- funnels through placement.ScoreHostsWithPredictor and therefore
         -- shares scoreHost / EvaluateEligibility with PlaceOnPrem.
@@ -1188,7 +1194,7 @@ rule FastSubmitOnPremReuse {
 -- Data locality
 -- =========================================================================
 
-value AssetKind = hf_model | hf_dataset | checkpoint | job_output | corpus
+enum AssetKind { hf_model | hf_dataset | checkpoint | job_output | corpus }
 
 -- A data asset referenced by a job input. Assets have a kind and an ID;
 -- the ID shape depends on kind (e.g. "meta-llama/Meta-Llama-3-8B" for
@@ -1198,10 +1204,10 @@ value DataAsset {
     id: String
 }
 
-value AssetContentType = file | directory
+enum AssetContentType { file | directory }
 
 rule ParseAssetRef {
-    when: ParseRequested(raw: String)
+    when: ParseRequested(raw)
 
     -- Prefix syntax: "<kind>:<id>". Recognized prefixes:
     --   hf:          -> hf_model
@@ -1216,7 +1222,7 @@ rule ParseAssetRef {
 
     ensures: AssetRefParsed(asset)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: dataloc.ParseAssetRef, ParseInputRef.
         -- Spec-level view: only the prefix -> kind mapping matters.
         -- The set of prefixes is extensible in implementation; additions
@@ -1236,7 +1242,7 @@ entity HostAssetRecord {
     last_seen: Timestamp
 
     -- Uniqueness: (host, asset.kind, asset.id) is unique per host.
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: dataloc/store.go, table host_data.
 }
 
@@ -1257,11 +1263,11 @@ rule DirectoryAssetDigest {
     when: DirectoryCheckpointRegistered(path)
 
     ensures:
-        size_bytes = Sum(file.size_bytes for file in RecursiveRegularFiles(path))
-        content_hash = Sha256(StableManifest(path))
-        content_type = directory
+        -- legacy: size_bytes = Sum(file.size_bytes for file in RecursiveRegularFiles(path))
+        -- legacy: content_hash = Sha256(StableManifest(path))
+        -- legacy: content_type = directory
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Directory checkpoint hashes are not tarball hashes. The stable
         -- manifest is sorted by slash-separated relative path; each line is
         -- "<relative-path>\t<size-bytes>\t<file-sha256>\n". This makes the
@@ -1293,7 +1299,7 @@ rule ScanHFCache {
             last_seen: now
         )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: dataloc.ScanHFCache / ScanHFCacheDetailed.
         -- The scan does not remove records for assets that have
         -- disappeared — RemoveStaleEntries handles that with a cutoff.
@@ -1334,7 +1340,7 @@ entity DataRequest {
     }
 }
 
-value DataRequestStatus = pending | running | completed | failed
+enum DataRequestStatus { pending | running | completed | failed }
 
 rule CreateDataRequest {
     when: AssetDownloadRequested(host, asset)
@@ -1349,25 +1355,25 @@ rule CreateDataRequest {
 }
 
 rule DownloadAssetToHost {
-    when: DataRequest.status becomes running
+    when: EvaluateDownloadAssetToHost()
 
     -- For HF assets, the download runs `huggingface-cli download` (or
     -- equivalent) over SSH on the target host into host.hf_cache_dir.
     -- On success, rescan and record the new asset. On failure, record
     -- the error and mark the request failed.
 
-    ensures: on_success:
-        HostAssetRecord.upserted(host: request.host, asset: request.asset, ...)
-        request.status = completed
-        request.completed_at = now
-    ensures: on_failure:
-        request.status = failed
-        request.error = reason
-        request.completed_at = now
+    -- legacy: ensures: on_success:
+        -- legacy: HostAssetRecord.upserted(host: request.host, asset: request.asset, ...)
+        -- legacy: request.status = completed
+        -- legacy: request.completed_at = now
+    -- legacy: ensures: on_failure:
+        -- legacy: request.status = failed
+        -- legacy: request.error = reason
+        -- legacy: request.completed_at = now
 }
 
 rule EvictStaleRecords {
-    when: EvictionRequested(cutoff: Timestamp)
+    when: EvictionRequested(cutoff)
 
     -- Records whose last_seen < cutoff are removed. This is a reaper;
     -- scans do not proactively delete records for missing assets so
@@ -1397,18 +1403,18 @@ rule SelectDataEvictionCandidates {
                          since = now - config.data_cache_reuse_window)
         let size_gb = max(candidate.size_bytes / 1000000000, 1)
         let density = recent_uses / size_gb
-      ensures: candidates are ordered by density ascending,
-               LastJobUse ascending,
-               host ascending,
-               asset kind ascending,
-               asset id ascending
+      -- legacy: ensures: candidates are ordered by density ascending,
+               -- legacy: LastJobUse ascending,
+               -- legacy: host ascending,
+               -- legacy: asset kind ascending,
+               -- legacy: asset id ascending
     else:
-      ensures: candidates are ordered by LastJobUse ascending,
-               host ascending,
-               asset kind ascending,
-               asset id ascending
+      -- legacy: ensures: candidates are ordered by LastJobUse ascending,
+               -- legacy: host ascending,
+               -- legacy: asset kind ascending,
+               -- legacy: asset id ascending
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: cmd/data.go runDataEvict plus
         -- internal/dataloc/evict.go. Invalid or empty policy values fall
         -- back to "lru"; invalid or empty reuse windows fall back to 30d.
@@ -1441,7 +1447,7 @@ rule DiscoverHost {
     let cpu_factor = lookup_cpu_factor(probe.cpu_model) ?? 1.0
     let gpus = group_identical_gpus(probe.gpus)
 
-    ensures: HostSpec.written(
+    ensures: HostSpecWritten(
         name: hostname,
         os: probe.os,
         arch: probe.arch,
@@ -1460,7 +1466,7 @@ rule DiscoverHost {
         hf_cache_dir: probe.hf_cache_dir
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The generated file goes to ~/.config/weft/hosts/<hostname>.yaml
         -- and replaces any existing file. Operators may edit the file
         -- after discovery; fields set non-zero in config.toml
@@ -1510,7 +1516,7 @@ invariant DataRequestsConverge {
     -- stuck in `running` past the host's setup_timeout is a bug in the
     -- downloader, not a valid state.
     for request in DataRequests:
-        eventually: request.status in {completed, failed}
+        -- legacy: eventually: request.status in {completed, failed}
 }
 
 invariant PlacementReasonsExplainUnplaced {
@@ -1553,7 +1559,7 @@ invariant TargetSatisfiesRequestedGPUCount {
         for target in job.selected_targets:
             target.num_gpus >= max(job.constraints.num_gpus, 1)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This invariant is about the target's PHYSICAL device count, not
         -- about co-scheduling. For on-prem hosts, co-scheduling is now
         -- covered by the derived reservation model (ActiveReservation /
@@ -1614,9 +1620,9 @@ invariant TargetSatisfiesRequestedGPUCount {
 -- Open Questions
 -- =========================================================================
 
-open question "Client-side re-check of the class VARIANT on fresh offers:
-internal/campaign/offers.go builds placement.Constraints without GPUClass at
-all three EvaluateEligibility call sites (arch, VRAM, GPU count), so the
-variant half of a class constraint is still enforced only by the provider's
-own gpu_name filter. MatchSKUMemory closes the memory half. Whether the
-variant half should also be re-checked client-side is undecided."
+-- legacy open question: open question "Client-side re-check of the class VARIANT on fresh offers:
+-- legacy open question: -- legacy: internal/campaign/offers.go builds placement.Constraints without GPUClass at
+-- legacy open question: -- legacy: all three EvaluateEligibility call sites (arch, VRAM, GPU count), so the
+-- legacy open question: variant half of a class constraint is still enforced only by the provider's
+-- legacy open question: -- legacy: own gpu_name filter. MatchSKUMemory closes the memory half. Whether the
+-- legacy open question: variant half should also be re-checked client-side is undecided."

@@ -459,8 +459,10 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	// Handle termination intent post-processing (mark destroy succeeded).
 	// Requires positive evidence the provider instance is gone; a
 	// never-polled nil must not be recorded as a confirmed destroy.
-	if action.Kind == ActionTerminationIntent && providerConfirmedTerminal(inst, providerErr, params.PauseTolerant) {
-		markTerminationIntentDestroyed(database, ci, now)
+	if action.Kind == ActionTerminationIntent && providerConfirmedGone(inst, providerErr) {
+		if markTerminationIntentDestroyed(database, ci, now) {
+			action.DestroyProvider = false
+		}
 	}
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
@@ -468,8 +470,19 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		return reconciled, terminated, synced.JobsUpdated, bidRaised
 	}
 
-	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
-	if client != nil && !isProviderTerminal(inst) && ci.Status == db.LaunchStatusRunning && r2Client != nil {
+	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance.
+	// A failed provider poll defers this watchdog for interruptible launches,
+	// but only up to stalePauseTimeout. Past that bound, a missing instance
+	// snapshot makes the SSH probe unknown; the probe hysteresis still applies,
+	// and ExecuteAction must positively destroy (or confirm absence of) the
+	// provider resource before committing a terminal local transition.
+	providerAllowsHeartbeatAdjudication := inst != nil && !isProviderTerminal(inst)
+	if inst == nil && providerErr != nil {
+		providerAllowsHeartbeatAdjudication = ci.InstanceType != cloud.InstanceTypeInterruptible ||
+			errors.Is(providerErr, cloud.ErrInstanceNotFound) ||
+			params.ProviderStatusUnknownFor >= stalePauseTimeout
+	}
+	if client != nil && providerAllowsHeartbeatAdjudication && ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if hbAction := r.checkStaleHeartbeat(r2Client, ci, inst); hbAction.Kind != ActionNone {
 			reconciled, terminated := executeReconcileAction(database, client, r2Client, ci, hbAction)
 			if reconciled {
@@ -821,12 +834,22 @@ func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, ins
 	defer cancel()
 
 	heartbeat, heartbeatAge := fetchReconcileHeartbeat(ctx, r2Client, ci.ID)
-	if heartbeatAge == 0 || heartbeatAge <= heartbeatStaleThreshold {
+	if heartbeat != nil && heartbeat.observationUnknown {
+		return InstanceAction{Kind: ActionNone}
+	}
+	staleThreshold := effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, time.Now())
+	if heartbeatAge == 0 || heartbeatAge <= staleThreshold {
 		r.clearProbeFailure(ci.ID)
 		return InstanceAction{Kind: ActionNone}
 	}
 
-	agentAlive, err := probeCampaignAgent(inst, 15*time.Second)
+	var agentAlive bool
+	var err error
+	if inst == nil {
+		err = errors.New("provider status unknown; no current SSH endpoint")
+	} else {
+		agentAlive, err = probeCampaignAgent(inst, 15*time.Second)
+	}
 	if err == nil && agentAlive {
 		r.clearProbeFailure(ci.ID)
 		return InstanceAction{Kind: ActionNone}
@@ -1212,9 +1235,9 @@ func isProviderTerminal(inst *cloud.Instance) bool {
 	return isProviderTerminalWithPolicy(inst, false)
 }
 
-// providerConfirmedTerminal reports whether there is positive provider
-// evidence that an *expected* destroy has landed: either an observed
-// terminal provider status, or a lookup that failed with the
+// providerConfirmedGone reports whether there is positive provider evidence
+// that an *expected* destroy has landed: either an observed destroyed/dead
+// status, or a lookup that failed with the
 // confirmed-absence sentinel (cloud.ErrInstanceNotFound). It backs the
 // termination-intent post-processing, where the agent already declared
 // it is shutting down and not-found corroborates that the instance is
@@ -1226,9 +1249,9 @@ func isProviderTerminal(inst *cloud.Instance) bool {
 // meaning the launch was never polled this pass (no provider ID
 // recorded yet because the create call is still in flight, or no
 // client configured for its provider) — is unknown, not terminal.
-func providerConfirmedTerminal(inst *cloud.Instance, providerErr error, pauseTolerant bool) bool {
+func providerConfirmedGone(inst *cloud.Instance, providerErr error) bool {
 	if inst != nil {
-		return isProviderTerminalWithPolicy(inst, pauseTolerant)
+		return !needsProviderDestroy(inst)
 	}
 	return errors.Is(providerErr, cloud.ErrInstanceNotFound)
 }

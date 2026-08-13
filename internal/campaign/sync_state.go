@@ -40,6 +40,40 @@ var (
 	}
 )
 
+// markerObservation carries the read certainty alongside the legacy
+// string-returning marker fetch hooks. Keeping certainty in the request
+// context lets tests substitute deterministic marker values without widening
+// every hook signature, while production fetchers still report read errors.
+type markerObservation struct {
+	mu      sync.Mutex
+	unknown bool
+}
+
+type markerObservationContextKey struct{}
+
+func withMarkerObservation(ctx context.Context, observation *markerObservation) context.Context {
+	return context.WithValue(ctx, markerObservationContextKey{}, observation)
+}
+
+func recordMarkerObservationError(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	observation, _ := ctx.Value(markerObservationContextKey{}).(*markerObservation)
+	if observation == nil {
+		return
+	}
+	observation.mu.Lock()
+	observation.unknown = true
+	observation.mu.Unlock()
+}
+
+func (o *markerObservation) isUnknown() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.unknown
+}
+
 // SyncedState holds the observation state collected from R2 and the provider,
 // persisted to launch_live_state, and returned for immediate use.
 type SyncedState struct {
@@ -48,6 +82,9 @@ type SyncedState struct {
 	BootstrapStage        string
 	HeartbeatAge          time.Duration
 	Heartbeat             *HeartbeatSample
+	HeartbeatUnknown      bool
+	InstancePhaseUnknown  bool
+	BootstrapStageUnknown bool
 	JobProgress           int // 0-100, or -1 if unavailable
 	JobProgressID         int64
 	JobProgressPhase      int // 1-based phase number (0 = unknown)
@@ -98,7 +135,8 @@ func SyncInstanceState(
 	opts SyncInstanceStateOpts,
 ) *SyncedState {
 	s := &SyncedState{
-		JobProgress: -1,
+		JobProgress:       -1,
+		TerminationIntent: ci.TerminationIntent,
 	}
 
 	if r2Client == nil || (ci.Status != db.LaunchStatusRunning && ci.Status != db.LaunchStatusGrace) {
@@ -126,7 +164,9 @@ func SyncInstanceState(
 	}()
 	go func() {
 		defer wave1.Done()
-		s.RawInstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
+		observation := &markerObservation{}
+		s.RawInstancePhase = syncFetchInstancePhase(withMarkerObservation(ctx, observation), r2Client, instanceID)
+		s.InstancePhaseUnknown = observation.isUnknown()
 	}()
 	if !opts.AgentVersionFetched {
 		wave1.Add(1)
@@ -185,7 +225,9 @@ func SyncInstanceState(
 		wave2.Add(1)
 		go func() {
 			defer wave2.Done()
-			s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
+			observation := &markerObservation{}
+			s.BootstrapStage = syncFetchBootstrapStage(withMarkerObservation(ctx, observation), r2Client, instanceID)
+			s.BootstrapStageUnknown = observation.isUnknown()
 		}()
 		wave2.Add(1)
 		go func() {
@@ -202,6 +244,10 @@ func SyncInstanceState(
 		go func() {
 			defer wave2.Done()
 			s.Heartbeat, s.HeartbeatAge = syncFetchHeartbeat(ctx, r2Client, instanceID)
+			if s.Heartbeat != nil && s.Heartbeat.observationUnknown {
+				s.HeartbeatUnknown = true
+				s.Heartbeat = nil
+			}
 		}()
 	}
 	var probeExists bool
@@ -380,7 +426,8 @@ func SyncInstanceState(
 	}
 
 	if syncObservedR2State(s) {
-		phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		observedAt := time.Now()
+		phaseChangedAt, persistErr := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
 			LaunchID:         instanceID,
 			InstancePhase:    s.InstancePhase,
 			BootstrapStage:   s.BootstrapStage,
@@ -392,15 +439,29 @@ func SyncInstanceState(
 			AgentVersion:     s.AgentVersion,
 			AgentProtocol:    agentProtocol,
 		})
-		if phaseChangedAt != nil {
+		if persistErr != nil {
+			slog.Warn("persist launch live state", "component", "sync", "instance", instanceID, "error", persistErr)
+			// The current external observation is still valid even though its
+			// durable cache write failed. Anchor a newly observed phase now so the
+			// watchdog does not fall back to the much older launch lifecycle time
+			// and turn a persistence failure into false stall evidence.
+			if s.InstancePhase != "" {
+				s.PhaseChangedAt = &observedAt
+			}
+			if s.JobProgressID > 0 && s.JobProgress >= 0 {
+				s.JobProgressChangedAt = &observedAt
+			}
+		} else if phaseChangedAt != nil {
 			t := time.Unix(*phaseChangedAt, 0)
 			s.PhaseChangedAt = &t
 		}
-		if live, err := db.GetLaunchLiveState(database, instanceID); err == nil && live != nil && live.JobProgressChangedAt != nil {
-			t := time.Unix(*live.JobProgressChangedAt, 0)
-			s.JobProgressChangedAt = &t
-		} else if err != nil {
-			slog.Warn("read structured progress timestamp", "component", "sync", "instance", instanceID, "error", err)
+		if persistErr == nil {
+			if live, err := db.GetLaunchLiveState(database, instanceID); err == nil && live != nil && live.JobProgressChangedAt != nil {
+				t := time.Unix(*live.JobProgressChangedAt, 0)
+				s.JobProgressChangedAt = &t
+			} else if err != nil {
+				slog.Warn("read structured progress timestamp", "component", "sync", "instance", instanceID, "error", err)
+			}
 		}
 	}
 	extendBootstrapDeadlineFromProgress(database, ci, s.BootstrapStage, previousBootstrapStage)
@@ -733,6 +794,9 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		BootstrapStage:        s.BootstrapStage,
 		HeartbeatAge:          s.HeartbeatAge,
 		Heartbeat:             s.Heartbeat,
+		HeartbeatUnknown:      s.HeartbeatUnknown,
+		InstancePhaseUnknown:  s.InstancePhaseUnknown,
+		BootstrapStageUnknown: s.BootstrapStageUnknown,
 		Now:                   now,
 		TerminationIntent:     s.TerminationIntent,
 		PhaseChangedAt:        s.PhaseChangedAt,

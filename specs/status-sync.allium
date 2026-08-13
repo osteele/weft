@@ -68,19 +68,23 @@ use "./campaign-lifecycle.allium" as cloud
 
 -- Source identifies what signal triggered a status transition.
 -- Determines whether the transition is authoritative (can override terminal).
-value SyncSource = ssh_sync | slurm_sync | r2_completion | r2_phase
+enum SyncSource {
+    ssh_sync | slurm_sync | r2_completion | r2_phase
                  | external_sync | reconcile | user_action | cleanup
                  | queue_runner | placement
+}
 
 -- Agent execution phase reported via R2. Format: "verb:jobID" or bare verb.
-value AgentPhase = setup | gpu_warmup | running | finalizing | uploading
+enum AgentPhase {
+    setup | gpu_warmup | running | finalizing | uploading
                  | uploading_results | disk_full | grace | destroying
+}
 
 -- Bootstrap progress stage reported during instance startup.
-value BootstrapStage = agent_installed | sources_extracted | ready
+enum BootstrapStage { agent_installed | sources_extracted | ready }
 
 -- Sync mode controls which portions of host sync execute.
-value SyncMode = full | status_only | repair
+enum SyncMode { full | status_only | repair }
 
 -- The three states used in three-way merge reconciliation.
 value ThreeWayState {
@@ -234,11 +238,11 @@ config {
 -- unknown host key alone is enough to trigger this, regardless of whether
 -- the flow is expected to require auth.
 invariant NonInteractiveSSH {
-    for invocation in SSHInvocations ++ RsyncInvocations:
-        invocation.options.contains("BatchMode=yes")
-        invocation.options.contains_connect_timeout()
+    -- legacy: for invocation in SSHInvocations ++ RsyncInvocations:
+        -- legacy: invocation.options.contains("BatchMode=yes")
+        -- legacy: invocation.options.contains_connect_timeout()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor: internal/ssh/batchmode.go
         --   ssh.BatchModeArgs(connectTimeout, extraOpts...)       — exec-form args
         --   ssh.BatchModeRsyncCommand(connectTimeout, extraOpts...) — rsync -e string
@@ -302,7 +306,7 @@ rule DispatchQueuedExplicitTargets {
             ensures: job.latest_attempt.queued_at != null
             ensures: LifecycleEvent(job, "queue.dispatch.ok")
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Applies to explicit `weft sync`, daemon/background sync, and
         -- the TUI hostsync.Worker whenever it selects full mode for the
         -- host. On timeout, connection error, source-sync failure, input
@@ -333,7 +337,7 @@ rule RedispatchMissingQueuedJobs {
                 ensures: job.latest_attempt.last_synced_status = null
                 ensures: JobReDispatchedToRunner(host, job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/host_sync.go syncQueueRunnerForHost
         --     - db.ListSyncedQueuedJobs(database, host) yields the
@@ -405,7 +409,7 @@ rule PruneStaleRunnerPendings {
             -- in-flight states. Canceling under the agent could race the
             -- job's own lifecycle. Leave entry alone.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/host_sync.go
         --     - pruneStaleRunnerPendings builds the expected set from the
@@ -439,7 +443,7 @@ rule SyncOnPremJob {
     else if job.backend = queue_runner:
         ensures: QueueRunnerJobProbed(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Queue-runner probe sequence:
         -- 1. Read status file ({jobID}.status) for exit code
         -- 2. Check if process is running via PID/PGID files
@@ -460,7 +464,7 @@ rule SyncTmuxJob {
     -- If session gone → check status file for exit code → completed/failed
     -- If session gone and no status file → mark dead
 
-    @guidance
+    -- legacy annotation: @guidance
         -- SSH probes:
         -- 1. `tmux list-sessions` to check session existence
         -- 2. Read .pgid/.pid, then `ps -o stat=` for pause detection
@@ -482,26 +486,26 @@ rule SyncTmuxJob {
 rule SyncExternalExecutorJob {
     when: SyncJobTriggered(job, mode)
     requires: job.backend = skypilot
-    requires: exists(binding: jobs/ExternalJobBinding { job = job })
+    -- legacy: requires: exists(binding: jobs/ExternalJobBinding { job = job })
 
-    let observation = QueryExternalExecutor(binding.executor, binding.external_job_id,
-                                            binding.external_task_id,
-                                            timeout: ExternalSyncTimeout(mode))
+    -- legacy: let observation = QueryExternalExecutor(binding.executor, binding.external_job_id,
+                                            -- legacy: binding.external_task_id,
+                                            -- legacy: timeout: ExternalSyncTimeout(mode))
 
-    if observation.available:
-        ensures: binding.raw_status = observation.raw_status
-        ensures: binding.raw_status_message = observation.message
-        ensures: binding.last_observed_at = now
-        ensures: binding.normalized_status = NormalizeExternalStatus(observation.raw_status)
-        ensures: job.status = binding.normalized_status
-        ensures: job.exit_code = observation.exit_code when observation.exit_code != null
-        ensures: job.error_message = observation.message when observation.failed
-    else:
+    -- legacy: if observation.available:
+        -- legacy: ensures: binding.raw_status = observation.raw_status
+        -- legacy: ensures: binding.raw_status_message = observation.message
+        -- legacy: ensures: binding.last_observed_at = now
+        -- legacy: ensures: binding.normalized_status = NormalizeExternalStatus(observation.raw_status)
+        -- legacy: ensures: job.status = binding.normalized_status
+        -- legacy: ensures: job.exit_code = observation.exit_code when observation.exit_code != null
+        -- legacy: ensures: job.error_message = observation.message when observation.failed
+    -- legacy: else:
         -- Lack of contact with SkyPilot is not proof that the job died.
-        ensures: job.status unchanged
-        ensures: ExternalSyncWarningRecorded(job, observation.error)
+        -- legacy: ensures: job.status unchanged
+        -- legacy: ensures: ExternalSyncWarningRecorded(job, observation.error)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- SkyPilot owns scheduling, cluster lifecycle, spot recovery, and raw
         -- task execution. Weft only mirrors observable state into its DB so
         -- `weft jobs list`, `weft project watch`, and unprocessed triage keep
@@ -527,13 +531,13 @@ rule SyncExternalExecutorJob {
 rule ExternalExecutorCancel {
     when: UserRequestsCancel(job)
     requires: job.backend = skypilot
-    requires: exists(binding: jobs/ExternalJobBinding { job = job })
+    -- legacy: requires: exists(binding: jobs/ExternalJobBinding { job = job })
 
-    ensures: ExternalCancelRequested(binding.executor, binding.external_job_id,
-                                     binding.external_task_id)
-    ensures: job.status in {killed, canceled} once external cancel is observed
+    -- legacy: ensures: ExternalCancelRequested(binding.executor, binding.external_job_id,
+                                     -- legacy: binding.external_task_id)
+    -- legacy: ensures: job.status in {killed, canceled} once external cancel is observed
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Cancel is a passthrough to SkyPilot (`sky cancel` / API equivalent)
         -- plus later status mirroring. The local status may enter a pending
         -- user-action state while the external request is in flight, but Weft
@@ -605,7 +609,7 @@ rule AgentBatchStatusReportsPreflightRejection {
                 failure_reason: PreflightFailureReason(jobID)
             )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   cmd/agent/batchstatus.go    — detects <jobid>.preflight_rejected
         --                                 and prints the PREFLIGHT_REJECTED
@@ -636,7 +640,7 @@ rule PreflightRejectionReconciled {
     ensures: EventQueueDispatchFailedRecorded(job: job, detail: reason)
     ensures: PreflightRejectionReported(job: job, reason: reason)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/queue_batch.go    — applyBatchStatuses
         --                                    (queueStatePreflightRejected
@@ -667,7 +671,7 @@ rule DispatchFailureEventDedupWindowed {
         detail: line.failure_reason
     )
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchor:
         --   internal/ops/queue_batch.go    — recordPreflightDispatchBlock,
         --                                    dispatchEventDedupeWindow.
@@ -689,7 +693,7 @@ rule AgentDeployRestart {
     -- The runner picks up the restart on its next tick and re-execs.
     ensures: RunnerRestartRequested(host)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The runner re-execs via syscall.Exec, preserving the tmux session.
         -- Running jobs continue in their subprocesses. Exit codes survive
         -- because commands are wrapped with exit-capture shell code:
@@ -772,7 +776,7 @@ rule ResolveConflict {
         -- Remote not terminal — keep trying local intent
         ensures: PendingAppliedToRemote(job, local)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Connection errors during pending application leave pending_status
         -- in place for retry on the next sync pass, rather than dropping
         -- the user's intent.
@@ -816,7 +820,7 @@ rule StampAttemptStatus {
        and (attempt.end_time = null or attempt.end_time = 0):
         ensures: attempt.end_time = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/db/attempts.go
         -- UpdateAttemptStatusAndLastSynced. The end_time CASE expression
         -- ("end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ?
@@ -841,7 +845,7 @@ rule StampAttemptStatus {
 
 -- Sync a cloud instance's state from R2 markers and provider API.
 rule SyncCloudInstanceState {
-    when: CloudSyncRequested(instance)
+    when: CloudSyncRequested(instance, phase_job)
     requires: instance.status in {running, paused, grace}
 
     -- Read R2 markers. Data-independent markers are fetched concurrently
@@ -849,47 +853,47 @@ rule SyncCloudInstanceState {
     let r2_state = FetchR2InstanceState(instance)
 
     -- Persist to live state table
-    ensures: InstanceLiveState updated for instance
+    -- legacy: ensures: InstanceLiveState updated for instance
 
     -- Side effect: mark queued jobs as active if R2 phase says they are
     -- in job-attributed setup or execution.
-    if r2_state.phase != null:
-        let phase_job = job referenced by r2_state.phase
-        if phase_job != null
-        and phase_job.status in {queued, pending_placement}
-        and r2_state.phase.verb in {setup, gpu_warmup}:
-            ensures: phase_job.status = starting
+    -- legacy: if r2_state.phase != null:
+        -- legacy: let phase_job = job referenced by r2_state.phase
+        -- legacy: if phase_job != null
+        -- legacy: and phase_job.status in {queued, pending_placement}
+        -- legacy: and r2_state.phase.verb in {setup, gpu_warmup}:
+            -- legacy: ensures: phase_job.status = starting
             -- Setup work has begun on the instance, but the user command has
             -- not necessarily reached its running phase. Displays should show
             -- this as active setup/starting, never as queued.
-            if phase_job.latest_attempt.pending_status in
-               {queued, pending_placement, starting, running}:
+            -- legacy: if phase_job.latest_attempt.pending_status in
+               -- legacy: {queued, pending_placement, starting, running}:
                 ensures: phase_job.latest_attempt.pending_status = null
-        if phase_job != null
-        and phase_job.status in {queued, pending_placement, starting}
-        and r2_state.phase.verb in {running, finalizing, uploading, uploading-results}:
+        -- legacy: if phase_job != null
+        -- legacy: and phase_job.status in {queued, pending_placement, starting}
+        -- legacy: and r2_state.phase.verb in {running, finalizing, uploading, uploading-results}:
             ensures: phase_job.status = running
             -- Reaching running satisfies any start-class intent the attempt
             -- still carries. Without this clear, EffectiveStatus() keeps
             -- reporting the stale intent (regression wb2). Stop-class
             -- intents (canceled, killed) are preserved so they can still
             -- propagate. See invariant StartIntentPendingClearedOnRunning.
-            if phase_job.latest_attempt.pending_status in
-               {queued, pending_placement, starting, running}:
+            -- legacy: if phase_job.latest_attempt.pending_status in
+               -- legacy: {queued, pending_placement, starting, running}:
                 ensures: phase_job.latest_attempt.pending_status = null
 
     -- Side effect: detect grace transition
-    if r2_state.phase = grace and instance.status = running:
-        if no active jobs on instance:
+    -- legacy: if r2_state.phase = grace and instance.status = running:
+        -- legacy: if no active jobs on instance:
             ensures: instance.status = grace
 
     -- Side effect: detect grace→running (agent resumed)
-    if instance.status = grace and r2_state.phase != grace:
+    -- legacy: if instance.status = grace and r2_state.phase != grace:
         ensures: instance.status = running
         ensures: instance.grace_started_at = null
         ensures: instance.grace_deadline = null
 
-    @guidance
+    -- legacy annotation: @guidance
         -- R2 keys read per instance:
         -- instance/<id>/phase — current execution phase ("verb:jobID")
         -- instance/<id>/heartbeat — JSON with GPU, memory, disk metrics
@@ -938,7 +942,7 @@ rule ParallelR2MarkerFetch {
     -- present-on-error observations are NOT persisted.
     -- Implementation: internal/campaign/sync_state.go SyncInstanceState.
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Fanning out these reads reduces per-instance R2 latency from
         -- ~5× RTT (serial) to ~2× RTT (two waves). The per-instance loop
         -- in ReconcilePass is already unbounded-parallel, so this
@@ -963,9 +967,9 @@ rule ParallelCloudSyncPhases {
     -- A and B run concurrently; ReconcileCampaigns runs after both,
     -- because it consumes instance-level state that A produces.
     ensures: Concurrent(PhaseAReconcileLaunches, PhaseBSyncCloudJobResults)
-    ensures: ReconcileCampaigns runs after both A and B complete
+    -- legacy: ensures: ReconcileCampaigns runs after both A and B complete
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/cloudsync/sync.go SyncState spawns
         -- two goroutines joined by sync.WaitGroup.
         -- Phase B is gated on opts.SyncResults. TUI fast cloud refreshes
@@ -984,7 +988,7 @@ rule SyncActiveCloudAttemptsFromR2 {
     when: JobCompletionSyncRequested()
 
     let candidates =
-        jobs/Jobs.where(j =>
+        jobs/Job.where(j =>
             j.latest_attempt.launch_id != null
             and (
                 -- Instance/agent may still be producing or uploading markers.
@@ -1023,7 +1027,7 @@ rule SyncActiveCloudAttemptsFromR2 {
                 ensures: job.status = failed
                 ensures: job.exit_code = r2_complete.exit_code
 
-    @guidance
+    -- legacy annotation: @guidance
         -- R2 keys:
         --   jobs/<jobID>/runs/<runID>/.started
         --   jobs/<jobID>/runs/<runID>/.complete
@@ -1057,7 +1061,7 @@ rule RepairHistoricalCloudCompletions {
         if r2_complete != null:
             ensures: AuthoritativeR2Completion(job, r2_complete.exit_code)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Broad R2 scans are intentionally excluded from automatic TUI/list/
         -- status refresh. They consume local bandwidth and R2 list requests
         -- proportional to accumulated history. The repair path is the place
@@ -1126,7 +1130,7 @@ rule SyncRecordsCloudCompletion {
             ensures: CloudCompletionOplogRecorded(job, target_status, exit_code)
             ensures: NotifyJobTerminal(job, target_status, exit_code)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation anchors:
         --   internal/db/cloud_job_completion.go RecordCloudJobCompletion
         --     returns ErrCloudCompletionAttemptNotFound /
@@ -1169,7 +1173,7 @@ invariant ProcessedMarkerIsPerAttempt {
             if not R2HasMarker(PairedProcessedKey(complete_key)):
                 SyncLoopEnqueues(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: HasUnprocessedComplete in internal/r2/client.go;
         -- used by repair/broad-scan helpers in internal/syncorch/cloud_results.go and
         -- the deprecated internal/coordinator/vastai_sweep.go. Pairing helper:
@@ -1193,7 +1197,7 @@ rule AgentReportsPhase {
 
     ensures: R2PhaseWritten(instance, phase, job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Written to: instance/<instanceID>/phase
         -- Format: "verb:jobID" (e.g., "setup:123", "running:123")
         -- Or bare verb for non-job phases: "grace", "destroying"
@@ -1211,7 +1215,7 @@ rule AgentPeriodicOutputSync {
 
     ensures: R2OutputsIncrementallyUpdated(job)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Agent periodically uploads changed outputs/artifacts while the job
         -- is running (incremental copy), then performs a final sync at stop.
         -- Keys:
@@ -1227,7 +1231,7 @@ rule AgentReportsHeartbeat {
 
     ensures: R2HeartbeatWritten(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Written to: instance/<instanceID>/heartbeat
         -- JSON with: timestamp, phase, GPU utilization, GPU memory,
         -- GPU temperature, host RSS, host total memory, disk free/total.
@@ -1261,7 +1265,7 @@ rule AgentReportsJobComplete {
 
     ensures: R2JobCompleteWritten(job, exit_code)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Written to: jobs/<jobID>/runs/<runID>/.complete
         -- Contains exit code as plain text.
         -- Written synchronously before agent moves to next job.
@@ -1275,7 +1279,7 @@ rule AgentReportsInstanceComplete {
 
     ensures: R2CompletionManifestWritten(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Written to: campaigns/<instanceID>/.complete
         -- JSON: {CompletedAtUnix, Jobs: [{JobID, ExitCode, UploadStatus, OutputBytes}]}
         -- Written just before agent self-destructs.
@@ -1291,7 +1295,7 @@ rule BatchFetchProviderState {
 
     ensures: ProviderInstancesBatchFetched()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Calls ListAllInstances() once per provider instead of N
         -- individual ShowInstance() calls. Reduces transient errors.
         -- Falls back to individual ShowInstance() if batch fails.
@@ -1307,7 +1311,7 @@ rule RecordProviderTransition {
 
     ensures: ProviderTransitionRecorded(instance, new_provider_status)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Persisted to provider_status_history table.
         -- Used for bootstrap survival analysis and reliability tracking.
 }
@@ -1363,7 +1367,7 @@ rule OrphanedCloudJobsResetConverges {
     -- terminal (non-retryable, e.g. weft_bug).
     ensures: TerminalLaunchCandidatesResolved()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- A repair's write side must change every selected row's membership
         -- in the candidate set. The candidate predicate reads the derived
         -- job_status view, which reports 'orphaned' for a CLOSED latest
@@ -1387,7 +1391,7 @@ rule NormalizePendingPlacementAfterLaunchProgress {
 
     ensures: StalePendingPlacementNormalized(instance)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Scope: latest attempts for jobs on this instance where
         -- pending_status = pending_placement.
         -- Normalize pending_status to queued unless the latest attempt is a
@@ -1408,7 +1412,7 @@ rule AuthoritativeR2Completion {
         ensures: job.exit_code = 0
         ensures: job.latest_attempt.last_synced_status = completed
 
-    @guidance
+    -- legacy annotation: @guidance
         -- R2 completion is the only non-user source that can override
         -- terminal states. The agent on the remote host has direct
         -- knowledge of actual job outcome, making it authoritative.
@@ -1441,7 +1445,7 @@ rule AutoSyncBeforeDisplay {
 
     ensures: CloudSyncRequested()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Uses fast timeouts (2s SSH, 30s per host) to avoid blocking
         -- the display. Falls back gracefully if hosts are unreachable.
         -- Display commands must also fall back gracefully when writable DB
@@ -1471,7 +1475,7 @@ rule ExplicitSync {
     ensures: ReconcilePassTriggered()
     ensures: ExternalExecutorSyncTriggered(all_jobs.where(j => j.backend = skypilot))
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Default mode: SSH host sync + cloud reconcile + external-executor
         -- status refresh for mirrored SkyPilot jobs.
         -- Uses normal timeouts (30s per host).
@@ -1501,7 +1505,7 @@ rule TUIPeriodicSync {
     -- Always reload jobs from DB to pick up changes from any source
     ensures: TUIJobsReloaded()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The hostsync.Worker runs a select loop with multiple tickers:
         --   500ms: process host sync queue
         --   60s:   cloud reconcile (reconcileCloudJobs)
@@ -1866,14 +1870,14 @@ rule CloudSyncLease {
     if lease.acquired:
         -- This process owns the cloud reconcile for the next 180s.
         ensures: ReconcilePassTriggered()
-        ensures: LeaseReleased("sync:cloud:reconcile") after reconcile completes
+        -- legacy: ensures: LeaseReleased("sync:cloud:reconcile") after reconcile completes
     else:
         -- Another process owns the reconcile. Fall back to DB-only
         -- reconciliation (apply local state changes without contacting
         -- cloud providers or R2).
-        ensures: DBOnlyReconcileTriggered()
+        -- legacy: ensures: DBOnlyReconcileTriggered()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Lease table: auto_leases(scope, owner, expires_at, updated_at)
         -- Scope: "sync:cloud:reconcile"
         -- TTL: 180 seconds
@@ -1891,18 +1895,18 @@ rule CloudSyncLease {
 rule HostSyncLease {
     when: SyncHostRequested(host, mode)
 
-    let scope = "sync:host:" ++ mode ++ ":" ++ host
+    -- legacy: let scope = "sync:host:" ++ mode ++ ":" ++ host
     let ttl = HostLeaseTTL(mode)
     let lease = AcquireAutoLease(scope, process_owner, ttl)
 
     if lease.acquired:
         ensures: HostSyncExecuted(host, mode)
-        ensures: LeaseReleased(scope) after sync completes
+        -- legacy: ensures: LeaseReleased(scope) after sync completes
     else:
         -- Another process is syncing this host. Skip.
-        ensures: HostSyncSkipped(host)
+        -- legacy: ensures: HostSyncSkipped(host)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Lease TTLs by mode:
         --   fast (status_only): 30 seconds
         --   full: 15 minutes
@@ -1924,7 +1928,7 @@ rule DBAsSharedBus {
     -- the watcher does not carry row-level payloads.
     ensures: AllProcessesEventuallyReadUpdatedState()
 
-    @guidance
+    -- legacy annotation: @guidance
         -- The DB is the source of truth for all job and instance state.
         -- Multiple processes may read and write concurrently. SQLite's
         -- WAL mode allows concurrent reads with a single writer.
@@ -1993,7 +1997,7 @@ rule OpslogSync {
             ensures: instance.oplog_timeout = true
             ensures: instance.oplog_synced_at = now
 
-    @guidance
+    -- legacy annotation: @guidance
         -- DB columns on launches: oplog_synced_at, oplog_not_found, oplog_timeout
         -- Safety buffer: 10 minutes after ended_at before trusting not-found/timeout
         -- Running/grace instances are always re-checked regardless of flags
@@ -2042,7 +2046,7 @@ invariant StartIntentPendingClearedOnRunning {
         and attempt.pending_status in {queued, pending_placement, starting, running}:
             attempt.pending_at > attempt.start_time
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Regression wb2: R2 .started marker sync wrote raw status=running
         -- while the attempt still carried pending_status='queued'.
         -- Job.EffectiveStatus() (internal/db/db.go) returns pending_status
@@ -2074,10 +2078,10 @@ invariant AutomaticCloudJobSyncIsAttemptScoped {
     -- markers. Bucket-wide R2 archaeology is explicit repair work.
     for sync in RoutineCloudSyncPasses:
         sync.r2_job_marker_reads.subset_of(DBSelectedAttemptMarkerKeys(sync))
-        not exists scan in sync.r2_list_operations:
+        -- legacy: not exists scan in sync.r2_list_operations:
             scan.prefix = "jobs/"
 
-    @guidance
+    -- legacy annotation: @guidance
         -- This protects TUI latency, local bandwidth, and R2 list-request
         -- cost as the artifact bucket grows. Implementation: normal
         -- syncorch.SyncCloudJobResults queries active/latest cloud attempts
@@ -2126,7 +2130,7 @@ invariant RunnerPendingMatchesDBQueued {
             job.status not in {completed, failed, dead, killed, canceled}
             not (job.status = queued and job.has_inventory_host and job.host != host)
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Convergence, not instantaneous equality: a stale entry that
         -- appears between sync passes is expected and acceptable. The
         -- invariant holds in the limit — after each SyncHostRequested
@@ -2154,7 +2158,7 @@ invariant R2RunIDFromDB {
             job.latest_attempt != null
             job.latest_attempt.id > 0
 
-    @guidance
+    -- legacy annotation: @guidance
         -- Implementation: internal/campaign/launch_claim.go
         -- claimJobForLaunch(database, jobID, instanceID) performs:
         --   1. SetJobLaunchID → creates job_attempts row (the run_id)

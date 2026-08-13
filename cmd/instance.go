@@ -879,7 +879,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		client := cloudClientForDBInstance(ci.Provider)
 		useLive := shouldRefreshInstanceLiveState(database, ci, forceLive, noLive)
 		if providerInstID != "" {
-			if useLive {
+			if useLive && client != nil {
 				inst, _ = client.ShowInstance(providerInstID)
 			}
 		}
@@ -1244,6 +1244,9 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 
 	// Get cloud instance info
 	client := cloudClientForDBInstance(ci.Provider)
+	if client == nil {
+		return fmt.Errorf("unsupported cloud provider %q for instance %s", ci.Provider, ids.FormatInstanceID(id))
+	}
 
 	// Wait for instance to be ready
 	fmt.Println("Waiting for instance...")
