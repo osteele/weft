@@ -198,6 +198,20 @@ an `activity` payload:
       "active_instances": 1,
       "autopilot_state": "idle"
     },
+    "runaway_breakers": [
+      {
+		"scope": "campaign 42, project=augur",
+		"campaign_id": 42,
+		"project": "augur",
+		"reason": "repeated_infrastructure_failures_without_progress",
+		"tripped_at": "2026-04-27T08:30:00Z",
+		"chain": 1,
+		"orphaned": 2,
+		"infra_failures": 3,
+		"spend_cents": 125,
+		"window": "24h0m0s"
+      }
+    ],
     "unprocessed": {
       "completed": 1,
       "failed": 0
@@ -218,12 +232,24 @@ an `activity` payload:
 ```
 
 The structured `snapshot`, `delta`, and `status_line` fields are for native
-clients. `unprocessed_jobs` contains the recent unprocessed terminal-job rows
-that correspond to the `unprocessed` counts, so clients can show completed or
-failed job details on first connect without waiting for a transition delta. The
-formatted fields match the compact prompt inputs used by `weft narrate`, so the
-CLI can sit on the same daemon resource without recreating DB queries in the
-command process.
+clients. `runaway_breakers` is omitted when no breaker is active; a non-empty
+collection means autopilot has stopped automatic relaunches in at least one
+scope visible to the subscription. `tripped_at` is the stable timestamp clients
+can use to distinguish a fresh trip from an old one without requiring
+per-second payload updates. `reason` is either
+`repeated_launch_failures_without_progress` or
+`repeated_infrastructure_failures_without_progress`. Project-filtered
+subscriptions include matching project scopes and global (`project=<all>`)
+scopes. `unprocessed_jobs` contains
+the recent unprocessed terminal-job rows that correspond to the `unprocessed`
+counts, so clients can show completed or failed job details on first connect
+without waiting for a transition delta. The formatted fields match the compact
+prompt inputs used by `weft narrate`, so the CLI can sit on the same daemon
+resource without recreating DB queries in the command process.
+
+The daemon refreshes runaway-breaker state at most once every five seconds and
+shares that result across activity subscribers. This bounds the lifecycle-event
+query cost while keeping trip and reset notifications prompt.
 
 ## Compatibility
 

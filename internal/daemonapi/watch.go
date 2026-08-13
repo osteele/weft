@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/ops"
@@ -106,10 +107,27 @@ type ActivityPayload struct {
 	Snapshot          *narrate.Snapshot         `json:"snapshot,omitempty"`
 	Delta             *narrate.Delta            `json:"delta,omitempty"`
 	StatusLine        *narrate.StatusLine       `json:"status_line,omitempty"`
+	RunawayBreakers   []RunawayBreakerView      `json:"runaway_breakers,omitempty"`
 	Unprocessed       narrate.UnprocessedCounts `json:"unprocessed,omitempty"`
 	UnprocessedJobs   []narrate.JobView         `json:"unprocessed_jobs,omitempty"`
 	FormattedSnapshot string                    `json:"formatted_snapshot,omitempty"`
 	FormattedDelta    string                    `json:"formatted_delta,omitempty"`
+}
+
+// RunawayBreakerView is the active give-up state for one autopilot scope.
+// A non-empty ActivityPayload.RunawayBreakers means automatic relaunches have
+// stopped in at least one scope visible to the subscription.
+type RunawayBreakerView struct {
+	Scope         string `json:"scope"`
+	CampaignID    int64  `json:"campaign_id,omitempty"`
+	Project       string `json:"project"`
+	Reason        string `json:"reason"`
+	TrippedAt     string `json:"tripped_at"`
+	Chain         int    `json:"chain"`
+	Orphaned      int    `json:"orphaned"`
+	InfraFailures int    `json:"infra_failures"`
+	SpendCents    int    `json:"spend_cents"`
+	Window        string `json:"window"`
 }
 
 type Server struct {
@@ -122,6 +140,30 @@ type Server struct {
 	writer     *WriteExecutor
 
 	budgetCentsPerHour int
+	runawayBreakers    runawayBreakerCache
+}
+
+const runawayBreakerRefreshInterval = 5 * time.Second
+
+type runawayBreakerCache struct {
+	mu          sync.Mutex
+	refreshedAt time.Time
+	infos       []campaign.RunawayBreakerInfo
+}
+
+func (c *runawayBreakerCache) load(database *sql.DB, now time.Time) ([]campaign.RunawayBreakerInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.refreshedAt.IsZero() && now.Before(c.refreshedAt.Add(runawayBreakerRefreshInterval)) {
+		return c.infos, nil
+	}
+	infos, err := campaign.LookupActiveRunawayBreakers(database)
+	if err != nil {
+		return nil, err
+	}
+	c.refreshedAt = now
+	c.infos = infos
+	return c.infos, nil
 }
 
 type DaemonInfo struct {
@@ -252,7 +294,7 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	case RequestMutate:
 		s.mutateRequest(reqCtx, database, encoder, req)
 	case RequestSubscribe:
-		subscribe(ctx, database, encoder, req, s.budgetCentsPerHour)
+		subscribe(ctx, database, encoder, req, s.budgetCentsPerHour, &s.runawayBreakers)
 	case RequestWatchJobs:
 		watchJobs(ctx, database, encoder, req)
 	default:
@@ -315,7 +357,7 @@ func (s *Server) submitJob(ctx context.Context, database *sql.DB, encoder *json.
 	})
 }
 
-func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request, budgetCentsPerHour int) {
+func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
 	sub := req.Subscribe
 	if sub == nil {
 		sub = &SubscriptionRequest{
@@ -350,7 +392,7 @@ func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, 
 	case ResourceProjectWatch:
 		subscribeProjectWatch(parent, database, encoder, id, *sub)
 	case ResourceActivity:
-		subscribeActivity(parent, database, encoder, id, *sub, budgetCentsPerHour)
+		subscribeActivity(parent, database, encoder, id, *sub, budgetCentsPerHour, runawayBreakers)
 	}
 }
 
@@ -403,8 +445,8 @@ func subscribeProjectWatch(parent context.Context, database *sql.DB, encoder *js
 	})
 }
 
-func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int) {
-	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour)
+func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
+	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour, runawayBreakers)
 }
 
 type subscriptionStep func(now time.Time) (*watchevents.SnapshotEvent, bool, error)
@@ -492,7 +534,7 @@ func projectWatchJobs(database *sql.DB, project string, recentWindow time.Durati
 	return watchevents.DedupeJobsByID(activeJobs, recentJobs), len(activeJobs) > 0, nil
 }
 
-func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int) {
+func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
 	ctx := parent
 	cancel := func() {}
 	if sub.TimeoutSeconds > 0 {
@@ -511,7 +553,7 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	var prev *narrate.Snapshot
 	lastKey := ""
 	for {
-		payload, active, err := buildActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour)
+		payload, active, err := buildCachedActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour, runawayBreakers)
 		if err != nil {
 			_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, SubscriptionID: id, Error: err.Error()})
 			return
@@ -546,7 +588,26 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	}
 }
 
+func buildCachedActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, cache *runawayBreakerCache) (*ActivityPayload, bool, error) {
+	if cache == nil {
+		return buildActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour)
+	}
+	breakers, err := cache.load(database, time.Now())
+	if err != nil {
+		return nil, false, fmt.Errorf("load active runaway breakers: %w", err)
+	}
+	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers)
+}
+
 func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int) (*ActivityPayload, bool, error) {
+	breakers, err := campaign.LookupActiveRunawayBreakers(database)
+	if err != nil {
+		return nil, false, fmt.Errorf("load active runaway breakers: %w", err)
+	}
+	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers)
+}
+
+func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, breakers []campaign.RunawayBreakerInfo) (*ActivityPayload, bool, error) {
 	snap, err := narrate.BuildSnapshot(database, narrate.SnapshotOptions{Project: sub.Project})
 	if err != nil {
 		return nil, false, err
@@ -555,6 +616,7 @@ func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narra
 		Snapshot:          snap,
 		FormattedSnapshot: narrate.FormatSnapshot(snap),
 	}
+	payload.RunawayBreakers = runawayBreakerViews(breakers, sub.Project)
 	if sub.IncludeDelta {
 		delta := narrate.DiffSnapshots(prev, snap)
 		if err := delta.ResolveRemovedJobs(database); err != nil {
@@ -587,6 +649,28 @@ func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narra
 	return payload, active, nil
 }
 
+func runawayBreakerViews(infos []campaign.RunawayBreakerInfo, project string) []RunawayBreakerView {
+	var views []RunawayBreakerView
+	for _, info := range infos {
+		if project != "" && info.Project != "<all>" && info.Project != project {
+			continue
+		}
+		views = append(views, RunawayBreakerView{
+			Scope:         info.ScopeLabel(),
+			CampaignID:    info.CampaignID,
+			Project:       info.Project,
+			Reason:        info.Reason,
+			TrippedAt:     info.TrippedAt.Format(time.RFC3339),
+			Chain:         info.Chain,
+			Orphaned:      info.Orphaned,
+			InfraFailures: info.InfraFails,
+			SpendCents:    info.SpendCents,
+			Window:        info.Window.String(),
+		})
+	}
+	return views
+}
+
 func activityPayloadHasDelta(payload *ActivityPayload) bool {
 	return payload != nil && payload.Delta != nil && !payload.Delta.Empty()
 }
@@ -600,11 +684,13 @@ func activityPayloadKey(payload *ActivityPayload) string {
 	data, err := json.Marshal(struct {
 		Snapshot    activitySnapshotKey       `json:"snapshot,omitempty"`
 		StatusLine  activityStatusLineKey     `json:"status_line,omitempty"`
+		Breakers    []RunawayBreakerView      `json:"runaway_breakers,omitempty"`
 		Unprocessed narrate.UnprocessedCounts `json:"unprocessed,omitempty"`
 		Rows        []narrate.JobView         `json:"unprocessed_jobs,omitempty"`
 	}{
 		Snapshot:    snapshot,
 		StatusLine:  statusLine,
+		Breakers:    payload.RunawayBreakers,
 		Unprocessed: payload.Unprocessed,
 		Rows:        payload.UnprocessedJobs,
 	})

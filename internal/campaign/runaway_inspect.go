@@ -25,6 +25,7 @@ import (
 type RunawayBreakerInfo struct {
 	CampaignID int64         // 0 == "no campaign linkage" (global scope)
 	Project    string        // "<all>" when the trip wasn't project-scoped
+	Reason     string        // stable machine-readable reason for the trip
 	TrippedAt  time.Time     // when the trip event was recorded
 	Chain      int           // longest trailing-orphaned chain at trip time
 	Orphaned   int           // total orphaned attempts in window at trip time
@@ -33,6 +34,11 @@ type RunawayBreakerInfo struct {
 	Window     time.Duration // policy window used at trip time
 	RawDetail  string        // verbatim lifecycle_events.detail (for debugging)
 }
+
+const (
+	RunawayBreakerReasonLaunchFailures = "repeated_launch_failures_without_progress"
+	RunawayBreakerReasonInfraFailures  = "repeated_infrastructure_failures_without_progress"
+)
 
 // MetricsLine renders the structured fields the way they appear in the
 // stored detail string, e.g. "chain=2 orphaned=8 spend=$0.41 window=24h".
@@ -70,19 +76,23 @@ func (i RunawayBreakerInfo) ScopeLabel() string {
 // (or never tripped) are omitted.
 //
 // "Scope" is the (campaign_id, project) tuple as recorded in the
-// lifecycle_events rows. The query uses one pass over recent runaway
-// events and reconstructs the matching map in Go because the
-// project portion is encoded in the detail string.
+// lifecycle_events rows. The lookup reads bounded sets of trip and resume
+// events and reconstructs the matching map in Go because the project portion
+// is encoded in the detail string.
 func LookupActiveRunawayBreakers(database *sql.DB) ([]RunawayBreakerInfo, error) {
 	if database == nil {
 		return nil, nil
 	}
-	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
-		KindPrefix: "relaunch.runaway_",
-		Limit:      1000,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list runaway events: %w", err)
+	var events []db.LifecycleEvent
+	for _, kind := range []string{db.EventRelaunchRunawayTripped, db.EventRelaunchRunawayResumed} {
+		rows, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+			Kind:  kind,
+			Limit: 1000,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list runaway events: %w", err)
+		}
+		events = append(events, rows...)
 	}
 
 	type scopeKey struct {
@@ -150,8 +160,12 @@ func LookupActiveRunawayBreakers(database *sql.DB) ([]RunawayBreakerInfo, error)
 		info := RunawayBreakerInfo{
 			CampaignID: k.CampaignID,
 			Project:    k.Project,
+			Reason:     RunawayBreakerReasonLaunchFailures,
 			TrippedAt:  time.Unix(s.trip.OccurredAt, 0),
 			RawDetail:  s.trip.Detail,
+		}
+		if strings.Contains(s.trip.Detail, "infra runaway:") {
+			info.Reason = RunawayBreakerReasonInfraFailures
 		}
 		parseRunawayMetrics(s.trip.Detail, &info)
 		out = append(out, info)

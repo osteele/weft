@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/ops"
@@ -245,6 +246,127 @@ func TestActivityPayloadKeyIgnoresTimestamps(t *testing.T) {
 	}
 	if activityPayloadKey(first) != activityPayloadKey(second) {
 		t.Fatal("activity payload key changed for timestamp-only differences")
+	}
+	second.RunawayBreakers = []RunawayBreakerView{{
+		Scope:     "global (project=<all>)",
+		Project:   "<all>",
+		Reason:    campaign.RunawayBreakerReasonLaunchFailures,
+		TrippedAt: time.Unix(150, 0).UTC().Format(time.RFC3339),
+	}}
+	if activityPayloadKey(first) == activityPayloadKey(second) {
+		t.Fatal("activity payload key did not change for runaway-breaker state")
+	}
+}
+
+func TestBuildActivityPayloadPublishesActiveRunawayBreakers(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	payload, _, err := buildActivityPayload(database, SubscriptionRequest{Resource: ResourceActivity}, nil, false, 0)
+	if err != nil {
+		t.Fatalf("build activity payload without breaker: %v", err)
+	}
+	if len(payload.RunawayBreakers) != 0 {
+		t.Fatalf("runaway breakers = %+v, want none", payload.RunawayBreakers)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal activity payload: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshal activity payload: %v", err)
+	}
+	if _, ok := fields["runaway_breakers"]; ok {
+		t.Fatalf("empty runaway_breakers field was not omitted: %s", raw)
+	}
+
+	trippedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: trippedAt.Unix(),
+		EventKind:  db.EventRelaunchRunawayTripped,
+		CampaignID: 42,
+		Detail:     "project=augur; infra runaway: infra_failures=3 limit=3 chain=1 orphaned=2 spend=$1.25 window=24h0m0s",
+	}); err != nil {
+		t.Fatalf("insert runaway trip: %v", err)
+	}
+
+	payload, _, err = buildActivityPayload(database, SubscriptionRequest{
+		Resource: ResourceActivity,
+		Project:  "augur",
+	}, nil, false, 0)
+	if err != nil {
+		t.Fatalf("build activity payload with breaker: %v", err)
+	}
+	if len(payload.RunawayBreakers) != 1 {
+		t.Fatalf("runaway breakers = %+v, want one", payload.RunawayBreakers)
+	}
+	got := payload.RunawayBreakers[0]
+	if got.Scope != "campaign 42, project=augur" || got.CampaignID != 42 || got.Project != "augur" {
+		t.Fatalf("runaway breaker scope = %+v", got)
+	}
+	if got.Reason != campaign.RunawayBreakerReasonInfraFailures {
+		t.Fatalf("runaway breaker reason = %q, want %q", got.Reason, campaign.RunawayBreakerReasonInfraFailures)
+	}
+	if got.TrippedAt != trippedAt.Format(time.RFC3339) {
+		t.Fatalf("runaway breaker tripped_at = %q, want %q", got.TrippedAt, trippedAt.Format(time.RFC3339))
+	}
+	if got.Chain != 1 || got.Orphaned != 2 || got.InfraFailures != 3 || got.SpendCents != 125 || got.Window != "24h0m0s" {
+		t.Fatalf("runaway breaker metrics = %+v", got)
+	}
+
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: trippedAt.Add(time.Hour).Unix(),
+		EventKind:  db.EventRelaunchRunawayResumed,
+		CampaignID: 42,
+		Detail:     "project=augur; test reset",
+	}); err != nil {
+		t.Fatalf("insert runaway reset: %v", err)
+	}
+	payload, _, err = buildActivityPayload(database, SubscriptionRequest{
+		Resource: ResourceActivity,
+		Project:  "augur",
+	}, nil, false, 0)
+	if err != nil {
+		t.Fatalf("build activity payload after reset: %v", err)
+	}
+	if len(payload.RunawayBreakers) != 0 {
+		t.Fatalf("runaway breakers after reset = %+v, want none", payload.RunawayBreakers)
+	}
+}
+
+func TestRunawayBreakerCacheBoundsRefreshes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	var cache runawayBreakerCache
+	now := time.Now()
+
+	infos, err := cache.load(database, now)
+	if err != nil {
+		t.Fatalf("initial cache load: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("initial runaway breakers = %+v, want none", infos)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		OccurredAt: now.Unix(),
+		EventKind:  db.EventRelaunchRunawayTripped,
+		Detail:     "project=<all>; no-progress runaway: chain=3 orphaned=3 spend=$0.00 window=24h0m0s",
+	}); err != nil {
+		t.Fatalf("insert runaway trip: %v", err)
+	}
+
+	infos, err = cache.load(database, now.Add(runawayBreakerRefreshInterval-time.Millisecond))
+	if err != nil {
+		t.Fatalf("cached load: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Fatalf("cache refreshed before interval: %+v", infos)
+	}
+	infos, err = cache.load(database, now.Add(runawayBreakerRefreshInterval))
+	if err != nil {
+		t.Fatalf("refreshed load: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("runaway breakers after refresh = %+v, want one", infos)
 	}
 }
 
