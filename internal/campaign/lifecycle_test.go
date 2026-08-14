@@ -182,6 +182,28 @@ func TestLaunchInstanceRejectsOfferBelowGroupGPUCount(t *testing.T) {
 	}
 }
 
+func TestLaunchInstanceRejectsExternalJobBeforeCreatingRental(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	job := &db.Job{ID: 101, Backend: db.BackendSkyPilot, Status: db.StatusQueued, Command: "python train.py"}
+	_, err := LaunchInstance(
+		&cloud.MockClient{ProviderVal: cloud.ProviderVastai}, nil, database, nil,
+		InstanceGroup{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{job}},
+		cloud.Offer{ProviderID: "offer", Provider: cloud.ProviderVastai, GPUName: "A100", GPUMemGB: 80, NumGPUs: 1},
+		LaunchOpts{}, cloud.R2Config{}, cloud.CreateOpts{}, R2Assets{}, nil, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "managed by SkyPilot") {
+		t.Fatalf("LaunchInstance external-job error = %v", err)
+	}
+	launches, listErr := db.ListLaunches(database)
+	if listErr != nil {
+		t.Fatalf("list launches: %v", listErr)
+	}
+	if len(launches) != 0 {
+		t.Fatalf("external job created %d launch rows", len(launches))
+	}
+}
+
 func TestLaunchInstanceNilR2Client(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

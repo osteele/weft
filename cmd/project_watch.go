@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -92,7 +91,7 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 }
 
 func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, opts terminal.WatchPlainOptions) error {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
 	defer cancel()
 
 	stdout := opts.Stdout
@@ -108,7 +107,7 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 	var lastWarnings []string
 
 	step := func(now time.Time) (terminal.WatchPlainStep, error) {
-		warnings := terminal.SyncProjectWatchData(database, projectWatchSync, projectWatchNoSync)
+		warnings := terminal.SyncProjectWatchData(ctx, database, projectWatchSync, projectWatchNoSync)
 		if !slices.Equal(warnings, lastWarnings) {
 			for _, warning := range warnings {
 				fmt.Fprintln(stderr, warning)

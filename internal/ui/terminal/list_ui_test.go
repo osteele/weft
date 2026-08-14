@@ -2556,6 +2556,28 @@ func TestListTUIGroupedControlsShowMoveForQueuedSelection(t *testing.T) {
 	}
 }
 
+func TestListTUIGroupedMoveAndLaunchRejectExternalExecutorJob(t *testing.T) {
+	m := listTUIModel{
+		groupedByStatus: true,
+		width:           100,
+		height:          20,
+		jobs: []*db.Job{{
+			ID: 202, Status: db.StatusQueued, Backend: db.BackendSkyPilot, Description: "external",
+		}},
+	}
+	m.rebuildGroupedRows()
+	next, cmd := m.beginGroupedMove()
+	got := next.(listTUIModel)
+	if cmd != nil || got.movePicker.active || !strings.Contains(got.statusMessage, "externally managed") {
+		t.Fatalf("external move result: cmd=%v active=%t message=%q", cmd, got.movePicker.active, got.statusMessage)
+	}
+	next, cmd = m.beginSelectedLaunchNew()
+	got = next.(listTUIModel)
+	if cmd != nil || !strings.Contains(got.statusMessage, "externally managed") {
+		t.Fatalf("external launch result: cmd=%v message=%q", cmd, got.statusMessage)
+	}
+}
+
 func TestListTUIGroupedKeyNLaunchesSelectedQueuedJob(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,

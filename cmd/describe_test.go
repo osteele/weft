@@ -101,6 +101,34 @@ func TestRunDescribeUpdatesDraftLocally(t *testing.T) {
 	}
 }
 
+func TestRunDescribeRejectsExternalExecutionFieldMutation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "PENDING", NormalizedStatus: db.StatusQueued, Command: "echo original",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	resetDescribeState()
+	t.Cleanup(resetDescribeState)
+	cmd := newDescribeTestCommand()
+	if err := cmd.Flags().Set("command", "echo changed"); err != nil {
+		t.Fatalf("set command: %v", err)
+	}
+	err = runDescribe(cmd, []string{fmt.Sprintf("%d", binding.JobID)})
+	if err == nil || !strings.Contains(err.Error(), "SkyPilot execution fields") {
+		t.Fatalf("runDescribe external error = %v", err)
+	}
+	job, err := db.GetJobByID(database, binding.JobID)
+	if err != nil {
+		t.Fatalf("reload job: %v", err)
+	}
+	if job.Command != "echo original" {
+		t.Fatalf("external command mutated to %q", job.Command)
+	}
+}
+
 func resetDescribeState() {
 	describeMessage = ""
 	describeProject = ""

@@ -205,9 +205,10 @@ CREATE TABLE IF NOT EXISTS external_job_bindings (
 	dashboard_url TEXT,
 	created_at INTEGER NOT NULL,
 	last_observed_at INTEGER,
+	cancel_requested_at INTEGER,
 	UNIQUE(executor, external_job_id, external_task_id)
 );
-CREATE INDEX IF NOT EXISTS idx_external_job_bindings_job ON external_job_bindings(job_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_external_job_bindings_job ON external_job_bindings(job_id);
 CREATE INDEX IF NOT EXISTS idx_external_job_bindings_executor ON external_job_bindings(executor);
 CREATE TABLE IF NOT EXISTS host_info_cache (
 		name TEXT PRIMARY KEY,

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -168,7 +169,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Cleanup and single-job modes need fully-synced state; run the sync
 	// synchronously for them.
 	if listCleanup > 0 || listShow > 0 {
-		printWarnings(syncListData(database))
+		printWarnings(syncListDataContext(cmd.Context(), database))
 		if listCleanup > 0 {
 			deleted, err := db.CleanupOld(database, listCleanup)
 			if err != nil {
@@ -187,10 +188,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	if useTUI {
 		return runListTUI(cmd, database, args)
 	}
-	return runListPlain(database, args)
+	return runListPlain(cmd.Context(), database, args)
 }
 
-func runListPlain(database *sql.DB, args []string) error {
+func runListPlain(ctx context.Context, database *sql.DB, args []string) error {
 	if !plainListShouldSync() {
 		return renderListPlain(database, args)
 	}
@@ -199,7 +200,7 @@ func runListPlain(database *sql.DB, args []string) error {
 	// soft deadline elapses, whichever comes first. The process always
 	// blocks on the sync before returning so in-flight DB writes aren't
 	// abandoned mid-transaction.
-	syncCh := startListSyncAsync(database)
+	syncCh := startListSyncAsync(ctx, database)
 	const listSyncSoftDeadline = 1 * time.Second
 	var (
 		syncWarnings []string
@@ -314,13 +315,13 @@ func dropCloudTimeoutWarnings(warnings []string) []string {
 	return out
 }
 
-func startListSyncAsync(database *sql.DB) <-chan []string {
+func startListSyncAsync(ctx context.Context, database *sql.DB) <-chan []string {
 	ch := make(chan []string, 1)
-	go func() { ch <- syncListDataFunc(database) }()
+	go func() { ch <- syncListDataFunc(ctx, database) }()
 	return ch
 }
 
-var syncListDataFunc = syncListData
+var syncListDataFunc = syncListDataContext
 
 func printWarnings(warnings []string) {
 	writeWarnings(os.Stderr, warnings)
@@ -338,6 +339,10 @@ func writeWarnings(w io.Writer, warnings []string) {
 }
 
 func syncListData(database *sql.DB) []string {
+	return syncListDataContext(context.Background(), database)
+}
+
+func syncListDataContext(ctx context.Context, database *sql.DB) []string {
 	if listNoSync {
 		return nil
 	}
@@ -353,6 +358,7 @@ func syncListData(database *sql.DB) []string {
 				warnings = append(warnings, fmt.Sprintf("Warning: sync failed: %v", err))
 			}
 		}
+		warnings = append(warnings, syncSkyForList(ctx, database)...)
 		return warnings
 	}
 
@@ -368,12 +374,23 @@ func syncListData(database *sql.DB) []string {
 		CloudTimeout: FastCloudSyncTimeout,
 	})
 	warnings = append(warnings, result.Warnings...)
+	warnings = append(warnings, syncSkyForList(ctx, database)...)
 	if !result.AllCompleted {
 		if note := buildStaleDataNote(database, result.HostsUnreachable, result.HostsSlow); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
 	return warnings
+}
+
+func syncSkyForList(parent context.Context, database *sql.DB) []string {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	_, _, err := syncSkyBindingsAmbient(ctx, database, "")
+	if err != nil {
+		return []string{fmt.Sprintf("Warning: SkyPilot sync skipped: %v", err)}
+	}
+	return nil
 }
 
 // defaultListMaxAgeDays is the recency window a bare `weft job list` applies:
@@ -850,9 +867,30 @@ func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nex
 		return
 	}
 	binding, err := db.GetExternalJobBindingByJobID(database, job.ID)
-	if err != nil || binding == nil {
+	if err != nil {
 		fmt.Printf("%sSkyPilot (binding unavailable)\n", firstPrefix)
 		return
+	}
+	for i, line := range externalBindingSummaryLines(job, binding, time.Now()) {
+		prefix := nextPrefix
+		if i == 0 {
+			prefix = firstPrefix
+		}
+		fmt.Printf("%s%s\n", prefix, line)
+	}
+}
+
+const externalBindingStaleAfter = 10 * time.Minute
+
+func externalBindingSummaryLines(job *db.Job, binding *db.ExternalJobBinding, now time.Time) []string {
+	if binding == nil {
+		if db.IsExternalSubmissionUnconfirmed(job, nil, now) {
+			return []string{
+				"SkyPilot submission unconfirmed; external work may still be running or billing",
+				"Recover: weft sky import --job " + ids.FormatJobID(job.ID) + " <sky-job-id>",
+			}
+		}
+		return []string{"SkyPilot (binding unavailable)"}
 	}
 	parts := []string{"SkyPilot"}
 	if binding.ExternalJobID != "" {
@@ -867,9 +905,12 @@ func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nex
 	if binding.RawStatus != "" {
 		parts = append(parts, "raw "+binding.RawStatus)
 	}
-	fmt.Printf("%s%s\n", firstPrefix, strings.Join(parts, " · "))
+	lines := []string{strings.Join(parts, " · ")}
+	if binding.CancelRequestedAt != nil {
+		lines = append(lines, "SkyPilot cancel requested; awaiting terminal confirmation")
+	}
 	if binding.RawStatusMessage != "" {
-		fmt.Printf("%s%s\n", nextPrefix, binding.RawStatusMessage)
+		lines = append(lines, binding.RawStatusMessage)
 	}
 	// The executor's message and weft's own observation failure are separate
 	// channels: the status above is only as good as its last observation, and
@@ -878,13 +919,18 @@ func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nex
 		age := ""
 		if binding.LastObservedAt != nil {
 			age = fmt.Sprintf(" (status last confirmed %s ago)",
-				db.FormatDuration(time.Now().Unix()-*binding.LastObservedAt))
+				db.FormatDuration(now.Unix()-*binding.LastObservedAt))
 		}
-		fmt.Printf("%sweft could not refresh this status%s: %s\n", nextPrefix, age, binding.SyncWarning)
+		lines = append(lines, fmt.Sprintf("weft could not refresh this status%s: %s", age, binding.SyncWarning))
+	} else if binding.LastObservedAt == nil {
+		lines = append(lines, "weft has never confirmed this status")
+	} else if age := now.Sub(time.Unix(*binding.LastObservedAt, 0)); age > externalBindingStaleAfter {
+		lines = append(lines, fmt.Sprintf("weft status observation is stale (last confirmed %s ago)", db.FormatDuration(int64(age.Seconds()))))
 	}
 	if binding.DashboardURL != "" {
-		fmt.Printf("%s%s\n", nextPrefix, binding.DashboardURL)
+		lines = append(lines, binding.DashboardURL)
 	}
+	return lines
 }
 
 func printJobMoveSummary(database *sql.DB, job *db.Job) {

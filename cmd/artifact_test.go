@@ -66,6 +66,24 @@ func TestResolveArtifactOutputPath(t *testing.T) {
 	}
 }
 
+func TestArtifactAddRejectsExternalJobBeforeRemoteAccess(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "RUNNING", NormalizedStatus: db.StatusRunning, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close setup database: %v", err)
+	}
+	err = runArtifactAdd(&cobra.Command{}, []string{ids.FormatJobID(binding.JobID), "output/model.pt"})
+	if err == nil || !strings.Contains(err.Error(), "managed by SkyPilot") {
+		t.Fatalf("artifact add error = %v, want external-backend refusal", err)
+	}
+}
+
 func TestResolveArtifactOutputPathForAllPreservesRelativePath(t *testing.T) {
 	dest, err := resolveArtifactOutputPathForAll("output/nested/result.json", "", 1941, false)
 	if err != nil {
@@ -2305,5 +2323,53 @@ func TestSyncCloudJobOutputsNotConfiguredSentinel(t *testing.T) {
 	job := syncJobOutputsTestJob(t, database, t.TempDir(), 0)
 	if _, err := syncCloudJobOutputs(database, job); !errors.Is(err, errR2NotConfigured) {
 		t.Fatalf("err = %v, want errR2NotConfigured", err)
+	}
+}
+
+func TestArtifactSyncRejectsExternalJobsWithoutCollection(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "RUNNING", NormalizedStatus: db.StatusRunning, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	job, err := db.GetJobByID(database, binding.JobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	localCalls := 0
+	outstandingCalls := 0
+	previousLocal := syncLocalJobArtifacts
+	previousOutstanding := syncOutstandingJobArtifacts
+	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
+		localCalls++
+		return artifacts.SyncResult{}, nil
+	}
+	syncOutstandingJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
+		outstandingCalls++
+		return artifacts.SyncResult{}, nil
+	}
+	t.Cleanup(func() {
+		syncLocalJobArtifacts = previousLocal
+		syncOutstandingJobArtifacts = previousOutstanding
+	})
+	if err := syncArtifactsForJob(database, job, nil, time.Second); err == nil || !strings.Contains(err.Error(), "managed by SkyPilot") {
+		t.Fatalf("syncArtifactsForJob error = %v, want external refusal", err)
+	}
+	if _, err := resolveJobArtifacts(database, nil, job); err == nil || !strings.Contains(err.Error(), "managed by SkyPilot") {
+		t.Fatalf("resolveJobArtifacts error = %v, want external refusal", err)
+	}
+	if err := deliverArtifactToken(&cobra.Command{}, database, job.ID, job, "output/result.json", false, false); err == nil || !strings.Contains(err.Error(), "managed by SkyPilot") {
+		t.Fatalf("deliverArtifactToken error = %v, want external refusal", err)
+	}
+	cmd := &cobra.Command{}
+	cmd.SetOut(io.Discard)
+	if err := runArtifactSyncOutstanding(cmd, database); err != nil {
+		t.Fatalf("runArtifactSyncOutstanding: %v", err)
+	}
+	if localCalls != 0 || outstandingCalls != 0 {
+		t.Fatalf("collection calls = local %d, outstanding %d; want none", localCalls, outstandingCalls)
 	}
 }

@@ -16,9 +16,10 @@ import (
 
 // Messages
 type jobsRefreshedMsg struct {
-	jobs            []*db.Job
-	jobDependencies map[int64]string // jobID -> dep_spec (e.g., "930" or "930+")
-	err             error
+	jobs             []*db.Job
+	jobDependencies  map[int64]string // jobID -> dep_spec (e.g., "930" or "930+")
+	externalBindings map[int64]*db.ExternalJobBinding
+	err              error
 }
 
 type dbWatcherReadyMsg struct {

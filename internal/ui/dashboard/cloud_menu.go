@@ -131,6 +131,9 @@ func (m Model) renderCloudMenu(background string) string {
 
 // openCloudMenu opens the rental menu for the selected job.
 func (m *Model) openCloudMenu(job *db.Job) tea.Cmd {
+	if job != nil && job.Backend == db.BackendSkyPilot {
+		return m.setFlash("SkyPilot jobs cannot be launched on a Weft rental", true)
+	}
 	if job != nil && job.HasTag(db.TagInventory) {
 		return m.setFlash("Inventory-only jobs cannot launch on rental GPUs", true)
 	}
@@ -230,6 +233,12 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 // and tracks it through the campaign system.
 func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) tea.Cmd {
 	return func() tea.Msg {
+		if job == nil {
+			return cloudJobLaunchedMsg{err: fmt.Errorf("no job selected")}
+		}
+		if job.Backend == db.BackendSkyPilot {
+			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot jobs cannot be launched on a Weft rental")}
+		}
 		if offering.Offer == nil {
 			return cloudJobLaunchedMsg{
 				jobID: job.ID,

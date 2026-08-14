@@ -22,6 +22,9 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 	if msg.jobDependencies != nil {
 		m.jobDependencies = msg.jobDependencies
 	}
+	if msg.externalBindings != nil {
+		m.externalBindings = msg.externalBindings
+	}
 	m.applyJobFilter()
 
 	runningJobIDs := make(map[int64]bool)
@@ -386,13 +389,8 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 			m.logContent = ""
 			m.logStale = false
 		}
-		if m.monitor != nil {
-			m.monitor.WatchJobLog(job)
-			if job.EffectiveStatus() == db.StatusRunning {
-				m.monitor.WatchJobStats(job)
-			}
-		} else {
-			cmds = append(cmds, m.fetchSelectedJobLog())
+		if cmd := m.startSelectedJobLog(); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		if len(cmds) > 0 {
 			return tea.Batch(cmds...)

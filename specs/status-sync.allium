@@ -513,15 +513,20 @@ rule SyncExternalExecutorJob {
         --
         -- Status normalization is intentionally coarse and bucket-oriented:
         --   pending/submitted/starting/provisioning/recovering -> queued
-        --   running                                           -> running
+        --   running/winding_down                              -> running
         --   succeeded/completed                               -> completed
-        --   failed/cancelled/canceled                         -> failed/canceled
+        --   failed                                            -> failed
+        --   cancelling/canceling                              -> running
+        --   cancelled/canceled                               -> canceled
         --   stopped/killed                                    -> killed
         -- Unknown non-terminal states remain queued with raw_status visible
         -- in `weft job info`; unknown terminal/error states become failed.
         --
         -- Sync is idempotent on ExternalJobBinding. It may be invoked by
         -- explicit `weft sky sync`, normal `weft sync`, or TUI/watch refresh.
+        -- Once a positive terminal observation lands, a delayed nonterminal
+        -- snapshot is ignored atomically; it cannot reopen the job, clear its
+        -- end time, or make the older snapshot look newly observed.
         -- It must not create or mutate CloudInstance/Launch rows, must not
         -- consume R2 `.complete` markers, and must not mark the job processed.
         -- Processed/unprocessed remains controlled by the local `processed`
@@ -539,9 +544,24 @@ rule ExternalExecutorCancel {
 
     -- legacy annotation: @guidance
         -- Cancel is a passthrough to SkyPilot (`sky cancel` / API equivalent)
-        -- plus later status mirroring. The local status may enter a pending
-        -- user-action state while the external request is in flight, but Weft
-        -- must not try to kill an SSH process, terminate a Weft Launch, or
+        -- plus later status mirroring. SkyPilot cancellation is managed-job
+        -- scoped, so Weft first requires a fresh positive queue observation
+        -- proving that the selected binding is the sole visible task under
+        -- that job ID; sibling or unknown membership fails closed. Weft sends
+        -- the external request, then transactionally records pending intent on
+        -- ExternalJobBinding only while the latest attempt remains nonterminal.
+        -- This intent is secondary display state and must not drive Job.status
+        -- terminal. A positive terminal observation atomically clears it and
+        -- owns the mirrored outcome,
+        -- including success or failure that races with cancellation. A
+        -- failed call records no intent. A process crash before the RPC cannot
+        -- leave a false local terminal state, while a crash after a successful
+        -- RPC is recovered by later positive status mirroring. The conditional
+        -- post-RPC write cannot recreate an intent after terminal observation.
+        -- All CLI, grouped-TUI, and dashboard cancellation entry points use
+        -- this shared adapter path. Generic local kill/draft/pause/resume,
+        -- retry/requeue, move/unplace, and launch-new controls fail closed.
+        -- Weft must not try to kill an SSH process, terminate a Weft Launch, or
         -- clean up a provider instance for an external-executor job.
 }
 

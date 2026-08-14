@@ -107,6 +107,40 @@ func TestEnsureDispatchAfterRestart(t *testing.T) {
 	})
 }
 
+func TestRestartJobRejectsSkyPilotWithoutMutation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42", ExternalTaskID: "task-a",
+		RawStatus: "SUCCEEDED", NormalizedStatus: db.StatusCompleted, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	var attemptsBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsBefore); err != nil {
+		t.Fatalf("count attempts before: %v", err)
+	}
+	err = restartJob(database, binding.JobID, restartOverrides{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be restarted") {
+		t.Fatalf("restartJob error = %v, want external-job refusal", err)
+	}
+	job, err := db.GetJobByID(database, binding.JobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	var attemptsAfter int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsAfter); err != nil {
+		t.Fatalf("count attempts after: %v", err)
+	}
+	afterBinding, err := db.GetExternalJobBindingByJobID(database, binding.JobID)
+	if err != nil {
+		t.Fatalf("get binding: %v", err)
+	}
+	if job.Status != db.StatusCompleted || attemptsAfter != attemptsBefore || afterBinding == nil || afterBinding.ExternalTaskID != "task-a" {
+		t.Fatalf("restart mutated external job: status=%q attempts=%d/%d binding=%+v", job.Status, attemptsAfter, attemptsBefore, afterBinding)
+	}
+}
+
 func TestRestartCommandAliases(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"retry"})
 	if err != nil {

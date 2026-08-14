@@ -69,12 +69,15 @@ func (m Model) requestHostSyncPriority(hostName string) {
 }
 
 func (m *Model) requestJobCPUTop(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || job.Backend == db.BackendSkyPilot {
 		m.jobCPUTopEntries = nil
 		m.jobCPUTopError = ""
 		m.jobCPUTopRequestedHost = ""
 		m.jobCPUTopDataHost = ""
 		m.jobCPUTopLoading = false
+		if job != nil && job.Backend == db.BackendSkyPilot {
+			m.jobCPUTopError = "CPU telemetry is not available for SkyPilot-managed jobs"
+		}
 		return nil
 	}
 	if m.jobCPUTopDataHost != job.Host {

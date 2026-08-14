@@ -422,7 +422,7 @@ ledger.
 
 ```bash
 weft sky submit [flags] <command>
-weft sky import --project NAME [--cwd DIR] <sky-job-id>
+weft sky import --project NAME [--cwd DIR] [--job wjID] [--task ID-OR-NAME] [--command COMMAND] <sky-job-id>
 weft sky sync [--project NAME]
 ```
 
@@ -432,6 +432,31 @@ SkyPilot jobs get normal Weft job IDs (`wj...`) and appear in
 selection, cluster lifecycle, retries, and raw task execution. Weft does not
 create rental instance rows, run its cloud agent, collect R2 outputs, or report
 direct rental costs for these jobs.
+
+`weft restart` / `weft retry` and `weft edit` refuse SkyPilot-backed jobs:
+creating or editing a local attempt would not change the managed execution.
+Move, unplace, launch-new, draft, pause, and resume controls are likewise not
+available. Submit a new SkyPilot job instead. Local bookkeeping remains
+available through the dedicated tag, project, and processed commands.
+
+`weft log wj...` requests the bound SkyPilot task's retained output and exits;
+add `--follow` to keep following it. Normal tail/follow views send the line
+limit to SkyPilot; grep filters that bounded view incrementally while
+following. `--full` and ranges fetch the complete retained stream. SkyPilot
+uses zero to mean the entire retained log, so its follow view requires a
+positive line limit. When a managed job has multiple tasks, Weft keeps the task ID in the
+binding so logs and status refresh address the same task.
+
+`weft kill` / `weft cancel` first refreshes the SkyPilot queue. Because
+SkyPilot cancellation is managed-job-wide, Weft refuses a task-qualified
+cancel when sibling tasks are visible or task membership cannot be confirmed.
+After a successful request, the job remains in its last confirmed nonterminal
+status with a secondary “cancel requested” marker until SkyPilot positively
+reports a terminal outcome. The CLI and both job-list TUIs use this same path.
+
+Weft does not collect artifacts from SkyPilot-backed jobs. `weft artifact sync`
+refuses an explicitly selected SkyPilot job and excludes it from bulk
+outstanding sync; use executor-managed storage for those outputs.
 
 For Weft-owned rentals, queue jobs with `weft run --tag rental ...` and launch
 them with `weft start instance`, `weft instance new`, or the autopilot. Weft
@@ -443,10 +468,19 @@ single job.
 **Common flags:**
 - `--project NAME`: associate the mirrored job with a Weft project
 - `--cwd DIR`: working directory/source mount recorded for the job
+- `--job wjID`: rebind an earlier unconfirmed submission to its original Weft job
+- `--task ID-OR-NAME`: select one task within a multi-task managed job; the
+  managed-job ID and task are matched together
+- `--command COMMAND`: record the task command for a new import when the
+  installed SkyPilot queue output does not expose it. Current SkyPilot releases
+  require this for new imports; recovery with `--job` keeps the original Weft
+  command.
 - `-m, --message TEXT`: local Weft description
 - `--gpu` / `--gpu-class`: SkyPilot accelerator class
 - `--gpu-count N`: accelerator count
-- `--gpu-mem GB`: GPU memory hint in the generated SkyPilot task
+- `--gpu-mem GB`: currently rejected for SkyPilot submissions because
+  SkyPilot task YAML has no standalone GPU-memory constraint; select a GPU
+  class with `--gpu` instead
 - `-e, --env KEY=VALUE`: environment variable in the generated task
 - `-t, --tag TAG`: local Weft tag for filtering and processed bookkeeping
 
@@ -459,7 +493,11 @@ weft job list --unprocessed
 weft log wj123
 weft cancel wj123
 
-weft sky import --project calibration 42
+weft sky import --project calibration --command "python train.py" 42
+
+# Recover a submit whose outcome was unknown, without creating a second wj row.
+# Repeating this exact command is safe.
+weft sky import --job wj123 42
 ```
 
 ### weft artifact

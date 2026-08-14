@@ -23,15 +23,16 @@ import (
 // uptime/cost), cached inventory host info for staleness, and the full
 // sibling list for "waiting for wjN" lookups on on-prem hosts.
 type selectedJobContext struct {
-	launchLiveByID        map[int64]*db.LaunchLiveState
-	launchByID            map[int64]*db.Launch
-	hostMetricsByName     map[string]*hostinfo.Host
-	hostInfoByName        map[string]*db.CachedHostInfo
-	cordonedHostsByName   map[string]bool
-	overloadedHostsByName map[string]bool
-	siblingJobs           []*db.Job
-	moveByJob             map[int64]*jobview.MoveDisplay
-	openIntentJobIDs      map[int64]struct{}
+	launchLiveByID         map[int64]*db.LaunchLiveState
+	launchByID             map[int64]*db.Launch
+	hostMetricsByName      map[string]*hostinfo.Host
+	hostInfoByName         map[string]*db.CachedHostInfo
+	cordonedHostsByName    map[string]bool
+	overloadedHostsByName  map[string]bool
+	siblingJobs            []*db.Job
+	moveByJob              map[int64]*jobview.MoveDisplay
+	openIntentJobIDs       map[int64]struct{}
+	externalBindingByJobID map[int64]*db.ExternalJobBinding
 	// cloudConfigured is true when at least one cloud provider client is
 	// available. When true, an unplaced job whose only blocker is "no local
 	// host matched ..." is not actionable (autopilot is responsible for
@@ -241,8 +242,59 @@ func renderHostFooterLine(job *db.Job, ctx selectedJobContext, now time.Time) st
 		return strings.Join(parts, " · ")
 	case db.JobTargetRentalInstance:
 		return renderRentalHostLine(job, ctx, now)
+	case db.JobTargetExternal:
+		return renderExternalHostLine(job, ctx.externalBindingByJobID[job.ID], now)
 	}
 	return ""
+}
+
+const externalObservationStaleAfter = 10 * time.Minute
+
+func renderExternalHostLine(job *db.Job, binding *db.ExternalJobBinding, now time.Time) string {
+	if binding == nil {
+		if db.IsExternalSubmissionUnconfirmed(job, nil, now) {
+			return "Host: SkyPilot · submission unconfirmed · external work may still be running or billing · recover with weft sky import --job " + ids.FormatJobID(job.ID) + " <sky-job-id>"
+		}
+		return "Host: SkyPilot · binding unavailable"
+	}
+	parts := []string{"Host: SkyPilot"}
+	if binding.ExternalJobID != "" {
+		parts = append(parts, "job "+binding.ExternalJobID)
+	}
+	if binding.ExternalTaskID != "" {
+		parts = append(parts, "task "+binding.ExternalTaskID)
+	}
+	cluster := binding.ExternalClusterName
+	if cluster == "" {
+		cluster = binding.ExternalClusterID
+	}
+	if cluster != "" {
+		parts = append(parts, "cluster "+cluster)
+	}
+	if binding.RawStatus != "" {
+		parts = append(parts, "raw "+binding.RawStatus)
+	}
+	if binding.CancelRequestedAt != nil {
+		parts = append(parts, "cancel requested")
+	}
+	if binding.LastObservedAt == nil {
+		parts = append(parts, "status never confirmed")
+	} else {
+		age := now.Sub(time.Unix(*binding.LastObservedAt, 0))
+		if age < 0 {
+			age = 0
+		}
+		if binding.SyncWarning != "" || age > externalObservationStaleAfter {
+			parts = append(parts, "last confirmed "+db.FormatDuration(int64(age.Seconds()))+" ago")
+		}
+	}
+	if binding.SyncWarning != "" {
+		parts = append(parts, binding.SyncWarning)
+	}
+	if binding.DashboardURL != "" {
+		parts = append(parts, binding.DashboardURL)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func appendInventoryHostTelemetry(parts []string, job *db.Job, metrics *hostinfo.Host, cached *db.CachedHostInfo, now time.Time) []string {

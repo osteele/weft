@@ -17,6 +17,9 @@ func RequestStatus(database *sql.DB, job *db.Job, targetStatus string, mode Time
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return Result{}, fmt.Errorf("job %s is owned by SkyPilot; local status requests are unsupported", ids.FormatJobID(job.ID))
+	}
 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("requesting status transition to %s", targetStatus))

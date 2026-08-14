@@ -119,6 +119,7 @@ type listTUIModel struct {
 	placementStatusByJob       map[int64]jobview.PlacementStatus
 	attemptOutcomeByJob        map[int64]db.AttemptOutcomeEvent
 	launchByID                 map[int64]*db.Launch
+	externalBindingByJobID     map[int64]*db.ExternalJobBinding
 	launchBootstrapP50         time.Duration
 	launchBootstrapDurations   db.BootstrapDurations
 	launchBootstrapSamples     int
@@ -275,6 +276,7 @@ type listJobsLoadedMsg struct {
 	placementStatusByJob     map[int64]jobview.PlacementStatus
 	attemptOutcomeByJob      map[int64]db.AttemptOutcomeEvent
 	launchByID               map[int64]*db.Launch
+	externalBindingByJobID   map[int64]*db.ExternalJobBinding
 	launchBootstrapP50       time.Duration
 	launchBootstrapDurations db.BootstrapDurations
 	launchBootstrapSamples   int
@@ -756,6 +758,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.placementStatusByJob = msg.placementStatusByJob
 		m.attemptOutcomeByJob = msg.attemptOutcomeByJob
 		m.launchByID = msg.launchByID
+		m.externalBindingByJobID = msg.externalBindingByJobID
 		m.launchBootstrapP50 = msg.launchBootstrapP50
 		m.launchBootstrapDurations = msg.launchBootstrapDurations
 		m.launchBootstrapSamples = msg.launchBootstrapSamples
@@ -1828,9 +1831,11 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	if m.selectedGroupedJob() != nil {
 		line += "  " + listKeyAttempts.footerToken()
 		line += "  " + listKeyKillCancel.footerToken()
-		line += "  " + listKeyUnplace.footerToken()
+		if selected := m.selectedGroupedJob(); selected != nil && selected.TargetKind() != db.JobTargetExternal {
+			line += "  " + listKeyUnplace.footerToken()
+		}
 		line += "  " + listKeyToggleProcessed.footerToken()
-		if selected := m.selectedGroupedJob(); m.isStatusGroupedView() && selected != nil && selected.EffectiveStatus() == db.StatusQueued {
+		if selected := m.selectedGroupedJob(); m.isStatusGroupedView() && selected != nil && selected.TargetKind() != db.JobTargetExternal && selected.EffectiveStatus() == db.StatusQueued {
 			line += "  " + listKeyMove.footerToken()
 			line += "  " + listKeyLaunchSelected.footerToken()
 		}
@@ -1874,16 +1879,17 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 		return nil
 	}
 	return renderSelectedJobDetail(job, selectedJobContext{
-		launchLiveByID:        m.launchLiveByID,
-		launchByID:            m.launchByID,
-		hostMetricsByName:     m.hostMetricsByName,
-		hostInfoByName:        m.hostInfoByName,
-		cordonedHostsByName:   m.cordonedHostsByName,
-		overloadedHostsByName: m.overloadedHostsByName,
-		siblingJobs:           m.jobs,
-		moveByJob:             moveDisplayMap(m.placementStatusByJob),
-		openIntentJobIDs:      openIntentJobIDMap(m.placementStatusByJob),
-		cloudConfigured:       len(m.cloudClients) > 0,
+		launchLiveByID:         m.launchLiveByID,
+		launchByID:             m.launchByID,
+		hostMetricsByName:      m.hostMetricsByName,
+		hostInfoByName:         m.hostInfoByName,
+		cordonedHostsByName:    m.cordonedHostsByName,
+		overloadedHostsByName:  m.overloadedHostsByName,
+		siblingJobs:            m.jobs,
+		moveByJob:              moveDisplayMap(m.placementStatusByJob),
+		openIntentJobIDs:       openIntentJobIDMap(m.placementStatusByJob),
+		externalBindingByJobID: m.externalBindingByJobID,
+		cloudConfigured:        len(m.cloudClients) > 0,
 	}, time.Now())
 }
 
@@ -2411,6 +2417,10 @@ func (m listTUIModel) beginSelectedLaunchNew() (tea.Model, tea.Cmd) {
 		m.statusMessage = "Select a queued job row to launch"
 		return m, nil
 	}
+	if job.TargetKind() == db.JobTargetExternal {
+		m.statusMessage = fmt.Sprintf("Launch not available for externally managed job #%d", job.ID)
+		return m, nil
+	}
 	if job.EffectiveStatus() != db.StatusQueued {
 		m.statusMessage = "Can only launch queued jobs"
 		return m, nil
@@ -2450,6 +2460,10 @@ func (m listTUIModel) toggleSelectedGroupedPriority() (tea.Model, tea.Cmd) {
 func (m listTUIModel) beginGroupedMove() (tea.Model, tea.Cmd) {
 	job := m.selectedGroupedJob()
 	if job == nil {
+		return m, nil
+	}
+	if job.TargetKind() == db.JobTargetExternal {
+		m.statusMessage = fmt.Sprintf("Move not available for externally managed job #%d", job.ID)
 		return m, nil
 	}
 	status := job.EffectiveStatus()
@@ -3195,6 +3209,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 		stageETAByName, stageEnteredAtByID := loadLaunchingStageETA(database, displayJobs, launchLiveByID)
 		placingJobIDs, placementQueuedAtByJob := placementDisplayMaps(placementStatusByJob)
 		hostInfoByName := loadInventoryHostInfo(database, jobs)
+		externalBindingByJobID := loadExternalBindingsForJobs(database, jobs)
 		cordonedHostsByName := loadCordonedHostsByName(database, jobs)
 		overloadedHostsByName := loadOverloadedHostsByName(database, jobs)
 		autopilotPaused, autopilotPausedReason, autopilotActive, autopilotPassStartedAt := autopilotPlacementWaitState(database)
@@ -3207,6 +3222,7 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			placementStatusByJob:     placementStatusByJob,
 			attemptOutcomeByJob:      attemptOutcomeByJob,
 			launchByID:               launchByID,
+			externalBindingByJobID:   externalBindingByJobID,
 			launchBootstrapP50:       bootstrapP50,
 			launchBootstrapDurations: bootstrapDurations,
 			launchBootstrapSamples:   bootstrapSamples,
@@ -3224,6 +3240,29 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 			autopilotPassStartedAt:   autopilotPassStartedAt,
 		}
 	}
+}
+
+func loadExternalBindingsForJobs(database *sql.DB, jobs []*db.Job) map[int64]*db.ExternalJobBinding {
+	wanted := make(map[int64]struct{})
+	for _, job := range jobs {
+		if job != nil && job.Backend == db.BackendSkyPilot {
+			wanted[job.ID] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	bindings, err := db.ListExternalJobBindings(database, db.ExternalExecutorSkyPilot, "")
+	if err != nil {
+		return nil
+	}
+	result := make(map[int64]*db.ExternalJobBinding, len(wanted))
+	for _, binding := range bindings {
+		if _, ok := wanted[binding.JobID]; ok {
+			result[binding.JobID] = binding
+		}
+	}
+	return result
 }
 
 func autopilotPlacementWaitState(database *sql.DB) (paused bool, pausedReason string, active bool, passStartedAt time.Time) {
@@ -3482,12 +3521,11 @@ func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {
 	return m.runBackgroundSyncFn(full, syncListTUIData)
 }
 
-// runBackgroundCloudSync runs only the cloud-side sync. Used when a
-// hostsync.Worker is handling host-side syncing on its own tick, so the cloud
-// reconciler (which performs orphan sweep + termination reconcile) still runs
-// every list-TUI tick.
+// runBackgroundCloudSync runs non-host refreshes. Used when a hostsync.Worker
+// owns host syncing, so cloud reconcile and external-executor observations
+// still run on every list-TUI tick.
 func (m listTUIModel) runBackgroundCloudSync(full bool) tea.Cmd {
-	return m.runBackgroundSyncFn(full, syncCloudStateForTUICtx)
+	return m.runBackgroundSyncFn(full, syncNonHostStateForTUI)
 }
 
 func (m *listTUIModel) enqueueBackgroundCloudSync(cmds []tea.Cmd, full bool) []tea.Cmd {
@@ -3529,7 +3567,7 @@ func syncListTUIData(ctx context.Context, database *sql.DB, full bool) []string 
 			warnings = append(warnings, note)
 		}
 	}
-	warnings = append(warnings, syncCloudStateForTUICtx(ctx, database, full)...)
+	warnings = append(warnings, syncNonHostStateForTUI(ctx, database, full)...)
 	return compactWarnings(warnings)
 }
 

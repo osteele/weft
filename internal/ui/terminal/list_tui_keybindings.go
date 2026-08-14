@@ -223,7 +223,7 @@ func listFlatKeyBindings() []listKeyBinding {
 			} else {
 				m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
 			}
-			return m, requestWatchJobKill(m.database, job.ID)
+			return m, requestWatchJobKill(m.ctx, m.database, job.ID)
 		}},
 		listKeyBinding{keys: listKeyToggleCordon.keys, action: listKeyToggleCordon.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return handleCordonToggle(m, m.currentSelectedJob())
@@ -523,7 +523,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 			}
 			m.clearAutoPilotPersistentState()
 			m.statusMessage = fmt.Sprintf("Killing job #%d...", job.ID)
-			return m, requestWatchJobKill(m.database, job.ID)
+			return m, requestWatchJobKill(m.ctx, m.database, job.ID)
 		}},
 		listKeyBinding{keys: listKeyToggleCordon.keys, action: listKeyToggleCordon.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return handleCordonToggle(m, m.selectedGroupedJob())
@@ -531,6 +531,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 		listKeyBinding{keys: listKeyUnplace.keys, action: listKeyUnplace.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			job := m.selectedGroupedJob()
 			if job == nil {
+				return m, nil
+			}
+			if job.TargetKind() == db.JobTargetExternal {
+				m.statusMessage = fmt.Sprintf("External job #%d cannot be unplaced", job.ID)
 				return m, nil
 			}
 			if job.EffectiveStatus() != db.StatusQueued {

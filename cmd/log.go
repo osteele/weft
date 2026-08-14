@@ -166,6 +166,9 @@ func runLog(cmd *cobra.Command, args []string) error {
 	if logFollow && len(jobIDs) > 1 {
 		return fmt.Errorf("--follow can only be used with a single job ID")
 	}
+	if logLines < 0 {
+		return fmt.Errorf("--lines/--tail must be nonnegative")
+	}
 
 	if logFull {
 		if cmd.Flags().Changed("from") {
@@ -253,6 +256,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	if job.Backend == db.BackendSkyPilot {
+		if logAttempt > 0 {
+			return runSkyLogForAttempt(cmd, database, job, logAttempt)
+		}
 		return runSkyLogForJob(cmd, database, job)
 	}
 
@@ -427,6 +433,32 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 	fmt.Print(processCarriageReturns(stdout))
 	return nil
+}
+
+func runSkyLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attemptNum int) error {
+	if logFollow {
+		return fmt.Errorf("--attempt cannot be combined with --follow")
+	}
+	attempts, err := db.ListAttempts(database, job.ID)
+	if err != nil {
+		return fmt.Errorf("list attempts: %w", err)
+	}
+	idx := indexOfAttempt(attempts, attemptNum)
+	if idx < 0 {
+		if len(attempts) == 0 {
+			return fmt.Errorf("job %s has no recorded attempts", ids.FormatJobID(job.ID))
+		}
+		return fmt.Errorf("job %s has no attempt #%d (have %d attempts: 1..%d)",
+			ids.FormatJobID(job.ID), attemptNum, len(attempts), attempts[0].AttemptNumber)
+	}
+	binding, err := db.GetExternalJobBindingByJobID(database, job.ID)
+	if err != nil {
+		return fmt.Errorf("get SkyPilot binding: %w", err)
+	}
+	if binding == nil || binding.AttemptID == nil || *binding.AttemptID != attempts[idx].ID {
+		return fmt.Errorf("attempt #%d is not the SkyPilot-bound attempt for job %s", attemptNum, ids.FormatJobID(job.ID))
+	}
+	return runSkyLogForJob(cmd, database, job)
 }
 
 // shouldUseCloudLogs routes log lookups to the cloud (R2/SSH) path when the

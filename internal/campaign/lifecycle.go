@@ -2163,6 +2163,11 @@ func LaunchInstance(
 	if progress == nil {
 		progress = func(string) {}
 	}
+	for _, job := range group.Jobs {
+		if job != nil && job.Backend == db.BackendSkyPilot {
+			return 0, fmt.Errorf("job %s is managed by SkyPilot and cannot be launched on a Weft rental", ids.FormatJobID(job.ID))
+		}
+	}
 	if r2Assets.Client == nil {
 		return 0, ErrR2ClientRequired
 	}

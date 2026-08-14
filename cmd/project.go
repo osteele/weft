@@ -160,7 +160,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
+	writeWarnings(cmd.ErrOrStderr(), syncListDataContext(cmd.Context(), database))
 
 	jobs, err := collectJobsForList(database, nil)
 	if err != nil {
@@ -190,7 +190,7 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
+	writeWarnings(cmd.ErrOrStderr(), syncListDataContext(cmd.Context(), database))
 
 	jobs, err := collectJobsForList(database, args)
 	if err != nil {
@@ -214,7 +214,7 @@ func runProjectSpent(cmd *cobra.Command, _ []string) error {
 	}
 	defer database.Close()
 
-	writeWarnings(cmd.ErrOrStderr(), syncListData(database))
+	writeWarnings(cmd.ErrOrStderr(), syncListDataContext(cmd.Context(), database))
 
 	rows, err := db.ListProjectSpendSince(database, since.Unix())
 	if err != nil {

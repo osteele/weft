@@ -582,6 +582,9 @@ func LaunchNewForJob(
 	if job == nil {
 		return "", fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if job.TargetKind() == db.JobTargetExternal {
+		return "", fmt.Errorf("job %s is owned by an external executor and cannot be launched on a Weft instance", ids.FormatJobID(jobID))
+	}
 	if !isMoveAdmissibleStatus(job.EffectiveStatus(), true) {
 		return "", fmt.Errorf("cannot launch new instance for job %s in status %s", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}
@@ -986,6 +989,9 @@ func MoveQueuedJobToNewInstance(database *sql.DB, jobID int64, force bool) (Resu
 		return Result{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	logPhase("load_job", jobLoadStarted, fmt.Sprintf("status=%s host=%s", job.EffectiveStatus(), job.Host), nil)
+	if job.TargetKind() == db.JobTargetExternal {
+		return Result{}, fmt.Errorf("job %s is owned by an external executor and cannot be moved to a Weft instance", ids.FormatJobID(jobID))
+	}
 	if !isMoveAdmissibleStatus(job.EffectiveStatus(), force) {
 		return Result{}, fmt.Errorf("can only move queued jobs (job %s has status: %s); pass --force to move running jobs", ids.FormatJobID(jobID), job.EffectiveStatus())
 	}

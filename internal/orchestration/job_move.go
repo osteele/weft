@@ -140,6 +140,12 @@ func ResolveEligibleJobsWithForce(
 
 	var eligible []*db.Job
 	for _, job := range jobs {
+		if job.TargetKind() == db.JobTargetExternal {
+			if explicitJobList {
+				callbacks.warningf("Warning: job %s is owned by an external executor and cannot be moved, skipping", ids.FormatJobID(job.ID))
+			}
+			continue
+		}
 		status := job.EffectiveStatus()
 		if !isEligibleMoveStatus(status, allowRunning) {
 			if explicitJobList {

@@ -474,7 +474,7 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 	var lastIssues string
 
 	step := func(_ time.Time) (WatchPlainStep, error) {
-		warnings := syncWatchedJobHostsQuiet(database, jobIDs)
+		warnings := syncWatchedJobStateQuiet(ctx, database, jobIDs)
 
 		watchedJobs := make([]*db.Job, 0, len(jobIDs))
 		for _, jobID := range jobIDs {
@@ -525,6 +525,12 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 		}, nil
 	}
 	return RunWatchPlainLoop(ctx, opts, step)
+}
+
+func syncWatchedJobStateQuiet(ctx context.Context, database *sql.DB, jobIDs []int64) []string {
+	warnings := syncWatchedJobHostsQuiet(database, jobIDs)
+	warnings = append(warnings, syncExternalStateForTUI(ctx, database)...)
+	return compactWarnings(warnings)
 }
 
 // syncWatchedJobHostsQuiet syncs hosts for the given jobs, suppressing log noise

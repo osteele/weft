@@ -84,6 +84,27 @@ func TestResolveEligibleJobs_ExplicitJobIDsWarnOnSkippedStatus(t *testing.T) {
 	}
 }
 
+func TestResolveEligibleJobsRejectsExternalExecutorJobs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "PENDING", NormalizedStatus: db.StatusQueued, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	var warnings []string
+	jobs, err := ResolveEligibleJobs(database, []int64{binding.JobID}, "", "", false, JobMoveCallbacks{
+		OnWarning: func(message string) { warnings = append(warnings, message) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "no eligible") {
+		t.Fatalf("ResolveEligibleJobs = %v, %v; want no eligible jobs", jobs, err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "external executor") {
+		t.Fatalf("warnings = %v, want external-executor refusal", warnings)
+	}
+}
+
 func TestResolveEligibleJobs_IncludesJobsWithOpenMoveIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 

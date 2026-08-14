@@ -119,7 +119,6 @@ value ExternalSubmitRequest {
     working_dir: String
     gpu_class: String?
     gpu_count: Integer?
-    gpu_mem_gb: Integer?
     env_vars: List<String>
     description: String?
 }
@@ -177,7 +176,13 @@ contract ExternalExecutorAdapter {
     -- legacy annotation: @invariant IdempotentOnIdentity
         -- observe and submit are idempotent on ExternalIdentity. Re-observing
         -- a known identity refreshes its binding; it never creates a second
-        -- local job for the same external work.
+        -- local job for the same external work. Matching uses the complete
+        -- (executor, external_job_id, external_task_id) identity: a job-id
+        -- match must not overwrite a task-qualified match, and an ambiguous
+        -- listing is UNKNOWN rather than permission to choose one row.
+        -- Importing a multi-task job accepts an explicit task ID/name and
+        -- resolves it only within the exact managed-job ID; a task scalar is
+        -- never treated as globally unique across managed jobs.
 
     -- legacy annotation: @guidance
         -- Implementation anchor: internal/skypilot/skypilot.go
@@ -185,9 +190,18 @@ contract ExternalExecutorAdapter {
         --   Runner is an interface so tests substitute fixture output; the
         --   fixture path is the only sanctioned way to exercise these rules
         --   without SkyPilot installed.
-        -- Adapter surface today: `sky jobs queue --output json` (observe),
-        -- `sky jobs launch` (submit), `sky jobs cancel` (cancel),
-        -- `sky jobs logs` (logs).
+        -- Adapter surface today: `sky jobs queue --all --verbose --output json`
+        -- (observe every managed job, not SkyPilot's default first 50, and
+        -- request the metadata/failure fields rendered by Weft),
+        -- `sky jobs launch --detach-run` (submit without tailing the entire
+        -- execution), `sky jobs cancel` (cancel),
+        -- `sky jobs logs <job-id> [task] --no-follow|--follow --tail N`
+        -- (logs). A normal tail/follow view sends its bounded tail to the
+        -- executor, and grep filters that bounded view incrementally. Full
+        -- and range views use `--tail 0` for the complete retained stream.
+        -- Because
+        -- SkyPilot defines zero as the complete retained log, a plain follow
+        -- view requires a positive tail bound; negative bounds are invalid.
 }
 
 -- ==========================================================================
@@ -252,6 +266,9 @@ rule ExternalExecutorRefreshPass {
     -- must not emit per-job warnings, must not print an error, and must
     -- not spend the observe budget discovering the same absence once per
     -- mirrored job.
+    -- The initiating command/watch context is carried through the probe and
+    -- observation call. Canceling a project watch cancels its Sky subprocess;
+    -- a detached background context must not keep the refresh alive.
     --
     -- Commands that explicitly named the executor (`weft sky sync`,
     -- `weft sky import`, `weft sky submit`) MAY surface not_configured as
@@ -295,6 +312,17 @@ rule ClassifyExternalObservation {
             )
             ensures: ExternalObservationUnavailable(binding, identity_not_listed)
 
+        -- A matched row without a status does not establish even a
+        -- nonterminal state. Preserve the prior observation rather than
+        -- normalizing an empty string to queued.
+        else if row.status = "":
+            ensures: ExternalObservation(
+                available: false,
+                unknown_cause: query_failed,
+                error: "executor row omitted status"
+            )
+            ensures: ExternalObservationUnavailable(binding, query_failed)
+
         else:
             ensures: ExternalObservation(
                 available: true,
@@ -326,6 +354,11 @@ rule ClassifyExternalObservation {
         -- recurring bug class is treating a failed or empty lookup as a
         -- confirmed negative; the mirrored-status case is the same shape as
         -- the nil-provider-instance and stale-heartbeat incidents.
+        -- ExternalExecutorRow must match the binding's complete identity.
+		-- When external_task_id is present, both job id and task id must match;
+		-- a row whose name merely equals the stored job id is not that work.
+        -- If multiple rows satisfy that identity, the result is unavailable
+        -- rather than whichever row happened to be visited last.
 }
 
 -- A refresh that produced no observation records the cause and advances
@@ -380,9 +413,16 @@ rule UnconfirmedExternalSubmission {
 
     -- legacy annotation: @guidance
         -- The job is recoverable-by-construction: it has a wj id, a project,
-        -- a command, and a working directory, so a user or agent can rebind
-        -- it with `weft sky import` once the external id is known, or cancel
-        -- it locally.
+        -- a command, and a working directory. Once the external id is known,
+        -- `weft sky import --job <wj-id> <external-id>` attaches the binding
+        -- to that same local job instead of creating a duplicate. An unbound
+        -- job cannot be canceled remotely until that identity is recovered.
+        -- A submit may recover only the labeled managed-job id before its
+        -- task id is visible. That creates one provisional binding with an
+        -- empty task component. A later unambiguous observation refines that
+        -- same binding atomically to the task-qualified identity; it must not
+        -- insert a second binding. A uniqueness conflict makes the entire
+        -- observation UNKNOWN and rolls back both status and identity writes.
         --
         -- What it must NOT do while unconfirmed:
         --   - become failed/dead on its own. Nothing has been observed.
@@ -392,11 +432,15 @@ rule UnconfirmedExternalSubmission {
         --   - be synced. status-sync.allium § SyncExternalExecutorJob is
         --     guarded on the binding existing, so an unbound job is simply
         --     not observable, which is exactly the binding_missing cause.
-        --
-        -- Divergence to resolve: `weft sky submit --dry-run-task` currently
-        -- creates a durable job row and then returns without submitting, so
-        -- every dry run leaves a permanently unconfirmed job. See the open
-        -- question on dry-run rows.
+}
+
+invariant ExternalTerminalObservationIsMonotonic {
+    -- A terminal executor observation closes the local execution boundary.
+	-- Without a source timestamp, neither a delayed nonterminal snapshot nor
+	-- a conflicting terminal snapshot can reopen or rewrite the job, clear its
+	-- end time, overwrite the terminal raw status, or advance the successful
+    -- observation timestamp. This also makes concurrent refresh ordering safe
+    -- without treating DB write time as remote observation order.
 }
 
 -- Surfacing rule: which grouped-status bucket a mirrored job lands in.
@@ -506,6 +550,10 @@ invariant ExternalJobsExcludedFromWeftPlacement {
     -- job.backend = skypilot implies
     -- legacy: not exists(move/PlacementIntent { job = job, state = open })
     -- legacy: and not exists(move/MoveIntent { job = job, state = open })
+    -- Generic draft, pause, resume, retry/requeue, status-edit, move,
+    -- unplace, and LaunchNewForJob entry points reject external jobs before
+    -- opening an intent or attempt. Cancellation is the only execution
+    -- control in this integration and must use ExternalExecutorAdapter.
 }
 
 invariant ExternalIdentityIsUnique {
@@ -518,6 +566,19 @@ invariant ExternalIdentityIsUnique {
                 -- legacy: not (a.executor = b.executor
                      -- legacy: and a.external_job_id = b.external_job_id
                      -- legacy: and a.external_task_id = b.external_task_id)
+}
+
+invariant ExternalJobHasSingleBinding {
+    true
+
+    -- A local job mirrors one external execution identity. The temporary
+    -- empty-task identity used by labeled-id recovery is refined in place,
+    -- never retained beside a task-qualified binding for the same job.
+    -- The database enforces a unique index on job_id in addition to the
+    -- complete external-identity uniqueness constraint. Migration repairs
+    -- legacy duplicates deterministically before installing that index.
+    -- GetBindingByJobID ordering is defensive and must not choose between
+    -- two live identities.
 }
 
 invariant ObservationTimestampImpliesObservation {
@@ -533,9 +594,9 @@ invariant MirroredStatusAgreesWithBinding {
     -- The binding's normalized_status is advisory until the sync writer
     -- copies it to Job.status; once an observation has landed, the two agree.
     -- Nothing else derives a stored job status from raw executor text, and no
-    -- surface re-derives one at render time. (An in-flight cancel shows
-    -- through the attempt's pending_status overlay, which does not touch the
-    -- stored status this invariant ranges over.)
+    -- surface re-derives one at render time. An in-flight cancel is secondary
+    -- binding state (`cancel_requested_at`); it does not touch Job.status or
+    -- the attempt's pending_status.
     -- legacy: for binding in jobs/ExternalJobBindings:
         -- legacy: binding.last_observed_at != null
             -- legacy: implies binding.normalized_status = binding.job.status
@@ -561,6 +622,7 @@ surface ExternalExecutorIntegration {
         -- legacy: binding.dashboard_url
         -- legacy: binding.normalized_status
         -- legacy: binding.last_observed_at
+        -- legacy: binding.cancel_requested_at
 
     -- legacy: contracts:
         -- legacy: demands ExternalExecutorAdapter
@@ -580,6 +642,9 @@ surface ExternalExecutorIntegration {
         -- properties of Weft's own agent on Weft's own rental substrate.
         -- Surfaces must not offer them for external jobs, and must not render
         -- empty placeholders that imply they were attempted.
+        -- Explicit artifact declaration, collection, and retrieval refuse
+        -- these jobs, and bulk outstanding-artifact sync excludes them
+        -- without attempting SSH, R2, or convention-output discovery.
 
     -- legacy annotation: @guarantee ProcessedRemainsWeftLocal
         -- The processed/unprocessed distinction is a Weft tag on the local
@@ -633,18 +698,20 @@ surface ExternalExecutorIntegration {
 -- Implementation: internal/db/external_jobs.go insertExternalAttempt and
 -- updateExternalAttemptTx.
 
--- RESOLVED for now: multiple bindings per job cannot arise today, so
--- highest-id-wins is defensive rather than load-bearing. AttachExternalBinding
--- has one call site and runs once per `weft sky submit`; import goes through
--- the upsert keyed on external identity; and `weft restart` has no
--- external-executor path at all. The question becomes live only if external
--- retry is implemented, and the answer should be chosen then rather than
--- inherited from the ORDER BY.
+-- RESOLVED: multiple bindings per job are prohibited. A labeled-id submit
+-- fallback can initially bind `(executor, job_id, "")`; when the queue later
+-- exposes a task-qualified row, observation refines that binding in place in
+-- the same transaction as the status write. A conflicting qualified identity
+-- rolls the transaction back. Import and attach reject attempts to steal an
+-- established identity. `GetBindingByJobID` ordering is defensive rather than
+-- a conflict-resolution policy.
 --
--- Note the adjacent gap this exposed: `weft restart` on a backend=skypilot job
--- is unhandled rather than refused. It should either refuse with a clear
--- message or route to the executor; falling through to the rental/on-prem path
--- is not a third option.
+-- `weft restart` on a backend=skypilot job is refused without mutation. A
+-- local retry attempt would still point at the old external binding and would
+-- not submit new work. Resubmission needs a separate external-executor design;
+-- falling through to the rental/on-prem reset path is not permitted. The same
+-- guard covers `weft edit --retry`, `weft edit --status queued`, direct DB
+-- requeue helpers, move/unplace, and launch-new entry points.
 
 -- RESOLVED: dry run skips the ledger write entirely. The ledger-before-external
 -- ordering exists so a crash mid-submit leaves a recoverable record; a render
@@ -654,9 +721,7 @@ surface ExternalExecutorIntegration {
 -- since no job id is allocated. Implementation: cmd/sky.go runSkySubmit returns
 -- before db.Open().
 
--- RESOLVED by removing the threshold from the surface. The observation age is
--- reported alongside a recorded sync warning rather than gated on a cutoff, so
--- there is no value to calibrate and no threshold that can turn healthy
--- managed-job recovery into noise. A threshold would only be needed if
--- staleness ever drove an action; it must not, since an unrefreshed status is
--- UNKNOWN, never terminal.
+-- RESOLVED by retaining a ten-minute display threshold while keeping the
+-- exact observation age visible. The threshold controls a warning only; it
+-- must never drive a lifecycle action, since an unrefreshed status is UNKNOWN,
+-- never terminal.

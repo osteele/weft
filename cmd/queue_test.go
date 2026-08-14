@@ -706,6 +706,44 @@ func TestRunEditFailedJobSuggestsRetry(t *testing.T) {
 	}
 }
 
+func TestRunEditRejectsSkyPilotWithoutMutation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42", ExternalTaskID: "task-a",
+		RawStatus: "SUCCEEDED", NormalizedStatus: db.StatusCompleted, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	if err := db.AddJobTag(database, binding.JobID, db.ProcessedTag); err != nil {
+		t.Fatalf("add processed tag: %v", err)
+	}
+	var attemptsBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsBefore); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("retry", "true"); err != nil {
+		t.Fatalf("set retry: %v", err)
+	}
+	err = runEdit(cmd, []string{fmt.Sprintf("%d", binding.JobID)})
+	if err == nil || !strings.Contains(err.Error(), "cannot be edited") {
+		t.Fatalf("runEdit error = %v, want external edit refusal", err)
+	}
+	job, err := db.GetJobByID(database, binding.JobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	var attemptsAfter int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsAfter); err != nil {
+		t.Fatalf("count attempts after: %v", err)
+	}
+	if job.Status != db.StatusCompleted || !job.HasTag(db.ProcessedTag) || attemptsAfter != attemptsBefore {
+		t.Fatalf("edit mutated external job: status=%q tags=%v attempts=%d/%d", job.Status, job.Tags, attemptsAfter, attemptsBefore)
+	}
+}
+
 func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	database := db.SetupTestDB(t)
 

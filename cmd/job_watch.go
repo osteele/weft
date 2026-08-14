@@ -86,7 +86,7 @@ func watchJobsPlainAll(database *sql.DB, opts terminal.WatchPlainOptions) error 
 	defer cancel()
 
 	step := func(_ time.Time) (terminal.WatchPlainStep, error) {
-		printWarnings(syncListData(database))
+		printWarnings(syncListDataContext(ctx, database))
 		jobs, err := collectJobsForList(database, nil)
 		if err != nil {
 			return terminal.WatchPlainStep{}, err

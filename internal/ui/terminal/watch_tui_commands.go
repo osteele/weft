@@ -523,8 +523,28 @@ func requestWatchJobSubmit(ctx context.Context, database *sql.DB, r2Client *r2.C
 	}
 }
 
-func requestWatchJobKill(database *sql.DB, jobID int64) tea.Cmd {
+func requestWatchJobKill(ctx context.Context, database *sql.DB, jobID int64) tea.Cmd {
 	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchKillDoneMsg{jobID: jobID, err: err}
+		}
+		if job != nil && job.Backend == db.BackendSkyPilot {
+			binding, err := db.GetExternalJobBindingByJobID(database, jobID)
+			if err != nil {
+				return watchKillDoneMsg{jobID: jobID, err: err}
+			}
+			cancelCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			requested, err := skyClientForTUI.CancelBinding(cancelCtx, database, binding)
+			if err != nil {
+				return watchKillDoneMsg{jobID: jobID, err: err}
+			}
+			if !requested {
+				return watchKillDoneMsg{jobID: jobID, message: fmt.Sprintf("SkyPilot job %s is already terminal", ids.FormatJobID(jobID))}
+			}
+			return watchKillDoneMsg{jobID: jobID, message: fmt.Sprintf("Cancel requested for SkyPilot job %s; awaiting terminal confirmation", ids.FormatJobID(jobID))}
+		}
 		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
 		if err != nil {
 			return watchKillDoneMsg{jobID: jobID, err: err}
@@ -703,8 +723,9 @@ func (m watchModel) reloadProjectGroups() tea.Cmd {
 
 func (m watchModel) runProjectBackgroundSync(full bool) tea.Cmd {
 	database := m.database
+	ctx := m.ctx
 	return func() tea.Msg {
-		return watchProjectSyncFinishedMsg{warnings: syncProjectWatchTUIData(database, full), full: full}
+		return watchProjectSyncFinishedMsg{warnings: syncProjectWatchTUIData(ctx, database, full), full: full}
 	}
 }
 

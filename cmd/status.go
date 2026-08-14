@@ -47,6 +47,7 @@ var (
 
 var syncRentalJobsStatusFunc = syncRentalJobsStatusWithTimeout
 var statusSyncHostsFunc = syncStatusHostsWithBounds
+var syncJobForStatusWaitFunc = ops.SyncJob
 
 var statusCmd = &cobra.Command{
 	Use:   "status [id]...",
@@ -197,6 +198,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 	// Sync logic: default bounded quick sync, --fast/--sync/--ssh-timeout tune the bound.
 	if needsSync {
+		if err := syncExternalStatusJobs(cmd.Context(), database, jobsForSync); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: SkyPilot status refresh failed; showing cached external status: %v\n", err)
+		}
 		sshTimeout, hostTimeout := statusHostSyncBounds()
 		if statusWait {
 			hostsToSync := make(map[string]struct{})
@@ -452,10 +456,19 @@ func waitForJobsCompletion(ctx context.Context, database *sql.DB, jobs []jobStat
 	}
 	fmt.Println()
 
-	if usedDaemon, err := waitForJobsCompletionViaDaemon(ctx, database, final, pending, order, lastReported, timeout); usedDaemon {
-		return final, err
+	hasPendingExternal := false
+	for _, req := range jobs {
+		if _, ok := pending[req.ID]; ok && req.Job != nil && req.Job.Backend == db.BackendSkyPilot {
+			hasPendingExternal = true
+			break
+		}
 	}
-	return waitForJobsCompletionPolling(database, final, pending, order, lastReported, timeout, tracker)
+	if !hasPendingExternal {
+		if usedDaemon, err := waitForJobsCompletionViaDaemon(ctx, database, final, pending, order, lastReported, timeout); usedDaemon {
+			return final, err
+		}
+	}
+	return waitForJobsCompletionPolling(ctx, database, final, pending, order, lastReported, timeout, tracker)
 }
 
 func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final map[int64]*db.Job, pending map[int64]struct{}, order []int64, lastReported map[int64]string, timeout time.Duration) (bool, error) {
@@ -556,7 +569,7 @@ func dialDaemonSubscribeJobs(ctx context.Context, socketPath string, order []int
 	}
 }
 
-func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pending map[int64]struct{}, order []int64, lastReported map[int64]string, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
+func waitForJobsCompletionPolling(ctx context.Context, database *sql.DB, final map[int64]*db.Job, pending map[int64]struct{}, order []int64, lastReported map[int64]string, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
@@ -576,6 +589,42 @@ func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pen
 	}
 
 	for len(pending) > 0 {
+		if timeout > 0 && !time.Now().Before(deadline) {
+			pendingIDs := make([]int64, 0, len(pending))
+			for id := range pending {
+				pendingIDs = append(pendingIDs, id)
+			}
+			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+		}
+
+		// One SkyPilot queue snapshot refreshes every selected binding. Querying
+		// the full external queue once per job multiplies latency and can overrun
+		// the caller's wait budget.
+		var externalJobs []*db.Job
+		for _, id := range order {
+			if _, ok := pending[id]; !ok {
+				continue
+			}
+			job, err := db.GetJobByID(database, id)
+			if err != nil {
+				return final, err
+			}
+			if job != nil && job.Backend == db.BackendSkyPilot && shouldAttemptSync(job.Status) {
+				externalJobs = append(externalJobs, job)
+			}
+		}
+		if len(externalJobs) > 0 {
+			syncCtx := ctx
+			var cancel context.CancelFunc
+			if timeout > 0 {
+				syncCtx, cancel = context.WithDeadline(ctx, deadline)
+			}
+			_ = syncExternalStatusJobs(syncCtx, database, externalJobs)
+			if cancel != nil {
+				cancel()
+			}
+		}
+
 		for _, id := range order {
 			if _, ok := pending[id]; !ok {
 				continue
@@ -596,6 +645,21 @@ func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pen
 				continue
 			}
 			if shouldAttemptSync(job.Status) {
+				if job.Backend == db.BackendSkyPilot {
+					refreshed, err := db.GetJobByID(database, id)
+					if err != nil {
+						return final, err
+					}
+					if refreshed != nil {
+						final[id] = refreshed
+						job = refreshed
+					}
+					reportChange(job)
+					if job != nil && isWaitTerminalStatus(job.Status) {
+						delete(pending, id)
+					}
+					continue
+				}
 				if job.IsRentalJob() {
 					syncRentalJobsStatus(database)
 					refreshed, err := db.GetJobByID(database, id)
@@ -612,7 +676,7 @@ func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pen
 					}
 					continue
 				}
-				if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
+				if _, err := syncJobForStatusWaitFunc(database, job, ops.DefaultSyncOptions()); err != nil {
 					if ssh.IsConnectionError(err.Error()) {
 						if tracker != nil {
 							tracker.MarkDown(job.Host)
@@ -652,7 +716,11 @@ func waitForJobsCompletionPolling(database *sql.DB, final map[int64]*db.Job, pen
 			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
 		}
 
-		<-ticker.C
+		select {
+		case <-ctx.Done():
+			return final, ctx.Err()
+		case <-ticker.C:
+		}
 	}
 
 	return final, nil
@@ -667,11 +735,33 @@ func allJobsSucceeded(requests []jobStatusRequest, final map[int64]*db.Job) bool
 		if job.EffectiveStatus() != db.StatusCompleted {
 			return false
 		}
+		if job.Backend == db.BackendSkyPilot {
+			continue
+		}
 		if job.ExitCode == nil || *job.ExitCode != 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func syncExternalStatusJobs(ctx context.Context, database *sql.DB, jobs []*db.Job) error {
+	var jobIDs []int64
+	for _, job := range jobs {
+		if job != nil && job.Backend == db.BackendSkyPilot {
+			jobIDs = append(jobIDs, job.ID)
+		}
+	}
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, _, err := skyClient.SyncJobBindingsAmbient(ctx, database, jobIDs)
+	return err
 }
 
 func mapKeys(m map[string]struct{}) []string {

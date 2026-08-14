@@ -170,3 +170,144 @@ func TestUpBackfillsLateTerminationIntentEndTimes(t *testing.T) {
 		}
 	}
 }
+
+func TestUpToV45RepairsDuplicateExternalBindingsAndEnforcesOnePerJob(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+
+	if err := Up(ctx, database); err != nil {
+		t.Fatalf("initial Up: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO jobs(id, working_dir, command, backend, created_at)
+		VALUES (1, '/tmp', 'python train.py', 'skypilot', 100)`); err != nil {
+		t.Fatalf("insert external job: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `DROP INDEX idx_external_job_bindings_job`); err != nil {
+		t.Fatalf("restore legacy non-unique binding schema: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `CREATE INDEX idx_external_job_bindings_job ON external_job_bindings(job_id)`); err != nil {
+		t.Fatalf("create legacy binding index: %v", err)
+	}
+	for _, fixture := range []struct {
+		externalID string
+		createdAt  int64
+	}{
+		{externalID: "41", createdAt: 100},
+		{externalID: "42", createdAt: 200},
+	} {
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO external_job_bindings(job_id, executor, external_job_id, created_at)
+			VALUES (1, 'skypilot', ?, ?)`, fixture.externalID, fixture.createdAt); err != nil {
+			t.Fatalf("insert legacy binding %s: %v", fixture.externalID, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id > 44`); err != nil {
+		t.Fatalf("rewind goose version: %v", err)
+	}
+
+	if err := Up(ctx, database); err != nil {
+		t.Fatalf("upgrade to v45: %v", err)
+	}
+	var count int
+	var externalID string
+	if err := database.QueryRowContext(ctx, `
+		SELECT COUNT(*), MAX(external_job_id)
+		FROM external_job_bindings
+		WHERE job_id = 1`).Scan(&count, &externalID); err != nil {
+		t.Fatalf("inspect repaired bindings: %v", err)
+	}
+	if count != 1 || externalID != "42" {
+		t.Fatalf("repaired bindings = count %d, id %q; want newest binding 42", count, externalID)
+	}
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO external_job_bindings(job_id, executor, external_job_id, created_at)
+		VALUES (1, 'skypilot', '43', 300)`); err == nil {
+		t.Fatal("v45 schema accepted a second binding for one job")
+	}
+}
+
+func TestV45RepairRollsBackDeduplicationAndIndexReplacementOnFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+
+	if err := Up(ctx, database); err != nil {
+		t.Fatalf("initial Up: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO jobs(id, working_dir, command, backend, created_at)
+		VALUES (1, '/tmp', 'python train.py', 'skypilot', 100)`); err != nil {
+		t.Fatalf("insert external job: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `DROP INDEX idx_external_job_bindings_job`); err != nil {
+		t.Fatalf("drop unique binding index: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `CREATE INDEX idx_external_job_bindings_job ON external_job_bindings(job_id)`); err != nil {
+		t.Fatalf("create legacy binding index: %v", err)
+	}
+	for _, externalID := range []string{"41", "42"} {
+		if _, err := database.ExecContext(ctx, `
+			INSERT INTO external_job_bindings(job_id, executor, external_job_id, created_at)
+			VALUES (1, 'skypilot', ?, 100)`, externalID); err != nil {
+			t.Fatalf("insert legacy binding %s: %v", externalID, err)
+		}
+	}
+	if _, err := database.ExecContext(ctx, `
+		CREATE TRIGGER reintroduce_external_binding
+		AFTER DELETE ON external_job_bindings
+		BEGIN
+			INSERT INTO external_job_bindings(job_id, executor, external_job_id, created_at)
+			VALUES (OLD.job_id, 'skypilot', 'reintroduced-' || OLD.id, 200);
+		END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id > 44`); err != nil {
+		t.Fatalf("rewind goose version: %v", err)
+	}
+
+	if err := Up(ctx, database); err == nil {
+		t.Fatal("v45 upgrade unexpectedly succeeded")
+	}
+	var count int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_job_bindings WHERE job_id = 1`).Scan(&count); err != nil {
+		t.Fatalf("count bindings after rollback: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("binding count after failed migration = %d, want original 2", count)
+	}
+	rows, err := database.QueryContext(ctx, `PRAGMA index_list(external_job_bindings)`)
+	if err != nil {
+		t.Fatalf("list indexes: %v", err)
+	}
+	defer rows.Close()
+	legacyIndexFound := false
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			t.Fatalf("scan index: %v", err)
+		}
+		if name == "idx_external_job_bindings_job" {
+			legacyIndexFound = true
+			if unique != 0 {
+				t.Fatal("failed migration left the replacement unique index installed")
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate indexes: %v", err)
+	}
+	if !legacyIndexFound {
+		t.Fatal("failed migration did not restore the legacy binding index")
+	}
+}

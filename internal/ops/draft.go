@@ -15,6 +15,9 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 	if job == nil {
 		return Result{}, db.ErrJobNotFound
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return Result{}, fmt.Errorf("job %s is owned by SkyPilot and cannot be marked draft", ids.FormatJobID(job.ID))
+	}
 
 	if job.EffectiveStatus() == db.StatusDraft {
 		return Result{

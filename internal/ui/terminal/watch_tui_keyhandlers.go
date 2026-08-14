@@ -172,7 +172,7 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job != nil {
 			m.clearAutoPilotPersistentState()
 			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Killing job #%d...", job.ID), false)
-			return m, tea.Batch(flashCmd, requestWatchJobKill(m.database, job.ID))
+			return m, tea.Batch(flashCmd, requestWatchJobKill(m.ctx, m.database, job.ID))
 		}
 	case "t":
 		// Terminate a cloud instance

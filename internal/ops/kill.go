@@ -28,6 +28,9 @@ func StopJob(database *sql.DB, job *db.Job, targetStatus string, opts ExecuteOpt
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return Result{}, fmt.Errorf("job %s is owned by SkyPilot; use external cancellation", ids.FormatJobID(job.ID))
+	}
 
 	var requestOp, doneOp string
 	var noun string
@@ -102,6 +105,9 @@ func StopJob(database *sql.DB, job *db.Job, targetStatus string, opts ExecuteOpt
 func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return Result{}, fmt.Errorf("job %s is owned by SkyPilot; use external cancellation", ids.FormatJobID(job.ID))
 	}
 
 	effectiveStatus := job.EffectiveStatus()

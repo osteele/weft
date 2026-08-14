@@ -56,7 +56,7 @@ weft mark-processed wj123
 An existing SkyPilot job can be imported:
 
 ```bash
-weft sky import --project my-project <sky-job-id>
+weft sky import --project my-project --command "python train.py" <sky-job-id>
 ```
 
 After import, the job is addressed as `wj...` in Weft. The external SkyPilot ID
@@ -78,9 +78,12 @@ Add an external binding table:
 | `normalized_status` | Weft status bucket |
 | `submitted_from_working_dir` / `submitted_from_project` | Project-scoping provenance |
 | `dashboard_url` | Optional SkyPilot dashboard/API link |
+| `cancel_requested_at` | Secondary pending-cancel state; never authoritative job status |
 | `created_at` / `last_observed_at` | Local bookkeeping |
 
-Idempotency key: `(executor, external_job_id, external_task_id)`.
+Idempotency key: `(executor, external_job_id, external_task_id)`. A unique
+`job_id` constraint also guarantees that one Weft job has one live binding;
+an initially unqualified task identity is refined in place.
 
 Use `jobs.backend = "skypilot"` and `jobs.target_kind = "external-executor"` for
 these rows. They are not `rental-instance` jobs.
@@ -95,7 +98,8 @@ The first adapter should normalize coarsely:
 | running | running |
 | succeeded, completed | completed |
 | failed | failed |
-| cancelling, cancelled, canceled | canceled |
+| cancelling, canceling | running |
+| cancelled, canceled | canceled |
 | stopped, killed | killed |
 
 Unknown non-terminal states should remain `queued` with the raw status visible in
@@ -110,14 +114,19 @@ query.
 Phase 1 commands:
 
 - `weft sky submit [weft run-like flags] <command>`: create the Weft row first,
-  submit to SkyPilot, then store the external binding.
-- `weft sky import [--project NAME] [--cwd DIR] <external-id>`: mirror an
-  existing SkyPilot job into Weft.
+  submit to SkyPilot in detached-run mode, then store the external binding.
+- `weft sky import [--project NAME] [--cwd DIR] [--command COMMAND]
+  <external-id>`: mirror an existing SkyPilot job into Weft. Current SkyPilot
+  queue JSON omits the task command, so a new import requires `--command`;
+  `--job` recovery retains the command Weft recorded before submission.
 - `weft sky sync [--project NAME]`: refresh external bindings.
 - `weft log <wj-id>`: for `backend=skypilot`, call SkyPilot logs through the
-  binding.
+  complete job/task binding; snapshot mode is explicitly non-following and
+  ordinary tail/follow views push the line bound to SkyPilot.
 - `weft kill|cancel <wj-id>`: for `backend=skypilot`, call SkyPilot cancel and
-  wait for a later sync to confirm terminal status.
+  wait for a later sync to confirm terminal status. Since cancellation is
+  managed-job-wide, a task-qualified request requires a fresh observation
+  proving there are no sibling tasks.
 
 Existing surfaces should include these jobs without separate commands:
 
@@ -125,6 +134,8 @@ Existing surfaces should include these jobs without separate commands:
 - `weft jobs list --project NAME`
 - `weft project watch [NAME]`
 - grouped status TUI
+- legacy dashboard TUI (ambient refresh, logs, and cancellation use SkyPilot;
+  host SSH/R2 monitoring is skipped)
 - `weft job info <wj-id>`
 
 ## TUI / Display
@@ -163,7 +174,7 @@ those signals.
 4. **Submit path**
    - Implement `weft sky submit`.
    - Generate a SkyPilot task from a conservative subset of Weft run flags:
-     command, working directory/source mount, GPU class/count/memory, env, and
+     command, working directory/source mount, GPU class/count, env, and
      description.
    - Store the Weft job before invoking SkyPilot.
 
@@ -175,9 +186,14 @@ those signals.
 6. **Hardening**
    - Add duplicate-import protection.
    - Add read-only fallback behavior when sync cannot write the DB.
-   - Add fixture-based tests for representative `sky jobs queue --output json`
-     payloads.
+   - Add fixture-based tests for representative
+     `sky jobs queue --all --verbose --output json` payloads.
    - Document unsupported features clearly in `weft job info`.
+
+The implemented boundary also rejects Weft-local retry/requeue, status edit,
+move/unplace, launch-new, draft, pause, resume, and artifact collection for
+external jobs. These operations would otherwise create false local state or
+duplicate execution without changing SkyPilot.
 
 ## Open Questions
 

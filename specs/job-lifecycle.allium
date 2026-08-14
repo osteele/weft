@@ -359,6 +359,7 @@ entity ExternalJobBinding {
     dashboard_url: String?
     created_at: Timestamp
     last_observed_at: Timestamp?
+    cancel_requested_at: Timestamp?
 
     -- The latest normalized status produced by the executor adapter. This is
     -- advisory until written to Job.status by status-sync.allium.
@@ -606,7 +607,7 @@ rule SubmitExternalExecutorJob {
         project: options.project,
         description: options.description,
         gpu_class: options.gpu_class,
-        gpu_mem_gb: options.gpu_mem_gb,
+        gpu_mem_gb: null,
         inputs: options.inputs,
         outputs: options.outputs,
         tags: options.tags,
@@ -642,9 +643,15 @@ rule SubmitExternalExecutorJob {
             submitted_from_project: options.project,
             created_at: now
         )
-    else:
+    else if ExternalSubmissionDefinitivelyRefused(job):
         ensures: job.status = dead
         ensures: job.error_message = ExternalSubmissionError(job)
+    else:
+        -- A timeout or a successful launch whose external id could not be
+        -- resolved is not a refusal. The task may be running and billing, so
+        -- preserve the durable unbound job for later import/rebinding.
+        ensures: job.status = queued
+        ensures: ExternalSubmissionUnconfirmed(job)
 
     -- legacy annotation: @guidance
         -- This is the Option C integration shape: Weft is the ledger/front
@@ -654,11 +661,34 @@ rule SubmitExternalExecutorJob {
         -- a CloudInstance/Launch row, and does not promise R2 output
         -- collection or Weft telemetry for this job unless a later adapter
         -- implements those imports explicitly.
+        -- Definitive refusal and unknown outcome are separate branches. See
+        -- external-executor.allium § UnconfirmedExternalSubmission.
+        -- A generic CLI nonzero exit is not proof of refusal: a transport or
+        -- client error may be returned after the external control plane has
+        -- accepted the request. The definitive branch requires typed,
+        -- positive adapter evidence that acceptance did not occur. Local
+        -- validation and task-rendering failures are also definitive because
+        -- they happen before the adapter is invoked.
+        -- SkyPilot task YAML has no supported standalone GPU-memory
+        -- constraint. `weft sky submit --gpu-mem` is rejected locally before
+        -- the job row is created; GPU class/count remain supported.
+        -- Once an unknown submission's external id is recovered, `weft sky
+        -- import --job <wj-id> <external-id>` attaches the binding to this
+        -- existing job. A plain import without --job remains an import of
+        -- externally submitted work and may create a new local job.
+		-- Retrying the same --job recovery after uncertain command output is
+		-- idempotent: the same identity returns the existing binding, while a
+		-- different identity is rejected rather than replacing it.
+		-- A successful detached SkyPilot launch's labeled managed-job ID is
+		-- stronger identity evidence than a generated-name queue match. Parse it
+		-- first; use a queue row only when its job ID agrees, because an older job
+		-- may retain the same generated name while the new row is not yet listed.
 }
 
 rule ImportExternalExecutorJob {
     when: ImportExternalExecutorJob(executor, external_job, options, job)
     requires: executor = skypilot
+	requires: options.command != null or external_job.command != null
 
     -- Import is for jobs that were submitted outside Weft but should appear
     -- in the same project-scoped and unprocessed-job surfaces. The importer
@@ -666,7 +696,7 @@ rule ImportExternalExecutorJob {
     -- current directory's project only when the user explicitly requests that
     -- association.
     ensures: Job.created(
-        command: external_job.command,
+        command: options.command ?? external_job.command,
         working_dir: options.working_dir,
         project: options.project,
         description: options.description ?? external_job.name,
@@ -684,6 +714,14 @@ rule ImportExternalExecutorJob {
         created_at: external_job.created_at ?? now,
         retry_count: 0
     )
+
+    -- legacy annotation: @guidance
+        -- A new import requires a real command from either the external
+        -- observation or an explicit --command option. Current SkyPilot queue
+        -- JSON does not include its stored entrypoint even in verbose mode, so
+        -- the CLI must request --command rather than inventing a placeholder.
+        -- Recovery with --job retains the command already recorded before the
+        -- uncertain submission and does not require this option.
     ensures: ExternalJobBinding.created(
         job: job,
         attempt: null,
@@ -2585,8 +2623,13 @@ rule JobLogCommandReadsSelectedAttempt {
         -- For external-executor jobs, the command routes through
         -- ExternalJobBinding to the executor adapter (for SkyPilot, `sky logs`
         -- or the API equivalent). The local wj<id> remains the command
-        -- address. If the external executor has no retained log for the
-        -- selected attempt, the command reports that absence directly; it
+        -- address. The adapter receives the complete external identity,
+        -- including external_task_id when present, so one task's log cannot
+        -- be substituted for another task under the same managed-job id.
+        -- Ordinary `weft log` is a finite snapshot and uses SkyPilot's
+        -- explicit `--no-follow`; `weft log --follow` uses `--follow`.
+        -- If the external executor has no retained log for the selected
+        -- attempt, the command reports that absence directly; it
         -- must not scan Weft R2 paths or remote SSH hosts looking for an
         -- unrelated log.
         --

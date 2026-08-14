@@ -57,7 +57,7 @@ func (m *Model) requestSyncsForActiveHosts() {
 
 	jobsByHost := make(map[string][]*db.Job)
 	for _, job := range m.allJobs {
-		if job != nil {
+		if job != nil && job.Backend != db.BackendSkyPilot {
 			jobsByHost[job.Host] = append(jobsByHost[job.Host], job)
 		}
 	}
@@ -90,7 +90,7 @@ func (m *Model) requestSyncAllHosts(priority bool) {
 
 	hosts := make(map[string]bool)
 	for _, job := range m.allJobs {
-		if job != nil {
+		if job != nil && job.Backend != db.BackendSkyPilot {
 			hosts[job.Host] = true
 		}
 	}

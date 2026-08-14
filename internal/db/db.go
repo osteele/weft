@@ -1812,6 +1812,13 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, newStatus string) erro
 // so the sync path will re-append the job to the remote queue if the immediate
 // append fails.
 func RequeueByID(database *sql.DB, id int64) error {
+	var backend string
+	if err := database.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, id).Scan(&backend); err != nil {
+		return err
+	}
+	if backend == BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %d cannot be requeued through Weft", id)
+	}
 	warnTransition(database, id, StatusQueued, false, status.SourceUserAction)
 
 	// Cloud retries need a fresh attempt, not just requested_status='queued':
@@ -1838,6 +1845,13 @@ func RequeueByID(database *sql.DB, id int64) error {
 // RequeueByIDTx is RequeueByID's on-prem branch inside a caller-owned
 // transaction. The caller is responsible for transition validation/logging.
 func RequeueByIDTx(tx *sql.Tx, id int64) error {
+	var backend string
+	if err := tx.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, id).Scan(&backend); err != nil {
+		return err
+	}
+	if backend == BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %d cannot be requeued through Weft", id)
+	}
 	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
 	now := time.Now().Unix()
 	// The requeue closes every attempt, so any open move intent no longer
@@ -1881,6 +1895,13 @@ func RequeueFreshAttemptByID(database *sql.DB, id int64, host string) error {
 // a concrete target when one is known. Pass an inventory host, a live launch ID,
 // or neither for an unplaced retry.
 func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launchID *int64) error {
+	var backend string
+	if err := database.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, id).Scan(&backend); err != nil {
+		return err
+	}
+	if backend == BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %d cannot create a local retry attempt", id)
+	}
 	warnOpenTransition(database, id, StatusQueued, false, status.SourceUserAction)
 
 	tx, err := database.Begin()
@@ -1897,6 +1918,13 @@ func RequeueFreshAttemptByTarget(database *sql.DB, id int64, host string, launch
 // RequeueFreshAttemptByTargetTx creates a fresh queued retry attempt inside a
 // caller-owned transaction.
 func RequeueFreshAttemptByTargetTx(tx *sql.Tx, id int64, host string, launchID *int64) error {
+	var backend string
+	if err := tx.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, id).Scan(&backend); err != nil {
+		return err
+	}
+	if backend == BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %d cannot create a local retry attempt", id)
+	}
 	now := time.Now().Unix()
 	// The requeue closes every attempt, so any open move intent no longer
 	// describes an executable move (RequeueAbandonsOpenMoveIntent in
@@ -1967,6 +1995,9 @@ func moveQueuedJobToUnplaced(database *sql.DB, id int64, reason string, promoteT
 	}
 	if job == nil {
 		return nil
+	}
+	if job.Backend == BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %d cannot be moved to Weft's unplaced queue", id)
 	}
 	tags := append([]string(nil), job.Tags...)
 	if promoteToRental && !job.HasTag(TagInventory) && !job.HasTag(TagRental) {
@@ -2050,6 +2081,9 @@ func ResetJobToUnplaced(database *sql.DB, jobID int64) error {
 // ResetJobToUnplacedTx resets a single job to unplaced state inside a
 // caller-owned transaction.
 func ResetJobToUnplacedTx(tx *sql.Tx, jobID int64, job *Job) error {
+	if job != nil && job.Backend == BackendSkyPilot {
+		return fmt.Errorf("external SkyPilot job %d cannot be reset to Weft's unplaced queue", jobID)
+	}
 	now := time.Now().Unix()
 	if err := closeAttemptsAndRequeue(tx, jobID, now); err != nil {
 		return err

@@ -1,11 +1,13 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/coordinatorrelay"
@@ -128,6 +130,9 @@ func (m Model) editJob() tea.Cmd {
 		}
 		if job == nil {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %s not found", ids.FormatJobID(jobID))}
+		}
+		if job.Backend == db.BackendSkyPilot {
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("SkyPilot execution fields cannot be edited by Weft")}
 		}
 		status := job.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusDraft {
@@ -344,6 +349,30 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 	ctx := m.ctx
 	return func() tea.Msg {
 		job := jobCopy
+		if job.Backend == db.BackendSkyPilot {
+			binding, err := db.GetExternalJobBindingByJobID(m.database, job.ID)
+			if err != nil {
+				return logFetchedMsg{jobID: job.ID, err: err}
+			}
+			if binding == nil {
+				return logFetchedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot job has no external binding")}
+			}
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			logCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			var stdout, stderr bytes.Buffer
+			err = skyClientForDashboard.StreamLogs(logCtx, binding.ExternalJobID, binding.ExternalTaskID, false, 500, &stdout, &stderr)
+			if err != nil {
+				if stderr.Len() > 0 {
+					err = fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+				}
+				return logFetchedMsg{jobID: job.ID, err: err}
+			}
+			content := stdout.String()
+			return logFetchedMsg{jobID: job.ID, content: content, progress: progress.FindLastProgressPreferExplicit(content)}
+		}
 		// For terminal jobs, try local cache first
 		if db.IsTerminalStatus(job.EffectiveStatus()) {
 			if cached, err := logcache.Read(job.ID); err == nil {
@@ -438,10 +467,34 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 	return m.fetchJobLog(m.selectedJob)
 }
 
+// startSelectedJobLog routes external jobs around the inventory-host monitor.
+// Production dashboard mode always installs a monitor, but SkyPilot logs are
+// owned by the executor adapter rather than an SSH host.
+func (m *Model) startSelectedJobLog() tea.Cmd {
+	if m.selectedJob == nil {
+		return nil
+	}
+	if m.selectedJob.Backend == db.BackendSkyPilot {
+		if m.monitor != nil {
+			m.monitor.WatchJobLog(nil)
+			m.monitor.WatchJobStats(nil)
+		}
+		return m.fetchSelectedJobLog()
+	}
+	if m.monitor != nil {
+		m.monitor.WatchJobLog(m.selectedJob)
+		if m.selectedJob.Status == db.StatusRunning {
+			m.monitor.WatchJobStats(m.selectedJob)
+		}
+		return nil
+	}
+	return m.fetchSelectedJobLog()
+}
+
 // fetchQuickProgress quickly greps the log file for the last progress line
 // This is faster than fetching the full log and is used for periodic refresh
 func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
-	if job == nil || job.EffectiveStatus() != db.StatusRunning {
+	if job == nil || job.Backend == db.BackendSkyPilot || job.EffectiveStatus() != db.StatusRunning {
 		return nil
 	}
 

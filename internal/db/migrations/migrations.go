@@ -154,11 +154,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddJobProgressChangedAtColumn},
 		&goose.GoFunc{RunDB: dropAddJobProgressChangedAtColumn},
 	)
+	addExternalCancelIntent := goose.NewGoMigration(
+		45,
+		&goose.GoFunc{RunTx: applyAddExternalCancelIntentColumn},
+		&goose.GoFunc{RunTx: dropAddExternalCancelIntentColumn},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -929,7 +934,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 39, 40, 43, 44}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
@@ -1030,6 +1035,49 @@ func dropAddExternalSyncWarningColumns(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN sync_warning_at`)
 	return nil
+}
+
+func applyAddExternalCancelIntentColumn(ctx context.Context, tx *sql.Tx) error {
+	exists, err := columnExistsTx(ctx, tx, "external_job_bindings", "cancel_requested_at")
+	if err != nil {
+		return fmt.Errorf("inspect external_job_bindings.cancel_requested_at: %w", err)
+	}
+	if !exists {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE external_job_bindings ADD COLUMN cancel_requested_at INTEGER`); err != nil {
+			return fmt.Errorf("add external_job_bindings.cancel_requested_at: %w", err)
+		}
+	}
+	// Older code defensively selected the newest binding when more than one
+	// identity pointed at a job. Preserve that established winner while making
+	// the one-binding-per-job invariant enforceable by SQLite.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM external_job_bindings
+		WHERE id NOT IN (SELECT MAX(id) FROM external_job_bindings GROUP BY job_id)`); err != nil {
+		return fmt.Errorf("deduplicate external job bindings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_external_job_bindings_job`); err != nil {
+		return fmt.Errorf("drop non-unique external binding job index: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_external_job_bindings_job ON external_job_bindings(job_id)`); err != nil {
+		return fmt.Errorf("enforce one external binding per job: %w", err)
+	}
+	return nil
+}
+
+func dropAddExternalCancelIntentColumn(ctx context.Context, tx *sql.Tx) error {
+	_, _ = tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_external_job_bindings_job`)
+	_, _ = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_external_job_bindings_job ON external_job_bindings(job_id)`)
+	_, _ = tx.ExecContext(ctx, `ALTER TABLE external_job_bindings DROP COLUMN cancel_requested_at`)
+	return nil
+}
+
+func columnExistsTx(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, column,
+	).Scan(&exists)
+	return exists > 0, err
 }
 
 // applyDropSpeculativeHostRegistry removes launches.host_id and the hosts

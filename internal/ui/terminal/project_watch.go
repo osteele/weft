@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -72,11 +73,11 @@ func loadProjectWatchGroups(database *sql.DB, recentWindow time.Duration) ([]pro
 	return groups, nil
 }
 
-func SyncProjectWatchData(database *sql.DB, fullSync bool, skipSync bool) []string {
-	return syncProjectWatchData(database, fullSync, skipSync)
+func SyncProjectWatchData(ctx context.Context, database *sql.DB, fullSync bool, skipSync bool) []string {
+	return syncProjectWatchData(ctx, database, fullSync, skipSync)
 }
 
-func syncProjectWatchData(database *sql.DB, fullSync bool, skipSync bool) []string {
+func syncProjectWatchData(ctx context.Context, database *sql.DB, fullSync bool, skipSync bool) []string {
 	if skipSync {
 		return nil
 	}
@@ -91,10 +92,11 @@ func syncProjectWatchData(database *sql.DB, fullSync bool, skipSync bool) []stri
 			warnings = append(warnings, note)
 		}
 	}
-	return warnings
+	warnings = append(warnings, syncExternalStateForTUI(ctx, database)...)
+	return compactWarnings(warnings)
 }
 
-func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
+func syncProjectWatchTUIData(ctx context.Context, database *sql.DB, full bool) []string {
 	timeout := FastSyncTimeout
 	if full {
 		timeout = NormalSyncTimeout
@@ -106,6 +108,7 @@ func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
 		}
 	}
 	warnings = append(warnings, syncCloudStateForTUI(database, full)...)
+	warnings = append(warnings, syncExternalStateForTUI(ctx, database)...)
 	return compactWarnings(warnings)
 }
 

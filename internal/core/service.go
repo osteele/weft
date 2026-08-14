@@ -78,6 +78,9 @@ func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode) (OperationResult, e
 	if err != nil {
 		return OperationResult{}, err
 	}
+	if err := rejectExternalControl(job, "kill or cancel"); err != nil {
+		return OperationResult{}, err
+	}
 
 	opts := ops.OptionsForMode(resolveMode(mode))
 	var outcome ops.Result
@@ -108,6 +111,9 @@ func (s *Service) DraftJob(jobID int64, mode ops.TimeoutMode) (OperationResult, 
 	if err != nil {
 		return OperationResult{}, err
 	}
+	if err := rejectExternalControl(job, "mark draft"); err != nil {
+		return OperationResult{}, err
+	}
 	outcome, err := ops.DraftJob(s.database, job, ops.OptionsForMode(resolveMode(mode)))
 	if err != nil {
 		return OperationResult{}, err
@@ -119,6 +125,9 @@ func (s *Service) DraftJob(jobID int64, mode ops.TimeoutMode) (OperationResult, 
 func (s *Service) PauseJob(jobID int64, mode ops.TimeoutMode) (OperationResult, error) {
 	job, err := s.loadJob(jobID)
 	if err != nil {
+		return OperationResult{}, err
+	}
+	if err := rejectExternalControl(job, "pause"); err != nil {
 		return OperationResult{}, err
 	}
 	effectiveStatus := job.EffectiveStatus()
@@ -144,6 +153,9 @@ func (s *Service) ResumeJob(jobID int64, mode ops.TimeoutMode) (OperationResult,
 	if err != nil {
 		return OperationResult{}, err
 	}
+	if err := rejectExternalControl(job, "resume"); err != nil {
+		return OperationResult{}, err
+	}
 	effectiveStatus := job.EffectiveStatus()
 	if effectiveStatus != db.StatusPaused {
 		return OperationResult{}, fmt.Errorf("job %d is %s; only paused jobs can be resumed", job.ID, effectiveStatus)
@@ -165,11 +177,21 @@ func (s *Service) RequestStatus(jobID int64, targetStatus string, mode ops.Timeo
 	if err != nil {
 		return OperationResult{}, err
 	}
+	if err := rejectExternalControl(job, "change status"); err != nil {
+		return OperationResult{}, err
+	}
 	outcome, err := ops.RequestStatus(s.database, job, targetStatus, resolveMode(mode))
 	if err != nil {
 		return OperationResult{}, err
 	}
 	return s.operationResult(jobID, outcome)
+}
+
+func rejectExternalControl(job *db.Job, action string) error {
+	if job != nil && job.Backend == db.BackendSkyPilot {
+		return fmt.Errorf("cannot %s SkyPilot job %d through Weft's local execution controls", action, job.ID)
+	}
+	return nil
 }
 
 func (s *Service) loadJob(jobID int64) (*db.Job, error) {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"io"
 	"os"
@@ -407,13 +408,13 @@ func TestRunListPlainDefaultDoesNotSync(t *testing.T) {
 		syncListDataFunc = originalSync
 	})
 	calls := 0
-	syncListDataFunc = func(_ *sql.DB) []string {
+	syncListDataFunc = func(_ context.Context, _ *sql.DB) []string {
 		calls++
 		return nil
 	}
 
 	captureStdout(t, func() {
-		if err := runListPlain(database, nil); err != nil {
+		if err := runListPlain(context.Background(), database, nil); err != nil {
 			t.Fatalf("runListPlain: %v", err)
 		}
 	})
@@ -441,13 +442,13 @@ func TestRunListPlainExplicitSyncRefreshes(t *testing.T) {
 		syncListDataFunc = originalSync
 	})
 	calls := 0
-	syncListDataFunc = func(_ *sql.DB) []string {
+	syncListDataFunc = func(_ context.Context, _ *sql.DB) []string {
 		calls++
 		return nil
 	}
 
 	captureStdout(t, func() {
-		if err := runListPlain(database, nil); err != nil {
+		if err := runListPlain(context.Background(), database, nil); err != nil {
 			t.Fatalf("runListPlain: %v", err)
 		}
 	})

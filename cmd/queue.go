@@ -1051,6 +1051,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %s cannot be edited through Weft; change executor-owned fields in SkyPilot", ids.FormatJobID(jobID))
+	}
 
 	// Handle status change (requeue)
 	effectiveStatus := job.EffectiveStatus()

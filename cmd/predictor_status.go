@@ -36,8 +36,9 @@ func ensurePredictorUsable(cmd *cobra.Command, cfg *config.Config, scope string)
 		return nil
 	}
 
+	ensureReady := predictorEnsureReadyFunc
 	if err := runWithTimeout(predictorReadinessTimeout, func() error {
-		return predictorEnsureReadyFunc(pcfg)
+		return ensureReady(pcfg)
 	}); err != nil {
 		var unavailable *predictor.UnavailableError
 		if errors.As(err, &unavailable) {
@@ -46,8 +47,9 @@ func ensurePredictorUsable(cmd *cobra.Command, cfg *config.Config, scope string)
 		return fmt.Errorf("%s: predictor check failed: %w", scope, err)
 	}
 
+	getStatus := predictorGetStatusFunc
 	status, err := valueWithTimeout(predictorReadinessTimeout, func() predictor.Status {
-		return predictorGetStatusFunc(pcfg)
+		return getStatus(pcfg)
 	})
 	if err != nil {
 		return fmt.Errorf("%s: predictor check failed: %w", scope, err)
@@ -71,8 +73,9 @@ func runEstimationStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	getStatus := predictorGetStatusFunc
 	status, statusErr := valueWithTimeout(predictorReadinessTimeout, func() predictor.Status {
-		return predictorGetStatusFunc(pcfg)
+		return getStatus(pcfg)
 	})
 	if statusErr != nil {
 		status = predictor.Status{

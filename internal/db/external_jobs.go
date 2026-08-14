@@ -32,6 +32,9 @@ type ExternalJobObservation struct {
 	GPUMemGB                *int
 	EnvVars                 []string
 	Tags                    []string
+	SubmittedAt             *int64
+	StartedAt               *int64
+	EndedAt                 *int64
 }
 
 // ExternalJobBinding mirrors a job owned by an external executor.
@@ -59,6 +62,23 @@ type ExternalJobBinding struct {
 	// ExternalObservationLeavesStateAlone.
 	SyncWarning   string
 	SyncWarningAt *int64
+	// CancelRequestedAt is pending external control-plane state. It is shown
+	// separately and does not make the authoritative job status terminal.
+	CancelRequestedAt *int64
+}
+
+const ExternalSubmissionUnconfirmedAfter = 5 * time.Minute
+
+// IsExternalSubmissionUnconfirmed reports when an external job has remained
+// nonterminal without a recoverable executor identity past the confirmation
+// window. A missing binding before that deadline is still allowed while the
+// submit command resolves the executor identity.
+func IsExternalSubmissionUnconfirmed(job *Job, binding *ExternalJobBinding, now time.Time) bool {
+	if job == nil || binding != nil || job.Backend != BackendSkyPilot || IsTerminalStatus(job.Status) {
+		return false
+	}
+	createdAt := time.Unix(job.CreatedAt, 0)
+	return !now.Before(createdAt.Add(ExternalSubmissionUnconfirmedAfter))
 }
 
 func normalizeExternalObservation(obs ExternalJobObservation) ExternalJobObservation {
@@ -98,24 +118,24 @@ func normalizeExternalObservation(obs ExternalJobObservation) ExternalJobObserva
 	return obs
 }
 
+func validateConfirmedExternalObservation(obs ExternalJobObservation) error {
+	if obs.ExternalJobID == "" {
+		return fmt.Errorf("external job id is required")
+	}
+	if obs.RawStatus == "" {
+		return fmt.Errorf("external job status is required for a confirmed observation")
+	}
+	return nil
+}
+
 // UpsertExternalJobFromObservation creates or refreshes a local Weft job for
 // an external executor row. It is idempotent on (executor, external_job_id,
 // external_task_id), matching the spec's ExternalJobBinding key.
 func UpsertExternalJobFromObservation(database *sql.DB, obs ExternalJobObservation) (*ExternalJobBinding, bool, error) {
 	obs = normalizeExternalObservation(obs)
-	if obs.ExternalJobID == "" {
-		return nil, false, fmt.Errorf("external job id is required")
-	}
-	if existing, err := FindExternalJobBinding(database, obs.Executor, obs.ExternalJobID, obs.ExternalTaskID); err != nil {
+	if err := validateConfirmedExternalObservation(obs); err != nil {
 		return nil, false, err
-	} else if existing != nil {
-		if err := UpdateExternalJobObservation(database, existing.JobID, obs); err != nil {
-			return nil, false, err
-		}
-		refreshed, err := GetExternalJobBindingByJobID(database, existing.JobID)
-		return refreshed, false, err
 	}
-
 	tx, err := database.Begin()
 	if err != nil {
 		return nil, false, err
@@ -123,18 +143,50 @@ func UpsertExternalJobFromObservation(database *sql.DB, obs ExternalJobObservati
 	defer tx.Rollback()
 
 	now := time.Now().Unix()
+	existing, err := findExternalJobBinding(tx, obs.Executor, obs.ExternalJobID, obs.ExternalTaskID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		if _, err := updateExternalJobObservationTx(tx, existing.JobID, obs, now); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		refreshed, err := GetExternalJobBindingByJobID(database, existing.JobID)
+		return refreshed, false, err
+	}
+	if obs.ExternalTaskID != "" {
+		unqualified, err := findExternalJobBinding(tx, obs.Executor, obs.ExternalJobID, "")
+		if err != nil {
+			return nil, false, err
+		}
+		if unqualified != nil {
+			if _, err := updateExternalJobObservationTx(tx, unqualified.JobID, obs, now); err != nil {
+				return nil, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, false, err
+			}
+			refreshed, err := GetExternalJobBindingByJobID(database, unqualified.JobID)
+			return refreshed, false, err
+		}
+	}
+
 	envVars := encodeStringSlice(obs.EnvVars)
 	tags := encodeStringSlice(canonicalizeTagSlice(obs.Tags))
 	var gpuMem any
 	if obs.GPUMemGB != nil {
 		gpuMem = *obs.GPUMemGB
 	}
+	createdAt := externalTimestampOr(obs.SubmittedAt, now)
 	result, err := tx.Exec(`
 		INSERT INTO jobs (
 			working_dir, command, description, created_at, backend,
 			gpu_class, gpu_mem_gb, env_vars, tags, project, placement_host
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')`,
-		obs.SubmittedFromWorkingDir, obs.Command, obs.Description, now, BackendSkyPilot,
+		obs.SubmittedFromWorkingDir, obs.Command, obs.Description, createdAt, BackendSkyPilot,
 		obs.GPUClass, gpuMem, envVars, tags, obs.SubmittedFromProject,
 	)
 	if err != nil {
@@ -202,7 +254,9 @@ func CreateExternalPendingJob(database *sql.DB, obs ExternalJobObservation) (int
 func insertExternalAttempt(execer dbExecer, jobID int64, obs ExternalJobObservation, now int64) (int64, error) {
 	status := obs.NormalizedStatus
 	var startTime any
-	if status == StatusRunning {
+	if obs.StartedAt != nil && *obs.StartedAt > 0 {
+		startTime = *obs.StartedAt
+	} else if status == StatusRunning {
 		startTime = now
 	}
 	var endTime any
@@ -216,15 +270,16 @@ func insertExternalAttempt(execer dbExecer, jobID int64, obs ExternalJobObservat
 	// is in raw_status / raw_status_message.
 	var exitCode any
 	if IsTerminalStatus(status) {
-		endTime = now
+		endTime = externalTimestampOr(obs.EndedAt, now)
 	}
+	queuedAt := externalTimestampOr(obs.SubmittedAt, now)
 	result, err := execer.Exec(`
 		INSERT INTO job_attempts (
 			job_id, attempt_number, host, status, queued_at, start_time,
 			end_time, exit_code, backend, remote_id, remote_state,
 			last_synced_status, error_message
 		) VALUES (?, 1, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		jobID, status, now, startTime, endTime, exitCode, BackendSkyPilot,
+		jobID, status, queuedAt, startTime, endTime, exitCode, BackendSkyPilot,
 		obs.ExternalJobID, obs.RawStatus, status, nullableString(obs.RawStatusMessage),
 	)
 	if err != nil {
@@ -238,7 +293,7 @@ func upsertExternalBindingTx(execer dbExecer, jobID int64, attemptID *int64, obs
 	if attemptID != nil {
 		attempt = *attemptID
 	}
-	_, err := execer.Exec(`
+	result, err := execer.Exec(`
 		INSERT INTO external_job_bindings (
 			job_id, attempt_id, executor, external_job_id, external_task_id,
 			external_cluster_id, external_cluster_name, raw_status,
@@ -246,7 +301,6 @@ func upsertExternalBindingTx(execer dbExecer, jobID int64, attemptID *int64, obs
 			submitted_from_project, dashboard_url, created_at, last_observed_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(executor, external_job_id, external_task_id) DO UPDATE SET
-			job_id = excluded.job_id,
 			attempt_id = COALESCE(excluded.attempt_id, external_job_bindings.attempt_id),
 			external_cluster_id = excluded.external_cluster_id,
 			external_cluster_name = excluded.external_cluster_name,
@@ -258,21 +312,32 @@ func upsertExternalBindingTx(execer dbExecer, jobID int64, attemptID *int64, obs
 			dashboard_url = excluded.dashboard_url,
 			last_observed_at = excluded.last_observed_at,
 			sync_warning = NULL,
-			sync_warning_at = NULL`,
+			sync_warning_at = NULL
+		WHERE external_job_bindings.job_id = excluded.job_id`,
 		jobID, attempt, obs.Executor, obs.ExternalJobID, obs.ExternalTaskID,
 		obs.ExternalClusterID, obs.ExternalClusterName, obs.RawStatus,
 		obs.RawStatusMessage, obs.NormalizedStatus, obs.SubmittedFromWorkingDir,
 		obs.SubmittedFromProject, obs.DashboardURL, now, now,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return fmt.Errorf("external identity %s/%s/%s is already bound to another job", obs.Executor, obs.ExternalJobID, obs.ExternalTaskID)
+	}
+	return nil
 }
 
 // AttachExternalBinding stores the external ID after a submit that created the
 // Weft job first.
 func AttachExternalBinding(database *sql.DB, jobID, attemptID int64, obs ExternalJobObservation) error {
 	obs = normalizeExternalObservation(obs)
-	if obs.ExternalJobID == "" {
-		return fmt.Errorf("external job id is required")
+	if err := validateConfirmedExternalObservation(obs); err != nil {
+		return err
 	}
 	tx, err := database.Begin()
 	if err != nil {
@@ -280,13 +345,118 @@ func AttachExternalBinding(database *sql.DB, jobID, attemptID int64, obs Externa
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
+	applied, err := updateExternalAttemptTx(tx, jobID, obs, now)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return fmt.Errorf("cannot attach external identity to terminal job %d", jobID)
+	}
 	if err := upsertExternalBindingTx(tx, jobID, &attemptID, obs, now); err != nil {
 		return err
 	}
-	if err := updateExternalAttemptTx(tx, jobID, obs, now); err != nil {
-		return err
-	}
 	return tx.Commit()
+}
+
+// RebindUnconfirmedExternalJob attaches a positively identified external job
+// to the original queued SkyPilot job left by an unconfirmed submission.
+func RebindUnconfirmedExternalJob(database *sql.DB, jobID int64, obs ExternalJobObservation) (*ExternalJobBinding, error) {
+	obs = normalizeExternalObservation(obs)
+	if err := validateConfirmedExternalObservation(obs); err != nil {
+		return nil, err
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var backend string
+	if err := tx.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, jobID).Scan(&backend); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("job %d not found", jobID)
+		}
+		return nil, err
+	}
+	if backend != BackendSkyPilot {
+		return nil, fmt.Errorf("job %d is not a SkyPilot job", jobID)
+	}
+	var bindingCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM external_job_bindings WHERE job_id = ?`, jobID).Scan(&bindingCount); err != nil {
+		return nil, err
+	}
+	if bindingCount != 0 {
+		existing, err := getExternalJobBindingByJobID(tx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if bindingCount == 1 && existing != nil && existing.Executor == obs.Executor && existing.ExternalJobID == obs.ExternalJobID {
+			switch {
+			case existing.ExternalTaskID == obs.ExternalTaskID:
+				if _, err := updateExternalJobObservationTx(tx, jobID, obs, time.Now().Unix()); err != nil {
+					return nil, err
+				}
+				if err := tx.Commit(); err != nil {
+					return nil, err
+				}
+				return GetExternalJobBindingByJobID(database, jobID)
+			case existing.ExternalTaskID == "" && obs.ExternalTaskID != "":
+				attemptID, err := getLatestAttemptIDTx(tx, jobID)
+				if err != nil {
+					return nil, err
+				}
+				if attemptID == 0 {
+					return nil, fmt.Errorf("job %d has no attempt to refine", jobID)
+				}
+				var currentStatus string
+				if err := tx.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&currentStatus); err != nil {
+					return nil, err
+				}
+				if IsTerminalStatus(currentStatus) {
+					return nil, fmt.Errorf("job %d is terminal and cannot be rebound", jobID)
+				}
+				if applied, err := updateExternalJobObservationTx(tx, jobID, obs, time.Now().Unix()); err != nil {
+					return nil, err
+				} else if !applied {
+					return nil, fmt.Errorf("job %d could not refine its external task identity", jobID)
+				}
+				if err := tx.Commit(); err != nil {
+					return nil, err
+				}
+				return GetExternalJobBindingByJobID(database, jobID)
+			}
+		}
+		return nil, fmt.Errorf("job %d already has a different external binding", jobID)
+	}
+	attemptID, err := getLatestAttemptIDTx(tx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if attemptID == 0 {
+		return nil, fmt.Errorf("job %d has no attempt to rebind", jobID)
+	}
+	var currentStatus string
+	if err := tx.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&currentStatus); err != nil {
+		return nil, err
+	}
+	if IsTerminalStatus(currentStatus) {
+		return nil, fmt.Errorf("job %d is terminal and cannot be rebound", jobID)
+	}
+	now := time.Now().Unix()
+	applied, err := updateExternalAttemptTx(tx, jobID, obs, now)
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return nil, fmt.Errorf("job %d could not be rebound", jobID)
+	}
+	if err := upsertExternalBindingTx(tx, jobID, &attemptID, obs, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return GetExternalJobBindingByJobID(database, jobID)
 }
 
 func MarkExternalSubmissionFailed(database *sql.DB, jobID int64, message string) error {
@@ -301,6 +471,54 @@ func MarkExternalSubmissionFailed(database *sql.DB, jobID int64, message string)
 		StatusDead, now, message, StatusDead, jobID,
 	)
 	return err
+}
+
+// SetExternalCancelIntent records a successfully sent cancel request on the
+// binding only while the latest external attempt is still nonterminal. It
+// deliberately does not use jobs.requested_status, which is a terminal status
+// overlay rather than a pending external operation.
+func SetExternalCancelIntent(database *sql.DB, jobID int64) (bool, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var backend string
+	if err := tx.QueryRow(`SELECT backend FROM jobs WHERE id = ?`, jobID).Scan(&backend); err != nil {
+		return false, err
+	}
+	if backend != BackendSkyPilot {
+		return false, fmt.Errorf("job %d is not a SkyPilot job", jobID)
+	}
+	attemptID, err := getLatestAttemptIDTx(tx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if attemptID == 0 {
+		return false, nil
+	}
+	var status string
+	if err := tx.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&status); err != nil {
+		return false, err
+	}
+	if IsTerminalStatus(status) {
+		return false, nil
+	}
+	result, err := tx.Exec(`UPDATE external_job_bindings SET cancel_requested_at = ? WHERE job_id = ?`, time.Now().Unix(), jobID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows != 1 {
+		return false, fmt.Errorf("job %d has no unique external binding", jobID)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // MarkExternalSyncWarning records that an external executor refresh could not
@@ -329,55 +547,148 @@ func ClearExternalSyncWarning(database dbExecer, jobID int64) error {
 }
 
 func UpdateExternalJobObservation(database *sql.DB, jobID int64, obs ExternalJobObservation) error {
+	_, err := ApplyExternalJobObservation(database, jobID, obs)
+	return err
+}
+
+// ApplyExternalJobObservation returns whether the observation changed the
+// mirrored state. A delayed nonterminal snapshot after terminal evidence is a
+// successful no-op, not an update.
+func ApplyExternalJobObservation(database *sql.DB, jobID int64, obs ExternalJobObservation) (bool, error) {
 	obs = normalizeExternalObservation(obs)
+	if err := validateConfirmedExternalObservation(obs); err != nil {
+		return false, err
+	}
 	tx, err := database.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
-	if err := updateExternalAttemptTx(tx, jobID, obs, now); err != nil {
-		return err
+	applied, err := updateExternalJobObservationTx(tx, jobID, obs, now)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return applied, nil
+}
+
+func updateExternalJobObservationTx(tx *sql.Tx, jobID int64, obs ExternalJobObservation, now int64) (bool, error) {
+	existing, err := getExternalJobBindingByJobID(tx, jobID)
+	if err != nil {
+		return false, err
+	}
+	refineTaskIdentity := false
+	if existing != nil {
+		if existing.Executor != obs.Executor || existing.ExternalJobID != obs.ExternalJobID {
+			return false, fmt.Errorf("observation identity %s/%s does not match job %d binding %s/%s", obs.Executor, obs.ExternalJobID, jobID, existing.Executor, existing.ExternalJobID)
+		}
+		switch {
+		case existing.ExternalTaskID == obs.ExternalTaskID:
+		case existing.ExternalTaskID == "" && obs.ExternalTaskID != "":
+			refineTaskIdentity = true
+		default:
+			return false, fmt.Errorf("observation task %q does not match job %d binding task %q", obs.ExternalTaskID, jobID, existing.ExternalTaskID)
+		}
+	}
+	applied, err := updateExternalAttemptTx(tx, jobID, obs, now)
+	if err != nil {
+		return false, err
+	}
+	if !applied {
+		return false, nil
+	}
+	if IsTerminalStatus(obs.NormalizedStatus) {
+		if _, err := tx.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = ?`, jobID); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(`UPDATE external_job_bindings SET cancel_requested_at = NULL WHERE job_id = ?`, jobID); err != nil {
+			return false, err
+		}
+	}
+	if refineTaskIdentity {
+		result, err := tx.Exec(`
+			UPDATE external_job_bindings
+			   SET external_task_id = ?
+			 WHERE id = ? AND job_id = ? AND external_task_id = ''`,
+			obs.ExternalTaskID, existing.ID, jobID)
+		if err != nil {
+			return false, err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if rows != 1 {
+			return false, fmt.Errorf("external task identity refinement lost a concurrent update for job %d", jobID)
+		}
 	}
 	attemptID, err := getLatestAttemptIDTx(tx, jobID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var attemptPtr *int64
 	if attemptID > 0 {
 		attemptPtr = &attemptID
 	}
 	if err := upsertExternalBindingTx(tx, jobID, attemptPtr, obs, now); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	return true, nil
 }
 
-func updateExternalAttemptTx(execer dbExecer, jobID int64, obs ExternalJobObservation, now int64) error {
+func updateExternalAttemptTx(execer dbExecer, jobID int64, obs ExternalJobObservation, now int64) (bool, error) {
 	attemptID, err := getLatestAttemptIDTx(execer, jobID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if attemptID == 0 {
 		_, err := insertExternalAttempt(execer, jobID, obs, now)
-		return err
+		return err == nil, err
 	}
 	status := obs.NormalizedStatus
-	var endTime any
+	var currentStatus, currentRawStatus string
+	if err := execer.QueryRow(`SELECT status, COALESCE(remote_state, '') FROM job_attempts WHERE id = ?`, attemptID).Scan(&currentStatus, &currentRawStatus); err != nil {
+		return false, err
+	}
+	if IsTerminalStatus(currentStatus) &&
+		(currentStatus != status ||
+			(IsTerminalStatus(status) && !strings.EqualFold(strings.TrimSpace(currentRawStatus), strings.TrimSpace(obs.RawStatus)))) {
+		// External terminal states are final. Without a source timestamp, a
+		// later DB writer cannot prove that a conflicting queue snapshot is a
+		// newer executor result. This includes two executor states that normalize
+		// to the same local bucket: neither may rewrite the first raw outcome.
+		return false, nil
+	}
 	// See insertExternalAttempt: exit codes are not observable from SkyPilot,
 	// so none is synthesised here either.
 	var exitCode any
-	if IsTerminalStatus(status) {
-		endTime = now
+	terminal := IsTerminalStatus(status)
+	var submittedAt any
+	if obs.SubmittedAt != nil && *obs.SubmittedAt > 0 {
+		submittedAt = *obs.SubmittedAt
 	}
+	var startedAt any
+	if obs.StartedAt != nil && *obs.StartedAt > 0 {
+		startedAt = *obs.StartedAt
+	} else if status == StatusRunning {
+		startedAt = now
+	}
+	endAt := externalTimestampOr(obs.EndedAt, now)
 	_, err = execer.Exec(`
 		UPDATE job_attempts
 		   SET status = ?,
+		       queued_at = CASE WHEN ? IS NOT NULL THEN ? ELSE queued_at END,
 		       start_time = CASE
-		           WHEN ? = ? AND (start_time IS NULL OR start_time = 0) THEN ?
+		           WHEN ? IS NOT NULL AND (start_time IS NULL OR start_time = 0) THEN ?
 		           ELSE start_time
 		       END,
-		       end_time = ?,
+		       end_time = CASE
+		           WHEN ? THEN COALESCE(NULLIF(end_time, 0), ?)
+		           ELSE NULL
+		       END,
 		       exit_code = ?,
 		       backend = ?,
 		       remote_id = ?,
@@ -385,10 +696,17 @@ func updateExternalAttemptTx(execer dbExecer, jobID int64, obs ExternalJobObserv
 		       last_synced_status = ?,
 		       error_message = ?
 		 WHERE id = ?`,
-		status, status, StatusRunning, now, endTime, exitCode, BackendSkyPilot,
+		status, submittedAt, submittedAt, startedAt, startedAt, terminal, endAt, exitCode, BackendSkyPilot,
 		obs.ExternalJobID, obs.RawStatus, status, nullableString(obs.RawStatusMessage), attemptID,
 	)
-	return err
+	return err == nil, err
+}
+
+func externalTimestampOr(value *int64, fallback int64) int64 {
+	if value != nil && *value > 0 {
+		return *value
+	}
+	return fallback
 }
 
 func getLatestAttemptIDTx(execer dbExecer, jobID int64) (int64, error) {
@@ -426,12 +744,16 @@ func canonicalizeTagSlice(tags []string) []string {
 }
 
 func FindExternalJobBinding(database *sql.DB, executor, externalJobID, externalTaskID string) (*ExternalJobBinding, error) {
-	row := database.QueryRow(`
+	return findExternalJobBinding(database, executor, externalJobID, externalTaskID)
+}
+
+func findExternalJobBinding(execer dbExecer, executor, externalJobID, externalTaskID string) (*ExternalJobBinding, error) {
+	row := execer.QueryRow(`
 		SELECT id, job_id, attempt_id, executor, external_job_id, external_task_id,
 		       external_cluster_id, external_cluster_name, raw_status,
 		       raw_status_message, normalized_status, submitted_from_working_dir,
 		       submitted_from_project, dashboard_url, created_at, last_observed_at,
-		       sync_warning, sync_warning_at
+		       sync_warning, sync_warning_at, cancel_requested_at
 		  FROM external_job_bindings
 		 WHERE executor = ? AND external_job_id = ? AND external_task_id = ?`,
 		executor, externalJobID, externalTaskID,
@@ -440,12 +762,16 @@ func FindExternalJobBinding(database *sql.DB, executor, externalJobID, externalT
 }
 
 func GetExternalJobBindingByJobID(database *sql.DB, jobID int64) (*ExternalJobBinding, error) {
-	row := database.QueryRow(`
+	return getExternalJobBindingByJobID(database, jobID)
+}
+
+func getExternalJobBindingByJobID(execer dbExecer, jobID int64) (*ExternalJobBinding, error) {
+	row := execer.QueryRow(`
 		SELECT id, job_id, attempt_id, executor, external_job_id, external_task_id,
 		       external_cluster_id, external_cluster_name, raw_status,
 		       raw_status_message, normalized_status, submitted_from_working_dir,
 		       submitted_from_project, dashboard_url, created_at, last_observed_at,
-		       sync_warning, sync_warning_at
+		       sync_warning, sync_warning_at, cancel_requested_at
 		  FROM external_job_bindings
 		 WHERE job_id = ?
 		 ORDER BY id DESC LIMIT 1`, jobID)
@@ -458,7 +784,7 @@ func ListExternalJobBindings(database *sql.DB, executor, project string) ([]*Ext
 		       b.external_cluster_id, b.external_cluster_name, b.raw_status,
 		       b.raw_status_message, b.normalized_status, b.submitted_from_working_dir,
 		       b.submitted_from_project, b.dashboard_url, b.created_at, b.last_observed_at,
-		       b.sync_warning, b.sync_warning_at
+		       b.sync_warning, b.sync_warning_at, b.cancel_requested_at
 		  FROM external_job_bindings b
 		  JOIN jobs j ON j.id = b.job_id
 		 WHERE b.executor = ? AND j.tombstoned = 0`
@@ -498,11 +824,11 @@ func scanExternalJobBinding(row externalBindingScanner) (*ExternalJobBinding, er
 
 func scanExternalJobBindingRows(row externalBindingScanner) (*ExternalJobBinding, error) {
 	var b ExternalJobBinding
-	var attemptID, lastObserved, syncWarningAt sql.NullInt64
+	var attemptID, lastObserved, syncWarningAt, cancelRequestedAt sql.NullInt64
 	var clusterID, clusterName, rawStatus, rawMessage, normalized, wd, project, dashboard, syncWarning sql.NullString
 	err := row.Scan(&b.ID, &b.JobID, &attemptID, &b.Executor, &b.ExternalJobID, &b.ExternalTaskID,
 		&clusterID, &clusterName, &rawStatus, &rawMessage, &normalized, &wd, &project,
-		&dashboard, &b.CreatedAt, &lastObserved, &syncWarning, &syncWarningAt)
+		&dashboard, &b.CreatedAt, &lastObserved, &syncWarning, &syncWarningAt, &cancelRequestedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +840,9 @@ func scanExternalJobBindingRows(row externalBindingScanner) (*ExternalJobBinding
 	}
 	if syncWarningAt.Valid {
 		b.SyncWarningAt = &syncWarningAt.Int64
+	}
+	if cancelRequestedAt.Valid {
+		b.CancelRequestedAt = &cancelRequestedAt.Int64
 	}
 	if clusterID.Valid {
 		b.ExternalClusterID = clusterID.String

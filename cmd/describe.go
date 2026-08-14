@@ -86,6 +86,13 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if job.Backend == db.BackendSkyPilot {
+		for _, flag := range []string{"directory", "command", "gpu", "gpus", "gpu-mem", "cpu", "gpu-class", "provider"} {
+			if cmd.Flags().Changed(flag) {
+				return fmt.Errorf("SkyPilot execution fields cannot be changed by Weft; submit a new external job instead")
+			}
+		}
+	}
 
 	// Normalize GPU flags (--gpu and --gpus are aliases)
 	gpuValue := describeGPU

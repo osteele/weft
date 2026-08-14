@@ -315,6 +315,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
+		if job.Backend == db.BackendSkyPilot {
+			return m, m.setFlash("SkyPilot jobs cannot be edited/restarted by Weft; submit a new external job instead", true)
+		}
 		// Open new job form pre-populated with ALL fields from this job
 		m.inputMode = true
 		m.inputFocus = 0
@@ -370,14 +373,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						}
 					}
 					// Tell the monitor to start polling for this job's log and stats
-					if m.monitor != nil {
-						m.monitor.WatchJobLog(m.selectedJob)
-						if m.selectedJob.Status == db.StatusRunning {
-							m.monitor.WatchJobStats(m.selectedJob)
-						}
-					} else {
-						// Fallback for non-monitor mode
-						return m, m.fetchSelectedJobLog()
+					if cmd := m.startSelectedJobLog(); cmd != nil {
+						return m, cmd
 					}
 					return m, nil
 				}
@@ -463,6 +460,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
+		if job.Backend == db.BackendSkyPilot {
+			return m, m.setFlash("SkyPilot jobs cannot be restarted by Weft; submit a new external job instead", true)
+		}
 		if m.restarting {
 			return m, m.setFlash("Restart already in progress...", false)
 		}
@@ -478,6 +478,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		job := m.getTargetJob()
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
+		}
+		if job.Backend == db.BackendSkyPilot {
+			return m, m.setFlash("SkyPilot jobs cannot be retried by Weft; submit a new external job instead", true)
 		}
 		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=y action=retry"))
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Retrying job %s...", ids.FormatJobID(job.ID)), false), m.retryJob(job))
@@ -637,6 +640,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
+		if job.Backend == db.BackendSkyPilot {
+			return m, m.setFlash("SkyPilot execution fields cannot be edited by Weft", true)
+		}
 		status := job.EffectiveStatus()
 		if status != db.StatusQueued && status != db.StatusDraft {
 			return m, m.setFlash("Can only edit queued or draft jobs", true)
@@ -674,6 +680,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		job := m.getTargetJob()
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
+		}
+		if job.Backend == db.BackendSkyPilot {
+			return m, m.setFlash("SkyPilot jobs cannot be launched on a Weft rental", true)
 		}
 		if job.EffectiveStatus() != db.StatusQueued {
 			return m, m.setFlash("Rental GPU only available for queued jobs", true)
@@ -786,6 +795,9 @@ func (m *Model) cycleTab(forward bool) (Model, tea.Cmd) {
 // cycleJobsTab toggles between Details and Logs tabs in Jobs view
 func (m *Model) cycleJobsTab(forward bool) (Model, tea.Cmd) {
 	tabs := []DetailTab{DetailTabDetails, DetailTabLogs, DetailTabCPU}
+	if job := m.getTargetJob(); job != nil && job.Backend == db.BackendSkyPilot {
+		tabs = tabs[:2]
+	}
 	currentIdx := 0
 	for i, tab := range tabs {
 		if tab == m.detailTab {
@@ -820,13 +832,8 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 			m.logContent = ""
 			m.logStale = false
 		}
-		if m.monitor != nil {
-			m.monitor.WatchJobLog(m.selectedJob)
-			if m.selectedJob.Status == db.StatusRunning {
-				m.monitor.WatchJobStats(m.selectedJob)
-			}
-		} else {
-			return *m, m.fetchSelectedJobLog()
+		if cmd := m.startSelectedJobLog(); cmd != nil {
+			return *m, cmd
 		}
 		return *m, nil
 	}
@@ -834,9 +841,14 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 }
 
 func (m *Model) switchToCPUTab() (Model, tea.Cmd) {
+	job := m.getTargetJob()
+	if job != nil && job.Backend == db.BackendSkyPilot {
+		m.detailTab = DetailTabDetails
+		m.jobSelectionActive = true
+		return *m, m.setFlash("CPU telemetry is not available for SkyPilot-managed jobs", true)
+	}
 	m.detailTab = DetailTabCPU
 	m.jobSelectionActive = true
-	job := m.getTargetJob()
 	if cmd := m.requestJobCPUTop(job); cmd != nil {
 		return *m, cmd
 	}

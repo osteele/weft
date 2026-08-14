@@ -200,11 +200,13 @@ table external_job_bindings
   col 13 dashboard_url TEXT notnull=0 default=<none> pk=0
   col 14 created_at INTEGER notnull=1 default=<none> pk=0
   col 15 last_observed_at INTEGER notnull=0 default=<none> pk=0
-  col 16 sync_warning TEXT notnull=0 default=<none> pk=0
-  col 17 sync_warning_at INTEGER notnull=0 default=<none> pk=0
+  col 16 cancel_requested_at INTEGER notnull=0 default=<none> pk=0
+  col 17 sync_warning TEXT notnull=0 default=<none> pk=0
+  col 18 sync_warning_at INTEGER notnull=0 default=<none> pk=0
   fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=CASCADE
   unique-index (executor,external_job_id,external_task_id) origin=u partial=0
+  unique-index (job_id) origin=c partial=0
 table failure_label_reviews
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 job_id INTEGER notnull=0 default=<none> pk=0

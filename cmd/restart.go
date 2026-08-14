@@ -773,6 +773,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if job == nil {
 		return db.ErrJobNotFound
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return fmt.Errorf("SkyPilot job %s cannot be restarted by Weft; submit a new external job instead", ids.FormatJobID(jobID))
+	}
 	if err := artifactspec.ValidateNeedsSpecs(job.Needs); err != nil {
 		jobRef := ids.FormatJobID(jobID)
 		return fmt.Errorf("job %s has malformed --needs: %w; fix with `weft edit %s --needs ...` or clear with `weft edit %s --clear-needs`", jobRef, err, jobRef, jobRef)

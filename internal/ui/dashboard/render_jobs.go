@@ -604,6 +604,9 @@ func (m Model) renderTabHeader() string {
 		{"Logs", DetailTabLogs},
 		{"CPU", DetailTabCPU},
 	}
+	if job := m.getTargetJob(); job != nil && job.Backend == db.BackendSkyPilot {
+		tabs = tabs[:2]
+	}
 
 	var rendered []string
 	for _, t := range tabs {
@@ -683,6 +686,10 @@ func (m Model) renderJobCPUTop(height int) string {
 	panelHeader := m.renderTabHeader() + "\n"
 	if job == nil {
 		panelContent := panelHeader + dimStyle.Render("No job selected")
+		return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+	}
+	if job.Backend == db.BackendSkyPilot {
+		panelContent := panelHeader + dimStyle.Render("CPU telemetry is not available for SkyPilot-managed jobs")
 		return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 	}
 
@@ -847,6 +854,67 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		}
 	}
 	b.WriteString("\n\n")
+	if job.Backend == db.BackendSkyPilot {
+		binding := m.externalBindings[job.ID]
+		if binding == nil {
+			b.WriteString(labelStyle.Render("Executor"))
+			if db.IsExternalSubmissionUnconfirmed(job, nil, time.Now()) {
+				b.WriteString(errorStyle.Render("SkyPilot submission unconfirmed"))
+				b.WriteString("\n")
+				b.WriteString(labelStyle.Render("Warning"))
+				b.WriteString(errorStyle.Render("external work may still be running or billing"))
+				b.WriteString("\n")
+				b.WriteString(labelStyle.Render("Recover"))
+				b.WriteString(valueStyle.Render("weft sky import --job " + ids.FormatJobID(job.ID) + " <sky-job-id>"))
+			} else {
+				b.WriteString(errorStyle.Render("SkyPilot binding unavailable"))
+			}
+			b.WriteString("\n")
+		} else {
+			identity := "SkyPilot job " + binding.ExternalJobID
+			if binding.ExternalTaskID != "" {
+				identity += " task " + binding.ExternalTaskID
+			}
+			b.WriteString(labelStyle.Render("Executor"))
+			b.WriteString(valueStyle.Render(identity))
+			b.WriteString("\n")
+			cluster := binding.ExternalClusterName
+			if cluster == "" {
+				cluster = binding.ExternalClusterID
+			}
+			if cluster != "" {
+				b.WriteString(labelStyle.Render("Cluster"))
+				b.WriteString(valueStyle.Render(cluster))
+				b.WriteString("\n")
+			}
+			if binding.RawStatus != "" {
+				b.WriteString(labelStyle.Render("Raw status"))
+				b.WriteString(valueStyle.Render(binding.RawStatus))
+				b.WriteString("\n")
+			}
+			b.WriteString(labelStyle.Render("Observed"))
+			if binding.LastObservedAt == nil {
+				b.WriteString(errorStyle.Render("status never confirmed"))
+			} else {
+				age := time.Now().Unix() - *binding.LastObservedAt
+				if age < 0 {
+					age = 0
+				}
+				observed := db.FormatDuration(age) + " ago"
+				if age > int64((10 * time.Minute).Seconds()) {
+					observed += " (stale)"
+				}
+				b.WriteString(valueStyle.Render(observed))
+			}
+			b.WriteString("\n")
+			if binding.SyncWarning != "" {
+				b.WriteString(labelStyle.Render("Sync warning"))
+				b.WriteString(errorStyle.Render(binding.SyncWarning))
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	// Description (if any)
 	if job.Description != "" {

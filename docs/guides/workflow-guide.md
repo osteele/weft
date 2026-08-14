@@ -1243,11 +1243,39 @@ laptop$ weft log wj123
 laptop$ weft job mark-processed wj123
 ```
 
+The default `weft log` call is a finite snapshot of retained output. Use
+`weft log --follow wj123` to keep following. Weft passes the binding's managed
+job and task IDs to SkyPilot, so a task-qualified job does not show another
+task's logs.
+
 To mirror a job that was submitted outside Weft:
 
 ```bash
-laptop$ weft sky import --project calibration 42
+laptop$ weft sky import --project calibration --command "python train.py" 42
 ```
+
+Current SkyPilot queue JSON does not expose the stored task command, so a new
+import requires `--command`. Weft records that command instead of inventing a
+placeholder that would corrupt command history and search.
+
+For a multi-task managed job, qualify the shared managed-job ID with the task
+ID or name so Weft stores the complete identity:
+
+```bash
+laptop$ weft sky import --project calibration --task train --command "python train.py" 42
+```
+
+If `weft sky submit` timed out or could not recover the managed-job ID, it
+leaves the original Weft job queued and unbound because the SkyPilot task may
+already be running. Once its external ID is known, attach it to that same job:
+
+```bash
+laptop$ weft sky import --job wj123 42
+```
+
+The `--job` form does not create a second Weft job. Repeating it with the same
+external identity is safe; a different identity is rejected instead of
+replacing the established binding.
 
 SkyPilot jobs are external-executor jobs, not Weft rental instances. Weft does
 not create `wi...` instance rows for them, run the Weft cloud agent, collect R2

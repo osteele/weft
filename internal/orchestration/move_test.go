@@ -18,6 +18,35 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
+func TestMoveQueuedJobToNewInstanceRejectsExternalJobBeforeMutation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "PENDING", NormalizedStatus: db.StatusQueued, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	var attemptsBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsBefore); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	_, err = MoveQueuedJobToNewInstance(database, binding.JobID, false)
+	if err == nil || !strings.Contains(err.Error(), "external executor") {
+		t.Fatalf("MoveQueuedJobToNewInstance error = %v, want external refusal", err)
+	}
+	var attemptsAfter, intents int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, binding.JobID).Scan(&attemptsAfter); err != nil {
+		t.Fatalf("count attempts after: %v", err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM move_intents WHERE job_id = ?`, binding.JobID).Scan(&intents); err != nil {
+		t.Fatalf("count move intents: %v", err)
+	}
+	if attemptsAfter != attemptsBefore || intents != 0 {
+		t.Fatalf("move mutated external job: attempts=%d/%d intents=%d", attemptsAfter, attemptsBefore, intents)
+	}
+}
+
 // TestGroupOutcomeTracker_PartitionsByEvent verifies the orchestration-side
 // matching of campaign per-group events back to the user-visible jobs in
 // each group: LaunchEventGroupDone marks those jobs placed, GroupFailed
@@ -892,6 +921,31 @@ func TestLaunchNewForJob_JobNotFound(t *testing.T) {
 	_, err := LaunchNewForJob(context.Background(), database, nil, nil, nil, 999, bidding.StrategyFast)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("LaunchNewForJob err = %v, want not found", err)
+	}
+}
+
+func TestLaunchNewForJobRejectsExternalJobBeforeOfferLookup(t *testing.T) {
+	database := db.SetupTestDB(t)
+	binding, _, err := db.UpsertExternalJobFromObservation(database, db.ExternalJobObservation{
+		Executor: db.ExternalExecutorSkyPilot, ExternalJobID: "42",
+		RawStatus: "PENDING", NormalizedStatus: db.StatusQueued, Command: "python train.py",
+	})
+	if err != nil {
+		t.Fatalf("create external job: %v", err)
+	}
+	_, err = LaunchNewForJob(context.Background(), database, nil, nil, nil, binding.JobID, bidding.StrategyFast)
+	if err == nil || !strings.Contains(err.Error(), "external executor") {
+		t.Fatalf("LaunchNewForJob error = %v, want external refusal", err)
+	}
+	var intents, launches int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM move_intents WHERE job_id = ?`, binding.JobID).Scan(&intents); err != nil {
+		t.Fatalf("count intents: %v", err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM launches`).Scan(&launches); err != nil {
+		t.Fatalf("count launches: %v", err)
+	}
+	if intents != 0 || launches != 0 {
+		t.Fatalf("external launch mutated DB: intents=%d launches=%d", intents, launches)
 	}
 }
 

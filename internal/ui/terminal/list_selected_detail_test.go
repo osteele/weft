@@ -42,6 +42,42 @@ func TestSelectedJobDetail_InventoryHost(t *testing.T) {
 	}
 }
 
+func TestSelectedJobDetail_ExternalExecutorShowsCachedStateAndWarning(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	observed := now.Add(-12 * time.Minute).Unix()
+	job := &db.Job{ID: 42, Backend: db.BackendSkyPilot, Status: db.StatusRunning}
+	lines := renderSelectedJobDetail(job, selectedJobContext{
+		externalBindingByJobID: map[int64]*db.ExternalJobBinding{42: {
+			ExternalJobID: "99", ExternalTaskID: "task-a", ExternalClusterName: "cluster-a",
+			RawStatus: "RUNNING", LastObservedAt: &observed,
+			SyncWarning: "SkyPilot query timed out", DashboardURL: "https://example.test/job/99",
+		}},
+	}, now)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"Host: SkyPilot", "job 99", "task task-a", "cluster cluster-a", "raw RUNNING", "last confirmed 12m ago", "SkyPilot query timed out", "https://example.test/job/99"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("external detail missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestSelectedJobDetail_ExternalExecutorShowsUnconfirmedSubmissionRecovery(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	job := &db.Job{ID: 42, Backend: db.BackendSkyPilot, Status: db.StatusQueued, CreatedAt: now.Add(-5 * time.Minute).Unix()}
+	line := renderExternalHostLine(job, nil, now)
+	for _, want := range []string{"submission unconfirmed", "running or billing", "weft sky import --job wj42 <sky-job-id>"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("old unbound detail missing %q: %q", want, line)
+		}
+	}
+
+	job.CreatedAt = now.Add(-4*time.Minute - 59*time.Second).Unix()
+	line = renderExternalHostLine(job, nil, now)
+	if strings.Contains(line, "submission unconfirmed") || !strings.Contains(line, "binding unavailable") {
+		t.Fatalf("young unbound detail = %q, want pending binding language", line)
+	}
+}
+
 func TestSelectedJobDetail_MoveIntentPhase(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	job := &db.Job{ID: 2538, Status: db.StatusRunning, Host: "wi3656", Project: "proj"}

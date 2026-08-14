@@ -170,7 +170,8 @@ type Model struct {
 	queueStoppedWarnedHosts map[string]bool
 
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
-	jobDependencies map[int64]string
+	jobDependencies  map[int64]string
+	externalBindings map[int64]*db.ExternalJobBinding
 
 	// LLM description generator (nil if LLM backend not available or disabled)
 	llmGenerator *llm.DescriptionGenerator
@@ -337,6 +338,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		focused:                 true,
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
+		externalBindings:        make(map[int64]*db.ExternalJobBinding),
 		progressTracker:         progress.NewTracker(),
 		jobProgress:             make(map[int64]*progress.Progress),
 		lastHostSyncTimes:       make(map[string]time.Time),
@@ -417,8 +419,10 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(
 			m.startMonitor(),
 			m.waitForMonitorEvent(),
+			m.refreshJobs(),
 			m.startCloudDiscovery(),
 			m.startLLMInit(),
+			m.startSyncTicker(),
 			m.startLogTicker(),
 			m.startHostRefreshTicker(),
 			m.startHostSummaryTicker(),
@@ -843,34 +847,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case tickMsg:
-		var cmds []tea.Cmd
-		cmds = append(cmds, m.startSyncTicker())
-		if cmd := m.ensureCurrentDaemonForTick(); cmd != nil {
+		cmds := []tea.Cmd{m.startSyncTicker()}
+		if m.monitor == nil {
+			if cmd := m.ensureCurrentDaemonForTick(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			// Monitor mode already refreshes jobs and inventory hosts. The
+			// legacy ticker owns those reads only when no monitor is installed.
+			cmds = append(cmds, m.refreshJobs())
+			m.requestSyncsForActiveHosts()
+		}
+		if cmd := m.refreshExternalJobs(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		// Always refresh job list to pick up new jobs created elsewhere
-		cmds = append(cmds, m.refreshJobs())
-		// Request syncs for hosts based on their job activity
-		m.requestSyncsForActiveHosts()
 		return m, tea.Batch(cmds...)
 
 	case logTickMsg:
+		cmds := []tea.Cmd{m.startLogTicker()}
 		// Update the monitor's watched jobs based on current UI state.
 		// The monitor handles the actual SSH polling and emits events.
 		if m.monitor != nil {
-			if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.EffectiveStatus() == db.StatusRunning {
+			if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Backend != db.BackendSkyPilot && m.selectedJob.EffectiveStatus() == db.StatusRunning {
 				m.monitor.WatchJobLog(m.selectedJob)
 			} else {
 				m.monitor.WatchJobLog(nil)
 			}
 			targetJob := m.getTargetJob()
-			if targetJob != nil && targetJob.EffectiveStatus() == db.StatusRunning {
+			if targetJob != nil && targetJob.Backend != db.BackendSkyPilot && targetJob.EffectiveStatus() == db.StatusRunning {
 				m.monitor.WatchJobStats(targetJob)
 			} else {
 				m.monitor.WatchJobStats(nil)
 			}
 		}
-		return m, m.startLogTicker()
+		if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Backend == db.BackendSkyPilot {
+			cmds = append(cmds, m.fetchSelectedJobLog())
+		}
+		return m, tea.Batch(cmds...)
 
 	case createTickMsg:
 		// Only continue ticking if still creating

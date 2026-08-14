@@ -138,10 +138,13 @@ test-race:
 	just test-race-db &
 	db_pid=$!
 	status=0
-	if ! cgo-test -race ./internal/daemonapi ./internal/localmutate ./internal/orchestration; then
+	if ! cgo-test -race ./internal/daemonapi ./internal/localmutate; then
 		status=1
 	fi
 	if ! wait "${db_pid}"; then
+		status=1
+	fi
+	if ! just test-race-orchestration; then
 		status=1
 	fi
 	exit "${status}"
@@ -153,8 +156,26 @@ test-race-db:
 	#!/usr/bin/env bash
 	set -uo pipefail
 	pids=()
-	for shard in '^Test[A-F]' '^Test[G-N]' '^Test[O-R]' '^Test[S-Z]'; do
+	for shard in '^Test[A-F]' '^Test[G-N]' '^Test[O-R]' '^Test([^A-R]|$)'; do
 		cgo-test -race ./internal/db -run "${shard}" -count=1 &
+		pids+=("$!")
+	done
+	status=0
+	for pid in "${pids[@]}"; do
+		if ! wait "${pid}"; then
+			status=1
+		fi
+	done
+	exit "${status}"
+
+# Run orchestration race tests in isolated processes. These tests also mutate
+# package-level lifecycle hooks, so process shards preserve their isolation.
+test-race-orchestration:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	pids=()
+	for shard in '^Test[A-F]' '^Test[G-Q]' '^TestR' '^Test([^A-R]|$)'; do
+		cgo-test -race ./internal/orchestration -run "${shard}" -count=1 &
 		pids+=("$!")
 	done
 	status=0

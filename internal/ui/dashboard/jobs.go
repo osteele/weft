@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"time"
@@ -11,7 +12,10 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuejob"
+	"github.com/osteele/weft/internal/skypilot"
 )
+
+var skyClientForDashboard = skypilot.Client{}
 
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
@@ -24,7 +28,31 @@ func (m Model) refreshJobs() tea.Cmd {
 		if err != nil {
 			// Non-fatal, just ignore it
 		}
-		return jobsRefreshedMsg{jobs: jobs, jobDependencies: deps}
+		bindings, err := db.ListExternalJobBindings(m.database, db.ExternalExecutorSkyPilot, "")
+		if err != nil {
+			return jobsRefreshedMsg{err: fmt.Errorf("list external bindings: %w", err)}
+		}
+		bindingsByJobID := make(map[int64]*db.ExternalJobBinding, len(bindings))
+		for _, binding := range bindings {
+			bindingsByJobID[binding.JobID] = binding
+		}
+		return jobsRefreshedMsg{jobs: jobs, jobDependencies: deps, externalBindings: bindingsByJobID}
+	}
+}
+
+func (m Model) refreshExternalJobs() tea.Cmd {
+	if m.database == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, _, _ = skyClientForDashboard.SyncBindingsAmbient(ctx, m.database, "")
+		return m.refreshJobs()()
 	}
 }
 
@@ -50,6 +78,9 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 func (m Model) requeueJobCmd(job *db.Job, mkMsg func(int64, bool, error) tea.Msg) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
+		if job.Backend == db.BackendSkyPilot {
+			return mkMsg(job.ID, false, fmt.Errorf("SkyPilot jobs cannot be restarted by Weft; submit a new external job instead"))
+		}
 		if !job.HasInventoryHost() {
 			return mkMsg(job.ID, false, fmt.Errorf("job missing host"))
 		}
@@ -361,12 +392,12 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	case jobFilterActive:
 		return status == db.StatusRunning || status == db.StatusStarting || status == db.StatusPaused || status == db.StatusQueued || status == db.StatusDraft || status == db.StatusPendingPlacement
 	case jobFilterSucceeded:
-		return status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
+		return status == db.StatusCompleted && (job.Backend == db.BackendSkyPilot || (job.ExitCode != nil && *job.ExitCode == 0))
 	case jobFilterFailed:
 		if status == db.StatusFailed || status == db.StatusDead || status == db.StatusKilled || status == db.StatusCanceled {
 			return true
 		}
-		return status == db.StatusCompleted && (job.ExitCode == nil || *job.ExitCode != 0)
+		return status == db.StatusCompleted && job.Backend != db.BackendSkyPilot && (job.ExitCode == nil || *job.ExitCode != 0)
 	default:
 		return true
 	}
@@ -459,7 +490,13 @@ func (m Model) getTargetJob() *db.Job {
 }
 
 func (m Model) killJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return m.cancelExternalJob(job)
+	}
+	if m.coreService == nil {
 		return nil
 	}
 
@@ -480,7 +517,15 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) draftJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return func() tea.Msg {
+			return jobDraftedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot jobs cannot be marked draft through Weft")}
+		}
+	}
+	if m.coreService == nil {
 		return nil
 	}
 	jobID := job.ID
@@ -498,7 +543,15 @@ func (m Model) draftJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) queueDraftJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return func() tea.Msg {
+			return jobQueuedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot job status is controlled by the external executor")}
+		}
+	}
+	if m.coreService == nil {
 		return nil
 	}
 	jobID := job.ID
@@ -516,7 +569,15 @@ func (m Model) queueDraftJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) runDraftJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return func() tea.Msg {
+			return jobQueuedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot job status is controlled by the external executor")}
+		}
+	}
+	if m.coreService == nil {
 		return nil
 	}
 	jobID := job.ID
@@ -534,7 +595,13 @@ func (m Model) runDraftJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return m.cancelExternalJob(job)
+	}
+	if m.coreService == nil {
 		return nil
 	}
 
@@ -554,7 +621,15 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) pauseJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return func() tea.Msg {
+			return jobPausedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot jobs cannot be paused through Weft")}
+		}
+	}
+	if m.coreService == nil {
 		return nil
 	}
 	jobID := job.ID
@@ -572,7 +647,15 @@ func (m Model) pauseJob(job *db.Job) tea.Cmd {
 }
 
 func (m Model) resumeJob(job *db.Job) tea.Cmd {
-	if job == nil || m.coreService == nil {
+	if job == nil {
+		return nil
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return func() tea.Msg {
+			return jobResumedMsg{jobID: job.ID, err: fmt.Errorf("SkyPilot jobs cannot be resumed through Weft")}
+		}
+	}
+	if m.coreService == nil {
 		return nil
 	}
 	jobID := job.ID
@@ -586,6 +669,33 @@ func (m Model) resumeJob(job *db.Job) tea.Cmd {
 			deferred: result.Outcome.Deferred,
 			message:  result.Outcome.Message,
 		}
+	}
+}
+
+func (m Model) cancelExternalJob(job *db.Job) tea.Cmd {
+	jobID := job.ID
+	return func() tea.Msg {
+		binding, err := db.GetExternalJobBindingByJobID(m.database, jobID)
+		if err != nil {
+			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
+		}
+		if binding == nil {
+			return jobKilledMsg{jobID: jobID, err: fmt.Errorf("SkyPilot job has no external binding"), cancelled: true}
+		}
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		requested, err := skyClientForDashboard.CancelBinding(ctx, m.database, binding)
+		if err != nil {
+			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
+		}
+		if !requested {
+			return jobKilledMsg{jobID: jobID, cancelled: true, message: fmt.Sprintf("SkyPilot job %s is already terminal", ids.FormatJobID(jobID))}
+		}
+		return jobKilledMsg{jobID: jobID, cancelled: true, message: fmt.Sprintf("Cancel requested for SkyPilot job %s; awaiting terminal confirmation", ids.FormatJobID(jobID))}
 	}
 }
 

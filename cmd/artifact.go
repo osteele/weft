@@ -244,6 +244,10 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
+		if job.Backend == db.BackendSkyPilot {
+			errorsList = append(errorsList, fmt.Sprintf("job %s is managed by SkyPilot; use executor-managed storage instead of Weft artifact sync", ids.FormatJobID(jobID)))
+			continue
+		}
 		if job.IsLaunchJob() {
 			result, syncErr := syncCloudJobArtifactsFunc(database, r2Client, job)
 			if syncErr != nil {
@@ -265,7 +269,7 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2 (skipped %d)\n", ids.FormatJobID(jobID), result.Added, result.Skipped)
 			continue
 		}
-		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
+		result, err := syncLocalJobArtifacts(database, job, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				// Try convention-based output sync instead
@@ -325,6 +329,9 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 	var syncedJobs int
 
 	for _, job := range jobs {
+		if job.Backend == db.BackendSkyPilot {
+			continue
+		}
 		if job.IsLaunchJob() {
 			cloudResult, syncErr := syncCloudJobArtifacts(database, r2Client, job)
 			if syncErr != nil && !errors.Is(syncErr, artifacts.ErrManifestMissing) {
@@ -337,7 +344,7 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 			}
 			continue
 		}
-		result, err := artifacts.SyncOutstandingJob(database, job, NormalSyncTimeout)
+		result, err := syncOutstandingJobArtifacts(database, job, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				continue
@@ -636,6 +643,9 @@ type jobArtifactResolution struct {
 }
 
 func resolveJobArtifacts(database *sql.DB, r2Client cloudOutputStore, job *db.Job) (jobArtifactResolution, error) {
+	if err := externalArtifactUnsupported(job); err != nil {
+		return jobArtifactResolution{}, err
+	}
 	entries, err := db.ListArtifactsByJob(database, job.ID)
 	if err != nil {
 		return jobArtifactResolution{}, err
@@ -803,6 +813,9 @@ func serveCachedArtifact(cmd *cobra.Command, entry *db.Artifact, destFor func(st
 // A row that matches but whose transfer fails surfaces the transfer's real
 // cause; "not found" is reported only when every source misses (wb20).
 func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job *db.Job, token string, multiple, stream bool) error {
+	if err := externalArtifactUnsupported(job); err != nil {
+		return err
+	}
 	destFor := func(source string) (string, error) {
 		if stream {
 			return "-", nil
@@ -1265,6 +1278,9 @@ func runArtifactAdd(cmd *cobra.Command, args []string) error {
 	}
 	if job == nil {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+	}
+	if err := externalArtifactUnsupported(job); err != nil {
+		return err
 	}
 
 	if err := ensureRemoteArtifactDir(job.Host); err != nil {
@@ -2681,6 +2697,7 @@ func downloadCloudPrefix(database *sql.DB, r2Client *r2.Client, prefix, localDir
 
 var (
 	syncLocalJobArtifacts            = artifacts.SyncJob
+	syncOutstandingJobArtifacts      = artifacts.SyncOutstandingJob
 	syncCloudJobArtifactsFunc        = syncCloudJobArtifacts
 	syncCloudJobOutputsFunc          = syncCloudJobOutputs
 	completionRecordFunc             = fetchCompletionRecord
@@ -2844,6 +2861,9 @@ func inventoryOutputLocations(job *db.Job) []string {
 }
 
 func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, timeout time.Duration) error {
+	if err := externalArtifactUnsupported(job); err != nil {
+		return err
+	}
 	if job.IsLaunchJob() {
 		_, err := syncCloudJobArtifactsFunc(database, r2Client, job)
 		if errors.Is(err, artifacts.ErrManifestMissing) {
@@ -2864,6 +2884,13 @@ func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, tim
 	}
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func externalArtifactUnsupported(job *db.Job) error {
+	if job != nil && job.Backend == db.BackendSkyPilot {
+		return fmt.Errorf("job %s is managed by SkyPilot; use executor-managed storage instead of Weft artifact commands", ids.FormatJobID(job.ID))
 	}
 	return nil
 }

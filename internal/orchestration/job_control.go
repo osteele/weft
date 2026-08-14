@@ -89,6 +89,9 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	if job == nil {
 		return ops.Result{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if job.Backend == db.BackendSkyPilot {
+		return ops.Result{}, fmt.Errorf("job %s is owned by SkyPilot; use an external-executor cancel path", ids.FormatJobID(jobID))
+	}
 
 	opts := ops.OptionsForMode(mode)
 	switch job.EffectiveStatus() {

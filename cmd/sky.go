@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,6 +29,9 @@ bookkeeping, status cache, and query surfaces.`,
 
 var skyImportProject string
 var skyImportCWD string
+var skyImportJob string
+var skyImportTask string
+var skyImportCommand string
 var skySyncProject string
 
 var skySubmitProject string
@@ -51,6 +58,9 @@ func init() {
 	}
 	importCmd.Flags().StringVar(&skyImportProject, "project", "", "Project name for the imported Weft job")
 	importCmd.Flags().StringVar(&skyImportCWD, "cwd", "", "Working directory to associate with the imported job")
+	importCmd.Flags().StringVar(&skyImportJob, "job", "", "Rebind an unconfirmed Weft job (for example wj123) instead of creating one")
+	importCmd.Flags().StringVar(&skyImportTask, "task", "", "Select a task ID or name within a multi-task managed job")
+	importCmd.Flags().StringVar(&skyImportCommand, "command", "", "Task command when the SkyPilot queue does not expose it")
 	skyCmd.AddCommand(importCmd)
 
 	syncCmd := &cobra.Command{
@@ -90,11 +100,46 @@ func runSkyImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("query SkyPilot jobs: %w", err)
 	}
-	job := skypilot.FindJob(jobs, externalID)
+	job, err := skypilot.ResolveJobWithTask(jobs, externalID, skyImportTask)
+	if err != nil {
+		return err
+	}
 	if job == nil {
-		return fmt.Errorf("SkyPilot job %q not found in `sky jobs queue --output json`", externalID)
+		return fmt.Errorf("SkyPilot job %q not found in `sky jobs queue --all --output json`", externalID)
 	}
 	obs := skypilot.ObservationFromJob(*job, skyImportProject, defaultSkyWorkingDir(skyImportCWD))
+	if strings.TrimSpace(skyImportCommand) != "" {
+		obs.Command = strings.TrimSpace(skyImportCommand)
+	}
+	if strings.TrimSpace(skyImportJob) != "" {
+		jobID, err := ids.ParseJobID(skyImportJob)
+		if err != nil {
+			return fmt.Errorf("parse --job: %w", err)
+		}
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer database.Close()
+		localJob, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return err
+		}
+		if localJob == nil {
+			return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+		}
+		obs.SubmittedFromWorkingDir = localJob.WorkingDir
+		obs.SubmittedFromProject = localJob.Project
+		binding, err := db.RebindUnconfirmedExternalJob(database, jobID, obs)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Rebound SkyPilot job %s to %s\n", obs.ExternalJobID, ids.FormatJobID(binding.JobID))
+		return nil
+	}
+	if strings.TrimSpace(obs.Command) == "" {
+		return fmt.Errorf("SkyPilot queue output does not expose the task command; pass --command with the command to record for the imported job")
+	}
 	binding, created, err := upsertSkyObservation(cmd, obs)
 	if err != nil {
 		return err
@@ -129,50 +174,11 @@ func runSkySync(cmd *cobra.Command, args []string) error {
 }
 
 func syncSkyBindings(ctx context.Context, database *sql.DB, project string) (updated int, missing int, err error) {
-	bindings, err := db.ListExternalJobBindings(database, db.ExternalExecutorSkyPilot, project)
-	if err != nil {
-		return 0, 0, fmt.Errorf("list external bindings: %w", err)
-	}
-	if len(bindings) == 0 {
-		return 0, 0, nil
-	}
-	jobs, err := skyClient.ListJobs(ctx)
-	if err != nil {
-		for _, binding := range bindings {
-			if markErr := db.MarkExternalSyncWarning(database, binding.JobID, "SkyPilot sync failed: "+err.Error()); markErr != nil {
-				return 0, 0, fmt.Errorf("record stale SkyPilot observation for %s: %w", ids.FormatJobID(binding.JobID), markErr)
-			}
-		}
-		return 0, 0, fmt.Errorf("query SkyPilot jobs: %w", err)
-	}
-	byKey := make(map[string]skypilot.Job, len(jobs)*3)
-	for _, job := range jobs {
-		for _, key := range []string{job.ID, job.TaskID, job.Name} {
-			key = strings.TrimSpace(key)
-			if key != "" {
-				byKey[key] = job
-			}
-		}
-	}
-	for _, binding := range bindings {
-		job, ok := byKey[binding.ExternalJobID]
-		if !ok && binding.ExternalTaskID != "" {
-			job, ok = byKey[binding.ExternalTaskID]
-		}
-		if !ok {
-			if err := db.MarkExternalSyncWarning(database, binding.JobID, "SkyPilot job was not returned by sky jobs queue"); err != nil {
-				return 0, 0, fmt.Errorf("record stale SkyPilot observation for %s: %w", ids.FormatJobID(binding.JobID), err)
-			}
-			missing++
-			continue
-		}
-		obs := skypilot.ObservationFromJob(job, binding.SubmittedFromProject, binding.SubmittedFromWorkingDir)
-		if err := db.UpdateExternalJobObservation(database, binding.JobID, obs); err != nil {
-			return 0, 0, fmt.Errorf("update %s: %w", ids.FormatJobID(binding.JobID), err)
-		}
-		updated++
-	}
-	return updated, missing, nil
+	return skyClient.SyncBindings(ctx, database, project)
+}
+
+func syncSkyBindingsAmbient(ctx context.Context, database *sql.DB, project string) (updated int, missing int, err error) {
+	return skyClient.SyncBindingsAmbient(ctx, database, project)
 }
 
 // skyDryRunTaskName stands in for the weft-wj<id> name a real submit assigns
@@ -186,6 +192,9 @@ func runSkySubmit(cmd *cobra.Command, args []string) error {
 	var gpuMem *int
 	if skySubmitGPUMem > 0 {
 		gpuMem = &skySubmitGPUMem
+	}
+	if gpuMem != nil {
+		return fmt.Errorf("--gpu-mem is not supported for SkyPilot submissions; select a GPU class with --gpu instead")
 	}
 	workingDir := defaultSkyWorkingDir(skySubmitCWD)
 	obs := db.ExternalJobObservation{
@@ -251,7 +260,12 @@ func runSkySubmit(cmd *cobra.Command, args []string) error {
 		EnvVars:  skySubmitEnv,
 	})
 	if err != nil {
-		_ = db.MarkExternalSubmissionFailed(database, jobID, err.Error())
+		var unconfirmed *skypilot.SubmissionUnconfirmedError
+		if !errors.As(err, &unconfirmed) {
+			if markErr := db.MarkExternalSubmissionFailed(database, jobID, err.Error()); markErr != nil {
+				return fmt.Errorf("submit SkyPilot job for %s: %v; record definitive submission failure: %w", ids.FormatJobID(jobID), err, markErr)
+			}
+		}
 		return fmt.Errorf("submit SkyPilot job for %s: %w", ids.FormatJobID(jobID), err)
 	}
 	attachObs := skypilot.ObservationFromJob(*job, skySubmitProject, workingDir)
@@ -305,8 +319,11 @@ func runSkyLogForJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	if binding == nil {
 		return fmt.Errorf("job %s has no SkyPilot binding", ids.FormatJobID(job.ID))
 	}
-	if logFollow && (logGrep != "" || logFrom > 0 || logTo > 0 || logFull || cmd.Flags().Changed("lines") || cmd.Flags().Changed("tail")) {
-		return fmt.Errorf("SkyPilot follow mode cannot be combined with local log filtering flags")
+	if logLines < 0 {
+		return fmt.Errorf("--lines/--tail must be nonnegative")
+	}
+	if logFollow && logLines == 0 {
+		return fmt.Errorf("SkyPilot follow requires a positive --lines/--tail value; zero means the entire retained log to SkyPilot")
 	}
 	ctx := cmd.Context()
 	if !logFollow {
@@ -314,16 +331,138 @@ func runSkyLogForJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 	}
-	out, err := skyClient.Logs(ctx, binding.ExternalJobID, logFollow)
+	remoteTail := logLines
+	if logFull || logFrom > 0 || logTo > 0 {
+		remoteTail = 0
+	}
+	if logFollow {
+		stdout := io.Writer(cmd.OutOrStdout())
+		var filter *streamingLogFilter
+		if logFrom > 1 || logGrep != "" {
+			filter = newStreamingLogFilterWithRange(stdout, logFrom, 0, logGrep)
+			stdout = filter
+		}
+		err := skyClient.FollowLogs(ctx, binding.ExternalJobID, binding.ExternalTaskID, remoteTail, stdout, cmd.ErrOrStderr())
+		if filter != nil {
+			if flushErr := filter.Flush(); err == nil {
+				err = flushErr
+			}
+		}
+		return err
+	}
+	if logLines == 0 && logFrom == 0 && logTo == 0 && !logFull {
+		return nil
+	}
+	stdout := io.Writer(cmd.OutOrStdout())
+	var filter *streamingLogFilter
+	if logFrom > 1 || logTo > 0 || logGrep != "" {
+		filter = newStreamingLogFilterWithRange(stdout, logFrom, logTo, logGrep)
+		stdout = filter
+	}
+	err = skyClient.StreamLogs(ctx, binding.ExternalJobID, binding.ExternalTaskID, false, remoteTail, stdout, cmd.ErrOrStderr())
+	if filter != nil {
+		if flushErr := filter.Flush(); err == nil {
+			err = flushErr
+		}
+	}
+	return err
+}
+
+const maxStreamingLogLineBytes = 1 << 20
+
+type streamingLogFilter struct {
+	dest    io.Writer
+	from    int
+	to      int
+	line    int
+	pattern string
+	re      *regexp.Regexp
+	pending bytes.Buffer
+	failed  bool
+}
+
+func newStreamingLogFilter(dest io.Writer, from int, pattern string) *streamingLogFilter {
+	return newStreamingLogFilterWithRange(dest, from, 0, pattern)
+}
+
+func newStreamingLogFilterWithRange(dest io.Writer, from, to int, pattern string) *streamingLogFilter {
+	filter := &streamingLogFilter{dest: dest, from: from, to: to, pattern: pattern}
+	filter.re, _ = regexp.Compile(pattern)
+	return filter
+}
+
+func (w *streamingLogFilter) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		newline := bytes.IndexByte(p, '\n')
+		segmentLen := len(p)
+		terminated := false
+		if newline >= 0 {
+			segmentLen = newline
+			terminated = true
+		}
+		if w.pending.Len()+segmentLen > maxStreamingLogLineBytes {
+			w.failed = true
+			return written, fmt.Errorf("SkyPilot log line exceeds %d bytes", maxStreamingLogLineBytes)
+		}
+		_, _ = w.pending.Write(p[:segmentLen])
+		written += segmentLen
+		p = p[segmentLen:]
+		if !terminated {
+			continue
+		}
+		written++
+		p = p[1:]
+		if err := w.emit(true); err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+func (w *streamingLogFilter) Flush() error {
+	if w.failed || w.pending.Len() == 0 {
+		return nil
+	}
+	return w.emit(false)
+}
+
+func (w *streamingLogFilter) emit(terminated bool) error {
+	w.line++
+	line := append([]byte(nil), w.pending.Bytes()...)
+	w.pending.Reset()
+	if w.from > 0 && w.line < w.from {
+		return nil
+	}
+	if w.to > 0 && w.line > w.to {
+		return nil
+	}
+	if w.pattern != "" {
+		matched := w.re != nil && w.re.Match(line)
+		if w.re == nil {
+			matched = bytes.Contains(line, []byte(w.pattern))
+		}
+		if !matched {
+			return nil
+		}
+	}
+	if err := writeStreamingLogBytes(w.dest, line); err != nil {
+		return err
+	}
+	if terminated {
+		return writeStreamingLogBytes(w.dest, []byte{'\n'})
+	}
+	return nil
+}
+
+func writeStreamingLogBytes(dest io.Writer, data []byte) error {
+	n, err := dest.Write(data)
 	if err != nil {
 		return err
 	}
-	if logFollow {
-		fmt.Print(string(out))
-		return nil
+	if n != len(data) {
+		return io.ErrShortWrite
 	}
-	output := filterLogContent(string(out), logFrom, logTo, logLines, logGrep)
-	fmt.Print(processCarriageReturns(output))
 	return nil
 }
 
@@ -340,11 +479,14 @@ func cancelSkyJob(cmd *cobra.Command, database *sql.DB, job *db.Job) (bool, erro
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
-	if err := skyClient.Cancel(ctx, binding.ExternalJobID); err != nil {
-		return true, err
+	requested, err := skyClient.CancelBinding(ctx, database, binding)
+	if err != nil {
+		return true, fmt.Errorf("record SkyPilot cancel intent: %w", err)
 	}
-	if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {
-		return true, err
+	if !requested {
+		fmt.Fprintf(cmd.OutOrStdout(), "SkyPilot job %s (%s) is already terminal\n",
+			ids.FormatJobID(job.ID), binding.ExternalJobID)
+		return true, nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Cancel requested for SkyPilot job %s (%s); run `weft sky sync` to confirm terminal state\n",
 		ids.FormatJobID(job.ID), binding.ExternalJobID)
