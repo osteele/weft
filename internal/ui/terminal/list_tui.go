@@ -32,6 +32,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/processguard"
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
@@ -86,6 +87,7 @@ type listTUIModel struct {
 	groupedRows                []groupedStatusRow
 	groupedSelectableRows      []int
 	autoInProgress             bool
+	autoUpgradePending         bool
 	autoPassStartedAt          time.Time
 	autoPassPhase              autoPilotPhaseHint
 	autoPersistentError        string
@@ -322,6 +324,7 @@ type listAutoPilotDoneMsg struct {
 	structuredBlocked map[int64]*blockreason.Structured
 	anotherHolding    bool
 	paused            bool
+	upgradePending    bool
 	err               error
 	// deferred marks a redelivery after the minimum-display hold so the handler
 	// knows to apply the result rather than schedule another tick.
@@ -929,6 +932,19 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autopilotPaused {
 			// Autopilot was disabled while this pass was in flight; drop
 			// the result rather than acting on it.
+			return m, nil
+		}
+		if msg.upgradePending {
+			m.replaceAutoBlockOverlay(nil, nil)
+			m.lastAutoPilotErrorRaw = ""
+			m.showAutoPilotErrorDetails = false
+			m.clearAutoPilotPersistentState()
+			m.autoUpgradePending = true
+			m.autoNextPassAt = time.Time{}
+			if !m.quickLaunchStatusProtected() {
+				m.statusMessage = "Auto-pilot handed off to upgraded Weft daemon"
+			}
+			m.rebuildGroupedRows()
 			return m, nil
 		}
 		if msg.err != nil {
@@ -3588,7 +3604,7 @@ func (m listTUIModel) toggleAutopilot() (tea.Model, tea.Cmd) {
 }
 
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
-	if !m.isStatusGroupedView() || m.autopilotPaused || m.autoInProgress || m.database == nil {
+	if !m.isStatusGroupedView() || m.autopilotPaused || m.autoInProgress || m.autoUpgradePending || m.database == nil {
 		return nil
 	}
 	if listTUIDelegatesBackgroundWorkToDaemon() {
@@ -3633,6 +3649,9 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 			if errors.Is(runErr, orchestration.ErrAutopilotBusy) {
 				return listAutoPilotDoneMsg{anotherHolding: true}
 			}
+			if errors.Is(runErr, processguard.ErrBinaryChanged) {
+				return listAutoPilotDoneMsg{upgradePending: true}
+			}
 		}
 		return listAutoPilotDoneMsg{
 			placed:            placed,
@@ -3672,13 +3691,11 @@ func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs [
 	return 0, 0, 0, "", nil, nil
 }
 
-// runGatedAutoPilotPass wraps the orchestration pass with the singleton
-// pause/active-runner gate. It returns ErrAutopilotPaused or ErrAutopilotBusy
-// (via the runner package) without running a pass when those conditions hold.
+// runGatedAutoPilotPass wraps the orchestration pass with the singleton and
+// binary-freshness gates. It returns without running a pass when autopilot is
+// paused, another runner owns the slot, or this process has been superseded.
 func runGatedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, label string) (int, int, int, string, map[int64]string, map[int64]*blockreason.Structured, error) {
-	result, err := orchestration.RunGroupedAutoPilotPassGatedWithOptions(ctx, database, scopedJobs, label, orchestration.AutopilotRunnerOptions{
-		AllowStaleBinary: true,
-	})
+	result, err := orchestration.RunGroupedAutoPilotPassGated(ctx, database, scopedJobs, label)
 	if result != nil {
 		return result.Placed, result.Rebalanced, result.Launched, result.LaunchedClass, result.BlockedReasons, result.StructuredBlocked, err
 	}

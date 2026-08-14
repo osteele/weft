@@ -122,20 +122,45 @@ func TestAutopilotRunner_StaleBinaryEnforcedByDefault(t *testing.T) {
 	}
 }
 
-func TestAutopilotRunner_StaleBinaryAllowedForForegroundController(t *testing.T) {
+func TestAutopilotRunner_BinaryChangeYieldsAfterCurrentPass(t *testing.T) {
 	database := openMigratedTestDB(t)
 	oldEnsureCurrentBinary := ensureCurrentBinary
-	ensureCurrentBinary = func() error { return processguard.ErrBinaryChanged }
+	current := true
+	ensureCurrentBinary = func() error {
+		if current {
+			return nil
+		}
+		return processguard.ErrBinaryChanged
+	}
 	t.Cleanup(func() { ensureCurrentBinary = oldEnsureCurrentBinary })
 
-	r := NewAutopilotRunnerWithOptions(database, "list-tui", AutopilotRunnerOptions{
-		AllowStaleBinary: true,
-	})
+	r := NewAutopilotRunner(database, "list-tui")
 	if err := r.TryAcquire(); err != nil {
-		t.Fatalf("TryAcquire with AllowStaleBinary: %v", err)
+		t.Fatalf("initial TryAcquire: %v", err)
 	}
+	current = false
 	if err := r.Release(time.Millisecond, "ok", nil); err != nil {
-		t.Fatalf("Release: %v", err)
+		t.Fatalf("release in-flight pass after binary change: %v", err)
+	}
+	if err := r.TryAcquire(); !errors.Is(err, processguard.ErrBinaryChanged) {
+		t.Fatalf("stale runner reacquire = %v, want ErrBinaryChanged", err)
+	}
+
+	state, err := db.LoadAutopilotState(database)
+	if err != nil {
+		t.Fatalf("LoadAutopilotState: %v", err)
+	}
+	if state.ActiveRunnerPID != 0 {
+		t.Fatalf("active runner PID = %d, want yielded slot", state.ActiveRunnerPID)
+	}
+
+	current = true // Models the replacement daemon running the installed binary.
+	replacement := NewAutopilotRunner(database, "daemon/replacement")
+	if err := replacement.TryAcquire(); err != nil {
+		t.Fatalf("replacement TryAcquire: %v", err)
+	}
+	if err := replacement.Release(time.Millisecond, "replacement", nil); err != nil {
+		t.Fatalf("replacement Release: %v", err)
 	}
 }
 

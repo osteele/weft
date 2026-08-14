@@ -2113,6 +2113,43 @@ func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
 	}
 }
 
+func TestListTUIAutoPilotUpgradeHandsOffWithoutRetry(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	m := listTUIModel{
+		groupedByStatus: true,
+		autoInProgress:  true,
+		database:        &sql.DB{},
+		jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, Tags: []string{"rental"}},
+		},
+		autoBlockReasons:      map[int64]string{1: "stale blocker"},
+		autoPersistentError:   "stale error",
+		lastAutoPilotErrorRaw: "stale raw error",
+	}
+
+	next, _ := m.Update(listAutoPilotDoneMsg{upgradePending: true})
+	got := next.(listTUIModel)
+	if got.autoInProgress {
+		t.Fatal("autoInProgress should be cleared for upgrade handoff")
+	}
+	if !got.autoUpgradePending {
+		t.Fatal("upgrade handoff should permanently stop this TUI's autopilot loop")
+	}
+	if got.statusMessage != "Auto-pilot handed off to upgraded Weft daemon" {
+		t.Fatalf("statusMessage = %q, want upgrade handoff", got.statusMessage)
+	}
+	if got.autoPersistentError != "" || got.lastAutoPilotErrorRaw != "" || len(got.autoBlockReasons) != 0 {
+		t.Fatalf("stale autopilot state survived handoff: error=%q raw=%q blocks=%v", got.autoPersistentError, got.lastAutoPilotErrorRaw, got.autoBlockReasons)
+	}
+
+	got.autoNextPassAt = time.Now().Add(-time.Second)
+	next, _ = got.Update(listSyncTickMsg{})
+	got = next.(listTUIModel)
+	if got.autoInProgress {
+		t.Fatal("stale TUI retried autopilot after upgrade handoff")
+	}
+}
+
 func TestListTUIBackgroundCloudSyncDedupesWhileInFlight(t *testing.T) {
 	m := listTUIModel{
 		pendingSyncHosts: make(map[string]struct{}),

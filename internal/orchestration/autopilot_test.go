@@ -140,9 +140,7 @@ func TestGatedAutopilotClaimsSlotBeforeFetchingOffers(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := RunGroupedAutoPilotPassGatedWithOptions(context.Background(), database, nil, "slow-prefetch", AutopilotRunnerOptions{
-			AllowStaleBinary: true,
-		})
+		_, err := RunGroupedAutoPilotPassGated(context.Background(), database, nil, "slow-prefetch")
 		done <- err
 	}()
 
@@ -152,7 +150,7 @@ func TestGatedAutopilotClaimsSlotBeforeFetchingOffers(t *testing.T) {
 		t.Fatal("SearchOffers did not start")
 	}
 
-	second := NewAutopilotRunnerWithOptions(database, "second-acquirer", AutopilotRunnerOptions{AllowStaleBinary: true})
+	second := NewAutopilotRunner(database, "second-acquirer")
 	if err := second.TryAcquire(); !errors.Is(err, ErrAutopilotBusy) {
 		t.Fatalf("second TryAcquire while offer fetch is blocked = %v, want ErrAutopilotBusy", err)
 	}
@@ -514,7 +512,7 @@ func TestRunGroupedAutoPilotPassGatedPausedDoesNotAutoPublish(t *testing.T) {
 		return campaign.CheckpointPublishResult{}, nil
 	}
 
-	_, err := RunGroupedAutoPilotPassGatedWithOptions(context.Background(), database, nil, "paused-test", AutopilotRunnerOptions{AllowStaleBinary: true})
+	_, err := RunGroupedAutoPilotPassGated(context.Background(), database, nil, "paused-test")
 	if !errors.Is(err, ErrAutopilotPaused) {
 		t.Fatalf("err = %v, want ErrAutopilotPaused", err)
 	}

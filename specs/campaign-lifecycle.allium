@@ -4727,6 +4727,29 @@ rule AutoPilotPassRespectsSingletonGate {
         -- auto-place / auto-launch fan out across multiple commands).
 }
 
+rule AutoPilotBinaryUpgradeHandsOffAtPassBoundary {
+    when: AutopilotControllerObservesInstalledBinaryChanged(controller)
+
+    ensures:
+        if controller.holds_pass_slot:
+            FinishCurrentPass(controller)
+            and ReleaseSlotOnCompletion(controller.pid)
+        else:
+            not ClaimAutopilotPassSlot(controller.pid, controller.label)
+            and YieldFuturePassesToCurrentBinary()
+
+    -- legacy annotation: @guidance
+        -- Binary freshness is checked by AutopilotRunner.TryAcquire before
+        -- it mutates autopilot_state. A binary replacement does not interrupt
+        -- a pass that already owns the slot; that pass reaches its normal
+        -- deferred Release. On its next acquisition attempt the old process
+        -- receives processguard.ErrBinaryChanged and cannot reclaim the slot.
+        -- The list TUI treats this as a durable upgrade handoff, not a pass
+        -- failure, so it neither displays a stale blocker nor retries.
+        -- Implementation: internal/orchestration/autopilot_runner.go and
+        -- internal/ui/terminal/list_tui.go.
+}
+
 invariant AutoPilotProviderOfferSearchRunsOutsideSingleton {
     -- Slow provider offer searches are not part of the DB-backed placement
     -- critical section. The singleton protects the fast DB placement decision

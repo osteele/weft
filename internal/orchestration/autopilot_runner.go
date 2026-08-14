@@ -39,10 +39,6 @@ var ErrAutopilotBusy = errors.New("autopilot pass is in progress on another runn
 var ensureCurrentBinary = processguard.EnsureCurrentBinary
 
 type AutopilotRunnerOptions struct {
-	// AllowStaleBinary lets foreground controllers such as `weft uj` keep
-	// driving autopilot after `weft` is rebuilt while the TUI is open.
-	// Headless controllers should keep the default strict behavior.
-	AllowStaleBinary bool
 	// IgnorePaused claims the singleton pass slot even when the sticky
 	// autopilot pause flag is set. Use only for explicit manual actions that
 	// must avoid racing autopilot without toggling its paused state.
@@ -106,17 +102,15 @@ func NewAutopilotRunnerWithOptions(database *sql.DB, label string, opts Autopilo
 	}
 }
 
-// TryAcquire claims the pass slot. Returns ErrAutopilotPaused / ErrAutopilotBusy
-// without holding any lock if the slot is unavailable. On success, the caller
-// MUST call Release.
+// TryAcquire claims the pass slot. It returns ErrAutopilotPaused,
+// ErrAutopilotBusy, or processguard.ErrBinaryChanged without holding the slot.
+// On success, the caller MUST call Release.
 func (r *AutopilotRunner) TryAcquire() error {
 	if r == nil || r.database == nil {
 		return nil
 	}
-	if !r.opts.AllowStaleBinary {
-		if err := ensureCurrentBinary(); err != nil {
-			return err
-		}
+	if err := ensureCurrentBinary(); err != nil {
+		return err
 	}
 	claimed, paused, existing, err := db.TryClaimAutopilotPassWithOptions(
 		r.database,

@@ -240,6 +240,13 @@ External commands that walk through placement (`weft autopilot run`,
 claim the slot, the writers do. If you start `weft autopilot run` while a
 TUI is open, the writers serialise — no double-placement.
 
+Installing a new Weft binary is a graceful controller handoff. A TUI that
+already owns the slot finishes and releases its current pass, but after its
+on-disk executable changes it cannot claim another pass. It then leaves future
+passes to the restarted daemon running the installed binary. This also closes
+the brief launchd unload/load window during `just install`: an old TUI cannot
+start a new pass while the replacement daemon is coming up.
+
 If you need an immediate halt (the autopilot is mid-pass and you want it
 out of the way), wait for the active runner to finish (`weft autopilot
 status` shows the heartbeat age) before issuing manual commands. Pause
