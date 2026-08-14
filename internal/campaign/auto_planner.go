@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -415,6 +416,7 @@ func SanitizeBlockedReason(reason string) string {
 		summary = first + " … " + last
 	}
 	summary = strings.ReplaceAll(summary, "provider returned success=false: provider rejected request", "provider rejected request")
+	summary = NormalizeBlockedReasonWording(summary)
 	summary = strings.ReplaceAll(summary,
 		"There are no longer any instances available with the requested specifications. Please refresh and try again.",
 		"requested instance type is no longer available; Weft will retry with fresh offers")
@@ -428,6 +430,18 @@ func SanitizeBlockedReason(reason string) string {
 		summary = summary[:maxLen-1] + "…"
 	}
 	return summary
+}
+
+var survivalRequiredPercentPattern = regexp.MustCompile(`< required ([0-9]+(?:\.[0-9]+)?%)`)
+
+// NormalizeBlockedReasonWording updates legacy persisted wording without
+// otherwise compacting or truncating the reason. Detail renderers use this to
+// keep historical structured evidence consistent with current CLI language.
+func NormalizeBlockedReasonWording(reason string) string {
+	if !strings.Contains(strings.ToLower(reason), "survival") {
+		return reason
+	}
+	return survivalRequiredPercentPattern.ReplaceAllString(reason, "< $1")
 }
 
 func isRetryableCreateProviderRejection(reason string) bool {

@@ -164,6 +164,11 @@ type listURLOpenedMsg struct {
 	err error
 }
 
+type listJobDiagnosisDoneMsg struct {
+	jobID int64
+	err   error
+}
+
 type groupedViewLayout struct {
 	visibleRows                 []groupedViewportLine
 	statusLine                  string
@@ -1256,6 +1261,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = fmt.Sprintf("Opened %s billing", providerNameForBillingURL(msg.url))
 		return m, nil
 
+	case listJobDiagnosisDoneMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Diagnosis for job #%d failed: %v", msg.jobID, msg.err)
+			return m, nil
+		}
+		m.statusMessage = fmt.Sprintf("Diagnosis for job #%d closed", msg.jobID)
+		return m, nil
+
 	case listProjectCandidatesLoadedMsg:
 		m.projectCandidatesLoading = false
 		if msg.err != nil {
@@ -1829,6 +1842,7 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	}
 	line += listKeyRefresh.footerToken()
 	if m.selectedGroupedJob() != nil {
+		line += "  " + listKeyDiagnose.footerToken()
 		line += "  " + listKeyAttempts.footerToken()
 		line += "  " + listKeyKillCancel.footerToken()
 		if selected := m.selectedGroupedJob(); selected != nil && selected.TargetKind() != db.JobTargetExternal {
@@ -2798,6 +2812,7 @@ func (m listTUIModel) footerText(rows int) string {
 	}
 	state += "  up/down move  space/b page  g/G top/bottom"
 	for _, binding := range []listKeyBinding{
+		listKeyDiagnose,
 		listKeyToggleQueuedDraft,
 		listKeyToggleUnprocessed,
 		listKeyToggleProcessed,
@@ -2822,7 +2837,7 @@ func (m listTUIModel) renderListHelpView() string {
 		viewBinding = listKeyListView
 	}
 	selectedJobLines := []string{
-		"  a view attempts for selected job",
+		"  a attempts  z diagnose placement/job state",
 		"  c coding-assistant (progress / review / remediate, status-dependent)",
 	}
 	if m.isStatusGroupedView() {
@@ -3798,6 +3813,17 @@ func openURLListCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		return listURLOpenedMsg{url: url, err: listOpenURLFunc(url)}
 	}
+}
+
+func runListJobDiagnosis(jobID int64) tea.Cmd {
+	executable, err := os.Executable()
+	if err != nil {
+		return func() tea.Msg { return listJobDiagnosisDoneMsg{jobID: jobID, err: err} }
+	}
+	command := exec.Command(executable, "diagnose", "job", ids.FormatJobID(jobID))
+	return tea.ExecProcess(command, func(err error) tea.Msg {
+		return listJobDiagnosisDoneMsg{jobID: jobID, err: err}
+	})
 }
 
 func openURLForListTUI(url string) error {

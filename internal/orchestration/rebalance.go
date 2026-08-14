@@ -1161,12 +1161,16 @@ func appendPlacementReason(database *sql.DB, jobID int64, reason string) {
 	// supersedes the prior snapshot.
 	_, newIsRunRate := ParseRunRateBlockedNeedCents(reason)
 	if !newIsRunRate {
+		reasons := make([]string, 0, len(job.PlacementReasons)+1)
 		for _, existing := range job.PlacementReasons {
 			if strings.TrimSpace(existing) == reason {
-				return
+				continue
 			}
+			reasons = append(reasons, existing)
 		}
-		reasons := append([]string(nil), job.PlacementReasons...)
+		// The final entry is authoritative for display. Move a repeated reason
+		// to the end so a condition that recurs after an intervening blocker
+		// becomes current again without accumulating duplicate history.
 		reasons = append(reasons, reason)
 		_ = db.SetJobPlacementReasons(database, jobID, reasons)
 		return

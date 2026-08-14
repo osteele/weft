@@ -206,9 +206,9 @@ func (s OfferFilterStats) NoOffersDetail(constraints string) string {
 		}
 		if s.SurvivalThreshold > 0 {
 			if passed == 1 {
-				return fmt.Sprintf("1 offer rejected (predicted survival %.0f%% < required %.0f%%)", s.BestRejectedSurvival*100, s.SurvivalThreshold*100)
+				return "1 offer rejected (predicted survival " + formatPercentBelow(s.BestRejectedSurvival, s.SurvivalThreshold) + ")"
 			}
-			return fmt.Sprintf("%s rejected (best predicted survival %.0f%% < required %.0f%%)", offerCount(passed), s.BestRejectedSurvival*100, s.SurvivalThreshold*100)
+			return fmt.Sprintf("%s rejected (best predicted survival %s)", offerCount(passed), formatPercentBelow(s.BestRejectedSurvival, s.SurvivalThreshold))
 		}
 		return fmt.Sprintf("%s rejected by survival threshold", offerCount(passed))
 	default:
@@ -253,11 +253,26 @@ func (s OfferFilterStats) rejectionStageDetails() []string {
 		appendDetail(s.HourlyRateFiltered, fmt.Sprintf("max-hourly-rate $%.2f/hr", float64(s.HourlyRateCapCents)/100))
 	}
 	if s.SurvivalRejected > 0 && s.SurvivalThreshold > 0 {
-		appendDetail(s.SurvivalRejected, fmt.Sprintf("survival (best %.0f%% < required %.0f%%)", s.BestRejectedSurvival*100, s.SurvivalThreshold*100))
+		appendDetail(s.SurvivalRejected, "survival (best "+formatPercentBelow(s.BestRejectedSurvival, s.SurvivalThreshold)+")")
 	} else {
 		appendDetail(s.SurvivalRejected, "survival threshold")
 	}
 	return details
+}
+
+func formatPercentBelow(value, threshold float64) string {
+	valuePct := value * 100
+	thresholdPct := threshold * 100
+	thresholdRounded := math.Round(thresholdPct)
+	if math.Round(valuePct) >= thresholdRounded && value < threshold {
+		for decimals := 1; decimals <= 6; decimals++ {
+			scale := math.Pow10(decimals)
+			if math.Round(valuePct*scale)/scale < thresholdRounded {
+				return fmt.Sprintf("%.*f%% < %.0f%%", decimals, valuePct, thresholdPct)
+			}
+		}
+	}
+	return fmt.Sprintf("%.0f%% < %.0f%%", valuePct, thresholdPct)
 }
 
 func formatTorchArchBounds(minCap, maxCap string) string {

@@ -46,6 +46,15 @@ When placement is active, Weft considers destinations in this order:
 If no inventory host fits, a rental-eligible job can remain queued as
 unplaced until the autopilot or a manual launch assigns it to an instance.
 
+Run `weft diagnose job JOB_ID` for a live explanation of an unplaced job. In
+addition to the recorded blocker, it repeats the exact offer search and tests
+active constraints one at a time. The counterfactual section can distinguish
+cheap offers with poor predicted survival from reliable offers that exceed the
+hourly-rate cap, and can expose excess provider, machine, CPU, RAM, disk, or
+compatibility pinning. Every probe keeps the requested GPU class fixed: an L4
+diagnosis does not cite an H100. The probes are read-only and do not change the
+job. In the TUI, select a job and press `z` to run the same diagnosis.
+
 Queued placement states are not, by themselves, evidence of a stall. Rental
 placement and new-instance startup commonly take 5-40 minutes and may retry
 several provider offers or launches as the market changes. Use job-level

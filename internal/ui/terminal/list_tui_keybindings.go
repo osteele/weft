@@ -85,6 +85,15 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 		{keys: "ctrl+z", action: "suspend", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, tea.Suspend
 		}},
+		{keys: listKeyDiagnose.keys, action: listKeyDiagnose.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			job := m.currentSelectedJob()
+			if job == nil {
+				m.statusMessage = "Select a job row to diagnose"
+				return m, nil
+			}
+			m.statusMessage = fmt.Sprintf("Diagnosing job #%d...", job.ID)
+			return m, runListJobDiagnosis(job.ID)
+		}},
 		{keys: "up", aliases: upAliases, action: "move up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if m.isGroupedView() {
 				if m.cursor > 0 {
@@ -143,6 +152,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 
 var (
 	listKeyAttempts          = listKeyBinding{keys: "a", action: "attempts"}
+	listKeyDiagnose          = listKeyBinding{keys: "z", action: "diagnose"}
 	listKeyAIAssist          = listKeyBinding{keys: "c", action: "coding-assistant"}
 	listKeyToggleProcessed   = listKeyBinding{keys: "p", action: "toggle processed"}
 	listKeyKillCancel        = listKeyBinding{keys: "x", aliases: []string{"k"}, action: "kill/cancel"}

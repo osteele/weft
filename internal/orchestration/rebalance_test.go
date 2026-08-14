@@ -757,6 +757,40 @@ func TestAppendPlacementReason_NonRunRateDoesNotEvictRunRate(t *testing.T) {
 	}
 }
 
+func TestAppendPlacementReason_RepeatedReasonBecomesLatest(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "recency", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	initial := []string{
+		"1 offer rejected (predicted survival 27% < 40%)",
+		"Vast.ai unreachable (network or provider outage); Weft will retry",
+	}
+	if err := db.SetJobPlacementReasons(database, jobID, initial); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	appendPlacementReason(database, jobID, initial[0])
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	want := []string{initial[1], initial[0]}
+	if strings.Join(job.PlacementReasons, "|") != strings.Join(want, "|") {
+		t.Fatalf("placement_reasons = %v, want %v", job.PlacementReasons, want)
+	}
+
+	appendPlacementReason(database, jobID, initial[0])
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		t.Fatalf("GetJobByID after repeat: %v", err)
+	}
+	if strings.Join(job.PlacementReasons, "|") != strings.Join(want, "|") {
+		t.Fatalf("placement_reasons after repeat = %v, want %v", job.PlacementReasons, want)
+	}
+}
+
 func createQueuedLaunchJob(t *testing.T, database *sql.DB, launchID int64, gpuClass string, dir string) int64 {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {

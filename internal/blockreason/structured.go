@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -131,7 +132,7 @@ func (s *Structured) DetailLines() []string {
 			return nil
 		}
 		if summary := strings.TrimSpace(s.Summary); summary != "" {
-			return []string{summary}
+			return []string{campaign.NormalizeBlockedReasonWording(summary)}
 		}
 		return nil
 	}
@@ -164,8 +165,9 @@ func (s *Structured) DetailLines() []string {
 // than the compact reason. Subsequent rows are indented under the avenue label
 // so the structure stays visible.
 func appendAvenueLines(lines []string, label, compact, detail string) []string {
+	compact = campaign.NormalizeBlockedReasonWording(compact)
 	lines = append(lines, label+"  "+compact)
-	detail = strings.TrimSpace(detail)
+	detail = strings.TrimSpace(campaign.NormalizeBlockedReasonWording(detail))
 	if detail == "" || detail == compact {
 		return lines
 	}

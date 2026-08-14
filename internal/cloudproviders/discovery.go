@@ -39,11 +39,64 @@ func (d Discovery) UnavailableError() error {
 		return nil
 	}
 
+	allUnreachable := true
+	providerNames := make([]string, 0, len(d.Unavailable))
+	for _, unavailable := range d.Unavailable {
+		if !isProviderReachabilityError(unavailable.Err) {
+			allUnreachable = false
+			break
+		}
+		providerNames = append(providerNames, providerDisplayName(unavailable.Provider))
+	}
+	if allUnreachable {
+		if len(providerNames) == 1 {
+			return fmt.Errorf("%s unreachable (network or provider outage); Weft will retry", providerNames[0])
+		}
+		return fmt.Errorf("cloud providers unreachable (%s; network or provider outage); Weft will retry", strings.Join(providerNames, ", "))
+	}
+
 	parts := make([]string, 0, len(d.Unavailable))
 	for _, unavailable := range d.Unavailable {
+		if isProviderReachabilityError(unavailable.Err) {
+			parts = append(parts, fmt.Sprintf("%s unreachable (network or provider outage)", providerDisplayName(unavailable.Provider)))
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("%s: %v", unavailable.Provider, unavailable.Err))
 	}
 	return fmt.Errorf("no cloud providers available: %s", strings.Join(parts, "; "))
+}
+
+func providerDisplayName(provider cloud.Provider) string {
+	if name := provider.DisplayName(); name != "" {
+		return name
+	}
+	return string(provider)
+}
+
+func isProviderReachabilityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"requests.exceptions.connectionerror",
+		"connectionpool(",
+		"max retries exceeded",
+		"dns lookup",
+		"failed to resolve",
+		"name resolution",
+		"network is unreachable",
+		"no route to host",
+		"connection refused",
+		"connection reset",
+		"timed out",
+		"deadline exceeded",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Discover creates cloud clients for enabled providers, preserving the existing

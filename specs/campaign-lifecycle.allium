@@ -728,6 +728,20 @@ contract CUDACompatibilityChain {
 -- satisfies a rate or survival threshold.
 -- Implementation: internal/campaign/offers.go OfferFilterStats.NoOffersDetail.
 
+-- On-demand diagnosis is a separate, explicitly counterfactual surface.
+-- `weft diagnose job` first repeats the exact live-market request, then may
+-- relax one active non-GPU-identity constraint at a time. It reports a probe
+-- only when the relaxation admits a viable offer or exposes additional
+-- candidates that another requirement still rejects. This distinguishes, for
+-- example, reliable offers over the rate cap from cheap offers below the
+-- survival floor, and can expose excess provider/machine/CPU/RAM pinning.
+-- Every probe MUST retain the original GPUClass; it does not relax geography,
+-- topology, interconnect, or GPU count. Counterfactual probes are read-only and
+-- never alter the job or placement policy. The TUI and Weft Status invoke this
+-- same CLI surface on demand rather than duplicating placement logic.
+-- Implementation: internal/campaign/placement_diagnosis.go;
+-- cmd/job_placement_diagnose.go; internal/ui/terminal/list_tui_keybindings.go.
+
 -- R2 source-tarball upload failures must be isolated per-group, not
 -- bubbled as a single error that fails the whole relaunch pass. Each
 -- InstanceGroup has its own source directory; one project exceeding the

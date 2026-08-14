@@ -121,7 +121,9 @@ Use `0` to clear `--max-hourly-rate`, `--max-spend`, or `--max-time` when
 overriding values copied with `--from`. Use `default`, `clear`, or `auto` to
 remove a `--grace-period` override. If the hourly-rate or survival filters
 remove every offer, the job remains queued and `weft diagnose` reports the
-constraint.
+constraint. `weft diagnose job JOB_ID` also performs a read-only live-market
+counterfactual analysis: it holds the requested GPU class fixed and reports
+which one-factor relaxations expose additional or viable offers.
 
 **Hardware-ceiling auto-strict.** When `--gpu-class` (or `--gpu`) names a
 specific model and `--gpu-mem` matches that model's actual capacity (A100

@@ -918,12 +918,16 @@ func runJobDiagnose(_ *cobra.Command, args []string) error {
 
 	jobs, errorsList := loadJobsForUnplace(database, jobIDs)
 	hydrateQueueBlockedReasons(jobs)
+	placementDiagnoser := newLivePlacementDiagnoser(database)
 	for i, job := range jobs {
 		if i > 0 {
 			fmt.Println("---")
 		}
 		x := explain.ForJob(database, job, time.Now())
 		fmt.Println(explain.DiagnoseText(x))
+		if placement := placementDiagnoser.diagnose(job); placement != "" {
+			fmt.Println(placement)
+		}
 	}
 	if len(errorsList) > 0 {
 		return fmt.Errorf("%s", strings.Join(errorsList, "; "))

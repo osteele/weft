@@ -168,6 +168,21 @@ func TestStructuredDetailLinesSkipsRedundantDetail(t *testing.T) {
 	}
 }
 
+func TestStructuredDetailLinesNormalizesLegacySurvivalWording(t *testing.T) {
+	s := &Structured{
+		Summary:      "1 offer rejected (predicted survival 27% < required 40%)",
+		Launch:       "1 offer rejected (predicted survival 27% < required 40%)",
+		LaunchDetail: "survival filter: best 27% < required 40%",
+	}
+	got := strings.Join(s.DetailLines(), "\n")
+	if strings.Contains(got, "< required 40%") {
+		t.Fatalf("DetailLines() retained legacy wording: %q", got)
+	}
+	if !strings.Contains(got, "predicted survival 27% < 40%") || !strings.Contains(got, "best 27% < 40%") {
+		t.Fatalf("DetailLines() = %q, want compact and detailed thresholds normalized", got)
+	}
+}
+
 // TestStructuredMarshalRoundTripIncludesFingerprint verifies the
 // error-coalescing fingerprint survives Marshal/Parse. Required so the TUI
 // disclosure and `weft incidents` CLI can group jobs by fingerprint after a

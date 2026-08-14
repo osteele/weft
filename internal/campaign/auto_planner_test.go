@@ -66,6 +66,13 @@ func TestSanitizeBlockedReasonClarifiesBareOfferFetchUnavailable(t *testing.T) {
 	}
 }
 
+func TestSanitizeBlockedReasonUpdatesStoredSurvivalWording(t *testing.T) {
+	got := SanitizeBlockedReason("1 offer rejected (predicted survival 27% < required 40%)")
+	if want := "1 offer rejected (predicted survival 27% < 40%)"; got != want {
+		t.Fatalf("SanitizeBlockedReason() = %q, want %q", got, want)
+	}
+}
+
 func TestApplyGroupOffer_BlocksOnlyUnreusedJobsWhenNoOffer(t *testing.T) {
 	plan := AutoPlacementPlan{BlockedReasons: map[int64]string{}}
 	group := InstanceGroup{

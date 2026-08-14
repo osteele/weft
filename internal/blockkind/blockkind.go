@@ -26,6 +26,7 @@ func ReasonKind(reason string) Kind {
 		isOfferFetchUnavailable(cleaned),
 		isRetryableOfferUnavailable(cleaned),
 		isRetryableCreateProviderRejection(cleaned),
+		isRetryableProviderReachabilityFailure(cleaned),
 		cleaned == "inventory-tagged: waiting for on-prem host",
 		strings.Contains(cleaned, "source sync already in flight"),
 		strings.Contains(cleaned, "source sync backing off"),
@@ -104,6 +105,12 @@ func isRetryableCreateProviderRejection(reason string) bool {
 	return strings.Contains(lower, "provider rejected request") &&
 		strings.Contains(lower, "create-instance") &&
 		strings.Contains(reason, "Weft will retry with fresh offers")
+}
+
+func isRetryableProviderReachabilityFailure(reason string) bool {
+	return strings.Contains(reason, "unreachable") &&
+		strings.Contains(reason, "network or provider outage") &&
+		strings.Contains(reason, "Weft will retry")
 }
 
 func isIncompleteProducerWait(reason string) bool {

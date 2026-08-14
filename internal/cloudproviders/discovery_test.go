@@ -23,8 +23,54 @@ func TestDiscoveryUnavailableError_SingleProvider(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unavailable error")
 	}
-	if got := err.Error(); got != "no cloud providers available: vastai: DNS lookup failed" {
+	if got := err.Error(); got != "Vast.ai unreachable (network or provider outage); Weft will retry" {
 		t.Fatalf("unexpected error: %q", got)
+	}
+}
+
+func TestDiscoveryUnavailableError_CompactsConnectivityTraceback(t *testing.T) {
+	traceback := "vastai CLI availability check failed: show user: Traceback (most recent call last):\n" +
+		"requests.exceptions.ConnectionError: HTTPSConnectionPool(host='console.vast.ai', port=443): Max retries exceeded"
+	result := discover([]providerCheck{
+		{
+			Provider: cloud.ProviderVastai,
+			Attempt:  true,
+			Load: func() (cloud.Client, error) {
+				return nil, fmt.Errorf("%s", traceback)
+			},
+		},
+	})
+
+	err := result.UnavailableError()
+	if err == nil {
+		t.Fatal("expected unavailable error")
+	}
+	want := "Vast.ai unreachable (network or provider outage); Weft will retry"
+	if got := err.Error(); got != want {
+		t.Fatalf("UnavailableError() = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "Traceback") || strings.Contains(err.Error(), "ConnectionPool") {
+		t.Fatalf("UnavailableError() leaked provider traceback: %q", err)
+	}
+}
+
+func TestDiscoveryUnavailableError_MultipleUnreachableProviders(t *testing.T) {
+	result := discover([]providerCheck{
+		{Provider: cloud.ProviderVastai, Attempt: true, Load: func() (cloud.Client, error) {
+			return nil, fmt.Errorf("DNS lookup failed")
+		}},
+		{Provider: cloud.ProviderRunpod, Attempt: true, Load: func() (cloud.Client, error) {
+			return nil, fmt.Errorf("connection timed out")
+		}},
+	})
+
+	err := result.UnavailableError()
+	if err == nil {
+		t.Fatal("expected unavailable error")
+	}
+	want := "cloud providers unreachable (Vast.ai, RunPod; network or provider outage); Weft will retry"
+	if got := err.Error(); got != want {
+		t.Fatalf("UnavailableError() = %q, want %q", got, want)
 	}
 }
 

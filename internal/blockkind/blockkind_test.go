@@ -14,6 +14,8 @@ func TestReasonKindTaxonomy(t *testing.T) {
 		{"inventory-tagged: waiting for on-prem host", KindWaiting},
 		{"offer unavailable: pod create --gpu-id: requested instance type is no longer available; Weft will retry with fresh offers", KindWaiting},
 		{"provider rejected request (vastai create-instance) (contract 43292019); Weft will retry with fresh offers", KindWaiting},
+		{"Vast.ai unreachable (network or provider outage); Weft will retry", KindWaiting},
+		{"cloud providers unreachable (Vast.ai, RunPod; network or provider outage); Weft will retry", KindWaiting},
 		{`waiting for "output/model.pt" from wj1570 (queued)`, KindWaiting},
 		{`waiting for "output/model.pt" from wj1570 (running)`, KindWaiting},
 		{`waiting for "output/model.pt" from wj1570 (running); could not reuse wi42: image incompatible`, KindWaiting},

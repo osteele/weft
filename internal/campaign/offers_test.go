@@ -1120,7 +1120,7 @@ func TestRankOffer_ReportsRateSurvivalTradeoff(t *testing.T) {
 	for _, want := range []string{
 		"2 offers found; none met all requirements",
 		"1 offer rejected by max-hourly-rate (cheapest meeting survival $1.00/hr > $0.50/hr)",
-		fmt.Sprintf("1 offer rejected by survival (best %.0f%% < required %.0f%%)", lowSurvival*100, minSurvival*100),
+		fmt.Sprintf("1 offer rejected by survival (best %.0f%% < %.0f%%)", lowSurvival*100, minSurvival*100),
 	} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("detail = %q, want substring %q", detail, want)
@@ -1269,12 +1269,12 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 		{"torch arch min", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, TorchArchMinCap: "7.5"}, "12 offers found, 5 offers passed VRAM/CUDA but all filtered by torch arch lower bound (min cap=7.5)"},
 		{"unknown provider compatibility", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 0, UnknownCompatibility: 5, ProviderCompatibilityFiltered: 5}, "12 offers found, 5 offers passed CUDA/image filters but all filtered because the provider did not report required CUDA/driver compatibility"},
 		{"forward compat driver", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterProvider: 5, ForwardCompatFiltered: 5, AfterForward: 0, ForwardCompatExampleGPU: "RTX 3090"}, "12 offers found, 5 offers passed provider compatibility but all filtered by Vast.ai datacenter forward-compat driver guard on consumer GPUs (e.g. RTX 3090)"},
-		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, SurvivalThreshold: 0.8, SurvivalRejected: 5, BestRejectedSurvival: 0.43}, "5 offers rejected (best predicted survival 43% < required 80%)"},
+		{"survival", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, SurvivalThreshold: 0.8, SurvivalRejected: 5, BestRejectedSurvival: 0.43}, "5 offers rejected (best predicted survival 43% < 80%)"},
 		{"defensive fallback", OfferFilterStats{RawCount: 12, AfterVRAM: 8, AfterCUDA: 5, AfterSurvival: 5}, "12 offers found, none met all criteria"},
 		{"singular vram", OfferFilterStats{RawCount: 1}, "1 offer found, all filtered by VRAM requirement"},
 		{"singular cuda", OfferFilterStats{RawCount: 1, AfterVRAM: 1}, "1 offer found, 1 offer passed interconnect/topology filters but all filtered by CUDA compatibility"},
 		{"singular torch arch", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, TorchArchMaxCap: "sm_89"}, "1 offer found, 1 offer passed VRAM/CUDA but all filtered by torch arch upper bound (max cap=sm_89)"},
-		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, SurvivalThreshold: 0.8, SurvivalRejected: 1, BestRejectedSurvival: 0.43}, "1 offer rejected (predicted survival 43% < required 80%)"},
+		{"singular survival", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, SurvivalThreshold: 0.8, SurvivalRejected: 1, BestRejectedSurvival: 0.43}, "1 offer rejected (predicted survival 43% < 80%)"},
 		{"multiple near misses", OfferFilterStats{
 			RawCount:                    3,
 			VRAMFiltered:                1,
@@ -1288,7 +1288,7 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 			SurvivalThreshold:           0.8,
 			SurvivalRejected:            1,
 			BestRejectedSurvival:        0.43,
-		}, "3 offers found; none met all requirements: 1 offer rejected by VRAM (best 16GB < required 24GB); 1 offer rejected by max-hourly-rate (cheapest meeting survival $2.10/hr > $1.50/hr); 1 offer rejected by survival (best 43% < required 80%)"},
+		}, "3 offers found; none met all requirements: 1 offer rejected by VRAM (best 16GB < required 24GB); 1 offer rejected by max-hourly-rate (cheapest meeting survival $2.10/hr > $1.50/hr); 1 offer rejected by survival (best 43% < 80%)"},
 		{"singular defensive fallback", OfferFilterStats{RawCount: 1, AfterVRAM: 1, AfterCUDA: 1, AfterSurvival: 1}, "1 offer found, none met all criteria"},
 	}
 	for _, tc := range cases {
@@ -1297,6 +1297,18 @@ func TestNoOffersDetail_FilterStages(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatPercentBelowPreservesVisibleInequality(t *testing.T) {
+	if got := formatPercentBelow(0.396, 0.4); got != "39.6% < 40%" {
+		t.Fatalf("formatPercentBelow() = %q, want visible inequality", got)
+	}
+	if got := formatPercentBelow(0.3996, 0.4); got != "39.96% < 40%" {
+		t.Fatalf("formatPercentBelow() = %q, want enough precision for a visible inequality", got)
+	}
+	if got := formatPercentBelow(0.27, 0.4); got != "27% < 40%" {
+		t.Fatalf("formatPercentBelow() = %q, want compact integers", got)
 	}
 }
 
