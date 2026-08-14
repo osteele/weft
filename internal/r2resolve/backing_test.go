@@ -1,10 +1,38 @@
 package r2resolve
 
 import (
+	"context"
 	"testing"
 
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/r2"
 )
+
+type listedObjects struct{ objects []r2.ObjectInfo }
+
+func (l listedObjects) ListObjects(context.Context, string) ([]r2.ObjectInfo, error) {
+	return l.objects, nil
+}
+
+func TestListRunIDsNewestFirst(t *testing.T) {
+	got, err := ListRunIDsFunc(context.Background(), listedObjects{objects: []r2.ObjectInfo{
+		{Key: "jobs/7/runs/2/output/a"},
+		{Key: "jobs/7/runs/11/output/a"},
+		{Key: "jobs/7/runs/5/output/a"},
+	}}, 7)
+	if err != nil {
+		t.Fatalf("ListRunIDsFunc: %v", err)
+	}
+	want := []int64{11, 5, 2}
+	if len(got) != len(want) {
+		t.Fatalf("run IDs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("run IDs = %v, want %v", got, want)
+		}
+	}
+}
 
 func TestConventionOutputRelPath(t *testing.T) {
 	tests := []struct {

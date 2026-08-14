@@ -114,7 +114,11 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 	if err != nil {
 		return nil, fmt.Errorf("search offers: %w", err)
 	}
-	return buildOffersFromGraphQL(gpuTypes, constraints), nil
+	offers, err := buildOffersFromGraphQL(gpuTypes, constraints)
+	if err != nil {
+		return nil, err
+	}
+	return offers, nil
 }
 
 // ShowUser returns the authenticated RunPod account balance/spend summary.
@@ -866,10 +870,10 @@ func parseGPUTypeOutput(data []byte, constraints cloud.OfferConstraints) ([]clou
 	return parseSearchOutput(data, constraints)
 }
 
-func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstraints) []cloud.Offer {
+func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
 	cloudType, err := cloud.NormalizeRunpodCloudType(constraints.RunpodCloudType)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var offers []cloud.Offer
 	var constraint placement.GPUConstraint
@@ -881,6 +885,9 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 		numGPUs = 1
 	}
 	for _, gt := range gpuTypes {
+		if strings.TrimSpace(gt.ID) == "" {
+			return nil, fmt.Errorf("parse GPU offers: provider returned GPU type without an id")
+		}
 		if !runpodGPUTypeSupportsCloudType(gt.SecureCloud, gt.CommunityCloud, cloudType) {
 			continue
 		}
@@ -934,7 +941,7 @@ func buildOffersFromGraphQL(gpuTypes []gqlGPUType, constraints cloud.OfferConstr
 			StockStatus: *gt.LowestPrice.StockStatus,
 		})
 	}
-	return offers
+	return offers, nil
 }
 
 func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
@@ -1032,13 +1039,20 @@ func runpodSearchRowPrice(row map[string]any, cloudType string) float64 {
 }
 
 func parsePods(data []byte) ([]Pod, error) {
+	if trimmed := strings.TrimSpace(string(data)); trimmed == "" || trimmed == "null" {
+		return nil, fmt.Errorf("pod list response is empty")
+	}
 	rows, err := decodeJSONArray(data)
 	if err != nil {
 		return nil, err
 	}
 	pods := make([]Pod, 0, len(rows))
 	for _, row := range rows {
-		pods = append(pods, podFromMap(row))
+		pod := podFromMap(row)
+		if strings.TrimSpace(pod.ID) == "" {
+			return nil, fmt.Errorf("pod response row missing id")
+		}
+		pods = append(pods, pod)
 	}
 	return pods, nil
 }
@@ -1048,7 +1062,13 @@ func parsePod(data []byte) (*Pod, error) {
 	if err != nil {
 		return nil, err
 	}
+	if obj == nil {
+		return nil, fmt.Errorf("pod response is null")
+	}
 	pod := podFromMap(obj)
+	if strings.TrimSpace(pod.ID) == "" {
+		return nil, fmt.Errorf("pod response missing id")
+	}
 	return &pod, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -14,6 +15,9 @@ import (
 )
 
 const graphqlEndpoint = "https://api.runpod.io/graphql"
+
+var graphqlEndpointURL = graphqlEndpoint
+var graphqlHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
 // gpuTypesQuery fetches all GPU types with pricing via the RunPod GraphQL API.
 // The REST-like `runpodctl gpu list` command does not include pricing, so we
@@ -72,7 +76,7 @@ type gqlDataCenter struct {
 }
 
 type gqlResponse struct {
-	Data struct {
+	Data *struct {
 		GPUTypes    []gqlGPUType    `json:"gpuTypes"`
 		DataCenters []gqlDataCenter `json:"dataCenters"`
 	} `json:"data"`
@@ -124,19 +128,22 @@ func fetchGPUTypes(ctx context.Context, cloudType string) ([]gqlGPUType, error) 
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", graphqlEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", graphqlEndpointURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := graphqlHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("runpod graphql: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("runpod graphql: HTTP %s: %s", resp.Status, strings.TrimSpace(string(detail)))
+	}
 
 	var gql gqlResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gql); err != nil {
@@ -148,6 +155,9 @@ func fetchGPUTypes(ctx context.Context, cloudType string) ([]gqlGPUType, error) 
 			msgs[i] = e.Message
 		}
 		return nil, fmt.Errorf("runpod graphql: %s", strings.Join(msgs, "; "))
+	}
+	if gql.Data == nil || gql.Data.GPUTypes == nil {
+		return nil, fmt.Errorf("runpod graphql: response missing data.gpuTypes")
 	}
 
 	// Build the set of GPU type IDs that are actually available in at least

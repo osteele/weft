@@ -249,6 +249,9 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	if strings.TrimSpace(string(out)) == "" {
 		return nil, fmt.Errorf("search offers: provider returned empty response")
 	}
+	if strings.TrimSpace(string(out)) == "null" {
+		return nil, fmt.Errorf("search offers: provider returned null response")
+	}
 
 	var offers []Offer
 	if err := json.Unmarshal(out, &offers); err != nil {
@@ -260,6 +263,9 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 
 	// Compute derived fields
 	for i := range offers {
+		if offers[i].ID <= 0 {
+			return nil, fmt.Errorf("parse offers: provider returned offer without a valid id")
+		}
 		offers[i].GPUMemGB = float64(offers[i].GPUMemMB) / 1024.0
 		if constraints.InstanceType == cloud.InstanceTypeInterruptible {
 			offers[i].InstanceType = cloud.InstanceTypeInterruptible
@@ -366,6 +372,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			return nil, fmt.Errorf("%w (contract %d)", classify("create-instance", sentinel, 0, reason), resp.NewContract)
 		}
 		return nil, classify("create-instance", sentinel, 0, reason)
+	}
+	if resp.NewContract <= 0 {
+		return nil, classify("create-instance", cloud.ErrProviderRejected, 0, "provider returned success=true without a valid contract id")
 	}
 
 	if opts.PublicKeyFile != "" {
@@ -515,6 +524,9 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("show instances: %w", err)
 	}
+	if trimmed := strings.TrimSpace(string(out)); trimmed == "" || trimmed == "null" {
+		return nil, fmt.Errorf("parse instances: provider returned empty response")
+	}
 
 	var instances []Instance
 	if err := json.Unmarshal(out, &instances); err != nil {
@@ -522,6 +534,11 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 			return nil, fmt.Errorf("show instances: %s", msg)
 		}
 		return nil, fmt.Errorf("parse instances: %w", err)
+	}
+	for _, inst := range instances {
+		if inst.ID <= 0 {
+			return nil, fmt.Errorf("parse instances: provider returned instance without a valid id")
+		}
 	}
 
 	for _, inst := range instances {
@@ -538,6 +555,9 @@ func (c *Client) ListAllInstances() ([]Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("show instances: %w", err)
 	}
+	if trimmed := strings.TrimSpace(string(out)); trimmed == "" || trimmed == "null" {
+		return nil, fmt.Errorf("parse instances: provider returned empty response")
+	}
 
 	var instances []Instance
 	if err := json.Unmarshal(out, &instances); err != nil {
@@ -545,6 +565,11 @@ func (c *Client) ListAllInstances() ([]Instance, error) {
 			return nil, fmt.Errorf("show instances: %s", msg)
 		}
 		return nil, fmt.Errorf("parse instances: %w", err)
+	}
+	for _, inst := range instances {
+		if inst.ID <= 0 {
+			return nil, fmt.Errorf("parse instances: provider returned instance without a valid id")
+		}
 	}
 	return instances, nil
 }

@@ -4,12 +4,61 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+func TestFetchGPUTypesRejectsGraphQLHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"errors":[{"message":"invalid API key"}]}`))
+	}))
+	defer server.Close()
+
+	oldEndpoint, oldClient := graphqlEndpointURL, graphqlHTTPClient
+	t.Cleanup(func() {
+		graphqlEndpointURL = oldEndpoint
+		graphqlHTTPClient = oldClient
+	})
+	graphqlEndpointURL = server.URL
+	graphqlHTTPClient = server.Client()
+	t.Setenv("RUNPOD_API_KEY", "test-key")
+
+	_, err := fetchGPUTypes(context.Background(), cloud.RunpodCloudTypeCommunity)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") || !strings.Contains(err.Error(), "invalid API key") {
+		t.Fatalf("fetchGPUTypes error = %v, want bounded HTTP/API error", err)
+	}
+}
+
+func TestFetchGPUTypesRejectsMissingGraphQLData(t *testing.T) {
+	for _, payload := range []string{"null", "{}", `{"data":null}`} {
+		t.Run(payload, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(payload))
+			}))
+			defer server.Close()
+
+			oldEndpoint, oldClient := graphqlEndpointURL, graphqlHTTPClient
+			t.Cleanup(func() {
+				graphqlEndpointURL = oldEndpoint
+				graphqlHTTPClient = oldClient
+			})
+			graphqlEndpointURL = server.URL
+			graphqlHTTPClient = server.Client()
+			t.Setenv("RUNPOD_API_KEY", "test-key")
+
+			if _, err := fetchGPUTypes(context.Background(), cloud.RunpodCloudTypeCommunity); err == nil {
+				t.Fatalf("fetchGPUTypes accepted malformed response %s", payload)
+			}
+		})
+	}
+}
 
 func TestEncodeTemplateStartCommandArg(t *testing.T) {
 	t.Run("encodes bash -lc command", func(t *testing.T) {
@@ -167,6 +216,28 @@ func TestParseCreatedPodID_JSON(t *testing.T) {
 	}
 }
 
+func TestParsePodRejectsNullOrMissingIdentity(t *testing.T) {
+	for _, input := range []string{"null", `{ "desiredStatus": "RUNNING" }`} {
+		if _, err := parsePod([]byte(input)); err == nil {
+			t.Fatalf("parsePod(%q) returned nil error", input)
+		}
+	}
+}
+
+func TestParsePodsRejectsMissingIdentity(t *testing.T) {
+	if _, err := parsePods([]byte(`[{"desiredStatus":"RUNNING"}]`)); err == nil {
+		t.Fatal("parsePods accepted a row without a provider ID")
+	}
+}
+
+func TestParsePodsRejectsEmptyOrNullResponse(t *testing.T) {
+	for _, payload := range []string{"", "null"} {
+		if _, err := parsePods([]byte(payload)); err == nil {
+			t.Fatalf("parsePods accepted malformed response %q", payload)
+		}
+	}
+}
+
 func TestParseGPUTypeOutput(t *testing.T) {
 	input := `[
 		{
@@ -297,12 +368,28 @@ func TestBuildOffersFromGraphQLExactL4DoesNotMatchL40(t *testing.T) {
 		},
 	}
 
-	offers := buildOffersFromGraphQL(gpuTypes, cloud.OfferConstraints{GPUClass: "l4", MinGPUMemGB: 20})
+	offers, err := buildOffersFromGraphQL(gpuTypes, cloud.OfferConstraints{GPUClass: "l4", MinGPUMemGB: 20})
+	if err != nil {
+		t.Fatalf("buildOffersFromGraphQL: %v", err)
+	}
 	if len(offers) != 1 || offers[0].ProviderID != "NVIDIA L4" {
 		t.Fatalf("offers = %+v, want only NVIDIA L4", offers)
 	}
 	if offers[0].StockStatus != "High" {
 		t.Fatalf("StockStatus = %q, want High", offers[0].StockStatus)
+	}
+}
+
+func TestBuildOffersFromGraphQLRejectsMissingIdentity(t *testing.T) {
+	price := 1.0
+	stock := "High"
+	_, err := buildOffersFromGraphQL([]gqlGPUType{{
+		LowestPrice:    &gqlLowestPrice{UninterruptablePrice: &price, StockStatus: &stock},
+		MemoryInGb:     24,
+		CommunityCloud: true,
+	}}, cloud.OfferConstraints{})
+	if err == nil {
+		t.Fatal("buildOffersFromGraphQL accepted GPU type without an ID")
 	}
 }
 

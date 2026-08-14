@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,6 +74,7 @@ var ListRunIDsFunc = func(ctx context.Context, client Lister, jobID int64) ([]in
 		seen[runID] = struct{}{}
 		runIDs = append(runIDs, runID)
 	}
+	sort.Slice(runIDs, func(i, j int) bool { return runIDs[i] > runIDs[j] })
 	return runIDs, nil
 }
 

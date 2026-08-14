@@ -1810,6 +1810,12 @@ rule LaunchInstance {
         -- and makes them invisible to reconcile.
         -- Implementation: internal/runpod/client.go, provider-keyed client
         -- registry consumed by internal/campaign/lifecycle.go.
+        -- Provider adapters must preserve transport failure evidence: a
+        -- non-success HTTP response or malformed provider payload is an
+        -- observation error, not an empty successful offer/instance result.
+        -- In particular, RunPod GraphQL HTTP errors must be checked before
+        -- decoding the response body so authentication/server failures never
+        -- become an ordinary no-offers result.
 }
 
 rule BeginLaunching {

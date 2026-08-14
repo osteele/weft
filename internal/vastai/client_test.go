@@ -280,6 +280,46 @@ func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceSuccessWithoutContractIDIsProviderRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": true, \"new_contract\": 0}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	inst, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if inst != nil {
+		t.Fatalf("CreateInstance instance = %+v, want nil", inst)
+	}
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "valid contract id") {
+		t.Fatalf("CreateInstance error = %v, want invalid contract detail", err)
+	}
+}
+
+func TestShowAndListInstancesRejectNullResponse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' 'null'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	if _, err := c.ShowInstance(12345); err == nil || errors.Is(err, cloud.ErrInstanceNotFound) {
+		t.Fatalf("ShowInstance error = %v, want malformed-response error", err)
+	}
+	if _, err := c.ListAllInstances(); err == nil {
+		t.Fatal("ListAllInstances accepted null response")
+	}
+}
+
 func TestCreateInstanceAccountCreditExhaustedFromCLIMessage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -725,6 +765,40 @@ func TestSearchOffersEmptyOutput(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "unexpected end of JSON input") {
 		t.Fatalf("SearchOffers() error = %v, should not expose JSON EOF", err)
+	}
+}
+
+func TestSearchOffersRejectsMissingIdentity(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"gpu_name\": \"RTX 4090\"}]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	offers, err := c.SearchOffers(OfferConstraints{})
+	if offers != nil {
+		t.Fatalf("SearchOffers offers = %#v, want nil", offers)
+	}
+	if err == nil || !strings.Contains(err.Error(), "valid id") {
+		t.Fatalf("SearchOffers error = %v, want invalid identity error", err)
+	}
+}
+
+func TestSearchOffersRejectsNullResponse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' 'null'\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	offers, err := c.SearchOffers(OfferConstraints{})
+	if offers != nil || err == nil || !strings.Contains(err.Error(), "null response") {
+		t.Fatalf("SearchOffers = (%#v, %v), want null-response error", offers, err)
 	}
 }
 
