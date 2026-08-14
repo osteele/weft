@@ -1,11 +1,14 @@
 package daemonapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +18,25 @@ import (
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/ops"
 )
+
+func TestPrepareSocketPathPreservesExistingSocket(t *testing.T) {
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-existing-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+
+	if err := prepareSocketPath(socketPath); err == nil {
+		t.Fatal("prepareSocketPath accepted an existing socket")
+	}
+	if _, err := os.Lstat(socketPath); err != nil {
+		t.Fatalf("prepareSocketPath removed existing socket: %v", err)
+	}
+}
 
 func TestWatchJobsEmitsInitialAndTerminalSnapshots(t *testing.T) {
 	database := db.SetupTestDB(t)
@@ -185,6 +207,9 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	if sub.Ready.Resource != ResourceActivity {
 		t.Fatalf("ready resource = %q, want activity", sub.Ready.Resource)
 	}
+	if sub.Ready.MaxEventBytes != DefaultActivityMaxEventBytes {
+		t.Fatalf("ready max event bytes = %d, want %d", sub.Ready.MaxEventBytes, DefaultActivityMaxEventBytes)
+	}
 
 	event := nextSubscriptionEvent(t, sub)
 	if event.Type != EventSubscriptionSnapshot || event.Activity == nil {
@@ -217,6 +242,73 @@ func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	}
 	if event.Activity.FormattedSnapshot == "" || event.Activity.FormattedDelta == "" {
 		t.Fatalf("formatted payload missing: %+v", event.Activity)
+	}
+}
+
+func TestEncodeBoundedActivityEventAcceptsExactBoundary(t *testing.T) {
+	event := Event{Type: EventSubscriptionSnapshot, APIVersion: 1, Resource: ResourceActivity, Activity: &ActivityPayload{FormattedSnapshot: "ok"}}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var output bytes.Buffer
+	frameBytes := len(data) + 1
+	if err := encodeBoundedActivityEvent(json.NewEncoder(&output), event, frameBytes); err != nil {
+		t.Fatalf("encodeBoundedActivityEvent exact boundary: %v", err)
+	}
+	if got := output.Len(); got != frameBytes {
+		t.Fatalf("encoded bytes = %d, want %d including delimiter", got, frameBytes)
+	}
+
+	output.Reset()
+	err = encodeBoundedActivityEvent(json.NewEncoder(&output), event, frameBytes-1)
+	sizeErr, ok := err.(*activityEventSizeError)
+	if !ok || sizeErr.eventBytes != frameBytes || sizeErr.maxBytes != frameBytes-1 {
+		t.Fatalf("boundary error = %#v, want event size %d max %d", err, frameBytes, frameBytes-1)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("oversized event emitted %d bytes", output.Len())
+	}
+}
+
+func TestSubscribeActivityReportsOversizedCompleteSnapshot(t *testing.T) {
+	database := db.SetupTestDB(t)
+	insertWatchTestProjectJob(t, database, 303, "augur", db.StatusQueued)
+	if _, err := database.Exec(`UPDATE jobs SET command = ? WHERE id = ?`, strings.Repeat("x", 8<<10), 303); err != nil {
+		t.Fatalf("enlarge job command: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server, err := StartServer(ctx, database, socketPath)
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	defer server.Close()
+
+	includeFormatted := false
+	sub, err := DialSubscribeActivity(ctx, socketPath, SubscriptionRequest{
+		Project:          "augur",
+		Follow:           true,
+		IncludeDelta:     true,
+		IncludeFormatted: &includeFormatted,
+		MaxEventBytes:    MinimumActivityMaxEventBytes,
+	})
+	if err != nil {
+		t.Fatalf("DialSubscribeActivity: %v", err)
+	}
+	defer sub.Close()
+	if sub.Ready.MaxEventBytes != MinimumActivityMaxEventBytes {
+		t.Fatalf("ready max event bytes = %d, want %d", sub.Ready.MaxEventBytes, MinimumActivityMaxEventBytes)
+	}
+	event := nextSubscriptionEvent(t, sub)
+	if event.Type != EventError || event.ErrorCode != ErrorCodeFrameTooLarge {
+		t.Fatalf("oversize event = %+v, want terminal frame_too_large error", event)
+	}
+	if event.EventBytes <= event.MaxEventBytes || event.MaxEventBytes != MinimumActivityMaxEventBytes {
+		t.Fatalf("oversize evidence = %d/%d", event.EventBytes, event.MaxEventBytes)
 	}
 }
 
@@ -256,6 +348,27 @@ func TestActivityPayloadKeyIgnoresTimestamps(t *testing.T) {
 	}}
 	if activityPayloadKey(first) == activityPayloadKey(second) {
 		t.Fatal("activity payload key did not change for runaway-breaker state")
+	}
+}
+
+func TestBuildActivityPayloadCanOmitFormattedFields(t *testing.T) {
+	database := db.SetupTestDB(t)
+	insertWatchTestProjectJob(t, database, 304, "augur", db.StatusQueued)
+	includeFormatted := false
+	payload, _, err := buildActivityPayload(database, SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Project:          "augur",
+		IncludeDelta:     true,
+		IncludeFormatted: &includeFormatted,
+	}, nil, true, 0)
+	if err != nil {
+		t.Fatalf("buildActivityPayload: %v", err)
+	}
+	if payload.FormattedSnapshot != "" || payload.FormattedDelta != "" {
+		t.Fatalf("formatted fields were included: %+v", payload)
+	}
+	if payload.Snapshot == nil || payload.Delta == nil {
+		t.Fatalf("structured fields missing: %+v", payload)
 	}
 }
 

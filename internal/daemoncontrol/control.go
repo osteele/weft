@@ -22,6 +22,11 @@ const (
 	Label = "com.osteele.weft.daemon"
 )
 
+var (
+	dialSocketTimeout = net.DialTimeout
+	restartForEnsure  = Restart
+)
+
 type Paths struct {
 	PIDFile    string
 	LockFile   string
@@ -225,9 +230,23 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 	if err != nil {
 		return status, EnsureNoop, err
 	}
-	if info, ok, err := SocketDaemonInfo(paths, 100*time.Millisecond); err != nil {
+	socketExists, err := socketPathExists(paths.SocketFile)
+	if err != nil {
 		return status, EnsureNoop, err
+	}
+	if info, ok, socketErr := SocketDaemonInfo(paths, 100*time.Millisecond); socketErr != nil {
+		// A confirmed stale pathname can be left for the replacement daemon to
+		// remove after it owns the process lock. Any other dial failure is
+		// unknown evidence and must not trigger cleanup or restart.
+		if status.Live && isConfirmedStaleSocketError(socketErr) {
+			status, err = restartForEnsure(paths, 5*time.Second, wait)
+			return status, EnsureRestarted, err
+		}
+		if !isConfirmedStaleSocketError(socketErr) {
+			return status, EnsureNoop, socketErr
+		}
 	} else if ok {
+		socketExists = true
 		if status.Live && status.PID != info.PID {
 			if _, _, err := stopLivePID(paths, status.PID, 5*time.Second); err != nil {
 				return status, EnsureNoop, err
@@ -242,12 +261,22 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 				return status, EnsureNoop, err
 			}
 		}
+	} else {
+		// The pathname may have disappeared between the initial stat and dial.
+		socketExists, err = socketPathExists(paths.SocketFile)
+		if err != nil {
+			return status, EnsureNoop, err
+		}
+	}
+	if status.Live && !socketExists {
+		status, err = restartForEnsure(paths, 5*time.Second, wait)
+		return status, EnsureRestarted, err
 	}
 	if status.Live && !status.ActiveBinaryStale {
 		return status, EnsureNoop, nil
 	}
 	if status.Live && status.ActiveBinaryStale {
-		status, err = Restart(paths, 5*time.Second, wait)
+		status, err = restartForEnsure(paths, 5*time.Second, wait)
 		return status, EnsureRestarted, err
 	}
 	if status.Installed {
@@ -477,7 +506,13 @@ func StartDetached(paths Paths) (int, error) {
 func EnsureSocketAvailable(paths Paths, timeout time.Duration) error {
 	info, ok, err := SocketDaemonInfo(paths, timeout)
 	if err != nil {
-		return err
+		if !isConfirmedStaleSocketError(err) {
+			return fmt.Errorf("daemon socket availability unknown; preserving %s: %w", paths.SocketFile, err)
+		}
+		if removeErr := os.Remove(paths.SocketFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("remove confirmed stale daemon socket: %w", removeErr)
+		}
+		return nil
 	}
 	if ok {
 		return fmt.Errorf("daemon already running on socket %s with PID %d", paths.SocketFile, info.PID)
@@ -494,12 +529,12 @@ func SocketDaemonInfo(paths Paths, timeout time.Duration) (daemonapi.DaemonInfo,
 	} else if err != nil {
 		return daemonapi.DaemonInfo{}, false, fmt.Errorf("stat daemon socket: %w", err)
 	}
-	conn, err := net.DialTimeout("unix", paths.SocketFile, timeout)
+	conn, err := dialSocketTimeout("unix", paths.SocketFile, timeout)
 	if err != nil {
-		if removeErr := os.Remove(paths.SocketFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return daemonapi.DaemonInfo{}, false, fmt.Errorf("remove stale daemon socket: %w", removeErr)
+		if errors.Is(err, os.ErrNotExist) {
+			return daemonapi.DaemonInfo{}, false, nil
 		}
-		return daemonapi.DaemonInfo{}, false, nil
+		return daemonapi.DaemonInfo{}, false, fmt.Errorf("dial daemon socket: %w", err)
 	}
 	_ = conn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -512,6 +547,22 @@ func SocketDaemonInfo(paths Paths, timeout time.Duration) (daemonapi.DaemonInfo,
 		return daemonapi.DaemonInfo{}, false, fmt.Errorf("daemon socket reported invalid PID %d", info.PID)
 	}
 	return info, true, nil
+}
+
+func socketPathExists(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("stat daemon socket: %w", err)
+	}
+	return true, nil
+}
+
+func isConfirmedStaleSocketError(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist)
 }
 
 func minDuration(a, b time.Duration) time.Duration {

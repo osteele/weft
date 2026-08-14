@@ -39,6 +39,10 @@ const (
 	ResourceJobStatus    = "job_status"
 	ResourceProjectWatch = "project_watch"
 	ResourceActivity     = "activity"
+
+	DefaultActivityMaxEventBytes = 64 << 20
+	MinimumActivityMaxEventBytes = 1 << 10
+	ErrorCodeFrameTooLarge       = "frame_too_large"
 )
 
 type Request struct {
@@ -62,15 +66,17 @@ type MutationRequest struct {
 }
 
 type SubscriptionRequest struct {
-	Resource       string  `json:"resource"`
-	JobIDs         []int64 `json:"job_ids,omitempty"`
-	Project        string  `json:"project,omitempty"`
-	RecentSeconds  int64   `json:"recent_seconds,omitempty"`
-	Follow         bool    `json:"follow,omitempty"`
-	IncludeDelta   bool    `json:"include_delta,omitempty"`
-	IncludeStatus  bool    `json:"include_status_line,omitempty"`
-	PollSeconds    int64   `json:"poll_seconds,omitempty"`
-	TimeoutSeconds int64   `json:"timeout_seconds,omitempty"`
+	Resource         string  `json:"resource"`
+	JobIDs           []int64 `json:"job_ids,omitempty"`
+	Project          string  `json:"project,omitempty"`
+	RecentSeconds    int64   `json:"recent_seconds,omitempty"`
+	Follow           bool    `json:"follow,omitempty"`
+	IncludeDelta     bool    `json:"include_delta,omitempty"`
+	IncludeStatus    bool    `json:"include_status_line,omitempty"`
+	IncludeFormatted *bool   `json:"include_formatted,omitempty"`
+	MaxEventBytes    int     `json:"max_event_bytes,omitempty"`
+	PollSeconds      int64   `json:"poll_seconds,omitempty"`
+	TimeoutSeconds   int64   `json:"timeout_seconds,omitempty"`
 }
 
 type JobSnapshot struct {
@@ -92,7 +98,10 @@ type Event struct {
 	Daemon         *DaemonInfo                `json:"daemon,omitempty"`
 	SubmittedJob   *SubmitJobResult           `json:"submitted_job,omitempty"`
 	Mutation       *MutationResult            `json:"mutation,omitempty"`
+	ErrorCode      string                     `json:"error_code,omitempty"`
 	Error          string                     `json:"error,omitempty"`
+	EventBytes     int                        `json:"event_bytes,omitempty"`
+	MaxEventBytes  int                        `json:"max_event_bytes,omitempty"`
 }
 
 type SubmitJobResult struct {
@@ -244,15 +253,7 @@ func prepareSocketPath(socketPath string) error {
 	} else if err != nil {
 		return fmt.Errorf("stat daemon watch socket: %w", err)
 	}
-	conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
-	if err == nil {
-		conn.Close()
-		return fmt.Errorf("daemon watch socket already in use: %s", socketPath)
-	}
-	if err := os.Remove(socketPath); err != nil {
-		return fmt.Errorf("remove stale daemon watch socket: %w", err)
-	}
-	return nil
+	return fmt.Errorf("daemon watch socket path already exists: %s", socketPath)
 }
 
 func (s *Server) acceptLoop(ctx context.Context, database *sql.DB) {
@@ -377,12 +378,21 @@ func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, 
 		_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, Error: fmt.Sprintf("unsupported subscription resource %q", sub.Resource)})
 		return
 	}
+	if sub.Resource == ResourceActivity {
+		maxEventBytes, err := activityEventLimit(sub.MaxEventBytes)
+		if err != nil {
+			_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, Error: err.Error()})
+			return
+		}
+		sub.MaxEventBytes = maxEventBytes
+	}
 	id := subscriptionID(req.ClientPID, sub)
 	if err := encoder.Encode(Event{
 		Type:           EventSubscriptionReady,
 		APIVersion:     1,
 		Resource:       sub.Resource,
 		SubscriptionID: id,
+		MaxEventBytes:  sub.MaxEventBytes,
 	}); err != nil {
 		return
 	}
@@ -562,19 +572,26 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 		shouldEmit := key != lastKey || activityPayloadHasDelta(payload)
 		if shouldEmit {
 			lastKey = key
-			if err := encoder.Encode(Event{
+			if err := encodeBoundedActivityEvent(encoder, Event{
 				Type:           EventSubscriptionSnapshot,
 				APIVersion:     1,
 				Resource:       sub.Resource,
 				SubscriptionID: id,
 				Activity:       payload,
-			}); err != nil {
+			}, sub.MaxEventBytes); err != nil {
+				if sizeErr, ok := err.(*activityEventSizeError); ok {
+					writeActivityEventSizeError(encoder, id, sub, sizeErr)
+				}
 				return
 			}
 		}
 		prev = payload.Snapshot
 		if !sub.Follow && !active {
-			_ = encoder.Encode(Event{Type: EventDone, APIVersion: 1, Resource: sub.Resource, SubscriptionID: id, Activity: payload})
+			if err := encodeBoundedActivityEvent(encoder, Event{Type: EventDone, APIVersion: 1, Resource: sub.Resource, SubscriptionID: id, Activity: payload}, sub.MaxEventBytes); err != nil {
+				if sizeErr, ok := err.(*activityEventSizeError); ok {
+					writeActivityEventSizeError(encoder, id, sub, sizeErr)
+				}
+			}
 			return
 		}
 		select {
@@ -586,6 +603,53 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 		case <-ticker.C:
 		}
 	}
+}
+
+type activityEventSizeError struct {
+	eventBytes int
+	maxBytes   int
+}
+
+func (e *activityEventSizeError) Error() string {
+	return fmt.Sprintf("activity event is %d bytes, exceeding negotiated maximum %d", e.eventBytes, e.maxBytes)
+}
+
+func activityEventLimit(requested int) (int, error) {
+	if requested < 0 {
+		return 0, fmt.Errorf("max_event_bytes must not be negative")
+	}
+	if requested > 0 && requested < MinimumActivityMaxEventBytes {
+		return 0, fmt.Errorf("max_event_bytes must be at least %d", MinimumActivityMaxEventBytes)
+	}
+	if requested == 0 || requested > DefaultActivityMaxEventBytes {
+		return DefaultActivityMaxEventBytes, nil
+	}
+	return requested, nil
+}
+
+func encodeBoundedActivityEvent(encoder *json.Encoder, event Event, maxBytes int) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	eventBytes := len(data) + 1 // json.Encoder appends the NDJSON newline delimiter.
+	if eventBytes > maxBytes {
+		return &activityEventSizeError{eventBytes: eventBytes, maxBytes: maxBytes}
+	}
+	return encoder.Encode(json.RawMessage(data))
+}
+
+func writeActivityEventSizeError(encoder *json.Encoder, id string, sub SubscriptionRequest, sizeErr *activityEventSizeError) {
+	_ = encoder.Encode(Event{
+		Type:           EventError,
+		APIVersion:     1,
+		Resource:       sub.Resource,
+		SubscriptionID: id,
+		ErrorCode:      ErrorCodeFrameTooLarge,
+		Error:          sizeErr.Error(),
+		EventBytes:     sizeErr.eventBytes,
+		MaxEventBytes:  sizeErr.maxBytes,
+	})
 }
 
 func buildCachedActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, cache *runawayBreakerCache) (*ActivityPayload, bool, error) {
@@ -612,9 +676,10 @@ func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest,
 	if err != nil {
 		return nil, false, err
 	}
-	payload := &ActivityPayload{
-		Snapshot:          snap,
-		FormattedSnapshot: narrate.FormatSnapshot(snap),
+	payload := &ActivityPayload{Snapshot: snap}
+	includeFormatted := sub.IncludeFormatted == nil || *sub.IncludeFormatted
+	if includeFormatted {
+		payload.FormattedSnapshot = narrate.FormatSnapshot(snap)
 	}
 	payload.RunawayBreakers = runawayBreakerViews(breakers, sub.Project)
 	if sub.IncludeDelta {
@@ -629,7 +694,9 @@ func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest,
 			return nil, false, fmt.Errorf("resolve removed instances: %w", err)
 		}
 		payload.Delta = &delta
-		payload.FormattedDelta = narrate.FormatDelta(delta)
+		if includeFormatted {
+			payload.FormattedDelta = narrate.FormatDelta(delta)
+		}
 	}
 	if includeStatus {
 		unprocessed, err := narrate.LoadUnprocessedCounts(database, sub.Project)

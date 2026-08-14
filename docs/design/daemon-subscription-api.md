@@ -39,7 +39,9 @@ is one newline-terminated JSON object sent to `~/.cache/weft/daemon.sock`:
     "resource": "activity",
     "follow": true,
     "include_delta": true,
-    "include_status_line": true
+    "include_status_line": true,
+    "include_formatted": false,
+    "max_event_bytes": 67108864
   }
 }
 ```
@@ -52,9 +54,10 @@ the complete current active-job map plus an optional delta. The
 last 14 days), including jobs that finished before the client connected.
 Consumers that only need one project may add `"project": "<name>"`.
 
-The feed is naturally bounded by active jobs, active instances, and the
-14-day unprocessed inbox. Clients should reconnect after daemon restart and
-replace their local model from the new initial snapshot.
+The feed's rows are time-bounded by active jobs, active instances, and the
+14-day unprocessed inbox. Its serialized frames are additionally bounded by
+the negotiated `max_event_bytes`. Clients should reconnect after daemon
+restart and replace their local model from the new initial snapshot.
 
 ## Transport
 
@@ -65,6 +68,12 @@ until completion, timeout, daemon shutdown, or client disconnect.
 
 The daemon closes the subscription when the client closes the socket. Clients
 should reconnect rather than polling SQLite directly.
+
+Socket observation is non-destructive. A client or status probe never unlinks
+the socket after an unknown or transient dial failure. Only daemon startup,
+while holding the singleton process lock, may remove a path whose refusal is
+confirmed stale. If the recorded daemon PID is live but the pathname is
+missing, lifecycle control restarts the daemon to recreate it.
 
 ## Request
 
@@ -93,6 +102,8 @@ Common fields:
 | `subscribe.follow` | Resource-specific flag to keep streaming after idle state. |
 | `subscribe.include_delta` | Resource-specific flag to include transition deltas. |
 | `subscribe.include_status_line` | Resource-specific flag to include deterministic summary counts. |
+| `subscribe.include_formatted` | Activity-only flag for formatted duplicates; omitted means true for v1 compatibility. |
+| `subscribe.max_event_bytes` | Activity-only requested frame ceiling; the ready event reports the accepted value. |
 
 ## Events
 
@@ -205,6 +216,8 @@ Request fields:
 | `project` | Optional exact project label. |
 | `include_delta` | Include a `narrate.Delta` against the previous emitted snapshot. |
 | `include_status_line` | Include deterministic status-line counts and unprocessed inbox counts. |
+| `include_formatted` | Include `formatted_snapshot` and `formatted_delta`; defaults to true. Native clients should request false. |
+| `max_event_bytes` | Requested serialized NDJSON frame ceiling, including the newline delimiter. Zero uses 64 MiB; larger values are clamped to 64 MiB; nonzero values below 1 KiB are rejected. |
 | `follow` | When true, continue streaming while idle. |
 
 Activity events use the same outer `subscription_snapshot` envelope and carry
@@ -278,6 +291,32 @@ counts, so clients can show completed or failed job details on first connect
 without waiting for a transition delta. The formatted fields match the compact
 prompt inputs used by `weft narrate`, so the CLI can sit on the same daemon
 resource without recreating DB queries in the command process.
+
+The activity ready event includes the accepted `max_event_bytes`. Every
+subsequent activity snapshot or done event fits that ceiling. API v1 preserves
+its complete-snapshot guarantee: it never truncates rows or emits a partial
+snapshot to satisfy the limit. If a complete event would be too large, the
+daemon instead sends a terminal error and closes the subscription:
+
+```json
+{
+  "type": "error",
+  "api_version": 1,
+  "resource": "activity",
+  "subscription_id": "12345:...",
+  "error_code": "frame_too_large",
+  "error": "activity event is 70000000 bytes, exceeding negotiated maximum 67108864",
+  "event_bytes": 70000000,
+  "max_event_bytes": 67108864
+}
+```
+
+That error is not a continuation token. The client begins a new subscription,
+discarding its previous model and replacing it from the next complete initial
+snapshot. It can reduce the payload with a `project` filter or
+`include_formatted: false`. If the structured snapshot still exceeds the hard
+ceiling, API v1 cannot represent it; pagination requires a future major API
+contract rather than silently weakening v1 completeness.
 
 The daemon refreshes runaway-breaker state at most once every five seconds and
 shares that result across activity subscribers. This bounds the lifecycle-event

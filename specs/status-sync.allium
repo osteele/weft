@@ -1972,13 +1972,32 @@ rule ActivitySubscriptionJobFeed {
         follow = true,
         include_delta = true,
         include_status_line = true,
+        include_formatted = false,
+        max_event_bytes = requested_limit,
     )
 
+    let accepted_limit = min(DefaultActivityFrameLimit(), requested_limit)
+
+    ensures: ReadyEvent.max_event_bytes = accepted_limit
     ensures: FirstEventAfterReadyIsCompleteSnapshot()
     ensures: SnapshotContainsAllActiveJobs()
     ensures: SnapshotContainsUnprocessedTerminalJobs(max_age = 14.days)
     ensures: LaterEventsContainCompleteCurrentSnapshot()
     ensures: NoRemoteSyncTriggered()
+
+    for event in ActivitySnapshotOrDoneEvents:
+        if SerializedSize(event) <= accepted_limit:
+            ensures: EventEmitted(event)
+        else:
+            ensures: TerminalErrorEmitted(
+                error_code = "frame_too_large",
+                event_bytes = SerializedSize(event),
+                max_event_bytes = accepted_limit,
+            )
+            ensures: not PartialOrTruncatedSnapshotEmitted()
+            ensures: ReconnectStartsNewCompleteSnapshot()
+
+    ensures: not FormattedActivityFieldsIncluded()
 
     -- Job timing fields carry distinct semantics. Missing evidence remains
     -- unknown; one timestamp must never be substituted for another merely so
@@ -2009,6 +2028,20 @@ rule ActivitySubscriptionJobFeed {
         -- docs/design/daemon-subscription-api.md. Implementation:
         -- internal/daemonapi/watch.go resource=activity and
         -- internal/narrate/snapshot.go JobView.
+}
+
+-- Socket probes distinguish confirmed staleness from unknown reachability.
+-- Unknown evidence must not destroy the pathname of a live listener.
+rule DaemonSocketObservationIsNonDestructive {
+    when: DaemonSocketDialFails(error)
+
+    if ConfirmedStaleSocketError(error) and DaemonStartupOwnsProcessLock():
+        ensures: StaleSocketPathMayBeRemoved()
+    else:
+        ensures: DaemonSocketPathPreserved()
+
+    if RecordedDaemonPIDIsLive() and DaemonSocketPathIsConfirmedMissing():
+        ensures: DaemonLifecycleRestartedToRestoreSocket()
 }
 
 -- Principle: DB as source of truth (read-side discipline).

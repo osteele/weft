@@ -223,6 +223,59 @@ func TestEnsureSocketAvailableRemovesStaleSocketPath(t *testing.T) {
 	}
 }
 
+func TestEnsureSocketAvailablePreservesSocketOnUnknownDialFailure(t *testing.T) {
+	paths := Paths{SocketFile: shortTestSocketPath(t)}
+	listener, err := net.Listen("unix", paths.SocketFile)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer listener.Close()
+
+	oldDial := dialSocketTimeout
+	dialSocketTimeout = func(string, string, time.Duration) (net.Conn, error) {
+		return nil, fmt.Errorf("temporary dial failure")
+	}
+	t.Cleanup(func() { dialSocketTimeout = oldDial })
+
+	if err := EnsureSocketAvailable(paths, 100*time.Millisecond); err == nil {
+		t.Fatal("EnsureSocketAvailable accepted unknown socket state")
+	}
+	if _, err := os.Lstat(paths.SocketFile); err != nil {
+		t.Fatalf("unknown dial failure removed live socket path: %v", err)
+	}
+}
+
+func TestEnsureCurrentRestartsLivePIDWithMissingSocket(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{
+		PIDFile:    filepath.Join(dir, "daemon.pid"),
+		SocketFile: filepath.Join(dir, "daemon.sock"),
+		PlistFile:  filepath.Join(dir, "daemon.plist"),
+	}
+	if err := WritePIDFile(paths.PIDFile, os.Getpid()); err != nil {
+		t.Fatalf("WritePIDFile: %v", err)
+	}
+
+	oldRestart := restartForEnsure
+	restarts := 0
+	restartForEnsure = func(got Paths, _, _ time.Duration) (Status, error) {
+		restarts++
+		if got.SocketFile != paths.SocketFile {
+			t.Fatalf("restart paths = %+v, want %+v", got, paths)
+		}
+		return Status{PID: 5150, Live: true}, nil
+	}
+	t.Cleanup(func() { restartForEnsure = oldRestart })
+
+	status, action, err := EnsureCurrent(paths, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("EnsureCurrent: %v", err)
+	}
+	if action != EnsureRestarted || restarts != 1 || status.PID != 5150 {
+		t.Fatalf("EnsureCurrent = status %+v action %q restarts %d", status, action, restarts)
+	}
+}
+
 func shortTestSocketPath(t *testing.T) string {
 	t.Helper()
 	path := fmt.Sprintf("/tmp/weft-dc-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
