@@ -136,18 +136,35 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 		return nil, fmt.Errorf("snapshot move source attempt: %w", err)
 	}
 
+	// Only open an intent when we actually bound it to a live source attempt.
+	// If the source disappeared between the caller's check and this transaction
+	// (e.g., the attempt became terminal/abandoned concurrently), create the
+	// intent already obsoleted so it never sits open with no valid source.
+	// An unplaced job with no attempts at all is the exception: the intent is
+	// the first speculative placement and has no source row yet.
+	state := string(MoveIntentStateOpen)
+	if !sourceAttemptID.Valid {
+		var attemptCount int64
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, p.JobID).Scan(&attemptCount); err != nil {
+			return nil, fmt.Errorf("count job attempts: %w", err)
+		}
+		if attemptCount > 0 {
+			state = string(MoveIntentStateObsoleted)
+		}
+	}
+
 	res, err := tx.Exec(
 		`INSERT INTO move_intents (
 			job_id, source_attempt_id, source_launch_id,
 			target_kind, target_launch_id, target_attempt_id, target_host, target_offer_provider, target_offer_id, target_gpu_name,
 			target_request_id, target_request_kind, target_request_created_at,
 			state, attempt_count, max_attempts, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.JobID, nullableSQLInt64(sourceAttemptID), nullableSQLInt64(sourceLaunchID),
 		string(p.TargetKind), nullableInt64(p.TargetLaunchID), nullableInt64(p.TargetAttemptID), emptyToNull(targetHost),
 		emptyToNull(p.TargetOfferProvider), emptyToNull(p.TargetOfferID), emptyToNull(p.TargetGPUName),
 		emptyToNull(p.TargetRequestID), emptyToNull(p.TargetRequestKind), nullableInt64(p.TargetRequestAt),
-		attemptCount, maxAttempts, now,
+		state, attemptCount, maxAttempts, now,
 	)
 	if err != nil {
 		if isUniqueConstraintErr(err) {
@@ -159,6 +176,29 @@ func CreateMoveIntent(database *sql.DB, p CreateMoveIntentParams) (*MoveIntent, 
 	if err != nil {
 		return nil, err
 	}
+
+	// Re-validate the source attempt after the insert. The snapshot read above
+	// can race with concurrent terminal/abandon updates; if the source is no
+	// longer open when this transaction commits, obsolete the intent immediately
+	// rather than leaving an open intent bound to a dead source.
+	if sourceAttemptID.Valid {
+		var stillOpen bool
+		if err := tx.QueryRow(
+			`SELECT 1 FROM job_attempts WHERE id = ? AND end_time IS NULL AND abandoned_at IS NULL`,
+			sourceAttemptID.Int64,
+		).Scan(&stillOpen); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("re-validate move source attempt: %w", err)
+		}
+		if !stillOpen {
+			if _, err := tx.Exec(
+				`UPDATE move_intents SET state = ?, resolved_at = ?, resolution = ? WHERE id = ? AND state = 'open'`,
+				string(MoveIntentStateObsoleted), now, "source attempt no longer open", id,
+			); err != nil {
+				return nil, fmt.Errorf("obsolete intent with stale source: %w", err)
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}

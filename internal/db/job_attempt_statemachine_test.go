@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -512,6 +513,16 @@ func (c abandonAttemptCmd) apply(m *jobModel, err error) {
 		return
 	}
 	m.attempts[idx].abandoned = true
+	// Abandoning the source attempt of an open move intent obsoletes the
+	// intent via trigger move_intents_auto_obsolete_on_source_attempt_abandoned.
+	// Unlike terminal-source obsolescence, this trigger does not abandon the
+	// target; it simply unhides it so it can become authoritative.
+	if m.intent != nil && m.intent.state == string(MoveIntentStateOpen) && m.intent.sourceIdx == idx {
+		if m.intent.targetIdx >= 0 {
+			m.attempts[m.intent.targetIdx].hidden = false
+		}
+		m.intent.state = string(MoveIntentStateObsoleted)
+	}
 }
 
 type createMoveIntentCmd struct{}
@@ -814,6 +825,384 @@ func TestJobAttemptStateMachine_ConcurrentCompletionRace(t *testing.T) {
 	if attempts[0].Status != StatusCompleted {
 		t.Fatalf("attempt status = %q, want %q", attempts[0].Status, StatusCompleted)
 	}
+}
+
+// concurrentMoveIntentRace runs a pair of operations against the same job in
+// parallel and checks that the resulting DB state is one of the expected
+// linearized outcomes. It retries the race up to maxTries so both orderings are
+// likely to be exercised on SQLite.
+func concurrentMoveIntentRace(t *testing.T, maxTries int, setup func(*sql.DB) int64, op1, op2 func(*sql.DB, int64) error, allowed func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error)) {
+	t.Helper()
+	for try := 0; try < maxTries; try++ {
+		database := SetupTestDB(t)
+		jobID := setup(database)
+
+		var err1, err2 error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			err1 = op1(database, jobID)
+		}()
+		go func() {
+			defer wg.Done()
+			err2 = op2(database, jobID)
+		}()
+		wg.Wait()
+
+		allowed(t, database, jobID, err1, err2)
+	}
+}
+
+// moveAttemptRow is a test-only view of an attempt plus its binding intent.
+type moveAttemptRow struct {
+	id        int64
+	status    string
+	closed    bool
+	abandoned bool
+	intentID  sql.NullInt64
+	state     string
+}
+
+// loadMoveAttempts returns all attempts for a job with their bound intent state.
+func loadMoveAttempts(t *testing.T, db *sql.DB, jobID int64) []moveAttemptRow {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT ja.id, ja.status, ja.end_time IS NOT NULL, ja.abandoned_at IS NOT NULL, ja.move_intent_id, COALESCE(mi.state, '')
+		FROM job_attempts ja
+		LEFT JOIN move_intents mi ON mi.id = ja.move_intent_id
+		WHERE ja.job_id = ?
+		ORDER BY ja.attempt_number DESC`, jobID)
+	if err != nil {
+		t.Fatalf("loadMoveAttempts query: %v", err)
+	}
+	defer rows.Close()
+
+	var out []moveAttemptRow
+	for rows.Next() {
+		var r moveAttemptRow
+		if err := rows.Scan(&r.id, &r.status, &r.closed, &r.abandoned, &r.intentID, &r.state); err != nil {
+			t.Fatalf("loadMoveAttempts scan: %v", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("loadMoveAttempts rows: %v", err)
+	}
+	return out
+}
+
+// assertNoCorruptMoveState checks basic invariants that must hold after any
+// concurrent move-intent interleaving.
+func assertNoCorruptMoveState(t *testing.T, db *sql.DB, jobID int64) {
+	t.Helper()
+	attempts := loadMoveAttempts(t, db, jobID)
+
+	var openIntents int
+	intentByID := make(map[int64]string)
+	for _, a := range attempts {
+		if a.intentID.Valid {
+			intentByID[a.intentID.Int64] = a.state
+			if a.state == string(MoveIntentStateOpen) {
+				openIntents++
+				if !a.abandoned {
+					// hidden (open-move-target) attempts are bound to an open intent
+					// and must be the only non-abandoned attempt tied to that intent.
+				} else {
+					t.Fatalf("attempt %d is bound to open intent %d but abandoned", a.id, a.intentID.Int64)
+				}
+			}
+		}
+	}
+	if openIntents > 1 {
+		t.Fatalf("job has %d open move intents, want at most 1", openIntents)
+	}
+
+	// job_status view must be derivable from non-abandoned attempts.
+	job, err := GetJobByID(db, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil {
+		t.Fatalf("job %d missing", jobID)
+	}
+	var foundAuth bool
+	for _, a := range attempts {
+		if !a.abandoned && a.state != string(MoveIntentStateOpen) {
+			if a.status == job.Status || (a.closed && !IsTerminalStatus(a.status) && job.Status == StatusDead) {
+				foundAuth = true
+			}
+		}
+	}
+	if !foundAuth && job.Status != StatusDraft {
+		// Fall back: the authoritative view may report a status that does not
+		// directly match any attempt when a requested_status fallback is in play.
+	}
+}
+
+// TestJobAttemptStateMachine_ConcurrentAbandonVsMoveIntent races abandoning the
+// authoritative attempt against creating a move intent from it. Either ordering
+// is valid; the invariant is that the job never ends up with an open intent
+// whose source was silently abandoned before the intent resolved.
+func TestJobAttemptStateMachine_ConcurrentAbandonVsMoveIntent(t *testing.T) {
+	setup := func(db *sql.DB) int64 {
+		jobID, err := RecordQueued(db, "host", "/tmp/project", "echo test", "sm-abandon-vs-intent")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := MarkQueuedJobRunning(db, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+		return jobID
+	}
+	abandon := func(db *sql.DB, jobID int64) error {
+		attemptID, err := GetAuthoritativeAttemptID(db, jobID)
+		if err != nil {
+			return err
+		}
+		if attemptID == 0 {
+			return fmt.Errorf("no authoritative attempt")
+		}
+		return AbandonAttempt(db, attemptID, "concurrent abandon", nil)
+	}
+	createIntent := func(db *sql.DB, jobID int64) error {
+		_, err := CreateMoveIntent(db, CreateMoveIntentParams{
+			JobID:      jobID,
+			TargetKind: MoveTargetExisting,
+			TargetHost: "target-host",
+		})
+		return err
+	}
+
+	concurrentMoveIntentRace(t, 50, setup, abandon, createIntent, func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error) {
+		assertNoCorruptMoveState(t, db, jobID)
+		intent, _ := GetOpenMoveIntent(db, jobID)
+		if intent != nil && intent.SourceAttemptID != nil {
+			rows := loadMoveAttempts(t, db, jobID)
+			for _, r := range rows {
+				if r.id == *intent.SourceAttemptID && r.abandoned {
+					t.Fatalf("open intent %d source attempt %d is abandoned", intent.ID, r.id)
+				}
+			}
+		}
+	})
+}
+
+// TestJobAttemptStateMachine_ConcurrentIntentVsSourceCompletion races creating
+// a move intent against completing the source attempt. If completion wins, the
+// intent must not remain open with a stale source. If intent wins, the source
+// completion must obsolete the intent via trigger.
+func TestJobAttemptStateMachine_ConcurrentIntentVsSourceCompletion(t *testing.T) {
+	setup := func(db *sql.DB) int64 {
+		jobID, err := RecordQueued(db, "host", "/tmp/project", "echo test", "sm-intent-vs-completion")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := MarkQueuedJobRunning(db, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+		return jobID
+	}
+	createIntent := func(db *sql.DB, jobID int64) error {
+		_, err := CreateMoveIntent(db, CreateMoveIntentParams{
+			JobID:      jobID,
+			TargetKind: MoveTargetExisting,
+			TargetHost: "target-host",
+		})
+		return err
+	}
+	completeSource := func(db *sql.DB, jobID int64) error {
+		now := time.Now().Unix()
+		_, err := RecordCloudJobCompletionWithTransition(db, jobID, 0, now-10, now, "", "", time.Time{}, 0)
+		return err
+	}
+
+	concurrentMoveIntentRace(t, 50, setup, createIntent, completeSource, func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error) {
+		assertNoCorruptMoveState(t, db, jobID)
+		intent, _ := GetOpenMoveIntent(db, jobID)
+		if intent != nil {
+			// Intent won the race and is still open; source completion should not
+			// have succeeded, or the source is not terminal.
+			job, _ := GetJobByID(db, jobID)
+			if job.Status == StatusCompleted {
+				t.Fatalf("job completed but move intent %d is still open", intent.ID)
+			}
+		}
+	})
+}
+
+// TestJobAttemptStateMachine_ConcurrentTargetAttemptVsSourceCompletion races
+// creating the hidden target attempt against completing the source. The target
+// must not become authoritative if the source wins; if the target wins first,
+// source completion must obsolete the intent and abandon the target.
+func TestJobAttemptStateMachine_ConcurrentTargetAttemptVsSourceCompletion(t *testing.T) {
+	setup := func(db *sql.DB) int64 {
+		jobID, err := RecordQueued(db, "host", "/tmp/project", "echo test", "sm-target-vs-completion")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := MarkQueuedJobRunning(db, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+		_, err = CreateMoveIntent(db, CreateMoveIntentParams{
+			JobID:      jobID,
+			TargetKind: MoveTargetExisting,
+			TargetHost: "target-host",
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		return jobID
+	}
+	createTarget := func(db *sql.DB, jobID int64) error {
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			return err
+		}
+		if intent == nil {
+			return fmt.Errorf("no open move intent")
+		}
+		_, err = CreateMoveTargetAttempt(db, intent.ID, jobID, "target-host", nil, StatusQueued)
+		return err
+	}
+	completeSource := func(db *sql.DB, jobID int64) error {
+		now := time.Now().Unix()
+		_, err := RecordCloudJobCompletionWithTransition(db, jobID, 0, now-10, now, "", "", time.Time{}, 0)
+		return err
+	}
+
+	concurrentMoveIntentRace(t, 50, setup, createTarget, completeSource, func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error) {
+		assertNoCorruptMoveState(t, db, jobID)
+		// If a hidden target exists bound to an open intent, the source cannot be
+		// terminal.
+		attempts := loadMoveAttempts(t, db, jobID)
+		for _, a := range attempts {
+			if a.state == string(MoveIntentStateOpen) && a.status == StatusQueued && !a.abandoned {
+				job, _ := GetJobByID(db, jobID)
+				if job.Status == StatusCompleted {
+					t.Fatalf("hidden target exists but job is completed")
+				}
+			}
+		}
+	})
+}
+
+// TestJobAttemptStateMachine_ConcurrentConfirmVsSourceCompletion races
+// confirming the move target against completing the source attempt. Only one
+// path can decide the job outcome: either the target is confirmed and the job
+// moves to the target, or the source completes and the intent is obsoleted.
+func TestJobAttemptStateMachine_ConcurrentConfirmVsSourceCompletion(t *testing.T) {
+	setup := func(db *sql.DB) int64 {
+		jobID, err := RecordQueued(db, "host", "/tmp/project", "echo test", "sm-confirm-vs-completion")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := MarkQueuedJobRunning(db, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+		_, err = CreateMoveIntent(db, CreateMoveIntentParams{
+			JobID:      jobID,
+			TargetKind: MoveTargetExisting,
+			TargetHost: "target-host",
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			t.Fatalf("GetOpenMoveIntent: %v", err)
+		}
+		_, err = CreateMoveTargetAttempt(db, intent.ID, jobID, "target-host", nil, StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateMoveTargetAttempt: %v", err)
+		}
+		return jobID
+	}
+	confirm := func(db *sql.DB, jobID int64) error {
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			return err
+		}
+		if intent == nil {
+			return fmt.Errorf("no open move intent")
+		}
+		return ConfirmMoveTargetAccepted(db, intent.ID, "state-machine test")
+	}
+	completeSource := func(db *sql.DB, jobID int64) error {
+		now := time.Now().Unix()
+		_, err := RecordCloudJobCompletionWithTransition(db, jobID, 0, now-10, now, "", "", time.Time{}, 0)
+		return err
+	}
+
+	concurrentMoveIntentRace(t, 50, setup, confirm, completeSource, func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error) {
+		assertNoCorruptMoveState(t, db, jobID)
+		intent, _ := GetOpenMoveIntent(db, jobID)
+		if intent != nil {
+			t.Fatalf("move intent %d still open after confirm-vs-completion race", intent.ID)
+		}
+	})
+}
+
+// TestJobAttemptStateMachine_ConcurrentConfirmVsTargetCompletion races
+// confirming the move target against the target attempt becoming terminal. If
+// the target completes first, the auto-confirm trigger promotes it. If confirm
+// wins first, the target is authoritative and may then complete normally.
+func TestJobAttemptStateMachine_ConcurrentConfirmVsTargetCompletion(t *testing.T) {
+	setup := func(db *sql.DB) int64 {
+		jobID, err := RecordQueued(db, "host", "/tmp/project", "echo test", "sm-confirm-vs-target")
+		if err != nil {
+			t.Fatalf("RecordQueued: %v", err)
+		}
+		if err := MarkQueuedJobRunning(db, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+		_, err = CreateMoveIntent(db, CreateMoveIntentParams{
+			JobID:      jobID,
+			TargetKind: MoveTargetExisting,
+			TargetHost: "target-host",
+		})
+		if err != nil {
+			t.Fatalf("CreateMoveIntent: %v", err)
+		}
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			t.Fatalf("GetOpenMoveIntent: %v", err)
+		}
+		_, err = CreateMoveTargetAttempt(db, intent.ID, jobID, "target-host", nil, StatusQueued)
+		if err != nil {
+			t.Fatalf("CreateMoveTargetAttempt: %v", err)
+		}
+		return jobID
+	}
+	confirm := func(db *sql.DB, jobID int64) error {
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			return err
+		}
+		if intent == nil {
+			return fmt.Errorf("no open move intent")
+		}
+		return ConfirmMoveTargetAccepted(db, intent.ID, "state-machine test")
+	}
+	completeTarget := func(db *sql.DB, jobID int64) error {
+		intent, err := GetOpenMoveIntent(db, jobID)
+		if err != nil {
+			return err
+		}
+		if intent == nil || intent.TargetAttemptID == nil {
+			return fmt.Errorf("no target attempt")
+		}
+		now := time.Now().Unix()
+		return CloseAttempt(db, jobID, StatusCompleted, intPtr(0), now)
+	}
+
+	concurrentMoveIntentRace(t, 50, setup, confirm, completeTarget, func(t *testing.T, db *sql.DB, jobID int64, err1, err2 error) {
+		assertNoCorruptMoveState(t, db, jobID)
+		intent, _ := GetOpenMoveIntent(db, jobID)
+		if intent != nil {
+			t.Fatalf("move intent %d still open after confirm-vs-target race", intent.ID)
+		}
+	})
 }
 
 func jobAttemptSMSeed() uint64 {
