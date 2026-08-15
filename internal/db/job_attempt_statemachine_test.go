@@ -20,6 +20,10 @@ import (
 //     rules as SSH sync completion
 //   - terminal attempts always have end_time
 //   - at most one open authoritative attempt exists at a time
+//   - abandoned attempts are removed from authority and the next eligible attempt
+//     becomes authoritative
+//   - move intents hide the target attempt until confirmed; confirmation abandons
+//     the source and promotes the target
 //   - the job_status view reflects the authoritative attempt
 //   - last_synced_status is updated only by sync operations
 //
@@ -45,9 +49,7 @@ func TestJobAttemptStateMachine_RandomCommands(t *testing.T) {
 		}
 
 		m := &jobModel{
-			status:     StatusQueued,
-			hasOpen:    true,
-			lastSynced: "",
+			attempts: []attemptModel{{status: StatusQueued}},
 		}
 
 		for step := 0; step < stepsPerRun; step++ {
@@ -62,13 +64,182 @@ func TestJobAttemptStateMachine_RandomCommands(t *testing.T) {
 	}
 }
 
-// jobModel is the reference state for one job. It intentionally does not model
-// every column; it tracks just enough to verify transitions and the
-// last_synced_status side effect.
-type jobModel struct {
+// attemptModel is one logical job attempt in the reference model.
+type attemptModel struct {
 	status     string
-	hasOpen    bool
+	closed     bool // end_time IS NOT NULL
+	abandoned  bool
+	hidden     bool // bound to an open move intent
 	lastSynced string
+}
+
+// effectiveStatus returns the status the job_status view would derive from this
+// attempt. A closed non-terminal attempt is reported as dead by the view.
+func (a attemptModel) effectiveStatus() string {
+	if a.closed && !IsTerminalStatus(a.status) {
+		return StatusDead
+	}
+	return a.status
+}
+
+// intentModel tracks an open or resolved move intent.
+type intentModel struct {
+	state     string
+	sourceIdx int
+	targetIdx int // -1 until a target attempt is created
+}
+
+// jobModel is the reference state for one job. Attempts are stored newest first
+// to match DB ordering by attempt_number DESC.
+type jobModel struct {
+	attempts        []attemptModel
+	intent          *intentModel
+	requestedStatus string // "" means NULL in the jobs table
+}
+
+// authIdx returns the newest non-abandoned, non-hidden attempt index, or -1.
+func (m *jobModel) authIdx() int {
+	for i, a := range m.attempts {
+		if !a.abandoned && !a.hidden {
+			return i
+		}
+	}
+	return -1
+}
+
+// openAuthIdx returns the newest open authoritative attempt index, or -1.
+func (m *jobModel) openAuthIdx() int {
+	for i, a := range m.attempts {
+		if !a.closed && !a.abandoned && !a.hidden {
+			return i
+		}
+	}
+	return -1
+}
+
+// openIdx returns the newest open, non-hidden attempt index, regardless of
+// abandoned state. Several DB helpers use latestOpenAttemptSubquery, which
+// selects from job_open_attempts without filtering abandoned_at.
+func (m *jobModel) openIdx() int {
+	for i, a := range m.attempts {
+		if !a.closed && !a.hidden {
+			return i
+		}
+	}
+	return -1
+}
+
+// newestIdx returns the newest non-abandoned attempt index, or -1.
+func (m *jobModel) newestIdx() int {
+	for i := range m.attempts {
+		if !m.attempts[i].abandoned {
+			return i
+		}
+	}
+	return -1
+}
+
+// expectedStatus derives the job status from the authoritative attempt or the
+// requested_status fallback, mirroring the job_status view.
+func (m *jobModel) expectedStatus() string {
+	if idx := m.authIdx(); idx >= 0 {
+		return m.attempts[idx].effectiveStatus()
+	}
+	if m.requestedStatus != "" {
+		return m.requestedStatus
+	}
+	return StatusDraft
+}
+
+// expectedLastSynced returns the last_synced_status from the authoritative
+// attempt, or empty when there is none.
+func (m *jobModel) expectedLastSynced() string {
+	if idx := m.authIdx(); idx >= 0 {
+		return m.attempts[idx].lastSynced
+	}
+	return ""
+}
+
+// closeOpen marks every open attempt closed without changing its status. This
+// mirrors closeOpenAttempts, which only stamps end_time.
+func (m *jobModel) closeOpen() {
+	for i := range m.attempts {
+		if !m.attempts[i].closed {
+			m.attempts[i].closed = true
+		}
+	}
+}
+
+// closeOpenCanceled marks every open attempt closed and sets its status to
+// canceled. This mirrors closeAttemptsAndRequeueWithOutcome when no outcome is
+// supplied.
+func (m *jobModel) closeOpenCanceled() {
+	for i := range m.attempts {
+		if !m.attempts[i].closed {
+			m.attempts[i].closed = true
+			m.attempts[i].status = StatusCanceled
+		}
+	}
+}
+
+// prependAttempt adds a new attempt at the front and shifts intent indices.
+func (m *jobModel) prependAttempt(a attemptModel) {
+	m.attempts = append([]attemptModel{a}, m.attempts...)
+	if m.intent != nil {
+		m.intent.sourceIdx++
+		if m.intent.targetIdx >= 0 {
+			m.intent.targetIdx++
+		}
+	}
+}
+
+// maybeAutoConfirmTarget mirrors the database trigger
+// move_intents_auto_confirm_on_target_attempt_end: when the hidden target of an
+// open move intent becomes terminal (completed/failed) with an end_time, the
+// source attempt is abandoned and the intent is confirmed so the target becomes
+// authoritative.
+func (m *jobModel) maybeAutoConfirmTarget(idx int) {
+	if m.intent == nil || m.intent.state != string(MoveIntentStateOpen) {
+		return
+	}
+	if m.intent.targetIdx != idx {
+		return
+	}
+	a := m.attempts[idx]
+	if !a.closed {
+		return
+	}
+	if a.status != StatusCompleted && a.status != StatusFailed {
+		return
+	}
+	m.attempts[m.intent.sourceIdx].abandoned = true
+	m.attempts[idx].hidden = false
+	m.intent.state = string(MoveIntentStateConfirmed)
+}
+
+// maybeAutoObsoleteSource mirrors the database trigger
+// move_intents_auto_obsolete_on_source_attempt_end: when the source attempt of
+// an open move intent finishes as completed/failed with an end_time, the hidden
+// target is abandoned and the intent is obsoleted.
+func (m *jobModel) maybeAutoObsoleteSource(idx int) {
+	if m.intent == nil || m.intent.state != string(MoveIntentStateOpen) {
+		return
+	}
+	if m.intent.sourceIdx != idx {
+		return
+	}
+	a := m.attempts[idx]
+	if !a.closed {
+		return
+	}
+	if a.status != StatusCompleted && a.status != StatusFailed {
+		return
+	}
+	if m.intent.targetIdx >= 0 {
+		m.attempts[m.intent.targetIdx].abandoned = true
+		m.attempts[m.intent.targetIdx].hidden = false
+	}
+	m.intent.state = string(MoveIntentStateObsoleted)
 }
 
 // jobCommand is one mutating operation against a job.
@@ -79,29 +250,36 @@ type jobCommand interface {
 }
 
 func randomJobCommand(rng *rand.Rand, m *jobModel) jobCommand {
-	// Bias toward commands that are likely to change state, but keep some
-	// invalid-transition commands so we exercise rejection paths.
-	switch rng.IntN(9) {
-	case 0:
-		return recordCompletionCmd{}
-	case 1:
-		return markDeadCmd{}
-	case 2:
-		return markQueuedCmd{}
-	case 3:
-		return markRunningCmd{}
-	case 4:
-		return markStartingCmd{}
-	case 5:
-		return resetUnplacedCmd{}
-	case 6:
-		status, exitCode := randomTerminalStatus(rng)
-		return closeAttemptCmd{status: status, exitCode: exitCode}
-	case 7:
-		return recordCloudCompletionCmd{exitCode: rng.IntN(2)} // 0 = success, 1 = failed
-	default:
-		return createAttemptCmd{status: randomAttemptStatus(rng)}
+	// Build a list of eligible commands each step so move-intent and abandon
+	// commands are only emitted in states where the model expects them to
+	// succeed.
+	var eligible []jobCommand
+
+	eligible = append(eligible, recordCompletionCmd{})
+	eligible = append(eligible, markDeadCmd{})
+	eligible = append(eligible, markQueuedCmd{})
+	eligible = append(eligible, markRunningCmd{})
+	eligible = append(eligible, markStartingCmd{})
+	eligible = append(eligible, resetUnplacedCmd{})
+	status, exitCode := randomTerminalStatus(rng)
+	eligible = append(eligible, closeAttemptCmd{status: status, exitCode: exitCode})
+	eligible = append(eligible, createAttemptCmd{status: randomAttemptStatus(rng)})
+	eligible = append(eligible, recordCloudCompletionCmd{exitCode: rng.IntN(2)})
+
+	if m.newestIdx() >= 0 {
+		eligible = append(eligible, abandonAttemptCmd{})
 	}
+	if m.intent == nil && m.openAuthIdx() >= 0 {
+		eligible = append(eligible, createMoveIntentCmd{})
+	}
+	if m.intent != nil && m.intent.state == string(MoveIntentStateOpen) && m.intent.targetIdx < 0 {
+		eligible = append(eligible, createMoveTargetAttemptCmd{status: randomMoveTargetStatus(rng)})
+	}
+	if m.intent != nil && m.intent.state == string(MoveIntentStateOpen) && m.intent.targetIdx >= 0 {
+		eligible = append(eligible, confirmMoveTargetCmd{})
+	}
+
+	return eligible[rng.IntN(len(eligible))]
 }
 
 type recordCompletionCmd struct{}
@@ -112,18 +290,19 @@ func (c recordCompletionCmd) run(db *sql.DB, jobID int64) error {
 	return RecordCompletionByID(db, jobID, 0, now)
 }
 func (c recordCompletionCmd) apply(m *jobModel, err error) {
-	if err != nil {
+	if err != nil || len(m.attempts) == 0 {
 		return
 	}
-	// RecordCompletionByID returns nil even when there is no attempt or the
-	// transition is invalid, because the underlying UPDATE matches zero rows.
-	// Only mutate the model when the transition is actually allowed.
-	if _, transitionErr := status.ValidateTransition(m.status, StatusCompleted, true); transitionErr != nil {
+	// RecordCompletionByID targets the physical latest attempt. The transition
+	// guard uses that attempt's status, not the authoritative job status.
+	if _, transitionErr := status.ValidateTransition(m.attempts[0].status, StatusCompleted, true); transitionErr != nil {
 		return
 	}
-	m.status = StatusCompleted
-	m.lastSynced = StatusCompleted
-	m.hasOpen = false
+	m.attempts[0].status = StatusCompleted
+	m.attempts[0].closed = true
+	m.attempts[0].lastSynced = StatusCompleted
+	m.maybeAutoConfirmTarget(0)
+	m.maybeAutoObsoleteSource(0)
 }
 
 type recordCloudCompletionCmd struct {
@@ -142,19 +321,24 @@ func (c recordCloudCompletionCmd) apply(m *jobModel, err error) {
 	if err != nil {
 		return
 	}
-	// Cloud completion targets the latest authoritative attempt with runID=0.
-	// It is authoritative and can override terminal states, except draft and
-	// pending_placement which have no path to completed/failed in the table.
 	target := StatusCompleted
 	if c.exitCode != 0 {
 		target = StatusFailed
 	}
-	if _, transitionErr := status.ValidateTransition(m.status, target, true); transitionErr != nil {
+	idx := m.authIdx()
+	if idx < 0 {
 		return
 	}
-	m.status = target
-	m.lastSynced = target
-	m.hasOpen = false
+	// RecordCloudJobCompletion's checkTransition reads the physical latest
+	// attempt, but the write targets the authoritative attempt.
+	if _, transitionErr := status.ValidateTransition(m.attempts[0].status, target, true); transitionErr != nil {
+		return
+	}
+	m.attempts[idx].status = target
+	m.attempts[idx].closed = true
+	m.attempts[idx].lastSynced = target
+	m.maybeAutoConfirmTarget(idx)
+	m.maybeAutoObsoleteSource(idx)
 }
 
 type markDeadCmd struct{}
@@ -167,18 +351,17 @@ func (c markDeadCmd) apply(m *jobModel, err error) {
 	if err != nil {
 		return
 	}
-	// MarkDeadByID uses checkOpenTransition, which returns nil when there is no
-	// open attempt. Guard against mutating the model when the DB had nothing to
-	// update.
-	if !m.hasOpen {
+	idx := m.openIdx()
+	if idx < 0 {
 		return
 	}
-	if _, transitionErr := status.ValidateTransition(m.status, StatusFailed, false); transitionErr != nil {
+	if _, transitionErr := status.ValidateTransition(m.attempts[idx].status, StatusFailed, false); transitionErr != nil {
 		return
 	}
-	m.status = StatusFailed
-	m.lastSynced = StatusFailed
-	m.hasOpen = false
+	m.attempts[idx].status = StatusFailed
+	m.attempts[idx].closed = true
+	m.attempts[idx].lastSynced = StatusFailed
+	m.maybeAutoObsoleteSource(idx)
 }
 
 type markQueuedCmd struct{}
@@ -191,9 +374,10 @@ func (c markQueuedCmd) apply(m *jobModel, err error) {
 	if err != nil {
 		return
 	}
-	m.status = StatusQueued
-	m.lastSynced = StatusQueued
-	m.hasOpen = true
+	// In this test all attempts are on-prem (no launch_id), so MarkQueuedByID
+	// always closes open attempts and creates a fresh queued attempt.
+	m.closeOpen()
+	m.prependAttempt(attemptModel{status: StatusQueued, lastSynced: StatusQueued})
 }
 
 type markRunningCmd struct{}
@@ -203,11 +387,15 @@ func (c markRunningCmd) run(db *sql.DB, jobID int64) error {
 	return MarkQueuedJobRunning(db, jobID)
 }
 func (c markRunningCmd) apply(m *jobModel, err error) {
-	if err != nil || !m.hasOpen {
+	if err != nil {
 		return
 	}
-	m.status = StatusRunning
-	m.lastSynced = StatusRunning
+	idx := m.openIdx()
+	if idx < 0 {
+		return
+	}
+	m.attempts[idx].status = StatusRunning
+	m.attempts[idx].lastSynced = StatusRunning
 }
 
 type markStartingCmd struct{}
@@ -217,11 +405,15 @@ func (c markStartingCmd) run(db *sql.DB, jobID int64) error {
 	return MarkQueuedJobStarting(db, jobID)
 }
 func (c markStartingCmd) apply(m *jobModel, err error) {
-	if err != nil || !m.hasOpen {
+	if err != nil {
 		return
 	}
-	m.status = StatusStarting
-	m.lastSynced = StatusStarting
+	idx := m.openIdx()
+	if idx < 0 {
+		return
+	}
+	m.attempts[idx].status = StatusStarting
+	m.attempts[idx].lastSynced = StatusStarting
 }
 
 type resetUnplacedCmd struct{}
@@ -234,9 +426,18 @@ func (c resetUnplacedCmd) apply(m *jobModel, err error) {
 	if err != nil {
 		return
 	}
-	m.status = StatusQueued
-	m.lastSynced = ""
-	m.hasOpen = true
+	m.closeOpenCanceled()
+	if m.intent != nil && m.intent.state == string(MoveIntentStateOpen) {
+		// closeAttemptsAndRequeue abandons the hidden target and cancels the
+		// intent before creating the replacement attempt.
+		if m.intent.targetIdx >= 0 {
+			m.attempts[m.intent.targetIdx].abandoned = true
+			m.attempts[m.intent.targetIdx].hidden = false
+		}
+		m.intent.state = string(MoveIntentStateCanceled)
+	}
+	m.prependAttempt(attemptModel{status: StatusQueued})
+	m.requestedStatus = StatusQueued
 }
 
 type closeAttemptCmd struct {
@@ -251,11 +452,17 @@ func (c closeAttemptCmd) run(db *sql.DB, jobID int64) error {
 	return CloseAttempt(db, jobID, c.status, c.exitCode, time.Now().Unix())
 }
 func (c closeAttemptCmd) apply(m *jobModel, err error) {
-	if err != nil || !m.hasOpen {
+	if err != nil {
 		return
 	}
-	m.status = c.status
-	m.hasOpen = false
+	idx := m.openIdx()
+	if idx < 0 {
+		return
+	}
+	m.attempts[idx].status = c.status
+	m.attempts[idx].closed = true
+	m.maybeAutoConfirmTarget(idx)
+	m.maybeAutoObsoleteSource(idx)
 }
 
 type createAttemptCmd struct {
@@ -273,9 +480,120 @@ func (c createAttemptCmd) apply(m *jobModel, err error) {
 	if err != nil {
 		return
 	}
-	m.status = c.status
-	m.lastSynced = ""
-	m.hasOpen = !IsTerminalStatus(c.status)
+	m.closeOpen()
+	m.prependAttempt(attemptModel{status: c.status, closed: IsTerminalStatus(c.status)})
+}
+
+type abandonAttemptCmd struct{}
+
+func (c abandonAttemptCmd) describe() string { return "AbandonAttempt" }
+func (c abandonAttemptCmd) run(db *sql.DB, jobID int64) error {
+	attemptID, err := GetAuthoritativeAttemptID(db, jobID)
+	if err != nil {
+		return err
+	}
+	if attemptID == 0 {
+		attemptID, err = GetLatestAttemptID(db, jobID)
+		if err != nil || attemptID == 0 {
+			return fmt.Errorf("no attempt to abandon")
+		}
+	}
+	return AbandonAttempt(db, attemptID, "state-machine test", nil)
+}
+func (c abandonAttemptCmd) apply(m *jobModel, err error) {
+	if err != nil {
+		return
+	}
+	idx := m.authIdx()
+	if idx < 0 {
+		idx = m.newestIdx()
+	}
+	if idx < 0 {
+		return
+	}
+	m.attempts[idx].abandoned = true
+}
+
+type createMoveIntentCmd struct{}
+
+func (c createMoveIntentCmd) describe() string { return "CreateMoveIntent" }
+func (c createMoveIntentCmd) run(db *sql.DB, jobID int64) error {
+	_, err := CreateMoveIntent(db, CreateMoveIntentParams{
+		JobID:      jobID,
+		TargetKind: MoveTargetExisting,
+		TargetHost: "target-host",
+	})
+	return err
+}
+func (c createMoveIntentCmd) apply(m *jobModel, err error) {
+	if err != nil {
+		return
+	}
+	idx := m.openAuthIdx()
+	if idx < 0 {
+		return
+	}
+	// The source attempt stays authoritative until the intent is confirmed;
+	// only the target attempt is hidden while the intent is open.
+	m.intent = &intentModel{
+		state:     string(MoveIntentStateOpen),
+		sourceIdx: idx,
+		targetIdx: -1,
+	}
+}
+
+type createMoveTargetAttemptCmd struct {
+	status string
+}
+
+func (c createMoveTargetAttemptCmd) describe() string {
+	return fmt.Sprintf("CreateMoveTargetAttempt(%s)", c.status)
+}
+func (c createMoveTargetAttemptCmd) run(db *sql.DB, jobID int64) error {
+	intent, err := GetOpenMoveIntent(db, jobID)
+	if err != nil {
+		return err
+	}
+	if intent == nil {
+		return fmt.Errorf("no open move intent")
+	}
+	_, err = CreateMoveTargetAttempt(db, intent.ID, jobID, "", nil, c.status)
+	return err
+}
+func (c createMoveTargetAttemptCmd) apply(m *jobModel, err error) {
+	if err != nil {
+		return
+	}
+	if m.intent == nil || m.intent.state != string(MoveIntentStateOpen) || m.intent.targetIdx >= 0 {
+		return
+	}
+	m.prependAttempt(attemptModel{status: c.status, hidden: true, closed: IsTerminalStatus(c.status)})
+	m.intent.targetIdx = 0
+}
+
+type confirmMoveTargetCmd struct{}
+
+func (c confirmMoveTargetCmd) describe() string { return "ConfirmMoveTargetAccepted" }
+func (c confirmMoveTargetCmd) run(db *sql.DB, jobID int64) error {
+	intent, err := GetOpenMoveIntent(db, jobID)
+	if err != nil {
+		return err
+	}
+	if intent == nil {
+		return fmt.Errorf("no open move intent")
+	}
+	return ConfirmMoveTargetAccepted(db, intent.ID, "state-machine test")
+}
+func (c confirmMoveTargetCmd) apply(m *jobModel, err error) {
+	if err != nil {
+		return
+	}
+	if m.intent == nil || m.intent.state != string(MoveIntentStateOpen) || m.intent.targetIdx < 0 {
+		return
+	}
+	m.attempts[m.intent.sourceIdx].abandoned = true
+	m.attempts[m.intent.targetIdx].hidden = false
+	m.intent.state = string(MoveIntentStateConfirmed)
 }
 
 func randomTerminalStatus(rng *rand.Rand) (string, *int) {
@@ -301,6 +619,45 @@ func randomAttemptStatus(rng *rand.Rand) string {
 	return statuses[rng.IntN(len(statuses))]
 }
 
+func randomMoveTargetStatus(rng *rand.Rand) string {
+	statuses := []string{StatusQueued, StatusStarting, StatusRunning}
+	return statuses[rng.IntN(len(statuses))]
+}
+
+// rawAttempt is a test-only view of a DB attempt row, including abandoned ones.
+type rawAttempt struct {
+	id        int64
+	status    string
+	closed    bool
+	abandoned bool
+	hidden    bool
+}
+
+func loadRawAttempts(db *sql.DB, jobID int64) ([]rawAttempt, error) {
+	rows, err := db.Query(`
+		SELECT ja.id, ja.status, ja.end_time IS NOT NULL, ja.abandoned_at IS NOT NULL, COALESCE(mi.state, '')
+		FROM job_attempts ja
+		LEFT JOIN move_intents mi ON mi.id = ja.move_intent_id
+		WHERE ja.job_id = ?
+		ORDER BY ja.attempt_number DESC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []rawAttempt
+	for rows.Next() {
+		var a rawAttempt
+		var state string
+		if err := rows.Scan(&a.id, &a.status, &a.closed, &a.abandoned, &state); err != nil {
+			return nil, err
+		}
+		a.hidden = state == string(MoveIntentStateOpen)
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // checkJobAttemptInvariants verifies that the persisted state matches the model
 // and the spec invariants.
 func checkJobAttemptInvariants(t *testing.T, db *sql.DB, jobID int64, m *jobModel, iteration, step int, desc string, seed uint64) {
@@ -314,13 +671,40 @@ func checkJobAttemptInvariants(t *testing.T, db *sql.DB, jobID int64, m *jobMode
 		t.Fatalf("iteration %d step %d: job %d missing\nseed=%d command=%s", iteration, step, jobID, seed, desc)
 	}
 
-	if job.Status != m.status {
-		t.Fatalf("iteration %d step %d: job status = %q, want %q\nseed=%d command=%s",
-			iteration, step, job.Status, m.status, seed, desc)
+	if job.Status != m.expectedStatus() {
+		t.Fatalf("iteration %d step %d: job status = %q, want %q\nmodel=%+v\nseed=%d command=%s",
+			iteration, step, job.Status, m.expectedStatus(), m, seed, desc)
 	}
-	if job.LastSyncedStatus != m.lastSynced {
-		t.Fatalf("iteration %d step %d: last_synced_status = %q, want %q\nseed=%d command=%s",
-			iteration, step, job.LastSyncedStatus, m.lastSynced, seed, desc)
+	if job.LastSyncedStatus != m.expectedLastSynced() {
+		t.Fatalf("iteration %d step %d: last_synced_status = %q, want %q\nmodel=%+v\nseed=%d command=%s",
+			iteration, step, job.LastSyncedStatus, m.expectedLastSynced(), m, seed, desc)
+	}
+
+	raw, err := loadRawAttempts(db, jobID)
+	if err != nil {
+		t.Fatalf("iteration %d step %d: loadRawAttempts: %v\nseed=%d command=%s", iteration, step, err, seed, desc)
+	}
+	if len(raw) != len(m.attempts) {
+		t.Fatalf("iteration %d step %d: attempt count = %d, want %d\nraw=%+v\nmodel=%+v\nseed=%d command=%s",
+			iteration, step, len(raw), len(m.attempts), raw, m.attempts, seed, desc)
+	}
+	for i := range raw {
+		if raw[i].status != m.attempts[i].status {
+			t.Fatalf("iteration %d step %d: attempt %d status = %q, want %q\nseed=%d command=%s",
+				iteration, step, i, raw[i].status, m.attempts[i].status, seed, desc)
+		}
+		if raw[i].closed != m.attempts[i].closed {
+			t.Fatalf("iteration %d step %d: attempt %d closed = %v, want %v\nseed=%d command=%s",
+				iteration, step, i, raw[i].closed, m.attempts[i].closed, seed, desc)
+		}
+		if raw[i].abandoned != m.attempts[i].abandoned {
+			t.Fatalf("iteration %d step %d: attempt %d abandoned = %v, want %v\nseed=%d command=%s",
+				iteration, step, i, raw[i].abandoned, m.attempts[i].abandoned, seed, desc)
+		}
+		if raw[i].hidden != m.attempts[i].hidden {
+			t.Fatalf("iteration %d step %d: attempt %d hidden = %v, want %v\nseed=%d command=%s",
+				iteration, step, i, raw[i].hidden, m.attempts[i].hidden, seed, desc)
+		}
 	}
 
 	attempts, err := ListAttempts(db, jobID)
@@ -329,11 +713,7 @@ func checkJobAttemptInvariants(t *testing.T, db *sql.DB, jobID int64, m *jobMode
 	}
 	t.Logf("iteration %d step %d: command=%s model=%+v attempts=%+v job=%+v", iteration, step, desc, m, attempts, job)
 
-	var openCount int
 	for i, a := range attempts {
-		if a.EndTime == nil {
-			openCount++
-		}
 		if IsTerminalStatus(a.Status) && a.EndTime == nil {
 			t.Fatalf("iteration %d step %d: terminal attempt %d status %q has no end_time\nseed=%d command=%s",
 				iteration, step, a.ID, a.Status, seed, desc)
@@ -347,30 +727,28 @@ func checkJobAttemptInvariants(t *testing.T, db *sql.DB, jobID int64, m *jobMode
 				iteration, step, attempts, seed, desc)
 		}
 	}
-	if openCount > 1 {
-		t.Fatalf("iteration %d step %d: %d open attempts\nseed=%d command=%s",
-			iteration, step, openCount, seed, desc)
-	}
 
 	authID, err := GetAuthoritativeAttemptID(db, jobID)
 	if err != nil {
 		t.Fatalf("iteration %d step %d: GetAuthoritativeAttemptID: %v\nseed=%d command=%s", iteration, step, err, seed, desc)
 	}
-	if len(attempts) == 0 {
+	authIdx := m.authIdx()
+	if authIdx < 0 {
 		if authID != 0 {
-			t.Fatalf("iteration %d step %d: no attempts but authoritative id = %d\nseed=%d command=%s",
+			t.Fatalf("iteration %d step %d: no authoritative attempt but id = %d\nseed=%d command=%s",
 				iteration, step, authID, seed, desc)
 		}
 	} else {
-		if authID != attempts[0].ID {
+		if authID != raw[authIdx].id {
 			t.Fatalf("iteration %d step %d: authoritative attempt = %d, want %d\nseed=%d command=%s",
-				iteration, step, authID, attempts[0].ID, seed, desc)
+				iteration, step, authID, raw[authIdx].id, seed, desc)
 		}
 		if job.LatestRunID == nil || *job.LatestRunID != authID {
 			t.Fatalf("iteration %d step %d: latest_run_id = %v, want %d\nseed=%d command=%s",
 				iteration, step, job.LatestRunID, authID, seed, desc)
 		}
 	}
+
 }
 
 // TestJobAttemptStateMachine_ConcurrentCompletionRace is an example of a
