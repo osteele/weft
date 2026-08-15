@@ -624,7 +624,7 @@ func (c *CloudClient) BootstrapFromR2WithProgress(ctx context.Context, podID, bu
 	}
 	progress("SSH ready")
 	sshCmd = injectNonInteractiveSSHOptions(sshCmd)
-	remoteCmd := fmt.Sprintf(`set -euo pipefail; rclone cat "r2:%s/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`, bucket, bootstrapKey)
+	remoteCmd := fmt.Sprintf(`set -euo pipefail; rclone cat 'r2:%s/%s' > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`, shellEscapeSingle(bucket), shellEscapeSingle(bootstrapKey))
 	wrapped := fmt.Sprintf("%s %s", sshCmd, shellQuoteSingle(remoteCmd))
 	progress("running bootstrap script")
 	out, runErr := c.runLocalCommand(ctx, wrapped)
@@ -863,7 +863,14 @@ func isPodNotReadyError(err error) bool {
 }
 
 func shellQuoteSingle(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "'" + shellEscapeSingle(s) + "'"
+}
+
+// shellEscapeSingle returns s with every single quote replaced by the
+// bash-compatible sequence '\”, suitable for placing inside an already
+// single-quoted shell word. It does not add the surrounding quotes.
+func shellEscapeSingle(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
 func parseGPUTypeOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {

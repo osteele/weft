@@ -97,6 +97,12 @@ func runSelfDestruct(t *testing.T, userKey string, extraEnv map[string]string) (
 	return out.String(), errb.String(), err
 }
 
+// runSelfDestructCommand returns the command string for inspection.
+func runSelfDestructCommand(t *testing.T, userKey string) string {
+	t.Helper()
+	return (&CloudClient{}).selfDestructCmdWithKey("12345", userKey)
+}
+
 // TestSelfDestructCmdFallsBackOnAuthFailure exercises the wi1517 scenario:
 // CONTAINER_API_KEY is set but unauthorized. The composite must still succeed
 // via the user-key fallback — the previous ${VAR:-fallback} form only fell
@@ -135,5 +141,54 @@ func TestSelfDestructCmdEmitsHTTPDiagnostic(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q; got:\n%s", want, stderr)
 		}
+	}
+}
+
+// TestSelfDestructCmdDoesNotEmbedKey verifies the literal user key is passed
+// through the WEFT_VAST_API_KEY environment variable and is not hardcoded
+// inside the _d helper (e.g., in the curl Authorization header or URL).
+func TestSelfDestructCmdDoesNotEmbedKey(t *testing.T) {
+	t.Parallel()
+	key := "vast-api-key-with-\"quotes\\and$special"
+	cmd := runSelfDestructCommand(t, key)
+	if !strings.Contains(cmd, "WEFT_VAST_API_KEY=") {
+		t.Fatalf("SelfDestructCmd does not set WEFT_VAST_API_KEY:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "Authorization: Bearer ${WEFT_VAST_API_KEY:-}") {
+		t.Fatalf("SelfDestructCmd does not read the key from WEFT_VAST_API_KEY:\n%s", cmd)
+	}
+	// The body of _d must reference the variable, not the literal key.
+	funcStart := strings.Index(cmd, "_d() {")
+	if funcStart < 0 {
+		t.Fatal("_d function not found in command")
+	}
+	if strings.Contains(cmd[funcStart:], key) {
+		t.Fatalf("literal API key appears inside _d body:\n%s", cmd[funcStart:])
+	}
+}
+
+// TestSelfDestructCmdHandlesKeyWithShellMetacharacters verifies that a key
+// containing characters that would break a naive interpolated command still
+// authorizes the fallback curl request.
+func TestSelfDestructCmdHandlesKeyWithShellMetacharacters(t *testing.T) {
+	t.Parallel()
+	key := "user-key-with-\"quotes\\and'apostrophes$pecial"
+	_, stderr, err := runSelfDestruct(t, key, nil)
+	if err != nil {
+		t.Fatalf("expected user-key path to run; err=%v stderr=%s", err, stderr)
+	}
+}
+
+// TestSelfDestructCmdUsesContainerKeyOverride verifies that when
+// CONTAINER_API_KEY is set and authorized, the container key is used instead of
+// the user key, even though the user key is configured in WEFT_VAST_API_KEY.
+func TestSelfDestructCmdUsesContainerKeyOverride(t *testing.T) {
+	t.Parallel()
+	_, stderr, err := runSelfDestruct(t, "wrong-key", map[string]string{
+		"CONTAINER_API_KEY": "user-key",
+		"CONTAINER_ID":      "12345",
+	})
+	if err != nil {
+		t.Fatalf("expected container-key path to succeed; err=%v stderr=%s", err, stderr)
 	}
 }

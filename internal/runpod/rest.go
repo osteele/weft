@@ -14,6 +14,8 @@ import (
 
 const restEndpoint = "https://rest.runpod.io/v1"
 
+var restEndpointURL = restEndpoint
+
 var fetchPodDetailFunc = fetchPodDetail
 
 // FetchPodDetail fetches a RunPod pod through REST with machine metadata
@@ -27,7 +29,7 @@ func fetchPodDetail(ctx context.Context, podID string) (*Pod, error) {
 	if err != nil {
 		return nil, err
 	}
-	u, err := url.Parse(restEndpoint + "/pods/" + url.PathEscape(podID))
+	u, err := url.Parse(restEndpointURL + "/pods/" + url.PathEscape(podID))
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +65,9 @@ func fetchPodDetail(ctx context.Context, podID string) (*Pod, error) {
 		return nil, fmt.Errorf("runpod rest pod decode: expected object")
 	}
 	pod := podFromMap(unwrapPodObject(obj))
+	if strings.TrimSpace(pod.ID) == "" {
+		return nil, fmt.Errorf("runpod rest pod decode: response missing id")
+	}
 	return &pod, nil
 }
 

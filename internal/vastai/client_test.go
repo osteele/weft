@@ -1295,3 +1295,175 @@ func TestDestroyInstanceErrorsOnUnrelatedFailure(t *testing.T) {
 		t.Fatalf("DestroyInstance: expected error for unrelated failure, got nil")
 	}
 }
+
+func TestShowInstanceRejectsZeroIDRow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"actual_status\": \"running\"}]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ShowInstance(12345)
+	if err == nil || !strings.Contains(err.Error(), "valid id") {
+		t.Fatalf("ShowInstance error = %v, want invalid-id error", err)
+	}
+}
+
+func TestListAllInstancesRejectsZeroIDRow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"actual_status\": \"running\"}]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ListAllInstances()
+	if err == nil || !strings.Contains(err.Error(), "valid id") {
+		t.Fatalf("ListAllInstances error = %v, want invalid-id error", err)
+	}
+}
+
+func TestShowInstanceReturnsNotFoundFromEmptyInventory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ShowInstance(12345)
+	if !errors.Is(err, cloud.ErrInstanceNotFound) {
+		t.Fatalf("ShowInstance error = %v, want ErrInstanceNotFound", err)
+	}
+}
+
+func TestListAllInstancesAcceptsEmptyInventory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	instances, err := c.ListAllInstances()
+	if err != nil {
+		t.Fatalf("ListAllInstances: %v", err)
+	}
+	if len(instances) != 0 {
+		t.Fatalf("ListAllInstances returned %d instances, want 0", len(instances))
+	}
+}
+
+func TestShowInstanceReturnsParseErrorForMalformedJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[{not json'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ShowInstance(12345)
+	if err == nil {
+		t.Fatal("ShowInstance accepted malformed JSON")
+	}
+	if errors.Is(err, cloud.ErrInstanceNotFound) {
+		t.Fatalf("ShowInstance error = %v, must not be ErrInstanceNotFound for malformed JSON", err)
+	}
+}
+
+func TestListAllInstancesReturnsParseErrorForMalformedJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[{not json'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ListAllInstances()
+	if err == nil {
+		t.Fatal("ListAllInstances accepted malformed JSON")
+	}
+}
+
+func TestCreateInstanceRejectsJSONArrayResponse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if err == nil {
+		t.Fatal("CreateInstance accepted JSON array response")
+	}
+}
+
+func TestCreateInstanceRejectsSuccessWithoutContractID(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": true}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("CreateInstance error = %v, want provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "contract id") {
+		t.Fatalf("CreateInstance error = %v, want missing-contract-id detail", err)
+	}
+}
+
+func TestChangeBidRejectsSuccessFalse(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"instance not running\"}'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	err := c.ChangeBid(12345, 0.20)
+	if !errors.Is(err, cloud.ErrProviderRejected) {
+		t.Fatalf("ChangeBid error = %v, want provider rejected", err)
+	}
+	if !strings.Contains(err.Error(), "instance not running") {
+		t.Fatalf("ChangeBid error = %v, want provider message", err)
+	}
+}
+
+func TestChangeBidRejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	script := "#!/bin/sh\nprintf '%s\\n' '{not json'\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	err := c.ChangeBid(12345, 0.20)
+	if err == nil {
+		t.Fatal("ChangeBid accepted malformed JSON")
+	}
+}

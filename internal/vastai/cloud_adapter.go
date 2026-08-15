@@ -170,12 +170,19 @@ func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 // "HTTP=<code> url=<url> body=<body>" to stderr so termination-intent.json's
 // LastError distinguishes 401/403/404/5xx instead of all looking like
 // "exit status 22".
+//
+// The user API key is passed through the WEFT_VAST_API_KEY environment variable
+// rather than interpolated into the command string. This keeps the literal key
+// out of argv/process listings on the instance and prevents shell metacharacters
+// in the key from breaking the curl invocation. The container-key path overrides
+// the variable for that single _d call.
 func (c *CloudClient) selfDestructCmdWithKey(providerInstanceID, userKey string) string {
 	return fmt.Sprintf(
-		`_d() { `+
-			`local url=$1 key=$2 body code; body=$(mktemp); `+
+		`WEFT_VAST_API_KEY=%s; `+
+			`_d() { `+
+			`local url=$1 body code; body=$(mktemp); `+
 			`code=$(curl -sS -o "$body" -w '%%{http_code}' -X DELETE "$url" `+
-			`-H "Authorization: Bearer $key" 2>>"$body"); `+
+			`-H "Authorization: Bearer ${WEFT_VAST_API_KEY:-}" 2>>"$body"); `+
 			`case "$code" in `+
 			`2*) rm -f "$body"; return 0;; `+
 			`*) printf 'HTTP=%%s url=%%s body=%%s\n' "$code" "$url" `+
@@ -183,9 +190,9 @@ func (c *CloudClient) selfDestructCmdWithKey(providerInstanceID, userKey string)
 			`esac; `+
 			`}; `+
 			`{ [ -n "${CONTAINER_API_KEY:-}" ] && `+
-			`_d "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-%s}/" "$CONTAINER_API_KEY"; } || `+
-			`_d "https://console.vast.ai/api/v0/instances/%s/" "%s"`,
-		providerInstanceID, providerInstanceID, userKey,
+			`WEFT_VAST_API_KEY="$CONTAINER_API_KEY" _d "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-%s}/"; } || `+
+			`_d "https://console.vast.ai/api/v0/instances/%s/"`,
+		shellQuoteSingle(userKey), providerInstanceID, providerInstanceID,
 	)
 }
 
@@ -215,6 +222,10 @@ func (c *CloudClient) Inner() VastaiClient {
 
 // machineIDToString converts a Vast.ai machine ID (int) to the cloud-layer
 // string representation. Zero means unknown/unset and maps to empty string.
+func shellQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func machineIDToString(id int) string {
 	if id == 0 {
 		return ""

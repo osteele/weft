@@ -896,6 +896,95 @@ func TestProbeDriverVersion(t *testing.T) {
 	}
 }
 
+func TestBootstrapFromR2WithProgressQuotesAdversarialBucketAndKey(t *testing.T) {
+	runner := newStubRunner(t,
+		map[string]stubCLIResponse{
+			"version":         {out: []byte("runpodctl 2.1.6")},
+			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
+			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
+			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
+		},
+		map[string]stubCLIResponse{
+			"ssh info pod-123": {out: []byte(`{"command":"ssh -i /tmp/RunPod-Key-Go -p 22000 root@1.2.3.4"}`)},
+		},
+	)
+	client := newCloudClientForTests(runner)
+
+	var gotCommand string
+	client.runLocalCommand = func(_ context.Context, command string) ([]byte, error) {
+		gotCommand = command
+		return []byte("ok\n"), nil
+	}
+
+	// Adversarial bucket/key containing spaces and shell variable references.
+	// Under the old double-quoted rclone path these would be expanded by the
+	// remote shell; under the fixed single-quoted path they are literal.
+	bucket := `my bucket`
+	bootstrapKey := `bootstrap/42.sh $HOME`
+	if err := client.BootstrapFromR2WithProgress(context.Background(), "pod-123", bucket, bootstrapKey, nil); err != nil {
+		t.Fatalf("BootstrapFromR2WithProgress: %v", err)
+	}
+
+	// The command must be a single ssh invocation followed by one quoted remote
+	// command argument. The rclone path must be single-quoted on the remote side
+	// so that shell metacharacters in bucket/key are treated as literal path
+	// components, not as remote command substitutions.
+	if !strings.HasPrefix(gotCommand, "ssh ") {
+		t.Fatalf("command does not start with ssh: %q", gotCommand)
+	}
+	if strings.Contains(gotCommand, `"r2:`) {
+		t.Fatalf("command uses double-quoted rclone path: %q", gotCommand)
+	}
+	if !strings.Contains(gotCommand, "rclone cat '") {
+		t.Fatalf("command does not single-quote the rclone path: %q", gotCommand)
+	}
+	// Confirm the literal bucket/key are present inside the quoted remote command.
+	if !strings.Contains(gotCommand, bucket) {
+		t.Fatalf("command missing bucket: %q", gotCommand)
+	}
+	if !strings.Contains(gotCommand, bootstrapKey) {
+		t.Fatalf("command missing bootstrap key: %q", gotCommand)
+	}
+}
+
+func TestBootstrapFromR2WithProgressSafelyQuotesCommandSubstitution(t *testing.T) {
+	runner := newStubRunner(t,
+		map[string]stubCLIResponse{
+			"version":         {out: []byte("runpodctl 2.1.6")},
+			"get --help":      {out: []byte("Available Commands:\n  cloud\n  pod\n")},
+			"gpu --help":      {out: []byte("Available Commands:\n  list\n")},
+			"pod --help":      {out: []byte("Available Commands:\n  create\n  delete\n  get\n  list\n")},
+			"template --help": {out: []byte("Available Commands:\n  create\n  get\n  list\n")},
+		},
+		map[string]stubCLIResponse{
+			"ssh info pod-123": {out: []byte(`{"command":"ssh -i /tmp/RunPod-Key-Go -p 22000 root@1.2.3.4"}`)},
+		},
+	)
+	client := newCloudClientForTests(runner)
+
+	var gotCommand string
+	client.runLocalCommand = func(_ context.Context, command string) ([]byte, error) {
+		gotCommand = command
+		return []byte("ok\n"), nil
+	}
+
+	bucket := `bucket`
+	bootstrapKey := `bootstrap/$(whoami).sh`
+	if err := client.BootstrapFromR2WithProgress(context.Background(), "pod-123", bucket, bootstrapKey, nil); err != nil {
+		t.Fatalf("BootstrapFromR2WithProgress: %v", err)
+	}
+
+	// The rclone path must be single-quoted so the remote shell treats
+	// $(whoami) as literal characters, not as a command substitution.
+	if strings.Contains(gotCommand, `"r2:`) {
+		t.Fatalf("command uses double-quoted rclone path: %q", gotCommand)
+	}
+	if !strings.Contains(gotCommand, "rclone cat '") {
+		t.Fatalf("command does not single-quote the rclone path: %q", gotCommand)
+	}
+}
+
 func TestWaitForSSHCommand_RespectsContextDeadline(t *testing.T) {
 	const path = "/opt/homebrew/bin/runpodctl"
 	runner := &cliRunner{

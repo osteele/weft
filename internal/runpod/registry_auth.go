@@ -14,6 +14,9 @@ import (
 
 const registryAuthEndpoint = "https://rest.runpod.io/v1/containerregistryauth"
 
+var registryAuthEndpointURL = registryAuthEndpoint
+var registryAuthHTTPClient = &http.Client{Timeout: 20 * time.Second}
+
 type registryAuthRecord struct {
 	ID          string `json:"id"`
 	RegistryID  string `json:"registryAuthId"`
@@ -49,12 +52,12 @@ func ensureRegistryAuth(ctx context.Context, auth *cloud.RegistryAuth) (string, 
 }
 
 func listRegistryAuths(ctx context.Context, apiKey string) ([]registryAuthRecord, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", registryAuthEndpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", registryAuthEndpointURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := registryAuthHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("list registry auths: %w", err)
 	}
@@ -66,7 +69,14 @@ func listRegistryAuths(ctx context.Context, apiKey string) ([]registryAuthRecord
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode registry auth list: %w", err)
 	}
-	return decodeRegistryAuthRecords(raw), nil
+	if raw == nil {
+		return nil, fmt.Errorf("list registry auths: response is null")
+	}
+	records := decodeRegistryAuthRecords(raw)
+	if records == nil {
+		return nil, fmt.Errorf("list registry auths: unrecognized response shape")
+	}
+	return records, nil
 }
 
 func createRegistryAuth(ctx context.Context, apiKey, name string, auth *cloud.RegistryAuth) (string, error) {
@@ -79,13 +89,13 @@ func createRegistryAuth(ctx context.Context, apiKey, name string, auth *cloud.Re
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", registryAuthEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", registryAuthEndpointURL, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := registryAuthHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("create registry auth: %w", err)
 	}
