@@ -251,6 +251,9 @@ uploads — `ArtifactRetrievalCoversAllRuns`).
 
 ## Decision: must R2 remain optional for on-prem hosts?
 
+> Recorded as [ADR 0004: Keep R2 optional for on-prem hosts](../decisions/0004-keep-r2-optional-for-on-prem-hosts.md).
+> This section remains the detailed record; the ADR is the citable summary.
+
 **Constraint under review.** The current design allows on-prem hosts with no
 R2 access. The question is whether that constraint is compatible with fixing
 the durability and staging defects, or whether requiring R2 everywhere would

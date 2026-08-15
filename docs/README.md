@@ -27,6 +27,7 @@ The documentation is organized by audience and depth.
 
 ## Architecture and Design
 
+- [Decision Records](decisions/) for why the architecture is the way it is
 - [Architecture](design/architecture.md) for the main system layout
 - [Subsystem Architecture](architecture/) for [placement](architecture/placement.md), [compatibility](architecture/compatibility.md), [disk estimation](architecture/disk-estimation.md), [sync](architecture/sync.md), [job lifecycle](architecture/job-lifecycle.md), and [instance lifecycle](architecture/instance-lifecycle.md)
 - [Deprecated Coordinator Architecture](design/coordinator-architecture.md) for historical context only

@@ -3,6 +3,8 @@
 > Deprecated: this document describes the historical coordinator-daemon design.
 > Current weft operation uses local CLI/TUI placement, direct SSH dispatch, and
 > durable remote agents instead of an always-on coordinator service.
+> See [ADR 0002: Retire the coordinator daemon](../decisions/0002-retire-the-coordinator-daemon.md)
+> for why.
 
 Weft is forked from weft to evolve from a laptop-centric job runner into
 a coordinator-based workload scheduler with resource inventory and data locality

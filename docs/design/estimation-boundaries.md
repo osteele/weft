@@ -3,6 +3,9 @@
 This document defines the intended division of labor between the three
 estimation-related projects that `weft` depends on.
 
+Recorded as [ADR 0003: Split estimation across three projects](../decisions/0003-split-estimation-across-three-projects.md).
+This document remains the detailed record; the ADR is the citable summary.
+
 ## Project Roles
 
 ### `llm-performance-models`
