@@ -16,6 +16,8 @@ import (
 // lifecycle with randomized command sequences. It checks:
 //   - high-level sync commands (RecordCompletionByID, MarkDeadByID) only accept
 //     valid transitions
+//   - cloud completion (RecordCloudJobCompletion) follows the same authoritative
+//     rules as SSH sync completion
 //   - terminal attempts always have end_time
 //   - at most one open authoritative attempt exists at a time
 //   - the job_status view reflects the authoritative attempt
@@ -79,7 +81,7 @@ type jobCommand interface {
 func randomJobCommand(rng *rand.Rand, m *jobModel) jobCommand {
 	// Bias toward commands that are likely to change state, but keep some
 	// invalid-transition commands so we exercise rejection paths.
-	switch rng.IntN(8) {
+	switch rng.IntN(9) {
 	case 0:
 		return recordCompletionCmd{}
 	case 1:
@@ -95,6 +97,8 @@ func randomJobCommand(rng *rand.Rand, m *jobModel) jobCommand {
 	case 6:
 		status, exitCode := randomTerminalStatus(rng)
 		return closeAttemptCmd{status: status, exitCode: exitCode}
+	case 7:
+		return recordCloudCompletionCmd{exitCode: rng.IntN(2)} // 0 = success, 1 = failed
 	default:
 		return createAttemptCmd{status: randomAttemptStatus(rng)}
 	}
@@ -119,6 +123,37 @@ func (c recordCompletionCmd) apply(m *jobModel, err error) {
 	}
 	m.status = StatusCompleted
 	m.lastSynced = StatusCompleted
+	m.hasOpen = false
+}
+
+type recordCloudCompletionCmd struct {
+	exitCode int
+}
+
+func (c recordCloudCompletionCmd) describe() string {
+	return fmt.Sprintf("RecordCloudJobCompletion(%d)", c.exitCode)
+}
+func (c recordCloudCompletionCmd) run(db *sql.DB, jobID int64) error {
+	now := time.Now().Unix()
+	_, err := RecordCloudJobCompletion(db, jobID, c.exitCode, now-10, now, "", "", time.Time{}, 0)
+	return err
+}
+func (c recordCloudCompletionCmd) apply(m *jobModel, err error) {
+	if err != nil {
+		return
+	}
+	// Cloud completion targets the latest authoritative attempt with runID=0.
+	// It is authoritative and can override terminal states, except draft and
+	// pending_placement which have no path to completed/failed in the table.
+	target := StatusCompleted
+	if c.exitCode != 0 {
+		target = StatusFailed
+	}
+	if _, transitionErr := status.ValidateTransition(m.status, target, true); transitionErr != nil {
+		return
+	}
+	m.status = target
+	m.lastSynced = target
 	m.hasOpen = false
 }
 
@@ -336,15 +371,70 @@ func checkJobAttemptInvariants(t *testing.T, db *sql.DB, jobID int64, m *jobMode
 				iteration, step, job.LatestRunID, authID, seed, desc)
 		}
 	}
+}
 
-	// Verify transition-checking commands behaved according to the spec table.
-	// (We only need to check the cases where we predicted an error.)
-	if desc == "RecordCompletionByID(0)" {
-		if _, transitionErr := status.ValidateTransition(m.status, StatusCompleted, true); transitionErr != nil {
-			// If the transition is invalid, the previous apply should not have
-			// changed the model; the invariant checks above already confirm the
-			// model matches the DB, which means the DB also rejected it.
+// TestJobAttemptStateMachine_ConcurrentCompletionRace is an example of a
+// command interleaving the randomized test cannot schedule deliberately: two
+// cloud sync processes observe the same running attempt and both try to record
+// completion. RecordCloudJobCompletionWithTransition retries on lock contention
+// and reports exactly one transition, leaving a single terminal attempt rather
+// than duplicated or corrupted state.
+func TestJobAttemptStateMachine_ConcurrentCompletionRace(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host", "/tmp/project", "echo test", "sm-concurrent")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+
+	now := time.Now().Unix()
+	type result struct {
+		transitioned bool
+		err          error
+	}
+	ch := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			res, err := RecordCloudJobCompletionWithTransition(database, jobID, 0, now-10, now, "", "", time.Time{}, 0)
+			ch <- result{res.Transitioned, err}
+		}()
+	}
+
+	var transitionedCount int
+	for i := 0; i < 2; i++ {
+		r := <-ch
+		if r.err != nil {
+			t.Fatalf("RecordCloudJobCompletionWithTransition: %v", r.err)
 		}
+		if r.transitioned {
+			transitionedCount++
+		}
+	}
+
+	if transitionedCount != 1 {
+		t.Fatalf("transitionedCount = %d, want 1", transitionedCount)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusCompleted {
+		t.Fatalf("status = %q, want %q", job.Status, StatusCompleted)
+	}
+
+	attempts, err := ListAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempts = %d, want 1", len(attempts))
+	}
+	if attempts[0].Status != StatusCompleted {
+		t.Fatalf("attempt status = %q, want %q", attempts[0].Status, StatusCompleted)
 	}
 }
 
