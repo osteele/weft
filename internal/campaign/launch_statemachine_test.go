@@ -137,12 +137,14 @@ func reconcileLaunch(t *testing.T, database *sql.DB, r *Reconciler, launchID int
 	})
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
-		ExecuteAction(database, client, ci, action)
-		if action.DestroyProvider {
-			m.destroyed = true
-		}
-		if action.TerminalStatus != "" && db.IsTerminalLaunchStatus(action.TerminalStatus) {
-			m.terminal = true
+		reconciled, terminated := ExecuteAction(database, client, ci, action)
+		if reconciled {
+			if action.DestroyProvider {
+				m.destroyed = true
+			}
+			if terminated && action.TerminalStatus != "" && db.IsTerminalLaunchStatus(action.TerminalStatus) {
+				m.terminal = true
+			}
 		}
 	}
 }
@@ -183,11 +185,12 @@ func checkLaunchReconcileInvariants(t *testing.T, database *sql.DB, jobID, launc
 	if job == nil {
 		t.Fatalf("iteration %d step %d: job %d missing\nseed=%d command=%s", iteration, step, jobID, seed, desc)
 	}
-	if m.terminal && isTerm && ci.Status == db.LaunchStatusFailed {
-		// After a failed terminal transition the job should be reset to
-		// unplaced (queued with no host), unless it was already terminal.
-		if !db.IsTerminalStatus(job.Status) && job.Status != db.StatusQueued && job.Status != db.StatusDraft {
-			t.Fatalf("iteration %d step %d: failed launch left job status = %q, want queued/draft\nseed=%d command=%s",
+	if isTerm && ci.Status == db.LaunchStatusFailed {
+		// After a failed terminal transition the job is reset to unplaced
+		// (queued/draft) or, when an attempt was created, derived as "orphaned"
+		// by the job_status view until the next placement reconciler pass.
+		if !db.IsTerminalStatus(job.Status) && job.Status != db.StatusQueued && job.Status != db.StatusDraft && job.Status != "orphaned" {
+			t.Fatalf("iteration %d step %d: failed launch left job status = %q, want queued/draft/orphaned\nseed=%d command=%s",
 				iteration, step, job.Status, seed, desc)
 		}
 	}
@@ -267,6 +270,61 @@ func TestLaunchReconcileStateMachine_Hysteresis(t *testing.T) {
 	}
 	if job.Status != db.StatusQueued {
 		t.Fatalf("job status = %q, want queued after reset", job.Status)
+	}
+}
+
+// TestLaunchReconcileStateMachine_DestroyDeferral checks that when
+// ExecuteAction cannot destroy the provider instance, the reference model is not
+// advanced and the launch remains non-terminal. This exercises the deferral
+// path that prevents a failed destroy from being recorded as a terminal
+// transition.
+func TestLaunchReconcileStateMachine_DestroyDeferral(t *testing.T) {
+	database := setupTestDB(t)
+	jobID, launchID, client := setupLaunchStateMachine(t, database)
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	client.destroyFail = fmt.Errorf("provider API unavailable")
+
+	r := NewReconciler()
+	r.deadConfirmTime = -1 // disable hysteresis so the first dead observation is terminal
+
+	ci, err := db.GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+
+	action := r.CheckInstance(CheckInstanceParams{
+		CI:           ci,
+		ProviderInst: &cloud.Instance{ProviderID: ci.EffectiveProviderID(), Status: cloud.ProviderStatusExited},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %v, want ActionProviderDead", action.Kind)
+	}
+
+	reconciled, terminated := ExecuteAction(database, client, ci, action)
+	if reconciled {
+		t.Fatalf("ExecuteAction reconciled despite destroy failure")
+	}
+	if terminated {
+		t.Fatalf("ExecuteAction terminated despite destroy failure")
+	}
+
+	ci, err = db.GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunch after deferral: %v", err)
+	}
+	if db.IsTerminalLaunchStatus(ci.Status) {
+		t.Fatalf("launch status = %q, want non-terminal after deferred destroy", ci.Status)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("job status = %q, want running after deferred destroy", job.Status)
 	}
 }
 
@@ -360,6 +418,20 @@ func setupLaunchStateMachine(t *testing.T, database *sql.DB) (jobID, launchID in
 type recordingMockClient struct {
 	*cloud.MockClient
 	destroyCount int
+	// destroyFail, when non-nil, causes DestroyInstance to return this error
+	// instead of succeeding. Used to test ExecuteAction deferral paths.
+	destroyFail error
+}
+
+func (c *recordingMockClient) DestroyInstance(providerID string) error {
+	if c.destroyFail != nil {
+		return c.destroyFail
+	}
+	if c.DestroyInstanceFunc != nil {
+		return c.DestroyInstanceFunc(providerID)
+	}
+	c.destroyCount++
+	return nil
 }
 
 func launchSMSeed() uint64 {

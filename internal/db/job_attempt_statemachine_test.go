@@ -934,9 +934,18 @@ func assertNoCorruptMoveState(t *testing.T, db *sql.DB, jobID int64) {
 			}
 		}
 	}
-	if !foundAuth && job.Status != StatusDraft {
-		// Fall back: the authoritative view may report a status that does not
-		// directly match any attempt when a requested_status fallback is in play.
+	if !foundAuth {
+		// The only legitimate case where no attempt directly matches the job
+		// status is when the view falls back to StatusDraft because there is no
+		// authoritative attempt, or when a user-level requested_status override
+		// is in play.
+		var requestedStatus sql.NullString
+		if err := db.QueryRow(`SELECT requested_status FROM jobs WHERE id = ?`, jobID).Scan(&requestedStatus); err != nil {
+			t.Fatalf("read requested_status: %v", err)
+		}
+		if job.Status != StatusDraft && !requestedStatus.Valid {
+			t.Fatalf("job status %q has no matching authoritative attempt (attempts=%+v)", job.Status, attempts)
+		}
 	}
 }
 
