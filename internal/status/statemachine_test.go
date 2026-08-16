@@ -23,11 +23,6 @@ func TestStateMachine_RandomTransitionSequences(t *testing.T) {
 
 	iterations := 200
 	maxSteps := 50
-	if testing.Short() {
-		iterations = 20
-		maxSteps = 20
-	}
-
 	statuses := AllStatuses()
 
 	for i := 0; i < iterations; i++ {

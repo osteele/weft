@@ -31,11 +31,6 @@ func TestLaunchReconcileStateMachine_RandomCommands(t *testing.T) {
 
 	iterations := 30
 	stepsPerRun := 25
-	if testing.Short() {
-		iterations = 5
-		stepsPerRun = 12
-	}
-
 	for i := 0; i < iterations; i++ {
 		database := setupTestDB(t)
 		jobID, launchID, client := setupLaunchStateMachine(t, database)

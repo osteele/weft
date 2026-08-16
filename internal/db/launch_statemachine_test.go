@@ -27,11 +27,6 @@ func TestLaunchStateMachine_RandomCommands(t *testing.T) {
 
 	iterations := 50
 	stepsPerRun := 30
-	if testing.Short() {
-		iterations = 10
-		stepsPerRun = 15
-	}
-
 	statuses := []string{
 		LaunchStatusPlanned,
 		LaunchStatusLaunching,

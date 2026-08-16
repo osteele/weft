@@ -36,11 +36,6 @@ func TestJobAttemptStateMachine_RandomCommands(t *testing.T) {
 
 	iterations := 50
 	stepsPerRun := 30
-	if testing.Short() {
-		iterations = 10
-		stepsPerRun = 15
-	}
-
 	for i := 0; i < iterations; i++ {
 		database := SetupTestDB(t)
 

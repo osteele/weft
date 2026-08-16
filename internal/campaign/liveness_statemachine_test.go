@@ -39,11 +39,6 @@ func TestLivenessStateMachine_RandomCommands(t *testing.T) {
 
 	iterations := 30
 	stepsPerRun := 30
-	if testing.Short() {
-		iterations = 5
-		stepsPerRun = 15
-	}
-
 	for i := 0; i < iterations; i++ {
 		database := setupTestDB(t)
 
