@@ -392,3 +392,68 @@ func TestBootstrapDurations_ConditionalMedian(t *testing.T) {
 		})
 	}
 }
+
+// TestLearnedTerminate_DistinguishesLearnedFromDefault: the accessor exists so
+// enforcement paths cannot mistake a configured default for a fitted curve.
+// ComputeBootstrapSurvival populates TerminateAfter either way, so the flag is
+// the only signal that separates them.
+func TestLearnedTerminate_DistinguishesLearnedFromDefault(t *testing.T) {
+	cases := []struct {
+		name      string
+		survival  *BootstrapSurvival
+		wantValue time.Duration
+		wantOK    bool
+	}{
+		{"nil survival", nil, 0, false},
+		{"default thresholds, nothing learned", &BootstrapSurvival{TerminateAfter: 20 * time.Minute}, 0, false},
+		{"learned", &BootstrapSurvival{TerminateAfter: 7 * time.Minute, TerminateLearned: true}, 7 * time.Minute, true},
+		{"flagged learned but no value", &BootstrapSurvival{TerminateLearned: true}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.survival.LearnedTerminate()
+			if ok != tc.wantOK || got != tc.wantValue {
+				t.Fatalf("LearnedTerminate() = (%v, %v), want (%v, %v)", got, ok, tc.wantValue, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestLearnedTerminate_EmptyHistoryReportsNothingLearned ties the accessor to
+// the computation it guards: a database with no launches yields defaults, and
+// the accessor must not surface them.
+func TestLearnedTerminate_EmptyHistoryReportsNothingLearned(t *testing.T) {
+	database := setupBootstrapTestDB(t)
+	defer database.Close()
+
+	s, err := ComputeBootstrapSurvival(database, "vastai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.TerminateAfter <= 0 {
+		t.Fatalf("expected a populated default threshold, got %v", s.TerminateAfter)
+	}
+	if _, ok := s.LearnedTerminate(); ok {
+		t.Fatalf("empty history reported a learned threshold: %+v", s)
+	}
+	if _, ok := s.LearnedWarn(); ok {
+		t.Fatalf("empty history reported a learned warn threshold: %+v", s)
+	}
+}
+
+// TestSetupLearnedTerminate_DistinguishesLearnedFromDefault mirrors the
+// bootstrap case for setup survival.
+func TestSetupLearnedTerminate_DistinguishesLearnedFromDefault(t *testing.T) {
+	var nilSurvival *SetupSurvival
+	if _, ok := nilSurvival.LearnedTerminate(); ok {
+		t.Error("nil setup survival reported a learned threshold")
+	}
+	defaults := &SetupSurvival{WarnAfter: 15 * time.Minute, TerminateAfter: 25 * time.Minute}
+	if _, ok := defaults.LearnedTerminate(); ok {
+		t.Error("default setup thresholds reported as learned")
+	}
+	learned := &SetupSurvival{TerminateAfter: 8 * time.Minute, TerminateLearned: true}
+	if got, ok := learned.LearnedTerminate(); !ok || got != 8*time.Minute {
+		t.Errorf("LearnedTerminate() = (%v, %v), want (8m, true)", got, ok)
+	}
+}

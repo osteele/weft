@@ -401,6 +401,14 @@ config {
 
     -- Hard cap for an OnStart chain that keeps restarting while continuing
     -- to refresh its stage marker.
+    -- LEGACY FALLBACK, not the operative threshold. The cap normally rides
+    -- the learned setup survival terminate threshold
+    -- (SetupSurvival.TerminateAfter, computed per command+workdir by
+    -- db.ComputeSetupSurvival); this constant applies when that curve has
+    -- not learned a threshold — too little history, so TerminateLearned is
+    -- false and the struct carries defaults. See
+    -- effectiveOnStartTotalActiveTimeout in
+    -- internal/campaign/instance_check.go.
     onstart_total_active_timeout: Duration = 25.minutes
 
     -- Default infrastructure-failure threshold for the unattended runaway
@@ -415,6 +423,12 @@ config {
     -- Bimodal observed distribution: probes either land within ~60s or
     -- never; an 8-minute window covers cold-image pulls without false-
     -- killing slow-but-progressing launches.
+    -- LEGACY FALLBACK, not the operative threshold. The dud window
+    -- normally rides the learned per-provider bootstrap survival terminate
+    -- threshold (BootstrapSurvival.TerminateAfter, computed by
+    -- db.ComputeBootstrapSurvival); this constant applies when that curve
+    -- has not learned a threshold (TerminateLearned false). See
+    -- effectiveDudVastTimeout in internal/campaign/instance_check.go.
     dud_vast_timeout: Duration = 8.minutes
     -- OnStart chain stall. When the OnStart probe HAS landed (so the
     -- container ran OnStart — dud_vast_timeout does not apply) but the
@@ -425,6 +439,12 @@ config {
     -- reach bootstrap. Catches the gap between dud detection (no probe) and
     -- the bootstrap `failed:` marker (written only by bootstrap.sh). See
     -- OnStartChainWatchdog.
+    -- LEGACY FALLBACK, not the operative threshold. The stall window
+    -- normally rides the learned setup survival terminate threshold
+    -- (SetupSurvival.TerminateAfter, computed per command+workdir by
+    -- db.ComputeSetupSurvival); this constant applies when that curve has
+    -- not learned a threshold (TerminateLearned false). See
+    -- effectiveOnStartStallTimeout in internal/campaign/instance_check.go.
     onstart_stall_timeout: Duration = 10.minutes
     -- Maximum time an instance may sit with agent_ready_at set but no job
     -- yet started and no phase reported. See IdleAfterReadyTimeout.
@@ -440,14 +460,26 @@ config {
     -- MUST exceed any provider-internal bootstrap context timeout so the
     -- launching goroutine's own cancellation normally fires first.
     --
+    -- LEGACY FALLBACK, not the operative threshold. The launching-phase
+    -- ceiling normally rides the learned per-provider bootstrap survival
+    -- terminate threshold (BootstrapSurvival.TerminateAfter, computed by
+    -- db.ComputeBootstrapSurvival); this constant applies when that curve
+    -- has not learned a threshold (TerminateLearned false). See
+    -- effectiveLaunchingPhaseTimeout in
+    -- internal/campaign/instance_check.go.
+    --
     -- Calibration: ~1500 historical launches show pre-running
     -- provisioning is bimodal (fast-or-never) — p99 ≤ 2 min, observed
     -- max 6.2 min, zero launches ever exceeded 10 min from create to
     -- status=running at the provider. 12 min gives ~2× margin over the
     -- worst case while recovering budget on dud rentals 13 min faster.
-    -- An adaptive threshold here would converge near p99 (~2 min) and
-    -- start false-killing the rare 3-4 min legitimate launches; the
-    -- bimodal distribution makes a fixed cutoff strictly better.
+    -- The earlier objection — that an adaptive threshold would converge
+    -- near p99 (~2 min) and false-kill the rare 3-4 min legitimate
+    -- launch — does not apply to the survival threshold actually used:
+    -- its terminate value is floored at 5 min and defaults to 20 min
+    -- when samples are insufficient, so relative to the p99 concern the
+    -- learned value can only lengthen this window, never shorten it
+    -- toward ~2 min. The 12-minute constant survives as the fallback.
     launching_phase_timeout: Duration = 12.minutes
 
     -- Hedge configuration. When enabled, the autopilot launches `count`
@@ -2294,7 +2326,7 @@ rule BootstrapTimeout {
 }
 
 rule LaunchingPhaseTimeout {
-    when: instance: Instance.created_at + config.launching_phase_timeout <= now
+    when: instance: Instance.created_at + EffectiveLaunchingPhaseTimeout(instance) <= now
     requires: instance.status = launching
     requires: instance.bootstrap_origin = null
 
@@ -2309,6 +2341,20 @@ rule LaunchingPhaseTimeout {
         -- Reason is infra_failure (retryable) so RelaunchAfterInfraFailure
         -- applies. The launching goroutine's own context timeout is the
         -- primary bound; this rule is the safety net for a wedged goroutine.
+        --
+        -- EffectiveLaunchingPhaseTimeout prefers the learned per-provider
+        -- bootstrap survival terminate threshold
+        -- (BootstrapSurvival.TerminateAfter) and falls back to
+        -- config.launching_phase_timeout when the provider's curve has
+        -- not learned one. A struct with TerminateLearned false carries
+        -- defaults, not evidence, and must not displace the constant.
+        -- The survival curve is computed by db.ComputeBootstrapSurvival
+        -- (>= 20 samples, terminate cutoff at P(success) < 0.03, floored
+        -- at 5 min; defaults to 20 min unlearned), cached on the
+        -- reconciler and recomputed every 5 min (survivalCacheTTL in
+        -- internal/campaign/reconcile.go).
+        -- Implementation: effectiveLaunchingPhaseTimeout in
+        -- internal/campaign/instance_check.go.
 }
 
 rule SetupStall {
@@ -2405,7 +2451,7 @@ rule DudVastDetection {
     requires: not HeartbeatObserved(instance)
     requires: InstancePhase(instance) = ""
     requires: BootstrapStage(instance) = ""
-    requires: now - instance.launched_at >= config.dud_vast_timeout
+    requires: now - instance.launched_at >= EffectiveDudVastTimeout(instance)
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
@@ -2423,8 +2469,19 @@ rule DudVastDetection {
         -- daemon failed to actually start the container, the image
         -- pull was blocked, or the offer was a zombie. The bimodal
         -- distribution of probe arrival times (within ~60s OR never)
-        -- means an 8-minute window catches dud rentals without false-
-        -- killing slow-but-progressing legitimate ones.
+        -- means a window of this order catches dud rentals without
+        -- false-killing slow-but-progressing legitimate ones.
+        --
+        -- EffectiveDudVastTimeout prefers the learned per-provider
+        -- bootstrap survival terminate threshold
+        -- (BootstrapSurvival.TerminateAfter) and falls back to
+        -- config.dud_vast_timeout when the provider's curve has not
+        -- learned one (TerminateLearned false). The curve comes from
+        -- db.ComputeBootstrapSurvival (>= 20 samples, terminate cutoff at
+        -- P(success) < 0.03, floored at 5 min; defaults to 20 min
+        -- unlearned), cached on the reconciler and recomputed
+        -- every 5 min (survivalCacheTTL in
+        -- internal/campaign/reconcile.go).
         --
         -- Defense-in-depth absence signals. The rule conjoins six
         -- absence signals rather than the single OnStart probe because
@@ -2456,7 +2513,8 @@ rule DudVastDetection {
         -- survival model now records the failed machine_id).
         --
         -- Implementation: internal/campaign/instance_check.go §4d
-        -- (ActionEmptyStatusTimeout with "dud Vast" stall message).
+        -- (ActionEmptyStatusTimeout with "dud Vast" stall message);
+        -- threshold via effectiveDudVastTimeout in the same file.
         -- SyncInstanceState populates the absence signals for both the
         -- watch and reconcile paths via internal/campaign/sync_state.go,
         -- where the on-error defaults above are enforced. The dud
@@ -2464,12 +2522,19 @@ rule DudVastDetection {
         -- the OnStart probe and heartbeat fetches to keep healthy-
         -- fleet reconcile passes cheap.
         --
-        -- Open: the 8-minute fixed threshold is at odds with P2's
-        -- adaptive-threshold thesis. RQ-E2 covers tuning the
-        -- bootstrap/first-registration survival cutoffs; the dud
-        -- timeout is a sibling fixed threshold that should be moved
-        -- onto the same survival framework, stratified by
-        -- (provider, data_center). Tracked separately.
+        -- Open: the dud window now rides the survival framework, but
+        -- only at provider granularity and only on a borrowed curve.
+        -- Two gaps remain. (1) Stratification: bootstrap survival is
+        -- computed per provider, not per (provider, data_center), so a
+        -- single bad data center is averaged into its provider's
+        -- threshold. (2) Curve fit: dud detection reuses the bootstrap
+        -- curve, which models time-to-bootstrap, not time-to-probe-
+        -- arrival — the events have different shapes (probe arrival is
+        -- ~60s-or-never; bootstrap completion is a long tail), so a
+        -- dud-specific survival curve would fit better than the
+        -- borrowed one. RQ-E2 covers tuning the bootstrap/first-
+        -- registration survival cutoffs; these two remain tracked
+        -- separately.
 }
 
 rule OnStartChainWatchdog {
@@ -2480,8 +2545,8 @@ rule OnStartChainWatchdog {
     requires: BootstrapStage(instance) = ""
     requires: OnStartStage(instance) != ""
     requires: IsOnStartFailureStage(OnStartStage(instance))
-              or now - OnStartStageChangedAt(instance) >= config.onstart_stall_timeout
-              or now - FirstOnStartProbeSeen(instance) >= config.onstart_total_active_timeout
+              or now - OnStartStageChangedAt(instance) >= EffectiveOnStartStallTimeout(instance)
+              or now - FirstOnStartProbeSeen(instance) >= EffectiveOnStartTotalActiveTimeout(instance)
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
@@ -2514,7 +2579,7 @@ rule OnStartChainWatchdog {
         --     rclone-missing-exit) — terminate immediately. This set MUST
         --     stay in sync with DefaultOnStartCmd in internal/cloud/types.go.
         --   - Stall: an in-progress token (apt-installing, etc.) unchanged
-        --     for onstart_stall_timeout — the chain hung (e.g. an
+        --     for EffectiveOnStartStallTimeout — the chain hung (e.g. an
         --     unresponsive apt mirror) and will not recover.
         --   - Total-active cap: the marker's R2 last-modified anchors the
         --     stall sub-case, so a provider that re-runs a failed OnStart
@@ -2524,12 +2589,41 @@ rule OnStartChainWatchdog {
         --     sub-case never trips and the instance bleeds to the adaptive
         --     deadline. FirstOnStartProbeSeen is set once (first probe
         --     observation, never overwritten), so now - FirstOnStartProbeSeen
-        --     >= onstart_total_active_timeout reaps the looping instance.
-        --     Set generously above onstart_stall_timeout so a slow but
-        --     genuinely progressing OnStart is not clipped. Incident
-        --     wi5105 (2026-07-12): a RunPod OnStart looped started↔deps-ready
-        --     for ~90 min ($1.02) because the churning marker defeated the
-        --     stall sub-case.
+        --     >= EffectiveOnStartTotalActiveTimeout reaps the looping
+        --     instance. Incident wi5105 (2026-07-12): a RunPod OnStart
+        --     looped started↔deps-ready for ~90 min ($1.02) because the
+        --     churning marker defeated the stall sub-case.
+        --
+        -- Both duration sub-cases prefer the learned setup survival
+        -- terminate threshold (SetupSurvival.TerminateAfter, computed by
+        -- db.ComputeSetupSurvival per command+workdir, falling back to
+        -- workdir-only, then all jobs; >= 20 samples, terminate cutoff at
+        -- P(success) < 0.03, floored at 10 min). On insufficient data the
+        -- curve reports defaults with TerminateLearned false, and the
+        -- constants above govern instead. Cached on the reconciler and recomputed
+        -- every 5 min (survivalCacheTTL in
+        -- internal/campaign/reconcile.go). Note this is SETUP survival,
+        -- not the per-provider bootstrap survival used by
+        -- LaunchingPhaseTimeout and DudVastDetection.
+        --
+        -- When a learned setup threshold is present, the sub-cases collapse
+        -- to the SAME duration: EffectiveOnStartStallTimeout and
+        -- EffectiveOnStartTotalActiveTimeout both resolve to
+        -- SetupSurvival.TerminateAfter. The legacy relationship between
+        -- the constants — total-active set generously above the stall
+        -- window so a slow but genuinely progressing OnStart is not
+        -- clipped — therefore holds only in the fallback case
+        -- (config.onstart_stall_timeout 10 min vs
+        -- config.onstart_total_active_timeout 25 min). With learned data
+        -- the sub-cases differ only in anchor: the stall window is
+        -- measured from the last stage-marker change, the total-active cap
+        -- from the first probe sighting. The looping-provider case is
+        -- still caught, because the churn refreshes the stall anchor but
+        -- never the total-active one — but the reap deadline can be
+        -- learned as high as ~60 min (setup survival MaxTimeSecs),
+        -- versus the old hard 25-minute cap. That weakening is an
+        -- accepted trade-off; see
+        -- docs/decisions/0005-let-learned-setup-survival-govern-onstart-watchdogs.md.
         --
         -- Gated pre-bootstrap (BootstrapStage = ""), pre-ready, pre-job: once
         -- bootstrap.sh writes a stage, or the agent reaches ready, or a job
@@ -2540,8 +2634,11 @@ rule OnStartChainWatchdog {
         -- unplaced and relaunch on a fresh offer, same as DudVastDetection.
         --
         -- Implementation: internal/campaign/instance_check.go §4e/4f/4g
-        -- (ActionBootstrapStalled). SyncInstanceState fetches the OnStart
-        -- stage marker (body + R2 last-modified) in the same pre-job window
+        -- (ActionBootstrapStalled); thresholds via
+        -- effectiveOnStartStallTimeout and
+        -- effectiveOnStartTotalActiveTimeout in the same file.
+        -- SyncInstanceState fetches the OnStart stage marker
+        -- (body + R2 last-modified) in the same pre-job window
         -- as the bootstrap stage, via internal/campaign/sync_state.go, and
         -- persists FirstOnStartProbeSeenUnix set-once on first probe sighting.
 }

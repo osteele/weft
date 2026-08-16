@@ -3093,3 +3093,442 @@ func TestReconcilerNoteProviderStatusPoll(t *testing.T) {
 		t.Fatalf("post-reset unknown pass duration = %s, want 0 (fresh window)", d)
 	}
 }
+
+// TestCheckInstance_EmptyStatusTimeout_SurvivalExtends: with learned bootstrap
+// survival data, the empty-status watchdog (rule 4) waits for the learned
+// terminate threshold instead of the legacy 1-minute constant.
+func TestCheckInstance_EmptyStatusTimeout_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-5 * time.Minute).Unix() // past legacy 1m, under learned 30m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst:      &cloud.Instance{Status: ""},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		Now:               now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("empty-status watchdog fired at 5m despite learned 30m terminate threshold: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_EmptyStatusTimeout_SurvivalTerminates: past the learned
+// terminate threshold, the empty-status watchdog fires with the same action
+// the legacy tests assert — here with a learned threshold SHORTER than the
+// legacy constant, so the kill is attributable to the learned value.
+func TestCheckInstance_EmptyStatusTimeout_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-45 * time.Second).Unix() // past learned 30s, under legacy 1m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: ""},
+		// The probe suppresses the dud-provider watchdog (rule 4d), which
+		// reads the same survival threshold and would otherwise mask the
+		// empty-status rule this test targets.
+		OnStartProbePresent: true,
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Second, TerminateAfter: 30 * time.Second, TerminateLearned: true},
+		Now:                 now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+}
+
+// TestCheckInstance_EmptyStatusTimeout_UnlearnedDefaultsFallBackToConstant:
+// ComputeBootstrapSurvival returns a populated struct carrying *default*
+// thresholds (20m terminate) when history is insufficient, with
+// TerminateLearned false. Those defaults must not displace the legacy
+// 1-minute constant — gating on TerminateAfter > 0 instead of the flag
+// stretched every cold-database watchdog window to 20 minutes.
+func TestCheckInstance_EmptyStatusTimeout_UnlearnedDefaultsFallBackToConstant(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-5 * time.Minute).Unix() // past legacy 1m, under the 20m default
+	// Mirrors ComputeBootstrapSurvival on a database with no launch history.
+	unlearned := &db.BootstrapSurvival{
+		SampleSize:     3,
+		WarnAfter:      15 * time.Minute,
+		TerminateAfter: 20 * time.Minute,
+	}
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst:      &cloud.Instance{Status: ""},
+		BootstrapSurvival: unlearned,
+		Now:               now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d) — unlearned defaults must fall back to the legacy constant", action.Kind, ActionEmptyStatusTimeout)
+	}
+
+	// Under the legacy constant the watchdog must still stay quiet before 1m.
+	youngLaunchedAt := now.Add(-45 * time.Second).Unix()
+	action = r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 2,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &youngLaunchedAt,
+			ProviderInstanceID: "test-456",
+		},
+		ProviderInst:      &cloud.Instance{Status: ""},
+		BootstrapSurvival: unlearned,
+		Now:               now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("empty-status watchdog fired at 45s, before the legacy 1m constant: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_PreRunningStatus_SurvivalExtends: with learned bootstrap
+// survival data, the stale non-running status watchdog (rule 4b) waits for
+// the learned terminate threshold instead of the legacy 5-minute constant.
+func TestCheckInstance_PreRunningStatus_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-6 * time.Minute).Unix() // past legacy 5m, under learned 30m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst:      &cloud.Instance{Status: cloud.ProviderStatusCreated},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		Now:               now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("pre-running watchdog fired at 6m despite learned 30m terminate threshold: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_PreRunningStatus_SurvivalTerminates: past the learned
+// terminate threshold, the stale non-running status watchdog fires exactly as
+// it does past the legacy constant — here with a learned threshold SHORTER
+// than legacy, so the kill is attributable to the learned value.
+func TestCheckInstance_PreRunningStatus_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-4 * time.Minute).Unix() // past learned 3m, under legacy 5m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated},
+		// The probe suppresses the dud-provider watchdog (rule 4d), which
+		// reads the same survival threshold and would otherwise mask the
+		// pre-running rule this test targets.
+		OnStartProbePresent: true,
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 2 * time.Minute, TerminateAfter: 3 * time.Minute, TerminateLearned: true},
+		Now:                 now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true")
+	}
+}
+
+// TestCheckInstance_LaunchingPhaseTimeout_SurvivalExtends: with learned
+// bootstrap survival data, the launching-phase safety net (rule 4c) waits for
+// the learned terminate threshold instead of the legacy 12-minute constant.
+func TestCheckInstance_LaunchingPhaseTimeout_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-(launchingPhaseTimeout + time.Minute)).Unix() // past legacy 12m, under learned 30m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusLaunching,
+			CreatedAt:          created,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst:      nil,
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		Now:               now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded") {
+		t.Fatalf("rule 4c fired at %s despite learned 30m terminate threshold: %q", launchingPhaseTimeout+time.Minute, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_LaunchingPhaseTimeout_SurvivalTerminates: past the
+// learned terminate threshold, the launching-phase safety net fires exactly
+// as it does past the legacy constant — here with a learned threshold SHORTER
+// than legacy, so the kill is attributable to the learned value.
+func TestCheckInstance_LaunchingPhaseTimeout_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-11 * time.Minute).Unix() // past learned 10m, under legacy 12m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusLaunching,
+			CreatedAt:          created,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst:      nil,
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 8 * time.Minute, TerminateAfter: 10 * time.Minute, TerminateLearned: true},
+		Now:               now,
+	})
+	killed := action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded")
+	if !killed {
+		t.Fatalf("rule 4c did not fire past the learned 10m threshold (action=%d, msg=%q)", action.Kind, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_DudProvider_SurvivalExtends: with learned bootstrap
+// survival data, the dud-provider watchdog (rule 4d) waits for the learned
+// terminate threshold instead of the legacy 8-minute constant.
+func TestCheckInstance_DudProvider_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-(dudVastTimeout + time.Minute)).Unix() // past legacy 8m, under learned 30m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-dud",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		Now:                 now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("dud watchdog fired at %s despite learned 30m terminate threshold: %q", dudVastTimeout+time.Minute, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_DudProvider_SurvivalTerminates: past the learned
+// terminate threshold, the dud-provider watchdog fires exactly as it does
+// past the legacy constant — here with a learned threshold SHORTER than
+// legacy, so the kill is attributable to the learned value.
+func TestCheckInstance_DudProvider_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-7 * time.Minute).Unix() // past learned 6m, under legacy 8m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-dud",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 4 * time.Minute, TerminateAfter: 6 * time.Minute, TerminateLearned: true},
+		Now:                 now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "dud provider") {
+		t.Errorf("StallMessage = %q, want it to mention 'dud provider'", action.StallMessage)
+	}
+	if !action.ResetJobs {
+		t.Error("ResetJobs should be true so orphaned jobs requeue")
+	}
+}
+
+// TestCheckInstance_OnStartStall_SurvivalExtends: with learned setup survival
+// data, the per-stage OnStart stall watchdog (rule 4f) waits for the learned
+// terminate threshold instead of the legacy 10-minute constant.
+func TestCheckInstance_OnStartStall_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-12 * time.Minute).Unix()
+	stageAt := now.Add(-(onStartStallTimeout + time.Minute)) // past legacy 10m, under learned 30m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-hung",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &stageAt,
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired at %s despite learned 30m terminate threshold: %q", onStartStallTimeout+time.Minute, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_OnStartStall_SurvivalTerminates: past the learned
+// terminate threshold, the per-stage OnStart stall watchdog fires exactly as
+// it does past the legacy constant — here with a learned threshold SHORTER
+// than legacy, so the kill is attributable to the learned value.
+func TestCheckInstance_OnStartStall_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-10 * time.Minute).Unix()
+	stageAt := now.Add(-9 * time.Minute) // past learned 8m, under legacy 10m
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-hung",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &stageAt,
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 5 * time.Minute, TerminateAfter: 8 * time.Minute, TerminateLearned: true},
+		Now:                   now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "OnStart stalled at apt-installing") {
+		t.Errorf("StallMessage = %q, want it to mention the stalled OnStart stage", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+	}
+}
+
+// TestCheckInstance_OnStartStall_UnlearnedDefaultsFallBackToConstant:
+// ComputeSetupSurvival returns default thresholds (25m terminate) with
+// TerminateLearned false when history is insufficient. Those defaults must not
+// displace the legacy 10-minute stall constant.
+func TestCheckInstance_OnStartStall_UnlearnedDefaultsFallBackToConstant(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-30 * time.Minute).Unix()
+	stageAt := now.Add(-onStartStallTimeout - time.Minute) // past legacy 10m, under the 25m default
+	// Mirrors ComputeSetupSurvival on a database with no setup history.
+	unlearned := &db.SetupSurvival{
+		SampleSize:     3,
+		WarnAfter:      15 * time.Minute,
+		TerminateAfter: 25 * time.Minute,
+	}
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-hung",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &stageAt,
+		SetupSurvival:         unlearned,
+		Now:                   now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q) — unlearned defaults must fall back to the legacy constant", action.Kind, action.StallMessage)
+	}
+
+	// Under the legacy constant the watchdog must still stay quiet before 10m.
+	youngStageAt := now.Add(-5 * time.Minute)
+	action = r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 2,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-young",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "apt-installing",
+		OnStartStageChangedAt: &youngStageAt,
+		SetupSurvival:         unlearned,
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired at 5m, before the legacy 10m constant: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_OnStartTotalCap_SurvivalExtends: with learned setup
+// survival data, the total OnStart active-time cap (rule 4g) waits for the
+// learned terminate threshold instead of the legacy 25-minute constant.
+func TestCheckInstance_OnStartTotalCap_SurvivalExtends(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-40 * time.Minute).Unix()
+	firstProbe := now.Add(-(onStartTotalActiveTimeout + time.Minute)).Unix() // past legacy 25m, under learned 40m
+	// Marker looks fresh so rule 4f is not what would fire here.
+	stageAt := now.Add(-30 * time.Second)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-loop",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "onstart-deps-ready",
+		OnStartStageChangedAt: &stageAt,
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 20 * time.Minute, TerminateAfter: 40 * time.Minute, TerminateLearned: true},
+		Now:                   now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart") {
+		t.Fatalf("OnStart watchdog fired at %s despite learned 40m terminate threshold: %q", onStartTotalActiveTimeout+time.Minute, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_OnStartTotalCap_SurvivalTerminates: past the learned
+// terminate threshold, the total OnStart active-time cap fires exactly as it
+// does past the legacy constant — here with a learned threshold SHORTER than
+// legacy, so the kill is attributable to the learned value.
+func TestCheckInstance_OnStartTotalCap_SurvivalTerminates(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-40 * time.Minute).Unix()
+	firstProbe := now.Add(-21 * time.Minute).Unix() // past learned 20m, under legacy 25m
+	// Marker looks fresh so rule 4f is not what fires here.
+	stageAt := now.Add(-30 * time.Second)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-loop",
+		},
+		ProviderInst:          &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:   true,
+		OnStartStage:          "onstart-deps-ready",
+		OnStartStageChangedAt: &stageAt,
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 10 * time.Minute, TerminateAfter: 20 * time.Minute, TerminateLearned: true},
+		Now:                   now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "OnStart active") {
+		t.Errorf("StallMessage = %q, want it to mention total OnStart-active time", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+	}
+}

@@ -15,6 +15,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0002](0002-retire-the-coordinator-daemon.md) | Retire the coordinator daemon | accepted |
 | [0003](0003-split-estimation-across-three-projects.md) | Split estimation across three projects | accepted |
 | [0004](0004-keep-r2-optional-for-on-prem-hosts.md) | Keep R2 optional for on-prem hosts | accepted |
+| [0005](0005-let-learned-setup-survival-govern-onstart-watchdogs.md) | Let learned setup survival govern the OnStart watchdogs | accepted |
 
 ## Adding one
 

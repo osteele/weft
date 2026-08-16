@@ -2562,3 +2562,165 @@ func TestReconcileCampaigns_IgnoresStaleHistoricalAttemptStatus(t *testing.T) {
 			campaignID, c.Status)
 	}
 }
+
+// --- getSetupSurvival cache tests ---
+//
+// The fixture mirrors internal/db/phase_survival_test.go's SufficientData
+// shape (enough observations to cross MinSamples so thresholds are learned,
+// not defaults), replicated here with raw inserts because the db test
+// helpers are unexported. The initial 20 observations — 10 fast successes
+// (30s..300s) and 10 setups that never completed (abandoned at 15m) — put
+// the survival curve under both cutoffs at fixed times, yielding learned
+// warn=5m / terminate=10m thresholds. Adding 20 long (30m) successes lifts
+// the curve above the cutoffs entirely, so a recompute falls back to the
+// 15m/25m defaults — an unambiguous signal that recomputation happened.
+
+const (
+	setupSurvivalTestCommand = "uv run pytest"
+	setupSurvivalTestWorkdir = "/tmp/project"
+)
+
+// insertSetupObservation inserts one job + first attempt + setup phase
+// timing row for setup-survival tests. Successes get a setup_end; failures
+// get only setup_start and the attempt's end_time bounds the observation.
+func insertSetupObservation(t *testing.T, database *sql.DB, jobID int64, succeeded bool, setupStart, setupDur int64) {
+	t.Helper()
+	status := db.StatusCompleted
+	if !succeeded {
+		status = db.StatusFailed
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, command, tombstoned, requested_status) VALUES (?, ?, ?, 0, NULL)`,
+		jobID, setupSurvivalTestWorkdir, setupSurvivalTestCommand,
+	); err != nil {
+		t.Fatalf("insertSetupObservation: insert job %d: %v", jobID, err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at, start_time, end_time)
+		 VALUES (?, 1, '', NULL, ?, ?, ?, ?)`,
+		jobID, status, setupStart, setupStart, setupStart+setupDur,
+	); err != nil {
+		t.Fatalf("insertSetupObservation: insert attempt for job %d: %v", jobID, err)
+	}
+	if succeeded {
+		if _, err := database.Exec(
+			`INSERT INTO job_phase_timings (job_id, setup_start, setup_end) VALUES (?, ?, ?)`,
+			jobID, setupStart, setupStart+setupDur,
+		); err != nil {
+			t.Fatalf("insertSetupObservation: insert timing for job %d: %v", jobID, err)
+		}
+	} else {
+		if _, err := database.Exec(
+			`INSERT INTO job_phase_timings (job_id, setup_start) VALUES (?, ?)`,
+			jobID, setupStart,
+		); err != nil {
+			t.Fatalf("insertSetupObservation: insert timing for job %d: %v", jobID, err)
+		}
+	}
+}
+
+// insertSetupSurvivalFixture inserts the initial 20 observations and returns
+// the next free job ID.
+func insertSetupSurvivalFixture(t *testing.T, database *sql.DB) int64 {
+	t.Helper()
+	const base = int64(1000000)
+	jobID := int64(100)
+	for i := 0; i < 10; i++ {
+		setupDur := int64(30 * (i + 1)) // 30s..300s
+		insertSetupObservation(t, database, jobID, true, base+5, setupDur)
+		jobID++
+	}
+	for i := 0; i < 10; i++ {
+		insertSetupObservation(t, database, jobID, false, base+5, 900) // setup never completed
+		jobID++
+	}
+	return jobID
+}
+
+// insertLongSetupSuccesses inserts count observations of 30m successful
+// setups, which push the survival curve back above the cutoffs so learned
+// thresholds revert to the configured defaults.
+func insertLongSetupSuccesses(t *testing.T, database *sql.DB, nextJobID int64, count int) {
+	t.Helper()
+	const base = int64(2000000)
+	for i := 0; i < count; i++ {
+		insertSetupObservation(t, database, nextJobID, true, base+5, 1800)
+		nextJobID++
+	}
+}
+
+func TestGetSetupSurvival_ComputesLearnedThresholds(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	insertSetupSurvivalFixture(t, database)
+
+	r := NewReconciler()
+	s := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
+	if s == nil {
+		t.Fatal("getSetupSurvival returned nil")
+	}
+	if s.SampleSize != 20 {
+		t.Errorf("SampleSize = %d, want 20", s.SampleSize)
+	}
+	if !s.WarnLearned || !s.TerminateLearned {
+		t.Errorf("thresholds should be learned with 20 samples: %+v", s)
+	}
+	if s.WarnAfter != 5*time.Minute {
+		t.Errorf("WarnAfter = %v, want learned 5m", s.WarnAfter)
+	}
+	if s.TerminateAfter != 10*time.Minute {
+		t.Errorf("TerminateAfter = %v, want learned 10m", s.TerminateAfter)
+	}
+}
+
+func TestGetSetupSurvival_CachesWithinTTL(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	nextJobID := insertSetupSurvivalFixture(t, database)
+
+	r := NewReconciler()
+	first := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
+	if first == nil || first.TerminateAfter != 10*time.Minute {
+		t.Fatalf("first call = %+v, want learned 10m terminate threshold", first)
+	}
+
+	// New observations that would change the thresholds on recompute.
+	insertLongSetupSuccesses(t, database, nextJobID, 20)
+
+	second := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
+	if second != first {
+		t.Errorf("second call within TTL recomputed: got %+v, want cached %+v", second, first)
+	}
+	if second.SampleSize != 20 || second.TerminateAfter != 10*time.Minute {
+		t.Errorf("cached thresholds changed within TTL: %+v", second)
+	}
+}
+
+func TestGetSetupSurvival_RecomputesAfterExpiry(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	nextJobID := insertSetupSurvivalFixture(t, database)
+
+	r := NewReconciler()
+	first := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
+	if first == nil || first.TerminateAfter != 10*time.Minute {
+		t.Fatalf("first call = %+v, want learned 10m terminate threshold", first)
+	}
+
+	insertLongSetupSuccesses(t, database, nextJobID, 20)
+
+	// Expire the cache without sleeping.
+	r.setupSurvivalCacheAt = time.Now().Add(-survivalCacheTTL)
+
+	refreshed := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
+	if refreshed == nil {
+		t.Fatal("getSetupSurvival after expiry returned nil")
+	}
+	if refreshed.SampleSize != 40 {
+		t.Errorf("SampleSize = %d, want 40 after recompute", refreshed.SampleSize)
+	}
+	if refreshed.TerminateAfter != 25*time.Minute || refreshed.TerminateLearned {
+		t.Errorf("TerminateAfter = %v (learned=%v), want default 25m after the long successes lifted the survival curve",
+			refreshed.TerminateAfter, refreshed.TerminateLearned)
+	}
+}
