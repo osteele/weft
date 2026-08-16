@@ -30,23 +30,25 @@ func corpusScanCommand() string {
 	return fmt.Sprintf(`_corpus_dir="$HOME/%s"
 if [ ! -d "$_corpus_dir" ]; then echo "%s $_corpus_dir" >&2; exit 3; fi
 if [ ! -r "$_corpus_dir" ] || [ ! -x "$_corpus_dir" ]; then echo "%s $_corpus_dir" >&2; exit 3; fi
-_dirs=()
+# POSIX: accumulate in the positional parameters. Arrays are a bash
+# extension and this runs under /bin/sh, which is dash on Debian family.
+set --
 for _c in "$_corpus_dir"/*/; do
   [ -d "$_c" ] || continue
   for _s in "$_c"*/; do
-    [ -d "$_s" ] && _dirs+=("$_s")
+    [ -d "$_s" ] && set -- "$@" "$_s"
   done
 done
-[ ${#_dirs[@]} -eq 0 ] && exit 0
-_out=$(du -sb "${_dirs[@]}" 2>/dev/null)
+[ "$#" -eq 0 ] && exit 0
+_out=$(du -sb "$@" 2>/dev/null)
 if [ -n "$_out" ]; then
   printf '%%s\n' "$_out"
 else
-  _out=$(du -sk "${_dirs[@]}" 2>/dev/null)
+  _out=$(du -sk "$@" 2>/dev/null)
   if [ -n "$_out" ]; then
     printf '%%s\n' "$_out" | awk '{printf "%%d\t%%s\n", $1*1024, $2}'
   else
-    printf '%%s\n' "${_dirs[@]}"
+    printf '%%s\n' "$@"
   fi
 fi`, CorpusBaseDir, scanBaseDirSentinel, scanBaseDirSentinel)
 }

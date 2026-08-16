@@ -253,7 +253,10 @@ func TestDashboardExternalDetailsShowUnconfirmedSubmissionRecovery(t *testing.T)
 		}
 	}
 
-	job.CreatedAt = time.Now().Add(-db.ExternalSubmissionUnconfirmedAfter + time.Second).Unix()
+	// A minute inside the 5-minute window, not a second: the render calls
+	// time.Now() again, and on a loaded machine a one-second margin can elapse
+	// between the two calls, aging the job across the threshold.
+	job.CreatedAt = time.Now().Add(-db.ExternalSubmissionUnconfirmedAfter + time.Minute).Unix()
 	rendered = (Model{externalBindings: map[int64]*db.ExternalJobBinding{}}).jobDetailContent(job)
 	if strings.Contains(rendered, "submission unconfirmed") || !strings.Contains(rendered, "binding unavailable") {
 		t.Fatalf("young unbound dashboard detail = %q, want pending binding language", rendered)

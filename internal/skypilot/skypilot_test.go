@@ -89,11 +89,15 @@ func TestStreamLogsRequestsFullSnapshotExplicitly(t *testing.T) {
 func TestFollowLogsStreamsBeforeProcessExit(t *testing.T) {
 	binDir := t.TempDir()
 	skyPath := filepath.Join(binDir, "sky")
-	if err := os.WriteFile(skyPath, []byte("#!/bin/sh\nprintf 'first line\\n'\nprintf 'diagnostic\\n' >&2\nexec sleep 30\n"), 0o755); err != nil {
+	if err := os.WriteFile(skyPath, []byte("#!/bin/sh\nprintf 'diagnostic\\n' >&2\nprintf 'first line\\n'\nexec sleep 30\n"), 0o755); err != nil {
 		t.Fatalf("write fake sky: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// stderr is written before stdout so that receiving the stdout line below
+	// proves the stderr write already happened. With the reverse order the
+	// cancel could land between the two printfs on a loaded machine, killing
+	// the process before it wrote stderr.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reader, writer := io.Pipe()

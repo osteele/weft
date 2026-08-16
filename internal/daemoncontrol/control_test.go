@@ -316,7 +316,9 @@ func TestCurrentStatusClassifiesZombiePIDAsStale(t *testing.T) {
 	if !status.HasPID || status.Live || !status.Stale {
 		t.Fatalf("status = %+v, want stale zombie PID", status)
 	}
-	pid, hadProcess, err := StopPID(paths, 100*time.Millisecond)
+	// Generous: this asserts SIGKILL escalation happens, not how fast a
+	// loaded machine reaps the process. 100ms failed on CI runners.
+	pid, hadProcess, err := StopPID(paths, 5*time.Second)
 	if err != nil {
 		t.Fatalf("StopPID: %v", err)
 	}
@@ -354,7 +356,9 @@ func TestStopPIDKillsProcessThatIgnoresTerm(t *testing.T) {
 	if err := WritePIDFile(paths.PIDFile, cmd.Process.Pid); err != nil {
 		t.Fatalf("WritePIDFile: %v", err)
 	}
-	pid, hadProcess, err := StopPID(paths, 100*time.Millisecond)
+	// Generous: this asserts SIGKILL escalation happens, not how fast a
+	// loaded machine reaps the process. 100ms failed on CI runners.
+	pid, hadProcess, err := StopPID(paths, 5*time.Second)
 	if err != nil {
 		t.Fatalf("StopPID: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 )
 
 func TestFetchPodDetailRejectsHTTPError(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"invalid API key"}`))
@@ -29,6 +30,7 @@ func TestFetchPodDetailRejectsHTTPError(t *testing.T) {
 }
 
 func TestFetchPodDetailRejectsNullResponse(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("null"))
@@ -46,6 +48,7 @@ func TestFetchPodDetailRejectsNullResponse(t *testing.T) {
 }
 
 func TestFetchPodDetailRejectsMissingIdentity(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	for _, body := range []string{`{}`, `{"status":"RUNNING"}`} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -65,6 +68,7 @@ func TestFetchPodDetailRejectsMissingIdentity(t *testing.T) {
 }
 
 func TestFetchPodDetailReturnsValidPod(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"pod-123","desiredStatus":"RUNNING","machineId":"machine-9","dataCenterId":"EU-SE-1"}`))
@@ -94,6 +98,7 @@ func TestFetchPodDetailReturnsValidPod(t *testing.T) {
 }
 
 func TestFetchPodDetailUnwrapsPodWrapper(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"pod":{"id":"pod-456","desiredStatus":"RUNNING"}}`))
@@ -114,6 +119,7 @@ func TestFetchPodDetailUnwrapsPodWrapper(t *testing.T) {
 }
 
 func TestFetchPodDetailNotFound(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"pod not found"}`))
@@ -131,6 +137,7 @@ func TestFetchPodDetailNotFound(t *testing.T) {
 }
 
 func TestUnwrapPodObject(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	tests := []struct {
 		name string
 		in   map[string]any
@@ -152,6 +159,7 @@ func TestUnwrapPodObject(t *testing.T) {
 }
 
 func TestFetchPodDetailRejectsMalformedJSON(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{invalid`))
@@ -169,6 +177,7 @@ func TestFetchPodDetailRejectsMalformedJSON(t *testing.T) {
 }
 
 func TestFetchPodDetailIncludesInstanceIDInURL(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -193,6 +202,7 @@ func TestFetchPodDetailIncludesInstanceIDInURL(t *testing.T) {
 // TestFetchPodDetailDoesNotLeakKey verifies that URL path/query and error text
 // do not include the API key.
 func TestFetchPodDetailDoesNotLeakKey(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "test-key")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"bad request"}`))

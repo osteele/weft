@@ -134,10 +134,12 @@ func scanHFCacheResultsContext(ctx context.Context, host string) ([]hfScanResult
 func hfCacheScanCommand() string {
 	return ResolveHFCacheDirShellVar() + `
 if [ ! -d "$_hf_cache" ] || [ ! -r "$_hf_cache" ] || [ ! -x "$_hf_cache" ]; then echo "` + scanBaseDirSentinel + ` $_hf_cache" >&2; exit 3; fi
-_dirs=()
-for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
-[ ${#_dirs[@]} -eq 0 ] && exit 0
-for _d in "${_dirs[@]}"; do
+# POSIX: accumulate in the positional parameters. Arrays are a bash
+# extension and this runs under /bin/sh, which is dash on Debian family.
+set --
+for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && set -- "$@" "$_p"; done
+[ "$#" -eq 0 ] && exit 0
+for _d in "$@"; do
   _name=$(basename "$_d")
   _status="ok"
   if [ ! -r "$_d" ] || [ ! -x "$_d" ]; then

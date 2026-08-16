@@ -1,0 +1,55 @@
+name: Tests
+
+# Runs on every branch, not just main: local work lives on long-lived branches
+# that are pushed rarely, and a workflow gated on main would almost never fire.
+on:
+  push:
+  pull_request:
+  schedule:
+    # Seed exploration, not regression detection — see model-checks below.
+    - cron: '23 6 * * *'
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-suite:
+    name: Full suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Deliberately without -short. `just test` passes it to skip the tests
+      # that cross-compile agent binaries (internal/runner, cmd/agent), so this
+      # is the only place they run. Integration tests skip themselves when
+      # SSH_TEST_HOST / SLURM_TEST_HOST are unset, which they are here.
+      - name: go test ./...
+        run: go test ./... -count=1
+
+  model-checks:
+    name: Model checks (seed ${{ matrix.seed }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned seeds give a deterministic regression signal: a failure here
+        # reproduces locally with WEFT_TEST_SEED=<seed>. The unpinned run in
+        # full-suite above draws a fresh seed each time, so repeated CI runs
+        # keep exploring new command sequences.
+        seed: ['1', '2', '3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run randomized state-machine model checks
+        env:
+          WEFT_TEST_SEED: ${{ matrix.seed }}
+        run: go test ./internal/campaign/ ./internal/db/ ./internal/status/ -run StateMachine -count=1

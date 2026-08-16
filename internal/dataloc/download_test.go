@@ -222,7 +222,7 @@ func TestDownloadAssetToHost_FinalCacheScanUsesCallerContext(t *testing.T) {
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", nil
-		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+		case strings.Contains(command, "_hf_cache") && strings.Contains(command, "du -sb"):
 			if _, ok := ctx.Deadline(); ok {
 				scanSawDeadline = true
 			}
@@ -258,7 +258,7 @@ func TestDownloadAssetToHost_ReportsIncompleteCacheAfterSuccessfulDownload(t *te
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", nil
-		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+		case strings.Contains(command, "_hf_cache") && strings.Contains(command, "du -sb"):
 			return "2276341\tincomplete\t/home/test/.cache/huggingface/hub/models--meta-llama--Llama-3.1-8B-Instruct\n", "", nil
 		default:
 			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
@@ -299,7 +299,7 @@ func TestDownloadAssetToHost_ReportsUnreadableCacheAsOwnershipIssue(t *testing.T
 			return "OK\n", "", nil
 		case strings.Contains(command, `if [ -f "$D/status" ]`):
 			return "STATUS=0\n---STDERR---\n", "", nil
-		case strings.Contains(command, "_dirs=()") && strings.Contains(command, "du -sb"):
+		case strings.Contains(command, "_hf_cache") && strings.Contains(command, "du -sb"):
 			return "0\tunreadable\t" + entryPath + "\n", "", nil
 		default:
 			return "", "", fmt.Errorf("unexpected command in test mock: %s", command)
