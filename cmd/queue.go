@@ -173,8 +173,13 @@ Examples:
 
 var editCmd = &cobra.Command{
 	Use:   "edit <job-id>",
-	Short: "Edit queued or draft job metadata",
-	Long: `Edit a queued or draft job's description, command, directory, environment variables, tags, or dependencies.
+	Short: "Edit queued, draft, or running job metadata",
+	Long: `Edit a job's description, command, directory, environment variables, tags, or dependencies.
+
+For running jobs, only display-only metadata can be changed: the description
+(--message) and tags that do not affect scheduling (e.g. 'processed'). Tags that
+affect placement or execution (rental, inventory, provider:*, exclusive,
+benchmark-isolation, interruptible, cpu-intensive) are frozen while the job runs.
 
 Examples:
   weft edit wj1595 --depends-on wj1599
@@ -999,6 +1004,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if !fieldChanged {
 		return usageErrorf("no changes specified; use metadata, dependency, resource, rental-policy, or status flags")
 	}
+
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
 	}
@@ -1065,10 +1071,56 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		} else if !requeueableStatuses[effectiveStatus] {
 			return fmt.Errorf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", ids.FormatJobID(jobID), effectiveStatus)
 		}
-	} else if effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
-		return editNonQueuedJobError(jobID, effectiveStatus)
+	}
+
+	// Classify tag changes into placement-affecting vs. display-only so that
+	// display/user-management tags (e.g. 'processed') can be edited on a running
+	// job without disturbing execution.
+	placementTagChanges := false
+	if tagsChanged {
+		switch {
+		case editClearTags:
+			for _, tag := range job.Tags {
+				if db.IsPlacementTag(tag) {
+					placementTagChanges = true
+					break
+				}
+			}
+		case cmd.Flags().Changed("remove-tag"):
+			for _, tag := range editRemoveTags {
+				if db.IsPlacementTag(tag) {
+					placementTagChanges = true
+					break
+				}
+			}
+		default:
+			for _, tag := range editTags {
+				if db.IsPlacementTag(tag) {
+					placementTagChanges = true
+					break
+				}
+			}
+		}
+	}
+
+	if effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
+		// Allow display-only edits on running/starting jobs: tags that do not
+		// affect placement (e.g. 'processed') and the description/message.
+		nonDisplayFieldChanged := cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
+			envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
+			rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || placementTagChanges
+		displayOnlyChange := cmd.Flags().Changed("message") || (tagsChanged && !placementTagChanges)
+		if statusChanged || nonDisplayFieldChanged || !displayOnlyChange {
+			return editNonQueuedJobError(jobID, effectiveStatus)
+		}
 	}
 	editWasDraft := effectiveStatus == db.StatusDraft
+
+	// Editing anything that affects placement can invalidate a cached blocker.
+	placementBlockedChanged := statusChanged || placementTagChanges ||
+		cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
+		envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
+		rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
 
 	var updates []string
 
@@ -1562,6 +1614,15 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Invalidate cached placement blockers when edits could change the placement
+	// decision (e.g. new --needs, different rental policy, or placement tags).
+	// Display-only changes like description or the 'processed' tag do not.
+	if placementBlockedChanged {
+		if err := db.SetJobPlacementBlocked(database, jobID, ""); err != nil {
+			return fmt.Errorf("clear cached placement blocker: %w", err)
+		}
+	}
+
 	if editWasDraft {
 		fmt.Printf("Updated draft job %s\n", ids.FormatJobID(jobID))
 	} else if deferredUpdate {
@@ -1601,7 +1662,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 func editNonQueuedJobError(jobID int64, status string) error {
 	jobRef := ids.FormatJobID(jobID)
-	message := fmt.Sprintf("job %s has status '%s', can only edit queued or draft jobs", jobRef, status)
+	message := fmt.Sprintf("job %s has status '%s'; only display-only fields (description and non-placement tags such as 'processed') can be edited on a running job", jobRef, status)
 	if requeueableStatuses[status] {
 		message += fmt.Sprintf("\nSolution: use `weft edit %s --retry ...` to requeue and apply edits, or `weft restart %s ...` to retry with overrides.", jobRef, jobRef)
 	}

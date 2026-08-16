@@ -1507,7 +1507,7 @@ func SetJobPlacementReasons(db dbExecer, jobID int64, reasons []string) error {
 // SetJobPlacementBlocked stores the structured launch/reuse breakdown for an
 // unplaced job (JSON-encoded blockreason.Structured). An empty string clears
 // the column.
-func SetJobPlacementBlocked(db *sql.DB, jobID int64, encoded string) error {
+func SetJobPlacementBlocked(db dbExecer, jobID int64, encoded string) error {
 	if strings.TrimSpace(encoded) == "" {
 		_, err := db.Exec(`UPDATE jobs SET placement_blocked = NULL WHERE id = ?`, jobID)
 		return err
@@ -1879,6 +1879,9 @@ func RequeueByIDTx(tx *sql.Tx, id int64) error {
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`UPDATE jobs SET placement_blocked = NULL WHERE id = ?`, id); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1944,6 +1947,9 @@ func RequeueFreshAttemptByTargetTx(tx *sql.Tx, id int64, host string, launchID *
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET placement_blocked = NULL WHERE id = ?`, id); err != nil {
 		return err
 	}
 	// Manual retry starts a new launch chain for budgeting purposes.
@@ -2096,6 +2102,9 @@ func ResetJobToUnplacedTx(tx *sql.Tx, jobID int64, job *Job) error {
 	}
 	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
 		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET placement_blocked = NULL WHERE id = ?`, jobID); err != nil {
 		return err
 	}
 	return nil
@@ -3436,6 +3445,18 @@ func HasCPUIntensiveTag(tags []string) bool {
 		}
 	}
 	return false
+}
+
+// IsPlacementTag reports whether a tag directly affects scheduling or execution.
+// Tags that only affect display/filtering (e.g. 'processed' or user labels) are
+// not placement tags and can be edited on a running job.
+func IsPlacementTag(tag string) bool {
+	canonical := CanonicalizeTag(tag)
+	switch canonical {
+	case TagExclusive, TagBenchmark, TagRental, TagInventory, TagInterruptible, TagCPUIntensive:
+		return true
+	}
+	return strings.HasPrefix(canonical, TagProviderPrefix)
 }
 
 // ProviderTag returns the canonical reserved provider tag for a provider name.

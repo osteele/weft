@@ -821,6 +821,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 					return fmt.Errorf("clear stale placement reasons: %w", err)
 				}
 				job.PlacementReasons = nil
+				if err := db.SetJobPlacementBlocked(tx, job.ID, ""); err != nil {
+					return fmt.Errorf("clear stale placement blocker: %w", err)
+				}
 			}
 			if !shouldForceFreshAttempt && len(updates) == 0 {
 				return nil

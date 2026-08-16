@@ -695,7 +695,7 @@ func TestRunEditFailedJobSuggestsRetry(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, want := range []string{
-		"can only edit queued or draft jobs",
+		"only display-only fields (description and non-placement tags such as 'processed') can be edited on a running job",
 		"Solution:",
 		fmt.Sprintf("weft edit %s --retry", ids.FormatJobID(jobID)),
 		fmt.Sprintf("weft restart %s", ids.FormatJobID(jobID)),
