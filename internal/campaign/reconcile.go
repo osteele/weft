@@ -1151,14 +1151,16 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 	return &marker, nil
 }
 
-// maxEmptyStatusTime is the maximum time to wait for a provider instance to
-// report a non-empty status. Instances stuck with empty actual_status beyond
-// this threshold are terminated as infra failures.
+// maxEmptyStatusTime is the legacy fallback maximum time to wait for a provider
+// instance to report a non-empty status. It is used only when bootstrap survival
+// data is unavailable. In normal operation instance_check.go uses the bootstrap
+// survival terminate threshold instead.
 const maxEmptyStatusTime = 1 * time.Minute
 
-// maxPreRunningStatusTime is the maximum time to wait for a provider instance to
-// reach "running" status. Instances stuck in any pre-running status ("created",
-// "loading", etc.) beyond this threshold are terminated as infra failures.
+// maxPreRunningStatusTime is the legacy fallback maximum time to wait for a
+// provider instance to reach "running" status. It is used only when bootstrap
+// survival data is unavailable. In normal operation instance_check.go uses the
+// bootstrap survival terminate threshold instead.
 const maxPreRunningStatusTime = 5 * time.Minute
 
 // maxProviderStatusUnavailableTime is the maximum time to wait when provider

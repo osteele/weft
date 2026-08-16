@@ -246,6 +246,64 @@ type CheckInstanceParams struct {
 	RunningPhaseJobTerminalSince *time.Time
 }
 
+// effectiveMaxEmptyStatusTime returns the empty-status kill threshold.
+// A learned bootstrap terminate threshold replaces the legacy 1-minute
+// constant so slow provider status propagation is not misclassified as a
+// provider failure.
+func (p CheckInstanceParams) effectiveMaxEmptyStatusTime() time.Duration {
+	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return maxEmptyStatusTime
+}
+
+// effectiveMaxPreRunningStatusTime returns the pre-running-status kill
+// threshold. Uses the learned bootstrap survival terminate threshold when one
+// exists, otherwise the legacy constant.
+func (p CheckInstanceParams) effectiveMaxPreRunningStatusTime() time.Duration {
+	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return maxPreRunningStatusTime
+}
+
+// effectiveLaunchingPhaseTimeout returns the launching-phase safety-net
+// timeout. Uses the learned bootstrap survival terminate threshold when one
+// exists.
+func (p CheckInstanceParams) effectiveLaunchingPhaseTimeout() time.Duration {
+	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return launchingPhaseTimeout
+}
+
+// effectiveDudVastTimeout returns the dud-provider detection window.
+// Uses the learned bootstrap survival terminate threshold when one exists.
+func (p CheckInstanceParams) effectiveDudVastTimeout() time.Duration {
+	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return dudVastTimeout
+}
+
+// effectiveOnStartStallTimeout returns the per-stage OnStart stall timeout.
+// Uses the learned setup survival terminate threshold when one exists.
+func (p CheckInstanceParams) effectiveOnStartStallTimeout() time.Duration {
+	if d, ok := p.SetupSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return onStartStallTimeout
+}
+
+// effectiveOnStartTotalActiveTimeout returns the total OnStart active-time
+// cap. Uses the learned setup survival terminate threshold when one exists.
+func (p CheckInstanceParams) effectiveOnStartTotalActiveTimeout() time.Duration {
+	if d, ok := p.SetupSurvival.LearnedTerminate(); ok {
+		return d
+	}
+	return onStartTotalActiveTimeout
+}
+
 // deferTerminationForUnknownStatus returns a display-only deferral action
 // when a watchdog termination must be held back: the launch is interruptible,
 // provider status is unknown (the most recent poll failed — ProviderInst nil
@@ -456,7 +514,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 	if p.ProviderInst != nil && p.ProviderInst.Status == "" {
 		if lifecycleStart := cloudInstanceLifecycleStart(ci); lifecycleStart != nil {
 			age := p.Now.Sub(*lifecycleStart)
-			if age > maxEmptyStatusTime {
+			if age > p.effectiveMaxEmptyStatusTime() {
 				return InstanceAction{
 					Kind:              ActionEmptyStatusTimeout,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -526,7 +584,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
 		if anchor := stalePreRunningAnchor(ci, p.LastProviderStatusChangeAt); anchor != nil {
 			age := p.Now.Sub(*anchor)
-			if age > maxPreRunningStatusTime {
+			if age > p.effectiveMaxPreRunningStatusTime() {
 				return InstanceAction{
 					Kind:              ActionEmptyStatusTimeout,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -544,15 +602,16 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 	// spec BootstrapTimeout can't anchor. Fire on CreatedAt; reason
 	// infra_failure so the retry path applies. See spec LaunchingPhaseTimeout.
 	if ci.Status == db.LaunchStatusLaunching && ci.BootstrapOrigin() == nil {
-		if start := cloudInstanceLifecycleStart(ci); start != nil && p.Now.Sub(*start) >= launchingPhaseTimeout {
-			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("launching phase exceeded %s", launchingPhaseTimeout)); ok {
+		timeout := p.effectiveLaunchingPhaseTimeout()
+		if start := cloudInstanceLifecycleStart(ci); start != nil && p.Now.Sub(*start) >= timeout {
+			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("launching phase exceeded %s", timeout)); ok {
 				return action
 			}
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      fmt.Sprintf("launching phase exceeded %s with no provider progress — terminating", launchingPhaseTimeout),
+				StallMessage:      fmt.Sprintf("launching phase exceeded %s with no provider progress — terminating", timeout),
 				DestroyProvider:   true,
 				ResetJobs:         true,
 				AttemptOutcome:    db.AttemptOutcomeOrphaned,
@@ -562,7 +621,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 
 	// 4d. Dud-provider detection. The provider reports the rental as `running`
 	// (LaunchedAt is set), but no agent activity has appeared in R2
-	// after dudVastTimeout: no OnStart probe, no heartbeat, no phase,
+	// after the dud timeout: no OnStart probe, no heartbeat, no phase,
 	// no current or historical bootstrap stage. This is a host-level binary failure
 	// signature (zombie offer, wedged docker daemon, image-pull block)
 	// and would otherwise wait the full adaptive bootstrap deadline
@@ -583,7 +642,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		p.InstancePhase == "" &&
 		p.BootstrapStage == "" {
 		runningAt := time.Unix(*ci.LaunchedAt, 0)
-		if p.Now.Sub(runningAt) >= dudVastTimeout {
+		if p.Now.Sub(runningAt) >= p.effectiveDudVastTimeout() {
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.LaunchStatusFailed,
@@ -628,7 +687,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		// hung (e.g. an unresponsive apt mirror) and will not recover.
 		if p.OnStartStageChangedAt != nil {
 			stalled := p.Now.Sub(*p.OnStartStageChangedAt)
-			if stalled >= onStartStallTimeout {
+			if stalled >= p.effectiveOnStartStallTimeout() {
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -649,7 +708,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		// bleed to the ~2h adaptive bootstrap deadline.
 		if ci.FirstOnStartProbeSeenUnix != nil {
 			active := p.Now.Sub(time.Unix(*ci.FirstOnStartProbeSeenUnix, 0))
-			if active >= onStartTotalActiveTimeout {
+			if active >= p.effectiveOnStartTotalActiveTimeout() {
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
@@ -686,11 +745,14 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		warnTimeout := bootstrapWarnTimeout
 		termTimeout := BootstrapTerminateTimeout
 		if p.BootstrapSurvival != nil {
-			if p.BootstrapSurvival.WarnAfter > 0 {
-				warnTimeout = p.BootstrapSurvival.WarnAfter
+			// bootstrapWarnTimeout/BootstrapTerminateTimeout equal the survival
+			// defaults, so reading only learned values leaves this unchanged
+			// while keeping defaults out of the kill decision.
+			if learned, ok := p.BootstrapSurvival.LearnedWarn(); ok {
+				warnTimeout = learned
 			}
-			if p.BootstrapSurvival.TerminateAfter > 0 {
-				termTimeout = p.BootstrapSurvival.TerminateAfter
+			if learned, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
+				termTimeout = learned
 			}
 			if originUnix := ci.BootstrapOrigin(); originUnix != nil {
 				learnedDeadline := time.Unix(*originUnix, 0).Add(termTimeout)

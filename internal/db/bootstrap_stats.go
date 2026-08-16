@@ -269,6 +269,34 @@ type BootstrapSurvival struct {
 	Durations        BootstrapDurations // sorted successful bootstrap durations for conditional estimates
 }
 
+// LearnedTerminate returns the terminate threshold only when it came from the
+// observed survival curve.
+//
+// Read this instead of TerminateAfter anywhere the threshold decides whether to
+// kill something. TerminateAfter is populated even when nothing was learned —
+// ComputeBootstrapSurvival fills the struct with configured defaults on thin
+// history — so a non-zero value is not evidence of a fitted curve, and testing
+// the value alone silently hands every caller the default. Display and
+// diagnostic surfaces want the raw field, since they report the default and
+// label its provenance.
+//
+// Safe on a nil receiver: an absent survival record reports nothing learned.
+func (s *BootstrapSurvival) LearnedTerminate() (time.Duration, bool) {
+	if s == nil || !s.TerminateLearned || s.TerminateAfter <= 0 {
+		return 0, false
+	}
+	return s.TerminateAfter, true
+}
+
+// LearnedWarn returns the warn threshold only when it came from the observed
+// survival curve. See LearnedTerminate.
+func (s *BootstrapSurvival) LearnedWarn() (time.Duration, bool) {
+	if s == nil || !s.WarnLearned || s.WarnAfter <= 0 {
+		return 0, false
+	}
+	return s.WarnAfter, true
+}
+
 // survivalConfig holds tunable parameters for a survival analysis.
 type survivalConfig struct {
 	BucketSecs     int     // time resolution for survival curve

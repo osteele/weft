@@ -26,47 +26,29 @@ const (
 	BootstrapTerminateTimeout = 20 * time.Minute // auto-terminate after this long
 	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
 
-	// launchingPhaseTimeout bounds `launching` when BootstrapOrigin is
-	// nil. See campaign-lifecycle.allium config.launching_phase_timeout
-	// for calibration and rationale.
-	// MUST exceed the launching goroutine's own context timeout so its
-	// cancellation fires first; this is the safety net. Matches
-	// config.launching_phase_timeout in campaign-lifecycle.allium.
+	// launchingPhaseTimeout is the legacy fallback bound for `launching` when
+	// BootstrapOrigin is nil. It is used only when bootstrap survival data is
+	// unavailable. In normal operation instance_check.go uses the bootstrap
+	// survival terminate threshold instead.
 	launchingPhaseTimeout = 12 * time.Minute
 
-	// dudVastTimeout is how long after Vast reports `running` we wait
-	// for the OnStart first-line probe to land in R2 before declaring
-	// a "dud" — Vast says the container is running, but no agent
-	// activity ever appears. The bimodal distribution of probe arrival
-	// times observed 2026-05-06 (probe within ~60s OR never) makes
-	// this a sharp signal: anything past several minutes is a host-
-	// level binary failure, not slow image pull. Set generously enough
-	// to cover legitimate cold-image pulls (typically 1–3 min) but
-	// well below the adaptive bootstrap deadline (often 1h+) so dud
-	// rentals are reclaimed before they bleed budget.
+	// dudVastTimeout is the legacy fallback for how long after Vast reports
+	// `running` we wait for the OnStart first-line probe to land in R2 before
+	// declaring a "dud". It is used only when bootstrap survival data is
+	// unavailable. In normal operation instance_check.go uses the bootstrap
+	// survival terminate threshold instead.
 	dudVastTimeout = 8 * time.Minute
 
-	// onStartStallTimeout is how long the OnStart shell's stage marker may
-	// sit unchanged on an in-progress step (apt/uv/rclone install) before the
-	// chain is declared dead. OnStart install steps normally finish in 1–3
-	// min; a marker frozen well past that with no bootstrap.sh handoff is a
-	// hung apt mirror / failed install, not slow progress. This closes the
-	// gap between dud detection (no probe at all) and the bootstrap `failed:`
-	// marker (written only by bootstrap.sh, which never ran in this case),
-	// so a stalled OnStart chain is reaped in minutes instead of waiting the
-	// full adaptive bootstrap deadline. See instance_check.go rule 4f.
+	// onStartStallTimeout is the legacy fallback for how long the OnStart
+	// shell's stage marker may sit unchanged. It is used only when setup
+	// survival data is unavailable. In normal operation instance_check.go uses
+	// the setup survival terminate threshold instead.
 	onStartStallTimeout = 10 * time.Minute
 
-	// onStartTotalActiveTimeout caps the total time an instance may sit in
-	// the OnStart phase (probe seen, no bootstrap.sh handoff, no agent ready)
-	// regardless of stage-marker freshness. Rule 4f measures a stall from the
-	// marker's R2 last-modified, which some providers (e.g. RunPod) refresh by
-	// re-running a failed OnStart from the top — the marker looks fresh while
-	// the chain loops without ever progressing to bootstrap.sh, so 4f never
-	// fires and the instance bleeds budget until the ~2h adaptive bootstrap
-	// deadline. Anchoring on FirstOnStartProbeSeenUnix (set-once, churn-immune)
-	// bounds that case. Set generously above onStartStallTimeout so a slow but
-	// genuinely progressing OnStart is not clipped. See instance_check.go rule 4g.
+	// onStartTotalActiveTimeout is the legacy fallback cap on total OnStart
+	// active time. It is used only when setup survival data is unavailable.
+	// In normal operation instance_check.go uses the setup survival terminate
+	// threshold instead.
 	onStartTotalActiveTimeout = 25 * time.Minute
 )
 

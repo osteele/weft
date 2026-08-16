@@ -19,6 +19,28 @@ type SetupSurvival struct {
 	TerminateLearned bool
 }
 
+// LearnedTerminate returns the terminate threshold only when it came from the
+// observed survival curve. See BootstrapSurvival.LearnedTerminate for why
+// enforcement paths must read this rather than TerminateAfter, which carries
+// configured defaults when history is thin.
+//
+// Safe on a nil receiver: an absent survival record reports nothing learned.
+func (s *SetupSurvival) LearnedTerminate() (time.Duration, bool) {
+	if s == nil || !s.TerminateLearned || s.TerminateAfter <= 0 {
+		return 0, false
+	}
+	return s.TerminateAfter, true
+}
+
+// LearnedWarn returns the warn threshold only when it came from the observed
+// survival curve. See LearnedTerminate.
+func (s *SetupSurvival) LearnedWarn() (time.Duration, bool) {
+	if s == nil || !s.WarnLearned || s.WarnAfter <= 0 {
+		return 0, false
+	}
+	return s.WarnAfter, true
+}
+
 // setupSurvivalConfig is the configuration for setup-phase stall detection.
 var setupSurvivalConfig = survivalConfig{
 	BucketSecs:     30,

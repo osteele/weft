@@ -761,8 +761,8 @@ func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage 
 	timeout := BootstrapTerminateTimeout
 	if survival, err := db.ComputeBootstrapSurvival(database, ci.Provider); err != nil {
 		slog.Debug("compute bootstrap survival deadline", "component", "sync", "instance", ci.ID, "provider", ci.Provider, "error", err)
-	} else if survival != nil && survival.TerminateAfter > 0 {
-		timeout = survival.TerminateAfter
+	} else if learned, ok := survival.LearnedTerminate(); ok {
+		timeout = learned
 	}
 
 	deadline := time.Unix(stageEnteredAt, 0).Add(timeout)
