@@ -431,3 +431,31 @@ func TestCUDAFamilyFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectHasCUDAPackages(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectPyproject(t, dir, `[project]
+dependencies = ["torch>=2.6", "numpy"]
+`)
+
+	sub := filepath.Join(dir, "experiments")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+
+	if !ProjectHasCUDAPackages(sub) {
+		t.Errorf("ProjectHasCUDAPackages(sub) = false, want true (walks up to project root)")
+	}
+
+	nonCUDA := t.TempDir()
+	writeProjectPyproject(t, nonCUDA, `[project]
+dependencies = ["requests"]
+`)
+	if ProjectHasCUDAPackages(nonCUDA) {
+		t.Errorf("ProjectHasCUDAPackages(nonCUDA) = true, want false")
+	}
+
+	if ProjectHasCUDAPackages(t.TempDir()) {
+		t.Errorf("ProjectHasCUDAPackages(no project) = true, want false")
+	}
+}

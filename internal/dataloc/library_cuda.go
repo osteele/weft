@@ -23,6 +23,7 @@ type LibraryFloor struct {
 	Name        string // canonical pypi name, lowercase
 	MinVersion  string // inclusive lower bound that triggers the floor (PEP 440 version)
 	CudaVersion string // required CUDA toolkit version (e.g. "12.8")
+	NeedsDevel  bool   // true if the library JIT-compiles kernels and needs nvcc
 	Reason      string // citation for maintainers
 }
 
@@ -32,31 +33,31 @@ type LibraryFloor struct {
 // LibraryMinCUDAFromDeps applies the highest CUDA across all entries that the
 // dep spec admits, so multiple entries per library form a stepped floor as
 // versions bump their CUDA requirement.
+//
+// Both vLLM entries set NeedsDevel because vLLM's flashinfer path JIT-compiles
+// kernels at run time and needs nvcc: a pytorch/pytorch runtime image broke
+// SGLang/vLLM pilots that nvidia/cuda:12.4.1-devel-ubuntu22.04 served.
 var libraryCudaFloors = []LibraryFloor{
 	{
 		Name:        "vllm",
 		MinVersion:  "0.17.0",
 		CudaVersion: "12.8",
+		NeedsDevel:  true,
 		Reason:      "vLLM 0.17 integrates flash-attention 4 which requires CUDA 12.8 / driver 570",
 	},
 	{
 		Name:        "vllm",
 		MinVersion:  "0.20.0",
 		CudaVersion: "13.0",
+		NeedsDevel:  true,
 		Reason:      "vLLM 0.20 switched default to CUDA 13.0 (PyTorch 2.11 upgrade, manylinux_2_28); needs driver 580+",
 	},
 }
 
-// LibraryMinCUDAFromDeps returns the highest CUDA toolkit version implied by
-// any DepSpec that matches an entry in libraryCudaFloors. Returns "" when no
-// applicable floor is found.
-//
-// A DepSpec matches a floor entry when (a) names match (case-insensitive), and
-// (b) the spec admits at least one version ≥ the floor's MinVersion. An empty
-// spec (bare package name) is conservatively treated as "could resolve to the
-// latest" and matches; callers that want stricter behavior should filter first.
-func LibraryMinCUDAFromDeps(deps []DepSpec) string {
-	best := ""
+// forEachMatchingLibraryFloor calls fn for every libraryCudaFloors entry that
+// is matched by a dep in deps. The list is tiny so the callback is invoked for
+// every match even if the caller could early-exit.
+func forEachMatchingLibraryFloor(deps []DepSpec, fn func(floor LibraryFloor)) {
 	for _, dep := range deps {
 		name := strings.ToLower(strings.TrimSpace(dep.Name))
 		if name == "" {
@@ -69,12 +70,41 @@ func LibraryMinCUDAFromDeps(deps []DepSpec) string {
 			if !specAdmitsMinVersion(dep.Spec, floor.MinVersion) {
 				continue
 			}
-			if best == "" || cmpCUDAVersion(floor.CudaVersion, best) > 0 {
-				best = floor.CudaVersion
-			}
+			fn(floor)
 		}
 	}
+}
+
+// LibraryMinCUDAFromDeps returns the highest CUDA toolkit version implied by
+// any DepSpec that matches an entry in libraryCudaFloors. Returns "" when no
+// applicable floor is found.
+//
+// A DepSpec matches a floor entry when (a) names match (case-insensitive), and
+// (b) the spec admits at least one version ≥ the floor's MinVersion. An empty
+// spec (bare package name) is conservatively treated as "could resolve to the
+// latest" and matches; callers that want stricter behavior should filter first.
+func LibraryMinCUDAFromDeps(deps []DepSpec) string {
+	best := ""
+	forEachMatchingLibraryFloor(deps, func(floor LibraryFloor) {
+		if best == "" || cmpCUDAVersion(floor.CudaVersion, best) > 0 {
+			best = floor.CudaVersion
+		}
+	})
 	return best
+}
+
+// LibraryNeedsDevelFromDeps reports whether any DepSpec that matches a
+// libraryCudaFloors entry has NeedsDevel set. This captures libraries whose
+// wheels JIT-compile kernels at runtime and therefore require an image with
+// nvcc (the -devel variant), not just the CUDA runtime.
+func LibraryNeedsDevelFromDeps(deps []DepSpec) bool {
+	needs := false
+	forEachMatchingLibraryFloor(deps, func(floor LibraryFloor) {
+		if floor.NeedsDevel {
+			needs = true
+		}
+	})
+	return needs
 }
 
 // specAdmitsMinVersion reports whether the version spec could resolve to a

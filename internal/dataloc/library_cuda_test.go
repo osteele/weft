@@ -225,3 +225,39 @@ func TestLibraryMinCUDAFromDeps(t *testing.T) {
 		})
 	}
 }
+
+func TestLibraryNeedsDevelFromDeps(t *testing.T) {
+	cases := []struct {
+		name string
+		deps []DepSpec
+		want bool
+	}{
+		{
+			name: "vllm triggers devel requirement",
+			deps: []DepSpec{{Name: "vllm", Spec: ">=0.17"}},
+			want: true,
+		},
+		{
+			name: "vllm below floor does not trigger",
+			deps: []DepSpec{{Name: "vllm", Spec: "<0.17"}},
+			want: false,
+		},
+		{
+			name: "torch does not trigger devel",
+			deps: []DepSpec{{Name: "torch", Spec: ">=2.0"}},
+			want: false,
+		},
+		{
+			name: "unrelated dependency does not trigger",
+			deps: []DepSpec{{Name: "numpy", Spec: ">=1.0"}},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LibraryNeedsDevelFromDeps(tc.deps); got != tc.want {
+				t.Errorf("LibraryNeedsDevelFromDeps(%+v) = %v, want %v", tc.deps, got, tc.want)
+			}
+		})
+	}
+}

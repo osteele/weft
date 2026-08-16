@@ -158,6 +158,23 @@ type RuntimeFloor struct {
 	// (script metadata or .weft.toml) rather than backfilled from the CUDA
 	// floor.
 	DriverExplicit bool
+	// ProjectEnvOwnsTorch is true when the project's uv-managed environment
+	// (as opposed to a PEP 723 script-isolated environment) is the one that
+	// will import torch/CUDA packages. Image selection uses this to decide
+	// whether a preinstalled pytorch/pytorch image is helpful.
+	ProjectEnvOwnsTorch bool
+	// NeedsDevel is true when the job's dependencies include a library that
+	// JIT-compiles kernels at runtime and therefore requires an image with
+	// nvcc (the -devel variant) rather than the CUDA runtime alone.
+	NeedsDevel bool
+	// ProjectTorchPinCUDA is the CUDA version resolved from the project's
+	// torch wheel pin (e.g. "12.4" from a cu124 wheel). It is non-empty only
+	// when that pin was resolvable AND governs the runtime env, so it marks a
+	// hard constraint: a resolved wheel is bound to its CUDA runtime and
+	// cannot be moved to another. A bare range such as torch>=2.6, or a lock
+	// exposing no CUDA variant, is a minimum rather than a pin and leaves this
+	// empty.
+	ProjectTorchPinCUDA string
 }
 
 // MergeInferred max-merges an inferred requirement (torch pin, library

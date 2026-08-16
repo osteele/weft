@@ -80,8 +80,8 @@ func TestCommandDepHeadroomGB_LMCacheIncludesTorch(t *testing.T) {
 	if got := commandDepIncrementalEnvGB(group.Jobs[0]); got != want {
 		t.Fatalf("commandDepIncrementalEnvGB = %d, want %d (lmcache+torch)", got, want)
 	}
-	if !slices.Contains(cudaPackages, "lmcache") {
-		t.Fatal("cudaPackages missing lmcache")
+	if !slices.Contains(dataloc.CUDAProjectPackages, "lmcache") {
+		t.Fatal("CUDAProjectPackages missing lmcache")
 	}
 }
 

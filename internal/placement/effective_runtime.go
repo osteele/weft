@@ -127,7 +127,7 @@ func ResolveEffectiveRuntime(localDir, command string, opts EffectiveRuntimeOpti
 	}
 	img = NormalizeRuntimeImageAlias(img)
 
-	rf := resolveRuntimeFloor(localDir, command, opts.FloorMode)
+	rf := resolveRuntimeFloor(localDir, command, opts.FloorMode, meta)
 	for _, spec := range runtimeImageSpecs {
 		if img != spec.CanonicalImage {
 			continue
@@ -150,9 +150,13 @@ func ResolveEffectiveRuntime(localDir, command string, opts EffectiveRuntimeOpti
 	return EffectiveRuntime{Image: img, ImagePullSecret: imagePullSecret, Floor: rf}, parseErr
 }
 
-func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode) RuntimeFloor {
+func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode, meta *dataloc.ScriptMeta) RuntimeFloor {
 	var rf RuntimeFloor
-	if scriptReq := dataloc.ScanScriptTorchRequirement(dir, command); scriptReq != nil {
+	scriptReq := dataloc.ScanScriptTorchRequirement(dir, command)
+	scriptDeps := dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))
+	scriptOwnsCUDA := scriptOwnsCUDAEnv(meta, scriptReq, scriptDeps)
+
+	if scriptReq != nil {
 		if mode == RuntimeFloorExact {
 			if scriptCUDA := dataloc.ScriptTorchCUDAVersion(dir, command); scriptCUDA != "" {
 				origin := "script PEP 723 torch dependency"
@@ -164,18 +168,28 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode) RuntimeFloo
 		} else {
 			mergeScriptTorchRuntimeFloor(&rf, scriptReq, dataloc.ScanScriptTorchPin(dir, command))
 		}
-	} else if pin := dataloc.ScanTorchPin(dir); pin != nil {
-		if mode == RuntimeFloorExact {
-			if cuda := dataloc.CUDAVariantVersion(pin.CudaVariant); cuda != "" {
-				rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, "torch pin")
+	} else if !scriptOwnsCUDA {
+		// The project torch pin only governs the runtime image when the
+		// project env is the one that will import torch. A PEP 723 script
+		// with its own torch/CUDA deps runs in an isolated environment and
+		// ignores the project lockfile, so the lockfile is not even read.
+		if pin := dataloc.ScanTorchPin(dir); pin != nil {
+			// Recorded in both floor modes: whether a hard wheel-bound pin
+			// exists is a property of the project, not of how the floor is
+			// being resolved.
+			rf.ProjectTorchPinCUDA = dataloc.CUDAVariantVersion(pin.CudaVariant)
+			if mode == RuntimeFloorExact {
+				if cuda := rf.ProjectTorchPinCUDA; cuda != "" {
+					rf.MergeInferred(cloud.ImageRequirements{MinCUDAVersion: cuda}, "torch pin")
+				}
+			} else {
+				mergeProjectTorchRuntimeFloor(&rf, pin)
 			}
-		} else {
-			mergeProjectTorchRuntimeFloor(&rf, pin)
 		}
 	}
 
 	deps := append([]dataloc.DepSpec{}, dataloc.ScanUVRunWith(command)...)
-	deps = append(deps, dataloc.ParseDepSpecs(dataloc.ScanScriptDependencies(dir, command))...)
+	deps = append(deps, scriptDeps...)
 	if libCUDA := dataloc.LibraryMinCUDAFromDeps(deps); libCUDA != "" {
 		const origin = "library dependency CUDA floor"
 		before := rf.Req.MinCUDAVersion
@@ -185,7 +199,27 @@ func resolveRuntimeFloor(dir, command string, mode RuntimeFloorMode) RuntimeFloo
 			rf.InferredCUDAOrigin = origin
 		}
 	}
+	rf.NeedsDevel = dataloc.LibraryNeedsDevelFromDeps(deps)
+
+	// ProjectEnvOwnsTorch is true when the project uv environment (not a PEP
+	// 723 script-isolated environment) imports torch/CUDA packages. This is
+	// what governs whether a preinstalled pytorch/pytorch image is useful.
+	rf.ProjectEnvOwnsTorch = !scriptOwnsCUDA && dataloc.ProjectHasCUDAPackages(dir)
 	return rf
+}
+
+// scriptOwnsCUDAEnv reports whether the execution environment that imports
+// torch/CUDA for this job is the PEP 723 script environment rather than the
+// project uv environment. It is true when the script is isolated (project uv
+// sync is skipped) or when the script carries its own torch/CUDA dependencies.
+func scriptOwnsCUDAEnv(meta *dataloc.ScriptMeta, scriptReq *dataloc.TorchRequirement, scriptDeps []dataloc.DepSpec) bool {
+	if meta != nil && meta.Isolated {
+		return true
+	}
+	if scriptReq != nil {
+		return true
+	}
+	return dataloc.DepsUseTorch(scriptDeps) || dataloc.LibraryMinCUDAFromDeps(scriptDeps) != ""
 }
 
 func mergeProjectTorchRuntimeFloor(rf *RuntimeFloor, pin *dataloc.TorchPin) {

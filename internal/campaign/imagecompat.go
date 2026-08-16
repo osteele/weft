@@ -95,29 +95,79 @@ func isPyTorchImage(image string) bool {
 	return imageRepo(image) == "pytorch/pytorch"
 }
 
-// torchImageForCUDAVersion returns a popular PyTorch Docker image tag for the
-// given CUDA major.minor version, or "" if no known image exists. The selected
-// images are widely used on Vast.ai and likely pre-cached in data centers.
-func torchImageForCUDAVersion(cudaMajorMinor string) string {
-	switch cudaMajorMinor {
-	case "12.4":
-		return "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
-	case "12.8":
-		return "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime"
-	default:
-		return ""
-	}
+type cudaImageEntry struct {
+	cuda    string
+	runtime string
+	devel   string
 }
 
-func defaultCUDAImageForVersion(cudaMajorMinor string) string {
-	switch cudaMajorMinor {
-	case "12.4":
-		return cloud.DefaultImage
-	case "12.8":
-		return "nvidia/cuda:12.8.1-runtime-ubuntu22.04"
-	default:
+// torchCUDAImages maps CUDA major.minor versions to verified pytorch/pytorch
+// image tags. The lookup selects the smallest entry >= the required version
+// within the same CUDA major; cross-major selection is refused because a CUDA
+// 13 image needs a driver that cannot run wheels built for CUDA 12.x. Keep
+// sorted ascending by cuda.
+var torchCUDAImages = []cudaImageEntry{
+	{"12.4", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel"},
+	{"12.6", "pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel"},
+	{"12.8", "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime", "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-devel"},
+	{"12.9", "pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime", "pytorch/pytorch:2.8.0-cuda12.9-cudnn9-devel"},
+	{"13.0", "pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime", "pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel"},
+}
+
+// nvidiaCUDAImages maps CUDA major.minor versions to verified nvidia/cuda
+// ubuntu22.04 image tags. Same lookup semantics as torchCUDAImages.
+var nvidiaCUDAImages = []cudaImageEntry{
+	{"12.4", cloud.DefaultImage, "nvidia/cuda:12.4.1-devel-ubuntu22.04"},
+	{"12.6", "nvidia/cuda:12.6.3-runtime-ubuntu22.04", "nvidia/cuda:12.6.3-devel-ubuntu22.04"},
+	{"12.8", "nvidia/cuda:12.8.1-runtime-ubuntu22.04", "nvidia/cuda:12.8.1-devel-ubuntu22.04"},
+	{"12.9", "nvidia/cuda:12.9.1-runtime-ubuntu22.04", "nvidia/cuda:12.9.1-devel-ubuntu22.04"},
+	{"13.0", "nvidia/cuda:13.0.2-runtime-ubuntu22.04", "nvidia/cuda:13.0.2-devel-ubuntu22.04"},
+}
+
+// lookupCUDAImage selects the smallest mapped CUDA version >= required that
+// shares the same major version. It returns "" when no same-major entry exists
+// or when required is unparsable.
+func lookupCUDAImage(table []cudaImageEntry, required string, needsDevel bool) string {
+	required = strings.TrimSpace(required)
+	if required == "" {
 		return ""
 	}
+	requiredComponents := cudaVersionComponents(required)
+	if len(requiredComponents) == 0 {
+		return ""
+	}
+	requiredMajor := requiredComponents[0]
+	for _, entry := range table {
+		entryComponents := cudaVersionComponents(entry.cuda)
+		if len(entryComponents) == 0 {
+			continue
+		}
+		if entryComponents[0] != requiredMajor {
+			continue
+		}
+		if cmpVersionComponents(entryComponents, requiredComponents) >= 0 {
+			if needsDevel {
+				return entry.devel
+			}
+			return entry.runtime
+		}
+	}
+	return ""
+}
+
+// torchImageForCUDAVersion returns a verified PyTorch Docker image tag for the
+// given CUDA major.minor version, or "" if no known same-major image exists.
+// Pass needsDevel=true to request the -devel variant for libraries that
+// JIT-compile kernels at runtime.
+func torchImageForCUDAVersion(cudaMajorMinor string, needsDevel bool) string {
+	return lookupCUDAImage(torchCUDAImages, cudaMajorMinor, needsDevel)
+}
+
+// defaultCUDAImageForVersion returns a verified nvidia/cuda base image tag for
+// the given CUDA major.minor version, or "" if no known same-major image
+// exists. Pass needsDevel=true to request the -devel variant.
+func defaultCUDAImageForVersion(cudaMajorMinor string, needsDevel bool) string {
+	return lookupCUDAImage(nvidiaCUDAImages, cudaMajorMinor, needsDevel)
 }
 
 // normalizeRentalImageAlias maps Weft's semantic/legacy runtime names to the
@@ -133,17 +183,17 @@ func cudaVersionString(minCUDA float64) string {
 	return fmt.Sprintf("%.1f", minCUDA)
 }
 
-func chooseAutoImageForMinCUDA(minCUDA float64, preferTorch bool) string {
+func chooseAutoImageForMinCUDA(minCUDA float64, preferTorch bool, needsDevel bool) string {
 	ver := cudaVersionString(minCUDA)
 	if ver == "" {
 		return ""
 	}
 	if preferTorch {
-		if torchImage := torchImageForCUDAVersion(ver); torchImage != "" {
+		if torchImage := torchImageForCUDAVersion(ver, needsDevel); torchImage != "" {
 			return torchImage
 		}
 	}
-	return defaultCUDAImageForVersion(ver)
+	return defaultCUDAImageForVersion(ver, needsDevel)
 }
 
 // imageSupremum returns the most capable compatible image for both a and b,

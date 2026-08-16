@@ -1736,6 +1736,14 @@ import torch
 	if groups[0].MinDriverVersion != 580 {
 		t.Fatalf("MinDriverVersion = %d, want 580", groups[0].MinDriverVersion)
 	}
+	// The script owns its env, so no pytorch/pytorch image is selected; the
+	// base image must still track the resolved floor. Without the base-image
+	// selection the group falls back to the CUDA 12.4 default while the floor
+	// says 13.0 — an offer chosen for one CUDA version running an image built
+	// for another. These deps need no nvcc, so the runtime variant is correct.
+	if groups[0].Image != "nvidia/cuda:13.0.2-runtime-ubuntu22.04" {
+		t.Fatalf("Image = %q, want nvidia/cuda:13.0.2-runtime-ubuntu22.04", groups[0].Image)
+	}
 }
 
 func TestSplitGroupsByImage_InferMinCUDAFromUVRunWith(t *testing.T) {
@@ -1815,6 +1823,179 @@ wheels = [
 	}
 	if groups[0].Image != "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime" {
 		t.Fatalf("Image = %q, want pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", groups[0].Image)
+	}
+}
+
+func TestSplitGroupsByImage_ScriptDepsOwnCUDAEnv(t *testing.T) {
+	// Regression: a PEP 723 script with its own torch/CUDA deps runs in an
+	// isolated environment (~/.cache/uv/environments-v2/), so the project's
+	// torch pin must NOT govern the image. Previously SplitGroupsByImage
+	// selected pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime from the project
+	// lockfile while the runtime floor was 12.8 from vllm, causing a driver
+	// mismatch on the rental.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	script := filepath.Join(dir, "scripts", "exp.py")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["vllm==0.19.1"]
+# ///
+import vllm
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "nvidia",
+		GPUMemGB: 48,
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: dir,
+			Command:    "uv run scripts/exp.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	want := "nvidia/cuda:12.8.1-devel-ubuntu22.04"
+	if groups[0].Image != want {
+		t.Fatalf("Image = %q, want %q", groups[0].Image, want)
+	}
+	if groups[0].MinCUDAVersion != "12.8" {
+		t.Fatalf("MinCUDAVersion = %q, want 12.8", groups[0].MinCUDAVersion)
+	}
+}
+
+func TestSplitGroupsByImage_UnresolvedProjectPinStillUpgrades(t *testing.T) {
+	// A bare `torch>=2.6` range with no uv.lock proves the project uses torch
+	// but resolves to no CUDA wheel variant, so nothing binds the image to a
+	// CUDA runtime. The GPU-constraint upgrade must still run: gating it on
+	// "the project env owns torch" rather than "a resolved wheel pin governs"
+	// left a Blackwell group on a CUDA 12.4 image it cannot run.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\nname = \"demo\"\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "blackwell",
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: dir,
+			Command:    "python train.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	// Torch project, so the upgrade keeps torch preinstalled rather than
+	// dropping to a bare nvidia/cuda base image.
+	if groups[0].Image != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
+		t.Fatalf("Image = %q, want pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime", groups[0].Image)
+	}
+}
+
+func TestSplitGroupsByImage_ResolvedProjectPinBlocksUpgrade(t *testing.T) {
+	// The converse of TestSplitGroupsByImage_UnresolvedProjectPinStillUpgrades:
+	// a resolved cu124 wheel IS bound to its CUDA runtime, so a Blackwell
+	// constraint must not move it. Without this the fix above could degrade
+	// into "always upgrade" and still look correct.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\nname = \"demo\"\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "blackwell",
+		Jobs: []*db.Job{{
+			ID:         2,
+			WorkingDir: dir,
+			Command:    "python train.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	if groups[0].Image != "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime" {
+		t.Fatalf("Image = %q, want the pinned pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", groups[0].Image)
+	}
+}
+
+func TestSplitGroupsByImage_IsolatedScriptSkipsProjectPin(t *testing.T) {
+	// An isolated script skips uv sync entirely, so the project torch pin is
+	// irrelevant even when the script deps do not themselves include torch.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\ndependencies = [\"torch>=2.6\"]\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(`
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-linux_x86_64.whl" },
+]
+`), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	script := filepath.Join(dir, "infer.py")
+	if err := os.WriteFile(script, []byte(`# /// script
+# dependencies = ["requests"]
+# [tool.weft]
+# isolated = true
+# ///
+import requests
+`), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	groups := SplitGroupsByImage(nil, []InstanceGroup{{
+		GPUClass: "A100",
+		GPUMemGB: 48,
+		Jobs: []*db.Job{{
+			ID:         1,
+			WorkingDir: dir,
+			Command:    "uv run infer.py",
+		}},
+	}})
+	if len(groups) != 1 {
+		t.Fatalf("len(groups) = %d, want 1", len(groups))
+	}
+	// No torch/CUDA deps in the isolated script and no GPU CUDA floor, so no
+	// CUDA image is forced; the empty image resolves to the default later.
+	if groups[0].Image != "" {
+		t.Fatalf("Image = %q, want empty (default resolves later)", groups[0].Image)
 	}
 }
 

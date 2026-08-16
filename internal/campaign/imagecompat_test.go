@@ -7,7 +7,7 @@ import (
 
 func TestTorchImageForCUDAVersion(t *testing.T) {
 	// Known CUDA version returns a pytorch image
-	img := torchImageForCUDAVersion("12.4")
+	img := torchImageForCUDAVersion("12.4", false)
 	if img == "" {
 		t.Fatal("expected pytorch image for CUDA 12.4")
 	}
@@ -23,22 +23,56 @@ func TestTorchImageForCUDAVersion(t *testing.T) {
 		t.Errorf("image CUDA version = %q, want 12.4", cudaVer)
 	}
 
+	// devel variant
+	if got := torchImageForCUDAVersion("12.4", true); !strings.Contains(got, "-devel") {
+		t.Errorf("expected devel variant, got %q", got)
+	}
+
 	// Unknown CUDA version returns empty
-	if got := torchImageForCUDAVersion("11.8"); got != "" {
+	if got := torchImageForCUDAVersion("11.8", false); got != "" {
 		t.Errorf("expected empty for unknown CUDA version, got %q", got)
 	}
 
-	if got := torchImageForCUDAVersion("12.8"); got == "" {
+	if got := torchImageForCUDAVersion("12.8", false); got == "" {
 		t.Error("expected pytorch image for CUDA 12.8")
+	}
+
+	// Unmapped same-major version degrades to the next mapped version within
+	// the major (e.g., 12.7 -> 12.8), not falling back to 12.4.
+	if got := torchImageForCUDAVersion("12.7", false); got != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
+		t.Errorf("torchImageForCUDAVersion(12.7) = %q, want 12.8 image", got)
+	}
+
+	// Cross-major lookup is refused.
+	if got := torchImageForCUDAVersion("13.5", false); got != "" {
+		t.Errorf("expected empty for cross-major CUDA version, got %q", got)
+	}
+}
+
+func TestDefaultCUDAImageForVersion(t *testing.T) {
+	if got := defaultCUDAImageForVersion("12.4", false); got != "nvidia/cuda:12.4.1-runtime-ubuntu22.04" {
+		t.Errorf("defaultCUDAImageForVersion(12.4,false) = %q", got)
+	}
+	if got := defaultCUDAImageForVersion("12.4", true); got != "nvidia/cuda:12.4.1-devel-ubuntu22.04" {
+		t.Errorf("defaultCUDAImageForVersion(12.4,true) = %q", got)
+	}
+	if got := defaultCUDAImageForVersion("12.7", false); got != "nvidia/cuda:12.8.1-runtime-ubuntu22.04" {
+		t.Errorf("defaultCUDAImageForVersion(12.7,false) = %q, want 12.8 image", got)
+	}
+	if got := defaultCUDAImageForVersion("11.8", false); got != "" {
+		t.Errorf("expected empty for unknown CUDA version, got %q", got)
 	}
 }
 
 func TestChooseAutoImageForMinCUDA(t *testing.T) {
-	if got := chooseAutoImageForMinCUDA(12.8, false); got != "nvidia/cuda:12.8.1-runtime-ubuntu22.04" {
-		t.Fatalf("chooseAutoImageForMinCUDA(12.8,false) = %q", got)
+	if got := chooseAutoImageForMinCUDA(12.8, false, false); got != "nvidia/cuda:12.8.1-runtime-ubuntu22.04" {
+		t.Fatalf("chooseAutoImageForMinCUDA(12.8,false,false) = %q", got)
 	}
-	if got := chooseAutoImageForMinCUDA(12.8, true); got != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
-		t.Fatalf("chooseAutoImageForMinCUDA(12.8,true) = %q", got)
+	if got := chooseAutoImageForMinCUDA(12.8, true, false); got != "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime" {
+		t.Fatalf("chooseAutoImageForMinCUDA(12.8,true,false) = %q", got)
+	}
+	if got := chooseAutoImageForMinCUDA(12.8, false, true); got != "nvidia/cuda:12.8.1-devel-ubuntu22.04" {
+		t.Fatalf("chooseAutoImageForMinCUDA(12.8,false,true) = %q", got)
 	}
 }
 

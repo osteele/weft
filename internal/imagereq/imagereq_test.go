@@ -40,6 +40,7 @@ func TestMinDriverForCUDA(t *testing.T) {
 		{"12.6", 560},
 		{"12.7", 560}, // 12.7 was skipped publicly; floor to 12.6
 		{"12.8", 570},
+		{"12.9", 575},
 		{"13.0", 580},
 		{"11.8", 0}, // below lowest tabled
 		{"", 0},
@@ -101,10 +102,9 @@ func TestBackfillDriverFromCUDA(t *testing.T) {
 
 func TestMinDriverForCUDA_TwoDigitMinor(t *testing.T) {
 	// Component-wise compare: a hypothetical CUDA 12.10 must sort AFTER
-	// 12.8, not before (the old float-parse path treated "12.10" as 12.1).
-	// We don't have a 12.10 row yet, so the function returns the next-lower
-	// (12.8 row = 570), NOT the 12.1 row = 530.
-	if got := MinDriverForCUDA("12.10"); got != 570 {
-		t.Errorf("MinDriverForCUDA(\"12.10\") = %d, want 570 (between 12.8 and 13.0, takes 12.8 floor)", got)
+	// 12.8 and 12.9, not before (the old float-parse path treated "12.10" as
+	// 12.1). With the 12.9 row present, 12.10 takes the 12.9 floor.
+	if got := MinDriverForCUDA("12.10"); got != 575 {
+		t.Errorf("MinDriverForCUDA(\"12.10\") = %d, want 575 (between 12.9 and 13.0, takes 12.9 floor)", got)
 	}
 }

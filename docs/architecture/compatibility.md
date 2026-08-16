@@ -92,16 +92,28 @@ agent-side torch CUDA preflight.
 For cloud jobs, `campaign.ResolveJobImageSettings` resolves the image with
 precedence script `[tool.weft] image` > matching
 `.weft.toml [cloud.image-overrides]` entry > `.weft.toml [cloud] image` >
-framework aliases > auto-pytorch (matched to the project's torch CUDA pin) >
-default.
+framework aliases > auto-selection (see below) > default.
 `SplitGroupsByImage` then groups jobs per launch:
 
-- **Auto-selection**: torch projects without an explicit image get the
-  pytorch image matching their pinned CUDA variant.
+- **Auto-selection**: follows which environment will import torch, not merely
+  whether the project depends on it. The project uv env owns torch when the
+  project declares CUDA packages and the script neither sets `isolated` nor
+  declares its own PEP 723 torch/CUDA dependencies; only then does a
+  preinstalled `pytorch/pytorch` image help, so only then is one selected. A
+  PEP 723 script with inline `dependencies` resolves on the worker in an
+  isolated uv env, so the project lockfile describes an env the job never
+  imports — those jobs get an `nvidia/cuda` base image instead. Either way the
+  CUDA version comes from the resolved runtime floor, so weft cannot select an
+  offer for one CUDA version and provision an image built for another.
+- **Variant**: `-devel` when a dependency JIT-compiles kernels at run time and
+  therefore needs `nvcc` (vLLM/flashinfer), `-runtime` otherwise.
+- **Version lookup**: the smallest tabled image version ≥ the required CUDA
+  *within the same major*; no cross-major substitution. An unmapped floor such
+  as 12.7 takes the 12.8 image rather than falling back to the default.
 - **Auto-upgrade**: a GPU-class constraint that implies a newer CUDA (e.g.
-  Blackwell → CUDA ≥ 12.8) upgrades the image — unless the project pins a
-  torch CUDA variant, in which case the wheel cannot use a different runtime
-  and the pin wins.
+  Blackwell → CUDA ≥ 12.8), or a `-runtime` image where the dependencies need
+  `nvcc`, upgrades the image — unless the project torch pin governs the runtime
+  env, in which case the wheel cannot use a different runtime and the pin wins.
 - **Merging**: jobs with mutually compatible images share an instance via
   `imageSupremum` (base < runtime < devel; nvidia/cuda < pytorch/pytorch).
 - **Aliases**: legacy/private SGLang runtime names normalize to the public

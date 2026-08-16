@@ -904,10 +904,9 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 		jobs             []*db.Job
 	}
 
-	// Fallback PyTorch image for torch projects whose pinned CUDA cannot be
-	// resolved; pin-aware selection in the loop below is preferred.
+	// CUDA version of the default image. Torch projects whose required CUDA
+	// cannot be resolved fall back to the PyTorch image at this version.
 	defaultCUDA, _, _ := parseCUDAImage(cloud.DefaultImage)
-	fallbackTorchImage := torchImageForCUDAVersion(defaultCUDA)
 
 	var result []InstanceGroup
 	for _, g := range groups {
@@ -931,29 +930,23 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 			explicitImage := img != ""
 			vastCapAdd := ResolveJobVastCapAdd(localDir, job.Command)
 
-			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
+			projectEnvOwnsTorch := rfFloor.ProjectEnvOwnsTorch
+			needsDevel := rfFloor.NeedsDevel
+			reqCUDA := req.MinCUDAVersion
 
-			// Resolve the project's pinned torch CUDA (e.g. "12.4"). When set,
-			// it governs the image's CUDA: a pinned torch wheel cannot use a
-			// different CUDA runtime, so the GPU-constraint upgrade below is
-			// skipped for pinned projects.
-			pinCUDA := ""
-			if hasTorch {
-				if pin := dataloc.ScanTorchPin(localDir); pin != nil {
-					pinCUDA = dataloc.CUDAVariantVersion(pin.CudaVariant)
-				}
-			}
-
-			// Auto-select a PyTorch image when the project depends on torch
-			// but no explicit image is configured. This avoids a ~5min cold
-			// uv sync of torch + CUDA wheels on every instance launch. The
-			// image's CUDA must match the project's torch pin; fall back to the
-			// default image when the pin's CUDA cannot be resolved.
-			if img == "" && hasTorch {
-				if pinned := torchImageForCUDAVersion(pinCUDA); pinned != "" {
-					img = pinned
-				} else if fallbackTorchImage != "" {
-					img = fallbackTorchImage
+			// Auto-select an image when no explicit image is configured. A
+			// preinstalled pytorch/pytorch image only helps when the project uv
+			// env is the one that will import torch. When a PEP 723 script owns
+			// its own env (isolated or inline torch/CUDA deps), use a base
+			// nvidia/cuda image at the required CUDA version instead.
+			if img == "" {
+				if projectEnvOwnsTorch {
+					img = torchImageForCUDAVersion(reqCUDA, needsDevel)
+					if img == "" {
+						img = torchImageForCUDAVersion(defaultCUDA, needsDevel)
+					}
+				} else {
+					img = defaultCUDAImageForVersion(reqCUDA, needsDevel)
 				}
 			}
 			if img == "" && placement.JobUsesFramework(localDir, job.Command, "sglang") {
@@ -961,22 +954,36 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 			}
 
 			// Auto-upgrade CUDA images when the GPU constraint requires a newer
-			// toolkit (e.g., Blackwell needs CUDA >= 12.8). Skipped when the
-			// project pins a torch CUDA: the pinned wheel cannot use a newer
-			// runtime, and arch-max filtering already keeps such jobs off GPUs
-			// that would need one. Explicit non-CUDA images are left unchanged
-			// and will fail later with a clear compatibility reason.
+			// toolkit (e.g., Blackwell needs CUDA >= 12.8) or when the selected
+			// variant lacks nvcc but the dependencies require it. Skipped only
+			// when a RESOLVED project torch wheel pin governs the runtime env:
+			// a resolved wheel is bound to its CUDA runtime and cannot move to
+			// a newer one, and arch-max filtering already keeps such jobs off
+			// GPUs that would need one. A bare range (torch>=2.6, or a lock
+			// exposing no CUDA variant) is a minimum rather than a pin and does
+			// not suppress the upgrade. Explicit non-CUDA images are left
+			// unchanged and will fail later with a clear compatibility reason.
 			requiredCUDA := placement.MinCUDAForConstraint(g.GPUClass)
-			if requiredCUDA > 0 && pinCUDA == "" {
+			projectPinGoverns := projectEnvOwnsTorch && rfFloor.ProjectTorchPinCUDA != ""
+			if !projectPinGoverns {
 				effectiveImage := img
 				if effectiveImage == "" {
 					effectiveImage = cloud.DefaultImage
 				}
-				if imageCUDA, _, ok := parseCUDAImage(effectiveImage); ok {
+				if imageCUDA, imageVariant, ok := parseCUDAImage(effectiveImage); ok {
 					currentCUDA := parseCUDAVersionFloat(imageCUDA)
-					if currentCUDA > 0 && currentCUDA < requiredCUDA {
-						preferTorch := hasTorch || isPyTorchImage(effectiveImage)
-						if upgraded := chooseAutoImageForMinCUDA(requiredCUDA, preferTorch); upgraded != "" && upgraded != effectiveImage {
+					needsUpgrade := (currentCUDA > 0 && currentCUDA < requiredCUDA) ||
+						(needsDevel && imageVariant != "devel")
+					if needsUpgrade {
+						// A devel-only upgrade keeps the image's own CUDA
+						// version rather than dropping to the constraint's.
+						targetCUDA := max(requiredCUDA, currentCUDA)
+						// The upgrade preserves the image family: an
+						// auto-selected torch project is already on a
+						// pytorch/pytorch image here, and an explicitly pinned
+						// base image stays a base image.
+						preferTorch := isPyTorchImage(effectiveImage)
+						if upgraded := chooseAutoImageForMinCUDA(targetCUDA, preferTorch, needsDevel); upgraded != "" && upgraded != effectiveImage {
 							img = upgraded
 							slog.Debug("auto-selected CUDA-compatible image for GPU constraint",
 								"component", "campaign",
@@ -990,9 +997,11 @@ func SplitGroupsByImage(database *sql.DB, groups []InstanceGroup) []InstanceGrou
 				}
 			}
 
-			// Warn when an explicit image doesn't include PyTorch but the
-			// project has torch dependencies.
-			if img != "" && hasTorch && !isPyTorchImage(img) {
+			// Warn when the image is expected to supply torch to the importing
+			// env but does not include PyTorch. Suppress the warning when a PEP
+			// 723 script owns its env, when the image already owns torch (e.g.
+			// SGLang images), or when the selected image is a pytorch image.
+			if img != "" && projectEnvOwnsTorch && !isPyTorchImage(img) && !placement.RuntimeImageOwnsTorch(img) {
 				slog.Warn("job has torch dependencies but image does not include PyTorch", "component", "campaign", "job_id", job.ID, "image", img)
 			}
 

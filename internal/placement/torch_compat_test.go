@@ -598,3 +598,104 @@ func TestRuntimeFloor_ExplicitDriverNotRaised(t *testing.T) {
 		t.Errorf("MinDriverVersion = %d, want explicit 530 preserved", rf.Req.MinDriverVersion)
 	}
 }
+
+func TestResolveEffectiveRuntime_ProjectEnvOwnsTorch(t *testing.T) {
+	dir := t.TempDir()
+	writePyproject(t, dir, `[project]
+dependencies = ["torch>=2.6"]
+`)
+	writeUVLock(t, dir, `
+[[package]]
+name = "torch"
+version = "2.6.0"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp312-cp312-linux_x86_64.whl" },
+]
+`)
+
+	// Plain project command: project env imports torch.
+	runtime, err := ResolveEffectiveRuntime(dir, "uv run python train.py", EffectiveRuntimeOptions{FloorMode: RuntimeFloorExact})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveRuntime: %v", err)
+	}
+	if !runtime.Floor.ProjectEnvOwnsTorch {
+		t.Errorf("ProjectEnvOwnsTorch = false, want true")
+	}
+	if runtime.Floor.Req.MinCUDAVersion != "12.4" {
+		t.Errorf("MinCUDAVersion = %q, want 12.4", runtime.Floor.Req.MinCUDAVersion)
+	}
+	// The cu124 wheel resolves, so the pin is hard and binds the image.
+	if runtime.Floor.ProjectTorchPinCUDA != "12.4" {
+		t.Errorf("ProjectTorchPinCUDA = %q, want 12.4", runtime.Floor.ProjectTorchPinCUDA)
+	}
+
+	// Isolated PEP 723 script: project env is skipped.
+	script := filepath.Join(dir, "infer.py")
+	writeScript(t, script, `# /// script
+# dependencies = ["vllm==0.19.1"]
+# [tool.weft]
+# isolated = true
+# ///
+import vllm
+`)
+	runtime, err = ResolveEffectiveRuntime(dir, "uv run infer.py", EffectiveRuntimeOptions{FloorMode: RuntimeFloorExact})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveRuntime: %v", err)
+	}
+	if runtime.Floor.ProjectEnvOwnsTorch {
+		t.Errorf("isolated script: ProjectEnvOwnsTorch = true, want false")
+	}
+	if runtime.Floor.Req.MinCUDAVersion != "12.8" {
+		t.Errorf("isolated script: MinCUDAVersion = %q, want 12.8 from vllm floor", runtime.Floor.Req.MinCUDAVersion)
+	}
+	if !runtime.Floor.NeedsDevel {
+		t.Errorf("isolated script: NeedsDevel = false, want true")
+	}
+	// The project lockfile is not even read for a script-owned env, so no
+	// hard pin is recorded even though the same cu124 lock is present.
+	if runtime.Floor.ProjectTorchPinCUDA != "" {
+		t.Errorf("isolated script: ProjectTorchPinCUDA = %q, want empty", runtime.Floor.ProjectTorchPinCUDA)
+	}
+}
+
+func TestResolveEffectiveRuntime_UnresolvedProjectPin(t *testing.T) {
+	// A bare range proves the project uses torch but binds no CUDA wheel, so
+	// the project env owns torch while no hard pin governs the image.
+	dir := t.TempDir()
+	writePyproject(t, dir, `[project]
+dependencies = ["torch>=2.6"]
+`)
+
+	runtime, err := ResolveEffectiveRuntime(dir, "uv run python train.py", EffectiveRuntimeOptions{FloorMode: RuntimeFloorExact})
+	if err != nil {
+		t.Fatalf("ResolveEffectiveRuntime: %v", err)
+	}
+	if !runtime.Floor.ProjectEnvOwnsTorch {
+		t.Errorf("ProjectEnvOwnsTorch = false, want true")
+	}
+	if runtime.Floor.ProjectTorchPinCUDA != "" {
+		t.Errorf("ProjectTorchPinCUDA = %q, want empty for a bare range", runtime.Floor.ProjectTorchPinCUDA)
+	}
+}
+
+func writePyproject(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+}
+
+func writeUVLock(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+}
+
+func writeScript(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+}

@@ -281,7 +281,14 @@ func ScanScriptTorchPin(dir, command string) *TorchPin {
 }
 
 func ScriptUsesTorch(dir, command string) bool {
-	for _, dep := range ParseDepSpecs(ScanScriptDependencies(dir, command)) {
+	return DepsUseTorch(ParseDepSpecs(ScanScriptDependencies(dir, command)))
+}
+
+// DepsUseTorch reports whether any parsed dependency names a torch-family
+// package (torch, torchvision, pytorch-lightning, ...). Callers that already
+// hold parsed deps should use this rather than re-scanning the script.
+func DepsUseTorch(deps []DepSpec) bool {
+	for _, dep := range deps {
 		if torchFamilyDepName(dep.Name) {
 			return true
 		}

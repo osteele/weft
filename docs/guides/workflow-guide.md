@@ -497,8 +497,13 @@ diagnosis and the runtime path to use on retry.
 
 The `image` key specifies a Docker image for cloud execution. Image precedence
 (highest to lowest): script `image` > matching `.weft.toml [cloud.image-overrides]`
-entry > `.weft.toml [cloud] image` > auto-selected PyTorch image > global
-default. Script metadata works with any command that references a `.py` file,
+entry > `.weft.toml [cloud] image` > auto-selected image > global
+default. Auto-selection picks a `pytorch/pytorch` image when the project uv
+environment is the one that imports torch, and an `nvidia/cuda` base image at
+the resolved CUDA floor when a PEP 723 script owns its own environment
+(`isolated`, or its own inline torch/CUDA dependencies); it uses a `-devel`
+variant when a dependency needs `nvcc` at run time. Script metadata works with
+any command that references a `.py` file,
 including `uv run script.py`, `python script.py`, and compound commands like
 `pip install foo && python script.py`.
 

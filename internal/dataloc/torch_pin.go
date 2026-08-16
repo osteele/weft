@@ -115,6 +115,52 @@ func JobUsesTorch(dir, command string) bool {
 	return ProjectUsesTorch(dir) || ScriptUsesTorch(dir, command)
 }
 
+// CUDAProjectPackages are Python packages with large Linux CUDA wheels. A
+// pyproject.toml that mentions any of these is treated as a CUDA-using project
+// for image-selection and disk-estimation purposes. Both consumers share this
+// list so the two decisions cannot disagree about the same pyproject.
+var CUDAProjectPackages = []string{
+	"torch", "torchvision", "torchaudio",
+	"nvidia-cublas", "nvidia-cuda-cupti", "nvidia-cuda-nvrtc",
+	"nvidia-cuda-runtime", "nvidia-cudnn", "nvidia-cufft",
+	"nvidia-curand", "nvidia-cusolver", "nvidia-cusparse",
+	"nvidia-nccl", "nvidia-nvjitlink", "nvidia-nvtx",
+	"jax", "jaxlib", "tensorflow", "vllm", "sglang", "lmcache",
+}
+
+// ProjectHasCUDAPackages reports whether the project containing dir declares
+// any CUDA package in its pyproject.toml. It walks up to the project root so
+// subdirectories resolve to the same project env as ScanTorchPin.
+func ProjectHasCUDAPackages(dir string) bool {
+	root := ProjectRoot(dir)
+	if root == "" {
+		return false
+	}
+	return PyprojectHasCUDAPackages(filepath.Join(root, "pyproject.toml"))
+}
+
+// PyprojectHasCUDAPackages scans one pyproject.toml for references to CUDA
+// packages. Uses substring line scanning rather than full TOML parsing, which
+// biases toward over-estimation (safe for disk sizing).
+func PyprojectHasCUDAPackages(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.ToLower(scanner.Text())
+		for _, pkg := range CUDAProjectPackages {
+			if strings.Contains(line, pkg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func torchFamilyDepName(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	return strings.Contains(n, "torch") || strings.Contains(n, "pytorch")
