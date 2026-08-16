@@ -163,23 +163,11 @@ func (r *Reconciler) ReconcileLaunches(ctx context.Context, database *sql.DB, cl
 	}
 	r.mu.Unlock()
 
-	// Recompute adaptive bootstrap timeouts only when the cache has expired.
-	if time.Since(r.bootstrapTimeoutsAt) >= survivalCacheTTL {
-		r.bootstrapTimeouts = make(map[string]*db.BootstrapSurvival)
-		providers := make(map[string]bool)
-		for _, ci := range instances {
-			providers[ci.Provider] = true
-		}
-		for provider := range providers {
-			if survival, err := db.ComputeBootstrapSurvival(database, provider); err != nil {
-				slog.Warn("failed to compute bootstrap survival", "component", "reconcile", "provider", provider, "error", err)
-			} else {
-				r.bootstrapTimeouts[provider] = survival
-				slog.Debug("bootstrap thresholds computed", "component", "reconcile", "provider", provider, "warn_after", survival.WarnAfter.Truncate(time.Second), "terminate_after", survival.TerminateAfter.Truncate(time.Second), "sample_size", survival.SampleSize)
-			}
-		}
-		r.bootstrapTimeoutsAt = time.Now()
+	providers := make(map[string]bool)
+	for _, ci := range instances {
+		providers[ci.Provider] = true
 	}
+	r.refreshBootstrapSurvival(database, providers)
 
 	// Batch-fetch all provider instances once per reconciliation pass.
 	// This replaces N individual ShowInstance() calls with one ListAllInstances()
@@ -451,9 +439,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	// OnStartProbePresent comes from SyncInstanceState above (shared
 	// across watch and reconcile).
 	resolveLastProviderStatusChange(database, &params, ci.ID)
-	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
-		params.BootstrapSurvival = survival
-	}
+	params.BootstrapSurvival = r.bootstrapSurvivalFor(ci.Provider)
 	action := r.CheckInstance(params)
 
 	// Handle termination intent post-processing (mark destroy succeeded).
@@ -632,6 +618,46 @@ func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID 
 			"component", "reconcile", "instance", instanceID,
 			"synced", synced, "remaining_non_terminal", remaining)
 	}
+}
+
+// refreshBootstrapSurvival repopulates the per-provider bootstrap threshold
+// cache when it has expired, and is a no-op within survivalCacheTTL of the last
+// refresh. A provider whose survival computation fails is left out of the map;
+// callers treat an absent entry as "no thresholds", not as zero thresholds.
+func (r *Reconciler) refreshBootstrapSurvival(database *sql.DB, providers map[string]bool) {
+	r.mu.Lock()
+	expired := time.Since(r.bootstrapTimeoutsAt) >= survivalCacheTTL
+	r.mu.Unlock()
+	if !expired {
+		return
+	}
+
+	// Compute outside the lock; ComputeBootstrapSurvival queries the DB once
+	// per provider and other reconciler state stays available meanwhile.
+	fresh := make(map[string]*db.BootstrapSurvival, len(providers))
+	for provider := range providers {
+		survival, err := db.ComputeBootstrapSurvival(database, provider)
+		if err != nil {
+			slog.Warn("failed to compute bootstrap survival", "component", "reconcile", "provider", provider, "error", err)
+			continue
+		}
+		fresh[provider] = survival
+		slog.Debug("bootstrap thresholds computed", "component", "reconcile", "provider", provider, "warn_after", survival.WarnAfter.Truncate(time.Second), "terminate_after", survival.TerminateAfter.Truncate(time.Second), "sample_size", survival.SampleSize)
+	}
+
+	r.mu.Lock()
+	r.bootstrapTimeouts = fresh
+	r.bootstrapTimeoutsAt = time.Now()
+	r.mu.Unlock()
+}
+
+// bootstrapSurvivalFor returns the cached thresholds for a provider, or nil
+// when none were computed. Read under the lock: reconcileOneInstance runs one
+// goroutine per instance, and a concurrent reconcile pass may be refreshing.
+func (r *Reconciler) bootstrapSurvivalFor(provider string) *db.BootstrapSurvival {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bootstrapTimeouts[provider]
 }
 
 // getSetupSurvival returns cached setup survival thresholds for a command+workdir,

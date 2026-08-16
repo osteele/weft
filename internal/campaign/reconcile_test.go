@@ -2724,3 +2724,144 @@ func TestGetSetupSurvival_RecomputesAfterExpiry(t *testing.T) {
 			refreshed.TerminateAfter, refreshed.TerminateLearned)
 	}
 }
+
+// --- refreshBootstrapSurvival cache tests ---
+//
+// The fixture inserts terminal launches for one provider, half of which
+// reached a job (a bootstrap success, anchored on the attempt's wrapper_start)
+// and half of which died beforehand. Below MinSamples the computed struct
+// carries defaults with TerminateLearned false; crossing MinSamples fits a
+// curve, so SampleSize and the learned flag are the observable that
+// distinguishes a cached result from a recomputed one.
+
+const bootstrapCacheTestProvider = "vastai"
+
+// insertBootstrapObservation inserts one terminal launch for the provider, and
+// for a success also the attempt and phase timing that mark when its first job
+// started.
+func insertBootstrapObservation(t *testing.T, database *sql.DB, launchID, jobID int64, succeeded bool, launchedAt, bootDur int64) {
+	t.Helper()
+	status := db.LaunchStatusCompleted
+	if !succeeded {
+		status = db.LaunchStatusFailed
+	}
+	if _, err := database.Exec(
+		`INSERT INTO launches (id, status, provider, launched_at, ended_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		launchID, status, bootstrapCacheTestProvider, launchedAt, launchedAt+bootDur+100, launchedAt,
+	); err != nil {
+		t.Fatalf("insert launch %d: %v", launchID, err)
+	}
+	if !succeeded {
+		return
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, working_dir, command, tombstoned, requested_status) VALUES (?, '/tmp', 'echo hi', 0, NULL)`,
+		jobID,
+	); err != nil {
+		t.Fatalf("insert job %d: %v", jobID, err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at) VALUES (?, 1, '', ?, ?, ?)`,
+		jobID, launchID, db.StatusCompleted, launchedAt,
+	); err != nil {
+		t.Fatalf("insert attempt for job %d: %v", jobID, err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_phase_timings (job_id, wrapper_start) VALUES (?, ?)`,
+		jobID, launchedAt+bootDur,
+	); err != nil {
+		t.Fatalf("insert timing for job %d: %v", jobID, err)
+	}
+}
+
+// insertBootstrapObservations inserts count observations, alternating fast
+// successes with failures that die late, and returns the next free IDs.
+func insertBootstrapObservations(t *testing.T, database *sql.DB, launchID, jobID int64, count int) (int64, int64) {
+	t.Helper()
+	const base = int64(1000000)
+	for i := 0; i < count; i++ {
+		if i%2 == 0 {
+			insertBootstrapObservation(t, database, launchID, jobID, true, base, int64(60+i*6))
+		} else {
+			insertBootstrapObservation(t, database, launchID, jobID, false, base, int64(600+i*10))
+		}
+		launchID++
+		jobID++
+	}
+	return launchID, jobID
+}
+
+func TestRefreshBootstrapSurvival_PopulatesPerProvider(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	insertBootstrapObservations(t, database, 1, 100, 30)
+
+	r := NewReconciler()
+	r.refreshBootstrapSurvival(database, map[string]bool{bootstrapCacheTestProvider: true})
+
+	s := r.bootstrapSurvivalFor(bootstrapCacheTestProvider)
+	if s == nil {
+		t.Fatal("no thresholds cached for the provider")
+	}
+	if s.SampleSize != 30 {
+		t.Errorf("SampleSize = %d, want 30", s.SampleSize)
+	}
+	if !s.TerminateLearned {
+		t.Errorf("terminate threshold should be learned with 30 samples: %+v", s)
+	}
+	if other := r.bootstrapSurvivalFor("runpod"); other != nil {
+		t.Errorf("unrequested provider cached: %+v", other)
+	}
+}
+
+func TestRefreshBootstrapSurvival_CachesWithinTTL(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	nextLaunch, nextJob := insertBootstrapObservations(t, database, 1, 100, 30)
+
+	r := NewReconciler()
+	providers := map[string]bool{bootstrapCacheTestProvider: true}
+	r.refreshBootstrapSurvival(database, providers)
+	first := r.bootstrapSurvivalFor(bootstrapCacheTestProvider)
+	if first == nil || first.SampleSize != 30 {
+		t.Fatalf("first refresh = %+v, want 30 samples", first)
+	}
+
+	// Observations that would change the result on recompute.
+	insertBootstrapObservations(t, database, nextLaunch, nextJob, 20)
+
+	r.refreshBootstrapSurvival(database, providers)
+	second := r.bootstrapSurvivalFor(bootstrapCacheTestProvider)
+	if second != first {
+		t.Errorf("refresh within TTL recomputed: got %+v, want cached %+v", second, first)
+	}
+}
+
+func TestRefreshBootstrapSurvival_RecomputesAfterExpiry(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+	nextLaunch, nextJob := insertBootstrapObservations(t, database, 1, 100, 30)
+
+	r := NewReconciler()
+	providers := map[string]bool{bootstrapCacheTestProvider: true}
+	r.refreshBootstrapSurvival(database, providers)
+	if first := r.bootstrapSurvivalFor(bootstrapCacheTestProvider); first == nil || first.SampleSize != 30 {
+		t.Fatalf("first refresh = %+v, want 30 samples", first)
+	}
+
+	insertBootstrapObservations(t, database, nextLaunch, nextJob, 20)
+
+	// Expire the cache without sleeping.
+	r.mu.Lock()
+	r.bootstrapTimeoutsAt = time.Now().Add(-survivalCacheTTL)
+	r.mu.Unlock()
+
+	r.refreshBootstrapSurvival(database, providers)
+	refreshed := r.bootstrapSurvivalFor(bootstrapCacheTestProvider)
+	if refreshed == nil {
+		t.Fatal("no thresholds cached after expiry")
+	}
+	if refreshed.SampleSize != 50 {
+		t.Errorf("SampleSize = %d, want 50 after recompute", refreshed.SampleSize)
+	}
+}
