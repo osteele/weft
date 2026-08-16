@@ -152,18 +152,14 @@ func TestFormatSurvivalSectionReportsThresholdProvenance(t *testing.T) {
 	report := &instanceDiagnoseReport{
 		Instance: &db.Launch{},
 		BootstrapSurvival: &db.BootstrapSurvival{
-			SampleSize:       40,
-			WarnAfter:        5 * time.Minute,
-			WarnLearned:      true,
-			TerminateAfter:   20 * time.Minute,
-			TerminateLearned: false,
+			SampleSize: 40,
+			Warn:       db.LearnedThreshold(5 * time.Minute),
+			Terminate:  db.DefaultThreshold(20 * time.Minute),
 		},
 		SetupSurvival: &db.SetupSurvival{
-			SampleSize:       249,
-			WarnAfter:        15 * time.Minute,
-			WarnLearned:      false,
-			TerminateAfter:   25 * time.Minute,
-			TerminateLearned: false,
+			SampleSize: 249,
+			Warn:       db.DefaultThreshold(15 * time.Minute),
+			Terminate:  db.DefaultThreshold(25 * time.Minute),
 		},
 	}
 

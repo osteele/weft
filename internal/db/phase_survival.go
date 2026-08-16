@@ -12,33 +12,27 @@ import (
 // completed setup. The warn and terminate thresholds are the times at which
 // this probability drops below configured cutoffs.
 type SetupSurvival struct {
-	SampleSize       int
-	WarnAfter        time.Duration
-	WarnLearned      bool
-	TerminateAfter   time.Duration
-	TerminateLearned bool
+	SampleSize int
+	Warn       Threshold
+	Terminate  Threshold
 }
 
-// LearnedTerminate returns the terminate threshold only when it came from the
-// observed survival curve. See BootstrapSurvival.LearnedTerminate for why
-// enforcement paths must read this rather than TerminateAfter, which carries
-// configured defaults when history is thin.
-//
-// Safe on a nil receiver: an absent survival record reports nothing learned.
+// LearnedTerminate returns the terminate threshold only when it was fitted from
+// observed data. Nil-safe: an absent survival record reports nothing learned.
 func (s *SetupSurvival) LearnedTerminate() (time.Duration, bool) {
-	if s == nil || !s.TerminateLearned || s.TerminateAfter <= 0 {
+	if s == nil {
 		return 0, false
 	}
-	return s.TerminateAfter, true
+	return s.Terminate.Learned()
 }
 
-// LearnedWarn returns the warn threshold only when it came from the observed
-// survival curve. See LearnedTerminate.
+// LearnedWarn returns the warn threshold only when it was fitted from observed
+// data. Nil-safe; see LearnedTerminate.
 func (s *SetupSurvival) LearnedWarn() (time.Duration, bool) {
-	if s == nil || !s.WarnLearned || s.WarnAfter <= 0 {
+	if s == nil {
 		return 0, false
 	}
-	return s.WarnAfter, true
+	return s.Warn.Learned()
 }
 
 // setupSurvivalConfig is the configuration for setup-phase stall detection.
@@ -87,9 +81,9 @@ func ComputeSetupSurvival(database *sql.DB, command, workingDir string) (*SetupS
 	}
 
 	result := &SetupSurvival{
-		SampleSize:     len(obs),
-		WarnAfter:      time.Duration(cfg.DefaultWarnSec) * time.Second,
-		TerminateAfter: time.Duration(cfg.DefaultTermSec) * time.Second,
+		SampleSize: len(obs),
+		Warn:       DefaultThreshold(time.Duration(cfg.DefaultWarnSec) * time.Second),
+		Terminate:  DefaultThreshold(time.Duration(cfg.DefaultTermSec) * time.Second),
 	}
 
 	if len(obs) < cfg.MinSamples {
@@ -97,13 +91,11 @@ func ComputeSetupSurvival(database *sql.DB, command, workingDir string) (*SetupS
 	}
 
 	warnSecs, termSecs := computeSurvivalThresholds(obs, cfg)
-	if warnSecs > 0 {
-		result.WarnAfter = time.Duration(warnSecs) * time.Second
-		result.WarnLearned = true
+	if learned := LearnedThreshold(time.Duration(warnSecs) * time.Second); learned.Known() {
+		result.Warn = learned
 	}
-	if termSecs > 0 {
-		result.TerminateAfter = time.Duration(termSecs) * time.Second
-		result.TerminateLearned = true
+	if learned := LearnedThreshold(time.Duration(termSecs) * time.Second); learned.Known() {
+		result.Terminate = learned
 	}
 
 	return result, nil

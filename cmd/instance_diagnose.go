@@ -484,10 +484,10 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 	if bs != nil {
 		fmt.Fprintf(&b, "  Bootstrap: n=%d, warn after %s (%s), terminate after %s (%s)\n",
 			bs.SampleSize,
-			bs.WarnAfter.Truncate(time.Second),
-			survivalThresholdProvenance(bs.WarnLearned),
-			bs.TerminateAfter.Truncate(time.Second),
-			survivalThresholdProvenance(bs.TerminateLearned))
+			bs.Warn.Duration().Truncate(time.Second),
+			survivalThresholdProvenance(bs.Warn.IsLearned()),
+			bs.Terminate.Duration().Truncate(time.Second),
+			survivalThresholdProvenance(bs.Terminate.IsLearned()))
 
 		// Compare this instance's bootstrap duration against thresholds.
 		if inst.LaunchedAt != nil {
@@ -510,7 +510,7 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 
 			if bootstrapEnd > 0 {
 				elapsed := time.Duration(bootstrapEnd-*inst.LaunchedAt) * time.Second
-				comparison := compareThreshold(elapsed, bs.WarnAfter, bs.TerminateAfter)
+				comparison := compareThreshold(elapsed, bs.Warn.Duration(), bs.Terminate.Duration())
 				fmt.Fprintf(&b, "    This instance: %s at %s %s\n",
 					bootstrapLabel, elapsed.Truncate(time.Second), comparison)
 			}
@@ -520,10 +520,10 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 	if ss != nil {
 		fmt.Fprintf(&b, "  Setup: n=%d, warn after %s (%s), terminate after %s (%s)\n",
 			ss.SampleSize,
-			ss.WarnAfter.Truncate(time.Second),
-			survivalThresholdProvenance(ss.WarnLearned),
-			ss.TerminateAfter.Truncate(time.Second),
-			survivalThresholdProvenance(ss.TerminateLearned))
+			ss.Warn.Duration().Truncate(time.Second),
+			survivalThresholdProvenance(ss.Warn.IsLearned()),
+			ss.Terminate.Duration().Truncate(time.Second),
+			survivalThresholdProvenance(ss.Terminate.IsLearned()))
 
 		// Find setup duration for this instance (iterate jobs for stable order).
 		for _, j := range report.Jobs {
@@ -533,12 +533,12 @@ func formatSurvivalSection(report *instanceDiagnoseReport) string {
 			}
 			if t.SetupEnd != nil {
 				elapsed := time.Duration(*t.SetupEnd-*t.SetupStart) * time.Second
-				comparison := compareThreshold(elapsed, ss.WarnAfter, ss.TerminateAfter)
+				comparison := compareThreshold(elapsed, ss.Warn.Duration(), ss.Terminate.Duration())
 				fmt.Fprintf(&b, "    This instance: setup completed at %s %s\n",
 					elapsed.Truncate(time.Second), comparison)
 			} else if inst.EndedAt != nil {
 				elapsed := time.Duration(*inst.EndedAt-*t.SetupStart) * time.Second
-				comparison := compareThreshold(elapsed, ss.WarnAfter, ss.TerminateAfter)
+				comparison := compareThreshold(elapsed, ss.Warn.Duration(), ss.Terminate.Duration())
 				fmt.Fprintf(&b, "    This instance: setup stalled at %s %s\n",
 					elapsed.Truncate(time.Second), comparison)
 			}

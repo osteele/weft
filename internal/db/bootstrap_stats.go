@@ -260,41 +260,30 @@ func (d BootstrapDurations) ConditionalMedian(elapsed time.Duration) (remaining 
 // thresholds are the times at which this probability drops below configured
 // cutoffs.
 type BootstrapSurvival struct {
-	Provider         string
-	SampleSize       int
-	WarnAfter        time.Duration      // time at which P(success) < warnCutoff
-	WarnLearned      bool               // true when WarnAfter came from the observed survival curve
-	TerminateAfter   time.Duration      // time at which P(success) < terminateCutoff
-	TerminateLearned bool               // true when TerminateAfter came from the observed survival curve
-	Durations        BootstrapDurations // sorted successful bootstrap durations for conditional estimates
+	Provider   string
+	SampleSize int
+	Warn       Threshold          // time at which P(success) < warnCutoff
+	Terminate  Threshold          // time at which P(success) < terminateCutoff
+	Durations  BootstrapDurations // sorted successful bootstrap durations for conditional estimates
 }
 
-// LearnedTerminate returns the terminate threshold only when it came from the
-// observed survival curve.
-//
-// Read this instead of TerminateAfter anywhere the threshold decides whether to
-// kill something. TerminateAfter is populated even when nothing was learned —
-// ComputeBootstrapSurvival fills the struct with configured defaults on thin
-// history — so a non-zero value is not evidence of a fitted curve, and testing
-// the value alone silently hands every caller the default. Display and
-// diagnostic surfaces want the raw field, since they report the default and
-// label its provenance.
-//
-// Safe on a nil receiver: an absent survival record reports nothing learned.
+// LearnedTerminate returns the terminate threshold only when it was fitted from
+// observed data. Nil-safe: an absent survival record reports nothing learned,
+// so enforcement paths need no nil check before asking.
 func (s *BootstrapSurvival) LearnedTerminate() (time.Duration, bool) {
-	if s == nil || !s.TerminateLearned || s.TerminateAfter <= 0 {
+	if s == nil {
 		return 0, false
 	}
-	return s.TerminateAfter, true
+	return s.Terminate.Learned()
 }
 
-// LearnedWarn returns the warn threshold only when it came from the observed
-// survival curve. See LearnedTerminate.
+// LearnedWarn returns the warn threshold only when it was fitted from observed
+// data. Nil-safe; see LearnedTerminate.
 func (s *BootstrapSurvival) LearnedWarn() (time.Duration, bool) {
-	if s == nil || !s.WarnLearned || s.WarnAfter <= 0 {
+	if s == nil {
 		return 0, false
 	}
-	return s.WarnAfter, true
+	return s.Warn.Learned()
 }
 
 // survivalConfig holds tunable parameters for a survival analysis.
@@ -344,10 +333,10 @@ func ComputeBootstrapSurvival(database *sql.DB, provider string) (*BootstrapSurv
 	}
 
 	result := &BootstrapSurvival{
-		Provider:       provider,
-		SampleSize:     len(obs),
-		WarnAfter:      time.Duration(cfg.DefaultWarnSec) * time.Second,
-		TerminateAfter: time.Duration(cfg.DefaultTermSec) * time.Second,
+		Provider:   provider,
+		SampleSize: len(obs),
+		Warn:       DefaultThreshold(time.Duration(cfg.DefaultWarnSec) * time.Second),
+		Terminate:  DefaultThreshold(time.Duration(cfg.DefaultTermSec) * time.Second),
 	}
 
 	if len(obs) < cfg.MinSamples {
@@ -355,13 +344,11 @@ func ComputeBootstrapSurvival(database *sql.DB, provider string) (*BootstrapSurv
 	}
 
 	warnSecs, termSecs := computeSurvivalThresholds(obs, cfg)
-	if warnSecs > 0 {
-		result.WarnAfter = time.Duration(warnSecs) * time.Second
-		result.WarnLearned = true
+	if learned := LearnedThreshold(time.Duration(warnSecs) * time.Second); learned.Known() {
+		result.Warn = learned
 	}
-	if termSecs > 0 {
-		result.TerminateAfter = time.Duration(termSecs) * time.Second
-		result.TerminateLearned = true
+	if learned := LearnedThreshold(time.Duration(termSecs) * time.Second); learned.Known() {
+		result.Terminate = learned
 	}
 
 	// Extract successful durations for conditional median estimates.

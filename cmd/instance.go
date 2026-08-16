@@ -996,7 +996,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		// Backfill adaptive bootstrap timeout for accurate display.
 		if liveUpdate.BootstrapTerminateAfter == 0 && ci.Provider != "" {
 			if survival, err := db.ComputeBootstrapSurvival(database, ci.Provider); err == nil && survival != nil {
-				liveUpdate.BootstrapTerminateAfter = survival.TerminateAfter
+				liveUpdate.BootstrapTerminateAfter = survival.Terminate.Duration()
 				liveUpdate.BootstrapDurations = survival.Durations
 			}
 		}

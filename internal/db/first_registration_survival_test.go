@@ -49,13 +49,13 @@ func TestComputeFirstRegistrationSurvival_EmptyUsesDefaults(t *testing.T) {
 	if s.ScopeLevel != FirstRegistrationScopeGlobal {
 		t.Fatalf("scope = %s, want global", s.ScopeLevel)
 	}
-	if s.WarnAfter != 5*time.Minute {
-		t.Fatalf("warn = %v, want 5m", s.WarnAfter)
+	if s.Warn.Duration() != 5*time.Minute {
+		t.Fatalf("warn = %v, want 5m", s.Warn.Duration())
 	}
-	if s.TerminateAfter != 12*time.Minute {
-		t.Fatalf("terminate = %v, want 12m", s.TerminateAfter)
+	if s.Terminate.Duration() != 12*time.Minute {
+		t.Fatalf("terminate = %v, want 12m", s.Terminate.Duration())
 	}
-	if s.WarnLearned || s.TerminateLearned {
+	if s.Warn.IsLearned() || s.Terminate.IsLearned() {
 		t.Fatalf("empty history marked thresholds learned: %+v", s)
 	}
 }

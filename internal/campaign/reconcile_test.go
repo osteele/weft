@@ -2662,14 +2662,14 @@ func TestGetSetupSurvival_ComputesLearnedThresholds(t *testing.T) {
 	if s.SampleSize != 20 {
 		t.Errorf("SampleSize = %d, want 20", s.SampleSize)
 	}
-	if !s.WarnLearned || !s.TerminateLearned {
+	if !s.Warn.IsLearned() || !s.Terminate.IsLearned() {
 		t.Errorf("thresholds should be learned with 20 samples: %+v", s)
 	}
-	if s.WarnAfter != 5*time.Minute {
-		t.Errorf("WarnAfter = %v, want learned 5m", s.WarnAfter)
+	if s.Warn.Duration() != 5*time.Minute {
+		t.Errorf("WarnAfter = %v, want learned 5m", s.Warn.Duration())
 	}
-	if s.TerminateAfter != 10*time.Minute {
-		t.Errorf("TerminateAfter = %v, want learned 10m", s.TerminateAfter)
+	if s.Terminate.Duration() != 10*time.Minute {
+		t.Errorf("TerminateAfter = %v, want learned 10m", s.Terminate.Duration())
 	}
 }
 
@@ -2680,7 +2680,7 @@ func TestGetSetupSurvival_CachesWithinTTL(t *testing.T) {
 
 	r := NewReconciler()
 	first := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
-	if first == nil || first.TerminateAfter != 10*time.Minute {
+	if first == nil || first.Terminate.Duration() != 10*time.Minute {
 		t.Fatalf("first call = %+v, want learned 10m terminate threshold", first)
 	}
 
@@ -2691,7 +2691,7 @@ func TestGetSetupSurvival_CachesWithinTTL(t *testing.T) {
 	if second != first {
 		t.Errorf("second call within TTL recomputed: got %+v, want cached %+v", second, first)
 	}
-	if second.SampleSize != 20 || second.TerminateAfter != 10*time.Minute {
+	if second.SampleSize != 20 || second.Terminate.Duration() != 10*time.Minute {
 		t.Errorf("cached thresholds changed within TTL: %+v", second)
 	}
 }
@@ -2703,7 +2703,7 @@ func TestGetSetupSurvival_RecomputesAfterExpiry(t *testing.T) {
 
 	r := NewReconciler()
 	first := r.getSetupSurvival(database, setupSurvivalTestCommand, setupSurvivalTestWorkdir)
-	if first == nil || first.TerminateAfter != 10*time.Minute {
+	if first == nil || first.Terminate.Duration() != 10*time.Minute {
 		t.Fatalf("first call = %+v, want learned 10m terminate threshold", first)
 	}
 
@@ -2719,9 +2719,9 @@ func TestGetSetupSurvival_RecomputesAfterExpiry(t *testing.T) {
 	if refreshed.SampleSize != 40 {
 		t.Errorf("SampleSize = %d, want 40 after recompute", refreshed.SampleSize)
 	}
-	if refreshed.TerminateAfter != 25*time.Minute || refreshed.TerminateLearned {
+	if refreshed.Terminate.Duration() != 25*time.Minute || refreshed.Terminate.IsLearned() {
 		t.Errorf("TerminateAfter = %v (learned=%v), want default 25m after the long successes lifted the survival curve",
-			refreshed.TerminateAfter, refreshed.TerminateLearned)
+			refreshed.Terminate.Duration(), refreshed.Terminate.IsLearned())
 	}
 }
 
@@ -2806,7 +2806,7 @@ func TestRefreshBootstrapSurvival_PopulatesPerProvider(t *testing.T) {
 	if s.SampleSize != 30 {
 		t.Errorf("SampleSize = %d, want 30", s.SampleSize)
 	}
-	if !s.TerminateLearned {
+	if !s.Terminate.IsLearned() {
 		t.Errorf("terminate threshold should be learned with 30 samples: %+v", s)
 	}
 	if other := r.bootstrapSurvivalFor("runpod"); other != nil {

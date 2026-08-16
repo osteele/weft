@@ -22,15 +22,13 @@ type FirstRegistrationScope struct {
 // FirstRegistrationSurvival holds historical/default thresholds and conditional
 // estimates for time-to-first-worker-registration from campaign creation.
 type FirstRegistrationSurvival struct {
-	ScopeLevel       string
-	Provider         string
-	DataCenter       string
-	SampleSize       int
-	WarnAfter        time.Duration
-	WarnLearned      bool
-	TerminateAfter   time.Duration
-	TerminateLearned bool
-	Durations        BootstrapDurations
+	ScopeLevel string
+	Provider   string
+	DataCenter string
+	SampleSize int
+	Warn       Threshold
+	Terminate  Threshold
+	Durations  BootstrapDurations
 
 	observations []survivalObservation
 }
@@ -153,12 +151,12 @@ func ComputeFirstRegistrationSurvival(database *sql.DB, scope FirstRegistrationS
 	}
 
 	result := &FirstRegistrationSurvival{
-		ScopeLevel:     selected.level,
-		Provider:       selected.provider,
-		DataCenter:     selected.dataCenter,
-		SampleSize:     len(selectedObs),
-		WarnAfter:      time.Duration(cfg.DefaultWarnSec) * time.Second,
-		TerminateAfter: time.Duration(cfg.DefaultTermSec) * time.Second,
+		ScopeLevel: selected.level,
+		Provider:   selected.provider,
+		DataCenter: selected.dataCenter,
+		SampleSize: len(selectedObs),
+		Warn:       DefaultThreshold(time.Duration(cfg.DefaultWarnSec) * time.Second),
+		Terminate:  DefaultThreshold(time.Duration(cfg.DefaultTermSec) * time.Second),
 	}
 
 	if len(selectedObs) < cfg.MinSamples {
@@ -176,13 +174,11 @@ func ComputeFirstRegistrationSurvival(database *sql.DB, scope FirstRegistrationS
 		DefaultWarnSec: cfg.DefaultWarnSec,
 		DefaultTermSec: cfg.DefaultTermSec,
 	})
-	if warnSecs > 0 {
-		result.WarnAfter = time.Duration(warnSecs) * time.Second
-		result.WarnLearned = true
+	if learned := LearnedThreshold(time.Duration(warnSecs) * time.Second); learned.Known() {
+		result.Warn = learned
 	}
-	if termSecs > 0 {
-		result.TerminateAfter = time.Duration(termSecs) * time.Second
-		result.TerminateLearned = true
+	if learned := LearnedThreshold(time.Duration(termSecs) * time.Second); learned.Known() {
+		result.Terminate = learned
 	}
 
 	durations := make(BootstrapDurations, 0, len(selectedObs))

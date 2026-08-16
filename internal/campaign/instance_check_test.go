@@ -381,11 +381,9 @@ func TestCheckInstance_BootstrapSurvivalExtendsExistingDeadline(t *testing.T) {
 		},
 		OnStartProbePresent: true,
 		BootstrapSurvival: &db.BootstrapSurvival{
-			SampleSize:       50,
-			WarnAfter:        20 * time.Minute,
-			WarnLearned:      true,
-			TerminateAfter:   30 * time.Minute,
-			TerminateLearned: true,
+			SampleSize: 50,
+			Warn:       db.LearnedThreshold(20 * time.Minute),
+			Terminate:  db.LearnedThreshold(30 * time.Minute),
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
 		Now:      now,
@@ -409,11 +407,9 @@ func TestCheckInstance_BootstrapSurvivalTerminatesAfterLearnedDeadline(t *testin
 		},
 		OnStartProbePresent: true,
 		BootstrapSurvival: &db.BootstrapSurvival{
-			SampleSize:       50,
-			WarnAfter:        20 * time.Minute,
-			WarnLearned:      true,
-			TerminateAfter:   30 * time.Minute,
-			TerminateLearned: true,
+			SampleSize: 50,
+			Warn:       db.LearnedThreshold(20 * time.Minute),
+			Terminate:  db.LearnedThreshold(30 * time.Minute),
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
 		Now:      now,
@@ -2434,11 +2430,9 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 		InstancePhase:  "setup:459",
 		PhaseChangedAt: &phaseStart,
 		SetupSurvival: &db.SetupSurvival{
-			SampleSize:       50,
-			WarnAfter:        5 * time.Minute,
-			WarnLearned:      true,
-			TerminateAfter:   7 * time.Minute,
-			TerminateLearned: true,
+			SampleSize: 50,
+			Warn:       db.LearnedThreshold(5 * time.Minute),
+			Terminate:  db.LearnedThreshold(7 * time.Minute),
 		},
 		JobState: JobState{HasStartedJob: true},
 		Now:      time.Now(),
@@ -3109,7 +3103,7 @@ func TestCheckInstance_EmptyStatusTimeout_SurvivalExtends(t *testing.T) {
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst:      &cloud.Instance{Status: ""},
-		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Minute), Terminate: db.LearnedThreshold(30 * time.Minute)},
 		Now:               now,
 	})
 	if action.Kind == ActionEmptyStatusTimeout {
@@ -3137,7 +3131,7 @@ func TestCheckInstance_EmptyStatusTimeout_SurvivalTerminates(t *testing.T) {
 		// reads the same survival threshold and would otherwise mask the
 		// empty-status rule this test targets.
 		OnStartProbePresent: true,
-		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Second, TerminateAfter: 30 * time.Second, TerminateLearned: true},
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Second), Terminate: db.LearnedThreshold(30 * time.Second)},
 		Now:                 now,
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
@@ -3156,9 +3150,9 @@ func TestCheckInstance_EmptyStatusTimeout_UnlearnedDefaultsFallBackToConstant(t 
 	launchedAt := now.Add(-5 * time.Minute).Unix() // past legacy 1m, under the 20m default
 	// Mirrors ComputeBootstrapSurvival on a database with no launch history.
 	unlearned := &db.BootstrapSurvival{
-		SampleSize:     3,
-		WarnAfter:      15 * time.Minute,
-		TerminateAfter: 20 * time.Minute,
+		SampleSize: 3,
+		Warn:       db.DefaultThreshold(15 * time.Minute),
+		Terminate:  db.DefaultThreshold(20 * time.Minute),
 	}
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -3209,7 +3203,7 @@ func TestCheckInstance_PreRunningStatus_SurvivalExtends(t *testing.T) {
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst:      &cloud.Instance{Status: cloud.ProviderStatusCreated},
-		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Minute), Terminate: db.LearnedThreshold(30 * time.Minute)},
 		Now:               now,
 	})
 	if action.Kind == ActionEmptyStatusTimeout {
@@ -3237,7 +3231,7 @@ func TestCheckInstance_PreRunningStatus_SurvivalTerminates(t *testing.T) {
 		// reads the same survival threshold and would otherwise mask the
 		// pre-running rule this test targets.
 		OnStartProbePresent: true,
-		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 2 * time.Minute, TerminateAfter: 3 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(2 * time.Minute), Terminate: db.LearnedThreshold(3 * time.Minute)},
 		Now:                 now,
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
@@ -3263,7 +3257,7 @@ func TestCheckInstance_LaunchingPhaseTimeout_SurvivalExtends(t *testing.T) {
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst:      nil,
-		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Minute), Terminate: db.LearnedThreshold(30 * time.Minute)},
 		Now:               now,
 	})
 	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded") {
@@ -3287,7 +3281,7 @@ func TestCheckInstance_LaunchingPhaseTimeout_SurvivalTerminates(t *testing.T) {
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst:      nil,
-		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 8 * time.Minute, TerminateAfter: 10 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival: &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(8 * time.Minute), Terminate: db.LearnedThreshold(10 * time.Minute)},
 		Now:               now,
 	})
 	killed := action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "launching phase exceeded")
@@ -3312,7 +3306,7 @@ func TestCheckInstance_DudProvider_SurvivalExtends(t *testing.T) {
 		},
 		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		OnStartProbePresent: false,
-		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Minute), Terminate: db.LearnedThreshold(30 * time.Minute)},
 		Now:                 now,
 	})
 	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
@@ -3337,7 +3331,7 @@ func TestCheckInstance_DudProvider_SurvivalTerminates(t *testing.T) {
 		},
 		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		OnStartProbePresent: false,
-		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, WarnAfter: 4 * time.Minute, TerminateAfter: 6 * time.Minute, TerminateLearned: true},
+		BootstrapSurvival:   &db.BootstrapSurvival{SampleSize: 30, Warn: db.DefaultThreshold(4 * time.Minute), Terminate: db.LearnedThreshold(6 * time.Minute)},
 		Now:                 now,
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
@@ -3370,7 +3364,7 @@ func TestCheckInstance_OnStartStall_SurvivalExtends(t *testing.T) {
 		OnStartProbePresent:   true,
 		OnStartStage:          "apt-installing",
 		OnStartStageChangedAt: &stageAt,
-		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 15 * time.Minute, TerminateAfter: 30 * time.Minute, TerminateLearned: true},
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, Warn: db.DefaultThreshold(15 * time.Minute), Terminate: db.LearnedThreshold(30 * time.Minute)},
 		Now:                   now,
 	})
 	if strings.Contains(action.StallMessage, "OnStart") {
@@ -3398,7 +3392,7 @@ func TestCheckInstance_OnStartStall_SurvivalTerminates(t *testing.T) {
 		OnStartProbePresent:   true,
 		OnStartStage:          "apt-installing",
 		OnStartStageChangedAt: &stageAt,
-		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 5 * time.Minute, TerminateAfter: 8 * time.Minute, TerminateLearned: true},
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, Warn: db.DefaultThreshold(5 * time.Minute), Terminate: db.LearnedThreshold(8 * time.Minute)},
 		Now:                   now,
 	})
 	if action.Kind != ActionBootstrapStalled {
@@ -3422,9 +3416,9 @@ func TestCheckInstance_OnStartStall_UnlearnedDefaultsFallBackToConstant(t *testi
 	stageAt := now.Add(-onStartStallTimeout - time.Minute) // past legacy 10m, under the 25m default
 	// Mirrors ComputeSetupSurvival on a database with no setup history.
 	unlearned := &db.SetupSurvival{
-		SampleSize:     3,
-		WarnAfter:      15 * time.Minute,
-		TerminateAfter: 25 * time.Minute,
+		SampleSize: 3,
+		Warn:       db.DefaultThreshold(15 * time.Minute),
+		Terminate:  db.DefaultThreshold(25 * time.Minute),
 	}
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -3488,7 +3482,7 @@ func TestCheckInstance_OnStartTotalCap_SurvivalExtends(t *testing.T) {
 		OnStartProbePresent:   true,
 		OnStartStage:          "onstart-deps-ready",
 		OnStartStageChangedAt: &stageAt,
-		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 20 * time.Minute, TerminateAfter: 40 * time.Minute, TerminateLearned: true},
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, Warn: db.DefaultThreshold(20 * time.Minute), Terminate: db.LearnedThreshold(40 * time.Minute)},
 		Now:                   now,
 	})
 	if strings.Contains(action.StallMessage, "OnStart") {
@@ -3519,7 +3513,7 @@ func TestCheckInstance_OnStartTotalCap_SurvivalTerminates(t *testing.T) {
 		OnStartProbePresent:   true,
 		OnStartStage:          "onstart-deps-ready",
 		OnStartStageChangedAt: &stageAt,
-		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, WarnAfter: 10 * time.Minute, TerminateAfter: 20 * time.Minute, TerminateLearned: true},
+		SetupSurvival:         &db.SetupSurvival{SampleSize: 30, Warn: db.DefaultThreshold(10 * time.Minute), Terminate: db.LearnedThreshold(20 * time.Minute)},
 		Now:                   now,
 	})
 	if action.Kind != ActionBootstrapStalled {
@@ -3545,9 +3539,9 @@ func TestCheckInstance_SetupStall_UnlearnedDefaultsFallBackToConstant(t *testing
 	phaseStart := now.Add(-30 * time.Minute)
 	// Mirrors ComputeSetupSurvival on a database with too little history.
 	unlearned := &db.SetupSurvival{
-		SampleSize:     4,
-		WarnAfter:      15 * time.Minute,
-		TerminateAfter: 25 * time.Minute,
+		SampleSize: 4,
+		Warn:       db.DefaultThreshold(15 * time.Minute),
+		Terminate:  db.DefaultThreshold(25 * time.Minute),
 	}
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{

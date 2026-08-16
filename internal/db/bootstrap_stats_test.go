@@ -50,13 +50,13 @@ func TestComputeBootstrapSurvival_Empty(t *testing.T) {
 		t.Errorf("sample size = %d, want 0", s.SampleSize)
 	}
 	// Should return defaults when insufficient data
-	if s.WarnAfter != 15*time.Minute {
-		t.Errorf("warn = %v, want 15m (default)", s.WarnAfter)
+	if s.Warn.Duration() != 15*time.Minute {
+		t.Errorf("warn = %v, want 15m (default)", s.Warn.Duration())
 	}
-	if s.TerminateAfter != 20*time.Minute {
-		t.Errorf("terminate = %v, want 20m (default)", s.TerminateAfter)
+	if s.Terminate.Duration() != 20*time.Minute {
+		t.Errorf("terminate = %v, want 20m (default)", s.Terminate.Duration())
 	}
-	if s.WarnLearned || s.TerminateLearned {
+	if s.Warn.IsLearned() || s.Terminate.IsLearned() {
 		t.Fatalf("empty history marked thresholds learned: %+v", s)
 	}
 }
@@ -164,8 +164,8 @@ func TestComputeBootstrapSurvival_InsufficientData(t *testing.T) {
 		t.Errorf("sample size = %d, want 5", s.SampleSize)
 	}
 	// Should return defaults
-	if s.WarnAfter != 15*time.Minute {
-		t.Errorf("warn = %v, want 15m (default)", s.WarnAfter)
+	if s.Warn.Duration() != 15*time.Minute {
+		t.Errorf("warn = %v, want 15m (default)", s.Warn.Duration())
 	}
 }
 
@@ -228,20 +228,20 @@ func TestComputeBootstrapSurvival_LearnedThresholds(t *testing.T) {
 	}
 
 	// Warn should be somewhere between 3-10 minutes
-	if s.WarnAfter < 3*time.Minute || s.WarnAfter > 10*time.Minute {
-		t.Errorf("warn = %v, want between 3m and 10m", s.WarnAfter)
+	if s.Warn.Duration() < 3*time.Minute || s.Warn.Duration() > 10*time.Minute {
+		t.Errorf("warn = %v, want between 3m and 10m", s.Warn.Duration())
 	}
 
 	// Terminate should be after warn
-	if s.TerminateAfter <= s.WarnAfter {
-		t.Errorf("terminate (%v) should be after warn (%v)", s.TerminateAfter, s.WarnAfter)
+	if s.Terminate.Duration() <= s.Warn.Duration() {
+		t.Errorf("terminate (%v) should be after warn (%v)", s.Terminate.Duration(), s.Warn.Duration())
 	}
 
 	// Terminate should be less than the old default of 20m given this data
-	if s.TerminateAfter >= 20*time.Minute {
-		t.Errorf("terminate = %v, should be less than 20m with this data", s.TerminateAfter)
+	if s.Terminate.Duration() >= 20*time.Minute {
+		t.Errorf("terminate = %v, should be less than 20m with this data", s.Terminate.Duration())
 	}
-	if !s.WarnLearned || !s.TerminateLearned {
+	if !s.Warn.IsLearned() || !s.Terminate.IsLearned() {
 		t.Fatalf("learned distribution did not mark both thresholds learned: %+v", s)
 	}
 }
@@ -288,8 +288,8 @@ func TestComputeBootstrapSurvival_PerProvider(t *testing.T) {
 	}
 
 	// runpod bootstraps are slower, so its thresholds should be higher
-	if runpod.WarnAfter <= vastai.WarnAfter {
-		t.Errorf("runpod warn (%v) should be > vastai warn (%v)", runpod.WarnAfter, vastai.WarnAfter)
+	if runpod.Warn.Duration() <= vastai.Warn.Duration() {
+		t.Errorf("runpod warn (%v) should be > vastai warn (%v)", runpod.Warn.Duration(), vastai.Warn.Duration())
 	}
 }
 
@@ -319,11 +319,11 @@ func TestComputeBootstrapSurvival_FloorEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if s.WarnAfter < 3*time.Minute {
-		t.Errorf("warn = %v, should not be below 3m floor", s.WarnAfter)
+	if s.Warn.Duration() < 3*time.Minute {
+		t.Errorf("warn = %v, should not be below 3m floor", s.Warn.Duration())
 	}
-	if s.TerminateAfter < 5*time.Minute {
-		t.Errorf("terminate = %v, should not be below 5m floor", s.TerminateAfter)
+	if s.Terminate.Duration() < 5*time.Minute {
+		t.Errorf("terminate = %v, should not be below 5m floor", s.Terminate.Duration())
 	}
 }
 
@@ -405,9 +405,9 @@ func TestLearnedTerminate_DistinguishesLearnedFromDefault(t *testing.T) {
 		wantOK    bool
 	}{
 		{"nil survival", nil, 0, false},
-		{"default thresholds, nothing learned", &BootstrapSurvival{TerminateAfter: 20 * time.Minute}, 0, false},
-		{"learned", &BootstrapSurvival{TerminateAfter: 7 * time.Minute, TerminateLearned: true}, 7 * time.Minute, true},
-		{"flagged learned but no value", &BootstrapSurvival{TerminateLearned: true}, 0, false},
+		{"default thresholds, nothing learned", &BootstrapSurvival{Terminate: DefaultThreshold(20 * time.Minute)}, 0, false},
+		{"learned", &BootstrapSurvival{Terminate: LearnedThreshold(7 * time.Minute)}, 7 * time.Minute, true},
+		{"learned flag with a non-positive value", &BootstrapSurvival{Terminate: LearnedThreshold(0)}, 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,8 +430,8 @@ func TestLearnedTerminate_EmptyHistoryReportsNothingLearned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.TerminateAfter <= 0 {
-		t.Fatalf("expected a populated default threshold, got %v", s.TerminateAfter)
+	if s.Terminate.Duration() <= 0 {
+		t.Fatalf("expected a populated default threshold, got %v", s.Terminate.Duration())
 	}
 	if _, ok := s.LearnedTerminate(); ok {
 		t.Fatalf("empty history reported a learned threshold: %+v", s)
@@ -448,11 +448,11 @@ func TestSetupLearnedTerminate_DistinguishesLearnedFromDefault(t *testing.T) {
 	if _, ok := nilSurvival.LearnedTerminate(); ok {
 		t.Error("nil setup survival reported a learned threshold")
 	}
-	defaults := &SetupSurvival{WarnAfter: 15 * time.Minute, TerminateAfter: 25 * time.Minute}
+	defaults := &SetupSurvival{Warn: DefaultThreshold(15 * time.Minute), Terminate: DefaultThreshold(25 * time.Minute)}
 	if _, ok := defaults.LearnedTerminate(); ok {
 		t.Error("default setup thresholds reported as learned")
 	}
-	learned := &SetupSurvival{TerminateAfter: 8 * time.Minute, TerminateLearned: true}
+	learned := &SetupSurvival{Terminate: LearnedThreshold(8 * time.Minute)}
 	if got, ok := learned.LearnedTerminate(); !ok || got != 8*time.Minute {
 		t.Errorf("LearnedTerminate() = (%v, %v), want (8m, true)", got, ok)
 	}

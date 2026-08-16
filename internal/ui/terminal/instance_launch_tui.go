@@ -2735,7 +2735,7 @@ func (m launchModel) firstRegistrationStatus() *firstRegistrationStatus {
 		elapsed:           elapsed,
 		severity:          launchWaitSeverityNormal,
 		qualifier:         firstRegistrationQualifier(launchWaitSeverityNormal),
-		deadlineRemaining: m.firstRegSurvival.TerminateAfter - elapsed,
+		deadlineRemaining: m.firstRegSurvival.Terminate.Duration() - elapsed,
 		scope:             m.firstRegSurvival.ScopeDescription(),
 		sampleSize:        m.firstRegSurvival.SampleSize,
 	}
@@ -2745,9 +2745,9 @@ func (m launchModel) firstRegistrationStatus() *firstRegistrationStatus {
 		status.successProbKnown = true
 		status.suspicionLabel = firstRegistrationSuspicionLabel(p)
 		status.severity = severityFromSuspicionLabel(status.suspicionLabel)
-	} else if status.elapsed >= m.firstRegSurvival.TerminateAfter && m.firstRegSurvival.TerminateAfter > 0 {
+	} else if term := m.firstRegSurvival.Terminate.Duration(); term > 0 && status.elapsed >= term {
 		status.severity = launchWaitSeverityCritical
-	} else if status.elapsed >= m.firstRegSurvival.WarnAfter && m.firstRegSurvival.WarnAfter > 0 {
+	} else if warn := m.firstRegSurvival.Warn.Duration(); warn > 0 && status.elapsed >= warn {
 		status.severity = launchWaitSeverityWarn
 	}
 

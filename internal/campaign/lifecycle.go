@@ -1561,7 +1561,13 @@ func launchCampaignWithStager(
 						return
 					}
 					elapsed := time.Since(campaignCreatedAt)
-					shouldTimeout := elapsed >= firstRegSurvival.TerminateAfter
+					// Unlike the watchdog constants, no separate fallback
+					// exists here: the configured default IS the policy, so
+					// this reads the effective value rather than learned-only.
+					// The positive check keeps an unset threshold from reading
+					// as a deadline that has already passed.
+					timeout := firstRegSurvival.Terminate.Duration()
+					shouldTimeout := timeout > 0 && elapsed >= timeout
 					if shouldTimeout {
 						firstRegistrationTimedOut = true
 					}
@@ -1810,7 +1816,7 @@ func launchCampaignWithStager(
 		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
 		return nil, fmt.Errorf(
 			"first worker registration timed out after %s (scope=%s sample=%d)",
-			firstRegSurvival.TerminateAfter.Truncate(time.Second),
+			firstRegSurvival.Terminate.Duration().Truncate(time.Second),
 			firstRegSurvival.ScopeDescription(),
 			firstRegSurvival.SampleSize,
 		)

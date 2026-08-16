@@ -1020,8 +1020,8 @@ func TestLaunchModelView_FirstRegistrationWaitUsesSurvivalThresholds(t *testing.
 		launching:               true,
 		launchCampaignCreatedAt: now.Add(-30 * time.Second),
 		firstRegSurvival: &db.FirstRegistrationSurvival{
-			WarnAfter:      2 * time.Minute,
-			TerminateAfter: 5 * time.Minute,
+			Warn:      db.DefaultThreshold(2 * time.Minute),
+			Terminate: db.DefaultThreshold(5 * time.Minute),
 		},
 	}
 

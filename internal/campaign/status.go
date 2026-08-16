@@ -225,7 +225,7 @@ func survivalTerminateAfter(s *db.BootstrapSurvival) time.Duration {
 	if s == nil {
 		return 0
 	}
-	return s.TerminateAfter
+	return s.Terminate.Duration()
 }
 
 func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.Launch) *time.Time {

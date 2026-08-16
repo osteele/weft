@@ -19,13 +19,13 @@ func TestComputeSetupSurvival_Empty(t *testing.T) {
 	if s.SampleSize != 0 {
 		t.Errorf("sample size = %d, want 0", s.SampleSize)
 	}
-	if s.WarnAfter != 15*time.Minute {
-		t.Errorf("warn = %v, want 15m (default)", s.WarnAfter)
+	if s.Warn.Duration() != 15*time.Minute {
+		t.Errorf("warn = %v, want 15m (default)", s.Warn.Duration())
 	}
-	if s.TerminateAfter != 25*time.Minute {
-		t.Errorf("terminate = %v, want 25m (default)", s.TerminateAfter)
+	if s.Terminate.Duration() != 25*time.Minute {
+		t.Errorf("terminate = %v, want 25m (default)", s.Terminate.Duration())
 	}
-	if s.WarnLearned || s.TerminateLearned {
+	if s.Warn.IsLearned() || s.Terminate.IsLearned() {
 		t.Fatalf("empty history marked thresholds learned: %+v", s)
 	}
 }
@@ -98,16 +98,16 @@ func TestComputeSetupSurvival_SufficientData(t *testing.T) {
 	if s.SampleSize < 20 {
 		t.Errorf("sample size = %d, want >= 20", s.SampleSize)
 	}
-	if s.WarnAfter < 5*time.Minute {
-		t.Errorf("warn = %v, should be >= 5m floor", s.WarnAfter)
+	if s.Warn.Duration() < 5*time.Minute {
+		t.Errorf("warn = %v, should be >= 5m floor", s.Warn.Duration())
 	}
-	if s.TerminateAfter <= s.WarnAfter {
-		t.Errorf("terminate (%v) should be after warn (%v)", s.TerminateAfter, s.WarnAfter)
+	if s.Terminate.Duration() <= s.Warn.Duration() {
+		t.Errorf("terminate (%v) should be after warn (%v)", s.Terminate.Duration(), s.Warn.Duration())
 	}
-	if !s.WarnLearned {
+	if !s.Warn.IsLearned() {
 		t.Error("warn threshold should be marked learned")
 	}
-	if !s.TerminateLearned {
+	if !s.Terminate.IsLearned() {
 		t.Error("terminate threshold should be marked learned")
 	}
 }
@@ -133,7 +133,7 @@ func TestComputeSetupSurvival_SufficientAllSuccessUsesDefaults(t *testing.T) {
 	if s.SampleSize != 25 {
 		t.Fatalf("sample size = %d, want 25", s.SampleSize)
 	}
-	if s.WarnLearned || s.TerminateLearned {
+	if s.Warn.IsLearned() || s.Terminate.IsLearned() {
 		t.Fatalf("all-success history marked configured defaults learned: %+v", s)
 	}
 }
@@ -179,13 +179,13 @@ func TestComputeSetupSurvival_InsufficientData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.WarnAfter != 15*time.Minute {
-		t.Errorf("warn = %v, want 15m (default)", s.WarnAfter)
+	if s.Warn.Duration() != 15*time.Minute {
+		t.Errorf("warn = %v, want 15m (default)", s.Warn.Duration())
 	}
-	if s.TerminateAfter != 25*time.Minute {
-		t.Errorf("terminate = %v, want 25m (default)", s.TerminateAfter)
+	if s.Terminate.Duration() != 25*time.Minute {
+		t.Errorf("terminate = %v, want 25m (default)", s.Terminate.Duration())
 	}
-	if s.WarnLearned || s.TerminateLearned {
+	if s.Warn.IsLearned() || s.Terminate.IsLearned() {
 		t.Fatalf("insufficient history marked thresholds learned: %+v", s)
 	}
 }

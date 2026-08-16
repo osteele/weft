@@ -167,10 +167,10 @@ func bootstrapStartupView(s *db.BootstrapSurvival, elapsed time.Duration) startu
 	view := startupSurvivalView{
 		Scope:                 s.Provider,
 		Samples:               s.SampleSize,
-		WarnAfterSeconds:      int64(s.WarnAfter / time.Second),
-		WarnThresholdSource:   survivalThresholdProvenance(s.WarnLearned),
-		TerminateAfterSeconds: int64(s.TerminateAfter / time.Second),
-		TerminateSource:       survivalThresholdProvenance(s.TerminateLearned),
+		WarnAfterSeconds:      int64(s.Warn.Duration() / time.Second),
+		WarnThresholdSource:   survivalThresholdProvenance(s.Warn.IsLearned()),
+		TerminateAfterSeconds: int64(s.Terminate.Duration() / time.Second),
+		TerminateSource:       survivalThresholdProvenance(s.Terminate.IsLearned()),
 	}
 	if elapsed > 0 {
 		if remaining, ok := s.Durations.ConditionalMedian(elapsed); ok {
@@ -188,10 +188,10 @@ func firstRegistrationStartupView(s *db.FirstRegistrationSurvival, elapsed time.
 	view := startupSurvivalView{
 		Scope:                 s.ScopeDescription(),
 		Samples:               s.SampleSize,
-		WarnAfterSeconds:      int64(s.WarnAfter / time.Second),
-		WarnThresholdSource:   survivalThresholdProvenance(s.WarnLearned),
-		TerminateAfterSeconds: int64(s.TerminateAfter / time.Second),
-		TerminateSource:       survivalThresholdProvenance(s.TerminateLearned),
+		WarnAfterSeconds:      int64(s.Warn.Duration() / time.Second),
+		WarnThresholdSource:   survivalThresholdProvenance(s.Warn.IsLearned()),
+		TerminateAfterSeconds: int64(s.Terminate.Duration() / time.Second),
+		TerminateSource:       survivalThresholdProvenance(s.Terminate.IsLearned()),
 	}
 	if elapsed > 0 {
 		if p, ok := s.ConditionalSuccess(elapsed); ok {
@@ -213,12 +213,12 @@ func startupRecommendation(elapsed time.Duration, bootstrap *db.BootstrapSurviva
 	terminate := time.Duration(0)
 	warn := time.Duration(0)
 	if bootstrap != nil {
-		terminate = maxDuration(terminate, bootstrap.TerminateAfter)
-		warn = maxDuration(warn, bootstrap.WarnAfter)
+		terminate = maxDuration(terminate, bootstrap.Terminate.Duration())
+		warn = maxDuration(warn, bootstrap.Warn.Duration())
 	}
 	if firstReg != nil {
-		terminate = maxDuration(terminate, firstReg.TerminateAfter)
-		warn = maxDuration(warn, firstReg.WarnAfter)
+		terminate = maxDuration(terminate, firstReg.Terminate.Duration())
+		warn = maxDuration(warn, firstReg.Warn.Duration())
 	}
 	if terminate > 0 && elapsed >= terminate {
 		return "terminate or replace: elapsed time exceeds startup terminate threshold"

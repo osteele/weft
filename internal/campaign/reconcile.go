@@ -642,7 +642,7 @@ func (r *Reconciler) refreshBootstrapSurvival(database *sql.DB, providers map[st
 			continue
 		}
 		fresh[provider] = survival
-		slog.Debug("bootstrap thresholds computed", "component", "reconcile", "provider", provider, "warn_after", survival.WarnAfter.Truncate(time.Second), "terminate_after", survival.TerminateAfter.Truncate(time.Second), "sample_size", survival.SampleSize)
+		slog.Debug("bootstrap thresholds computed", "component", "reconcile", "provider", provider, "warn", survival.Warn, "terminate", survival.Terminate, "sample_size", survival.SampleSize)
 	}
 
 	r.mu.Lock()
