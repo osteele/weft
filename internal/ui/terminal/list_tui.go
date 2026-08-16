@@ -106,6 +106,11 @@ type listTUIModel struct {
 	expandedBlocked            map[int64]bool
 	showInstanceFailures       bool
 	instanceFailuresScroll     int
+	showJobDiagnosis           bool
+	jobDiagnosisJobID          int64
+	jobDiagnosisLines          []string
+	jobDiagnosisScroll         int
+	jobDiagnosisLoading        bool
 	lastAutoPilotErrorRaw      string
 	showAutoPilotErrorDetails  bool
 	autopilotPaused            bool
@@ -164,9 +169,10 @@ type listURLOpenedMsg struct {
 	err error
 }
 
-type listJobDiagnosisDoneMsg struct {
-	jobID int64
-	err   error
+type listJobDiagnosisLoadedMsg struct {
+	jobID  int64
+	output string
+	err    error
 }
 
 type groupedViewLayout struct {
@@ -657,6 +663,22 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.instanceFailuresScroll = max(0, m.instanceFailuresScroll-page)
 			case "pgdown", " ":
 				m.instanceFailuresScroll = min(m.instanceFailuresMaxScroll(), m.instanceFailuresScroll+page)
+			}
+			return m, nil
+		}
+		if m.showJobDiagnosis {
+			page := max(1, m.height-3)
+			switch msg.String() {
+			case "z", "esc", "q", "enter":
+				m.showJobDiagnosis = false
+			case "up", "k":
+				m.jobDiagnosisScroll = max(0, m.jobDiagnosisScroll-1)
+			case "down", "j":
+				m.jobDiagnosisScroll = min(m.jobDiagnosisMaxScroll(), m.jobDiagnosisScroll+1)
+			case "pgup", "b":
+				m.jobDiagnosisScroll = max(0, m.jobDiagnosisScroll-page)
+			case "pgdown", " ":
+				m.jobDiagnosisScroll = min(m.jobDiagnosisMaxScroll(), m.jobDiagnosisScroll+page)
 			}
 			return m, nil
 		}
@@ -1261,12 +1283,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = fmt.Sprintf("Opened %s billing", providerNameForBillingURL(msg.url))
 		return m, nil
 
-	case listJobDiagnosisDoneMsg:
-		if msg.err != nil {
+	case listJobDiagnosisLoadedMsg:
+		m.jobDiagnosisLoading = false
+		if msg.err != nil && strings.TrimSpace(msg.output) == "" {
 			m.statusMessage = fmt.Sprintf("Diagnosis for job #%d failed: %v", msg.jobID, msg.err)
 			return m, nil
 		}
-		m.statusMessage = fmt.Sprintf("Diagnosis for job #%d closed", msg.jobID)
+		m.showJobDiagnosis = true
+		m.jobDiagnosisJobID = msg.jobID
+		m.jobDiagnosisLines = strings.Split(strings.TrimRight(msg.output, "\n"), "\n")
+		m.jobDiagnosisScroll = 0
 		return m, nil
 
 	case listProjectCandidatesLoadedMsg:
@@ -1362,6 +1388,9 @@ func (m listTUIModel) baseView() string {
 	}
 	if m.showInstanceFailures {
 		return m.renderInstanceFailuresView()
+	}
+	if m.showJobDiagnosis {
+		return m.renderJobDiagnosisView()
 	}
 	if m.isGroupedView() {
 		return m.groupedView()
@@ -1715,6 +1744,68 @@ func (m listTUIModel) renderInstanceFailuresView() string {
 	return b.String()
 }
 
+func (m listTUIModel) jobDiagnosisLinesRendered() []string {
+	out := make([]string, 0, len(m.jobDiagnosisLines))
+	for _, ln := range m.jobDiagnosisLines {
+		out = append(out, truncateDisplayWidth(ln, m.width))
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+func (m listTUIModel) jobDiagnosisBodyHeight() int {
+	return max(1, m.height-2) // title + footer
+}
+
+func (m listTUIModel) jobDiagnosisMaxScroll() int {
+	return max(0, len(m.jobDiagnosisLinesRendered())-m.jobDiagnosisBodyHeight())
+}
+
+// renderJobDiagnosisView is the read-only `z` diagnose overlay: a scrollable
+// view of the selected job's placement / blocker diagnosis, with esc/q/z to
+// return to the list.
+func (m listTUIModel) renderJobDiagnosisView() string {
+	if m.width <= 0 || m.height <= 0 {
+		return "Loading..."
+	}
+	lines := m.jobDiagnosisLinesRendered()
+	bodyHeight := m.jobDiagnosisBodyHeight()
+	maxScroll := max(0, len(lines)-bodyHeight)
+	scroll := min(m.jobDiagnosisScroll, maxScroll)
+	end := min(len(lines), scroll+bodyHeight)
+
+	var b strings.Builder
+	title := fmt.Sprintf("Diagnosis for %s", ids.FormatJobID(m.jobDiagnosisJobID))
+	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
+	b.WriteString("\n")
+	if m.jobDiagnosisLoading {
+		b.WriteString("Loading...")
+		b.WriteString("\n")
+		shown := 1
+		for ; shown < bodyHeight; shown++ {
+			b.WriteString("\n")
+		}
+	} else {
+		shown := 0
+		for _, ln := range lines[scroll:end] {
+			b.WriteString(ln)
+			b.WriteString("\n")
+			shown++
+		}
+		for ; shown < bodyHeight; shown++ {
+			b.WriteString("\n")
+		}
+	}
+	foot := "esc/q/z back · ↑/↓ scroll"
+	if maxScroll > 0 {
+		foot += fmt.Sprintf("  ·  %d–%d of %d", scroll+1, end, len(lines))
+	}
+	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(foot, m.width)))
+	return b.String()
+}
+
 func (m listTUIModel) syncInProgress() bool {
 	return len(m.pendingSyncHosts) > 0
 }
@@ -2034,7 +2125,7 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
-	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.showInstanceFailures || m.autoRunRateInputActive {
+	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.showInstanceFailures || m.showJobDiagnosis || m.autoRunRateInputActive {
 		return m, nil
 	}
 	if m.isGroupedView() {
@@ -3816,14 +3907,15 @@ func openURLListCmd(url string) tea.Cmd {
 }
 
 func runListJobDiagnosis(jobID int64) tea.Cmd {
-	executable, err := os.Executable()
-	if err != nil {
-		return func() tea.Msg { return listJobDiagnosisDoneMsg{jobID: jobID, err: err} }
+	return func() tea.Msg {
+		executable, err := os.Executable()
+		if err != nil {
+			return listJobDiagnosisLoadedMsg{jobID: jobID, err: err}
+		}
+		command := exec.Command(executable, "diagnose", "job", ids.FormatJobID(jobID))
+		output, err := command.CombinedOutput()
+		return listJobDiagnosisLoadedMsg{jobID: jobID, output: string(output), err: err}
 	}
-	command := exec.Command(executable, "diagnose", "job", ids.FormatJobID(jobID))
-	return tea.ExecProcess(command, func(err error) tea.Msg {
-		return listJobDiagnosisDoneMsg{jobID: jobID, err: err}
-	})
 }
 
 func openURLForListTUI(url string) error {

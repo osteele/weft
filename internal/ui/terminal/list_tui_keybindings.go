@@ -92,6 +92,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 				return m, nil
 			}
 			m.statusMessage = fmt.Sprintf("Diagnosing job #%d...", job.ID)
+			m.jobDiagnosisLoading = true
 			return m, runListJobDiagnosis(job.ID)
 		}},
 		{keys: "up", aliases: upAliases, action: "move up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
