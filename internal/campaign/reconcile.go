@@ -483,7 +483,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 			params.ProviderStatusUnknownFor >= stalePauseTimeout
 	}
 	if client != nil && providerAllowsHeartbeatAdjudication && ci.Status == db.LaunchStatusRunning && r2Client != nil {
-		if hbAction := r.checkStaleHeartbeat(r2Client, ci, inst); hbAction.Kind != ActionNone {
+		if hbAction := r.checkStaleHeartbeat(r2Client, ci, inst, now); hbAction.Kind != ActionNone {
 			reconciled, terminated := executeReconcileAction(database, client, r2Client, ci, hbAction)
 			if reconciled {
 				r.clearProbeFailure(ci.ID)
@@ -804,7 +804,7 @@ func (r *Reconciler) clearProbeFailure(id int64) {
 	r.mu.Unlock()
 }
 
-func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
+func (r *Reconciler) noteProbeFailure(id int64, now time.Time) probeFailureState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.probeFailures == nil {
@@ -812,7 +812,7 @@ func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
 	}
 	state := r.probeFailures[id]
 	if state.Count == 0 {
-		state.FirstAt = time.Now()
+		state.FirstAt = now
 	}
 	state.Count++
 	r.probeFailures[id] = state
@@ -829,7 +829,7 @@ func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
 // destroy-before-mark, oplog, and disk-report pipeline; the caller clears
 // the probe-failure state only once the action actually executes, so a
 // deferred destroy retries without restarting the hysteresis window.
-func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, inst *cloud.Instance) InstanceAction {
+func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, inst *cloud.Instance, now time.Time) InstanceAction {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -837,7 +837,7 @@ func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, ins
 	if heartbeat != nil && heartbeat.observationUnknown {
 		return InstanceAction{Kind: ActionNone}
 	}
-	staleThreshold := effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, time.Now())
+	staleThreshold := effectiveHeartbeatStaleThreshold(ci.AgentReadyAtUnix, now)
 	if heartbeatAge == 0 || heartbeatAge <= staleThreshold {
 		r.clearProbeFailure(ci.ID)
 		return InstanceAction{Kind: ActionNone}
@@ -858,8 +858,8 @@ func (r *Reconciler) checkStaleHeartbeat(r2Client *r2.Client, ci *db.Launch, ins
 	if err != nil {
 		// A probe error is the unknown case; a probe that reaches the host
 		// and reports the agent gone is positive evidence, handled above.
-		state := r.noteProbeFailure(ci.ID)
-		elapsed := time.Since(state.FirstAt)
+		state := r.noteProbeFailure(ci.ID, now)
+		elapsed := now.Sub(state.FirstAt)
 		if state.Count < minProbeFailureAttempts || elapsed < minProbeFailureWindow {
 			slog.Debug("heartbeat stale and agent probe unreachable, waiting before termination", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "attempt", state.Count, "min_attempts", minProbeFailureAttempts, "elapsed", elapsed.Truncate(time.Second), "min_window", minProbeFailureWindow)
 			return InstanceAction{Kind: ActionNone}

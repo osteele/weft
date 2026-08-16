@@ -1050,6 +1050,7 @@ func TestCheckStaleHeartbeat_UnknownObservationDoesNotProbe(t *testing.T) {
 		&r2.Client{},
 		&db.Launch{ID: 1, Status: db.LaunchStatusRunning},
 		&cloud.Instance{ProviderID: "provider-1", Status: cloud.ProviderStatusRunning},
+		time.Now(),
 	)
 	if action.Kind != ActionNone {
 		t.Fatalf("action = %+v, want none for unknown liveness observation", action)
@@ -1642,7 +1643,7 @@ func TestCheckStaleHeartbeat_UsesEarlyLifeThreshold(t *testing.T) {
 		return false, nil
 	}
 
-	action := NewReconciler().checkStaleHeartbeat(&r2.Client{}, ci, &cloud.Instance{})
+	action := NewReconciler().checkStaleHeartbeat(&r2.Client{}, ci, &cloud.Instance{}, time.Now())
 	if action.Kind != ActionNone {
 		t.Fatalf("action = %+v, want no stale-heartbeat action inside the 8-minute early-life threshold", action)
 	}
