@@ -3532,3 +3532,84 @@ func TestCheckInstance_OnStartTotalCap_SurvivalTerminates(t *testing.T) {
 		t.Errorf("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
 	}
 }
+
+// TestCheckInstance_SetupStall_UnlearnedDefaultsFallBackToConstant: unlearned
+// setup survival must not govern the setup-stall watchdog. Its defaults
+// (15m warn / 25m terminate) are TIGHTER than the constants (25m / 45m), which
+// were deliberately loosened to avoid false-killing slow setups; adopting the
+// defaults quietly undid that. At 30m an unlearned instance is past the
+// survival default but short of the constant, so it warns and survives.
+func TestCheckInstance_SetupStall_UnlearnedDefaultsFallBackToConstant(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-35 * time.Minute).Unix()
+	phaseStart := now.Add(-30 * time.Minute)
+	// Mirrors ComputeSetupSurvival on a database with too little history.
+	unlearned := &db.SetupSurvival{
+		SampleSize:     4,
+		WarnAfter:      15 * time.Minute,
+		TerminateAfter: 25 * time.Minute,
+	}
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "setup:1",
+		PhaseChangedAt: &phaseStart,
+		SetupSurvival:  unlearned,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            now,
+	})
+	if action.Kind == ActionSetupStalled {
+		t.Fatalf("setup-stall fired at 30m on unlearned defaults; the 45m constant governs: %q", action.StallMessage)
+	}
+
+	// Past the constant it must still terminate.
+	oldPhaseStart := now.Add(-50 * time.Minute)
+	action = r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         2,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "setup:2",
+		PhaseChangedAt: &oldPhaseStart,
+		SetupSurvival:  unlearned,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            now,
+	})
+	if action.Kind != ActionSetupStalled {
+		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d) past the 45m constant", action.Kind, ActionSetupStalled)
+	}
+}
+
+// TestCheckInstance_SetupStall_ZeroValuedSurvivalDoesNotTerminateOnSight: a
+// non-nil survival struct with zero thresholds must not be read as a 0s
+// deadline. Reading the raw fields made `phaseAge >= 0` trivially true, so a
+// freshly entered setup phase would be terminated immediately.
+func TestCheckInstance_SetupStall_ZeroValuedSurvivalDoesNotTerminateOnSight(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-5 * time.Minute).Unix()
+	phaseStart := now.Add(-30 * time.Second)
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "setup:1",
+		PhaseChangedAt: &phaseStart,
+		SetupSurvival:  &db.SetupSurvival{},
+		JobState:       JobState{HasStartedJob: true},
+		Now:            now,
+	})
+	if action.Kind == ActionSetupStalled {
+		t.Fatalf("zero-valued survival terminated a 30s-old setup phase: %q", action.StallMessage)
+	}
+}

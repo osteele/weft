@@ -379,8 +379,17 @@ config {
     grace_shutdown_timeout: Duration = 2.minutes
     bootstrap_warn_threshold: Duration = 15.minutes
     bootstrap_timeout: Duration = 20.minutes
-    setup_stall_warn: Duration = 15.minutes
-    setup_stall_timeout: Duration = 25.minutes
+    -- Setup-stall fallbacks, used when the setup survival curve has not
+    -- learned thresholds for the command+workdir. Raised from 15/25 minutes
+    -- after slow-but-progressing setups (large uv sync, multi-GB model
+    -- downloads) were being false-killed. The raise was initially inert:
+    -- instance_check.go assigned the survival struct's raw fields whenever
+    -- one was present, so the unlearned defaults (15m/25m) shadowed these
+    -- constants in the reconcile path. Enforcement now reads only learned
+    -- values (SetupSurvival.LearnedWarn / LearnedTerminate), so these apply
+    -- whenever nothing was learned.
+    setup_stall_warn: Duration = 25.minutes
+    setup_stall_timeout: Duration = 45.minutes
     -- Steady-state heartbeat staleness threshold. Raised from 3.minutes
     -- after observing setup-phase silences (high-RSS uv-sync /
     -- multi-GB HF download work) on instances that produced
@@ -2367,12 +2376,16 @@ rule SetupStall {
     ensures: instance.ended_at = now
 
     -- legacy annotation: @guidance
-		-- Triggered when setup phase exceeds config.setup_stall_timeout
-		-- with no progress. The phase-specific start timestamp is required:
-		-- launch time and provider-ready time are not evidence of setup age,
-		-- so a legacy row with unknown phase timing cannot be terminated by
-		-- this rule. Thresholds may be learned per command or retain their
-		-- configured defaults when the survival curve never crosses a cutoff.
+		-- Triggered when setup phase exceeds the effective terminate
+		-- threshold with no progress: the learned setup survival value when
+		-- one exists for the command+workdir, otherwise
+		-- config.setup_stall_timeout. A survival struct carrying unlearned
+		-- defaults does not qualify — it is a configured fallback, not a
+		-- measurement, and its 25-minute default is tighter than the
+		-- 45-minute constant this rule falls back to.
+		-- The phase-specific start timestamp is required: launch time and
+		-- provider-ready time are not evidence of setup age, so a legacy row
+		-- with unknown phase timing cannot be terminated by this rule.
 }
 
 rule HedgeCohortCull {

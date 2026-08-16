@@ -831,11 +831,19 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 			if phaseStart != nil {
 				phaseAge := p.Now.Sub(*phaseStart)
 
+				// Learned thresholds only. Assigning the raw fields adopted
+				// the survival *defaults* (15m/25m) whenever a struct was
+				// present, which is nearly always, so the deliberately
+				// loosened constants below almost never took effect — and a
+				// zero-valued struct would have set a 0s deadline that fires
+				// on sight.
 				warnTimeout := defaultSetupStallWarn
 				termTimeout := defaultSetupStallTerminate
-				if p.SetupSurvival != nil {
-					warnTimeout = p.SetupSurvival.WarnAfter
-					termTimeout = p.SetupSurvival.TerminateAfter
+				if learned, ok := p.SetupSurvival.LearnedWarn(); ok {
+					warnTimeout = learned
+				}
+				if learned, ok := p.SetupSurvival.LearnedTerminate(); ok {
+					termTimeout = learned
 				}
 
 				if phaseAge >= termTimeout {
