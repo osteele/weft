@@ -95,6 +95,11 @@ const (
 	// requires the call-site survey described in docs/planning/ROADMAP.md
 	// § "Structured termination reasons for credit exhaustion".
 	TerminationReasonAccountCreditExhausted = "account_credit_exhausted"
+	// TerminationReasonInvalidRequest labels failures where the job spec or
+	// its declared inputs are internally inconsistent — e.g. a --needs
+	// artifact that the producer job did not produce. These are not provider
+	// failures and not weft bugs; they should not train the survival model.
+	TerminationReasonInvalidRequest = "invalid_request"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be

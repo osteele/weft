@@ -83,6 +83,8 @@ func ClassifySurvivalTrainingOutcome(reason, detail string, diskGB int) Survival
 		return SurvivalTrainExcludedProviderAPI
 	case jobdb.TerminationReasonPhaseStall:
 		return SurvivalTrainExcludedSetup
+	case jobdb.TerminationReasonInvalidRequest:
+		return SurvivalTrainExcludedInvalidRequest
 	}
 
 	if strings.Contains(detailLower, "unknown flag: --min-cuda-version") {

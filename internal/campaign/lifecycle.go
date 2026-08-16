@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudneeds"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -2440,10 +2441,14 @@ func LaunchInstance(
 		_, _ = db.ResetLaunchJobs(database, instanceID, outcome)
 	}
 	failLaunchBeforeCreate := func(detail string, err error) (int64, error) {
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail+": "+err.Error())
+		reason := db.TerminationReasonInfraFailure
+		if errors.Is(err, cloudneeds.ErrArtifactPublicationFailed) {
+			reason = db.TerminationReasonInvalidRequest
+		}
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, reason, detail+": "+err.Error())
 		resetLaunchJobsForFailure(db.AttemptOutcomeOrphaned, "new instance "+detail+" before destination acceptance")
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"launch_id=%d reason=infra_failure detail=%s: %s", instanceID, detail, err))
+			"launch_id=%d reason=%s detail=%s: %s", instanceID, reason, detail, err))
 		return instanceID, err
 	}
 

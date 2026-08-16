@@ -35,6 +35,7 @@ func TestTerminationReasonConstantsMatchSchema(t *testing.T) {
 		TerminationReasonProviderTimeout:        {},
 		TerminationReasonUploadStall:            {},
 		TerminationReasonAccountCreditExhausted: {},
+		TerminationReasonInvalidRequest:         {},
 	}
 
 	database := setupTestDB(t)
