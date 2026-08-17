@@ -820,6 +820,45 @@ rule ReleaseDependency {
 -- Execution rules
 -- ==========================================================================
 
+rule PrewarmSpendBoundedByProgressNotOnlyDeadline {
+    when: AgentPrewarmDownloadRuns(instance, assets)
+
+    -- A wall-clock deadline bounds how long a prewarm may run; it does not
+    -- bound what a wedged one costs, because a hang always runs to the full
+    -- deadline and the retry loop then multiplies it. The bound that matters
+    -- is on progress.
+
+    ensures:
+        -- A prewarm download whose log stops growing for the stall window is
+        -- terminated at that window rather than at its wall-clock deadline.
+    ensures:
+        -- A stall is distinguishable from a deadline expiry by the caller, so
+        -- the two can be retried differently. Both surface exit code 124.
+
+    -- legacy annotation: @guidance
+        -- wb74: an HF prewarm wedged on the first shard of the first model
+        -- and cost 2h35m of rental for zero work — three attempts against a
+        -- 60-minute setup timeout. Nothing observable said so: the job
+        -- reported running throughout, and `weft info` and
+        -- `weft instance audit` both correctly reported a healthy instance,
+        -- because they describe the instance and not the transfer. A live
+        -- log would not have helped either, since a stalled download emits
+        -- nothing by definition. Progress, not output content, is the only
+        -- signal that separates slow from dead.
+        --
+        -- Implementation: runner.RunSetupCommandWithStallTimeout with
+        -- watchSetupStall polling the log's size, returning
+        -- runner.ErrSetupStalled; cmd/agent/jobloop.go passes
+        -- hfPrewarmStallTimeout. An unstattable log counts as unknown, not
+        -- stalled — killing a live process on a failed stat is worse than
+        -- waiting out the deadline.
+        --
+        -- The xet fallback keys off this too. It was gated on error text in
+        -- the log, and a wedged transfer emits none, so the one mitigation
+        -- that addressed the failure could never fire for it; a stall whose
+        -- log shows a xet handoff now disables xet on retry.
+}
+
 rule JobStarts {
     when: job: Job.status transitions_to running
 

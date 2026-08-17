@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -115,6 +116,12 @@ func WarnIfWorkdirMissingEnv(workingDir string, jobID int64, logPath string) {
 	}
 }
 
+// ErrSetupStalled marks a setup command killed because it stopped producing
+// output, as distinct from one that ran to its wall-clock deadline. A stalled
+// transfer and a genuinely slow one are different facts and warrant different
+// retries.
+var ErrSetupStalled = errors.New("setup command stalled")
+
 // RunSetupCommand runs a detected environment setup command synchronously.
 // If timeout > 0, the process is killed after that duration (exit code 124,
 // matching the timeout(1) convention). A zero timeout uses DefaultSetupTimeout.
@@ -122,6 +129,15 @@ func WarnIfWorkdirMissingEnv(workingDir string, jobID int64, logPath string) {
 // can reach the process during setup.
 // Returns ExitInfo and error. On success, ExitInfo.ExitCode is 0 and error is nil.
 func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths, timeout time.Duration) (ExitInfo, error) {
+	return RunSetupCommandWithStallTimeout(setupCmd, jobID, workingDir, envVars, paths, timeout, 0)
+}
+
+// RunSetupCommandWithStallTimeout additionally kills the command when its log
+// has not grown for stallTimeout, returning ErrSetupStalled. A wall-clock
+// timeout alone bounds a wedged command at the whole budget, so a hung
+// download pays the maximum every time and the retry loop multiplies it; a
+// stall bound charges stallTimeout instead. Pass 0 to disable.
+func RunSetupCommandWithStallTimeout(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths, timeout, stallTimeout time.Duration) (ExitInfo, error) {
 	if timeout == 0 {
 		timeout = inventory.DefaultSetupTimeout
 	}
@@ -166,7 +182,24 @@ func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []
 		defer timer.Stop()
 	}
 
+	var stalled atomic.Bool
+	if stallTimeout > 0 && paths.Log != "" {
+		stopStallWatch := watchSetupStall(paths.Log, stallTimeout, func() {
+			stalled.Store(true)
+			slog.Warn("setup command stalled, sending SIGTERM", "component", "runner", "job_id", jobID, "stall_timeout", stallTimeout, "pgid", proc.PGID)
+			appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: no setup output for %s; treating as stalled and terminating\n", stallTimeout)))
+			KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, "")
+		})
+		defer stopStallWatch()
+	}
+
 	if waitErr := proc.Cmd.Wait(); waitErr != nil {
+		if stalled.Load() {
+			ei := ExitInfo{ExitCode: 124}
+			slog.Warn("setup command stalled", "component", "runner", "job_id", jobID, "stall_timeout", stallTimeout, "cmd", setupCmd)
+			WriteStatusFile(paths, ei)
+			return ei, fmt.Errorf("%w: no output for %s", ErrSetupStalled, stallTimeout)
+		}
 		if timedOut.Load() {
 			ei := ExitInfo{ExitCode: 124}
 			slog.Warn("setup command timed out", "component", "runner", "job_id", jobID, "timeout", timeout, "cmd", setupCmd)
@@ -541,4 +574,49 @@ func fileExists(path string) bool {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// watchSetupStall calls onStall once when logPath stops growing for
+// stallTimeout, and returns a function that stops the watch. Polling the
+// log's size is enough to tell "working slowly" from "wedged" without
+// parsing content. A log that cannot be stat'd is treated as not-yet-growing
+// rather than stalled: an unreadable path is unknown evidence, and killing a
+// live process on it would be worse than waiting for the wall-clock timeout.
+func watchSetupStall(logPath string, stallTimeout time.Duration, onStall func()) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(watchdogTickPeriod(stallTimeout))
+		defer ticker.Stop()
+		lastSize := int64(-1)
+		if info, err := os.Stat(logPath); err == nil {
+			lastSize = info.Size()
+		}
+		lastChange := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-ticker.C:
+				info, err := os.Stat(logPath)
+				if err != nil {
+					continue
+				}
+				if size := info.Size(); size != lastSize {
+					lastSize = size
+					lastChange = now
+					continue
+				}
+				if now.Sub(lastChange) >= stallTimeout {
+					onStall()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
 }

@@ -846,11 +846,86 @@ func stubPrewarmRunner(t *testing.T, fn func(string, int64, string, []string, ru
 	t.Helper()
 	oldRunner := runSetupCommand
 	oldBackoff := hfPrewarmBackoffFunc
-	runSetupCommand = fn
+	runSetupCommand = func(script string, jobID int64, workDir string, env []string, paths runner.JobPaths, timeout, _ time.Duration) (runner.ExitInfo, error) {
+		return fn(script, jobID, workDir, env, paths, timeout)
+	}
 	hfPrewarmBackoffFunc = func(int) time.Duration { return 0 }
 	return func() {
 		runSetupCommand = oldRunner
 		hfPrewarmBackoffFunc = oldBackoff
+	}
+}
+
+// TestHFPrewarmStallXetFallback guards wb74: a wedged transfer emits no error
+// text, so the xet fallback keys off the stall sentinel plus a xet handoff in
+// the log. A stall with no xet handoff must not blame xet.
+func TestHFPrewarmStallXetFallback(t *testing.T) {
+	tests := []struct {
+		name            string
+		firstAttemptLog string
+		wantXetDisabled bool
+	}{
+		{
+			name:            "xet handoff then silence",
+			firstAttemptLog: "Fetching 12 files:   0%|          | 0/12\nXet Storage is enabled for this repo. Downloading file from Xet Storage..\n",
+			wantXetDisabled: true,
+		},
+		{
+			name:            "no xet involvement",
+			firstAttemptLog: "Fetching 12 files:   0%|          | 0/12\n",
+			wantXetDisabled: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var envs [][]string
+			restore := stubPrewarmRunner(t, func(_ string, _ int64, _ string, env []string, paths runner.JobPaths, _ time.Duration) (runner.ExitInfo, error) {
+				envs = append(envs, append([]string(nil), env...))
+				if len(envs) == 1 {
+					appendPrewarmStatus(paths.Log, tt.firstAttemptLog)
+					return runner.ExitInfo{ExitCode: 124}, fmt.Errorf("%w: no output for 10m0s", runner.ErrSetupStalled)
+				}
+				return runner.ExitInfo{}, nil
+			})
+			defer restore()
+
+			dir := t.TempDir()
+			job := cloud.AgentJob{ID: 6261, Command: "echo hi", Dir: dir, Inputs: []string{"hf:org/model"}}
+			paths := runner.NewJobPaths(t.TempDir(), job.ID)
+			assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
+
+			res := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, paths)
+			if !res.ok {
+				t.Fatalf("prewarm should have succeeded on the retry, got err=%v", res.err)
+			}
+			if len(envs) < 2 {
+				t.Fatalf("expected a retry after the stall, got %d attempt(s)", len(envs))
+			}
+			if got := slices.Contains(envs[1], "HF_HUB_DISABLE_XET=1"); got != tt.wantXetDisabled {
+				t.Fatalf("retry disabled xet = %v, want %v; env = %v", got, tt.wantXetDisabled, envs[1])
+			}
+		})
+	}
+}
+
+// The prewarm must arm the stall watch; a zero stall timeout would restore the
+// unbounded hang wb74 was about.
+func TestHFPrewarmPassesStallTimeout(t *testing.T) {
+	var gotStall time.Duration
+	oldRunner := runSetupCommand
+	runSetupCommand = func(_ string, _ int64, _ string, _ []string, _ runner.JobPaths, _, stallTimeout time.Duration) (runner.ExitInfo, error) {
+		gotStall = stallTimeout
+		return runner.ExitInfo{}, nil
+	}
+	defer func() { runSetupCommand = oldRunner }()
+
+	dir := t.TempDir()
+	job := cloud.AgentJob{ID: 6263, Command: "echo hi", Dir: dir, Inputs: []string{"hf:org/model"}}
+	assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
+
+	runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID))
+	if gotStall != hfPrewarmStallTimeout {
+		t.Fatalf("stall timeout passed to the runner = %s, want %s", gotStall, hfPrewarmStallTimeout)
 	}
 }
 

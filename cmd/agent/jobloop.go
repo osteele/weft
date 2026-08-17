@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -180,8 +181,13 @@ type setupPrewarmResult struct {
 
 const hfPrewarmMaxAttempts = 3
 
+// hfPrewarmStallTimeout bounds a wedged HF download. Generous enough that a
+// slow-but-live transfer keeps its wall-clock budget, short enough that a hang
+// costs minutes rather than the whole prewarm allowance times the retry count.
+const hfPrewarmStallTimeout = 10 * time.Minute
+
 var (
-	runSetupCommand      = runner.RunSetupCommand
+	runSetupCommand      = runner.RunSetupCommandWithStallTimeout
 	hfPrewarmBackoffFunc = hfPrewarmBackoff
 )
 
@@ -456,7 +462,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		}
 	}
 	didWork = true
-	ei, err := runSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg))
+	ei, err := runSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg), 0)
 	if err != nil {
 		return setupPrewarmResult{
 			didWork:  true,
@@ -489,7 +495,7 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 		}
 		appendPrewarmStatus(paths.Log, fmt.Sprintf("weft: HF prewarm attempt %d/%d%s\n",
 			attempt, hfPrewarmMaxAttempts, hfPrewarmXetSuffix(disableXet)))
-		ei, err := runSetupCommand(script, job.ID, workDir, env, paths, timeout)
+		ei, err := runSetupCommand(script, job.ID, workDir, env, paths, timeout, hfPrewarmStallTimeout)
 		if err == nil {
 			return setupPrewarmResult{ok: true, didWork: true, logPath: paths.Log}
 		}
@@ -506,9 +512,19 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 		if attempt == hfPrewarmMaxAttempts {
 			break
 		}
-		if hfPrewarmLogHasXetError(paths.Log) && !disableXet {
-			disableXet = true
-			appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after xet transfer error\n")
+		if !disableXet {
+			logText := hfPrewarmLogText(paths.Log)
+			switch {
+			case hfPrewarmTextHasXetError(logText):
+				disableXet = true
+				appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after xet transfer error\n")
+			case errors.Is(err, runner.ErrSetupStalled) && hfPrewarmTextUsedXet(logText):
+				// A wedged transfer emits no error text, so a stall whose log
+				// shows a xet handoff is the same suspicion by different
+				// evidence.
+				disableXet = true
+				appendPrewarmStatus(paths.Log, "weft: HF prewarm retry disabling xet after stalled xet transfer\n")
+			}
 		}
 		time.Sleep(hfPrewarmBackoffFunc(attempt))
 	}
@@ -549,12 +565,23 @@ func appendPrewarmStatus(path, line string) {
 	_, _ = f.WriteString(line)
 }
 
-func hfPrewarmLogHasXetError(path string) bool {
+// hfPrewarmLogText returns the prewarm log's contents, or "" when it cannot
+// be read. Callers pass it to the text predicates below so one failed attempt
+// costs one read rather than one per predicate.
+func hfPrewarmLogText(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return ""
 	}
-	return hfPrewarmTextHasXetError(string(data))
+	return string(data)
+}
+
+// hfPrewarmTextUsedXet reports whether the log shows the transfer had handed
+// off to Xet storage, regardless of whether it then errored. Paired with a
+// stall this is grounds to retry without Xet; on its own it means nothing,
+// since the successful path logs the same line.
+func hfPrewarmTextUsedXet(text string) bool {
+	return strings.Contains(strings.ToLower(text), "xet storage")
 }
 
 func hfPrewarmTextHasXetError(text string) bool {
