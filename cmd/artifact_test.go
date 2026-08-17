@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2resolve"
 	"github.com/osteele/weft/internal/runner"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -140,6 +141,9 @@ type fakeCloudArtifactStore struct {
 	objects              map[string][]byte
 	objectExistsOverride map[string]bool
 	listErr              error // when set, ListObjects returns this for every prefix
+	// listDelay stalls ListObjects for the given prefix, so a test can fix
+	// the order in which concurrent listings return.
+	listDelay map[string]time.Duration
 }
 
 func (s *fakeCloudArtifactStore) GetObject(_ context.Context, key string) ([]byte, error) {
@@ -169,6 +173,9 @@ func (s *fakeCloudArtifactStore) GetObjectReader(_ context.Context, key string) 
 }
 
 func (s *fakeCloudArtifactStore) ListObjects(_ context.Context, prefix string) ([]r2.ObjectInfo, error) {
+	if d, ok := s.listDelay[prefix]; ok {
+		time.Sleep(d)
+	}
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
@@ -905,6 +912,52 @@ func TestListCloudJobOutputFiles_SurfacesListError(t *testing.T) {
 	}
 }
 
+// TestListCloudOutputFilesForRuns_NewestAttemptWins guards wb70. A resumed
+// job uploads one object per attempt under the same rel path, each longer
+// than the last, so several runs offer that path at different sizes. The
+// listings run concurrently; keeping whichever returned first made the
+// choice a goroutine race, and `weft artifact get` could hand back an early
+// attempt's partial output as the job's result — undetectably, since every
+// object is intact and internally consistent. Resolution must follow the
+// caller's candidate order (newest attempt first) instead.
+func TestListCloudOutputFilesForRuns_NewestAttemptWins(t *testing.T) {
+	const jobID = int64(6218)
+	latest, stale := int64(40944), int64(40851)
+	rel := "outputs/experiments/exp087/full/screen.jsonl"
+
+	latestPrefix := r2keys.JobAttemptOutputsPrefix(jobID, latest)
+	stalePrefix := r2keys.JobAttemptOutputsPrefix(jobID, stale)
+	store := &fakeCloudArtifactStore{
+		objects: map[string][]byte{
+			latestPrefix + rel: []byte("1132 rows worth"),
+			stalePrefix + rel:  []byte("397 rows"),
+		},
+		// Hand the stale attempt's listing back first, every time.
+		listDelay: map[string]time.Duration{latestPrefix: 30 * time.Millisecond},
+	}
+
+	files, err := listCloudOutputFilesForRuns(store, jobID, []int64{latest, stale})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	var matched []runner.OutputFile
+	for _, f := range files {
+		if f.RelPath == rel {
+			matched = append(matched, f)
+		}
+	}
+	if len(matched) != 1 {
+		t.Fatalf("want exactly one row for %s, got %+v", rel, matched)
+	}
+	if matched[0].R2Key != latestPrefix+rel {
+		t.Errorf("R2Key = %q, want the newest attempt's object %q", matched[0].R2Key, latestPrefix+rel)
+	}
+	if want := int64(len(store.objects[latestPrefix+rel])); matched[0].SizeBytes != want {
+		t.Errorf("SizeBytes = %d, want %d (the newest attempt's)", matched[0].SizeBytes, want)
+	}
+}
+
 func TestSyncCloudJobArtifactsWithStore_DirectoryArtifact(t *testing.T) {
 	database := db.SetupTestDB(t)
 	home := t.TempDir()
@@ -1204,6 +1257,54 @@ func TestRunArtifactSync_PrintsZeroConventionOutputs(t *testing.T) {
 	}
 	if got := outBuf.String(); !strings.Contains(got, "synced 0 convention-based outputs") {
 		t.Fatalf("stdout = %q, want zero-output count", got)
+	}
+	// Nothing was written, so there is no destination to name.
+	if got := outBuf.String(); strings.Contains(got, " into ") {
+		t.Fatalf("stdout = %q, want no destination for a zero-count sync", got)
+	}
+}
+
+// TestRunArtifactSync_NamesLocalStoreDestination guards wb69. Sync writes
+// into the durable local store, never beside the caller's sources, so a bare
+// "synced 1 artifacts" reads as a silent no-op to anyone who then looks for
+// the file in their project tree and reports a lost write.
+func TestRunArtifactSync_NamesLocalStoreDestination(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", "echo hi", "cloud")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai", GPUSpec: "H200"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	prevCloud := syncCloudJobArtifactsFunc
+	t.Cleanup(func() { syncCloudJobArtifactsFunc = prevCloud })
+	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
+		return artifacts.SyncResult{Added: 1}, nil
+	}
+
+	outBuf := &bytes.Buffer{}
+	c := &cobra.Command{}
+	c.SetOut(outBuf)
+
+	if err := runArtifactSync(c, []string{strconv.FormatInt(jobID, 10)}); err != nil {
+		t.Fatalf("runArtifactSync: %v", err)
+	}
+
+	wantDir, err := artifacts.LocalJobDir(jobID)
+	if err != nil {
+		t.Fatalf("LocalJobDir: %v", err)
+	}
+	got := outBuf.String()
+	if !strings.Contains(got, workdir.ToTildeRelative(wantDir)) {
+		t.Fatalf("stdout = %q, want the local store path %q", got, workdir.ToTildeRelative(wantDir))
 	}
 }
 

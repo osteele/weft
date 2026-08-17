@@ -71,6 +71,28 @@ ConnectionError: HTTPSConnectionPool(host='huggingface.co', port=443): Read time
 	}
 }
 
+// TestTimeoutRule_IgnoresWeftHarnessNarration guards wb68. weft narrates its
+// own setup phase into the job log, and one of those lines carries a timeout
+// token. On wj6237 it was the only such token in the log, so a job that
+// exited 2 because a pre-registered gate reported its verdict was diagnosed
+// "Execution timed out" — the harness's preflight attributed to the job body.
+func TestTimeoutRule_IgnoresWeftHarnessNarration(t *testing.T) {
+	log := `weft: torch preflight timed out after 30s; continuing
+[PROGRESS] 38/38 (100%)
+[RESULT] status=failed-prerequisite
+=== END exit=2 ===`
+	if got := DiagnoseFromLog(log); got != nil && got.Pattern == "timeout" {
+		t.Fatalf("harness narration alone must not diagnose a timeout, got %+v", got)
+	}
+
+	// A timeout reported by the job body itself still classifies, even when
+	// the same harness line is present.
+	withReal := log + "\nTimeoutError: inference deadline exceeded"
+	if got := DiagnoseFromLog(withReal); got == nil || got.Pattern != "timeout" {
+		t.Fatalf("job-body timeout should still classify as `timeout`, got %+v", got)
+	}
+}
+
 func TestDataPatterns_HFRepoNotFoundDoesNotMatchGated(t *testing.T) {
 	log := `Traceback (most recent call last):
 huggingface_hub.errors.RepositoryNotFoundError: 401 Client Error. Repository Not Found for url: https://huggingface.co/llama-3.1-8b/resolve/main/config.json.

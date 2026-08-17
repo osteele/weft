@@ -169,6 +169,48 @@ rule DiagnosisFirstMatchWins {
         -- pin the ordering.
 }
 
+-- A rule's evidence is the job's own output. weft narrates its own setup
+-- phase into the same log, and some of that narration carries tokens the
+-- looser rules match on, so a rule broad enough to fire on narration alone
+-- must exclude those lines before matching.
+rule DiagnosisEvidenceExcludesHarnessNarration {
+    when: LogClassificationRequested(log, entry_point)
+
+    ensures:
+        -- A rule that matches only weft's own setup-phase lines produces no
+        -- diagnosis. Those lines report on the harness, not the job body.
+
+    -- legacy annotation: @guidance
+        -- Implementation: failurePatternRule.ignore, set to
+        -- weftHarnessNarration on the `timeout` rule, which matches a bare
+        -- "timed out" or "timeout" token anywhere in the log. On wj6237
+        -- "weft: torch preflight timed out after 30s; continuing" was the
+        -- only such token present, and it labelled a job that exited 2 by
+        -- design "Execution timed out" (wb68).
+}
+
+-- The log is one source of evidence; the exit status is another, and it is
+-- the harder one to fake. A diagnosis that the exit status contradicts is
+-- withheld rather than surfaced.
+rule TimeoutDiagnosisRequiresConsistentExitStatus {
+    when: JobDiagnosisResolved(job, diagnosis)
+
+    ensures:
+        -- A `timeout` diagnosis survives only when the exit status is
+        -- consistent with a deadline kill: absent, zero, or death by
+        -- signal (124 from timeout(1), 137 SIGKILL, 143 SIGTERM). Any
+        -- other non-zero code means the process chose its exit, and the
+        -- diagnosis is dropped.
+
+    -- legacy annotation: @guidance
+        -- Implementation: dropUnsupportedTimeout in
+        -- cmd/diagnosis_format.go, applied to both the stored diagnosis
+        -- and the log-cache fallback. A deliberate non-zero exit — a
+        -- pre-registered gate reporting its verdict, say — is a result;
+        -- calling it a timeout invites a pointless re-run on a longer cap
+        -- or a bigger GPU (wb68).
+}
+
 -- failurePatternRules is assembled from named tiers concatenated in
 -- decreasing specificity. The tier ordering is the normative precedence
 -- contract; individual rule order within a tier is an implementation

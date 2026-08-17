@@ -211,6 +211,22 @@ func addArtifactListFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&artifactListSync, "sync", false, "Sync artifacts from remote before listing")
 }
 
+// syncDestinationNote names where a sync actually wrote, for interpolation
+// into the "synced N ..." lines. Every artifact sync path lands in the
+// durable local store, never beside the caller's sources, so a bare count
+// reads as a silent no-op to anyone who then looks for the file in their
+// project tree (wb69). Empty when nothing was written.
+func syncDestinationNote(jobID int64, added int) string {
+	if added == 0 {
+		return ""
+	}
+	dir, err := artifacts.LocalJobDir(jobID)
+	if err != nil {
+		return ""
+	}
+	return " into " + workdir.ToTildeRelative(dir)
+}
+
 func runArtifactSync(cmd *cobra.Command, args []string) error {
 	database, err := db.Open()
 	if err != nil {
@@ -255,7 +271,7 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 					// No manifest in R2; try convention-based output sync
 					outResult, outErr := syncJobOutputsFunc(database, job)
 					if outErr == nil {
-						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs%s\n", ids.FormatJobID(jobID), outResult.Added, syncDestinationNote(jobID, outResult.Added))
 						continue
 					}
 					// A missing manifest is expected for jobs without
@@ -266,7 +282,7 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 				errorsList = append(errorsList, fmt.Sprintf("job %s: sync cloud artifacts: %v", ids.FormatJobID(jobID), syncErr))
 				continue
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2 (skipped %d)\n", ids.FormatJobID(jobID), result.Added, result.Skipped)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2%s (skipped %d)\n", ids.FormatJobID(jobID), result.Added, syncDestinationNote(jobID, result.Added), result.Skipped)
 			continue
 		}
 		result, err := syncLocalJobArtifacts(database, job, NormalSyncTimeout)
@@ -275,7 +291,7 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 				// Try convention-based output sync instead
 				outResult, syncErr := syncJobOutputsFunc(database, job)
 				if syncErr == nil {
-					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs\n", ids.FormatJobID(jobID), outResult.Added)
+					fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs%s\n", ids.FormatJobID(jobID), outResult.Added, syncDestinationNote(jobID, outResult.Added))
 					continue
 				}
 				// Surface the actual fallback failure rather than the misleading
@@ -287,7 +303,7 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			if hasFilesystemOutputDeclarations(job) {
 				if outResult, syncErr := syncJobOutputsFunc(database, job); syncErr == nil {
 					if outResult.Added > 0 {
-						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d declared outputs\n", ids.FormatJobID(jobID), outResult.Added)
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d declared outputs%s\n", ids.FormatJobID(jobID), outResult.Added, syncDestinationNote(jobID, outResult.Added))
 						continue
 					}
 				}
@@ -300,9 +316,9 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if len(jobIDs) > 1 {
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts (skipped %d)\n", ids.FormatJobID(jobID), result.Added, result.Skipped)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts%s (skipped %d)\n", ids.FormatJobID(jobID), result.Added, syncDestinationNote(jobID, result.Added), result.Skipped)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts (skipped %d)\n", result.Added, result.Skipped)
+			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts%s (skipped %d)\n", result.Added, syncDestinationNote(jobID, result.Added), result.Skipped)
 		}
 	}
 
@@ -3213,27 +3229,21 @@ func listCloudJobOutputFiles(r2Client cloudOutputLister, job *db.Job) ([]runner.
 	return result, errors.Join(discErr, listErr)
 }
 
+// listCloudOutputFilesForRuns lists each run's outputs and artifact-files
+// prefixes concurrently, then merges them in runIDs order — newest attempt
+// first, per artifactRunIDCandidates.
+//
+// The merge order is the whole point. A resumed job uploads one object per
+// attempt under the same rel path, each attempt's longer than the last, so
+// several runs legitimately offer the same path at different sizes, and every
+// one of those objects is intact and self-consistent. Each listing therefore
+// writes to its own slot, so the caller's precedence rather than arrival time
+// decides which attempt's copy `weft artifact get` hands back (wb70).
 func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs []int64) ([]runner.OutputFile, error) {
-	result := make([]runner.OutputFile, 0)
-	seen := make(map[string]struct{})
+	// Two slots per run: outputs prefix first, then artifact files.
+	slots := make([][]runner.OutputFile, 2*len(runIDs))
 	var mu sync.Mutex
 	var listErrs []error
-	appendFile := func(relPath string, sizeBytes int64, r2Key string) {
-		if relPath == "" {
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if _, ok := seen[relPath]; ok {
-			return
-		}
-		seen[relPath] = struct{}{}
-		result = append(result, runner.OutputFile{
-			RelPath:   relPath,
-			SizeBytes: sizeBytes,
-			R2Key:     r2Key,
-		})
-	}
 	recordErr := func(err error) {
 		if err == nil {
 			return
@@ -3242,44 +3252,53 @@ func listCloudOutputFilesForRuns(r2Client cloudOutputLister, jobID int64, runIDs
 		listErrs = append(listErrs, err)
 		mu.Unlock()
 	}
+	listInto := func(slot int, prefix, displayPrefix string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		files, err := r2Client.ListObjects(ctx, prefix)
+		cancel()
+		if err != nil {
+			recordErr(fmt.Errorf("list %s: %w", prefix, err))
+			return
+		}
+		out := make([]runner.OutputFile, 0, len(files))
+		for _, f := range files {
+			out = append(out, runner.OutputFile{
+				RelPath:   displayPrefix + strings.TrimPrefix(f.Key, prefix),
+				SizeBytes: f.SizeBytes,
+				R2Key:     f.Key,
+			})
+		}
+		slots[slot] = out
+	}
 
 	var wg sync.WaitGroup
-	for _, runID := range runIDs {
-		// Convention-based outputs
-		outputsPrefix := r2keys.JobAttemptOutputsPrefix(jobID, runID)
-		wg.Add(1)
+	for i, runID := range runIDs {
+		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			files, err := r2Client.ListObjects(ctx, outputsPrefix)
-			cancel()
-			if err != nil {
-				recordErr(fmt.Errorf("list %s: %w", outputsPrefix, err))
-				return
-			}
-			for _, f := range files {
-				appendFile(strings.TrimPrefix(f.Key, outputsPrefix), f.SizeBytes, f.Key)
-			}
+			listInto(2*i, r2keys.JobAttemptOutputsPrefix(jobID, runID), "")
 		}()
-
-		// Artifact manifest entries
-		artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(jobID, runID)
-		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			aFiles, err := r2Client.ListObjects(ctx, artifactsPrefix)
-			cancel()
-			if err != nil {
-				recordErr(fmt.Errorf("list %s: %w", artifactsPrefix, err))
-				return
-			}
-			for _, f := range aFiles {
-				appendFile("artifacts/"+strings.TrimPrefix(f.Key, artifactsPrefix), f.SizeBytes, f.Key)
-			}
+			listInto(2*i+1, r2keys.JobAttemptArtifactFilesPrefix(jobID, runID), "artifacts/")
 		}()
 	}
 	wg.Wait()
+
+	result := make([]runner.OutputFile, 0)
+	seen := make(map[string]struct{})
+	for _, slot := range slots {
+		for _, f := range slot {
+			if f.RelPath == "" {
+				continue
+			}
+			if _, ok := seen[f.RelPath]; ok {
+				continue
+			}
+			seen[f.RelPath] = struct{}{}
+			result = append(result, f)
+		}
+	}
 	return result, errors.Join(listErrs...)
 }
 

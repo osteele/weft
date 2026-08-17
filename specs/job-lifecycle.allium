@@ -1528,6 +1528,13 @@ rule ArtifactRetrievalCoversAllRuns {
              -- legacy: run's id, not the current latest_run_id — provenance names the
              -- legacy: attempt that uploaded the bytes
 
+    ensures:
+        -- When several runs offer the same artifact path, the winner is the
+        -- first run in candidate order — recorded latest run, then run
+        -- zero, then discovered runs newest-first — regardless of which
+        -- listing returned first. Resolution is a function of the
+        -- candidate order alone, so repeated invocations agree.
+
     -- legacy annotation: @guidance
         -- A superseded or canceled attempt's uploads outlive latest_run_id
         -- (the wb19 pattern). Consumer staging already handled this via
@@ -1535,6 +1542,18 @@ rule ArtifactRetrievalCoversAllRuns {
         -- than a private [latest, 0] reimplementation. Implementation:
         -- cmd/artifact.go listCloudJobOutputFiles fallback and
         -- artifactRunIDCandidates, both delegating to internal/r2resolve.
+        -- Candidate order is a precedence relation, not a search order
+        -- that may stop early: a resumed job uploads one object per
+        -- attempt under the same path, each attempt's longer than the
+        -- last, so several runs legitimately answer and one must be
+        -- chosen. listCloudOutputFilesForRuns lists the runs concurrently
+        -- but merges them into candidate order; keeping whichever listing
+        -- returned first made the choice a goroutine race and let `get`
+        -- return an early attempt's partial output as the job's result
+        -- (wb70). Nothing downstream can catch that substitution — each
+        -- attempt's object is intact and internally consistent, so a
+        -- length or checksum check on the transfer confirms the wrong
+        -- object rather than rejecting it.
         -- Run stamping: downloadCloudPrefix and
         -- syncCloudJobArtifactsWithStore carry the probed run id into
         -- db.UpsertArtifact (artifacts.StoreLocalArtifactForRun), which

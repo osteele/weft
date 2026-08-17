@@ -34,7 +34,18 @@ type failurePatternRule struct {
 	re         *regexp.Regexp
 	match      func(string) []string
 	details    func([]string, string) map[string]any
+	// ignore removes lines from the log before this rule sees it. Set it on
+	// rules loose enough that harness narration alone would satisfy them.
+	ignore *regexp.Regexp
 }
+
+// weftHarnessNarration matches weft's own setup-phase log lines. They report
+// on the harness, not the job body, so a rule that would otherwise match on
+// narration alone must filter them out first: "weft: torch preflight timed
+// out after 30s; continuing" was the sole timeout token in the log of a job
+// that exited 2 by design, and it made a deliberate gate failure read as
+// "Execution timed out" (wb68).
+var weftHarnessNarration = regexp.MustCompile(`(?m)^weft:[^\n]*\n?`)
 
 // failurePatternRules is the ordered post-mortem classifier table consumed by
 // matchFailurePattern. Matching is first-match-wins, so precedence is the
@@ -283,6 +294,7 @@ var environmentSignalRules = []failurePatternRule{
 		message:    "Execution timed out",
 		confidence: 0.9,
 		re:         regexp.MustCompile(`(?is)timed out|timeout|deadline exceeded|exceeded .*max(?:imum)? time|SIGTERM.*budget`),
+		ignore:     weftHarnessNarration,
 		details: func(match []string, logContent string) map[string]any {
 			details := map[string]any{}
 			if budget := firstIntSubmatch(`(?i)(?:budget|max(?:imum)? time|timeout)\D+(\d+)\s*(?:seconds|secs|s)\b`, logContent); budget > 0 {
@@ -480,11 +492,15 @@ func cudaCompatFromDriverAPIVersion(version string) string {
 
 func matchFailurePattern(logContent, detectedBy string) *ErrorDiagnosis {
 	for _, rule := range failurePatternRules {
+		evidence := logContent
+		if rule.ignore != nil {
+			evidence = rule.ignore.ReplaceAllString(evidence, "")
+		}
 		var match []string
 		if rule.match != nil {
-			match = rule.match(logContent)
+			match = rule.match(evidence)
 		} else {
-			match = rule.re.FindStringSubmatch(logContent)
+			match = rule.re.FindStringSubmatch(evidence)
 		}
 		if match == nil {
 			continue
@@ -498,7 +514,7 @@ func matchFailurePattern(logContent, detectedBy string) *ErrorDiagnosis {
 			Details:    match[0],
 		}
 		if rule.details != nil {
-			d.StructuredDetails = rule.details(match, logContent)
+			d.StructuredDetails = rule.details(match, evidence)
 		}
 		if rule.patternID == "gpu_oom" {
 			enrichGPUOOMDiagnosis(logContent, d)

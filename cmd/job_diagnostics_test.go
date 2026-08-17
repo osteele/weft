@@ -30,6 +30,8 @@ func TestResolveJobDiagnosis(t *testing.T) {
 		Pattern: "module_not_found", Category: "environment", Message: "missing module: torch",
 	})
 	zero := 0
+	two := 2
+	sigterm := 143
 
 	cases := []struct {
 		name          string
@@ -73,6 +75,31 @@ func TestResolveJobDiagnosis(t *testing.T) {
 			name:          "empty log file returns nil",
 			job:           &db.Job{ID: 5},
 			writeEmptyLog: true,
+		},
+		{
+			// wb68: wj6237 exited 2 because a pre-registered gate reported
+			// its verdict, 2m39s into a 2h cap. The only timeout token in
+			// the log was weft's own preflight line, and it made a result
+			// read as an infrastructure failure worth re-running.
+			name:       "deliberate non-zero exit is not a timeout",
+			job:        &db.Job{ID: 6237, Status: db.StatusFailed, ExitCode: &two},
+			logContent: "weft: torch preflight timed out after 30s; continuing\n[RESULT] status=failed-prerequisite\n=== END exit=2 ===\n",
+		},
+		{
+			// The same guard must not swallow a real deadline kill, whose
+			// signature is death by signal rather than a chosen exit code.
+			name:        "SIGTERM exit keeps its timeout diagnosis",
+			job:         &db.Job{ID: 6238, Status: db.StatusFailed, ExitCode: &sigterm},
+			logContent:  "Execution exceeded maximum time budget\n=== END exit=143 ===\n",
+			wantPattern: "timeout",
+		},
+		{
+			// The suppression applies to a stored diagnosis too, not just
+			// the log-cache fallback.
+			name: "stored timeout dropped for a chosen exit code",
+			job: &db.Job{ID: 6239, Status: db.StatusFailed, ExitCode: &two, ErrorDiagnosis: mustMarshalDiagnosis(t, &remediation.ErrorDiagnosis{
+				Pattern: "timeout", Category: "environment", Message: "Execution timed out",
+			})},
 		},
 	}
 
