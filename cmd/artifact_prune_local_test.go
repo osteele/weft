@@ -392,3 +392,198 @@ func TestResolvePruneScopes_OffStaysSingle(t *testing.T) {
 		t.Fatalf("scopes = %v, want [%s]", scopes, parent)
 	}
 }
+
+func TestConfirmPruneApply(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"yes lower", "yes\n", true},
+		{"y lower", "y\n", true},
+		{"Y upper", "Y\n", true},
+		{"no", "no\n", false},
+		{"n", "n\n", false},
+		{"empty", "\n", false},
+		{"EOF", "", false},
+		{"maybe", "maybe\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			cmd.SetIn(strings.NewReader(tt.input))
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			got, err := confirmPruneApply(cmd)
+			if err != nil {
+				t.Fatalf("confirmPruneApply: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("confirmPruneApply(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			if !strings.Contains(out.String(), "Apply these deletions? [y/N]") {
+				t.Fatalf("missing prompt in output: %q", out.String())
+			}
+		})
+	}
+}
+
+// resetPruneGlobals restores the package-level prune flags used by
+// runArtifactPrune so tests do not leak state.
+func resetPruneGlobals(t *testing.T) {
+	t.Helper()
+	old := map[string]any{
+		"pruneLocal":       pruneLocal,
+		"pruneLocalApply":  pruneLocalApply,
+		"pruneLocalDryRun": pruneLocalDryRun,
+		"pruneLocalDir":    pruneLocalDir,
+		"pruneOutputs":     pruneOutputs,
+		"pruneArtifacts":   pruneArtifacts,
+		"pruneOlderThan":   pruneOlderThan,
+		"pruneSince":       pruneSince,
+		"pruneRecursive":   pruneRecursive,
+	}
+	t.Cleanup(func() {
+		pruneLocal = old["pruneLocal"].(bool)
+		pruneLocalApply = old["pruneLocalApply"].(bool)
+		pruneLocalDryRun = old["pruneLocalDryRun"].(bool)
+		pruneLocalDir = old["pruneLocalDir"].(string)
+		pruneOutputs = old["pruneOutputs"].(bool)
+		pruneArtifacts = old["pruneArtifacts"].(bool)
+		pruneOlderThan = old["pruneOlderThan"].(string)
+		pruneSince = old["pruneSince"].(string)
+		pruneRecursive = old["pruneRecursive"].(string)
+	})
+}
+
+func TestRunArtifactPrune_DryRunPrintsApplyCommand(t *testing.T) {
+	database := db.SetupTestDB(t)
+	resetPruneGlobals(t)
+
+	scope := t.TempDir()
+	writeRestorableOutput(t, database, scope, "a.bin", 10)
+
+	pruneLocal = true
+	pruneLocalApply = false
+	pruneLocalDryRun = false
+	pruneLocalDir = scope
+	pruneOutputs = true
+	pruneArtifacts = true
+
+	oldPrompt := pruneConfirmApply
+	pruneConfirmApply = func(*cobra.Command) (bool, error) { return false, nil }
+	t.Cleanup(func() { pruneConfirmApply = oldPrompt })
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runArtifactPrune(cmd, nil); err != nil {
+		t.Fatalf("runArtifactPrune: %v\n%s", err, out.String())
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "Would delete output/a.bin") {
+		t.Fatalf("expected dry-run deletion line, got:\n%s", output)
+	}
+	if !strings.Contains(output, "To apply these deletions, run:") {
+		t.Fatalf("expected apply command hint, got:\n%s", output)
+	}
+	if !strings.Contains(output, "weft artifact prune --local --apply") {
+		t.Fatalf("expected canonical prune apply command, got:\n%s", output)
+	}
+
+	// File must still exist.
+	if _, err := os.Stat(filepath.Join(scope, "output", "a.bin")); err != nil {
+		t.Fatalf("expected a.bin to remain after dry run: %v", err)
+	}
+}
+
+func TestRunArtifactPrune_InteractiveApplyDeletesFiles(t *testing.T) {
+	database := db.SetupTestDB(t)
+	resetPruneGlobals(t)
+
+	scope := t.TempDir()
+	writeRestorableOutput(t, database, scope, "a.bin", 10)
+
+	pruneLocal = true
+	pruneLocalApply = false
+	pruneLocalDryRun = false
+	pruneLocalDir = scope
+	pruneOutputs = true
+	pruneArtifacts = true
+
+	oldPrompt := pruneConfirmApply
+	pruneConfirmApply = func(*cobra.Command) (bool, error) { return true, nil }
+	t.Cleanup(func() { pruneConfirmApply = oldPrompt })
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	if err := runArtifactPrune(cmd, nil); err != nil {
+		t.Fatalf("runArtifactPrune: %v\n%s", err, out.String())
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "Would delete output/a.bin") {
+		t.Fatalf("expected first dry-run pass, got:\n%s", output)
+	}
+	if !strings.Contains(output, "Deleting output/a.bin") {
+		t.Fatalf("expected second apply pass, got:\n%s", output)
+	}
+	if strings.Contains(output, "To apply these deletions, run:") {
+		t.Fatalf("should not print apply command after confirmation, got:\n%s", output)
+	}
+
+	if _, err := os.Stat(filepath.Join(scope, "output", "a.bin")); !os.IsNotExist(err) {
+		t.Fatalf("expected a.bin to be deleted: %v", err)
+	}
+}
+
+func TestRunArtifactPrune_RequiresLocalFlag(t *testing.T) {
+	resetPruneGlobals(t)
+	pruneLocal = false
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := runArtifactPrune(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error without --local")
+	}
+	if !strings.Contains(err.Error(), "--local is required") {
+		t.Fatalf("expected --local required error, got: %v", err)
+	}
+}
+
+func TestRunArtifactPrune_PruneLocalAliasImpliesLocal(t *testing.T) {
+	database := db.SetupTestDB(t)
+	resetPruneGlobals(t)
+
+	scope := t.TempDir()
+	writeRestorableOutput(t, database, scope, "a.bin", 10)
+
+	oldPrompt := pruneConfirmApply
+	pruneConfirmApply = func(*cobra.Command) (bool, error) { return false, nil }
+	t.Cleanup(func() { pruneConfirmApply = oldPrompt })
+
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	rootCmd.SetArgs([]string{"artifact", "prune-local", "--dir", scope})
+	var out bytes.Buffer
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("rootCmd.Execute: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Would delete output/a.bin") {
+		t.Fatalf("expected dry-run output via prune-local alias without --local, got:\n%s", out.String())
+	}
+}

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -123,15 +124,17 @@ var artifactAddCmd = &cobra.Command{
 	RunE:  runArtifactAdd,
 }
 
-var artifactPruneLocalCmd = &cobra.Command{
-	Use:   "prune-local",
-	Short: "Delete local files that are restorable via weft commands",
+var artifactPruneCmd = &cobra.Command{
+	Use:     "prune",
+	Aliases: []string{"prune-local"},
+	Short:   "Delete local files that are restorable via weft commands",
 	Long: `Delete local files that can be restored via weft artifact/sync workflows.
 
 By default this command runs in dry-run mode and only prints what would be
-deleted. Pass --apply to actually delete files.`,
+deleted. Pass --apply to actually delete files, or --local to target local
+files (the only supported mode today).`,
 	Args: usageArgs(cobra.NoArgs),
-	RunE: runArtifactPruneLocal,
+	RunE: runArtifactPrune,
 }
 
 var artifactCatCmd = &cobra.Command{
@@ -164,6 +167,7 @@ var (
 	artifactAll      bool
 	artifactTimeout  time.Duration
 	artifactParallel int
+	pruneLocal       bool
 	pruneLocalApply  bool
 	pruneLocalDryRun bool
 	pruneLocalDir    string
@@ -184,7 +188,7 @@ func init() {
 	artifactCmd.AddCommand(artifactGetCmd)
 	artifactCmd.AddCommand(artifactCatCmd)
 	artifactCmd.AddCommand(artifactAddCmd)
-	artifactCmd.AddCommand(artifactPruneLocalCmd)
+	artifactCmd.AddCommand(artifactPruneCmd)
 
 	addArtifactListFlags(artifactListCmd)
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
@@ -196,15 +200,16 @@ func init() {
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
 	artifactCatCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactCatCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
-	artifactPruneLocalCmd.Flags().BoolVar(&pruneLocalApply, "apply", false, "Delete files (without this flag, only preview)")
-	artifactPruneLocalCmd.Flags().BoolVar(&pruneLocalDryRun, "dry-run", false, "Preview deletions without deleting files")
-	artifactPruneLocalCmd.Flags().StringVar(&pruneLocalDir, "dir", ".", "Directory scope (default: current directory)")
-	artifactPruneLocalCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Delete only files older than this duration (e.g. 7d, 48h, or 7)")
-	artifactPruneLocalCmd.Flags().StringVar(&pruneSince, "since", "", "Delete only files modified since this time (YYYY-MM-DD, RFC3339, or duration like \"24h ago\")")
-	artifactPruneLocalCmd.Flags().BoolVar(&pruneOutputs, "include-outputs", true, "Consider convention output files (output/, outputs/)")
-	artifactPruneLocalCmd.Flags().BoolVar(&pruneArtifacts, "include-artifacts", true, "Consider artifact-backed file paths")
-	artifactPruneLocalCmd.Flags().BoolVar(&pruneRemoveEmpty, "remove-empty-dirs", false, "Remove empty directories after deleting files")
-	artifactPruneLocalCmd.Flags().StringVar(&pruneRecursive, "recursive", "auto", "Recurse into project subdirectories: auto (default; on when --dir isn't itself a project), on, off")
+	artifactPruneCmd.Flags().BoolVar(&pruneLocal, "local", false, "Target local restorable files (required; only local pruning is supported today)")
+	artifactPruneCmd.Flags().BoolVar(&pruneLocalApply, "apply", false, "Delete files (without this flag, only preview)")
+	artifactPruneCmd.Flags().BoolVar(&pruneLocalDryRun, "dry-run", false, "Preview deletions without deleting files")
+	artifactPruneCmd.Flags().StringVar(&pruneLocalDir, "dir", ".", "Directory scope (default: current directory)")
+	artifactPruneCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Delete only files older than this duration (e.g. 7d, 48h, or 7)")
+	artifactPruneCmd.Flags().StringVar(&pruneSince, "since", "", "Delete only files modified since this time (YYYY-MM-DD, RFC3339, or duration like \"24h ago\")")
+	artifactPruneCmd.Flags().BoolVar(&pruneOutputs, "include-outputs", true, "Consider convention output files (output/, outputs/)")
+	artifactPruneCmd.Flags().BoolVar(&pruneArtifacts, "include-artifacts", true, "Consider artifact-backed file paths")
+	artifactPruneCmd.Flags().BoolVar(&pruneRemoveEmpty, "remove-empty-dirs", false, "Remove empty directories after deleting files")
+	artifactPruneCmd.Flags().StringVar(&pruneRecursive, "recursive", "auto", "Recurse into project subdirectories: auto (default; on when --dir isn't itself a project), on, off")
 }
 
 func addArtifactListFlags(cmd *cobra.Command) {
@@ -1603,7 +1608,10 @@ type localPrunePlan struct {
 	Warnings               []string
 }
 
-func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
+func runArtifactPrune(cmd *cobra.Command, _ []string) error {
+	if !pruneLocal && cmd.CalledAs() != "prune-local" {
+		return usageErrorf("--local is required (only local pruning is supported today)")
+	}
 	if strings.TrimSpace(pruneOlderThan) != "" && strings.TrimSpace(pruneSince) != "" {
 		return usageErrorf("--older-than and --since are mutually exclusive")
 	}
@@ -1643,35 +1651,89 @@ func runArtifactPruneLocal(cmd *cobra.Command, _ []string) error {
 
 	effectiveDryRun := !pruneLocalApply || pruneLocalDryRun
 	multiProject := len(scopes) > 1
-	totalDeleteFailures := 0
-	var rollupFiles int
-	var rollupBytes int64
-	for i, scope := range scopes {
-		if multiProject {
-			if i > 0 {
-				fmt.Fprintln(cmd.OutOrStdout())
+
+	runScopes := func(dryRun bool) (int, int64, int, error) {
+		totalDeleteFailures := 0
+		var rollupFiles int
+		var rollupBytes int64
+		for i, scope := range scopes {
+			if multiProject {
+				if i > 0 {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
+				rel, _ := filepath.Rel(scopeRoot, scope)
+				if rel == "" || rel == "." {
+					rel = scope
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "== %s ==\n", rel)
 			}
-			rel, _ := filepath.Rel(scopeRoot, scope)
-			if rel == "" || rel == "." {
-				rel = scope
+			result, err := pruneOneScope(cmd, database, scope, filter, dryRun, progress, jobs)
+			if err != nil {
+				return 0, 0, 0, err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "== %s ==\n", rel)
+			totalDeleteFailures += result.DeleteFailures
+			rollupFiles += result.Files
+			rollupBytes += result.Bytes
 		}
-		result, err := pruneOneScope(cmd, database, scope, filter, effectiveDryRun, progress, jobs)
+		if multiProject {
+			printPruneRollup(cmd, len(scopes), rollupFiles, rollupBytes, dryRun)
+		}
+		return rollupFiles, rollupBytes, totalDeleteFailures, nil
+	}
+
+	_, _, totalDeleteFailures, err := runScopes(effectiveDryRun)
+	if err != nil {
+		return err
+	}
+
+	if effectiveDryRun {
+		confirmed, err := pruneConfirmApply(cmd)
 		if err != nil {
 			return err
 		}
-		totalDeleteFailures += result.DeleteFailures
-		rollupFiles += result.Files
-		rollupBytes += result.Bytes
+		if confirmed {
+			fmt.Fprintln(cmd.OutOrStdout())
+			_, _, totalDeleteFailures, err = runScopes(false)
+			if err != nil {
+				return err
+			}
+			if totalDeleteFailures > 0 {
+				return fmt.Errorf("failed to delete %d file(s)", totalDeleteFailures)
+			}
+			return nil
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "To apply these deletions, run: %s\n", buildPruneLocalApplyCommand())
+		return nil
 	}
-	if multiProject {
-		printPruneRollup(cmd, len(scopes), rollupFiles, rollupBytes, effectiveDryRun)
-	}
+
 	if totalDeleteFailures > 0 {
 		return fmt.Errorf("failed to delete %d file(s)", totalDeleteFailures)
 	}
 	return nil
+}
+
+// pruneConfirmApply asks the user whether to apply the previously displayed
+// dry-run deletions. It returns true for yes/ye/y and false for no, empty, or
+// EOF. The variable form lets tests inject deterministic responses.
+var pruneConfirmApply = defaultPruneConfirmApply
+
+func defaultPruneConfirmApply(cmd *cobra.Command) (bool, error) {
+	if !hasTerminalIO() || inAgentContext() {
+		return false, nil
+	}
+	return confirmPruneApply(cmd)
+}
+
+// confirmPruneApply prompts on cmd's output stream and reads an answer from
+// cmd's input stream.
+func confirmPruneApply(cmd *cobra.Command) (bool, error) {
+	fmt.Fprint(cmd.OutOrStdout(), "Apply these deletions? [y/N] ")
+	line, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 // printPruneRollup writes the cross-project total after per-scope output when
@@ -1749,7 +1811,6 @@ func pruneOneScope(cmd *cobra.Command, database *sql.DB, scopeRoot string, filte
 		fmt.Fprintf(cmd.OutOrStdout(), "Would free: %s (%d bytes)\n", humanizeBytes(plan.Bytes), plan.Bytes)
 		printLocalPruneSummary(cmd, plan, true, len(plan.Files), plan.Bytes)
 		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: no files deleted.\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "To apply these deletions, run: %s\n", buildPruneLocalApplyCommand())
 		return pruneScopeResult{Files: len(plan.Files), Bytes: plan.Bytes}, nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d file(s), reclaimed %s (%d bytes)\n", deletedFiles, humanizeBytes(deletedBytes), deletedBytes)
@@ -1921,7 +1982,7 @@ func formatIntWithCommas(n int64) string {
 }
 
 func buildPruneLocalApplyCommand() string {
-	args := []string{"weft", "artifact", "prune-local", "--apply"}
+	args := []string{"weft", "artifact", "prune", "--local", "--apply"}
 	if strings.TrimSpace(pruneLocalDir) != "" && strings.TrimSpace(pruneLocalDir) != "." {
 		args = append(args, "--dir", shellQuote(pruneLocalDir))
 	}

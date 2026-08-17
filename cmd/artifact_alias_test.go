@@ -34,3 +34,20 @@ func TestListAliasesResolveToListCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestArtifactPruneAliasesResolveToPruneCommand(t *testing.T) {
+	for _, args := range [][]string{
+		{"artifact", "prune", "--local"},
+		{"artifacts", "prune", "--local"},
+		{"artifact", "prune-local"},
+		{"artifacts", "prune-local"},
+	} {
+		cmd, _, err := rootCmd.Find(args)
+		if err != nil {
+			t.Fatalf("Find(%v): %v", args, err)
+		}
+		if cmd != artifactPruneCmd {
+			t.Fatalf("Find(%v) command = %q, want artifactPruneCmd", args, cmd.CommandPath())
+		}
+	}
+}

@@ -588,13 +588,15 @@ image_pull_secret = "ghcr.io"                   # Optional [registry] key
 Use `weft artifact list <job-id>` to see discovered outputs and
 `weft artifact sync <job-id>` to pull them from the remote host on demand.
 
-#### Reclaiming local disk with `prune-local`
+#### Reclaiming local disk with `prune --local`
 
-`weft artifact prune-local` deletes local files that can be restored later
-from R2 or the local artifact store, freeing disk without losing anything
-recoverable. Defaults to dry-run; pass `--apply` to delete.
+`weft artifact prune --local` (synonym: `weft artifact prune-local`) deletes
+local files that can be restored later from R2 or the local artifact store,
+freeing disk without losing anything recoverable. Defaults to dry-run; pass
+`--apply` to delete.
 
 **Flags:**
+- `--local` — target local restorable files (required; the only supported mode today)
 - `--apply` — delete files (without it, only previews)
 - `--dir PATH` — directory scope (default: current directory)
 - `--older-than DURATION` — restrict to files older than e.g. `7d`, `48h`, `7`
@@ -609,14 +611,25 @@ recoverable. Defaults to dry-run; pass `--apply` to delete.
 **Examples:**
 ```bash
 # Preview what would be deleted in the current project
-weft artifact prune-local --older-than 7d
+weft artifact prune --local --older-than 7d
 
 # Apply the deletions
-weft artifact prune-local --older-than 7d --apply
+weft artifact prune --local --older-than 7d --apply
 
 # Sweep every project under ~/code in one command (auto-recursion)
-cd ~/code && weft artifact prune-local --apply
+cd ~/code && weft artifact prune --local --apply
 ```
+
+When run without `--apply` in an interactive terminal outside of a coding-agent
+context, the command previews the deletions and then asks:
+
+```
+Apply these deletions? [y/N]
+```
+
+Answering `y` or `yes` applies the deletions immediately; any other answer (or
+running in a non-TTY / agent context) prints the `weft artifact prune --local
+--apply …` command needed to apply them later.
 
 When the command spans more than one project (auto-recursion or `--recursive
 on`), each project prints its own `== <project> ==` section and per-project
