@@ -321,6 +321,23 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			oplog.WithDetailf("jobs=%d job_ids=%v", len(reset.JobIDs), reset.JobIDs))
 	}
 
+	// Complete cancels whose work started anyway. A cancel writes local state
+	// and cannot recall a launch already dispatched — the job travels in the
+	// instance payload and the agent never re-reads cancellation — so the
+	// cancel's effect has to be finished here, once the start is observable.
+	// This is the pass every runner shares, so one call covers the headless
+	// runner, the daemon, and the TUI.
+	// The count and the error are independent: a start with no instance to
+	// signal always contributes an error, so an else-if would drop the record
+	// of every job the same pass did stop.
+	stoppedAfterCancel, cancelSweepErr := StopJobsStartedAfterCancel(database)
+	if stoppedAfterCancel > 0 {
+		oplog.Log("auto_pilot.cancel_after_start_stopped", oplog.WithDetailf("jobs=%d", stoppedAfterCancel))
+	}
+	if cancelSweepErr != nil {
+		oplog.Log("auto_pilot.cancel_after_start_error", oplog.WithError(cancelSweepErr))
+	}
+
 	// Lift wedge auto-cordons whose retest cooldown has elapsed so a host whose
 	// source-sync mount has recovered rejoins placement automatically. Still-
 	// wedged hosts re-cordon on their next failed dispatch.

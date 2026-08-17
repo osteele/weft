@@ -2118,6 +2118,69 @@ rule UserCancelsJob {
         -- failure signal from runtime infrastructure.
 }
 
+rule CancelCompletesAgainstDispatchAlreadyInFlight {
+    when: AutoPilotTick(job, attempt)
+    requires: job.requested_status = canceled
+              and job.cancel_requested_at != null
+              and attempt.start_time > job.cancel_requested_at
+
+    ensures: job.requested_status = killed
+             and not Dispatchable(job)
+        -- The attempt's instance is signalled first, and only a written marker
+        -- escalates the intent: a start whose signal failed keeps
+        -- requested_status = canceled and is retried on the next tick, rather
+        -- than leaving selection with the kill never delivered. An attempt with
+        -- no recorded instance has no agent to signal, so it lands locally —
+        -- attempt status as well as intent, or the job reads killed over an
+        -- open attempt nothing will close — and is reported, not counted.
+
+    -- legacy annotation: @guidance
+        -- A cancel writes local state and cannot recall a launch already
+        -- dispatched: the job is baked into the instance payload at launch
+        -- (internal/campaign/agentjob.go) and cmd/agent/jobloop.go
+        -- runJobSequence never re-reads cancellation before starting it. So
+        -- the cancel's effect has to be completed later, when the start
+        -- becomes observable. wb72: three queued jobs were cancelled, two ran
+        -- on rentals anyway, 3 and 10 minutes later — the gap is provisioning
+        -- latency, and the intermittency is only whether a dispatch happened
+        -- to be in flight. A pre-dispatch check would not have helped; the
+        -- cancel arrived 25 seconds after the placement decision.
+        --
+        -- Why this is a correctness rule and not a cost one: had those jobs
+        -- completed they would have written plausible result artifacts from a
+        -- build the user had deliberately cancelled into the corrected run's
+        -- output directory, with nothing marking them superseded.
+        --
+        -- The channel is the per-instance kill marker the agent polls
+        -- (r2keys.InstanceKillJob), the same one `weft kill` uses — a local
+        -- status write alone never reaches a running agent. The job-level
+        -- kill helpers cannot be reused here: they refuse a job whose
+        -- effective status is already terminal, which is exactly the state a
+        -- cancelled-but-running job is in, so the sweep reaches
+        -- SignalCloudJobKill directly.
+        --
+        -- Selection requires positive evidence, because the action terminates
+        -- work: an unknown cancel time excludes the job rather than counting
+        -- as before-everything, an unobserved start excludes it, and equal
+        -- timestamps do not qualify. Implementation:
+        -- db.JobsStartedAfterCancel and
+        -- orchestration.StopJobsStartedAfterCancel, called from
+        -- runGroupedAutoPilotPassWithOptions so the headless runner, the
+        -- daemon and the TUI all get it from one place. This is a per-tick
+        -- sweep over observable state, not an edge-triggered hook: the start
+        -- weft has to react to is precisely the one no local event announced.
+        --
+        -- The escalation to killed doubles as the idempotence marker, since
+        -- selection filters on requested_status = canceled. That means a
+        -- retraction is recorded under two values, and the invariant
+        -- CancelSurvivesInstanceTermination protects — a cancelled job must
+        -- never be resurrected into queued by a teardown — has to hold over
+        -- {canceled, killed}, not canceled alone. It does today: the
+        -- requeue filters in resetLaunchJobsTx exclude both, by view status
+        -- and by raw requested_status. A new filter written against canceled
+        -- only would reopen that bug for swept jobs.
+}
+
 rule CancelSurvivesInstanceTermination {
     when: InstanceTerminated(instance, job)
     requires: job in instance.jobs and job.requested_status = canceled

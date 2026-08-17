@@ -60,7 +60,21 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 		return "", err
 	}
+	return SignalCloudJobKill(context.Background(), jobID, inst.ID, targetStatus)
+}
 
+// SignalCloudJobKill writes the per-instance kill marker the agent polls.
+//
+// This is the one channel that reaches a running agent: the agent reads
+// r2keys.InstanceKillJob rather than the database, so a local status write
+// alone never stops work already dispatched. Callers that have established the
+// job should not be running are expected to reach this directly — the
+// job-level helpers above refuse a job whose effective status is already
+// terminal, which is exactly the state a cancelled-but-running job is in.
+//
+// Recording the job's intent belongs to the caller, so a caller that must not
+// escalate until the marker is known to be written can order the two itself.
+func SignalCloudJobKill(ctx context.Context, jobID, launchID int64, targetStatus string) (string, error) {
 	cfg, _ := config.Load()
 	r2Client, err := BuildR2Client(cfg)
 	if err != nil {
@@ -70,8 +84,8 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		return "", fmt.Errorf("R2 client is not configured")
 	}
 
-	killKey := r2keys.InstanceKillJob(inst.ID)
-	if err := r2Client.PutObject(context.Background(), killKey, strings.NewReader(fmt.Sprintf("%d", jobID)), "text/plain"); err != nil {
+	killKey := r2keys.InstanceKillJob(launchID)
+	if err := r2Client.PutObject(ctx, killKey, strings.NewReader(fmt.Sprintf("%d", jobID)), "text/plain"); err != nil {
 		return "", fmt.Errorf("write kill signal to R2: %w", err)
 	}
 	return fmt.Sprintf("Job %s %s on rental instance (kill signal sent)", ids.FormatJobID(jobID), targetStatus), nil
@@ -119,8 +133,21 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	}
 }
 
+// signalCloudJobKillFunc is the sweep's seam over the R2 kill marker, so the
+// selection, ordering and reporting logic is testable without cloud
+// credentials. It deliberately covers only the marker write: the intent
+// escalation that makes the sweep idempotent stays in production code, where a
+// test can observe it.
+var signalCloudJobKillFunc = SignalCloudJobKill
+
+// cancelSweepSignalTimeout bounds one kill-marker write. The sweep runs inside
+// every autopilot pass, and the AWS SDK's default dial timeout and retries
+// would otherwise let a single unreachable instance stall the pass for over a
+// minute, serially, for every runner sharing the pass.
+const cancelSweepSignalTimeout = 15 * time.Second
+
 // StopJobsStartedAfterCancel terminates work that began after its job's cancel
-// was requested, and reports how many it stopped.
+// was requested, and reports how many it signalled.
 //
 // A cancel writes local state; it cannot recall a launch already dispatched,
 // because the job travels in the instance payload and the agent never
@@ -131,7 +158,21 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 //
 // Errors stopping one job do not abort the sweep: each is independent, and a
 // job that cannot be reached now is retried on the next pass rather than
-// blocking the others.
+// blocking the others. That retry is why the intent is escalated only once the
+// marker is written: escalating first drops the job out of
+// db.JobsStartedAfterCancel whether or not the kill ever landed, abandoning a
+// cancel the user asked for on nothing more than a timed-out write. The retry
+// is bounded without needing a counter, because selection ends as soon as the
+// attempt reaches a terminal status.
+//
+// Only a cloud attempt carries an instance to signal. An on-prem attempt
+// records no launch, so no agent polls a marker for it: the job is landed
+// locally and reported, because the remote process is still running. Stopping
+// it would need a bounded ops.StopJob and is not done here.
+//
+// The count is what was signalled. A job that could not be reached is reported
+// rather than counted, because a sweep that counted attempts would report
+// success for work still running.
 func StopJobsStartedAfterCancel(database *sql.DB) (int, error) {
 	starts, err := db.JobsStartedAfterCancel(database)
 	if err != nil {
@@ -143,11 +184,45 @@ func StopJobsStartedAfterCancel(database *sql.DB) (int, error) {
 		oplog.LogJob(oplog.OpJobKill, start.JobID, "", oplog.WithDetailf(
 			"started %s after cancel requested %s; stopping work the user canceled",
 			start.StartedAt.Format(time.RFC3339), start.CancelRequestedAt.Format(time.RFC3339)))
-		if _, err := KillOrCancelCloudJob(database, start.JobID, db.StatusKilled); err != nil {
-			failures = append(failures, fmt.Errorf("job %s: %w", ids.FormatJobID(start.JobID), err))
+		if start.LaunchID == nil {
+			if err := landUnsignalledCancel(database, start.JobID); err != nil {
+				failures = append(failures, fmt.Errorf("job %s: %w", ids.FormatJobID(start.JobID), err))
+				continue
+			}
+			failures = append(failures, fmt.Errorf("job %s started after its cancel with no instance recorded; marked killed locally, but no agent could be signalled and any remote process is still running", ids.FormatJobID(start.JobID)))
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), cancelSweepSignalTimeout)
+		_, signalErr := signalCloudJobKillFunc(ctx, start.JobID, *start.LaunchID, db.StatusKilled)
+		cancel()
+		if signalErr != nil {
+			failures = append(failures, fmt.Errorf("job %s: %w", ids.FormatJobID(start.JobID), signalErr))
+			continue
+		}
+		if err := db.SetRequestedStatus(database, start.JobID, db.StatusKilled); err != nil {
+			failures = append(failures, fmt.Errorf("job %s: record killed intent: %w", ids.FormatJobID(start.JobID), err))
 			continue
 		}
 		stopped++
 	}
 	return stopped, errors.Join(failures...)
+}
+
+// landUnsignalledCancel records a post-cancel start that has no agent to
+// signal as killed locally.
+//
+// The attempt status is written as well as the intent. Intent alone leaves the
+// job reading killed through job_status while its latest attempt stays open
+// with no end_time and no agent left to close it — the shape
+// TerminalJobsHaveEndTime exists to exclude. The attempt closes first: if that
+// write fails the job keeps its cancel intent and the next pass retries it,
+// whereas escalating the intent first would strand the open attempt.
+func landUnsignalledCancel(database *sql.DB, jobID int64) error {
+	if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusKilled); err != nil {
+		return fmt.Errorf("close attempt as killed: %w", err)
+	}
+	if err := db.SetRequestedStatus(database, jobID, db.StatusKilled); err != nil {
+		return fmt.Errorf("record killed intent: %w", err)
+	}
+	return nil
 }
