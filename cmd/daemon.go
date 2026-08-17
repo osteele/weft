@@ -177,26 +177,73 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
 	pass := 0
 	runAutopilot := true
-	lastOutcome := outcomeIdle
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		pass++
-		wait, outcome := runDaemonPass(ctx, database, cfg, pass, runAutopilot)
+		before := wakeSnapshot
+		passResult := runDaemonPass(ctx, database, cfg, pass, runAutopilot)
 		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
 			wakeSnapshot = nextSnapshot
 		} else {
 			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
 		}
-		lastOutcome = outcome
+
+		// State the autopilot reads moved while this iteration ran — usually
+		// because the pre-pass sync landed new host or cloud state. Those
+		// writes fire a change notification, but this iteration's own
+		// snapshot has already absorbed them, so the follow-up pass has to be
+		// scheduled here rather than waited for.
+		selfMoved := wakeSnapshot != before
+		timerRunsPass := selfMoved || autopilotTimerRunsPass(passResult.outcome, passResult.blockedReasons)
+		wait := passResult.wait
+		if selfMoved && wait > orchestration.AutopilotCooldownProgress {
+			wait = orchestration.AutopilotCooldownProgress
+		}
+
+		// The daemon owns host and cloud freshness, so it wakes on a sync
+		// cadence even when replanning would be pointless. Whether each wake
+		// also runs an autopilot pass is the shared policy's call.
+		quietWait := daemonSyncCadence(wakeSnapshot, wait, passResult.syncIncomplete)
+		emitDaemonPass(passResult, daemonEffectiveWait(wait, quietWait, timerRunsPass))
+
 		var reason autopilotWakeReason
-		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, changeSource, nil, database, wait, true, wakeSnapshot)
+		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, autopilotWaitParams{
+			changeSource:  changeSource,
+			database:      database,
+			baseline:      wakeSnapshot,
+			wait:          wait,
+			timerRunsPass: timerRunsPass,
+			quietWait:     quietWait,
+			label:         "daemon",
+		})
 		if reason == autopilotWakeDone {
 			return nil
 		}
-		runAutopilot = reason != autopilotWakeTimer || autopilotTimerRunsPass(lastOutcome)
+		runAutopilot = reason != autopilotWakeTimer || timerRunsPass
 	}
+}
+
+// daemonQuietSyncInterval is how often the daemon refreshes host and cloud
+// state when nothing is queued, running, or live. The short adaptive cadence
+// exists to track work in flight; with no work in flight it only produces SSH
+// traffic to idle hosts and provider polls nobody is waiting on.
+const daemonQuietSyncInterval = 5 * time.Minute
+
+// daemonSyncCadence returns how long the daemon may wait before refreshing
+// external state. The quiet interval applies only when there is no work in
+// flight and the last sync actually completed: a host that could not be
+// reached leaves its state unknown, which is a reason to look again soon, not
+// a reason to stand down.
+func daemonSyncCadence(snapshot autopilotWakeSnapshot, wait time.Duration, syncIncomplete bool) time.Duration {
+	if syncIncomplete || !snapshot.Quiet() {
+		return wait
+	}
+	if wait > daemonQuietSyncInterval {
+		return wait
+	}
+	return daemonQuietSyncInterval
 }
 
 func daemonInfo(pid int, version string) daemonapi.DaemonInfo {
@@ -218,7 +265,7 @@ func daemonPrePassHostTimeout() time.Duration {
 	return FastSyncHostTimeout
 }
 
-func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) (time.Duration, autopilotOutcome) {
+func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) daemonPassResult {
 	started := time.Now()
 	var (
 		result *orchestration.GroupedAutoPilotResult
@@ -249,18 +296,48 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
 
+	// The outcome describes what the autopilot pass did, not what sync found.
+	// Sync results steer the wake cadence instead: an incomplete sync keeps
+	// the short cadence (see daemonSyncCadence), and sync landing state the
+	// autopilot reads is caught by the wake-snapshot delta in the loop above.
+	// Folding either into the outcome overstated the autopilot's activity —
+	// one unreachable host was enough to report every idle pass as blocked.
 	outcome, wait := classifyAutopilotPass(result, runErr, autopilotRunPausedWait)
-	if syncResult.HostsUpdated+syncResult.CloudUpdated > 0 && outcome != outcomeError {
-		outcome = outcomeProgress
-		wait = orchestration.AutopilotCooldownProgress
-	}
-	if !syncResult.AllCompleted && outcome == outcomeIdle {
-		outcome = outcomeBlocked
-		wait = orchestration.AutopilotCooldownBlocked
-	}
 	wait = capDaemonWaitForInterruptibles(database, wait)
-	emitDaemonPass(pass, started, syncResult, result, outcome, runErr, wait)
-	return wait, outcome
+
+	out := daemonPassResult{
+		pass:           pass,
+		started:        started,
+		wait:           wait,
+		outcome:        outcome,
+		result:         result,
+		runErr:         runErr,
+		syncResult:     syncResult,
+		syncIncomplete: !syncResult.AllCompleted,
+	}
+	if result != nil {
+		out.blockedReasons = result.BlockedReasons
+	}
+	return out
+}
+
+// daemonPassResult is one daemon iteration's report to the wait loop. The pass
+// is reported to the user by the loop rather than here, because the loop is
+// what settles the actual wait — printing "next in" before that produced a
+// number the daemon then ignored.
+type daemonPassResult struct {
+	pass           int
+	started        time.Time
+	wait           time.Duration
+	outcome        autopilotOutcome
+	blockedReasons map[int64]string
+	result         *orchestration.GroupedAutoPilotResult
+	runErr         error
+	syncResult     syncorch.SyncResult
+	// syncIncomplete records that at least one host or provider could not be
+	// reached. That is unknown state, not quiet state, so it holds the short
+	// wake cadence rather than escalating the autopilot outcome.
+	syncIncomplete bool
 }
 
 func runDaemonPrePassSync(ctx context.Context, database *sql.DB, cfg *config.Config, opts syncorch.SyncOptions) syncorch.SyncResult {
@@ -321,24 +398,39 @@ func capDaemonWaitForInterruptibles(database *sql.DB, wait time.Duration) time.D
 	return daemonInterruptiblePollInterval
 }
 
-func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult, result *orchestration.GroupedAutoPilotResult, outcome autopilotOutcome, runErr error, wait time.Duration) {
+// daemonEffectiveWait reports how long the daemon will actually sleep, so the
+// per-pass log line matches what happens next. Whichever timer is armed first
+// ends the wait; the backstop bounds both.
+func daemonEffectiveWait(wait, quietWait time.Duration, timerRunsPass bool) time.Duration {
+	effective := quietWait
+	if timerRunsPass && wait > 0 && (effective <= 0 || wait < effective) {
+		effective = wait
+	}
+	if effective <= 0 || effective > orchestration.AutopilotQuietBackstop {
+		effective = orchestration.AutopilotQuietBackstop
+	}
+	return effective
+}
+
+func emitDaemonPass(p daemonPassResult, wait time.Duration) {
+	syncResult := p.syncResult
 	placed, launched, rebalanced, blocked := 0, 0, 0, 0
-	if result != nil {
-		placed = result.Placed
-		launched = result.Launched
-		rebalanced = result.Rebalanced
-		blocked = orchestration.AutoPilotBlockedReasonCount(result.BlockedReasons)
+	if p.result != nil {
+		placed = p.result.Placed
+		launched = p.result.Launched
+		rebalanced = p.result.Rebalanced
+		blocked = orchestration.AutoPilotBlockedReasonCount(p.result.BlockedReasons)
 	}
 	parts := []string{
-		fmt.Sprintf("pass %d", pass),
-		string(outcome),
+		fmt.Sprintf("pass %d", p.pass),
+		string(p.outcome),
 		fmt.Sprintf("sync=%d", syncResult.HostsUpdated+syncResult.CloudUpdated),
 		fmt.Sprintf("hosts=%d", syncResult.HostsReached),
 		fmt.Sprintf("placed=%d", placed),
 		fmt.Sprintf("launched=%d", launched),
 		fmt.Sprintf("rebalanced=%d", rebalanced),
 		fmt.Sprintf("blocked=%d", blocked),
-		fmt.Sprintf("dur=%s", time.Since(started).Truncate(time.Millisecond)),
+		fmt.Sprintf("dur=%s", time.Since(p.started).Truncate(time.Millisecond)),
 	}
 	if len(syncResult.HostsUnreachable) > 0 {
 		parts = append(parts, fmt.Sprintf("offline=%s", strings.Join(syncResult.HostsUnreachable, ",")))
@@ -346,8 +438,8 @@ func emitDaemonPass(pass int, started time.Time, syncResult syncorch.SyncResult,
 	if len(syncResult.HostsSlow) > 0 {
 		parts = append(parts, fmt.Sprintf("slow=%s", strings.Join(syncResult.HostsSlow, ",")))
 	}
-	if runErr != nil && !errors.Is(runErr, orchestration.ErrAutopilotPaused) && !errors.Is(runErr, orchestration.ErrAutopilotBusy) {
-		parts = append(parts, fmt.Sprintf("err=%q", runErr.Error()))
+	if p.runErr != nil && !errors.Is(p.runErr, orchestration.ErrAutopilotPaused) && !errors.Is(p.runErr, orchestration.ErrAutopilotBusy) {
+		parts = append(parts, fmt.Sprintf("err=%q", p.runErr.Error()))
 	}
 	fmt.Printf("[%s] %s (next in %s)\n", time.Now().Format("15:04:05"), strings.Join(parts, " "), wait.Truncate(time.Second))
 }

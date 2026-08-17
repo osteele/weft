@@ -99,6 +99,9 @@ type listTUIModel struct {
 	autoRunRateInputPhase      autoBudgetPhase
 	autoDailyCapCents          int
 	autoNextPassAt             time.Time
+	autoTimerRunsPass          bool
+	autoWakeSnapshot           orchestration.WakeSnapshot
+	autoLastPassAt             time.Time
 	autoLeaseOwner             string
 	autoLeaseScope             string
 	autoBlockReasons           map[int64]string
@@ -985,7 +988,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot failed: " + orchestration.SummarizeAutoPilotError(msg.err)
 			}
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownError)
+			m.recordAutoPilotPassOutcome(nil, msg.err)
 			m.rebuildGroupedRows()
 			return m, nil
 		}
@@ -996,14 +999,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The auto-pilot status line already reports the paused state
 			// from autopilot_state (loaded in reloadJobs); don't duplicate
 			// it in statusMessage.
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
+			m.recordAutoPilotPassOutcome(nil, orchestration.ErrAutopilotPaused)
 			return m, nil
 		}
 		if msg.anotherHolding {
 			if !m.quickLaunchStatusProtected() {
 				m.statusMessage = "Auto-pilot: another runner is active"
 			}
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownContend)
+			m.recordAutoPilotPassOutcome(nil, orchestration.ErrAutopilotBusy)
 			return m, nil
 		}
 		m.replaceAutoBlockOverlay(msg.blockedReasons, msg.structuredBlocked)
@@ -1013,14 +1016,12 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autoPersistentBlocked = summary
 			m.autoPersistentBlockedN = count
 		}
-		if msg.placed > 0 || msg.rebalanced > 0 || msg.launched > 0 {
-			m.clearAutoPilotPersistentState()
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownProgress)
-		} else if orchestration.AutoPilotBlockedReasonCount(msg.blockedReasons) > 0 {
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownBlocked)
-		} else {
-			m.autoNextPassAt = time.Now().Add(listAutoPilotCooldownIdle)
-		}
+		m.recordAutoPilotPassOutcome(&orchestration.GroupedAutoPilotResult{
+			Placed:         msg.placed,
+			Rebalanced:     msg.rebalanced,
+			Launched:       msg.launched,
+			BlockedReasons: msg.blockedReasons,
+		}, nil)
 		if !m.quickLaunchStatusProtected() {
 			switch {
 			case msg.placed > 0 && msg.rebalanced > 0 && msg.launched > 0:
@@ -1844,6 +1845,29 @@ func (m *listTUIModel) clearAutoPilotPersistentState() {
 
 func (m *listTUIModel) resumeAutoPilotNow() {
 	m.autoNextPassAt = time.Time{}
+	// A resume follows a user action that changed autopilot inputs (budget,
+	// breaker), so the next tick must replan even if the database has not
+	// moved since the last pass.
+	m.autoTimerRunsPass = true
+}
+
+// recordAutoPilotPassOutcome applies the shared dispatch policy to a finished
+// pass: it sets the cooldown and records whether the cooldown expiring is by
+// itself a reason to run the next one.
+func (m *listTUIModel) recordAutoPilotPassOutcome(result *orchestration.GroupedAutoPilotResult, passErr error) {
+	outcome, cooldown := orchestration.ClassifyPass(result, passErr, orchestration.AutopilotCooldownContend)
+	if outcome == orchestration.OutcomeProgress {
+		m.clearAutoPilotPersistentState()
+	}
+	var blockedReasons map[int64]string
+	if result != nil {
+		blockedReasons = result.BlockedReasons
+	}
+	m.autoNextPassAt = time.Now().Add(cooldown)
+	m.autoTimerRunsPass = orchestration.TimerRunsPass(outcome, blockedReasons)
+	if snapshot, err := orchestration.ReadWakeSnapshot(m.database); err == nil {
+		m.autoWakeSnapshot = snapshot
+	}
 }
 
 func (m listTUIModel) hasOpenPlacementIntent(jobID int64) bool {
@@ -3747,6 +3771,35 @@ func (m listTUIModel) toggleAutopilot() (tea.Model, tea.Cmd) {
 	return m, m.requestReloadJobs()
 }
 
+// shouldRunAutoPilotPass applies the shared dispatch policy to the TUI's
+// tick-driven loop: once the cooldown expires, a pass runs only if the timer
+// alone justifies one (see orchestration.TimerRunsPass) or if state the
+// autopilot reads has actually moved since the last pass. Without this the TUI
+// replanned every cooldown for as long as any job stayed blocked, re-deriving
+// the same answer from the same inputs.
+//
+// The snapshot read is a handful of counting queries against the local SQLite
+// file, and it happens at most once per cooldown window rather than per tick.
+func (m *listTUIModel) shouldRunAutoPilotPass() bool {
+	if m.autoTimerRunsPass || m.autoLastPassAt.IsZero() {
+		return true
+	}
+	// Change detection is not provably complete, so never stay quiet forever.
+	if time.Since(m.autoLastPassAt) >= orchestration.AutopilotQuietBackstop {
+		return true
+	}
+	snapshot, err := orchestration.ReadWakeSnapshot(m.database)
+	if err != nil {
+		// A failed read cannot show that nothing moved.
+		return true
+	}
+	if snapshot == m.autoWakeSnapshot {
+		return false
+	}
+	m.autoWakeSnapshot = snapshot
+	return true
+}
+
 func (m *listTUIModel) runAutoPilot() tea.Cmd {
 	if !m.isStatusGroupedView() || m.autopilotPaused || m.autoInProgress || m.autoUpgradePending || m.database == nil {
 		return nil
@@ -3761,8 +3814,12 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 		// Nothing to evaluate; skip the pass so the status line doesn't flicker.
 		return nil
 	}
+	if !m.shouldRunAutoPilotPass() {
+		return nil
+	}
 	m.autoInProgress = true
 	m.autoPassStartedAt = time.Now()
+	m.autoLastPassAt = m.autoPassStartedAt
 
 	database := m.database
 	ctx := m.ctx
@@ -3813,16 +3870,6 @@ func (m *listTUIModel) runAutoPilot() tea.Cmd {
 // auto-pilot status line stays visible, even when the pass completes sooner.
 // Prevents rapid flicker between "evaluating" and idle text on every sync tick.
 const listAutoPilotMinDisplayDuration = 1200 * time.Millisecond
-
-// Aliases for the shared autopilot cooldowns; preserves call sites in this
-// file and the existing list_ui_test.go references.
-const (
-	listAutoPilotCooldownError    = orchestration.AutopilotCooldownError
-	listAutoPilotCooldownBlocked  = orchestration.AutopilotCooldownBlocked
-	listAutoPilotCooldownIdle     = orchestration.AutopilotCooldownIdle
-	listAutoPilotCooldownProgress = orchestration.AutopilotCooldownProgress
-	listAutoPilotCooldownContend  = orchestration.AutopilotCooldownContend
-)
 
 func runGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (int, int, int, string, map[int64]string, error) {
 	result, err := orchestration.RunGroupedAutoPilotPass(ctx, database, scopedJobs)

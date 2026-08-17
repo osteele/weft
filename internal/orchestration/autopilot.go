@@ -1200,7 +1200,7 @@ func finalizeUnplacedBlockedReasons(
 			if _, done := structuredBlocked[jobID]; done {
 				continue
 			}
-			if !isRunRateBudgetReason(flat) {
+			if !blockreason.IsRunRateBudgetReason(flat) {
 				continue
 			}
 			job, ok := remainingByID[jobID]
@@ -1956,10 +1956,12 @@ func minLaunchGroupJobID(group campaign.LaunchGroup) int64 {
 	return minID
 }
 
-// Launch-side reasons used to compose the launch+reuse breakdown.
+// Launch-side reasons used to compose the launch+reuse breakdown. Both are
+// shared with the dispatch policy's reason classifier, which must be able to
+// recognize these fragments to tell a budget verdict from a market one.
 const (
-	noRentalHeadroomLaunchReason  = "no rental headroom"
-	reuseRejectedHeadlineFragment = "running instances couldn't accept this job"
+	noRentalHeadroomLaunchReason  = blockreason.NoRentalHeadroomHeadline
+	reuseRejectedHeadlineFragment = blockreason.ReuseRejectedHeadline
 )
 
 // blockReasonBase composes the combined launch+reuse summary headline from a
@@ -1967,19 +1969,6 @@ const (
 // accept this job".
 func blockReasonBase(launch string) string {
 	return launch + "; " + reuseRejectedHeadlineFragment
-}
-
-// isRunRateBudgetReason reports whether a flat blocked reason is the run-rate
-// (budget) gate's verdict — the launch-side blocker emitted when launching new
-// instances would breach the configured run-rate target. Unlike the
-// placeholders above this is an authoritative launch reason, not a safety-net
-// fallback, but finalizeUnplacedBlockedReasons still reattaches reuse detail to
-// it so the second operative reason (why running instances refused the job)
-// survives alongside the budget verdict. Matches the "no subset fits",
-// "headroom exhausted", and auto-launch variants.
-func isRunRateBudgetReason(s string) bool {
-	return strings.Contains(s, "run-rate target exceeded") ||
-		strings.Contains(s, "run-rate headroom exhausted")
 }
 
 func noRentalHeadroomReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {

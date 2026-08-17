@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/syncorch"
 )
 
@@ -152,5 +153,141 @@ func TestReleaseDaemonAutopilotClaimDoesNotClearOtherPID(t *testing.T) {
 	}
 	if state.ActiveRunnerPID != daemonPID {
 		t.Fatalf("active runner pid = %d, want %d", state.ActiveRunnerPID, daemonPID)
+	}
+}
+
+func TestDaemonSyncCadence(t *testing.T) {
+	busy := orchestration.WakeSnapshot{ActiveJobs: 1}
+	quiet := orchestration.WakeSnapshot{}
+	adaptive := orchestration.AutopilotCooldownIdle
+
+	tests := []struct {
+		name           string
+		snapshot       orchestration.WakeSnapshot
+		wait           time.Duration
+		syncIncomplete bool
+		want           time.Duration
+	}{
+		{
+			name:     "work in flight keeps the adaptive cadence",
+			snapshot: busy,
+			wait:     adaptive,
+			want:     adaptive,
+		},
+		{
+			name:     "quiet system backs off to the quiet interval",
+			snapshot: quiet,
+			wait:     adaptive,
+			want:     daemonQuietSyncInterval,
+		},
+		{
+			// An unreachable host leaves its state unknown. Unknown is a
+			// reason to look again soon, not a reason to stand down — the
+			// system may only look quiet because we could not see it.
+			name:           "incomplete sync holds the short cadence even when quiet",
+			snapshot:       quiet,
+			wait:           adaptive,
+			syncIncomplete: true,
+			want:           adaptive,
+		},
+		{
+			name:     "a cooldown longer than the quiet interval is not shortened",
+			snapshot: quiet,
+			wait:     2 * daemonQuietSyncInterval,
+			want:     2 * daemonQuietSyncInterval,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := daemonSyncCadence(tc.snapshot, tc.wait, tc.syncIncomplete)
+			if got != tc.want {
+				t.Errorf("daemonSyncCadence = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every field that makes a snapshot non-quiet must be one the daemon would
+// want to sync for. A field missing from Quiet() lets the daemon back off to
+// the five-minute cadence while work is in flight.
+func TestWakeSnapshotQuietCoversEveryWorkSignal(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot orchestration.WakeSnapshot
+	}{
+		{name: "unplaced job", snapshot: orchestration.WakeSnapshot{UnplacedJobs: 1}},
+		{name: "active job", snapshot: orchestration.WakeSnapshot{ActiveJobs: 1}},
+		{name: "live launch", snapshot: orchestration.WakeSnapshot{LiveLaunches: 1}},
+		{name: "open placement intent", snapshot: orchestration.WakeSnapshot{OpenPlacementIntents: 1}},
+		{name: "open move intent", snapshot: orchestration.WakeSnapshot{OpenMoveIntents: 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.snapshot.Quiet() {
+				t.Errorf("%+v reads as quiet; the daemon would back off while work is in flight", tc.snapshot)
+			}
+		})
+	}
+	if !(orchestration.WakeSnapshot{}).Quiet() {
+		t.Error("an empty snapshot must read as quiet")
+	}
+}
+
+// The daemon's per-pass log line reports how long it will sleep, so it must be
+// computed from the wait the loop actually applies rather than the autopilot
+// cooldown alone.
+func TestDaemonEffectiveWait(t *testing.T) {
+	tests := []struct {
+		name          string
+		wait          time.Duration
+		quietWait     time.Duration
+		timerRunsPass bool
+		want          time.Duration
+	}{
+		{
+			name:          "armed timer shorter than the sync cadence wins",
+			wait:          orchestration.AutopilotCooldownProgress,
+			quietWait:     daemonQuietSyncInterval,
+			timerRunsPass: true,
+			want:          orchestration.AutopilotCooldownProgress,
+		},
+		{
+			name:          "unarmed timer leaves the sync cadence",
+			wait:          orchestration.AutopilotCooldownIdle,
+			quietWait:     daemonQuietSyncInterval,
+			timerRunsPass: false,
+			want:          daemonQuietSyncInterval,
+		},
+		{
+			name:          "sync cadence shorter than the cooldown wins",
+			wait:          orchestration.AutopilotCooldownError,
+			quietWait:     orchestration.AutopilotCooldownIdle,
+			timerRunsPass: true,
+			want:          orchestration.AutopilotCooldownIdle,
+		},
+		{
+			name:          "backstop bounds a wait with nothing else armed",
+			wait:          0,
+			quietWait:     0,
+			timerRunsPass: false,
+			want:          orchestration.AutopilotQuietBackstop,
+		},
+		{
+			name:          "backstop caps a longer cadence",
+			wait:          0,
+			quietWait:     2 * orchestration.AutopilotQuietBackstop,
+			timerRunsPass: false,
+			want:          orchestration.AutopilotQuietBackstop,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := daemonEffectiveWait(tc.wait, tc.quietWait, tc.timerRunsPass)
+			if got != tc.want {
+				t.Errorf("daemonEffectiveWait(%s, %s, %v) = %s, want %s",
+					tc.wait, tc.quietWait, tc.timerRunsPass, got, tc.want)
+			}
+		})
 	}
 }

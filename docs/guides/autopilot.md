@@ -188,6 +188,57 @@ on timeout, `weft autopilot run` performs a cloud sync, and only replans if
 that sync updates local state. This keeps unattended autopilot from repeatedly
 planning against an unchanged DB.
 
+A database write only counts as a change when it moves something the autopilot
+reads: the newest lifecycle event, the number of unplaced, queued, or running
+jobs, live instances, open placement or move intents, or the committed run
+rate. Unrelated writes do not trigger a pass. The weft config file is watched
+alongside the database, so editing the hourly target or daily cap wakes the
+autopilot immediately rather than at the next interval.
+
+## When a blocked job is retried
+
+An idle pass does not replan when its cooldown expires — there was nothing to
+act on, and anything that makes work actionable is a change the runner already
+waits for.
+
+A blocked pass depends on what blocked it:
+
+- Blockers that only a fresh provider query can clear — no offers, offer fetch
+  failures, an offer that vanished between search and create — are retried on
+  the cooldown. Nothing local ever signals that the rental market moved.
+- Blockers waiting on a retry backoff are retried too, on a slower cadence. A
+  backoff expires on a clock and no row is written when it does, so a timer is
+  the only way to notice — but the deadline is local and at most a couple of
+  minutes out, so it does not need the market's cadence.
+- Blockers that clear through a local change — the run-rate budget, the daily
+  cap, reuse rejections from running instances — wait for that change. A
+  finishing instance frees run-rate headroom and wakes the autopilot at once.
+- A blocker weft does not recognize is retried on the cooldown, so an
+  unclassified reason is never a reason a job sits still.
+
+Every runner also replans at least once every 10 minutes regardless. This
+backstop is not only there in case a wake-up is missed: some of what a pass
+does is driven by a clock rather than by a change. Auto-cordons placed on hosts
+whose source sync wedged are lifted once their retest window elapses, and
+deferred checkpoint publishes become eligible again after their cooldown —
+neither writes anything when its deadline passes. Host definitions also live in
+YAML outside the database. The backstop bounds how late any of that can be.
+
+## What the autopilot costs while it waits
+
+The three runners share one dispatch policy, so `weft autopilot run`, the
+daemon, and the TUI all agree on when a pass is worth running. What differs is
+what else they own:
+
+- `weft autopilot run` only runs passes. It waits for a change, a
+  market-sensitive cooldown, or the backstop.
+- The daemon also owns host and cloud freshness, so it keeps waking to sync
+  even when replanning would be pointless. With nothing queued, running, or
+  live it drops to a 5-minute sync cadence; if a host or provider could not be
+  reached, it holds the short cadence instead, since unreachable is unknown
+  rather than idle.
+- A TUI stands down entirely while a live daemon is present.
+
 Cloud sync is process-coordinated with the same provider lease used by the
 TUIs and monitor paths. If another process is already reconciling providers,
 the headless runner uses the database-only fallback and waits for the winning
@@ -196,8 +247,11 @@ process to publish changes into SQLite.
 `--once --json` is the right tool for cron jobs and ops scripts: each line
 is one JSON pass record with `outcome`, `placed`, `rebalanced`,
 `launched`, and `blocked_reasons`. `outcome` is one of `progress` (work
-done), `idle` (nothing to do), `blocked` (work waiting but breaker
-tripped), `error`, `paused`, `busy` (another runner holds the slot).
+done), `idle` (nothing to do), `blocked` (work waiting, with the reasons in
+`blocked_reasons`), `error`, `paused`, `busy` (another runner holds the
+slot). The outcome describes the autopilot pass only; sync results appear in
+the daemon's own `sync=`, `hosts=`, and `offline=` fields rather than being
+folded into it.
 
 ## Rebalancing queued work
 

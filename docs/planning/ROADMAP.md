@@ -375,6 +375,42 @@ comparison dance, matching the Move/Placement/Termination intent shape.
 Worth revisiting when the view's complexity becomes a concrete pain
 point. Mostly clarity, not behavior change.
 
+## Deadline-aware autopilot wake-ups
+
+The autopilot dispatcher (`internal/orchestration/dispatch.go`) ends a wait on
+one of three things: an observed change to the wake snapshot, a cooldown, or
+the quiet backstop. Two of the things a pass reacts to are neither — they
+advance on a clock and write nothing when their deadline passes:
+
+- Retry backoffs (`internal/retrypolicy`, currently 15s/30s/60s/2m), surfaced
+  as `"reuse backoff 45s remaining"` and `"retry backoff …"` blockers.
+- Pass-internal timed gates: the source-sync auto-cordon retest window
+  (`ops.AutoUncordonRecoveredSourceSyncHosts`, 15m) and the deferred
+  checkpoint-publish cooldown (10m).
+
+Today these are covered by polling — `AutopilotCooldownBackoff` for backoff
+blockers, the backstop for the pass-internal gates — so a recheck that lands
+before the deadline re-derives the same answer, and one that lands after it
+adds latency. Both are bounded but neither is right.
+
+The fix is for a pass to report the earliest instant at which any of its
+time-based gates becomes eligible, and for the dispatcher to sleep until that
+instant instead of polling toward it. Sketch:
+
+- Add a `NextDeadline time.Time` to `GroupedAutoPilotResult`, set by each site
+  that declines work because a window has not elapsed (the backoff paths in
+  `internal/campaign/relaunch.go` and `fillReusableInstances`, the uncordon
+  retest, the checkpoint-publish cooldown).
+- Have `ClassifyPass` return that deadline alongside the cooldown, and
+  `WaitForInvalidation` treat it as another armed timer.
+- Then `AutopilotCooldownBackoff` can go away, and the backstop returns to
+  being purely a safety net for missed events and out-of-database inputs
+  (host YAML), which is what its doc comment claims it is.
+
+Worth doing when the reason-text coupling starts to bite: today the deadline is
+recoverable only by parsing the countdown out of a display string, which is why
+the interim uses a fixed interval instead.
+
 ## Calibrate cloud launch retry policy
 
 The cloud launch retry defaults in `internal/retrypolicy` are historical

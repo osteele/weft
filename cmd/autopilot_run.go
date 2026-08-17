@@ -62,16 +62,18 @@ func init() {
 }
 
 // autopilotOutcome is a typed view of the per-pass outcome; the underlying
-// string values are also the JSON contract emitted by `--json`.
-type autopilotOutcome string
+// string values are also the JSON contract emitted by `--json`. The policy
+// that produces it is shared with the daemon and the TUI — see
+// internal/orchestration/dispatch.go.
+type autopilotOutcome = orchestration.PassOutcome
 
 const (
-	outcomeProgress autopilotOutcome = "progress"
-	outcomeIdle     autopilotOutcome = "idle"
-	outcomeBlocked  autopilotOutcome = "blocked"
-	outcomeError    autopilotOutcome = "error"
-	outcomePaused   autopilotOutcome = "paused"
-	outcomeBusy     autopilotOutcome = "busy"
+	outcomeProgress = orchestration.OutcomeProgress
+	outcomeIdle     = orchestration.OutcomeIdle
+	outcomeBlocked  = orchestration.OutcomeBlocked
+	outcomeError    = orchestration.OutcomeError
+	outcomePaused   = orchestration.OutcomePaused
+	outcomeBusy     = orchestration.OutcomeBusy
 )
 
 type autopilotRunPassEvent struct {
@@ -204,164 +206,105 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		if autopilotRunMaxPasses > 0 && pass >= autopilotRunMaxPasses {
 			return nil
 		}
+		var blockedReasons map[int64]string
+		if result != nil {
+			blockedReasons = result.BlockedReasons
+		}
 		var reason autopilotWakeReason
-		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, changeSource, cfg, database, wait, autopilotTimerRunsPass(outcome), wakeSnapshot)
+		wakeSnapshot, reason = waitForAutopilotInvalidation(ctx, autopilotWaitParams{
+			changeSource:  changeSource,
+			database:      database,
+			baseline:      wakeSnapshot,
+			wait:          wait,
+			timerRunsPass: autopilotTimerRunsPass(outcome, blockedReasons),
+			syncCfg:       cfg,
+			label:         "autopilot run",
+		})
 		if reason == autopilotWakeDone {
 			return nil
 		}
 	}
 }
 
-type autopilotWakeSnapshot struct {
-	LifecycleID          int64
-	UnplacedJobs         int
-	LiveLaunches         int
-	OpenPlacementIntents int
-	OpenMoveIntents      int
-}
+// Thin adapters over the shared dispatch policy in internal/orchestration, so
+// the headless runner, the daemon, and the TUI cannot drift on when a pass is
+// worth running.
 
-func readAutopilotWakeSnapshot(database *sql.DB) (autopilotWakeSnapshot, error) {
-	var snap autopilotWakeSnapshot
-	if database == nil {
-		return snap, nil
-	}
-	if err := database.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM lifecycle_events`).Scan(&snap.LifecycleID); err != nil {
-		return snap, err
-	}
-	if err := database.QueryRow(`
-		SELECT COUNT(*)
-		  FROM job_status
-		 WHERE tombstoned = 0
-		   AND effective_target_kind = ?
-		   AND COALESCE(pending_status, status) IN (?, ?)`,
-		string(db.JobTargetUnplaced), db.StatusQueued, db.StatusPendingPlacement,
-	).Scan(&snap.UnplacedJobs); err != nil {
-		return snap, err
-	}
-	if err := database.QueryRow(`
-		SELECT COUNT(*)
-		  FROM launches
-		 WHERE status IN (?, ?, ?, ?)`,
-		db.LaunchStatusLaunching, db.LaunchStatusRunning, db.LaunchStatusPaused, db.LaunchStatusGrace,
-	).Scan(&snap.LiveLaunches); err != nil {
-		return snap, err
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM placement_intents WHERE state = 'open'`).Scan(&snap.OpenPlacementIntents); err != nil {
-		return snap, err
-	}
-	if err := database.QueryRow(`SELECT COUNT(*) FROM move_intents WHERE state = 'open'`).Scan(&snap.OpenMoveIntents); err != nil {
-		return snap, err
-	}
-	return snap, nil
-}
+type autopilotWakeSnapshot = orchestration.WakeSnapshot
 
-func autopilotTimerRunsPass(outcome autopilotOutcome) bool {
-	switch outcome {
-	case outcomeProgress, outcomeBlocked, outcomeError, outcomeBusy, outcomePaused:
-		return true
-	default:
-		return false
-	}
-}
-
-type autopilotWakeReason string
+type autopilotWakeReason = orchestration.WakeReason
 
 const (
-	autopilotWakeAction autopilotWakeReason = "action"
-	autopilotWakeTimer  autopilotWakeReason = "timer"
-	autopilotWakeDone   autopilotWakeReason = "done"
+	autopilotWakeTimer = orchestration.WakeTimer
+	autopilotWakeDone  = orchestration.WakeDone
 )
 
-func waitForAutopilotInvalidation(ctx context.Context, changeSource *dbwatch.Source, cfg *config.Config, database *sql.DB, wait time.Duration, timerRunsPass bool, baseline autopilotWakeSnapshot) (autopilotWakeSnapshot, autopilotWakeReason) {
-	if changeSource == nil {
-		if waitForDurationOrDone(ctx, wait) {
-			return baseline, autopilotWakeDone
-		}
-		return baseline, autopilotWakeTimer
-	}
-	var pending *autopilotWakeSnapshot
-	var debounceDeadline time.Time
-	var timerDeadline time.Time
-	if timerRunsPass && wait > 0 {
-		timerDeadline = time.Now().Add(wait)
-	}
-	for {
-		nextWait := wait
-		if !timerDeadline.IsZero() {
-			untilTimer := time.Until(timerDeadline)
-			if untilTimer <= 0 {
-				return baseline, autopilotWakeTimer
-			}
-			nextWait = untilTimer
-		}
-		if pending != nil {
-			untilDebounce := time.Until(debounceDeadline)
-			if untilDebounce <= 0 {
-				return *pending, autopilotWakeAction
-			}
-			if nextWait <= 0 || untilDebounce < nextWait {
-				nextWait = untilDebounce
-			}
-		}
-		changed, done := waitForDBChangeOrTimeout(ctx, changeSource, nextWait, "autopilot run")
-		if done {
-			return baseline, autopilotWakeDone
-		}
-		if changed {
-			snap, err := readAutopilotWakeSnapshot(database)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
-				return baseline, autopilotWakeAction
-			}
-			if snap != baseline {
-				pendingSnap := snap
-				pending = &pendingSnap
-				debounceDeadline = time.Now().Add(autopilotLifecycleDebounce)
-			} else {
-				pending = nil
-			}
-			continue
-		}
-		if pending != nil && time.Now().After(debounceDeadline.Add(-time.Millisecond)) {
-			return *pending, autopilotWakeAction
-		}
-		if timerRunsPass {
-			return baseline, autopilotWakeTimer
-		}
-		if cfg == nil {
-			continue
-		}
-		result, completed := syncCloudStateWithTimeout(cfg, database, nil, NormalCloudSyncTimeout, false)
-		if !completed || result.Updated > 0 {
-			snap, err := readAutopilotWakeSnapshot(database)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
-				return baseline, autopilotWakeAction
-			}
-			return snap, autopilotWakeAction
-		}
-	}
+func readAutopilotWakeSnapshot(database *sql.DB) (autopilotWakeSnapshot, error) {
+	return orchestration.ReadWakeSnapshot(database)
+}
+
+func autopilotTimerRunsPass(outcome autopilotOutcome, blockedReasons map[int64]string) bool {
+	return orchestration.TimerRunsPass(outcome, blockedReasons)
 }
 
 func classifyAutopilotPass(result *orchestration.GroupedAutoPilotResult, err error, pausedWait time.Duration) (autopilotOutcome, time.Duration) {
-	switch {
-	case errors.Is(err, orchestration.ErrAutopilotPaused):
-		return outcomePaused, pausedWait
-	case errors.Is(err, orchestration.ErrAutopilotBusy):
-		return outcomeBusy, orchestration.AutopilotCooldownContend
-	case err != nil:
-		return outcomeError, orchestration.AutopilotCooldownError
+	return orchestration.ClassifyPass(result, err, pausedWait)
+}
+
+// autopilotWaitParams configures one wait between passes.
+type autopilotWaitParams struct {
+	changeSource *dbwatch.Source
+	database     *sql.DB
+	baseline     autopilotWakeSnapshot
+	wait         time.Duration
+
+	// timerRunsPass carries the shared policy verdict for the pass that just
+	// finished.
+	timerRunsPass bool
+
+	// quietWait ends the wait with a timer reason even when timerRunsPass is
+	// false. The daemon uses it to hold its sync cadence; the headless runner
+	// leaves it zero because a wake it does not act on is wasted.
+	quietWait time.Duration
+
+	// syncCfg, when set, refreshes cloud state on a quiet timer expiry. A
+	// sync that updates rows ends the wait, since it may have unblocked work
+	// that produced no other local write.
+	syncCfg *config.Config
+
+	label string
+}
+
+func waitForAutopilotInvalidation(ctx context.Context, p autopilotWaitParams) (autopilotWakeSnapshot, autopilotWakeReason) {
+	var waiter orchestration.ChangeWaiter
+	if p.changeSource != nil {
+		waiter = p.changeSource
 	}
-	if result == nil {
-		return outcomeIdle, orchestration.AutopilotCooldownIdle
+	label := p.label
+	if label == "" {
+		label = "autopilot"
 	}
-	if result.Placed > 0 || result.Launched > 0 || result.Rebalanced > 0 || result.OverloadMoved > 0 {
-		return outcomeProgress, orchestration.AutopilotCooldownProgress
+
+	opts := orchestration.InvalidationOptions{
+		Waiter:        waiter,
+		ReadSnapshot:  func() (autopilotWakeSnapshot, error) { return readAutopilotWakeSnapshot(p.database) },
+		Baseline:      p.baseline,
+		Wait:          p.wait,
+		TimerRunsPass: p.timerRunsPass,
+		QuietWait:     p.quietWait,
+		Backstop:      orchestration.AutopilotQuietBackstop,
+		Debounce:      autopilotLifecycleDebounce,
+		OnError: func(err error) {
+			fmt.Fprintf(os.Stderr, "warning: %s wake state: %v\n", label, err)
+		},
 	}
-	if orchestration.AutoPilotBlockedReasonCount(result.BlockedReasons) > 0 {
-		return outcomeBlocked, orchestration.AutopilotCooldownBlocked
+	if p.syncCfg != nil {
+		opts.OnQuietTimeout = func(context.Context) bool {
+			result, completed := syncCloudStateWithTimeout(p.syncCfg, p.database, nil, NormalCloudSyncTimeout, false)
+			return !completed || result.Updated > 0
+		}
 	}
-	return outcomeIdle, orchestration.AutopilotCooldownIdle
+	return orchestration.WaitForInvalidation(ctx, opts)
 }
 
 // waitOrDone sleeps for d, returning true if the context was canceled first.

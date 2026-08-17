@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -135,44 +136,63 @@ func (s *Source) isRelevant(event fsnotify.Event) bool {
 }
 
 // OpenJobsDBWatcher watches the jobs DB directory and returns the watcher and
-// the set of DB-related files that should trigger refresh.
+// the set of files that should trigger refresh. The config file is watched
+// alongside the database: settings such as the autopilot's run-rate target are
+// decision inputs that never produce a database write, so an editor that
+// watches only the database sleeps through them.
 func OpenJobsDBWatcher() (*fsnotify.Watcher, map[string]struct{}, error) {
 	dbFile := db.Path()
 	if dbFile == "" {
 		return nil, nil, nil
 	}
 
-	dir := filepath.Dir(dbFile)
 	targets := Targets(dbFile)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := watcher.Add(dir); err != nil {
-		_ = watcher.Close()
-		return nil, nil, err
+	// fsnotify watches directories, so collect the distinct parents of every
+	// target. The config file usually lives beside the database, in which
+	// case this is a single watch.
+	dirs := make(map[string]struct{}, 2)
+	for target := range targets {
+		dirs[filepath.Dir(target)] = struct{}{}
+	}
+	dbDir := filepath.Dir(dbFile)
+	dirs[dbDir] = struct{}{}
+	for dir := range dirs {
+		if err := watcher.Add(dir); err != nil {
+			// A missing config directory must not cost us the database
+			// watch, which is the one that carries most changes.
+			if dir == dbDir {
+				_ = watcher.Close()
+				return nil, nil, err
+			}
+			continue
+		}
 	}
 	return watcher, targets, nil
 }
 
-// Targets returns the DB file names that should be treated as refresh events.
+// Targets returns the file names that should be treated as refresh events.
 func Targets(dbFile string) map[string]struct{} {
 	if dbFile == "" {
 		return nil
 	}
 	dir := filepath.Dir(dbFile)
-	targets := make(map[string]struct{}, 3)
-	addTarget := func(name string) {
-		if name == "" {
+	targets := make(map[string]struct{}, 4)
+	addTarget := func(path string) {
+		if path == "" {
 			return
 		}
-		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
+		targets[filepath.Clean(path)] = struct{}{}
 	}
 	base := filepath.Base(dbFile)
-	addTarget(base)
-	addTarget(base + "-wal")
-	addTarget(base + "-shm")
+	addTarget(filepath.Join(dir, base))
+	addTarget(filepath.Join(dir, base+"-wal"))
+	addTarget(filepath.Join(dir, base+"-shm"))
+	addTarget(config.ConfigPath())
 	return targets
 }
 

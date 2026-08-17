@@ -2081,7 +2081,7 @@ func TestListTUIAutoPilotFailureSchedulesCooldown(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoInProgress:  true,
-		database:        &sql.DB{},
+		database:        db.SetupTestDB(t),
 		jobs: []*db.Job{
 			{ID: 1, Status: db.StatusQueued, Tags: []string{"rental"}},
 		},
@@ -2118,7 +2118,7 @@ func TestListTUIAutoPilotUpgradeHandsOffWithoutRetry(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoInProgress:  true,
-		database:        &sql.DB{},
+		database:        db.SetupTestDB(t),
 		jobs: []*db.Job{
 			{ID: 1, Status: db.StatusQueued, Tags: []string{"rental"}},
 		},
@@ -2183,18 +2183,18 @@ func TestListTUIAutoPilotOutcomeCooldowns(t *testing.T) {
 		msg  listAutoPilotDoneMsg
 		want time.Duration
 	}{
-		{"progress", listAutoPilotDoneMsg{launched: 1}, listAutoPilotCooldownProgress},
-		{"blocked", listAutoPilotDoneMsg{blockedReasons: map[int64]string{1: "waiting"}}, listAutoPilotCooldownBlocked},
-		{"idle", listAutoPilotDoneMsg{}, listAutoPilotCooldownIdle},
-		{"contention", listAutoPilotDoneMsg{anotherHolding: true}, listAutoPilotCooldownContend},
-		{"error", listAutoPilotDoneMsg{err: errors.New("boom")}, listAutoPilotCooldownError},
+		{"progress", listAutoPilotDoneMsg{launched: 1}, orchestration.AutopilotCooldownProgress},
+		{"blocked", listAutoPilotDoneMsg{blockedReasons: map[int64]string{1: "waiting"}}, orchestration.AutopilotCooldownBlocked},
+		{"idle", listAutoPilotDoneMsg{}, orchestration.AutopilotCooldownIdle},
+		{"contention", listAutoPilotDoneMsg{anotherHolding: true}, orchestration.AutopilotCooldownContend},
+		{"error", listAutoPilotDoneMsg{err: errors.New("boom")}, orchestration.AutopilotCooldownError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := listTUIModel{
 				groupedByStatus: true,
 				autoInProgress:  true,
-				database:        &sql.DB{},
+				database:        db.SetupTestDB(t),
 			}
 			start := time.Now()
 			next, _ := m.Update(tc.msg)
@@ -2215,7 +2215,7 @@ func TestListTUIResumeAutoPilotNowClearsCooldown(t *testing.T) {
 	makeModel := func() listTUIModel {
 		return listTUIModel{
 			groupedByStatus: true,
-			database:        &sql.DB{},
+			database:        db.SetupTestDB(t),
 			autoNextPassAt:  time.Now().Add(30 * time.Second),
 		}
 	}
@@ -2323,7 +2323,7 @@ func TestListTUIAutoPilotFailureClearsStaleBlockReasons(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus:     true,
 		autoInProgress:      true,
-		database:            &sql.DB{},
+		database:            db.SetupTestDB(t),
 		jobs:                jobs,
 		width:               120,
 		height:              40,
@@ -2358,7 +2358,7 @@ func TestListTUIAutoPilotFailureSummarizesGraceAckError(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoInProgress:  true,
-		database:        &sql.DB{},
+		database:        db.SetupTestDB(t),
 	}
 
 	err := errors.New("submit jobs to instance control plane: get object grace/728/acks/1775574400000-728-123456.json: operation error S3: GetObject, https response error StatusCode: 404")
@@ -2386,7 +2386,7 @@ func TestListTUIAutoPilotFailureStoresRawErrorAndShowsNormalizedStatus(t *testin
 	m := listTUIModel{
 		groupedByStatus: true,
 		autoInProgress:  true,
-		database:        &sql.DB{},
+		database:        db.SetupTestDB(t),
 	}
 	err := errors.New("line one\n    line two")
 	next, _ := m.Update(listAutoPilotDoneMsg{err: err})
@@ -3838,5 +3838,101 @@ func TestListTUIHelpOverlayUsesTwoColumnsOnShortWideTerminal(t *testing.T) {
 	}
 	if !strings.Contains(out, "Navigation:") || !strings.Contains(out, "Automation:") {
 		t.Fatalf("expected two-column help to retain sections, got:\n%s", out)
+	}
+}
+
+// The TUI runs on a tick, so once a cooldown expires it would replan every
+// cycle for as long as any job stayed blocked. The shared dispatch policy
+// suppresses that when the timer alone does not justify a pass and nothing the
+// autopilot reads has moved.
+func TestListTUIShouldRunAutoPilotPass(t *testing.T) {
+	database := db.SetupTestDB(t)
+	snapshot, err := orchestration.ReadWakeSnapshot(database)
+	if err != nil {
+		t.Fatalf("ReadWakeSnapshot: %v", err)
+	}
+
+	t.Run("timer policy allows a pass", func(t *testing.T) {
+		m := listTUIModel{
+			database:          database,
+			autoTimerRunsPass: true,
+			autoLastPassAt:    time.Now(),
+			autoWakeSnapshot:  snapshot,
+		}
+		if !m.shouldRunAutoPilotPass() {
+			t.Fatal("a market-sensitive blocker must keep replanning on the timer")
+		}
+	})
+
+	t.Run("first pass always runs", func(t *testing.T) {
+		m := listTUIModel{database: database}
+		if !m.shouldRunAutoPilotPass() {
+			t.Fatal("the first pass must run")
+		}
+	})
+
+	t.Run("unchanged state is skipped", func(t *testing.T) {
+		m := listTUIModel{
+			database:          database,
+			autoTimerRunsPass: false,
+			autoLastPassAt:    time.Now(),
+			autoWakeSnapshot:  snapshot,
+		}
+		if m.shouldRunAutoPilotPass() {
+			t.Fatal("replanning unchanged state re-derives the same answer")
+		}
+	})
+
+	t.Run("moved state runs and rebaselines", func(t *testing.T) {
+		m := listTUIModel{
+			database:          database,
+			autoTimerRunsPass: false,
+			autoLastPassAt:    time.Now(),
+			autoWakeSnapshot:  orchestration.WakeSnapshot{LifecycleID: -1},
+		}
+		if !m.shouldRunAutoPilotPass() {
+			t.Fatal("a changed snapshot must run a pass")
+		}
+		if m.autoWakeSnapshot != snapshot {
+			t.Fatalf("baseline = %+v, want the observed snapshot %+v", m.autoWakeSnapshot, snapshot)
+		}
+		if m.shouldRunAutoPilotPass() {
+			t.Fatal("the rebaselined snapshot must not re-trigger")
+		}
+	})
+
+	t.Run("backstop runs despite unchanged state", func(t *testing.T) {
+		m := listTUIModel{
+			database:          database,
+			autoTimerRunsPass: false,
+			autoLastPassAt:    time.Now().Add(-orchestration.AutopilotQuietBackstop - time.Second),
+			autoWakeSnapshot:  snapshot,
+		}
+		if !m.shouldRunAutoPilotPass() {
+			t.Fatal("change detection is not provably complete; the backstop must fire")
+		}
+	})
+}
+
+// A resume follows a user action that changed autopilot inputs, so the next
+// tick must replan even though the database has not moved.
+func TestListTUIResumeAutoPilotNowOverridesSuppression(t *testing.T) {
+	database := db.SetupTestDB(t)
+	snapshot, err := orchestration.ReadWakeSnapshot(database)
+	if err != nil {
+		t.Fatalf("ReadWakeSnapshot: %v", err)
+	}
+	m := listTUIModel{
+		database:          database,
+		autoTimerRunsPass: false,
+		autoLastPassAt:    time.Now(),
+		autoWakeSnapshot:  snapshot,
+	}
+	if m.shouldRunAutoPilotPass() {
+		t.Fatal("precondition: the pass should be suppressed before the resume")
+	}
+	m.resumeAutoPilotNow()
+	if !m.shouldRunAutoPilotPass() {
+		t.Fatal("a budget change or breaker reset must force the next pass")
 	}
 }
