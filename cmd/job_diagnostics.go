@@ -104,7 +104,7 @@ func hasFailureSignal(job *db.Job) bool {
 }
 
 func printLaunchTerminationDetail(database *sql.DB, job *db.Job) {
-	if job.LaunchID == nil || *job.LaunchID == 0 {
+	if database == nil || job == nil || job.LaunchID == nil || *job.LaunchID == 0 {
 		return
 	}
 	launch, err := db.GetLaunch(database, *job.LaunchID)
@@ -117,6 +117,9 @@ func printLaunchTerminationDetail(database *sql.DB, job *db.Job) {
 }
 
 func printJobPhasesAndPeaks(database *sql.DB, job *db.Job) {
+	if database == nil || job == nil {
+		return
+	}
 	t, err := db.GetJobPhaseTimings(database, job.ID)
 	if err != nil || t == nil {
 		return

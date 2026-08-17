@@ -53,7 +53,7 @@ type Dependencies struct {
 	PerformSyncWithTimeoutForHostsDetailedWithOptions func(*sql.DB, []string, time.Duration, bool, bool) (bool, []string, []string, []string)
 	AttemptRelaunchOrphanedJobs                       func(*sql.DB, *config.Config, int, map[int64]float64, []int64, string, bool, bool) (*campaign.RelaunchResult, error)
 	BuildStaleDataNote                                func(*sql.DB, []string, []string) string
-	PrintJobStatus                                    func(*db.Job, bool)
+	PrintJobStatus                                    func(*sql.DB, *db.Job, bool)
 	RefreshLaunchGroupsWithOnPrem                     func(*sql.DB, *config.Config, string, string, map[int64]bool, func(int, int), func(string)) ([]campaign.InstanceGroup, error)
 	SyncRentalJobsStatus                              func(*sql.DB) bool
 	SyncCloudState                                    func(*config.Config, *sql.DB, *campaign.Reconciler, bool) CloudSyncResult
@@ -242,9 +242,9 @@ func buildStaleDataNote(database *sql.DB, unreachable, slow []string) string {
 	return deps.BuildStaleDataNote(database, unreachable, slow)
 }
 
-func printJobStatus(job *db.Job, exitOnComplete bool) {
+func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	if deps.PrintJobStatus != nil {
-		deps.PrintJobStatus(job, exitOnComplete)
+		deps.PrintJobStatus(database, job, exitOnComplete)
 	}
 }
 

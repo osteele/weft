@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,4 +242,35 @@ func TestDriverFloorLine_NoTorchPin(t *testing.T) {
 	if line := driverFloorLine(job); line != "" {
 		t.Errorf("driverFloorLine = %q, want empty for project without torch pin", line)
 	}
+}
+
+// printJobStatus is wired straight into terminal.Dependencies.PrintJobStatus;
+// this pins the signature that carries the database through to plain watch
+// (wb73), so a future change cannot silently drop the handle again.
+var _ func(*sql.DB, *db.Job, bool) = printJobStatus
+
+// TestJobDiagnosticsToleratesNilDatabase guards wb73: these helpers must
+// degrade to "no diagnostics" on a nil database rather than panic in
+// db.GetLaunch and take the watch process down.
+func TestJobDiagnosticsToleratesNilDatabase(t *testing.T) {
+	launchID := int64(7290)
+	job := &db.Job{ID: 6269, Status: db.StatusFailed, LaunchID: &launchID}
+
+	printLaunchTerminationDetail(nil, job)
+	printJobPhasesAndPeaks(nil, job)
+	printJobLocalDiagnostics(nil, job)
+	printLaunchTerminationDetail(nil, nil)
+	printJobPhasesAndPeaks(nil, nil)
+}
+
+// With a real handle the same helpers must reach their lookups and tolerate a
+// miss — a job whose launch row is absent yields no detail, not an error path.
+func TestJobDiagnosticsWithDatabaseHandlesMissingLaunch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID := int64(7290)
+	job := &db.Job{ID: 6269, Status: db.StatusFailed, LaunchID: &launchID}
+
+	printLaunchTerminationDetail(database, job)
+	printJobPhasesAndPeaks(database, job)
+	printJobLocalDiagnostics(database, job)
 }

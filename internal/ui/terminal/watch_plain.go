@@ -517,7 +517,7 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, opts WatchPlainOptions) er
 					if i > 0 {
 						fmt.Fprintln(stdout, "---")
 					}
-					printJobStatus(job, false)
+					printJobStatus(database, job, false)
 				}
 				return nil
 			},
