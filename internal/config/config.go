@@ -241,6 +241,17 @@ type DataConfig struct {
 
 var defaultSourceExcludeDirs = []string{"runs", "wand", "wandb"}
 
+// defaultSubmitterSessionEnvVars is the order in which a submitting agent's
+// session id is looked for. Native per-session ids come first: an agent that
+// mints its own id knows more than a launcher wrapping it does. AGENT_SESSION_ID
+// is minted per launch by agent-command-guards' agent-launcher for agents that
+// export nothing of their own, and that launcher unsets the native ids before
+// exec'ing a child — so a nested agent cannot answer to its parent's id. The
+// unset and this order are two halves of one rule; reordering this list breaks
+// the nesting protection and attributes a child's jobs to one specific wrong
+// session, which is worse than not identifying a session at all.
+var defaultSubmitterSessionEnvVars = []string{"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSION_ID"}
+
 // Bool returns a pointer to v for tri-state config fields.
 func Bool(v bool) *bool {
 	return &v
@@ -251,9 +262,17 @@ type NotificationsConfig struct {
 	// Command is run via `sh -c` when a job reaches a terminal status
 	// (completed or failed), with job context in WEFT_JOB_* environment
 	// variables: WEFT_JOB_ID, WEFT_JOB_STATUS, WEFT_JOB_EXIT_CODE,
-	// WEFT_JOB_DIR, WEFT_JOB_DESCRIPTION, WEFT_JOB_HOST, WEFT_JOB_SUMMARY.
-	// Empty disables notifications.
+	// WEFT_JOB_DIR, WEFT_JOB_DESCRIPTION, WEFT_JOB_HOST, WEFT_JOB_SUMMARY,
+	// WEFT_JOB_SUBMITTER_SESSION. Empty disables notifications.
 	Command string `yaml:"command" toml:"command"`
+	// SubmitterSessionEnvVars names the environment variables consulted, in
+	// order, to identify the agent session that submitted a job. The first
+	// non-empty one wins; the value is stored opaquely and re-exported as
+	// WEFT_JOB_SUBMITTER_SESSION so a notification can be addressed to the
+	// submitting session instead of broadcast to every session in the
+	// project. A configured list replaces the default rather than extending
+	// it, because the order is load-bearing (see SubmitterSession).
+	SubmitterSessionEnvVars []string `yaml:"submitter_session_env_vars" toml:"submitter_session_env_vars"`
 }
 
 // RemediationConfig holds configuration for automatic job failure remediation.
@@ -1613,6 +1632,48 @@ func (c *Config) SourceExcludeDirs() []string {
 		}
 	}
 	return excludes
+}
+
+// SubmitterSessionEnvVars returns the ordered environment variable names
+// consulted to identify the submitting agent session. A configured list
+// replaces the defaults; an empty or all-blank list falls back to them.
+func (c *Config) SubmitterSessionEnvVars() []string {
+	if c != nil {
+		names := make([]string, 0, len(c.Notifications.SubmitterSessionEnvVars))
+		for _, name := range c.Notifications.SubmitterSessionEnvVars {
+			if name = strings.TrimSpace(name); name != "" {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			return names
+		}
+	}
+	return append([]string(nil), defaultSubmitterSessionEnvVars...)
+}
+
+// SubmitterSession returns the session id of the agent submitting a job, read
+// from this process's environment, or "" when none is set (a plain human
+// shell, for example). The value is opaque: weft neither parses nor validates
+// it, and only re-exports it to the notification command.
+//
+// Call this only from a process the submitting agent invoked — the CLI submit
+// path. A long-lived daemon or autopilot must not: it may have inherited the
+// environment of whichever agent session happened to start it, and would then
+// stamp every job it records with that one session, misattributing all of
+// them. Job-recording paths that run in such a process (the coordinator relay)
+// build their parameters from the wire and correctly leave this empty.
+func (c *Config) SubmitterSession() string {
+	return submitterSessionFrom(c.SubmitterSessionEnvVars(), os.Getenv)
+}
+
+func submitterSessionFrom(names []string, getenv func(string) string) string {
+	for _, name := range names {
+		if v := strings.TrimSpace(getenv(name)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 const (

@@ -373,6 +373,7 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 		Metadata:         metadata,
 		CLIOverrides:     params.CLIOverrides,
 		MaxComputeCap:    params.MaxComputeCap,
+		SubmitterSession: submitterSession(),
 	})
 	if err != nil {
 		return fmt.Errorf("record draft job: %w", err)
@@ -783,6 +784,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 	submitToken := "run-" + uuid.NewString()
+	runSubmitterSession := submitterSession()
 
 	if meta := scriptMeta; meta != nil {
 		var applied []string
@@ -1229,6 +1231,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
 			SubmitToken:      submitToken,
+			SubmitterSession: runSubmitterSession,
 		}
 	}
 

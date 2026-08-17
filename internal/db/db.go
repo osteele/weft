@@ -2526,6 +2526,36 @@ func FindJobIDBySubmitToken(db dbExecer, token string) (int64, bool, error) {
 	return 0, false, err
 }
 
+// SetJobSubmitterSession stores the opaque agent-session id of the submitter.
+// An empty value clears the column, which is the normal state for a job
+// submitted from a plain shell or recorded by a process that is not the
+// submitter (see config.Config.SubmitterSession).
+func SetJobSubmitterSession(db dbExecer, jobID int64, session string) error {
+	var v interface{}
+	if strings.TrimSpace(session) != "" {
+		v = strings.TrimSpace(session)
+	}
+	_, err := db.Exec(`UPDATE jobs SET submitter_session = ? WHERE id = ?`, v, jobID)
+	return err
+}
+
+// JobSubmitterSession returns the submitting agent's session id for a job, or
+// "" when none was recorded. It reads the jobs table directly rather than
+// travelling on Job: the value has exactly one consumer, the notification
+// command, and adding it to the shared job_status view would recreate that
+// view for a field no query filters or displays.
+func JobSubmitterSession(db dbExecer, jobID int64) (string, error) {
+	var session sql.NullString
+	err := db.QueryRow(`SELECT submitter_session FROM jobs WHERE id = ?`, jobID).Scan(&session)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return session.String, nil
+}
+
 // SetJobEnvVars updates the stored environment variables for a job.
 // The values are stored as a JSON array; passing nil or an empty slice clears the field.
 func SetJobEnvVars(db dbExecer, jobID int64, envVars []string) error {

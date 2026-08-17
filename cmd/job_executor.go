@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -191,6 +192,18 @@ func extractGPUFromEnvVars(envVars []string) string {
 
 // queueJob records a job locally via RecordQueuedJob (DB-only, no SSH).
 // The caller is responsible for calling syncHostWithProgress to push to the remote.
+// submitterSession returns the agent session id to record on jobs submitted by
+// this process, or "" when the caller exported none. Reading the environment is
+// only correct here in cmd/, where the process was invoked by the submitter
+// itself; see config.Config.SubmitterSession for why a daemon must not.
+func submitterSession() string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.SubmitterSession()
+}
+
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	gpu := opts.GPU
 	if gpu == "" {
@@ -286,6 +299,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Disk:             opts.Disk,
 		CLIOverrides:     cliOverrides,
 		MaxComputeCap:    opts.MaxComputeCap,
+		SubmitterSession: submitterSession(),
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)

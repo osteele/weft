@@ -19,7 +19,7 @@ func TestRunSetsJobEnvVars(t *testing.T) {
 	}
 	exit := 0
 	Run(`printf '%s|%s|%s|%s|%s' "$WEFT_JOB_ID" "$WEFT_JOB_STATUS" "$WEFT_JOB_EXIT_CODE" "$WEFT_JOB_DIR" "$WEFT_JOB_SUMMARY" > `+out,
-		job, db.StatusCompleted, &exit)
+		job, db.StatusCompleted, &exit, "")
 
 	data, err := os.ReadFile(out)
 	if err != nil {
@@ -33,11 +33,44 @@ func TestRunSetsJobEnvVars(t *testing.T) {
 	}
 }
 
+func TestRunExportsSubmitterSession(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "captured")
+	job := &db.Job{ID: 5, Host: "cool30"}
+	Run(`printf '[%s]' "$WEFT_JOB_SUBMITTER_SESSION" > `+out,
+		job, db.StatusCompleted, nil, "abc-123")
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("notify command did not run: %v", err)
+	}
+	if got := string(data); got != "[abc-123]" {
+		t.Errorf("WEFT_JOB_SUBMITTER_SESSION = %q, want %q", got, "[abc-123]")
+	}
+}
+
+// An unidentified submitter must still notify, with the variable set and empty,
+// so the notify command sees "no addressee" rather than an unset variable it
+// might mistake for a missing feature.
+func TestRunExportsEmptySubmitterSession(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "captured")
+	job := &db.Job{ID: 6, Host: "cool30"}
+	Run(`printf '[%s]' "${WEFT_JOB_SUBMITTER_SESSION?unset}" > `+out,
+		job, db.StatusCompleted, nil, "")
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("notify command did not run: %v", err)
+	}
+	if got := string(data); got != "[]" {
+		t.Errorf("WEFT_JOB_SUBMITTER_SESSION = %q, want %q", got, "[]")
+	}
+}
+
 func TestRunFailureExitCodeInSummary(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "captured")
 	job := &db.Job{ID: 7, Host: "h", Description: "d"}
 	exit := 2
-	Run(`printf '%s' "$WEFT_JOB_SUMMARY" > `+out, job, db.StatusFailed, &exit)
+	Run(`printf '%s' "$WEFT_JOB_SUMMARY" > `+out, job, db.StatusFailed, &exit, "")
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("notify command did not run: %v", err)
@@ -49,5 +82,5 @@ func TestRunFailureExitCodeInSummary(t *testing.T) {
 
 func TestRunCommandFailureIsNonFatal(t *testing.T) {
 	job := &db.Job{ID: 1}
-	Run("exit 3", job, db.StatusFailed, nil) // must not panic or exit
+	Run("exit 3", job, db.StatusFailed, nil, "") // must not panic or exit
 }

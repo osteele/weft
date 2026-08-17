@@ -165,11 +165,17 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddCancelRequestedAt},
 		&goose.GoFunc{RunDB: dropAddCancelRequestedAt},
 	)
+	// Go-only: guarded column add, per the addResultsVerifyDetail note above.
+	addJobSubmitterSession := goose.NewGoMigration(
+		49,
+		&goose.GoFunc{RunDB: applyAddJobSubmitterSession},
+		&goose.GoFunc{RunDB: dropAddJobSubmitterSession},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -443,6 +449,28 @@ func applyAddJobSubmitToken(ctx context.Context, db *sql.DB) error {
 func dropAddJobSubmitToken(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_jobs_submit_token`)
 	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN submit_token`)
+	return nil
+}
+
+// applyAddJobSubmitterSession adds jobs.submitter_session, the opaque id of the
+// agent session that submitted the job. It is written only by CLI submit paths
+// and read only when re-exporting WEFT_JOB_SUBMITTER_SESSION to the
+// notification command, so it needs no index: there is no lookup by value.
+func applyAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "jobs", "submitter_session")
+	if err != nil {
+		return fmt.Errorf("inspect jobs.submitter_session: %w", err)
+	}
+	if !exists {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN submitter_session TEXT`); err != nil {
+			return fmt.Errorf("add jobs.submitter_session: %w", err)
+		}
+	}
+	return nil
+}
+
+func dropAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN submitter_session`)
 	return nil
 }
 
@@ -940,7 +968,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

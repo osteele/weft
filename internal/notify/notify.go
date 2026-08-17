@@ -4,6 +4,12 @@
 // variables. The intended use is pushing job-completion events to local
 // agents (e.g. `agent-mail notify`), but the mechanism is generic.
 //
+// WEFT_JOB_SUBMITTER_SESSION carries the agent session that submitted the job,
+// so the command can address the notification to that session rather than
+// broadcasting to every session in the project. It is empty when the submitter
+// exported no session id, which the command must treat as "no addressee" —
+// weft does not interpret the value.
+//
 // Callers invoke JobTerminal only at transition points (after a
 // transition-validated DB update succeeds), so each terminal transition
 // notifies at most once. Notification failures are logged, never fatal:
@@ -41,12 +47,23 @@ func JobTerminal(database *sql.DB, jobID int64, finalStatus string, exitCode *in
 		slog.Warn("notify: job lookup failed", "component", "notify", "job_id", jobID, "error", err)
 		return
 	}
-	Run(cfg.Notifications.Command, job, finalStatus, exitCode)
+	// A missing submitter session is normal (job submitted from a plain
+	// shell), and a failed lookup must not cost the notification: an
+	// unaddressed notification still reaches the submitter, just alongside
+	// everyone else in the project.
+	submitterSession, err := db.JobSubmitterSession(database, jobID)
+	if err != nil {
+		slog.Warn("notify: submitter session lookup failed", "component", "notify",
+			"job_id", jobID, "error", err)
+	}
+	Run(cfg.Notifications.Command, job, finalStatus, exitCode, submitterSession)
 }
 
 // Run executes the notify command synchronously with WEFT_JOB_* env vars.
+// submitterSession is the opaque agent-session id recorded at submit time, or
+// "" when none was; the command decides what to do with it.
 // Exposed separately from JobTerminal for testing.
-func Run(command string, job *db.Job, finalStatus string, exitCode *int) {
+func Run(command string, job *db.Job, finalStatus string, exitCode *int, submitterSession string) {
 	exitStr := ""
 	if exitCode != nil {
 		exitStr = fmt.Sprintf("%d", *exitCode)
@@ -64,6 +81,7 @@ func Run(command string, job *db.Job, finalStatus string, exitCode *int) {
 		"WEFT_JOB_DESCRIPTION="+job.Description,
 		"WEFT_JOB_HOST="+job.Host,
 		"WEFT_JOB_SUMMARY="+summary,
+		"WEFT_JOB_SUBMITTER_SESSION="+submitterSession,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Warn("notify: command failed", "component", "notify",

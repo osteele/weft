@@ -105,6 +105,13 @@ type QueueJobParams struct {
 	CLIOverrides     *db.CLIResourceOverrides
 	MaxComputeCap    string
 	SubmitToken      string
+	// SubmitterSession is the opaque agent-session id of the submitter, used
+	// to address the completion notification back to the session that asked
+	// for the job. Only callers running in the submitting process may set it
+	// (see config.Config.SubmitterSession); it is deliberately not read from
+	// the environment here, because this function also runs inside long-lived
+	// processes that may have inherited an unrelated session's environment.
+	SubmitterSession string
 	// Metadata is persisted to job_attempts.job_metadata as part of the same
 	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
 	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
@@ -325,6 +332,11 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	if submitToken != "" {
 		if err := db.SetJobSubmitToken(tx, jobID, submitToken); err != nil {
 			return 0, fmt.Errorf("record submit token: %w", err)
+		}
+	}
+	if strings.TrimSpace(params.SubmitterSession) != "" {
+		if err := db.SetJobSubmitterSession(tx, jobID, params.SubmitterSession); err != nil {
+			return 0, fmt.Errorf("record submitter session: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {

@@ -42,6 +42,36 @@ working instead of blocking on `status --wait`.
 See [Claude Code Channels](claude-code-channels.md) for installation and the
 event payload shape.
 
+## Job-Completion Notifications
+
+The `[notifications] command` in `config.toml` runs once per job reaching a
+terminal status, with job context in environment variables: `WEFT_JOB_ID`,
+`WEFT_JOB_STATUS`, `WEFT_JOB_EXIT_CODE`, `WEFT_JOB_DIR`,
+`WEFT_JOB_DESCRIPTION`, `WEFT_JOB_HOST`, `WEFT_JOB_SUMMARY`, and
+`WEFT_JOB_SUBMITTER_SESSION`.
+
+`WEFT_JOB_SUBMITTER_SESSION` identifies the agent session that submitted the
+job, so a notifier can wake that one session instead of every session working
+in the directory. Weft captures it at submit time from the first non-empty of
+`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `AGENT_SESSION_ID` — override the
+list, in priority order, with `[notifications]
+submitter_session_env_vars`. The value is opaque to Weft: it is stored and
+re-exported unchanged.
+
+It is empty whenever no session can be identified — a job submitted from a
+plain shell, or one recorded by a process that is not the submitter. Treat
+empty as "no addressee" and fall back to whatever unaddressed delivery you
+would otherwise have done, rather than dropping the notification; the session
+that submitted a long job may well have exited before it finished.
+
+With [agent-mail](https://github.com/osteele/agent-mail), which broadcasts on
+an empty or unresolvable `--session`:
+
+```toml
+[notifications]
+  command = "agent-mail notify --from weft --project \"$WEFT_JOB_DIR\" --message \"$WEFT_JOB_SUMMARY\" --session \"$WEFT_JOB_SUBMITTER_SESSION\" --no-slack"
+```
+
 ## Machine-Readable Commands
 
 Several commands are intended for scripts and agents:
