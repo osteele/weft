@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
@@ -17,6 +18,7 @@ const liveLogUploadInterval = 60 * time.Second
 type liveLogUploadState struct {
 	partHashes   map[int]uint64
 	manifestJSON string
+	readErr      string
 }
 
 func startLogUploader(bucket string, jobID, runID int64, logPath string) func() {
@@ -50,7 +52,22 @@ func startLogUploader(bucket string, jobID, runID int64, logPath string) func() 
 
 func uploadLiveLog(bucket string, jobID, runID int64, logPath string, state *liveLogUploadState) {
 	data, err := os.ReadFile(logPath)
-	if err != nil || len(data) == 0 {
+	if err != nil {
+		// A missing file is the ordinary state before the job writes output.
+		// Any other read failure is a malfunction that would otherwise leave
+		// no trace, so record it — once per distinct error, since this runs
+		// every tick for the life of the job.
+		reason := err.Error()
+		if !errors.Is(err, os.ErrNotExist) && state.readErr != reason {
+			oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
+				oplog.WithDetailf("live log unreadable at %s", logPath),
+				oplog.WithError(err))
+		}
+		state.readErr = reason
+		return
+	}
+	state.readErr = ""
+	if len(data) == 0 {
 		return
 	}
 

@@ -115,9 +115,10 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 	resetLogModeState()
 	defer resetLogModeState()
 
+	started := time.Now().Add(-30 * time.Second)
 	origFetch := fetchAndDisplayLogFromR2Func
 	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *sql.DB, _ *db.Job, _ int64) error {
-		return &cloudLogSnapshotError{jobID: 4035, status: db.StatusRunning, kind: cloudLogSnapshotMissing}
+		return &cloudLogSnapshotError{jobID: 4035, status: db.StatusRunning, kind: cloudLogSnapshotMissing, startedAt: started}
 	}
 	t.Cleanup(func() {
 		fetchAndDisplayLogFromR2Func = origFetch
@@ -126,7 +127,7 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 	var out bytes.Buffer
 	cmd := &cobra.Command{Use: "log"}
 	cmd.SetOut(&out)
-	job := &db.Job{ID: 4035, Status: db.StatusRunning}
+	job := &db.Job{ID: 4035, Status: db.StatusRunning, StartTime: started.Unix()}
 	if err := runLogForCloudJob(cmd, nil, job); err != nil {
 		t.Fatalf("runLogForCloudJob: %v", err)
 	}
@@ -137,6 +138,68 @@ func TestRunLogForCloudJobUnavailableRunningJobPrintsNotice(t *testing.T) {
 	}
 	if strings.Contains(msg, "R2") || strings.Contains(msg, "SSH") || strings.Contains(msg, "uploaded") {
 		t.Fatalf("output = %q, should not expose log transport details", msg)
+	}
+}
+
+// TestCloudLogSnapshotErrorEscalatesPastStartupWindow guards wb71. A running
+// cloud job that has published no log must not be told indefinitely that the
+// silence is normal and to retry shortly, which is advice to keep waiting
+// during exactly the window where a hang would matter. Past the startup window
+// the message must report the silence as a fact about the job and point at the
+// surfaces that carry evidence.
+func TestCloudLogSnapshotErrorEscalatesPastStartupWindow(t *testing.T) {
+	fresh := &cloudLogSnapshotError{jobID: 6261, status: "running", kind: cloudLogSnapshotMissing, startedAt: time.Now().Add(-30 * time.Second)}
+	if msg := fresh.RunningMessage(); !strings.Contains(msg, "This is normal shortly after a cloud job starts") {
+		t.Fatalf("fresh message = %q, want the startup-window wording", msg)
+	}
+
+	stale := &cloudLogSnapshotError{jobID: 6261, status: "running", kind: cloudLogSnapshotMissing, startedAt: time.Now().Add(-(2*time.Hour + 30*time.Minute))}
+	msg := stale.RunningMessage()
+	if strings.Contains(msg, "shortly") {
+		t.Fatalf("message after 2h30m = %q, must not advise waiting", msg)
+	}
+	if !strings.Contains(msg, "No log has been published") {
+		t.Fatalf("message = %q, want the silence reported as a fact", msg)
+	}
+	for _, want := range []string{"weft info wj6261", "weft instance audit wj6261"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message = %q, want a pointer to %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "R2") || strings.Contains(msg, "manifest") {
+		t.Fatalf("message = %q, should not expose storage details", msg)
+	}
+}
+
+// A job whose start Weft never recorded is in an unknown state, not a recent
+// one, so it must get neither the "this is normal shortly after a cloud job
+// starts" reassurance nor a fabricated elapsed time.
+func TestCloudLogSnapshotErrorUnknownStartIsReportedAsUnknown(t *testing.T) {
+	unknown := &cloudLogSnapshotError{jobID: 6261, status: "running", kind: cloudLogSnapshotMissing, startedAt: recordedStart(&db.Job{ID: 6261})}
+	msg := unknown.RunningMessage()
+	if strings.Contains(msg, "This is normal shortly after a cloud job starts") {
+		t.Fatalf("message = %q, must not claim a recent start it cannot confirm", msg)
+	}
+	if !strings.Contains(msg, "no recorded start time") {
+		t.Fatalf("message = %q, want the unknown start named", msg)
+	}
+	for _, want := range []string{"weft info wj6261", "weft instance audit wj6261"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message = %q, want a pointer to %q", msg, want)
+		}
+	}
+}
+
+func TestRecordedStartZeroWhenUnrecorded(t *testing.T) {
+	if got := recordedStart(&db.Job{ID: 1}); !got.IsZero() {
+		t.Fatalf("recordedStart with no start time = %v, want zero time", got)
+	}
+	if got := recordedStart(nil); !got.IsZero() {
+		t.Fatalf("recordedStart(nil) = %v, want zero time", got)
+	}
+	started := time.Now().Add(-90 * time.Second)
+	if got := recordedStart(&db.Job{ID: 2, StartTime: started.Unix()}); got.Unix() != started.Unix() {
+		t.Fatalf("recordedStart = %v, want %v", got, started)
 	}
 }
 

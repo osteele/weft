@@ -806,7 +806,7 @@ func contextualizeCloudLogFetchError(database *sql.DB, job *db.Job, err error) e
 				err:    err,
 			}
 		}
-		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: kind, err: err}
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: kind, startedAt: recordedStart(job), err: err}
 	}
 	msg := err.Error()
 	if isCloudLogSnapshotLookupError(msg) {
@@ -822,9 +822,19 @@ func contextualizeCloudLogFetchError(database *sql.DB, job *db.Job, err error) e
 				err:    err,
 			}
 		}
-		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotMissing, err: err}
+		return &cloudLogSnapshotError{jobID: job.ID, status: statusLabel, kind: cloudLogSnapshotMissing, startedAt: recordedStart(job), err: err}
 	}
 	return err
+}
+
+// recordedStart reports when a job started, or the zero time when Weft has no
+// recorded start. A start Weft never recorded is unknown, not recent, and the
+// caller must be able to tell the two apart.
+func recordedStart(job *db.Job) time.Time {
+	if job == nil || job.StartTime <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(job.StartTime, 0)
 }
 
 type cloudLogAvailabilityState int
@@ -877,8 +887,17 @@ type cloudLogSnapshotError struct {
 	status string
 	kind   cloudLogSnapshotErrorKind
 	launch *db.Launch
-	err    error
+	// startedAt is the job's recorded start, or the zero time when Weft never
+	// recorded one. Elapsed time is derived at formatting time so the message
+	// stays accurate however long the error is held before it is printed.
+	startedAt time.Time
+	err       error
 }
+
+// liveLogPatienceWindow is how long a running cloud job's missing live log
+// still counts as ordinary startup lag. Past it, absence is a fact about the
+// job worth investigating rather than something to wait out.
+const liveLogPatienceWindow = 10 * time.Minute
 
 func (e *cloudLogSnapshotError) Error() string {
 	if e.kind == cloudLogSnapshotLookupFailed {
@@ -900,8 +919,25 @@ func (e *cloudLogSnapshotError) RunningMessage() string {
 		return fmt.Sprintf("Could not read the current log snapshot for job %s (status: %s). Use `weft log %s --follow` for live output, or retry shortly.",
 			jobID, e.status, jobID)
 	}
+	if e.startedAt.IsZero() {
+		return fmt.Sprintf("No log has been published for job %s (status: %s), and Weft has no recorded start time for it, so how long it has been silent is unknown. %s",
+			jobID, e.status, cloudLogEvidenceHint(jobID))
+	}
+	if elapsed := time.Since(e.startedAt); elapsed >= liveLogPatienceWindow {
+		// Past the startup window the silence is a fact about the job rather
+		// than something to wait out, so report it as one.
+		return fmt.Sprintf("No log has been published for job %s (status: %s) after %s. The agent uploads output only once the job writes it, so a job whose output is still buffered shows nothing here. This does not indicate the job is stuck. %s",
+			jobID, e.status, db.FormatDuration(int64(elapsed.Seconds())), cloudLogEvidenceHint(jobID))
+	}
 	return fmt.Sprintf("Log is not available yet for job %s (status: %s). This is normal shortly after a cloud job starts. Use `weft log %s --follow` for live output, or retry shortly.",
 		jobID, e.status, jobID)
+}
+
+// cloudLogEvidenceHint names the surfaces that carry lifecycle evidence when a
+// running job has published no log.
+func cloudLogEvidenceHint(jobID string) string {
+	return fmt.Sprintf("Check `weft info %s` and `weft instance audit %s` for lifecycle evidence, and `weft log %s --follow` for output as soon as it appears.",
+		jobID, jobID, jobID)
 }
 
 func (e *cloudLogSnapshotError) TerminalMessage() string {

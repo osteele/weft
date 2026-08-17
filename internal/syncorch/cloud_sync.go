@@ -138,7 +138,10 @@ func syncCloud(ctx context.Context, cfg *config.Config, database *sql.DB, opts C
 			return res
 		}
 		if !ok {
-			slog.Info("cloud sync lease held; running database-only fallback", "component", "sync", "scope", leaseScope)
+			// Another process holding the lease is the ordinary steady state
+			// whenever the daemon is up, and this runs once per sync tick, so
+			// it belongs below the level that reaches a foreground terminal.
+			slog.Debug("cloud sync lease held; running database-only fallback", "component", "sync", "scope", leaseScope)
 			return syncCloudWithClients(ctx, database, reconciler, nil, nil, opts, cfg)
 		}
 		defer func() {
