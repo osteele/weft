@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -895,6 +896,12 @@ const statusNeedsRental = "needs_rental"
 
 var dbPath string
 var bugDBPath string
+
+// sharedDBFile is the jobs database every installed weft on this machine uses,
+// recorded even when this process is redirected elsewhere. checkDevBuildMayMigrate
+// compares against it, so it must be derived from the same place dbPath is.
+var sharedDBFile string
+
 var startupRepairFn = startupRepair
 
 func init() {
@@ -903,8 +910,51 @@ func init() {
 		panic(err)
 	}
 	configDir := filepath.Join(home, ".config", "weft")
+	sharedDBFile = filepath.Join(configDir, "jobs.db")
+
+	if runningUnderGoTest() {
+		// A test binary must never resolve to the shared database. Opening it
+		// applies pending migrations, so a test in a tree carrying an
+		// unreleased migration advances the schema past what the installed
+		// binary understands, and every weft command on the machine fails
+		// until it is rebuilt (wb75). The directory is per-process because
+		// packages test in parallel; clearing it first keeps a recycled pid
+		// from inheriting a database left at another tree's schema version.
+		configDir = filepath.Join(os.TempDir(), fmt.Sprintf("weft-test-db-%d", os.Getpid()))
+		_ = os.RemoveAll(configDir)
+	}
+
 	dbPath = filepath.Join(configDir, "jobs.db")
 	bugDBPath = filepath.Join(configDir, "bugs.db")
+}
+
+// runningUnderGoTest reports whether this process is a Go test binary.
+//
+// This cannot use testing.Testing(): that is set while the test binary starts
+// up, which is after package initialization, so it reads false from an init
+// function. The executable name and the -test.* flags are both available
+// immediately.
+func runningUnderGoTest() bool {
+	if len(os.Args) == 0 {
+		return false
+	}
+	return looksLikeTestBinary(os.Args[0], os.Args[1:])
+}
+
+// looksLikeTestBinary reports whether an executable name and its arguments are
+// those of a Go test binary. The name covers `go test`, which always builds a
+// `.test` executable; the arguments cover a binary from `go test -c -o name`,
+// which carries the harness flags under any name.
+func looksLikeTestBinary(exe string, args []string) bool {
+	if strings.HasSuffix(exe, ".test") || strings.HasSuffix(exe, ".test.exe") {
+		return true
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-test.") || strings.HasPrefix(arg, "--test.") {
+			return true
+		}
+	}
+	return false
 }
 
 // Open opens the database, creating it if necessary
@@ -1032,6 +1082,10 @@ func initSchema(db *sql.DB) (bool, error) {
 	}
 	if !pending {
 		return false, nil
+	}
+
+	if err := checkDevBuildMayMigrate(dbPath); err != nil {
+		return false, err
 	}
 
 	// Snapshot a database that already holds data before migrating, so a bad
@@ -5256,4 +5310,67 @@ func GetJobDependencyInfo(db *sql.DB) (map[int64]string, error) {
 		}
 	}
 	return result, rows.Err()
+}
+
+// AllowDevMigrationEnv lets a developer who means it migrate the shared
+// database from a build that is not the installed one.
+const AllowDevMigrationEnv = "WEFT_ALLOW_DEV_MIGRATION"
+
+// checkDevBuildMayMigrate refuses to migrate the shared database from a binary
+// that is not the one on PATH.
+//
+// From the installed binary's point of view the migration is one-way and
+// silent: the failure surfaces later, in another process, in another project,
+// as "schema is at version N but this weft binary only knows N-1". The moment
+// of migration is the only place the warning is cheap (wb75).
+//
+// Only the shared jobs database is protected. A developer pointing at their own
+// file is doing nothing to anyone else, and bugs.db needs no equivalent guard
+// because initBugSchema is idempotent DDL with no version counter to advance —
+// an older binary can still open a bugs.db a newer one touched, which is what
+// keeps `weft bug list` usable when jobs.db is the thing that is broken.
+//
+// Only a confirmed mismatch refuses:
+// an unresolvable executable path, or no weft on PATH, is unknown rather than
+// mismatched, and refusing on unknown evidence would block legitimate work on
+// a machine with no weft installed at all.
+func checkDevBuildMayMigrate(path string) error {
+	if os.Getenv(AllowDevMigrationEnv) != "" {
+		return nil
+	}
+	if !samePath(path, sharedDBFile) {
+		return nil
+	}
+	running, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	installed, err := exec.LookPath("weft")
+	if err != nil {
+		return nil
+	}
+	if samePath(running, installed) {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to migrate the shared database from a build that is not the installed weft.\n"+
+			"  running:   %s\n  installed: %s\n  database:  %s\n"+
+			"Migrating would advance the schema past what the installed binary understands, "+
+			"and every weft command on this machine would fail until it is rebuilt. "+
+			"Install first (just install), or set %s=1 to migrate anyway.",
+		running, installed, path, AllowDevMigrationEnv)
+}
+
+// samePath compares two filesystem paths through symlinks, falling back to a
+// lexical comparison when a path cannot be resolved. Resolution can only
+// collapse two names onto one real file, never separate one file into two, so a
+// caller that refuses on a match never refuses on an unresolved path.
+func samePath(a, b string) bool {
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
