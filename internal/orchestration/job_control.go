@@ -3,13 +3,16 @@ package orchestration
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -114,4 +117,37 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	default:
 		return ops.Result{}, fmt.Errorf("job %s is %s; nothing to kill", ids.FormatJobID(job.ID), job.EffectiveStatus())
 	}
+}
+
+// StopJobsStartedAfterCancel terminates work that began after its job's cancel
+// was requested, and reports how many it stopped.
+//
+// A cancel writes local state; it cannot recall a launch already dispatched,
+// because the job travels in the instance payload and the agent never
+// re-reads cancellation. So the cancel's effect has to be completed later,
+// when the start becomes observable. Detection is db.JobsStartedAfterCancel,
+// which requires a recorded cancel time strictly before an observed start —
+// terminating on anything weaker would kill live work on absent evidence.
+//
+// Errors stopping one job do not abort the sweep: each is independent, and a
+// job that cannot be reached now is retried on the next pass rather than
+// blocking the others.
+func StopJobsStartedAfterCancel(database *sql.DB) (int, error) {
+	starts, err := db.JobsStartedAfterCancel(database)
+	if err != nil {
+		return 0, fmt.Errorf("find jobs started after cancel: %w", err)
+	}
+	stopped := 0
+	var failures []error
+	for _, start := range starts {
+		oplog.LogJob(oplog.OpJobKill, start.JobID, "", oplog.WithDetailf(
+			"started %s after cancel requested %s; stopping work the user canceled",
+			start.StartedAt.Format(time.RFC3339), start.CancelRequestedAt.Format(time.RFC3339)))
+		if _, err := KillOrCancelCloudJob(database, start.JobID, db.StatusKilled); err != nil {
+			failures = append(failures, fmt.Errorf("job %s: %w", ids.FormatJobID(start.JobID), err))
+			continue
+		}
+		stopped++
+	}
+	return stopped, errors.Join(failures...)
 }

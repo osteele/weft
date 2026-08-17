@@ -159,11 +159,17 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunTx: applyAddExternalCancelIntentColumn},
 		&goose.GoFunc{RunTx: dropAddExternalCancelIntentColumn},
 	)
+	// Go-only: guarded column add, per the addResultsVerifyDetail note above.
+	addCancelRequestedAt := goose.NewGoMigration(
+		48,
+		&goose.GoFunc{RunDB: applyAddCancelRequestedAt},
+		&goose.GoFunc{RunDB: dropAddCancelRequestedAt},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -934,7 +940,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
@@ -1123,5 +1129,42 @@ func undoDropSpeculativeHostRegistry(ctx context.Context, db *sql.DB) error {
 		first_seen_at INTEGER NOT NULL,
 		UNIQUE(provider, provider_machine_id)
 	)`)
+	return nil
+}
+
+// applyAddCancelRequestedAt records when a user's cancel intent was expressed,
+// so a later start can be recognised as one the user already asked not to
+// happen.
+//
+// requested_status alone cannot support that judgement: it says a cancel was
+// requested but not when, so an attempt starting afterwards is
+// indistinguishable from one already running when the cancel landed (wb72).
+// Terminating the wrong one kills live work, so the reconciler needs a cancel
+// time strictly before the observed start.
+//
+// Guarded rather than a plain SQL migration: a database seeded from the
+// current schema and then rewound to replay migrations already has the
+// column, and an unconditional ALTER fails on it.
+//
+// The column stays nullable and unset for existing rows. A job cancelled
+// before it existed has an unknown cancel time, which must read as "no
+// evidence" and leave the job alone — never as "cancelled at epoch", which
+// would place it before every attempt.
+func applyAddCancelRequestedAt(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "jobs", "cancel_requested_at")
+	if err != nil {
+		return fmt.Errorf("inspect jobs columns: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN cancel_requested_at INTEGER`); err != nil {
+		return fmt.Errorf("add jobs.cancel_requested_at: %w", err)
+	}
+	return nil
+}
+
+func dropAddCancelRequestedAt(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN cancel_requested_at`)
 	return nil
 }

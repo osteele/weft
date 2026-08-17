@@ -1261,3 +1261,63 @@ func MarkAttemptQueuedByID(database *sql.DB, jobID int64) error {
 	}
 	return tx.Commit()
 }
+
+// CancelledJobStart records an attempt that began after its job's cancel was
+// requested — work the user asked not to happen, running anyway.
+type CancelledJobStart struct {
+	JobID             int64
+	AttemptID         int64
+	LaunchID          *int64
+	StartedAt         time.Time
+	CancelRequestedAt time.Time
+}
+
+// JobsStartedAfterCancel returns attempts that started strictly after their
+// job's recorded cancel time and are still open.
+//
+// Every clause is positive evidence, because the caller terminates on this.
+// A job with cancel intent but no recorded cancel time is excluded: the time
+// is unknown, not zero, and treating unknown as "before every attempt" would
+// kill work on no evidence. An attempt whose start_time is null is likewise
+// excluded — not yet observed to have started is not the same as started
+// before the cancel. Equal timestamps do not qualify; only a start strictly
+// after the cancel shows the dispatch outlived the user's decision.
+func JobsStartedAfterCancel(database *sql.DB) ([]CancelledJobStart, error) {
+	rows, err := database.Query(`
+		SELECT j.id, ja.id, ja.launch_id, ja.start_time, j.cancel_requested_at
+		FROM jobs j
+		JOIN job_attempts ja ON ja.job_id = j.id
+		WHERE j.requested_status = ?
+		  AND j.cancel_requested_at IS NOT NULL
+		  AND j.cancel_requested_at > 0
+		  AND ja.start_time IS NOT NULL
+		  AND ja.start_time > j.cancel_requested_at
+		  AND ja.status IN (?, ?, ?)
+		ORDER BY j.id, ja.id`,
+		StatusCanceled, StatusRunning, StatusStarting, StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CancelledJobStart
+	for rows.Next() {
+		var (
+			rec       CancelledJobStart
+			launchID  sql.NullInt64
+			startedAt int64
+			cancelAt  int64
+		)
+		if err := rows.Scan(&rec.JobID, &rec.AttemptID, &launchID, &startedAt, &cancelAt); err != nil {
+			return nil, err
+		}
+		if launchID.Valid {
+			id := launchID.Int64
+			rec.LaunchID = &id
+		}
+		rec.StartedAt = time.Unix(startedAt, 0)
+		rec.CancelRequestedAt = time.Unix(cancelAt, 0)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}

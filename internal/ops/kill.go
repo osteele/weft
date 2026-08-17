@@ -137,7 +137,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 		return Result{
 			Success: true,
 			JobID:   job.ID,
-			Message: fmt.Sprintf("Job %s canceled", ids.FormatJobID(job.ID)),
+			Message: fmt.Sprintf("Job %s canceled locally; if a launch was already dispatched it is stopped when the instance reports in", ids.FormatJobID(job.ID)),
 		}, nil
 	}
 

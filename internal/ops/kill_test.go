@@ -337,8 +337,15 @@ func TestCancelQueuedJob_UnplacedNoAttempt(t *testing.T) {
 	if result.Deferred {
 		t.Fatal("expected Deferred to be false")
 	}
-	if result.Message != "Job wj1 canceled" {
-		t.Fatalf("unexpected message: %q", result.Message)
+	// The message must not claim more than a local write achieved. A cancel
+	// cannot recall a launch already dispatched, and reporting a bare
+	// "canceled" is what stopped a user checking while the job ran anyway
+	// (wb72).
+	if !strings.Contains(result.Message, "canceled locally") {
+		t.Fatalf("message should scope the cancel to local state: %q", result.Message)
+	}
+	if !strings.Contains(result.Message, "wj1") {
+		t.Fatalf("message should name the job: %q", result.Message)
 	}
 
 	updatedJob, err := db.GetJobByID(database, jobID)

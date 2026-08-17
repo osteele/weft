@@ -1760,9 +1760,38 @@ func SetPendingStatus(database *sql.DB, jobID int64, s string) error {
 // SetRequestedStatus sets jobs.requested_status directly.
 // This is used for hostless jobs where status should be derived locally
 // without remote reconciliation.
+//
+// Requesting a cancel also stamps cancel_requested_at, which is what lets a
+// later attempt be recognised as one the user had already asked not to
+// happen. The stamp is only ever set, never cleared here: a requeue clears it
+// explicitly alongside requested_status, so a stale cancel time cannot
+// outlive the intent it records.
 func SetRequestedStatus(database *sql.DB, jobID int64, s string) error {
-	_, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, s, jobID)
+	if s == StatusCanceled {
+		_, err := database.Exec(
+			`UPDATE jobs SET requested_status = ?, cancel_requested_at = ? WHERE id = ?`,
+			s, time.Now().Unix(), jobID)
+		return err
+	}
+	_, err := database.Exec(
+		`UPDATE jobs SET requested_status = ?, cancel_requested_at = NULL WHERE id = ?`, s, jobID)
 	return err
+}
+
+// CancelRequestedAt reports when a cancel was requested for the job, and
+// whether one is recorded at all. Absent means no evidence — either no cancel,
+// or one predating the column — and callers must treat it as "do not act"
+// rather than "cancelled long ago".
+func CancelRequestedAt(database *sql.DB, jobID int64) (time.Time, bool, error) {
+	var at sql.NullInt64
+	err := database.QueryRow(`SELECT cancel_requested_at FROM jobs WHERE id = ?`, jobID).Scan(&at)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if !at.Valid || at.Int64 <= 0 {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(at.Int64, 0), true, nil
 }
 
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
