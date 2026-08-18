@@ -162,11 +162,12 @@ func TestDaemonSyncCadence(t *testing.T) {
 	adaptive := orchestration.AutopilotCooldownIdle
 
 	tests := []struct {
-		name           string
-		snapshot       orchestration.WakeSnapshot
-		wait           time.Duration
-		syncIncomplete bool
-		want           time.Duration
+		name             string
+		snapshot         orchestration.WakeSnapshot
+		wait             time.Duration
+		syncIncomplete   bool
+		incompleteStreak int
+		want             time.Duration
 	}{
 		{
 			name:     "work in flight keeps the adaptive cadence",
@@ -184,11 +185,53 @@ func TestDaemonSyncCadence(t *testing.T) {
 			// An unreachable host leaves its state unknown. Unknown is a
 			// reason to look again soon, not a reason to stand down — the
 			// system may only look quiet because we could not see it.
-			name:           "incomplete sync holds the short cadence even when quiet",
-			snapshot:       quiet,
-			wait:           adaptive,
-			syncIncomplete: true,
-			want:           adaptive,
+			name:             "first incomplete sync holds the short cadence even when quiet",
+			snapshot:         quiet,
+			wait:             adaptive,
+			syncIncomplete:   true,
+			incompleteStreak: 1,
+			want:             adaptive,
+		},
+		{
+			name:             "second consecutive incomplete sync backs off",
+			snapshot:         quiet,
+			wait:             adaptive,
+			syncIncomplete:   true,
+			incompleteStreak: 2,
+			want:             2 * adaptive,
+		},
+		{
+			name:             "third consecutive incomplete sync doubles again",
+			snapshot:         quiet,
+			wait:             adaptive,
+			syncIncomplete:   true,
+			incompleteStreak: 3,
+			want:             4 * adaptive,
+		},
+		{
+			name:             "escalation caps at the quiet interval",
+			snapshot:         quiet,
+			wait:             adaptive,
+			syncIncomplete:   true,
+			incompleteStreak: 6,
+			want:             daemonQuietSyncInterval,
+		},
+		{
+			// A completed sync resets the streak: a leftover positive streak
+			// must not keep escalating a quiet, synced system.
+			name:             "a completed sync resets the streak",
+			snapshot:         quiet,
+			wait:             adaptive,
+			incompleteStreak: 4,
+			want:             daemonQuietSyncInterval,
+		},
+		{
+			name:             "work in flight keeps the short cadence despite a long streak",
+			snapshot:         busy,
+			wait:             adaptive,
+			syncIncomplete:   true,
+			incompleteStreak: 7,
+			want:             adaptive,
 		},
 		{
 			name:     "a cooldown longer than the quiet interval is not shortened",
@@ -196,11 +239,19 @@ func TestDaemonSyncCadence(t *testing.T) {
 			wait:     2 * daemonQuietSyncInterval,
 			want:     2 * daemonQuietSyncInterval,
 		},
+		{
+			name:             "incomplete sync never shortens a cooldown above the quiet interval",
+			snapshot:         quiet,
+			wait:             2 * daemonQuietSyncInterval,
+			syncIncomplete:   true,
+			incompleteStreak: 3,
+			want:             2 * daemonQuietSyncInterval,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := daemonSyncCadence(tc.snapshot, tc.wait, tc.syncIncomplete)
+			got := daemonSyncCadence(tc.snapshot, tc.wait, tc.syncIncomplete, tc.incompleteStreak)
 			if got != tc.want {
 				t.Errorf("daemonSyncCadence = %s, want %s", got, tc.want)
 			}
@@ -289,5 +340,17 @@ func TestDaemonEffectiveWait(t *testing.T) {
 					tc.wait, tc.quietWait, tc.timerRunsPass, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNextIncompleteSyncStreak(t *testing.T) {
+	if got := nextIncompleteSyncStreak(0, true); got != 1 {
+		t.Errorf("first incomplete sync: streak = %d, want 1", got)
+	}
+	if got := nextIncompleteSyncStreak(3, true); got != 4 {
+		t.Errorf("consecutive incomplete sync: streak = %d, want 4", got)
+	}
+	if got := nextIncompleteSyncStreak(3, false); got != 0 {
+		t.Errorf("completed sync must reset the streak: streak = %d, want 0", got)
 	}
 }

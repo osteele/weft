@@ -177,6 +177,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
 	pass := 0
 	runAutopilot := true
+	incompleteSyncStreak := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -184,6 +185,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		pass++
 		before := wakeSnapshot
 		passResult := runDaemonPass(ctx, database, cfg, pass, runAutopilot)
+		incompleteSyncStreak = nextIncompleteSyncStreak(incompleteSyncStreak, passResult.syncIncomplete)
 		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
 			wakeSnapshot = nextSnapshot
 		} else {
@@ -205,7 +207,11 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		// The daemon owns host and cloud freshness, so it wakes on a sync
 		// cadence even when replanning would be pointless. Whether each wake
 		// also runs an autopilot pass is the shared policy's call.
-		quietWait := daemonSyncCadence(wakeSnapshot, wait, passResult.syncIncomplete)
+		quietWait := daemonSyncCadence(wakeSnapshot, wait, passResult.syncIncomplete, incompleteSyncStreak)
+		if passResult.syncIncomplete && incompleteSyncStreak >= 2 && wakeSnapshot.Quiet() && quietWait != wait {
+			fmt.Fprintf(os.Stderr, "warning: sync incomplete x%d, backing off to %s\n",
+				incompleteSyncStreak, quietWait.Truncate(time.Second))
+		}
 		emitDaemonPass(passResult, daemonEffectiveWait(wait, quietWait, timerRunsPass))
 
 		var reason autopilotWakeReason
@@ -236,9 +242,41 @@ const daemonQuietSyncInterval = 5 * time.Minute
 // flight and the last sync actually completed: a host that could not be
 // reached leaves its state unknown, which is a reason to look again soon, not
 // a reason to stand down.
-func daemonSyncCadence(snapshot autopilotWakeSnapshot, wait time.Duration, syncIncomplete bool) time.Duration {
-	if syncIncomplete || !snapshot.Quiet() {
+//
+// When the sync is incomplete the wait escalates with the consecutive streak
+// (incompleteStreak): the first incomplete sync keeps the short wait so a
+// transient flap recovers fast, and each consecutive one doubles the wait up
+// to the quiet interval. A persistently unreachable host thus cannot pin the
+// daemon to the short cadence (and its heavy pre-pass sync) forever, while a
+// completed sync resets the streak back to the short wait.
+// nextIncompleteSyncStreak advances the consecutive incomplete-sync counter
+// that daemonSyncCadence escalates on: an incomplete sync extends the streak,
+// a completed one resets it so the next flap starts back at the short wait.
+func nextIncompleteSyncStreak(streak int, syncIncomplete bool) int {
+	if !syncIncomplete {
+		return 0
+	}
+	return streak + 1
+}
+
+func daemonSyncCadence(snapshot autopilotWakeSnapshot, wait time.Duration, syncIncomplete bool, incompleteStreak int) time.Duration {
+	if !snapshot.Quiet() {
 		return wait
+	}
+	if syncIncomplete {
+		// A wait at or above the quiet interval is not an escalation target;
+		// never shorten it.
+		if wait >= daemonQuietSyncInterval {
+			return wait
+		}
+		backoff := wait
+		for i := 1; i < incompleteStreak; i++ {
+			backoff *= 2
+			if backoff >= daemonQuietSyncInterval {
+				return daemonQuietSyncInterval
+			}
+		}
+		return backoff
 	}
 	if wait > daemonQuietSyncInterval {
 		return wait
