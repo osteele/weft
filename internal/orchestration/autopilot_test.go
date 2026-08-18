@@ -2184,6 +2184,67 @@ func TestRunGroupedAutoPilotPass_FailedReuseFallsBackToRentalReason(t *testing.T
 	}
 }
 
+func TestRunGroupedAutoPilotPass_RelaunchNilResultStillFinalizesBlockedReasons(t *testing.T) {
+	// The relaunch-nil-result exit must still assemble the result and run
+	// the deferred blocked-reason epilogue: a planner-blocked job's reason
+	// has to be both on the returned result and persisted to
+	// placement_reasons even though the pass returns an error.
+	database := db.SetupTestDB(t)
+	blockedJobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python blocked.py", "blocked job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU blockedJob: %v", err)
+	}
+	rentalJobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python rental.py", "rental job", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU rentalJob: %v", err)
+	}
+
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+	})
+	plannerReason := "planner: no compatible offers"
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{
+			BlockedReasons: map[int64]string{blockedJobID: plannerReason},
+		}, nil
+	}
+	var relaunchScope []int64
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, scope []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		relaunchScope = append([]int64(nil), scope...)
+		return nil, nil
+	}
+
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
+	if err == nil || !strings.Contains(err.Error(), "relaunch returned no result") {
+		t.Fatalf("error = %v, want relaunch-nil-result error", err)
+	}
+	if len(relaunchScope) != 1 || relaunchScope[0] != rentalJobID {
+		t.Fatalf("relaunch scope = %v, want [%d]", relaunchScope, rentalJobID)
+	}
+	if result == nil {
+		t.Fatal("result is nil; the nil-result relaunch exit must still assemble the result")
+	}
+	if got := result.BlockedReasons[blockedJobID]; got != plannerReason {
+		t.Fatalf("blocked reason = %q, want %q", got, plannerReason)
+	}
+	job, err := db.GetJobByID(database, blockedJobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	persisted := false
+	for _, reason := range job.PlacementReasons {
+		if reason == plannerReason {
+			persisted = true
+		}
+	}
+	if !persisted {
+		t.Fatalf("placement reasons = %#v, want persisted %q", job.PlacementReasons, plannerReason)
+	}
+}
+
 func TestRunGroupedAutoPilotPass_DoesNotBlockJobCreatedAfterPlannerSnapshot(t *testing.T) {
 	// Regression: a job that appears after the planner snapshot must not be
 	// swept into this pass's fresh-rental scope or inherit one of its reasons.

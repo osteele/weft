@@ -274,9 +274,59 @@ func removeCheckpointDeferredJobsFromPlan(plan *campaign.AutoPlacementPlan, reas
 	plan.ReuseAssignments = reuse
 }
 
+// passAccum carries the progress counters and blocked-reason state that
+// the exit paths of runGroupedAutoPilotPassWithOptions report through
+// result(), so every path returns the same assembly and none can skip
+// it. The finalize fields hold the deferred epilogue's per-path inputs:
+// each exit path that reaches a settled blocked-reason outcome arms the
+// epilogue with the candidate snapshot it finalizes against.
+type passAccum struct {
+	placed        int
+	rebalanced    int
+	launched      int
+	autoReplanned int
+	reuseFilled   int
+	overloadMoved int
+	launchedClass string
+
+	blockedReasons    map[int64]string
+	structuredBlocked map[int64]*blockreason.Structured
+
+	// finalizeRemaining and finalizeCandidates differ by arming path: the
+	// run-rate branch finalizes the remaining launch candidates, later
+	// branches the full unplaced-candidate snapshot.
+	finalizeArmed      bool
+	finalizeRemaining  map[int64]*db.Job
+	finalizeCandidates []int64
+}
+
+func (a *passAccum) result() *GroupedAutoPilotResult {
+	return &GroupedAutoPilotResult{
+		Placed:            a.placed,
+		Rebalanced:        a.rebalanced,
+		Launched:          a.launched,
+		AutoReplanned:     a.autoReplanned,
+		ReuseFilled:       a.reuseFilled,
+		OverloadMoved:     a.overloadMoved,
+		LaunchedClass:     a.launchedClass,
+		BlockedReasons:    a.blockedReasons,
+		StructuredBlocked: a.structuredBlocked,
+	}
+}
+
+// armFinalize supplies the candidate snapshot the deferred epilogue must
+// finalize against; the snapshot is per-path, so callers pass whichever
+// list their branch would have finalized.
+func (a *passAccum) armFinalize(remainingByID map[int64]*db.Job, candidates []int64) {
+	a.finalizeArmed = true
+	a.finalizeRemaining = remainingByID
+	a.finalizeCandidates = candidates
+}
+
 func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, scopedJobs []*db.Job, plannerOptions campaign.PlanOptions) (out *GroupedAutoPilotResult, outErr error) {
+	acc := &passAccum{}
 	if database == nil {
-		return &GroupedAutoPilotResult{}, nil
+		return acc.result(), nil
 	}
 	// Inventory-tagged unplaced jobs are surfaced via this map so every return
 	// path can attach a fresh "waiting for on-prem host" reason to them
@@ -347,6 +397,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		oplog.Log("auto_pilot.source_sync_uncordon", oplog.WithDetailf("hosts=%d", lifted))
 	}
 	moveRetryLaunches, err := fulfillOpenMoveToNewIntents(ctx, database, scoped)
+	acc.launched = moveRetryLaunches
 	if err != nil {
 		oplog.Log("auto_pilot.move_intents_retry_error", oplog.WithError(err))
 	}
@@ -365,21 +416,17 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	// [autopilot] auto_replan_stuck_inventory_dispatch = true. See
 	// internal/config AutopilotConfig and specs/campaign-lifecycle.allium §
 	// AutoReplanStuckInventoryDispatch.
-	var autoReplanned int
 	if autoReplanConfigEnabled() {
-		autoReplanned, err = autoReplanStuckInventoryJobs(database, scoped, movingJobs)
+		acc.autoReplanned, err = autoReplanStuckInventoryJobs(database, scoped, movingJobs)
 		if err != nil {
 			oplog.Log("auto_pilot.auto_replan_error", oplog.WithError(err))
 		}
 	}
 	cfg, err := config.Load()
 	if err != nil {
-		return &GroupedAutoPilotResult{
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-		}, err
+		return acc.result(), err
 	}
-	overloadMoved, err := autoPilotDrainOverloadedInventoryHosts(ctx, database, cfg, scoped, movingJobs)
+	acc.overloadMoved, err = autoPilotDrainOverloadedInventoryHosts(ctx, database, cfg, scoped, movingJobs)
 	if err != nil {
 		oplog.Log("auto_pilot.overload_drain_error", oplog.WithError(err))
 	}
@@ -435,6 +482,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	// unplaced whenever no TUI was open or its single sync goroutine was
 	// starved by a hung cloud sync.
 	inventoryAwaiting, inventoryPlaced := autoPilotPlaceInventory(database, cfg, inventoryAwaiting)
+	acc.placed = inventoryPlaced
 	inventoryAwaitingReasons = persistInventoryAwaitingReasons(database, inventoryAwaiting)
 	if len(unplaced) == 0 {
 		persistBlockedReasonsForUnplaced(database, inventoryAwaitingReasons, nil)
@@ -444,24 +492,15 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			MovingJobs: movingJobs,
 		})
 		if rebErr != nil {
-			return &GroupedAutoPilotResult{
-				Placed:        inventoryPlaced,
-				Launched:      moveRetryLaunches,
-				AutoReplanned: autoReplanned,
-				OverloadMoved: overloadMoved,
-			}, rebErr
+			return acc.result(), rebErr
 		}
-		return &GroupedAutoPilotResult{
-			Placed:        inventoryPlaced,
-			Rebalanced:    onPremRebalanced + len(rebalanceResult.Moves),
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			OverloadMoved: overloadMoved,
-		}, nil
+		acc.rebalanced = onPremRebalanced + len(rebalanceResult.Moves)
+		return acc.result(), nil
 	}
 
 	unplaced, prePlaced := autoPilotPlaceComputeIntensive(database, cfg, unplaced)
 	prePlaced += inventoryPlaced
+	acc.placed = prePlaced
 	if len(unplaced) == 0 {
 		persistBlockedReasonsForUnplaced(database, inventoryAwaitingReasons, nil)
 		rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
@@ -470,20 +509,10 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			MovingJobs: movingJobs,
 		})
 		if err != nil {
-			return &GroupedAutoPilotResult{
-				Placed:        prePlaced,
-				Launched:      moveRetryLaunches,
-				AutoReplanned: autoReplanned,
-				OverloadMoved: overloadMoved,
-			}, err
+			return acc.result(), err
 		}
-		return &GroupedAutoPilotResult{
-			Placed:        prePlaced,
-			Rebalanced:    onPremRebalanced + len(rebalanceResult.Moves),
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			OverloadMoved: overloadMoved,
-		}, nil
+		acc.rebalanced = onPremRebalanced + len(rebalanceResult.Moves)
+		return acc.result(), nil
 	}
 	r2Client, _ := BuildR2Client(cfg)
 	checkpointPublishReasons := map[int64]string{}
@@ -493,12 +522,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			checkpointPublishReasons[jobID] = reason
 		}
 		if publishErr != nil {
-			return &GroupedAutoPilotResult{
-				Placed:        prePlaced,
-				Launched:      moveRetryLaunches,
-				AutoReplanned: autoReplanned,
-				OverloadMoved: overloadMoved,
-			}, publishErr
+			return acc.result(), publishErr
 		}
 		if published > 0 {
 			oplog.Log("auto_pilot.checkpoint_auto_publish", oplog.WithDetailf("published=%d", published))
@@ -514,12 +538,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 
 	launches, err := db.ListRunningLaunches(database)
 	if err != nil {
-		return &GroupedAutoPilotResult{
-			Placed:        prePlaced,
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			OverloadMoved: overloadMoved,
-		}, err
+		return acc.result(), err
 	}
 	capacities := make([]campaign.InstanceCapacity, 0, len(launches))
 	for _, ci := range launches {
@@ -542,15 +561,12 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		oplog.Log("auto_pilot.planner_error",
 			oplog.WithError(err),
 			oplog.WithDetailf("unplaced=%d capacities=%d", len(unplaced), len(capacities)))
-		return &GroupedAutoPilotResult{
-			Placed:        prePlaced,
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			OverloadMoved: overloadMoved,
-		}, err
+		return acc.result(), err
 	}
 	blockedReasons := map[int64]string{}
 	structuredBlocked := map[int64]*blockreason.Structured{}
+	acc.blockedReasons = blockedReasons
+	acc.structuredBlocked = structuredBlocked
 	for jobID, reason := range plan.BlockedReasons {
 		if strings.TrimSpace(reason) != "" {
 			blockedReasons[jobID] = reason
@@ -609,6 +625,21 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		planDetail += fmt.Sprintf(" reason=%q", sampleReason)
 	}
 	oplog.Log("auto_pilot.plan", oplog.WithDetail(planDetail))
+
+	// Single deferred epilogue for the settled-outcome exit paths below:
+	// a path arms it with the candidate snapshot it finalizes against, and
+	// the call fires once at return. Unarmed paths — every return above and
+	// the mid-pass error returns below that never reached a settled
+	// outcome — must not persist reasons. This defer is registered after the
+	// inventory-reasons defer above, so it runs before it: persistence must
+	// not see the inventory overlay, which that defer merges only into the
+	// in-memory result.
+	defer func() {
+		if !acc.finalizeArmed {
+			return
+		}
+		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, acc.finalizeRemaining, acc.finalizeCandidates, capacities, r2Client)
+	}()
 
 	runRateTarget := cfg.AutoRunRateSoftTargetCentsPerHour()
 	reusePreferredFallback := false
@@ -689,24 +720,19 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 							blockedReasons[jobID] = reason
 						}
 						remainingByID, candidateIDs := remainingLaunchCandidates(database, plan.LaunchJobIDs)
-						finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, candidateIDs, capacities, r2Client)
-						return &GroupedAutoPilotResult{
-							Placed:            0,
-							Launched:          moveRetryLaunches,
-							AutoReplanned:     autoReplanned,
-							OverloadMoved:     overloadMoved,
-							LaunchedClass:     "",
-							BlockedReasons:    blockedReasons,
-							StructuredBlocked: structuredBlocked,
-						}, nil
+						acc.armFinalize(remainingByID, candidateIDs)
+						// The run-rate-exhausted verdict reports zero placement
+						// progress; on-prem placements earlier in this pass are not
+						// counted on this exit.
+						acc.placed = 0
+						return acc.result(), nil
 					}
 				}
 			}
 		}
 	}
 
-	placed := prePlaced
-	placed += submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics, blockedReasons, recordedReuse)
+	acc.placed = prePlaced + submitAutoPilotReuseAssignments(ctx, database, r2Client, plan.ReuseAssignments, reuseDiagnostics, blockedReasons, recordedReuse)
 
 	rebalanceResult, err := autoPilotRebalanceQueuedJobsAcrossInstances(ctx, database, QueueRebalanceOptions{
 		Apply:      true,
@@ -715,32 +741,19 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		MovingJobs: movingJobs,
 	})
 	if err != nil {
-		return &GroupedAutoPilotResult{
-			Placed:        placed,
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			OverloadMoved: overloadMoved,
-		}, err
+		return acc.result(), err
 	}
-	rebalanced := len(rebalanceResult.Moves)
-	rebalanced += onPremRebalanced
+	acc.rebalanced = len(rebalanceResult.Moves) + onPremRebalanced
 
-	reuseFilled, err := autoPilotFillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics, blockedReasons, recordedReuse)
+	acc.reuseFilled, err = autoPilotFillReusableInstances(ctx, database, r2Client, scoped, movingJobs, reuseDiagnostics, blockedReasons, recordedReuse)
 	if err != nil {
 		oplog.Log("auto_pilot.reuse_fill_error", oplog.WithError(err))
 	}
-	placed += reuseFilled
+	acc.placed += acc.reuseFilled
 
 	remaining, err := db.ListUnplacedJobs(database)
 	if err != nil {
-		return &GroupedAutoPilotResult{
-			Placed:        placed,
-			Rebalanced:    rebalanced,
-			Launched:      moveRetryLaunches,
-			AutoReplanned: autoReplanned,
-			ReuseFilled:   reuseFilled,
-			OverloadMoved: overloadMoved,
-		}, err
+		return acc.result(), err
 	}
 	rentalScope := make([]int64, 0, len(remaining))
 	allCandidates := make([]int64, 0, len(remaining))
@@ -778,18 +791,8 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 	if len(rentalScope) == 0 {
 		oplog.Log("auto_pilot.no_rental_scope",
 			oplog.WithDetailf("candidates=%d blocked=%d", len(allCandidates), len(blockedReasons)))
-		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
-		return &GroupedAutoPilotResult{
-			Placed:            placed,
-			Rebalanced:        rebalanced,
-			Launched:          moveRetryLaunches,
-			AutoReplanned:     autoReplanned,
-			ReuseFilled:       reuseFilled,
-			OverloadMoved:     overloadMoved,
-			LaunchedClass:     "",
-			BlockedReasons:    blockedReasons,
-			StructuredBlocked: structuredBlocked,
-		}, nil
+		acc.armFinalize(remainingByID, allCandidates)
+		return acc.result(), nil
 	}
 
 	// Pre-launch credit gate: if every enabled provider's account credit is
@@ -805,18 +808,8 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		for _, jobID := range rentalScope {
 			blockedReasons[jobID] = reason
 		}
-		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
-		return &GroupedAutoPilotResult{
-			Placed:            placed,
-			Rebalanced:        rebalanced,
-			Launched:          moveRetryLaunches,
-			AutoReplanned:     autoReplanned,
-			ReuseFilled:       reuseFilled,
-			OverloadMoved:     overloadMoved,
-			LaunchedClass:     "",
-			BlockedReasons:    blockedReasons,
-			StructuredBlocked: structuredBlocked,
-		}, nil
+		acc.armFinalize(remainingByID, allCandidates)
+		return acc.result(), nil
 	}
 
 	oplog.Log("auto_pilot.launching",
@@ -834,32 +827,12 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 				blockedReasons[jobID] = launchReason
 			}
 		}
-		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
-		return &GroupedAutoPilotResult{
-			Placed:            placed,
-			Rebalanced:        rebalanced,
-			Launched:          moveRetryLaunches,
-			AutoReplanned:     autoReplanned,
-			ReuseFilled:       reuseFilled,
-			OverloadMoved:     overloadMoved,
-			LaunchedClass:     "",
-			BlockedReasons:    blockedReasons,
-			StructuredBlocked: structuredBlocked,
-		}, err
+		acc.armFinalize(remainingByID, allCandidates)
+		return acc.result(), err
 	}
 	if result == nil {
-		finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
-		return &GroupedAutoPilotResult{
-			Placed:            placed,
-			Rebalanced:        rebalanced,
-			Launched:          moveRetryLaunches,
-			AutoReplanned:     autoReplanned,
-			ReuseFilled:       reuseFilled,
-			OverloadMoved:     overloadMoved,
-			LaunchedClass:     "",
-			BlockedReasons:    blockedReasons,
-			StructuredBlocked: structuredBlocked,
-		}, fmt.Errorf("autopilot relaunch returned no result for jobs %v", rentalScope)
+		acc.armFinalize(remainingByID, allCandidates)
+		return acc.result(), fmt.Errorf("autopilot relaunch returned no result for jobs %v", rentalScope)
 	}
 	if result.BlockedReason != "" {
 		for _, jobID := range rentalScope {
@@ -876,7 +849,7 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 			if retryErr == nil && len(retryPlan.ReuseAssignments) > 0 {
 				fallbackPlaced := submitAutoPilotReuseAssignments(ctx, database, r2Client, retryPlan.ReuseAssignments, reuseDiagnostics, blockedReasons, recordedReuse)
 				if fallbackPlaced > 0 {
-					placed += fallbackPlaced
+					acc.placed += fallbackPlaced
 					for _, assignment := range retryPlan.ReuseAssignments {
 						if assignment.Job != nil {
 							delete(blockedReasons, assignment.Job.ID)
@@ -942,32 +915,14 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		}
 	}
 	recordLaunchDecisions(database, result.InstanceIDs, "autopilot_launch", "no reusable instance matched; launched a new instance")
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked, reuseDiagnostics, recordedReuse, onPremDetails, remainingByID, allCandidates, capacities, r2Client)
+	acc.launched += len(result.InstanceIDs)
+	acc.launchedClass = launchedClassFromResult(database, result.InstanceIDs)
+	acc.armFinalize(remainingByID, allCandidates)
 	if len(unclassified) > 0 {
-		return &GroupedAutoPilotResult{
-			Placed:            placed,
-			Rebalanced:        rebalanced,
-			Launched:          moveRetryLaunches + len(result.InstanceIDs),
-			AutoReplanned:     autoReplanned,
-			ReuseFilled:       reuseFilled,
-			OverloadMoved:     overloadMoved,
-			LaunchedClass:     launchedClassFromResult(database, result.InstanceIDs),
-			BlockedReasons:    blockedReasons,
-			StructuredBlocked: structuredBlocked,
-		}, fmt.Errorf("autopilot rental path left queued jobs unclassified: %v", unclassified)
+		return acc.result(), fmt.Errorf("autopilot rental path left queued jobs unclassified: %v", unclassified)
 	}
 
-	return &GroupedAutoPilotResult{
-		Placed:            placed,
-		Rebalanced:        rebalanced,
-		Launched:          moveRetryLaunches + len(result.InstanceIDs),
-		AutoReplanned:     autoReplanned,
-		ReuseFilled:       reuseFilled,
-		OverloadMoved:     overloadMoved,
-		LaunchedClass:     launchedClassFromResult(database, result.InstanceIDs),
-		BlockedReasons:    blockedReasons,
-		StructuredBlocked: structuredBlocked,
-	}, nil
+	return acc.result(), nil
 }
 
 func fillReusableInstances(
