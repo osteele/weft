@@ -62,14 +62,36 @@ const onStartVerifyCmd = `test -r ` + onStartScriptPath +
 	`grep -q ` + OnStartSentinel + ` ` + onStartScriptPath +
 	` && echo WEFT_ONSTART_INSTALLED || echo WEFT_ONSTART_MISSING`
 
-// SupportsOnStartVerification reports whether the premise this check rests on
-// — sentinel absent from onStartScriptPath implies weft's script was not
-// installed — holds for the instance's provider. Kept as a pure predicate so
-// the gate is testable without reaching the network: a test that instead
-// pointed a non-vast.ai instance at an unresolvable host would pass whether or
-// not the gate existed.
+// OnStartVerifyGrace is how long after the provider reports `running` weft
+// waits before asking the container whether its OnStart script was installed.
+// Providers write the start script before starting sshd, so an SSH-reachable
+// container has already had its script decided; the grace is insurance
+// against a provider that orders those the other way.
+const OnStartVerifyGrace = 2 * time.Minute
+
+// OnStartVerifyTimeout hard-bounds the SSH round trip. An instance that
+// cannot answer within it stays unknown, which is the safe verdict, and the
+// next pass asks again. It must stay well under the fast cloud-sync budget
+// (syncorch.FastCloudTimeoutCLI, 10s) or a single unreachable instance in the
+// dud window makes `weft list` report a degraded sync.
+const OnStartVerifyTimeout = 5 * time.Second
+
+// ProviderSupportsOnStartVerification reports whether the premise this check
+// rests on — sentinel absent from onStartScriptPath implies weft's script was
+// not installed — holds for a provider. Callers that hold only a provider
+// name use this to skip the provider API round trip that building an
+// *Instance would cost.
+func ProviderSupportsOnStartVerification(provider Provider) bool {
+	return provider == ProviderVastai
+}
+
+// SupportsOnStartVerification reports whether the verification premise holds
+// for the instance's provider. Kept as a pure predicate so the gate is
+// testable without reaching the network: a test that instead pointed a
+// non-vast.ai instance at an unresolvable host would pass whether or not the
+// gate existed.
 func SupportsOnStartVerification(inst *Instance) bool {
-	return inst != nil && inst.Provider == ProviderVastai
+	return inst != nil && ProviderSupportsOnStartVerification(inst.Provider)
 }
 
 // VerifyOnStartInstalled reports whether weft's OnStart script is present on

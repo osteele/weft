@@ -499,11 +499,16 @@ config {
     -- effectiveLaunchingPhaseTimeout in
     -- internal/campaign/instance_check.go.
     --
-    -- Calibration: ~1500 historical launches show pre-running
-    -- provisioning is bimodal (fast-or-never) — p99 ≤ 2 min, observed
-    -- max 6.2 min, zero launches ever exceeded 10 min from create to
-    -- status=running at the provider. 12 min gives ~2× margin over the
-    -- worst case while recovering budget on dud rentals 13 min faster.
+    -- Calibration: RESTATED 2026-08-18 against n=4270. The original
+    -- reading (~1500 launches; p99 <= 2 min, max 6.2 min, "zero launches
+    -- ever exceeded 10 min from create to status=running") no longer
+    -- holds. Current launched_at->provider_running_at: vast.ai p50 1.9
+    -- min, p90 5.7 min, p99 23.0 min; RunPod p50 0.8, p90 4.7, p99 25.8.
+    -- 5.0% of vast.ai launches now exceed 10 minutes and go on to run.
+    -- Pre-running provisioning is therefore NOT fast-or-never, and any
+    -- constant in this family tuned against the old reading is too tight.
+    -- 12 min sits near p95; the learned threshold is what keeps it from
+    -- false-killing, which is the reverse of the original rationale.
     -- The earlier objection — that an adaptive threshold would converge
     -- near p99 (~2 min) and false-kill the rare 3-4 min legitimate
     -- launch — does not apply to the survival threshold actually used:
@@ -2588,6 +2593,7 @@ rule OnStartScriptMissing {
 
 rule DudVastDetection {
     when: EvaluateDudVastDetection(instance)
+    requires: not ProviderObservedNotRunning(instance)
     requires: instance.launched_at != null
     requires: instance.agent_ready_at = null
     requires: not OnStartProbeWritten(instance)
@@ -2639,6 +2645,23 @@ rule DudVastDetection {
         -- threshold was adopted unclamped, so an instance whose container
         -- never received its OnStart script sat 86 min ($3.80) inside an
         -- 8-minute detector that matched it on every other clause.
+        --
+        -- ProviderObservedNotRunning stands the rule down when the provider
+        -- positively reports a non-running, non-empty status (created,
+        -- loading). instance.status becomes running when the launch call
+        -- returns — "instance is now self-starting" — not when the provider
+        -- reaches running, so weft can hold status=running over an instance
+        -- the provider has not started yet. That instance has not failed to
+        -- bootstrap; it has not been given the chance. Ownership passes by
+        -- status: StaleNonRunningStatus takes the pre-running ones, and
+        -- ProviderDead takes any the provider reports as terminal. The
+        -- guard is scoped to a positive
+        -- reading: an unknown provider status is deliberately left to the
+        -- unknown-streak bound, which is a designed escape hatch for
+        -- interruptible instances whose polling is failing. This mattered
+        -- only once dud_vast_timeout_ceiling brought the dud window below
+        -- the pre-running p99 — at the old unclamped ~110 min the two never
+        -- collided.
         --
         -- Defense-in-depth absence signals. The rule conjoins six
         -- absence signals rather than the single OnStart probe because

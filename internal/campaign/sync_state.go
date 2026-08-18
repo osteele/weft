@@ -71,7 +71,7 @@ func verifyOnStartScriptCached(launchID int64, inst *cloud.Instance) cloud.OnSta
 			return entry.verdict
 		}
 	}
-	verdict := syncVerifyOnStartScript(inst, onStartVerifyTimeout)
+	verdict := syncVerifyOnStartScript(inst, cloud.OnStartVerifyTimeout)
 	onStartVerifyMemo.mu.Lock()
 	defer onStartVerifyMemo.mu.Unlock()
 	if onStartVerifyMemo.entries == nil {
@@ -358,7 +358,7 @@ func SyncInstanceState(
 	// period so a container whose provider is still writing its start script
 	// is not misread as one that never got it.
 	if probeChecked && !s.OnStartProbePresent && !jobState.HasStartedJob &&
-		time.Since(time.Unix(*ci.LaunchedAt, 0)) >= onStartVerifyGrace {
+		time.Since(time.Unix(*ci.LaunchedAt, 0)) >= cloud.OnStartVerifyGrace {
 		s.OnStartScriptVerification = verifyOnStartScriptCached(instanceID, opts.ProviderInst)
 		slog.Debug("onstart script verification", "component", "sync", "instance", instanceID, "verdict", s.OnStartScriptVerification.String())
 	}

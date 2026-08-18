@@ -3845,3 +3845,84 @@ func TestCheckInstance_OnStartScriptMissing_QuietOnceJobStarted(t *testing.T) {
 		t.Fatalf("rule 4c-onstart fired on an instance with a started job: %q", action.StallMessage)
 	}
 }
+
+// preRunningWatchdogAction runs the watchdogs against an instance that weft
+// marked running `age` ago and the provider reports as providerStatus. Five
+// rules return ActionEmptyStatusTimeout, so callers assert on StallMessage to
+// say which one they mean.
+func preRunningWatchdogAction(t *testing.T, age time.Duration, providerStatus string) InstanceAction {
+	t.Helper()
+	now := time.Now()
+	launchedAt := now.Add(-age).Unix()
+	return NewReconciler().CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-prerunning",
+		},
+		ProviderInst:      &cloud.Instance{Status: providerStatus},
+		BootstrapSurvival: wi7309LearnedSurvival(),
+		Now:               now,
+	})
+}
+
+// TestCheckInstance_EmptyStatusTimeout_LearnedTerminateIsCapped pins the
+// ceiling on the empty-status window.
+//
+// BootstrapSurvival is measured from provider_running_at forward, so it
+// describes a window this rule has already finished waiting on; borrowing its
+// quantile stretched a one-minute detector past an hour and a half. The
+// existing survival tests could not catch this because they use a 30-minute
+// learned value — small enough that the pathology never shows. This one uses
+// the value the wi7309 provider curve had actually learned.
+func TestCheckInstance_EmptyStatusTimeout_LearnedTerminateIsCapped(t *testing.T) {
+	action := preRunningWatchdogAction(t, maxEmptyStatusTimeCeiling+time.Minute, "")
+	if !strings.Contains(action.StallMessage, "empty status") {
+		t.Fatalf("want the empty-status watchdog to fire once the learned 110m threshold is capped at %s; got kind %d (%q)", maxEmptyStatusTimeCeiling, action.Kind, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_EmptyStatusTimeout_QuietUnderCeiling guards the other side
+// of the clamp.
+func TestCheckInstance_EmptyStatusTimeout_QuietUnderCeiling(t *testing.T) {
+	action := preRunningWatchdogAction(t, maxEmptyStatusTimeCeiling-time.Minute, "")
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("empty-status watchdog fired inside the %s ceiling: %q", maxEmptyStatusTimeCeiling, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_PreRunningStatus_LearnedTerminateIsCapped pins the ceiling
+// on the stale-non-running window. Looser than the empty-status ceiling
+// because provisioning and image pull happen here: on current data the
+// 5-minute constant sits near p88 and 30 minutes above p99.
+func TestCheckInstance_PreRunningStatus_LearnedTerminateIsCapped(t *testing.T) {
+	action := preRunningWatchdogAction(t, maxPreRunningStatusTimeCeiling+time.Minute, cloud.ProviderStatusCreated)
+	if !strings.Contains(action.StallMessage, "stuck in") {
+		t.Fatalf("want the stale-non-running watchdog to fire once the learned 110m threshold is capped at %s; got kind %d (%q)", maxPreRunningStatusTimeCeiling, action.Kind, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_PreRunningStatus_QuietInsideP99 is the false-kill guard
+// that matters for this ceiling. On current data 12.5% of vast.ai launches
+// take longer than the 5-minute constant to reach `running` and go on to run
+// normally; the ceiling must sit well clear of them.
+func TestCheckInstance_PreRunningStatus_QuietInsideP99(t *testing.T) {
+	// p99 of launched_at→provider_running_at is ~23 min (vast.ai), ~26 (RunPod).
+	action := preRunningWatchdogAction(t, 26*time.Minute, cloud.ProviderStatusCreated)
+	if action.Kind == ActionEmptyStatusTimeout {
+		t.Fatalf("pre-running watchdog fired at 26m, inside the observed p99 of legitimate provisioning: %q", action.StallMessage)
+	}
+}
+
+// TestCheckInstance_DudDetection_StandsDownWhilePreRunning is the standalone
+// guard on rule 4d's stand-down. At 26 minutes the instance is past
+// dudVastTimeoutCeiling, so without the guard 4d destroys a rental the
+// provider has not finished provisioning — and it would report that as a dud,
+// not as the pre-running case QuietInsideP99 is named for.
+func TestCheckInstance_DudDetection_StandsDownWhilePreRunning(t *testing.T) {
+	action := preRunningWatchdogAction(t, 26*time.Minute, cloud.ProviderStatusCreated)
+	if strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("rule 4d fired on an instance the provider still reports as %q: %q", cloud.ProviderStatusCreated, action.StallMessage)
+	}
+}

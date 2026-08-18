@@ -53,20 +53,6 @@ const (
 	// magnitude the probe distribution actually occupies.
 	dudVastTimeoutCeiling = 15 * time.Minute
 
-	// onStartVerifyGrace is how long after the provider reports `running`
-	// weft waits before asking the container whether its OnStart script was
-	// installed. Providers write the start script before starting sshd, so
-	// an SSH-reachable container has already had its script decided; the
-	// grace is insurance against a provider that orders those the other way.
-	onStartVerifyGrace = 2 * time.Minute
-
-	// onStartVerifyTimeout hard-bounds the SSH round trip. An instance that
-	// cannot answer within it stays unknown, which is the safe verdict, and
-	// the next pass asks again. It must stay well under the fast cloud-sync
-	// budget (syncorch.FastCloudTimeoutCLI, 10s) or a single unreachable
-	// instance in the dud window makes `weft list` report a degraded sync.
-	onStartVerifyTimeout = 5 * time.Second
-
 	// onStartVerifyUnknownCooldown rate-limits re-asking an instance that
 	// could not answer. Unknown is the expensive verdict — it is the one that
 	// pays the full timeout — and asking again within seconds cannot learn

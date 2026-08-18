@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/r2upload"
 	"github.com/osteele/weft/internal/ui/terminal"
@@ -43,9 +45,13 @@ type instanceDiagnoseReport struct {
 	BootstrapStage    string
 	OnStartProbe      string // body of instance/<id>/onstart-probe — present iff OnStart actually ran
 	OnStartStage      string // body of instance/<id>/onstart-stage — last successful OnStart step name
-	Obs               terminal.CloudInstanceObservability
-	Diagnosis         instanceDiagnosis
-	Timeline          []timelineEntry
+	// OnStartScriptVerification is the in-container reading of whether the
+	// provider installed weft's OnStart script; Unknown unless
+	// shouldVerifyOnStartScript let the check run.
+	OnStartScriptVerification cloud.OnStartVerification
+	Obs                       terminal.CloudInstanceObservability
+	Diagnosis                 instanceDiagnosis
+	Timeline                  []timelineEntry
 	// UploadFailures maps job ID → marker. Populated best-effort from R2;
 	// missing entries either had a successful upload or no marker (e.g.
 	// agent never reached the upload step).
@@ -150,20 +156,28 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 	bootstrapStage := ""
 	onStartProbe := ""
 	onStartStage := ""
+	// probeConfirmedAbsent separates "R2 answered and the key is not there"
+	// from "the probe could not be read". Only the former licenses an
+	// in-container verdict; an unreadable R2 would otherwise let weft blame
+	// the container for the observer's own failure.
+	probeConfirmedAbsent := false
 	uploadFailures := map[int64]r2upload.FailureMarker{}
 	if r2Client, err := newR2ClientFromConfig(); err == nil && r2Client != nil {
-		fetch := func(key string) string {
+		fetch := func(key string) (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			if data, err := r2Client.GetObject(ctx, key); err == nil {
-				return strings.TrimSpace(string(data))
+			data, err := r2Client.GetObject(ctx, key)
+			if err != nil {
+				return "", err
 			}
-			return ""
+			return strings.TrimSpace(string(data)), nil
 		}
-		livePhaseRaw = fetch(r2keys.InstancePhase(inst.ID))
-		bootstrapStage = fetch(r2keys.BootstrapStage(inst.ID))
-		onStartProbe = fetch(r2keys.InstanceOnStartProbe(inst.ID))
-		onStartStage = fetch(r2keys.InstanceOnStartStage(inst.ID))
+		livePhaseRaw, _ = fetch(r2keys.InstancePhase(inst.ID))
+		bootstrapStage, _ = fetch(r2keys.BootstrapStage(inst.ID))
+		var probeErr error
+		onStartProbe, probeErr = fetch(r2keys.InstanceOnStartProbe(inst.ID))
+		probeConfirmedAbsent = r2.IsNotFound(probeErr)
+		onStartStage, _ = fetch(r2keys.InstanceOnStartStage(inst.ID))
 
 		// Upload-failure markers per job (best-effort; missing is normal).
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -179,28 +193,77 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	onStartVerification := cloud.OnStartVerificationUnknown
+	if shouldVerifyOnStartScript(inst, bootstrapStage, probeConfirmedAbsent, time.Now()) {
+		onStartVerification = verifyOnStartScriptInContainer(inst)
+	}
+
 	report := &instanceDiagnoseReport{
-		Instance:          inst,
-		Jobs:              jobs,
-		Outcomes:          outcomes,
-		PhaseTimings:      timings,
-		LifecycleEvents:   events,
-		BootstrapSurvival: bootstrapSurvival,
-		SetupSurvival:     setupSurvival,
-		LivePhaseRaw:      livePhaseRaw,
-		LivePhase:         livePhase,
-		LivePhaseChanged:  livePhaseChanged,
-		BootstrapStage:    bootstrapStage,
-		OnStartProbe:      onStartProbe,
-		OnStartStage:      onStartStage,
-		Obs:               obs,
-		Diagnosis:         diagnosis,
-		Timeline:          timeline,
-		UploadFailures:    uploadFailures,
+		Instance:                  inst,
+		Jobs:                      jobs,
+		Outcomes:                  outcomes,
+		PhaseTimings:              timings,
+		LifecycleEvents:           events,
+		BootstrapSurvival:         bootstrapSurvival,
+		SetupSurvival:             setupSurvival,
+		LivePhaseRaw:              livePhaseRaw,
+		LivePhase:                 livePhase,
+		LivePhaseChanged:          livePhaseChanged,
+		BootstrapStage:            bootstrapStage,
+		OnStartProbe:              onStartProbe,
+		OnStartStage:              onStartStage,
+		OnStartScriptVerification: onStartVerification,
+		Obs:                       obs,
+		Diagnosis:                 diagnosis,
+		Timeline:                  timeline,
+		UploadFailures:            uploadFailures,
 	}
 
 	fmt.Print(formatInstanceDiagnoseReport(report))
 	return nil
+}
+
+// shouldVerifyOnStartScript reports whether asking the container about its
+// OnStart script can both be answered and change what the report says.
+//
+// It mirrors the gates the reconcile path applies in sync_state.go: the probe
+// must be confirmed absent rather than merely unread, the instance must still
+// be alive to answer, the provider's bootstrap must arrive as an OnStart
+// script at all, and the grace period must have passed so a provider that
+// writes the script after starting sshd is not read as one that never wrote
+// it. The bootstrap-stage gate is this path's own: formatBootstrapSection
+// consults the verdict only when no stage marker landed, so an SSH round trip
+// taken with a stage in hand is discarded.
+func shouldVerifyOnStartScript(inst *db.Launch, bootstrapStage string, probeConfirmedAbsent bool, now time.Time) bool {
+	if !probeConfirmedAbsent || bootstrapStage != "" || inst.IsTerminal() {
+		return false
+	}
+	if !cloud.ProviderSupportsOnStartVerification(cloud.Provider(inst.Provider)) {
+		return false
+	}
+	if inst.LaunchedAt == nil {
+		return false
+	}
+	return now.Sub(time.Unix(*inst.LaunchedAt, 0)) >= cloud.OnStartVerifyGrace
+}
+
+// verifyOnStartScriptInContainer reads the instance's filesystem over SSH.
+// Every way of failing to look yields OnStartVerificationUnknown, which the
+// report renders as the unresolved hedge.
+func verifyOnStartScriptInContainer(inst *db.Launch) cloud.OnStartVerification {
+	client := cloudClientForDBInstance(inst.Provider)
+	if client == nil {
+		return cloud.OnStartVerificationUnknown
+	}
+	providerID := inst.EffectiveProviderID()
+	if providerID == "" {
+		return cloud.OnStartVerificationUnknown
+	}
+	pinst, err := client.ShowInstance(providerID)
+	if err != nil {
+		return cloud.OnStartVerificationUnknown
+	}
+	return cloud.VerifyOnStartInstalled(pinst, cloud.OnStartVerifyTimeout)
 }
 
 func reconcileInstanceDiagnoseLivePhase(jobs []*db.Job, phase string) string {
@@ -328,10 +391,14 @@ func formatGPUMetrics(t *db.JobPhaseTimings) string {
 //   - probe, onstart-stage, none  → OnStart's chain died at `onstart-stage`
 //     (e.g. apt-installing, rclone-installing) — surfaces which install step failed
 //   - probe, no stages            → OnStart ran but never wrote a stage marker
-//   - no probe, no stages         → OnStart never executed, or no outbound network
+//   - no probe, no stages         → ambiguous on R2 evidence alone, so the
+//     in-container verification resolves it where it could be taken: script
+//     absent means the provider never installed it, script present means the
+//     container ran it and could not reach R2. Unknown keeps the hedge.
 //
 // See docs/guides/cloud-instance-debugging.md.
-func formatBootstrapSection(stage, probe, onstartStage string, launched bool) string {
+func formatBootstrapSection(report *instanceDiagnoseReport) string {
+	stage, probe, onstartStage := report.BootstrapStage, report.OnStartProbe, report.OnStartStage
 	if stage != "" {
 		out := fmt.Sprintf("\nBootstrap:\n  Last stage:    %s\n", stage)
 		if probe != "" {
@@ -342,7 +409,7 @@ func formatBootstrapSection(stage, probe, onstartStage string, launched bool) st
 		}
 		return out
 	}
-	if !launched {
+	if report.Instance.LaunchedAt == nil {
 		return ""
 	}
 	if probe != "" {
@@ -354,9 +421,17 @@ func formatBootstrapSection(stage, probe, onstartStage string, launched bool) st
 		}
 		return out
 	}
-	return "\nBootstrap:\n" +
-		"  Last stage:    (no marker on R2 — bootstrap.sh likely never ran)\n" +
-		"  OnStart probe: (none — container probably never executed OnStart, or had no outbound network)\n"
+	out := "\nBootstrap:\n" +
+		"  Last stage:    (no marker on R2 — bootstrap.sh likely never ran)\n"
+	switch report.OnStartScriptVerification {
+	case cloud.OnStartConfirmedMissing:
+		out += "  OnStart probe: (none — the provider never installed the OnStart script; verified in container)\n"
+	case cloud.OnStartConfirmedInstalled:
+		out += "  OnStart probe: (none — script IS installed in the container, so it ran and could not reach R2)\n"
+	default:
+		out += "  OnStart probe: (none — container probably never executed OnStart, or had no outbound network)\n"
+	}
+	return out
 }
 
 func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
@@ -400,7 +475,7 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 		}
 	}
 
-	b.WriteString(formatBootstrapSection(report.BootstrapStage, report.OnStartProbe, report.OnStartStage, inst.LaunchedAt != nil))
+	b.WriteString(formatBootstrapSection(report))
 
 	// Section 2: Root cause
 	b.WriteString("\n")

@@ -252,23 +252,36 @@ type CheckInstanceParams struct {
 	RunningPhaseJobTerminalSince *time.Time
 }
 
-// effectiveMaxEmptyStatusTime returns the empty-status kill threshold.
-// A learned bootstrap terminate threshold replaces the legacy 1-minute
-// constant so slow provider status propagation is not misclassified as a
-// provider failure.
+// providerObservedNotRunning reports a positive provider reading of a
+// non-running status. It is the population StaleNonRunningStatus (rule 4b)
+// and, once terminal statuses are excluded, ProviderDead (rule 7) adjudicate;
+// DudVastDetection (rule 4d) stands down on it. A nil or empty status is
+// unknown, never not-running: the unknown-streak bound governs that case.
+func (p CheckInstanceParams) providerObservedNotRunning() bool {
+	return p.ProviderInst != nil &&
+		p.ProviderInst.Status != "" &&
+		p.ProviderInst.Status != cloud.ProviderStatusRunning
+}
+
+// effectiveMaxEmptyStatusTime returns the empty-status kill threshold. A
+// learned bootstrap terminate threshold replaces the legacy 1-minute constant
+// so slow provider status propagation is not misclassified as a provider
+// failure, clamped to maxEmptyStatusTimeCeiling; see that constant for the
+// derivation.
 func (p CheckInstanceParams) effectiveMaxEmptyStatusTime() time.Duration {
 	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
-		return d
+		return min(d, maxEmptyStatusTimeCeiling)
 	}
 	return maxEmptyStatusTime
 }
 
 // effectiveMaxPreRunningStatusTime returns the pre-running-status kill
 // threshold. Uses the learned bootstrap survival terminate threshold when one
-// exists, otherwise the legacy constant.
+// exists, clamped to maxPreRunningStatusTimeCeiling; see that constant for the
+// derivation and for why the legacy fallback is too tight.
 func (p CheckInstanceParams) effectiveMaxPreRunningStatusTime() time.Duration {
 	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
-		return d
+		return min(d, maxPreRunningStatusTimeCeiling)
 	}
 	return maxPreRunningStatusTime
 }
@@ -588,8 +601,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 	// non-running state gets a fresh deadline rather than inheriting an
 	// already-exceeded one. Skip when IntendedStatus already signals
 	// termination — step 8 catches that faster.
-	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
-		!isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
+	if p.providerObservedNotRunning() && !isProviderTerminalWithPolicy(p.ProviderInst, p.PauseTolerant) {
 		if anchor := stalePreRunningAnchor(ci, p.LastProviderStatusChangeAt); anchor != nil {
 			age := p.Now.Sub(*anchor)
 			if age > p.effectiveMaxPreRunningStatusTime() {
@@ -662,7 +674,15 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 	// signal of life means a downstream rule (heartbeat-stale,
 	// bootstrap-stalled) is the right adjudicator.
 	// See campaign-lifecycle.allium § DudVastDetection.
+	//
+	// providerObservedNotRunning stands the rule down: ci.Status becomes
+	// running when the launch call returns, not when the provider reaches
+	// running, so weft holds status=running over instances the provider still
+	// has in `created` or `loading`. Those have not failed to bootstrap — they
+	// have not been given the chance — and rules 4b and 7 own them by status.
+	// See ADR 0010.
 	if ci.Status == db.LaunchStatusRunning &&
+		!p.providerObservedNotRunning() &&
 		ci.LaunchedAt != nil && *ci.LaunchedAt > 0 &&
 		ci.AgentReadyAtUnix == nil &&
 		!p.OnStartProbePresent &&

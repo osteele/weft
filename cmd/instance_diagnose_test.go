@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2upload"
 )
@@ -312,5 +313,99 @@ func TestJobDescription_UsesDescriptionWhenNoCommand(t *testing.T) {
 	}
 	if got != "line1 line2" {
 		t.Fatalf("jobDescription = %q, want %q", got, "line1 line2")
+	}
+}
+
+// TestFormatBootstrapSection_NoProbeResolvesHedge: with no probe and no
+// stages, the R2 evidence alone cannot say whether the script never ran or
+// the container could not reach R2. The in-container verdict resolves it, and
+// an unknown verdict must leave the original hedge intact.
+func TestFormatBootstrapSection_NoProbeResolvesHedge(t *testing.T) {
+	tests := []struct {
+		name         string
+		verification cloud.OnStartVerification
+		wantContains string
+	}{
+		{
+			name:         "confirmed missing names the provider",
+			verification: cloud.OnStartConfirmedMissing,
+			wantContains: "the provider never installed the OnStart script",
+		},
+		{
+			name:         "confirmed installed points at the network",
+			verification: cloud.OnStartConfirmedInstalled,
+			wantContains: "could not reach R2",
+		},
+		{
+			name:         "unknown keeps the hedge",
+			verification: cloud.OnStartVerificationUnknown,
+			wantContains: "probably never executed OnStart, or had no outbound network",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatBootstrapSection(bootstrapSectionReport("", "", tt.verification))
+			if !strings.Contains(got, tt.wantContains) {
+				t.Errorf("formatBootstrapSection() = %q, want it to contain %q", got, tt.wantContains)
+			}
+		})
+	}
+}
+
+// TestFormatBootstrapSection_VerdictIgnoredWhenProbeLanded: once the probe is
+// present the ambiguity the verdict resolves does not exist, so the verdict
+// must not leak into a section describing a different failure mode.
+func TestFormatBootstrapSection_VerdictIgnoredWhenProbeLanded(t *testing.T) {
+	got := formatBootstrapSection(bootstrapSectionReport("", "2026-08-18T15:00:00Z", cloud.OnStartConfirmedMissing))
+	if strings.Contains(got, "never installed") {
+		t.Errorf("verdict leaked into the probe-present branch: %q", got)
+	}
+}
+
+// bootstrapSectionReport builds the minimum report formatBootstrapSection
+// reads: a launched instance plus the R2-derived markers.
+func bootstrapSectionReport(stage, probe string, verification cloud.OnStartVerification) *instanceDiagnoseReport {
+	launchedAt := int64(1)
+	return &instanceDiagnoseReport{
+		Instance:                  &db.Launch{LaunchedAt: &launchedAt},
+		BootstrapStage:            stage,
+		OnStartProbe:              probe,
+		OnStartScriptVerification: verification,
+	}
+}
+
+// TestShouldVerifyOnStartScript pins the gates that keep a provider API call
+// and an SSH round trip out of the report path. Each must be able to veto on
+// its own: an unconfirmed probe absence (the observer's R2 may be the thing
+// that failed), a stage marker already in hand (the verdict would be
+// discarded unread), a provider whose bootstrap does not arrive as an OnStart
+// script, a terminal instance, and an instance still inside the grace period.
+func TestShouldVerifyOnStartScript(t *testing.T) {
+	old := time.Now().Add(-time.Hour).Unix()
+	fresh := time.Now().Add(-30 * time.Second).Unix()
+	base := func() *db.Launch {
+		return &db.Launch{Provider: "vastai", Status: db.LaunchStatusRunning, LaunchedAt: &old}
+	}
+	tests := []struct {
+		name                 string
+		inst                 *db.Launch
+		bootstrapStage       string
+		probeConfirmedAbsent bool
+		want                 bool
+	}{
+		{"confirmed absent on a live vast.ai instance", base(), "", true, true},
+		{"probe absence not confirmed", base(), "", false, false},
+		{"stage marker landed", base(), "downloading", true, false},
+		{"provider has no OnStart script", &db.Launch{Provider: "runpod", Status: db.LaunchStatusRunning, LaunchedAt: &old}, "", true, false},
+		{"terminal instance cannot answer", &db.Launch{Provider: "vastai", Status: db.LaunchStatusFailed, LaunchedAt: &old}, "", true, false},
+		{"never launched", &db.Launch{Provider: "vastai", Status: db.LaunchStatusRunning}, "", true, false},
+		{"inside the grace period", &db.Launch{Provider: "vastai", Status: db.LaunchStatusRunning, LaunchedAt: &fresh}, "", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldVerifyOnStartScript(tt.inst, tt.bootstrapStage, tt.probeConfirmedAbsent, time.Now()); got != tt.want {
+				t.Errorf("shouldVerifyOnStartScript() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

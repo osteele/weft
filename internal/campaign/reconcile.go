@@ -1183,11 +1183,46 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 // survival terminate threshold instead.
 const maxEmptyStatusTime = 1 * time.Minute
 
+// maxEmptyStatusTimeCeiling bounds how far learned bootstrap survival data may
+// stretch the empty-status window.
+//
+// BootstrapSurvival is measured from provider_running_at to the first job's
+// wrapper start, so it describes work that begins only once the provider
+// reports `running`. This rule waits for the provider to report any status at
+// all, which is strictly earlier — the two intervals do not overlap, and the
+// curve carries no information about this one. Unclamped it stretched a
+// one-minute window past an hour and a half.
+//
+// Ceiling derived from the launched_at→provider_running_at distribution
+// (n=4270 as of 2026-08-18): p90 ≈ 5.7 min, p99 ≈ 23 min. Reaching a non-empty
+// status is a strict prefix of reaching `running`, so that distribution bounds
+// this one from above; 10 minutes clears its p90 with margin while keeping the
+// window an order of magnitude below the borrowed curve.
+const maxEmptyStatusTimeCeiling = 10 * time.Minute
+
 // maxPreRunningStatusTime is the legacy fallback maximum time to wait for a
 // provider instance to reach "running" status. It is used only when bootstrap
 // survival data is unavailable. In normal operation instance_check.go uses the
 // bootstrap survival terminate threshold instead.
 const maxPreRunningStatusTime = 5 * time.Minute
+
+// maxPreRunningStatusTimeCeiling bounds how far learned bootstrap survival
+// data may stretch the stale-non-running-status window.
+//
+// Same disjointness as maxEmptyStatusTimeCeiling: this rule waits for the
+// provider to reach `running`, and the borrowed curve starts measuring there.
+//
+// The ceiling is looser than the empty-status one because the event is
+// genuinely slower — provisioning and image pull happen in this window — and
+// because the 5-minute constant is demonstrably too tight, which is why the
+// learned override was adopted in the first place. Against the
+// launched_at→provider_running_at distribution (n=4270 as of 2026-08-18),
+// 5 min sits near p88: it would reap 12.5% of vast.ai launches that went on to
+// run. 30 minutes sits above p99 (23 min vast.ai, 26 min RunPod). Relative to
+// the unclamped learned value it newly reaps ~0.4% of launches (24 vs 9 of
+// 3864 vast.ai launches ran later than 30 and 110 minutes respectively) and
+// reclaims roughly 80 minutes of rental on each wedged one.
+const maxPreRunningStatusTimeCeiling = 30 * time.Minute
 
 // maxProviderStatusUnavailableTime is the maximum time to wait when provider
 // status polling fails or omits a known launch before any job/phase progress is
