@@ -192,3 +192,37 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestTorchPreflightCommandBindsScriptRequiresPython(t *testing.T) {
+	dir := t.TempDir()
+	script := `# /// script
+# requires-python = ">=3.11,<3.14"
+# dependencies = ["torch>=2.2,<2.7"]
+# ///
+import torch
+`
+	writeFile(t, filepath.Join(dir, "screen.py"), script)
+	got := torchPreflightShellCommand(dir, "uv run screen.py")
+	// Without the bound, uv resolves against the image default interpreter;
+	// on an image defaulting to 3.14 that leaves torch<2.7 with no wheel.
+	if !strings.Contains(got, `--python '>=3.11,<3.14'`) {
+		t.Fatalf("command = %q, want the script requires-python bound", got)
+	}
+	if !strings.Contains(got, "--with 'torch>=2.2,<2.7'") {
+		t.Fatalf("command = %q, want the script dependencies preserved", got)
+	}
+}
+
+func TestTorchPreflightCommandOmitsPythonWithoutRequiresPython(t *testing.T) {
+	dir := t.TempDir()
+	script := `# /// script
+# dependencies = ["torch>=2.2"]
+# ///
+import torch
+`
+	writeFile(t, filepath.Join(dir, "train.py"), script)
+	got := torchPreflightShellCommand(dir, "uv run train.py")
+	if strings.Contains(got, "--python") {
+		t.Fatalf("command = %q, want no interpreter request when the script declares no bound", got)
+	}
+}

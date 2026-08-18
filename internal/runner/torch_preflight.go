@@ -90,6 +90,15 @@ func torchPreflightShellCommand(workingDir, jobCommand string) string {
 	if scriptDeps := torchPreflightScriptDeps(workingDir, jobCommand); len(scriptDeps) > 0 {
 		var b strings.Builder
 		b.WriteString("uv run --isolated")
+		// The invocation ends in `python -c`, not the script path, so uv has
+		// no script from which to read requires-python and would otherwise
+		// select the image's uv default. The job's own `uv run script.py`
+		// honors this bound; the preflight standing in for it must select
+		// the same interpreter.
+		if requiresPython := dataloc.ScanScriptRequiresPython(workingDir, jobCommand); requiresPython != "" {
+			b.WriteString(" --python ")
+			b.WriteString(shellQuote(requiresPython))
+		}
 		for _, dep := range scriptDeps {
 			b.WriteString(" --with ")
 			b.WriteString(shellQuote(dep))

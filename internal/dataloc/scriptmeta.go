@@ -236,6 +236,36 @@ func ScanScriptDependencies(dir, command string) []string {
 	return out
 }
 
+// ScanScriptRequiresPython returns the PEP 723 top-level `requires-python`
+// bound, intersected across EVERY Python script referenced in the shell
+// command. Clauses from separate scripts are comma-joined, which is how PEP
+// 440 spells the intersection of two specifier sets; duplicate clauses are
+// dropped so a repeated bound does not lengthen the request.
+//
+// The result constrains interpreter selection for a synthesized uv invocation
+// that does not name the script itself; uv otherwise falls back to the image
+// default, which on images whose default exceeds the script's ceiling resolves
+// dependencies against an interpreter the job would never have used.
+func ScanScriptRequiresPython(dir, command string) string {
+	var clauses []string
+	seen := map[string]bool{}
+	for _, tree := range scanScriptPEP723Trees(dir, command) {
+		spec := firstStringValue(tree, "requires-python")
+		if spec == "" {
+			continue
+		}
+		for _, clause := range strings.Split(spec, ",") {
+			clause = strings.TrimSpace(clause)
+			if clause == "" || seen[clause] {
+				continue
+			}
+			seen[clause] = true
+			clauses = append(clauses, clause)
+		}
+	}
+	return strings.Join(clauses, ",")
+}
+
 // ScriptHasPEP723Metadata reports whether a referenced script contains a PEP
 // 723 inline metadata block. command is used to resolve scripts after a leading
 // `cd`; script is the path token from that command.

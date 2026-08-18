@@ -1858,6 +1858,34 @@ rule DetectFailureReason {
 -- producing exit-127 storms across wj2221-wj2232 + follow-on attempts on
 -- 2026-05-28.
 
+-- When the torch preflight is built from a script's PEP 723 block rather
+-- than from the project, it must reproduce the interpreter the job's own
+-- command will select, not merely the job's dependencies. That branch
+-- synthesizes `uv run --isolated --with <dep> … python -c …`; because the
+-- invocation ends in `python -c` and never names the script, uv has no
+-- script from which to read `requires-python`, and the interpreter falls
+-- back to the image's uv default. The runner must therefore pass the
+-- script's declared bound explicitly as `--python <specifier>`. Where a
+-- command references several scripts, the bounds intersect: PEP 440
+-- spells intersection as comma-joined clauses, matching how the same
+-- branch already merges `dependencies` across every referenced script.
+-- Without this the preflight resolves against an interpreter the job
+-- would never have used, and a bounded requirement fails for want of a
+-- wheel that the real run would never have needed — a false infra
+-- failure that is retried and re-billed on each fresh rental.
+-- Implementation: internal/runner/torch_preflight.go
+-- torchPreflightShellCommand, internal/dataloc/scriptmeta.go
+-- ScanScriptRequiresPython. Generally: a synthesized setup-phase
+-- invocation that stands in for the job command must reproduce every
+-- property of the real invocation that changes resolution — the
+-- interpreter bound as much as the dependency list — because uv reads
+-- those from the script or project the synthesized form omits.
+-- Regression: wj6277 on 2026-08-18 (wb80) — a script bounded to
+-- `>=3.11,<3.14` with `torch>=2.2,<2.7` was preflighted on an image
+-- defaulting to CPython 3.14, which has no cp314 torch wheel in that
+-- range; the same script had passed a day earlier on an image whose
+-- default was within the bound.
+
 -- On cloud pytorch images, weft takes a "system-torch shortcut" to avoid
 -- a ~870 MiB torch download per job: bootstrap creates .venv with
 -- `python -m venv --system-site-packages` against /opt/conda/bin/python,

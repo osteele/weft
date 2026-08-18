@@ -1008,3 +1008,27 @@ func assertStringMap(t *testing.T, name string, got, want map[string]string) {
 		}
 	}
 }
+
+func TestScanScriptRequiresPythonIntersectsAcrossScripts(t *testing.T) {
+	dir := t.TempDir()
+	writeScript := func(name, spec string) {
+		writePyFile(t, dir, name, "# /// script\n# requires-python = \""+spec+"\"\n# dependencies = [\"torch\"]\n# ///\n")
+	}
+	writeScript("prep.py", ">=3.11,<3.14")
+	writeScript("run.py", ">=3.11")
+
+	// Comma-joining is how PEP 440 spells specifier-set intersection; the
+	// repeated >=3.11 clause must not be emitted twice.
+	got := ScanScriptRequiresPython(dir, "python prep.py && python run.py")
+	if got != ">=3.11,<3.14" {
+		t.Fatalf("ScanScriptRequiresPython = %q, want %q", got, ">=3.11,<3.14")
+	}
+}
+
+func TestScanScriptRequiresPythonEmptyWhenUndeclared(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", "# /// script\n# dependencies = [\"torch\"]\n# ///\n")
+	if got := ScanScriptRequiresPython(dir, "uv run train.py"); got != "" {
+		t.Fatalf("ScanScriptRequiresPython = %q, want empty", got)
+	}
+}
