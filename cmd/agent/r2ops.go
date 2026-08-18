@@ -166,3 +166,28 @@ func uploadOpslog(bucket string, instanceID int64, logDir string) {
 		}
 	}
 }
+
+// writeJobAttemptComplete is the single writer of the R2 .complete marker
+// (r2keys.JobAttemptComplete, value = exit code). It owns the opslog-before-
+// marker ordering: the opslog upload must precede the marker so a
+// self-destruct racing post-job work still leaves the agent's diagnostic
+// trail in R2 (see runJobSequence). Rewriting the marker with the same exit
+// code is idempotent; the background repair path relies on that.
+//
+// opslogDir is the directory holding agent-ops.jsonl; pass "" only on paths
+// whose opslog was already uploaded before the work was enqueued —
+// re-uploading from there could overwrite the instance opslog key with
+// stale content from an older job's log snapshot.
+//
+// Uses the r2PutForAgent seam (a var aliasing r2Put) rather than r2Put
+// directly so tests can intercept marker writes; the implementations are
+// identical.
+func writeJobAttemptComplete(bucket string, instanceID int64, opslogDir string, jobID, runID int64, exitCode int) error {
+	if bucket == "" {
+		return nil
+	}
+	if opslogDir != "" {
+		uploadOpslog(bucket, instanceID, opslogDir)
+	}
+	return r2PutForAgent(bucket, r2keys.JobAttemptComplete(jobID, runID), fmt.Sprintf("%d", exitCode))
+}

@@ -29,24 +29,25 @@ const staleLogSnapshotAge = 6 * time.Hour
 // Workdir deletion is deferred until CleanupWorkdirs() so a later job in the
 // same campaign cannot race a per-job cleanup for a shared source tree.
 type bgWorkManager struct {
-	wg               sync.WaitGroup
-	mu               sync.Mutex
-	cond             *sync.Cond
-	errors           []bgWorkError
-	summaries        map[int64]runner.JobCompletionSummary
-	workdirs         map[string]struct{} // resolved absolute paths touched this campaign
-	uploadsByWorkdir map[string]*sync.WaitGroup
-	skipDeletion     bool
-	queue            []*queuedPostJobWork
-	active           map[string]*queuedPostJobWork
-	known            map[string]*queuedPostJobWork
-	queueCapacity    int
-	workerLimit      int
-	maxRetainedBytes int64
-	closed           bool
-	state            *publicationState
-	descriptorDir    string
-	stageRunner      func(*queuedPostJobWork) bool
+	wg                      sync.WaitGroup
+	mu                      sync.Mutex
+	cond                    *sync.Cond
+	uploadCond              *sync.Cond
+	errors                  []bgWorkError
+	summaries               map[int64]runner.JobCompletionSummary
+	workdirs                map[string]struct{} // resolved absolute paths touched this campaign
+	pendingUploadsByWorkdir map[string]int
+	skipDeletion            bool
+	queue                   []*queuedPostJobWork
+	active                  map[string]*queuedPostJobWork
+	known                   map[string]*queuedPostJobWork
+	queueCapacity           int
+	workerLimit             int
+	maxRetainedBytes        int64
+	closed                  bool
+	state                   *publicationState
+	descriptorDir           string
+	stageRunner             func(*queuedPostJobWork) bool
 }
 
 const (
@@ -394,18 +395,19 @@ func newBGWorkManagerForScope(
 		state = &publicationState{}
 	}
 	m := &bgWorkManager{
-		summaries:        make(map[int64]runner.JobCompletionSummary),
-		workdirs:         make(map[string]struct{}),
-		uploadsByWorkdir: make(map[string]*sync.WaitGroup),
-		active:           make(map[string]*queuedPostJobWork),
-		known:            make(map[string]*queuedPostJobWork),
-		skipDeletion:     skipDeletion,
-		workerLimit:      workerLimit,
-		queueCapacity:    queueCapacity,
-		state:            state,
-		descriptorDir:    publicationDescriptorDir(scope),
+		summaries:               make(map[int64]runner.JobCompletionSummary),
+		workdirs:                make(map[string]struct{}),
+		pendingUploadsByWorkdir: make(map[string]int),
+		active:                  make(map[string]*queuedPostJobWork),
+		known:                   make(map[string]*queuedPostJobWork),
+		skipDeletion:            skipDeletion,
+		workerLimit:             workerLimit,
+		queueCapacity:           queueCapacity,
+		state:                   state,
+		descriptorDir:           publicationDescriptorDir(scope),
 	}
 	m.cond = sync.NewCond(&m.mu)
+	m.uploadCond = sync.NewCond(&m.mu)
 	for _, job := range jobs {
 		dir := runner.ExpandTilde(job.Dir)
 		if dir != "" {
@@ -927,15 +929,20 @@ func (m *bgWorkManager) Close() {
 // WaitForUploadsInWorkdir blocks until every post-job upload currently in
 // flight for workdir has completed. See rule
 // SharedWorkdirUploadBarrierBeforeNextJob in specs/job-lifecycle.allium.
+//
+// Implemented as a mutex-guarded pending-count rather than a sync.WaitGroup:
+// registerUpload may run while a waiter is parked (a shared workdir can get
+// its next job's upload registered before the previous waiter returns), and
+// Add-after-Wait on a WaitGroup is undefined. The count makes registration
+// during a wait well-defined: the waiter rechecks the count on every wake.
 func (m *bgWorkManager) WaitForUploadsInWorkdir(workdir string) {
 	if workdir == "" {
 		return
 	}
 	m.mu.Lock()
-	wg := m.uploadsByWorkdir[workdir]
-	m.mu.Unlock()
-	if wg != nil {
-		wg.Wait()
+	defer m.mu.Unlock()
+	for m.pendingUploadsByWorkdir[workdir] > 0 {
+		m.uploadCond.Wait()
 	}
 }
 
@@ -952,12 +959,7 @@ func (m *bgWorkManager) registerUploadLocked(workdir string) {
 	if workdir == "" {
 		return
 	}
-	wg, ok := m.uploadsByWorkdir[workdir]
-	if !ok {
-		wg = &sync.WaitGroup{}
-		m.uploadsByWorkdir[workdir] = wg
-	}
-	wg.Add(1)
+	m.pendingUploadsByWorkdir[workdir]++
 }
 
 func (m *bgWorkManager) completeUpload(workdir string) {
@@ -965,11 +967,15 @@ func (m *bgWorkManager) completeUpload(workdir string) {
 		return
 	}
 	m.mu.Lock()
-	wg := m.uploadsByWorkdir[workdir]
-	m.mu.Unlock()
-	if wg != nil {
-		wg.Done()
+	defer m.mu.Unlock()
+	if m.pendingUploadsByWorkdir[workdir] <= 0 {
+		return
 	}
+	m.pendingUploadsByWorkdir[workdir]--
+	if m.pendingUploadsByWorkdir[workdir] == 0 {
+		delete(m.pendingUploadsByWorkdir, workdir)
+	}
+	m.uploadCond.Broadcast()
 }
 
 func (m *bgWorkManager) recordError(jobID int64, op string, err error) {
@@ -1036,7 +1042,12 @@ func repairR2Markers(pw postJobWork) error {
 	if pw.r2Bucket == "" {
 		return nil
 	}
-	if err := r2PutForAgent(pw.r2Bucket, r2keys.JobAttemptComplete(pw.jobID, pw.runID), fmt.Sprintf("%d", pw.exitCode)); err != nil {
+	// opslogDir is "" by design: the completion-time writeJobAttemptComplete
+	// call already uploaded the opslog before this work was enqueued, and by
+	// drain time cfg.LogDir may already hold a later job's rotated opslog —
+	// re-uploading from there could overwrite the instance opslog key with
+	// the wrong job's content. The marker rewrite itself is idempotent.
+	if err := writeJobAttemptComplete(pw.r2Bucket, pw.instanceID, "", pw.jobID, pw.runID, pw.exitCode); err != nil {
 		return err
 	}
 	// These keys are opportunistic live views. Earlier completion handling may

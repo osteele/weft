@@ -972,10 +972,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 				outputWindowStartUnix: outputWindowStartUnix,
 				outputDirs:            job.OutputDirs,
 			})
-			if cfg.OnPhase != nil {
-				cfg.OnPhase(uploadingPhase)
-			}
-			writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
+			setSequencePhase(cfg, uploadingPhase, job.ID)
 			lastPostJobID = job.ID
 			if i < len(jobs)-1 {
 				cleanLogDir(cfg.LogDir)
@@ -1032,14 +1029,13 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.AnyInfraFailed = true
 		}
 
-		// Upload the opslog before writing .complete so a self-destruct that
-		// races the post-job work still leaves the agent's diagnostic trail
-		// (which captures the stderr message from runJobWithProgress) in R2.
-		uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
-
 		// Write .complete marker synchronously so local sync sees
 		// this job as finished before the next job's .started marker.
-		r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
+		// writeJobAttemptComplete uploads the opslog first so a
+		// self-destruct that races the post-job work still leaves the
+		// agent's diagnostic trail (which captures the stderr message
+		// from runJobWithProgress) in R2.
+		_ = writeJobAttemptComplete(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir, job.ID, job.RunID, exitCode)
 
 		// === Synchronous post-job work ===
 		cleanupPhase := fmt.Sprintf("post_job_cleanup:%d", job.ID)
@@ -1090,10 +1086,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			uploadStartedUnix:     uploadStartedUnix,
 		})
 
-		if cfg.OnPhase != nil {
-			cfg.OnPhase(uploadingPhase)
-		}
-		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
+		setSequencePhase(cfg, uploadingPhase, job.ID)
 		lastPostJobID = job.ID
 
 		// Merge jobs accepted since the last merge (mid-job drains plus one
@@ -1103,10 +1096,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			continue
 		}
 		if newJobs := newJobsPoller.Take(func(phase string) {
-			if cfg.OnPhase != nil {
-				cfg.OnPhase(phase)
-			}
-			writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
+			setSequencePhase(cfg, phase, currentJobIDFromPhase(phase))
 		}); len(newJobs) > 0 {
 			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
 			bgm.RegisterNewJobs(newJobs)
@@ -1232,10 +1222,7 @@ func runSlottedJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequ
 	}
 	if newJobsPoller != nil {
 		newJobs := newJobsPoller.Take(func(phase string) {
-			if cfg.OnPhase != nil {
-				cfg.OnPhase(phase)
-			}
-			writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
+			setSequencePhase(cfg, phase, currentJobIDFromPhase(phase))
 		})
 		newJobsPoller.Stop()
 		newJobsPoller = nil
@@ -1306,11 +1293,7 @@ func jobFailureReasonIsInfra(logDir string, jobID int64) bool {
 }
 
 func setSequencePhase(cfg jobSequenceConfig, phase string, jobID int64) {
-	if cfg.OnPhase != nil {
-		cfg.OnPhase(phase)
-	}
-	oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(jobID), oplog.WithDetail(phase))
-	writePhase(cfg.R2Bucket, cfg.PhaseKey, phase)
+	recordPhase(cfg.R2Bucket, cfg.PhaseKey, phase, jobID, cfg.OnPhase)
 }
 
 // recordPrewarmFailure writes failure artifacts and the R2 .complete marker
@@ -1345,7 +1328,7 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 		SetupStart:   now,
 		SetupEnd:     now,
 	})
-	r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", ei.ExitCode))
+	_ = writeJobAttemptComplete(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir, job.ID, job.RunID, ei.ExitCode)
 	return ei.ExitCode
 }
 
@@ -1387,7 +1370,7 @@ func recordEarlyJobFailure(cfg jobSequenceConfig, job cloud.AgentJob, reason str
 			fmt.Fprintf(os.Stderr, "upload results for failed job %d: %s %s\n", job.ID, upload.Status, upload.Error)
 		}
 	}
-	_ = r2PutForAgent(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
+	_ = writeJobAttemptComplete(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir, job.ID, job.RunID, exitCode)
 }
 
 func sourceRecoveryFailureReason(err error) string {
@@ -1714,10 +1697,7 @@ func ensureFailureArtifacts(logDir string, jobID int64, ei runner.ExitInfo, runE
 // don't pay cold-start overhead in their first measured config.
 func runGPUWarmup(r2Bucket, phaseKey string, nextJobID int64, onPhase func(string)) {
 	phase := fmt.Sprintf("gpu_warmup:%d", nextJobID)
-	if onPhase != nil {
-		onPhase(phase)
-	}
-	writePhase(r2Bucket, phaseKey, phase)
+	recordPhase(r2Bucket, phaseKey, phase, nextJobID, onPhase)
 	fmt.Println("Running GPU warmup (CUDA context + cuBLAS init)...")
 
 	start := time.Now()

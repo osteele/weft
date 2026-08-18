@@ -2626,7 +2626,9 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 
 	now := time.Now().Unix()
 	for _, job := range jobs {
-		// Close old attempt and create fresh unplaced one
+		// Close old attempt and create fresh unplaced one. From-status guard
+		// is the driving SELECT (status IN queued/running) plus the open-
+		// attempt constraint here; canceled is table-valid from both.
 		if _, err := tx.Exec(`
 			UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ?
 			WHERE job_id = ? AND end_time IS NULL`,
@@ -3086,6 +3088,10 @@ func closeLaunchAttemptsTx(tx *sql.Tx, instanceID int64, outcome string) error {
 		attemptStatus = StatusFailed
 	}
 	now := time.Now().Unix()
+	// No from-status guard by design: launch teardown closes *every* open
+	// attempt regardless of status (canceled/failed from queued, starting,
+	// running, or paused are all table-valid); the open-attempt constraint
+	// is the guard.
 	if _, err := tx.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, end_time = COALESCE(NULLIF(end_time, 0), ?), pending_status = NULL
@@ -3100,7 +3106,9 @@ func closeLaunchAttemptsTx(tx *sql.Tx, instanceID int64, outcome string) error {
 	// failed/canceled, so a close that only touches open attempts leaves the
 	// job permanently non-terminal and re-selected by every repair pass.
 	// Stamp the launch's disposition onto such attempts when they are still
-	// the job's latest authoritative attempt.
+	// the job's latest authoritative attempt. From-status guard is embedded
+	// in attemptClosedWithoutDecisiveRecord (status NOT IN completed/failed
+	// and no detaching cloud_outcome).
 	_, err := tx.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, cloud_outcome = ?, pending_status = NULL
@@ -3211,6 +3219,10 @@ func repairCompletedCloudAttemptsWithoutEvidence(database *sql.DB) error {
 
 	now := time.Now().Unix()
 	for _, a := range attempts {
+		// Repair path un-poisoning rows fabricated by older cleanup; the
+		// driving SELECT in this transaction pinned each row to
+		// status=completed AND start_time IS NULL, so completed -> canceled
+		// here is deliberate data repair outside the transition table.
 		if _, err := tx.Exec(
 			`UPDATE job_attempts
 			    SET status = ?, end_time = COALESCE(NULLIF(end_time, 0), ?),

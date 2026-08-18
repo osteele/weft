@@ -198,77 +198,81 @@ entity Job {
     -- legacy: status: draft | pending_placement | queued | starting | running
           -- legacy: | paused | completed | failed | dead | killed | canceled
 
-    -- legacy: transitions status {
+    transitions status {
         -- Normal forward flow
-        -- legacy: draft -> queued
-        -- legacy: pending_placement -> queued
-        -- legacy: pending_placement -> canceled
-        -- legacy: queued -> starting
-        -- legacy: queued -> running
-        -- legacy: queued -> paused
-        -- legacy: queued -> canceled
-        -- legacy: queued -> killed
-        -- legacy: queued -> dead
-        -- legacy: queued -> failed
-        -- legacy: queued -> draft
-        -- legacy: starting -> running
-        -- legacy: starting -> completed
-        -- legacy: starting -> dead
-        -- legacy: starting -> failed
-        -- legacy: starting -> killed
-        -- legacy: starting -> paused
-        -- legacy: starting -> queued
-        -- legacy: starting -> draft
-        -- legacy: running -> completed
-        -- legacy: running -> failed
-        -- legacy: running -> dead
-        -- legacy: running -> killed
-        -- legacy: running -> canceled
-        -- legacy: running -> paused
-        -- legacy: running -> queued
-        -- legacy: running -> draft
-        -- legacy: paused -> running
-        -- legacy: paused -> killed
-        -- legacy: paused -> canceled
-        -- legacy: paused -> failed
-        -- legacy: paused -> queued
+        draft -> queued
+        pending_placement -> queued
+        pending_placement -> canceled
+        queued -> starting
+        queued -> running
+        queued -> paused
+        queued -> canceled
+        queued -> killed
+        queued -> dead
+        queued -> failed
+        queued -> draft
+        starting -> running
+        starting -> completed
+        starting -> dead
+        starting -> failed
+        starting -> killed
+        starting -> paused
+        starting -> queued
+        starting -> draft
+        running -> completed
+        running -> failed
+        running -> dead
+        running -> killed
+        running -> canceled
+        running -> paused
+        running -> queued
+        running -> draft
+        paused -> running
+        paused -> killed
+        paused -> canceled
+        paused -> failed
+        paused -> queued
 
         -- Restart/requeue paths (from terminal states)
-        -- legacy: completed -> queued
-        -- legacy: failed -> running
-        -- legacy: failed -> paused
-        -- legacy: failed -> queued
-        -- legacy: dead -> running
-        -- legacy: dead -> paused
-        -- legacy: dead -> queued
-        -- legacy: killed -> paused
-        -- legacy: killed -> queued
-        -- legacy: canceled -> paused
-        -- legacy: canceled -> queued
-        -- legacy: canceled -> failed
+        completed -> queued
+        failed -> running
+        failed -> paused
+        failed -> queued
+        dead -> running
+        dead -> paused
+        dead -> queued
+        killed -> paused
+        killed -> queued
+        canceled -> paused
+        canceled -> queued
+        canceled -> failed
 
-        -- Authoritative overrides (R2 completion corrects race conditions)
-        -- legacy: queued -> completed
-        -- legacy: failed -> completed
-        -- legacy: dead -> completed
-        -- legacy: killed -> completed
-        -- legacy: canceled -> completed
+        -- Authoritative overrides (R2 completion corrects race conditions).
+        -- Edges annotated "-- authoritative" may only be taken by an
+        -- authoritative source (the agent's .complete marker);
+        -- internal/status requires the authoritative flag for them. The
+        -- annotation is load-bearing: spec_transitions_test.go parses it to
+        -- keep this block and the code table set-equal.
+        queued -> completed    -- authoritative
+        failed -> completed    -- authoritative
+        dead -> completed      -- authoritative
+        killed -> completed    -- authoritative
+        canceled -> completed  -- authoritative
         -- An agent's .complete marker is ground truth about the job's
         -- outcome; orphan recovery's dead/killed is a guess made before
         -- the marker was observed, so an authoritative failed completion
         -- may override those guessed terminal states. completed -> failed
         -- remains forbidden: a stale failed marker must never overwrite a
         -- later authoritative completed.
+        dead -> failed         -- authoritative
+        killed -> failed       -- authoritative
         -- Carve-out: a completion whose kill_reason is user_kill was
         -- produced by weft's own kill signal — it confirms the user's stop
         -- rather than reporting a self-failure, so ingestion keeps the
         -- user's killed/canceled status (backfilling exit metadata) instead
         -- of taking this edge (db.RecordCloudJobCompletion).
-        -- legacy: dead -> failed
-        -- legacy: killed -> failed
-
-        -- legacy: terminal: completed, dead, failed, killed, canceled, draft
-    -- legacy: }
+        terminal: completed, dead, failed, killed, canceled, draft
+    }
 }
 
 -- Each execution attempt for a job. A job may have multiple attempts

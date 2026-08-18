@@ -350,15 +350,23 @@ func writePhase(r2Bucket, phaseKey, phase string) {
 	go r2Put(r2Bucket, phaseKey, phase)
 }
 
+// recordPhase routes one phase transition through every phase surface: the
+// in-process phase setter (if any), the ops log, and the R2 phase marker
+// (best-effort, see writePhase). jobID is 0 for instance-level phases
+// ("grace", "destroying") that carry no job suffix; "verb:jobID" phases
+// pass the job so the ops log entry is attributable.
+func recordPhase(r2Bucket, phaseKey, phase string, jobID int64, setPhase func(string)) {
+	if setPhase != nil {
+		setPhase(phase)
+	}
+	oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(jobID), oplog.WithDetail(phase))
+	writePhase(r2Bucket, phaseKey, phase)
+}
+
 // phaseCallback returns an OnPhase callback that writes phase markers to R2.
 func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)) func(string) {
 	return func(phase string) {
-		full := fmt.Sprintf("%s:%d", phase, jobID)
-		if setPhase != nil {
-			setPhase(full)
-		}
-		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(jobID), oplog.WithDetail(full))
-		writePhase(r2Bucket, phaseKey, full)
+		recordPhase(r2Bucket, phaseKey, fmt.Sprintf("%s:%d", phase, jobID), jobID, setPhase)
 	}
 }
 

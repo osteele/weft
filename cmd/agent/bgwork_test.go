@@ -533,3 +533,70 @@ func TestPruneStaleLogSnapshots(t *testing.T) {
 type errForTest string
 
 func (e errForTest) Error() string { return string(e) }
+
+// TestWaitForUploadsInWorkdir_BlocksAcrossConcurrentRegistration pins the
+// SharedWorkdirUploadBarrierBeforeNextJob invariant (specs/job-lifecycle.allium):
+// a waiter must not return while any upload for the workdir is pending,
+// including one registered after the waiter parked. The previous
+// sync.WaitGroup implementation made that registration an Add-after-Wait
+// misuse, which could let the barrier release early.
+func TestWaitForUploadsInWorkdir_BlocksAcrossConcurrentRegistration(t *testing.T) {
+	m := newBGWorkManager(nil, true)
+	defer m.Close()
+
+	const dir = "/tmp/shared-workdir"
+	m.registerUpload(dir)
+
+	returned := make(chan struct{})
+	go func() {
+		m.WaitForUploadsInWorkdir(dir)
+		close(returned)
+	}()
+
+	// Let the waiter park. Nothing has completed, so a correct barrier must
+	// still be blocking here — deterministic, since only completeUpload
+	// can release it.
+	select {
+	case <-returned:
+		t.Fatal("waiter returned with a pending upload")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Register a second upload while the waiter is parked — the exact
+	// pattern that was Add-after-Wait on the WaitGroup.
+	m.registerUpload(dir)
+
+	// Completing only the first must leave the waiter blocked.
+	m.completeUpload(dir)
+	select {
+	case <-returned:
+		t.Fatal("waiter returned while a second upload is still pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	m.completeUpload(dir)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not return after all uploads completed")
+	}
+}
+
+// TestWaitForUploadsInWorkdir_UnregisteredDirReturnsImmediately pins the
+// empty-workdir fast paths: no registration, no blocking.
+func TestWaitForUploadsInWorkdir_UnregisteredDirReturnsImmediately(t *testing.T) {
+	m := newBGWorkManager(nil, true)
+	defer m.Close()
+
+	done := make(chan struct{})
+	go func() {
+		m.WaitForUploadsInWorkdir("")
+		m.WaitForUploadsInWorkdir("/tmp/never-registered")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter blocked on an unregistered workdir")
+	}
+}

@@ -107,7 +107,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 	prefix := controlplane.GracePrefix(instanceIDInt)
 	phaseKey := controlplane.InstancePhase(instanceIDInt)
 
-	writePhase(r2Bucket, phaseKey, "grace")
+	recordPhase(r2Bucket, phaseKey, "grace", 0, nil)
 
 	// Write initial status
 	writeGraceStatus(r2Bucket, prefix, graceStatus{
@@ -167,7 +167,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 		// Check for resubmitted jobs.
 		jobs, err := drainGraceJobRequests(r2Bucket, instanceIDInt, func(phase string) {
-			writePhase(r2Bucket, phaseKey, phase)
+			recordPhase(r2Bucket, phaseKey, phase, currentJobIDFromPhase(phase), nil)
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll grace jobs: %v\n", err)
@@ -224,7 +224,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			Deadline:   deadline.Format(time.RFC3339),
 			FailedJobs: failedJobs,
 		})
-		writePhase(r2Bucket, phaseKey, "grace")
+		recordPhase(r2Bucket, phaseKey, "grace", 0, nil)
 	}
 }
 
@@ -312,7 +312,7 @@ func selfDestruct(opts selfDestructOpts) {
 		}
 	}
 	r2Put(opts.Bucket, controlplane.CampaignComplete(instanceIDInt), completionPayload)
-	writePhase(opts.Bucket, phaseKey, "destroying")
+	recordPhase(opts.Bucket, phaseKey, "destroying", opts.JobID, nil)
 	writeTerminationIntent(opts.Bucket, instanceIDInt, *marker)
 
 	// Clean up grace keys

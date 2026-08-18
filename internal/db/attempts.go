@@ -89,6 +89,10 @@ func closeAttemptsAndRequeueWithOutcome(db dbExecer, jobID int64, now int64, clo
 	if err := resolveOpenMoveIntentAbandonedTx(db, jobID, now, resolution); err != nil {
 		return err
 	}
+	// No from-status guard by design: this is the requeue primitive shared by
+	// ResetLaunchJobs, RequeueByID, ResetJobToUnplaced, and
+	// cleanupStaleAttempts — its contract is "cancel whatever is open, then
+	// requeue", so the end_time (open-attempt) constraint is the guard.
 	if _, err := db.Exec(
 		`UPDATE job_attempts
 		    SET status = ?,
@@ -732,6 +736,8 @@ func carryForwardDependencyMetadata(execer dbExecer, jobID, newAttemptID int64) 
 }
 
 // CloseAttempt marks the current open attempt for a job as ended.
+// Scoping to the open attempt is the guard; the caller owns the target
+// status (racing close paths deliberately write terminal statuses).
 func CloseAttempt(db *sql.DB, jobID int64, status string, exitCode *int, endTime int64) error {
 	_, err := db.Exec(`
 		UPDATE job_attempts
@@ -772,6 +778,8 @@ func GetAuthoritativeAttemptID(db *sql.DB, jobID int64) (int64, error) {
 }
 
 // UpdateAttemptRunning marks the latest open attempt as running with a start time.
+// Open-attempt scoping is the guard; transition validation happens in the
+// Mark* wrappers (see MarkQueuedJobRunning).
 //
 // On-prem callers invoke this optimistically before the remote start has
 // actually succeeded, and the failure path relies on pending_status being
@@ -790,7 +798,9 @@ func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 }
 
 // UpdateAttemptStarting marks the latest open attempt as starting with a start
-// time. This is the cloud-observed setup counterpart to UpdateAttemptRunning.
+// time. This is the cloud-observed setup counterpart to UpdateAttemptRunning;
+// like it, open-attempt scoping is the guard and MarkQueuedJobStarting owns
+// the transition validation.
 func UpdateAttemptStarting(execer dbExecer, jobID int64) error {
 	now := time.Now().Unix()
 	_, err := execer.Exec(`
@@ -883,6 +893,9 @@ func NormalizeStalePendingPlacementNoLaunch(database *sql.DB) (int64, error) {
 // Uses latestAttemptSubquery (not just open attempts) because completion is
 // authoritative — it can override a previous "failed" status from a race
 // condition (e.g., job was marked dead locally but status file shows completion).
+// Guard is caller-side: RecordCompletionByIDWithTransition runs checkTransition
+// before this write; the authoritative-override edges (failed/dead/killed/
+// canceled -> completed) are in internal/status.
 func UpdateAttemptCompletion(execer dbExecer, jobID int64, exitCode int, endTime int64) error {
 	// Stamp cloud_outcome in the same UPDATE for cloud rows
 	// (launch_id NOT NULL). Mirrors the derivation the
@@ -913,7 +926,8 @@ func UpdateAttemptCompletion(execer dbExecer, jobID int64, exitCode int, endTime
 // UpdateAttemptCompletionIfNonTerminal is the notification-safe counterpart to
 // UpdateAttemptCompletion. It performs the terminal write only while the
 // selected attempt is still non-terminal, so concurrent sync processes cannot
-// both claim the same terminal transition.
+// both claim the same terminal transition. The WHERE status NOT IN (terminal)
+// clause is the hard from-status guard.
 func UpdateAttemptCompletionIfNonTerminal(execer dbExecer, jobID int64, exitCode int, endTime int64) (bool, error) {
 	cloudOutcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
@@ -944,6 +958,8 @@ func UpdateAttemptCompletionIfNonTerminal(execer dbExecer, jobID int64, exitCode
 }
 
 // UpdateAttemptDead marks the latest open attempt as failed (unexpected termination).
+// Open-attempt scoping is the guard; failed is a table-valid target from every
+// open execution status (queued/starting/running/paused).
 func UpdateAttemptDead(execer dbExecer, jobID int64) error {
 	endTime := time.Now().Unix()
 	_, err := execer.Exec(`
@@ -1056,7 +1072,8 @@ func UpdateAttemptLastSyncedStatus(db *sql.DB, jobID int64, status string) error
 // UpdateAttemptStatusAndLastSynced updates status and last_synced_status on
 // the latest open attempt. Terminal transitions also stamp end_time if
 // missing, preserving the TerminalJobsHaveEndTime invariant — see
-// StampAttemptStatus in specs/status-sync.allium.
+// StampAttemptStatus in specs/status-sync.allium. Guard is caller-side:
+// UpdateStatusAndLastSynced runs checkOpenTransition before this write.
 func UpdateAttemptStatusAndLastSynced(execer dbExecer, jobID int64, status string) error {
 	if IsTerminalStatus(status) {
 		now := time.Now().Unix()
@@ -1079,6 +1096,9 @@ func UpdateAttemptStatusAndLastSynced(execer dbExecer, jobID int64, status strin
 
 // ClearAttemptPendingAndUpdateStatus reconciles pending_status by clearing it
 // and updating status + last_synced_status on the latest open attempt.
+// Guard is caller-side: ClearPendingAndUpdateStatus runs checkTransition
+// before this write; the queued/draft branch deliberately resets a closed
+// attempt (requeue semantics), which is why it uses latestAttemptSubquery.
 func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 	// Use latestAttemptSubquery because this can reset a closed (terminal)
 	// attempt back to queued/draft status.

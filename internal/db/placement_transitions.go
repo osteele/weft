@@ -258,6 +258,10 @@ func handleMoveTargetFailedBeforeStartTx(tx *sql.Tx, jobID, targetLaunchID, now 
 	}
 
 	if !targetEnded.Valid || targetEnded.Int64 <= 0 {
+		// From-status guard: the target attempt was proven not-yet-started
+		// (target.start_time invalid, checked above) and the end_time clause
+		// scopes to open attempts — an unstarted move target is
+		// queued/pending_placement, from which canceled is table-valid.
 		if _, err := tx.Exec(
 			`UPDATE job_attempts
 			    SET status = ?,

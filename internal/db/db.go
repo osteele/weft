@@ -1397,6 +1397,7 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 
 // UpdateJobRunning transitions a starting job to running
 func UpdateJobRunning(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusRunning, false, status.SourceSSHSync)
 	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusStarting)
 	return err
@@ -1406,6 +1407,7 @@ func UpdateJobRunning(db *sql.DB, id int64) error {
 // cloud_outcome in the same UPDATE for cloud rows (launch_id NOT NULL),
 // matching ClosedCloudAttemptHasOutcome (campaign-lifecycle.allium).
 func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
+	warnOpenTransition(db, id, StatusDead, false, status.SourceSSHSync)
 	endTime := time.Now().Unix()
 	_, err := db.Exec(`
 		UPDATE job_attempts
@@ -1660,6 +1662,7 @@ func ListActiveCloudJobs(db *sql.DB) ([]*Job, error) {
 
 // MarkJobDraftPending updates a job to draft status locally and records pending cleanup.
 func MarkJobDraftPending(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusDraft, false, status.SourceUserAction)
 	now := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE job_attempts SET status = ?, pending_status = ?, pending_at = ?

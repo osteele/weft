@@ -949,3 +949,69 @@ func TestRecordCloudJobCompletion_UserKillOnOpenAttemptRecordsKilled(t *testing.
 		t.Fatalf("status = %q, want %q", gotStatus, StatusKilled)
 	}
 }
+
+// TestMarkStuckJobDead_DoesNotOverwriteTerminalStatus pins the from-status
+// guard on the stuck-job fallback. FindStuckJobsOnCompletedLaunches selects
+// attempts in an execution status, but a completion can land between that
+// find and MarkStuckJobDead's write; the dead write must not stomp it
+// (completed -> dead has no transition edge).
+func TestMarkStuckJobDead_DoesNotOverwriteTerminalStatus(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`,
+		StatusRunning, jobID,
+	); err != nil {
+		t.Fatalf("seed running attempt: %v", err)
+	}
+	attemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil || attemptID == 0 {
+		t.Fatalf("GetLatestAttemptID = %d, %v", attemptID, err)
+	}
+
+	if err := MarkStuckJobDead(database, attemptID); err != nil {
+		t.Fatalf("MarkStuckJobDead on running attempt: %v", err)
+	}
+	var got string
+	if err := database.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&got); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if got != StatusDead {
+		t.Fatalf("status after stuck-job dead = %q, want %q", got, StatusDead)
+	}
+
+	// A late completion lands on the same attempt; the fallback must not
+	// overwrite it.
+	if _, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, exit_code = 0, end_time = 500, last_synced_status = ?
+		 WHERE id = ?`,
+		StatusCompleted, StatusCompleted, attemptID,
+	); err != nil {
+		t.Fatalf("seed completed attempt: %v", err)
+	}
+	if err := MarkStuckJobDead(database, attemptID); err != nil {
+		t.Fatalf("MarkStuckJobDead on completed attempt: %v", err)
+	}
+	if err := database.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&got); err != nil {
+		t.Fatalf("query attempt: %v", err)
+	}
+	if got != StatusCompleted {
+		t.Fatalf("status after second stuck-job dead = %q, want %q (completed must survive)", got, StatusCompleted)
+	}
+}

@@ -16,7 +16,6 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
-	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -146,10 +145,7 @@ func handleDiskFull(r2Bucket string, instanceID int64, ballastDir, ballastPath, 
 	if jobID > 0 {
 		failurePhase = fmt.Sprintf("disk-full:%d", jobID)
 	}
-	if setPhase != nil {
-		setPhase(failurePhase)
-	}
-	writePhase(r2Bucket, phaseKey, failurePhase)
+	recordPhase(r2Bucket, phaseKey, failurePhase, jobID, setPhase)
 
 	if err := os.Remove(ballastPath); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "warning: remove ballast file: %v\n", err)
@@ -167,7 +163,6 @@ func handleDiskFull(r2Bucket string, instanceID int64, ballastDir, ballastPath, 
 		_ = r2Put(r2Bucket, r2keys.InstanceDiskFailure(instanceID), string(data))
 	}
 
-	oplog.Log(oplog.OpPhaseTransition, oplog.WithDetail(failurePhase))
 	fmt.Fprintf(os.Stderr, "disk monitor: free space dropped below threshold (%s free); terminating instance\n", formatBytes(freeBytesBefore))
 	terminateInstanceForFailure(r2Bucket, instanceID, selfDestructCmd, failurePhase, jobID)
 }

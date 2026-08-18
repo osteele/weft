@@ -677,6 +677,11 @@ func updateExternalAttemptTx(execer dbExecer, jobID int64, obs ExternalJobObserv
 		startedAt = now
 	}
 	endAt := externalTimestampOr(obs.EndedAt, now)
+	// No internal-table guard by design: the external queue (SkyPilot) is
+	// authoritative for its own lifecycle, so the written status is the
+	// executor's normalized observation, not an internal transition. The
+	// terminal-finality check above is the guard — it refuses to rewrite a
+	// terminal attempt with a conflicting outcome.
 	_, err = execer.Exec(`
 		UPDATE job_attempts
 		   SET status = ?,

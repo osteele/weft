@@ -241,6 +241,10 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	}
 
 	if runID > 0 && cloudInstanceID.Valid {
+		// From-status guard is the WHERE clause: end_time IS NULL plus
+		// status IN (queued, starting, running) — a bulk terminal close of
+		// later open attempts on the same launch, never a rewrite of an
+		// already-terminal row.
 		if _, err := database.Exec(
 			`UPDATE job_attempts
 			 SET status = ?, exit_code = ?, start_time = COALESCE(start_time, ?),
@@ -263,6 +267,8 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		}
 	}
 	if runID > 0 && exitCode == 0 {
+		// Same from-status guard shape as the finalize write above: only
+		// later open attempts in an execution status are superseded.
 		if _, err := database.Exec(
 			`UPDATE job_attempts
 			 SET status = ?, exit_code = ?, start_time = COALESCE(start_time, ?),
@@ -490,14 +496,20 @@ func FindStuckJobsOnCompletedLaunches(database *sql.DB) ([]StuckJob, error) {
 
 // MarkStuckJobDead marks a stuck job attempt as dead. Called when R2 sync
 // has been attempted and failed — no completion data is recoverable.
+// The status guard mirrors FindStuckJobsOnCompletedLaunches: dead may only
+// land on an attempt still in an execution status, so a completion that
+// arrived between find and mark is never stomped (completed -> dead has no
+// transition edge).
 func MarkStuckJobDead(database *sql.DB, attemptID int64) error {
 	_, err := database.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, end_time = COALESCE(end_time, ?),
 		     failure_reason = 'launch completed but job results were not synced from R2',
 		     cloud_outcome = ?
-		 WHERE id = ?`,
+		 WHERE id = ?
+		   AND status IN (?, ?, ?)`,
 		StatusDead, time.Now().Unix(), AttemptOutcomeOrphaned, attemptID,
+		StatusStarting, StatusRunning, StatusPaused,
 	)
 	return err
 }
