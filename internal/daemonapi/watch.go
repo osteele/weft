@@ -154,6 +154,10 @@ type Server struct {
 
 const runawayBreakerRefreshInterval = 5 * time.Second
 
+// activityHeartbeatInterval bounds silence between activity snapshots on an
+// idle subscription; clients treat longer silence as staleness.
+const activityHeartbeatInterval = 45 * time.Second
+
 type runawayBreakerCache struct {
 	mu          sync.Mutex
 	refreshedAt time.Time
@@ -295,9 +299,9 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	case RequestMutate:
 		s.mutateRequest(reqCtx, database, encoder, req)
 	case RequestSubscribe:
-		subscribe(ctx, database, encoder, req, s.budgetCentsPerHour, &s.runawayBreakers)
+		subscribe(reqCtx, database, encoder, req, s.budgetCentsPerHour, &s.runawayBreakers)
 	case RequestWatchJobs:
-		watchJobs(ctx, database, encoder, req)
+		watchJobs(reqCtx, database, encoder, req)
 	default:
 		_ = encoder.Encode(Event{Type: EventError, Error: fmt.Sprintf("unsupported request type %q", req.Type)})
 	}
@@ -456,7 +460,7 @@ func subscribeProjectWatch(parent context.Context, database *sql.DB, encoder *js
 }
 
 func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
-	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour, runawayBreakers)
+	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour, runawayBreakers, activityHeartbeatInterval)
 }
 
 type subscriptionStep func(now time.Time) (*watchevents.SnapshotEvent, bool, error)
@@ -544,7 +548,7 @@ func projectWatchJobs(database *sql.DB, project string, recentWindow time.Durati
 	return watchevents.DedupeJobsByID(activeJobs, recentJobs), len(activeJobs) > 0, nil
 }
 
-func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
+func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, heartbeat time.Duration) {
 	ctx := parent
 	cancel := func() {}
 	if sub.TimeoutSeconds > 0 {
@@ -562,6 +566,7 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	includeStatus := sub.IncludeStatus || !sub.IncludeDelta
 	var prev *narrate.Snapshot
 	lastKey := ""
+	var lastEmit time.Time
 	for {
 		payload, active, err := buildCachedActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour, runawayBreakers)
 		if err != nil {
@@ -570,8 +575,12 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 		}
 		key := activityPayloadKey(payload)
 		shouldEmit := key != lastKey || activityPayloadHasDelta(payload)
+		if heartbeat > 0 && !shouldEmit && !lastEmit.IsZero() && time.Since(lastEmit) >= heartbeat {
+			shouldEmit = true
+		}
 		if shouldEmit {
 			lastKey = key
+			lastEmit = time.Now()
 			if err := encodeBoundedActivityEvent(encoder, Event{
 				Type:           EventSubscriptionSnapshot,
 				APIVersion:     1,
@@ -748,6 +757,10 @@ func activityPayloadKey(payload *ActivityPayload) string {
 	}
 	snapshot := stableSnapshotKey(payload.Snapshot)
 	statusLine := stableStatusLineKey(payload.StatusLine)
+	rows := make([]narrate.JobView, 0, len(payload.UnprocessedJobs))
+	for _, job := range payload.UnprocessedJobs {
+		rows = append(rows, stableJobView(job))
+	}
 	data, err := json.Marshal(struct {
 		Snapshot    activitySnapshotKey       `json:"snapshot,omitempty"`
 		StatusLine  activityStatusLineKey     `json:"status_line,omitempty"`
@@ -759,7 +772,7 @@ func activityPayloadKey(payload *ActivityPayload) string {
 		StatusLine:  statusLine,
 		Breakers:    payload.RunawayBreakers,
 		Unprocessed: payload.Unprocessed,
-		Rows:        payload.UnprocessedJobs,
+		Rows:        rows,
 	})
 	if err != nil {
 		return ""
@@ -795,18 +808,38 @@ func stableSnapshotKey(snapshot *narrate.Snapshot) activitySnapshotKey {
 	if snapshot == nil {
 		return activitySnapshotKey{}
 	}
-	return activitySnapshotKey{
-		Jobs:      snapshot.Jobs,
-		Instances: snapshot.Instances,
-		Autopilot: snapshot.Autopilot,
+	autopilot := snapshot.Autopilot
+	// PassAgeSeconds is an age counter recomputed from the build time, so it
+	// churns on every poll; the heartbeat refreshes it in the emitted
+	// payload, so it must not drive emit-on-change. State stays in the key:
+	// it is also clock-derived but only crosses discrete boundaries
+	// (running/stale/idle), and those rare transitions are exactly what a
+	// status client wants emitted promptly.
+	autopilot.PassAgeSeconds = 0
+	jobs := make(map[int64]narrate.JobView, len(snapshot.Jobs))
+	for id, job := range snapshot.Jobs {
+		jobs[id] = stableJobView(job)
 	}
+	return activitySnapshotKey{
+		Jobs:      jobs,
+		Instances: snapshot.Instances,
+		Autopilot: autopilot,
+	}
+}
+
+// stableJobView strips build-time-derived narration so elapsed time alone
+// never reads as a state change.
+func stableJobView(job narrate.JobView) narrate.JobView {
+	job.Explanation = ""
+	job.SuggestedAction = ""
+	return job
 }
 
 func stableStatusLineKey(statusLine *narrate.StatusLine) activityStatusLineKey {
 	if statusLine == nil {
 		return activityStatusLineKey{}
 	}
-	return activityStatusLineKey{
+	key := activityStatusLineKey{
 		RunningJobs:          statusLine.RunningJobs,
 		QueuedJobs:           statusLine.QueuedJobs,
 		StartingJobs:         statusLine.StartingJobs,
@@ -817,12 +850,13 @@ func stableStatusLineKey(statusLine *narrate.StatusLine) activityStatusLineKey {
 		RunRateUSDPerHour:    statusLine.RunRateUSDPerHour,
 		BudgetUSDPerHour:     statusLine.BudgetUSDPerHour,
 		Projects:             statusLine.Projects,
-		AutopilotState:       statusLine.AutopilotState,
 		UnprocessedCompleted: statusLine.UnprocessedCompleted,
 		UnprocessedFailed:    statusLine.UnprocessedFailed,
 		CompletedProjects:    statusLine.CompletedProjects,
 		FailedProjects:       statusLine.FailedProjects,
+		AutopilotState:       statusLine.AutopilotState,
 	}
+	return key
 }
 
 func filterProjectJobs(jobs []*db.Job, project string) []*db.Job {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -349,6 +350,200 @@ func TestActivityPayloadKeyIgnoresTimestamps(t *testing.T) {
 	if activityPayloadKey(first) == activityPayloadKey(second) {
 		t.Fatal("activity payload key did not change for runaway-breaker state")
 	}
+}
+
+func TestActivityPayloadKeyIgnoresNowDerivedFields(t *testing.T) {
+	stable := &ActivityPayload{
+		Snapshot: &narrate.Snapshot{
+			Jobs:      map[int64]narrate.JobView{1: {ID: 1, Status: db.StatusRunning, Explanation: "running: job is running", SuggestedAction: "monitor progress"}},
+			Instances: map[int64]narrate.InstanceView{},
+			Autopilot: narrate.AutopilotView{State: "running", PassAgeSeconds: 10},
+		},
+		StatusLine: &narrate.StatusLine{
+			AutopilotState: "running",
+			RunningJobs:    1,
+		},
+	}
+	aged := &ActivityPayload{
+		Snapshot: &narrate.Snapshot{
+			Jobs:      map[int64]narrate.JobView{1: {ID: 1, Status: db.StatusRunning, Explanation: "running: dispatch [42s ago] blocked", SuggestedAction: "replan: waiting 42s"}},
+			Instances: map[int64]narrate.InstanceView{},
+			Autopilot: narrate.AutopilotView{State: "running", PassAgeSeconds: 300},
+		},
+		StatusLine: &narrate.StatusLine{
+			AutopilotState: "running",
+			RunningJobs:    1,
+		},
+	}
+	if activityPayloadKey(stable) != activityPayloadKey(aged) {
+		t.Fatal("activity payload key changed for now-derived fields only")
+	}
+	// Autopilot state is clock-derived but discrete: crossing a boundary
+	// (running -> stale) is a rare, meaningful transition and must emit.
+	aged.Snapshot.Autopilot.State = "stale"
+	aged.StatusLine.AutopilotState = "stale"
+	if activityPayloadKey(stable) == activityPayloadKey(aged) {
+		t.Fatal("activity payload key did not change for an autopilot state transition")
+	}
+	aged.Snapshot.Autopilot.State = "running"
+	aged.StatusLine.AutopilotState = "running"
+	stable.Snapshot.Autopilot.LastSummary = "placed 30 jobs"
+	if activityPayloadKey(stable) == activityPayloadKey(aged) {
+		t.Fatal("activity payload key did not change for stored autopilot state")
+	}
+}
+
+func TestActivitySubscriptionDedupsPassAgeChurn(t *testing.T) {
+	database := db.SetupTestDB(t)
+	passStartedAt := time.Now().Add(-10 * time.Second).Unix()
+	if _, err := database.Exec(
+		`UPDATE autopilot_state SET pass_started_at = ?, last_heartbeat = ? WHERE id = 1`,
+		passStartedAt, time.Now().Unix()); err != nil {
+		t.Fatalf("seed autopilot pass: %v", err)
+	}
+
+	includeFormatted := false
+	sub := startActivityLoopTest(t, database, SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      1,
+	}, time.Hour)
+
+	first := nextSubscriptionEvent(t, sub)
+	if first.Type != EventSubscriptionSnapshot || first.Activity == nil || first.Activity.Snapshot == nil {
+		t.Fatalf("first event = %+v, want activity snapshot", first)
+	}
+	if got := first.Activity.Snapshot.Autopilot.PassAgeSeconds; got < 10 {
+		t.Fatalf("emitted pass_age_seconds = %d, want >= 10", got)
+	}
+
+	// Two more poll ticks advance only the autopilot pass age. The stable key
+	// must suppress re-emission until the heartbeat interval elapses.
+	if err := sub.conn.SetReadDeadline(time.Now().Add(2500 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var extra Event
+	if err := sub.decoder.Decode(&extra); err == nil {
+		t.Fatalf("unexpected emission when only pass age changed: %+v", extra)
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("read after polls: %v", err)
+	}
+}
+
+func TestActivitySubscriptionHeartbeatRefreshesIdleFeed(t *testing.T) {
+	database := db.SetupTestDB(t)
+	includeFormatted := false
+	sub := startActivityLoopTest(t, database, SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      1,
+	}, time.Second)
+
+	first := nextSubscriptionEvent(t, sub)
+	if first.Type != EventSubscriptionSnapshot || first.Activity == nil || first.Activity.Snapshot == nil {
+		t.Fatalf("first event = %+v, want activity snapshot", first)
+	}
+	second := nextSubscriptionEvent(t, sub)
+	if second.Type != EventSubscriptionSnapshot || second.Activity == nil || second.Activity.Snapshot == nil {
+		t.Fatalf("second event = %+v, want heartbeat activity snapshot", second)
+	}
+	if got := second.Activity.Snapshot.Autopilot.State; got != "never" {
+		t.Fatalf("heartbeat autopilot state = %q, want never", got)
+	}
+	if second.Activity.Snapshot.Time.IsZero() {
+		t.Fatal("heartbeat snapshot missing refreshed time")
+	}
+}
+
+func TestSubscriptionLoopsExitOnClientDisconnect(t *testing.T) {
+	database := db.SetupTestDB(t)
+	insertWatchTestJob(t, database, 401, db.StatusQueued)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server, err := StartServer(ctx, database, socketPath)
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	defer server.Close()
+
+	cases := []struct {
+		name string
+		req  Request
+	}{
+		{name: "activity subscription", req: Request{
+			Type: RequestSubscribe, ClientPID: os.Getpid(),
+			Subscribe: &SubscriptionRequest{Resource: ResourceActivity, Follow: true},
+		}},
+		{name: "job_status subscription", req: Request{
+			Type: RequestSubscribe, ClientPID: os.Getpid(),
+			Subscribe: &SubscriptionRequest{Resource: ResourceJobStatus, JobIDs: []int64{401}},
+		}},
+		{name: "watch_jobs", req: Request{
+			Type: RequestWatchJobs, ClientPID: os.Getpid(), JobIDs: []int64{401},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := runtime.NumGoroutine()
+			conn, err := net.Dial("unix", server.socketPath)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			decoder := json.NewDecoder(conn)
+			if err := json.NewEncoder(conn).Encode(tc.req); err != nil {
+				conn.Close()
+				t.Fatalf("encode request: %v", err)
+			}
+			for {
+				var event Event
+				if err := decoder.Decode(&event); err != nil {
+					conn.Close()
+					t.Fatalf("read initial event: %v", err)
+				}
+				if event.Type == EventSnapshot || event.Type == EventSubscriptionSnapshot {
+					break
+				}
+			}
+			// The subscription loop is now blocked on the connection-scoped
+			// context. Sever without a clean close and require every
+			// connection goroutine to exit.
+			conn.Close()
+			deadline := time.Now().Add(5 * time.Second)
+			for runtime.NumGoroutine() > base {
+				if time.Now().After(deadline) {
+					t.Fatalf("subscription loop survived client disconnect: %d goroutines, want %d", runtime.NumGoroutine(), base)
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+		})
+	}
+}
+
+func startActivityLoopTest(t *testing.T, database *sql.DB, sub SubscriptionRequest, heartbeat time.Duration) *Subscription {
+	t.Helper()
+	maxEventBytes, err := activityEventLimit(sub.MaxEventBytes)
+	if err != nil {
+		t.Fatalf("activity event limit: %v", err)
+	}
+	sub.MaxEventBytes = maxEventBytes
+	serverSide, clientSide := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverSide.Close()
+		_ = clientSide.Close()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go runActivitySubscriptionLoop(ctx, database, json.NewEncoder(serverSide), "test-sub", sub, 0, nil, heartbeat)
+	return &Subscription{conn: clientSide, decoder: json.NewDecoder(clientSide)}
 }
 
 func TestBuildActivityPayloadCanOmitFormattedFields(t *testing.T) {

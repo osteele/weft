@@ -49,8 +49,10 @@ is one newline-terminated JSON object sent to `~/.cache/weft/daemon.sock`:
 This is a cached/no-sync read: handling the subscription reads local database
 state and does not contact hosts or providers. The first
 `subscription_snapshot` is a complete initial snapshot. Later snapshots carry
-the complete current active-job map plus an optional delta. The
-`unprocessed_jobs` array carries the bounded terminal-job inbox (at most the
+the complete current active-job map plus an optional delta. The daemon emits a
+snapshot when the stable payload changes; an idle feed is kept fresh by a
+full-snapshot heartbeat every 45 seconds (see the activity resource below).
+The `unprocessed_jobs` array carries the bounded terminal-job inbox (at most the
 last 14 days), including jobs that finished before the client connected.
 Consumers that only need one project may add `"project": "<name>"`.
 
@@ -275,6 +277,14 @@ an `activity` payload:
   }
 }
 ```
+
+Activity snapshots are emitted on change. When nothing changed, the daemon
+still re-emits a full snapshot once per heartbeat interval of 45 seconds,
+recomputing `snapshot.time` and `autopilot.pass_age_seconds` on every
+emission so elapsed state age stays derivable on an idle feed. A client may
+therefore treat silence beyond a small multiple of the heartbeat interval
+(for example two or three intervals) as staleness: the daemon is gone, the
+socket broke, or the subscription died.
 
 The structured `snapshot`, `delta`, and `status_line` fields are for native
 clients. `runaway_breakers` is omitted when no breaker is active; a non-empty
