@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/retrypolicy"
 )
@@ -124,6 +125,97 @@ func TestClassifyPass(t *testing.T) {
 			}
 			if gotWait != tc.wantWait {
 				t.Errorf("wait = %s, want %s", gotWait, tc.wantWait)
+			}
+		})
+	}
+}
+
+// A pass whose result carries a settled typed recheck need gets the refined
+// blocked outcome; the string path only applies when the result has none.
+func TestClassifyPassTypedRecheckNeed(t *testing.T) {
+	deadline := blockreason.RecheckDeadline
+	market := blockreason.RecheckMarket
+	none := blockreason.RecheckNone
+	pausedWait := 42 * time.Second
+
+	tests := []struct {
+		name        string
+		result      *GroupedAutoPilotResult
+		wantOutcome PassOutcome
+		wantWait    time.Duration
+	}{
+		{
+			name: "typed deadline gets the backoff cooldown",
+			result: &GroupedAutoPilotResult{
+				BlockedReasons: map[int64]string{1: "reuse backoff 45s remaining (after 2 failed submit(s))"},
+				Recheck:        &deadline,
+			},
+			wantOutcome: OutcomeBlockedDeadline,
+			wantWait:    AutopilotCooldownBackoff,
+		},
+		{
+			name: "typed market gets the market cooldown",
+			result: &GroupedAutoPilotResult{
+				BlockedReasons: map[int64]string{1: "no offers available"},
+				Recheck:        &market,
+			},
+			wantOutcome: OutcomeBlockedMarket,
+			wantWait:    AutopilotCooldownBlocked,
+		},
+		{
+			// A dependency reason is database-observable; the string path
+			// would misclassify it as market and keep the timer running.
+			name: "typed none waits for the database write",
+			result: &GroupedAutoPilotResult{
+				BlockedReasons: map[int64]string{1: "waiting on job dependency: wj1 must complete"},
+				Recheck:        &none,
+			},
+			wantOutcome: OutcomeBlockedNone,
+			wantWait:    AutopilotCooldownBlocked,
+		},
+		{
+			name: "typed need present but reasons all waiting-kind is idle",
+			result: &GroupedAutoPilotResult{
+				BlockedReasons: map[int64]string{1: "inventory-tagged: waiting for on-prem host"},
+				Recheck:        &market,
+			},
+			wantOutcome: OutcomeIdle,
+			wantWait:    AutopilotCooldownIdle,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOutcome, gotWait := ClassifyPass(tc.result, nil, pausedWait)
+			if gotOutcome != tc.wantOutcome {
+				t.Errorf("outcome = %q, want %q", gotOutcome, tc.wantOutcome)
+			}
+			if gotWait != tc.wantWait {
+				t.Errorf("wait = %s, want %s", gotWait, tc.wantWait)
+			}
+		})
+	}
+}
+
+// The refined blocked outcomes carry the typed recheck need, so TimerRunsPass
+// decides the timer without re-parsing reason strings. OutcomeBlocked itself
+// still falls back to the string classifier.
+func TestTimerRunsPassTypedOutcomes(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome PassOutcome
+		blocked map[int64]string
+		want    bool
+	}{
+		{name: "typed market keeps the timer", outcome: OutcomeBlockedMarket, want: true},
+		{name: "typed deadline keeps the timer", outcome: OutcomeBlockedDeadline, want: true},
+		{name: "typed none waits for a change", outcome: OutcomeBlockedNone, want: false},
+		{name: "plain blocked with no typed need falls back to strings", outcome: OutcomeBlocked, blocked: map[int64]string{1: "no offers available"}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TimerRunsPass(tc.outcome, tc.blocked); got != tc.want {
+				t.Errorf("TimerRunsPass(%q, %v) = %v, want %v", tc.outcome, tc.blocked, got, tc.want)
 			}
 		})
 	}

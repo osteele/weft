@@ -39,6 +39,15 @@ const (
 	OutcomeError    PassOutcome = "error"
 	OutcomePaused   PassOutcome = "paused"
 	OutcomeBusy     PassOutcome = "busy"
+
+	// The blocked refinements carry the typed recheck need ClassifyPass
+	// derived from the pass's verdicts, so TimerRunsPass decides the timer
+	// without re-parsing reason strings. OutcomeBlocked itself is the
+	// fallback when no typed need was computed; its cooldown still varies
+	// with the string classification, but the outcome value stays "blocked".
+	OutcomeBlockedMarket   PassOutcome = "blocked-market"
+	OutcomeBlockedDeadline PassOutcome = "blocked-deadline"
+	OutcomeBlockedNone     PassOutcome = "blocked-none"
 )
 
 // AutopilotCooldownBackoff is the recheck interval for a pass blocked only on
@@ -66,6 +75,10 @@ const AutopilotQuietBackstop = 10 * time.Minute
 
 // ClassifyPass turns a finished pass into its outcome and the cooldown to
 // apply before the next one.
+//
+// When the result carries a settled typed recheck need (result.Recheck), it
+// drives both the cooldown and the refined blocked outcome. Otherwise the
+// persisted reason strings are classified, preserving the pre-typed behavior.
 func ClassifyPass(result *GroupedAutoPilotResult, err error, pausedWait time.Duration) (PassOutcome, time.Duration) {
 	switch {
 	case errors.Is(err, ErrAutopilotPaused):
@@ -82,6 +95,16 @@ func ClassifyPass(result *GroupedAutoPilotResult, err error, pausedWait time.Dur
 		return OutcomeProgress, AutopilotCooldownProgress
 	}
 	if AutoPilotBlockedReasonCount(result.BlockedReasons) > 0 {
+		if need, computed := result.recheckNeed(); computed {
+			switch need {
+			case blockreason.RecheckDeadline:
+				return OutcomeBlockedDeadline, AutopilotCooldownBackoff
+			case blockreason.RecheckMarket:
+				return OutcomeBlockedMarket, AutopilotCooldownBlocked
+			default:
+				return OutcomeBlockedNone, AutopilotCooldownBlocked
+			}
+		}
 		// A pass blocked only on retry backoffs is waiting out a local
 		// deadline; rechecking it at the market's cadence just burns offer
 		// fetches on an answer that cannot have changed yet.
@@ -102,8 +125,16 @@ func ClassifyPass(result *GroupedAutoPilotResult, err error, pausedWait time.Dur
 // write will announce — a fresh provider query, or a retry backoff elapsing. A
 // pass blocked purely on the run-rate budget or on reuse rejections waits for
 // the database change that clears it. ClassifyPass sets how long that wait is.
+//
+// The refined blocked outcomes (OutcomeBlockedMarket, OutcomeBlockedDeadline,
+// OutcomeBlockedNone) already carry the typed recheck need; OutcomeBlocked
+// falls back to classifying the reason strings.
 func TimerRunsPass(outcome PassOutcome, blockedReasons map[int64]string) bool {
 	switch outcome {
+	case OutcomeBlockedMarket, OutcomeBlockedDeadline:
+		return true
+	case OutcomeBlockedNone:
+		return false
 	case OutcomeBlocked:
 		return blockreason.RecheckFor(blockedReasons) != blockreason.RecheckNone
 	case OutcomeIdle:

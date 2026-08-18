@@ -212,7 +212,7 @@ func runGroupedAutoPilotPassForTest(t *testing.T, ctx context.Context, database 
 		return QueueRebalanceResult{}, nil
 	}
 	if !opts.realFillReusableInstances {
-		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, map[int64]string, map[int64]string, map[int64][]blockreason.ReuseRejection) (int, error) {
+		autoPilotFillReusableInstances = func(context.Context, *sql.DB, *r2.Client, map[int64]struct{}, map[int64]struct{}, *passAccum) (int, error) {
 			return 0, nil
 		}
 	}
@@ -1052,24 +1052,26 @@ func TestSelectLaunchGroupsWithinHeadroom_ExemptsRateCappedGroup(t *testing.T) {
 func TestApplyAcceptedLaunchGroups_UpdatesLegacyLaunchFields(t *testing.T) {
 	plan := campaign.AutoPlacementPlan{
 		LaunchJobIDs: []int64{1, 2, 3},
-		BlockedReasons: map[int64]string{
-			1: "old reason",
-			2: "old reason",
-		},
 	}
+	acc := &passAccum{}
+	acc.setLaunchBlocker(1, blockreason.KindMarket, "old reason")
+	acc.setLaunchBlocker(2, blockreason.KindMarket, "old reason")
 	groups := []campaign.LaunchGroup{
 		{JobIDs: []int64{3, 1}, CostPerHourCents: 70},
 	}
 
-	applyAcceptedLaunchGroups(&plan, groups, plan.BlockedReasons)
+	applyAcceptedLaunchGroups(&plan, groups, acc)
 	if plan.LaunchRateCentsPerHour != 70 {
 		t.Fatalf("launch rate = %d, want 70", plan.LaunchRateCentsPerHour)
 	}
 	if len(plan.LaunchJobIDs) != 2 || plan.LaunchJobIDs[0] != 1 || plan.LaunchJobIDs[1] != 3 {
 		t.Fatalf("launch job ids = %v, want [1 3]", plan.LaunchJobIDs)
 	}
-	if _, exists := plan.BlockedReasons[1]; exists {
-		t.Fatalf("blocked reason for accepted job 1 should be cleared, got %q", plan.BlockedReasons[1])
+	if acc.isBlocked(1) {
+		t.Fatalf("blocked reason for accepted job 1 should be cleared")
+	}
+	if !acc.isBlocked(2) {
+		t.Fatalf("blocked reason for non-accepted job 2 should remain")
 	}
 }
 
@@ -1518,15 +1520,15 @@ func TestMergeRelaunchReasonsIntoBlockedReasons_PrefersPerJobOverPerInstance(t *
 		1607: failedInstanceID,
 	}
 
-	blockedReasons := map[int64]string{}
-	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
+	acc := &passAccum{}
+	mergeRelaunchReasonsIntoBlockedReasons(acc, result, failedInstanceByJob)
 
 	for jobID, want := range map[int64]string{
 		1605: pftReason,
 		1606: asideReason,
 		1607: airReason,
 	} {
-		got := blockedReasons[jobID]
+		got := acc.blockedReasons[jobID]
 		if got != want {
 			t.Errorf("blockedReasons[%d] = %q, want %q", jobID, got, want)
 		}
@@ -1545,10 +1547,10 @@ func TestMergeRelaunchReasonsIntoBlockedReasons_FallsBackToPerInstance(t *testin
 	}
 	failedInstanceByJob := map[int64]int64{100: 42}
 
-	blockedReasons := map[int64]string{}
-	mergeRelaunchReasonsIntoBlockedReasons(blockedReasons, result, failedInstanceByJob)
+	acc := &passAccum{}
+	mergeRelaunchReasonsIntoBlockedReasons(acc, result, failedInstanceByJob)
 
-	if got, want := blockedReasons[100], "no offers available"; got != want {
+	if got, want := acc.blockedReasons[100], "no offers available"; got != want {
 		t.Errorf("blockedReasons[100] = %q, want %q", got, want)
 	}
 }
@@ -2005,15 +2007,15 @@ func TestFillReusableInstancesRecordsRejectionReason(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	diagnostics := map[int64]string{}
-	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, diagnostics, map[int64]string{}, nil)
+	acc := &passAccum{}
+	placed, err := fillReusableInstances(context.Background(), database, nil, nil, nil, acc)
 	if err != nil {
 		t.Fatalf("fillReusableInstances: %v", err)
 	}
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0", placed)
 	}
-	if got := diagnostics[jobID]; !strings.Contains(got, "could not reuse") || !strings.Contains(got, "GPU memory insufficient") {
+	if got := acc.verdict(jobID).Diagnostics(); !strings.Contains(got, "could not reuse") || !strings.Contains(got, "GPU memory insufficient") {
 		t.Fatalf("reuse diagnostic = %q, want a could-not-reuse GPU memory reason", got)
 	}
 }
@@ -2306,20 +2308,64 @@ func TestRunGroupedAutoPilotPass_DoesNotBlockJobCreatedAfterPlannerSnapshot(t *t
 	}
 }
 
-func TestAddAutoPilotBlockedReasonCombinesDistinctPaths(t *testing.T) {
-	reasons := map[int64]string{
-		1951: "run-rate headroom exhausted ($0.24/hr free, this group needs $1.52/hr)",
+func TestReuseDiagnosticsCombineDistinctPaths(t *testing.T) {
+	acc := &passAccum{}
+	acc.setLaunchBlocker(1951, blockreason.KindBudget, "run-rate headroom exhausted ($0.24/hr free, this group needs $1.52/hr)")
+	acc.addReuseDiagnostic(1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
+	acc.addReuseDiagnostic(1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
+
+	flat, _ := acc.verdict(1951).Settle(nil)
+	if !strings.Contains(flat, "run-rate headroom exhausted") {
+		t.Fatalf("flat = %q, want run-rate reason", flat)
+	}
+	if strings.Count(flat, "reuse blocked") != 1 {
+		t.Fatalf("flat = %q, want one reuse reason", flat)
+	}
+}
+
+// A real pass settles the typed aggregate recheck need onto the result: a
+// planner-market blocker must surface as RecheckMarket so ClassifyPass can
+// pick the refined blocked outcome without re-parsing strings.
+func TestRunGroupedAutoPilotPass_SettlesTypedRecheckNeed(t *testing.T) {
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "typed need", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 
-	addAutoPilotBlockedReason(reasons, 1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
-	addAutoPilotBlockedReason(reasons, 1951, "reuse blocked: wi2808 RTX 6000Ada 45GB: GPU class mismatch: job=h100 instance=NVIDIA")
-
-	got := reasons[1951]
-	if !strings.Contains(got, "run-rate headroom exhausted") {
-		t.Fatalf("reason = %q, want run-rate reason", got)
+	originalBuildPlan := autoPilotBuildPlan
+	originalRelaunch := autoPilotRelaunch
+	originalPlace := autoPilotPlaceComputeIntensive
+	t.Cleanup(func() {
+		autoPilotBuildPlan = originalBuildPlan
+		autoPilotRelaunch = originalRelaunch
+		autoPilotPlaceComputeIntensive = originalPlace
+	})
+	autoPilotPlaceComputeIntensive = func(_ *sql.DB, _ *config.Config, jobs []*db.Job) ([]*db.Job, int) {
+		return jobs, 0
 	}
-	if strings.Count(got, "reuse blocked") != 1 {
-		t.Fatalf("reason = %q, want one reuse reason", got)
+	plannerReason := "no offers from providers for gpu=A40"
+	autoPilotBuildPlan = func(_ *sql.DB, _ *config.Config, _ []*db.Job, _ []campaign.InstanceCapacity) (campaign.AutoPlacementPlan, error) {
+		return campaign.AutoPlacementPlan{BlockedReasons: map[int64]string{jobID: plannerReason}}, nil
+	}
+	autoPilotRelaunch = func(_ *sql.DB, _ *config.Config, _ int, _ map[int64]float64, _ []int64, _ string, _ bool, _ bool) (*campaign.RelaunchResult, error) {
+		return &campaign.RelaunchResult{}, nil
+	}
+
+	result, err := runGroupedAutoPilotPassForTest(t, context.Background(), database, nil)
+	if err != nil {
+		t.Fatalf("RunGroupedAutoPilotPass: %v", err)
+	}
+	if result.BlockedReasons[jobID] != plannerReason {
+		t.Fatalf("blocked reason = %q, want %q", result.BlockedReasons[jobID], plannerReason)
+	}
+	if result.Recheck == nil || *result.Recheck != blockreason.RecheckMarket {
+		t.Fatalf("Recheck = %v, want %v", result.Recheck, blockreason.RecheckMarket)
+	}
+	if outcome, _ := ClassifyPass(result, nil, 0); outcome != OutcomeBlockedMarket {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeBlockedMarket)
 	}
 }
 
@@ -2414,16 +2460,15 @@ func TestSubmitAutoPilotReuseAssignments_SourceTooLargeBlocksWithoutClaiming(t *
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
-	reuseDiagnostics := map[int64]string{}
-	blockedReasons := map[int64]string{}
+	acc := &passAccum{}
 	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
 		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
-		reuseDiagnostics, blockedReasons, nil)
+		acc)
 
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0", placed)
 	}
-	reason := blockedReasons[jobID]
+	reason := acc.blockedReasons[jobID]
 	if !strings.Contains(reason, "weft data publish") && !strings.Contains(reason, "exceeds") && !strings.Contains(reason, "limit") {
 		t.Fatalf("blockedReasons = %q, want authoritative source-size reason", reason)
 	}
@@ -2531,15 +2576,15 @@ func TestSubmitAutoPilotReuseAssignments_BackoffSkips(t *testing.T) {
 	}
 	reuseBackoffEventEmitted.Delete(jobID)
 
-	reuseDiagnostics := map[int64]string{}
+	acc := &passAccum{}
 	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
 		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
-		reuseDiagnostics, map[int64]string{}, nil)
+		acc)
 
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0 (backoff window)", placed)
 	}
-	if diag := reuseDiagnostics[jobID]; !strings.Contains(diag, "reuse backoff") {
+	if diag := acc.verdict(jobID).Diagnostics(); !strings.Contains(diag, "reuse backoff") {
 		t.Fatalf("diagnostic = %q, want reuse backoff detail", diag)
 	}
 	attempts, err := db.GetLaunchAttempts(database, jobID)
@@ -2585,19 +2630,23 @@ func TestFinalizeUnplacedBlockedReasons_PersistsRecordedReuseAndOnPrem(t *testin
 
 	instLabel := ids.FormatInstanceID(instanceID)
 	launchReason := "provider launch failed: test outage"
-	blockedReasons := map[int64]string{jobID: launchReason}
-	structuredBlocked := map[int64]*blockreason.Structured{}
-	recordedReuse := map[int64][]blockreason.ReuseRejection{
-		jobID: {{Instance: instLabel, Reason: "submit failed: upload source: connection reset", Detail: "full error text"}},
-	}
-	onPremDetails := map[int64]string{
-		jobID: "cool30: driver floor: NVIDIA driver 525.125.06 < required >=570",
-	}
+	recordedReuse := []blockreason.ReuseRejection{{Instance: instLabel, Reason: "submit failed: upload source: connection reset", Detail: "full error text"}}
+	onPremDetail := "cool30: driver floor: NVIDIA driver 525.125.06 < required >=570"
 
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
-		map[int64]string{}, recordedReuse, onPremDetails,
+	vb := &blockreason.VerdictBuilder{}
+	vb.SetLaunchBlocker(blockreason.KindMarket, launchReason)
+	vb.RecordReuse(recordedReuse)
+	vb.SetOnPremDetail(onPremDetail)
+	flat, structured, _, _, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
 		map[int64]*db.Job{jobID: job}, []int64{jobID},
 		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+	if flat[jobID] != launchReason {
+		t.Fatalf("flat = %q, want %q", flat[jobID], launchReason)
+	}
+	if structured[jobID] == nil {
+		t.Fatal("structured breakdown missing")
+	}
 
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -2633,14 +2682,14 @@ func TestFinalizeUnplacedBlockedReasons_DropsReuseOnlyNonCandidate(t *testing.T)
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
-	blockedReasons := map[int64]string{}
-	structuredBlocked := map[int64]*blockreason.Structured{}
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
-		map[int64]string{jobID: "could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB"},
-		nil, nil, map[int64]*db.Job{jobID: job}, nil, nil, nil)
+	vb := &blockreason.VerdictBuilder{}
+	vb.AddReuseDiagnostic("could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB")
+	flat, _, _, _, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
+		map[int64]*db.Job{jobID: job}, nil, nil, nil)
 
-	if len(blockedReasons) != 0 {
-		t.Fatalf("blockedReasons = %v, want no reuse-only blocker", blockedReasons)
+	if len(flat) != 0 {
+		t.Fatalf("flat = %v, want no reuse-only blocker", flat)
 	}
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -2651,6 +2700,48 @@ func TestFinalizeUnplacedBlockedReasons_DropsReuseOnlyNonCandidate(t *testing.T)
 	}
 	if refreshed.PlacementBlockedJSON != "" {
 		t.Fatalf("placement_blocked = %q, want empty", refreshed.PlacementBlockedJSON)
+	}
+}
+
+// The terminal-classification invariant is generalized from the rental path
+// to every path: a planned candidate that ends the pass unplaced with no
+// terminal verdict is an orchestration defect. Here a candidate on a
+// non-rental path (no rental relaunch runs) carries only an opportunistic
+// reuse diagnostic, so the epilogue must name it rather than silently leaving
+// it unblocked.
+func TestFinalizeUnplacedBlockedReasons_NonRentalPathFlagsUnclassifiedCandidate(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python x.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	vb := &blockreason.VerdictBuilder{}
+	vb.AddReuseDiagnostic("could not reuse running instances: wi3816 RTX A6000 45GB: GPU memory insufficient: job=48GB")
+	flat, structured, _, unclassified, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
+		map[int64]*db.Job{jobID: job}, []int64{jobID}, nil, nil)
+
+	if len(flat) != 0 || len(structured) != 0 {
+		t.Fatalf("settled flat=%v structured=%v, want none for an unclassified candidate", flat, structured)
+	}
+	if len(unclassified) != 1 || unclassified[0] != jobID {
+		t.Fatalf("unclassified = %v, want [%d]", unclassified, jobID)
+	}
+
+	// A settled candidate is not flagged.
+	vb2 := &blockreason.VerdictBuilder{}
+	vb2.SetLaunchBlocker(blockreason.KindMarket, "no offers available")
+	_, _, _, unclassified, _ = finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb2},
+		map[int64]*db.Job{jobID: job}, []int64{jobID}, nil, nil)
+	if len(unclassified) != 0 {
+		t.Fatalf("unclassified = %v, want none for a settled candidate", unclassified)
 	}
 }
 
@@ -2756,15 +2847,14 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedAttachesReuseBreakdown(t *
 	job.GPUMemGB = &mem
 
 	runRate := "run-rate target exceeded (no subset fits): target $3.50/hr, current $3.42/hr + planned $4.36/hr = $7.78/hr (headroom $0.08/hr, cheapest group $4.36/hr)"
-	blockedReasons := map[int64]string{jobID: runRate}
-	structuredBlocked := map[int64]*blockreason.Structured{}
-
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
-		map[int64]string{}, nil, nil,
+	vb := &blockreason.VerdictBuilder{}
+	vb.SetLaunchBlocker(blockreason.KindBudget, runRate)
+	flat, structured, _, _, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
 		map[int64]*db.Job{jobID: job}, nil,
 		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
 
-	if got := blockedReasons[jobID]; got != runRate {
+	if got := flat[jobID]; got != runRate {
 		t.Fatalf("compact reason changed: got %q, want unchanged budget verdict", got)
 	}
 
@@ -2775,6 +2865,9 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedAttachesReuseBreakdown(t *
 	s := blockreason.Parse(refreshed.PlacementBlockedJSON)
 	if s == nil {
 		t.Fatalf("placement_blocked did not decode: %q", refreshed.PlacementBlockedJSON)
+	}
+	if structured[jobID] == nil || structured[jobID].Marshal() != refreshed.PlacementBlockedJSON {
+		t.Fatalf("returned structured does not match what was persisted")
 	}
 	if !s.IsPlacementFailure() {
 		t.Fatalf("expected an expandable placement failure, got %+v", s)
@@ -2826,14 +2919,17 @@ func TestFinalizeUnplacedBlockedReasons_RunRateCompositeKeepsLaunchClean(t *test
 	job.GPUMemGB = &mem
 
 	runRate := "run-rate headroom exhausted ($1.60/hr free, this group needs $1.65/hr)"
-	composite := runRate + "; could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible"
-	blockedReasons := map[int64]string{jobID: composite}
-	structuredBlocked := map[int64]*blockreason.Structured{}
-
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
-		map[int64]string{}, nil, nil,
+	vb := &blockreason.VerdictBuilder{}
+	vb.SetLaunchBlocker(blockreason.KindBudget, runRate)
+	vb.AddReuseDiagnostic("could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible")
+	flat, structured, _, _, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
 		map[int64]*db.Job{jobID: job}, nil,
 		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	if flat[jobID] != runRate+"; could not reuse running instances: wi5212 A100 PCIE 40GB: image incompatible" {
+		t.Fatalf("flat = %q, want the composite reason", flat[jobID])
+	}
 
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -2842,6 +2938,9 @@ func TestFinalizeUnplacedBlockedReasons_RunRateCompositeKeepsLaunchClean(t *test
 	s := blockreason.Parse(refreshed.PlacementBlockedJSON)
 	if s == nil {
 		t.Fatalf("placement_blocked did not decode: %q", refreshed.PlacementBlockedJSON)
+	}
+	if structured[jobID] == nil || structured[jobID].Marshal() != refreshed.PlacementBlockedJSON {
+		t.Fatalf("returned structured does not match what was persisted")
 	}
 	if s.Launch != runRate {
 		t.Fatalf("launch blocker = %q, want %q", s.Launch, runRate)
@@ -2892,13 +2991,19 @@ func TestFinalizeUnplacedBlockedReasons_RunRateBlockedCompatibleInstanceStaysBud
 	job.GPUMemGB = &mem
 
 	runRate := "run-rate target exceeded (no subset fits): target $3.50/hr, current $3.42/hr + planned $4.36/hr = $7.78/hr (headroom $0.08/hr, cheapest group $4.36/hr)"
-	blockedReasons := map[int64]string{jobID: runRate}
-	structuredBlocked := map[int64]*blockreason.Structured{}
-
-	finalizeUnplacedBlockedReasons(database, blockedReasons, structuredBlocked,
-		map[int64]string{}, nil, nil,
+	vb := &blockreason.VerdictBuilder{}
+	vb.SetLaunchBlocker(blockreason.KindBudget, runRate)
+	flat, structured, _, _, _ := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{jobID: vb},
 		map[int64]*db.Job{jobID: job}, nil,
 		[]campaign.InstanceCapacity{{Instance: inst, DiskFreeGB: 100}}, nil)
+
+	if flat[jobID] != runRate {
+		t.Fatalf("flat = %q, want unchanged budget verdict", flat[jobID])
+	}
+	if len(structured) != 0 {
+		t.Fatalf("structured = %+v, want none (busy-but-compatible instances yield no breakdown)", structured)
+	}
 
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -2957,15 +3062,33 @@ func TestSubmitAutoPilotReuseAssignments_AttemptCapSkips(t *testing.T) {
 		t.Fatalf("GetJobByID: %v", err)
 	}
 
-	reuseDiagnostics := map[int64]string{}
+	acc := &passAccum{}
 	placed := submitAutoPilotReuseAssignments(context.Background(), database, nil,
 		[]campaign.ReuseAssignment{{Job: job, Instance: campaign.InstanceCapacity{Instance: inst}}},
-		reuseDiagnostics, map[int64]string{}, nil)
+		acc)
 
 	if placed != 0 {
 		t.Fatalf("placed = %d, want 0 at the attempt cap", placed)
 	}
-	if !strings.Contains(reuseDiagnostics[jobID], "max cloud attempts") {
-		t.Fatalf("reuseDiagnostics = %q, want max-attempts reason", reuseDiagnostics[jobID])
+	if !strings.Contains(acc.verdict(jobID).Diagnostics(), "max cloud attempts") {
+		t.Fatalf("reuseDiagnostics = %q, want max-attempts reason", acc.verdict(jobID).Diagnostics())
+	}
+}
+
+func TestFinalizeUnplacedBlockedReasons_SurfacesVerifyListError(t *testing.T) {
+	// A failed unplaced re-list means the terminal-classification invariant
+	// cannot be checked, not that it holds; the error must surface instead
+	// of silently passing the pass.
+	database := db.SetupTestDB(t)
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, _, _, unclassified, verifyErr := finalizeUnplacedBlockedReasons(database,
+		map[int64]*blockreason.VerdictBuilder{}, map[int64]*db.Job{}, []int64{1}, nil, nil)
+	if verifyErr == nil {
+		t.Fatal("verifyErr = nil, want error from closed database")
+	}
+	if len(unclassified) != 0 {
+		t.Fatalf("unclassified = %v, want none when the re-list failed", unclassified)
 	}
 }
