@@ -272,6 +272,43 @@ func TestEncodeBoundedActivityEventAcceptsExactBoundary(t *testing.T) {
 	}
 }
 
+// TestActivityEventLimitMatchesDocumentedContract covers every negotiation
+// branch documented in docs/design/daemon-subscription-api.md: zero selects
+// the default, larger requests clamp to the default, nonzero values below the
+// minimum are rejected, and negative requests never negotiate a ceiling.
+func TestActivityEventLimitMatchesDocumentedContract(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested int
+		want      int
+		wantErr   bool
+	}{
+		{name: "negative rejected", requested: -1, wantErr: true},
+		{name: "zero uses default", requested: 0, want: DefaultActivityMaxEventBytes},
+		{name: "below minimum rejected", requested: MinimumActivityMaxEventBytes - 1, wantErr: true},
+		{name: "minimum accepted", requested: MinimumActivityMaxEventBytes, want: MinimumActivityMaxEventBytes},
+		{name: "between minimum and default passes through", requested: MinimumActivityMaxEventBytes + 1, want: MinimumActivityMaxEventBytes + 1},
+		{name: "above default clamped", requested: DefaultActivityMaxEventBytes + 1, want: DefaultActivityMaxEventBytes},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := activityEventLimit(tc.requested)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("activityEventLimit(%d) = %d, want error", tc.requested, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("activityEventLimit(%d): %v", tc.requested, err)
+			}
+			if got != tc.want {
+				t.Fatalf("activityEventLimit(%d) = %d, want %d", tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSubscribeActivityReportsOversizedCompleteSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 	insertWatchTestProjectJob(t, database, 303, "augur", db.StatusQueued)
