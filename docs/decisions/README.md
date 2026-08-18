@@ -18,6 +18,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0005](0005-let-learned-setup-survival-govern-onstart-watchdogs.md) | Let learned setup survival govern the OnStart watchdogs | accepted |
 | [0006](0006-settle-blocked-reason-verdicts-through-one-typed-builder.md) | Settle blocked-reason verdicts through one typed builder | accepted |
 | [0007](0007-typed-recheck-with-string-classifier-fallback.md) | Type the recheck cadence, keep the string classifier as fallback | accepted |
+| [0008](0008-cap-the-borrowed-curve-in-dud-detection.md) | Cap the borrowed survival curve in dud detection | accepted |
 
 ## Adding one
 

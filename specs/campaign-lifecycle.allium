@@ -432,13 +432,18 @@ config {
     -- Bimodal observed distribution: probes either land within ~60s or
     -- never; an 8-minute window covers cold-image pulls without false-
     -- killing slow-but-progressing launches.
-    -- LEGACY FALLBACK, not the operative threshold. The dud window
-    -- normally rides the learned per-provider bootstrap survival terminate
-    -- threshold (BootstrapSurvival.TerminateAfter, computed by
-    -- db.ComputeBootstrapSurvival); this constant applies when that curve
-    -- has not learned a threshold (TerminateLearned false). See
-    -- effectiveDudVastTimeout in internal/campaign/instance_check.go.
+    -- Applies when the learned per-provider bootstrap survival curve has not
+    -- learned a terminate threshold (TerminateLearned false). When it has,
+    -- the dud window rides that threshold clamped to
+    -- dud_vast_timeout_ceiling. See effectiveDudVastTimeout in
+    -- internal/campaign/instance_check.go.
     dud_vast_timeout: Duration = 8.minutes
+    -- Ceiling on the learned bootstrap survival terminate threshold when it
+    -- stands in for dud_vast_timeout. Bounds a long-tailed
+    -- bootstrap-COMPLETION quantile from redefining a probe-ARRIVAL window
+    -- whose distribution is the bimodal one described above. See
+    -- DudVastDetection.
+    dud_vast_timeout_ceiling: Duration = 15.minutes
     -- OnStart chain stall. When the OnStart probe HAS landed (so the
     -- container ran OnStart — dud_vast_timeout does not apply) but the
     -- OnStart stage marker then freezes on an in-progress install step
@@ -2541,6 +2546,19 @@ rule DudVastDetection {
         -- every 5 min (survivalCacheTTL in
         -- internal/campaign/reconcile.go).
         --
+        -- The learned value is clamped to config.dud_vast_timeout_ceiling.
+        -- This rule reasons about probe ARRIVAL, whose distribution is the
+        -- bimodal one described above; BootstrapSurvival measures bootstrap
+        -- COMPLETION, a different random variable whose long tail puts its
+        -- terminate cutoff beyond an hour on mature providers. Learned data
+        -- may extend this window for a provider whose probes genuinely
+        -- arrive late, but must not define it, because a quantile of the
+        -- wrong distribution silently replaces a constant calibrated to the
+        -- right one. Incident wi7309 (2026-08-18): a learned 1h50m bootstrap
+        -- threshold was adopted unclamped, so an instance whose container
+        -- never received its OnStart script sat 86 min ($3.80) inside an
+        -- 8-minute detector that matched it on every other clause.
+        --
         -- Defense-in-depth absence signals. The rule conjoins six
         -- absence signals rather than the single OnStart probe because
         -- each individual R2 read can return an indistinguishable
@@ -2590,9 +2608,13 @@ rule DudVastDetection {
         -- arrival — the events have different shapes (probe arrival is
         -- ~60s-or-never; bootstrap completion is a long tail), so a
         -- dud-specific survival curve would fit better than the
-        -- borrowed one. RQ-E2 covers tuning the bootstrap/first-
-        -- registration survival cutoffs; these two remain tracked
-        -- separately.
+        -- borrowed one. Gap (2) is now bounded rather than open: the
+        -- borrowed threshold is clamped to dud_vast_timeout_ceiling, so
+        -- a long-tail bootstrap quantile can no longer redefine the
+        -- probe-arrival window (docs/decisions/0008). The clamp is a
+        -- bound, not a fit; a dedicated curve is still the right fix.
+        -- RQ-E2 covers tuning the bootstrap/first-registration survival
+        -- cutoffs; these two remain tracked separately.
 }
 
 rule OnStartChainWatchdog {
@@ -2601,10 +2623,11 @@ rule OnStartChainWatchdog {
     requires: not HasStartedJob(instance)
     requires: InstancePhase(instance) = ""
     requires: BootstrapStage(instance) = ""
-    requires: OnStartStage(instance) != ""
-    requires: IsOnStartFailureStage(OnStartStage(instance))
-              or now - OnStartStageChangedAt(instance) >= EffectiveOnStartStallTimeout(instance)
-              or now - FirstOnStartProbeSeen(instance) >= EffectiveOnStartTotalActiveTimeout(instance)
+    requires: (OnStartStage(instance) != ""
+               and (IsOnStartFailureStage(OnStartStage(instance))
+                    or now - OnStartStageChangedAt(instance) >= EffectiveOnStartStallTimeout(instance)))
+              or (FirstOnStartProbeSeen(instance) != null
+                  and now - FirstOnStartProbeSeen(instance) >= EffectiveOnStartTotalActiveTimeout(instance))
 
     ensures: instance.status = failed
     ensures: instance.termination_reason = infra_failure
@@ -2651,6 +2674,19 @@ rule OnStartChainWatchdog {
         --     instance. Incident wi5105 (2026-07-12): a RunPod OnStart
         --     looped started↔deps-ready for ~90 min ($1.02) because the
         --     churning marker defeated the stall sub-case.
+        --
+        -- The stage requirement is scoped to the two sub-cases that read a
+        -- stage. The total-active cap needs only FirstOnStartProbeSeen, and
+        -- requiring a stage for it too left a hole: the probe can land and
+        -- NO stage ever follow, when the OnStart shell dies between its
+        -- first line and its first stage write, or when the provider injects
+        -- the env carrying the probe URL but never materialises the script
+        -- itself. In that window DudVastDetection is suppressed (the probe
+        -- is a sign of life), the failure-token and stall sub-cases have no
+        -- stage to read, and a stage-gated cap cannot fire either — so no
+        -- rule adjudicates and the instance bleeds to the adaptive deadline.
+        -- Incident wi7306 (2026-08-18): probe landed, no stage ever written,
+        -- 117 min billed.
         --
         -- Both duration sub-cases prefer the learned setup survival
         -- terminate threshold (SetupSurvival.TerminateAfter, computed by

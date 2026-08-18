@@ -277,11 +277,13 @@ func (p CheckInstanceParams) effectiveLaunchingPhaseTimeout() time.Duration {
 	return launchingPhaseTimeout
 }
 
-// effectiveDudVastTimeout returns the dud-provider detection window.
-// Uses the learned bootstrap survival terminate threshold when one exists.
+// effectiveDudVastTimeout returns the dud-provider detection window. Uses the
+// learned bootstrap survival terminate threshold when one exists, clamped to
+// dudVastTimeoutCeiling: the learned curve measures bootstrap completion, not
+// probe arrival, so it may extend this window but must not define it.
 func (p CheckInstanceParams) effectiveDudVastTimeout() time.Duration {
 	if d, ok := p.BootstrapSurvival.LearnedTerminate(); ok {
-		return d
+		return min(d, dudVastTimeoutCeiling)
 	}
 	return dudVastTimeout
 }
@@ -668,9 +670,8 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		ci.AgentReadyAtUnix == nil &&
 		!p.JobState.HasStartedJob &&
 		p.InstancePhase == "" &&
-		p.BootstrapStage == "" &&
-		p.OnStartStage != ""
-	if onStartActive {
+		p.BootstrapStage == ""
+	if onStartActive && p.OnStartStage != "" {
 		// 4e. A definitive install failure marker — terminate now.
 		if isOnStartFailureStage(p.OnStartStage) {
 			return InstanceAction{
@@ -699,25 +700,39 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 				}
 			}
 		}
-		// 4g. Total OnStart time exceeded without ever reaching bootstrap.sh
-		// or agent-ready. Rule 4f measures the stall from the marker's R2
-		// last-modified, so a provider that re-runs a failed OnStart from the
-		// top (e.g. RunPod) refreshes the marker every loop and 4f never
-		// fires. Anchoring on FirstOnStartProbeSeenUnix (set-once, immune to
-		// marker rewrites) reaps the looping instance instead of letting it
-		// bleed to the ~2h adaptive bootstrap deadline.
-		if ci.FirstOnStartProbeSeenUnix != nil {
-			active := p.Now.Sub(time.Unix(*ci.FirstOnStartProbeSeenUnix, 0))
-			if active >= p.effectiveOnStartTotalActiveTimeout() {
-				return InstanceAction{
-					Kind:              ActionBootstrapStalled,
-					TerminalStatus:    db.LaunchStatusFailed,
-					TerminationReason: db.TerminationReasonInfraFailure,
-					StallMessage:      fmt.Sprintf("OnStart active %s without reaching bootstrap (marker at %s; likely restarting/looping) — terminating instance, jobs reset to queued", active.Truncate(time.Second), p.OnStartStage),
-					DestroyProvider:   true,
-					ResetJobs:         true,
-					AttemptOutcome:    db.AttemptOutcomeOrphaned,
-				}
+	}
+
+	// 4g. Total OnStart time exceeded without ever reaching bootstrap.sh or
+	// agent-ready. Rule 4f measures the stall from the marker's R2
+	// last-modified, so a provider that re-runs a failed OnStart from the top
+	// (e.g. RunPod) refreshes the marker every loop and 4f never fires.
+	// Anchoring on FirstOnStartProbeSeenUnix (set-once, immune to marker
+	// rewrites) reaps the looping instance instead of letting it bleed to the
+	// ~2h adaptive bootstrap deadline.
+	//
+	// Deliberately outside the OnStartStage guard that 4e/4f need: the probe
+	// alone is a sufficient anchor. A probe that lands with no stage ever
+	// following is its own failure mode — the OnStart shell died between its
+	// first line and its first stage write, or the provider injected the env
+	// carrying the probe URL but never materialised the script. In that window
+	// 4d stands down (the probe is a sign of life) and 4e/4f have no stage to
+	// read, so this rule is the only adjudicator; without it the instance
+	// bleeds to the adaptive bootstrap deadline.
+	if onStartActive && ci.FirstOnStartProbeSeenUnix != nil {
+		active := p.Now.Sub(time.Unix(*ci.FirstOnStartProbeSeenUnix, 0))
+		if active >= p.effectiveOnStartTotalActiveTimeout() {
+			stageDesc := "no stage marker written"
+			if p.OnStartStage != "" {
+				stageDesc = "marker at " + p.OnStartStage + "; likely restarting/looping"
+			}
+			return InstanceAction{
+				Kind:              ActionBootstrapStalled,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      fmt.Sprintf("OnStart active %s without reaching bootstrap (%s) — terminating instance, jobs reset to queued", active.Truncate(time.Second), stageDesc),
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
 			}
 		}
 	}

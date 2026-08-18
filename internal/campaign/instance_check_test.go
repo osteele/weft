@@ -3607,3 +3607,139 @@ func TestCheckInstance_SetupStall_ZeroValuedSurvivalDoesNotTerminateOnSight(t *t
 		t.Fatalf("zero-valued survival terminated a 30s-old setup phase: %q", action.StallMessage)
 	}
 }
+
+// wi7309LearnedSurvival is the provider bootstrap survival curve from the
+// wi7309 incident: a mature sample whose terminate quantile sits far past any
+// plausible OnStart probe arrival.
+func wi7309LearnedSurvival() *db.BootstrapSurvival {
+	return &db.BootstrapSurvival{
+		SampleSize: 3814,
+		Warn:       db.LearnedThreshold(81 * time.Minute),
+		Terminate:  db.LearnedThreshold(110 * time.Minute),
+	}
+}
+
+// TestCheckInstance_DudProvider_LearnedTerminateIsCapped pins the ceiling on
+// how far learned bootstrap survival data may stretch the dud window.
+//
+// Regression: wi7309's provider curve had learned a 1h50m bootstrap terminate
+// threshold, and effectiveDudVastTimeout adopted it wholesale. The dud rule
+// reasons about probe arrival (bimodal — a couple of minutes, or never), not
+// bootstrap completion, so the 8-minute detector became a 110-minute one and
+// an instance whose container never ran burned $3.80 before anything reaped
+// it. The learned value must not push the window past dudVastTimeoutCeiling.
+func TestCheckInstance_DudProvider_LearnedTerminateIsCapped(t *testing.T) {
+	now := time.Now()
+	// Past the ceiling, but far short of the learned 1h50m threshold.
+	launchedAt := now.Add(-(dudVastTimeoutCeiling + time.Minute)).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-dud-capped",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		BootstrapSurvival:   wi7309LearnedSurvival(),
+		Now:                 now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout — the learned 110m threshold must be capped at %s (%q)", action.Kind, dudVastTimeoutCeiling, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "dud provider") {
+		t.Errorf("StallMessage = %q, want it to mention 'dud provider'", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Error("want ResetJobs and DestroyProvider so the orphaned job requeues on a fresh offer")
+	}
+}
+
+// TestCheckInstance_DudProvider_QuietUnderCeiling guards the other side of the
+// clamp: capping the learned value must not turn the dud rule into a hair
+// trigger for instances still inside the window.
+func TestCheckInstance_DudProvider_QuietUnderCeiling(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-(dudVastTimeoutCeiling - time.Minute)).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-dud-under-ceiling",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: false,
+		BootstrapSurvival:   wi7309LearnedSurvival(),
+		Now:                 now,
+	})
+	if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
+		t.Fatalf("dud watchdog fired at %s, inside the %s ceiling: %q", dudVastTimeoutCeiling-time.Minute, dudVastTimeoutCeiling, action.StallMessage)
+	}
+}
+
+// TestCheckInstance_OnStartTotalCap_FiresWithoutStageMarker pins rule 4g's
+// independence from the OnStart stage marker.
+//
+// Regression: wi7306 and wi7307 landed their OnStart probe and then never
+// wrote a stage. Rule 4d stood down (the probe is a sign of life), rules
+// 4e/4f could not read a stage that was never written, and 4g — which needs
+// only the set-once probe timestamp — was gated behind the same
+// OnStartStage != "" guard as 4e/4f. Nothing adjudicated, and both instances
+// bled ~116 minutes to the bootstrap deadline.
+func TestCheckInstance_OnStartTotalCap_FiresWithoutStageMarker(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-40 * time.Minute).Unix()
+	firstProbe := now.Add(-onStartTotalActiveTimeout - time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-no-stage",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: true,
+		// No OnStartStage and no OnStartStageChangedAt: the shell died between
+		// its probe line and its first stage write.
+		Now: now,
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled — rule 4g must fire on the probe anchor alone (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "no stage marker written") {
+		t.Errorf("StallMessage = %q, want it to say no stage marker was written", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Error("want ResetJobs and DestroyProvider so orphaned jobs requeue on a fresh offer")
+	}
+}
+
+// TestCheckInstance_OnStartTotalCap_QuietWithoutStageBeforeCap confirms the
+// ungated 4g still respects its timeout: a probe that landed recently with no
+// stage yet is normal early OnStart, not a stall.
+func TestCheckInstance_OnStartTotalCap_QuietWithoutStageBeforeCap(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-3 * time.Minute).Unix()
+	firstProbe := now.Add(-2 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                        1,
+			Status:                    db.LaunchStatusLaunching,
+			LaunchedAt:                &launchedAt,
+			FirstOnStartProbeSeenUnix: &firstProbe,
+			ProviderInstanceID:        "test-onstart-no-stage-young",
+		},
+		ProviderInst:        &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent: true,
+		Now:                 now,
+	})
+	if strings.Contains(action.StallMessage, "OnStart active") {
+		t.Fatalf("rule 4g fired on an OnStart that had only just probed: %q", action.StallMessage)
+	}
+}

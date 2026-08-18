@@ -32,12 +32,26 @@ const (
 	// survival terminate threshold instead.
 	launchingPhaseTimeout = 12 * time.Minute
 
-	// dudVastTimeout is the legacy fallback for how long after Vast reports
-	// `running` we wait for the OnStart first-line probe to land in R2 before
-	// declaring a "dud". It is used only when bootstrap survival data is
-	// unavailable. In normal operation instance_check.go uses the bootstrap
-	// survival terminate threshold instead.
+	// dudVastTimeout is how long after Vast reports `running` we wait for the
+	// OnStart first-line probe to land in R2 before declaring a "dud".
 	dudVastTimeout = 8 * time.Minute
+
+	// dudVastTimeoutCeiling bounds how far learned bootstrap survival data may
+	// stretch the dud-detection window.
+	//
+	// The dud rule reasons about OnStart *probe arrival*, which is bimodal:
+	// the probe is the OnStart shell's first line, so it lands within a couple
+	// of minutes of the container starting, or it never lands at all.
+	// BootstrapSurvival measures a different random variable — *bootstrap
+	// completion* — whose distribution is long-tailed, and whose terminate
+	// cutoff routinely sits beyond an hour. Adopting that quantile unclamped
+	// turned an 8-minute detector into a 110-minute one, so instances whose
+	// container never ran burned a full rental before anything reaped them.
+	//
+	// The ceiling keeps learned data in the loop for providers whose probes
+	// genuinely arrive late, while holding the window to the order of
+	// magnitude the probe distribution actually occupies.
+	dudVastTimeoutCeiling = 15 * time.Minute
 
 	// onStartStallTimeout is the legacy fallback for how long the OnStart
 	// shell's stage marker may sit unchanged. It is used only when setup
