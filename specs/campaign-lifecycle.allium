@@ -444,6 +444,23 @@ config {
     -- whose distribution is the bimodal one described above. See
     -- DudVastDetection.
     dud_vast_timeout_ceiling: Duration = 15.minutes
+    -- How long after the provider reports `running` weft waits before
+    -- asking the container whether its OnStart script was installed.
+    -- Providers write the start script before starting sshd, so an
+    -- SSH-reachable container has already had its script decided; this is
+    -- insurance against one that orders those the other way. See
+    -- OnStartScriptMissing.
+    onstart_verify_grace: Duration = 2.minutes
+    -- Hard bound on the verification SSH round trip: one attempt, killed at
+    -- the deadline. An instance that cannot answer within it stays unknown,
+    -- which is the safe verdict, and the next pass asks again. It must stay
+    -- well under the fast cloud-sync budget or one unreachable instance in
+    -- the dud window degrades every `weft list`.
+    onstart_verify_timeout: Duration = 5.seconds
+    -- How long a verdict of unknown suppresses re-asking the same instance.
+    -- Unknown is the verdict that pays the full timeout, and a container
+    -- still bringing up sshd has nothing new to say seconds later.
+    onstart_verify_unknown_cooldown: Duration = 1.minute
     -- OnStart chain stall. When the OnStart probe HAS landed (so the
     -- container ran OnStart — dud_vast_timeout does not apply) but the
     -- OnStart stage marker then freezes on an in-progress install step
@@ -2503,6 +2520,70 @@ rule IdleAfterReadyTimeout {
         -- Implementation: internal/campaign/instance_check.go §5a
         -- (ActionIdleAfterReadyTimeout); threshold in
         -- internal/campaign/reconcile.go idleAfterReadyTimeout.
+}
+
+rule OnStartScriptMissing {
+    when: EvaluateOnStartScriptMissing(instance)
+    requires: instance.agent_ready_at = null
+    requires: not HasStartedJob(instance)
+    requires: OnStartScriptVerification(instance) = confirmed_missing
+
+    ensures: instance.status = failed
+    ensures: instance.termination_reason = infra_failure
+    ensures: instance.ended_at = now
+
+    -- legacy annotation: @guidance
+        -- Weft read the container and found a start script without its
+        -- sentinel: the provider accepted the launch, took the OnStart
+        -- command, and never installed it. Nothing can follow from that —
+        -- no probe, stage, heartbeat or phase will ever be written — so
+        -- the instance is terminated on the evidence, with no window.
+        --
+        -- This is the only pre-bootstrap rule that fires on a positive
+        -- observation rather than an absence conjunction, and the reason
+        -- is the failure it catches. Every signal DudVastDetection weighs
+        -- is an R2 read of a push mechanism the OnStart script itself
+        -- drives, so when the script is what went missing, all six are
+        -- absent and absence proves nothing: the container may equally
+        -- have no outbound network, or R2 may be unreachable, or the
+        -- observer's own network may be down. That is why that rule must
+        -- wait out a window. Reading the container is an independent,
+        -- pull-based channel that settles the question directly, so this
+        -- rule needs no window at all.
+        --
+        -- OnStartScriptVerification is a three-state observation and only
+        -- confirmed_missing is actionable. No SSH details, an unreachable
+        -- host, a timeout, and an unreadable file are all unknown, and
+        -- unknown falls through to DudVastDetection's timeout — an
+        -- instance weft cannot reach is never one whose script is missing.
+        -- The check runs only inside the dud window, only once the probe
+        -- has been confirmed absent, only before any job has started, and
+        -- only after config.onstart_verify_grace. A settled
+        -- confirmed_installed verdict is never re-asked and an unknown one
+        -- no sooner than config.onstart_verify_unknown_cooldown, so an
+        -- instance is reached at over SSH a handful of times at most.
+        --
+        -- The check applies to vast.ai only, because the premise "sentinel
+        -- absent from /root/onstart.sh implies weft's script was not
+        -- installed" is provider-specific. RunPod refuses per-pod startup
+        -- commands and bootstraps through its template's dockerStartCmd, so
+        -- a base-image start script there would read as confirmed_missing
+        -- on a healthy pod. Other providers return unknown.
+        --
+        -- The sentinel is matched by its absence from the script weft
+        -- sent, not against any provider's placeholder text: providers
+        -- write their own stub when no start script is installed (vast.ai
+        -- writes an 82-byte shebang-and-comment file) and that text is
+        -- theirs to change. cloud.OnStartSentinel MUST remain a substring
+        -- of DefaultOnStartCmd; a rename that breaks the coupling would
+        -- confirm-missing every healthy container in the fleet.
+        --
+        -- Incident wi7309 (2026-08-18): vast.ai stored weft's
+        -- --onstart-cmd in its instance record and injected extra_env into
+        -- the container, but never materialised the script onto the
+        -- filesystem. 86 min, $3.80, zero bootstrap activity. A sibling
+        -- rental created in the same second with the same payload probed
+        -- at +189s and completed normally.
 }
 
 rule DudVastDetection {

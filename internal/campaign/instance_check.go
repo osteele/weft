@@ -231,6 +231,12 @@ type CheckInstanceParams struct {
 	// started" from "container running, OnStart in flight".
 	OnStartProbePresent bool
 
+	// OnStartScriptVerification is the SSH-observed verdict on whether the
+	// provider installed weft's OnStart script into the container. Unknown
+	// unless the dud-window check ran and completed. Only
+	// cloud.OnStartConfirmedMissing licenses action; see rule 4c-onstart.
+	OnStartScriptVerification cloud.OnStartVerification
+
 	// BootstrapActivitySeen is true when current or historical bootstrap
 	// stage data exists for the launch. It protects the dud-provider
 	// watchdog from false-firing on transient empty R2 reads after
@@ -621,6 +627,31 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
+	// The pre-bootstrap window shared by the OnStart rules below: the provider
+	// has the container, but nothing downstream of OnStart has reported in.
+	preBootstrap := (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching) &&
+		ci.AgentReadyAtUnix == nil &&
+		!p.JobState.HasStartedJob
+
+	// 4c-onstart. Confirmed-missing OnStart script: weft read the container
+	// and found a start script without its sentinel, so no probe, stage,
+	// heartbeat or phase can ever appear and waiting cannot help. This is the
+	// one pre-bootstrap rule that acts on a positive observation rather than
+	// an absence conjunction, so it needs no window. Only ConfirmedMissing
+	// acts; Unknown falls through to 4d's timeout.
+	// See campaign-lifecycle.allium § OnStartScriptMissing and ADR 0009.
+	if preBootstrap && p.OnStartScriptVerification == cloud.OnStartConfirmedMissing {
+		return InstanceAction{
+			Kind:              ActionEmptyStatusTimeout,
+			TerminalStatus:    db.LaunchStatusFailed,
+			TerminationReason: db.TerminationReasonInfraFailure,
+			StallMessage:      "provider never installed the OnStart script (verified in container) — terminating instance, jobs reset to queued",
+			DestroyProvider:   true,
+			ResetJobs:         true,
+			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+		}
+	}
+
 	// 4d. Dud-provider detection. The provider reports the rental as `running`
 	// (LaunchedAt is set), but no agent activity has appeared in R2
 	// after the dud timeout: no OnStart probe, no heartbeat, no phase,
@@ -666,9 +697,7 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 	// adjudicate that window using the OnStart stage marker the watchdog now
 	// carries. Gated pre-bootstrap (BootstrapStage empty), pre-ready, pre-job.
 	// See campaign-lifecycle.allium § OnStartChainWatchdog.
-	onStartActive := (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusLaunching) &&
-		ci.AgentReadyAtUnix == nil &&
-		!p.JobState.HasStartedJob &&
+	onStartActive := preBootstrap &&
 		p.InstancePhase == "" &&
 		p.BootstrapStage == ""
 	if onStartActive && p.OnStartStage != "" {

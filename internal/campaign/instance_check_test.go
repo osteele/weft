@@ -3743,3 +3743,105 @@ func TestCheckInstance_OnStartTotalCap_QuietWithoutStageBeforeCap(t *testing.T) 
 		t.Fatalf("rule 4g fired on an OnStart that had only just probed: %q", action.StallMessage)
 	}
 }
+
+// TestCheckInstance_OnStartScriptMissing_TerminatesImmediately pins rule 4c-onstart:
+// a container weft has read, whose start script lacks the weft sentinel, is
+// terminated on that evidence without waiting out any window.
+//
+// Regression: wi7309 (2026-08-18). vast.ai accepted weft's --onstart-cmd,
+// stored the script in its instance record and injected extra_env into the
+// container, but never wrote the script to disk — /root/onstart.sh was the
+// provider's own 82-byte stub. No probe could ever be written, so every
+// signal rule 4d reads was absent, and the instance billed 86 minutes.
+func TestCheckInstance_OnStartScriptMissing_TerminatesImmediately(t *testing.T) {
+	now := time.Now()
+	// Well inside every timeout: only the positive verdict justifies the kill.
+	launchedAt := now.Add(-3 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-missing",
+		},
+		ProviderInst:              &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		OnStartProbePresent:       false,
+		OnStartScriptVerification: cloud.OnStartConfirmedMissing,
+		BootstrapSurvival:         wi7309LearnedSurvival(),
+		Now:                       now,
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%q)", action.Kind, action.StallMessage)
+	}
+	if !strings.Contains(action.StallMessage, "never installed the OnStart script") {
+		t.Errorf("StallMessage = %q, want it to name the missing OnStart script", action.StallMessage)
+	}
+	if !action.ResetJobs || !action.DestroyProvider {
+		t.Error("want ResetJobs and DestroyProvider so the orphaned job requeues on a fresh offer")
+	}
+	if action.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Errorf("TerminationReason = %q, want infra failure", action.TerminationReason)
+	}
+}
+
+// TestCheckInstance_OnStartScriptNonMissingVerdicts_DoNotTerminate is the
+// invariant that matters most: ConfirmedMissing is the only verdict that
+// licenses a kill. An SSH failure, a timeout, and an unreadable file all yield
+// Unknown, and Unknown must never be read as confirmed-missing — the
+// observer's own network is the likelier fault and terminating is
+// irreversible. ConfirmedInstalled means the container is healthy so far, so
+// the timeout rules stay the adjudicator.
+func TestCheckInstance_OnStartScriptNonMissingVerdicts_DoNotTerminate(t *testing.T) {
+	for _, verdict := range []cloud.OnStartVerification{
+		cloud.OnStartVerificationUnknown,
+		cloud.OnStartConfirmedInstalled,
+	} {
+		t.Run(verdict.String(), func(t *testing.T) {
+			now := time.Now()
+			launchedAt := now.Add(-3 * time.Minute).Unix()
+			r := NewReconciler()
+			action := r.CheckInstance(CheckInstanceParams{
+				CI: &db.Launch{
+					ID:                 1,
+					Status:             db.LaunchStatusRunning,
+					LaunchedAt:         &launchedAt,
+					ProviderInstanceID: "test-onstart-" + verdict.String(),
+				},
+				ProviderInst:              &cloud.Instance{Status: cloud.ProviderStatusRunning},
+				OnStartProbePresent:       false,
+				OnStartScriptVerification: verdict,
+				BootstrapSurvival:         wi7309LearnedSurvival(),
+				Now:                       now,
+			})
+			if action.Kind == ActionEmptyStatusTimeout {
+				t.Fatalf("terminated on a %s verdict: %q", verdict, action.StallMessage)
+			}
+		})
+	}
+}
+
+// TestCheckInstance_OnStartScriptMissing_QuietOnceJobStarted: a job that has
+// already started proves the chain worked, so a stale or wrong verdict must
+// not reach in and kill a working instance. AgentReadyAtUnix is deliberately
+// left unset so the started-job conjunct is the one under test.
+func TestCheckInstance_OnStartScriptMissing_QuietOnceJobStarted(t *testing.T) {
+	now := time.Now()
+	launchedAt := now.Add(-10 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-onstart-running-job",
+		},
+		ProviderInst:              &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		JobState:                  JobState{HasStartedJob: true},
+		OnStartScriptVerification: cloud.OnStartConfirmedMissing,
+		Now:                       now,
+	})
+	if strings.Contains(action.StallMessage, "never installed the OnStart script") {
+		t.Fatalf("rule 4c-onstart fired on an instance with a started job: %q", action.StallMessage)
+	}
+}

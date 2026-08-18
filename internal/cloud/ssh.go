@@ -83,6 +83,31 @@ func RunOnInstance(inst *Instance, command string, timeout time.Duration) (strin
 	return SSHRunWithRetry(InstanceSSHTarget(inst), InstanceSSHArgs(inst), command, timeout)
 }
 
+// RunOnInstanceOnce executes a command on a cloud instance over a single SSH
+// attempt hard-bounded by timeout: ConnectTimeout caps the handshake and the
+// ssh process is killed when the deadline passes, so a container that accepts
+// the connection and then wedges cannot block the caller.
+//
+// RunOnInstance's timeout bounds only retry scheduling — a wedged attempt runs
+// unbounded inside it — so callers on a reconcile path, whose failure verdict
+// is "unknown" and who will ask again on the next tick, want this instead.
+func RunOnInstanceOnce(inst *Instance, command string, timeout time.Duration) (string, error) {
+	if inst.SSHHost == "" {
+		return "", fmt.Errorf("instance %s has no SSH host", inst.ProviderID)
+	}
+	connectSecs := int(timeout.Seconds())
+	if connectSecs < 1 {
+		connectSecs = 1
+	}
+	args := append(InstanceSSHArgs(inst), "-o", fmt.Sprintf("ConnectTimeout=%d", connectSecs))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	target := InstanceSSHTarget(inst)
+	sshaudit.Log(sshaudit.KindCommand, target, 0)
+	out, err := exec.CommandContext(ctx, "ssh", append(args, target, command)...).CombinedOutput()
+	return string(out), err
+}
+
 // SSHRunWithRetry executes a command on a remote host via SSH, retrying on
 // connection failures (exit code 255) until timeout. Useful for freshly
 // provisioned instances where sshd may not be ready immediately.

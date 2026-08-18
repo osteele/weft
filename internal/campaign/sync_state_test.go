@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
@@ -1377,6 +1378,121 @@ func TestSyncInstanceState_OnStartProbePresumesPresentOnError(t *testing.T) {
 	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if !synced.OnStartProbePresent {
 		t.Fatalf("OnStartProbePresent = false on confirmed-present probe; want true")
+	}
+}
+
+// TestSyncInstanceState_OnStartScriptVerifyGating pins when weft is willing to
+// SSH a container to read its start script: only once the probe has been
+// confirmed absent, and only past the grace period. Every SSH here lands on a
+// rental that is still being paid for, and a container that has not yet been
+// given its script must not be misread as one that never will be.
+func TestSyncInstanceState_OnStartScriptVerifyGating(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sinceLaunch time.Duration
+		probeExists bool
+		wantCalls   int
+	}{
+		{"probe absent past grace", 9 * time.Minute, false, 1},
+		{"probe absent inside grace", 30 * time.Second, false, 0},
+		{"probe present", 9 * time.Minute, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := setupTestDB(t)
+			defer database.Close()
+
+			instanceID, err := db.CreateLaunch(database, &db.Launch{
+				Status:  db.LaunchStatusRunning,
+				GPUSpec: "RTX_4090",
+			})
+			if err != nil {
+				t.Fatalf("create instance: %v", err)
+			}
+			launchedAt := time.Now().Add(-tc.sinceLaunch).Unix()
+			if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+				t.Fatalf("set launched_at: %v", err)
+			}
+			ci, _ := db.GetLaunch(database, instanceID)
+
+			origProbe := syncCheckOnStartProbe
+			origVerify := syncVerifyOnStartScript
+			t.Cleanup(func() {
+				syncCheckOnStartProbe = origProbe
+				syncVerifyOnStartScript = origVerify
+				resetOnStartVerifyMemo()
+			})
+			resetOnStartVerifyMemo()
+			syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
+				return tc.probeExists, nil
+			}
+			verifyCalls := 0
+			syncVerifyOnStartScript = func(_ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
+				verifyCalls++
+				return cloud.OnStartConfirmedMissing
+			}
+
+			synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{},
+				SyncInstanceStateOpts{ProviderInst: &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}})
+
+			if verifyCalls != tc.wantCalls {
+				t.Fatalf("syncVerifyOnStartScript called %d times, want %d", verifyCalls, tc.wantCalls)
+			}
+			wantVerdict := cloud.OnStartVerificationUnknown
+			if tc.wantCalls > 0 {
+				wantVerdict = cloud.OnStartConfirmedMissing
+			}
+			if synced.OnStartScriptVerification != wantVerdict {
+				t.Fatalf("OnStartScriptVerification = %v, want %v", synced.OnStartScriptVerification, wantVerdict)
+			}
+		})
+	}
+}
+
+// TestSyncInstanceState_OnStartScriptVerifySettledVerdictIsNotReasked: a
+// script that is on disk does not come off, so the confirmed-installed verdict
+// is asked once. Without the memo a healthy-but-slow container is SSHed on
+// every reconcile tick for the rest of its dud window.
+func TestSyncInstanceState_OnStartScriptVerifySettledVerdictIsNotReasked(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	launchedAt := time.Now().Add(-9 * time.Minute).Unix()
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+		t.Fatalf("set launched_at: %v", err)
+	}
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origProbe := syncCheckOnStartProbe
+	origVerify := syncVerifyOnStartScript
+	t.Cleanup(func() {
+		syncCheckOnStartProbe = origProbe
+		syncVerifyOnStartScript = origVerify
+		resetOnStartVerifyMemo()
+	})
+	resetOnStartVerifyMemo()
+	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
+	verifyCalls := 0
+	syncVerifyOnStartScript = func(_ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
+		verifyCalls++
+		return cloud.OnStartConfirmedInstalled
+	}
+
+	opts := SyncInstanceStateOpts{ProviderInst: &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}}
+	for range 3 {
+		synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, opts)
+		if synced.OnStartScriptVerification != cloud.OnStartConfirmedInstalled {
+			t.Fatalf("OnStartScriptVerification = %v, want installed", synced.OnStartScriptVerification)
+		}
+	}
+	if verifyCalls != 1 {
+		t.Fatalf("syncVerifyOnStartScript called %d times across 3 passes, want 1", verifyCalls)
 	}
 }
 

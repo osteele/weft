@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -38,7 +39,63 @@ var (
 	syncCheckOnStartProbe    = func(ctx context.Context, c *r2.Client, key string) (bool, error) {
 		return reconcileObjectExists(ctx, c, key)
 	}
+	syncVerifyOnStartScript = cloud.VerifyOnStartInstalled
 )
+
+// onStartVerifyMemo remembers each launch's last OnStart-script verdict so the
+// reconciler does not re-SSH an instance whose answer it already has. A
+// confirmed-installed script is settled — a file on disk does not come off —
+// so that verdict is never re-asked; an unknown one is re-asked no more often
+// than onStartVerifyUnknownCooldown, since the container is usually still
+// bringing up sshd and each unknown costs the full timeout.
+var onStartVerifyMemo struct {
+	mu      sync.Mutex
+	entries map[int64]onStartVerifyEntry
+}
+
+type onStartVerifyEntry struct {
+	verdict cloud.OnStartVerification
+	at      time.Time
+}
+
+// verifyOnStartScriptCached returns the launch's OnStart-script verdict,
+// consulting the container only when the memo has nothing usable.
+func verifyOnStartScriptCached(launchID int64, inst *cloud.Instance) cloud.OnStartVerification {
+	now := time.Now()
+	onStartVerifyMemo.mu.Lock()
+	entry, ok := onStartVerifyMemo.entries[launchID]
+	onStartVerifyMemo.mu.Unlock()
+	if ok {
+		if entry.verdict == cloud.OnStartConfirmedInstalled ||
+			(entry.verdict == cloud.OnStartVerificationUnknown && now.Sub(entry.at) < onStartVerifyUnknownCooldown) {
+			return entry.verdict
+		}
+	}
+	verdict := syncVerifyOnStartScript(inst, onStartVerifyTimeout)
+	onStartVerifyMemo.mu.Lock()
+	defer onStartVerifyMemo.mu.Unlock()
+	if onStartVerifyMemo.entries == nil {
+		onStartVerifyMemo.entries = make(map[int64]onStartVerifyEntry)
+	}
+	// Entries only matter inside a launch's dud window, so drop any that have
+	// outlived the longest window rather than growing the map for the life of
+	// a daemon.
+	for id, e := range onStartVerifyMemo.entries {
+		if now.Sub(e.at) > dudVastTimeoutCeiling {
+			delete(onStartVerifyMemo.entries, id)
+		}
+	}
+	onStartVerifyMemo.entries[launchID] = onStartVerifyEntry{verdict: verdict, at: now}
+	return verdict
+}
+
+// resetOnStartVerifyMemo clears the verdict memo so tests start from a known
+// state.
+func resetOnStartVerifyMemo() {
+	onStartVerifyMemo.mu.Lock()
+	defer onStartVerifyMemo.mu.Unlock()
+	onStartVerifyMemo.entries = nil
+}
 
 // markerObservation carries the read certainty alongside the legacy
 // string-returning marker fetch hooks. Keeping certainty in the request
@@ -106,6 +163,12 @@ type SyncedState struct {
 	// the bootstrap-stage fetch covers. See instance_check.go rules 4e/4f.
 	OnStartStage          string
 	OnStartStageChangedAt *time.Time
+	// OnStartScriptVerification is the SSH-observed verdict on whether the
+	// provider actually installed weft's OnStart script in the container.
+	// Checked only inside the dud window, once the probe has failed to
+	// appear and the grace period has passed; unknown otherwise and on any
+	// failure to look. See instance_check.go § rule 4c-onstart.
+	OnStartScriptVerification cloud.OnStartVerification
 }
 
 // SyncInstanceStateOpts configures optional behaviors for SyncInstanceState.
@@ -116,6 +179,10 @@ type SyncInstanceStateOpts struct {
 	// AgentVersionFetched indicates the caller already attempted to fetch
 	// the agent version (even if the result was empty).
 	AgentVersionFetched bool
+	// ProviderInst carries the provider's view of the instance, including
+	// the SSH details the OnStart script verification needs. Nil leaves
+	// OnStartScriptVerification unknown.
+	ProviderInst *cloud.Instance
 }
 
 // SyncInstanceState polls external sources (R2 markers) for a running cloud
@@ -281,6 +348,19 @@ func SyncInstanceState(
 				}
 			}
 		}
+	}
+
+	// The probe's absence is ambiguous on its own — it means the script never
+	// ran, or the container has no outbound network, or R2 could not be
+	// reached. Ask the container directly, which distinguishes them. Gated on
+	// the probe having been checked and confirmed absent, on no job having
+	// started (rule 4c-onstart stands down once one has), and on a grace
+	// period so a container whose provider is still writing its start script
+	// is not misread as one that never got it.
+	if probeChecked && !s.OnStartProbePresent && !jobState.HasStartedJob &&
+		time.Since(time.Unix(*ci.LaunchedAt, 0)) >= onStartVerifyGrace {
+		s.OnStartScriptVerification = verifyOnStartScriptCached(instanceID, opts.ProviderInst)
+		slog.Debug("onstart script verification", "component", "sync", "instance", instanceID, "verdict", s.OnStartScriptVerification.String())
 	}
 
 	if hbPhase := freshHeartbeatPhase(ci, s.Heartbeat, s.HeartbeatAge); hbPhase != "" && hbPhase != s.InstancePhase {
@@ -787,25 +867,26 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		instancePhase = ""
 	}
 	return CheckInstanceParams{
-		CI:                    ci,
-		R2Client:              r2Client,
-		JobState:              jobState,
-		InstancePhase:         instancePhase,
-		BootstrapStage:        s.BootstrapStage,
-		HeartbeatAge:          s.HeartbeatAge,
-		Heartbeat:             s.Heartbeat,
-		HeartbeatUnknown:      s.HeartbeatUnknown,
-		InstancePhaseUnknown:  s.InstancePhaseUnknown,
-		BootstrapStageUnknown: s.BootstrapStageUnknown,
-		Now:                   now,
-		TerminationIntent:     s.TerminationIntent,
-		PhaseChangedAt:        s.PhaseChangedAt,
-		JobProgressID:         s.JobProgressID,
-		JobProgressPct:        s.JobProgress,
-		JobProgressChangedAt:  s.JobProgressChangedAt,
-		BootstrapActivitySeen: s.BootstrapActivitySeen,
-		OnStartProbePresent:   s.OnStartProbePresent,
-		OnStartStage:          s.OnStartStage,
-		OnStartStageChangedAt: s.OnStartStageChangedAt,
+		CI:                        ci,
+		R2Client:                  r2Client,
+		JobState:                  jobState,
+		InstancePhase:             instancePhase,
+		BootstrapStage:            s.BootstrapStage,
+		HeartbeatAge:              s.HeartbeatAge,
+		Heartbeat:                 s.Heartbeat,
+		HeartbeatUnknown:          s.HeartbeatUnknown,
+		InstancePhaseUnknown:      s.InstancePhaseUnknown,
+		BootstrapStageUnknown:     s.BootstrapStageUnknown,
+		Now:                       now,
+		TerminationIntent:         s.TerminationIntent,
+		PhaseChangedAt:            s.PhaseChangedAt,
+		JobProgressID:             s.JobProgressID,
+		JobProgressPct:            s.JobProgress,
+		JobProgressChangedAt:      s.JobProgressChangedAt,
+		BootstrapActivitySeen:     s.BootstrapActivitySeen,
+		OnStartProbePresent:       s.OnStartProbePresent,
+		OnStartStage:              s.OnStartStage,
+		OnStartStageChangedAt:     s.OnStartStageChangedAt,
+		OnStartScriptVerification: s.OnStartScriptVerification,
 	}
 }
