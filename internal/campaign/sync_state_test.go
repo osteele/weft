@@ -75,7 +75,7 @@ func TestSyncInstanceState_GraceToRunning(t *testing.T) {
 	}
 	syncCheckR2GraceStatus = checkR2GraceStatus
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	// Instance should have exited grace
 	if ci.Status != db.LaunchStatusRunning {
@@ -220,7 +220,7 @@ func TestSyncInstanceState_RefreshesJobsBeforeDisplayPhase(t *testing.T) {
 		return nil, nil
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, staleJobs, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, staleJobs, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
 	want := fmt.Sprintf("running:%d", jobID)
 	if synced.InstancePhase != want {
 		t.Fatalf("InstancePhase = %q, want %q", synced.InstancePhase, want)
@@ -313,7 +313,7 @@ func TestSyncInstanceState_PhaseConfirmsHiddenMoveTarget(t *testing.T) {
 		return nil
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	if synced.JobsUpdated != 1 {
 		t.Fatalf("JobsUpdated = %d, want 1", synced.JobsUpdated)
@@ -582,7 +582,7 @@ func TestSyncInstanceState_GraceStaysWhenPhaseIsGrace(t *testing.T) {
 	}
 	syncCheckR2GraceStatus = checkR2GraceStatus
 
-	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	// Should remain in grace
 	if ci.Status != db.LaunchStatusGrace {
@@ -649,7 +649,7 @@ func TestSyncInstanceState_DoesNotEnterGraceWithActiveJobs(t *testing.T) {
 		return true
 	}
 
-	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	if ci.Status != db.LaunchStatusRunning {
 		t.Fatalf("ci.Status = %q, want %q", ci.Status, db.LaunchStatusRunning)
@@ -736,7 +736,7 @@ func TestSyncInstanceState_FetchesInParallel(t *testing.T) {
 	// AgentVersionFetched skips the third wave-1 fetch (agent version), so the
 	// observed waves run: {termIntent, phase} then {jobProgress, heartbeat}.
 	SyncInstanceState(
-		context.Background(), database, ci, &r2.Client{}, nil,
+		context.Background(), database, ci, nil, &r2.Client{}, nil,
 		JobState{HasStartedJob: true},
 		SyncInstanceStateOpts{AgentVersionFetched: true},
 	)
@@ -831,7 +831,7 @@ func TestSyncInstanceState_ReconcilesDisplayPhaseFromDBAndR2(t *testing.T) {
 			syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
 				return tt.rawPhase(jobID)
 			}
-			synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
+			synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
 			if synced.InstancePhase != tt.wantPhase(jobID) {
 				t.Fatalf("InstancePhase = %q, want %q", synced.InstancePhase, tt.wantPhase(jobID))
 			}
@@ -890,7 +890,7 @@ func TestSyncInstanceState_SetupPhaseMarksQueuedJobStarting(t *testing.T) {
 	}
 	syncCheckR2GraceStatus = func(_ *r2.Client, _ *db.Launch, _ *sql.DB) bool { return false }
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if synced.JobsUpdated != 1 {
 		t.Fatalf("JobsUpdated = %d, want 1", synced.JobsUpdated)
 	}
@@ -910,7 +910,7 @@ func TestSyncInstanceState_SetupPhaseMarksQueuedJobStarting(t *testing.T) {
 		return fmt.Sprintf("running:%d", jobID)
 	}
 	ci, _ = db.GetLaunch(database, instanceID)
-	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, []*db.Job{job}, JobState{}, SyncInstanceStateOpts{})
+	synced = SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, []*db.Job{job}, JobState{}, SyncInstanceStateOpts{})
 	if synced.JobsUpdated != 1 {
 		t.Fatalf("running JobsUpdated = %d, want 1", synced.JobsUpdated)
 	}
@@ -978,7 +978,7 @@ func TestSyncInstanceState_DisplayOnlyPhaseDoesNotBlockBootstrapTimeout(t *testi
 		return nil, nil
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{AgentVersionFetched: true})
 	if synced.InstancePhase != "post_job_uploads_drained:3583" {
 		t.Fatalf("InstancePhase = %q, want display-only phase preserved", synced.InstancePhase)
 	}
@@ -1058,7 +1058,7 @@ func TestSyncInstanceState_PrefersFreshHeartbeatPhase(t *testing.T) {
 		{ID: 1383, Status: db.StatusFailed},
 		{ID: 1760, Status: db.StatusQueued},
 	}
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, jobs, JobState{HasStartedJob: true}, SyncInstanceStateOpts{AgentVersionFetched: true})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, jobs, JobState{HasStartedJob: true}, SyncInstanceStateOpts{AgentVersionFetched: true})
 	if synced.RawInstancePhase != "uploading:1383" {
 		t.Fatalf("RawInstancePhase = %q, want %q", synced.RawInstancePhase, "uploading:1383")
 	}
@@ -1116,7 +1116,7 @@ func TestSyncInstanceState_ExtendsBootstrapDeadlineFromFirstStage(t *testing.T) 
 	}
 
 	before := time.Now()
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if synced.BootstrapStage != "agent_starting" {
 		t.Fatalf("BootstrapStage = %q, want agent_starting", synced.BootstrapStage)
 	}
@@ -1183,7 +1183,7 @@ func TestSyncInstanceState_DoesNotExtendBootstrapDeadlineAfterStageAlreadySeen(t
 		return nil, nil
 	}
 
-	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if ci.BootstrapDeadlineUnix == nil || *ci.BootstrapDeadlineUnix != pastDeadline.Unix() {
 		t.Fatalf("BootstrapDeadlineUnix = %v, want unchanged %d", ci.BootstrapDeadlineUnix, pastDeadline.Unix())
 	}
@@ -1237,7 +1237,7 @@ func TestSyncInstanceState_ExtendsBootstrapDeadlineFromLaterStageProgress(t *tes
 	}
 
 	before := time.Now()
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if synced.BootstrapStage != "sources_extracted" {
 		t.Fatalf("BootstrapStage = %q, want sources_extracted", synced.BootstrapStage)
 	}
@@ -1292,7 +1292,7 @@ func TestSyncInstanceState_RemembersBootstrapActivityAcrossEmptyFetch(t *testing
 		return nil, nil
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if synced.BootstrapStage != "" {
 		t.Fatalf("BootstrapStage = %q, want empty current fetch", synced.BootstrapStage)
 	}
@@ -1357,7 +1357,7 @@ func TestSyncInstanceState_OnStartProbePresumesPresentOnError(t *testing.T) {
 		return false, context.DeadlineExceeded
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if !synced.OnStartProbePresent {
 		t.Fatalf("OnStartProbePresent = false on R2 error; defensive policy requires true so the dud watchdog cannot fire on a missed read")
 	}
@@ -1367,7 +1367,7 @@ func TestSyncInstanceState_OnStartProbePresumesPresentOnError(t *testing.T) {
 	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
 		return false, nil
 	}
-	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced = SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if synced.OnStartProbePresent {
 		t.Fatalf("OnStartProbePresent = true on confirmed-absent probe; want false so the dud watchdog can fire on a real dud")
 	}
@@ -1375,7 +1375,7 @@ func TestSyncInstanceState_OnStartProbePresumesPresentOnError(t *testing.T) {
 	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) {
 		return true, nil
 	}
-	synced = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced = SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	if !synced.OnStartProbePresent {
 		t.Fatalf("OnStartProbePresent = false on confirmed-present probe; want true")
 	}
@@ -1431,8 +1431,8 @@ func TestSyncInstanceState_OnStartScriptVerifyGating(t *testing.T) {
 				return cloud.OnStartConfirmedMissing
 			}
 
-			synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{},
-				SyncInstanceStateOpts{ProviderInst: &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}})
+			providerInst := &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}
+			synced := SyncInstanceState(context.Background(), database, ci, providerInst, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 			if verifyCalls != tc.wantCalls {
 				t.Fatalf("syncVerifyOnStartScript called %d times, want %d", verifyCalls, tc.wantCalls)
@@ -1484,9 +1484,9 @@ func TestSyncInstanceState_OnStartScriptVerifySettledVerdictIsNotReasked(t *test
 		return cloud.OnStartConfirmedInstalled
 	}
 
-	opts := SyncInstanceStateOpts{ProviderInst: &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}}
+	providerInst := &cloud.Instance{Provider: cloud.ProviderVastai, SSHHost: "ssh.example.invalid"}
 	for range 3 {
-		synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, opts)
+		synced := SyncInstanceState(context.Background(), database, ci, providerInst, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 		if synced.OnStartScriptVerification != cloud.OnStartConfirmedInstalled {
 			t.Fatalf("OnStartScriptVerification = %v, want installed", synced.OnStartScriptVerification)
 		}
@@ -1528,7 +1528,7 @@ func TestSyncInstanceState_OnStartProbeSkippedOutsideDudWindow(t *testing.T) {
 		return true, nil
 	}
 
-	_ = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{HasStartedJob: true}, SyncInstanceStateOpts{})
+	_ = SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{HasStartedJob: true}, SyncInstanceStateOpts{})
 
 	if probeCalls != 0 {
 		t.Fatalf("syncCheckOnStartProbe called %d times for ready instance; want 0", probeCalls)
@@ -1586,7 +1586,7 @@ func TestSyncInstanceState_HeartbeatFetchedInDudWindow(t *testing.T) {
 		return true, nil
 	}
 
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{HasStartedJob: false}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{HasStartedJob: false}, SyncInstanceStateOpts{})
 
 	if hbCalls == 0 {
 		t.Fatalf("heartbeat not fetched inside dud-detection window; previous gating left the watchdog blind to the agent's first heartbeat")
@@ -1660,7 +1660,7 @@ func TestSyncInstanceState_LiveStateWriteFailureUsesCurrentObservationTime(t *te
 
 	started := time.Now()
 	synced := SyncInstanceState(
-		context.Background(), database, ci, &r2.Client{}, jobs, JobState{},
+		context.Background(), database, ci, nil, &r2.Client{}, jobs, JobState{},
 		SyncInstanceStateOpts{AgentVersionFetched: true},
 	)
 	if synced.PhaseChangedAt == nil {
@@ -1763,7 +1763,7 @@ func TestDudWatchdogSurvivesFlakyR2(t *testing.T) {
 	rec := NewReconciler()
 	ci, _ := db.GetLaunch(database, instanceID)
 	for i := 0; i < 60; i++ {
-		synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+		synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 		params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
 		action := rec.CheckInstance(params)
 		if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
@@ -1824,7 +1824,7 @@ func TestDudWatchdogFiresOnRealDud(t *testing.T) {
 
 	rec := NewReconciler()
 	ci, _ := db.GetLaunch(database, instanceID)
-	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
 	action := rec.CheckInstance(params)
 
@@ -1891,7 +1891,7 @@ func TestSyncInstanceState_PersistsFirstOnStartProbeSeen(t *testing.T) {
 	}
 
 	t0 := time.Now()
-	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	got, _ := db.GetLaunch(database, instanceID)
 	if got.FirstOnStartProbeSeenUnix == nil {
@@ -1904,7 +1904,7 @@ func TestSyncInstanceState_PersistsFirstOnStartProbeSeen(t *testing.T) {
 	// A subsequent observation must NOT overwrite (set-once semantics).
 	originalTs := *got.FirstOnStartProbeSeenUnix
 	time.Sleep(1100 * time.Millisecond)
-	SyncInstanceState(context.Background(), database, got, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, got, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	again, _ := db.GetLaunch(database, instanceID)
 	if again.FirstOnStartProbeSeenUnix == nil || *again.FirstOnStartProbeSeenUnix != originalTs {
@@ -1928,7 +1928,7 @@ func TestSyncInstanceState_PersistsFirstOnStartProbeSeen(t *testing.T) {
 		return false, context.DeadlineExceeded // R2 errored; presumed-present
 	}
 	ci2, _ := db.GetLaunch(database, another)
-	SyncInstanceState(context.Background(), database, ci2, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+	SyncInstanceState(context.Background(), database, ci2, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
 
 	got2, _ := db.GetLaunch(database, another)
 	if got2.FirstOnStartProbeSeenUnix != nil {

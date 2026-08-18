@@ -179,10 +179,6 @@ type SyncInstanceStateOpts struct {
 	// AgentVersionFetched indicates the caller already attempted to fetch
 	// the agent version (even if the result was empty).
 	AgentVersionFetched bool
-	// ProviderInst carries the provider's view of the instance, including
-	// the SSH details the OnStart script verification needs. Nil leaves
-	// OnStartScriptVerification unknown.
-	ProviderInst *cloud.Instance
 }
 
 // SyncInstanceState polls external sources (R2 markers) for a running cloud
@@ -190,12 +186,18 @@ type SyncInstanceStateOpts struct {
 // performs side effects: marking queued jobs as running, detecting grace
 // transitions, and persisting termination intents.
 //
+// providerInst is the provider's view of the instance, including the SSH
+// details the OnStart script verification needs. A nil providerInst means
+// the provider view is unavailable, which leaves OnStartScriptVerification
+// unknown.
+//
 // Returns the synced state for immediate use by the caller (e.g., to build
 // CheckInstanceParams or InstanceUpdate).
 func SyncInstanceState(
 	ctx context.Context,
 	database *sql.DB,
 	ci *db.Launch,
+	providerInst *cloud.Instance,
 	r2Client *r2.Client,
 	jobs []*db.Job,
 	jobState JobState,
@@ -359,7 +361,7 @@ func SyncInstanceState(
 	// is not misread as one that never got it.
 	if probeChecked && !s.OnStartProbePresent && !jobState.HasStartedJob &&
 		time.Since(time.Unix(*ci.LaunchedAt, 0)) >= cloud.OnStartVerifyGrace {
-		s.OnStartScriptVerification = verifyOnStartScriptCached(instanceID, opts.ProviderInst)
+		s.OnStartScriptVerification = verifyOnStartScriptCached(instanceID, providerInst)
 		slog.Debug("onstart script verification", "component", "sync", "instance", instanceID, "verdict", s.OnStartScriptVerification.String())
 	}
 

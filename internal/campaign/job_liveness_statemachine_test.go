@@ -254,7 +254,7 @@ func syncInstanceStateJob(t *testing.T, database *sql.DB, r *Reconciler, now *ti
 		t.Fatalf("GetLaunchJobsIncludingAttempts: %v", err)
 	}
 	jobState := ComputeJobState(jobs, nil)
-	_ = SyncInstanceState(context.Background(), database, ci, &r2.Client{}, jobs, jobState, SyncInstanceStateOpts{})
+	_ = SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, jobs, jobState, SyncInstanceStateOpts{})
 }
 
 func reconcileInstanceJob(t *testing.T, database *sql.DB, r *Reconciler, now *time.Time, client *recordingMockClient, m *jobLivenessModel, rng *rand.Rand) {

@@ -572,10 +572,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			jobState := ComputeJobState(jobs, attemptOutcomes)
 
 			// Sync external state (R2 markers, termination intent) to launch_live_state.
-			synced := SyncInstanceState(ctx, database, ci, r2c, jobs, jobState, SyncInstanceStateOpts{
+			synced := SyncInstanceState(ctx, database, ci, cachedInstance, r2c, jobs, jobState, SyncInstanceStateOpts{
 				AgentVersion:        agentVersion,
 				AgentVersionFetched: agentVersionFetched,
-				ProviderInst:        cachedInstance,
 			})
 			agentVersion = synced.AgentVersion
 			agentVersionFetched = true

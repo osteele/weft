@@ -397,7 +397,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	jobState := ComputeJobState(jobs, attemptOutcomes)
 
 	// Sync external state (R2 markers, termination intent) to launch_live_state.
-	synced := SyncInstanceState(context.Background(), database, ci, r2Client, jobs, jobState, SyncInstanceStateOpts{ProviderInst: inst})
+	synced := SyncInstanceState(context.Background(), database, ci, inst, r2Client, jobs, jobState, SyncInstanceStateOpts{})
 
 	// Proactively sync job completions from R2 every reconcile pass.
 	// Without this, jobs that completed on the instance stay "running" in the DB
