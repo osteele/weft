@@ -381,7 +381,7 @@ func TestRunGroupedAutoPilotPass_AutoReplanDisabledByDefault(t *testing.T) {
 func TestAutoPublishMissingCheckpointsFlagOnUnderThreshold(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
-	resetAutoPublishCheckpointAttempts(t)
+	resetAutoPublishCheckpointAttempts(t, database)
 
 	origPublish := autoPilotPublishCheckpointToR2
 	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
@@ -410,7 +410,7 @@ func TestAutoPublishMissingCheckpointsFlagOnUnderThreshold(t *testing.T) {
 func TestAutoPublishMissingCheckpointsRequiresFlagAndThreshold(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := recordQueuedCheckpointJob(t, database, "trace", 2*1024*1024*1024)
-	resetAutoPublishCheckpointAttempts(t)
+	resetAutoPublishCheckpointAttempts(t, database)
 
 	origPublish := autoPilotPublishCheckpointToR2
 	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
@@ -445,7 +445,7 @@ func TestAutoPublishMissingCheckpointsRequiresFlagAndThreshold(t *testing.T) {
 func TestAutoPublishMissingCheckpointsConfirmedFailureDoesNotAbortPass(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
-	resetAutoPublishCheckpointAttempts(t)
+	resetAutoPublishCheckpointAttempts(t, database)
 
 	origPublish := autoPilotPublishCheckpointToR2
 	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
@@ -471,7 +471,7 @@ func TestAutoPublishMissingCheckpointsConfirmedFailureDoesNotAbortPass(t *testin
 func TestAutoPublishMissingCheckpointsUnknownDefersWithoutFailingJob(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
-	resetAutoPublishCheckpointAttempts(t)
+	resetAutoPublishCheckpointAttempts(t, database)
 
 	origPublish := autoPilotPublishCheckpointToR2
 	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
@@ -496,6 +496,60 @@ func TestAutoPublishMissingCheckpointsUnknownDefersWithoutFailingJob(t *testing.
 	}
 	if refreshed.EffectiveStatus() != db.StatusQueued {
 		t.Fatalf("status = %s, want queued", refreshed.EffectiveStatus())
+	}
+}
+
+func TestAutoPublishMissingCheckpointsCooldownAcrossPasses(t *testing.T) {
+	// Two independent passes (no shared memory) must share the cooldown gate
+	// through the persisted attempt event: the second pass defers within the
+	// window and publishes again once it has elapsed.
+	database := db.SetupTestDB(t)
+	job := recordQueuedCheckpointJob(t, database, "trace", 1024)
+	resetAutoPublishCheckpointAttempts(t, database)
+
+	origPublish := autoPilotPublishCheckpointToR2
+	t.Cleanup(func() { autoPilotPublishCheckpointToR2 = origPublish })
+	calls := 0
+	autoPilotPublishCheckpointToR2 = func(context.Context, *sql.DB, *r2.Client, cloud.R2Config, dataloc.DataAsset) (campaign.CheckpointPublishResult, error) {
+		calls++
+		return campaign.CheckpointPublishResult{Uploaded: true}, nil
+	}
+
+	cfg := autoPublishCheckpointTestConfig(true, 1)
+
+	published, reasons, err := autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if published != 1 || calls != 1 {
+		t.Fatalf("first pass published=%d calls=%d, want 1/1", published, calls)
+	}
+	if reason := reasons[job.ID]; reason != "" {
+		t.Fatalf("first pass reason = %q, want empty", reason)
+	}
+
+	published, reasons, err = autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if published != 0 || calls != 1 {
+		t.Fatalf("second pass published=%d calls=%d, want 0/1 (cooldown shared across passes)", published, calls)
+	}
+	if reason := reasons[job.ID]; !strings.Contains(reason, "recently attempted") {
+		t.Fatalf("second pass reason = %q, want recently attempted", reason)
+	}
+
+	// Age the attempt past the cooldown; the gate reopens.
+	if _, err := database.Exec(`UPDATE lifecycle_events SET occurred_at = ? WHERE event_kind = ?`,
+		time.Now().Add(-2*autoPublishCheckpointCooldown).Unix(), db.EventCheckpointAutoPublishAttempt); err != nil {
+		t.Fatalf("age attempt event: %v", err)
+	}
+	published, _, err = autoPublishMissingCheckpoints(context.Background(), database, cfg, &r2.Client{}, []*db.Job{job})
+	if err != nil {
+		t.Fatalf("third pass: %v", err)
+	}
+	if published != 1 || calls != 2 {
+		t.Fatalf("third pass published=%d calls=%d, want 1/2", published, calls)
 	}
 }
 
@@ -597,17 +651,13 @@ func autoPublishCheckpointTestConfig(enabled bool, maxGB float64) *config.Config
 	}
 }
 
-func resetAutoPublishCheckpointAttempts(t *testing.T) {
+func resetAutoPublishCheckpointAttempts(t *testing.T, database *sql.DB) {
 	t.Helper()
-	autoPublishCheckpointAttempts.Lock()
-	old := autoPublishCheckpointAttempts.last
-	autoPublishCheckpointAttempts.last = make(map[string]time.Time)
-	autoPublishCheckpointAttempts.Unlock()
-	t.Cleanup(func() {
-		autoPublishCheckpointAttempts.Lock()
-		autoPublishCheckpointAttempts.last = old
-		autoPublishCheckpointAttempts.Unlock()
-	})
+	// The cooldown gate is derived from persisted EventCheckpointAutoPublishAttempt
+	// events, not a process-local map; clear them so the test starts cold.
+	if _, err := database.Exec(`DELETE FROM lifecycle_events WHERE event_kind = ?`, db.EventCheckpointAutoPublishAttempt); err != nil {
+		t.Fatalf("reset checkpoint auto-publish attempts: %v", err)
+	}
 }
 
 func TestRunGroupedAutoPilotPass_DoesNotRelaunchPlannerBlockedJobs(t *testing.T) {
@@ -1776,6 +1826,128 @@ func TestMoveIntentRetryAction_ReadyTerminalTargetWithoutStartRetries(t *testing
 	}
 	if got.State != db.MoveIntentStateOpen {
 		t.Fatalf("intent state = %s, want open", got.State)
+	}
+}
+
+func TestDecideMoveIntentActionTable(t *testing.T) {
+	// Every action must appear at least once; the rows below enumerate the
+	// decision-relevant observation space, including the regression rows:
+	// terminal-launch cleanup, protection-window wait, exhaustion by attempts.
+	tests := []struct {
+		name string
+		obs  moveIntentObservation
+		want moveIntentAction
+	}{
+		{
+			name: "protection window shields fresh intent without target launch",
+			obs:  moveIntentObservation{WithinProtectionWindow: true, AttemptCount: 1, MaxAttempts: 4},
+			want: moveIntentActionWait,
+		},
+		{
+			name: "non-terminal target without agent-ready waits",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: true, AttemptCount: 1, MaxAttempts: 4},
+			want: moveIntentActionWait,
+		},
+		{
+			name: "plain retry before target launch exists",
+			obs:  moveIntentObservation{AttemptCount: 1, MaxAttempts: 4},
+			want: moveIntentActionRetry,
+		},
+		{
+			name: "retry when target launch row vanished",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: false, AttemptCount: 1, MaxAttempts: 4},
+			want: moveIntentActionRetry,
+		},
+		{
+			name: "exhaust by attempts before target launch exists",
+			obs:  moveIntentObservation{AttemptCount: 4, MaxAttempts: 4},
+			want: moveIntentActionExhaust,
+		},
+		{
+			name: "exhaust by attempts when target launch row vanished",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: false, AttemptCount: 4, MaxAttempts: 4},
+			want: moveIntentActionExhaust,
+		},
+		{
+			name: "confirm when target launch already started the job",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: true, TargetStartedJob: true},
+			want: moveIntentActionConfirm,
+		},
+		{
+			name: "confirm when non-terminal target is agent-ready",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: true, AgentReady: true},
+			want: moveIntentActionConfirm,
+		},
+		{
+			name: "terminal launch that never started the job cleans up then retries",
+			obs:  moveIntentObservation{HasTargetLaunch: true, TargetLaunchID: 11, LaunchFound: true, LaunchTerminal: true},
+			want: moveIntentActionCleanupAndRetry,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decideMoveIntentAction(tt.obs); got != tt.want {
+				t.Fatalf("decideMoveIntentAction(%+v) = %v, want %v", tt.obs, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMoveIntentRetryAction_ExhaustsByTransitionOutcome(t *testing.T) {
+	// Regression row the pure decision cannot express: the durable transition
+	// outcome — not the stale in-memory attempt count — drives exhaustion.
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "python train.py", "move exhaust", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	source, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch source: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, source); err != nil {
+		t.Fatalf("SetJobLaunchID source: %v", err)
+	}
+	target, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch target: %v", err)
+	}
+	intent, err := db.CreateMoveIntent(database, db.CreateMoveIntentParams{
+		JobID:          jobID,
+		TargetKind:     db.MoveTargetNew,
+		TargetLaunchID: &target,
+		AttemptCount:   1,
+		MaxAttempts:    4,
+	})
+	if err != nil {
+		t.Fatalf("CreateMoveIntent: %v", err)
+	}
+	if _, err := db.CreateMoveTargetAttempt(database, intent.ID, jobID, "", &target, db.StatusQueued); err != nil {
+		t.Fatalf("CreateMoveTargetAttempt: %v", err)
+	}
+	if err := db.UpdateLaunchStatus(database, target, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus target: %v", err)
+	}
+	// The in-memory intent still shows one attempt spent. Bump the durable
+	// attempt counter past the budget so HandleMoveTargetFailedBeforeStart
+	// reports Exhausted, which the fold must honor over the stale count.
+	if _, err := database.Exec(`UPDATE move_intents SET attempt_count = ? WHERE id = ?`, intent.MaxAttempts, intent.ID); err != nil {
+		t.Fatalf("bump attempt_count: %v", err)
+	}
+
+	action, err := moveIntentRetryAction(database, intent)
+	if err != nil {
+		t.Fatalf("moveIntentRetryAction: %v", err)
+	}
+	if action != moveIntentActionExhaust {
+		t.Fatalf("action = %v, want exhaust", action)
+	}
+	got, err := db.GetMoveIntent(database, intent.ID)
+	if err != nil {
+		t.Fatalf("GetMoveIntent: %v", err)
+	}
+	if got.State != db.MoveIntentStateCanceled {
+		t.Fatalf("intent state = %q, want canceled", got.State)
 	}
 }
 

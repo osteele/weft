@@ -117,6 +117,14 @@ const (
 	// failures made the current target a poor placement.
 	EventQueueDispatchAutoReplanned = "queue.dispatch.auto_replanned"
 
+	// EventCheckpointAutoPublishAttempt records one checkpoint auto-publish
+	// attempt. The Detail carries the per-(job, asset) attempt key and JobID
+	// the job it gates, so the cooldown can be re-derived from the most recent
+	// attempt event. Deriving the gate from this event stream (rather than a
+	// process-local map) makes the cooldown shared across runner processes and
+	// surviving crashes.
+	EventCheckpointAutoPublishAttempt = "checkpoint.auto_publish_attempt"
+
 	// TUI retry outcomes
 	EventRetryAutoTriggered   = "retry.auto_triggered"
 	EventRetryManualTriggered = "retry.manual_triggered"
@@ -452,6 +460,32 @@ func LatestJobDispatchFailureDetail(database *sql.DB, jobID int64, detailPrefix 
 		return "", err
 	}
 	return detail.String, nil
+}
+
+// CheckpointAutoPublishAttemptedWithinCooldown reports whether a checkpoint
+// auto-publish attempt for key was recorded within cooldown before now. The
+// cooldown derives from the persisted attempt stream
+// (EventCheckpointAutoPublishAttempt; detail = attempt key), so the gate is
+// shared across runner processes and a crash does not reset it. Per-pass
+// query cost is fine: local SQLite, sub-millisecond.
+func CheckpointAutoPublishAttemptedWithinCooldown(database *sql.DB, jobID int64, key string, cooldown time.Duration, now time.Time) (bool, error) {
+	if database == nil || jobID == 0 || key == "" || cooldown <= 0 {
+		return false, nil
+	}
+	cutoff := now.Add(-cooldown).Unix()
+	var n int
+	err := database.QueryRow(`
+		SELECT COUNT(*) FROM lifecycle_events
+		WHERE event_kind = ?
+		  AND job_id = ?
+		  AND detail = ?
+		  AND occurred_at > ?`,
+		EventCheckpointAutoPublishAttempt, jobID, key, cutoff,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // ReuseFailureStreak returns the number of reuse.submit_failed events for

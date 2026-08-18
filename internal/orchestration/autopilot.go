@@ -99,11 +99,6 @@ const placementIntentProtectionWindow = 5 * time.Minute
 
 const autoPublishCheckpointCooldown = 10 * time.Minute
 
-var autoPublishCheckpointAttempts = struct {
-	sync.Mutex
-	last map[string]time.Time
-}{last: make(map[string]time.Time)}
-
 func RunGroupedAutoPilotPass(ctx context.Context, database *sql.DB, scopedJobs []*db.Job) (out *GroupedAutoPilotResult, outErr error) {
 	return runGroupedAutoPilotPassWithOptions(ctx, database, scopedJobs, campaign.PlanOptions{})
 }
@@ -122,6 +117,7 @@ func autoPublishMissingCheckpoints(ctx context.Context, database *sql.DB, cfg *c
 		return 0, reasons, nil
 	}
 	maxBytes := cfg.AutoPublishCheckpointMaxBytes()
+	now := time.Now()
 	var published int
 	for _, job := range jobs {
 		if job == nil || job.HasTag(db.TagInventory) || job.EffectiveStatus() != db.StatusQueued {
@@ -140,8 +136,28 @@ func autoPublishMissingCheckpoints(ctx context.Context, database *sql.DB, cfg *c
 				continue
 			}
 			attemptKey := fmt.Sprintf("%d:%s", job.ID, asset.Ref())
-			if !markAutoPublishAttempt(attemptKey, time.Now()) {
+			// The cooldown is derived from the persisted attempt event stream,
+			// so a fresh pass in another runner process sees it: one attempt
+			// per (job, asset) per autoPublishCheckpointCooldown.
+			attempted, err := db.CheckpointAutoPublishAttemptedWithinCooldown(database, job.ID, attemptKey, autoPublishCheckpointCooldown, now)
+			if err != nil {
+				reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish deferred: could not read attempt history for %s: %v", asset.Ref(), err)
+				continue
+			}
+			if attempted {
 				reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish deferred: recently attempted %s; waiting before retry", asset.Ref())
+				continue
+			}
+			// Record the attempt before publishing: a deferred or failed
+			// upload still gates the next pass, and the cooldown must not be
+			// lost if the runner crashes mid-upload.
+			if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind:  db.EventCheckpointAutoPublishAttempt,
+				JobID:      job.ID,
+				Detail:     attemptKey,
+				OccurredAt: now.Unix(),
+			}); err != nil {
+				reasons[job.ID] = fmt.Sprintf("checkpoint auto-publish deferred: could not record attempt for %s: %v", asset.Ref(), err)
 				continue
 			}
 			result, err := autoPilotPublishCheckpointToR2(ctx, database, r2Client, cfg.Vastai.R2.ToCloudR2Config(), asset)
@@ -202,17 +218,6 @@ func checkpointAutoPublishCandidate(database *sql.DB, asset dataloc.DataAsset, m
 			asset.Ref(), formatBytesForAutopilot(entry.SizeBytes), formatBytesForAutopilot(maxBytes)), false
 	}
 	return entry, "", true
-}
-
-func markAutoPublishAttempt(key string, now time.Time) bool {
-	autoPublishCheckpointAttempts.Lock()
-	defer autoPublishCheckpointAttempts.Unlock()
-	last, ok := autoPublishCheckpointAttempts.last[key]
-	if ok && now.Sub(last) < autoPublishCheckpointCooldown {
-		return false
-	}
-	autoPublishCheckpointAttempts.last[key] = now
-	return true
 }
 
 func formatBytesForAutopilot(size int64) string {
@@ -1422,54 +1427,123 @@ const (
 	moveIntentActionRetry
 	moveIntentActionExhaust
 	moveIntentActionConfirm
+	// moveIntentActionCleanupAndRetry means the target launch is terminal and
+	// never started the job. The caller must consume the failed target
+	// (HandleMoveTargetFailedBeforeStart / ResetLaunchJobs) before retrying;
+	// the decision is not final because the transition outcome (Exhausted) is
+	// only known after that cleanup, and the caller folds it into the final
+	// action exactly as the original if-tree did.
+	moveIntentActionCleanupAndRetry
 )
 
+// moveIntentObservation is the read-only input to decideMoveIntentAction. It
+// captures every fact moveIntentRetryAction reads from the DB and the intent,
+// so the decision stays side-effect-free and table-testable.
+type moveIntentObservation struct {
+	HasTargetLaunch        bool
+	TargetLaunchID         int64 // set when HasTargetLaunch; the caller's cleanup needs it
+	WithinProtectionWindow bool
+	AttemptCount           int
+	MaxAttempts            int
+	LaunchFound            bool
+	LaunchTerminal         bool
+	AgentReady             bool
+	TargetStartedJob       bool
+}
+
+// decideMoveIntentAction classifies an open move-to-new intent's next action
+// from the gathered observation. It has no DB access and no side effects.
+//
+// The protection window applies only while no target launch exists; once a
+// target launch is recorded, that launch's own lifecycle decides. A terminal
+// launch that never started the job maps to moveIntentActionCleanupAndRetry:
+// the caller performs the target cleanup, then folds the transition outcome.
+func decideMoveIntentAction(obs moveIntentObservation) moveIntentAction {
+	if !obs.HasTargetLaunch {
+		if obs.WithinProtectionWindow {
+			return moveIntentActionWait
+		}
+		if obs.AttemptCount >= obs.MaxAttempts {
+			return moveIntentActionExhaust
+		}
+		return moveIntentActionRetry
+	}
+	if !obs.LaunchFound {
+		if obs.AttemptCount >= obs.MaxAttempts {
+			return moveIntentActionExhaust
+		}
+		return moveIntentActionRetry
+	}
+	if obs.TargetStartedJob {
+		return moveIntentActionConfirm
+	}
+	if !obs.LaunchTerminal {
+		if obs.AgentReady {
+			return moveIntentActionConfirm
+		}
+		return moveIntentActionWait
+	}
+	return moveIntentActionCleanupAndRetry
+}
+
 func moveIntentRetryAction(database *sql.DB, intent *db.MoveIntent) (moveIntentAction, error) {
-	if intent.TargetLaunchID == nil || *intent.TargetLaunchID <= 0 {
-		if time.Since(time.Unix(intent.CreatedAt, 0)) < placementIntentProtectionWindow {
-			return moveIntentActionWait, nil
-		}
-		if intent.AttemptCount >= intent.MaxAttempts {
-			return moveIntentActionExhaust, nil
-		}
-		return moveIntentActionRetry, nil
-	}
-	launch, err := db.GetLaunch(database, *intent.TargetLaunchID)
+	obs, err := gatherMoveIntentObservation(database, intent)
 	if err != nil {
 		return moveIntentActionWait, err
 	}
-	if launch == nil {
-		if intent.AttemptCount >= intent.MaxAttempts {
-			return moveIntentActionExhaust, nil
-		}
-		return moveIntentActionRetry, nil
+	action := decideMoveIntentAction(obs)
+	if action != moveIntentActionCleanupAndRetry {
+		return action, nil
 	}
-	started, err := moveIntentTargetStartedJob(database, intent.JobID, *intent.TargetLaunchID)
-	if err != nil {
-		return moveIntentActionWait, err
-	}
-	if started {
-		return moveIntentActionConfirm, nil
-	}
-	if !campaign.IsInstanceTerminal(launch.Status) {
-		if launch.AgentReadyAtUnix != nil {
-			return moveIntentActionConfirm, nil
-		}
-		return moveIntentActionWait, nil
-	}
-	transition, err := db.HandleMoveTargetFailedBeforeStart(database, intent.JobID, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned)
+	// Terminal target launch that never started the job: consume the failed
+	// target, then fold the transition outcome into the final action exactly
+	// as the original if-tree did — Exhausted, or a spent durable attempt
+	// budget, closes the intent; otherwise retry with a fresh target launch.
+	transition, err := db.HandleMoveTargetFailedBeforeStart(database, intent.JobID, obs.TargetLaunchID, db.AttemptOutcomeOrphaned)
 	if err != nil {
 		return moveIntentActionWait, err
 	}
 	if !transition.Handled {
-		if _, err := db.ResetLaunchJobs(database, *intent.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
+		if _, err := db.ResetLaunchJobs(database, obs.TargetLaunchID, db.AttemptOutcomeOrphaned); err != nil {
 			return moveIntentActionWait, err
 		}
 	}
-	if transition.Exhausted || intent.AttemptCount >= intent.MaxAttempts {
+	if transition.Exhausted || obs.AttemptCount >= obs.MaxAttempts {
 		return moveIntentActionExhaust, nil
 	}
 	return moveIntentActionRetry, nil
+}
+
+// gatherMoveIntentObservation reads the DB facts the retry decision needs.
+// Any read error is surfaced to the caller, which maps it to Wait (with the
+// error): a decision reached on a failed read is a guess.
+func gatherMoveIntentObservation(database *sql.DB, intent *db.MoveIntent) (moveIntentObservation, error) {
+	obs := moveIntentObservation{
+		WithinProtectionWindow: time.Since(time.Unix(intent.CreatedAt, 0)) < placementIntentProtectionWindow,
+		AttemptCount:           intent.AttemptCount,
+		MaxAttempts:            intent.MaxAttempts,
+	}
+	if intent.TargetLaunchID == nil || *intent.TargetLaunchID <= 0 {
+		return obs, nil
+	}
+	obs.HasTargetLaunch = true
+	obs.TargetLaunchID = *intent.TargetLaunchID
+	launch, err := db.GetLaunch(database, obs.TargetLaunchID)
+	if err != nil {
+		return obs, err
+	}
+	if launch == nil {
+		return obs, nil
+	}
+	obs.LaunchFound = true
+	started, err := moveIntentTargetStartedJob(database, intent.JobID, obs.TargetLaunchID)
+	if err != nil {
+		return obs, err
+	}
+	obs.TargetStartedJob = started
+	obs.LaunchTerminal = campaign.IsInstanceTerminal(launch.Status)
+	obs.AgentReady = launch.AgentReadyAtUnix != nil
+	return obs, nil
 }
 
 func moveIntentTargetStartedJob(database *sql.DB, jobID, launchID int64) (bool, error) {

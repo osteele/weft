@@ -272,6 +272,56 @@ func TestInsertLifecycleEventDedup(t *testing.T) {
 	}
 }
 
+func TestCheckpointAutoPublishAttemptedWithinCooldown(t *testing.T) {
+	database := SetupTestDB(t)
+	const (
+		jobID = int64(7)
+		key   = "7:checkpoint:trace"
+	)
+	cooldown := 10 * time.Minute
+	now := time.Unix(1_000_000, 0)
+
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, jobID, key, cooldown, now); err != nil || attempted {
+		t.Fatalf("no attempt on record: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+
+	// First process records an attempt; a second process's fresh gate — no
+	// shared memory — reads it back from the DB within the cooldown window.
+	if err := InsertLifecycleEvent(database, &LifecycleEvent{
+		EventKind:  EventCheckpointAutoPublishAttempt,
+		JobID:      jobID,
+		Detail:     key,
+		OccurredAt: now.Unix(),
+	}); err != nil {
+		t.Fatalf("InsertLifecycleEvent: %v", err)
+	}
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, jobID, key, cooldown, now.Add(5*time.Minute)); err != nil || !attempted {
+		t.Fatalf("within window: attempted=%v err=%v, want true/nil", attempted, err)
+	}
+
+	// The gate is keyed per (job, asset): other keys and other jobs are
+	// independent of this attempt.
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, jobID, "7:checkpoint:other", cooldown, now.Add(5*time.Minute)); err != nil || attempted {
+		t.Fatalf("different key: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, 8, key, cooldown, now.Add(5*time.Minute)); err != nil || attempted {
+		t.Fatalf("different job: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+
+	// Once the cooldown window has elapsed, the gate reopens.
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, jobID, key, cooldown, now.Add(11*time.Minute)); err != nil || attempted {
+		t.Fatalf("after window: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+
+	// Nil DB / invalid args are a no-op, not an error.
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(nil, jobID, key, cooldown, now); err != nil || attempted {
+		t.Fatalf("nil db: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+	if attempted, err := CheckpointAutoPublishAttemptedWithinCooldown(database, 0, key, cooldown, now); err != nil || attempted {
+		t.Fatalf("zero job id: attempted=%v err=%v, want false/nil", attempted, err)
+	}
+}
+
 func TestCountActiveSourceSyncTimeoutHosts(t *testing.T) {
 	database := SetupTestDB(t)
 	now := time.Now()
