@@ -279,9 +279,15 @@ an `activity` payload:
 ```
 
 Activity snapshots are emitted on change. When nothing changed, the daemon
-still re-emits a full snapshot once per heartbeat interval of 45 seconds,
-recomputing `snapshot.time` and `autopilot.pass_age_seconds` on every
-emission so elapsed state age stays derivable on an idle feed. A client may
+still re-emits a full snapshot once per heartbeat interval of 45 seconds. The
+heartbeat is independent of payload construction: builds run in a worker
+goroutine, so a build slower than the heartbeat interval cannot silence the
+feed. A heartbeat re-emits the last built payload **unchanged** — in
+particular `snapshot.time` is not refreshed, because clients derive data age
+from it; the heartbeat proves the daemon is alive while the preserved
+timestamp tells the truth about how old the data is. Before the first build
+completes there is no payload to re-emit, so heartbeat ticks emit nothing
+(the client already has `subscription_ready`). A client may
 therefore treat silence beyond a small multiple of the heartbeat interval
 (for example two or three intervals) as staleness: the daemon is gone, the
 socket broke, or the subscription died.

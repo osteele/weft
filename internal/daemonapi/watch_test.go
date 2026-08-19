@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -473,6 +474,9 @@ func TestActivitySubscriptionDedupsPassAgeChurn(t *testing.T) {
 func TestActivitySubscriptionHeartbeatRefreshesIdleFeed(t *testing.T) {
 	database := db.SetupTestDB(t)
 	includeFormatted := false
+	// The heartbeat interval is shorter than the poll interval so the first
+	// heartbeat fires before any rebuild: the heartbeat event must carry the
+	// first build's payload unchanged.
 	sub := startActivityLoopTest(t, database, SubscriptionRequest{
 		Resource:         ResourceActivity,
 		Follow:           true,
@@ -480,7 +484,7 @@ func TestActivitySubscriptionHeartbeatRefreshesIdleFeed(t *testing.T) {
 		IncludeStatus:    false,
 		IncludeFormatted: &includeFormatted,
 		PollSeconds:      1,
-	}, time.Second)
+	}, 400*time.Millisecond)
 
 	first := nextSubscriptionEvent(t, sub)
 	if first.Type != EventSubscriptionSnapshot || first.Activity == nil || first.Activity.Snapshot == nil {
@@ -494,7 +498,398 @@ func TestActivitySubscriptionHeartbeatRefreshesIdleFeed(t *testing.T) {
 		t.Fatalf("heartbeat autopilot state = %q, want never", got)
 	}
 	if second.Activity.Snapshot.Time.IsZero() {
-		t.Fatal("heartbeat snapshot missing refreshed time")
+		t.Fatal("heartbeat snapshot missing timestamp")
+	}
+	// The heartbeat re-emits the last built payload unchanged: snapshot.Time
+	// reports the age of the data, not the emission time.
+	if !second.Activity.Snapshot.Time.Equal(first.Activity.Snapshot.Time) {
+		t.Fatalf("heartbeat refreshed snapshot time: first = %v, second = %v",
+			first.Activity.Snapshot.Time, second.Activity.Snapshot.Time)
+	}
+}
+
+func TestActivityInputsCacheSharesProjectScopedReads(t *testing.T) {
+	database := db.SetupTestDB(t)
+	exitZero := 0
+	completedID, err := db.RecordQueued(database, "cool30", "/tmp/augur", "echo ok", "done")
+	if err != nil {
+		t.Fatalf("record completed: %v", err)
+	}
+	if err := db.SetJobProject(database, completedID, "augur"); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+	if err := db.CloseAttempt(database, completedID, db.StatusCompleted, &exitZero, time.Now().Unix()); err != nil {
+		t.Fatalf("close completed: %v", err)
+	}
+
+	var cache activityInputsCache
+	now := time.Now()
+	first, err := cache.load(database, "", now)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	if len(first.views) != 1 || first.views[0].ID != completedID {
+		t.Fatalf("first load views = %+v, want the completed job", first.views)
+	}
+
+	// A second subscriber in the same TTL window reuses the snapshot and the
+	// unprocessed views instead of rebuilding them.
+	second, err := cache.load(database, "", now.Add(activityInputsCacheTTL/2))
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if second.snapshot != first.snapshot {
+		t.Fatal("load within TTL rebuilt the snapshot instead of sharing it")
+	}
+	if &second.views[0] != &first.views[0] {
+		t.Fatal("load within TTL rebuilt the unprocessed views instead of sharing them")
+	}
+
+	// A different project scope gets its own entry.
+	scoped, err := cache.load(database, "augur", now.Add(activityInputsCacheTTL/2))
+	if err != nil {
+		t.Fatalf("scoped load: %v", err)
+	}
+	if scoped.snapshot == first.snapshot {
+		t.Fatal("project-scoped load shared the unscoped cache entry")
+	}
+
+	// Past the TTL the inputs are rebuilt.
+	fresh, err := cache.load(database, "", now.Add(activityInputsCacheTTL+time.Millisecond))
+	if err != nil {
+		t.Fatalf("post-TTL load: %v", err)
+	}
+	if fresh.snapshot == first.snapshot {
+		t.Fatal("load past TTL returned stale cached inputs")
+	}
+}
+
+// blockingActivityBuilder returns a payload built once, then blocks every
+// subsequent build until release is closed. It simulates a payload build
+// slower than the heartbeat interval.
+type blockingActivityBuilder struct {
+	payload *ActivityPayload
+	release chan struct{}
+
+	mu      sync.Mutex
+	builds  int
+	blockAt int
+}
+
+func (b *blockingActivityBuilder) build(prev *narrate.Snapshot) (*ActivityPayload, bool, error) {
+	b.mu.Lock()
+	b.builds++
+	n := b.builds
+	payload := b.payload
+	b.mu.Unlock()
+	if n > b.blockAt {
+		<-b.release
+	}
+	return payload, true, nil
+}
+
+func (b *blockingActivityBuilder) setPayload(payload *ActivityPayload) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.payload = payload
+}
+
+func (b *blockingActivityBuilder) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.builds
+}
+
+func activityLoopTestPayload() *ActivityPayload {
+	return &ActivityPayload{Snapshot: &narrate.Snapshot{
+		Time:      time.Unix(1700000000, 0),
+		Jobs:      map[int64]narrate.JobView{},
+		Instances: map[int64]narrate.InstanceView{},
+		Autopilot: narrate.AutopilotView{State: "never"},
+	}}
+}
+
+func TestActivityHeartbeatContinuesDuringSlowBuild(t *testing.T) {
+	includeFormatted := false
+	sub := SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      1,
+		MaxEventBytes:    DefaultActivityMaxEventBytes,
+	}
+	builder := &blockingActivityBuilder{
+		payload: activityLoopTestPayload(),
+		release: make(chan struct{}),
+		blockAt: 1, // the first build succeeds; the 1s poll tick starts one that blocks
+	}
+
+	serverSide, clientSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runActivityLoop(ctx, json.NewEncoder(serverSide), "test-sub", sub, 100*time.Millisecond, builder.build)
+	}()
+	// Cleanup must unblock a mid-write loop before waiting for it: net.Pipe
+	// writes block until the peer reads, so cancel alone can leave the loop
+	// stuck in encoder.Encode after the test stops reading.
+	t.Cleanup(func() {
+		cancel()
+		close(builder.release)
+		_ = serverSide.Close()
+		_ = clientSide.Close()
+		<-done
+	})
+	decoder := json.NewDecoder(clientSide)
+
+	start := time.Now()
+	first := decodeActivityLoopEvent(t, clientSide, decoder)
+	if !first.Activity.Snapshot.Time.Equal(builder.payload.Snapshot.Time) {
+		t.Fatalf("first snapshot time = %v, want %v", first.Activity.Snapshot.Time, builder.payload.Snapshot.Time)
+	}
+
+	// The second build starts at the 1s poll tick and blocks. Heartbeats must
+	// keep flowing through it, re-emitting the last built payload with its
+	// original timestamp.
+	duringBlockedBuild := 0
+	for time.Since(start) < 1600*time.Millisecond {
+		event := decodeActivityLoopEvent(t, clientSide, decoder)
+		if !event.Activity.Snapshot.Time.Equal(builder.payload.Snapshot.Time) {
+			t.Fatalf("heartbeat refreshed snapshot time: got %v, want %v",
+				event.Activity.Snapshot.Time, builder.payload.Snapshot.Time)
+		}
+		if time.Since(start) > 1100*time.Millisecond {
+			duringBlockedBuild++
+		}
+	}
+	if duringBlockedBuild < 2 {
+		t.Fatalf("received %d heartbeats during the blocked build, want at least 2", duringBlockedBuild)
+	}
+	if builds := builder.count(); builds != 2 {
+		t.Fatalf("builds = %d, want 2 (at most one build in flight)", builds)
+	}
+}
+
+func TestActivityHeartbeatSilentBeforeFirstBuild(t *testing.T) {
+	includeFormatted := false
+	sub := SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      1,
+		MaxEventBytes:    DefaultActivityMaxEventBytes,
+	}
+	builder := &blockingActivityBuilder{
+		payload: activityLoopTestPayload(),
+		release: make(chan struct{}),
+		blockAt: 0, // even the first build blocks
+	}
+
+	serverSide, clientSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runActivityLoop(ctx, json.NewEncoder(serverSide), "test-sub", sub, 100*time.Millisecond, builder.build)
+	}()
+	// See TestActivityHeartbeatContinuesDuringSlowBuild: close the pipe before
+	// waiting so a mid-write loop can exit. builder.release is already closed
+	// below, so every worker build has completed by cleanup time.
+	t.Cleanup(func() {
+		cancel()
+		_ = serverSide.Close()
+		_ = clientSide.Close()
+		<-done
+	})
+
+	// No payload has ever been built, so heartbeat ticks emit nothing rather
+	// than inventing a payload.
+	if err := clientSide.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var early Event
+	decoder := json.NewDecoder(clientSide)
+	if err := decoder.Decode(&early); err == nil {
+		t.Fatalf("received event before the first build completed: %+v", early)
+	} else if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("read before first build: %v", err)
+	}
+
+	// The subscription still works once the build completes. The first Decode
+	// timed out, and json.Decoder caches that error, so read with a fresh one.
+	close(builder.release)
+	event := decodeActivityLoopEvent(t, clientSide, json.NewDecoder(clientSide))
+	if !event.Activity.Snapshot.Time.Equal(builder.payload.Snapshot.Time) {
+		t.Fatalf("snapshot time = %v, want %v", event.Activity.Snapshot.Time, builder.payload.Snapshot.Time)
+	}
+}
+
+func decodeActivityLoopEvent(t *testing.T, conn net.Conn, decoder *json.Decoder) Event {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var event Event
+	if err := decoder.Decode(&event); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	if event.Type != EventSubscriptionSnapshot || event.Activity == nil || event.Activity.Snapshot == nil {
+		t.Fatalf("event = %+v, want activity snapshot", event)
+	}
+	return event
+}
+
+// Two concurrent activity subscribers over the same project scope must share
+// the project-scoped reads (snapshot + unprocessed inbox) through the
+// server's activityInputsCache, not rebuild them independently. The
+// observable signal is the snapshot timestamp: a cache hit hands the second
+// subscriber the first subscriber's *narrate.Snapshot, so both first
+// payloads carry the same snapshot.Time; independent builds capture distinct
+// timestamps because BuildSnapshot reads the clock at the start of two
+// separate, DB-query-laden builds. This pins the production wiring in
+// handleConn: if the cache is not passed through, the timestamps diverge.
+func TestActivitySubscribersShareProjectScopedReads(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	server, err := StartServer(ctx, database, socketPath)
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	defer server.Close()
+
+	includeFormatted := false
+	firstSnapshot := func() *narrate.Snapshot {
+		t.Helper()
+		conn, err := net.Dial("unix", server.socketPath)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if err := json.NewEncoder(conn).Encode(Request{
+			Type:      RequestSubscribe,
+			ClientPID: os.Getpid(),
+			Subscribe: &SubscriptionRequest{Resource: ResourceActivity, Follow: true, IncludeFormatted: &includeFormatted},
+		}); err != nil {
+			t.Fatalf("encode request: %v", err)
+		}
+		decoder := json.NewDecoder(conn)
+		for {
+			var event Event
+			if err := decoder.Decode(&event); err != nil {
+				t.Fatalf("decode event: %v", err)
+			}
+			if event.Type == EventSubscriptionSnapshot {
+				if event.Activity == nil || event.Activity.Snapshot == nil {
+					t.Fatalf("event = %+v, want activity snapshot", event)
+				}
+				return event.Activity.Snapshot
+			}
+		}
+	}
+
+	// Sequential, well within the 1s cache TTL: the second subscriber's first
+	// payload must be built from the cached inputs of the first.
+	first := firstSnapshot()
+	second := firstSnapshot()
+	if !second.Time.Equal(first.Time) {
+		t.Fatalf("subscribers built independent snapshots (times %v and %v): project-scoped reads were not shared",
+			first.Time, second.Time)
+	}
+}
+
+// A heartbeat re-emit must honor the negotiated frame limit like any other
+// emission: the re-emitted payload can exceed max_event_bytes even when the
+// last emitted payload fit, because the stable payload key strips
+// now-derived fields (job explanations, autopilot pass age), so a payload
+// can grow past the limit without ever taking the change-emission path.
+func TestActivityHeartbeatRespectsMaxEventBytes(t *testing.T) {
+	includeFormatted := false
+	small := activityLoopTestPayload()
+	small.Snapshot.Jobs[7] = narrate.JobView{ID: 7, Status: db.StatusRunning, Explanation: "ok"}
+	// Same stable key as small (stableJobView strips Explanation) but larger
+	// than the negotiated frame limit.
+	large := activityLoopTestPayload()
+	large.Snapshot.Jobs[7] = narrate.JobView{ID: 7, Status: db.StatusRunning, Explanation: strings.Repeat("x", 8*1024)}
+
+	sub := SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      1,
+		MaxEventBytes:    MinimumActivityMaxEventBytes,
+	}
+	builder := &blockingActivityBuilder{release: make(chan struct{}), blockAt: 1 << 30} // never blocks; only the payload swap matters
+	builder.payload = small
+
+	serverSide, clientSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runActivityLoop(ctx, json.NewEncoder(serverSide), "test-sub", sub, 700*time.Millisecond, builder.build)
+	}()
+	// See TestActivityHeartbeatContinuesDuringSlowBuild: close the pipe before
+	// waiting so a mid-write loop can exit.
+	t.Cleanup(func() {
+		cancel()
+		_ = serverSide.Close()
+		_ = clientSide.Close()
+		<-done
+	})
+	decoder := json.NewDecoder(clientSide)
+
+	first := decodeActivityLoopEvent(t, clientSide, decoder)
+	if first.Type != EventSubscriptionSnapshot {
+		t.Fatalf("first event = %+v, want activity snapshot", first)
+	}
+
+	// The 1s poll tick rebuilds with the oversize payload; the stable key is
+	// unchanged, so it is not change-emitted, and the next heartbeat re-emit
+	// is the first emit to carry it.
+	builder.setPayload(large)
+
+	for {
+		if err := clientSide.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var event Event
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event.Type == EventError {
+			if event.ErrorCode != ErrorCodeFrameTooLarge {
+				t.Fatalf("error event = %+v, want %q", event, ErrorCodeFrameTooLarge)
+			}
+			if event.MaxEventBytes != MinimumActivityMaxEventBytes || event.EventBytes <= event.MaxEventBytes {
+				t.Fatalf("size error bounds = %d/%d, want event bytes above %d",
+					event.EventBytes, event.MaxEventBytes, MinimumActivityMaxEventBytes)
+			}
+			break
+		}
+		// A snapshot event must never carry the oversize payload: that is a
+		// raw over-limit frame on the wire.
+		if got := event.Activity.Snapshot.Jobs[7].Explanation; len(got) > len("ok") {
+			t.Fatalf("received over-limit snapshot frame on heartbeat (explanation %d bytes)", len(got))
+		}
+	}
+
+	// The loop exits after reporting the oversize frame, same as the primary
+	// emission path.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscription loop did not exit after the oversize heartbeat")
 	}
 }
 
@@ -579,7 +974,7 @@ func startActivityLoopTest(t *testing.T, database *sql.DB, sub SubscriptionReque
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go runActivitySubscriptionLoop(ctx, database, json.NewEncoder(serverSide), "test-sub", sub, 0, nil, heartbeat)
+	go runActivitySubscriptionLoop(ctx, database, json.NewEncoder(serverSide), "test-sub", sub, 0, nil, nil, heartbeat)
 	return &Subscription{conn: clientSide, decoder: json.NewDecoder(clientSide)}
 }
 

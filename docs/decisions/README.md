@@ -21,6 +21,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0008](0008-cap-the-borrowed-curve-in-dud-detection.md) | Cap the borrowed survival curve in dud detection | accepted |
 | [0009](0009-read-the-container-before-declaring-it-dead.md) | Read the container before declaring it dead | accepted |
 | [0010](0010-cap-the-borrowed-curve-in-the-pre-running-watchdogs.md) | Cap the borrowed curve in the pre-running watchdogs | accepted |
+| [0011](0011-heartbeat-preserves-snapshot-time.md) | Heartbeats preserve the snapshot timestamp | accepted |
 
 ## Adding one
 

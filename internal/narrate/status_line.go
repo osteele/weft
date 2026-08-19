@@ -56,6 +56,35 @@ func LoadUnprocessedCounts(database *sql.DB, project string) (UnprocessedCounts,
 	if err != nil {
 		return UnprocessedCounts{}, err
 	}
+	return unprocessedCountsFromJobs(jobs), nil
+}
+
+// LoadUnprocessedJobViews returns the bounded unprocessed terminal-job inbox as
+// narrate job views, using the same project scope and age window as
+// LoadUnprocessedCounts.
+func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error) {
+	jobs, err := loadUnprocessedJobs(database, project)
+	if err != nil {
+		return nil, err
+	}
+	return unprocessedJobViews(database, jobs), nil
+}
+
+// LoadUnprocessedCountsAndViews runs the unprocessed-inbox query once and
+// derives both the status-line counts and the job views from the same job
+// list, for callers that need both. The inbox query is the expensive part
+// (a 14-day terminal-job scan), so callers needing counts and views must use
+// this rather than calling LoadUnprocessedCounts and LoadUnprocessedJobViews
+// separately.
+func LoadUnprocessedCountsAndViews(database *sql.DB, project string) (UnprocessedCounts, []JobView, error) {
+	jobs, err := loadUnprocessedJobs(database, project)
+	if err != nil {
+		return UnprocessedCounts{}, nil, err
+	}
+	return unprocessedCountsFromJobs(jobs), unprocessedJobViews(database, jobs), nil
+}
+
+func unprocessedCountsFromJobs(jobs []*db.Job) UnprocessedCounts {
 	var counts UnprocessedCounts
 	completedProjects := map[string]struct{}{}
 	failedProjects := map[string]struct{}{}
@@ -79,17 +108,10 @@ func LoadUnprocessedCounts(database *sql.DB, project string) (UnprocessedCounts,
 	}
 	counts.CompletedProjects = sortedStringKeys(completedProjects)
 	counts.FailedProjects = sortedStringKeys(failedProjects)
-	return counts, nil
+	return counts
 }
 
-// LoadUnprocessedJobViews returns the bounded unprocessed terminal-job inbox as
-// narrate job views, using the same project scope and age window as
-// LoadUnprocessedCounts.
-func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error) {
-	jobs, err := loadUnprocessedJobs(database, project)
-	if err != nil {
-		return nil, err
-	}
+func unprocessedJobViews(database *sql.DB, jobs []*db.Job) []JobView {
 	views := make([]JobView, 0, len(jobs))
 	for _, job := range jobs {
 		if !isUnprocessedTerminalJob(job) {
@@ -98,7 +120,7 @@ func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error
 		views = append(views, jobToView(database, job, nil, jobview.PlacementStatus{}))
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
-	return views, nil
+	return views
 }
 
 func loadUnprocessedJobs(database *sql.DB, project string) ([]*db.Job, error) {

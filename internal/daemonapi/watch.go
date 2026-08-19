@@ -150,6 +150,7 @@ type Server struct {
 
 	budgetCentsPerHour int
 	runawayBreakers    runawayBreakerCache
+	activityInputs     activityInputsCache
 }
 
 const runawayBreakerRefreshInterval = 5 * time.Second
@@ -157,6 +158,14 @@ const runawayBreakerRefreshInterval = 5 * time.Second
 // activityHeartbeatInterval bounds silence between activity snapshots on an
 // idle subscription; clients treat longer silence as staleness.
 const activityHeartbeatInterval = 45 * time.Second
+
+// activityInputsCacheTTL bounds how long project-scoped activity inputs are
+// shared across subscribers. It matches the default activity poll interval
+// (runActivitySubscriptionLoop polls once per second): subscribers tick once
+// per interval, so a one-interval TTL collapses the per-subscriber duplicate
+// builds within a tick into a single build while adding at most one tick of
+// staleness.
+const activityInputsCacheTTL = time.Second
 
 type runawayBreakerCache struct {
 	mu          sync.Mutex
@@ -177,6 +186,62 @@ func (c *runawayBreakerCache) load(database *sql.DB, now time.Time) ([]campaign.
 	c.refreshedAt = now
 	c.infos = infos
 	return c.infos, nil
+}
+
+// activityInputs holds the project-scoped reads behind an activity payload:
+// the narrate snapshot and the unprocessed-inbox counts and views. These
+// depend only on the project scope, not on the subscriber, so subscribers
+// over the same project share them.
+//
+// The snapshot is treated as immutable after build: DiffSnapshots,
+// FormatSnapshot, BuildStatusLine, and the delta resolvers only read it, so
+// one *narrate.Snapshot can be handed to every subscriber goroutine at once.
+type activityInputs struct {
+	snapshot *narrate.Snapshot
+	counts   narrate.UnprocessedCounts
+	views    []narrate.JobView
+}
+
+// activityInputsCache shares activityInputs across subscribers per project.
+// The mutex covers the whole load so a cache miss runs one build even when
+// several subscribers miss simultaneously.
+type activityInputsCache struct {
+	mu      sync.Mutex
+	entries map[string]activityInputsEntry
+}
+
+type activityInputsEntry struct {
+	refreshedAt time.Time
+	inputs      activityInputs
+}
+
+func (c *activityInputsCache) load(database *sql.DB, project string, now time.Time) (activityInputs, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[project]; ok && now.Before(entry.refreshedAt.Add(activityInputsCacheTTL)) {
+		return entry.inputs, nil
+	}
+	inputs, err := loadActivityInputs(database, project)
+	if err != nil {
+		return activityInputs{}, err
+	}
+	if c.entries == nil {
+		c.entries = map[string]activityInputsEntry{}
+	}
+	c.entries[project] = activityInputsEntry{refreshedAt: now, inputs: inputs}
+	return inputs, nil
+}
+
+func loadActivityInputs(database *sql.DB, project string) (activityInputs, error) {
+	snap, err := narrate.BuildSnapshot(database, narrate.SnapshotOptions{Project: project})
+	if err != nil {
+		return activityInputs{}, err
+	}
+	counts, views, err := narrate.LoadUnprocessedCountsAndViews(database, project)
+	if err != nil {
+		return activityInputs{}, fmt.Errorf("load unprocessed inbox: %w", err)
+	}
+	return activityInputs{snapshot: snap, counts: counts, views: views}, nil
 }
 
 type DaemonInfo struct {
@@ -299,7 +364,7 @@ func (s *Server) handleConn(ctx context.Context, database *sql.DB, conn net.Conn
 	case RequestMutate:
 		s.mutateRequest(reqCtx, database, encoder, req)
 	case RequestSubscribe:
-		subscribe(reqCtx, database, encoder, req, s.budgetCentsPerHour, &s.runawayBreakers)
+		subscribe(reqCtx, database, encoder, req, s.budgetCentsPerHour, &s.runawayBreakers, &s.activityInputs)
 	case RequestWatchJobs:
 		watchJobs(reqCtx, database, encoder, req)
 	default:
@@ -362,7 +427,7 @@ func (s *Server) submitJob(ctx context.Context, database *sql.DB, encoder *json.
 	})
 }
 
-func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
+func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, req Request, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, activityInputs *activityInputsCache) {
 	sub := req.Subscribe
 	if sub == nil {
 		sub = &SubscriptionRequest{
@@ -406,7 +471,7 @@ func subscribe(parent context.Context, database *sql.DB, encoder *json.Encoder, 
 	case ResourceProjectWatch:
 		subscribeProjectWatch(parent, database, encoder, id, *sub)
 	case ResourceActivity:
-		subscribeActivity(parent, database, encoder, id, *sub, budgetCentsPerHour, runawayBreakers)
+		subscribeActivity(parent, database, encoder, id, *sub, budgetCentsPerHour, runawayBreakers, activityInputs)
 	}
 }
 
@@ -459,8 +524,8 @@ func subscribeProjectWatch(parent context.Context, database *sql.DB, encoder *js
 	})
 }
 
-func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache) {
-	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour, runawayBreakers, activityHeartbeatInterval)
+func subscribeActivity(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, inputs *activityInputsCache) {
+	runActivitySubscriptionLoop(parent, database, encoder, id, sub, budgetCentsPerHour, runawayBreakers, inputs, activityHeartbeatInterval)
 }
 
 type subscriptionStep func(now time.Time) (*watchevents.SnapshotEvent, bool, error)
@@ -548,7 +613,35 @@ func projectWatchJobs(database *sql.DB, project string, recentWindow time.Durati
 	return watchevents.DedupeJobsByID(activeJobs, recentJobs), len(activeJobs) > 0, nil
 }
 
-func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, heartbeat time.Duration) {
+func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, inputs *activityInputsCache, heartbeat time.Duration) {
+	includeStatus := sub.IncludeStatus || !sub.IncludeDelta
+	build := func(prev *narrate.Snapshot) (*ActivityPayload, bool, error) {
+		return buildCachedActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour, runawayBreakers, inputs)
+	}
+	runActivityLoop(parent, encoder, id, sub, heartbeat, build)
+}
+
+type activityBuildResult struct {
+	payload *ActivityPayload
+	active  bool
+	err     error
+}
+
+// activityBuildFunc builds one activity payload against prev, the
+// subscriber's most recent snapshot (nil before the first build). The delta
+// is per-subscriber state, so each subscription builds its own payload even
+// when the underlying project-scoped reads are shared.
+type activityBuildFunc func(prev *narrate.Snapshot) (*ActivityPayload, bool, error)
+
+// runActivityLoop emits activity snapshots on change and heartbeats on idle.
+// Builds run in a worker goroutine, at most one at a time, so a build slower
+// than the heartbeat interval cannot silence the feed: the loop selects over
+// build results, the poll and heartbeat tickers, and cancellation. All
+// encoder writes stay in this goroutine (json.Encoder is not
+// concurrency-safe); the worker only builds and reports over a buffered
+// channel so a build that outlives the subscription can always report and
+// exit instead of leaking.
+func runActivityLoop(parent context.Context, encoder *json.Encoder, id string, sub SubscriptionRequest, heartbeat time.Duration, build activityBuildFunc) {
 	ctx := parent
 	cancel := func() {}
 	if sub.TimeoutSeconds > 0 {
@@ -562,54 +655,100 @@ func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encod
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	var heartbeatC <-chan time.Time
+	if heartbeat > 0 {
+		heartbeatTicker := time.NewTicker(heartbeat)
+		defer heartbeatTicker.Stop()
+		heartbeatC = heartbeatTicker.C
+	}
 
-	includeStatus := sub.IncludeStatus || !sub.IncludeDelta
+	results := make(chan activityBuildResult, 1)
+	buildInFlight := false
+	startBuild := func(prev *narrate.Snapshot) {
+		buildInFlight = true
+		go func() {
+			payload, active, err := build(prev)
+			results <- activityBuildResult{payload: payload, active: active, err: err}
+		}()
+	}
+
 	var prev *narrate.Snapshot
+	var lastPayload *ActivityPayload
 	lastKey := ""
 	var lastEmit time.Time
+
+	// emit writes a snapshot event and reports whether the connection is
+	// still usable; false means the loop must exit.
+	emit := func(payload *ActivityPayload) bool {
+		if err := encodeBoundedActivityEvent(encoder, Event{
+			Type:           EventSubscriptionSnapshot,
+			APIVersion:     1,
+			Resource:       sub.Resource,
+			SubscriptionID: id,
+			Activity:       payload,
+		}, sub.MaxEventBytes); err != nil {
+			if sizeErr, ok := err.(*activityEventSizeError); ok {
+				writeActivityEventSizeError(encoder, id, sub, sizeErr)
+			}
+			return false
+		}
+		lastEmit = time.Now()
+		return true
+	}
+
+	startBuild(nil)
 	for {
-		payload, active, err := buildCachedActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour, runawayBreakers)
-		if err != nil {
-			_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, SubscriptionID: id, Error: err.Error()})
-			return
-		}
-		key := activityPayloadKey(payload)
-		shouldEmit := key != lastKey || activityPayloadHasDelta(payload)
-		if heartbeat > 0 && !shouldEmit && !lastEmit.IsZero() && time.Since(lastEmit) >= heartbeat {
-			shouldEmit = true
-		}
-		if shouldEmit {
-			lastKey = key
-			lastEmit = time.Now()
-			if err := encodeBoundedActivityEvent(encoder, Event{
-				Type:           EventSubscriptionSnapshot,
-				APIVersion:     1,
-				Resource:       sub.Resource,
-				SubscriptionID: id,
-				Activity:       payload,
-			}, sub.MaxEventBytes); err != nil {
-				if sizeErr, ok := err.(*activityEventSizeError); ok {
-					writeActivityEventSizeError(encoder, id, sub, sizeErr)
+		select {
+		case result := <-results:
+			buildInFlight = false
+			if result.err != nil {
+				_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, SubscriptionID: id, Error: result.err.Error()})
+				return
+			}
+			payload := result.payload
+			key := activityPayloadKey(payload)
+			if key != lastKey || activityPayloadHasDelta(payload) {
+				lastKey = key
+				if !emit(payload) {
+					return
+				}
+			}
+			lastPayload = payload
+			prev = payload.Snapshot
+			if !sub.Follow && !result.active {
+				if err := encodeBoundedActivityEvent(encoder, Event{Type: EventDone, APIVersion: 1, Resource: sub.Resource, SubscriptionID: id, Activity: payload}, sub.MaxEventBytes); err != nil {
+					if sizeErr, ok := err.(*activityEventSizeError); ok {
+						writeActivityEventSizeError(encoder, id, sub, sizeErr)
+					}
 				}
 				return
 			}
-		}
-		prev = payload.Snapshot
-		if !sub.Follow && !active {
-			if err := encodeBoundedActivityEvent(encoder, Event{Type: EventDone, APIVersion: 1, Resource: sub.Resource, SubscriptionID: id, Activity: payload}, sub.MaxEventBytes); err != nil {
-				if sizeErr, ok := err.(*activityEventSizeError); ok {
-					writeActivityEventSizeError(encoder, id, sub, sizeErr)
+		case <-ticker.C:
+			if !buildInFlight {
+				startBuild(prev)
+			}
+		case <-heartbeatC:
+			// Invariant: a heartbeat re-emits the last built payload
+			// unchanged — in particular snapshot.Time is preserved, never
+			// refreshed. Refreshing a timestamp the daemon did not
+			// re-observe would assert a freshness we have no evidence for:
+			// the heartbeat proves the daemon is alive, and the preserved
+			// timestamp tells the truth about how old the data is. Before
+			// the first build completes there is no payload to re-emit, so
+			// the tick is skipped (the client already has
+			// subscription_ready). The re-emit goes through the same
+			// bounded emit as any change emission, so a heartbeat never
+			// exceeds the negotiated frame limit.
+			if lastPayload != nil && time.Since(lastEmit) >= heartbeat {
+				if !emit(lastPayload) {
+					return
 				}
 			}
-			return
-		}
-		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				_ = encoder.Encode(Event{Type: EventError, Resource: sub.Resource, SubscriptionID: id, Error: ctx.Err().Error()})
 			}
 			return
-		case <-ticker.C:
 		}
 	}
 }
@@ -661,15 +800,27 @@ func writeActivityEventSizeError(encoder *json.Encoder, id string, sub Subscript
 	})
 }
 
-func buildCachedActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, cache *runawayBreakerCache) (*ActivityPayload, bool, error) {
-	if cache == nil {
-		return buildActivityPayload(database, sub, prev, includeStatus, budgetCentsPerHour)
+func buildCachedActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, breakerCache *runawayBreakerCache, inputsCache *activityInputsCache) (*ActivityPayload, bool, error) {
+	var breakers []campaign.RunawayBreakerInfo
+	var err error
+	if breakerCache != nil {
+		breakers, err = breakerCache.load(database, time.Now())
+	} else {
+		breakers, err = campaign.LookupActiveRunawayBreakers(database)
 	}
-	breakers, err := cache.load(database, time.Now())
 	if err != nil {
 		return nil, false, fmt.Errorf("load active runaway breakers: %w", err)
 	}
-	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers)
+	var inputs activityInputs
+	if inputsCache != nil {
+		inputs, err = inputsCache.load(database, sub.Project, time.Now())
+	} else {
+		inputs, err = loadActivityInputs(database, sub.Project)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers, inputs)
 }
 
 func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int) (*ActivityPayload, bool, error) {
@@ -677,14 +828,15 @@ func buildActivityPayload(database *sql.DB, sub SubscriptionRequest, prev *narra
 	if err != nil {
 		return nil, false, fmt.Errorf("load active runaway breakers: %w", err)
 	}
-	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers)
-}
-
-func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, breakers []campaign.RunawayBreakerInfo) (*ActivityPayload, bool, error) {
-	snap, err := narrate.BuildSnapshot(database, narrate.SnapshotOptions{Project: sub.Project})
+	inputs, err := loadActivityInputs(database, sub.Project)
 	if err != nil {
 		return nil, false, err
 	}
+	return buildActivityPayloadWithBreakers(database, sub, prev, includeStatus, budgetCentsPerHour, breakers, inputs)
+}
+
+func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest, prev *narrate.Snapshot, includeStatus bool, budgetCentsPerHour int, breakers []campaign.RunawayBreakerInfo, inputs activityInputs) (*ActivityPayload, bool, error) {
+	snap := inputs.snapshot
 	payload := &ActivityPayload{Snapshot: snap}
 	includeFormatted := sub.IncludeFormatted == nil || *sub.IncludeFormatted
 	if includeFormatted {
@@ -708,18 +860,10 @@ func buildActivityPayloadWithBreakers(database *sql.DB, sub SubscriptionRequest,
 		}
 	}
 	if includeStatus {
-		unprocessed, err := narrate.LoadUnprocessedCounts(database, sub.Project)
-		if err != nil {
-			return nil, false, fmt.Errorf("count unprocessed: %w", err)
-		}
-		unprocessedJobs, err := narrate.LoadUnprocessedJobViews(database, sub.Project)
-		if err != nil {
-			return nil, false, fmt.Errorf("list unprocessed jobs: %w", err)
-		}
-		statusLine := narrate.BuildStatusLine(snap, budgetCentsPerHour, unprocessed)
+		statusLine := narrate.BuildStatusLine(snap, budgetCentsPerHour, inputs.counts)
 		payload.StatusLine = &statusLine
-		payload.Unprocessed = unprocessed
-		payload.UnprocessedJobs = unprocessedJobs
+		payload.Unprocessed = inputs.counts
+		payload.UnprocessedJobs = inputs.views
 	}
 	active := len(snap.Jobs) > 0 || len(snap.Instances) > 0
 	return payload, active, nil
@@ -810,8 +954,8 @@ func stableSnapshotKey(snapshot *narrate.Snapshot) activitySnapshotKey {
 	}
 	autopilot := snapshot.Autopilot
 	// PassAgeSeconds is an age counter recomputed from the build time, so it
-	// churns on every poll; the heartbeat refreshes it in the emitted
-	// payload, so it must not drive emit-on-change. State stays in the key:
+	// churns whenever the project-scoped inputs are rebuilt; it must not
+	// drive emit-on-change. State stays in the key:
 	// it is also clock-derived but only crosses discrete boundaries
 	// (running/stale/idle), and those rare transitions are exactly what a
 	// status client wants emitted promptly.
