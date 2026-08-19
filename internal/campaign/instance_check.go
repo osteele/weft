@@ -206,7 +206,9 @@ type CheckInstanceParams struct {
 	JobProgressChangedAt *time.Time
 
 	// LastProviderStatusChangeAt is the time of the most recent
-	// provider_status_transitions row for this launch. Used to anchor
+	// provider_status_transitions row for this launch that records an actual
+	// status change; rows marking the provider first becoming legible carry an
+	// empty old_status and are excluded. Used to anchor
 	// rule 4b's pre-running timeout on time-since-status-went-non-running
 	// instead of launched_at, so a previously-running instance gets a
 	// fresh deadline when it transitions to a non-running status.

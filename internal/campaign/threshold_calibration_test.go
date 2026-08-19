@@ -30,11 +30,16 @@ const calibPreClampThreshold = 110 * time.Minute
 //	    go test ./internal/campaign/ -run TestThresholdCalibration -v
 //
 // Only two of the three ceilings are replayable. maxEmptyStatusTimeCeiling
-// governs the wait for the provider to report any non-empty status, and no
-// column in `launches` records when that first happened — ready_at and
+// governs the wait for the provider to report any non-empty status. No column
+// in `launches` records when that first happened — ready_at and
 // agent_ready_at_unix are much later events, and provider_running_at is rule
-// P's. Scoring it would require inventing a proxy, so it is left out rather
-// than reported against a stand-in.
+// P's. provider_status_transitions rows with an empty old_status mark the
+// provider becoming legible, but they are scoped to the observing process
+// rather than to the launch: a restarted reconciler or a new watch session
+// emits another one, so the earliest such row is a lower bound on latency, not
+// a measurement of it. Scoring this ceiling still needs a per-launch
+// first-legible timestamp, so it is left out rather than reported against a
+// stand-in.
 func TestThresholdCalibration(t *testing.T) {
 	path := os.Getenv("WEFT_CALIBRATION_DB")
 	if path == "" {
