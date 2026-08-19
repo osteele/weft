@@ -279,10 +279,11 @@ an `activity` payload:
 ```
 
 Activity snapshots are emitted on change. When nothing changed, the daemon
-still re-emits a full snapshot once per heartbeat interval of 45 seconds. The
-heartbeat is independent of payload construction: builds run in a worker
-goroutine, so a build slower than the heartbeat interval cannot silence the
-feed. A heartbeat re-emits the last built payload **unchanged** — in
+still re-emits a full snapshot one heartbeat interval (45 seconds, subject to
+normal timer slack) after the last emission of any kind — change or
+heartbeat. The heartbeat is independent of payload construction: builds run in
+a worker goroutine, so a build slower than the heartbeat interval cannot
+silence the feed. A heartbeat re-emits the last built payload **unchanged** — in
 particular `snapshot.time` is not refreshed, because clients derive data age
 from it; the heartbeat proves the daemon is alive while the preserved
 timestamp tells the truth about how old the data is. Before the first build

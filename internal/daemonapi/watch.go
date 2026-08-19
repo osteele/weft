@@ -655,9 +655,10 @@ func runActivityLoop(parent context.Context, encoder *json.Encoder, id string, s
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	var heartbeatTicker *time.Ticker
 	var heartbeatC <-chan time.Time
 	if heartbeat > 0 {
-		heartbeatTicker := time.NewTicker(heartbeat)
+		heartbeatTicker = time.NewTicker(heartbeat)
 		defer heartbeatTicker.Stop()
 		heartbeatC = heartbeatTicker.C
 	}
@@ -693,6 +694,12 @@ func runActivityLoop(parent context.Context, encoder *json.Encoder, id string, s
 			return false
 		}
 		lastEmit = time.Now()
+		// The heartbeat means "it has been at most one interval since the
+		// client last heard from us", so every successful emission —
+		// change-emission and heartbeat alike — restarts the interval.
+		if heartbeatTicker != nil {
+			heartbeatTicker.Reset(heartbeat)
+		}
 		return true
 	}
 
@@ -739,6 +746,14 @@ func runActivityLoop(parent context.Context, encoder *json.Encoder, id string, s
 			// subscription_ready). The re-emit goes through the same
 			// bounded emit as any change emission, so a heartbeat never
 			// exceeds the negotiated frame limit.
+			//
+			// The ticker resets on every emission, so a tick normally
+			// arrives one full interval after the last emit. The
+			// time.Since(lastEmit) guard is still load-bearing: the ticker
+			// channel is buffered, so a tick can already be pending when an
+			// emission resets the ticker (a tick that fired while the loop
+			// was handling a build result). Without the guard that stale
+			// tick would heartbeat immediately after a fresh emission.
 			if lastPayload != nil && time.Since(lastEmit) >= heartbeat {
 				if !emit(lastPayload) {
 					return

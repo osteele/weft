@@ -566,10 +566,13 @@ func TestActivityInputsCacheSharesProjectScopedReads(t *testing.T) {
 
 // blockingActivityBuilder returns a payload built once, then blocks every
 // subsequent build until release is closed. It simulates a payload build
-// slower than the heartbeat interval.
+// slower than the heartbeat interval. firstDelay delays the first build, to
+// position the first emission at a known phase relative to the heartbeat
+// ticker.
 type blockingActivityBuilder struct {
-	payload *ActivityPayload
-	release chan struct{}
+	payload    *ActivityPayload
+	release    chan struct{}
+	firstDelay time.Duration
 
 	mu      sync.Mutex
 	builds  int
@@ -582,6 +585,9 @@ func (b *blockingActivityBuilder) build(prev *narrate.Snapshot) (*ActivityPayloa
 	n := b.builds
 	payload := b.payload
 	b.mu.Unlock()
+	if n == 1 && b.firstDelay > 0 {
+		time.Sleep(b.firstDelay)
+	}
 	if n > b.blockAt {
 		<-b.release
 	}
@@ -726,6 +732,72 @@ func TestActivityHeartbeatSilentBeforeFirstBuild(t *testing.T) {
 	event := decodeActivityLoopEvent(t, clientSide, json.NewDecoder(clientSide))
 	if !event.Activity.Snapshot.Time.Equal(builder.payload.Snapshot.Time) {
 		t.Fatalf("snapshot time = %v, want %v", event.Activity.Snapshot.Time, builder.payload.Snapshot.Time)
+	}
+}
+
+// The heartbeat fires one interval after the last emission, not on a fixed
+// phase from loop start: an emit landing just after a tick must not push the
+// next heartbeat a full extra interval out (which would double the worst-case
+// silence and false-alarm clients that treat 2x the interval as staleness).
+//
+// The phase is controlled, not hoped for: the first build completes 1.05
+// intervals after loop start, so the first emission lands just after the
+// first tick boundary. The build delay is a sleep, which never returns early,
+// so under fixed-phase ticking the next tick always evaluates
+// time.Since(lastEmit) at 0.95 intervals — below the threshold, a
+// deterministic skip — and the heartbeat fires at ~2 intervals. With the
+// ticker reset on emit, it fires at ~1 interval. The 1.5x threshold separates
+// the two cleanly.
+func TestActivityHeartbeatFiresOneIntervalAfterLastEmission(t *testing.T) {
+	includeFormatted := false
+	const heartbeat = 300 * time.Millisecond
+	sub := SubscriptionRequest{
+		Resource:         ResourceActivity,
+		Follow:           true,
+		IncludeDelta:     false,
+		IncludeStatus:    false,
+		IncludeFormatted: &includeFormatted,
+		PollSeconds:      3600, // no rebuild intervenes between the emissions
+		MaxEventBytes:    DefaultActivityMaxEventBytes,
+	}
+	builder := &blockingActivityBuilder{
+		payload:    activityLoopTestPayload(),
+		release:    make(chan struct{}),
+		blockAt:    1 << 30, // never blocks
+		firstDelay: heartbeat + heartbeat/20,
+	}
+
+	serverSide, clientSide := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runActivityLoop(ctx, json.NewEncoder(serverSide), "test-sub", sub, heartbeat, builder.build)
+	}()
+	// See TestActivityHeartbeatContinuesDuringSlowBuild: close the pipe before
+	// waiting so a mid-write loop can exit. No build ever blocks here, so
+	// release stays open and unused.
+	t.Cleanup(func() {
+		cancel()
+		_ = serverSide.Close()
+		_ = clientSide.Close()
+		<-done
+	})
+	decoder := json.NewDecoder(clientSide)
+
+	first := decodeActivityLoopEvent(t, clientSide, decoder)
+	emittedAt := time.Now()
+	second := decodeActivityLoopEvent(t, clientSide, decoder)
+	gap := time.Since(emittedAt)
+
+	if first.Type != EventSubscriptionSnapshot || second.Type != EventSubscriptionSnapshot {
+		t.Fatalf("events = %q, %q, want two activity snapshots", first.Type, second.Type)
+	}
+	if gap > 3*heartbeat/2 {
+		t.Fatalf("heartbeat arrived %v after the last emission, want about one interval (%v); got nearly two", gap, heartbeat)
+	}
+	if gap < heartbeat/2 {
+		t.Fatalf("heartbeat arrived %v after the last emission, want about one interval (%v); fired far too early", gap, heartbeat)
 	}
 }
 
