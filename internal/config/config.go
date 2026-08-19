@@ -43,7 +43,8 @@ type Config struct {
 	// HostRefreshInterval is how often to refresh host info in hosts view
 	HostRefreshInterval int `yaml:"host_refresh_interval" toml:"host_refresh_interval"`
 
-	// EnableMouse toggles mouse support in the TUI (disables terminal selection when true)
+	// EnableMouse toggles mouse reporting in the TUIs (reporting disables the
+	// terminal's own text selection; the list TUI's M key toggles it at runtime)
 	EnableMouse bool `yaml:"enable_mouse" toml:"enable_mouse"`
 
 	// LogCacheMaxAge is how long to keep cached log files (in days)
@@ -767,7 +768,7 @@ func DefaultConfig() *Config {
 		SyncIdleInterval:    60,
 		LogRefreshInterval:  3,
 		HostRefreshInterval: 30,
-		EnableMouse:         false,
+		EnableMouse:         true,
 		LogCacheMaxAge:      7,
 		LogCacheMaxSize:     1024 * 1024, // 1MB
 		ShowUsageHints:      true,

@@ -175,6 +175,7 @@ func TestListTUIGroupedUnprocessedHidesCanceledJobs(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		unprocessedView: true,
+		mouseEnabled:    true,
 		width:           100,
 		height:          20,
 		title:           "Jobs",
@@ -1280,6 +1281,7 @@ func TestListTUIGroupedViewShowsStatusAndControlsOnSeparateLines(t *testing.T) {
 func TestListTUIGroupedViewKeepsControlsVisibleWhenStatusIsLong(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
+		mouseEnabled:    true,
 		width:           64,
 		height:          12,
 		title:           "Jobs",

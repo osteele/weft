@@ -89,6 +89,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m.beginSelectedJobDiagnosis()
 		}},
 		{keys: "up", aliases: upAliases, action: "move up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			if m.isGroupedView() {
 				if m.cursor > 0 {
 					m.cursor--
@@ -99,6 +100,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "down", aliases: []string{"j"}, action: "move down", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			if m.isGroupedView() {
 				if m.cursor < len(m.groupedSelectableRows)-1 {
 					m.cursor++
@@ -109,10 +111,12 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "g", aliases: []string{"home"}, action: "top", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			m.cursor = 0
 			return m, nil
 		}},
 		{keys: "G", aliases: []string{"end"}, action: "bottom", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			if m.isGroupedView() {
 				if len(m.groupedSelectableRows) > 0 {
 					m.cursor = len(m.groupedSelectableRows) - 1
@@ -123,6 +127,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "pgdown", aliases: []string{"space"}, action: "page down", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			m.cursor += m.pageSize()
 			if m.isGroupedView() {
 				if m.cursor >= len(m.groupedSelectableRows) {
@@ -134,11 +139,25 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, nil
 		}},
 		{keys: "pgup", aliases: []string{"b"}, action: "page up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.selRangeActive = false
 			m.cursor -= m.pageSize()
 			if m.cursor < 0 {
 				m.cursor = 0
 			}
 			return m, nil
+		}},
+		{keys: listKeyCopyID.keys, action: listKeyCopyID.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m.copySelectionID()
+		}},
+		{keys: listKeyCopyDetails.keys, action: listKeyCopyDetails.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			return m.copySelectionDetails()
+		}},
+		{keys: listKeyToggleMouse.keys, action: listKeyToggleMouse.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			m.mouseEnabled = !m.mouseEnabled
+			if m.mouseEnabled {
+				return m, tea.EnableMouseCellMotion
+			}
+			return m, tea.DisableMouse
 		}},
 	}
 	return bindings
@@ -171,6 +190,9 @@ var (
 	listKeyRebalance         = listKeyBinding{keys: "R", action: "rebalance"}
 	listKeyAutoErrorDetails  = listKeyBinding{keys: "e", action: "error details"}
 	listKeyAutoHideError     = listKeyBinding{keys: "e", action: "hide error"}
+	listKeyCopyID            = listKeyBinding{keys: "y", action: "copy id"}
+	listKeyCopyDetails       = listKeyBinding{keys: "Y", action: "copy details"}
+	listKeyToggleMouse       = listKeyBinding{keys: "M", action: "mouse"}
 )
 
 func listFlatKeyBindings() []listKeyBinding {

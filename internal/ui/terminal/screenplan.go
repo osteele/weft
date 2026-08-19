@@ -98,6 +98,15 @@ func (p screenPlan) render() string {
 	return b.String()
 }
 
+// rowIdxAt returns the model row drawn at screen row y, or -1 when that line
+// stands for no row (title, filler, footer) or y is off screen.
+func (p screenPlan) rowIdxAt(y int) int {
+	if y < 0 || y >= len(p.lines) {
+		return -1
+	}
+	return p.lines[y].rowIdx
+}
+
 // hit resolves a press at display column x of screen row y. When spans overlap, the
 // narrowest span containing x wins; otherwise the line-wide target applies.
 func (p screenPlan) hit(x, y int) (clickTarget, bool) {

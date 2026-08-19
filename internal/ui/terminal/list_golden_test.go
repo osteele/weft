@@ -172,6 +172,7 @@ func listGoldenTUIModel(unprocessed bool) listTUIModel {
 			7001: {ID: 7001, Status: db.LaunchStatusLaunching, CreatedAt: now - 240},
 		},
 		launchSpinner: s,
+		mouseEnabled:  true,
 	}
 	m.rebuildGroupedRows()
 	return m

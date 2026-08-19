@@ -169,6 +169,17 @@ type listTUIModel struct {
 	appConfig                  *config.Config
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
+	// selAnchor is the cursor position where a mouse-drag selection started.
+	// selRangeActive marks the selection as a range (anchor…cursor) rather
+	// than a single row; the bool keeps the zero value range-free.
+	selAnchor      int
+	selRangeActive bool
+	// dragging is true between a left press on a selectable row and its
+	// release; motion events in that window extend the range.
+	dragging bool
+	// mouseEnabled tracks whether mouse reporting is on, so the M toggle and
+	// the title-line indicator agree. Initialized from config.EnableMouse.
+	mouseEnabled bool
 	// planCache holds the plan from the most recent View(). Pointer so it survives bubbletea's
 	// value-receiver copies. Hit testing reads it so a click resolves against the frame the user
 	// actually saw, not one rebuilt from a database that may have moved between render and click.
@@ -258,6 +269,8 @@ func (m *listTUIModel) setGroupMode(mode listGroupMode) {
 	}
 	m.groupMode = mode
 	m.groupedByStatus = mode == listGroupStatus
+	m.selRangeActive = false
+	m.dragging = false
 	m.rebuildLayout()
 	m.rebuildGroupedRows()
 	m.clampCursor()
@@ -437,7 +450,11 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 
 	stdio := InstallTUIStdioCapture()
 
-	finalModel, err := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	programOpts := []tea.ProgramOption{stdio.Option, tea.WithAltScreen(), tea.WithReportFocus()}
+	if cfg.EnableMouse {
+		programOpts = append(programOpts, tea.WithMouseCellMotion())
+	}
+	finalModel, err := tea.NewProgram(router, programOpts...).Run()
 	stdio.Restore()
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)
@@ -492,6 +509,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		quickLaunchScope:       "list_quick_launch:" + buildListAutoLeaseScope(baseTitle),
 		focused:                true,
+		mouseEnabled:           cfg.EnableMouse,
 		appConfig:              cfg,
 		cloudClients:           cloudClients,
 		launchSpinner:          s,
@@ -1460,6 +1478,7 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 	parts := m.flatFrameParts()
 	bodyRows := parts.bodyRows
 	mateRows, matesActive := hostMatesForFlatView(m.jobs, m.cursor)
+	rangeLo, rangeHi, rangeActive := m.rangeSelectionSpan()
 	rowWidth := m.width
 	plan := newScreenPlan(m.width, m.height)
 
@@ -1484,7 +1503,7 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 			if matesActive && (idx == m.cursor || mateRows[idx]) {
 				row = applyHostMateMarkerForJob(row, m.jobs[idx])
 			}
-			if idx == m.cursor {
+			if idx == m.cursor || (rangeActive && idx >= rangeLo && idx <= rangeHi) {
 				row = renderSelectedRow(row, m.width)
 			}
 			plan.add(row, idx, clickTarget{kind: targetSelectRow, rowIdx: idx})
@@ -1719,7 +1738,10 @@ func (m listTUIModel) displayTitle() string {
 		title = strings.TrimSpace(title + " • draft")
 	}
 	if m.unprocessedView {
-		return strings.TrimSpace(title + " • unprocessed")
+		title = strings.TrimSpace(title + " • unprocessed")
+	}
+	if !m.mouseEnabled {
+		title = strings.TrimSpace(title + " • mouse off (M to re-enable)")
 	}
 	return title
 }
@@ -1780,6 +1802,7 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 	rows := m.groupedRows
 	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
 	selectedRow := m.selectedGroupedRow()
+	rangeRows := m.rangeSelectedRowIdxs()
 	mateRows, matesActive := hostMatesForGroupedRows(rows, selectedRow)
 	rowWidth := m.width
 	plan := newScreenPlan(m.width, m.height)
@@ -1806,7 +1829,7 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 				line = applyHostMateMarkerForJob(line, rj)
 			}
 		}
-		if selectedRow >= 0 && row.rowIdx >= 0 && row.rowIdx == selectedRow {
+		if selectedRow >= 0 && row.rowIdx >= 0 && (row.rowIdx == selectedRow || rangeRows[row.rowIdx]) {
 			if matesActive {
 				line = applyHostMateMarkerForJob(line, m.groupedRows[row.rowIdx].job)
 			}
@@ -2266,6 +2289,9 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	line += "  " + listKeyToggleStatusArea.footerToken()
 	line += "  " + listKeyListView.footerToken()
 	line += "  " + listKeyInstances.footerToken()
+	line += "  " + listKeyCopyID.footerToken()
+	line += "  " + listKeyCopyDetails.footerToken()
+	line += "  " + listKeyToggleMouse.footerToken()
 	line += "  ?:help"
 	return line
 }
@@ -2425,14 +2451,167 @@ func (m listTUIModel) selectedGroupedLaunch() *db.Launch {
 }
 
 func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
-		return m, nil
-	}
 	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.showInstanceFailures || m.showJobDiagnosis || m.autoRunRateInputActive {
+		m.dragging = false
 		return m, nil
 	}
-	target, _ := m.currentPlan().hit(msg.X, msg.Y)
-	return m, m.dispatchTarget(target)
+	switch {
+	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+		target, _ := m.currentPlan().hit(msg.X, msg.Y)
+		m.selRangeActive = false
+		m.dragging = false
+		if pos := m.selectablePositionForRowIdx(target.rowIdx); target.kind == targetSelectRow && pos >= 0 {
+			m.selAnchor = pos
+			m.dragging = true
+		}
+		return m, m.dispatchTarget(target)
+	case m.dragging && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionMotion:
+		// A drag extends the selection to the row under the cursor. The row
+		// comes from the plan's rowIdx (a model row), not the screen row, so a
+		// repaint mid-drag cannot corrupt the range.
+		if pos := m.selectablePositionForRowIdx(m.currentPlan().rowIdxAt(msg.Y)); pos >= 0 {
+			m.cursor = pos
+			m.selRangeActive = pos != m.selAnchor
+			m.clampCursor()
+			m.adjustOffset()
+		}
+		return m, nil
+	case m.dragging && msg.Action == tea.MouseActionRelease:
+		m.dragging = false
+		return m, nil
+	}
+	return m, nil
+}
+
+// selectablePositionForRowIdx maps a plan row index to a cursor position in
+// the current selection domain, or -1 when the row is not selectable.
+func (m listTUIModel) selectablePositionForRowIdx(rowIdx int) int {
+	if rowIdx < 0 {
+		return -1
+	}
+	if !m.isGroupedView() {
+		if rowIdx < len(m.jobs) {
+			return rowIdx
+		}
+		return -1
+	}
+	for pos, ri := range m.groupedSelectableRows {
+		if ri == rowIdx {
+			return pos
+		}
+	}
+	return -1
+}
+
+// rangeSelectionSpan returns the inclusive cursor-position span of the active
+// drag selection, or false when the selection is a single row.
+func (m listTUIModel) rangeSelectionSpan() (int, int, bool) {
+	if !m.selRangeActive || m.selAnchor == m.cursor {
+		return 0, 0, false
+	}
+	lo, hi := m.selAnchor, m.cursor
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return lo, hi, true
+}
+
+// rangeSelectedRowIdxs returns the groupedRows indices the drag selection
+// highlights: the body rows (jobs and launches) inside the span. Section
+// headers and other non-body rows the drag crosses are never highlighted.
+func (m listTUIModel) rangeSelectedRowIdxs() map[int]bool {
+	lo, hi, ok := m.rangeSelectionSpan()
+	if !ok || !m.isGroupedView() {
+		return nil
+	}
+	rows := map[int]bool{}
+	for pos := lo; pos <= hi && pos < len(m.groupedSelectableRows); pos++ {
+		rowIdx := m.groupedSelectableRows[pos]
+		if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		if row := m.groupedRows[rowIdx]; row.job != nil || row.launch != nil {
+			rows[rowIdx] = true
+		}
+	}
+	return rows
+}
+
+// rangeSelectedJobIDs returns the job IDs the drag selection covers, in
+// display order, or nil when the selection is a single row.
+func (m listTUIModel) rangeSelectedJobIDs() []int64 {
+	lo, hi, ok := m.rangeSelectionSpan()
+	if !ok {
+		return nil
+	}
+	var jobIDs []int64
+	if !m.isGroupedView() {
+		for i := lo; i <= hi && i < len(m.jobs); i++ {
+			if m.jobs[i] != nil {
+				jobIDs = append(jobIDs, m.jobs[i].ID)
+			}
+		}
+		return jobIDs
+	}
+	for pos := lo; pos <= hi && pos < len(m.groupedSelectableRows); pos++ {
+		rowIdx := m.groupedSelectableRows[pos]
+		if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		if job := m.groupedRows[rowIdx].job; job != nil {
+			jobIDs = append(jobIDs, job.ID)
+		}
+	}
+	return jobIDs
+}
+
+// copySelectionID is the y keybinding's action: copy the selected object's
+// identifier — job ID, instance ID, or a blocked bucket's reason plus job IDs
+// — or the compact job-ID list when a drag range is active.
+func (m listTUIModel) copySelectionID() (listTUIModel, tea.Cmd) {
+	if jobIDs := m.rangeSelectedJobIDs(); len(jobIDs) > 0 {
+		return m, copyToClipboardCmd(pluralize(len(jobIDs), "job", "jobs"), ids.FormatJobIDListCompact(jobIDs))
+	}
+	if m.isGroupedView() {
+		rowIdx := m.selectedGroupedRow()
+		if rowIdx >= 0 && rowIdx < len(m.groupedRows) {
+			row := m.groupedRows[rowIdx]
+			switch {
+			case row.job != nil:
+				id := ids.FormatJobID(row.job.ID)
+				return m, copyToClipboardCmd(id, id)
+			case row.launch != nil:
+				id := ids.FormatInstanceID(row.launch.ID)
+				return m, copyToClipboardCmd(id, id)
+			case len(row.jobIDs) > 0:
+				return m, copyToClipboardCmd("blocking status", blockedBucketCopyPayload(row))
+			}
+		}
+		m.statusMessage = "Select a job or instance row to copy"
+		return m, nil
+	}
+	if job := m.currentSelectedJob(); job != nil {
+		id := ids.FormatJobID(job.ID)
+		return m, copyToClipboardCmd(id, id)
+	}
+	m.statusMessage = "Select a job row to copy"
+	return m, nil
+}
+
+// copySelectionDetails is the Y keybinding's action: copy the selected
+// object's footer detail block (the "Job:"/"Host:"/blocker lines) as plain
+// text for pasting into a bug report.
+func (m listTUIModel) copySelectionDetails() (listTUIModel, tea.Cmd) {
+	lines := m.selectedJobDetailLines()
+	if len(lines) == 0 {
+		m.statusMessage = "No details to copy"
+		return m, nil
+	}
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = ansi.Strip(line)
+	}
+	return m, copyToClipboardCmd(pluralize(len(plain), "line", "lines"), strings.Join(plain, "\n"))
 }
 
 // dispatchTarget performs the action a resolved click target names. Clicks
@@ -3268,6 +3447,9 @@ func (m listTUIModel) footerText(rows int) string {
 		listKeyKillCancel,
 		listKeyToggleCordon,
 		listKeyPriority,
+		listKeyCopyID,
+		listKeyCopyDetails,
+		listKeyToggleMouse,
 		listKeyProjectFilter,
 		listKeyToggleStatusArea,
 		listKeyGroupedView,
