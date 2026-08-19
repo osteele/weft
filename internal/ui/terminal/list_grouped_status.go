@@ -42,6 +42,16 @@ type groupedStatusRow struct {
 	jobIDs []int64
 	// incidentFingerprint identifies the incident a rollup row summarizes.
 	incidentFingerprint string
+	// collapsible marks a section header the TUI lets the user collapse and
+	// expand. Only set on interactive renders; plain output has no notion of
+	// collapsed sections.
+	collapsible bool
+	// parentJobID names the job whose per-avenue disclosure a detail row
+	// belongs to, so a click on the detail can collapse the parent.
+	parentJobID int64
+	// sampleJobID is the incident rollup's deterministically chosen sample
+	// job: the row a click jumps to.
+	sampleJobID int64
 }
 
 type groupedStatusRowStyle string
@@ -84,6 +94,9 @@ type groupedStatusRenderOptions struct {
 	// user has opened for an in-place per-avenue disclosure.
 	blockedDetail   map[int64]*blockreason.Structured
 	expandedBlocked map[int64]bool
+	// collapsedSections names the section keys the TUI has collapsed to their
+	// header row. Consulted only on interactive renders.
+	collapsedSections map[string]bool
 	// interactive is true for the live TUI render and false for plain text
 	// output. The failed-instances section uses it to decide whether to
 	// collapse the FYI buckets behind an expand toggle (TUI) or render all
@@ -271,11 +284,21 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		if len(section.jobs) == 0 {
 			continue
 		}
+		collapsed := opts.interactive && opts.collapsedSections[section.key]
+		headerText := fmt.Sprintf("%s (%d):", section.title, len(section.jobs))
+		if opts.interactive {
+			headerText = applyDisclosureMarker(headerText, !collapsed)
+		}
 		rows = append(rows, groupedStatusRow{
-			text:     fmt.Sprintf("%s (%d):", section.title, len(section.jobs)),
-			isHeader: true,
-			section:  section.key,
+			text:        headerText,
+			isHeader:    true,
+			section:     section.key,
+			collapsible: opts.interactive,
 		})
+		if collapsed {
+			rows = append(rows, groupedStatusRow{text: ""})
+			continue
+		}
 		if section.key == "unplaced" || section.key == "queued" {
 			rows = appendBlockedGroupedJobRows(rows, section, projectWidth, width, opts, now)
 		} else if section.key == "launching" {
@@ -403,7 +426,8 @@ func appendBlockedGroupedJobRows(
 	opts groupedStatusRenderOptions,
 	now time.Time,
 ) []groupedStatusRow {
-	sharedLaunch, sharedCount := commonLaunchBlocker(section.jobs, opts.blockedDetail)
+	sharedLaunch, sharedJobIDs := commonLaunchBlocker(section.jobs, opts.blockedDetail)
+	sharedCount := len(sharedJobIDs)
 	if sharedLaunch == "" {
 		rows = appendActiveIncidentsRows(rows, section, opts.blockedDetail, section.key)
 	}
@@ -421,6 +445,7 @@ func appendBlockedGroupedJobRows(
 			isBlocked: kind == blockreason.KindBlocked,
 			wrap:      true,
 			section:   section.key,
+			jobIDs:    sharedJobIDs,
 		})
 	}
 	order := make([]blockedReasonBucketKey, 0, len(section.jobs))
@@ -444,6 +469,11 @@ func appendBlockedGroupedJobRows(
 		}
 		jobs := buckets[key]
 		header, headerStyle := groupedStatusBlockedBucketHeader(key, jobs)
+		if opts.interactive {
+			// The triangle marks the header as the line that reveals the
+			// bucket's jobs; they are always shown, so it stays expanded.
+			header = applyDisclosureMarker(header, true)
+		}
 		rows = append(rows, groupedStatusRow{
 			text:      header,
 			isBlocked: true,
@@ -603,6 +633,7 @@ func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSec
 			section:             sectionKey,
 			jobIDs:              inc.jobIDs,
 			incidentFingerprint: inc.fingerprint,
+			sampleJobID:         inc.sampleJobID,
 		})
 	}
 	return rows
@@ -733,19 +764,20 @@ func incidentDetail(fingerprint, sample, display string) string {
 // back to exact-Launch-string equality when fingerprints are absent or
 // disagree, preserving today's behavior for unclassified errors.
 //
-// The returned count lets the caller distinguish "for all" from "for N of
-// M" so the hoist line doesn't overstate its scope when only a subset of
-// the section's jobs share the blocker (the rest may be deferred for
-// unrelated reasons that don't persist a Structured breakdown).
-func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structured) (string, int) {
+// The returned IDs are the covered jobs, sorted, so the caller can attach
+// them to the hoist row as its click-copy payload and distinguish "for all"
+// from "for N of M" — the hoist line must not overstate its scope when only a
+// subset of the section's jobs share the blocker (the rest may be deferred
+// for unrelated reasons that don't persist a Structured breakdown).
+func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structured) (string, []int64) {
 	if len(detail) == 0 {
-		return "", 0
+		return "", nil
 	}
 	fingerprint := ""
 	launch := ""
 	launchAgreed := true
 	useFingerprint := true
-	covered := 0
+	var covered []int64
 	for _, job := range jobs {
 		if job == nil {
 			continue
@@ -756,9 +788,9 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 		}
 		l := blockreason.DisplayReasonForKind(blockreason.KindBlocked, d.Launch)
 		if l == "" {
-			return "", 0
+			return "", nil
 		}
-		covered++
+		covered = append(covered, job.ID)
 		if launch == "" {
 			launch = l
 		} else if l != launch {
@@ -776,19 +808,20 @@ func commonLaunchBlocker(jobs []*db.Job, detail map[int64]*blockreason.Structure
 		// match, no hoist is possible. Bail early so we don't return the
 		// last-seen Launch as a falsely shared blocker.
 		if !launchAgreed && !useFingerprint {
-			return "", 0
+			return "", nil
 		}
 	}
-	if covered < 2 {
-		return "", 0
+	if len(covered) < 2 {
+		return "", nil
 	}
+	sort.Slice(covered, func(i, j int) bool { return covered[i] < covered[j] })
 	if launchAgreed && launch != "" {
 		return launch, covered
 	}
 	if useFingerprint && fingerprint != "" {
 		return incidentDisplayReason(fingerprint, launch), covered
 	}
-	return "", 0
+	return "", nil
 }
 
 // blockedBucketKey is the subheader grouping key for a blocked job. Once the
@@ -881,9 +914,10 @@ func appendBlockedDisclosureRows(
 				prefix = continuation
 			}
 			rows = append(rows, groupedStatusRow{
-				text:    prefix + w,
-				style:   groupedStatusRowStyleDisclosure,
-				section: sectionKey,
+				text:        prefix + w,
+				style:       groupedStatusRowStyleDisclosure,
+				section:     sectionKey,
+				parentJobID: job.ID,
 			})
 		}
 	}

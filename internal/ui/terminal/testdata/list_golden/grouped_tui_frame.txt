@@ -1,30 +1,30 @@
 Jobs (6) • group:status
-Running (1):
+▾ Running (1):
 -   wj501 — alpha  — ETA ~1h44 (34m–4h) — started 4m ago — move source wi6201 → wi6202 (non-aut…
 
-Placing (1):
+▾ Placing (1):
 -   wj501 — alpha open move source and target    — placing 3m ago — move pending wi6201 → wi6202
 
-Launching (1):
+▾ Launching (1):
 - ⣾  wj503 — beta  launching setup                                    — deps installing · 4m ago
 
-Unplaced (1):
-  waiting: planner: provider offer fetch unavailable: cached offer snapshot missing; market
-    unknown; Weft will retry
+▾ Unplaced (1):
+▾ waiting: planner: provider offer fetch unavailable: cached offer snapshot missing; market
+  unknown; Weft will retry
   -   wj502 — alpha blocked rental offer                                        — created 3m ago
 
-Completed (1):
+▾ Completed (1):
 - ⌂ wj504 — beta  finished cleanly                            — completed 15m ago — completed ok
 
-Failed (1):
+▾ Failed (1):
 - ⌂ wj505 — gamma finished with nonzero exit               — failed 25m ago — completed (exit 2)
 
-Killed/Canceled (1):
+▾ Killed/Canceled (1):
 -   wj506 — gamma operator canceled                                  — placed 10m ago — canceled
 
 
-Job: wj501 · elapsed 4m · ETA ~1h44 (34m–4h)
-Host: wi6201
+Job: wj501 · elapsed 4m · ETA ~1h44 (34m–4h) (z:diagnose)
+Host: wi6201 (i:instances)
 Move: wi6201 → wi6202 · waiting for destination acceptance
 Auto-pilot: monitoring (1 unplaced, 1 running)
 A:auto (ON)  r:refresh  z:diagnose  a:attempts  x:kill/cancel  u:unplace  p:toggle processed  P…

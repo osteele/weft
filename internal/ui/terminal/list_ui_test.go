@@ -2482,7 +2482,7 @@ func TestListTUIAutoPilotStatusUsesPluralInstancesWording(t *testing.T) {
 	}
 }
 
-func TestListTUIGroupedSelectionSkipsHeaders(t *testing.T) {
+func TestListTUIGroupedSelectionIncludesSectionHeaders(t *testing.T) {
 	m := listTUIModel{
 		groupedByStatus: true,
 		width:           100,
@@ -2494,20 +2494,26 @@ func TestListTUIGroupedSelectionSkipsHeaders(t *testing.T) {
 	}
 	m.rebuildGroupedRows()
 
-	if len(m.groupedSelectableRows) != 2 {
-		t.Fatalf("selectable rows = %d, want 2", len(m.groupedSelectableRows))
+	// Section headers are cursor stops so enter/click can collapse them.
+	if len(m.groupedSelectableRows) != 3 {
+		t.Fatalf("selectable rows = %d, want 3 (1 header + 2 jobs)", len(m.groupedSelectableRows))
 	}
-	if row := m.selectedGroupedRow(); row < 0 || row >= len(m.groupedRows) || m.groupedRows[row].isHeader {
-		t.Fatalf("initial selected row should be a job row, got row=%d", row)
-	}
+	// The keyless initial selection lands on the first job row, not a header.
 	if job := m.selectedGroupedJob(); job == nil || job.ID != 101 {
 		t.Fatalf("initial selected job = %+v, want ID 101", job)
 	}
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	got := next.(listTUIModel)
+	if section := got.selectedCollapsibleSection(); section == "" {
+		t.Fatalf("after up the selection should be a section header, row = %d", got.selectedGroupedRow())
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = next.(listTUIModel).Update(tea.KeyMsg{Type: tea.KeyDown})
+	got = next.(listTUIModel)
 	if job := got.selectedGroupedJob(); job == nil || job.ID != 102 {
-		t.Fatalf("after down selected job = %+v, want ID 102", job)
+		t.Fatalf("after up then two downs selected job = %+v, want ID 102", job)
 	}
 }
 
@@ -2522,7 +2528,9 @@ func TestListTUIGroupedRebuildPreservesSelectedJob(t *testing.T) {
 		},
 	}
 	m.rebuildGroupedRows()
+	// Down twice: the first stop past job 101 is the Queued section header.
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = next.(listTUIModel).Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(listTUIModel)
 	if job := m.selectedGroupedJob(); job == nil || job.ID != 102 {
 		t.Fatalf("selected job before rebuild = %+v, want ID 102", job)
@@ -2783,6 +2791,7 @@ func TestListTUIMouseClickSelectsGroupedJobRow(t *testing.T) {
 	next, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
+		X:      30, // past the job-ID copy span
 		Y:      clickY,
 	})
 	got := next.(listTUIModel)
@@ -2791,7 +2800,7 @@ func TestListTUIMouseClickSelectsGroupedJobRow(t *testing.T) {
 	}
 }
 
-func TestListTUIMouseClickIgnoresGroupedHeaderAndFooter(t *testing.T) {
+func TestListTUIMouseClickTogglesGroupedSectionHeader(t *testing.T) {
 	m := listTUIModel{
 		title:           "Jobs",
 		groupedByStatus: true,
@@ -2803,16 +2812,31 @@ func TestListTUIMouseClickIgnoresGroupedHeaderAndFooter(t *testing.T) {
 		},
 	}
 	m.rebuildGroupedRows()
-	m.cursor = 1
 
+	// Y=1 is the Unplaced section header; clicking it collapses the section.
 	next, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		Y:      1,
 	})
 	got := next.(listTUIModel)
-	if got.cursor != 1 {
-		t.Fatalf("header click cursor = %d, want unchanged 1", got.cursor)
+	if !got.collapsedSections["unplaced"] {
+		t.Fatalf("header click should collapse the unplaced section, collapsed = %v", got.collapsedSections)
+	}
+	for _, row := range got.groupedRows {
+		if row.job != nil {
+			t.Fatalf("collapsed section still shows job row: %+v", row)
+		}
+	}
+
+	next, _ = got.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Y:      1,
+	})
+	got = next.(listTUIModel)
+	if got.collapsedSections["unplaced"] {
+		t.Fatalf("second header click should expand the unplaced section, collapsed = %v", got.collapsedSections)
 	}
 
 	next, _ = got.Update(tea.MouseMsg{
@@ -2821,8 +2845,8 @@ func TestListTUIMouseClickIgnoresGroupedHeaderAndFooter(t *testing.T) {
 		Y:      19,
 	})
 	got = next.(listTUIModel)
-	if got.cursor != 1 {
-		t.Fatalf("footer click cursor = %d, want unchanged 1", got.cursor)
+	if len(got.collapsedSections) != 0 {
+		t.Fatalf("footer click must not change collapse state, collapsed = %v", got.collapsedSections)
 	}
 }
 
@@ -3300,6 +3324,7 @@ func TestListTUIMouseClickSelectsGroupedJobAfterBlockedReason(t *testing.T) {
 	next, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
+		X:      30, // past the job-ID copy span
 		Y:      clickY,
 	})
 	got := next.(listTUIModel)

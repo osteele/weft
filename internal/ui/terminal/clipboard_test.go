@@ -291,15 +291,17 @@ func TestBlockedBucketCopyClickEndToEnd(t *testing.T) {
 	}
 }
 
-func TestIncidentRollupRowIsNotACopyTarget(t *testing.T) {
+func TestIncidentRollupRowIsAJumpTarget(t *testing.T) {
 	row := groupedStatusRow{
 		text:                "  incident: no matching rental offers from providers — 2 jobs",
 		isBlocked:           true,
 		jobIDs:              []int64{750, 751},
 		incidentFingerprint: "vastai/empty-result:no-offers",
+		sampleJobID:         750,
 	}
-	if target := groupedRowClickTarget(row, 3); target.actionable() {
-		t.Fatalf("incident rollup row must stay click-inert, got %+v", target)
+	target := groupedRowClickTarget(row, 3)
+	if target.kind != targetIncidentJump || target.rowIdx != 3 {
+		t.Fatalf("incident rollup row must jump to its sample job, got %+v", target)
 	}
 }
 
@@ -336,5 +338,53 @@ func TestFlashCoversPinnedQuickLaunchStatus(t *testing.T) {
 	}
 	if got := m.statusLineText(m.groupedStatusText()); got != "Launching new instance..." {
 		t.Fatalf("pinned status must reappear after flash expiry, got %q", got)
+	}
+}
+
+func TestJobIDCopyFlashNamesTheJobID(t *testing.T) {
+	seams := swapClipboardSeams(t, nil)
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           96,
+		height:          30,
+		jobs:            []*db.Job{{ID: 504, Status: db.StatusRunning, CreatedAt: 1}},
+	}
+	m.rebuildGroupedRows()
+	plan := m.buildGroupedScreenPlan()
+
+	rowY := -1
+	for y, line := range plan.lines {
+		if strings.Contains(stripANSI(line.text), "wj504") {
+			rowY = y
+			break
+		}
+	}
+	if rowY < 0 {
+		t.Fatalf("no wj504 row in frame:\n%s", plan.render())
+	}
+
+	target, ok := plan.hit(2, rowY)
+	if !ok || target.kind != targetCopy {
+		t.Fatalf("hit = %+v, %v; want a copy target on the ID region", target, ok)
+	}
+
+	cmd := m.dispatchTarget(target)
+	if cmd == nil {
+		t.Fatal("dispatchTarget returned no command")
+	}
+	msg, isCopy := cmd().(clipboardCopiedMsg)
+	if !isCopy {
+		t.Fatalf("cmd produced %T, want clipboardCopiedMsg", cmd())
+	}
+
+	// The flash names the object copied, so the user can tell wj504 from wj505
+	// without re-reading the row.
+	text, isError := msg.flashText()
+	if text != "wj504 copied to clipboard" || isError {
+		t.Fatalf("flash = %q, isError=%v; want %q, false", text, isError, "wj504 copied to clipboard")
+	}
+	if len(seams.nativePayloads) != 1 || seams.nativePayloads[0] != "wj504" {
+		t.Fatalf("clipboard payload = %q, want [wj504]", seams.nativePayloads)
 	}
 }

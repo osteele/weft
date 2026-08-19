@@ -86,14 +86,7 @@ func listCommonKeyBindings(grouped bool) []listKeyBinding {
 			return m, tea.Suspend
 		}},
 		{keys: listKeyDiagnose.keys, action: listKeyDiagnose.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			job := m.currentSelectedJob()
-			if job == nil {
-				m.statusMessage = "Select a job row to diagnose"
-				return m, nil
-			}
-			m.statusMessage = fmt.Sprintf("Diagnosing job #%d...", job.ID)
-			m.jobDiagnosisLoading = true
-			return m, runListJobDiagnosis(job.ID)
+			return m.beginSelectedJobDiagnosis()
 		}},
 		{keys: "up", aliases: upAliases, action: "move up", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if m.isGroupedView() {
@@ -296,6 +289,84 @@ func listFlatKeyBindings() []listKeyBinding {
 	return bindings
 }
 
+// beginSelectedJobDiagnosis is the z keybinding's action: open the diagnosis
+// overlay for the job under the cursor.
+func (m listTUIModel) beginSelectedJobDiagnosis() (listTUIModel, tea.Cmd) {
+	job := m.currentSelectedJob()
+	if job == nil {
+		m.statusMessage = "Select a job row to diagnose"
+		return m, nil
+	}
+	m.statusMessage = fmt.Sprintf("Diagnosing job #%d...", job.ID)
+	m.jobDiagnosisLoading = true
+	return m, runListJobDiagnosis(job.ID)
+}
+
+// toggleExpandAllBlockers is the O keybinding's action: expand every job's
+// placement breakdown, or collapse them all when any is open.
+func (m listTUIModel) toggleExpandAllBlockers() (listTUIModel, tea.Cmd) {
+	expandable := 0
+	for _, d := range m.autoBlockDetail {
+		if d != nil && d.IsPlacementFailure() {
+			expandable++
+		}
+	}
+	if expandable == 0 {
+		m.statusMessage = "No placement breakdowns to expand"
+		return m, nil
+	}
+	anyExpanded := false
+	for _, open := range m.expandedBlocked {
+		if open {
+			anyExpanded = true
+			break
+		}
+	}
+	next := map[int64]bool{}
+	if !anyExpanded {
+		for jobID, d := range m.autoBlockDetail {
+			if d != nil && d.IsPlacementFailure() {
+				next[jobID] = true
+			}
+		}
+	}
+	m.expandedBlocked = next
+	m.rebuildGroupedRows()
+	return m, nil
+}
+
+// hasExpandableAutoBlockers reports whether O has anything to expand.
+func (m listTUIModel) hasExpandableAutoBlockers() bool {
+	for _, d := range m.autoBlockDetail {
+		if d != nil && d.IsPlacementFailure() {
+			return true
+		}
+	}
+	return false
+}
+
+// toggleAutoErrorDetails is the e keybinding's action: show or hide the
+// autopilot error details block.
+func (m listTUIModel) toggleAutoErrorDetails() (listTUIModel, tea.Cmd) {
+	if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
+		m.statusMessage = "No auto-pilot error details."
+		return m, nil
+	}
+	m.showAutoPilotErrorDetails = !m.showAutoPilotErrorDetails
+	return m, nil
+}
+
+// openInstanceFailuresOverlay is the f keybinding's action.
+func (m listTUIModel) openInstanceFailuresOverlay() (listTUIModel, tea.Cmd) {
+	if !m.hasRecentInstanceFailures() {
+		m.statusMessage = "No recent instance failures"
+		return m, nil
+	}
+	m.showInstanceFailures = true
+	m.instanceFailuresScroll = 0
+	return m, nil
+}
+
 func handleGroupedDisclosureKey(m listTUIModel, action groupedDisclosureAction) (tea.Model, tea.Cmd) {
 	setState := func(current bool) bool {
 		switch action {
@@ -389,6 +460,10 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m.beginAutoRunRateInput()
 		}},
 		listKeyBinding{keys: "enter", action: "expand", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
+			if section := m.selectedCollapsibleSection(); section != "" {
+				m.toggleSectionCollapse(section)
+				return m, nil
+			}
 			return handleGroupedDisclosureKey(m, groupedDisclosureToggle)
 		}},
 		listKeyBinding{keys: "right", action: "expand", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
@@ -398,34 +473,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return handleGroupedDisclosureKey(m, groupedDisclosureCollapse)
 		}},
 		listKeyBinding{keys: "O", action: "expand all blockers", handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			expandable := 0
-			for _, d := range m.autoBlockDetail {
-				if d != nil && d.IsPlacementFailure() {
-					expandable++
-				}
-			}
-			if expandable == 0 {
-				m.statusMessage = "No placement breakdowns to expand"
-				return m, nil
-			}
-			anyExpanded := false
-			for _, open := range m.expandedBlocked {
-				if open {
-					anyExpanded = true
-					break
-				}
-			}
-			next := map[int64]bool{}
-			if !anyExpanded {
-				for jobID, d := range m.autoBlockDetail {
-					if d != nil && d.IsPlacementFailure() {
-						next[jobID] = true
-					}
-				}
-			}
-			m.expandedBlocked = next
-			m.rebuildGroupedRows()
-			return m, nil
+			return m.toggleExpandAllBlockers()
 		}},
 		listKeyBinding{keys: listKeyListView.keys, action: listKeyListView.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if m.moveLookupPending {
@@ -445,13 +493,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, func() tea.Msg { return switchToSystemWatchMsg{} }
 		}},
 		listKeyBinding{keys: listKeyInstanceFailures.keys, action: listKeyInstanceFailures.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if !m.hasRecentInstanceFailures() {
-				m.statusMessage = "No recent instance failures"
-				return m, nil
-			}
-			m.showInstanceFailures = true
-			m.instanceFailuresScroll = 0
-			return m, nil
+			return m.openInstanceFailuresOverlay()
 		}},
 		listKeyBinding{keys: listKeyHosts.keys, action: listKeyHosts.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return switchToHostsMsg{} }
@@ -464,12 +506,7 @@ func listGroupedKeyBindings() []listKeyBinding {
 			return m, nil
 		}},
 		listKeyBinding{keys: listKeyAutoErrorDetails.keys, action: listKeyAutoErrorDetails.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
-			if strings.TrimSpace(m.lastAutoPilotErrorRaw) == "" {
-				m.statusMessage = "No auto-pilot error details."
-				return m, nil
-			}
-			m.showAutoPilotErrorDetails = !m.showAutoPilotErrorDetails
-			return m, nil
+			return m.toggleAutoErrorDetails()
 		}},
 		listKeyBinding{keys: listKeyLaunchQueued.keys, action: listKeyLaunchQueued.action, handler: func(m listTUIModel) (tea.Model, tea.Cmd) {
 			if !m.isStatusGroupedView() {

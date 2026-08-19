@@ -11,14 +11,27 @@ const (
 	targetOpenURL
 	targetRestartDaemon
 	targetCopy
+	targetCollapseBlocked
+	targetIncidentJump
+	targetAutoErrorToggle
+	targetExpandAllBlockers
+	targetDiagnose
+	targetInstanceFailures
+	targetInstances
+	targetHosts
+	targetDismissStatus
+	targetControlsKey
 )
 
 type clickTarget struct {
-	kind   targetKind
-	rowIdx int // index into m.groupedRows (grouped view) or m.jobs (flat view); -1 otherwise
-	toggle string
-	url    string
-	label  string
+	kind    targetKind
+	rowIdx  int // index into m.groupedRows (grouped view) or m.jobs (flat view); -1 otherwise
+	toggle  string
+	url     string
+	label   string
+	payload string // copy payload when it is not derived from a grouped row
+	jobID   int64  // job a disclosure-collapse target belongs to
+	key     string // controls-line key token to invoke
 }
 
 func (t clickTarget) actionable() bool { return t.kind != targetNone }
@@ -59,6 +72,14 @@ func newScreenPlan(width, height int) screenPlan {
 // -1 for title, filler, and footer lines that stand for no row.
 func (p *screenPlan) add(text string, rowIdx int, target clickTarget) {
 	p.lines = append(p.lines, screenLine{text: text, rowIdx: rowIdx, lineTarget: target})
+}
+
+// addSpan attaches a column-scoped target to the most recently added line.
+func (p *screenPlan) addSpan(span hitSpan) {
+	if len(p.lines) == 0 {
+		return
+	}
+	p.lines[len(p.lines)-1].spans = append(p.lines[len(p.lines)-1].spans, span)
 }
 
 func (p screenPlan) render() string {

@@ -70,50 +70,53 @@ type listTUIModel struct {
 	// job..."). flash is the transient result of a completed synchronous
 	// action; it self-expires. Targets that START something use statusMessage;
 	// targets that COMPLETE something use flash.
-	statusMessage              string
-	flash                      flash.State
-	daemonRestartInProgress    bool
-	dbWatcher                  *dbwatch.Source
-	debounceActive             bool
-	debouncePending            bool
-	reloadInProgress           bool
-	reloadPending              bool
-	syncWorker                 *hostsync.Worker
-	ctx                        context.Context
-	cancel                     context.CancelFunc
-	groupMode                  listGroupMode
-	groupedByStatus            bool
-	groupedUnprocessedView     bool
-	projectFilter              string
-	projectInputActive         bool
-	projectInputValue          string
-	projectCandidates          []string
-	projectCandidateCursor     int
-	projectCandidatesLoading   bool
-	hideStatusArea             bool
-	groupedRows                []groupedStatusRow
-	groupedSelectableRows      []int
-	autoInProgress             bool
-	autoUpgradePending         bool
-	autoPassStartedAt          time.Time
-	autoPassPhase              autoPilotPhaseHint
-	autoPersistentError        string
-	autoPersistentBlocked      string
-	autoPersistentBlockedN     int
-	autoRunRateTargetCents     int
-	autoRunRateInputActive     bool
-	autoRunRateInputValue      string
-	autoRunRateInputPhase      autoBudgetPhase
-	autoDailyCapCents          int
-	autoNextPassAt             time.Time
-	autoTimerRunsPass          bool
-	autoWakeSnapshot           orchestration.WakeSnapshot
-	autoLastPassAt             time.Time
-	autoLeaseOwner             string
-	autoLeaseScope             string
-	autoBlockReasons           map[int64]string
-	autoBlockDetail            map[int64]*blockreason.Structured
-	expandedBlocked            map[int64]bool
+	statusMessage            string
+	flash                    flash.State
+	daemonRestartInProgress  bool
+	dbWatcher                *dbwatch.Source
+	debounceActive           bool
+	debouncePending          bool
+	reloadInProgress         bool
+	reloadPending            bool
+	syncWorker               *hostsync.Worker
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	groupMode                listGroupMode
+	groupedByStatus          bool
+	groupedUnprocessedView   bool
+	projectFilter            string
+	projectInputActive       bool
+	projectInputValue        string
+	projectCandidates        []string
+	projectCandidateCursor   int
+	projectCandidatesLoading bool
+	hideStatusArea           bool
+	groupedRows              []groupedStatusRow
+	groupedSelectableRows    []int
+	autoInProgress           bool
+	autoUpgradePending       bool
+	autoPassStartedAt        time.Time
+	autoPassPhase            autoPilotPhaseHint
+	autoPersistentError      string
+	autoPersistentBlocked    string
+	autoPersistentBlockedN   int
+	autoRunRateTargetCents   int
+	autoRunRateInputActive   bool
+	autoRunRateInputValue    string
+	autoRunRateInputPhase    autoBudgetPhase
+	autoDailyCapCents        int
+	autoNextPassAt           time.Time
+	autoTimerRunsPass        bool
+	autoWakeSnapshot         orchestration.WakeSnapshot
+	autoLastPassAt           time.Time
+	autoLeaseOwner           string
+	autoLeaseScope           string
+	autoBlockReasons         map[int64]string
+	autoBlockDetail          map[int64]*blockreason.Structured
+	expandedBlocked          map[int64]bool
+	// collapsedSections holds the session-scoped set of grouped-status section
+	// keys the user has collapsed to their header row.
+	collapsedSections          map[string]bool
 	showInstanceFailures       bool
 	instanceFailuresScroll     int
 	showJobDiagnosis           bool
@@ -194,6 +197,7 @@ type groupedViewLayout struct {
 	statusLine          string
 	sharedStatus        sharedTUIStatusLinesView
 	autoPilotLine       string
+	autoPilotTarget     clickTarget
 	errorDetailsLines   []string
 	instanceHealthLines []string
 	selectedDetails     []string
@@ -1493,12 +1497,20 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
 	for _, line := range parts.selectedDetailLines {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+		text, target := m.selectedDetailPlanLine(line)
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
 	}
-	for i, line := range parts.sharedStatus.lines {
-		plan.add(line, -1, sharedStatusLineTarget(parts.sharedStatus, i))
+	for i := range parts.sharedStatus.lines {
+		line, target := sharedStatusPlanLine(parts.sharedStatus, i, m.width)
+		plan.add(line, -1, target)
 	}
-	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.statusLineText(m.footerText(bodyRows)), m.width)), -1, clickTarget{})
+	// The flat footer mixes a transient flash with the controls legend; only a
+	// showing flash makes the whole line dismiss-on-click.
+	footerTarget := clickTarget{}
+	if m.flash.Render() != "" {
+		footerTarget = clickTarget{kind: targetDismissStatus}
+	}
+	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.statusLineText(m.footerText(bodyRows)), m.width)), -1, footerTarget)
 	return plan
 }
 
@@ -1509,10 +1521,162 @@ func sharedStatusLineTarget(status sharedTUIStatusLinesView, i int) clickTarget 
 	case status.daemonActionable && status.daemonLineIndex == i:
 		return clickTarget{kind: targetRestartDaemon, label: "daemon"}
 	case status.vastCreditWarningActionable && status.vastCreditWarningLineIndex == i:
-		return clickTarget{kind: targetOpenURL, url: status.creditWarningBillingURL, label: status.creditWarningProviderName}
+		return clickTarget{kind: targetOpenURL, url: status.creditWarningBillingURL, label: status.creditWarningProviderName + " billing"}
+	case status.systemLineIndex >= 0 && status.systemLineIndex == i:
+		return clickTarget{kind: targetInstances, label: "instances"}
+	case status.pausedBannerLineIndex >= 0 && status.pausedBannerLineIndex == i:
+		// The banner warns about paused instances; the instances view is where
+		// they are inspected. Resume/destroy stay keyboard-only: both are
+		// mutations with money attached.
+		return clickTarget{kind: targetInstances, label: "instances"}
 	default:
 		return clickTarget{}
 	}
+}
+
+// sharedStatusPlanLine resolves shared status line i's click target and, when
+// the target is one a first-time viewer could not guess, appends its hint.
+func sharedStatusPlanLine(status sharedTUIStatusLinesView, i, width int) (string, clickTarget) {
+	target := sharedStatusLineTarget(status, i)
+	line := status.lines[i]
+	if target.kind == targetInstances {
+		line = truncateDisplayWidth(line+" ("+listKeyInstances.footerToken()+")", width)
+	}
+	return line, target
+}
+
+// selectedDetailPlanLine resolves the click target for one selected-job footer
+// line ("Job:", "Host:") and appends the hint that advertises it. Lines that
+// name nothing actionable — "Move:" above all, where the tempting verbs would
+// mutate a job with a pending move — stay inert and unhinted.
+func (m listTUIModel) selectedDetailPlanLine(line string) (string, clickTarget) {
+	job := m.currentSelectedJob()
+	if job == nil {
+		return line, clickTarget{}
+	}
+	switch {
+	case strings.HasPrefix(line, "Job: "):
+		return line + " (" + listKeyDiagnose.footerToken() + ")", clickTarget{kind: targetDiagnose}
+	case strings.HasPrefix(line, "Host: "):
+		return m.hostDetailPlanLine(line, job)
+	default:
+		return line, clickTarget{}
+	}
+}
+
+// hostDetailPlanLine resolves the "Host:" footer line's target from the
+// selected job's placement kind: rental instances travel to the instances
+// view (or the failures overlay when the launch failed), inventory hosts to
+// the hosts view, and a SkyPilot external job opens its dashboard URL.
+func (m listTUIModel) hostDetailPlanLine(line string, job *db.Job) (string, clickTarget) {
+	switch job.TargetKind() {
+	case db.JobTargetInventoryHost:
+		return line + " (" + listKeyHosts.footerToken() + ")", clickTarget{kind: targetHosts}
+	case db.JobTargetExternal:
+		binding := m.externalBindingByJobID[job.ID]
+		if binding == nil || strings.TrimSpace(binding.DashboardURL) == "" {
+			return line, clickTarget{}
+		}
+		return line + " (click: dashboard)", clickTarget{kind: targetOpenURL, url: binding.DashboardURL, label: "SkyPilot dashboard"}
+	case db.JobTargetRentalInstance:
+		var launch *db.Launch
+		if job.LaunchID != nil {
+			launch = m.launchByID[*job.LaunchID]
+		}
+		if launch != nil && launch.Status == db.LaunchStatusFailed {
+			// The f overlay only has content when recent failures were
+			// summarized, so the hint and the target gate on it together: a
+			// hint that lies about clickability is worse than none.
+			if m.hasRecentInstanceFailures() {
+				return line + " (f:diagnose)", clickTarget{kind: targetInstanceFailures}
+			}
+			return line, clickTarget{}
+		}
+		return line + " (" + listKeyInstances.footerToken() + ")", clickTarget{kind: targetInstances}
+	default:
+		return line, clickTarget{}
+	}
+}
+
+// autoPilotLineAction resolves the Auto-pilot status line's click target and
+// its inline hint. Toggling the autopilot is deliberately never one of the
+// outcomes: pausing placement produces no visible failure, and the symptom
+// surfaces minutes later looking like a weft bug rather than a misclick.
+func (m listTUIModel) autoPilotLineAction() (clickTarget, string) {
+	// "Reporting an error" is what the line renders (autoPersistentError); the
+	// e toggle additionally needs the raw error, and the two are set and
+	// cleared together on pass completion.
+	if strings.TrimSpace(m.autoPersistentError) != "" && strings.TrimSpace(m.lastAutoPilotErrorRaw) != "" {
+		return clickTarget{kind: targetAutoErrorToggle}, " (e:details)"
+	}
+	if m.hasExpandableAutoBlockers() {
+		return clickTarget{kind: targetExpandAllBlockers}, " (O:expand)"
+	}
+	return clickTarget{}, ""
+}
+
+// controlsLineKeyExcludedFromClick reports whether a controls-line token stays
+// keyboard-only. The controls line is the deliberate carve-out where a click
+// may act on something other than selection or navigation — it is a legend,
+// not a statement about the system — but even here the destructive tokens
+// (kill/cancel fires immediately, with no confirmation) and the tokens that
+// launch instances, spend money, or change a policy or budget are excluded.
+// This carve-out is deliberate: do not generalize it into "clicks may mutate".
+func controlsLineKeyExcludedFromClick(key string) bool {
+	switch key {
+	case listKeyKillCancel.keys, // x: kill/cancel
+		listKeyUnplace.keys,         // u: unplace
+		listKeyToggleProcessed.keys, // p: processed tag
+		listKeyMove.keys,            // m: move
+		listKeyLaunchSelected.keys,  // N: launch for selected
+		listKeyLaunchQueued.keys,    // n: launch
+		listKeyPriority.keys,        // P: priority
+		listKeyRebalance.keys,       // R: rebalance
+		listKeyGroupedAuto.keys,     // A: autopilot toggle
+		listKeyToggleCordon.keys:    // C: cordon
+		return true
+	}
+	return false
+}
+
+// controlsLineSpans resolves the clickable key:action tokens on the controls
+// line. The line is already display-truncated, so a token cut by the ellipsis
+// gets no span.
+func controlsLineSpans(line string) []hitSpan {
+	var spans []hitSpan
+	col := 0
+	for _, token := range strings.Split(line, "  ") {
+		width := lipgloss.Width(token)
+		if idx := strings.Index(token, ":"); idx > 0 && !strings.Contains(token, "…") {
+			if key := token[:idx]; !controlsLineKeyExcludedFromClick(key) {
+				spans = append(spans, hitSpan{startCol: col, endCol: col + width, target: clickTarget{kind: targetControlsKey, key: key}})
+			}
+		}
+		col += width + 2
+	}
+	return spans
+}
+
+// jobIDCopySpan locates the job ID in a rendered grouped-status row and
+// returns the click span that copies it. The span is anchored at column 0
+// with two cells of right padding: the ⌂ and ☁ placement glyphs are East
+// Asian Ambiguous, so terminals disagree on their width by one cell, and a
+// span computed from the assumed glyph width could sit one cell off from what
+// was drawn — silently selecting when the user meant to copy. The decoration
+// left of the ID has no competing target and the " — " after it is dead
+// space, so glyph-width drift moves the ID within the span, never outside it.
+func jobIDCopySpan(line string, job *db.Job, width int) (hitSpan, bool) {
+	plain := ansi.Strip(line)
+	id := ids.FormatJobID(job.ID)
+	idx := strings.Index(plain, id)
+	if idx < 0 {
+		return hitSpan{}, false
+	}
+	endCol := lipgloss.Width(plain[:idx]) + lipgloss.Width(id) + 2
+	if width > 0 && endCol > width {
+		endCol = width
+	}
+	return hitSpan{startCol: 0, endCol: endCol, target: clickTarget{kind: targetCopy, label: id, payload: id}}, true
 }
 
 // cachePlan records the plan a View() just composed so hit testing resolves clicks
@@ -1572,19 +1736,39 @@ func (m listTUIModel) groupedView() string {
 // cursor to it. It is the single definition shared by row selection and the
 // groupedSelectableRows index.
 func groupedRowClickable(row groupedStatusRow) bool {
-	return row.expandToggle != "" || ((row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked)
+	if row.expandToggle != "" {
+		return true
+	}
+	// Collapsible section headers are cursor stops so enter can toggle them.
+	if row.isHeader {
+		return row.collapsible
+	}
+	return (row.job != nil || row.launch != nil) && !row.isBlocked
 }
 
 // groupedRowClickTarget resolves the click target for a grouped body row.
 func groupedRowClickTarget(row groupedStatusRow, rowIdx int) clickTarget {
+	if row.isHeader && row.collapsible {
+		return clickTarget{kind: targetToggleSection, toggle: row.section}
+	}
+	// A disclosure detail row collapses the per-avenue breakdown it belongs
+	// to, duplicating left on the parent job row.
+	if row.style == groupedStatusRowStyleDisclosure && row.parentJobID != 0 {
+		return clickTarget{kind: targetCollapseBlocked, jobID: row.parentJobID}
+	}
+	// An incident rollup jumps to its sample job and opens that job's blocker
+	// detail rather than copying: the rollup summarizes, it is not the thing
+	// to paste into a bug report.
+	if row.incidentFingerprint != "" {
+		return clickTarget{kind: targetIncidentJump, rowIdx: rowIdx}
+	}
 	if groupedRowClickable(row) {
 		return clickTarget{kind: targetSelectRow, rowIdx: rowIdx}
 	}
-	// Blocked/waiting reason bucket headers are refused by row selection
-	// (row.isBlocked), so a click would otherwise be a silent no-op; the copy
-	// target gives it a meaning. Incident rollups carry jobIDs too but are not
-	// copy targets.
-	if len(row.jobIDs) > 0 && row.incidentFingerprint == "" {
+	// Blocked/waiting reason bucket headers and the shared launch-blocker
+	// hoist are refused by row selection (row.isBlocked), so a click would
+	// otherwise be a silent no-op; the copy target gives it a meaning.
+	if len(row.jobIDs) > 0 {
 		return clickTarget{kind: targetCopy, rowIdx: rowIdx, label: "blocking status"}
 	}
 	return clickTarget{}
@@ -1637,6 +1821,11 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 			target = groupedRowClickTarget(*sourceRow, row.rowIdx)
 		}
 		plan.add(line, row.rowIdx, target)
+		if sourceRow != nil && sourceRow.job != nil && m.isStatusGroupedView() {
+			if span, ok := jobIDCopySpan(line, sourceRow.job, m.width); ok {
+				plan.addSpan(span)
+			}
+		}
 		bodyLinesWritten++
 	}
 	for ; bodyLinesWritten < layout.maxBodyLines; bodyLinesWritten++ {
@@ -1651,27 +1840,38 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 		}
 	}
 	for _, line := range layout.errorDetailsLines {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+		// The disclosed error-details block hides on click, duplicating e.
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{kind: targetAutoErrorToggle})
 	}
 	for _, line := range layout.selectedDetails {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+		text, target := m.selectedDetailPlanLine(line)
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
 	}
 	if layout.statusLine != "" {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)), -1, clickTarget{})
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)), -1, clickTarget{kind: targetDismissStatus})
+	}
+	healthTarget := clickTarget{}
+	if m.hasRecentInstanceFailures() {
+		healthTarget = clickTarget{kind: targetInstanceFailures}
 	}
 	for _, line := range layout.instanceHealthLines {
-		plan.add(line, -1, clickTarget{})
+		plan.add(line, -1, healthTarget)
 	}
-	for i, line := range layout.sharedStatus.lines {
-		plan.add(line, -1, sharedStatusLineTarget(layout.sharedStatus, i))
+	for i := range layout.sharedStatus.lines {
+		line, target := sharedStatusPlanLine(layout.sharedStatus, i, m.width)
+		plan.add(line, -1, target)
 	}
 	if layout.autoPilotLine != "" {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)), -1, clickTarget{})
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)), -1, layout.autoPilotTarget)
 	}
 	for _, line := range layout.budgetPanelLines {
 		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
-	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.controlsLine, m.width)), -1, clickTarget{})
+	controlsText := truncateDisplayWidth(layout.controlsLine, m.width)
+	plan.add(listTUIFooterStyle.Render(controlsText), -1, clickTarget{})
+	for _, span := range controlsLineSpans(controlsText) {
+		plan.addSpan(span)
+	}
 	return plan
 }
 
@@ -1684,6 +1884,12 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
 	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, visibleRunning, m.autoRunRateTargetCents, m.isUJGroupedView())
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
+	autoPilotTarget := clickTarget{}
+	if autoPilotLine != "" {
+		var hint string
+		autoPilotTarget, hint = m.autoPilotLineAction()
+		autoPilotLine += hint
+	}
 	errorDetailsLines := m.groupedErrorDetailsLines()
 	selectedDetailLines := m.selectedJobDetailLines()
 	instanceHealthLines := buildInstanceHealthFooter(m.recentFailedInstances, m.width, time.Now()).lines
@@ -1691,6 +1897,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		statusLine = ""
 		sharedStatus = emptySharedTUIStatusLinesView()
 		autoPilotLine = ""
+		autoPilotTarget = clickTarget{}
 		errorDetailsLines = nil
 		selectedDetailLines = nil
 		instanceHealthLines = nil
@@ -1730,6 +1937,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 		statusLine:          statusLine,
 		sharedStatus:        sharedStatus,
 		autoPilotLine:       autoPilotLine,
+		autoPilotTarget:     autoPilotTarget,
 		errorDetailsLines:   errorDetailsLines,
 		instanceHealthLines: instanceHealthLines,
 		selectedDetails:     selectedDetailLines,
@@ -2144,6 +2352,9 @@ func groupedRowSelectionKey(row groupedStatusRow) groupedSelectionKey {
 	if row.expandToggle != "" {
 		return groupedSelectionKey{kind: "expand", name: row.expandToggle}
 	}
+	if row.isHeader && row.collapsible {
+		return groupedSelectionKey{kind: "section", name: row.section}
+	}
 	return groupedSelectionKey{}
 }
 
@@ -2224,9 +2435,11 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, m.dispatchTarget(target)
 }
 
-// dispatchTarget performs the action a resolved click target names: moving the
-// cursor to a row, restarting the daemon, opening a billing URL, or copying a
-// row's payload to the clipboard.
+// dispatchTarget performs the action a resolved click target names. Clicks
+// never destroy, never change a policy or budget, and never spend money: the
+// mutating cases below only navigate, reveal or hide detail, copy an
+// identifier, or re-invoke a keybinding from the controls line (which applies
+// its own exclusion list).
 func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
 	switch t.kind {
 	case targetSelectRow:
@@ -2240,6 +2453,41 @@ func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
 			m.adjustOffset()
 		}
 		return nil
+	case targetToggleSection:
+		m.toggleSectionCollapse(t.toggle)
+		return nil
+	case targetCollapseBlocked:
+		if m.expandedBlocked[t.jobID] {
+			delete(m.expandedBlocked, t.jobID)
+			m.rebuildGroupedRows()
+		}
+		return nil
+	case targetIncidentJump:
+		if t.rowIdx < 0 || t.rowIdx >= len(m.groupedRows) {
+			return nil
+		}
+		row := m.groupedRows[t.rowIdx]
+		jobID := row.sampleJobID
+		if jobID == 0 && len(row.jobIDs) > 0 {
+			jobID = row.jobIDs[0]
+		}
+		if jobID == 0 {
+			return nil
+		}
+		if m.expandedBlocked == nil {
+			m.expandedBlocked = map[int64]bool{}
+		}
+		m.expandedBlocked[jobID] = true
+		m.rebuildGroupedRows()
+		// Selecting the row is enough to scroll it into view: the grouped
+		// viewport always reveals the selected row.
+		for i, r := range m.groupedRows {
+			if r.job != nil && r.job.ID == jobID {
+				m.selectGroupedRowByIndex(i)
+				break
+			}
+		}
+		return nil
 	case targetRestartDaemon:
 		if m.daemonRestartInProgress {
 			return nil
@@ -2248,24 +2496,97 @@ func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
 		m.statusMessage = "Restarting daemon..."
 		return restartDaemonListCmd()
 	case targetOpenURL:
-		m.statusMessage = fmt.Sprintf("Opening %s billing...", t.label)
+		m.statusMessage = fmt.Sprintf("Opening %s...", t.label)
 		return openURLListCmd(t.url)
 	case targetCopy:
+		if t.payload != "" {
+			return copyToClipboardCmd(t.label, t.payload)
+		}
 		if t.rowIdx < 0 || t.rowIdx >= len(m.groupedRows) {
 			return nil
 		}
 		return copyToClipboardCmd(t.label, blockedBucketCopyPayload(m.groupedRows[t.rowIdx]))
+	case targetAutoErrorToggle:
+		next, cmd := m.toggleAutoErrorDetails()
+		*m = next
+		return cmd
+	case targetExpandAllBlockers:
+		next, cmd := m.toggleExpandAllBlockers()
+		*m = next
+		return cmd
+	case targetDiagnose:
+		next, cmd := m.beginSelectedJobDiagnosis()
+		*m = next
+		return cmd
+	case targetInstanceFailures:
+		next, cmd := m.openInstanceFailuresOverlay()
+		*m = next
+		return cmd
+	case targetInstances:
+		return func() tea.Msg { return switchToSystemWatchMsg{} }
+	case targetHosts:
+		return func() tea.Msg { return switchToHostsMsg{} }
+	case targetDismissStatus:
+		m.flash.Clear()
+		m.statusMessage = ""
+		return nil
+	case targetControlsKey:
+		if controlsLineKeyExcludedFromClick(t.key) {
+			return nil
+		}
+		next, cmd, handled := handleListKeyBinding(*m, t.key, listGroupedKeyBindings())
+		if !handled {
+			return nil
+		}
+		if nextList, ok := next.(listTUIModel); ok {
+			*m = nextList
+		}
+		return cmd
 	default:
 		return nil
 	}
 }
 
+// toggleSectionCollapse flips one grouped-status section between its full row
+// list and its header-only collapsed form.
+func (m *listTUIModel) toggleSectionCollapse(section string) {
+	if section == "" {
+		return
+	}
+	if m.collapsedSections == nil {
+		m.collapsedSections = map[string]bool{}
+	}
+	if m.collapsedSections[section] {
+		delete(m.collapsedSections, section)
+	} else {
+		m.collapsedSections[section] = true
+	}
+	m.rebuildGroupedRows()
+}
+
+// selectedCollapsibleSection returns the section key of the collapsible
+// section header under the cursor, or "" when the cursor is on any other row.
+func (m listTUIModel) selectedCollapsibleSection() string {
+	rowIdx := m.selectedGroupedRow()
+	if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+		return ""
+	}
+	row := m.groupedRows[rowIdx]
+	if row.isHeader && row.collapsible {
+		return row.section
+	}
+	return ""
+}
+
 // blockedBucketCopyPayload renders a blocked/waiting bucket header row as the
 // two-line text to paste into a bug report: the reason, then the compact job
 // ID list. The header's display count (" (N)") is redundant with the ID list,
-// so it is stripped.
+// so it is stripped, as is the disclosure triangle the interactive render
+// prefixes the header with.
 func blockedBucketCopyPayload(row groupedStatusRow) string {
 	text := strings.TrimSpace(row.text)
+	text = strings.TrimPrefix(text, "▾ ")
+	text = strings.TrimPrefix(text, "▸ ")
 	if n := len(row.jobIDs); n > 1 {
 		text = strings.TrimSuffix(text, fmt.Sprintf(" (%d)", n))
 	}
@@ -3152,6 +3473,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 			},
 			blockedDetail:              m.effectiveBlockedDetail(),
 			expandedBlocked:            m.expandedBlocked,
+			collapsedSections:          m.collapsedSections,
 			interactive:                true,
 			daemonStopped:              m.placementDaemonStopped,
 			autopilotPaused:            m.autopilotPaused,
@@ -3171,6 +3493,25 @@ func (m *listTUIModel) rebuildGroupedRows() {
 		return
 	}
 	m.clampGroupedCursor()
+	m.preferJobRowOverHeader()
+}
+
+// preferJobRowOverHeader nudges a selection that landed on a section header
+// to the first job or launch row: a header is a control, and the initial or
+// fallback selection should name a job so the footer detail lines have a
+// subject. A deliberate header selection carries a section selection key and
+// is restored before this runs, so only keyless fallback selections move.
+func (m *listTUIModel) preferJobRowOverHeader() {
+	rowIdx := m.selectedGroupedRow()
+	if rowIdx < 0 || rowIdx >= len(m.groupedRows) || !m.groupedRows[rowIdx].isHeader {
+		return
+	}
+	for i, ri := range m.groupedSelectableRows {
+		if ri >= 0 && ri < len(m.groupedRows) && !m.groupedRows[ri].isHeader {
+			m.cursor = i
+			return
+		}
+	}
 }
 
 func (m *listTUIModel) restoreGroupedSelection(selected groupedSelectionKey) bool {

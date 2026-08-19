@@ -112,12 +112,19 @@ type sharedTUIStatusLinesView struct {
 	vastCreditWarningActionable bool
 	creditWarningBillingURL     string
 	creditWarningProviderName   string
+	systemLineIndex             int
+	pausedBannerLineIndex       int
 }
 
 // emptySharedTUIStatusLinesView is the no-status-lines view. Surfaces that hide the
 // status area use it so no stale line index or billing target survives the hiding.
 func emptySharedTUIStatusLinesView() sharedTUIStatusLinesView {
-	return sharedTUIStatusLinesView{daemonLineIndex: -1, vastCreditWarningLineIndex: -1}
+	return sharedTUIStatusLinesView{
+		daemonLineIndex:            -1,
+		vastCreditWarningLineIndex: -1,
+		systemLineIndex:            -1,
+		pausedBannerLineIndex:      -1,
+	}
 }
 
 func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning int, targetCents int, daemonActionHint bool) sharedTUIStatusLinesView {
@@ -129,6 +136,7 @@ func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning 
 		lines = append(lines, daemon.line)
 	}
 	if line := renderSystemLine(database, width, visibleRunning, targetCents); line != "" {
+		view.systemLineIndex = len(lines)
 		lines = append(lines, line)
 	}
 	if warning := renderProviderCreditWarningLineView(width); warning.line != "" {
@@ -139,6 +147,7 @@ func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning 
 		lines = append(lines, warning.line)
 	}
 	if banner := renderPausedLaunchesBanner(database, width); banner != "" {
+		view.pausedBannerLineIndex = len(lines)
 		lines = append(lines, banner)
 	}
 	view.lines = lines
