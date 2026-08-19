@@ -294,6 +294,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			isHeader:    true,
 			section:     section.key,
 			collapsible: opts.interactive,
+			jobIDs:      sortedRowJobIDs(section.jobs),
 		})
 		if collapsed {
 			rows = append(rows, groupedStatusRow{text: ""})

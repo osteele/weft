@@ -2291,7 +2291,6 @@ func (m listTUIModel) groupedControlsText(hasQueued bool) string {
 	line += "  " + listKeyInstances.footerToken()
 	line += "  " + listKeyCopyID.footerToken()
 	line += "  " + listKeyCopyDetails.footerToken()
-	line += "  " + listKeyToggleMouse.footerToken()
 	line += "  ?:help"
 	return line
 }
@@ -2305,6 +2304,9 @@ func (m listTUIModel) selectedJobDetailLines() []string {
 	}
 	if job == nil {
 		if m.isGroupedView() {
+			if lines := m.selectedSectionSummaryLines(); len(lines) > 0 {
+				return lines
+			}
 			return renderSelectedLaunchDetail(m.selectedGroupedLaunch(), m.width, time.Now())
 		}
 		return nil
@@ -2583,6 +2585,8 @@ func (m listTUIModel) copySelectionID() (listTUIModel, tea.Cmd) {
 			case row.launch != nil:
 				id := ids.FormatInstanceID(row.launch.ID)
 				return m, copyToClipboardCmd(id, id)
+			case row.isHeader && len(row.jobIDs) > 0:
+				return m, copyToClipboardCmd(pluralize(len(row.jobIDs), "job", "jobs"), ids.FormatJobIDListCompact(row.jobIDs))
 			case len(row.jobIDs) > 0:
 				return m, copyToClipboardCmd("blocking status", blockedBucketCopyPayload(row))
 			}
@@ -2763,9 +2767,7 @@ func (m listTUIModel) selectedCollapsibleSection() string {
 // so it is stripped, as is the disclosure triangle the interactive render
 // prefixes the header with.
 func blockedBucketCopyPayload(row groupedStatusRow) string {
-	text := strings.TrimSpace(row.text)
-	text = strings.TrimPrefix(text, "▾ ")
-	text = strings.TrimPrefix(text, "▸ ")
+	text := stripDisclosureMarker(row.text)
 	if n := len(row.jobIDs); n > 1 {
 		text = strings.TrimSuffix(text, fmt.Sprintf(" (%d)", n))
 	}
@@ -5443,4 +5445,52 @@ func (m listTUIModel) waitForDBEvent() tea.Cmd {
 		}
 		return listDBWatchEventMsg{}
 	}
+}
+
+// selectedSectionSummaryLines renders the summary for a selected section
+// header, resolving the header's job IDs against the current job list so the
+// summary reflects the same rows the section shows.
+func (m listTUIModel) selectedSectionSummaryLines() []string {
+	rowIdx := m.selectedGroupedRow()
+	if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+		return nil
+	}
+	row := m.groupedRows[rowIdx]
+	if !row.isHeader || len(row.jobIDs) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*db.Job, len(m.jobs))
+	for _, job := range m.jobs {
+		if job != nil {
+			byID[job.ID] = job
+		}
+	}
+	jobs := make([]*db.Job, 0, len(row.jobIDs))
+	for _, id := range row.jobIDs {
+		if job := byID[id]; job != nil {
+			jobs = append(jobs, job)
+		}
+	}
+	return renderSectionSummary(sectionTitleFromHeader(row.text), jobs, m.width)
+}
+
+// sectionTitleFromHeader recovers the plain section name from a rendered
+// header line, which carries a disclosure marker and a trailing count.
+func sectionTitleFromHeader(text string) string {
+	title := strings.TrimSpace(stripDisclosureMarker(text))
+	if idx := strings.LastIndex(title, " ("); idx > 0 {
+		title = title[:idx]
+	}
+	return strings.TrimSuffix(title, ":")
+}
+
+// stripDisclosureMarker removes the expand/collapse triangle a rendered row
+// carries, leaving the text the row would show without one.
+func stripDisclosureMarker(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "▾ ")
+	text = strings.TrimPrefix(text, "▸ ")
+	text = strings.TrimPrefix(text, "▾")
+	text = strings.TrimPrefix(text, "▸")
+	return strings.TrimSpace(text)
 }

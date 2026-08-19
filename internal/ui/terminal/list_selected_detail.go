@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -701,4 +702,71 @@ func firstLine(s string) string {
 		s = string(runes[:maxRunes-1]) + "…"
 	}
 	return s
+}
+
+// renderSectionSummary describes the section a selected header names. A
+// header is a control rather than a job, so the Job/Host block has no subject
+// and would otherwise render empty; this reports what the section holds —
+// how many jobs, whose projects, and where they are running — instead of the
+// count the header line already shows.
+func renderSectionSummary(title string, jobs []*db.Job, width int) []string {
+	if len(jobs) == 0 {
+		return nil
+	}
+	parts := []string{
+		"Section: " + title,
+		pluralize(len(jobs), "job", "jobs"),
+	}
+	if projects := sectionTally(jobs, campaign.JobProjectLabel); projects != "" {
+		parts = append(parts, projects)
+	}
+	if targets := sectionTally(jobs, sectionTargetLabel); targets != "" {
+		parts = append(parts, targets)
+	}
+	return []string{truncateDisplayWidth(strings.Join(parts, " · "), width)}
+}
+
+func sectionTargetLabel(job *db.Job) string {
+	switch job.TargetKind() {
+	case db.JobTargetInventoryHost:
+		return "on-prem"
+	case db.JobTargetRentalInstance:
+		return "rental"
+	case db.JobTargetExternal:
+		return "external"
+	default:
+		return "unplaced"
+	}
+}
+
+// sectionTally counts jobs by a label and renders the counts most-common
+// first, breaking ties by name so the line is stable across refreshes.
+func sectionTally(jobs []*db.Job, label func(*db.Job) string) string {
+	counts := map[string]int{}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if name := strings.TrimSpace(label(job)); name != "" {
+			counts[name]++
+		}
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if counts[names[i]] != counts[names[j]] {
+			return counts[names[i]] > counts[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	rendered := make([]string, 0, len(names))
+	for _, name := range names {
+		rendered = append(rendered, fmt.Sprintf("%s %d", name, counts[name]))
+	}
+	return strings.Join(rendered, ", ")
 }

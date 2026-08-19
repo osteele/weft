@@ -388,3 +388,90 @@ func TestJobIDCopyFlashNamesTheJobID(t *testing.T) {
 		t.Fatalf("clipboard payload = %q, want [wj504]", seams.nativePayloads)
 	}
 }
+
+func sectionHeaderCursor(t *testing.T, m listTUIModel, title string) listTUIModel {
+	t.Helper()
+	for pos, rowIdx := range m.groupedSelectableRows {
+		if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
+			continue
+		}
+		row := m.groupedRows[rowIdx]
+		if row.isHeader && strings.Contains(stripANSI(row.text), title) {
+			m.cursor = pos
+			return m
+		}
+	}
+	t.Fatalf("no selectable %q section header among %d rows", title, len(m.groupedRows))
+	return m
+}
+
+func sectionSummaryModel(t *testing.T) listTUIModel {
+	t.Helper()
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           120,
+		height:          30,
+		jobs: []*db.Job{
+			{ID: 501, Status: db.StatusRunning, Project: "alpha", CreatedAt: 1},
+			{ID: 502, Status: db.StatusRunning, Project: "alpha", CreatedAt: 2},
+			{ID: 503, Status: db.StatusRunning, Project: "beta", CreatedAt: 3},
+		},
+	}
+	m.rebuildGroupedRows()
+	return m
+}
+
+func TestSelectedSectionHeaderCopiesItsJobIDs(t *testing.T) {
+	seams := swapClipboardSeams(t, nil)
+	m := sectionHeaderCursor(t, sectionSummaryModel(t), "Unplaced")
+
+	m, cmd := m.copySelectionID()
+	if cmd == nil {
+		t.Fatal("y on a section header must copy, not refuse")
+	}
+	msg, ok := cmd().(clipboardCopiedMsg)
+	if !ok {
+		t.Fatalf("cmd produced %T, want clipboardCopiedMsg", cmd())
+	}
+	if text, isError := msg.flashText(); text != "3 jobs copied to clipboard" || isError {
+		t.Fatalf("flash = %q, isError=%v; want %q", text, isError, "3 jobs copied to clipboard")
+	}
+	if len(seams.nativePayloads) != 1 || seams.nativePayloads[0] != "wj501:wj503" {
+		t.Fatalf("payload = %q, want [wj501:wj503]", seams.nativePayloads)
+	}
+	if m.statusMessage == "Select a job or instance row to copy" {
+		t.Fatal("header selection must not report the nothing-to-copy status")
+	}
+}
+
+func TestSelectedSectionHeaderShowsSummaryNotBlank(t *testing.T) {
+	m := sectionHeaderCursor(t, sectionSummaryModel(t), "Unplaced")
+
+	lines := m.selectedJobDetailLines()
+	if len(lines) == 0 {
+		t.Fatal("a selected section header must render a summary, not an empty detail block")
+	}
+	got := stripANSI(lines[0])
+	for _, want := range []string{"Section: Unplaced", "3 jobs", "alpha 2", "beta 1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestSelectedSectionHeaderDetailsCopyable(t *testing.T) {
+	seams := swapClipboardSeams(t, nil)
+	m := sectionHeaderCursor(t, sectionSummaryModel(t), "Unplaced")
+
+	_, cmd := m.copySelectionDetails()
+	if cmd == nil {
+		t.Fatal("Y on a section header must copy its summary, not refuse")
+	}
+	if _, ok := cmd().(clipboardCopiedMsg); !ok {
+		t.Fatalf("cmd produced %T, want clipboardCopiedMsg", cmd())
+	}
+	if len(seams.nativePayloads) != 1 || !strings.Contains(seams.nativePayloads[0], "Section: Unplaced") {
+		t.Fatalf("payload = %q, want the section summary", seams.nativePayloads)
+	}
+}
