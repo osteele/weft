@@ -125,7 +125,7 @@ func unprocessedJobViews(database *sql.DB, jobs []*db.Job) []JobView {
 
 func loadUnprocessedJobs(database *sql.DB, project string) ([]*db.Job, error) {
 	const maxAgeDays = 14
-	jobs, err := db.ListJobsWithMaxAge(database, "", "", 0, maxAgeDays, nil, "unprocessed")
+	jobs, err := db.ListUnprocessedTerminalJobs(database, maxAgeDays)
 	if err != nil {
 		return nil, err
 	}
