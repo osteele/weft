@@ -159,6 +159,10 @@ type listTUIModel struct {
 	appConfig                  *config.Config
 	cloudClients               []cloud.Client
 	aiAssist                   *aiAssistState
+	// planCache holds the plan from the most recent View(). Pointer so it survives bubbletea's
+	// value-receiver copies. Hit testing reads it so a click resolves against the frame the user
+	// actually saw, not one rebuilt from a database that may have moved between render and click.
+	planCache *screenPlan
 }
 
 type listDaemonRestartedMsg struct {
@@ -179,22 +183,16 @@ type listJobDiagnosisLoadedMsg struct {
 }
 
 type groupedViewLayout struct {
-	visibleRows                 []groupedViewportLine
-	statusLine                  string
-	sharedStatusLines           []string
-	autoPilotLine               string
-	errorDetailsLines           []string
-	instanceHealthLines         []string
-	selectedDetails             []string
-	budgetPanelLines            []string
-	controlsLine                string
-	maxBodyLines                int
-	daemonStatusY               int
-	daemonActionable            bool
-	vastCreditWarningY          int
-	vastCreditWarningActionable bool
-	creditWarningBillingURL     string
-	creditWarningProviderName   string
+	visibleRows         []groupedViewportLine
+	statusLine          string
+	sharedStatus        sharedTUIStatusLinesView
+	autoPilotLine       string
+	errorDetailsLines   []string
+	instanceHealthLines []string
+	selectedDetails     []string
+	budgetPanelLines    []string
+	controlsLine        string
+	maxBodyLines        int
 }
 
 type groupedSelectionKey struct {
@@ -486,6 +484,7 @@ func newListTUIModel(database *sql.DB, args []string, jobs []*db.Job, title stri
 		appConfig:              cfg,
 		cloudClients:           cloudClients,
 		launchSpinner:          s,
+		planCache:              new(screenPlan),
 	}
 	model.rebuildGroupedRows()
 	if foregroundSyncEnabled {
@@ -1401,45 +1400,65 @@ func (m listTUIModel) baseView() string {
 		return "Loading..."
 	}
 
-	layout := m.layout
-	var b strings.Builder
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
-	selectedDetailLines := m.selectedJobDetailLines()
-	if m.hideStatusArea {
-		sharedStatusLines = nil
-		selectedDetailLines = nil
-	}
+	return m.cachePlan(m.buildFlatScreenPlan()).render()
+}
 
+// flatFrameParts is the flat frame's footer content plus the body-row budget that
+// survives reserving it. One definition serves both the renderer and the scroller,
+// so the rows the frame draws and the rows the scroller pages by cannot disagree.
+type flatFrameParts struct {
+	sharedStatus        sharedTUIStatusLinesView
+	selectedDetailLines []string
+	promptLines         []string
+	bodyRows            int
+}
+
+func (m listTUIModel) flatFrameParts() flatFrameParts {
+	parts := flatFrameParts{sharedStatus: emptySharedTUIStatusLinesView()}
+	if !m.hideStatusArea {
+		parts.sharedStatus = renderSharedTUIStatusLinesView(m.database, m.width, -1, m.autoRunRateTargetCents, false)
+		parts.selectedDetailLines = m.selectedJobDetailLines()
+	}
+	if m.projectInputActive {
+		parts.promptLines = m.projectFilterPromptLines()
+	}
+	// Footer block: the controls line plus everything drawn below the separator.
+	footerBlock := 1 + len(parts.promptLines) + len(parts.selectedDetailLines) + len(parts.sharedStatus.lines)
+	parts.bodyRows = max(0, m.height-2-1-footerBlock)
+	return parts
+}
+
+// flatBodyHeight returns the flat body's row budget; the viewport scroller
+// pages by it.
+func (m listTUIModel) flatBodyHeight() int {
+	return m.flatFrameParts().bodyRows
+}
+
+// buildFlatScreenPlan composes the flat frame as an ordered list of screen
+// lines: index in lines == screen Y.
+func (m listTUIModel) buildFlatScreenPlan() screenPlan {
+	layout := m.layout
+	parts := m.flatFrameParts()
+	bodyRows := parts.bodyRows
 	mateRows, matesActive := hostMatesForFlatView(m.jobs, m.cursor)
 	rowWidth := m.width
+	plan := newScreenPlan(m.width, m.height)
 
 	title := fmt.Sprintf("%s (%d)", m.displayTitle(), len(m.jobs))
-	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
-	b.WriteString("\n")
+	plan.add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
 	header := truncateDisplayWidth(formatJobListHeader(layout), rowWidth)
-	b.WriteString(listTUIHeaderStyle.Render(truncateDisplayWidth(header, m.width)))
-	b.WriteString("\n")
+	plan.add(listTUIHeaderStyle.Render(truncateDisplayWidth(header, m.width)), -1, clickTarget{})
 
-	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
-	if m.projectInputActive {
-		footerBlockLines++
-	}
-	bodyRows := max(0, m.height-2-1-footerBlockLines)
-	bodyLinesWritten := 0
 	if len(m.jobs) == 0 {
-		b.WriteString(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)))
-		b.WriteString("\n")
-		bodyLinesWritten = 1
+		plan.add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)), -1, clickTarget{})
 		for i := 1; i < bodyRows; i++ {
-			b.WriteString("\n")
-			bodyLinesWritten++
+			plan.add("", -1, clickTarget{})
 		}
 	} else {
 		for i := 0; i < bodyRows; i++ {
 			idx := m.offset + i
 			if idx >= len(m.jobs) {
-				b.WriteString("\n")
-				bodyLinesWritten++
+				plan.add("", -1, clickTarget{})
 				continue
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), rowWidth)
@@ -1449,34 +1468,64 @@ func (m listTUIModel) baseView() string {
 			if idx == m.cursor {
 				row = renderSelectedRow(row, m.width)
 			}
-			b.WriteString(row)
-			b.WriteString("\n")
-			bodyLinesWritten++
+			plan.add(row, idx, clickTarget{kind: targetSelectRow, rowIdx: idx})
 		}
-	}
-	for bodyLinesWritten < bodyRows {
-		b.WriteString("\n")
-		bodyLinesWritten++
 	}
 
 	// Always keep a visible separator above the status/footer block.
-	b.WriteString("\n")
-	if m.projectInputActive {
-		for _, line := range m.projectFilterPromptLines() {
-			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
-			b.WriteString("\n")
-		}
+	plan.add("", -1, clickTarget{})
+	for _, line := range parts.promptLines {
+		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
-	for _, line := range selectedDetailLines {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
+	for _, line := range parts.selectedDetailLines {
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
-	for _, line := range sharedStatusLines {
-		b.WriteString(line)
-		b.WriteString("\n")
+	for i, line := range parts.sharedStatus.lines {
+		plan.add(line, -1, sharedStatusLineTarget(parts.sharedStatus, i))
 	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(bodyRows), m.width)))
-	return b.String()
+	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(bodyRows), m.width)), -1, clickTarget{})
+	return plan
+}
+
+// sharedStatusLineTarget returns the click target for shared status line i, or an
+// inert target when that line offers no action.
+func sharedStatusLineTarget(status sharedTUIStatusLinesView, i int) clickTarget {
+	switch {
+	case status.daemonActionable && status.daemonLineIndex == i:
+		return clickTarget{kind: targetRestartDaemon, label: "daemon"}
+	case status.vastCreditWarningActionable && status.vastCreditWarningLineIndex == i:
+		return clickTarget{kind: targetOpenURL, url: status.creditWarningBillingURL, label: status.creditWarningProviderName}
+	default:
+		return clickTarget{}
+	}
+}
+
+// cachePlan records the plan a View() just composed so hit testing resolves clicks
+// against the frame the user actually saw. Models built as bare struct literals in
+// tests have no cache and simply skip the record.
+func (m listTUIModel) cachePlan(plan screenPlan) screenPlan {
+	if m.planCache != nil {
+		*m.planCache = plan
+	}
+	return plan
+}
+
+// buildScreenPlan builds the plan for the frame hit testing resolves against.
+func (m listTUIModel) buildScreenPlan() screenPlan {
+	if m.isGroupedView() {
+		return m.buildGroupedScreenPlan()
+	}
+	return m.buildFlatScreenPlan()
+}
+
+// currentPlan returns the plan from the most recent View() when it was composed for
+// the current terminal size, and rebuilds otherwise. Models built as bare struct
+// literals in tests have no cache and always rebuild.
+func (m listTUIModel) currentPlan() screenPlan {
+	if m.planCache != nil && m.planCache.width == m.width && m.planCache.height == m.height && len(m.planCache.lines) > 0 {
+		return *m.planCache
+	}
+	return m.buildScreenPlan()
 }
 
 func (m listTUIModel) displayTitle() string {
@@ -1501,25 +1550,35 @@ func (m listTUIModel) groupedView() string {
 		return "Loading..."
 	}
 
-	var b strings.Builder
-	title := fmt.Sprintf("%s (%d) • group:%s", m.displayTitle(), len(m.jobs), listGroupModeLabel(m.effectiveGroupMode()))
-	b.WriteString(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)))
-	b.WriteString("\n")
+	return m.cachePlan(m.buildGroupedScreenPlan()).render()
+}
 
-	groupedJobs := m.groupedJobsWithAutoReasons()
+// groupedRowClickable reports whether a click on the row's line should move the
+// cursor to it. It is the single definition shared by row selection and the
+// groupedSelectableRows index.
+func groupedRowClickable(row groupedStatusRow) bool {
+	return row.expandToggle != "" || ((row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked)
+}
+
+// buildGroupedScreenPlan composes the grouped frame as an ordered list of
+// screen lines: index in lines == screen Y.
+func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 	rows := m.groupedRows
-
-	layout := m.buildGroupedViewLayout(rows, groupedJobs)
+	layout := m.buildGroupedViewLayout(rows, m.groupedJobsWithAutoReasons())
 	selectedRow := m.selectedGroupedRow()
-	mateRows, matesActive := hostMatesForGroupedRows(m.groupedRows, selectedRow)
+	mateRows, matesActive := hostMatesForGroupedRows(rows, selectedRow)
 	rowWidth := m.width
+	plan := newScreenPlan(m.width, m.height)
+
+	title := fmt.Sprintf("%s (%d) • group:%s", m.displayTitle(), len(m.jobs), listGroupModeLabel(m.effectiveGroupMode()))
+	plan.add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
+
 	bodyLinesWritten := 0
 	if len(rows) == 0 {
 		// Empty view: the message goes in the body — under the title, separated
 		// by a blank line — where jobs would otherwise be listed.
-		b.WriteString("\n")
-		b.WriteString(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateBaseText(), m.width)))
-		b.WriteString("\n")
+		plan.add("", -1, clickTarget{})
+		plan.add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateBaseText(), m.width)), -1, clickTarget{})
 		bodyLinesWritten = 2
 	}
 	for _, row := range layout.visibleRows {
@@ -1543,53 +1602,47 @@ func (m listTUIModel) groupedView() string {
 			styled.text = line
 			line = styled.renderText()
 		}
-		b.WriteString(line)
-		b.WriteString("\n")
+		target := clickTarget{}
+		if sourceRow != nil && groupedRowClickable(*sourceRow) {
+			target = clickTarget{kind: targetSelectRow, rowIdx: row.rowIdx}
+		}
+		plan.add(line, row.rowIdx, target)
 		bodyLinesWritten++
 	}
-	for bodyLinesWritten < layout.maxBodyLines {
-		b.WriteString("\n")
-		bodyLinesWritten++
+	for ; bodyLinesWritten < layout.maxBodyLines; bodyLinesWritten++ {
+		plan.add("", -1, clickTarget{})
 	}
 
 	// Visually separate grouped job rows from footer lines.
-	b.WriteString("\n")
+	plan.add("", -1, clickTarget{})
 	if m.projectInputActive {
 		for _, line := range m.projectFilterPromptLines() {
-			b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
-			b.WriteString("\n")
+			plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 		}
 	}
 	for _, line := range layout.errorDetailsLines {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
 	for _, line := range layout.selectedDetails {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
 	if layout.statusLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)))
-		b.WriteString("\n")
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)), -1, clickTarget{})
 	}
 	for _, line := range layout.instanceHealthLines {
-		b.WriteString(line)
-		b.WriteString("\n")
+		plan.add(line, -1, clickTarget{})
 	}
-	for _, line := range layout.sharedStatusLines {
-		b.WriteString(line)
-		b.WriteString("\n")
+	for i, line := range layout.sharedStatus.lines {
+		plan.add(line, -1, sharedStatusLineTarget(layout.sharedStatus, i))
 	}
 	if layout.autoPilotLine != "" {
-		b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)))
-		b.WriteString("\n")
+		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)), -1, clickTarget{})
 	}
 	for _, line := range layout.budgetPanelLines {
-		b.WriteString(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)))
-		b.WriteString("\n")
+		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
-	b.WriteString(listTUIFooterStyle.Render(truncateDisplayWidth(layout.controlsLine, m.width)))
-	return b.String()
+	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.controlsLine, m.width)), -1, clickTarget{})
+	return plan
 }
 
 func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJobs []*db.Job) groupedViewLayout {
@@ -1606,9 +1659,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	instanceHealthLines := buildInstanceHealthFooter(m.recentFailedInstances, m.width, time.Now()).lines
 	if m.hideStatusArea {
 		statusLine = ""
-		sharedStatus.lines = nil
-		sharedStatus.daemonLineIndex = -1
-		sharedStatus.daemonActionable = false
+		sharedStatus = emptySharedTUIStatusLinesView()
 		autoPilotLine = ""
 		errorDetailsLines = nil
 		selectedDetailLines = nil
@@ -1644,41 +1695,17 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	}
 	footerLines := baseFooterLines + len(errorDetailsLines)
 	maxBodyLines := max(0, m.height-1-footerLines) // 1 for title
-	daemonStatusY := -1
-	vastCreditWarningY := -1
-	sharedStatusBaseY := 1 + maxBodyLines + 1
-	if m.projectInputActive {
-		sharedStatusBaseY += len(m.projectFilterPromptLines())
-	}
-	sharedStatusBaseY += len(errorDetailsLines)
-	sharedStatusBaseY += len(selectedDetailLines)
-	if statusLine != "" {
-		sharedStatusBaseY++
-	}
-	sharedStatusBaseY += len(instanceHealthLines)
-	if sharedStatus.daemonActionable && sharedStatus.daemonLineIndex >= 0 {
-		daemonStatusY = sharedStatusBaseY + sharedStatus.daemonLineIndex
-	}
-	if sharedStatus.vastCreditWarningActionable && sharedStatus.vastCreditWarningLineIndex >= 0 {
-		vastCreditWarningY = sharedStatusBaseY + sharedStatus.vastCreditWarningLineIndex
-	}
 	return groupedViewLayout{
-		visibleRows:                 selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow()),
-		statusLine:                  statusLine,
-		sharedStatusLines:           sharedStatus.lines,
-		autoPilotLine:               autoPilotLine,
-		errorDetailsLines:           errorDetailsLines,
-		instanceHealthLines:         instanceHealthLines,
-		selectedDetails:             selectedDetailLines,
-		budgetPanelLines:            budgetPanelLines,
-		controlsLine:                m.groupedControlsText(eta.HasQueued),
-		maxBodyLines:                maxBodyLines,
-		daemonStatusY:               daemonStatusY,
-		daemonActionable:            sharedStatus.daemonActionable,
-		vastCreditWarningY:          vastCreditWarningY,
-		vastCreditWarningActionable: sharedStatus.vastCreditWarningActionable,
-		creditWarningBillingURL:     sharedStatus.creditWarningBillingURL,
-		creditWarningProviderName:   sharedStatus.creditWarningProviderName,
+		visibleRows:         selectGroupedRowsForViewport(rows, maxBodyLines, m.selectedGroupedRow()),
+		statusLine:          statusLine,
+		sharedStatus:        sharedStatus,
+		autoPilotLine:       autoPilotLine,
+		errorDetailsLines:   errorDetailsLines,
+		instanceHealthLines: instanceHealthLines,
+		selectedDetails:     selectedDetailLines,
+		budgetPanelLines:    budgetPanelLines,
+		controlsLine:        m.groupedControlsText(eta.HasQueued),
+		maxBodyLines:        maxBodyLines,
 	}
 }
 
@@ -2152,119 +2179,42 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.rebalancePreview.active || m.movePicker.active || m.aiAssist != nil || m.showHelp || m.showInstanceFailures || m.showJobDiagnosis || m.autoRunRateInputActive {
 		return m, nil
 	}
-	if m.isGroupedView() {
-		layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
-		if cmd := m.handleGroupedStatusClick(msg.Y, layout); cmd != nil {
-			return m, cmd
-		}
-		m.selectGroupedMouseRow(msg.Y, layout.visibleRows)
-		return m, nil
-	}
-	if cmd := m.handleFlatStatusClick(msg.Y); cmd != nil {
-		return m, cmd
-	}
-	m.selectFlatMouseRow(msg.Y)
-	return m, nil
+	target, _ := m.currentPlan().hit(msg.X, msg.Y)
+	return m, m.dispatchTarget(target)
 }
 
-func (m *listTUIModel) handleGroupedStatusClick(y int, layout groupedViewLayout) tea.Cmd {
-	if m.hideStatusArea {
+// dispatchTarget performs the action a resolved click target names: moving the
+// cursor to a row, restarting the daemon, or opening a billing URL.
+func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
+	switch t.kind {
+	case targetSelectRow:
+		if m.isGroupedView() {
+			m.selectGroupedRowByIndex(t.rowIdx)
+			return nil
+		}
+		if t.rowIdx >= 0 && t.rowIdx < len(m.jobs) {
+			m.cursor = t.rowIdx
+			m.clampCursor()
+			m.adjustOffset()
+		}
 		return nil
-	}
-	if m.isUJGroupedView() && layout.daemonActionable && y == layout.daemonStatusY {
+	case targetRestartDaemon:
 		if m.daemonRestartInProgress {
 			return nil
 		}
 		m.daemonRestartInProgress = true
 		m.statusMessage = "Restarting daemon..."
 		return restartDaemonListCmd()
-	}
-	if layout.vastCreditWarningActionable && y == layout.vastCreditWarningY {
-		m.statusMessage = fmt.Sprintf("Opening %s billing...", layout.creditWarningProviderName)
-		return openURLListCmd(layout.creditWarningBillingURL)
-	}
-	return nil
-}
-
-func (m *listTUIModel) handleFlatStatusClick(y int) tea.Cmd {
-	if m.hideStatusArea {
+	case targetOpenURL:
+		m.statusMessage = fmt.Sprintf("Opening %s billing...", t.label)
+		return openURLListCmd(t.url)
+	default:
 		return nil
 	}
-	warningY, billingURL, providerName := m.flatCreditWarningTarget()
-	if billingURL == "" || y != warningY {
-		return nil
-	}
-	m.statusMessage = fmt.Sprintf("Opening %s billing...", providerName)
-	return openURLListCmd(billingURL)
 }
 
-func (m listTUIModel) flatVastCreditWarningY() (int, bool) {
-	y, billingURL, _ := m.flatCreditWarningTarget()
-	return y, billingURL != ""
-}
-
-func (m listTUIModel) flatCreditWarningTarget() (int, string, string) {
-	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, -1, m.autoRunRateTargetCents, false)
-	if !sharedStatus.vastCreditWarningActionable || sharedStatus.vastCreditWarningLineIndex < 0 {
-		return -1, "", ""
-	}
-	y := 2 + m.flatBodyRows() + 1
-	if m.projectInputActive {
-		y += len(m.projectFilterPromptLines())
-	}
-	y += len(m.selectedJobDetailLines())
-	return y + sharedStatus.vastCreditWarningLineIndex, sharedStatus.creditWarningBillingURL, sharedStatus.creditWarningProviderName
-}
-
-func (m listTUIModel) isUJGroupedView() bool {
-	return m.groupedByStatus && m.groupedUnprocessedView
-}
-
-func (m *listTUIModel) selectFlatMouseRow(y int) {
-	if y < 2 {
-		return
-	}
-	row := y - 2
-	if row >= m.flatBodyRows() {
-		return
-	}
-	idx := m.offset + row
-	if idx < 0 || idx >= len(m.jobs) {
-		return
-	}
-	m.cursor = idx
-	m.clampCursor()
-	m.adjustOffset()
-}
-
-func (m listTUIModel) flatBodyRows() int {
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
-	selectedDetailLines := m.selectedJobDetailLines()
-	if m.hideStatusArea {
-		sharedStatusLines = nil
-		selectedDetailLines = nil
-	}
-	footerBlockLines := len(sharedStatusLines) + len(selectedDetailLines) + 1
-	if m.projectInputActive {
-		footerBlockLines += len(m.projectFilterPromptLines())
-	}
-	return max(0, m.height-2-1-footerBlockLines)
-}
-
-func (m *listTUIModel) selectGroupedMouseRow(y int, visibleRows []groupedViewportLine) {
-	if y < 1 {
-		return
-	}
-	bodyRow := y - 1
-	if bodyRow < 0 || bodyRow >= len(visibleRows) {
-		return
-	}
-	rowIdx := visibleRows[bodyRow].rowIdx
+func (m *listTUIModel) selectGroupedRowByIndex(rowIdx int) {
 	if rowIdx < 0 || rowIdx >= len(m.groupedRows) {
-		return
-	}
-	row := m.groupedRows[rowIdx]
-	if row.expandToggle == "" && ((row.job == nil && row.launch == nil) || row.isHeader || row.isBlocked) {
 		return
 	}
 	for i, selectableRow := range m.groupedSelectableRows {
@@ -2274,6 +2224,10 @@ func (m *listTUIModel) selectGroupedMouseRow(y int, visibleRows []groupedViewpor
 			return
 		}
 	}
+}
+
+func (m listTUIModel) isUJGroupedView() bool {
+	return m.groupedByStatus && m.groupedUnprocessedView
 }
 
 func (m listTUIModel) groupedViewportRows() []groupedViewportLine {
@@ -3150,7 +3104,7 @@ func (m *listTUIModel) rebuildGroupedRows() {
 	}
 	m.groupedSelectableRows = m.groupedSelectableRows[:0]
 	for i, row := range m.groupedRows {
-		if row.expandToggle != "" || ((row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked) {
+		if groupedRowClickable(row) {
 			m.groupedSelectableRows = append(m.groupedSelectableRows, i)
 		}
 	}
@@ -3275,7 +3229,7 @@ func (m listTUIModel) pageSize() int {
 	if m.isGroupedView() {
 		return max(1, len(m.groupedViewportRows()))
 	}
-	return max(1, m.flatBodyRows())
+	return max(1, m.flatBodyHeight())
 }
 
 func (m *listTUIModel) requestReloadJobs() tea.Cmd {

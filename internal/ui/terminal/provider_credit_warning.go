@@ -114,9 +114,15 @@ type sharedTUIStatusLinesView struct {
 	creditWarningProviderName   string
 }
 
+// emptySharedTUIStatusLinesView is the no-status-lines view. Surfaces that hide the
+// status area use it so no stale line index or billing target survives the hiding.
+func emptySharedTUIStatusLinesView() sharedTUIStatusLinesView {
+	return sharedTUIStatusLinesView{daemonLineIndex: -1, vastCreditWarningLineIndex: -1}
+}
+
 func renderSharedTUIStatusLinesView(database *sql.DB, width int, visibleRunning int, targetCents int, daemonActionHint bool) sharedTUIStatusLinesView {
 	lines := make([]string, 0, 3)
-	view := sharedTUIStatusLinesView{daemonLineIndex: -1, vastCreditWarningLineIndex: -1}
+	view := emptySharedTUIStatusLinesView()
 	if daemon := renderDaemonStatusLineView(width, daemonActionHint); daemon.line != "" {
 		view.daemonLineIndex = len(lines)
 		view.daemonActionable = daemon.actionable
@@ -191,19 +197,21 @@ func placementDaemonStopped() bool {
 }
 
 type daemonStatusLineView struct {
-	line       string
+	line string
+	// actionable reports that this line carries a click target, which is true only
+	// where the wording offers one — the surfaces that pass actionHint.
 	actionable bool
 }
 
 func renderDaemonStatusLineView(width int, actionHint bool) daemonStatusLineView {
 	status, err := daemonStatusProbe(daemonStatusPaths())
 	var msg string
-	actionable := false
+	fixable := false
 	switch {
 	case err != nil:
 		msg = "Daemon: status unavailable"
 	case status.ActiveBinaryStale:
-		actionable = true
+		fixable = true
 		if actionHint {
 			msg = "Daemon: stale binary; click to restart"
 		} else {
@@ -212,14 +220,14 @@ func renderDaemonStatusLineView(width int, actionHint bool) daemonStatusLineView
 	case status.Live:
 		return daemonStatusLineView{}
 	case status.Stale:
-		actionable = true
+		fixable = true
 		if actionHint {
 			msg = "Daemon: stale; click to restart"
 		} else {
 			msg = "Daemon: stale"
 		}
 	default:
-		actionable = true
+		fixable = true
 		if actionHint {
 			msg = "Daemon: stopped; click to start"
 		} else {
@@ -229,7 +237,7 @@ func renderDaemonStatusLineView(width int, actionHint bool) daemonStatusLineView
 	if width > 0 {
 		msg = truncateDisplayWidth(msg, width)
 	}
-	return daemonStatusLineView{line: tuiFailedStyle.Render(msg), actionable: actionable}
+	return daemonStatusLineView{line: tuiFailedStyle.Render(msg), actionable: fixable && actionHint}
 }
 
 // renderPausedLaunchesBanner shows a warning when one or more launches are in

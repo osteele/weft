@@ -212,13 +212,13 @@ func TestListTUIToggleStatusAreaIncreasesBodyRows(t *testing.T) {
 	}
 	m.rebuildLayout()
 
-	before := m.flatBodyRows()
+	before := m.flatBodyHeight()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("S")})
 	got := next.(listTUIModel)
 	if !got.hideStatusArea {
 		t.Fatal("expected status area to be hidden")
 	}
-	if after := got.flatBodyRows(); after <= before {
+	if after := got.flatBodyHeight(); after <= before {
 		t.Fatalf("body rows after hiding status = %d, want > %d", after, before)
 	}
 }
@@ -284,7 +284,7 @@ func TestListTUIPageDownScrollsFlatViewport(t *testing.T) {
 		jobs:   jobs,
 	}
 	m.rebuildLayout()
-	bodyRows := m.flatBodyRows()
+	bodyRows := m.flatBodyHeight()
 	if bodyRows <= 1 {
 		t.Fatalf("bodyRows = %d, want enough rows for paging", bodyRows)
 	}
@@ -2880,15 +2880,15 @@ func TestListTUIMouseClickGroupedDaemonWarningRestartsDaemon(t *testing.T) {
 		jobs:                   nil,
 	}
 	m.rebuildGroupedRows()
-	layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
-	if layout.daemonStatusY < 0 {
+	clickY := targetYForKind(t, m, targetRestartDaemon)
+	if clickY < 0 {
 		t.Fatal("expected actionable daemon status row")
 	}
 
 	next, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		Y:      layout.daemonStatusY,
+		Y:      clickY,
 	})
 	got := next.(listTUIModel)
 	if got.statusMessage != "Restarting daemon..." {
@@ -3004,15 +3004,15 @@ func TestListTUIMouseClickGroupedVastCreditWarningOpensBilling(t *testing.T) {
 		jobs:            nil,
 	}
 	m.rebuildGroupedRows()
-	layout := m.buildGroupedViewLayout(m.groupedRows, m.groupedJobsWithAutoReasons())
-	if layout.vastCreditWarningY < 0 {
+	clickY := targetYForKind(t, m, targetOpenURL)
+	if clickY < 0 {
 		t.Fatal("expected actionable Vast.ai credit warning row")
 	}
 
 	next, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		Y:      layout.vastCreditWarningY,
+		Y:      clickY,
 	})
 	got := next.(listTUIModel)
 	if got.statusMessage != "Opening Vast.ai billing..." {
@@ -3039,6 +3039,100 @@ func TestListTUIMouseClickGroupedVastCreditWarningOpensBilling(t *testing.T) {
 	}
 }
 
+// TestListTUIFlatFilterPromptKeepsClicksAligned pins the fix for the flat view
+// disagreeing with its own hit test about the project filter prompt's height:
+// the renderer draws len(projectFilterPromptLines()) lines while the sizing
+// used to reserve a single one, so status-area clicks landed rows off. The
+// frame and the click resolution now come from one screen plan.
+func TestListTUIFlatFilterPromptKeepsClicksAligned(t *testing.T) {
+	SeedProviderCreditWarningForTesting(t, "WARNING: Vast.ai credits low ($5.00 < $10.00)")
+	var opened []string
+	oldOpen := listOpenURLFunc
+	listOpenURLFunc = func(url string) error {
+		opened = append(opened, url)
+		return nil
+	}
+	t.Cleanup(func() { listOpenURLFunc = oldOpen })
+
+	m := listTUIModel{
+		title:                  "Jobs",
+		width:                  100,
+		height:                 16,
+		projectInputActive:     true,
+		projectInputValue:      "al",
+		projectCandidates:      []string{"alpha", "alpine", "aloha", "amber", "anchor", "another"},
+		projectCandidateCursor: 0,
+		jobs: []*db.Job{
+			{ID: 101, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+	m.rebuildLayout()
+
+	frame := stripANSI(m.View())
+	frameLines := strings.Split(frame, "\n")
+	if len(frameLines) != m.height {
+		t.Fatalf("frame is %d lines tall, want exactly %d (terminal height):\n%s", len(frameLines), m.height, frame)
+	}
+	promptStart := -1
+	for i, line := range frameLines {
+		if strings.HasPrefix(line, "project filter:") {
+			promptStart = i
+			break
+		}
+	}
+	if promptStart < 0 {
+		t.Fatalf("filter prompt not rendered in frame:\n%s", frame)
+	}
+	promptLineCount := 1
+	for _, line := range frameLines[promptStart+1:] {
+		if !strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "> ") {
+			break
+		}
+		promptLineCount++
+	}
+	if promptLineCount < 2 {
+		t.Fatalf("expected multi-line filter prompt in frame, got %d prompt lines:\n%s", promptLineCount, frame)
+	}
+	if promptLineCount != len(m.projectFilterPromptLines()) {
+		t.Fatalf("frame draws %d prompt lines, prompt reports %d", promptLineCount, len(m.projectFilterPromptLines()))
+	}
+
+	warningY := -1
+	for i, line := range frameLines {
+		if strings.Contains(line, "credits low") {
+			warningY = i
+			break
+		}
+	}
+	if warningY < 0 {
+		t.Fatalf("credit warning line not rendered in frame:\n%s", frame)
+	}
+
+	next, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		X:      2,
+		Y:      warningY,
+	})
+	got := next.(listTUIModel)
+	if cmd == nil {
+		t.Fatalf("click on rendered warning line at y=%d produced no command; frame:\n%s", warningY, frame)
+	}
+	if got.statusMessage != "Opening Vast.ai billing..." {
+		t.Fatalf("statusMessage = %q, want open progress", got.statusMessage)
+	}
+	msg, ok := cmd().(listURLOpenedMsg)
+	if !ok {
+		t.Fatalf("open command returned %T", msg)
+	}
+	if msg.url != vastaiBillingURL {
+		t.Fatalf("opened url = %q, want %q", msg.url, vastaiBillingURL)
+	}
+	if len(opened) != 1 || opened[0] != vastaiBillingURL {
+		t.Fatalf("opened = %v, want [%q]", opened, vastaiBillingURL)
+	}
+}
+
 func TestListTUIMouseClickFlatVastCreditWarningOpensBilling(t *testing.T) {
 	SeedProviderCreditWarningForTesting(t, "WARNING: Vast.ai credits low ($5.00 < $10.00)")
 	var opened []string
@@ -3057,8 +3151,8 @@ func TestListTUIMouseClickFlatVastCreditWarningOpensBilling(t *testing.T) {
 			{ID: 101, Status: db.StatusQueued, Description: "queued"},
 		},
 	}
-	warningY, actionable := m.flatVastCreditWarningY()
-	if !actionable || warningY < 0 {
+	warningY := targetYForKind(t, m, targetOpenURL)
+	if warningY < 0 {
 		t.Fatal("expected actionable Vast.ai credit warning row")
 	}
 
@@ -3104,8 +3198,8 @@ func TestListTUIMouseClickFlatRunPodCreditWarningOpensBilling(t *testing.T) {
 			{ID: 101, Status: db.StatusQueued, Description: "queued"},
 		},
 	}
-	warningY, actionable := m.flatVastCreditWarningY()
-	if !actionable || warningY < 0 {
+	warningY := targetYForKind(t, m, targetOpenURL)
+	if warningY < 0 {
 		t.Fatal("expected actionable RunPod credit warning row")
 	}
 
@@ -3162,8 +3256,7 @@ func TestListTUIMouseClickCreditWarningIgnoresNonBillingWarning(t *testing.T) {
 					{ID: 101, Status: db.StatusQueued, Description: "queued"},
 				},
 			}
-			_, actionable := m.flatVastCreditWarningY()
-			if actionable {
+			if y := targetYForKind(t, m, targetOpenURL); y >= 0 {
 				t.Fatalf("warning %q should not be actionable", warning)
 			}
 			_, cmd := m.Update(tea.MouseMsg{
@@ -3254,6 +3347,18 @@ func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {
 	}
 	t.Fatalf("job %d was not visible in grouped viewport rows: %+v", jobID, m.groupedViewportRows())
 	return 0
+}
+
+// targetYForKind returns the screen Y of the first line of the model's own frame
+// carrying the given click target kind, or -1 when no line does.
+func targetYForKind(t *testing.T, m listTUIModel, kind targetKind) int {
+	t.Helper()
+	for i, line := range m.buildScreenPlan().lines {
+		if line.lineTarget.kind == kind {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestListTUIFlatViewMarksSelectedRowWhenHostMatesActive(t *testing.T) {
@@ -3934,5 +4039,42 @@ func TestListTUIResumeAutoPilotNowOverridesSuppression(t *testing.T) {
 	m.resumeAutoPilotNow()
 	if !m.shouldRunAutoPilotPass() {
 		t.Fatal("a budget change or breaker reset must force the next pass")
+	}
+}
+
+func TestListTUIMouseClickDaemonWarningInertOutsideUJ(t *testing.T) {
+	withStoppedDaemonStatus(t)
+	calls := 0
+	oldRestart := listRestartDaemonFunc
+	listRestartDaemonFunc = func() (daemoncontrol.Status, daemoncontrol.EnsureAction, error) {
+		calls++
+		return daemoncontrol.Status{PID: 4242, Live: true}, daemoncontrol.EnsureRestarted, nil
+	}
+	t.Cleanup(func() { listRestartDaemonFunc = oldRestart })
+
+	// Same stopped-daemon state as the UJ restart test, but a plain grouped view.
+	// Restart is a UJ-only affordance: outside it the daemon line states the problem
+	// without offering the remedy, so no clickable target may exist on any row.
+	m := listTUIModel{
+		title:           "Jobs",
+		groupedByStatus: true,
+		width:           100,
+		height:          12,
+		jobs:            nil,
+	}
+	m.rebuildGroupedRows()
+
+	if y := targetYForKind(t, m, targetRestartDaemon); y >= 0 {
+		t.Fatalf("non-uj grouped view exposed a daemon restart target at y=%d", y)
+	}
+
+	plan := m.currentPlan()
+	for y := range plan.lines {
+		if target, ok := plan.hit(0, y); ok && target.kind == targetRestartDaemon {
+			t.Fatalf("plan.hit(0, %d) resolved to a daemon restart target outside uj", y)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("daemon restart invoked %d times outside uj, want 0", calls)
 	}
 }
