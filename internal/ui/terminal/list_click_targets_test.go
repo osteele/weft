@@ -27,17 +27,17 @@ func clickTargetTestModel(jobs []*db.Job) listTUIModel {
 // substr, or fails the test.
 func planYForText(t *testing.T, plan screenPlan, substr string) int {
 	t.Helper()
-	for y, line := range plan.lines {
-		if strings.Contains(stripANSI(line.text), substr) {
+	for y, line := range plan.Lines {
+		if strings.Contains(stripANSI(line.Text), substr) {
 			return y
 		}
 	}
-	t.Fatalf("no plan line contains %q:\n%s", substr, plan.render())
+	t.Fatalf("no plan line contains %q:\n%s", substr, plan.Render())
 	return -1
 }
 
 func hitKind(plan screenPlan, x, y int) (clickTarget, bool) {
-	return plan.hit(x, y)
+	return plan.Hit(x, y)
 }
 
 // glyphSpanFixture renders one ⌂ (inventory) row and one ☁ (interruptible
@@ -50,7 +50,7 @@ func glyphSpanFixture(t *testing.T) (listTUIModel, screenPlan) {
 		{ID: 504, Status: db.StatusCompleted, Host: "cool30", Description: "inventory job"},
 	})
 	plan := m.buildGroupedScreenPlan()
-	frame := stripANSI(plan.render())
+	frame := stripANSI(plan.Render())
 	if !strings.Contains(frame, "⌂ wj504") || !strings.Contains(frame, "☁ wj505") {
 		t.Fatalf("fixture must render one ⌂ row and one ☁ row:\n%s", frame)
 	}
@@ -61,7 +61,7 @@ func glyphSpanFixture(t *testing.T) (listTUIModel, screenPlan) {
 // line at y: the start column, and the end column (exclusive).
 func idSpanColumns(t *testing.T, plan screenPlan, y int, id string) (start, end int) {
 	t.Helper()
-	plain := stripANSI(plan.lines[y].text)
+	plain := stripANSI(plan.Lines[y].Text)
 	idx := strings.Index(plain, id)
 	if idx < 0 {
 		t.Fatalf("line %d has no %q: %q", y, id, plain)
@@ -115,11 +115,11 @@ func TestJobIDCopySpanSurvivesSelectionPadding(t *testing.T) {
 	start, end := idSpanColumns(t, plan, y, "wj504")
 
 	// Select the row and confirm the span resolves at the same columns.
-	rowIdx := plan.lines[y].rowIdx
+	rowIdx := plan.Lines[y].RowIdx
 	m.selectGroupedRowByIndex(rowIdx)
 	selectedPlan := m.buildGroupedScreenPlan()
 	sy := planYForText(t, selectedPlan, "wj504 ")
-	if got := lipgloss.Width(selectedPlan.lines[sy].text); got != m.width {
+	if got := lipgloss.Width(selectedPlan.Lines[sy].Text); got != m.width {
 		t.Fatalf("selected row display width = %d, want padded to %d", got, m.width)
 	}
 	selStart, selEnd := idSpanColumns(t, selectedPlan, sy, "wj504")
@@ -408,8 +408,8 @@ func TestAutopilotLineClickNeverTogglesAutopilot(t *testing.T) {
 		m.lastAutoPilotErrorRaw = "offer search failed: exit 1"
 		plan := m.buildGroupedScreenPlan()
 		y := planYForText(t, plan, "Auto-pilot: failed")
-		if !strings.Contains(stripANSI(plan.lines[y].text), "(e:details)") {
-			t.Fatalf("error line should carry the click hint, got %q", stripANSI(plan.lines[y].text))
+		if !strings.Contains(stripANSI(plan.Lines[y].Text), "(e:details)") {
+			t.Fatalf("error line should carry the click hint, got %q", stripANSI(plan.Lines[y].Text))
 		}
 		target, ok := hitKind(plan, 2, y)
 		if !ok || target.kind != targetAutoErrorToggle {
@@ -448,8 +448,8 @@ func TestAutopilotLineClickNeverTogglesAutopilot(t *testing.T) {
 func TestControlsLineClickTargets(t *testing.T) {
 	m := clickTargetTestModel([]*db.Job{{ID: 301, Status: db.StatusQueued, Description: "queued"}})
 	plan := m.buildGroupedScreenPlan()
-	y := len(plan.lines) - 1
-	text := stripANSI(plan.lines[y].text)
+	y := len(plan.Lines) - 1
+	text := stripANSI(plan.Lines[y].Text)
 	if !strings.Contains(text, "x:kill/cancel") {
 		t.Fatalf("controls line should offer kill/cancel for the selected queued job: %q", text)
 	}

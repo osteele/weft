@@ -203,11 +203,3 @@ type moveExecuteDoneMsg struct {
 	action     moveExecuteAction
 	err        error
 }
-
-// ---------------------------------------------------------------------------
-// Render row types (system mode)
-// ---------------------------------------------------------------------------
-
-type watchRenderRow struct {
-	text string
-}

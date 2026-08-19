@@ -19,14 +19,14 @@ import (
 
 // renderStructuredBlock renders an instance block's structured lines, making
 // the instance header and job rows selectable while other lines are plain.
-func renderStructuredBlock(lines []watchInstanceLine, addSelectable, addPlain func(string)) {
+func renderStructuredBlock(lines []watchInstanceLine, addHeader, addJobRow, addPlain func(string)) {
 	if len(lines) == 0 {
 		return
 	}
-	addSelectable(lines[0].text)
+	addHeader(lines[0].text)
 	for _, sl := range lines[1:] {
 		if sl.jobID != 0 {
-			addSelectable(sl.text)
+			addJobRow(sl.text)
 		} else {
 			addPlain(sl.text)
 		}
@@ -48,22 +48,11 @@ func (m watchModel) baseView() string {
 	if m.projectHelp && m.mode != watchModeProject {
 		return m.renderWatchHelpView()
 	}
-
-	switch {
-	case m.mode.isInstanceBased():
-		content, cursorLine := m.renderInstanceView()
-		return m.applyViewport(content, cursorLine)
-	case m.mode == watchModeSystem:
-		content, cursorLine := m.renderSystemView()
-		return m.applyViewport(content, cursorLine)
-	case m.mode == watchModeProject:
-		return m.renderProjectView()
-	}
-	return ""
+	return m.cacheWatchPlan(m.buildWatchPlan()).Render()
 }
 
-func (m watchModel) renderInstanceView() (string, int) {
-	var b strings.Builder
+func (m watchModel) renderInstanceView() ([]watchFrameLine, int) {
+	var lines []watchFrameLine
 	now := time.Now()
 	width := m.width
 	if width <= 0 {
@@ -79,23 +68,28 @@ func (m watchModel) renderInstanceView() (string, int) {
 	showInstanceHeader := hasVisibleInstances || m.done
 	selectableIndex := 0
 	selectedVisualLine := -1
-	lineCount := 0
 
-	countLine := func() { lineCount++ }
 	addLine := func(text string) {
-		b.WriteString(text)
-		b.WriteString("\n")
-		countLine()
+		lines = append(lines, watchPlainLine(text))
 	}
 	addSelectable := func(text string) {
 		if selectableIndex == m.cursor {
 			text = watchSelectedRowStyle.Render(padToWidth(text, width))
-			selectedVisualLine = lineCount
+			selectedVisualLine = len(lines)
 		}
-		b.WriteString(text)
-		b.WriteString("\n")
-		countLine()
+		lines = append(lines, watchFrameLine{text: text, rowIdx: selectableIndex, target: clickTarget{kind: targetSelectRow, rowIdx: selectableIndex}})
 		selectableIndex++
+	}
+	// instanceHeaderFor returns the selectable-line appender for an instance
+	// block header, which additionally carries the instance-ID copy span.
+	instanceHeaderFor := func(instanceID int64) func(string) {
+		return func(text string) {
+			row := len(lines)
+			addSelectable(text)
+			if span, ok := instanceIDCopySpan(lines[row].text, instanceID, width); ok {
+				lines[row].spans = append(lines[row].spans, span)
+			}
+		}
 	}
 
 	// Header
@@ -148,7 +142,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 					predecessors:             donors,
 					replacementReason:        m.failedReplaceReason[id],
 				})
-				renderStructuredBlock(structured, addSelectable, addLine)
+				renderStructuredBlock(structured, instanceHeaderFor(id), addSelectable, addLine)
 			} else {
 				addLine(m.spinner.View() + fmt.Sprintf(" Instance %s — waiting for data...", ids.FormatInstanceID(id)))
 			}
@@ -160,7 +154,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 			predecessors:      donors,
 			replacementReason: m.failedReplaceReason[id],
 		})
-		renderStructuredBlock(structured, addSelectable, addLine)
+		renderStructuredBlock(structured, instanceHeaderFor(id), addSelectable, addLine)
 		addLine("")
 	}
 
@@ -196,10 +190,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 
 	// Partial launch errors
 	if len(m.partialErrors) > 0 && !m.partialErrorsRetried {
-		block := formatPartialErrors(m.partialErrors, width)
-		b.WriteString(block)
-		b.WriteString("\n")
-		lineCount += strings.Count(block, "\n") + 1
+		for _, line := range strings.Split(formatPartialErrors(m.partialErrors, width), "\n") {
+			addLine(line)
+		}
 	}
 
 	// Retry status
@@ -208,8 +201,10 @@ func (m watchModel) renderInstanceView() (string, int) {
 	} else if m.retryResult != "" {
 		addLine(m.retryResult)
 	}
-	for _, line := range renderSharedTUIStatusLines(m.database, width, m.autoRunRateTargetCents) {
-		addLine(line)
+	sharedStatus := renderSharedTUIStatusLinesView(m.database, width, -1, m.autoRunRateTargetCents, true)
+	for i := range sharedStatus.lines {
+		line, target := sharedStatusPlanLine(sharedStatus, i, width)
+		lines = append(lines, watchFrameLine{text: line, rowIdx: -1, target: target})
 	}
 	if line := m.autoPilotStatusLine(); line != "" {
 		addLine(watchDimStyle.Render(line))
@@ -229,33 +224,33 @@ func (m watchModel) renderInstanceView() (string, int) {
 		addLine(watchDimStyle.Render(degraded.TerminalJobAttachmentDegradedNote()))
 	}
 
-	return b.String(), selectedVisualLine
+	return lines, selectedVisualLine
 }
 
-func (m watchModel) renderSystemView() (string, int) {
+func (m watchModel) renderSystemView() []watchFrameLine {
 	width := m.width
 	if width <= 0 {
 		width = 100
 	}
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, width, m.autoRunRateTargetCents)
+	sharedStatus := renderSharedTUIStatusLinesView(m.database, width, -1, m.autoRunRateTargetCents, true)
 
-	rows := make([]watchRenderRow, 0, 8+len(m.cloudInstances)+len(m.unplacedJobs))
+	rows := make([]watchFrameLine, 0, 8+len(m.cloudInstances)+len(m.unplacedJobs))
 	selectedVisualIndex := -1
 	selectableIndex := 0
 
 	addHeader := func(text string) {
-		rows = append(rows, watchRenderRow{text: watchTitleStyle.Render(text)})
+		rows = append(rows, watchPlainLine(watchTitleStyle.Render(text)))
 	}
 	addSelectable := func(text string) {
 		if selectableIndex == m.cursor {
 			text = watchSelectedRowStyle.Render(padToWidth(text, width))
 			selectedVisualIndex = len(rows)
 		}
-		rows = append(rows, watchRenderRow{text: text})
+		rows = append(rows, watchFrameLine{text: text, rowIdx: selectableIndex, target: clickTarget{kind: targetSelectRow, rowIdx: selectableIndex}})
 		selectableIndex++
 	}
 	addPlain := func(text string) {
-		rows = append(rows, watchRenderRow{text: text})
+		rows = append(rows, watchPlainLine(text))
 	}
 
 	title := "System Watch"
@@ -300,9 +295,16 @@ func (m watchModel) renderSystemView() (string, int) {
 			if len(structured) == 0 {
 				continue
 			}
+			truncHeader := func(s string) {
+				row := len(rows)
+				addSelectable(truncate(s, width))
+				if span, ok := instanceIDCopySpan(rows[row].text, ci.ID, width); ok {
+					rows[row].spans = append(rows[row].spans, span)
+				}
+			}
 			truncSelect := func(s string) { addSelectable(truncate(s, width)) }
 			truncPlain := func(s string) { addPlain(truncate(s, width)) }
-			renderStructuredBlock(structured, truncSelect, truncPlain)
+			renderStructuredBlock(structured, truncHeader, truncSelect, truncPlain)
 		}
 	}
 	addPlain("")
@@ -369,10 +371,11 @@ func (m watchModel) renderSystemView() (string, int) {
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
-	// Render rows into content string. Reserve the footer controls plus any
-	// status/footer lines that render below the scrollable content.
-	reservedFooterLines := 1 + len(sharedStatusLines)
-	if m.autoPilotStatusLine() != "" {
+	// Reserve the footer controls plus any status/footer lines that render
+	// below the scrollable content.
+	autoLine := m.autoPilotStatusLine()
+	reservedFooterLines := 1 + len(sharedStatus.lines)
+	if autoLine != "" {
 		reservedFooterLines++
 	}
 	contentHeight := m.height - reservedFooterLines
@@ -385,37 +388,23 @@ func (m watchModel) renderSystemView() (string, int) {
 		end = len(rows)
 	}
 
-	var b strings.Builder
-	for i := start; i < end; i++ {
-		b.WriteString(rows[i].text)
-		if i < end-1 {
-			b.WriteString("\n")
-		}
-	}
+	lines := make([]watchFrameLine, 0, m.height)
+	lines = append(lines, rows[start:end]...)
 	if end-start < contentHeight {
 		padLine := strings.Repeat(" ", max(0, m.width))
 		for i := end - start; i < contentHeight; i++ {
-			b.WriteString("\n")
-			b.WriteString(padLine)
+			lines = append(lines, watchPlainLine(padLine))
 		}
 	}
-	if b.Len() > 0 {
-		b.WriteString("\n")
+	for i := range sharedStatus.lines {
+		line, target := sharedStatusPlanLine(sharedStatus, i, width)
+		lines = append(lines, watchFrameLine{text: line, rowIdx: -1, target: target})
 	}
-	for _, line := range sharedStatusLines {
-		b.WriteString(line)
-		b.WriteString("\n")
+	if autoLine != "" {
+		lines = append(lines, watchPlainLine(watchDimStyle.Render(autoLine)))
 	}
-	if line := m.autoPilotStatusLine(); line != "" {
-		b.WriteString(watchDimStyle.Render(line))
-		b.WriteString("\n")
-	}
-	footer := strings.Join(footerParts, "  ")
-	b.WriteString(footer)
-
-	// For system mode, scrolling is done via watchScrollStart above, so we
-	// return -1 to skip applyViewport's cursor-based slicing.
-	return b.String(), -1
+	lines = append(lines, watchPlainLine(strings.Join(footerParts, "  ")))
+	return lines
 }
 
 func (m watchModel) hasPreservedJobAttachment() bool {
@@ -427,31 +416,21 @@ func (m watchModel) hasPreservedJobAttachment() bool {
 	return false
 }
 
-// applyViewport slices rendered content to fit the terminal height.
+// applyViewportLines slices frame lines to fit the terminal height.
 // If cursorLine >= 0, it centers the viewport around that line.
 // Otherwise, bottom-anchored: scrollOff=0 shows the bottom of the content.
-func (m watchModel) applyViewport(content string, cursorLine int) string {
+func (m watchModel) applyViewportLines(lines []watchFrameLine, cursorLine int) []watchFrameLine {
 	if m.height <= 0 || m.done {
-		return content
+		return lines
 	}
 
 	// System mode uses its own scrolling in renderSystemView
 	if cursorLine < 0 && m.mode == watchModeSystem {
-		return content
-	}
-
-	// Fast path: count newlines to check fit without allocating a []string
-	if strings.Count(content, "\n") < m.height {
-		return content
-	}
-
-	lines := strings.Split(content, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+		return lines
 	}
 
 	if len(lines) <= m.height {
-		return content
+		return lines
 	}
 
 	// If we have a cursor line, center viewport around it
@@ -461,15 +440,15 @@ func (m watchModel) applyViewport(content string, cursorLine int) string {
 		if end > len(lines) {
 			end = len(lines)
 		}
-		visible := lines[start:end]
+		visible := append([]watchFrameLine(nil), lines[start:end]...)
 		if start > 0 {
-			visible[0] = watchDimStyle.Render(fmt.Sprintf("↑ %d more lines above", start))
+			visible[0] = watchPlainLine(watchDimStyle.Render(fmt.Sprintf("↑ %d more lines above", start)))
 		}
 		off := len(lines) - end
 		if off > 0 {
-			visible[len(visible)-1] = watchDimStyle.Render(fmt.Sprintf("↓ %d more lines below", off))
+			visible[len(visible)-1] = watchPlainLine(watchDimStyle.Render(fmt.Sprintf("↓ %d more lines below", off)))
 		}
-		return strings.Join(visible, "\n")
+		return visible
 	}
 
 	// Bottom-anchored scrolling (fallback for instance-based modes without cursor)
@@ -485,16 +464,16 @@ func (m watchModel) applyViewport(content string, cursorLine int) string {
 		start = 0
 	}
 
-	visible := lines[start:end]
+	visible := append([]watchFrameLine(nil), lines[start:end]...)
 
 	if start > 0 {
-		visible[0] = watchDimStyle.Render(fmt.Sprintf("↑ %d more lines above", start))
+		visible[0] = watchPlainLine(watchDimStyle.Render(fmt.Sprintf("↑ %d more lines above", start)))
 	}
 	if off > 0 {
-		visible[len(visible)-1] = watchDimStyle.Render(fmt.Sprintf("↓ %d more lines below", off))
+		visible[len(visible)-1] = watchPlainLine(watchDimStyle.Render(fmt.Sprintf("↓ %d more lines below", off)))
 	}
 
-	return strings.Join(visible, "\n")
+	return visible
 }
 
 // ---------------------------------------------------------------------------
@@ -882,66 +861,59 @@ func padToWidth(s string, width int) string {
 // View: project mode
 // ---------------------------------------------------------------------------
 
-func (m watchModel) renderProjectView() string {
+func (m watchModel) renderProjectPlan() screenPlan {
 	if m.width <= 0 || m.height <= 0 {
-		return "Loading..."
-	}
-	if m.projectHelp {
-		return m.renderProjectHelpView()
+		return watchPlanFromText(m.width, m.height, "Loading...")
 	}
 
 	lines := m.projectLines
-	sharedStatusLines := renderSharedTUIStatusLines(m.database, m.width, m.autoRunRateTargetCents)
+	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, -1, m.autoRunRateTargetCents, true)
 	autoLine := m.autoPilotStatusLine()
 	rows := m.projectPageSize()
 	if rows > 1 {
 		rows-- // blank separator before footer/status block
 	}
-	if len(sharedStatusLines) > 0 && rows > len(sharedStatusLines) {
-		rows -= len(sharedStatusLines)
+	if len(sharedStatus.lines) > 0 && rows > len(sharedStatus.lines) {
+		rows -= len(sharedStatus.lines)
 	}
 	if autoLine != "" && rows > 1 {
 		rows--
 	}
-	var b strings.Builder
+	frame := make([]watchFrameLine, 0, m.height)
 	title := fmt.Sprintf("Project Watch (%d projects)", len(m.projectGroups))
-	b.WriteString(watchTitleStyle.Render(truncateDisplayWidth(title, m.width)))
-	b.WriteString("\n")
+	frame = append(frame, watchPlainLine(watchTitleStyle.Render(truncateDisplayWidth(title, m.width))))
 
 	if len(lines) == 0 {
 		empty := m.projectEmptyStateText()
-		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(empty, m.width)))
-		b.WriteString("\n")
+		frame = append(frame, watchPlainLine(watchDimStyle.Render(truncateDisplayWidth(empty, m.width))))
 		for i := 1; i < rows; i++ {
-			b.WriteString("\n")
+			frame = append(frame, watchPlainLine(""))
 		}
 	} else {
 		for i := 0; i < rows; i++ {
 			idx := m.projectOffset + i
 			if idx >= len(lines) {
-				b.WriteString("\n")
+				frame = append(frame, watchPlainLine(""))
 				continue
 			}
 			line := truncateDisplayWidth(lines[idx], m.width)
 			if idx == m.cursor {
 				line = watchSelectedRowStyle.Render(line)
 			}
-			b.WriteString(line)
-			b.WriteString("\n")
+			frame = append(frame, watchFrameLine{text: line, rowIdx: idx, target: clickTarget{kind: targetSelectRow, rowIdx: idx}})
 		}
 	}
 
-	b.WriteString("\n")
-	for _, line := range sharedStatusLines {
-		b.WriteString(line)
-		b.WriteString("\n")
+	frame = append(frame, watchPlainLine(""))
+	for i := range sharedStatus.lines {
+		line, target := sharedStatusPlanLine(sharedStatus, i, m.width)
+		frame = append(frame, watchFrameLine{text: line, rowIdx: -1, target: target})
 	}
 	if autoLine != "" {
-		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(autoLine, m.width)))
-		b.WriteString("\n")
+		frame = append(frame, watchPlainLine(watchDimStyle.Render(truncateDisplayWidth(autoLine, m.width))))
 	}
-	b.WriteString(watchDimStyle.Render(truncateDisplayWidth(m.projectFooterText(), m.width)))
-	return b.String()
+	frame = append(frame, watchPlainLine(watchDimStyle.Render(truncateDisplayWidth(m.projectFooterText(), m.width))))
+	return watchPlanFromLines(m.width, m.height, frame)
 }
 
 func (m watchModel) projectFooterText() string {

@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
@@ -155,6 +156,10 @@ type watchModel struct {
 	height       int
 	scrollOff    int // lines scrolled up from bottom (0 = pinned to bottom)
 	focused      bool
+	// planCache holds the plan from the most recent View(). Pointer so it survives bubbletea's
+	// value-receiver copies. Hit testing reads it so a click resolves against the frame the user
+	// actually saw, not one rebuilt from a database that may have moved between render and click.
+	planCache *screenPlan
 
 	// Replacement chain cache (both modes, recomputed when instanceIDs change)
 	cachedHiddenIDs         map[int64]bool
@@ -249,6 +254,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
 		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
+		planCache:              new(screenPlan),
 	}
 	m.rebuildReplacementCache()
 	return m
@@ -284,6 +290,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
 		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
+		planCache:              new(screenPlan),
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false, nil)
@@ -351,6 +358,7 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 		autoRunRateTargetCents: cfg.AutoRunRateSoftTargetCents(),
 		autoDailyCapCents:      cfg.AutoRunawaySpendDailyCapCents(),
 		focused:                true,
+		planCache:              new(screenPlan),
 	}
 
 	// Load unplaced jobs so Init auto-pilot can act on them immediately.
@@ -491,13 +499,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.moveCursor(-3)
-		case tea.MouseButtonWheelDown:
-			m.moveCursor(3)
-		}
-		return m, nil
+		return m.handleMouse(msg)
 
 	case watchUpdateMsg:
 		return m.handleWatchUpdate(msg)
@@ -518,6 +520,25 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case flash.ExpiredMsg:
 		m.flash.HandleExpired()
 		return m, nil
+
+	case clipboardCopiedMsg:
+		text, isError := msg.flashText()
+		return m, m.flash.Set(text, isError)
+
+	case listDaemonRestartedMsg:
+		if msg.err != nil {
+			return m, m.flash.Set(fmt.Sprintf("Daemon restart failed: %v", msg.err), true)
+		}
+		if msg.action == daemoncontrol.EnsureNoop {
+			return m, nil
+		}
+		return m, m.flash.Set(fmt.Sprintf("Daemon restarted (PID %d)", msg.pid), false)
+
+	case listURLOpenedMsg:
+		if msg.err != nil {
+			return m, m.flash.Set(fmt.Sprintf("Open browser failed: %v", msg.err), true)
+		}
+		return m, m.flash.Set(fmt.Sprintf("Opened %s billing", providerNameForBillingURL(msg.url)), false)
 
 	case watchCheckDoneMsg:
 		return m.handleCheckDone()
@@ -767,7 +788,7 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if m, ok := r.active.(watchModel); ok {
 			if m.done {
-				fmt.Print(m.View())
+				fmt.Print(renderWatchExitSnapshot(m))
 			}
 			if m.syncWorker != nil {
 				m.syncWorker.Stop()
@@ -783,7 +804,13 @@ func renderWatchExitSnapshot(model tea.Model) string {
 	if !ok || !m.done {
 		return ""
 	}
-	return m.View()
+	view := m.View()
+	if m.mode.isInstanceBased() {
+		// The instance view composes one line per row; the exit snapshot keeps
+		// the trailing newline so the shell prompt starts on a fresh line.
+		view += "\n"
+	}
+	return view
 }
 
 func filterInstanceModeUnplacedJobs(jobs []*db.Job, projectFilter string) []*db.Job {

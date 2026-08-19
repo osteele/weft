@@ -257,12 +257,12 @@ func TestRebalancePreviewYConfirmsNotCopies(t *testing.T) {
 // rowIdx, or fails the test.
 func planYForRowIdx(t *testing.T, plan screenPlan, rowIdx int) int {
 	t.Helper()
-	for y, line := range plan.lines {
-		if line.rowIdx == rowIdx {
+	for y, line := range plan.Lines {
+		if line.RowIdx == rowIdx {
 			return y
 		}
 	}
-	t.Fatalf("no plan line draws row %d:\n%s", rowIdx, plan.render())
+	t.Fatalf("no plan line draws row %d:\n%s", rowIdx, plan.Render())
 	return -1
 }
 
@@ -329,13 +329,13 @@ func TestDragSelectsRowRange(t *testing.T) {
 
 	plan := m.buildGroupedScreenPlan()
 	headerY := planYForText(t, plan, "blocked: no offers")
-	if strings.Contains(plan.lines[headerY].text, "\x1b[7m") {
+	if strings.Contains(plan.Lines[headerY].Text, "\x1b[7m") {
 		t.Error("bucket header line must not render selected")
 	}
 	for _, id := range []int64{750, 751} {
 		y := planYForRowIdx(t, plan, groupedRowIdxForJob(t, m, id))
-		if !strings.Contains(plan.lines[y].text, "\x1b[7m") {
-			t.Errorf("wj%d line must render selected: %q", id, plan.lines[y].text)
+		if !strings.Contains(plan.Lines[y].Text, "\x1b[7m") {
+			t.Errorf("wj%d line must render selected: %q", id, plan.Lines[y].Text)
 		}
 	}
 }

@@ -1,6 +1,6 @@
 package terminal
 
-import "strings"
+import "github.com/osteele/weft/internal/ui/hit"
 
 type targetKind uint8
 
@@ -36,103 +36,11 @@ type clickTarget struct {
 
 func (t clickTarget) actionable() bool { return t.kind != targetNone }
 
-// hitSpan is a column-scoped target within one line. Columns are DISPLAY columns
-// (0-based, end exclusive), not byte offsets and not rune counts.
-type hitSpan struct {
-	startCol int
-	endCol   int
-	target   clickTarget
-}
+type hitSpan = hit.Span[clickTarget]
+type screenLine = hit.Line[clickTarget]
+type screenPlan = hit.Plan[clickTarget]
 
-// screenLine is exactly one physical terminal row of the composed frame. text is the
-// final, width-truncated, already-styled string emitted verbatim.
-type screenLine struct {
-	text       string
-	rowIdx     int // grouped body rows only; -1 for title/filler/status lines
-	lineTarget clickTarget
-	spans      []hitSpan
-}
-
-// screenPlan is the whole frame. Index in lines == screen Y. That identity is the entire
-// point of this type: there is no other Y computation anywhere. width and height are the
-// terminal dimensions the frame was composed for, and are the cache key for reusing it.
-type screenPlan struct {
-	lines  []screenLine
-	width  int
-	height int
-}
-
-// newScreenPlan returns an empty plan sized for a width x height terminal. The frame
-// normally fills exactly height lines, so lines is preallocated to that capacity.
+// newScreenPlan returns an empty plan sized for a width x height terminal.
 func newScreenPlan(width, height int) screenPlan {
-	return screenPlan{lines: make([]screenLine, 0, max(0, height)), width: width, height: height}
-}
-
-// add appends one physical row. rowIdx names the underlying list row the line draws, or
-// -1 for title, filler, and footer lines that stand for no row.
-func (p *screenPlan) add(text string, rowIdx int, target clickTarget) {
-	p.lines = append(p.lines, screenLine{text: text, rowIdx: rowIdx, lineTarget: target})
-}
-
-// addSpan attaches a column-scoped target to the most recently added line.
-func (p *screenPlan) addSpan(span hitSpan) {
-	if len(p.lines) == 0 {
-		return
-	}
-	p.lines[len(p.lines)-1].spans = append(p.lines[len(p.lines)-1].spans, span)
-}
-
-func (p screenPlan) render() string {
-	var b strings.Builder
-	size := 0
-	for _, line := range p.lines {
-		size += len(line.text) + 1
-	}
-	b.Grow(size)
-	for i, line := range p.lines {
-		if i > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(line.text)
-	}
-	return b.String()
-}
-
-// rowIdxAt returns the model row drawn at screen row y, or -1 when that line
-// stands for no row (title, filler, footer) or y is off screen.
-func (p screenPlan) rowIdxAt(y int) int {
-	if y < 0 || y >= len(p.lines) {
-		return -1
-	}
-	return p.lines[y].rowIdx
-}
-
-// hit resolves a press at display column x of screen row y. When spans overlap, the
-// narrowest span containing x wins; otherwise the line-wide target applies.
-func (p screenPlan) hit(x, y int) (clickTarget, bool) {
-	if y < 0 || y >= len(p.lines) {
-		return clickTarget{}, false
-	}
-	if x < 0 || x >= p.width {
-		return clickTarget{}, false
-	}
-	line := p.lines[y]
-	best := -1
-	bestWidth := 0
-	for i, span := range line.spans {
-		if x < span.startCol || x >= span.endCol {
-			continue
-		}
-		if w := span.endCol - span.startCol; best < 0 || w < bestWidth {
-			best = i
-			bestWidth = w
-		}
-	}
-	if best >= 0 {
-		return line.spans[best].target, true
-	}
-	if line.lineTarget.actionable() {
-		return line.lineTarget, true
-	}
-	return clickTarget{}, false
+	return hit.New[clickTarget](width, height)
 }

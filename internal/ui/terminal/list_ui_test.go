@@ -3380,8 +3380,8 @@ func groupedClickYForJob(t *testing.T, m listTUIModel, jobID int64) int {
 // carrying the given click target kind, or -1 when no line does.
 func targetYForKind(t *testing.T, m listTUIModel, kind targetKind) int {
 	t.Helper()
-	for i, line := range m.buildScreenPlan().lines {
-		if line.lineTarget.kind == kind {
+	for i, line := range m.buildScreenPlan().Lines {
+		if line.LineTarget.kind == kind {
 			return i
 		}
 	}
@@ -4096,9 +4096,9 @@ func TestListTUIMouseClickDaemonWarningInertOutsideUJ(t *testing.T) {
 	}
 
 	plan := m.currentPlan()
-	for y := range plan.lines {
-		if target, ok := plan.hit(0, y); ok && target.kind == targetRestartDaemon {
-			t.Fatalf("plan.hit(0, %d) resolved to a daemon restart target outside uj", y)
+	for y := range plan.Lines {
+		if target, ok := plan.Hit(0, y); ok && target.kind == targetRestartDaemon {
+			t.Fatalf("plan.Hit(0, %d) resolved to a daemon restart target outside uj", y)
 		}
 	}
 	if calls != 0 {

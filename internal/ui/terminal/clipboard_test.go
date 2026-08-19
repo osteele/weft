@@ -256,16 +256,16 @@ func TestBlockedBucketCopyClickEndToEnd(t *testing.T) {
 
 	// Find the bucket header line on screen and click it.
 	headerY := -1
-	for y, line := range plan.lines {
-		if strings.Contains(stripANSI(line.text), "blocked: "+reason) {
+	for y, line := range plan.Lines {
+		if strings.Contains(stripANSI(line.Text), "blocked: "+reason) {
 			headerY = y
 			break
 		}
 	}
 	if headerY < 0 {
-		t.Fatalf("no blocked bucket header in frame:\n%s", plan.render())
+		t.Fatalf("no blocked bucket header in frame:\n%s", plan.Render())
 	}
-	target, ok := plan.hit(2, headerY)
+	target, ok := plan.Hit(2, headerY)
 	if !ok || target.kind != targetCopy || target.label != "blocking status" {
 		t.Fatalf("hit = %+v, %v; want targetCopy labeled %q", target, ok, "blocking status")
 	}
@@ -354,17 +354,17 @@ func TestJobIDCopyFlashNamesTheJobID(t *testing.T) {
 	plan := m.buildGroupedScreenPlan()
 
 	rowY := -1
-	for y, line := range plan.lines {
-		if strings.Contains(stripANSI(line.text), "wj504") {
+	for y, line := range plan.Lines {
+		if strings.Contains(stripANSI(line.Text), "wj504") {
 			rowY = y
 			break
 		}
 	}
 	if rowY < 0 {
-		t.Fatalf("no wj504 row in frame:\n%s", plan.render())
+		t.Fatalf("no wj504 row in frame:\n%s", plan.Render())
 	}
 
-	target, ok := plan.hit(2, rowY)
+	target, ok := plan.Hit(2, rowY)
 	if !ok || target.kind != targetCopy {
 		t.Fatalf("hit = %+v, %v; want a copy target on the ID region", target, ok)
 	}

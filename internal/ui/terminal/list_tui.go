@@ -1437,7 +1437,7 @@ func (m listTUIModel) baseView() string {
 		return "Loading..."
 	}
 
-	return m.cachePlan(m.buildFlatScreenPlan()).render()
+	return m.cachePlan(m.buildFlatScreenPlan()).Render()
 }
 
 // flatFrameParts is the flat frame's footer content plus the body-row budget that
@@ -1483,20 +1483,20 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 	plan := newScreenPlan(m.width, m.height)
 
 	title := fmt.Sprintf("%s (%d)", m.displayTitle(), len(m.jobs))
-	plan.add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
+	plan.Add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
 	header := truncateDisplayWidth(formatJobListHeader(layout), rowWidth)
-	plan.add(listTUIHeaderStyle.Render(truncateDisplayWidth(header, m.width)), -1, clickTarget{})
+	plan.Add(listTUIHeaderStyle.Render(truncateDisplayWidth(header, m.width)), -1, clickTarget{})
 
 	if len(m.jobs) == 0 {
-		plan.add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)), -1, clickTarget{})
+		plan.Add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateText(), m.width)), -1, clickTarget{})
 		for i := 1; i < bodyRows; i++ {
-			plan.add("", -1, clickTarget{})
+			plan.Add("", -1, clickTarget{})
 		}
 	} else {
 		for i := 0; i < bodyRows; i++ {
 			idx := m.offset + i
 			if idx >= len(m.jobs) {
-				plan.add("", -1, clickTarget{})
+				plan.Add("", -1, clickTarget{})
 				continue
 			}
 			row := truncateDisplayWidth(formatJobListRow(layout, m.jobs[idx]), rowWidth)
@@ -1506,22 +1506,22 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 			if idx == m.cursor || (rangeActive && idx >= rangeLo && idx <= rangeHi) {
 				row = renderSelectedRow(row, m.width)
 			}
-			plan.add(row, idx, clickTarget{kind: targetSelectRow, rowIdx: idx})
+			plan.Add(row, idx, clickTarget{kind: targetSelectRow, rowIdx: idx})
 		}
 	}
 
 	// Always keep a visible separator above the status/footer block.
-	plan.add("", -1, clickTarget{})
+	plan.Add("", -1, clickTarget{})
 	for _, line := range parts.promptLines {
-		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+		plan.Add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
 	for _, line := range parts.selectedDetailLines {
 		text, target := m.selectedDetailPlanLine(line)
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
+		plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
 	}
 	for i := range parts.sharedStatus.lines {
 		line, target := sharedStatusPlanLine(parts.sharedStatus, i, m.width)
-		plan.add(line, -1, target)
+		plan.Add(line, -1, target)
 	}
 	// The flat footer mixes a transient flash with the controls legend; only a
 	// showing flash makes the whole line dismiss-on-click.
@@ -1529,7 +1529,7 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 	if m.flash.Render() != "" {
 		footerTarget = clickTarget{kind: targetDismissStatus}
 	}
-	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.statusLineText(m.footerText(bodyRows)), m.width)), -1, footerTarget)
+	plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(m.statusLineText(m.footerText(bodyRows)), m.width)), -1, footerTarget)
 	return plan
 }
 
@@ -1668,7 +1668,7 @@ func controlsLineSpans(line string) []hitSpan {
 		width := lipgloss.Width(token)
 		if idx := strings.Index(token, ":"); idx > 0 && !strings.Contains(token, "…") {
 			if key := token[:idx]; !controlsLineKeyExcludedFromClick(key) {
-				spans = append(spans, hitSpan{startCol: col, endCol: col + width, target: clickTarget{kind: targetControlsKey, key: key}})
+				spans = append(spans, hitSpan{StartCol: col, EndCol: col + width, Target: clickTarget{kind: targetControlsKey, key: key}})
 			}
 		}
 		col += width + 2
@@ -1695,7 +1695,7 @@ func jobIDCopySpan(line string, job *db.Job, width int) (hitSpan, bool) {
 	if width > 0 && endCol > width {
 		endCol = width
 	}
-	return hitSpan{startCol: 0, endCol: endCol, target: clickTarget{kind: targetCopy, label: id, payload: id}}, true
+	return hitSpan{StartCol: 0, EndCol: endCol, Target: clickTarget{kind: targetCopy, label: id, payload: id}}, true
 }
 
 // cachePlan records the plan a View() just composed so hit testing resolves clicks
@@ -1720,7 +1720,7 @@ func (m listTUIModel) buildScreenPlan() screenPlan {
 // the current terminal size, and rebuilds otherwise. Models built as bare struct
 // literals in tests have no cache and always rebuild.
 func (m listTUIModel) currentPlan() screenPlan {
-	if m.planCache != nil && m.planCache.width == m.width && m.planCache.height == m.height && len(m.planCache.lines) > 0 {
+	if m.planCache != nil && m.planCache.Width == m.width && m.planCache.Height == m.height && len(m.planCache.Lines) > 0 {
 		return *m.planCache
 	}
 	return m.buildScreenPlan()
@@ -1751,7 +1751,7 @@ func (m listTUIModel) groupedView() string {
 		return "Loading..."
 	}
 
-	return m.cachePlan(m.buildGroupedScreenPlan()).render()
+	return m.cachePlan(m.buildGroupedScreenPlan()).Render()
 }
 
 // groupedRowClickable reports whether a click on the row's line should move the
@@ -1808,14 +1808,14 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 	plan := newScreenPlan(m.width, m.height)
 
 	title := fmt.Sprintf("%s (%d) • group:%s", m.displayTitle(), len(m.jobs), listGroupModeLabel(m.effectiveGroupMode()))
-	plan.add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
+	plan.Add(listTUITitleStyle.Render(truncateDisplayWidth(title, m.width)), -1, clickTarget{})
 
 	bodyLinesWritten := 0
 	if len(rows) == 0 {
 		// Empty view: the message goes in the body — under the title, separated
 		// by a blank line — where jobs would otherwise be listed.
-		plan.add("", -1, clickTarget{})
-		plan.add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateBaseText(), m.width)), -1, clickTarget{})
+		plan.Add("", -1, clickTarget{})
+		plan.Add(listTUIEmptyStyle.Render(truncateDisplayWidth(m.emptyStateBaseText(), m.width)), -1, clickTarget{})
 		bodyLinesWritten = 2
 	}
 	for _, row := range layout.visibleRows {
@@ -1843,57 +1843,57 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 		if sourceRow != nil {
 			target = groupedRowClickTarget(*sourceRow, row.rowIdx)
 		}
-		plan.add(line, row.rowIdx, target)
+		plan.Add(line, row.rowIdx, target)
 		if sourceRow != nil && sourceRow.job != nil && m.isStatusGroupedView() {
 			if span, ok := jobIDCopySpan(line, sourceRow.job, m.width); ok {
-				plan.addSpan(span)
+				plan.AddSpan(span)
 			}
 		}
 		bodyLinesWritten++
 	}
 	for ; bodyLinesWritten < layout.maxBodyLines; bodyLinesWritten++ {
-		plan.add("", -1, clickTarget{})
+		plan.Add("", -1, clickTarget{})
 	}
 
 	// Visually separate grouped job rows from footer lines.
-	plan.add("", -1, clickTarget{})
+	plan.Add("", -1, clickTarget{})
 	if m.projectInputActive {
 		for _, line := range m.projectFilterPromptLines() {
-			plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+			plan.Add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 		}
 	}
 	for _, line := range layout.errorDetailsLines {
 		// The disclosed error-details block hides on click, duplicating e.
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{kind: targetAutoErrorToggle})
+		plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{kind: targetAutoErrorToggle})
 	}
 	for _, line := range layout.selectedDetails {
 		text, target := m.selectedDetailPlanLine(line)
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
+		plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(text, m.width)), -1, target)
 	}
 	if layout.statusLine != "" {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)), -1, clickTarget{kind: targetDismissStatus})
+		plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.statusLine, m.width)), -1, clickTarget{kind: targetDismissStatus})
 	}
 	healthTarget := clickTarget{}
 	if m.hasRecentInstanceFailures() {
 		healthTarget = clickTarget{kind: targetInstanceFailures}
 	}
 	for _, line := range layout.instanceHealthLines {
-		plan.add(line, -1, healthTarget)
+		plan.Add(line, -1, healthTarget)
 	}
 	for i := range layout.sharedStatus.lines {
 		line, target := sharedStatusPlanLine(layout.sharedStatus, i, m.width)
-		plan.add(line, -1, target)
+		plan.Add(line, -1, target)
 	}
 	if layout.autoPilotLine != "" {
-		plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)), -1, layout.autoPilotTarget)
+		plan.Add(listTUIFooterStyle.Render(truncateDisplayWidth(layout.autoPilotLine, m.width)), -1, layout.autoPilotTarget)
 	}
 	for _, line := range layout.budgetPanelLines {
-		plan.add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
+		plan.Add(listTUIPromptStyle.Render(truncateDisplayWidth(line, m.width)), -1, clickTarget{})
 	}
 	controlsText := truncateDisplayWidth(layout.controlsLine, m.width)
-	plan.add(listTUIFooterStyle.Render(controlsText), -1, clickTarget{})
+	plan.Add(listTUIFooterStyle.Render(controlsText), -1, clickTarget{})
 	for _, span := range controlsLineSpans(controlsText) {
-		plan.addSpan(span)
+		plan.AddSpan(span)
 	}
 	return plan
 }
@@ -2457,7 +2457,7 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
-		target, _ := m.currentPlan().hit(msg.X, msg.Y)
+		target, _ := m.currentPlan().Hit(msg.X, msg.Y)
 		m.selRangeActive = false
 		m.dragging = false
 		if pos := m.selectablePositionForRowIdx(target.rowIdx); target.kind == targetSelectRow && pos >= 0 {
@@ -2469,7 +2469,7 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// A drag extends the selection to the row under the cursor. The row
 		// comes from the plan's rowIdx (a model row), not the screen row, so a
 		// repaint mid-drag cannot corrupt the range.
-		if pos := m.selectablePositionForRowIdx(m.currentPlan().rowIdxAt(msg.Y)); pos >= 0 {
+		if pos := m.selectablePositionForRowIdx(m.currentPlan().RowIdxAt(msg.Y)); pos >= 0 {
 			m.cursor = pos
 			m.selRangeActive = pos != m.selAnchor
 			m.clampCursor()
