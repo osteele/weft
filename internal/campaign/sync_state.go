@@ -59,8 +59,9 @@ type onStartVerifyEntry struct {
 }
 
 // verifyOnStartScriptCached returns the launch's OnStart-script verdict,
-// consulting the container only when the memo has nothing usable.
-func verifyOnStartScriptCached(launchID int64, inst *cloud.Instance) cloud.OnStartVerification {
+// consulting the container only when the memo has nothing usable. ctx bounds
+// the underlying SSH call by the caller's deadline.
+func verifyOnStartScriptCached(ctx context.Context, launchID int64, inst *cloud.Instance) cloud.OnStartVerification {
 	now := time.Now()
 	onStartVerifyMemo.mu.Lock()
 	entry, ok := onStartVerifyMemo.entries[launchID]
@@ -71,7 +72,7 @@ func verifyOnStartScriptCached(launchID int64, inst *cloud.Instance) cloud.OnSta
 			return entry.verdict
 		}
 	}
-	verdict := syncVerifyOnStartScript(inst, cloud.OnStartVerifyTimeout)
+	verdict := syncVerifyOnStartScript(ctx, inst, cloud.OnStartVerifyTimeout)
 	onStartVerifyMemo.mu.Lock()
 	defer onStartVerifyMemo.mu.Unlock()
 	if onStartVerifyMemo.entries == nil {
@@ -361,7 +362,7 @@ func SyncInstanceState(
 	// is not misread as one that never got it.
 	if probeChecked && !s.OnStartProbePresent && !jobState.HasStartedJob &&
 		time.Since(time.Unix(*ci.LaunchedAt, 0)) >= cloud.OnStartVerifyGrace {
-		s.OnStartScriptVerification = verifyOnStartScriptCached(instanceID, providerInst)
+		s.OnStartScriptVerification = verifyOnStartScriptCached(ctx, instanceID, providerInst)
 		slog.Debug("onstart script verification", "component", "sync", "instance", instanceID, "verdict", s.OnStartScriptVerification.String())
 	}
 
@@ -859,19 +860,68 @@ func extendBootstrapDeadlineFromProgress(database *sql.DB, ci *db.Launch, stage 
 	ci.BootstrapDeadlineUnix = &deadlineUnix
 }
 
-// CheckParams builds CheckInstanceParams from synced state and caller-provided context.
-// The caller is responsible for setting ProviderInst, ProviderErr,
-// ProviderStatusUnknownFor, BootstrapSurvival, and SetupSurvival on the
-// returned params.
-func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState JobState, now time.Time) CheckInstanceParams {
+// ProviderObservation is the caller's current reading of the provider for
+// one instance. Built by NewProviderObservation so a caller cannot supply
+// some fields and silently leave others zero. Nil Inst and nil Err are
+// legal and mean "unavailable".
+type ProviderObservation struct {
+	Inst       *cloud.Instance
+	Err        error
+	UnknownFor time.Duration
+}
+
+// NewProviderObservation requires the caller to state every component of
+// the provider reading, including the unavailable ones.
+func NewProviderObservation(inst *cloud.Instance, err error, unknownFor time.Duration) ProviderObservation {
+	return ProviderObservation{Inst: inst, Err: err, UnknownFor: unknownFor}
+}
+
+// SurvivalThresholds carries both learned curves. Both are required:
+// omitting one silently downgrades the windows it governs to their
+// fallback constants, which is how the watch path lost its setup
+// thresholds. Nil pointers are legal and mean "unavailable".
+type SurvivalThresholds struct {
+	Bootstrap *db.BootstrapSurvival
+	Setup     *db.SetupSurvival
+}
+
+// NewSurvivalThresholds requires the caller to state both curves, even
+// when one or both are unavailable.
+func NewSurvivalThresholds(bootstrap *db.BootstrapSurvival, setup *db.SetupSurvival) SurvivalThresholds {
+	return SurvivalThresholds{Bootstrap: bootstrap, Setup: setup}
+}
+
+// CheckParams builds CheckInstanceParams from the synced state s carries and
+// the caller-provided context. Everything shared between the watch and
+// reconcile paths — provider fields, both survival curves, pause tolerance,
+// the last provider status change, and the running-phase terminal job — is
+// populated here; the caller adds only path-specific fields (e.g.
+// HedgeCohortHasReadySibling on reconcile). Nil provider and survival values
+// are legal and mean "unavailable"; the point of the positional parameters is
+// that the caller must state them, not that they be non-nil.
+func (s *SyncedState) CheckParams(
+	database *sql.DB,
+	ci *db.Launch,
+	r2Client *r2.Client,
+	jobs []*db.Job,
+	attemptOutcomes map[int64]string,
+	jobState JobState,
+	provider ProviderObservation,
+	survival SurvivalThresholds,
+	now time.Time,
+) CheckInstanceParams {
 	instancePhase := s.InstancePhase
 	if !isActiveInstancePhase(instancePhase) {
 		instancePhase = ""
 	}
-	return CheckInstanceParams{
+	params := CheckInstanceParams{
 		CI:                        ci,
+		ProviderInst:              provider.Inst,
+		ProviderErr:               provider.Err,
+		ProviderStatusUnknownFor:  provider.UnknownFor,
 		R2Client:                  r2Client,
 		JobState:                  jobState,
+		PauseTolerant:             hasPreemptibleJobs(jobs),
 		InstancePhase:             instancePhase,
 		BootstrapStage:            s.BootstrapStage,
 		HeartbeatAge:              s.HeartbeatAge,
@@ -890,5 +940,10 @@ func (s *SyncedState) CheckParams(ci *db.Launch, r2Client *r2.Client, jobState J
 		OnStartStage:              s.OnStartStage,
 		OnStartStageChangedAt:     s.OnStartStageChangedAt,
 		OnStartScriptVerification: s.OnStartScriptVerification,
+		BootstrapSurvival:         survival.Bootstrap,
+		SetupSurvival:             survival.Setup,
 	}
+	resolveLastProviderStatusChange(database, &params, ci.ID)
+	populateRunningPhaseTerminalJob(&params, jobs, attemptOutcomes)
+	return params
 }

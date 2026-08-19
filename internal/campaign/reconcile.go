@@ -412,21 +412,10 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 
 	now := time.Now()
 
-	// Setup survival: reconciler-specific caching of per-command thresholds.
-	var setupSurvival *db.SetupSurvival
-	if verb, phaseJobID, ok := ParsePhaseJobID(synced.InstancePhase); ok && verb == PhaseSetup {
-		if j := findJobInSlice(jobs, phaseJobID); j != nil {
-			setupSurvival = r.getSetupSurvival(database, j.Command, j.WorkingDir)
-		}
-	}
-
-	params := synced.CheckParams(ci, r2Client, jobState, now)
-	params.ProviderInst = inst
-	params.ProviderErr = providerErr
-	params.ProviderStatusUnknownFor = r.noteProviderStatusPoll(ci.ID, inst == nil && providerErr != nil, now)
-	params.SetupSurvival = setupSurvival
-	params.PauseTolerant = hasPreemptibleJobs(jobs)
-	populateRunningPhaseTerminalJob(&params, jobs, attemptOutcomes)
+	params := synced.CheckParams(database, ci, r2Client, jobs, attemptOutcomes, jobState,
+		NewProviderObservation(inst, providerErr, r.noteProviderStatusPoll(ci.ID, inst == nil && providerErr != nil, now)),
+		NewSurvivalThresholds(r.bootstrapSurvivalFor(ci.Provider), r.setupSurvivalForPhase(database, synced.InstancePhase, jobs)),
+		now)
 	if ci.HedgeCohortID != nil && ci.AgentReadyAtUnix == nil {
 		// Gated on AgentReadyAtUnix == nil so the survivor — which by
 		// definition has it set — never queries for its own cull.
@@ -436,10 +425,6 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		}
 		params.HedgeCohortHasReadySibling = hasWinner
 	}
-	// OnStartProbePresent comes from SyncInstanceState above (shared
-	// across watch and reconcile).
-	resolveLastProviderStatusChange(database, &params, ci.ID)
-	params.BootstrapSurvival = r.bootstrapSurvivalFor(ci.Provider)
 	action := r.CheckInstance(params)
 
 	// Handle termination intent post-processing (mark destroy succeeded).
@@ -662,6 +647,24 @@ func (r *Reconciler) bootstrapSurvivalFor(provider string) *db.BootstrapSurvival
 
 // getSetupSurvival returns cached setup survival thresholds for a command+workdir,
 // recomputing when the cache has expired.
+// setupSurvivalForPhase resolves the learned setup thresholds for the job the
+// instance phase names, or nil when the phase names no setup job. Shared by
+// both CheckParams callers: the watcher lost its setup thresholds once
+// already, and a second copy of this derivation is how it would happen again —
+// the caller-parity guard compares fields assigned after CheckParams, not the
+// expressions feeding it.
+func (r *Reconciler) setupSurvivalForPhase(database *sql.DB, instancePhase string, jobs []*db.Job) *db.SetupSurvival {
+	verb, phaseJobID, ok := ParsePhaseJobID(instancePhase)
+	if !ok || verb != PhaseSetup {
+		return nil
+	}
+	j := findJobInSlice(jobs, phaseJobID)
+	if j == nil {
+		return nil
+	}
+	return r.getSetupSurvival(database, j.Command, j.WorkingDir)
+}
+
 func (r *Reconciler) getSetupSurvival(database *sql.DB, command, workingDir string) *db.SetupSurvival {
 	key := command + "\x00" + workingDir
 

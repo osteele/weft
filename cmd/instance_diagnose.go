@@ -263,7 +263,7 @@ func verifyOnStartScriptInContainer(inst *db.Launch) cloud.OnStartVerification {
 	if err != nil {
 		return cloud.OnStartVerificationUnknown
 	}
-	return cloud.VerifyOnStartInstalled(pinst, cloud.OnStartVerifyTimeout)
+	return cloud.VerifyOnStartInstalled(context.Background(), pinst, cloud.OnStartVerifyTimeout)
 }
 
 func reconcileInstanceDiagnoseLivePhase(jobs []*db.Job, phase string) string {

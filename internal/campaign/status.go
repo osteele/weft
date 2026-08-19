@@ -581,13 +581,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			// Run shared reconciliation checks
 			now := time.Now()
-			params := synced.CheckParams(ci, r2c, jobState, now)
-			params.ProviderInst = cachedInstance
-			params.ProviderErr = lastProviderErr
-			params.ProviderStatusUnknownFor = watchReconciler.noteProviderStatusPoll(ci.ID, cachedInstance == nil && lastProviderErr != nil, now)
-			params.PauseTolerant = hasPreemptibleJobs(jobs)
-			params.BootstrapSurvival = survival
-			resolveLastProviderStatusChange(database, &params, ci.ID)
+			params := synced.CheckParams(database, ci, r2c, jobs, attemptOutcomes, jobState,
+				NewProviderObservation(cachedInstance, lastProviderErr, watchReconciler.noteProviderStatusPoll(ci.ID, cachedInstance == nil && lastProviderErr != nil, now)),
+				NewSurvivalThresholds(survival, watchReconciler.setupSurvivalForPhase(database, synced.InstancePhase, jobs)),
+				now)
 			action := watchReconciler.CheckInstance(params)
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)

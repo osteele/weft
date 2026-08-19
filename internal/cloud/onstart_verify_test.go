@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -35,10 +36,10 @@ func TestClassifyOnStartVerifyOutput(t *testing.T) {
 // TestVerifyOnStartInstalled_NoSSHDetailsIsUnknown: an instance weft cannot
 // reach must never be reported as one whose script is missing.
 func TestVerifyOnStartInstalled_NoSSHDetailsIsUnknown(t *testing.T) {
-	if got := VerifyOnStartInstalled(nil, 0); got != OnStartVerificationUnknown {
+	if got := VerifyOnStartInstalled(context.Background(), nil, 0); got != OnStartVerificationUnknown {
 		t.Errorf("nil instance = %v, want unknown", got)
 	}
-	if got := VerifyOnStartInstalled(&Instance{Provider: ProviderVastai}, 0); got != OnStartVerificationUnknown {
+	if got := VerifyOnStartInstalled(context.Background(), &Instance{Provider: ProviderVastai}, 0); got != OnStartVerificationUnknown {
 		t.Errorf("instance without SSHHost = %v, want unknown", got)
 	}
 }

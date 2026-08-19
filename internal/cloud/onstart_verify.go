@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -97,12 +98,13 @@ func SupportsOnStartVerification(inst *Instance) bool {
 // VerifyOnStartInstalled reports whether weft's OnStart script is present on
 // the instance's filesystem. Any failure to look — and any provider whose
 // bootstrap does not arrive as an OnStart script — yields
-// OnStartVerificationUnknown.
-func VerifyOnStartInstalled(inst *Instance, timeout time.Duration) OnStartVerification {
+// OnStartVerificationUnknown. ctx bounds the underlying SSH call by the
+// caller's deadline.
+func VerifyOnStartInstalled(ctx context.Context, inst *Instance, timeout time.Duration) OnStartVerification {
 	if !SupportsOnStartVerification(inst) {
 		return OnStartVerificationUnknown
 	}
-	out, err := RunOnInstanceOnce(inst, onStartVerifyCmd, timeout)
+	out, err := RunOnInstanceOnce(ctx, inst, onStartVerifyCmd, timeout)
 	if err != nil {
 		return OnStartVerificationUnknown
 	}

@@ -989,7 +989,7 @@ func TestSyncInstanceState_DisplayOnlyPhaseDoesNotBlockBootstrapTimeout(t *testi
 		t.Fatalf("job progress fetched %d time(s), want 0 for display-only phase", progressCalls)
 	}
 
-	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	params := synced.CheckParams(database, ci, &r2.Client{}, nil, nil, JobState{}, NewProviderObservation(nil, nil, 0), NewSurvivalThresholds(nil, nil), time.Now())
 	if params.InstancePhase != "" {
 		t.Fatalf("CheckParams.InstancePhase = %q, want empty for watchdogs", params.InstancePhase)
 	}
@@ -1299,7 +1299,7 @@ func TestSyncInstanceState_RemembersBootstrapActivityAcrossEmptyFetch(t *testing
 	if !synced.BootstrapActivitySeen {
 		t.Fatal("BootstrapActivitySeen = false, want true from prior cached stage")
 	}
-	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	params := synced.CheckParams(database, ci, &r2.Client{}, nil, nil, JobState{}, NewProviderObservation(nil, nil, 0), NewSurvivalThresholds(nil, nil), time.Now())
 	if !params.BootstrapActivitySeen {
 		t.Fatal("CheckParams BootstrapActivitySeen = false, want true")
 	}
@@ -1426,7 +1426,7 @@ func TestSyncInstanceState_OnStartScriptVerifyGating(t *testing.T) {
 				return tc.probeExists, nil
 			}
 			verifyCalls := 0
-			syncVerifyOnStartScript = func(_ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
+			syncVerifyOnStartScript = func(_ context.Context, _ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
 				verifyCalls++
 				return cloud.OnStartConfirmedMissing
 			}
@@ -1479,7 +1479,7 @@ func TestSyncInstanceState_OnStartScriptVerifySettledVerdictIsNotReasked(t *test
 	resetOnStartVerifyMemo()
 	syncCheckOnStartProbe = func(_ context.Context, _ *r2.Client, _ string) (bool, error) { return false, nil }
 	verifyCalls := 0
-	syncVerifyOnStartScript = func(_ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
+	syncVerifyOnStartScript = func(_ context.Context, _ *cloud.Instance, _ time.Duration) cloud.OnStartVerification {
 		verifyCalls++
 		return cloud.OnStartConfirmedInstalled
 	}
@@ -1764,7 +1764,7 @@ func TestDudWatchdogSurvivesFlakyR2(t *testing.T) {
 	ci, _ := db.GetLaunch(database, instanceID)
 	for i := 0; i < 60; i++ {
 		synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
-		params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+		params := synced.CheckParams(database, ci, &r2.Client{}, nil, nil, JobState{}, NewProviderObservation(nil, nil, 0), NewSurvivalThresholds(nil, nil), time.Now())
 		action := rec.CheckInstance(params)
 		if action.Kind == ActionEmptyStatusTimeout && strings.Contains(action.StallMessage, "dud provider") {
 			t.Fatalf("tick %d: rule 4d false-fired on a healthy-but-R2-flaky instance:\n  stall=%q\n  params=%+v",
@@ -1825,7 +1825,7 @@ func TestDudWatchdogFiresOnRealDud(t *testing.T) {
 	rec := NewReconciler()
 	ci, _ := db.GetLaunch(database, instanceID)
 	synced := SyncInstanceState(context.Background(), database, ci, nil, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
-	params := synced.CheckParams(ci, &r2.Client{}, JobState{}, time.Now())
+	params := synced.CheckParams(database, ci, &r2.Client{}, nil, nil, JobState{}, NewProviderObservation(nil, nil, 0), NewSurvivalThresholds(nil, nil), time.Now())
 	action := rec.CheckInstance(params)
 
 	if action.Kind != ActionEmptyStatusTimeout {
