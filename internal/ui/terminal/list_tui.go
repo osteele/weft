@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/app/dbwatch"
+	"github.com/osteele/weft/internal/app/flash"
 	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
@@ -50,21 +51,27 @@ const listQuitTeardownCap = 1 * time.Second
 const backgroundSyncKey = ""
 
 type listTUIModel struct {
-	database                   *sql.DB
-	args                       []string
-	title                      string
-	unprocessedView            bool
-	statusView                 string
-	jobs                       []*db.Job
-	layout                     jobListLayout
-	cursor                     int
-	offset                     int
-	width                      int
-	height                     int
-	syncEnabled                bool
-	pendingSyncHosts           map[string]struct{}
-	nextSyncTickAt             time.Time
+	database         *sql.DB
+	args             []string
+	title            string
+	unprocessedView  bool
+	statusView       string
+	jobs             []*db.Job
+	layout           jobListLayout
+	cursor           int
+	offset           int
+	width            int
+	height           int
+	syncEnabled      bool
+	pendingSyncHosts map[string]struct{}
+	nextSyncTickAt   time.Time
+	// statusMessage is durable operation state, set when an async op starts
+	// and overwritten when it completes ("Restarting daemon...", "Moving
+	// job..."). flash is the transient result of a completed synchronous
+	// action; it self-expires. Targets that START something use statusMessage;
+	// targets that COMPLETE something use flash.
 	statusMessage              string
+	flash                      flash.State
 	daemonRestartInProgress    bool
 	dbWatcher                  *dbwatch.Source
 	debounceActive             bool
@@ -424,10 +431,10 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	cfg, _ := config.Load()
 	router := newListWatchRouterModel(database, cfg, args, jobs, title, syncEnabled, groupedByStatus, projectFilter)
 
-	outputOpt, restore := InstallTUIStdioCapture()
+	stdio := InstallTUIStdioCapture()
 
-	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
-	restore()
+	finalModel, err := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus(), tea.WithMouseCellMotion()).Run()
+	stdio.Restore()
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)
 	}
@@ -734,6 +741,14 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BlurMsg:
 		m.focused = false
 		return m, nil
+
+	case flash.ExpiredMsg:
+		m.flash.HandleExpired()
+		return m, nil
+
+	case clipboardCopiedMsg:
+		text, isError := msg.flashText()
+		return m, m.flash.Set(text, isError)
 
 	case spinner.TickMsg:
 		if !m.hasActiveLaunchingSpinner() {
@@ -1483,7 +1498,7 @@ func (m listTUIModel) buildFlatScreenPlan() screenPlan {
 	for i, line := range parts.sharedStatus.lines {
 		plan.add(line, -1, sharedStatusLineTarget(parts.sharedStatus, i))
 	}
-	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.footerText(bodyRows), m.width)), -1, clickTarget{})
+	plan.add(listTUIFooterStyle.Render(truncateDisplayWidth(m.statusLineText(m.footerText(bodyRows)), m.width)), -1, clickTarget{})
 	return plan
 }
 
@@ -1560,6 +1575,21 @@ func groupedRowClickable(row groupedStatusRow) bool {
 	return row.expandToggle != "" || ((row.job != nil || row.launch != nil) && !row.isHeader && !row.isBlocked)
 }
 
+// groupedRowClickTarget resolves the click target for a grouped body row.
+func groupedRowClickTarget(row groupedStatusRow, rowIdx int) clickTarget {
+	if groupedRowClickable(row) {
+		return clickTarget{kind: targetSelectRow, rowIdx: rowIdx}
+	}
+	// Blocked/waiting reason bucket headers are refused by row selection
+	// (row.isBlocked), so a click would otherwise be a silent no-op; the copy
+	// target gives it a meaning. Incident rollups carry jobIDs too but are not
+	// copy targets.
+	if len(row.jobIDs) > 0 && row.incidentFingerprint == "" {
+		return clickTarget{kind: targetCopy, rowIdx: rowIdx, label: "blocking status"}
+	}
+	return clickTarget{}
+}
+
 // buildGroupedScreenPlan composes the grouped frame as an ordered list of
 // screen lines: index in lines == screen Y.
 func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
@@ -1603,8 +1633,8 @@ func (m listTUIModel) buildGroupedScreenPlan() screenPlan {
 			line = styled.renderText()
 		}
 		target := clickTarget{}
-		if sourceRow != nil && groupedRowClickable(*sourceRow) {
-			target = clickTarget{kind: targetSelectRow, rowIdx: row.rowIdx}
+		if sourceRow != nil {
+			target = groupedRowClickTarget(*sourceRow, row.rowIdx)
 		}
 		plan.add(line, row.rowIdx, target)
 		bodyLinesWritten++
@@ -1650,7 +1680,7 @@ func (m listTUIModel) buildGroupedViewLayout(rows []groupedStatusRow, groupedJob
 	// Per-job ETA now lives on the "Job:" line in selectedDetailLines, so
 	// no standalone campaign-wide ETA line is rendered.
 	eta := computeGroupedETA(groupedJobs, m.launchLiveByID, time.Now())
-	statusLine := m.groupedStatusText()
+	statusLine := m.statusLineText(m.groupedStatusText())
 	visibleRunning := countVisibleRunningJobs(groupedJobs)
 	sharedStatus := renderSharedTUIStatusLinesView(m.database, m.width, visibleRunning, m.autoRunRateTargetCents, m.isUJGroupedView())
 	autoPilotLine := m.groupedAutoPilotStatusText(visibleRunning)
@@ -1862,6 +1892,17 @@ func (m listTUIModel) groupedStatusText() string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// statusLineText returns the flash while one is showing, else the derived
+// status text. The flash covers the status line without touching
+// statusMessage, so a pinned quick-launch status reappears intact when the
+// flash expires.
+func (m listTUIModel) statusLineText(derived string) string {
+	if rendered := m.flash.Render(); rendered != "" {
+		return rendered
+	}
+	return derived
 }
 
 func (m *listTUIModel) clearAutoPilotPersistentState() {
@@ -2184,7 +2225,8 @@ func (m listTUIModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 // dispatchTarget performs the action a resolved click target names: moving the
-// cursor to a row, restarting the daemon, or opening a billing URL.
+// cursor to a row, restarting the daemon, opening a billing URL, or copying a
+// row's payload to the clipboard.
 func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
 	switch t.kind {
 	case targetSelectRow:
@@ -2208,9 +2250,26 @@ func (m *listTUIModel) dispatchTarget(t clickTarget) tea.Cmd {
 	case targetOpenURL:
 		m.statusMessage = fmt.Sprintf("Opening %s billing...", t.label)
 		return openURLListCmd(t.url)
+	case targetCopy:
+		if t.rowIdx < 0 || t.rowIdx >= len(m.groupedRows) {
+			return nil
+		}
+		return copyToClipboardCmd(t.label, blockedBucketCopyPayload(m.groupedRows[t.rowIdx]))
 	default:
 		return nil
 	}
+}
+
+// blockedBucketCopyPayload renders a blocked/waiting bucket header row as the
+// two-line text to paste into a bug report: the reason, then the compact job
+// ID list. The header's display count (" (N)") is redundant with the ID list,
+// so it is stripped.
+func blockedBucketCopyPayload(row groupedStatusRow) string {
+	text := strings.TrimSpace(row.text)
+	if n := len(row.jobIDs); n > 1 {
+		text = strings.TrimSuffix(text, fmt.Sprintf(" (%d)", n))
+	}
+	return text + "\n" + ids.FormatJobIDListCompact(row.jobIDs)
 }
 
 func (m *listTUIModel) selectGroupedRowByIndex(rowIdx int) {

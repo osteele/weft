@@ -90,8 +90,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Suppress log output and capture stdout/stderr while the TUI runs to
 	// avoid corrupting the alternate screen.
-	outputOpt, restore := terminal.InstallTUIStdioCapture()
-	defer restore()
+	stdio := terminal.InstallTUIStdioCapture()
+	defer stdio.Restore()
 	opts.Monitor = mon
 	defer mon.Stop()
 	snapshot := dashboard.LoadInitialSnapshot(database, opts.HostCacheDuration)
@@ -105,7 +105,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		useMouse = tuiMouse
 	}
 
-	programOpts := []tea.ProgramOption{outputOpt, tea.WithAltScreen(), tea.WithReportFocus()}
+	programOpts := []tea.ProgramOption{stdio.Option, tea.WithAltScreen(), tea.WithReportFocus()}
 	if useMouse {
 		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}

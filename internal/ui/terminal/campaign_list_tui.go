@@ -475,11 +475,11 @@ func (m campaignListModel) scheduleCampaignListSyncTick() tea.Cmd {
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	router := newCampaignListRouterModel(database, campaigns)
 
-	outputOpt, restore := InstallTUIStdioCapture()
+	stdio := InstallTUIStdioCapture()
 
-	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus())
+	p := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus())
 	finalModel, err := p.Run()
-	restore()
+	stdio.Restore()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}

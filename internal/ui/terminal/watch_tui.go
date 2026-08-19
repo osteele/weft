@@ -754,11 +754,11 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 		}
 	}
 
-	outputOpt, restore := InstallTUIStdioCapture()
+	stdio := InstallTUIStdioCapture()
 
-	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	p := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
-	restore()
+	stdio.Restore()
 	if err != nil {
 		return instanceIDs, err
 	}

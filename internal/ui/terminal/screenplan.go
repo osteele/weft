@@ -10,6 +10,7 @@ const (
 	targetToggleSection
 	targetOpenURL
 	targetRestartDaemon
+	targetCopy
 )
 
 type clickTarget struct {

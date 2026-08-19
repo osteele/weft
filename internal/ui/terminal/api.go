@@ -46,10 +46,10 @@ type LaunchResult struct {
 func RunWatchLoop(database *sql.DB, cfg *config.Config) error {
 	router := newWatchRouterModel(database, cfg, "")
 
-	outputOpt, restore := InstallTUIStdioCapture()
-	p := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
+	stdio := InstallTUIStdioCapture()
+	p := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus())
 	finalModel, err := p.Run()
-	restore()
+	stdio.Restore()
 
 	var pendingExec func() error
 	if r, ok := finalModel.(watchRouterModel); ok {
@@ -86,10 +86,10 @@ func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	predCfg := buildPredictorConfig(cfg)
 	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, "", jobIDFilter, reconciling, fromWatch, inlineWatchEnabled)
 
-	outputOpt, restore := InstallTUIStdioCapture()
-	p := tea.NewProgram(model, outputOpt, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	stdio := InstallTUIStdioCapture()
+	p := tea.NewProgram(model, stdio.Option, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
-	restore()
+	stdio.Restore()
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("launch TUI error: %w", err)
 	}
@@ -129,10 +129,10 @@ func RunCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string) error {
 	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, projectFilter)
 
-	outputOpt, restore := InstallTUIStdioCapture()
-	defer restore()
+	stdio := InstallTUIStdioCapture()
+	defer stdio.Restore()
 
-	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	finalModel, err := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
 			w.syncWorker.Stop()
@@ -161,10 +161,10 @@ type DashboardOptions struct {
 func RunDashboardTUI(database *sql.DB, cfg *config.Config, opts DashboardOptions) error {
 	router := newDashboardWatchRouterModel(database, cfg, opts)
 
-	outputOpt, restore := InstallTUIStdioCapture()
-	defer restore()
+	stdio := InstallTUIStdioCapture()
+	defer stdio.Restore()
 
-	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	finalModel, err := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	if r, ok := finalModel.(watchRouterModel); ok {
 		r.cleanupActive()
 		r.stopBanners()
@@ -180,10 +180,10 @@ func RunDashboardTUI(database *sql.DB, cfg *config.Config, opts DashboardOptions
 func RunHostsTUI(database *sql.DB, cfg *config.Config) error {
 	router := newHostsWatchRouterModel(database, cfg)
 
-	outputOpt, restore := InstallTUIStdioCapture()
-	defer restore()
+	stdio := InstallTUIStdioCapture()
+	defer stdio.Restore()
 
-	finalModel, err := tea.NewProgram(router, outputOpt, tea.WithAltScreen(), tea.WithReportFocus()).Run()
+	finalModel, err := tea.NewProgram(router, stdio.Option, tea.WithAltScreen(), tea.WithReportFocus()).Run()
 	if r, ok := finalModel.(watchRouterModel); ok {
 		if h, ok := r.active.(hostsTUIModel); ok {
 			h.shutdown()

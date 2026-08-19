@@ -36,6 +36,12 @@ type groupedStatusRow struct {
 	// in-place disclosure. The value identifies what it toggles (e.g.
 	// failedInstancesSectionKey).
 	expandToggle string
+	// jobIDs names the jobs this row stands for (bucket headers, incident
+	// rollups). Unlike job/launch it drives click-payload content, not
+	// selection, so wrap continuations keep it.
+	jobIDs []int64
+	// incidentFingerprint identifies the incident a rollup row summarizes.
+	incidentFingerprint string
 }
 
 type groupedStatusRowStyle string
@@ -444,6 +450,7 @@ func appendBlockedGroupedJobRows(
 			style:     headerStyle,
 			wrap:      true,
 			section:   section.key,
+			jobIDs:    sortedRowJobIDs(jobs),
 		})
 		for _, job := range jobs {
 			rows = appendGroupedStatusJobRow(rows, job, section, projectWidth, width, opts.launchLiveByID, opts.placementQueuedAtByJob, opts.attemptOutcomeByJob, nil, now, "", groupedStatusLaunchingETA{}, true, opts.overloadedHostsByName)
@@ -476,16 +483,34 @@ func groupedStatusBlockedBucketHeader(key blockedReasonBucketKey, jobs []*db.Job
 	return text, groupedStatusRowStyleMoveDim
 }
 
+// sortedRowJobIDs extracts non-nil job IDs in ascending order so click
+// payloads are deterministic regardless of bucket map iteration order.
+func sortedRowJobIDs(jobs []*db.Job) []int64 {
+	jobIDs := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil {
+			jobIDs = append(jobIDs, job.ID)
+		}
+	}
+	sort.Slice(jobIDs, func(i, j int) bool { return jobIDs[i] < jobIDs[j] })
+	return jobIDs
+}
+
 // activeIncidentSummary describes one fingerprint affecting ≥2 jobs in the
 // section. Sample is one job's launch reason picked deterministically (lowest
 // job ID) so the rollup row can carry the human-readable upstream message
 // alongside the fingerprint identifier.
 type activeIncidentSummary struct {
 	fingerprint string
-	count       int
+	jobIDs      []int64
 	sample      string
 	sampleJobID int64
 }
+
+// count is derived from jobIDs, mirroring the CLI twin
+// cmd/incidents.go:IncidentSummary, so a count can never disagree with the
+// list it summarizes.
+func (s activeIncidentSummary) count() int { return len(s.jobIDs) }
 
 // collectActiveIncidents scans the section for fingerprints shared across ≥2
 // jobs and returns them in deterministic order (highest count first, ties
@@ -496,7 +521,7 @@ func collectActiveIncidents(jobs []*db.Job, detail map[int64]*blockreason.Struct
 		return nil
 	}
 	type bucket struct {
-		count       int
+		jobIDs      []int64
 		sample      string
 		sampleJobID int64
 	}
@@ -518,7 +543,7 @@ func collectActiveIncidents(jobs []*db.Job, detail map[int64]*blockreason.Struct
 			b = &bucket{}
 			by[fp] = b
 		}
-		b.count++
+		b.jobIDs = append(b.jobIDs, job.ID)
 		candidate := strings.TrimSpace(d.Launch)
 		if candidate == "" {
 			candidate = strings.TrimSpace(d.Summary)
@@ -536,19 +561,19 @@ func collectActiveIncidents(jobs []*db.Job, detail map[int64]*blockreason.Struct
 	}
 	out := make([]activeIncidentSummary, 0, len(by))
 	for fp, b := range by {
-		if b.count < 2 {
+		if len(b.jobIDs) < 2 {
 			continue
 		}
 		out = append(out, activeIncidentSummary{
 			fingerprint: fp,
-			count:       b.count,
+			jobIDs:      b.jobIDs,
 			sample:      b.sample,
 			sampleJobID: b.sampleJobID,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].count != out[j].count {
-			return out[i].count > out[j].count
+		if out[i].count() != out[j].count() {
+			return out[i].count() > out[j].count()
 		}
 		return out[i].fingerprint < out[j].fingerprint
 	})
@@ -567,15 +592,17 @@ func appendActiveIncidentsRows(rows []groupedStatusRow, section groupedStatusSec
 	}
 	for _, inc := range incidents {
 		reason := incidentDisplayReason(inc.fingerprint, inc.sample)
-		text := fmt.Sprintf("  incident: %s — %s", reason, blockreason.Plural(inc.count, "job", "jobs"))
+		text := fmt.Sprintf("  incident: %s — %s", reason, blockreason.Plural(inc.count(), "job", "jobs"))
 		if detail := incidentDetail(inc.fingerprint, inc.sample, reason); detail != "" {
 			text += ": " + detail
 		}
 		rows = append(rows, groupedStatusRow{
-			text:      text,
-			isBlocked: true,
-			wrap:      true,
-			section:   sectionKey,
+			text:                text,
+			isBlocked:           true,
+			wrap:                true,
+			section:             sectionKey,
+			jobIDs:              inc.jobIDs,
+			incidentFingerprint: inc.fingerprint,
 		})
 	}
 	return rows
@@ -606,6 +633,9 @@ func wrapAndTruncateGroupedStatusRows(rows []groupedStatusRow, width int) []grou
 			continuation.job = nil
 			continuation.launch = nil
 			continuation.expandToggle = ""
+			// jobIDs is deliberately kept: it drives copy-payload content, not
+			// selection, and a wrapped bucket header is visually one item —
+			// clicking its second line means the same thing.
 			out = append(out, continuation)
 		}
 	}
