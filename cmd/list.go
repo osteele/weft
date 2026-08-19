@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -998,18 +999,45 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 		if err != nil {
 			return err
 		}
+		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultJSONColumnKeys); err != nil {
+			return err
+		}
 		return terminal.PrintJobsJSON(os.Stdout, jobs, cols)
 	case "tsv", "tab":
 		cols, err := terminal.ResolveColumns(listColumns, terminal.DefaultTSVColumnKeys)
 		if err != nil {
 			return err
 		}
+		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultTSVColumnKeys); err != nil {
+			return err
+		}
 		return terminal.PrintJobsTSV(os.Stdout, jobs, cols)
 	case "table", "":
+		// No table layout lists the column by default, so only an explicit
+		// --columns can ask for it.
+		if err := populateSubmitterSessionColumn(database, jobs, nil); err != nil {
+			return err
+		}
 		return terminal.WriteListPlainOutput(terminal.RenderJobListPlainWithOptions(jobs, terminal.ListOutputWidth(), listColumns, listNoTruncate))
 	default:
 		return fmt.Errorf("unknown format %q (use table, json, or tsv)", listFormat)
 	}
+}
+
+// populateSubmitterSessionColumn fills in the submitter session when the
+// selected columns ask for it. The value is stored on the jobs table but is not
+// projected by the views job rows are read through, so it takes a second query
+// that is worth skipping when nothing renders it. defaultKeys mirrors the
+// fallback in terminal.ResolveColumns: an empty --columns selects them.
+func populateSubmitterSessionColumn(database *sql.DB, jobs []*db.Job, defaultKeys []string) error {
+	keys := listColumns
+	if len(keys) == 0 {
+		keys = defaultKeys
+	}
+	if !slices.Contains(keys, "submitter_session") {
+		return nil
+	}
+	return db.PopulateSubmitterSessions(database, jobs)
 }
 
 func groupedUnprocessedViewExcludesCanceled() bool {

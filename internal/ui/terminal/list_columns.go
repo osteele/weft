@@ -140,6 +140,14 @@ func allColumnDefs() []columnDef {
 				return job.GPUClass
 			},
 		},
+		{
+			// The submitting agent session, as the opaque string weft stored at
+			// `weft run` time. Empty means the submission was not attributable
+			// to a session; consumers bucket those separately rather than
+			// treating the absence as an error.
+			key: "submitter_session", title: "SESSION", width: 12,
+			value: func(job *db.Job) string { return job.SubmitterSession },
+		},
 	}
 }
 
@@ -157,7 +165,7 @@ func columnDefMap() map[string]columnDef {
 var defaultTableColumnKeys = []string{"check", "id", "priority", "host", "status", "started", "project", "description"}
 
 // defaultJSONColumnKeys returns the column keys used in JSON output by default.
-var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu"}
+var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu", "submitter_session"}
 
 // defaultTSVColumnKeys returns the column keys used in TSV output by default
 // (same as the wide table but without the checkmark column).

@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/ui/terminal"
 )
 
 func TestFilterJobsByEffectiveStatusExcludesHostlessRunningFromRunning(t *testing.T) {
@@ -929,5 +930,73 @@ func TestShowJob_LogCacheFallback(t *testing.T) {
 
 	if !strings.Contains(out, "(gpu_oom)") {
 		t.Errorf("showJob did not surface gpu_oom pattern via log-cache fallback, got:\n%s", out)
+	}
+}
+
+// The submitter session is filled in by a separate query, so every format that
+// can render the column has to ask for it. Gating it on the JSON branch alone
+// left `--columns submitter_session` rendering an always-empty column in table
+// and TSV output.
+func TestPopulateSubmitterSessionColumnFollowsSelectedColumns(t *testing.T) {
+	restoreListFlags(t)
+
+	database, jobID := recordFailedJob(t, "submitter-session-columns")
+	if err := db.SetJobSubmitterSession(database, jobID, "sess-abc-123"); err != nil {
+		t.Fatalf("SetJobSubmitterSession: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		columns     []string
+		defaultKeys []string
+		want        string
+	}{
+		{name: "json default", columns: nil, defaultKeys: terminal.DefaultJSONColumnKeys, want: "sess-abc-123"},
+		{name: "tsv explicit", columns: []string{"id", "submitter_session"}, defaultKeys: terminal.DefaultTSVColumnKeys, want: "sess-abc-123"},
+		{name: "table explicit", columns: []string{"id", "submitter_session"}, defaultKeys: nil, want: "sess-abc-123"},
+		{name: "tsv default omits it", columns: nil, defaultKeys: terminal.DefaultTSVColumnKeys, want: ""},
+		{name: "narrowed json selection omits it", columns: []string{"id", "status"}, defaultKeys: terminal.DefaultJSONColumnKeys, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			listColumns = tc.columns
+			job := &db.Job{ID: jobID}
+			if err := populateSubmitterSessionColumn(database, []*db.Job{job}, tc.defaultKeys); err != nil {
+				t.Fatalf("populateSubmitterSessionColumn: %v", err)
+			}
+			if job.SubmitterSession != tc.want {
+				t.Fatalf("SubmitterSession = %q, want %q", job.SubmitterSession, tc.want)
+			}
+		})
+	}
+}
+
+// The gating helper is exercised directly elsewhere; this pins the WIRING —
+// that each format arm actually calls it. A helper that is correct but
+// unreferenced from an output path renders a silently empty column, which is
+// the failure mode this whole gating exists to avoid.
+func TestPrintJobsPopulatesSubmitterSessionPerFormat(t *testing.T) {
+	restoreListFlags(t)
+
+	database, jobID := recordFailedJob(t, "submitter-session-wiring")
+	if err := db.SetJobSubmitterSession(database, jobID, "sess-42"); err != nil {
+		t.Fatalf("SetJobSubmitterSession: %v", err)
+	}
+
+	for _, format := range []string{"json", "tsv", "table"} {
+		t.Run(format, func(t *testing.T) {
+			listFormat = format
+			listColumns = []string{"id", "submitter_session"}
+			jobs := []*db.Job{{ID: jobID, Status: db.StatusFailed}}
+
+			out := captureStdout(t, func() {
+				if err := printJobs(database, jobs); err != nil {
+					t.Fatalf("printJobs(%s): %v", format, err)
+				}
+			})
+			if !strings.Contains(out, "sess-42") {
+				t.Fatalf("%s output does not carry the submitter session:\n%s", format, out)
+			}
+		})
 	}
 }

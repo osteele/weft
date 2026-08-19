@@ -92,16 +92,20 @@ type Job struct {
 	CLIResourceOverrides *CLIResourceOverrides // Current explicit CLI resource intent, replayed on retry
 	PlacementReasons     []string              // Why the job is currently unplaced
 	PlacementBlockedJSON string                // JSON blockreason.Structured: launch/reuse breakdown for an unplaced job
-	LaunchID             *int64                // Cloud instance ID if this job is part of a cloud instance
-	CampaignJobIndex     *int                  // Position within a cloud campaign sequence, if assigned
-	LatestRunID          *int64                // Latest execution attempt row for this logical job
-	QueueBlockedReason   string                // Transient UI-only queue gate reason; not persisted
-	DisplayAttemptID     int64                 `json:"-"` // Transient UI-only attempt row override; 0 means authoritative job row
-	DisplayAttemptNumber int                   `json:"-"` // Transient UI-only attempt number for expanded move rows
-	DisplayMoveSource    string                `json:"-"` // Transient UI-only move source label
-	DisplayMoveTarget    string                `json:"-"` // Transient UI-only move target label
-	DisplayMovePhase     string                `json:"-"` // Transient UI-only move phase for list/detail views
-	DisplayMoveDim       bool                  `json:"-"` // Transient UI-only marker for non-authoritative attempts
+	// SubmitterSession identifies the agent session that ran `weft run`, as an
+	// opaque string. Empty means the submission was not attributable to a
+	// session, which is a normal value rather than an error.
+	SubmitterSession     string
+	LaunchID             *int64 // Cloud instance ID if this job is part of a cloud instance
+	CampaignJobIndex     *int   // Position within a cloud campaign sequence, if assigned
+	LatestRunID          *int64 // Latest execution attempt row for this logical job
+	QueueBlockedReason   string // Transient UI-only queue gate reason; not persisted
+	DisplayAttemptID     int64  `json:"-"` // Transient UI-only attempt row override; 0 means authoritative job row
+	DisplayAttemptNumber int    `json:"-"` // Transient UI-only attempt number for expanded move rows
+	DisplayMoveSource    string `json:"-"` // Transient UI-only move source label
+	DisplayMoveTarget    string `json:"-"` // Transient UI-only move target label
+	DisplayMovePhase     string `json:"-"` // Transient UI-only move phase for list/detail views
+	DisplayMoveDim       bool   `json:"-"` // Transient UI-only marker for non-authoritative attempts
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -2544,9 +2548,9 @@ func SetJobSubmitterSession(db dbExecer, jobID int64, session string) error {
 
 // JobSubmitterSession returns the submitting agent's session id for a job, or
 // "" when none was recorded. It reads the jobs table directly rather than
-// travelling on Job: the value has exactly one consumer, the notification
-// command, and adding it to the shared job_status view would recreate that
-// view for a field no query filters or displays.
+// travelling on Job, because the shared job_status view cannot carry the
+// column; see PopulateSubmitterSessions for the bulk equivalent and for why
+// the view is off limits.
 func JobSubmitterSession(db dbExecer, jobID int64) (string, error) {
 	var session sql.NullString
 	err := db.QueryRow(`SELECT submitter_session FROM jobs WHERE id = ?`, jobID).Scan(&session)
@@ -5406,4 +5410,61 @@ func samePath(a, b string) bool {
 		b = rb
 	}
 	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// PopulateSubmitterSessions fills in Job.SubmitterSession for the given jobs
+// in one query. The column lives on the jobs table and is deliberately absent
+// from jobSelectColumns: job rows are read through the job_status and
+// launch_job_membership views, whose definitions are pinned by a schema guard
+// and replayed by migrations that run before the column exists. Reading it
+// separately keeps those views untouched.
+//
+// Jobs with no recorded session keep an empty value, which means the
+// submission was not attributable to a session rather than that the lookup
+// failed.
+func PopulateSubmitterSessions(db *sql.DB, jobs []*Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	seen := make(map[int64]struct{}, len(jobs))
+	ids := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		ids = append(ids, job.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id, submitter_session FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
+	if err != nil {
+		return fmt.Errorf("read submitter sessions: %w", err)
+	}
+	defer rows.Close()
+	sessions := make(map[int64]string, len(ids))
+	for rows.Next() {
+		var id int64
+		var session sql.NullString
+		if err := rows.Scan(&id, &session); err != nil {
+			return fmt.Errorf("scan submitter session: %w", err)
+		}
+		sessions[id] = session.String
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if session, ok := sessions[job.ID]; ok {
+			job.SubmitterSession = session
+		}
+	}
+	return nil
 }
