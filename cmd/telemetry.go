@@ -109,24 +109,28 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 			first.Format("15:04:05"),
 			last.Format("15:04:05"),
 			last.Sub(first).Round(time.Second))
-		if out.GPU != nil && out.GPU.TempMax > 0 {
-			fmt.Printf("  Temperature: %d–%d°C (mean %.0f°C)\n", out.GPU.TempMin, out.GPU.TempMax, out.GPU.TempMean)
-		}
-		if out.GPU != nil && out.GPU.UtilMax > 0 {
-			fmt.Printf("  Utilisation: %d–%d%% (mean %.0f%%)\n", out.GPU.UtilMin, out.GPU.UtilMax, out.GPU.UtilMean)
-		}
-		if out.GPU != nil && out.GPU.ClockMax > 0 {
-			fmt.Printf("  Clock:       %d–%d MHz (mean %.0f MHz)\n", out.GPU.ClockMin, out.GPU.ClockMax, out.GPU.ClockMean)
-		}
-		if out.GPU != nil && out.GPU.MemPeakMiB > 0 {
-			if out.GPU.MemTotalMiB > 0 {
-				fmt.Printf("  GPU Memory:  %d / %d MiB (peak)\n", out.GPU.MemPeakMiB, out.GPU.MemTotalMiB)
-			} else {
-				fmt.Printf("  GPU Memory:  %d MiB (peak)\n", out.GPU.MemPeakMiB)
+		if g := out.GPU; g != nil {
+			// A range needs both ends; report whichever the source could
+			// supply rather than printing a fabricated bound beside a real one.
+			if g.TempMax != nil {
+				fmt.Printf("  Temperature: %s (mean %s)\n", formatRangeInt(g.TempMin, g.TempMax, "°C"), formatMean(g.TempMean, "°C"))
 			}
-		}
-		if out.GPU != nil && out.GPU.Throttled {
-			fmt.Printf("  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
+			if g.UtilMax != nil {
+				fmt.Printf("  Utilisation: %s (mean %s)\n", formatRangeInt(g.UtilMin, g.UtilMax, "%"), formatMean(g.UtilMean, "%"))
+			}
+			if g.ClockMax != nil {
+				fmt.Printf("  Clock:       %s (mean %s)\n", formatRangeInt(g.ClockMin, g.ClockMax, " MHz"), formatMean(g.ClockMean, " MHz"))
+			}
+			if g.MemPeakMiB != nil {
+				if g.MemTotalMiB != nil {
+					fmt.Printf("  GPU Memory:  %d / %d MiB (peak)\n", *g.MemPeakMiB, *g.MemTotalMiB)
+				} else {
+					fmt.Printf("  GPU Memory:  %d MiB (peak)\n", *g.MemPeakMiB)
+				}
+			}
+			if g.Throttled != nil && *g.Throttled {
+				fmt.Printf("  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
+			}
 		}
 		if out.Summary != nil {
 			for _, gpu := range out.Summary.GPUs {
@@ -165,6 +169,54 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runTelemetrySources holds every telemetry source recorded for one attempt.
+// No single one is complete, and `weft telemetry` and `weft job info` must
+// summarise an attempt identically, so both read the set through here rather
+// than each choosing its own subset.
+type runTelemetrySources struct {
+	Rollup        *db.TimeseriesSummary
+	LegacySamples []db.TimeseriesSample
+	RichSamples   []db.TelemetrySample
+}
+
+func loadRunTelemetry(database *sql.DB, runID int64) (runTelemetrySources, error) {
+	var sources runTelemetrySources
+	var err error
+	sources.Rollup, err = db.GetTimeseriesSummaryByRun(database, runID)
+	if err != nil {
+		return runTelemetrySources{}, fmt.Errorf("get latest-run timeseries summary: %w", err)
+	}
+	if sources.Rollup == nil {
+		sources.LegacySamples, err = db.GetTimeseriesByRun(database, runID)
+		if err != nil {
+			return runTelemetrySources{}, fmt.Errorf("get latest-run timeseries: %w", err)
+		}
+	}
+	sources.RichSamples, err = db.GetTelemetryByRun(database, runID)
+	if err != nil {
+		return runTelemetrySources{}, fmt.Errorf("get latest-run telemetry: %w", err)
+	}
+	return sources, nil
+}
+
+// gpuStats takes each field from the first source that reports it, so no
+// single source's blind spot becomes the attempt's: the rollup carries neither
+// clocks nor minima, and the per-device rows carry no temperature.
+//
+// Order matters. The timeseries sources come first because their utilisation
+// and memory are aggregated across the host's GPUs, which is what these fields
+// mean to existing consumers; the per-device rows report one card at a time,
+// so promoting them would silently redefine mem_peak_mib. The per-device
+// source goes last and fills only what the others cannot report at all — in
+// practice the GPU clocks.
+func (s runTelemetrySources) gpuStats() *db.GPUTelemetryStats {
+	return db.MergeGPUTelemetryStats(
+		db.ComputeGPUTelemetryStats(s.LegacySamples),
+		db.GPUTelemetryStatsFromTimeseriesSummary(s.Rollup),
+		db.ComputeGPUTelemetryStatsFromGPUSamples(s.RichSamples),
+	)
+}
+
 func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, error) {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
@@ -180,21 +232,11 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 	}
 	out.AttemptID = *job.LatestRunID
 
-	legacySummary, err := db.GetTimeseriesSummaryByRun(database, *job.LatestRunID)
+	sources, err := loadRunTelemetry(database, *job.LatestRunID)
 	if err != nil {
-		return telemetryOutput{}, fmt.Errorf("get latest-run timeseries summary: %w", err)
+		return telemetryOutput{}, err
 	}
-	var legacySamples []db.TimeseriesSample
-	if legacySummary == nil {
-		legacySamples, err = db.GetTimeseriesByRun(database, *job.LatestRunID)
-		if err != nil {
-			return telemetryOutput{}, fmt.Errorf("get latest-run timeseries: %w", err)
-		}
-	}
-	richSamples, err := db.GetTelemetryByRun(database, *job.LatestRunID)
-	if err != nil {
-		return telemetryOutput{}, fmt.Errorf("get latest-run telemetry: %w", err)
-	}
+	legacySummary, legacySamples, richSamples := sources.Rollup, sources.LegacySamples, sources.RichSamples
 
 	if len(richSamples) > 0 {
 		out.TimeMin = richSamples[0].Ts
@@ -213,11 +255,7 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 		out.DurationS = float64(out.TimeMax - out.TimeMin)
 	}
 
-	if legacySummary != nil {
-		out.GPU = db.GPUTelemetryStatsFromTimeseriesSummary(legacySummary)
-	} else {
-		out.GPU = db.ComputeGPUTelemetryStats(legacySamples)
-	}
+	out.GPU = sources.gpuStats()
 	if len(richSamples) > 0 {
 		var wallDuration float64
 		if job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {
@@ -246,4 +284,24 @@ func splitTelemetryGPUDevices(job *db.Job) []string {
 		}
 	}
 	return result
+}
+
+// formatRangeInt renders a measured range, or just the upper bound when the
+// source could not report a minimum. Printing a nil minimum as 0 would invent
+// a reading.
+func formatRangeInt(lo, hi *int, unit string) string {
+	if hi == nil {
+		return "n/a"
+	}
+	if lo == nil {
+		return fmt.Sprintf("%d%s (peak)", *hi, unit)
+	}
+	return fmt.Sprintf("%d–%d%s", *lo, *hi, unit)
+}
+
+func formatMean(v *float64, unit string) string {
+	if v == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.0f%s", *v, unit)
 }

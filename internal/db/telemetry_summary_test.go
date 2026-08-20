@@ -31,28 +31,28 @@ func TestComputeGPUTelemetryStats_Basic(t *testing.T) {
 	if stats.SampleCount != 3 {
 		t.Errorf("SampleCount = %d, want 3", stats.SampleCount)
 	}
-	if stats.TempMin != 60 || stats.TempMax != 70 {
-		t.Errorf("Temp min/max = %d/%d, want 60/70", stats.TempMin, stats.TempMax)
+	if derefI(stats.TempMin) != 60 || derefI(stats.TempMax) != 70 {
+		t.Errorf("Temp min/max = %d/%d, want 60/70", derefI(stats.TempMin), derefI(stats.TempMax))
 	}
-	if stats.TempMean != 65 {
-		t.Errorf("TempMean = %.1f, want 65.0", stats.TempMean)
+	if derefF(stats.TempMean) != 65 {
+		t.Errorf("TempMean = %.1f, want 65.0", derefF(stats.TempMean))
 	}
-	if stats.UtilMin != 80 || stats.UtilMax != 90 {
-		t.Errorf("Util min/max = %d/%d, want 80/90", stats.UtilMin, stats.UtilMax)
+	if derefI(stats.UtilMin) != 80 || derefI(stats.UtilMax) != 90 {
+		t.Errorf("Util min/max = %d/%d, want 80/90", derefI(stats.UtilMin), derefI(stats.UtilMax))
 	}
-	if stats.UtilMean != 85 {
-		t.Errorf("UtilMean = %.1f, want 85.0", stats.UtilMean)
+	if derefF(stats.UtilMean) != 85 {
+		t.Errorf("UtilMean = %.1f, want 85.0", derefF(stats.UtilMean))
 	}
-	if stats.ClockMin != 1500 || stats.ClockMax != 1600 {
-		t.Errorf("Clock min/max = %d/%d, want 1500/1600", stats.ClockMin, stats.ClockMax)
+	if derefI(stats.ClockMin) != 1500 || derefI(stats.ClockMax) != 1600 {
+		t.Errorf("Clock min/max = %d/%d, want 1500/1600", derefI(stats.ClockMin), derefI(stats.ClockMax))
 	}
-	if stats.MemPeakMiB != 8000 {
-		t.Errorf("MemPeakMiB = %d, want 8000", stats.MemPeakMiB)
+	if derefI(stats.MemPeakMiB) != 8000 {
+		t.Errorf("MemPeakMiB = %d, want 8000", derefI(stats.MemPeakMiB))
 	}
-	if stats.MemTotalMiB != 24000 {
-		t.Errorf("MemTotalMiB = %d, want 24000", stats.MemTotalMiB)
+	if derefI(stats.MemTotalMiB) != 24000 {
+		t.Errorf("MemTotalMiB = %d, want 24000", derefI(stats.MemTotalMiB))
 	}
-	if stats.Throttled {
+	if derefB(stats.Throttled) {
 		t.Error("Throttled should be false for temps <= 80°C")
 	}
 }
@@ -67,11 +67,11 @@ func TestComputeGPUTelemetryStats_Throttled(t *testing.T) {
 	if stats == nil {
 		t.Fatal("expected non-nil stats")
 	}
-	if !stats.Throttled {
+	if !derefB(stats.Throttled) {
 		t.Error("Throttled should be true when temp > 80°C")
 	}
-	if stats.TempMax != 85 {
-		t.Errorf("TempMax = %d, want 85", stats.TempMax)
+	if derefI(stats.TempMax) != 85 {
+		t.Errorf("TempMax = %d, want 85", derefI(stats.TempMax))
 	}
 }
 
@@ -85,10 +85,88 @@ func TestComputeGPUTelemetryStats_PartialData(t *testing.T) {
 	if stats == nil {
 		t.Fatal("expected non-nil stats")
 	}
-	if stats.TempMin != 50 || stats.TempMax != 50 {
-		t.Errorf("Temp min/max = %d/%d, want 50/50", stats.TempMin, stats.TempMax)
+	if derefI(stats.TempMin) != 50 || derefI(stats.TempMax) != 50 {
+		t.Errorf("Temp min/max = %d/%d, want 50/50", derefI(stats.TempMin), derefI(stats.TempMax))
 	}
-	if stats.UtilMin != 80 || stats.UtilMax != 80 {
-		t.Errorf("Util min/max = %d/%d, want 80/80", stats.UtilMin, stats.UtilMax)
+	if derefI(stats.UtilMin) != 80 || derefI(stats.UtilMax) != 80 {
+		t.Errorf("Util min/max = %d/%d, want 80/80", derefI(stats.UtilMin), derefI(stats.UtilMax))
+	}
+}
+
+// The summary distinguishes "not reported by this path" from "measured zero",
+// so these read through a default. Tests that care about the distinction
+// assert on the pointer directly.
+func derefI(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func derefF(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func derefB(v *bool) bool {
+	return v != nil && *v
+}
+
+// The rollup carries no minima, no clocks and no total memory. Those must come
+// back absent rather than zero: a consumer pooling calibration numbers cannot
+// otherwise tell a field this path never had from a GPU that genuinely read 0.
+func TestRollupReportsAbsenceNotZero(t *testing.T) {
+	stats := GPUTelemetryStatsFromTimeseriesSummary(&TimeseriesSummary{
+		SampleCount:    10,
+		PeakGPUTempC:   65,
+		MeanGPUTempC:   60,
+		PeakGPUUtilPct: 90,
+		MeanGPUUtilPct: 80,
+		PeakGPUMemMiB:  8000,
+	})
+	if stats == nil {
+		t.Fatal("stats = nil, want a rollup summary")
+	}
+	if stats.Source != TelemetrySourceRollup {
+		t.Errorf("Source = %q, want %q", stats.Source, TelemetrySourceRollup)
+	}
+	for name, got := range map[string]*int{
+		"TempMin":     stats.TempMin,
+		"UtilMin":     stats.UtilMin,
+		"ClockMin":    stats.ClockMin,
+		"ClockMax":    stats.ClockMax,
+		"MemTotalMiB": stats.MemTotalMiB,
+	} {
+		if got != nil {
+			t.Errorf("%s = %d, want absent: the rollup cannot report it", name, *got)
+		}
+	}
+	if stats.ClockMean != nil {
+		t.Errorf("ClockMean = %v, want absent", *stats.ClockMean)
+	}
+	// What it does carry must still be present.
+	if stats.TempMax == nil || *stats.TempMax != 65 {
+		t.Errorf("TempMax = %v, want 65", stats.TempMax)
+	}
+}
+
+// A genuine zero must survive as a present zero, not be mistaken for absence.
+func TestMeasuredZeroIsReportedNotOmitted(t *testing.T) {
+	stats := ComputeGPUTelemetryStats([]TimeseriesSample{
+		{GPUTempC: 40, GPUUtilPct: 0, GPUClockMHz: 300},
+		{GPUTempC: 42, GPUUtilPct: 0, GPUClockMHz: 300},
+	})
+	if stats == nil {
+		t.Fatal("stats = nil, want a summary")
+	}
+	// Utilisation was never above zero, so no sample contributed: the path
+	// reports it as absent rather than inventing a measured 0.
+	if stats.UtilMax != nil {
+		t.Errorf("UtilMax = %d, want absent when no sample reported utilisation", *stats.UtilMax)
+	}
+	if stats.ClockMin == nil || *stats.ClockMin != 300 {
+		t.Errorf("ClockMin = %v, want 300", stats.ClockMin)
 	}
 }

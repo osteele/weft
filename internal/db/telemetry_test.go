@@ -92,3 +92,68 @@ func TestInsertAndSummarizeTelemetry(t *testing.T) {
 func telemetryFloat64Ptr(value float64) *float64 {
 	return &value
 }
+
+// Every sample's GPU rows must survive the join, not just the last one's.
+// The GPU rows are attached to the sample slice after it is fully built, so a
+// join that holds pointers taken during the build attaches rows to backing
+// arrays that append has already discarded, and the earlier samples come back
+// with no GPUs at all.
+func TestGetTelemetryByRunAttachesGPUsToEverySample(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+
+	// Enough samples that the slice reallocates several times while growing.
+	const sampleCount = 8
+	var samples []TelemetrySample
+	for i := range sampleCount {
+		samples = append(samples, TelemetrySample{
+			Ts:       int64(1000 + i),
+			ElapsedS: float64(i),
+			GPUs: []TelemetryGPUSample{{
+				GPUIndex:      "0",
+				GPUName:       "A100",
+				GPUMemUsedMiB: 100 + i,
+				GPUUtilPct:    telemetryFloat64Ptr(float64(i)),
+				GPUSMClockMHz: telemetryUint32Ptr(uint32(1200 + i)),
+			}},
+		})
+	}
+	if err := InsertTelemetrySamples(database, jobID, samples); err != nil {
+		t.Fatalf("InsertTelemetrySamples: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("LatestRunID = nil, want a run")
+	}
+	got, err := GetTelemetryByRun(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetTelemetryByRun: %v", err)
+	}
+	if len(got) != sampleCount {
+		t.Fatalf("samples = %d, want %d", len(got), sampleCount)
+	}
+	for i, s := range got {
+		if len(s.GPUs) != 1 {
+			t.Errorf("sample %d (ts=%d): GPUs = %d, want 1", i, s.Ts, len(s.GPUs))
+			continue
+		}
+		if s.GPUs[0].GPUSMClockMHz == nil {
+			t.Errorf("sample %d (ts=%d): clock absent", i, s.Ts)
+		}
+	}
+}
+
+func telemetryUint32Ptr(value uint32) *uint32 {
+	return &value
+}

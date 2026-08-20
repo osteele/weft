@@ -1307,13 +1307,16 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.HasTag(db.TagBenchmark) {
 			var stats *db.GPUTelemetryStats
 			if job.LatestRunID != nil {
-				if summary, telErr := db.GetTimeseriesSummaryByRun(database, *job.LatestRunID); telErr != nil {
+				sources, telErr := loadRunTelemetry(database, *job.LatestRunID)
+				if telErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry: %v\n", telErr)
-				} else if summary != nil {
-					stats = db.GPUTelemetryStatsFromTimeseriesSummary(summary)
+				} else {
+					stats = sources.gpuStats()
 				}
 			}
 			if stats == nil {
+				// Jobs recorded before attempts were tracked have timeseries
+				// rows scoped to the job rather than to a run.
 				samples, telErr := db.GetTimeseries(database, job.ID)
 				if telErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry: %v\n", telErr)
@@ -1324,13 +1327,16 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			if stats != nil {
 				fmt.Println()
 				fmt.Println("Telemetry:")
-				if stats.TempMax > 0 {
-					fmt.Printf("  GPU Temp:  %d°C peak, %.0f°C mean\n", stats.TempMax, stats.TempMean)
+				if stats.TempMax != nil && stats.TempMean != nil {
+					fmt.Printf("  GPU Temp:  %d°C peak, %.0f°C mean\n", *stats.TempMax, *stats.TempMean)
 				}
-				if stats.UtilMax > 0 {
-					fmt.Printf("  GPU Util:  %.0f%% mean\n", stats.UtilMean)
+				if stats.UtilMean != nil {
+					fmt.Printf("  GPU Util:  %.0f%% mean\n", *stats.UtilMean)
 				}
-				if stats.Throttled {
+				if stats.ClockMean != nil {
+					fmt.Printf("  GPU Clock: %.0f MHz mean\n", *stats.ClockMean)
+				}
+				if stats.Throttled != nil && *stats.Throttled {
 					fmt.Printf("  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
 				}
 			}

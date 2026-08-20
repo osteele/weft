@@ -119,7 +119,11 @@ func GetTelemetryByRun(database *sql.DB, runID int64) ([]TelemetrySample, error)
 	defer rows.Close()
 
 	var samples []TelemetrySample
-	byTS := make(map[int64]*TelemetrySample)
+	// Indexed by position, not by pointer: append reallocates the backing
+	// array as the slice grows, so a pointer captured before a reallocation
+	// refers to the discarded copy and any GPU rows attached through it are
+	// silently lost.
+	byTS := make(map[int64]int)
 	for rows.Next() {
 		var (
 			s                TelemetrySample
@@ -145,7 +149,7 @@ func GetTelemetryByRun(database *sql.DB, runID int64) ([]TelemetrySample, error)
 		s.ProcNetRxBPS = floatPtrFromNull(procNetRxBPS)
 		s.ProcNetTxBPS = floatPtrFromNull(procNetTxBPS)
 		samples = append(samples, s)
-		byTS[s.Ts] = &samples[len(samples)-1]
+		byTS[s.Ts] = len(samples) - 1
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -192,7 +196,8 @@ func GetTelemetryByRun(database *sql.DB, runID int64) ([]TelemetrySample, error)
 		gpu.GPUPCIeRxMiBS = floatPtrFromNull(gpuPCIeRxMiBS)
 		gpu.GPUSMClockMHz = uint32PtrFromNull(gpuSMClockMHz)
 		gpu.GPUMemClockMHz = uint32PtrFromNull(gpuMemClockMHz)
-		if sample := byTS[ts]; sample != nil {
+		if idx, ok := byTS[ts]; ok {
+			sample := &samples[idx]
 			sample.GPUs = append(sample.GPUs, gpu)
 		}
 	}

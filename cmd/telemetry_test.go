@@ -108,11 +108,11 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 	if out.GPU == nil {
 		t.Fatal("GPU stats = nil, want latest-run stats")
 	}
-	if out.GPU.MemPeakMiB != 120 {
-		t.Fatalf("GPU.MemPeakMiB = %d, want 120", out.GPU.MemPeakMiB)
+	if out.GPU.MemPeakMiB == nil || *out.GPU.MemPeakMiB != 120 {
+		t.Fatalf("GPU.MemPeakMiB = %v, want 120", out.GPU.MemPeakMiB)
 	}
-	if out.GPU.TempMax != 65 {
-		t.Fatalf("GPU.TempMax = %d, want 65", out.GPU.TempMax)
+	if out.GPU.TempMax == nil || *out.GPU.TempMax != 65 {
+		t.Fatalf("GPU.TempMax = %v, want 65", out.GPU.TempMax)
 	}
 	if out.Summary == nil || len(out.Summary.GPUs) != 1 {
 		t.Fatalf("Summary = %+v, want one GPU summary", out.Summary)
