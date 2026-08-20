@@ -18,7 +18,7 @@ type ScriptMeta struct {
 	GPUCount      int    // Exact number of GPUs requested on one host
 	GPUMemGB      int    // Requested GPU memory in GB (headroom may be applied by CLI)
 	GPUMemStrict  *bool  // Exact gpu-mem matching (no headroom), when explicitly set
-	Interconnect  string // Requested intra-host interconnect: any, pcie, nvlink
+	Interconnect  string // Requested intra-host interconnect; see placement.InterconnectValues
 	CPUCores      int    // Minimum effective CPU cores/vCPUs
 	CPUMemGB      int    // Minimum host/system RAM in GB (headroom may be applied by CLI)
 	CPUMemStrict  *bool  // Exact cpu-mem matching (no headroom), when explicitly set

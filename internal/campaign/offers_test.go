@@ -1861,3 +1861,28 @@ func TestOfferConstraintsForGroup_BidLossEscalationForcesOnDemand(t *testing.T) 
 		t.Errorf("InstanceType = %q, want empty for non-preemptible group", c.InstanceType)
 	}
 }
+
+// A slot-packed group rents N GPUs to run N single-GPU jobs side by side. No
+// job crosses a GPU, so no fabric is required between them — demanding an
+// all-to-all NVLink domain there would reject perfectly good offers for a
+// topology nothing uses.
+func TestInterconnectUniformIgnoresSlotPackedGPUCount(t *testing.T) {
+	bridged := 112.0
+	offers := []cloud.Offer{
+		{GPUName: "A100 PCIE 40GB", NumGPUs: 4, NVLinkBandwidth: &bridged},
+	}
+
+	packed := InstanceGroup{Interconnect: "nvlink-uniform", NumGPUs: 4, SlotGPUs: true}
+	got, removed := filterOffersByInterconnect(offers, packed)
+	if len(got) != 1 || removed != 0 {
+		t.Fatalf("slot-packed group kept %d offers (removed %d), want 1 kept", len(got), removed)
+	}
+
+	// The same offer and count for one job spanning all four GPUs is exactly
+	// the wj6307 shape and must still be rejected.
+	spanning := InstanceGroup{Interconnect: "nvlink-uniform", NumGPUs: 4}
+	got, removed = filterOffersByInterconnect(offers, spanning)
+	if len(got) != 0 || removed != 1 {
+		t.Fatalf("spanning group kept %d offers (removed %d), want 0 kept", len(got), removed)
+	}
+}

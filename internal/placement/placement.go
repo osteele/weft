@@ -66,7 +66,7 @@ type Constraints struct {
 	GPUMemGB     int      `enforce:"gpu_memory"`   // Minimum GPU memory in GB; 0 = no minimum
 	CPUCores     int      `enforce:"cpu_cores"`    // Minimum effective CPU cores/vCPUs
 	CPUMemGB     int      `enforce:"host_ram"`     // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
-	Interconnect string   `enforce:"interconnect"` // Requested intra-host interconnect: any, pcie, nvlink
+	Interconnect string   `enforce:"interconnect"` // Requested intra-host interconnect; see InterconnectValues
 	Inputs       []string `enforce:"-"`            // Asset refs the job reads (for locality scoring)
 	Command      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
 	Project      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
@@ -369,6 +369,36 @@ func hostGPUNameSignals(host inventory.HostSpec) string {
 	return strings.Join(parts, " ")
 }
 
+// Interconnect requirement values. "nvlink" asks that NVLink be present;
+// InterconnectNVLinkUniform asks that every participating GPU reach every
+// other over it.
+const (
+	InterconnectAny           = "any"
+	InterconnectPCIe          = "pcie"
+	InterconnectNVLink        = "nvlink"
+	InterconnectNVLinkUniform = "nvlink-uniform"
+)
+
+// InterconnectValues lists the accepted requirement values in increasing
+// strictness, for flag help and validation errors.
+var InterconnectValues = []string{InterconnectAny, InterconnectPCIe, InterconnectNVLink, InterconnectNVLinkUniform}
+
+// hasNVSwitchClassSignal reports whether naming identifies a part whose GPUs
+// are connected all-to-all rather than in bridged pairs. SXM parts sit on an
+// NVSwitch baseboard, so any subset of them is fully connected; "nvswitch"
+// covers a provider that names the fabric directly. loweredName must already
+// be lowercased, so the vocabulary is normalized in one place.
+//
+// This deliberately does NOT accept "nvl". The H100 NVL and H200 NVL are
+// bridged pairs, which is precisely the topology uniformity excludes. Nor
+// does it accept a bare model name like "B200": those parts are usually
+// NVSwitch-based, but the name alone is not evidence, and a placement
+// decision on unknown topology has to fail closed. Callers wanting the
+// looser guarantee should ask for "nvlink" instead.
+func hasNVSwitchClassSignal(loweredName string) bool {
+	return strings.Contains(loweredName, "sxm") || strings.Contains(loweredName, "nvswitch")
+}
+
 // InterconnectSatisfied reports whether a target's evidence satisfies an
 // interconnect requirement. A reported provider measurement is authoritative:
 // positive bandwidth means NVLink and zero means no measured NVLink. When the
@@ -379,22 +409,42 @@ func hostGPUNameSignals(host inventory.HostSpec) string {
 // cards gets pairwise NVLink only. The offer filter, the reuse matcher, and
 // on-prem host scoring all judge targets through this one predicate so they
 // cannot drift.
-func InterconnectSatisfied(req, nameSignals string, nvlinkBandwidth *float64) bool {
+//
+// "nvlink" asks only that NVLink be present somewhere among the GPUs.
+// "nvlink-uniform" additionally asks that every participating GPU reach every
+// other over NVLink, which is what a collective benchmark needs if its
+// timings are to be comparable across hosts. numGPUs is how many GPUs the
+// request will actually use; it is what separates the two, since a single
+// bridge already spans a pair.
+func InterconnectSatisfied(req, nameSignals string, nvlinkBandwidth *float64, numGPUs int) bool {
 	req = strings.ToLower(strings.TrimSpace(req))
-	if req == "" || req == "any" {
+	if req == "" || req == InterconnectAny {
 		return true
 	}
+	name := strings.ToLower(nameSignals)
 	hasNVLinkSignal := false
 	if nvlinkBandwidth != nil {
 		hasNVLinkSignal = *nvlinkBandwidth > 0
 	} else {
-		name := strings.ToLower(nameSignals)
 		hasNVLinkSignal = strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
 	}
 	switch req {
-	case "nvlink":
+	case InterconnectNVLink:
 		return hasNVLinkSignal
-	case "pcie":
+	case InterconnectNVLinkUniform:
+		// One NVLink connection already spans a pair, so at two GPUs or
+		// fewer any NVLink presence is uniform by construction.
+		if numGPUs <= 2 {
+			return hasNVLinkSignal
+		}
+		// Past a pair, only an NVSwitch-class part connects every GPU to
+		// every other. Measured bandwidth cannot answer this and must not
+		// be consulted: a PCIe host with NVLink bridges reports positive
+		// bandwidth for its pairs, which is exactly how a 4-GPU request
+		// once landed on two bridged pairs and produced collective timings
+		// that were not comparable with a single-domain host.
+		return hasNVSwitchClassSignal(name)
+	case InterconnectPCIe:
 		return !hasNVLinkSignal
 	}
 	return true

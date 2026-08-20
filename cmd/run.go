@@ -424,7 +424,7 @@ func init() {
 	runCmd.Flags().IntVar(&runGPUCount, "gpus", 0, "Exact number of GPUs to expose on one host or rental instance")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runGPUMemStrict, "gpu-mem-strict", false, "Use exact gpu-mem matching without default safety headroom")
-	runCmd.Flags().StringVar(&runInterconnect, "interconnect", "", "Multi-GPU interconnect requirement: any, pcie, or nvlink")
+	runCmd.Flags().StringVar(&runInterconnect, "interconnect", "", "Multi-GPU interconnect requirement: any, pcie, nvlink (present), or nvlink-uniform (every GPU pair)")
 	runCmd.Flags().Bool("nvlink-required", false, "Alias for --interconnect=nvlink")
 	runCmd.Flags().Bool("same-host", false, "Require all requested GPUs on one host (default for --gpus)")
 	runCmd.Flags().IntVar(&runCPUCores, "cpu-cores", 0, "Minimum effective CPU cores/vCPUs for rental placement")
@@ -961,10 +961,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("nvlink-required") {
 		required, _ := cmd.Flags().GetBool("nvlink-required")
 		if required {
-			if runInterconnect != "" && !strings.EqualFold(runInterconnect, "nvlink") {
+			if runInterconnect != "" && !strings.EqualFold(runInterconnect, placement.InterconnectNVLink) {
 				return fmt.Errorf("--nvlink-required cannot be combined with --interconnect=%s", runInterconnect)
 			}
-			runInterconnect = "nvlink"
+			runInterconnect = placement.InterconnectNVLink
 		}
 	}
 	if cmd.Flags().Changed("same-host") {
@@ -988,7 +988,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return normalizeErr
 	}
 	if runGPUCount > 1 && runInterconnect == "" {
-		runInterconnect = "any"
+		runInterconnect = placement.InterconnectAny
 	}
 	if runGPUCount > 0 {
 		count := runGPUCount
@@ -1604,13 +1604,15 @@ func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {
 
 func normalizeInterconnect(value string) (string, error) {
 	v := strings.ToLower(strings.TrimSpace(value))
-	switch v {
-	case "", "any", "pcie", "nvlink":
+	switch {
+	case v == "":
+		return "", nil
+	case v == "none":
+		return placement.InterconnectAny, nil
+	case slices.Contains(placement.InterconnectValues, v):
 		return v, nil
-	case "none":
-		return "any", nil
 	default:
-		return "", fmt.Errorf("--interconnect must be one of any, pcie, nvlink")
+		return "", fmt.Errorf("--interconnect must be one of %s", strings.Join(placement.InterconnectValues, ", "))
 	}
 }
 

@@ -4402,7 +4402,7 @@ rule InstanceReuseDiskCheck {
 -- RAM, and the explicit CPU-cores floor shipped that way.
 rule InterconnectSatisfied {
     when: EvaluateInterconnect(requirement, gpu_naming_signals,
-                               nvlink_bandwidth)
+                               nvlink_bandwidth, num_gpus)
 
     -- Provider measurements distinguish three states. A positive numeric
     -- value confirms NVLink; a reported zero confirms no measured NVLink;
@@ -4424,6 +4424,31 @@ rule InterconnectSatisfied {
 
     ensures:
         requirement in {null, "", any} implies result = true
+
+    -- nvlink asks that NVLink be present. nvlink_uniform asks that every
+    -- participating GPU pair be NVLink connected, which is what a collective
+    -- benchmark needs for its timings to be comparable across hosts. The two
+    -- differ only above a pair, because one NVLink connection already spans
+    -- two GPUs.
+    if requirement = nvlink_uniform and num_gpus <= 2:
+        ensures:
+            result = EvaluateInterconnect(nvlink, gpu_naming_signals,
+                                          nvlink_bandwidth, num_gpus)
+
+    -- Above a pair, uniformity is judged on the part class and the provider
+    -- measurement must NOT be consulted. A host of bridged pairs reports
+    -- positive bandwidth for those pairs, so bandwidth cannot separate two
+    -- NVLink islands from one NVLink domain. Naming that does not state the
+    -- fabric is unknown, not permissive: an unverifiable topology fails
+    -- closed, because placing on it yields results that are wrong rather
+    -- than merely slow.
+    if requirement = nvlink_uniform and num_gpus > 2:
+        ensures:
+            result = gpu_naming_signals contains_any [sxm, nvswitch]
+        ensures:
+            gpu_naming_signals contains_any [nvl] and
+            not gpu_naming_signals contains_any [sxm, nvswitch]
+                implies result = false
 }
 
 invariant LaunchPreservesInterconnectEvidence {
@@ -4469,7 +4494,8 @@ rule InstanceReuseHostAxes {
     -- ensures:
     -- InterconnectSatisfied(job.interconnect,
     -- instance.gpu_naming_signals,
-    -- instance.offer.nvlink_bandwidth)
+    -- instance.offer.nvlink_bandwidth,
+    -- job.num_gpus)
 
     -- legacy annotation: @guidance
     -- Implementation: internal/campaign/reuse.go matchJobToInstance,

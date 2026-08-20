@@ -325,7 +325,7 @@ Supported keys (all optional):
 | `gpus` / `gpu-count` | int    | `--gpus`            |
 | `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
 | `gpu-mem-strict` | bool       | `--gpu-mem-strict`  |
-| `interconnect` | string (`any`, `pcie`, `nvlink`) | `--interconnect` |
+| `interconnect` | string (`any`, `pcie`, `nvlink`, `nvlink-uniform`) | `--interconnect` |
 | `cpu-cores` | int             | `--cpu-cores`       |
 | `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
 | `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |

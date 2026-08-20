@@ -105,7 +105,12 @@ Use `start <job-id>` to start a queued job immediately.
 - `--gpus N`: Require exactly N GPUs on one host or rental instance
 - `--gpu-mem GB`: Requested GPU memory in GB (weft adds `+2GB` headroom by default, except when the value matches a known hardware ceiling — see below)
 - `--gpu-mem-strict`: Use exact `--gpu-mem` matching (disable default `+2GB` headroom)
-- `--interconnect any|pcie|nvlink`: Multi-GPU topology requirement (`any` is the default for `--gpus N`)
+- `--interconnect any|pcie|nvlink|nvlink-uniform`: Multi-GPU topology requirement
+  (`any` is the default for `--gpus N`). `nvlink` requires NVLink to be present;
+  `nvlink-uniform` additionally requires every participating GPU pair to be NVLink
+  connected, which above two GPUs means SXM/NVSwitch parts only. See
+  [placement](../guides/placement.md) for why a bridged host satisfies the first
+  and not the second.
 - `--nvlink-required`: Alias for `--interconnect nvlink`
 - `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers

@@ -151,13 +151,45 @@ Topology constraints are optional:
 ```bash
 weft run --gpu h100 --gpus 4 --interconnect nvlink 'python train.py'
 weft run --gpu h100 --gpus 4 --nvlink-required 'python train.py'
+weft run --gpu h100 --gpus 4 --interconnect nvlink-uniform 'python bench.py'
 ```
 
 `--interconnect any` is the default for multi-GPU requests. Provider-measured
 NVLink bandwidth takes precedence when available: a positive value satisfies
 `nvlink`, while a reported zero satisfies `pcie`. If the provider reports no
 measurement, Weft falls back to explicit NVLink/SXM signals in the offer name;
-it does not assume that an unknown multi-GPU offer has NVLink. Use `--cpu-cores
+it does not assume that an unknown multi-GPU offer has NVLink.
+
+### `nvlink` and `nvlink-uniform` are different guarantees
+
+`nvlink` asks that NVLink be **present**. It does not ask that every GPU reach
+every other one over it. An NVLink bridge connects a *pair* of cards, so a
+4-GPU request satisfying `nvlink` can land on two bridged pairs joined only by
+PCIe — two NVLink islands, not one domain. This is not hypothetical: job
+wj6307 asked for `nvlink` on 4 GPUs, was served a host of two NV12 pairs
+bridged by PCIe, and produced collective timings that are not comparable with
+a single-domain host.
+
+`nvlink-uniform` asks that **every participating GPU pair** be NVLink
+connected. Use it for collective benchmarks (NCCL all-reduce, tensor
+parallelism throughput) where a mixed fabric makes results incomparable across
+hosts rather than merely slower.
+
+Weft judges uniformity from the part class, not from measured bandwidth,
+because a bridged host reports positive bandwidth for its pairs and so cannot
+be distinguished from a fully-connected one by that number alone:
+
+| GPUs requested | Satisfies `nvlink-uniform` |
+|---|---|
+| 1 or 2 | any NVLink signal — one link already spans the pair |
+| 3 or more | SXM / NVSwitch parts only (`A100 SXM4`, `H100 SXM`, `H200 SXM`) |
+
+`H100 NVL` and `H200 NVL` are bridged pairs, so they satisfy `nvlink` but
+**not** `nvlink-uniform` above two GPUs. A bare model name that does not state
+its fabric (`B200`) is treated as unknown and rejected for `nvlink-uniform`
+rather than assumed: an unverifiable topology fails closed. If that costs you
+an otherwise good offer, ask for `nvlink` instead and record the fabric your
+job actually received. Use `--cpu-cores
 N` to require a minimum effective CPU core/vCPU count on rental offers;
 `cpu-intensive` still uses `WEFT_COMPUTE_CPU_CORES` as its default floor.
 

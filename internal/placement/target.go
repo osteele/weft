@@ -248,7 +248,7 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	if c.CPUCores > 0 && t.CPUCores > 0 && t.CPUCores < c.CPUCores {
 		return fail(ReasonCPUCores, fmt.Sprintf("host CPU cores %d below required %d", t.CPUCores, c.CPUCores), t.CPUCores, c.CPUCores)
 	}
-	if t.GPUNamingSignalsKnown && !InterconnectSatisfied(c.Interconnect, t.GPUNamingSignals, nil) {
+	if t.GPUNamingSignalsKnown && !InterconnectSatisfied(c.Interconnect, t.GPUNamingSignals, nil, requiredGPUCount(c)) {
 		req := strings.ToLower(strings.TrimSpace(c.Interconnect))
 		return fail(ReasonInterconnect, fmt.Sprintf("interconnect %s required; host GPU naming shows no match", req), 0, 0)
 	}

@@ -1505,3 +1505,33 @@ func TestAutoDetectedInputsForCommandExplicitInputsWin(t *testing.T) {
 		t.Fatalf("autoDetectedInputsForCommand = %v, want empty when explicit inputs are declared", got)
 	}
 }
+
+func TestNormalizeInterconnectAcceptsUniform(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"any", "any"},
+		{"none", "any"},
+		{"pcie", "pcie"},
+		{"nvlink", "nvlink"},
+		{"nvlink-uniform", "nvlink-uniform"},
+		{"NVLink-Uniform", "nvlink-uniform"},
+		{"  nvlink-uniform  ", "nvlink-uniform"},
+	} {
+		got, err := normalizeInterconnect(tc.in)
+		if err != nil {
+			t.Fatalf("normalizeInterconnect(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalizeInterconnect(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// The error names every accepted value, so a typo tells the user what the
+	// stricter option is actually called.
+	_, err := normalizeInterconnect("nvlink_uniform")
+	if err == nil {
+		t.Fatal("expected an error for an unknown interconnect value")
+	}
+	if !strings.Contains(err.Error(), "nvlink-uniform") {
+		t.Fatalf("error %q does not name nvlink-uniform", err)
+	}
+}

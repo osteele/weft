@@ -731,7 +731,8 @@ rule EvaluateEligibility {
         or host.cpu_cores >= c.cpu_cores
     requires: InterconnectSatisfied(c.interconnect,
                                     host.gpu_naming_signals,
-                                    null)
+                                    null,
+                                    max(c.num_gpus, 1))
 
     -- 2. GPU class match.
     if c.gpu_class != null:

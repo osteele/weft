@@ -68,7 +68,7 @@ type InstanceGroup struct {
 	GPUMemGB        int    // Supremum of GPU memory across all jobs in the group
 	CPUCores        int    // Minimum effective CPU cores/vCPUs
 	CPUMemGB        int    // Supremum of host/system RAM (effective) across all jobs in the group
-	Interconnect    string // Requested intra-host interconnect: any, pcie, nvlink
+	Interconnect    string // Requested intra-host interconnect; see placement.InterconnectValues
 	MaxGPUMemGB     int    // Legacy metadata retained for old rows; not used for placement
 	DiskGB          int    // Estimated disk space needed (0 = use default)
 	// JobDiskGB holds per-job disk floors so SplitToParallel can size each

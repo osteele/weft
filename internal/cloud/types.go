@@ -162,7 +162,7 @@ type OfferConstraints struct {
 	MinDriverVersion     int      `axis:"driver"`              // minimum NVIDIA driver major version (0 = no floor)
 	MinCUDAVersion       string   `axis:"cuda"`                // minimum provider CUDA runtime/driver compatibility (e.g. "12.8")
 	NumGPUs              int      `axis:"num_gpus"`            // number of GPUs needed (default 1)
-	Interconnect         string   `axis:"interconnect"`        // required intra-host interconnect: any, pcie, nvlink
+	Interconnect         string   `axis:"interconnect"`        // required intra-host interconnect; see placement.InterconnectValues
 	ExcludeGeos          []string `axis:"geo"`                 // two-letter country codes to exclude (e.g., ["CN"])
 	MinCPUCoresEffective int      `axis:"cpu_cores"`           // minimum effective CPU cores (e.g., for compute-intensive jobs)
 	MinHostRAMGB         int      `axis:"host_ram"`            // minimum host/system RAM in GB (0 = no floor)

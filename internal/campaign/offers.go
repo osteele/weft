@@ -848,6 +848,20 @@ func filterOffersByVRAMReq(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 	return filtered, removed
 }
 
+// interconnectGPUCountForGroup returns how many GPUs a single job in the group
+// will use, which is what an interconnect requirement is about — a fabric
+// matters only between GPUs one job spans. A slot-packed group rents N GPUs to
+// run N single-GPU jobs concurrently, so its jobs never cross GPUs and its
+// GPU count says nothing about the fabric they need. Using the rental's count
+// there would demand an all-to-all NVLink domain for jobs that use one GPU
+// each.
+func interconnectGPUCountForGroup(group InstanceGroup) int {
+	if group.SlotGPUs {
+		return 1
+	}
+	return requiredGPUCountForGroup(group)
+}
+
 func requiredGPUCountForGroup(group InstanceGroup) int {
 	return normalizedGPUCount(group.NumGPUs)
 }
@@ -927,13 +941,13 @@ func filterOffersByHostRAM(offers []cloud.Offer, group InstanceGroup) ([]cloud.O
 
 func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cloud.Offer, int) {
 	req := strings.ToLower(strings.TrimSpace(group.Interconnect))
-	if len(offers) == 0 || req == "" || req == "any" {
+	if len(offers) == 0 || req == "" || req == placement.InterconnectAny {
 		return offers, 0
 	}
 	filtered := make([]cloud.Offer, 0, len(offers))
 	removed := 0
 	for _, o := range offers {
-		if !placement.InterconnectSatisfied(req, o.GPUName+" "+o.DataCenter, o.NVLinkBandwidth) {
+		if !placement.InterconnectSatisfied(req, o.GPUName+" "+o.DataCenter, o.NVLinkBandwidth, interconnectGPUCountForGroup(group)) {
 			removed++
 			continue
 		}
