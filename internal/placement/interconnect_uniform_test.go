@@ -116,3 +116,42 @@ func TestInterconnectUniformJudgesEachDeviceNotTheWholeHost(t *testing.T) {
 		t.Error("no candidate devices must not satisfy nvlink-uniform")
 	}
 }
+
+// Script metadata reaches placement without passing the CLI's validation, so a
+// misspelling there once resolved to an empty requirement — silently dropping
+// the constraint and letting the job run on any fabric. It must fail loudly
+// instead: a dropped constraint produces numbers that are wrong to compare,
+// which is worse than a job that refuses to start.
+func TestScriptMetadataInterconnectIsValidated(t *testing.T) {
+	for _, bad := range []string{"nvlink_uniform", "nvlink uniform", "nvswitch", "sxm", "yes"} {
+		if _, err := NormalizeInterconnect(bad); err == nil {
+			t.Errorf("NormalizeInterconnect(%q) accepted an unknown value", bad)
+		}
+	}
+	for in, want := range map[string]string{
+		"":               "",
+		"none":           InterconnectAny,
+		"ANY":            InterconnectAny,
+		" nvlink ":       InterconnectNVLink,
+		"NVLink-Uniform": InterconnectNVLinkUniform,
+		"pcie":           InterconnectPCIe,
+	} {
+		got, err := NormalizeInterconnect(in)
+		if err != nil {
+			t.Errorf("NormalizeInterconnect(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("NormalizeInterconnect(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// An unrecognized requirement must never reach the predicate, but if one ever
+// does it reads as "no requirement" — which is why the normalizer is the gate
+// and this documents the hazard it exists to prevent.
+func TestUnknownRequirementReadsAsNoConstraint(t *testing.T) {
+	if !InterconnectSatisfied("nvlink_uniform", []string{"A100 PCIE"}, nil, 8) {
+		t.Fatal("an unknown requirement is permissive at the predicate; the normalizer must reject it first")
+	}
+}

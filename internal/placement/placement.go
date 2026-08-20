@@ -201,7 +201,15 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 			c.CPUMemGB = db.EffectiveCPUMemGB(meta.CPUMemGB, strict)
 		}
 		if strings.TrimSpace(c.Interconnect) == "" && strings.TrimSpace(meta.Interconnect) != "" {
-			c.Interconnect = strings.ToLower(strings.TrimSpace(meta.Interconnect))
+			// Script metadata reaches placement without passing the CLI's
+			// validation, so it is validated here too. A misspelling must not
+			// resolve to an empty requirement: that would drop the constraint
+			// the script asked for and place the job on any fabric at all.
+			normalized, err := NormalizeInterconnect(meta.Interconnect)
+			if err != nil {
+				return ResolvedConstraints{Constraints: c}, fmt.Errorf("script metadata: %w", err)
+			}
+			c.Interconnect = normalized
 		}
 	}
 
@@ -378,6 +386,26 @@ const (
 	InterconnectNVLink        = "nvlink"
 	InterconnectNVLinkUniform = "nvlink-uniform"
 )
+
+// NormalizeInterconnect lowercases and validates an interconnect requirement,
+// mapping the "none" spelling onto "any". It is the single gate every source
+// of the value passes through — CLI flag, queue flag, and script metadata —
+// so an unrecognized spelling cannot reach the predicate, where an unknown
+// requirement reads as no requirement at all and silently drops the
+// constraint the author asked for.
+func NormalizeInterconnect(value string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case v == "":
+		return "", nil
+	case v == "none":
+		return InterconnectAny, nil
+	case slices.Contains(InterconnectValues, v):
+		return v, nil
+	default:
+		return "", fmt.Errorf("interconnect must be one of %s", strings.Join(InterconnectValues, ", "))
+	}
+}
 
 // InterconnectValues lists the accepted requirement values in increasing
 // strictness, for flag help and validation errors.

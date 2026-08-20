@@ -1602,18 +1602,15 @@ func scanRunScriptMeta(localDir, command string) (*dataloc.ScriptMeta, error) {
 	return scriptMeta, nil
 }
 
+// normalizeInterconnect validates the flag value and phrases the error in
+// flag terms. The rule itself lives in placement, which is also where script
+// metadata is validated, so the two cannot accept different sets.
 func normalizeInterconnect(value string) (string, error) {
-	v := strings.ToLower(strings.TrimSpace(value))
-	switch {
-	case v == "":
-		return "", nil
-	case v == "none":
-		return placement.InterconnectAny, nil
-	case slices.Contains(placement.InterconnectValues, v):
-		return v, nil
-	default:
+	v, err := placement.NormalizeInterconnect(value)
+	if err != nil {
 		return "", fmt.Errorf("--interconnect must be one of %s", strings.Join(placement.InterconnectValues, ", "))
 	}
+	return v, nil
 }
 
 func evaluateRecentOnPremPlacement(database *sql.DB, constraints placement.Constraints) (*placement.PlacementPlan, bool, error) {
