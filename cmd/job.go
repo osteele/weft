@@ -1204,6 +1204,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
 		}
 		printDeliveredGPU(database, job)
+		printInterconnect(database, job)
 		if job.CLIResourceOverrides != nil && len(job.CLIResourceOverrides.MachineAffinity) > 0 {
 			fmt.Printf("Pinned to:   %s (machine affinity)\n",
 				strings.Join(job.CLIResourceOverrides.MachineAffinity, ", "))
@@ -1791,4 +1792,80 @@ func cloudRuntimeFloorForJobInfo(job *db.Job) placement.RuntimeFloor {
 		_ = rf.ApplyCLIOverride(job.CLIResourceOverrides.MinCUDAVersion)
 	}
 	return rf
+}
+
+// printInterconnect reports the GPU fabric a rental provided against the one
+// the job asked for. Weft cannot observe topology from outside the workload:
+// it infers a part class from the provider's GPU naming and reports the
+// provider's bandwidth measurement, which confirms NVLink is present but
+// cannot distinguish one NVLink domain from several bridged islands. The line
+// says which of those it is showing, so a surprising result can be argued
+// with afterwards instead of reconstructed by probing from inside the job.
+func printInterconnect(database *sql.DB, job *db.Job) {
+	requested := job.RequestedInterconnect()
+	launch := jobLaunch(database, job)
+	if launch == nil {
+		return
+	}
+	name := strings.TrimSpace(launch.ResolvedGPUName)
+	if requested == "" && name == "" {
+		return
+	}
+
+	parts := []string{}
+	if requested != "" {
+		parts = append(parts, "requested "+requested)
+	}
+	if name != "" {
+		parts = append(parts, "delivered "+name+" ("+interconnectClassPhrase(name)+")")
+	}
+	if launch.NVLinkBandwidth != nil {
+		if *launch.NVLinkBandwidth > 0 {
+			parts = append(parts, fmt.Sprintf("provider reports %.0f GB/s NVLink", *launch.NVLinkBandwidth))
+		} else {
+			parts = append(parts, "provider reports no NVLink")
+		}
+	}
+	if len(parts) == 0 {
+		return
+	}
+	fmt.Printf("Interconnect: %s\n", strings.Join(parts, " · "))
+
+	if warning := interconnectTopologyWarning(requested, name, job.RequestedGPUCount()); warning != "" {
+		fmt.Print(warning)
+	}
+}
+
+// interconnectClassPhrase describes what a GPU name implies about the fabric
+// between cards, in the same terms placement judges it.
+func interconnectClassPhrase(name string) string {
+	lowered := strings.ToLower(name)
+	switch {
+	case strings.Contains(lowered, "sxm"), strings.Contains(lowered, "nvswitch"):
+		return "NVSwitch class; every pair NVLink"
+	case strings.Contains(lowered, "nvl"):
+		return "NVLink-bridged pairs"
+	default:
+		return "no NVLink indicated by naming"
+	}
+}
+
+// interconnectTopologyWarning flags the case that costs a benchmark its
+// comparability: NVLink present, more than a pair of GPUs, and nothing in the
+// naming showing the pairs are joined. The job did not fail — it produced
+// numbers whose fabric differs from a single-domain host, which is only
+// visible if something says so.
+func interconnectTopologyWarning(requested, deliveredName string, numGPUs int) string {
+	if requested != placement.InterconnectNVLink || numGPUs <= 2 || deliveredName == "" {
+		return ""
+	}
+	lowered := strings.ToLower(deliveredName)
+	if strings.Contains(lowered, "sxm") || strings.Contains(lowered, "nvswitch") {
+		return ""
+	}
+	return fmt.Sprintf(""+
+		"  ! %d GPUs on a part whose naming shows no NVSwitch: NVLink may be\n"+
+		"    present between pairs but not between every pair. Collective\n"+
+		"    timings from a bridged host are not comparable with a single-domain\n"+
+		"    host. Use --interconnect nvlink-uniform to require every pair.\n", numGPUs)
 }
