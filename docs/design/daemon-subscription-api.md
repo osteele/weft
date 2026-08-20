@@ -49,9 +49,22 @@ is one newline-terminated JSON object sent to `~/.cache/weft/daemon.sock`:
 This is a cached/no-sync read: handling the subscription reads local database
 state and does not contact hosts or providers. The first
 `subscription_snapshot` is a complete initial snapshot. Later snapshots carry
-the complete current active-job map plus an optional delta. The daemon emits a
-snapshot when the stable payload changes; an idle feed is kept fresh by a
-full-snapshot heartbeat every 45 seconds (see the activity resource below).
+the complete current active-job map plus an optional delta.
+
+`subscription_ready` is returned immediately, but the first
+`subscription_snapshot` is not prompt: the daemon starts building it when the
+subscription opens and emits it when that build finishes. The build's cost
+scales with the size of the unprocessed inbox and with machine load, and is
+not bounded by the heartbeat interval — first-snapshot latencies of tens of
+seconds have been measured on a large database under heavy load. **Clients
+must not set a deadline on the first snapshot that is shorter than the
+heartbeat interval**, and should treat a slow first snapshot as normal rather
+than as a failed subscription. `subscription_ready` is the signal that the
+subscription was accepted; it says nothing about when data will arrive.
+
+The daemon emits a snapshot when the stable payload changes; an idle feed is
+kept fresh by a full-snapshot heartbeat every 45 seconds (see the activity
+resource below).
 The `unprocessed_jobs` array carries the bounded terminal-job inbox (at most the
 last 14 days), including jobs that finished before the client connected.
 Consumers that only need one project may add `"project": "<name>"`.
