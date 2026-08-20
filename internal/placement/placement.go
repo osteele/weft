@@ -416,17 +416,25 @@ func hasNVSwitchClassSignal(loweredName string) bool {
 // timings are to be comparable across hosts. numGPUs is how many GPUs the
 // request will actually use; it is what separates the two, since a single
 // bridge already spans a pair.
-func InterconnectSatisfied(req, nameSignals string, nvlinkBandwidth *float64, numGPUs int) bool {
+func InterconnectSatisfied(req string, deviceSignals []string, nvlinkBandwidth *float64, numGPUs int) bool {
 	req = strings.ToLower(strings.TrimSpace(req))
 	if req == "" || req == InterconnectAny {
 		return true
 	}
-	name := strings.ToLower(nameSignals)
+	names := make([]string, 0, len(deviceSignals))
+	for _, signal := range deviceSignals {
+		names = append(names, strings.ToLower(signal))
+	}
 	hasNVLinkSignal := false
 	if nvlinkBandwidth != nil {
 		hasNVLinkSignal = *nvlinkBandwidth > 0
 	} else {
-		hasNVLinkSignal = strings.Contains(name, "nvl") || strings.Contains(name, "sxm")
+		for _, name := range names {
+			if strings.Contains(name, "nvl") || strings.Contains(name, "sxm") {
+				hasNVLinkSignal = true
+				break
+			}
+		}
 	}
 	switch req {
 	case InterconnectNVLink:
@@ -443,7 +451,18 @@ func InterconnectSatisfied(req, nameSignals string, nvlinkBandwidth *float64, nu
 		// bandwidth for its pairs, which is exactly how a 4-GPU request
 		// once landed on two bridged pairs and produced collective timings
 		// that were not comparable with a single-domain host.
-		return hasNVSwitchClassSignal(name)
+		// Every device the job can be given must be NVSwitch-class. On a
+		// host whose GPUs are a mix, one SXM card elsewhere on the box says
+		// nothing about the fabric between the GPUs this job would get.
+		if len(names) == 0 {
+			return false
+		}
+		for _, name := range names {
+			if !hasNVSwitchClassSignal(name) {
+				return false
+			}
+		}
+		return true
 	case InterconnectPCIe:
 		return !hasNVLinkSignal
 	}

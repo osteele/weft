@@ -65,10 +65,10 @@ func TestInterconnectUniformRejectsBridgedPairsAboveTwoGPUs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := InterconnectSatisfied(InterconnectNVLink, tc.signals, tc.bandwidth, tc.numGPUs); got != tc.wantLoose {
+			if got := InterconnectSatisfied(InterconnectNVLink, []string{tc.signals}, tc.bandwidth, tc.numGPUs); got != tc.wantLoose {
 				t.Errorf("nvlink = %v, want %v", got, tc.wantLoose)
 			}
-			if got := InterconnectSatisfied(InterconnectNVLinkUniform, tc.signals, tc.bandwidth, tc.numGPUs); got != tc.wantUniform {
+			if got := InterconnectSatisfied(InterconnectNVLinkUniform, []string{tc.signals}, tc.bandwidth, tc.numGPUs); got != tc.wantUniform {
 				t.Errorf("nvlink-uniform = %v, want %v", got, tc.wantUniform)
 			}
 		})
@@ -78,17 +78,41 @@ func TestInterconnectUniformRejectsBridgedPairsAboveTwoGPUs(t *testing.T) {
 // The looser values must not shift when a stricter one is added beside them.
 func TestInterconnectLooseValuesUnchangedByGPUCount(t *testing.T) {
 	for _, n := range []int{0, 1, 2, 4, 8} {
-		if !InterconnectSatisfied("", "A100 PCIE", nil, n) {
+		if !InterconnectSatisfied("", []string{"A100 PCIE"}, nil, n) {
 			t.Errorf("empty requirement rejected at %d GPUs", n)
 		}
-		if !InterconnectSatisfied(InterconnectAny, "A100 PCIE", nil, n) {
+		if !InterconnectSatisfied(InterconnectAny, []string{"A100 PCIE"}, nil, n) {
 			t.Errorf("any rejected at %d GPUs", n)
 		}
-		if !InterconnectSatisfied(InterconnectPCIe, "A100 PCIE", f64(0), n) {
+		if !InterconnectSatisfied(InterconnectPCIe, []string{"A100 PCIE"}, f64(0), n) {
 			t.Errorf("pcie rejected a PCIe host at %d GPUs", n)
 		}
-		if InterconnectSatisfied(InterconnectPCIe, "A100 SXM4", nil, n) {
+		if InterconnectSatisfied(InterconnectPCIe, []string{"A100 SXM4"}, nil, n) {
 			t.Errorf("pcie accepted an SXM host at %d GPUs", n)
 		}
+	}
+}
+
+// A host holding both SXM and PCIe cards must not let the SXM naming vouch for
+// GPUs a job cannot use. Before per-device evaluation the whole host was one
+// concatenated string, so "sxm" anywhere satisfied uniformity for every GPU on
+// the box.
+func TestInterconnectUniformJudgesEachDeviceNotTheWholeHost(t *testing.T) {
+	mixed := []string{"A100 SXM4 80GB a100", "RTX 2080 Ti rtx2080ti"}
+	if InterconnectSatisfied(InterconnectNVLinkUniform, mixed, nil, 4) {
+		t.Error("a mixed SXM/PCIe candidate set must not satisfy nvlink-uniform")
+	}
+	if !InterconnectSatisfied(InterconnectNVLinkUniform, []string{"A100 SXM4 80GB a100", "A100 SXM4 80GB a100"}, nil, 4) {
+		t.Error("an all-SXM candidate set must satisfy nvlink-uniform")
+	}
+	// pcie is the converse and was wrong in the same way: an SXM card
+	// elsewhere on the host made a PCIe-pinned job look non-PCIe.
+	if !InterconnectSatisfied(InterconnectPCIe, []string{"RTX 2080 Ti rtx2080ti"}, nil, 2) {
+		t.Error("a PCIe-only candidate set must satisfy pcie")
+	}
+	// An empty candidate set cannot demonstrate uniformity and must not be
+	// read as vacuously true.
+	if InterconnectSatisfied(InterconnectNVLinkUniform, nil, nil, 4) {
+		t.Error("no candidate devices must not satisfy nvlink-uniform")
 	}
 }

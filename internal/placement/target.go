@@ -248,7 +248,7 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	if c.CPUCores > 0 && t.CPUCores > 0 && t.CPUCores < c.CPUCores {
 		return fail(ReasonCPUCores, fmt.Sprintf("host CPU cores %d below required %d", t.CPUCores, c.CPUCores), t.CPUCores, c.CPUCores)
 	}
-	if t.GPUNamingSignalsKnown && !InterconnectSatisfied(c.Interconnect, t.GPUNamingSignals, nil, requiredGPUCount(c)) {
+	if t.GPUNamingSignalsKnown && !InterconnectSatisfied(c.Interconnect, candidateDeviceSignals(t, c), nil, requiredGPUCount(c)) {
 		req := strings.ToLower(strings.TrimSpace(c.Interconnect))
 		return fail(ReasonInterconnect, fmt.Sprintf("interconnect %s required; host GPU naming shows no match", req), 0, 0)
 	}
@@ -418,6 +418,33 @@ func filterDerivedDriverRequirementCoveredByCUDA(reqs []compat.Requirement, c Co
 		filtered = append(filtered, req)
 	}
 	return filtered
+}
+
+// candidateDeviceSignals returns naming for the GPUs this job could actually
+// be given: the devices satisfying its per-device constraints. Interconnect is
+// judged on these rather than on the host as a whole, because a fabric between
+// GPUs the job cannot use is not a fabric the job gets — on a host holding
+// both SXM and PCIe cards, the SXM naming must not admit a job pinned to the
+// PCIe ones.
+//
+// When no device matches, every device is returned: the job cannot run here
+// anyway, and the GPU-class check reports that far more usefully than an
+// interconnect rejection would.
+func candidateDeviceSignals(t TargetSpec, c Constraints) []string {
+	gc := ParseGPUConstraint(c.GPUClass)
+	signals := make([]string, 0, len(t.Devices))
+	for _, d := range t.Devices {
+		if deviceSatisfiesPerDeviceConstraints(d, gc, c, t.MaxComputeCapUnknownFailsClosed) {
+			signals = append(signals, d.Name+" "+d.Class)
+		}
+	}
+	if len(signals) > 0 {
+		return signals
+	}
+	for _, d := range t.Devices {
+		signals = append(signals, d.Name+" "+d.Class)
+	}
+	return signals
 }
 
 func matchingDeviceCount(t TargetSpec, c Constraints) (matching int, classMatched bool, memMatched bool, maxMatched bool, minMatched bool, sawUnknownMax bool) {

@@ -2781,7 +2781,7 @@ func TestInterconnectSatisfiedMeasurementPrecedence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := InterconnectSatisfied(tt.requirement, tt.signals, tt.bandwidth, 2); got != tt.want {
+			if got := InterconnectSatisfied(tt.requirement, []string{tt.signals}, tt.bandwidth, 2); got != tt.want {
 				t.Errorf("InterconnectSatisfied() = %v, want %v", got, tt.want)
 			}
 		})
