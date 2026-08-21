@@ -3716,8 +3716,16 @@ func (m listTUIModel) hasActiveLaunchingSpinner() bool {
 	if !m.isStatusGroupedView() {
 		return false
 	}
-	for _, job := range m.groupedJobsWithAutoReasons() {
-		if groupedStatusBucketWithOptions(job, m.launchesWithActiveJob(), jobview.LaunchesEverReady(m.launchByID), groupedStatusRenderOptions{
+	// Decorate once and classify against fixed maps. Each
+	// groupedJobsWithAutoReasons call reaches RunRateHeadroom and so issues a
+	// SUM over launches; evaluating launchesWithActiveJob per iteration made
+	// that one query per job scanned, ten times a second for as long as a
+	// launch stayed un-ready.
+	jobs := m.groupedJobsWithAutoReasons()
+	launchesWithActiveJob := computeLaunchesWithActiveJob(jobs, m.launchLiveByID)
+	launchesEverReady := jobview.LaunchesEverReady(m.launchByID)
+	for _, job := range jobs {
+		if groupedStatusBucketWithOptions(job, launchesWithActiveJob, launchesEverReady, groupedStatusRenderOptions{
 			launchStatusByID:     m.launchStatusByID,
 			placingJobIDs:        m.placingJobIDs,
 			placementStatusByJob: m.placementStatusByJob,
