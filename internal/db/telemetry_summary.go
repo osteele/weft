@@ -22,10 +22,24 @@ const (
 )
 
 // GPUTelemetryStats summarises GPU telemetry. Every measured field is a
-// pointer: nil means no path reported it, and a non-nil zero is a real
-// reading. A GPU genuinely idles at 0% utilisation, so a bare int cannot tell
-// those apart, and a consumer that cannot tell will pool fabricated zeros into
-// real measurements without noticing.
+// pointer, so a present value — including a present zero — is a reading. A GPU
+// genuinely idles at 0% utilisation, so a bare int cannot tell that from a
+// field nothing reported, and a consumer that cannot tell will pool fabricated
+// zeros into real measurements without noticing.
+//
+// Nil is weaker than "nothing measured this", and the difference matters to
+// anyone recording it as a fact. job_timeseries stores its GPU columns with
+// COALESCE(..., 0), so in that table a measured idle zero and "this job had no
+// GPU" are the same byte; the aggregation over it therefore gates on > 0 and
+// suppresses a genuine zero. A job carrying per-device rows never shows that,
+// because those columns are nullable and fill the gap — but for a
+// timeseries-only job that idled, utilisation reads nil despite having been
+// measured.
+//
+// Source is what resolves it: nil on a payload whose Source includes
+// gpu_samples means no source had the field, while nil on a
+// timeseries-only payload may be a suppressed zero. Record the source
+// alongside the value rather than recording absence on its own.
 type GPUTelemetryStats struct {
 	SampleCount int      `json:"sample_count"`
 	Source      string   `json:"source"`
