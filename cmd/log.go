@@ -120,7 +120,7 @@ func addLogFlags(cmd *cobra.Command) {
 	cmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
 	cmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
 	cmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
-	cmd.Flags().IntVar(&logAttempt, "attempt", 0, "Show log from a specific attempt number (default: latest). See `weft job info` for the attempt list.")
+	cmd.Flags().IntVar(&logAttempt, "attempt", 0, "Show log from a specific attempt number. See `weft info --all-attempts` for the attempt list.")
 
 	// Operations log flags
 	cmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
@@ -263,13 +263,28 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return runSkyLogForJob(cmd, database, job)
 	}
 
-	// For terminal jobs, default to showing the full log unless the user
-	// explicitly requested a specific range or line count.
-	if status.IsTerminal(job.Status) && !logFull && logFrom == 0 && logTo == 0 &&
-		!cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
-		logFrom = 1
-		logFull = true
+	// A queued retry that has not started has no current log. For a finite default read,
+	// select the most recent attempt that actually started and name it before
+	// displaying its output. This selection is based on attempt lifecycle
+	// metadata, not on whether a log object happens to exist.
+	if logAttempt == 0 && !logFollow {
+		provenance, provenanceErr := loadAttemptDisplayProvenance(database, job)
+		if provenanceErr != nil {
+			return fmt.Errorf("list attempts: %w", provenanceErr)
+		}
+		if provenance.currentUnstarted && provenance.latestStarted != nil {
+			selected := provenance.latestStarted
+			fmt.Printf("Current retry has not started; showing attempt #%d (%s on %s).\n",
+				selected.AttemptNumber, attemptStatus(*selected), attemptTarget(*selected))
+			handled, attemptErr := runLogForAttempt(cmd, database, job, selected.AttemptNumber)
+			if handled {
+				return attemptErr
+			}
+			job = jobForAttempt(job, selected)
+		}
 	}
+
+	applyDefaultLogRangeForStatus(cmd, job.Status)
 
 	if logAttempt > 0 {
 		handled, err := runLogForAttempt(cmd, database, job, logAttempt)
@@ -286,6 +301,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
 		fmt.Printf("Job %s has not started yet; no logs are available.\n", ids.FormatJobID(job.ID))
 		printPlacementLines(queuedPlacementLines(database, job), 12)
+		fmt.Printf("Attempts:    weft info %s --all-attempts\n", ids.FormatJobID(job.ID))
 		return nil
 	}
 
@@ -642,9 +658,10 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 			ids.FormatJobID(job.ID), attemptNum, len(attempts), attempts[0].AttemptNumber)
 	}
 	target := &attempts[idx]
+	applyDefaultLogRangeForStatus(cmd, target.Status)
 
 	if target.LaunchID != nil {
-		if err := fetchAndDisplayLogFromR2WithDatabase(cmd, database, job, target.ID); err != nil {
+		if err := fetchAndDisplayLogFromR2Func(cmd, database, job, target.ID); err != nil {
 			return true, fmt.Errorf("fetch log for attempt #%d: %w", attemptNum, err)
 		}
 		return true, nil
@@ -655,7 +672,8 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 	// that have been superseded by a later on-host attempt). The latest
 	// on-host attempt — superseded or not — still holds the live <jobID>.log.
 	if target.Host == "" {
-		return true, fmt.Errorf("attempt #%d log is not on host (no placement recorded)", attemptNum)
+		return true, fmt.Errorf("attempt #%d has no log because no placement was recorded; inspect attempts with `weft info %s --all-attempts`",
+			attemptNum, ids.FormatJobID(job.ID))
 	}
 	hostAttempts := attemptsOnHost(attempts, target.Host)
 	pos := indexOfAttempt(hostAttempts, target.AttemptNumber)
@@ -670,6 +688,14 @@ func runLogForAttempt(cmd *cobra.Command, database *sql.DB, job *db.Job, attempt
 		return true, err
 	}
 	return true, nil
+}
+
+func applyDefaultLogRangeForStatus(cmd *cobra.Command, jobStatus string) {
+	if status.IsTerminal(jobStatus) && !logFull && logFrom == 0 && logTo == 0 &&
+		!cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail") {
+		logFrom = 1
+		logFull = true
+	}
 }
 
 // attemptsOnHost returns attempts that ran on host, sorted oldest first.

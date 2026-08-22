@@ -88,6 +88,9 @@ func TestRunLogForJob_QueuedPlacedJobHasNoLogsYet(t *testing.T) {
 	if !strings.Contains(out, "Queue reason: waiting for assigned target to start the job") {
 		t.Fatalf("output = %q, want queue reason", out)
 	}
+	if !strings.Contains(out, "weft info ") || !strings.Contains(out, "--all-attempts") {
+		t.Fatalf("output = %q, want attempt-inspection guidance", out)
+	}
 }
 
 func TestContextualizeCloudLogFetchErrorRunningJob(t *testing.T) {
@@ -633,8 +636,11 @@ func TestRunLogForAttempt_OnPremNotOnAnyHost(t *testing.T) {
 	if err == nil {
 		t.Fatal("runLogForAttempt returned nil error, want 'not on host' failure")
 	}
-	if !strings.Contains(err.Error(), "no placement recorded") {
-		t.Fatalf("error = %q, want 'no placement recorded' explanation", err)
+	if !strings.Contains(err.Error(), "no placement was recorded") {
+		t.Fatalf("error = %q, want 'no placement was recorded' explanation", err)
+	}
+	if !strings.Contains(err.Error(), "weft info") || !strings.Contains(err.Error(), "--all-attempts") {
+		t.Fatalf("error = %q, want attempt-inspection guidance", err)
 	}
 }
 

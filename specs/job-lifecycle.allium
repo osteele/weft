@@ -2776,16 +2776,19 @@ rule AttemptsViewIsReadOnly {
         --                                           switchBackFromAttemptsMsg
 }
 
--- `weft log <job-id>` without --attempt reads the selected job attempt,
--- which defaults to the job's latest attempt. It must not substitute an
--- older attempt's log when the latest attempt has no log object or an empty
--- log object.
+-- `weft log <job-id>` without --attempt reads the selected job attempt. A
+-- finite read selects the most recent started attempt when the current retry
+-- is queued and has not started; otherwise it selects the latest attempt.
+-- Selection happens from lifecycle metadata before log lookup, so a missing
+-- or empty log object never causes a scan backward.
 rule JobLogCommandReadsSelectedAttempt {
     when: UserRequestsJobLog(job, requested_attempt)
 
     -- legacy: let selected_attempt =
         -- legacy: if requested_attempt != null:
             -- legacy: job.attempts.find(a => a.attempt_number = requested_attempt)
+		-- legacy: else if not follow and job.current_retry.queued_and_unstarted:
+			-- legacy: job.attempts.find(a => a.start_time != null)
         -- legacy: else:
             -- legacy: job.latest_attempt
 
@@ -2797,7 +2800,11 @@ rule JobLogCommandReadsSelectedAttempt {
 
     -- legacy annotation: @guidance
         -- Default command:
-        --   `weft log <job-id>` reads job.latest_attempt.
+		--   `weft log <job-id>` reads job.latest_attempt except when the
+		--   current retry is queued and has not started. For that state, a finite
+		--   read selects the most recent attempt with a start_time and prints
+		--   a notice naming the selected attempt.
+		--   `--follow` remains bound to the current attempt.
         --
         -- Explicit attempt command:
         --   `weft log <job-id> --attempt N` reads the attempt whose
@@ -2820,7 +2827,7 @@ rule JobLogCommandReadsSelectedAttempt {
         -- must not scan Weft R2 paths or remote SSH hosts looking for an
         -- unrelated log.
         --
-        -- Missing or empty log objects for the selected attempt are
+		-- Missing or empty log objects for the lifecycle-selected attempt are
         -- authoritative. The command may return zero bytes or a not-found
         -- error for that selected attempt, but it must not scan older
         -- job_attempts rows to find output from another attempt. Legacy

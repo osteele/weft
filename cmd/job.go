@@ -1534,6 +1534,16 @@ func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
 	now := time.Now().Unix()
 	fmt.Println()
 	fmt.Printf("Attempts:    %d\n", len(attempts))
+	provenance, provenanceErr := loadAttemptDisplayProvenance(database, job)
+	if provenanceErr == nil && provenance.currentUnstarted {
+		fmt.Printf("Current:     retry queued; no current attempt has started (target: %s)\n", job.TargetDisplay())
+		if provenance.latestStarted != nil {
+			started := provenance.latestStarted
+			fmt.Printf("Evidence:    #%d %s on %s (latest started attempt)\n",
+				started.AttemptNumber, attemptStatus(*started), attemptTarget(*started))
+			printAttemptLogHint(job.ID, started)
+		}
+	}
 	if latest := attempts[0]; latest.StartTime != nil {
 		fmt.Printf("Latest:      #%d started %s on %s\n", latest.AttemptNumber, formatUnixTime(*latest.StartTime), attemptTarget(latest))
 	} else if latest := attempts[0]; isAttemptPreflightRejected(latest) {

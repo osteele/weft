@@ -1231,6 +1231,7 @@ weft log --events [flags]
 - `--to N`: Show lines up to line N
 - `--grep PATTERN`: Filter lines matching pattern
 - `--full`: Show the entire log (`--from 1`)
+- `--attempt N`: Show the log from a specific recorded attempt
 - `-t, --timeout DURATION`: SSH timeout for slow connections
 - `--sync`: Perform a full sync before showing the log
 - `--no-sync`: Skip status and cloud-log sync
@@ -1257,6 +1258,7 @@ weft log wj42 --to 100             # First 100 lines
 weft log wj42 --grep error         # Lines containing "error"
 weft log wj42 -f --grep epoch      # Follow, filter for "epoch"
 weft log wj42 --full               # Entire log (explicit)
+weft log wj42 --attempt 2          # Log from attempt #2
 weft log --ops --job wj42        # Operations for a job
 weft log --ops --host vastai:17  # Operations for a rental instance
 weft log --events --kind relaunch
@@ -1269,6 +1271,14 @@ weft log --events --kind relaunch
 - `--follow` cannot be used with `--to`
 - `--grep` can be combined with any other option
 - `--ops` and `--events` do not take a job ID positional argument
+- A finite default read normally selects the current attempt. If the current
+  retry is queued and has not started, it instead shows the most recent
+  attempt that started and prints the selected attempt number. `--follow`
+  never makes this substitution because it follows only the current attempt.
+- Use `weft info <job-id> --all-attempts` to inspect retry history, then
+  `weft log <job-id> --attempt N` to select an earlier attempt explicitly.
+- A missing or empty log for a started attempt is authoritative; Weft does not
+  search still earlier attempts based on whether a log object exists.
 
 ### weft telemetry
 

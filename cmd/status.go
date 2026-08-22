@@ -311,6 +311,8 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
+	provenance, _ := loadAttemptDisplayProvenance(database, job)
+
 	// Override queued status for jobs whose last cloud attempt failed
 	applyAttemptOutcomeOverrides(database, []*db.Job{job})
 
@@ -319,7 +321,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	// authoritative same-run evidence and can arrive after a transient failed
 	// mark, so explicit sync still gets a chance to repair them.
 	if isWaitTerminalStatus(job.EffectiveStatus()) && !(statusSync && job.HasInventoryHost() && job.UsesQueueRunner()) {
-		printJobStatus(database, job, exitOnComplete)
+		printJobStatusWithProvenance(database, job, exitOnComplete, provenance)
 		return
 	}
 
@@ -959,6 +961,11 @@ func printJobStatusLineWithContext(database *sql.DB, job *db.Job) {
 }
 
 func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
+	provenance, _ := loadAttemptDisplayProvenance(database, job)
+	printJobStatusWithProvenance(database, job, exitOnComplete, provenance)
+}
+
+func printJobStatusWithProvenance(database *sql.DB, job *db.Job, exitOnComplete bool, provenance attemptDisplayProvenance) {
 	effectiveStatus := job.EffectiveStatus()
 	display := queueblock.Display(job, nil)
 	x := explain.ForJob(database, job, time.Now())
@@ -971,6 +978,7 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	} else {
 		fmt.Printf("Status:   %s\n", effectiveStatus)
 	}
+	printStatusAttemptProvenance(provenance)
 	printPlacementLines(queuedPlacementLines(database, job), 10)
 	if explanationHasHighConfidenceBlocker(x) && x.PrimaryReason != display.Reason {
 		fmt.Printf("%-9s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
@@ -1023,6 +1031,9 @@ func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 		fmt.Println()
 		if launch, ok := latestJobLaunchWithTermination(database, job, db.TerminationReasonDiskFull); ok {
 			fmt.Printf("Hints:    weft instance disk-report %s  # Show disk-full report\n", ids.FormatInstanceID(launch.ID))
+		} else if provenance.currentUnstarted && provenance.latestStarted != nil {
+			fmt.Printf("Hints:    weft log %s --attempt %d  # View latest started attempt\n",
+				ids.FormatJobID(job.ID), provenance.latestStarted.AttemptNumber)
 		} else {
 			fmt.Printf("Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
 		}
