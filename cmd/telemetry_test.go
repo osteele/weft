@@ -18,6 +18,10 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
 		t.Fatalf("UpdateQueuedToRunning: %v", err)
 	}
+	oldAttemptID, err := db.GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID(old): %v", err)
+	}
 
 	oldTimeseries := []db.TimeseriesSample{{
 		Ts:             1000,
@@ -137,6 +141,49 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 		if !strings.Contains(string(payload), field) {
 			t.Errorf("JSON output missing %s: %s", field, payload)
 		}
+	}
+
+	selected, err := collectTelemetryOutputForRun(database, jobID, oldAttemptID, true)
+	if err != nil {
+		t.Fatalf("collectTelemetryOutputForRun: %v", err)
+	}
+	if selected.AttemptID != oldAttemptID {
+		t.Fatalf("selected AttemptID = %d, want %d", selected.AttemptID, oldAttemptID)
+	}
+	if selected.RawSamples == nil || len(*selected.RawSamples) != 1 {
+		t.Fatalf("selected RawSamples = %+v, want one sample", selected.RawSamples)
+	}
+	if got := (*selected.RawSamples)[0]; got.Ts != 1000 || len(got.GPUs) != 1 || got.GPUs[0].GPUName != "A100" {
+		t.Fatalf("selected raw sample = %+v, want old attempt's A100 sample", got)
+	}
+	selectedPayload, err := json.Marshal(selected)
+	if err != nil {
+		t.Fatalf("marshal selected telemetry output: %v", err)
+	}
+	if !strings.Contains(string(selectedPayload), `"raw_samples":[{"ts":1000`) {
+		t.Fatalf("selected JSON missing raw samples: %s", selectedPayload)
+	}
+}
+
+func TestCollectTelemetryOutputForRunRejectsAnotherJobsAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued(first): %v", err)
+	}
+	otherJobID, err := db.RecordQueued(database, "host2", "/tmp/project", "python eval.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued(other): %v", err)
+	}
+	otherRunID, err := db.GetLatestAttemptID(database, otherJobID)
+	if err != nil {
+		t.Fatalf("GetLatestAttemptID(other): %v", err)
+	}
+
+	_, err = collectTelemetryOutputForRun(database, jobID, otherRunID, true)
+	if err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("error = %v, want attempt ownership error", err)
 	}
 }
 

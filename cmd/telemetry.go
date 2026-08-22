@@ -13,7 +13,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var telemetryJSON bool
+var (
+	telemetryJSON           bool
+	telemetryIncludeSamples bool
+	telemetryRunID          int64
+)
 
 var jobTelemetryCmd = &cobra.Command{
 	Use:   "telemetry <job-id> [job-id...]",
@@ -34,26 +38,36 @@ var telemetryCmd = &cobra.Command{
 func init() {
 	jobCmd.AddCommand(jobTelemetryCmd)
 	rootCmd.AddCommand(telemetryCmd)
-	jobTelemetryCmd.Flags().BoolVar(&telemetryJSON, "json", false, "Emit machine-readable JSON")
-	telemetryCmd.Flags().BoolVar(&telemetryJSON, "json", false, "Emit machine-readable JSON")
+	for _, command := range []*cobra.Command{jobTelemetryCmd, telemetryCmd} {
+		command.Flags().BoolVar(&telemetryJSON, "json", false, "Emit machine-readable JSON")
+		command.Flags().BoolVar(&telemetryIncludeSamples, "samples", false, "Include raw samples in JSON output")
+		command.Flags().Int64Var(&telemetryRunID, "run", 0, "Select a specific attempt ID (single job only)")
+	}
 }
 
 type telemetryOutput struct {
-	JobID     int64                   `json:"job_id"`
-	Job       string                  `json:"job"`
-	AttemptID int64                   `json:"attempt_id,omitempty"`
-	TimeMin   int64                   `json:"time_min"`
-	TimeMax   int64                   `json:"time_max"`
-	DurationS float64                 `json:"duration_s"`
-	Samples   int                     `json:"samples"`
-	GPU       *db.GPUTelemetryStats   `json:"gpu,omitempty"`
-	Summary   *db.JobTelemetrySummary `json:"summary,omitempty"`
+	JobID      int64                   `json:"job_id"`
+	Job        string                  `json:"job"`
+	AttemptID  int64                   `json:"attempt_id,omitempty"`
+	TimeMin    int64                   `json:"time_min"`
+	TimeMax    int64                   `json:"time_max"`
+	DurationS  float64                 `json:"duration_s"`
+	Samples    int                     `json:"samples"`
+	GPU        *db.GPUTelemetryStats   `json:"gpu,omitempty"`
+	Summary    *db.JobTelemetrySummary `json:"summary,omitempty"`
+	RawSamples *[]db.TelemetrySample   `json:"raw_samples,omitempty"`
 }
 
 func runTelemetry(cmd *cobra.Command, args []string) error {
+	if telemetryIncludeSamples && !telemetryJSON {
+		return usageErrorf("--samples requires --json")
+	}
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
 		return err
+	}
+	if telemetryRunID != 0 && len(jobIDs) != 1 {
+		return usageErrorf("--run requires exactly one job")
 	}
 
 	database, err := db.OpenForReading()
@@ -81,7 +95,7 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 			fmt.Println("---")
 		}
 
-		out, err := collectTelemetryOutput(database, jobID)
+		out, err := collectTelemetryOutputForRun(database, jobID, telemetryRunID, telemetryIncludeSamples)
 		if err != nil {
 			return fmt.Errorf("job %s: %w", ids.FormatJobID(jobID), err)
 		}
@@ -206,6 +220,10 @@ func (s runTelemetrySources) gpuStats() *db.GPUTelemetryStats {
 }
 
 func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, error) {
+	return collectTelemetryOutputForRun(database, jobID, 0, false)
+}
+
+func collectTelemetryOutputForRun(database *sql.DB, jobID, requestedRunID int64, includeSamples bool) (telemetryOutput, error) {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return telemetryOutput{}, fmt.Errorf("get job: %w", err)
@@ -215,16 +233,46 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 	}
 
 	out := telemetryOutput{JobID: jobID, Job: ids.FormatJobID(jobID)}
-	if job.LatestRunID == nil {
+	if includeSamples {
+		rawSamples := []db.TelemetrySample{}
+		out.RawSamples = &rawSamples
+	}
+
+	runID := requestedRunID
+	var selectedAttempt *db.JobAttempt
+	if runID == 0 {
+		if job.LatestRunID == nil {
+			return out, nil
+		}
+		runID = *job.LatestRunID
+	} else {
+		attempts, err := db.ListAttempts(database, jobID)
+		if err != nil {
+			return telemetryOutput{}, fmt.Errorf("list attempts: %w", err)
+		}
+		for i := range attempts {
+			if attempts[i].ID == runID {
+				selectedAttempt = &attempts[i]
+				break
+			}
+		}
+		if selectedAttempt == nil {
+			return telemetryOutput{}, fmt.Errorf("attempt %d does not belong to job %s", runID, ids.FormatJobID(jobID))
+		}
+	}
+	if runID == 0 {
 		return out, nil
 	}
-	out.AttemptID = *job.LatestRunID
+	out.AttemptID = runID
 
-	sources, err := loadRunTelemetry(database, *job.LatestRunID)
+	sources, err := loadRunTelemetry(database, runID)
 	if err != nil {
 		return telemetryOutput{}, err
 	}
 	legacySummary, legacySamples, richSamples := sources.Rollup, sources.LegacySamples, sources.RichSamples
+	if includeSamples {
+		out.RawSamples = &richSamples
+	}
 
 	if len(richSamples) > 0 {
 		out.TimeMin = richSamples[0].Ts
@@ -246,7 +294,9 @@ func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, err
 	out.GPU = sources.gpuStats()
 	if len(richSamples) > 0 {
 		var wallDuration float64
-		if job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {
+		if selectedAttempt != nil && selectedAttempt.StartTime != nil && selectedAttempt.EndTime != nil && *selectedAttempt.EndTime > *selectedAttempt.StartTime {
+			wallDuration = float64(*selectedAttempt.EndTime - *selectedAttempt.StartTime)
+		} else if requestedRunID == 0 && job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {
 			wallDuration = float64(*job.EndTime - job.StartTime)
 		}
 		out.Summary = db.SummarizeTelemetry(richSamples, wallDuration, splitTelemetryGPUDevices(job))

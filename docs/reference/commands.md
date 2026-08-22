@@ -1272,7 +1272,7 @@ weft log --events --kind relaunch
 
 ### weft telemetry
 
-Show telemetry for a job's latest attempt.
+Show telemetry for a job attempt. The latest attempt is selected by default.
 
 ```bash
 weft telemetry <job-id> [job-id...]
@@ -1285,14 +1285,22 @@ available, plus per-GPU memory, activity, and SM / memory clock ranges from the
 richer telemetry stream. JSON output records per-device clock minima, maxima,
 and means under `summary.gpus`.
 
+For job diagnostics, `--json --samples` adds the rich per-sample records under
+`raw_samples`. Use `--run <attempt-id>` to inspect a specific attempt of a
+single job. The command rejects attempt IDs that do not belong to that job.
+
 **Flags:**
 - `--json`: Emit machine-readable JSON
+- `--samples`: Include raw samples in JSON output (requires `--json`)
+- `--run <attempt-id>`: Select a specific attempt (single job only)
 
 **Examples:**
 ```bash
 weft telemetry wj42
 weft telemetry wj42 wj43
 weft telemetry wj42 --json
+weft telemetry wj42 --json --samples
+weft telemetry wj42 --run 314 --json --samples
 ```
 
 ### weft job restart
