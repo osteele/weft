@@ -233,7 +233,7 @@ individual ML artifacts, per-host caches, or output lineage.
 - **Convention-based output collection**: anything written to `output/`/`outputs/`
   is tracked and synced to R2 automatically.
 - **Artifact store** (`internal/artifacts`, `cmd/artifact.go`): a per-job manifest
-  (local `~/.config/weft/artifacts`, durable in R2) addressable by token
+  (local `~/.local/share/weft/artifacts`, durable in R2) addressable by token
   (`weft artifact list/get/cat/sync/add`), with a sync orchestrator
   (`internal/syncorch`) that reconciles results from both cloud (R2) and on-prem
   hosts.

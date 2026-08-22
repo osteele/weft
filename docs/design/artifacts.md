@@ -45,7 +45,7 @@ the key to understanding the subsystem's failure modes.
 
 | Store | Where | Contents | Durability |
 |---|---|---|---|
-| **Local artifact cache** | `~/.config/weft/artifacts/<jobID>/...` on the control machine + `artifacts` DB table (path, stored path, size, sha256, attempt id) | Bytes copied from a host or downloaded from R2 | Durable; survives workdir reuse |
+| **Local artifact cache** | `~/.local/share/weft/artifacts/<jobID>/...` on the control machine (`$XDG_DATA_HOME/weft/artifacts/`) + `artifacts` DB table (path, stored path, size, sha256, attempt id) | Bytes copied from a host or downloaded from R2 | Durable; survives workdir reuse |
 | **R2 per-run objects** | `jobs/<id>/runs/<run>/outputs/...` and `jobs/<id>/runs/<run>/artifacts/files/...` (+ `artifacts/manifest.json`) | Bytes uploaded by an agent during/after the run | Durable; keyed per run, immune to overwrite by later jobs |
 | **Pointer records** | `host_data` rows of kind `job-output`, asset id `<jobID>/<relPath>` (`internal/ops/artifacts.go RecordJobOutputs`) | Host + path only — no bytes, no size, no hash | Declared-output pointers (including `--produces` entries) dereference into the immutable completion-time snapshot under `~/.cache/weft/artifacts/<jobID>/<run>/outputs/` on the host; pointers for **undeclared** convention outputs still dereference into the live working directory, which the next job may overwrite |
 | **Host-live files** | The job's working directory on the host | Whatever is currently on disk | None — shared mutable state across jobs in the same directory |

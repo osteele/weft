@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/appdirs"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
@@ -40,7 +41,7 @@ type Config struct {
 	// Default: 50
 	RetrainInterval int `yaml:"retrain_interval"`
 	// DBPaths lists job database paths to feed into training.
-	// The weft DB (~/.config/weft/jobs.db) is always included.
+	// The Weft operational database is always included.
 	DBPaths []string `yaml:"db_paths"`
 }
 
@@ -349,9 +350,9 @@ func BuildConfig(projectPath, modelDir string, retrainInterval int, dbPaths []st
 		DBPaths:         append([]string(nil), dbPaths...),
 	}
 
-	home, err := os.UserHomeDir()
+	stateDir, err := appdirs.StateDir()
 	if err == nil {
-		weftDB := filepath.Join(home, ".config", "weft", "jobs.db")
+		weftDB := filepath.Join(stateDir, "jobs.db")
 		if !slices.Contains(cfg.DBPaths, weftDB) {
 			cfg.DBPaths = append(cfg.DBPaths, weftDB)
 		}

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/osteele/weft/internal/appdirs"
 	"github.com/osteele/weft/internal/db"
 	_ "modernc.org/sqlite"
 )
@@ -27,8 +28,11 @@ func TestReplayEstimateForJob(t *testing.T) {
 		t.Fatalf("parse job id: %v", err)
 	}
 
-	home, _ := os.UserHomeDir()
-	dbPath := filepath.Join(home, ".config/weft/jobs.db")
+	stateDir, err := appdirs.StateDir()
+	if err != nil {
+		t.Fatalf("resolve state directory: %v", err)
+	}
+	dbPath := filepath.Join(stateDir, "jobs.db")
 	if v := os.Getenv("WEFT_DB"); v != "" {
 		dbPath = v
 	}

@@ -1,6 +1,7 @@
 package daemoncontrol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -117,6 +119,43 @@ func TestLaunchdEnvironmentPathIncludesProviderCLIDirs(t *testing.T) {
 	}
 	if countPathListEntry(got, "/opt/homebrew/bin") != 1 {
 		t.Fatalf("PATH %q should contain /opt/homebrew/bin once", got)
+	}
+}
+
+func TestAbsoluteEnvDir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/srv/weft-state")
+	if got := absoluteEnvDir("XDG_STATE_HOME"); got != "/srv/weft-state" {
+		t.Fatalf("absoluteEnvDir() = %q, want /srv/weft-state", got)
+	}
+	t.Setenv("XDG_STATE_HOME", "relative/state")
+	if got := absoluteEnvDir("XDG_STATE_HOME"); got != "" {
+		t.Fatalf("absoluteEnvDir() = %q for relative path, want empty", got)
+	}
+}
+
+func TestLaunchdPlistCarriesXDGOverrides(t *testing.T) {
+	var out bytes.Buffer
+	err := plistTemplate.Execute(&out, plistData{
+		Label:         Label,
+		Binary:        "/usr/local/bin/weft",
+		Path:          "/usr/bin:/bin",
+		XDGConfigHome: "/srv/config",
+		XDGStateHome:  "/srv/state",
+		XDGDataHome:   "/srv/data",
+		StdoutLog:     "/tmp/weft.out",
+		StderrLog:     "/tmp/weft.err",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<key>XDG_CONFIG_HOME</key>\n\t\t<string>/srv/config</string>",
+		"<key>XDG_STATE_HOME</key>\n\t\t<string>/srv/state</string>",
+		"<key>XDG_DATA_HOME</key>\n\t\t<string>/srv/data</string>",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("plist missing %q:\n%s", want, out.String())
+		}
 	}
 }
 

@@ -12,6 +12,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	dataHome, err := os.MkdirTemp("", "weft-cmd-test-data-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test data home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dataHome); err != nil {
+		fmt.Fprintf(os.Stderr, "set test data home: %v\n", err)
+		os.Exit(1)
+	}
 	original := ensurePredictorUsableFunc
 	originalLoadConfig := loadPredictorConfig
 	ensurePredictorUsableFunc = func(*cobra.Command, *config.Config, string) error {
@@ -31,5 +40,9 @@ func TestMain(m *testing.M) {
 	restoreSSH()
 	ensurePredictorUsableFunc = original
 	loadPredictorConfig = originalLoadConfig
+	if err := os.RemoveAll(dataHome); err != nil && code == 0 {
+		fmt.Fprintf(os.Stderr, "remove test data home: %v\n", err)
+		code = 1
+	}
 	os.Exit(code)
 }

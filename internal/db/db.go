@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/appdirs"
 	"github.com/osteele/weft/internal/db/migrations"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/status"
@@ -909,12 +910,11 @@ var sharedDBFile string
 var startupRepairFn = startupRepair
 
 func init() {
-	home, err := os.UserHomeDir()
+	stateDir, err := appdirs.StateDir()
 	if err != nil {
 		panic(err)
 	}
-	configDir := filepath.Join(home, ".config", "weft")
-	sharedDBFile = filepath.Join(configDir, "jobs.db")
+	sharedDBFile = filepath.Join(stateDir, "jobs.db")
 
 	if runningUnderGoTest() {
 		// A test binary must never resolve to the shared database. Opening it
@@ -924,12 +924,12 @@ func init() {
 		// until it is rebuilt (wb75). The directory is per-process because
 		// packages test in parallel; clearing it first keeps a recycled pid
 		// from inheriting a database left at another tree's schema version.
-		configDir = filepath.Join(os.TempDir(), fmt.Sprintf("weft-test-db-%d", os.Getpid()))
-		_ = os.RemoveAll(configDir)
+		stateDir = filepath.Join(os.TempDir(), fmt.Sprintf("weft-test-db-%d", os.Getpid()))
+		_ = os.RemoveAll(stateDir)
 	}
 
-	dbPath = filepath.Join(configDir, "jobs.db")
-	bugDBPath = filepath.Join(configDir, "bugs.db")
+	dbPath = filepath.Join(stateDir, "jobs.db")
+	bugDBPath = filepath.Join(stateDir, "bugs.db")
 }
 
 // runningUnderGoTest reports whether this process is a Go test binary.

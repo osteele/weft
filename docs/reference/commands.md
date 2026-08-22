@@ -355,20 +355,27 @@ Directories are not supported.
 
 ### weft db
 
-Manage the local jobs database (`~/.config/weft/jobs.db`): take consistent
+Manage the local jobs database (`~/.local/state/weft/jobs.db`, or
+`$XDG_STATE_HOME/weft/jobs.db`): take consistent
 snapshots, prune old snapshots.
+
+Configuration remains under `~/.config/weft` (or `$XDG_CONFIG_HOME/weft`).
+Durable local artifacts live under `~/.local/share/weft/artifacts` (or
+`$XDG_DATA_HOME/weft/artifacts`). When changing any XDG base-directory
+override, stop all Weft processes first and reinstall the launchd daemon so
+the service records the same absolute overrides as the CLI.
 
 #### Automatic pre-migration backups
 
 Whenever `weft` opens a database that needs a schema migration, it first
-writes a snapshot to `~/.config/weft/backups/jobs.db.pre-migration-v<N>-<timestamp>.db`
+writes a snapshot to `~/.local/state/weft/backups/jobs.db.pre-migration-v<N>-<timestamp>.db`
 using SQLite's `VACUUM INTO`. The previous on-disk schema version is encoded
 in the filename. The 3 most recent pre-migration backups are kept; older ones
 are pruned automatically. Skipped on first init (empty DB) and on read-only
 opens.
 
 If a migration corrupts state, recover by stopping all `weft` processes and
-copying the most recent pre-migration backup over `~/.config/weft/jobs.db`.
+copying the most recent pre-migration backup over `~/.local/state/weft/jobs.db`.
 
 #### `weft db snapshot`
 
@@ -382,11 +389,11 @@ directly by `sqlite3` or by analysis tools.
 
 **Flags:**
 - `--out PATH` — destination file (default:
-  `~/.config/weft/backups/jobs.db.snapshot-<timestamp>.db`)
+  `~/.local/state/weft/backups/jobs.db.snapshot-<timestamp>.db`)
 
 **Examples:**
 ```bash
-# Default path under ~/.config/weft/backups/
+# Default path under ~/.local/state/weft/backups/
 weft db snapshot
 
 # Custom destination, e.g. for offline analysis
@@ -402,7 +409,7 @@ ship a backup daemon. A daily snapshot via launchd is one plist.
 weft db gc [--keep N] [--apply]
 ```
 
-Prune snapshots in `~/.config/weft/backups/`, keeping the N newest. Defaults
+Prune snapshots in `~/.local/state/weft/backups/`, keeping the N newest. Defaults
 to dry-run; pass `--apply` to delete. Considers all `.db` files in that
 directory, including pre-migration backups and manual snapshots.
 
@@ -512,7 +519,8 @@ weft sky import --job wj123 42
 Track and retrieve job outputs through a durable local artifact store.
 
 Artifacts are declared by writing a manifest on the remote host. The CLI
-syncs those files into `~/.config/weft/artifacts/` so they survive
+syncs those files into `~/.local/share/weft/artifacts/` (or
+`$XDG_DATA_HOME/weft/artifacts/`) so they survive
 remote cleanup.
 
 **Manifest format:**
@@ -655,7 +663,7 @@ The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
 - Queue runner schedules queued jobs in FIFO order (subject to CPU allotments)
 - Saves job metadata and logs to `~/.cache/weft/logs/` on the remote host
-- Records the job in a local SQLite database (`~/.config/weft/jobs.db`)
+- Records the job in a local SQLite database (`~/.local/state/weft/jobs.db`)
 - Captures exit code when job completes
 - Sends Slack notification on completion (if configured)
 - Returns immediately (non-blocking)
@@ -765,7 +773,7 @@ is not the final job cost to record in an experiment.
 
 Record and inspect Weft bug reports. By default, `weft bug` uses GitHub issues
 through the `gh` CLI and uses GitHub issue numbers (`#123`). Configure the
-legacy local tracker to keep reports in `~/.config/weft/bugs.db`, a small
+legacy local tracker to keep reports in `~/.local/state/weft/bugs.db`, a small
 SQLite database that is separate from the main jobs database and uses `wb<id>`
 identifiers:
 

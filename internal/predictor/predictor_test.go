@@ -14,11 +14,9 @@ import (
 )
 
 func TestBuildConfig(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home directory")
-	}
-	weftDB := filepath.Join(home, ".config", "weft", "jobs.db")
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	weftDB := filepath.Join(stateHome, "weft", "jobs.db")
 
 	t.Run("auto appends weft DB", func(t *testing.T) {
 		cfg := BuildConfig("/path/to/project", "/models", 50, []string{"/other/db.sqlite"})

@@ -420,9 +420,10 @@ covered in [Artifact Store](artifacts.md).
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/weft/jobs.db` | SQLite database |
+| `~/.local/state/weft/jobs.db` | SQLite database (`$XDG_STATE_HOME/weft/jobs.db`) |
 | `~/.config/weft/config.toml` | Configuration |
 | `~/.config/weft/config` | Legacy config (Slack webhook) |
+| `~/.local/share/weft/artifacts/` | Durable local artifacts (`$XDG_DATA_HOME/weft/artifacts/`) |
 
 ### Remote (Server)
 

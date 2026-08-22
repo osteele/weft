@@ -26,7 +26,7 @@ const calibPreClampThreshold = 110 * time.Minute
 // The report is emitted through t.Logf and the test never fails, so it needs
 // -v to show anything:
 //
-//	WEFT_CALIBRATION_DB=$HOME/.config/weft/jobs.db \
+//	WEFT_CALIBRATION_DB=$HOME/.local/state/weft/jobs.db \
 //	    go test ./internal/campaign/ -run TestThresholdCalibration -v
 //
 // Only two of the three ceilings are replayable. maxEmptyStatusTimeCeiling
@@ -43,7 +43,7 @@ const calibPreClampThreshold = 110 * time.Minute
 func TestThresholdCalibration(t *testing.T) {
 	path := os.Getenv("WEFT_CALIBRATION_DB")
 	if path == "" {
-		t.Skip("set WEFT_CALIBRATION_DB=$HOME/.config/weft/jobs.db to run threshold calibration")
+		t.Skip("set WEFT_CALIBRATION_DB=$HOME/.local/state/weft/jobs.db to run threshold calibration")
 	}
 	// mode=ro and no migrations, matching db.OpenReadOnly. busy_timeout matters
 	// because the corpus is the live jobs.db, written concurrently by the

@@ -26,6 +26,12 @@ var plistTemplate = template.Must(template.New("daemon-plist").Parse(`<?xml vers
 	<dict>
 		<key>PATH</key>
 		<string>{{.Path}}</string>
+		{{if .XDGConfigHome}}<key>XDG_CONFIG_HOME</key>
+		<string>{{.XDGConfigHome}}</string>{{end}}
+		{{if .XDGStateHome}}<key>XDG_STATE_HOME</key>
+		<string>{{.XDGStateHome}}</string>{{end}}
+		{{if .XDGDataHome}}<key>XDG_DATA_HOME</key>
+		<string>{{.XDGDataHome}}</string>{{end}}
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -40,11 +46,22 @@ var plistTemplate = template.Must(template.New("daemon-plist").Parse(`<?xml vers
 `))
 
 type plistData struct {
-	Label     string
-	Binary    string
-	Path      string
-	StdoutLog string
-	StderrLog string
+	Label         string
+	Binary        string
+	Path          string
+	XDGConfigHome string
+	XDGStateHome  string
+	XDGDataHome   string
+	StdoutLog     string
+	StderrLog     string
+}
+
+func absoluteEnvDir(name string) string {
+	dir := strings.TrimSpace(os.Getenv(name))
+	if !filepath.IsAbs(dir) {
+		return ""
+	}
+	return dir
 }
 
 func launchdEnvironmentPath(home string) string {
@@ -130,11 +147,14 @@ func writeLaunchdPlist(paths Paths, binary string) error {
 		return err
 	}
 	if err := plistTemplate.Execute(f, plistData{
-		Label:     Label,
-		Binary:    binary,
-		Path:      launchdEnvironmentPath(home),
-		StdoutLog: paths.StdoutLog,
-		StderrLog: paths.StderrLog,
+		Label:         Label,
+		Binary:        binary,
+		Path:          launchdEnvironmentPath(home),
+		XDGConfigHome: absoluteEnvDir("XDG_CONFIG_HOME"),
+		XDGStateHome:  absoluteEnvDir("XDG_STATE_HOME"),
+		XDGDataHome:   absoluteEnvDir("XDG_DATA_HOME"),
+		StdoutLog:     paths.StdoutLog,
+		StderrLog:     paths.StderrLog,
 	}); err != nil {
 		_ = f.Close()
 		return err

@@ -393,7 +393,7 @@ weft instance launch --jobs <ids> --max-spend '$1.00' --max-time 30m --grace-per
 ```bash
 weft campaign watch <campaign-id> --plain
 # or check DB directly
-sqlite3 ~/.config/weft/jobs.db "SELECT id, status, gpu_class FROM jobs WHERE id IN (<ids>);"
+sqlite3 ~/.local/state/weft/jobs.db "SELECT id, status, gpu_class FROM jobs WHERE id IN (<ids>);"
 ```
 
 ### Step 4: Verify telemetry and phases
@@ -480,7 +480,7 @@ weft campaign watch <campaign-id>
 To reset completed test jobs for re-testing:
 
 ```bash
-sqlite3 ~/.config/weft/jobs.db "UPDATE jobs SET status='queued', host='' WHERE id IN (<ids>);"
+sqlite3 ~/.local/state/weft/jobs.db "UPDATE jobs SET status='queued', host='' WHERE id IN (<ids>);"
 ```
 
 ---

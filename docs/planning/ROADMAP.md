@@ -178,7 +178,7 @@ mechanical from there. Candidates, ordered by frequency I'd expect to hit:
 | Database opened read-only | When `db.OpenForReading` falls back | User is reading possibly-stale data; surface so display drift isn't a surprise. |
 | Grace-period instance expiring soon | Poll `cloud_instances.grace_deadline` | Banner at < 5 min remaining; users miss these. |
 | Background sync error streak | Track consecutive `cloud sync skipped` events | N≥3 in a row → banner. Catches network/VPN flaps that aren't a single-poll failure. |
-| Disk space low (backups dir, log cache) | `statfs` on `~/.config/weft/backups`, `~/.cache/weft/logs` | Threshold ~5 GB free or <5%. |
+| Disk space low (backups dir, log cache) | `statfs` on `~/.local/state/weft/backups`, `~/.cache/weft/logs` | Threshold ~5 GB free or <5%. |
 | Long DB write lock held | Track time since last successful Open() with migrations | Banner if another process has held the writer > 30 s. |
 | Update available (binary) | Compare `os.Executable()` mtime to running PID's start | Distinct from schema-drift: binary updated but DB schema unchanged; offer relaunch. |
 

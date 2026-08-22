@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/appdirs"
 )
 
 // RemoteArtifactsDir is the directory for artifact manifests on remote hosts.
@@ -36,11 +38,11 @@ func NamedAssetSatisfiedFile(logDir string, name string) string {
 
 // LocalArtifactsDir returns the local artifact store root.
 func LocalArtifactsDir() (string, error) {
-	home, err := os.UserHomeDir()
+	dataDir, err := appdirs.DataDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "weft", "artifacts"), nil
+	return filepath.Join(dataDir, "artifacts"), nil
 }
 
 // LocalJobDir returns the local artifact directory for a job.

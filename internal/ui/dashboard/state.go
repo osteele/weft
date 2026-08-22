@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/osteele/weft/internal/appdirs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,11 +17,11 @@ type State struct {
 var statePath string
 
 func init() {
-	home, err := os.UserHomeDir()
+	stateDir, err := appdirs.StateDir()
 	if err != nil {
 		return
 	}
-	statePath = filepath.Join(home, ".config", "weft", "tui-state.yaml")
+	statePath = filepath.Join(stateDir, "tui-state.yaml")
 }
 
 // LoadState reads the TUI state file, returning empty state if it doesn't exist
