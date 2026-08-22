@@ -3,9 +3,11 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -998,5 +1000,228 @@ func TestPrintJobsPopulatesSubmitterSessionPerFormat(t *testing.T) {
 				t.Fatalf("%s output does not carry the submitter session:\n%s", format, out)
 			}
 		})
+	}
+}
+
+// TestCollectJobsForListKeepsNewestUnderLimit pins the agent-facing contract of
+// the CLI list: the job just submitted survives --limit. Active jobs sort first
+// in SQL, so without a recency sort ahead of the limit slice a brand-new queued
+// job is the first row dropped — the one an agent checking "did my submission
+// land" came to see.
+func TestCollectJobsForListKeepsNewestUnderLimit(t *testing.T) {
+	database := db.SetupTestDB(t)
+	newestID := seedActiveThenNewest(t, database, 4)
+	setNewestFirstListFlags(t, 4)
+
+	jobs, err := collectJobsForList(database, nil)
+	if err != nil {
+		t.Fatalf("collectJobsForList: %v", err)
+	}
+	if !containsJobID(jobs, newestID) {
+		t.Errorf("newest job %d was truncated by --limit %d; got %d rows", newestID, listLimit, len(jobs))
+	}
+}
+
+// TestCollectJobsForListSearchKeepsNewestUnderLimit pins the same guarantee on
+// the --search branch, which reaches --limit by a different route: db.SearchJobs
+// orders by start_time descending, and a job that has not started yet has no
+// start time, so the newest job sorts last there rather than second.
+func TestCollectJobsForListSearchKeepsNewestUnderLimit(t *testing.T) {
+	database := db.SetupTestDB(t)
+	newestID := seedActiveThenNewest(t, database, 4)
+	setNewestFirstListFlags(t, 4)
+	listSearch = "echo"
+
+	jobs, err := collectJobsForList(database, nil)
+	if err != nil {
+		t.Fatalf("collectJobsForList: %v", err)
+	}
+	if !containsJobID(jobs, newestID) {
+		t.Errorf("newest job %d was truncated by --limit %d; got %d rows", newestID, listLimit, len(jobs))
+	}
+	if listLimitHiddenCount != 1 {
+		t.Errorf("search path did not record the capped row: got %d, want 1", listLimitHiddenCount)
+	}
+}
+
+// TestCollectJobsForListExplicitIDsKeepNewestUnderLimit pins the guarantee on
+// the explicit-job-ID branch, where the fetch preserves the order the IDs were
+// typed in and so caps away the highest IDs the user just named.
+func TestCollectJobsForListExplicitIDsKeepNewestUnderLimit(t *testing.T) {
+	database := db.SetupTestDB(t)
+	newestID := seedActiveThenNewest(t, database, 4)
+	setNewestFirstListFlags(t, 4)
+
+	jobs, err := collectJobsForList(database, []string{fmt.Sprintf("1::%d", newestID)})
+	if err != nil {
+		t.Fatalf("collectJobsForList: %v", err)
+	}
+	if !containsJobID(jobs, newestID) {
+		t.Errorf("newest job %d was truncated by --limit %d; got %d rows", newestID, listLimit, len(jobs))
+	}
+	if listLimitHiddenCount != 1 {
+		t.Errorf("explicit-ID path did not record the capped row: got %d, want 1", listLimitHiddenCount)
+	}
+}
+
+// setNewestFirstListFlags puts the list flags in the state renderListPlain
+// establishes: every host in scope, a cap of limit, and the recency sort opted
+// into. restoreListFlags does not cover listNewestFirst, which this diff adds.
+func setNewestFirstListFlags(t *testing.T, limit int) {
+	t.Helper()
+	restoreListFlags(t)
+	prevNewest := listNewestFirst
+	t.Cleanup(func() { listNewestFirst = prevNewest })
+	listLimit, listAllHosts, listNewestFirst = limit, true, true
+}
+
+func containsJobID(jobs []*db.Job, id int64) bool {
+	return slices.ContainsFunc(jobs, func(j *db.Job) bool { return j.ID == id })
+}
+
+// captureStderr mirrors captureStdout for the notices renderListPlain writes to
+// stderr, which is where they must go: they are emitted above the format switch
+// in printJobs, so json and tsv stdout has to stay free of them.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = oldStderr }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	return string(data)
+}
+
+// seedActiveThenNewest records n running jobs and then one newer queued job,
+// returning the queued job's id. The running jobs hold the front of the SQL
+// ordering, so the queued job is what a small --limit drops.
+func seedActiveThenNewest(t *testing.T, database *sql.DB, n int) int64 {
+	t.Helper()
+	started := time.Now().Add(-time.Hour).Unix()
+	for i := 0; i < n; i++ {
+		id, err := db.RecordQueued(database, "studio", "/tmp/active", "echo active", "")
+		if err != nil {
+			t.Fatalf("record active %d: %v", i, err)
+		}
+		if _, err := database.Exec(
+			`UPDATE job_attempts SET start_time = ?, status = 'running' WHERE job_id = ?`,
+			started, id); err != nil {
+			t.Fatalf("mark running %d: %v", i, err)
+		}
+	}
+	newestID, err := db.RecordQueued(database, "studio", "/tmp/new", "echo new", "")
+	if err != nil {
+		t.Fatalf("record newest: %v", err)
+	}
+	return newestID
+}
+
+// TestRenderListPlainShowsNewestAndReportsCap is the wiring test: it drives the
+// real CLI path rather than collectJobsForList, so it fails if renderListPlain
+// stops opting into the recency sort or stops reporting the cap. A helper that
+// is correct but unreferenced from the output path is the failure mode here.
+func TestRenderListPlainShowsNewestAndReportsCap(t *testing.T) {
+	restoreListFlags(t)
+	stubEmptyQueueStatus(t)
+	database := db.SetupTestDB(t)
+	newestID := seedActiveThenNewest(t, database, 4)
+
+	listLimit, listAllHosts, listFormat = 4, true, "table"
+
+	var stdout string
+	stderr := captureStderr(t, func() {
+		stdout = captureStdout(t, func() {
+			if err := renderListPlain(database, nil); err != nil {
+				t.Fatalf("renderListPlain: %v", err)
+			}
+		})
+	})
+
+	if !strings.Contains(stdout, fmt.Sprintf("wj%d", newestID)) {
+		t.Errorf("newest job wj%d missing from listing:\n%s", newestID, stdout)
+	}
+	if !strings.Contains(stderr, "hidden by --limit 4") {
+		t.Errorf("cap not reported on stderr; got %q", stderr)
+	}
+}
+
+// TestListLimitNoticeStaysOutOfMachineStdout pins the purity boundary: the cap
+// notice is useful to a human and corrupting to a parser, so json and tsv stdout
+// must be byte-identical whether or not the cap dropped rows.
+func TestListLimitNoticeStaysOutOfMachineStdout(t *testing.T) {
+	restoreListFlags(t)
+	stubEmptyQueueStatus(t)
+	database := db.SetupTestDB(t)
+	seedActiveThenNewest(t, database, 4)
+	listAllHosts = true
+
+	render := func(format string, limit int) string {
+		t.Helper()
+		listFormat, listLimit = format, limit
+		var out string
+		// Captured only to keep the notice off the test binary's own stderr.
+		captureStderr(t, func() {
+			out = captureStdout(t, func() {
+				if err := renderListPlain(database, nil); err != nil {
+					t.Fatalf("renderListPlain(%s): %v", format, err)
+				}
+			})
+		})
+		return out
+	}
+
+	for _, format := range []string{"json", "tsv"} {
+		capped := render(format, 4)
+		if listLimitHiddenCount == 0 {
+			t.Fatalf("%s: cap did not fire, purity assertion would be vacuous", format)
+		}
+		uncapped := render(format, 0)
+		// The capped run legitimately holds fewer rows; what must not differ is
+		// the presence of anything that is not a data row.
+		for _, line := range strings.Split(strings.TrimSpace(capped), "\n") {
+			if strings.Contains(line, "hidden") || strings.Contains(line, "--limit") {
+				t.Errorf("%s stdout has a non-data line: %q", format, line)
+			}
+		}
+		if uncapped == "" {
+			t.Errorf("%s uncapped stdout empty", format)
+		}
+	}
+}
+
+// TestCollectJobsForListLeavesSharedCallersOrdered pins the approved scope: only
+// the CLI plain path reorders. Callers that do not opt in keep the SQL ordering
+// that puts active jobs first, so the TUI and project listings are unaffected.
+func TestCollectJobsForListLeavesSharedCallersOrdered(t *testing.T) {
+	database := db.SetupTestDB(t)
+	newestID := seedActiveThenNewest(t, database, 4)
+
+	restoreListFlags(t)
+	listLimit, listAllHosts = 4, true
+	if listNewestFirst {
+		t.Fatalf("listNewestFirst leaked true into a shared caller")
+	}
+
+	jobs, err := collectJobsForList(database, nil)
+	if err != nil {
+		t.Fatalf("collectJobsForList: %v", err)
+	}
+	for _, j := range jobs {
+		if j.ID == newestID {
+			t.Fatalf("shared callers should keep active-first ordering; newest job %d surfaced", newestID)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -238,6 +239,8 @@ func plainListShouldSync() bool {
 }
 
 func renderListPlain(database *sql.DB, args []string) error {
+	listNewestFirst = true
+	defer func() { listNewestFirst = false }()
 	jobs, err := collectJobsForList(database, args)
 	if err != nil {
 		return err
@@ -245,6 +248,10 @@ func renderListPlain(database *sql.DB, args []string) error {
 	if listOlderHiddenCount > 0 {
 		fmt.Fprintf(os.Stderr, "%d older %s hidden by the default %d-day window — pass --all to include them.\n",
 			listOlderHiddenCount, pluralize("job", listOlderHiddenCount), defaultListMaxAgeDays)
+	}
+	if listLimitHiddenCount > 0 {
+		fmt.Fprintf(os.Stderr, "%d more %s hidden by --limit %d — pass --limit 0 to include them.\n",
+			listLimitHiddenCount, pluralize("job", listLimitHiddenCount), listLimit)
 	}
 	return printJobs(database, jobs)
 }
@@ -408,8 +415,43 @@ const defaultListMaxAgeDays = 7
 // list-flag state rather than thread an extra return value through every caller.
 var listOlderHiddenCount int
 
+// listLimitHiddenCount records how many jobs matched the current list filters
+// but were dropped by --limit. Set by collectJobsForList, read by
+// renderListPlain, so a capped listing does not read as "this is everything".
+var listLimitHiddenCount int
+
+// listNewestFirst makes collectJobsForList order by job ID descending before
+// applying --limit, so the most recently submitted jobs are the ones that
+// survive the cap. Only the CLI's plain list path sets it: that surface answers
+// "did the job I just submitted get created" for an agent, where recency is the
+// useful sort key. The TUI, project listings, and job watch leave it false and
+// keep the SQL ordering, which puts active jobs first.
+var listNewestFirst bool
+
+// sortJobsNewestFirst orders jobs by job ID descending.
+func sortJobsNewestFirst(jobs []*db.Job) {
+	slices.SortFunc(jobs, func(a, b *db.Job) int { return cmp.Compare(b.ID, a.ID) })
+}
+
+// applyListLimit caps a fully filtered job set at --limit. When listNewestFirst
+// is set it orders by job ID descending first, so the cap keeps the most
+// recently submitted jobs, and it records what the cap dropped in
+// listLimitHiddenCount. Every return path in collectJobsForList goes through
+// here so no branch can truncate silently.
+func applyListLimit(jobs []*db.Job) []*db.Job {
+	if listNewestFirst {
+		sortJobsNewestFirst(jobs)
+	}
+	if listLimit > 0 && len(jobs) > listLimit {
+		listLimitHiddenCount = len(jobs) - listLimit
+		jobs = jobs[:listLimit]
+	}
+	return jobs
+}
+
 func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	listOlderHiddenCount = 0
+	listLimitHiddenCount = 0
 	statusFilter, processedFilter, failedOnly, err := listFilters()
 	if err != nil {
 		return nil, err
@@ -437,10 +479,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		if err != nil {
 			return nil, err
 		}
-		if listLimit > 0 && len(jobs) > listLimit {
-			jobs = jobs[:listLimit]
-		}
-		return jobs, nil
+		return applyListLimit(jobs), nil
 	}
 
 	hostFilterHosts := []string{}
@@ -462,7 +501,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" || listMine || wantRental || wantInventory || listSince != "" || listActive {
+		if listNewestFirst || len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" || listMine || wantRental || wantInventory || listSince != "" || listActive {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -482,10 +521,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		if err != nil {
 			return nil, err
 		}
-		if listLimit > 0 && len(jobs) > listLimit {
-			jobs = jobs[:listLimit]
-		}
-		return jobs, nil
+		return applyListLimit(jobs), nil
 	}
 
 	// Default to the recency window unless --all or --since widens it.
@@ -532,11 +568,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		}
 	}
 
-	if listLimit > 0 && len(jobs) > listLimit {
-		jobs = jobs[:listLimit]
-	}
-
-	return jobs, nil
+	return applyListLimit(jobs), nil
 }
 
 func collectJobsForListWithFilters(database *sql.DB, args []string, statusFilter, processedFilter, projectFilter string) ([]*db.Job, error) {

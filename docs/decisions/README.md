@@ -23,6 +23,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0010](0010-cap-the-borrowed-curve-in-the-pre-running-watchdogs.md) | Cap the borrowed curve in the pre-running watchdogs | accepted |
 | [0011](0011-heartbeat-preserves-snapshot-time.md) | Heartbeats preserve the snapshot timestamp | accepted |
 | [0012](0012-separate-state-and-data-from-configuration.md) | Separate state and data from configuration | accepted |
+| [0013](0013-sort-the-cli-job-list-by-recency.md) | Sort the CLI job list by recency | accepted |
 
 ## Adding one
 

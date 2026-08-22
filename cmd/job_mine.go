@@ -147,15 +147,7 @@ func loadRecentNormalizedJobs(limit int) ([]*normalizedJobRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(jobs, func(a, b *db.Job) int {
-		if a.ID > b.ID {
-			return -1
-		}
-		if a.ID < b.ID {
-			return 1
-		}
-		return 0
-	})
+	sortJobsNewestFirst(jobs)
 	if limit > 0 && len(jobs) > limit {
 		jobs = jobs[:limit]
 	}

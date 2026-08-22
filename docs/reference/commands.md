@@ -952,7 +952,10 @@ weft jobs list [flags]      # Alias
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
 - `--tag TAG`: Filter by tag (can be repeated)
-- `--limit N`: Limit results (default: 50)
+- `--limit N`: Limit results (default: 50; `0` for no limit). Results are
+  ordered newest first, so the most recently submitted jobs are the ones
+  kept when the limit applies. When it drops rows, the count is reported on
+  stderr. The TUI and `weft project jobs` instead order active jobs first.
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
 - `--sync`: Sync job statuses from remote hosts before listing
