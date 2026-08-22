@@ -29,9 +29,9 @@ type CommandJob struct {
 	Desc      string `json:"desc,omitempty"`
 	SourceSHA string `json:"source_sha256,omitempty"`
 	// SourceR2Key, when set, tells the runner to skip the per-job marker
-	// check and instead download + extract sources/<sha>.tar.gz from R2 into
-	// a per-job dir. Used by Layer D as a content-fidelity fallback after a
-	// per-job marker failure.
+	// check and instead download + extract the exact recorded v1 or v2 source
+	// key from R2 into a per-job dir. Used by Layer D as a content-fidelity
+	// fallback after a per-job marker failure.
 	SourceR2Key  string   `json:"source_r2_key,omitempty"`
 	Env          []string `json:"env,omitempty"`
 	Deps         string   `json:"deps,omitempty"`

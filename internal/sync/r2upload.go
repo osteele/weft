@@ -28,7 +28,7 @@ const (
 	sourceListMinObjectsPerScan   = 1000
 	sourceListMaxObjectsPerScan   = 10000
 	sourceSlowDiscoveryThreshold  = 5 * time.Second
-	sourceClosureReceiptVersion   = "v1"
+	sourceClosureReceiptVersion   = "v2"
 )
 
 // UploadSourceProgressFunc receives coarse source upload phase updates.
@@ -46,6 +46,7 @@ type SourceUploadResult struct {
 // cache discovery was resolved. It is emitted to structured logs for large or
 // slow snapshots and retained in the result for focused diagnostics and tests.
 type SourceUploadStats struct {
+	HashWorkers           int
 	ReceiptHit            bool
 	ReceiptLookupFailed   bool
 	ReceiptWriteFailed    bool
@@ -87,8 +88,8 @@ type sourceClosureReceipt struct {
 }
 
 type sourceClosureReceiptObject struct {
-	Key    string `json:"key"`
-	SHA256 string `json:"sha256"`
+	Key            string `json:"key"`
+	IdentitySHA256 string `json:"identity_sha256"`
 }
 
 type sourcePresence uint8
@@ -171,6 +172,7 @@ func uploadSourceRootsToR2(ctx context.Context, store sourceObjectStore, localDi
 		return SourceUploadResult{}, fmt.Errorf("create source manifest: %w", err)
 	}
 	stats.HashDuration = time.Since(hashStarted)
+	stats.HashWorkers = build.workers
 	defer build.cleanup()
 	defer removeFiles(build.tarPaths)
 	manifest := build.manifest
@@ -181,7 +183,7 @@ func uploadSourceRootsToR2(ctx context.Context, store sourceObjectStore, localDi
 	stats.Objects = len(objects)
 
 	discoveryStarted := time.Now()
-	receiptKey := dataplane.SourceClosureReceipt(manifest.Hash)
+	receiptKey := dataplane.SourceClosureReceiptV2(manifest.Hash)
 	onProgress("checking source receipt")
 	receiptExists, receiptErr := store.ObjectExists(ctx, receiptKey)
 	if receiptErr != nil {
@@ -343,7 +345,7 @@ func marshalSourceClosureReceipt(manifestHash string, objects []sourceUploadObje
 		if object.key == "" || object.digest == "" {
 			return nil, fmt.Errorf("source closure %s contains an object without a key or digest", manifestHash)
 		}
-		receiptObjects = append(receiptObjects, sourceClosureReceiptObject{Key: object.key, SHA256: object.digest})
+		receiptObjects = append(receiptObjects, sourceClosureReceiptObject{Key: object.key, IdentitySHA256: object.digest})
 	}
 	sort.Slice(receiptObjects, func(i, j int) bool { return receiptObjects[i].Key < receiptObjects[j].Key })
 	receipt := sourceClosureReceipt{
@@ -455,6 +457,8 @@ func sourceObjectListPrefix(key string) (string, bool) {
 	switch {
 	case strings.HasPrefix(key, "assets/"):
 		namespace = "assets/"
+	case strings.HasPrefix(key, "sources/v2/sha256/"):
+		namespace = "sources/v2/sha256/"
 	case strings.HasPrefix(key, "sources/"):
 		namespace = "sources/"
 	default:
@@ -551,6 +555,7 @@ func logSourceUploadStats(ctx context.Context, stats SourceUploadStats) {
 	slog.Log(ctx, level, "source R2 cache discovery",
 		"component", "sync",
 		"strategy", strategy,
+		"hash_workers", stats.HashWorkers,
 		"receipt_hit", stats.ReceiptHit,
 		"objects", stats.Objects,
 		"cache_hits", stats.CacheHits,

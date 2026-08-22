@@ -24,6 +24,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0011](0011-heartbeat-preserves-snapshot-time.md) | Heartbeats preserve the snapshot timestamp | accepted |
 | [0012](0012-separate-state-and-data-from-configuration.md) | Separate state and data from configuration | accepted |
 | [0013](0013-sort-the-cli-job-list-by-recency.md) | Sort the CLI job list by recency | accepted |
+| [0014](0014-key-source-archives-by-canonical-tar-identity.md) | Key source archives by canonical tar identity | accepted |
 
 ## Adding one
 

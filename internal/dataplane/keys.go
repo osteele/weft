@@ -191,8 +191,18 @@ func AgentBinary(version, goos, goarch string) string {
 	return fmt.Sprintf("agents/%s/%s-%s", version, goos, goarch)
 }
 
+// SourceTarball returns the legacy v1 key whose digest identifies the gzip
+// representation. Keep this constructor for older metadata that stores only a
+// v1 digest; new source manifests use SourceTarballV2.
 func SourceTarball(hash string) string {
 	return fmt.Sprintf("sources/%s.tar.gz", hash)
+}
+
+// SourceTarballV2 returns the key for an archive identified by the SHA-256 of
+// its canonical uncompressed tar stream. The gzip representation may change
+// without changing this identity.
+func SourceTarballV2(hash string) string {
+	return fmt.Sprintf("sources/v2/sha256/%s.tar.gz", hash)
 }
 
 // SourceClosureReceipt is the immutable commit marker written after every
@@ -200,6 +210,12 @@ func SourceTarball(hash string) string {
 // keeps an existence-only lookup meaningful if the receipt schema changes.
 func SourceClosureReceipt(manifestHash string) string {
 	return fmt.Sprintf("source-closures/v1/%s.json", manifestHash)
+}
+
+// SourceClosureReceiptV2 is the commit marker for v2 canonical-tar source
+// identities. It is separate from v1 so existence never crosses semantics.
+func SourceClosureReceiptV2(manifestHash string) string {
+	return fmt.Sprintf("source-closures/v2/sha256/%s.json", manifestHash)
 }
 
 // NamedAsset returns the R2 key for a named asset published via

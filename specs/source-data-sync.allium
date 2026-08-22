@@ -50,7 +50,7 @@ use "./campaign-lifecycle.allium" as cloud
 external entity DispatchEntry {
     job: jobs/Job
     source_sha256: String?          -- SHA the dispatcher queued the job with
-    source_r2_key: String?          -- "sources/<sha>.tar.gz" when R2-isolated
+    source_r2_key: String?          -- exact recorded v1 or v2 source object key
 }
 
 -- DataAsset identifies a piece of named, addressable data (an HF model,
@@ -156,14 +156,15 @@ contract AgentStagingContract {
 
     -- legacy annotation: @invariant SourceHashMatchesManifest
         -- The source_hash referenced by the manifest served to the agent
-        -- resolves to an object under the sources/ prefix whose content
-        -- hashes to that value. The agent is entitled to reject mismatches
-        -- as a hard failure.
+        -- resolves through the exact recorded source key. For v1, the hash
+        -- identifies the gzip bytes; for v2, it identifies the canonical
+        -- uncompressed tar stream. The agent is entitled to reject a
+        -- mismatch under the recorded version's rules as a hard failure.
 
 	-- legacy annotation: @invariant SourceRootManifestMatchesObjects
 		-- Every root entry in the source_root_manifest resolves to an R2
-		-- object under the sources/ prefix whose content hashes to that
-		-- root's content_hash. The manifest hash is the source identity
+		-- object under the sources/ prefix whose versioned identity matches
+		-- that root's content_hash. The manifest hash is the source identity
 		-- for the whole job; the root hashes are the dedupe identity for
 		-- each mounted directory.
 
@@ -192,15 +193,16 @@ contract AgentStagingContract {
 
 -- A deterministic snapshot of a user's working directory at submission time,
 -- with exclude rules and declared local_path overlays applied. Identified
--- by the SHA-256 of the gzipped tarball contents; the same tree always
--- produces the same hash. Snapshots are not persisted entities in the DB —
--- they exist as the R2 object `sources/<hash>` and as rsync state on each
+-- by the SHA-256 of the canonical uncompressed tar stream; the same tree
+-- always produces the same hash independently of gzip settings. Snapshots are
+-- not persisted entities in the DB — they exist as a versioned R2 source
+-- object and as rsync state on each
 -- host that has received them — but they are modelled here as an entity
 -- because sync and reuse rules need to refer to "the snapshot for this
 -- working dir at this time".
 entity SourceSnapshot {
     working_dir: String             -- absolute local path at submission
-    content_hash: String            -- hex SHA-256 of tarball
+    content_hash: String            -- hex SHA-256 of canonical tar stream
     size_bytes: Integer
     excludes: List<ExcludePattern>
     local_overlays: List<String>    -- relative paths that were overlaid
@@ -281,7 +283,7 @@ entity PerJobSourceMarker {
 -- shared across all instances that reference it.
 entity CloudSourceObject {
     snapshot: SourceSnapshot
-    r2_key: String                  -- e.g. "sources/<hash>.tar.gz"
+    r2_key: String                  -- exact v1 or sources/v2/sha256/<hash>.tar.gz key
     uploaded_at: Timestamp
 }
 
@@ -307,6 +309,11 @@ config {
 
 	-- Files at or above this size are raw content-addressed source blobs.
 	large_source_blob_bytes: Integer = 8_388_608  -- 8 MiB
+
+	-- Source hashing/compression may use no more than half of GOMAXPROCS.
+	-- The implementation reduces this further from the one-minute host load
+	-- average and reserves one CPU for other processes.
+	max_source_worker_fraction: Decimal = 0.5
 
     -- Per-rsync deadlines.
     rsync_connect_timeout: Duration = 15.seconds   -- ssh connection window
@@ -401,7 +408,7 @@ rule BuildSourceSnapshot {
 
     ensures: SourceSnapshot.created(
         working_dir: working_dir,
-        content_hash: HashTarball(working_dir, excludes, overlays),
+        content_hash: SHA256(CanonicalTar(working_dir, excludes, overlays)),
         size_bytes: MeasureSize(working_dir, excludes),
         excludes: excludes,
         local_overlays: overlays.file_path,
@@ -873,8 +880,8 @@ rule PreflightRejected {
 --       PREFLIGHT_REJECTED protocol. The detail carries the expected SHA, so
 --       the dispatcher can branch on whether the laptop tree can still
 --       reproduce that SHA:
---         - matches  → upload the source tarball to R2 under
---                      sources/<sha>.tar.gz (idempotent; same data plane as
+--         - matches  → upload the source tarball to R2 under its current
+--                      versioned content-addressed key (idempotent; same data plane as
 --                      cloud rentals), stamp source_r2_key on the queue
 --                      entry, skip the rsync and the per-job marker write
 --                      for this dispatch.
@@ -1020,7 +1027,7 @@ rule UploadSourceToCloud {
     -- for blob in root.blobs:
     -- if not R2ObjectExists(blob.r2_key):
     -- legacy: R2Put(key: blob.r2_key, body: RawFileBytes(blob), content_type: "application/octet-stream")
-    -- let key = "sources/" + root.snapshot.content_hash + ".tar.gz"
+    -- let key = "sources/v2/sha256/" + root.snapshot.content_hash + ".tar.gz"
     -- if not R2ObjectExists(key):
     -- legacy: R2Put(key: key, body: TarballFor(root.snapshot), content_type: "application/gzip")
     -- legacy: CloudSourceObject.created(
@@ -1049,7 +1056,7 @@ rule UploadSourceToCloud {
     -- Implementation anchor:
     --   cmd/run.go                    — pinRunSourceSnapshot
     --   internal/sync/r2upload.go     — UploadCloudSourceRootsToR2WithProgressForInputsAndCommands
-    --   internal/dataplane/keys.go    — SourceTarball and NamedAsset key helpers
+    --   internal/dataplane/keys.go    — SourceTarballV2 and NamedAsset key helpers
 }
 
 rule SelectCloudSourceManifestAtDispatch {
@@ -1068,7 +1075,7 @@ rule SelectCloudSourceManifestAtDispatch {
 }
 
 -- When a cloud instance reaches the sources_extracted bootstrap stage, the
--- agent has pulled each sources/<hash>.tar.gz named in the manifest and
+-- agent has pulled each exact versioned source key named in the manifest and
 -- expanded it into that root's mount directory. After that point, per-job
 -- dispatches on that instance reuse the already-extracted trees and repair
 -- any missing mount before setup or command execution.
@@ -1721,12 +1728,24 @@ invariant LocalInputsInsideWorkingDir {
             IsInsideWorkingDir(input.file_path, job.working_dir)
 }
 
--- Every R2 object under the sources/ prefix is keyed by the content hash
--- of the object it stores. This lets many instances share one tarball and
--- lets the uploader skip work when the hash already exists.
+-- Every new R2 source object is keyed by the SHA-256 of its canonical
+-- uncompressed tar stream. The compressed representation is not the identity.
 invariant R2SourceObjectsContentAddressed {
     for obj in CloudSourceObjects:
-        obj.r2_key = "sources/" + obj.snapshot.content_hash + ".tar.gz"
+		obj.r2_key = "sources/v2/sha256/" + obj.snapshot.content_hash + ".tar.gz"
+}
+
+-- Historical attempts keep the exact v1 key recorded at submission. Retrieval
+-- never derives a historical key with the current v2 constructor, and adopting
+-- v2 does not authorize deleting or rewriting v1 objects.
+invariant HistoricalSourceKeysRemainRetrievable {
+	for entry in DispatchEntries where entry.source_r2_key != null:
+		RetrievedSourceKey(entry.job) = entry.source_r2_key
+
+	-- legacy annotation: @guidance
+		-- Cloud attempts likewise retain their exact source keys in bootstrap
+		-- and manifest metadata. CLI and agent retrieval parse those stored
+		-- keys; they must not reconstruct them with SourceTarballV2.
 }
 
 -- Cloud source repair must inspect every mount in the job's source-root
@@ -1858,7 +1877,7 @@ surface AgentStagingInterface {
 
     -- legacy annotation: @guarantee ManifestPublishedAfterAllInputsStaged
         -- weft does not publish the campaign manifest for an instance
-        -- until (a) the sources/<hash> object exists in R2, and (b)
+        -- until (a) every exact versioned source key exists in R2, and (b)
         -- every needs/<key> referenced by any job in the manifest exists
         -- in R2. The agent may treat a published manifest as proof that
         -- all declared inputs are resolvable.

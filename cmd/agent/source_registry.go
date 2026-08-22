@@ -333,11 +333,11 @@ func ensureOneSourceFresh(bucket string, mount cloud.SourceMount) error {
 	return nil
 }
 
-// fetchSourceTarballToDir downloads sources/<sha>.tar.gz from R2 (or reuses a
-// cached copy) and extracts it into perJobDir. Used as the implementation of
-// runner.Runner.EnsureSourceFromR2: returns a non-nil error on any failure so
-// the runner can reject the attempt at preflight instead of silently running
-// against the wrong sources.
+// fetchSourceTarballToDir downloads the exact recorded v1 or v2 source key
+// from R2 (or reuses a cached copy) and extracts it into perJobDir. Used as the
+// implementation of runner.Runner.EnsureSourceFromR2: returns a non-nil error
+// on any failure so the runner can reject the attempt at preflight instead of
+// silently running against the wrong sources.
 //
 // The per-job dir is created if missing and the cached tarball is shared
 // across jobs that need the same R2 key (content-addressed).

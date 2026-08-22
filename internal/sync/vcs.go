@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -15,9 +16,11 @@ type VCSInfo struct {
 	Dirty    bool   `json:"dirty,omitempty"`
 }
 
-// DetectVCSInfo returns VCS provenance when localDir is recognizably a git or
-// jj repo. Failures to run the VCS command leave provenance absent rather than
-// inventing an "unknown clean" state.
+// DetectVCSInfo returns optional VCS provenance when localDir is recognizably a
+// git or jj repo. Source capture remains filesystem-based: this metadata does
+// not select files, require commits, or gate snapshots. Failures to run the VCS
+// command leave provenance absent rather than inventing an "unknown clean"
+// state.
 func DetectVCSInfo(localDir string) *VCSInfo {
 	if _, err := os.Stat(filepath.Join(localDir, ".jj")); err == nil {
 		return detectJjInfo(localDir)
@@ -29,22 +32,28 @@ func DetectVCSInfo(localDir string) *VCSInfo {
 }
 
 func detectJjInfo(localDir string) *VCSInfo {
-	out, err := exec.Command("jj", "-R", localDir, "log", "-r", "@", "--no-graph", "-T", `change_id ++ "\n" ++ commit_id ++ "\n"`).Output()
+	out, err := exec.Command("jj", "-R", localDir, "log", "-r", "@", "--no-graph", "-T", `change_id ++ "\n" ++ commit_id ++ "\n" ++ empty ++ "\n"`).Output()
 	if err != nil {
 		return nil
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	info := &VCSInfo{Type: "jj"}
-	if len(lines) > 0 {
-		info.ChangeID = strings.TrimSpace(lines[0])
+	return parseJjInfo(string(out))
+}
+
+func parseJjInfo(output string) *VCSInfo {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 3 {
+		return nil
 	}
-	if len(lines) > 1 {
-		info.Revision = strings.TrimSpace(lines[1])
+	empty, err := strconv.ParseBool(strings.TrimSpace(lines[2]))
+	if err != nil {
+		return nil
 	}
-	if err := exec.Command("jj", "-R", localDir, "diff", "--quiet").Run(); err != nil {
-		info.Dirty = true
+	return &VCSInfo{
+		Type:     "jj",
+		ChangeID: strings.TrimSpace(lines[0]),
+		Revision: strings.TrimSpace(lines[1]),
+		Dirty:    !empty,
 	}
-	return info
 }
 
 func detectGitInfo(localDir string) *VCSInfo {

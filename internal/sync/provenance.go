@@ -24,8 +24,9 @@ func PerJobSourceMarkerFile(jobID int64) string {
 	return fmt.Sprintf(".weft-source.%d.sha256", jobID)
 }
 
-// ComputeSourceSHA256 computes a deterministic SHA-256 fingerprint for the
-// source snapshot that SyncSources would send (same exclude rules).
+// ComputeSourceSHA256 computes a deterministic SHA-256 fingerprint of the
+// canonical tar stream for the source snapshot that SyncSources would send
+// (same exclude rules). It does not hash the gzip representation.
 func ComputeSourceSHA256(localDir string) (string, error) {
 	return ComputeSourceSHA256ForCommands(localDir, nil)
 }

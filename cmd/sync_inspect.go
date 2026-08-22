@@ -74,7 +74,7 @@ func runSyncInspect(cmd *cobra.Command, args []string) error {
 	if inspection.TarballHash != "" {
 		if cfg, err := config.Load(); err == nil {
 			if r2Client, err := buildR2Client(cfg); err == nil && r2Client != nil {
-				report.R2Key = r2keys.SourceTarball(inspection.TarballHash)
+				report.R2Key = r2keys.SourceTarballV2(inspection.TarballHash)
 				if uploaded, err := r2Client.ObjectExists(context.Background(), report.R2Key); err == nil {
 					report.R2Uploaded = &uploaded
 				}

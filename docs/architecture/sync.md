@@ -23,16 +23,26 @@ Two transport paths share the same snapshot semantics:
   immutable source manifest before the job row becomes visible. After `local:` overlays are applied,
   regular files of at least 8 MiB are diverted into raw content-addressed
   `assets/<sha256>` objects. The residual tree becomes a deterministic gzip
-  tarball (`tarball.go`, with zeroed mtimes/uids so identical trees hash
-  identically), stored as `sources/<sha256>.tar.gz`. Both object kinds are
-  deduped by existence probes. Bootstrap and agent refresh extract the tarball,
-  materialize each blob at its root-relative path, and verify its SHA-256.
+  tarball (`tarball.go`, with zeroed mtimes/uids so identical trees have the
+  same canonical tar stream), stored as
+  `sources/v2/sha256/<canonical-tar-sha256>.tar.gz`. The gzip representation is
+  produced in parallel but is not the identity. Large-file hashing and gzip
+  use at most half of `GOMAXPROCS`, reduced further by the host's one-minute
+  load average so source staging leaves capacity for other processes. Both
+  object kinds are deduped by existence probes. Bootstrap and agent refresh
+  extract the tarball, materialize each blob at its root-relative path, and
+  verify each raw blob's SHA-256.
   Symlinks remain in the tarball; extraction rejects tar-slip entries
   (absolute paths, `..` escapes, and out-of-root symlink targets; see
   `archive.go`).
   Fresh launches and instance reuse consume the stored per-job manifest. Rows
   created before submit-time pinning have no pin and retain dispatch-time
   snapshot derivation.
+
+  Attempts submitted by older clients retain their exact
+  `sources/<gzip-sha256>.tar.gz` v1 key in bootstrap and manifest metadata.
+  Retrieval consumes that recorded key verbatim; v1 objects are not rekeyed or
+  deleted as part of the v2 transition.
 
 **Size cap**: `MaxSourceTarballBytes` (500 MiB) bounds the uncompressed
 residual tarball, after large-file diversion. Overflow errors
@@ -47,9 +57,10 @@ path-escape rejection. Overlay contents are counted once.
 
 ## Provenance
 
-`ComputeSourceSHA256` hashes the tarball itself, so anything that changes
-snapshot content (including symlink targets) changes the hash. Two markers
-record what was synced (`provenance.go`):
+`ComputeSourceSHA256` hashes the canonical uncompressed tar stream, so anything
+that changes snapshot content (including symlink targets) changes the hash
+without tying provenance to a particular gzip encoder. Two markers record what
+was synced (`provenance.go`):
 
 - the **rolling** per-working-dir marker (`.weft-source.sha256`),
   overwritten by any sync to that directory; and

@@ -238,7 +238,7 @@ func TestUploadCloudSourceReusesLargeBlob(t *testing.T) {
 	if !second.Stats.ReceiptHit {
 		t.Fatal("second upload did not use the source closure receipt")
 	}
-	receiptKey := dataplane.SourceClosureReceipt(first.Manifest.Hash)
+	receiptKey := dataplane.SourceClosureReceiptV2(first.Manifest.Hash)
 	if got := store.puts[receiptKey]; got != 1 {
 		t.Fatalf("receipt put count = %d, want 1 for %s", got, receiptKey)
 	}
@@ -254,6 +254,14 @@ func TestUploadCloudSourceReusesLargeBlob(t *testing.T) {
 	}
 	if len(receipt.Objects) != first.Stats.Objects {
 		t.Fatalf("receipt object count = %d, want %d", len(receipt.Objects), first.Stats.Objects)
+	}
+	for _, object := range receipt.Objects {
+		if object.Key == "" || object.IdentitySHA256 == "" {
+			t.Fatalf("receipt object lacks versioned identity: %+v", object)
+		}
+	}
+	if first.Stats.HashWorkers < 1 {
+		t.Fatalf("hash workers = %d, want at least 1", first.Stats.HashWorkers)
 	}
 }
 
@@ -367,6 +375,25 @@ func TestDiscoverSourceObjectsByPrefixFallsBackAfterListFailure(t *testing.T) {
 	for key, exists := range checked {
 		if !exists {
 			t.Fatalf("fallback classified present key %s as absent", key)
+		}
+	}
+}
+
+func TestSourceObjectListPrefixSupportsLegacyAndCanonicalTarKeys(t *testing.T) {
+	tests := []struct {
+		key    string
+		prefix string
+		ok     bool
+	}{
+		{key: "assets/abcdef", prefix: "assets/a", ok: true},
+		{key: "sources/abcdef.tar.gz", prefix: "sources/a", ok: true},
+		{key: "sources/v2/sha256/abcdef.tar.gz", prefix: "sources/v2/sha256/a", ok: true},
+		{key: "sources/v2/sha256/not-hex.tar.gz", ok: false},
+	}
+	for _, tc := range tests {
+		prefix, ok := sourceObjectListPrefix(tc.key)
+		if prefix != tc.prefix || ok != tc.ok {
+			t.Errorf("sourceObjectListPrefix(%q) = (%q, %v), want (%q, %v)", tc.key, prefix, ok, tc.prefix, tc.ok)
 		}
 	}
 }

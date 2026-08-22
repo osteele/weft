@@ -6,11 +6,17 @@ func TestSourceTarball(t *testing.T) {
 	if got := SourceTarball("abc123"); got != "sources/abc123.tar.gz" {
 		t.Fatalf("SourceTarball = %q", got)
 	}
+	if got := SourceTarballV2("abc123"); got != "sources/v2/sha256/abc123.tar.gz" {
+		t.Fatalf("SourceTarballV2 = %q", got)
+	}
 }
 
 func TestSourceClosureReceipt(t *testing.T) {
 	if got := SourceClosureReceipt("abc123"); got != "source-closures/v1/abc123.json" {
 		t.Fatalf("SourceClosureReceipt = %q", got)
+	}
+	if got := SourceClosureReceiptV2("abc123"); got != "source-closures/v2/sha256/abc123.json" {
+		t.Fatalf("SourceClosureReceiptV2 = %q", got)
 	}
 }
 

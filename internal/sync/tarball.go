@@ -2,7 +2,6 @@ package sync
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/klauspost/pgzip"
 )
 
 // MaxSourceTarballBytes is the maximum uncompressed source size before
@@ -24,9 +25,12 @@ const MaxSourceTarballBytes = 500 * 1024 * 1024 // 500 MB
 // source tarballs into an individually content-addressed object.
 const LargeSourceBlobThresholdBytes = 8 * 1024 * 1024 // 8 MiB
 
+const sourceGzipBlockSize = 1 << 20
+
 // CreateSourceTarball creates a gzip-compressed tarball of localDir, skipping
 // entries matching DefaultExcludes(). Returns the path to a temp file and the
-// hex-encoded SHA-256 hash of the tarball contents.
+// hex-encoded SHA-256 hash of the canonical uncompressed tar stream. The hash
+// is independent of the gzip encoder and its worker count.
 //
 // Returns an error if the uncompressed source exceeds MaxSourceTarballBytes.
 func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err error) {
@@ -50,6 +54,10 @@ func createSourceTarballWithOverlays(localDir string, excludes, overlayInputs []
 // createSourceTarball writes a deterministic snapshot while omitting exact
 // slash-relative paths in omittedPaths. maxBytes <= 0 disables the size cap.
 func createSourceTarball(localDir string, excludes, overlayInputs []string, omittedPaths map[string]struct{}, maxBytes int64) (tmpPath string, sha256hex string, err error) {
+	return createSourceTarballWithWorkers(localDir, excludes, overlayInputs, omittedPaths, maxBytes, sourceWorkerLimit())
+}
+
+func createSourceTarballWithWorkers(localDir string, excludes, overlayInputs []string, omittedPaths map[string]struct{}, maxBytes int64, workers int) (tmpPath string, sha256hex string, err error) {
 	tmpFile, err := os.CreateTemp("", "weft-source-*.tar.gz")
 	if err != nil {
 		return "", "", fmt.Errorf("create temp file: %w", err)
@@ -62,11 +70,15 @@ func createSourceTarball(localDir string, excludes, overlayInputs []string, omit
 		}
 	}()
 
+	if workers < 1 {
+		workers = 1
+	}
+	gw := pgzip.NewWriter(tmpFile)
+	if err := gw.SetConcurrency(sourceGzipBlockSize, workers); err != nil {
+		return "", "", fmt.Errorf("configure gzip concurrency: %w", err)
+	}
 	hasher := sha256.New()
-	mw := io.MultiWriter(tmpFile, hasher)
-
-	gw := gzip.NewWriter(mw)
-	tw := tar.NewWriter(gw)
+	tw := tar.NewWriter(io.MultiWriter(gw, hasher))
 
 	localDir = strings.TrimRight(localDir, "/")
 

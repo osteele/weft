@@ -20,6 +20,7 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/google/go-containerregistry v0.20.6
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/pgzip v1.2.6
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/muesli/termenv v0.16.0
 	github.com/pelletier/go-toml v1.9.5

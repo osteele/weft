@@ -161,6 +161,7 @@ func AgentBinary(version, goos, goarch string) string {
 	return dataplane.AgentBinary(version, goos, goarch)
 }
 func SourceTarball(hash string) string   { return dataplane.SourceTarball(hash) }
+func SourceTarballV2(hash string) string { return dataplane.SourceTarballV2(hash) }
 func NamedAsset(sha256Hex string) string { return dataplane.NamedAsset(sha256Hex) }
 
 func CoordinatorRelayRequest(requestID string) string {

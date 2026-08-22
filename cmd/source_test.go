@@ -42,19 +42,23 @@ func TestParseBootstrapSources(t *testing.T) {
 	script := `
 rclone copyto "r2:$R2_BUCKET/sources/aaa.tar.gz" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C "/workspace/proj-a" && rm -f /tmp/src.tar.gz
 rclone copyto "r2:$R2_BUCKET/sources/bbb.tar.gz" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C "/workspace/proj b" && rm -f /tmp/src.tar.gz
+rclone copyto "r2:$R2_BUCKET/sources/v2/sha256/ccc.tar.gz" /tmp/src.tar.gz && tar xzf /tmp/src.tar.gz -C "/workspace/proj-c" && rm -f /tmp/src.tar.gz
 `
 	got, err := parseBootstrapSources(script)
 	if err != nil {
 		t.Fatalf("parseBootstrapSources: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
 	}
 	if got[0].R2Key != "sources/aaa.tar.gz" || got[0].RemoteDir != "/workspace/proj-a" {
 		t.Fatalf("first mapping = %+v", got[0])
 	}
 	if got[1].R2Key != "sources/bbb.tar.gz" || got[1].RemoteDir != "/workspace/proj b" {
 		t.Fatalf("second mapping = %+v", got[1])
+	}
+	if got[2].R2Key != "sources/v2/sha256/ccc.tar.gz" || got[2].RemoteDir != "/workspace/proj-c" {
+		t.Fatalf("third mapping = %+v", got[2])
 	}
 }
 

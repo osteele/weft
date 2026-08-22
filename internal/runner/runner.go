@@ -64,10 +64,10 @@ type Runner struct {
 
 	// EnsureSourceFromR2 is an optional preflight hook used by jobs queued
 	// in R2-isolated mode (CommandJob.SourceR2Key != ""). The agent
-	// implementation downloads sources/<sha>.tar.gz from R2 (rclone) and
-	// extracts it into perJobDir, then returns nil. A non-nil error causes
-	// the runner to reject the attempt at preflight (no startTime, no meta
-	// file, sentinel + failure_reason written). When nil, jobs with
+	// implementation downloads the exact recorded v1 or v2 source key from
+	// R2 (rclone) and extracts it into perJobDir, then returns nil. A non-nil
+	// error causes the runner to reject the attempt at preflight (no startTime,
+	// no meta file, sentinel + failure_reason written). When nil, jobs with
 	// SourceR2Key fall back to the shared working dir with a debug log.
 	EnsureSourceFromR2 func(jobID int64, r2Key, perJobDir string) error
 

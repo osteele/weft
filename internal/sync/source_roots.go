@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
@@ -277,10 +278,12 @@ type sourceManifestBuild struct {
 	manifest  SourceManifest
 	tarPaths  []string
 	blobPaths [][]string
+	workers   int
 	cleanup   func()
 }
 
 func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string, commands []string, divertLargeFiles bool) (sourceManifestBuild, error) {
+	workers := sourceWorkerLimit()
 	roots, warnings, err := ResolveSourceRootsForCommands(projectRoot, commands)
 	if err != nil {
 		return sourceManifestBuild{}, err
@@ -327,16 +330,16 @@ func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 		var rootBlobPaths []string
 		if divertLargeFiles {
 			var blobs []dataplane.SourceBlob
-			blobs, rootBlobPaths, omittedPaths, err = findLargeSourceBlobs(rootSourceDir, excludes)
+			blobs, rootBlobPaths, omittedPaths, err = findLargeSourceBlobs(rootSourceDir, excludes, workers)
 			roots[i].Blobs = blobs
 		}
 		if err == nil && divertLargeFiles {
-			tmpPath, hash, err = createSourceTarball(rootSourceDir, excludes, stagedOverlayInputs, omittedPaths, MaxSourceTarballBytes)
+			tmpPath, hash, err = createSourceTarballWithWorkers(rootSourceDir, excludes, stagedOverlayInputs, omittedPaths, MaxSourceTarballBytes, workers)
 		} else if err == nil && i == 0 && !applyExcludes {
-			tmpPath, hash, err = createSourceTarballWithOverlays(rootSourceDir, nil, stagedOverlayInputs)
+			tmpPath, hash, err = createSourceTarballWithWorkers(rootSourceDir, nil, stagedOverlayInputs, nil, MaxSourceTarballBytes, workers)
 		} else {
 			if err == nil {
-				tmpPath, hash, err = CreateSourceTarball(rootSourceDir)
+				tmpPath, hash, err = createSourceTarballWithWorkers(rootSourceDir, excludes, nil, nil, MaxSourceTarballBytes, workers)
 			}
 		}
 		if err != nil {
@@ -353,7 +356,7 @@ func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 			return sourceManifestBuild{}, fmt.Errorf("measure source root %s: %w", roots[i].LocalPath, err)
 		}
 		roots[i].Hash = hash
-		roots[i].R2Key = dataplane.SourceTarball(hash)
+		roots[i].R2Key = dataplane.SourceTarballV2(hash)
 		roots[i].SizeBytes = sizeBytes
 		if vcs := DetectVCSInfo(roots[i].LocalPath); vcs != nil {
 			roots[i].VCS = vcs
@@ -369,6 +372,7 @@ func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 		manifest:  SourceManifest{Roots: roots, Hash: hash, Warnings: warnings},
 		tarPaths:  tmpPaths,
 		blobPaths: blobPaths,
+		workers:   workers,
 		cleanup:   cleanup,
 	}, nil
 }
@@ -397,10 +401,12 @@ func manifestHash(roots []SourceRoot) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func findLargeSourceBlobs(localDir string, excludes []string) ([]dataplane.SourceBlob, []string, map[string]struct{}, error) {
-	var blobs []dataplane.SourceBlob
-	var paths []string
-	omitted := make(map[string]struct{})
+func findLargeSourceBlobs(localDir string, excludes []string, workerLimit int) ([]dataplane.SourceBlob, []string, map[string]struct{}, error) {
+	type candidate struct {
+		filename string
+		relPath  string
+	}
+	var candidates []candidate
 	err := filepath.Walk(localDir, func(filename string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			if os.IsPermission(walkErr) {
@@ -424,34 +430,74 @@ func findLargeSourceBlobs(localDir string, excludes []string) ([]dataplane.Sourc
 		if !info.Mode().IsRegular() || info.Size() < LargeSourceBlobThresholdBytes {
 			return nil
 		}
-		f, err := os.Open(filename)
-		if err != nil {
-			return fmt.Errorf("open diverted source file %s: %w", relPath, err)
-		}
-		h := sha256.New()
-		_, copyErr := io.Copy(h, f)
-		closeErr := f.Close()
-		if copyErr != nil {
-			return fmt.Errorf("hash diverted source file %s: %w", relPath, copyErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close diverted source file %s: %w", relPath, closeErr)
-		}
-		hash := hex.EncodeToString(h.Sum(nil))
-		slashRelPath := filepath.ToSlash(relPath)
-		blobs = append(blobs, dataplane.SourceBlob{
-			R2Key:   dataplane.NamedAsset(hash),
-			RelPath: slashRelPath,
-			SHA256:  hash,
-		})
-		paths = append(paths, filename)
-		omitted[slashRelPath] = struct{}{}
+		candidates = append(candidates, candidate{filename: filename, relPath: filepath.ToSlash(relPath)})
 		return nil
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("scan large source files in %s: %w", localDir, err)
 	}
+	if len(candidates) == 0 {
+		return nil, nil, map[string]struct{}{}, nil
+	}
+
+	type hashResult struct {
+		hash string
+		err  error
+	}
+	results := make([]hashResult, len(candidates))
+	jobs := make(chan int)
+	workers := min(max(1, workerLimit), len(candidates))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				item := candidates[index]
+				results[index].hash, results[index].err = hashSourceBlob(item.filename, item.relPath)
+			}
+		}()
+	}
+	for index := range candidates {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	blobs := make([]dataplane.SourceBlob, 0, len(candidates))
+	paths := make([]string, 0, len(candidates))
+	omitted := make(map[string]struct{}, len(candidates))
+	for index, item := range candidates {
+		result := results[index]
+		if result.err != nil {
+			return nil, nil, nil, result.err
+		}
+		blobs = append(blobs, dataplane.SourceBlob{
+			R2Key:   dataplane.NamedAsset(result.hash),
+			RelPath: item.relPath,
+			SHA256:  result.hash,
+		})
+		paths = append(paths, item.filename)
+		omitted[item.relPath] = struct{}{}
+	}
 	return blobs, paths, omitted, nil
+}
+
+func hashSourceBlob(filename, relPath string) (string, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return "", fmt.Errorf("open diverted source file %s: %w", relPath, err)
+	}
+	h := sha256.New()
+	_, copyErr := io.Copy(h, f)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("hash diverted source file %s: %w", relPath, copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close diverted source file %s: %w", relPath, closeErr)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func removeFiles(paths []string) {
