@@ -11,63 +11,87 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/jobview"
+	"github.com/osteele/weft/internal/sessioninbox"
 	"github.com/osteele/weft/internal/status"
 )
+
+const (
+	UnprocessedScopeUnscoped       = sessioninbox.ScopeUnscoped
+	UnprocessedScopeScopedEmpty    = sessioninbox.ScopeScopedEmpty
+	UnprocessedScopeScopedNonEmpty = sessioninbox.ScopeScopedNonEmpty
+)
+
+// UnprocessedScope records whether the inbox was attributable to an exact
+// submitter session. The session id is opaque and is absent for unscoped reads.
+type UnprocessedScope = sessioninbox.Scope
 
 // StatusLine is the deterministic per-entry header. It carries counts that
 // operators expect to see every wake — running/queued/instances/run rate,
 // project mix, and the unprocessed-results inbox — and is computed
 // directly from the snapshot, with no model call or token spend.
 type StatusLine struct {
-	Now                  time.Time `json:"now"`
-	RunningJobs          int       `json:"running_jobs"`
-	QueuedJobs           int       `json:"queued_jobs"`
-	StartingJobs         int       `json:"starting_jobs"`
-	PendingPlacement     int       `json:"pending_placement"`
-	ActiveInstances      int       `json:"active_instances"`
-	GraceInstances       int       `json:"grace_instances"`
-	LaunchingInst        int       `json:"launching_instances"`
-	RunRateUSDPerHour    float64   `json:"run_rate_usd_per_hour"`
-	BudgetUSDPerHour     float64   `json:"budget_usd_per_hour"` // 0 = no configured target
-	Projects             []string  `json:"projects"`            // sorted, deduped names of projects with active jobs
-	AutopilotState       string    `json:"autopilot_state"`
-	UnprocessedCompleted int       `json:"unprocessed_completed"` // unprocessed jobs in terminal "completed" state
-	UnprocessedFailed    int       `json:"unprocessed_failed"`    // unprocessed jobs in failed/dead/killed/canceled
-	CompletedProjects    []string  `json:"completed_projects,omitempty"`
-	FailedProjects       []string  `json:"failed_projects,omitempty"`
+	Now                  time.Time        `json:"now"`
+	RunningJobs          int              `json:"running_jobs"`
+	QueuedJobs           int              `json:"queued_jobs"`
+	StartingJobs         int              `json:"starting_jobs"`
+	PendingPlacement     int              `json:"pending_placement"`
+	ActiveInstances      int              `json:"active_instances"`
+	GraceInstances       int              `json:"grace_instances"`
+	LaunchingInst        int              `json:"launching_instances"`
+	RunRateUSDPerHour    float64          `json:"run_rate_usd_per_hour"`
+	BudgetUSDPerHour     float64          `json:"budget_usd_per_hour"` // 0 = no configured target
+	Projects             []string         `json:"projects"`            // sorted, deduped names of projects with active jobs
+	AutopilotState       string           `json:"autopilot_state"`
+	UnprocessedScope     UnprocessedScope `json:"unprocessed_scope"`
+	UnprocessedCompleted int              `json:"unprocessed_completed"` // unprocessed jobs in terminal "completed" state
+	UnprocessedFailed    int              `json:"unprocessed_failed"`    // unprocessed jobs in failed/dead or completed with non-zero exit
+	CompletedProjects    []string         `json:"completed_projects,omitempty"`
+	FailedProjects       []string         `json:"failed_projects,omitempty"`
 }
 
 // UnprocessedCounts collects unprocessed terminal-job counts for the
 // status line. Caller may compute these from any source; narrate.go
 // queries the DB.
 type UnprocessedCounts struct {
-	Completed         int      `json:"completed"`
-	Failed            int      `json:"failed"`
-	CompletedProjects []string `json:"completed_projects,omitempty"`
-	FailedProjects    []string `json:"failed_projects,omitempty"`
+	Scope             UnprocessedScope `json:"scope"`
+	Completed         int              `json:"completed"`
+	Failed            int              `json:"failed"`
+	CompletedProjects []string         `json:"completed_projects,omitempty"`
+	FailedProjects    []string         `json:"failed_projects,omitempty"`
+}
+
+type UnprocessedJobViews struct {
+	Scope UnprocessedScope `json:"scope"`
+	Jobs  []JobView        `json:"jobs"`
+}
+
+type UnprocessedCountsAndViews struct {
+	Scope  UnprocessedScope  `json:"scope"`
+	Counts UnprocessedCounts `json:"counts"`
+	Jobs   []JobView         `json:"jobs"`
 }
 
 // LoadUnprocessedCounts queries terminal jobs in the unprocessed inbox and
 // splits the count into successes versus failures. Optionally scoped to a
 // project. Bounded to the last 14 days so old terminal jobs do not dominate
 // status surfaces.
-func LoadUnprocessedCounts(database *sql.DB, project string) (UnprocessedCounts, error) {
-	jobs, err := loadUnprocessedJobs(database, project)
+func LoadUnprocessedCounts(database *sql.DB, project, submitterSession string) (UnprocessedCounts, error) {
+	result, err := loadUnprocessedJobs(database, project, submitterSession)
 	if err != nil {
 		return UnprocessedCounts{}, err
 	}
-	return unprocessedCountsFromJobs(jobs), nil
+	return unprocessedCountsFromJobs(result.Scope, result.Jobs), nil
 }
 
 // LoadUnprocessedJobViews returns the bounded unprocessed terminal-job inbox as
 // narrate job views, using the same project scope and age window as
 // LoadUnprocessedCounts.
-func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error) {
-	jobs, err := loadUnprocessedJobs(database, project)
+func LoadUnprocessedJobViews(database *sql.DB, project, submitterSession string) (UnprocessedJobViews, error) {
+	result, err := loadUnprocessedJobs(database, project, submitterSession)
 	if err != nil {
-		return nil, err
+		return UnprocessedJobViews{}, err
 	}
-	return unprocessedJobViews(database, jobs), nil
+	return UnprocessedJobViews{Scope: result.Scope, Jobs: unprocessedJobViews(database, result.Jobs)}, nil
 }
 
 // LoadUnprocessedCountsAndViews runs the unprocessed-inbox query once and
@@ -76,23 +100,27 @@ func LoadUnprocessedJobViews(database *sql.DB, project string) ([]JobView, error
 // (a 14-day terminal-job scan), so callers needing counts and views must use
 // this rather than calling LoadUnprocessedCounts and LoadUnprocessedJobViews
 // separately.
-func LoadUnprocessedCountsAndViews(database *sql.DB, project string) (UnprocessedCounts, []JobView, error) {
-	jobs, err := loadUnprocessedJobs(database, project)
+func LoadUnprocessedCountsAndViews(database *sql.DB, project, submitterSession string) (UnprocessedCountsAndViews, error) {
+	result, err := loadUnprocessedJobs(database, project, submitterSession)
 	if err != nil {
-		return UnprocessedCounts{}, nil, err
+		return UnprocessedCountsAndViews{}, err
 	}
-	return unprocessedCountsFromJobs(jobs), unprocessedJobViews(database, jobs), nil
+	return UnprocessedCountsAndViews{
+		Scope:  result.Scope,
+		Counts: unprocessedCountsFromJobs(result.Scope, result.Jobs),
+		Jobs:   unprocessedJobViews(database, result.Jobs),
+	}, nil
 }
 
-func unprocessedCountsFromJobs(jobs []*db.Job) UnprocessedCounts {
-	var counts UnprocessedCounts
+func unprocessedCountsFromJobs(scope UnprocessedScope, jobs []*db.Job) UnprocessedCounts {
+	counts := UnprocessedCounts{Scope: scope}
 	completedProjects := map[string]struct{}{}
 	failedProjects := map[string]struct{}{}
 	for _, j := range jobs {
-		if !isUnprocessedTerminalJob(j) {
+		if !sessioninbox.IsInboxJob(j) {
 			continue
 		}
-		if isFailedJob(j) {
+		if sessioninbox.IsFailedJob(j) {
 			counts.Failed++
 			if p := strings.TrimSpace(j.Project); p != "" {
 				failedProjects[p] = struct{}{}
@@ -114,7 +142,7 @@ func unprocessedCountsFromJobs(jobs []*db.Job) UnprocessedCounts {
 func unprocessedJobViews(database *sql.DB, jobs []*db.Job) []JobView {
 	views := make([]JobView, 0, len(jobs))
 	for _, job := range jobs {
-		if !isUnprocessedTerminalJob(job) {
+		if !sessioninbox.IsInboxJob(job) {
 			continue
 		}
 		views = append(views, jobToView(database, job, nil, jobview.PlacementStatus{}))
@@ -123,37 +151,17 @@ func unprocessedJobViews(database *sql.DB, jobs []*db.Job) []JobView {
 	return views
 }
 
-func loadUnprocessedJobs(database *sql.DB, project string) ([]*db.Job, error) {
-	const maxAgeDays = 14
-	jobs, err := db.ListUnprocessedTerminalJobs(database, maxAgeDays)
+type unprocessedJobsResult struct {
+	Scope UnprocessedScope
+	Jobs  []*db.Job
+}
+
+func loadUnprocessedJobs(database *sql.DB, project, submitterSession string) (unprocessedJobsResult, error) {
+	scope, jobs, err := sessioninbox.Rows(database, project, submitterSession)
 	if err != nil {
-		return nil, err
+		return unprocessedJobsResult{}, err
 	}
-	if project != "" {
-		jobs = db.FilterJobsByProject(jobs, project)
-	}
-	return jobs, nil
-}
-
-func isFailedJob(job *db.Job) bool {
-	if job == nil {
-		return false
-	}
-	switch job.EffectiveStatus() {
-	case db.StatusFailed, db.StatusDead:
-		return true
-	case db.StatusCompleted:
-		return job.ExitCode != nil && *job.ExitCode != 0
-	default:
-		return false
-	}
-}
-
-func isUnprocessedTerminalJob(job *db.Job) bool {
-	if job == nil {
-		return false
-	}
-	return isFailedJob(job) || job.EffectiveStatus() == status.Completed
+	return unprocessedJobsResult{Scope: scope, Jobs: jobs}, nil
 }
 
 func sortedStringKeys(m map[string]struct{}) []string {
@@ -178,6 +186,7 @@ func BuildStatusLine(s *Snapshot, budgetCentsPerHour int, unprocessed Unprocesse
 	sl := StatusLine{
 		Now:                  s.Time,
 		AutopilotState:       s.Autopilot.State,
+		UnprocessedScope:     unprocessed.Scope,
 		UnprocessedCompleted: unprocessed.Completed,
 		UnprocessedFailed:    unprocessed.Failed,
 		CompletedProjects:    append([]string(nil), unprocessed.CompletedProjects...),

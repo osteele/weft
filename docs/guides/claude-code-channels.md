@@ -59,12 +59,17 @@ The server uses stdin/stdout for MCP JSON-RPC and writes diagnostics to stderr. 
 
 ## What Claude receives
 
-On startup, Weft sends one summary of unprocessed terminal jobs for the resolved project. Unprocessed means the job does not have the reserved `processed` tag. The summary uses the same 14-day terminal-job window as `weft narrate`.
+On startup, Weft sends one summary of unprocessed terminal jobs submitted by
+the exact current agent session in the resolved project. Unprocessed means the
+job does not have the reserved `processed` tag. The summary uses the same
+14-day terminal-job window as `weft narrate`. When the channel process has no
+session id, it omits the summary instead of reporting a clean inbox it could
+not establish.
 
 Example startup message:
 
 ```text
-augur has 3 unprocessed terminal jobs from the last 14 days: 1 completed, 2 failed. Review: weft jobs list --project augur --unprocessed --group-by status
+augur has 3 unprocessed terminal jobs from the last 14 days: 1 completed, 2 failed. Use the process-results skill before marking them processed. Review: weft jobs list --project augur --unprocessed --group-by status
 ```
 
 After startup, Weft watches the jobs database and sends channel notifications for terminal job transitions:

@@ -237,11 +237,11 @@ func loadActivityInputs(database *sql.DB, project string) (activityInputs, error
 	if err != nil {
 		return activityInputs{}, err
 	}
-	counts, views, err := narrate.LoadUnprocessedCountsAndViews(database, project)
+	inbox, err := narrate.LoadUnprocessedCountsAndViews(database, project, "")
 	if err != nil {
 		return activityInputs{}, fmt.Errorf("load unprocessed inbox: %w", err)
 	}
-	return activityInputs{snapshot: snap, counts: counts, views: views}, nil
+	return activityInputs{snapshot: snap, counts: inbox.Counts, views: inbox.Jobs}, nil
 }
 
 type DaemonInfo struct {

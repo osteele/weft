@@ -453,9 +453,7 @@ func dropAddJobSubmitToken(ctx context.Context, db *sql.DB) error {
 }
 
 // applyAddJobSubmitterSession adds jobs.submitter_session, the opaque id of the
-// agent session that submitted the job. It is written only by CLI submit paths
-// and read only when re-exporting WEFT_JOB_SUBMITTER_SESSION to the
-// notification command, so it needs no index: there is no lookup by value.
+// agent session that submitted the job.
 func applyAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
 	exists, err := columnExists(ctx, db, "jobs", "submitter_session")
 	if err != nil {

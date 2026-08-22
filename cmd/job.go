@@ -1010,10 +1010,15 @@ func runInfo(cmd *cobra.Command, args []string) error {
 	if sawJob && sawInstance {
 		return usageErrorf("cannot mix job and instance IDs in one command; use only wj... or only wi...")
 	}
+	run := runJobInfoFromInfoFunc
 	if sawInstance {
-		return runInstanceStatusFromInfoFunc(cmd, args)
+		run = runInstanceStatusFromInfoFunc
 	}
-	return runJobInfoFromInfoFunc(cmd, args)
+	if err := run(cmd, args); err != nil {
+		return err
+	}
+	writeSessionUnprocessedReminderFor(cmd.OutOrStdout())
+	return nil
 }
 
 func runJobInfo(cmd *cobra.Command, args []string) error {

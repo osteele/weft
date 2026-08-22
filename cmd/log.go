@@ -244,6 +244,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 	if len(errorsList) > 0 {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
+	writeSessionUnprocessedReminder(database, cmd.ErrOrStderr())
 	return nil
 }
 

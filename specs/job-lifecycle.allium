@@ -115,6 +115,7 @@ entity Job {
 
     -- Execution backend
     backend: Backend
+    submitter_session: String? -- opaque id resolved at CLI submission time
 
     -- Mutable state
     status: Status
@@ -387,6 +388,39 @@ invariant ExternalJobsUseWeftBookkeeping {
     -- as the authoritative processed marker.
     for binding in ExternalJobBindings:
         ProcessedState(binding.job) = binding.job.tags.contains(processed)
+}
+
+enum SessionInboxScope {
+    unscoped | scoped_empty | scoped_nonempty
+}
+
+rule QuerySessionUnprocessedInbox {
+    when: QuerySessionUnprocessedInbox(session_id, project, now)
+
+    -- legacy annotation: @guidance
+        -- The query owns the same 14-day terminal-inbox predicate as the
+        -- ordinary unprocessed surface: completed, failed, or dead;
+        -- untombstoned; and lacking the exact processed tag. Killed and
+        -- canceled jobs remain terminal but are not inbox rows.
+        --
+        -- A non-empty session id matches Job.submitter_session by exact
+        -- string equality. Prefixes, normalization, launcher ancestry, and
+        -- other agent-identity heuristics are forbidden. The CLI resolves
+        -- the opaque id through Config.SubmitterSession; long-lived daemons
+        -- do not infer a session from their inherited environment.
+        --
+        -- Scope is a three-state result. No session id yields unscoped;
+        -- an exact scoped lookup with no rows yields scoped_empty; and a
+        -- lookup with rows yields scoped_nonempty. Unscoped renderers are
+        -- silent: they must not print a reassuring zero or claim there is
+        -- nothing to process.
+        --
+        -- The machine contract is versioned and carries scope, completed /
+        -- failed / total counts, and for each job its wj id, effective
+        -- status, project, age in seconds, and the timestamp field used as
+        -- age provenance. Human status, info, log, artifact-list, completion,
+        -- and session-startup surfaces may render the actionable reminder.
+        -- JSON, TSV, cat, and artifact get/cat stdout remain byte-pure.
 }
 
 -- Job processes launched by the weft runner get a small set of WEFT_*

@@ -119,7 +119,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if kind == idTargetInstance {
-			return runInstanceStatusFromStatusFunc(cmd, args)
+			if err := runInstanceStatusFromStatusFunc(cmd, args); err != nil {
+				return err
+			}
+			writeSessionUnprocessedReminderFor(cmd.OutOrStdout())
+			return nil
 		}
 	}
 
@@ -159,7 +163,11 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 	// No args: show all active jobs
 	if len(args) == 0 {
-		return showActiveJobs(database)
+		if err := showActiveJobs(database); err != nil {
+			return err
+		}
+		writeSessionUnprocessedReminder(database, cmd.OutOrStdout())
+		return nil
 	}
 
 	// Parse job IDs (supports ranges, ellipsis, and comma-separated lists).
@@ -282,6 +290,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		if waitInputInvalid {
 			allSucceeded = false
 		}
+		writeSessionUnprocessedReminder(database, cmd.OutOrStdout())
 		if allSucceeded {
 			os.Exit(ExitSuccess)
 		} else {
@@ -289,6 +298,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	writeSessionUnprocessedReminder(database, cmd.OutOrStdout())
 	return nil
 }
 

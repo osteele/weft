@@ -16,7 +16,6 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/narrate"
 	"github.com/osteele/weft/internal/ops"
 )
@@ -528,8 +527,8 @@ func TestActivityInputsCacheSharesProjectScopedReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first load: %v", err)
 	}
-	if len(first.views) != 1 || first.views[0].ID != completedID {
-		t.Fatalf("first load views = %+v, want the completed job", first.views)
+	if first.counts.Scope.State != narrate.UnprocessedScopeUnscoped || len(first.views) != 0 {
+		t.Fatalf("first load inbox = scope:%q views:%+v, want an explicitly unscoped empty inbox", first.counts.Scope.State, first.views)
 	}
 
 	// A second subscriber in the same TTL window reuses the snapshot and the
@@ -541,8 +540,8 @@ func TestActivityInputsCacheSharesProjectScopedReads(t *testing.T) {
 	if second.snapshot != first.snapshot {
 		t.Fatal("load within TTL rebuilt the snapshot instead of sharing it")
 	}
-	if &second.views[0] != &first.views[0] {
-		t.Fatal("load within TTL rebuilt the unprocessed views instead of sharing them")
+	if second.counts.Scope.State != first.counts.Scope.State || len(second.views) != 0 {
+		t.Fatal("load within TTL changed the unscoped inbox state")
 	}
 
 	// A different project scope gets its own entry.
@@ -1224,7 +1223,7 @@ func TestBuildActivityPayloadIncludesFastTerminalJobs(t *testing.T) {
 	}
 }
 
-func TestBuildActivityPayloadIncludesUnprocessedJobDetails(t *testing.T) {
+func TestBuildActivityPayloadKeepsMissingSessionUnscoped(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "cool30", "/tmp/done", "echo ok", "done")
 	if err != nil {
@@ -1246,24 +1245,14 @@ func TestBuildActivityPayloadIncludesUnprocessedJobDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildActivityPayload: %v", err)
 	}
-	if payload.Unprocessed.Completed != 1 {
-		t.Fatalf("unprocessed counts = %+v, want one completed", payload.Unprocessed)
+	if payload.Unprocessed.Scope.State != narrate.UnprocessedScopeUnscoped {
+		t.Fatalf("unprocessed scope = %+v, want unscoped", payload.Unprocessed.Scope)
 	}
-	if len(payload.UnprocessedJobs) != 1 {
-		t.Fatalf("unprocessed job details = %+v, want one row", payload.UnprocessedJobs)
+	if payload.Unprocessed.Completed != 0 || payload.Unprocessed.Failed != 0 || len(payload.UnprocessedJobs) != 0 {
+		t.Fatalf("unscoped activity payload asserted inbox contents: counts=%+v jobs=%+v", payload.Unprocessed, payload.UnprocessedJobs)
 	}
-	got := payload.UnprocessedJobs[0]
-	if got.ID != jobID || got.Status != db.StatusCompleted || got.Project != "done-project" {
-		t.Fatalf("unprocessed row = %+v, want completed job %d in done-project", got, jobID)
-	}
-	if got.EffectiveStatus != db.StatusCompleted || got.Description != "done" || got.CommandFull != "echo ok" {
-		t.Fatalf("unprocessed stable fields = %+v", got)
-	}
-	if got.Source == nil || got.Source.WorkingDir != "/tmp/done" {
-		t.Fatalf("unprocessed source provenance = %+v", got.Source)
-	}
-	if got.PlacementBucket != string(jobview.BucketCompletions) || got.EndTime == nil || got.StateSince != *got.EndTime {
-		t.Fatalf("unprocessed timing = bucket:%q end:%v state_since:%d", got.PlacementBucket, got.EndTime, got.StateSince)
+	if payload.StatusLine == nil || payload.StatusLine.UnprocessedScope.State != narrate.UnprocessedScopeUnscoped {
+		t.Fatalf("status-line scope = %+v, want unscoped", payload.StatusLine)
 	}
 }
 

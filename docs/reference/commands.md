@@ -986,6 +986,19 @@ weft job list --show 42                # Job details
 weft job list --cleanup 30             # Remove old jobs
 ```
 
+### weft session unprocessed
+
+Print the current agent session's recent unprocessed terminal-job inbox as a
+versioned JSON object. Use `weft session unprocessed`, optionally with
+`--project augur`.
+
+The command resolves the session through Weft's configured submitter-session
+environment order and matches the stored id exactly. Its `scope.state` is one
+of `scoped_nonempty`, `scoped_empty`, or `unscoped`. An unscoped result means
+this process has no attributable session id; its zero counts do not assert
+that the session inbox is empty. Each job includes its effective status,
+project, age, and the timestamp field used as age provenance.
+
 ### weft project jobs
 
 List jobs grouped by project instead of as one flat table.

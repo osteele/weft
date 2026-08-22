@@ -17,6 +17,7 @@ func TestFormatChannelStartupSummary(t *testing.T) {
 		"augur has 3 unprocessed terminal jobs",
 		"1 completed",
 		"2 failed",
+		"process-results skill",
 		"weft jobs list --project augur --unprocessed --group-by status",
 	} {
 		if !strings.Contains(got, want) {
@@ -30,8 +31,21 @@ func TestFormatChannelStartupSummary(t *testing.T) {
 	}
 }
 
+func TestChannelStartupOmitsUnscopedInboxSummary(t *testing.T) {
+	database := db.SetupTestDB(t)
+	var out bytes.Buffer
+	server := newChannelServer(database, "augur", "", 0, false, strings.NewReader(""), &out, &bytes.Buffer{})
+	if err := server.emitStartupSummary(); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("unscoped startup emitted a reassuring inbox summary: %s", out.String())
+	}
+}
+
 func TestChannelStartupSummaryPayload(t *testing.T) {
 	database := db.SetupTestDB(t)
+	const submitterSession = "session-channel-test"
 	now := time.Now().Unix()
 	exitZero := 0
 	exitOne := 1
@@ -41,6 +55,9 @@ func TestChannelStartupSummaryPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.SetJobProject(database, completed, "augur"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobSubmitterSession(database, completed, submitterSession); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CloseAttempt(database, completed, db.StatusCompleted, &exitZero, now); err != nil {
@@ -54,6 +71,9 @@ func TestChannelStartupSummaryPayload(t *testing.T) {
 	if err := db.SetJobProject(database, failed, "augur"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetJobSubmitterSession(database, failed, submitterSession); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.CloseAttempt(database, failed, db.StatusFailed, &exitOne, now); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +85,9 @@ func TestChannelStartupSummaryPayload(t *testing.T) {
 	if err := db.SetJobProject(database, processed, "augur"); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetJobSubmitterSession(database, processed, submitterSession); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.CloseAttempt(database, processed, db.StatusFailed, &exitOne, now); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +96,7 @@ func TestChannelStartupSummaryPayload(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	server := newChannelServer(database, "augur", 0, false, strings.NewReader(""), &out, &bytes.Buffer{})
+	server := newChannelServer(database, "augur", submitterSession, 0, false, strings.NewReader(""), &out, &bytes.Buffer{})
 	if err := server.emitStartupSummary(); err != nil {
 		t.Fatal(err)
 	}

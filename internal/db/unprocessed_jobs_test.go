@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
+
+const inboxTestSession = "session-inbox-test"
 
 // inboxTestSeed records seeded jobs by expected fate in the unprocessed
 // terminal-job inbox.
@@ -49,6 +52,9 @@ func seedUnprocessedInboxTestJobs(t *testing.T, database *sql.DB) inboxTestSeed 
 		id, err := RecordQueued(database, "cool30", "/tmp/inbox", "echo ok", "inbox test")
 		if err != nil {
 			t.Fatalf("record queued: %v", err)
+		}
+		if err := SetJobSubmitterSession(database, id, inboxTestSession); err != nil {
+			t.Fatalf("set submitter session: %v", err)
 		}
 		return id
 	}
@@ -157,6 +163,9 @@ func seedUnprocessedInboxTestJobs(t *testing.T, database *sql.DB) inboxTestSeed 
 	draftID, err := res.LastInsertId()
 	if err != nil {
 		t.Fatalf("draft job id: %v", err)
+	}
+	if err := SetJobSubmitterSession(database, draftID, inboxTestSession); err != nil {
+		t.Fatalf("set draft submitter session: %v", err)
 	}
 	seed.excluded[draftID] = "draft (no attempt)"
 
@@ -320,7 +329,7 @@ func TestUnprocessedTerminalJobsSQLPrefilterDropsNonInboxRows(t *testing.T) {
 	database := SetupTestDB(t)
 	seed := seedUnprocessedInboxTestJobs(t, database)
 
-	query, args := unprocessedTerminalJobsQuery(14)
+	query, args := unprocessedTerminalJobsQuery(14, inboxTestSession)
 	rows, err := database.Query(`SELECT id FROM (`+query+`)`, args...)
 	if err != nil {
 		t.Fatalf("candidate query: %v", err)
@@ -370,14 +379,62 @@ func TestUnprocessedTerminalJobsSQLPrefilterDropsNonInboxRows(t *testing.T) {
 	if len(candidates) >= oldFetch {
 		t.Errorf("SQL pre-filter fetched %d rows, old query fetched %d — no row-count win", len(candidates), oldFetch)
 	}
-	t.Logf("plan:\n%s", explainQueryPlan(t, database, query, args...))
+	plan := explainQueryPlan(t, database, query, args...)
+	t.Logf("plan:\n%s", plan)
+	if !strings.Contains(plan, "idx_jobs_submitter_session") {
+		t.Errorf("session inbox query does not use idx_jobs_submitter_session:\n%s", plan)
+	}
+}
+
+func TestListUnprocessedTerminalJobsUsesExactSessionScope(t *testing.T) {
+	database := SetupTestDB(t)
+	exitZero := 0
+	now := time.Now().Unix()
+	record := func(session string) int64 {
+		t.Helper()
+		jobID, err := RecordQueued(database, "cool30", "/tmp/session-scope", "echo ok", session)
+		if err != nil {
+			t.Fatalf("record %q: %v", session, err)
+		}
+		if session != "" {
+			if err := SetJobSubmitterSession(database, jobID, session); err != nil {
+				t.Fatalf("set session %q: %v", session, err)
+			}
+		}
+		if err := CloseAttempt(database, jobID, StatusCompleted, &exitZero, now); err != nil {
+			t.Fatalf("close %q: %v", session, err)
+		}
+		return jobID
+	}
+	wantID := record("session-abc")
+	record("session-abc-child")
+	record("")
+
+	result, err := ListUnprocessedTerminalJobs(database, 14, "session-abc")
+	if err != nil {
+		t.Fatalf("ListUnprocessedTerminalJobs: %v", err)
+	}
+	if !result.Scoped || len(result.Jobs) != 1 || result.Jobs[0].ID != wantID {
+		t.Fatalf("exact session result = scoped:%v jobs:%v, want only %d", result.Scoped, jobIDs(result.Jobs), wantID)
+	}
+
+	unscoped, err := ListUnprocessedTerminalJobs(database, 14, "")
+	if err != nil {
+		t.Fatalf("unscoped ListUnprocessedTerminalJobs: %v", err)
+	}
+	if unscoped.Scoped || len(unscoped.Jobs) != 0 {
+		t.Fatalf("missing session result = scoped:%v jobs:%v, want a distinct unscoped empty result", unscoped.Scoped, jobIDs(unscoped.Jobs))
+	}
 }
 
 func mustUnprocessedTerminalJobs(t *testing.T, database *sql.DB, maxAgeDays int) []*Job {
 	t.Helper()
-	jobs, err := ListUnprocessedTerminalJobs(database, maxAgeDays)
+	result, err := ListUnprocessedTerminalJobs(database, maxAgeDays, inboxTestSession)
 	if err != nil {
 		t.Fatalf("ListUnprocessedTerminalJobs: %v", err)
 	}
-	return jobs
+	if !result.Scoped {
+		t.Fatal("ListUnprocessedTerminalJobs returned an unscoped result")
+	}
+	return result.Jobs
 }

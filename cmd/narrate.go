@@ -403,7 +403,7 @@ func (r *narrateRunner) emitStartupOverview(out io.Writer, snap *narrate.Snapsho
 	if snap == nil {
 		return nil
 	}
-	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project)
+	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project, r.cfg.SubmitterSession())
 	if err != nil {
 		return fmt.Errorf("count unprocessed: %w", err)
 	}
@@ -436,7 +436,7 @@ func (r *narrateRunner) tick(ctx context.Context) error {
 		return fmt.Errorf("load lifecycle events: %w", err)
 	}
 
-	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project)
+	unprocessed, err := loadUnprocessedCounts(r.database, r.opts.Project, r.cfg.SubmitterSession())
 	if err != nil {
 		return fmt.Errorf("count unprocessed: %w", err)
 	}
@@ -591,8 +591,9 @@ func formatNarrateSlackMessage(statusLine narrate.StatusLine, narration string, 
 
 // loadUnprocessedCounts queries terminal jobs in the unprocessed inbox and
 // splits the count into successes (completed) vs failures (failed / dead /
-// killed / canceled). Optionally scoped to a project. Bounded to the last
+// completed with non-zero exit). Optionally scoped to a project and exact
+// submitter session. Bounded to the last
 // 14 days so the inbox doesn't drag in ancient history.
-func loadUnprocessedCounts(database *sql.DB, project string) (narrate.UnprocessedCounts, error) {
-	return narrate.LoadUnprocessedCounts(database, project)
+func loadUnprocessedCounts(database *sql.DB, project, submitterSession string) (narrate.UnprocessedCounts, error) {
+	return narrate.LoadUnprocessedCounts(database, project, submitterSession)
 }

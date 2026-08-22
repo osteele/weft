@@ -116,7 +116,13 @@ func TestLoadUnprocessedCountsIncludesTerminalProjects(t *testing.T) {
 		t.Fatalf("tag processed completed: %v", err)
 	}
 
-	counts, err := loadUnprocessedCounts(database, "")
+	const submitterSession = "session-narrate-command-test"
+	for _, jobID := range []int64{completedAugur, completedUnset, failedAugur, completedBad, killedJob, canceledJob, processedFailed, processedCompleted} {
+		if err := db.SetJobSubmitterSession(database, jobID, submitterSession); err != nil {
+			t.Fatalf("set submitter session for %d: %v", jobID, err)
+		}
+	}
+	counts, err := loadUnprocessedCounts(database, "", submitterSession)
 	if err != nil {
 		t.Fatalf("loadUnprocessedCounts: %v", err)
 	}

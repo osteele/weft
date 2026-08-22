@@ -18,6 +18,8 @@ import (
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/narrate"
+	"github.com/osteele/weft/internal/sessioninbox"
 	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/watchevents"
@@ -92,7 +94,7 @@ func runChannelServe(cmd *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	server := newChannelServer(database, project, channelDebounce, channelIncludeRunning, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+	server := newChannelServer(database, project, submitterSession(), channelDebounce, channelIncludeRunning, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 	return server.serve(ctx)
 }
 
@@ -212,25 +214,27 @@ func validateChannelProject(database *sql.DB, project string) error {
 }
 
 type channelServer struct {
-	database       *sql.DB
-	project        string
-	debounce       time.Duration
-	includeRunning bool
-	in             io.Reader
-	out            io.Writer
-	errOut         io.Writer
-	writeMu        sync.Mutex
+	database         *sql.DB
+	project          string
+	submitterSession string
+	debounce         time.Duration
+	includeRunning   bool
+	in               io.Reader
+	out              io.Writer
+	errOut           io.Writer
+	writeMu          sync.Mutex
 }
 
-func newChannelServer(database *sql.DB, project string, debounce time.Duration, includeRunning bool, in io.Reader, out io.Writer, errOut io.Writer) *channelServer {
+func newChannelServer(database *sql.DB, project, submitterSession string, debounce time.Duration, includeRunning bool, in io.Reader, out io.Writer, errOut io.Writer) *channelServer {
 	return &channelServer{
-		database:       database,
-		project:        project,
-		debounce:       debounce,
-		includeRunning: includeRunning,
-		in:             in,
-		out:            out,
-		errOut:         errOut,
+		database:         database,
+		project:          project,
+		submitterSession: submitterSession,
+		debounce:         debounce,
+		includeRunning:   includeRunning,
+		in:               in,
+		out:              out,
+		errOut:           errOut,
 	}
 }
 
@@ -350,9 +354,12 @@ func (s *channelServer) writeJSON(v any) error {
 }
 
 func (s *channelServer) emitStartupSummary() error {
-	counts, err := loadUnprocessedCounts(s.database, s.project)
+	counts, err := loadUnprocessedCounts(s.database, s.project, s.submitterSession)
 	if err != nil {
 		return fmt.Errorf("count unprocessed jobs: %w", err)
+	}
+	if counts.Scope.State == narrate.UnprocessedScopeUnscoped {
+		return nil
 	}
 	content := formatChannelStartupSummary(s.project, counts.Completed, counts.Failed)
 	return s.writeChannel(content, map[string]string{
@@ -361,6 +368,7 @@ func (s *channelServer) emitStartupSummary() error {
 		"unprocessed_completed":   strconv.Itoa(counts.Completed),
 		"unprocessed_failed":      strconv.Itoa(counts.Failed),
 		"unprocessed_window_days": "14",
+		"unprocessed_scope":       string(counts.Scope.State),
 	})
 }
 
@@ -369,8 +377,8 @@ func formatChannelStartupSummary(project string, completed, failed int) string {
 		return fmt.Sprintf("%s has no unprocessed terminal jobs from the last 14 days.", project)
 	}
 	total := completed + failed
-	return fmt.Sprintf("%s has %d unprocessed terminal %s from the last 14 days: %d completed, %d failed. Review: weft jobs list --project %s --unprocessed --group-by status",
-		project, total, pluralize("job", total), completed, failed, project)
+	return fmt.Sprintf("%s has %d unprocessed terminal %s from the last 14 days: %d completed, %d failed. %s Review: weft jobs list --project %s --unprocessed --group-by status",
+		project, total, pluralize("job", total), completed, failed, sessioninbox.ReminderAdvice, project)
 }
 
 func (s *channelServer) watchProject(ctx context.Context) error {

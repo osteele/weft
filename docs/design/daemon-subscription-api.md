@@ -54,7 +54,7 @@ the complete current active-job map plus an optional delta.
 `subscription_ready` is returned immediately, but the first
 `subscription_snapshot` is not prompt: the daemon starts building it when the
 subscription opens and emits it when that build finishes. The build's cost
-scales with the size of the unprocessed inbox and with machine load, and is
+scales with the activity snapshot and with machine load, and is
 not bounded by the heartbeat interval — first-snapshot latencies of tens of
 seconds have been measured on a large database under heavy load. **Clients
 must not set a deadline on the first snapshot that is shorter than the
@@ -65,9 +65,12 @@ subscription was accepted; it says nothing about when data will arrive.
 The daemon emits a snapshot when the stable payload changes; an idle feed is
 kept fresh by a full-snapshot heartbeat every 45 seconds (see the activity
 resource below).
-The `unprocessed_jobs` array carries the bounded terminal-job inbox (at most the
-last 14 days), including jobs that finished before the client connected.
-Consumers that only need one project may add `"project": "<name>"`.
+The daemon does not infer an agent session from its inherited environment.
+Activity subscriptions therefore report the unprocessed scope as `unscoped`
+and omit inbox rows rather than presenting a global or reassuringly empty
+session inbox. Agent status lines should use the versioned
+`weft session unprocessed` query. Consumers may still add
+`"project": "<name>"` to scope the rest of the activity snapshot.
 
 The feed's rows are time-bounded by active jobs, active instances, and the
 14-day unprocessed inbox. Its serialized frames are additionally bounded by
@@ -315,10 +318,9 @@ per-second payload updates. `reason` is either
 `repeated_launch_failures_without_progress` or
 `repeated_infrastructure_failures_without_progress`. Project-filtered
 subscriptions include matching project scopes and global (`project=<all>`)
-scopes. `unprocessed_jobs` contains
-the recent unprocessed terminal-job rows that correspond to the `unprocessed`
-counts, so clients can show completed or failed job details on first connect
-without waiting for a transition delta. The formatted fields match the compact
+scopes. When the unprocessed scope is attributable, `unprocessed_jobs`
+contains the recent terminal-job rows that correspond to the `unprocessed`
+counts. An unscoped daemon payload carries no such rows. The formatted fields match the compact
 prompt inputs used by `weft narrate`, so the CLI can sit on the same daemon
 resource without recreating DB queries in the command process.
 

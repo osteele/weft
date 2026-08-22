@@ -28,6 +28,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/sessioninbox"
 )
 
 // commandTimeout bounds the notify command so a hung notifier cannot stall
@@ -56,7 +57,13 @@ func JobTerminal(database *sql.DB, jobID int64, finalStatus string, exitCode *in
 		slog.Warn("notify: submitter session lookup failed", "component", "notify",
 			"job_id", jobID, "error", err)
 	}
-	Run(cfg.Notifications.Command, job, finalStatus, exitCode, submitterSession)
+	query, err := sessioninbox.Load(database, "", submitterSession, time.Now())
+	if err != nil {
+		slog.Warn("notify: unprocessed session inbox lookup failed", "component", "notify",
+			"job_id", jobID, "error", err)
+	}
+	run(cfg.Notifications.Command, job, finalStatus, exitCode, submitterSession,
+		sessioninbox.FormatReminder(query))
 }
 
 // Run executes the notify command synchronously with WEFT_JOB_* env vars.
@@ -64,11 +71,18 @@ func JobTerminal(database *sql.DB, jobID int64, finalStatus string, exitCode *in
 // "" when none was; the command decides what to do with it.
 // Exposed separately from JobTerminal for testing.
 func Run(command string, job *db.Job, finalStatus string, exitCode *int, submitterSession string) {
+	run(command, job, finalStatus, exitCode, submitterSession, "")
+}
+
+func run(command string, job *db.Job, finalStatus string, exitCode *int, submitterSession, reminder string) {
 	exitStr := ""
 	if exitCode != nil {
 		exitStr = fmt.Sprintf("%d", *exitCode)
 	}
 	summary := buildSummary(job, finalStatus, exitCode)
+	if reminder != "" {
+		summary += "\n" + reminder
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
