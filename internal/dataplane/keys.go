@@ -195,6 +195,13 @@ func SourceTarball(hash string) string {
 	return fmt.Sprintf("sources/%s.tar.gz", hash)
 }
 
+// SourceClosureReceipt is the immutable commit marker written after every
+// object in a source manifest has been confirmed in R2. The versioned path
+// keeps an existence-only lookup meaningful if the receipt schema changes.
+func SourceClosureReceipt(manifestHash string) string {
+	return fmt.Sprintf("source-closures/v1/%s.json", manifestHash)
+}
+
 // NamedAsset returns the R2 key for a named asset published via
 // `weft data publish`. The bytes are content-addressed by SHA256 to keep
 // dedup honest across renames, but the name → hash mapping lives in the

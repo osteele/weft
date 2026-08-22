@@ -479,6 +479,62 @@ func TestDownloadObjectToFileWithIdleTimeout_MidDownloadFailureLeavesExistingFil
 	}
 }
 
+func TestListObjectsLimitedReportsWhetherPrefixWasExhausted(t *testing.T) {
+	tests := []struct {
+		name         string
+		isTruncated  bool
+		wantComplete bool
+	}{
+		{name: "complete", wantComplete: true},
+		{name: "truncated", isTruncated: true, wantComplete: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			client := newTestS3Client(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != http.MethodGet {
+					t.Errorf("method = %s, want GET", r.Method)
+				}
+				if got := r.URL.Query().Get("prefix"); got != "assets/a" {
+					t.Errorf("prefix = %q, want assets/a", got)
+				}
+				if got := r.URL.Query().Get("max-keys"); got != "2" {
+					t.Errorf("max-keys = %q, want 2", got)
+				}
+				truncated := "false"
+				nextToken := ""
+				if tc.isTruncated {
+					truncated = "true"
+					nextToken = "<NextContinuationToken>next</NextContinuationToken>"
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>test-bucket</Name><Prefix>assets/a</Prefix><KeyCount>2</KeyCount><MaxKeys>2</MaxKeys>
+  <IsTruncated>%s</IsTruncated>%s
+  <Contents><Key>assets/a1</Key><Size>1</Size><ETag>"one"</ETag></Contents>
+  <Contents><Key>assets/a2</Key><Size>2</Size><ETag>"two"</ETag></Contents>
+</ListBucketResult>`, truncated, nextToken)
+			}))
+
+			objects, complete, err := client.ListObjectsLimited(context.Background(), "assets/a", 2)
+			if err != nil {
+				t.Fatalf("ListObjectsLimited: %v", err)
+			}
+			if complete != tc.wantComplete {
+				t.Fatalf("complete = %t, want %t", complete, tc.wantComplete)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
+			}
+			if len(objects) != 2 || objects[0].Key != "assets/a1" || objects[1].Key != "assets/a2" {
+				t.Fatalf("objects = %+v", objects)
+			}
+		})
+	}
+}
+
 func newTestS3Client(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)

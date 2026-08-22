@@ -8,6 +8,12 @@ func TestSourceTarball(t *testing.T) {
 	}
 }
 
+func TestSourceClosureReceipt(t *testing.T) {
+	if got := SourceClosureReceipt("abc123"); got != "source-closures/v1/abc123.json" {
+		t.Fatalf("SourceClosureReceipt = %q", got)
+	}
+}
+
 func TestJobAttemptArtifactManifest(t *testing.T) {
 	if got := JobAttemptArtifactManifest(17, 23); got != "jobs/17/runs/23/artifacts/manifest.json" {
 		t.Fatalf("JobAttemptArtifactManifest = %q", got)

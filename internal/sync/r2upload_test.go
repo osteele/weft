@@ -3,26 +3,65 @@ package sync
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/dataplane"
+	"github.com/osteele/weft/internal/r2"
 )
 
 type countingSourceStore struct {
-	objects map[string][]byte
-	puts    map[string]int
+	mu                      sync.Mutex
+	objects                 map[string][]byte
+	puts                    map[string]int
+	headCalls               map[string]int
+	listCalls               map[string]int
+	headDelay               time.Duration
+	activeHeads             int
+	maxActiveHeads          int
+	listErr                 error
+	forceListTruncatedAfter int
 }
 
 func newCountingSourceStore() *countingSourceStore {
-	return &countingSourceStore{objects: make(map[string][]byte), puts: make(map[string]int)}
+	return &countingSourceStore{
+		objects:   make(map[string][]byte),
+		puts:      make(map[string]int),
+		headCalls: make(map[string]int),
+		listCalls: make(map[string]int),
+	}
 }
 
-func (s *countingSourceStore) ObjectExists(_ context.Context, key string) (bool, error) {
+func (s *countingSourceStore) ObjectExists(ctx context.Context, key string) (bool, error) {
+	s.mu.Lock()
 	_, ok := s.objects[key]
+	s.headCalls[key]++
+	s.activeHeads++
+	s.maxActiveHeads = max(s.maxActiveHeads, s.activeHeads)
+	delay := s.headDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.activeHeads--
+			s.mu.Unlock()
+			return false, ctx.Err()
+		}
+	}
+	s.mu.Lock()
+	s.activeHeads--
+	s.mu.Unlock()
 	return ok, nil
 }
 
@@ -31,9 +70,57 @@ func (s *countingSourceStore) PutObject(_ context.Context, key string, body io.R
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.objects[key] = data
 	s.puts[key]++
 	return nil
+}
+
+func (s *countingSourceStore) PutObjectConditional(_ context.Context, key string, body io.Reader, _ string, _ string, ifNoneMatch string) (string, error) {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ifNoneMatch == "*" {
+		if _, exists := s.objects[key]; exists {
+			return "", r2.ErrPreconditionFailed
+		}
+	}
+	s.objects[key] = data
+	s.puts[key]++
+	return "test-etag", nil
+}
+
+func (s *countingSourceStore) ListObjectsLimited(_ context.Context, prefix string, maxObjects int) ([]r2.ObjectInfo, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listCalls[prefix]++
+	if s.listErr != nil {
+		return nil, false, s.listErr
+	}
+	keys := make([]string, 0)
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	limit := maxObjects
+	if s.forceListTruncatedAfter > 0 {
+		limit = min(limit, s.forceListTruncatedAfter)
+	}
+	complete := len(keys) <= limit
+	if !complete {
+		keys = keys[:limit]
+	}
+	objects := make([]r2.ObjectInfo, 0, len(keys))
+	for _, key := range keys {
+		objects = append(objects, r2.ObjectInfo{Key: key, SizeBytes: int64(len(s.objects[key]))})
+	}
+	return objects, complete, nil
 }
 
 func writeSparseTestFile(t *testing.T, path string, size int64) {
@@ -148,6 +235,153 @@ func TestUploadCloudSourceReusesLargeBlob(t *testing.T) {
 	if got := store.puts[blobKey]; got != 1 {
 		t.Fatalf("blob put count = %d, want 1 for %s", got, blobKey)
 	}
+	if !second.Stats.ReceiptHit {
+		t.Fatal("second upload did not use the source closure receipt")
+	}
+	receiptKey := dataplane.SourceClosureReceipt(first.Manifest.Hash)
+	if got := store.puts[receiptKey]; got != 1 {
+		t.Fatalf("receipt put count = %d, want 1 for %s", got, receiptKey)
+	}
+	if got := store.headCalls[blobKey]; got != 1 {
+		t.Fatalf("blob HEAD count = %d, want 1; receipt hit should skip the second probe", got)
+	}
+	var receipt sourceClosureReceipt
+	if err := json.Unmarshal(store.objects[receiptKey], &receipt); err != nil {
+		t.Fatalf("unmarshal receipt: %v", err)
+	}
+	if receipt.Version != sourceClosureReceiptVersion || receipt.ManifestHash != first.Manifest.Hash {
+		t.Fatalf("receipt identity = %+v", receipt)
+	}
+	if len(receipt.Objects) != first.Stats.Objects {
+		t.Fatalf("receipt object count = %d, want %d", len(receipt.Objects), first.Stats.Objects)
+	}
+}
+
+func TestCheckSourceObjectsConcurrentlyUsesBoundedParallelism(t *testing.T) {
+	store := newCountingSourceStore()
+	store.headDelay = 10 * time.Millisecond
+	objects := syntheticSourceUploadObjects("b", 96)
+
+	presence, requests, err := checkSourceObjectsConcurrently(context.Background(), store, objects, 8)
+	if err != nil {
+		t.Fatalf("checkSourceObjectsConcurrently: %v", err)
+	}
+	if requests != len(objects) || len(presence) != len(objects) {
+		t.Fatalf("requests/presence = %d/%d, want %d/%d", requests, len(presence), len(objects), len(objects))
+	}
+	if store.maxActiveHeads <= 1 || store.maxActiveHeads > 8 {
+		t.Fatalf("maximum concurrent HEADs = %d, want 2..8", store.maxActiveHeads)
+	}
+}
+
+func TestDiscoverSourceObjectsByPrefixClassifiesCompleteListing(t *testing.T) {
+	store := newCountingSourceStore()
+	objects := syntheticSourceUploadObjects("a", 160)
+	for _, object := range objects[:100] {
+		store.objects[object.key] = []byte("present")
+	}
+	presence := make(map[string]sourcePresence)
+	stats := SourceUploadStats{}
+
+	discoverSourceObjectsByPrefix(context.Background(), store, objects, presence, &stats)
+
+	if stats.ListPrefixes != 1 || stats.ListCompletePrefixes != 1 || stats.ListTruncatedPrefixes != 0 {
+		t.Fatalf("listing stats = %+v", stats)
+	}
+	for i, object := range objects {
+		want := sourcePresenceAbsent
+		if i < 100 {
+			want = sourcePresencePresent
+		}
+		if got := presence[object.key]; got != want {
+			t.Fatalf("presence[%s] = %d, want %d", object.key, got, want)
+		}
+	}
+}
+
+func TestDiscoverSourceObjectsByPrefixDoesNotInferAbsenceFromTruncatedListing(t *testing.T) {
+	store := newCountingSourceStore()
+	store.forceListTruncatedAfter = 10
+	objects := syntheticSourceUploadObjects("c", 160)
+	for _, object := range objects {
+		store.objects[object.key] = []byte("present")
+	}
+	presence := make(map[string]sourcePresence)
+	stats := SourceUploadStats{}
+
+	discoverSourceObjectsByPrefix(context.Background(), store, objects, presence, &stats)
+	unknown := make([]sourceUploadObject, 0)
+	for _, object := range objects {
+		if presence[object.key] == sourcePresenceUnknown {
+			unknown = append(unknown, object)
+		}
+	}
+	checked, requests, err := checkSourceObjectsConcurrently(context.Background(), store, unknown, 8)
+	if err != nil {
+		t.Fatalf("fallback HEAD checks: %v", err)
+	}
+	for key, exists := range checked {
+		if !exists {
+			t.Fatalf("fallback classified present key %s as absent", key)
+		}
+		presence[key] = sourcePresencePresent
+	}
+
+	if stats.ListTruncatedPrefixes != 1 || stats.ListCompletePrefixes != 0 {
+		t.Fatalf("listing stats = %+v", stats)
+	}
+	if requests != len(objects)-10 {
+		t.Fatalf("fallback HEAD requests = %d, want %d", requests, len(objects)-10)
+	}
+	for _, object := range objects {
+		if got := presence[object.key]; got != sourcePresencePresent {
+			t.Fatalf("presence[%s] = %d, want present", object.key, got)
+		}
+	}
+}
+
+func TestDiscoverSourceObjectsByPrefixFallsBackAfterListFailure(t *testing.T) {
+	store := newCountingSourceStore()
+	store.listErr = errors.New("list unavailable")
+	objects := syntheticSourceUploadObjects("d", 128)
+	for _, object := range objects {
+		store.objects[object.key] = []byte("present")
+	}
+	presence := make(map[string]sourcePresence)
+	stats := SourceUploadStats{}
+
+	discoverSourceObjectsByPrefix(context.Background(), store, objects, presence, &stats)
+	unknown := make([]sourceUploadObject, 0, len(objects))
+	for _, object := range objects {
+		if presence[object.key] == sourcePresenceUnknown {
+			unknown = append(unknown, object)
+		}
+	}
+	checked, requests, err := checkSourceObjectsConcurrently(context.Background(), store, unknown, 8)
+	if err != nil {
+		t.Fatalf("fallback HEAD checks: %v", err)
+	}
+	if stats.ListFailedPrefixes != 1 || requests != len(objects) {
+		t.Fatalf("list failures/HEAD requests = %d/%d, want 1/%d", stats.ListFailedPrefixes, requests, len(objects))
+	}
+	for key, exists := range checked {
+		if !exists {
+			t.Fatalf("fallback classified present key %s as absent", key)
+		}
+	}
+}
+
+func syntheticSourceUploadObjects(firstHex string, count int) []sourceUploadObject {
+	objects := make([]sourceUploadObject, 0, count)
+	for i := range count {
+		digest := firstHex + fmt.Sprintf("%063x", i)
+		objects = append(objects, sourceUploadObject{
+			key:    dataplane.NamedAsset(digest),
+			digest: digest,
+			label:  fmt.Sprintf("synthetic source object %d", i),
+		})
+	}
+	return objects
 }
 
 func TestCloudSourceManifestIdentityIncludesDivertedFile(t *testing.T) {

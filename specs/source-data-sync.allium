@@ -333,6 +333,14 @@ config {
     -- resolvable before publishing a manifest.
     r2_object_exists_timeout: Duration = 20.seconds
 
+    -- Source closure discovery uses bounded concurrency. Large uniformly
+    -- hashed groups may first enumerate one-hex-digit R2 prefixes, but only a
+    -- complete listing proves absence. Truncated and failed listings leave
+    -- unreturned objects unknown and therefore fall back to HEAD.
+    source_exists_concurrency: Integer = 32
+    source_list_concurrency: Integer = 8
+    source_list_min_objects_per_prefix: Integer = 128
+
     -- Cloud-agent HF prewarm retry policy. Each attempt runs the whole
     -- download script under the setup timeout; transient Hub/network
     -- failures get bounded retries with a short backoff rather than
@@ -990,6 +998,16 @@ rule EscalateToR2IsolatedSource {
 -- residual tarball and missing blobs for every source root.
 rule UploadSourceToCloud {
     when: EvaluateUploadSourceToCloud()
+
+    -- The manifest hash names an immutable versioned closure receipt. Its
+    -- existence proves that every content-addressed source object was present
+    -- after a prior upload. On a miss, Weft discovers the object set with
+    -- bounded prefix listings and concurrent HEAD requests, uploads confirmed
+    -- absences, then publishes the receipt with If-None-Match: *.
+    --
+    -- Source tarballs and assets are append-only. Any future source-object GC
+    -- must invalidate every referencing closure receipt before deleting an
+    -- object; otherwise an existence-only receipt lookup would be unsound.
 
     -- Legacy body retained as migration guidance:
     -- when: JobSubmissionRequested(job)

@@ -508,6 +508,55 @@ func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, 
 	return result, nil
 }
 
+// ListObjectsLimited returns at most maxObjects objects under prefix. Complete
+// is true only when R2 confirmed that the returned page sequence exhausted the
+// prefix. Callers may use a complete listing to infer absence; a truncated
+// listing can confirm only the objects it returned.
+func (c *Client) ListObjectsLimited(ctx context.Context, prefix string, maxObjects int) ([]ObjectInfo, bool, error) {
+	if maxObjects <= 0 {
+		return nil, false, fmt.Errorf("list objects under %s: max objects must be positive", prefix)
+	}
+	input := &s3.ListObjectsV2Input{
+		Bucket:  aws.String(c.bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(int32(min(maxObjects, 1000))),
+	}
+
+	result := make([]ObjectInfo, 0, min(maxObjects, 1000))
+	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("list objects under %s: %w", prefix, err)
+		}
+		remaining := maxObjects - len(result)
+		contents := page.Contents
+		if len(contents) > remaining {
+			contents = contents[:remaining]
+		}
+		for _, obj := range contents {
+			var size int64
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+			var lastModified time.Time
+			if obj.LastModified != nil {
+				lastModified = *obj.LastModified
+			}
+			result = append(result, ObjectInfo{
+				Key:          aws.ToString(obj.Key),
+				SizeBytes:    size,
+				LastModified: lastModified,
+				ETag:         aws.ToString(obj.ETag),
+			})
+		}
+		if len(result) == maxObjects {
+			return result, len(page.Contents) <= remaining && !paginator.HasMorePages(), nil
+		}
+	}
+	return result, true, nil
+}
+
 // PutObject uploads data to R2 under the given key.
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
 	input := &s3.PutObjectInput{
