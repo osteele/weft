@@ -97,6 +97,29 @@ func TestEvaluateEligibilityHostAxes(t *testing.T) {
 	}
 }
 
+func TestEvaluateEligibilityRequiredCapabilities(t *testing.T) {
+	target := TargetSpec{
+		Capabilities:           []string{"agent:codex", "service:r2"},
+		CapabilityAvailability: map[string]int{"agent:codex": 1},
+	}
+	if got := EvaluateEligibility(Constraints{RequiredCapabilities: []string{"agent:codex"}}, target); !got.Eligible {
+		t.Fatalf("matching capability rejected: %v", got.Messages())
+	}
+	if got := EvaluateEligibility(Constraints{RequiredCapabilities: []string{"agent:gemini"}}, target); got.Eligible {
+		t.Fatal("missing capability accepted")
+	}
+	target.CapabilityAvailability["agent:codex"] = 0
+	if got := EvaluateEligibility(Constraints{RequiredCapabilities: []string{"agent:codex"}}, target); got.Eligible {
+		t.Fatal("capability with exhausted concurrency accepted")
+	}
+	target.CapabilityAvailability["agent:codex"] = 1
+	remaining := 0
+	target.AgentSlotsRemaining = &remaining
+	if got := EvaluateEligibility(Constraints{RequiredCapabilities: []string{"agent:codex"}}, target); got.Eligible {
+		t.Fatal("agent capability with exhausted shared concurrency accepted")
+	}
+}
+
 func TestEvaluateEligibilityHostAxisUnknownCoresAndRAMPass(t *testing.T) {
 	target := TargetSpecFromHostSpec(inventory.HostSpec{Name: "legacy"}, nil, nil)
 	verdict := EvaluateEligibility(Constraints{CPUCores: 32, CPUMemGB: 128}, target)

@@ -60,17 +60,18 @@ func LoadHostNames() ([]string, error) {
 // axis in each placement system — so a new constraint field cannot be added
 // without deciding where it is enforced. See TestConstraintSystemCoverage.
 type Constraints struct {
-	GPUClass     string   `enforce:"gpu_class"`    // Required GPU class (e.g., "a100"); empty = no preference
-	Provider     string   `enforce:"provider"`     // Requested rental provider (e.g., "vastai", "runpod"); empty = any
-	NumGPUs      int      `enforce:"num_gpus"`     // Exact number of GPUs requested on one host/rental (0/1 = one)
-	GPUMemGB     int      `enforce:"gpu_memory"`   // Minimum GPU memory in GB; 0 = no minimum
-	CPUCores     int      `enforce:"cpu_cores"`    // Minimum effective CPU cores/vCPUs
-	CPUMemGB     int      `enforce:"host_ram"`     // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
-	Interconnect string   `enforce:"interconnect"` // Requested intra-host interconnect; see InterconnectValues
-	Inputs       []string `enforce:"-"`            // Asset refs the job reads (for locality scoring)
-	Command      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
-	Project      string   `enforce:"-"`            // For predictor-based scoring; empty = skip
-	Tags         []string `enforce:"-"`            // Driving tags translate into other axes (cpu-intensive -> cpu_cores, interruptible -> instance routing, benchmark -> idle-host scoring)
+	GPUClass             string   `enforce:"gpu_class"`    // Required GPU class (e.g., "a100"); empty = no preference
+	Provider             string   `enforce:"provider"`     // Requested rental provider (e.g., "vastai", "runpod"); empty = any
+	NumGPUs              int      `enforce:"num_gpus"`     // Exact number of GPUs requested on one host/rental (0/1 = one)
+	GPUMemGB             int      `enforce:"gpu_memory"`   // Minimum GPU memory in GB; 0 = no minimum
+	CPUCores             int      `enforce:"cpu_cores"`    // Minimum effective CPU cores/vCPUs
+	CPUMemGB             int      `enforce:"host_ram"`     // Minimum host/system RAM in GB (effective, headroom applied); 0 = no minimum
+	Interconnect         string   `enforce:"interconnect"` // Requested intra-host interconnect; see InterconnectValues
+	Inputs               []string `enforce:"-"`            // Asset refs the job reads (for locality scoring)
+	Command              string   `enforce:"-"`            // For predictor-based scoring; empty = skip
+	Project              string   `enforce:"-"`            // For predictor-based scoring; empty = skip
+	Tags                 []string `enforce:"-"`            // Driving tags translate into other axes (cpu-intensive -> cpu_cores, interruptible -> instance routing, benchmark -> idle-host scoring)
+	RequiredCapabilities []string `enforce:"capability"`
 
 	// PreferredInstanceIDs is a soft preference toward reusing these specific
 	// rental instances. Used to co-locate a consumer on its --needs
@@ -141,6 +142,7 @@ type ConstraintSource struct {
 	Command                string
 	Project                string
 	Tags                   []string
+	RequiredCapabilities   []string
 	PreferredInstanceIDs   []int64
 	LocalDir               string
 	PersistedMaxComputeCap string
@@ -177,6 +179,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		Command:              src.Command,
 		Project:              src.Project,
 		Tags:                 src.Tags,
+		RequiredCapabilities: slices.Clone(src.RequiredCapabilities),
 		PreferredInstanceIDs: src.PreferredInstanceIDs,
 		SelfJobID:            src.SelfJobID,
 	}
@@ -281,6 +284,9 @@ func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
 	}
 	if j.GPUMemGB != nil {
 		src.GPUMemGB = *j.GPUMemGB
+	}
+	if j.Metadata != nil && j.Metadata.Agent != nil {
+		src.RequiredCapabilities = slices.Clone(j.Metadata.Agent.RequiredCapabilities)
 	}
 	return src
 }
@@ -947,6 +953,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	if c.HasGPURuntimeBounds() {
 		gc = ParseGPUConstraint(c.GPUClass)
 		target := TargetSpecFromHostSpec(host, nil, activeGPUReservations(database, host.Name))
+		target.CapabilityAvailability, target.AgentSlotsRemaining = activeCapabilityAvailability(database, host, c.SelfJobID)
 		if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
 			target.Cordoned = true
 			target.CordonReason = reason
@@ -965,6 +972,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		s.Reasons = append(s.Reasons, freeGPUCapacityPassReason(target, c)...)
 	} else {
 		target := TargetSpecFromHostSpec(host, nil, nil)
+		target.CapabilityAvailability, target.AgentSlotsRemaining = activeCapabilityAvailability(database, host, c.SelfJobID)
 		if cordoned, reason, err := db.IsInventoryExecutionTargetCordoned(database, host.Name); err == nil && cordoned {
 			target.Cordoned = true
 			target.CordonReason = reason
@@ -1209,6 +1217,15 @@ func CheckHostConstraints(host inventory.HostSpec, c Constraints) Verdict {
 	return EvaluateEligibility(c, TargetSpecFromHostSpec(host, nil, nil))
 }
 
+// CheckHostConstraintsWithActiveJobs also applies configured capability-slot
+// limits. It is used by atomic admission paths that must not enqueue work for
+// a worker whose authenticated agent pool is already full.
+func CheckHostConstraintsWithActiveJobs(database *sql.DB, host inventory.HostSpec, c Constraints) Verdict {
+	target := TargetSpecFromHostSpec(host, nil, activeGPUReservations(database, host.Name))
+	target.CapabilityAvailability, target.AgentSlotsRemaining = activeCapabilityAvailability(database, host, c.SelfJobID)
+	return EvaluateEligibility(c, target)
+}
+
 // activeGPUReservations derives the reservation slice consumed by
 // EvaluateEligibility. If active-job state cannot be read, placement degrades
 // to the historical "all matching GPUs free" approximation.
@@ -1226,6 +1243,53 @@ func activeGPUReservations(database *sql.DB, host string) []GPUReservation {
 		return nil
 	}
 	return GPUReservationsForJobs(active)
+}
+
+func activeCapabilityAvailability(database *sql.DB, host inventory.HostSpec, selfJobID int64) (map[string]int, *int) {
+	if len(host.AgentConcurrency) == 0 {
+		return nil, nil
+	}
+	available := make(map[string]int, len(host.AgentConcurrency))
+	var totalRemaining *int
+	for agent, limit := range host.AgentConcurrency {
+		if strings.TrimSpace(agent) == "*" {
+			remaining := limit
+			totalRemaining = &remaining
+			continue
+		}
+		name := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(agent)), "agent:")
+		available["agent:"+name] = limit
+	}
+	if database == nil {
+		return available, totalRemaining
+	}
+	active, err := db.ListActiveJobs(database, host.Name)
+	if err != nil {
+		for capability := range available {
+			available[capability] = 0
+		}
+		if totalRemaining != nil {
+			*totalRemaining = 0
+		}
+		return available, totalRemaining
+	}
+	for _, job := range active {
+		if job.ID == selfJobID || (selfJobID > 0 && job.ID > selfJobID) || job.Metadata == nil || job.Metadata.Agent == nil {
+			continue
+		}
+		countedAgent := false
+		for _, capability := range job.Metadata.Agent.RequiredCapabilities {
+			capability = strings.ToLower(strings.TrimSpace(capability))
+			if !countedAgent && strings.HasPrefix(capability, "agent:") && totalRemaining != nil {
+				*totalRemaining = *totalRemaining - 1
+				countedAgent = true
+			}
+			if _, limited := available[capability]; limited {
+				available[capability]--
+			}
+		}
+	}
+	return available, totalRemaining
 }
 
 func freeGPUCapacityPassReason(target TargetSpec, c Constraints) []string {

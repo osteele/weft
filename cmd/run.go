@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -140,6 +141,11 @@ var (
 	runNeeds           []string
 	runDryRun          bool
 	runNoSync          bool
+	runIfOnline        bool
+	runJSON            bool
+	runAgent           string
+	runCapabilities    []string
+	runIdempotencyKey  string
 	runHFToken         bool
 	runHFTokenFrom     string
 	runSecretVars      []string
@@ -215,9 +221,11 @@ func trySubmitJobToGraceReuse(cmd *cobra.Command, database *sql.DB, jobID int64)
 	}
 	switch outcome {
 	case cloudReuseAckReceived:
-		fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted and assigned to warm instance %s\n",
-			ids.FormatJobID(jobID), ids.FormatInstanceID(inst.ID))
-		printRunSubmissionExpectation(cmd.OutOrStdout(), database, jobID)
+		if !runJSON {
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted and assigned to warm instance %s\n",
+				ids.FormatJobID(jobID), ids.FormatInstanceID(inst.ID))
+			printRunSubmissionExpectation(cmd.OutOrStdout(), database, jobID)
+		}
 		return true, nil
 	case cloudReuseAckNotObserved:
 		fmt.Fprintf(os.Stderr, "warning: warm instance %s did not acknowledge job %s before the short submit timeout; continuing with normal placement\n",
@@ -452,6 +460,12 @@ func init() {
 	runCmd.Flags().StringSliceVar(&runNeeds, "needs", nil, "Artifact path:version this job needs (repeatable, e.g., output/model.pt:100)")
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
 	runCmd.Flags().BoolVar(&runNoSync, "no-sync", false, "Skip source sync before submission")
+	runCmd.Flags().BoolVar(&runIfOnline, "if-online", false, "Submit immediately to an online inventory host, or create no job")
+	runCmd.Flags().BoolVar(&runIfOnline, "no-queue", false, "Alias for --if-online")
+	runCmd.Flags().BoolVar(&runJSON, "json", false, "Print a versioned JSON submission receipt")
+	runCmd.Flags().StringVar(&runAgent, "agent", "", "Require an authenticated agent CLI on the host (codex, gemini, opencode, or kimi)")
+	runCmd.Flags().StringSliceVar(&runCapabilities, "require-capability", nil, "Require a host capability label; can be repeated")
+	runCmd.Flags().StringVar(&runIdempotencyKey, "idempotency-key", "", "Caller assignment ID used to deduplicate submission retries")
 	addJobAddFlagAliases(runCmd)
 }
 
@@ -481,6 +495,15 @@ func parseRunJobIDFlags() error {
 func runRun(cmd *cobra.Command, args []string) error {
 	if err := parseRunJobIDFlags(); err != nil {
 		return err
+	}
+	if runIfOnline && (runDraft || runAfter > 0 || runAfterAny > 0 || runNoSync) {
+		return fmt.Errorf("--if-online cannot be combined with --draft, dependencies, or --no-sync")
+	}
+	if runJSON && (runDraft || runDryRun || runWait || runFollow || runAfter > 0 || runAfterAny > 0 || runKillJobID > 0) {
+		return fmt.Errorf("--json is supported for direct submissions; it cannot be combined with draft, dry-run, wait/follow, dependency, or kill modes")
+	}
+	if key := strings.TrimSpace(runIdempotencyKey); strings.ContainsAny(key, "\r\n") || len(key) > 200 {
+		return fmt.Errorf("--idempotency-key must be at most 200 characters and contain no newlines")
 	}
 
 	// Handle --kill mode
@@ -601,6 +624,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if len(runNeeds) == 0 {
 			runNeeds = append([]string(nil), fromJob.Needs...)
+		}
+		if len(runCapabilities) == 0 && runAgent == "" && fromJob.Metadata != nil && fromJob.Metadata.Agent != nil {
+			runCapabilities = append([]string(nil), fromJob.Metadata.Agent.RequiredCapabilities...)
 		}
 
 		// Allow overriding command from positional args. Joining supports the
@@ -784,7 +810,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 	submitToken := "run-" + uuid.NewString()
+	submissionNonce := ""
+	if runIdempotencyKey = strings.TrimSpace(runIdempotencyKey); runIdempotencyKey != "" {
+		submitToken = "external:" + runIdempotencyKey
+		submissionNonce = uuid.NewString()
+	}
 	runSubmitterSession := submitterSession()
+	requiredCapabilities, err := normalizeRunCapabilities(runAgent, runCapabilities)
+	if err != nil {
+		return err
+	}
 
 	if meta := scriptMeta; meta != nil {
 		var applied []string
@@ -1078,10 +1113,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		resolvedNeeds = allNeeds
 	}
 	requestedProvider, hasRequestedProvider := db.RequestedProvider(runTags)
+	if runIfOnline && (hasRequestedProvider || db.HasRentalTag(runTags) || db.IsLaunchHost(host)) {
+		if runJSON {
+			_ = emitRunReceipt(cmd, runSubmissionReceipt{
+				PlacementDecision: "not_accepted",
+				SelectedHost:      host,
+				IdempotencyKey:    runIdempotencyKey,
+			})
+		}
+		return fmt.Errorf("--if-online admits inventory hosts only; no job was created")
+	}
 	if hasRequestedProvider && host != "" && !db.IsLaunchHost(host) {
 		return fmt.Errorf("--provider=%s cannot be used with inventory host %q; omit --host to keep the job unplaced for rental launch", requestedProvider, host)
 	}
-	fastAutoSubmit := host == "" && !runDraft && !runDryRun && !runWait && !runFollow && runAfter == 0 && runAfterAny == 0
+	fastAutoSubmit := host == "" && !runIfOnline && !runDraft && !runDryRun && !runWait && !runFollow && runAfter == 0 && runAfterAny == 0
 	// Skip predictor entirely when placement won't use it: explicit --host,
 	// rental-tagged jobs, draft submissions, and the fast auto-submit path.
 	// The daemon/autopilot performs predictor-backed placement after the job
@@ -1125,19 +1170,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpuMemGB = *resolvedGPUMemGB
 	}
 	resolvedConstraints, err := placement.ResolveConstraints(placement.ConstraintSource{
-		GPUClass:     gpuClass,
-		Provider:     requestedProvider,
-		NumGPUs:      runGPUCount,
-		GPUMemGB:     gpuMemGB,
-		CPUCores:     runCPUCores,
-		CPUMemGB:     db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
-		Interconnect: runInterconnect,
-		Inputs:       runInputs,
-		Command:      command,
-		Project:      projectName,
-		Tags:         runTags,
-		LocalDir:     localDir,
-		CLIOverrides: cliOverrides,
+		GPUClass:             gpuClass,
+		Provider:             requestedProvider,
+		NumGPUs:              runGPUCount,
+		GPUMemGB:             gpuMemGB,
+		CPUCores:             runCPUCores,
+		CPUMemGB:             db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
+		Interconnect:         runInterconnect,
+		Inputs:               runInputs,
+		Command:              command,
+		Project:              projectName,
+		Tags:                 runTags,
+		RequiredCapabilities: requiredCapabilities,
+		LocalDir:             localDir,
+		CLIOverrides:         cliOverrides,
 	})
 	if err != nil {
 		return err
@@ -1149,6 +1195,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// the shared workdir (the classifier in internal/campaign/
 	// needs_classify.go does the actual routing at launch time).
 	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
+
+	if runIdempotencyKey != "" {
+		if existingID, ok, lookupErr := db.FindJobIDBySubmitToken(database, submitToken); lookupErr != nil {
+			return fmt.Errorf("look up idempotency key: %w", lookupErr)
+		} else if ok {
+			existing, getErr := db.GetJobByID(database, existingID)
+			if getErr != nil {
+				return fmt.Errorf("read idempotent submission: %w", getErr)
+			}
+			if runJSON {
+				return emitRunReceipt(cmd, runReceiptForJob(existing, "deduplicated", false, true, runIdempotencyKey))
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s already exists for idempotency key %q\n", ids.FormatJobID(existingID), runIdempotencyKey)
+			return nil
+		}
+	}
 
 	if shouldValidateRentalJobImage(host, runTags, runDraft, runDryRun) {
 		endImageProbe := rec.Phase("submit", "validating container image")
@@ -1206,6 +1268,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("pin source snapshot: %w", err)
 	}
+	var agentMetadata *db.JobAgentMetadata
+	if len(requiredCapabilities) > 0 {
+		agentMetadata = &db.JobAgentMetadata{RequiredCapabilities: requiredCapabilities}
+	}
 
 	buildRunQueueParams := func(targetHost string) ops.QueueJobParams {
 		return ops.QueueJobParams{
@@ -1227,7 +1293,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
-			Metadata:         &db.JobMetadata{Source: sourceMeta},
+			Metadata: &db.JobMetadata{
+				Source:          sourceMeta,
+				Agent:           agentMetadata,
+				SubmissionNonce: submissionNonce,
+			},
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
 			SubmitToken:      submitToken,
@@ -1271,6 +1341,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				}
 			} else {
 				sources := []placement.CandidateSource{&placement.OnPremSource{}, &campaign.ReuseSource{}}
+				if runIfOnline {
+					sources = []placement.CandidateSource{&placement.OnPremSource{}}
+				}
 				endPlacement := rec.Phase("placement", "evaluating placement")
 				plan, err := placement.Evaluate(placement.EvaluateRequest{
 					Constraints: placementConstraints,
@@ -1280,6 +1353,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 				})
 				endPlacement()
 				if err != nil {
+					if runIfOnline && runJSON {
+						_ = emitRunReceipt(cmd, runSubmissionReceipt{
+							PlacementDecision: "not_accepted",
+							SourcePin:         sourcePinFromMetadata(sourceMeta),
+							IdempotencyKey:    runIdempotencyKey,
+						})
+					}
 					return err
 				}
 				placementPlan = plan
@@ -1301,6 +1381,43 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		if err := validatePinnedHostQueueGate(host, placementConstraints); err != nil {
 			return err
+		}
+		if runIfOnline {
+			if host == "" {
+				if runJSON {
+					_ = emitRunReceipt(cmd, runSubmissionReceipt{
+						PlacementDecision: "not_accepted",
+						SourcePin:         sourcePinFromMetadata(sourceMeta),
+						IdempotencyKey:    runIdempotencyKey,
+					})
+				}
+				return fmt.Errorf("no eligible inventory host is online; no job was created")
+			}
+			if spec := inventory.FindHost(host); spec != nil {
+				verdict := placement.CheckHostConstraintsWithActiveJobs(database, *spec, placementConstraints)
+				if !verdict.Eligible {
+					if runJSON {
+						_ = emitRunReceipt(cmd, runSubmissionReceipt{
+							PlacementDecision: "not_accepted",
+							SelectedHost:      host,
+							SourcePin:         sourcePinFromMetadata(sourceMeta),
+							IdempotencyKey:    runIdempotencyKey,
+						})
+					}
+					return fmt.Errorf("host %s cannot accept the job: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
+				}
+			}
+			if !placement.ProbeHosts([]string{host}, 5*time.Second)[host] {
+				if runJSON {
+					_ = emitRunReceipt(cmd, runSubmissionReceipt{
+						PlacementDecision: "not_accepted",
+						SelectedHost:      host,
+						SourcePin:         sourcePinFromMetadata(sourceMeta),
+						IdempotencyKey:    runIdempotencyKey,
+					})
+				}
+				return fmt.Errorf("host %s is offline; no job was created", host)
+			}
 		}
 
 		// Concentration check: when the user's constraints look likely
@@ -1324,6 +1441,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
 		}
+		if submissionNonce != "" {
+			recorded, getErr := db.GetJobByID(database, jobID)
+			if getErr != nil {
+				return fmt.Errorf("read idempotent submission: %w", getErr)
+			}
+			if recorded.Metadata == nil || recorded.Metadata.SubmissionNonce != submissionNonce {
+				if runJSON {
+					return emitRunReceipt(cmd, runReceiptForJob(recorded, "deduplicated", false, true, runIdempotencyKey))
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s already exists for idempotency key %q\n", ids.FormatJobID(jobID), runIdempotencyKey)
+				return nil
+			}
+		}
 		recordRunPlacementTelemetry(database, cfg, jobID, "run", "fast", placementPlan, placementResult, predict)
 
 		// Store placement telemetry if auto-placement was used
@@ -1334,12 +1464,79 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		if runIfOnline {
+			if spec := inventory.FindHost(host); spec != nil {
+				admittedConstraints := placementConstraints
+				admittedConstraints.SelfJobID = jobID
+				verdict := placement.CheckHostConstraintsWithActiveJobs(database, *spec, admittedConstraints)
+				if !verdict.Eligible {
+					if deleteErr := db.DeleteJob(database, jobID); deleteErr != nil {
+						return fmt.Errorf("capability admission failed and cleanup of %s failed: %v", ids.FormatJobID(jobID), deleteErr)
+					}
+					if runJSON {
+						_ = emitRunReceipt(cmd, runSubmissionReceipt{
+							PlacementDecision: "not_accepted",
+							SelectedHost:      host,
+							SourcePin:         sourcePinFromMetadata(sourceMeta),
+							IdempotencyKey:    runIdempotencyKey,
+						})
+					}
+					return fmt.Errorf("host %s lost the admission race: %s; no job was created", host, strings.Join(verdict.Messages(), "; "))
+				}
+			}
+			endSync := rec.Phase("sync", fmt.Sprintf("dispatching immediately to %s", host))
+			syncResult, syncErr := ops.SyncHost(database, host, ops.HostSyncOptions{
+				Timeout: 10 * time.Second,
+				Logger:  ops.NewSilentSyncLogger(),
+			}, func(h string) (bool, error) {
+				return ensureQueueRunnerStarted(h)
+			})
+			endSync()
+			job, getErr := db.GetJobByID(database, jobID)
+			accepted := getErr == nil && job != nil && job.LastSyncedStatus == db.StatusQueued
+			if !accepted {
+				if deleteErr := db.DeleteJob(database, jobID); deleteErr != nil {
+					return fmt.Errorf("immediate dispatch failed and cleanup of %s failed: %v (sync: %v)", ids.FormatJobID(jobID), deleteErr, syncErr)
+				}
+				if runJSON {
+					_ = emitRunReceipt(cmd, runSubmissionReceipt{
+						PlacementDecision: "not_accepted",
+						SelectedHost:      host,
+						SourcePin:         sourcePinFromMetadata(sourceMeta),
+						IdempotencyKey:    runIdempotencyKey,
+					})
+				}
+				if syncErr != nil {
+					return fmt.Errorf("immediate dispatch to %s failed; no job was created: %w", host, syncErr)
+				}
+				return fmt.Errorf("immediate dispatch to %s was not acknowledged; no job was created (contacted=%t)", host, syncResult.HostContacted)
+			}
+			ensureDaemonForWork(os.Stderr)
+			if runJSON {
+				return emitRunReceipt(cmd, runReceiptForJob(job, "accepted_immediately", true, false, runIdempotencyKey))
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted immediately on %s\n", ids.FormatJobID(jobID), host)
+			if runWait {
+				rec.PrintSummary()
+				return waitForQueuedJobCompletion(database, jobID, false)
+			}
+			if runFollow {
+				rec.PrintSummary()
+				return followQueuedJob(database, jobID, host, false)
+			}
+			return nil
+		}
+
 		if host == "" {
 			accepted, err := trySubmitJobToGraceReuse(cmd, database, jobID)
 			if err != nil {
 				return err
 			}
 			if accepted {
+				if runJSON {
+					job, _ := db.GetJobByID(database, jobID)
+					return emitRunReceipt(cmd, runReceiptForJob(job, "accepted_immediately", true, false, runIdempotencyKey))
+				}
 				return nil
 			}
 			reasons := []string{autoPlacementPendingReason}
@@ -1347,13 +1544,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
 			ensureDaemonForWork(os.Stderr)
+			if runJSON {
+				job, _ := db.GetJobByID(database, jobID)
+				return emitRunReceipt(cmd, runReceiptForJob(job, "queued", false, false, runIdempotencyKey))
+			}
 			printAutoPlacementPending(cmd.OutOrStdout(), database, jobID, autoPlacementPendingReason)
 			return nil
 		}
 
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Job #%d queued on %s\n", jobID, host)
-		if placementResult != nil && placementResult.CompletionEst.Mean > 0 {
+		if !runJSON {
+			fmt.Fprintf(w, "Job #%d queued on %s\n", jobID, host)
+		}
+		if !runJSON && placementResult != nil && placementResult.CompletionEst.Mean > 0 {
 			est := placementResult.CompletionEst
 			fmt.Fprintf(w, "  Est. completion: ~%.0fm", est.Mean.Minutes())
 			// Show breakdown if any component is significant
@@ -1377,19 +1580,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Fprintln(w)
 		}
-		printRunSubmissionExpectation(w, database, jobID)
-		printSubmissionPreview(w, placementResult)
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
-		fmt.Fprintf(w, "  Command: %s\n", command)
-		if runDescription != "" {
-			fmt.Fprintf(w, "  Description: %s\n", runDescription)
+		if !runJSON {
+			printRunSubmissionExpectation(w, database, jobID)
+			printSubmissionPreview(w, placementResult)
+			fmt.Fprintln(w)
+			fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
+			fmt.Fprintf(w, "  Command: %s\n", command)
+			if runDescription != "" {
+				fmt.Fprintf(w, "  Description: %s\n", runDescription)
+			}
+			if len(runEnvVars) > 0 {
+				fmt.Fprintf(w, "  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
+			}
+			printDiskPreview(w, diskMeta)
+			printSourceRootsPreview(w, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 		}
-		if len(runEnvVars) > 0 {
-			fmt.Fprintf(w, "  Env vars: %s\n", formatEnvVarsForDisplay(runEnvVars))
-		}
-		printDiskPreview(w, diskMeta)
-		printSourceRootsPreview(w, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 
 		// Push explicit-host jobs immediately. Auto-placed jobs intentionally
 		// leave dispatch to the daemon so submission avoids live SSH probes.
@@ -1400,6 +1605,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 			deferred = !syncHostWithProgress(database, host, runNoSync, rec)
 		}
 		ensureDaemonForWork(os.Stderr)
+		if runJSON {
+			job, _ := db.GetJobByID(database, jobID)
+			acceptedImmediately := job != nil && job.LastSyncedStatus == db.StatusQueued
+			decision := "queued"
+			if acceptedImmediately {
+				decision = "accepted_immediately"
+			}
+			return emitRunReceipt(cmd, runReceiptForJob(job, decision, acceptedImmediately, false, runIdempotencyKey))
+		}
 
 		// wait/follow handlers call os.Exit, which would bypass the deferred
 		// PrintSummary. Print it now so the user sees phase timing before

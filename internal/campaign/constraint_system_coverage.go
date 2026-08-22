@@ -72,6 +72,7 @@ const containerUserlandNote = "cloud jobs run in containers; the host userland i
 // field fails TestConstraintSystemCoverage until each system's row exists.
 var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageNote{
 	SystemOfferChain: {
+		"capability":    {checkedInSystem, "EvaluateEligibility rejects cloud offers, which do not advertise host-local authenticated services"},
 		"gpu_class":     {checkedInSystem, "provider search + applyEligibilityFilters (SKU memory, class match); per-provider detail in axisEnforcement"},
 		"provider":      {checkedInSystem, "searchAllProvidersWithDiagnostics client selection"},
 		"num_gpus":      {checkedInSystem, "filterOffersByGPUCount"},
@@ -87,6 +88,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"glibcxx_floor": {notApplicableInSystem, containerUserlandNote},
 	},
 	SystemReuse: {
+		"capability":    {checkedInSystem, "EvaluateEligibility rejects rentals, which do not advertise host-local authenticated services"},
 		"gpu_class":     {checkedInSystem, "matchInstanceTargetEligibility"},
 		"provider":      {checkedInSystem, "matchProviderIntent + providerViolation in EvaluateEligibility"},
 		"num_gpus":      {checkedInSystem, "matchInstanceTargetEligibility (unknown instance count relaxes to 1 — fail-open)"},
@@ -102,6 +104,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"glibcxx_floor": {notApplicableInSystem, containerUserlandNote},
 	},
 	SystemOnPrem: {
+		"capability":    {checkedInSystem, "EvaluateEligibility checks inventory labels and configured concurrency availability"},
 		"gpu_class":     {checkedInSystem, "EvaluateEligibility device matching"},
 		"provider":      {checkedInSystem, "providerViolation in EvaluateEligibility (hosts have no rental provider, so a provider request excludes on-prem)"},
 		"num_gpus":      {checkedInSystem, "EvaluateEligibility count + free-GPU accounting"},
@@ -117,6 +120,7 @@ var constraintSystemEnforcement = map[PlacementSystem]map[string]systemCoverageN
 		"glibcxx_floor": {checkedInSystem, "targetCompatibilityViolation vs inventory glibcxx_max (missing fails open)"},
 	},
 	SystemClaimBackstop: {
+		"capability":    {notApplicableInSystem, backstopScopeNote},
 		"machine_pin":   {checkedInSystem, "assertMachineAffinitySatisfied (setJobLaunchIDOnce, CreateMoveTargetAttempt) + assertNoMachineAffinityForHost (AssignJobHost, host move targets)"},
 		"gpu_class":     {notApplicableInSystem, backstopScopeNote + "; the SKU-memory sub-axis is the standing candidate for a second backstop (the 80GB/40GB incident completed 'successfully')"},
 		"provider":      {notApplicableInSystem, backstopScopeNote},

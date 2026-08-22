@@ -32,13 +32,16 @@ type TargetSpec struct {
 	CPUMemGB          int
 	// GPUInventoryKnown means Devices is complete enough to confirm that a
 	// target has no CUDA-capable GPU.
-	GPUInventoryKnown     bool
-	GPUNamingSignals      string
-	GPUNamingSignalsKnown bool
-	CUDAVersion           string
-	NVIDIADriverVersion   string
-	NVIDIADriverMajor     int
-	GLIBCXXVersion        string
+	GPUInventoryKnown      bool
+	GPUNamingSignals       string
+	GPUNamingSignalsKnown  bool
+	CUDAVersion            string
+	NVIDIADriverVersion    string
+	NVIDIADriverMajor      int
+	GLIBCXXVersion         string
+	Capabilities           []string
+	CapabilityAvailability map[string]int
+	AgentSlotsRemaining    *int
 
 	// MachineKey is the provider-qualified physical machine identity
 	// (db.ProviderMachineKey form, e.g. "vastai/49863"). Empty means the
@@ -103,6 +106,8 @@ const (
 	ReasonCPUCores        EligibilityReasonKind = "cpu_cores"
 	ReasonHostRAM         EligibilityReasonKind = "host_ram"
 	ReasonInterconnect    EligibilityReasonKind = "interconnect"
+	ReasonCapability      EligibilityReasonKind = "host_capability"
+	ReasonCapabilityBusy  EligibilityReasonKind = "host_capability_busy"
 )
 
 func (r EligibilityReason) String() string {
@@ -134,6 +139,7 @@ func TargetSpecFromHostSpec(host inventory.HostSpec, metrics *HostMetrics, reser
 		NVIDIADriverVersion:             strings.TrimSpace(host.NVIDIADriverVersion),
 		NVIDIADriverMajor:               driverMajor(host.NVIDIADriverVersion),
 		GLIBCXXVersion:                  strings.TrimSpace(host.GLIBCXXMaxVersion),
+		Capabilities:                    slices.Clone(host.Capabilities),
 		MaxComputeCapUnknownFailsClosed: true,
 	}
 	if metrics != nil {
@@ -235,6 +241,28 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 	if t.OptInOnly && !t.ExplicitlyNamed {
 		return fail(ReasonOptInOnly, "host is opt-in only (specify with --host)", 0, 0)
+	}
+	for _, required := range c.RequiredCapabilities {
+		required = strings.ToLower(strings.TrimSpace(required))
+		if required == "" {
+			continue
+		}
+		found := false
+		for _, capability := range t.Capabilities {
+			if strings.ToLower(strings.TrimSpace(capability)) == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fail(ReasonCapability, fmt.Sprintf("required host capability %q is unavailable", required), 0, 1)
+		}
+		if strings.HasPrefix(required, "agent:") && t.AgentSlotsRemaining != nil && *t.AgentSlotsRemaining <= 0 {
+			return fail(ReasonCapabilityBusy, "authenticated agent worker has no concurrency slots available", *t.AgentSlotsRemaining, 1)
+		}
+		if remaining, limited := t.CapabilityAvailability[required]; limited && remaining <= 0 {
+			return fail(ReasonCapabilityBusy, fmt.Sprintf("required host capability %q has no concurrency slots available", required), remaining, 1)
+		}
 	}
 	if reason, violated := machinePinViolation(c, t); violated {
 		return fail(ReasonMachinePin, reason, 0, 0)

@@ -87,6 +87,40 @@ Several commands are intended for scripts and agents:
 Prefer these first-class command modes over process-list inspection, provider
 CLI polling, or repeated retries.
 
+### Atomic fallback submissions
+
+Use `weft run --if-online --json` when another scheduler owns the assignment
+and Weft is only the preferred immediate path. Weft either dispatches to a
+currently reachable inventory worker and returns a
+`weft.run.receipt.v1` receipt, or exits unsuccessfully after returning a
+`not_accepted` receipt and removes the local job record. The caller can then
+use its fallback without leaving work that Weft might execute later.
+
+Pass a stable external assignment ID with `--idempotency-key`; retrying that ID
+returns the existing job instead of submitting a duplicate. Agent workers can
+be selected with `--agent codex` (equivalent to
+`--require-capability agent:codex`). Provisioned capabilities and admission
+limits are explicit host configuration:
+
+```toml
+[hosts.studio]
+capabilities = ["agent:codex", "agent:gemini", "agent:opencode", "agent:kimi"]
+
+[hosts.studio.agent_concurrency]
+"*" = 2
+codex = 2
+gemini = 1
+opencode = 1
+kimi = 1
+```
+
+The `"*"` entry caps all authenticated-agent jobs together; named entries add
+stricter per-CLI limits.
+
+The receipt contains the job ID, placement decision, selected host, immutable
+source pin, immediate-acceptance flag, and deduplication status. Human progress
+and warnings remain on stderr so stdout stays parseable JSON.
+
 ## Plans
 
 YAML job plans are shaped for agent emission as well as human editing. They let

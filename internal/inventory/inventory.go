@@ -121,6 +121,8 @@ type HostSpec struct {
 	HFCacheDir          string            `yaml:"hf_cache_dir,omitempty"`  // resolved HF hub cache dir (e.g. /mnt/nas/.cache/huggingface/hub)
 	SetupTimeout        string            `yaml:"setup_timeout,omitempty"` // max duration for setup commands (e.g. "90m"); default 20m
 	Benchmark           BenchmarkGateSpec `yaml:"benchmark,omitempty"`
+	Capabilities        []string          `yaml:"capabilities,omitempty"`
+	AgentConcurrency    map[string]int    `yaml:"agent_concurrency,omitempty"`
 }
 
 // BenchmarkGateSpec configures how quiet a host must be before benchmark jobs start.
@@ -385,6 +387,15 @@ func applyHostConfig(base HostSpec, cfg config.HostConfig) HostSpec {
 	}
 	if cfg.GPUFactor != 0 {
 		base.GPUFactor = cfg.GPUFactor
+	}
+	if len(cfg.Capabilities) > 0 {
+		base.Capabilities = slices.Clone(cfg.Capabilities)
+	}
+	if len(cfg.AgentConcurrency) > 0 {
+		base.AgentConcurrency = make(map[string]int, len(cfg.AgentConcurrency))
+		for agent, limit := range cfg.AgentConcurrency {
+			base.AgentConcurrency[agent] = limit
+		}
 	}
 	if cfg.HFCacheDir != "" {
 		base.HFCacheDir = cfg.HFCacheDir

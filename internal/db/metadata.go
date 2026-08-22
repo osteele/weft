@@ -17,7 +17,15 @@ type JobMetadata struct {
 	Dependencies     *JobDependencyMetadata `json:"dependencies,omitempty"`
 	Disk             *JobDiskMetadata       `json:"disk,omitempty"`
 	Source           *JobSourceMetadata     `json:"source,omitempty"`
+	Agent            *JobAgentMetadata      `json:"agent,omitempty"`
+	SubmissionNonce  string                 `json:"submission_nonce,omitempty"`
 	BestEffortInputs []string               `json:"best_effort_inputs,omitempty"`
+}
+
+// JobAgentMetadata stores durable worker capabilities requested by an
+// authenticated automation job.
+type JobAgentMetadata struct {
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
 }
 
 // JobSourceMetadata records the ordered source-root identity for a job.

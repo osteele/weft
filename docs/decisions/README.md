@@ -25,6 +25,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0012](0012-separate-state-and-data-from-configuration.md) | Separate state and data from configuration | accepted |
 | [0013](0013-sort-the-cli-job-list-by-recency.md) | Sort the CLI job list by recency | accepted |
 | [0014](0014-key-source-archives-by-canonical-tar-identity.md) | Key source archives by canonical tar identity | accepted |
+| [0015](0015-make-fallback-submission-an-explicit-admission-contract.md) | Make fallback submission an explicit admission contract | accepted |
 
 ## Adding one
 

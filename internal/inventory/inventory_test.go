@@ -49,6 +49,20 @@ gpus:
 	}
 }
 
+func TestApplyHostConfigAgentCapabilities(t *testing.T) {
+	base := HostSpec{Name: "studio"}
+	got := applyHostConfig(base, config.HostConfig{
+		Capabilities:     []string{"agent:codex", "agent:gemini"},
+		AgentConcurrency: map[string]int{"codex": 2},
+	})
+	if len(got.Capabilities) != 2 || got.Capabilities[0] != "agent:codex" {
+		t.Fatalf("capabilities = %v", got.Capabilities)
+	}
+	if got.AgentConcurrency["codex"] != 2 {
+		t.Fatalf("agent concurrency = %v", got.AgentConcurrency)
+	}
+}
+
 func TestLoadHostsFromDir_MultipleFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"a", "b", "c"} {
