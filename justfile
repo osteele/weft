@@ -223,8 +223,28 @@ test-runner-integration:
     go test -v ./internal/runner/... -run "Integration" -timeout 120s
 
 # Format code
-format:
-    go fmt ./...
+format *args:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if (( $# == 0 )); then
+		go fmt ./...
+		exit
+	fi
+	go_files=()
+	package_args=()
+	for arg in "$@"; do
+		if [[ "${arg}" == *.go && -f "${arg}" ]]; then
+			go_files+=("${arg}")
+		else
+			package_args+=("${arg}")
+		fi
+	done
+	if (( ${#go_files[@]} > 0 )); then
+		gofmt -w "${go_files[@]}"
+	fi
+	if (( ${#package_args[@]} > 0 )); then
+		go fmt "${package_args[@]}"
+	fi
 
 # Run linter
 lint:
