@@ -33,7 +33,9 @@ func TestHumanizeFailureReason_KnownReasons(t *testing.T) {
 		"killed_stdout_silence": "killed: no stdout output for the silence-watchdog timeout",
 		"killed_gpu_idle":       "killed: GPU idle for the GPU-watchdog timeout",
 		"cuda_driver_too_old":   "cuda driver too old",
-		db.FailureReasonInfraTorchPreflightFailed: "instance pool has broken CUDA; torch preflight failed before user code started",
+		db.FailureReasonInfraTorchPreflightFailed:       "CUDA probe failed before user code started",
+		db.FailureReasonTorchPreflightEnvironmentFailed: "torch preflight could not start its Python environment",
+		db.FailureReasonTorchPreflightImportFailed:      "torch preflight could not import torch",
 	}
 	for input, want := range tests {
 		if got := humanizeFailureReason(input); got != want {

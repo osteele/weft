@@ -797,11 +797,14 @@ contract CUDACompatibilityChain {
 -- user command. The preflight is fail-closed: it must require
 -- torch.cuda.is_available(), initialize CUDA, and execute a tiny CUDA operation
 -- on the assigned device. If any step fails, the job fails in setup with a
--- CUDA/driver diagnosis instead of silently running the user script on CPU.
--- The failure is infrastructure-side, not user-code failure: the preflight is
--- owned by Weft and runs before the user command. A failed torch preflight
--- therefore terminates the instance as infra_failure, resets the job to the
--- queue, and lets autopilot place it on a fresh instance.
+-- stage-specific diagnosis instead of silently running the user script on CPU.
+-- Runner-owned output markers distinguish failure before Python starts, during
+-- torch import, and after torch imports when the CUDA probe runs. Only the last
+-- class is infrastructure-side: dependency resolution, interpreter selection,
+-- and torch import belong to the job environment and must not trigger rental
+-- replacement or machine avoidance. A CUDA-stage failure terminates the
+-- instance as infra_failure, resets the job to the queue, and lets autopilot
+-- place it on a fresh instance.
 --
 -- Bounded recovery: a job may be auto-requeued for at most three distinct
 -- instance launches that fail torch preflight. After the third distinct
@@ -813,7 +816,7 @@ contract CUDACompatibilityChain {
 -- preflight. This prevents bouncing between offers on the same bad GPU.
 -- Implementation: internal/runner/torch_preflight.go runTorchPreflight;
 -- internal/runner/single.go (call site before user command);
--- internal/db/failure_modes.go ClassifyInfraFailure(PhaseTorchPreflight);
+-- internal/db/failure_modes.go ClassifyInfraFailure(PhaseTorchPreflightCUDA);
 -- internal/db/cloud_instances.go ResetLaunchJobs cap logic;
 -- internal/db/placement_transitions.go FailedTorchPreflightMachineIDs.
 
@@ -1948,13 +1951,13 @@ rule BeginLaunching {
         --       (short connect timeout / single attempt) so fallback builders
         --       (for example Fly) can be tried immediately
         --    d) if every builder fails AND no exact-version object is in R2,
-        --       fall back to the most recently uploaded cached agent binary
-        --       in R2 for the target platform. This is a soft-match path
-        --       intended for cold-network launches where builders are
-        --       unreachable. The warning MUST name the stale version used
-        --       and its upload time so operators can tell a fallback apart
-        --       from a fresh build.
-        --       Implementation: internal/agentdeploy/r2.go (latestAgentInR2).
+        --       fail asset staging and do not launch the instance. An agent
+        --       artifact is executable code whose version must match the
+        --       requested version recorded for diagnostics; a stale cached
+        --       artifact must never be substituted under that identity.
+        --       The staging error preserves the requested version and the
+        --       builder failure so the operator can repair agent deployment.
+        --       Implementation: internal/agentdeploy/r2.go.
         -- 4. Upload bootstrap shell script to R2
         -- 5. Write agent startup manifest to R2 with job list and environment
         -- The provider's onstart handler fetches and executes the bootstrap script.

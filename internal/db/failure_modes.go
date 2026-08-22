@@ -46,6 +46,17 @@ const (
 	// preflight failure before the user command started.
 	FailureReasonInfraTorchPreflightFailed = "infra_torch_preflight_failed"
 
+	// FailureReasonTorchPreflightEnvironmentFailed marks failure to start the
+	// Python environment used by the torch preflight. Dependency resolution and
+	// interpreter selection happen here, so this is not a CUDA infrastructure
+	// diagnosis.
+	FailureReasonTorchPreflightEnvironmentFailed = "torch_preflight_environment_failed"
+
+	// FailureReasonTorchPreflightImportFailed marks failure after Python starts
+	// but before torch imports. This is a user-environment failure, not evidence
+	// that the rental's CUDA hardware is broken.
+	FailureReasonTorchPreflightImportFailed = "torch_preflight_import_failed"
+
 	// ExitCodeSetupTimeout is the setup-phase watchdog's exit code, matching
 	// timeout(1)'s convention. runner.ExitCodeSetupTimeout aliases this value.
 	ExitCodeSetupTimeout = 124
@@ -72,9 +83,12 @@ const (
 	// PhaseGPUCountPreflight is the agent's pre-spend probe that the
 	// instance physically exposes the GPUs the job sequence requests.
 	PhaseGPUCountPreflight FailurePhase = "gpu_count_preflight"
-	// PhaseTorchPreflight is the runner's weft-owned CUDA sanity check for
-	// torch before the user command starts.
-	PhaseTorchPreflight FailurePhase = "torch_preflight"
+	// PhaseTorchPreflightEnvironment selects and starts the Python environment.
+	PhaseTorchPreflightEnvironment FailurePhase = "torch_preflight_environment"
+	// PhaseTorchPreflightImport imports torch inside the selected environment.
+	PhaseTorchPreflightImport FailurePhase = "torch_preflight_import"
+	// PhaseTorchPreflightCUDA exercises torch's CUDA runtime and assigned GPU.
+	PhaseTorchPreflightCUDA FailurePhase = "torch_preflight_cuda"
 	// PhaseSetup is a detected setup command (uv sync, etc.) run by the
 	// agent's prewarm before the user command.
 	PhaseSetup FailurePhase = "setup"
@@ -106,9 +120,12 @@ func ClassifyInfraFailure(phase FailurePhase, exitCode int, logTail string) (rea
 		// The provider allocated fewer GPUs than the offer advertised —
 		// nothing the user's code did.
 		return "", true
-	case PhaseTorchPreflight:
-		// The torch CUDA preflight is weft-owned and runs before the user
-		// command starts, so failures here are rental/runtime infrastructure.
+	case PhaseTorchPreflightEnvironment:
+		return FailureReasonTorchPreflightEnvironmentFailed, false
+	case PhaseTorchPreflightImport:
+		return FailureReasonTorchPreflightImportFailed, false
+	case PhaseTorchPreflightCUDA:
+		// Only failures after torch imported are evidence from the CUDA probe.
 		return FailureReasonInfraTorchPreflightFailed, true
 	case PhaseSetup:
 		// Setup timeouts (exit 124) almost always mean rental network

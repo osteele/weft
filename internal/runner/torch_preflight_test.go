@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/db"
 )
 
 // TestPreflightEnv_InheritsHomeFromOsEnviron is a regression test for the
@@ -44,6 +45,8 @@ func TestTorchPreflightCommandRequiresWorkingCUDA(t *testing.T) {
 		t.Fatal("preflight must not skip CUDA initialization when torch reports CUDA unavailable")
 	}
 	for _, want := range []string{
+		torchPreflightPythonStartedMarker,
+		torchPreflightTorchImportedMarker,
 		"not torch.cuda.is_available()",
 		"torch.cuda.init()",
 		"torch.zeros(1, device='cuda')",
@@ -51,6 +54,56 @@ func TestTorchPreflightCommandRequiresWorkingCUDA(t *testing.T) {
 	} {
 		if !strings.Contains(torchPreflightPythonCode, want) {
 			t.Fatalf("preflight code %q missing %q", torchPreflightPythonCode, want)
+		}
+	}
+}
+
+func TestTorchPreflightFailureStage(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   TorchPreflightFailureStage
+	}{
+		{
+			name:   "resolver fails before Python starts",
+			output: "error: no solution found when resolving dependencies",
+			want:   TorchPreflightFailureEnvironment,
+		},
+		{
+			name:   "resolver quotes command containing markers",
+			output: "failed to run python -c \"print('" + torchPreflightPythonStartedMarker + "')\"",
+			want:   TorchPreflightFailureEnvironment,
+		},
+		{
+			name:   "torch import fails",
+			output: torchPreflightPythonStartedMarker + "\nModuleNotFoundError: No module named 'torch'",
+			want:   TorchPreflightFailureTorchImport,
+		},
+		{
+			name: "CUDA probe fails after torch import",
+			output: torchPreflightPythonStartedMarker + "\n" +
+				torchPreflightTorchImportedMarker + "\ntorch.cuda.is_available() is false",
+			want: TorchPreflightFailureCUDA,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := torchPreflightFailureStage(tt.output); got != tt.want {
+				t.Fatalf("torchPreflightFailureStage(%q) = %q, want %q", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTorchPreflightFailurePhase(t *testing.T) {
+	tests := map[TorchPreflightFailureStage]db.FailurePhase{
+		TorchPreflightFailureEnvironment: db.PhaseTorchPreflightEnvironment,
+		TorchPreflightFailureTorchImport: db.PhaseTorchPreflightImport,
+		TorchPreflightFailureCUDA:        db.PhaseTorchPreflightCUDA,
+	}
+	for stage, want := range tests {
+		if got := torchPreflightFailurePhase(stage); got != want {
+			t.Fatalf("torchPreflightFailurePhase(%q) = %q, want %q", stage, got, want)
 		}
 	}
 }

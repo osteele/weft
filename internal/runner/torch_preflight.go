@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,11 +14,16 @@ import (
 	"github.com/osteele/weft/internal/placement"
 )
 
+const (
+	torchPreflightPythonStartedMarker = "weft: torch preflight: python started"
+	torchPreflightTorchImportedMarker = "weft: torch preflight: torch imported"
+)
+
 // torchPreflightPythonCode is the snippet we run before the user command on
 // GPU-using torch jobs. It requires CUDA to be available, initializes it, and
 // performs a tiny device allocation so driver/runtime mismatches fail before
 // the user script can silently fall back to CPU.
-const torchPreflightPythonCode = `import sys, torch; sys.exit('torch.cuda.is_available() is false') if not torch.cuda.is_available() else None; torch.cuda.init(); torch.zeros(1, device='cuda').sum().item(); torch.cuda.synchronize(); print('weft: torch preflight ok')`
+const torchPreflightPythonCode = `import sys; print('` + torchPreflightPythonStartedMarker + `', flush=True); import torch; print('` + torchPreflightTorchImportedMarker + `', flush=True); sys.exit('torch.cuda.is_available() is false') if not torch.cuda.is_available() else None; torch.cuda.init(); torch.zeros(1, device='cuda').sum().item(); torch.cuda.synchronize(); print('weft: torch preflight ok')`
 
 const torchPreflightCommand = `python -c "` + torchPreflightPythonCode + `"`
 
@@ -24,6 +31,17 @@ const torchPreflightCommand = `python -c "` + torchPreflightPythonCode + `"`
 // The check itself takes ~1-3s on a healthy host; we allow 30s so cold
 // venv interpreter starts don't false-positive as failures.
 const torchPreflightTimeout = 30 * time.Second
+
+// TorchPreflightFailureStage identifies the furthest runner-owned boundary
+// reached before the preflight failed. It deliberately depends only on stable
+// Weft markers, not on uv, Python, or torch error prose.
+type TorchPreflightFailureStage string
+
+const (
+	TorchPreflightFailureEnvironment TorchPreflightFailureStage = "environment"
+	TorchPreflightFailureTorchImport TorchPreflightFailureStage = "torch_import"
+	TorchPreflightFailureCUDA        TorchPreflightFailureStage = "cuda"
+)
 
 // preflightEnv builds the env for the `bash -lc` preflight invocation. It
 // merges os.Environ() under the job's envVars so HOME (and other
@@ -39,15 +57,16 @@ func preflightEnv(envVars []string) []string {
 
 // runTorchPreflight runs a small Python snippet that imports torch and
 // initializes CUDA. On failure, the command's stderr is appended to the
-// job log so the post-hoc remediator can classify it. Returns (ExitInfo,
-// nil) on success and (ExitInfo, error) on failure or timeout.
+// job log and captured alongside runner-owned stage markers. Returns an empty
+// stage on success and the furthest reached stage on failure. A timeout remains
+// advisory and returns no error.
 //
 // The preflight uses `uv run --no-sync` when uv.lock is present so the
 // project's resolved torch is exercised (not whatever happens to be on
 // the system PATH). Otherwise it uses the image interpreter, accepting
 // either `python` or `python3` because several cloud base images ship only
 // the latter.
-func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, error) {
+func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, TorchPreflightFailureStage, error) {
 	deadline := torchPreflightTimeout
 	if setupTimeout > 0 && setupTimeout < deadline {
 		deadline = setupTimeout
@@ -61,29 +80,52 @@ func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []str
 	cmd := exec.CommandContext(ctx, "bash", "-lc", cmdStr)
 	cmd.Dir = workingDir
 	cmd.Env = preflightEnv(envVars)
+	var output bytes.Buffer
+	var commandOutput io.Writer = &output
 	logFile, openErr := os.OpenFile(paths.Log, os.O_APPEND|os.O_WRONLY, 0o644)
 	if openErr == nil {
 		defer logFile.Close()
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
+		commandOutput = io.MultiWriter(logFile, &output)
 	}
+	cmd.Stdout = commandOutput
+	cmd.Stderr = commandOutput
 
 	runErr := cmd.Run()
 	if runErr == nil {
-		return ExitInfo{}, nil
+		return ExitInfo{}, "", nil
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		// A timed-out preflight is suspicious but not by itself proof of
 		// driver mismatch — treat it as advisory and let the user command
 		// run. Surface it in the log and continue.
 		appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: torch preflight timed out after %s; continuing\n", deadline)))
-		return ExitInfo{}, nil
+		return ExitInfo{}, "", nil
 	}
 	ei := ExtractExitInfo(runErr)
 	if ei.ExitCode == 0 {
 		ei.ExitCode = 1
 	}
-	return ei, fmt.Errorf("torch preflight failed (exit %d): %w", ei.ExitCode, runErr)
+	stage := torchPreflightFailureStage(output.String())
+	return ei, stage, fmt.Errorf("torch preflight failed during %s stage (exit %d): %w", stage, ei.ExitCode, runErr)
+}
+
+func torchPreflightFailureStage(output string) TorchPreflightFailureStage {
+	if outputHasLine(output, torchPreflightTorchImportedMarker) {
+		return TorchPreflightFailureCUDA
+	}
+	if outputHasLine(output, torchPreflightPythonStartedMarker) {
+		return TorchPreflightFailureTorchImport
+	}
+	return TorchPreflightFailureEnvironment
+}
+
+func outputHasLine(output, marker string) bool {
+	for line := range strings.SplitSeq(output, "\n") {
+		if strings.TrimSpace(line) == marker {
+			return true
+		}
+	}
+	return false
 }
 
 func torchPreflightShellCommand(workingDir, jobCommand string) string {

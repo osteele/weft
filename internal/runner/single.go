@@ -306,14 +306,11 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// will classify the log on a hit; the gain here is wall-clock and a
 	// clearer phase attribution.
 	if len(gpuDevices) > 0 && shouldRunTorchPreflight(expandedDir, command, scriptMeta) {
-		ei, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, cfg.SetupTimeout)
+		ei, failureStage, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, cfg.SetupTimeout)
 		if preflightErr != nil {
 			now := time.Now().Unix()
 			phases.SetupEnd = now
-			failureReason, _ := db.ClassifyInfraFailure(db.PhaseTorchPreflight, ei.ExitCode, "")
-			if failureReason == "" {
-				failureReason = FailureReasonTorchPreflight
-			}
+			failureReason, _ := db.ClassifyInfraFailure(torchPreflightFailurePhase(failureStage), ei.ExitCode, "")
 			WriteFailureReasonFile(paths, failureReason)
 			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
 			WritePhasesFile(paths, phases)
@@ -631,6 +628,17 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	slog.Info("job completed", "component", "runner", "job_id", cfg.JobID, "exit_code", ei.ExitCode)
 	return ei, nil
+}
+
+func torchPreflightFailurePhase(stage TorchPreflightFailureStage) db.FailurePhase {
+	switch stage {
+	case TorchPreflightFailureTorchImport:
+		return db.PhaseTorchPreflightImport
+	case TorchPreflightFailureCUDA:
+		return db.PhaseTorchPreflightCUDA
+	default:
+		return db.PhaseTorchPreflightEnvironment
+	}
 }
 
 func appendPrewarmLog(jobLog, prewarmLog string) {

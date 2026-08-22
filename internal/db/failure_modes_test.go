@@ -39,8 +39,20 @@ func TestClassifyInfraFailure(t *testing.T) {
 			wantInfra: true,
 		},
 		{
-			name:       "torch preflight failure is infra",
-			phase:      PhaseTorchPreflight,
+			name:       "torch preflight environment failure is user attributed",
+			phase:      PhaseTorchPreflightEnvironment,
+			exitCode:   1,
+			wantReason: FailureReasonTorchPreflightEnvironmentFailed,
+		},
+		{
+			name:       "torch import failure is user attributed",
+			phase:      PhaseTorchPreflightImport,
+			exitCode:   1,
+			wantReason: FailureReasonTorchPreflightImportFailed,
+		},
+		{
+			name:       "torch CUDA probe failure is infra",
+			phase:      PhaseTorchPreflightCUDA,
 			exitCode:   1,
 			logTail:    "cuda error: unknown error",
 			wantReason: FailureReasonInfraTorchPreflightFailed,

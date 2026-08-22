@@ -1848,6 +1848,13 @@ rule DetectFailureReason {
 --   * GPU-count preflight shortfall: the instance physically exposes
 --     fewer GPUs than the sequence's jobs request, detected before any
 --     billable setup/prewarm spend.
+--   * Torch CUDA preflight failure: the runner-owned "torch imported" marker
+--     proves dependency resolution, Python startup, and torch import completed
+--     before the CUDA probe failed. Failures before that marker are classified
+--     as torch_preflight_environment_failed or torch_preflight_import_failed;
+--     they remain user-attributed and do not trigger rental replacement or
+--     machine avoidance. Classification uses these stable stage markers rather
+--     than parsing version-dependent uv, Python, or torch error prose.
 -- Justification: these conditions indicate rental network, hardware, or
 -- provider-allocation problems, not user error. Marking the job
 -- permanently failed would strand the user on a bad rental instead of

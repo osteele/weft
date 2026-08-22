@@ -290,7 +290,11 @@ func humanizeFailureReason(reason string) string {
 	case "setup_timeout":
 		return "setup phase exceeded its time budget (slow rental network/download or heavy uv sync); will retry on a different rental"
 	case db.FailureReasonInfraTorchPreflightFailed:
-		return "instance pool has broken CUDA; torch preflight failed before user code started"
+		return "CUDA probe failed before user code started"
+	case db.FailureReasonTorchPreflightEnvironmentFailed:
+		return "torch preflight could not start its Python environment"
+	case db.FailureReasonTorchPreflightImportFailed:
+		return "torch preflight could not import torch"
 	case "run_timeout":
 		return "run phase exceeded its --max-time budget"
 	case "killed_stdout_silence":

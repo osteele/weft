@@ -65,7 +65,6 @@ const (
 	FailureReasonGPUIdle          = "killed_gpu_idle"
 	FailureReasonStdoutSilence    = "killed_stdout_silence"
 	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
-	FailureReasonTorchPreflight   = "torch_preflight_failed"
 	FailureReasonDiskFull         = "disk_full"
 	FailureReasonSetupTimeout     = "setup_timeout"
 	FailureReasonRunTimeout       = "run_timeout"
