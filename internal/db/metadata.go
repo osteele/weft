@@ -153,12 +153,18 @@ type JobTelemetrySummary struct {
 
 // JobTelemetryDeviceSummary stores per-device derived telemetry.
 type JobTelemetryDeviceSummary struct {
-	GPUIndex          string   `json:"gpu_index"`
-	GPUName           string   `json:"gpu_name,omitempty"`
-	GPUActiveSeconds  float64  `json:"gpu_active_seconds,omitempty"`
-	GPUMeanUtilPct    *float64 `json:"gpu_mean_util_pct,omitempty"`
-	GPUMeanMemUtilPct *float64 `json:"gpu_mean_mem_util_pct,omitempty"`
-	GPUPeakMemMiB     int      `json:"gpu_peak_mem_mib,omitempty"`
+	GPUIndex           string   `json:"gpu_index"`
+	GPUName            string   `json:"gpu_name,omitempty"`
+	GPUActiveSeconds   float64  `json:"gpu_active_seconds,omitempty"`
+	GPUMeanUtilPct     *float64 `json:"gpu_mean_util_pct,omitempty"`
+	GPUMeanMemUtilPct  *float64 `json:"gpu_mean_mem_util_pct,omitempty"`
+	GPUPeakMemMiB      int      `json:"gpu_peak_mem_mib,omitempty"`
+	GPUSMClockMinMHz   *int     `json:"gpu_sm_clock_min_mhz,omitempty"`
+	GPUSMClockMaxMHz   *int     `json:"gpu_sm_clock_max_mhz,omitempty"`
+	GPUSMClockMeanMHz  *float64 `json:"gpu_sm_clock_mean_mhz,omitempty"`
+	GPUMemClockMinMHz  *int     `json:"gpu_mem_clock_min_mhz,omitempty"`
+	GPUMemClockMaxMHz  *int     `json:"gpu_mem_clock_max_mhz,omitempty"`
+	GPUMemClockMeanMHz *float64 `json:"gpu_mem_clock_mean_mhz,omitempty"`
 }
 
 func decodeJobMetadata(value sql.NullString) *JobMetadata {

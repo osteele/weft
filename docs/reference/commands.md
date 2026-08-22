@@ -1281,8 +1281,9 @@ weft job telemetry <job-id> [job-id...]   # Alias
 
 The command reads the latest attempt's synced telemetry samples, prints the
 time range, and summarizes GPU utilisation, temperature / clock data when
-available, plus per-GPU memory and activity data from the richer telemetry
-stream.
+available, plus per-GPU memory, activity, and SM / memory clock ranges from the
+richer telemetry stream. JSON output records per-device clock minima, maxima,
+and means under `summary.gpus`.
 
 **Flags:**
 - `--json`: Emit machine-readable JSON

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -71,11 +73,13 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 			ElapsedS:  0,
 			ProcRSSKB: 1000,
 			GPUs: []db.TelemetryGPUSample{{
-				GPUIndex:      "0",
-				GPUName:       "H100",
-				GPUMemUsedMiB: 120,
-				GPUUtilPct:    float64PtrTelemetry(40),
-				GPUMemUtilPct: float64PtrTelemetry(12),
+				GPUIndex:       "0",
+				GPUName:        "H100",
+				GPUMemUsedMiB:  120,
+				GPUUtilPct:     float64PtrTelemetry(40),
+				GPUMemUtilPct:  float64PtrTelemetry(12),
+				GPUSMClockMHz:  uint32PtrTelemetry(1200),
+				GPUMemClockMHz: uint32PtrTelemetry(1500),
 			}},
 		},
 		{
@@ -83,11 +87,13 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 			ElapsedS:  1,
 			ProcRSSKB: 1100,
 			GPUs: []db.TelemetryGPUSample{{
-				GPUIndex:      "0",
-				GPUName:       "H100",
-				GPUMemUsedMiB: 150,
-				GPUUtilPct:    float64PtrTelemetry(60),
-				GPUMemUtilPct: float64PtrTelemetry(15),
+				GPUIndex:       "0",
+				GPUName:        "H100",
+				GPUMemUsedMiB:  150,
+				GPUUtilPct:     float64PtrTelemetry(60),
+				GPUMemUtilPct:  float64PtrTelemetry(15),
+				GPUSMClockMHz:  uint32PtrTelemetry(1400),
+				GPUMemClockMHz: uint32PtrTelemetry(1600),
 			}},
 		},
 	}
@@ -120,8 +126,43 @@ func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 	if out.Summary.GPUs[0].GPUPeakMemMiB != 150 {
 		t.Fatalf("Summary peak mem = %d, want 150", out.Summary.GPUs[0].GPUPeakMemMiB)
 	}
+	if got := out.Summary.GPUs[0]; got.GPUSMClockMinMHz == nil || *got.GPUSMClockMinMHz != 1200 || got.GPUMemClockMaxMHz == nil || *got.GPUMemClockMaxMHz != 1600 {
+		t.Fatalf("Summary clocks = %+v, want SM min 1200 and memory max 1600", got)
+	}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal telemetry output: %v", err)
+	}
+	for _, field := range []string{`"gpu_sm_clock_min_mhz":1200`, `"gpu_mem_clock_max_mhz":1600`} {
+		if !strings.Contains(string(payload), field) {
+			t.Errorf("JSON output missing %s: %s", field, payload)
+		}
+	}
+}
+
+func TestFormatDeviceTelemetryPartsIncludesClockRanges(t *testing.T) {
+	parts := formatDeviceTelemetryParts(db.JobTelemetryDeviceSummary{
+		GPUSMClockMinMHz:   intPtrTelemetry(1200),
+		GPUSMClockMaxMHz:   intPtrTelemetry(1400),
+		GPUSMClockMeanMHz:  float64PtrTelemetry(1300),
+		GPUMemClockMinMHz:  intPtrTelemetry(1500),
+		GPUMemClockMaxMHz:  intPtrTelemetry(1600),
+		GPUMemClockMeanMHz: float64PtrTelemetry(1550),
+	})
+	want := "SM clock 1200–1400 MHz (mean 1300 MHz), memory clock 1500–1600 MHz (mean 1550 MHz)"
+	if got := strings.Join(parts, ", "); got != want {
+		t.Fatalf("parts = %q, want %q", got, want)
+	}
 }
 
 func float64PtrTelemetry(value float64) *float64 {
+	return &value
+}
+
+func intPtrTelemetry(value int) *int {
+	return &value
+}
+
+func uint32PtrTelemetry(value uint32) *uint32 {
 	return &value
 }

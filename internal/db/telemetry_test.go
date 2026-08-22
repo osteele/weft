@@ -34,7 +34,15 @@ func TestInsertAndSummarizeTelemetry(t *testing.T) {
 			ProcCPUSysS:  0.1,
 			ProcRSSKB:    1000,
 			GPUs: []TelemetryGPUSample{
-				{GPUIndex: "0", GPUName: "A100", GPUMemUsedMiB: 100, GPUUtilPct: telemetryFloat64Ptr(50), GPUMemUtilPct: telemetryFloat64Ptr(25)},
+				{
+					GPUIndex:       "0",
+					GPUName:        "A100",
+					GPUMemUsedMiB:  100,
+					GPUUtilPct:     telemetryFloat64Ptr(50),
+					GPUMemUtilPct:  telemetryFloat64Ptr(25),
+					GPUSMClockMHz:  telemetryUint32Ptr(1200),
+					GPUMemClockMHz: telemetryUint32Ptr(1500),
+				},
 			},
 		},
 		{
@@ -44,8 +52,21 @@ func TestInsertAndSummarizeTelemetry(t *testing.T) {
 			ProcCPUSysS:  0.2,
 			ProcRSSKB:    2000,
 			GPUs: []TelemetryGPUSample{
-				{GPUIndex: "0", GPUName: "A100", GPUMemUsedMiB: 120, GPUUtilPct: telemetryFloat64Ptr(100), GPUMemUtilPct: telemetryFloat64Ptr(50)},
-				{GPUIndex: "1", GPUName: "A100", GPUMemUsedMiB: 80},
+				{
+					GPUIndex:       "0",
+					GPUName:        "A100",
+					GPUMemUsedMiB:  120,
+					GPUUtilPct:     telemetryFloat64Ptr(100),
+					GPUMemUtilPct:  telemetryFloat64Ptr(50),
+					GPUSMClockMHz:  telemetryUint32Ptr(1400),
+					GPUMemClockMHz: telemetryUint32Ptr(1600),
+				},
+				{
+					GPUIndex:      "1",
+					GPUName:       "A100",
+					GPUMemUsedMiB: 80,
+					GPUSMClockMHz: telemetryUint32Ptr(1000),
+				},
 			},
 		},
 	}
@@ -78,6 +99,19 @@ func TestInsertAndSummarizeTelemetry(t *testing.T) {
 	}
 	if len(summary.GPUs) != 2 {
 		t.Fatalf("gpu summary count = %d, want 2", len(summary.GPUs))
+	}
+	if got := summary.GPUs[0]; got.GPUSMClockMinMHz == nil || *got.GPUSMClockMinMHz != 1200 ||
+		got.GPUSMClockMaxMHz == nil || *got.GPUSMClockMaxMHz != 1400 ||
+		got.GPUSMClockMeanMHz == nil || *got.GPUSMClockMeanMHz != 1300 {
+		t.Fatalf("GPU 0 SM clock summary = %+v, want 1200/1400/1300", got)
+	}
+	if got := summary.GPUs[0]; got.GPUMemClockMinMHz == nil || *got.GPUMemClockMinMHz != 1500 ||
+		got.GPUMemClockMaxMHz == nil || *got.GPUMemClockMaxMHz != 1600 ||
+		got.GPUMemClockMeanMHz == nil || *got.GPUMemClockMeanMHz != 1550 {
+		t.Fatalf("GPU 0 memory clock summary = %+v, want 1500/1600/1550", got)
+	}
+	if got := summary.GPUs[1]; got.GPUSMClockMinMHz == nil || *got.GPUSMClockMinMHz != 1000 || got.GPUMemClockMaxMHz != nil {
+		t.Fatalf("GPU 1 partial clock summary = %+v, want SM=1000 and absent memory clock", got)
 	}
 
 	got, err := GetTelemetryByRun(database, *updated.LatestRunID)

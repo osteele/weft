@@ -325,6 +325,12 @@ func SummarizeTelemetry(samples []TelemetrySample, wallDuration float64, assigne
 					acc.activeSeconds += duration
 				}
 			}
+			if gpu.GPUSMClockMHz != nil {
+				acc.smClock.add(float64(*gpu.GPUSMClockMHz))
+			}
+			if gpu.GPUMemClockMHz != nil {
+				acc.memClock.add(float64(*gpu.GPUMemClockMHz))
+			}
 		}
 	}
 
@@ -337,10 +343,16 @@ func SummarizeTelemetry(samples []TelemetrySample, wallDuration float64, assigne
 
 	for index, acc := range deviceAgg {
 		deviceSummary := JobTelemetryDeviceSummary{
-			GPUIndex:         index,
-			GPUName:          acc.name,
-			GPUActiveSeconds: acc.activeSeconds,
-			GPUPeakMemMiB:    acc.peakMemMiB,
+			GPUIndex:           index,
+			GPUName:            acc.name,
+			GPUActiveSeconds:   acc.activeSeconds,
+			GPUPeakMemMiB:      acc.peakMemMiB,
+			GPUSMClockMinMHz:   acc.smClock.minInt(),
+			GPUSMClockMaxMHz:   acc.smClock.maxInt(),
+			GPUSMClockMeanMHz:  acc.smClock.mean(),
+			GPUMemClockMinMHz:  acc.memClock.minInt(),
+			GPUMemClockMaxMHz:  acc.memClock.maxInt(),
+			GPUMemClockMeanMHz: acc.memClock.mean(),
 		}
 		if acc.totalDuration > 0 {
 			value := acc.utilWeighted / acc.totalDuration
@@ -367,6 +379,8 @@ type telemetryDeviceAccumulator struct {
 	memUtilWeighted float64
 	hasMemUtil      bool
 	peakMemMiB      int
+	smClock         running
+	memClock        running
 }
 
 func sampleInterval(samples []TelemetrySample, wallDuration float64) float64 {

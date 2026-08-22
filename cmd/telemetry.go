@@ -134,23 +134,11 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		}
 		if out.Summary != nil {
 			for _, gpu := range out.Summary.GPUs {
-				var parts []string
 				label := gpu.GPUIndex
 				if gpu.GPUName != "" {
 					label = fmt.Sprintf("%s (%s)", gpu.GPUIndex, gpu.GPUName)
 				}
-				if gpu.GPUMeanUtilPct != nil {
-					parts = append(parts, fmt.Sprintf("mean util %.0f%%", *gpu.GPUMeanUtilPct))
-				}
-				if gpu.GPUMeanMemUtilPct != nil {
-					parts = append(parts, fmt.Sprintf("mean mem util %.0f%%", *gpu.GPUMeanMemUtilPct))
-				}
-				if gpu.GPUPeakMemMiB > 0 {
-					parts = append(parts, fmt.Sprintf("peak mem %d MiB", gpu.GPUPeakMemMiB))
-				}
-				if gpu.GPUActiveSeconds > 0 {
-					parts = append(parts, fmt.Sprintf("active %s", (time.Duration(gpu.GPUActiveSeconds*float64(time.Second))).Round(time.Second)))
-				}
+				parts := formatDeviceTelemetryParts(gpu)
 				if len(parts) > 0 {
 					fmt.Printf("  GPU %s: %s\n", label, strings.Join(parts, ", "))
 				}
@@ -304,4 +292,31 @@ func formatMean(v *float64, unit string) string {
 		return "n/a"
 	}
 	return fmt.Sprintf("%.0f%s", *v, unit)
+}
+
+func formatDeviceTelemetryParts(gpu db.JobTelemetryDeviceSummary) []string {
+	var parts []string
+	if gpu.GPUMeanUtilPct != nil {
+		parts = append(parts, fmt.Sprintf("mean util %.0f%%", *gpu.GPUMeanUtilPct))
+	}
+	if gpu.GPUMeanMemUtilPct != nil {
+		parts = append(parts, fmt.Sprintf("mean mem util %.0f%%", *gpu.GPUMeanMemUtilPct))
+	}
+	if gpu.GPUPeakMemMiB > 0 {
+		parts = append(parts, fmt.Sprintf("peak mem %d MiB", gpu.GPUPeakMemMiB))
+	}
+	if gpu.GPUSMClockMaxMHz != nil {
+		parts = append(parts, fmt.Sprintf("SM clock %s (mean %s)",
+			formatRangeInt(gpu.GPUSMClockMinMHz, gpu.GPUSMClockMaxMHz, " MHz"),
+			formatMean(gpu.GPUSMClockMeanMHz, " MHz")))
+	}
+	if gpu.GPUMemClockMaxMHz != nil {
+		parts = append(parts, fmt.Sprintf("memory clock %s (mean %s)",
+			formatRangeInt(gpu.GPUMemClockMinMHz, gpu.GPUMemClockMaxMHz, " MHz"),
+			formatMean(gpu.GPUMemClockMeanMHz, " MHz")))
+	}
+	if gpu.GPUActiveSeconds > 0 {
+		parts = append(parts, fmt.Sprintf("active %s", (time.Duration(gpu.GPUActiveSeconds*float64(time.Second))).Round(time.Second)))
+	}
+	return parts
 }
