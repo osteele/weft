@@ -306,3 +306,47 @@ func withNoDaemon(t *testing.T) {
 		daemonStatusFunc = oldStatus
 	})
 }
+
+// TestRecordQueuedJobRejectsDaemonSuccessWithoutJobID pins that a daemon reply
+// of "no error, no job id" is not treated as a submission. Returning (0, nil)
+// would tell the caller its job was queued when no row exists, which is
+// indistinguishable from success at the exit code and leaves no id to check.
+func TestRecordQueuedJobRejectsDaemonSuccessWithoutJobID(t *testing.T) {
+	database := db.SetupTestDB(t)
+	withTestDaemon(t, "/tmp/weft-submit-zero-id.sock")
+
+	oldDialMutation := dialMutationFunc
+	// Succeeds without populating the result: the shape a version skew or a
+	// truncated reply produces.
+	dialMutationFunc = func(ctx context.Context, socketPath string, op string, payload any, result any) error {
+		return nil
+	}
+	t.Cleanup(func() { dialMutationFunc = oldDialMutation })
+
+	directCalled := false
+	oldDirect := recordQueuedJobDirectFunc
+	recordQueuedJobDirectFunc = func(database *sql.DB, params ops.QueueJobParams) (int64, error) {
+		directCalled = true
+		return ops.RecordQueuedJob(database, params)
+	}
+	t.Cleanup(func() { recordQueuedJobDirectFunc = oldDirect })
+
+	jobID, err := RecordQueuedJob(context.Background(), database, ops.QueueJobParams{
+		WorkingDir:  "/tmp/project",
+		Command:     "echo zero id",
+		Description: "zero id",
+		SubmitToken: "zero-id-token",
+	})
+	if err != nil {
+		t.Fatalf("RecordQueuedJob: %v", err)
+	}
+	if jobID == 0 {
+		t.Fatal("returned job id 0 with no error: a submission that did not happen reported as success")
+	}
+	if !directCalled {
+		t.Error("expected the direct fallback to run after the daemon returned no job id")
+	}
+	if _, err := db.GetJobByID(database, jobID); err != nil {
+		t.Errorf("returned job id %d has no row: %v", jobID, err)
+	}
+}

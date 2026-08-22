@@ -65,6 +65,14 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 	var result daemonapi.SubmitJobResult
 	used, err := tryDaemonMutationWithTimeout(ctx, OpSubmitJob, params, &result, submitRPCTimeout)
 	if used {
+		// A reply that carries no job id is not evidence that a job was
+		// recorded, so it must not be returned as a successful submission the
+		// caller cannot tell from a real one. Convert it to an error and let it
+		// take the same recovery path as a transport failure: look the token
+		// up, then fall back to writing directly.
+		if err == nil && result.JobID == 0 {
+			err = fmt.Errorf("daemon reported a successful submission without a job id")
+		}
 		if err != nil {
 			if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
 				return jobID, nil
