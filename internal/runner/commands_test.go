@@ -674,6 +674,9 @@ func TestProcessCommands_Add_SkipsArchiveForLiveJob(t *testing.T) {
 	if len(archived) != 0 {
 		t.Fatalf("expected no archived heartbeat for live job, got %v", archived)
 	}
+	if slices.Contains(state.Pending, jobID) {
+		t.Fatalf("duplicate add must not enqueue a second copy of live job %d: %v", jobID, state.Pending)
+	}
 }
 
 func appendCmd(t *testing.T, path string, cmd opsqueue.QueueCommand) {

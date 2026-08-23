@@ -695,9 +695,11 @@ func runIDsCompatible(want *int64, got int64) bool {
 //
 //   - state.json positively shows the job as Finished/Running/Current, or as
 //     Pending with a matching payload run_id → materialized, leave it.
-//   - The payload probe failed while state.json still lists the job as Pending →
-//     the pending entry's run_id is unknown, not stale. Unknown is not absence:
-//     leave it in place rather than re-running a job the runner still queues.
+//   - The payload probe failed while state.json exists → the runner snapshot
+//     cannot prove that an absent or pending entry is stale. This is the normal
+//     R2-pull case: state publication and inbox consumption are asynchronous,
+//     and the R2 snapshot does not expose job payload files. Unknown is not
+//     absence, so leave the durable dispatch in place.
 //   - The job is absent from state.json entirely (or state itself is the
 //     no-state-file sentinel) → confirmed absent, re-dispatch.
 //
@@ -713,9 +715,10 @@ func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payload
 	if queuedJobMaterializedInRunner(job, state, payloads) {
 		return false // runner positively holds it
 	}
-	if payloadErr != nil && state != nil && slices.Contains(state.Pending, job.ID) {
-		// Runner still lists the job pending but the payload run_id could not be
-		// read: absence of evidence, not evidence of absence — leave it.
+	if payloadErr != nil && state != nil {
+		// A runner snapshot without a successful payload probe cannot prove
+		// absence. In particular, an R2 state snapshot may have been published
+		// immediately before the daemon consumed the durable inbox request.
 		return false
 	}
 	return true // confirmed absent from the runner's state

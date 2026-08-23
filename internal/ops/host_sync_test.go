@@ -113,6 +113,14 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 			wantRedispatch: false,
 		},
 		{
+			name:           "job absent from snapshot with payload probe error is left in place (unknown)",
+			job:            absentJob,
+			state:          state,
+			payloads:       nil,
+			payloadErr:     probeErr,
+			wantRedispatch: false,
+		},
+		{
 			name:           "job absent from state is re-dispatched even without probe error",
 			job:            absentJob,
 			state:          state,

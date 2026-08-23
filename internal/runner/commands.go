@@ -134,6 +134,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 					}
 					break
 				}
+				live := cp.jobIsLive(state, cmd.Job.ID)
 				// Write job data file first so a write failure leaves prior
 				// artifacts intact (no archived-but-unrun limbo).
 				if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
@@ -152,7 +153,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 					// for a live job is legitimate (host_sync forward
 					// reconcile, retry paths) — mergeResourceFields
 					// in writeJobFile already covers that case.
-					if cp.logDir != "" && !cp.jobIsLive(state, cmd.Job.ID) {
+					if cp.logDir != "" && !live {
 						if err := ArchiveExistingFiles(cp.logDir, cmd.Job.ID); err != nil {
 							// Don't silently swallow: a rename failure
 							// leaves the primary .status in place and
@@ -160,9 +161,11 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 							fmt.Fprintf(os.Stderr, "warning: archive prior artifacts for job %d: %v\n", cmd.Job.ID, err)
 						}
 					}
-					state.addPendingLocked(cmd.Job.ID)
-					// Cancel any pending stop — new work arrived.
-					state.StopRequested = false
+					if !live {
+						state.addPendingLocked(cmd.Job.ID)
+						// Cancel any pending stop — new work arrived.
+						state.StopRequested = false
+					}
 				}
 			}
 
