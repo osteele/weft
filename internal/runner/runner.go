@@ -27,13 +27,16 @@ type Runner struct {
 	logDir       string
 	setupTimeout time.Duration
 
-	state           *State
-	cmdProc         *CommandProcessor
-	gpuInv          *GPUInventory
-	cpuConfig       CPUConfig
-	telemetryConfig TelemetryConfig
-	benchCfg        BenchmarkConfig
-	cpuCount        int
+	state            *State
+	cmdProc          *CommandProcessor
+	gpuInv           *GPUInventory
+	cpuConfig        CPUConfig
+	telemetryConfig  TelemetryConfig
+	benchCfg         BenchmarkConfig
+	cpuCount         int
+	ramTargetPercent int
+	hostMemoryStats  func() (totalKB, usedKB, availableKB int64)
+	processRSSKB     func(pid int) int64
 
 	// File paths
 	commandsFile string
@@ -125,21 +128,24 @@ func DefaultConfig() Config {
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
 	return &Runner{
-		queueDir:        cfg.QueueDir,
-		logDir:          cfg.LogDir,
-		setupTimeout:    cfg.SetupTimeout,
-		commandsFile:    filepath.Join(cfg.QueueDir, opsqueue.CommandsFileName()),
-		stateFile:       filepath.Join(cfg.QueueDir, opsqueue.StateFileName()),
-		currentFile:     filepath.Join(cfg.QueueDir, opsqueue.CurrentFileName()),
-		pidFile:         filepath.Join(cfg.QueueDir, opsqueue.PidFileName()),
-		runnerLog:       filepath.Join(cfg.QueueDir, opsqueue.RunnerLogName()),
-		cpuConfig:       DefaultCPUConfig(),
-		telemetryConfig: DefaultTelemetryConfig(),
-		benchCfg:        DefaultBenchmarkConfig(),
-		processes:       make(map[string]*Process),
-		hookStopFuncs:   make(map[string]func()),
-		nowFunc:         time.Now,
-		stopCh:          make(chan struct{}),
+		queueDir:         cfg.QueueDir,
+		logDir:           cfg.LogDir,
+		setupTimeout:     cfg.SetupTimeout,
+		commandsFile:     filepath.Join(cfg.QueueDir, opsqueue.CommandsFileName()),
+		stateFile:        filepath.Join(cfg.QueueDir, opsqueue.StateFileName()),
+		currentFile:      filepath.Join(cfg.QueueDir, opsqueue.CurrentFileName()),
+		pidFile:          filepath.Join(cfg.QueueDir, opsqueue.PidFileName()),
+		runnerLog:        filepath.Join(cfg.QueueDir, opsqueue.RunnerLogName()),
+		cpuConfig:        DefaultCPUConfig(),
+		telemetryConfig:  DefaultTelemetryConfig(),
+		benchCfg:         DefaultBenchmarkConfig(),
+		ramTargetPercent: defaultRAMUtilizationTarget,
+		hostMemoryStats:  HostMemoryStatsKB,
+		processRSSKB:     ProcCurrentRSSKB,
+		processes:        make(map[string]*Process),
+		hookStopFuncs:    make(map[string]func()),
+		nowFunc:          time.Now,
+		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -403,6 +409,15 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 			decision.reason = fmt.Sprintf("host load gate: %d%% >= %d%% ceiling (1-min loadavg / %d cores)", loadPct, r.cpuConfig.HostLoadCeiling, r.cpuCount)
 			return decision
 		}
+	}
+
+	if ramDecision := r.evaluateRAMAdmission(job); !ramDecision.Admit {
+		decision.reason = fmt.Sprintf(
+			"ram gate: projected %.1f GiB > %.1f GiB target",
+			float64(ramDecision.ProjectedUsedKB)/(1024*1024),
+			float64(ramDecision.CapacityKB)/(1024*1024),
+		)
+		return decision
 	}
 
 	// Refresh actual GPU memory snapshot before GPU checks (only for GPU jobs).
@@ -854,6 +869,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		Samples:                  []int{},
 		GPUDevices:               gpuDevices,
 		GPUMemGB:                 gpuMemGB,
+		RAMReservationKB:         job.RAMReservationKB,
 		DiskPath:                 expandedDir,
 		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
 		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
@@ -865,6 +881,35 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	return nil
+}
+
+func (r *Runner) evaluateRAMAdmission(job *opsqueue.CommandJob) RAMAdmissionDecision {
+	totalKB, usedKB, _ := r.hostMemoryStats()
+	running := make([]RAMCommitment, 0, r.state.RunningCount())
+	for jobID, state := range r.state.RunningSnapshot() {
+		reservationKB := state.RAMReservationKB
+		if reservationKB == 0 {
+			if queued, err := ReadJobFile(r.queueDir, mustParseInt64(jobID)); err == nil {
+				reservationKB = queued.RAMReservationKB
+			}
+		}
+		currentRSSKB := state.FinalRSSKB
+		paths := NewJobPaths(r.logDir, mustParseInt64(jobID))
+		if pid, ok := ReadPIDFile(paths.PID); ok {
+			currentRSSKB = r.processRSSKB(pid)
+		}
+		running = append(running, RAMCommitment{
+			ReservationKB: reservationKB,
+			CurrentRSSKB:  currentRSSKB,
+		})
+	}
+	return EvaluateRAMAdmission(RAMAdmissionInput{
+		TotalKB:           totalKB,
+		UsedKB:            usedKB,
+		TargetPercent:     r.ramTargetPercent,
+		Running:           running,
+		NextReservationKB: job.RAMReservationKB,
+	})
 }
 
 // finishFailedSetup closes out a job whose setup phase failed before the main

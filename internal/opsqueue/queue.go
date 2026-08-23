@@ -58,21 +58,22 @@ type QueueEntry struct {
 	// SourceManifest identifies the complete immutable source closure for a
 	// submit-time-pinned job. When present, the runner materializes every root
 	// and diverted blob instead of consulting the submitter's live working tree.
-	SourceManifest *SourceManifest
-	EnvVars        []string
-	DepSpec        string
-	CPUAllotment   *int
-	GPU            string
-	GPUClass       string
-	GPUCount       int
-	GPUMemGB       *int
-	Interconnect   string
-	CPUCores       int
-	Tags           []string
-	OutputDirs     []string
-	Outputs        []string
-	Produces       []string
-	Needs          []string
+	SourceManifest   *SourceManifest
+	EnvVars          []string
+	DepSpec          string
+	CPUAllotment     *int
+	GPU              string
+	GPUClass         string
+	GPUCount         int
+	GPUMemGB         *int
+	Interconnect     string
+	CPUCores         int
+	RAMReservationKB int64
+	Tags             []string
+	OutputDirs       []string
+	Outputs          []string
+	Produces         []string
+	Needs            []string
 }
 
 // SourceManifest is the queue protocol representation of an immutable source

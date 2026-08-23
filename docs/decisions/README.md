@@ -29,6 +29,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0016](0016-run-inventory-queue-jobs-from-the-submitted-source-closure.md) | Run inventory queue jobs from the submitted source closure | accepted |
 | [0017](0017-use-host-addressed-r2-mailboxes-for-isolated-inventory-hosts.md) | Use host-addressed R2 mailboxes for isolated inventory hosts | accepted |
 | [0018](0018-delete-the-retired-coordinator-implementation.md) | Delete the retired coordinator implementation | accepted |
+| [0019](0019-admit-concurrent-jobs-with-host-local-ram-reservations.md) | Admit concurrent jobs with host-local RAM reservations | accepted |
 
 ## Adding one
 

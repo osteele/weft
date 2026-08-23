@@ -52,6 +52,7 @@ Schema (`PlacementMeta`):
 |-------|----------|-------------|
 | PredictedDurationS | `pred_dur_s` | Predicted wall-clock seconds for selected host |
 | PredictedRSSKB | `pred_rss_kb` | Predicted peak RSS in KB |
+| PredictedRSSUpperKB | `pred_rss_upper_kb` | Upper confidence bound for peak RSS in KB; used by host-local RAM admission |
 | PredictedGPUMemMiB | `pred_gpu_mib` | Predicted peak GPU memory in MiB |
 | SelectedScore | `score` | Placement score of the selected host |
 | RunnerUpHost | `runner_up` | Second-best eligible host |

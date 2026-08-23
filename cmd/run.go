@@ -2192,6 +2192,7 @@ func buildPlacementMeta(result *placement.PlacementResult, predict placement.Job
 		if p != nil {
 			meta.PredictedDurationS = p.DurationS
 			meta.PredictedRSSKB = p.PeakRSSKB
+			meta.PredictedRSSUpperKB = p.PeakRSSKBUpper
 			meta.PredictedGPUMemMiB = p.MaxGPUMemMiB
 		}
 	}

@@ -87,11 +87,21 @@ func TicksToSeconds(ticks int64) string {
 // Reads VmRSS from /proc/{pid}/status and sums across the tree.
 // Returns 0 on non-Linux or if /proc is unavailable.
 func ProcCurrentRSSKB(pid int) int64 {
-	if _, err := os.Stat("/proc"); err != nil {
-		return 0
-	}
 	pids := GetProcessTree(pid)
 	var totalRSS int64
+	if _, err := os.Stat("/proc"); err != nil {
+		for _, p := range pids {
+			out, err := exec.Command("ps", "-p", strconv.Itoa(p), "-o", "rss=").Output()
+			if err != nil {
+				continue
+			}
+			rss, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+			if err == nil {
+				totalRSS += rss
+			}
+		}
+		return totalRSS
+	}
 	for _, p := range pids {
 		statusPath := fmt.Sprintf("/proc/%d/status", p)
 		data, err := os.ReadFile(statusPath)

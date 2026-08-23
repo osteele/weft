@@ -85,11 +85,12 @@ func TestState_SaveLoad(t *testing.T) {
 	id := int64(10)
 	s.Current = &id
 	s.AddRunning("10", RunningJobState{
-		StartedAt:      1000,
-		WarmupUntil:    1120,
-		LocalAllotment: 30,
-		GPUDevices:     []string{"0"},
-		GPUMemGB:       20,
+		StartedAt:        1000,
+		WarmupUntil:      1120,
+		LocalAllotment:   30,
+		GPUDevices:       []string{"0"},
+		GPUMemGB:         20,
+		RAMReservationKB: 32 * gibKB,
 	})
 	s.RecordFinished("5", 0, 999)
 
@@ -120,6 +121,9 @@ func TestState_SaveLoad(t *testing.T) {
 	}
 	if len(rs.GPUDevices) != 1 || rs.GPUDevices[0] != "0" {
 		t.Errorf("running.gpu_devices: got %v, want [0]", rs.GPUDevices)
+	}
+	if rs.RAMReservationKB != 32*gibKB {
+		t.Errorf("running.ram_reservation_kb: got %d, want %d", rs.RAMReservationKB, 32*gibKB)
 	}
 }
 

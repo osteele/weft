@@ -307,57 +307,6 @@ to produce and harder for operators to observe.
   durable transition-event table, so narration does not report transient
   intermediate states.
 
-## Host-local RAM-admission ledger (concurrent-set OOM)
-
-`--cpu-mem` (shipped) is a per-job-vs-**total**-RAM hard gate: it filters
-Vast.ai offers by `cpu_ram` and marks an on-prem host ineligible when its total
-RAM is below the declared floor. That guarantees a job *can* fit a host in
-isolation, but not that a *concurrent set* of jobs fits — two 32GB jobs both
-pass on a 64GB host and then OOM-kill (exit 137) when both load. Placement-time
-defenses are all reactive (the RAM% overload classifier in
-`internal/placement/overload.go` hard-rejects at 96% and penalizes at 85%; the
-predicted-RSS-vs-free-RAM soft penalty in `applyResourceSoftConstraints`), and
-reactive admission has a structural race it cannot close: between "place job" and
-"job's RSS becomes resident" the live metric does not reflect the commitment —
-which for memory is exactly the model-load spike window.
-
-Resolution is a two-layer split, not a placement-time reservation ledger:
-keep placement reactive (global, speculative, correctable — and free of the
-distributed-state ownership problem), and add a **host-local start-admission
-ledger** at the point that already serializes job starts.
-
-- **Home: the host-resident queue runner** (`internal/runner`), which already
-  serializes dispatch decisions while tracking several running jobs. It is the
-  kubelet-equivalent: one owner per host and one start-admission decision at a
-  time.
-- **Derived, not stateful.** At each start decision compute
-  `committed = Σ reservation over jobs currently running on this host`; admit iff
-  `committed + nonweft_used + next ≤ hostRAM × factor`, else hold the job and
-  re-evaluate when a running job exits. No persistent reserve/release state to
-  leak — a crashed job is simply no longer running, so its commitment vanishes;
-  a runner restart re-derives from the live process set. The `nonweft_used` term
-  (from the live RAM metric) keeps the reactive layer for what the ledger cannot
-  see on a shared host.
-- **Reservation weight = `max(declared --cpu-mem, predicted PeakRSS_upper)`.**
-  Even an undeclared job gets a predicted-RSS reservation, and the predictor's
-  estimate is the freshest signal by start time — so the gate degrades
-  gracefully under poor declaration quality, unlike a placement-time ledger fed
-  only by declared values.
-- **Composition.** The shipped placement gate (can-fit-ever) is also the safety
-  valve that prevents the start gate from holding an impossible job forever:
-  reject at placement when the reservation exceeds the host's total RAM, hold at
-  start when it exceeds *currently free*. Work-conserving — the host can still be
-  targeted by many queued jobs; they start as RAM frees, so no fleet capacity is
-  stranded and holding a queued job briefly is near-free backpressure.
-- **Remaining work** is queue semantics, all inside the runner: release trigger
-  (running job exits → re-scan held jobs) and anti-starvation (reserve-ahead /
-  aging so a large held job is not perpetually jumped by small ones).
-
-Worth building when concurrent-set RAM OOMs prove a recurring cost (empirical —
-how often they happen vs. the utilization given up by reserving). The shipped
-placement gate plus the reactive overload classifier are the correct first half
-regardless; this is the second half for the must-not-OOM case.
-
 ## UserIntent entity (replaces requested_status three-way merge)
 
 The `job_status` view derives `Job.status` from `jobs.requested_status`

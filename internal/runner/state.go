@@ -30,18 +30,19 @@ type State struct {
 // RunningJobState captures per-job runtime state for concurrent execution.
 // Field names match the bash runner's JSON format for compatibility.
 type RunningJobState struct {
-	RunID          int64    `json:"run_id,omitempty"`
-	StartedAt      int64    `json:"started_at"`
-	WarmupUntil    int64    `json:"warmup_until"`
-	LocalAllotment int      `json:"local_allotment"`
-	Samples        []int    `json:"samples,omitempty"`
-	OverCount      int      `json:"over_count"`
-	UnderCount     int      `json:"under_count"`
-	OverHist       []int    `json:"over_hist,omitempty"`
-	UnderHist      []int    `json:"under_hist,omitempty"`
-	GPUDevices     []string `json:"gpu_devices,omitempty"`
-	GPUMemGB       int      `json:"gpu_mem_gb,omitempty"`
-	DiskPath       string   `json:"disk_path,omitempty"`
+	RunID            int64    `json:"run_id,omitempty"`
+	StartedAt        int64    `json:"started_at"`
+	WarmupUntil      int64    `json:"warmup_until"`
+	LocalAllotment   int      `json:"local_allotment"`
+	Samples          []int    `json:"samples,omitempty"`
+	OverCount        int      `json:"over_count"`
+	UnderCount       int      `json:"under_count"`
+	OverHist         []int    `json:"over_hist,omitempty"`
+	UnderHist        []int    `json:"under_hist,omitempty"`
+	GPUDevices       []string `json:"gpu_devices,omitempty"`
+	GPUMemGB         int      `json:"gpu_mem_gb,omitempty"`
+	RAMReservationKB int64    `json:"ram_reservation_kb,omitempty"`
+	DiskPath         string   `json:"disk_path,omitempty"`
 
 	// Resource usage tracking (updated during sampling)
 	RusageUserCPU string `json:"rusage_user_cpu,omitempty"`

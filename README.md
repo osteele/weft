@@ -47,6 +47,12 @@ driver, CUDA, GPU architecture, and cloud-image requirements from the project's
 `torch` pin. Benchmark isolation gates and per-run telemetry support controlled
 GPU, model, and configuration sweeps.
 
+An inventory host can run several jobs concurrently when its CPU, RAM, and GPU
+admission gates allow it. The queue runner combines live RAM use with declared
+or predicted per-job reservations, preventing concurrent model-load commitments
+from exceeding its host target. See
+[Host-local RAM admission](docs/architecture/ram-admission.md).
+
 ## Interfaces
 
 Interactive and automated interfaces call the same core operations and use the

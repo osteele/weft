@@ -132,3 +132,10 @@ func TestCommandPaths(t *testing.T) {
 		t.Fatalf("StateFilePath = %q", got)
 	}
 }
+
+func TestNewAddCommandCarriesRAMReservation(t *testing.T) {
+	cmd := NewAddCommand(QueueEntry{JobID: 42, Command: "true", RAMReservationKB: 123456})
+	if cmd.Job == nil || cmd.Job.RAMReservationKB != 123456 {
+		t.Fatalf("RAMReservationKB = %v, want 123456", cmd.Job)
+	}
+}

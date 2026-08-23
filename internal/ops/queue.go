@@ -56,32 +56,47 @@ func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sour
 		runID = *job.LatestRunID
 	}
 	entry := opsqueue.QueueEntry{
-		JobID:          job.ID,
-		RunID:          runID,
-		WorkingDir:     job.WorkingDir,
-		Command:        job.Command,
-		Description:    job.Description,
-		SourceSHA256:   sourceSHA256,
-		SourceR2Key:    sourceR2Key,
-		SourceManifest: sourceManifest,
-		EnvVars:        job.EnvVars,
-		DepSpec:        job.DepSpec,
-		CPUAllotment:   job.CPUAllotment,
-		GPU:            job.GPU,
-		GPUClass:       job.GPUClass,
-		GPUCount:       job.RequestedGPUCount(),
-		GPUMemGB:       job.GPUMemGB,
-		Interconnect:   job.RequestedInterconnect(),
-		CPUCores:       job.RequestedCPUCores(),
-		Tags:           job.Tags,
-		OutputDirs:     job.OutputDirs,
-		Outputs:        job.Outputs,
-		Produces:       job.Produces,
-		Needs:          job.Needs,
+		JobID:            job.ID,
+		RunID:            runID,
+		WorkingDir:       job.WorkingDir,
+		Command:          job.Command,
+		Description:      job.Description,
+		SourceSHA256:     sourceSHA256,
+		SourceR2Key:      sourceR2Key,
+		SourceManifest:   sourceManifest,
+		EnvVars:          job.EnvVars,
+		DepSpec:          job.DepSpec,
+		CPUAllotment:     job.CPUAllotment,
+		GPU:              job.GPU,
+		GPUClass:         job.GPUClass,
+		GPUCount:         job.RequestedGPUCount(),
+		GPUMemGB:         job.GPUMemGB,
+		Interconnect:     job.RequestedInterconnect(),
+		CPUCores:         job.RequestedCPUCores(),
+		RAMReservationKB: jobRAMReservationKB(job),
+		Tags:             job.Tags,
+		OutputDirs:       job.OutputDirs,
+		Outputs:          job.Outputs,
+		Produces:         job.Produces,
+		Needs:            job.Needs,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
 	return appendQueueCommand(job.Host, addCmd, opts)
+}
+
+func jobRAMReservationKB(job *db.Job) int64 {
+	if job == nil {
+		return 0
+	}
+	reservation := int64(job.RequestedCPUMemGB()) * 1024 * 1024
+	if job.PlacementMeta != nil && job.PlacementMeta.PredictedRSSUpperKB != nil {
+		predicted := int64(*job.PlacementMeta.PredictedRSSUpperKB)
+		if predicted > reservation {
+			reservation = predicted
+		}
+	}
+	return reservation
 }
 
 // pinnedQueueSourceManifest converts durable submit-time metadata into the

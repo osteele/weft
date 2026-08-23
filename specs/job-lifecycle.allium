@@ -1699,7 +1699,7 @@ rule CompletedOutputsSurviveWorkdirReuse {
 -- Queue-runner dispatch and concurrency
 -- ==========================================================================
 -- The queue runner on each host dispatches queued jobs subject to a
--- host-wide CPU utilization cap and a per-job warm-up window. GPU jobs
+-- host-wide CPU and RAM utilization caps and a per-job warm-up window. GPU jobs
 -- claim a device exclusively among our own jobs; CPU-only jobs share
 -- host cores, governed by the allotment rules below.
 
@@ -1742,6 +1742,13 @@ rule QueueRunnerDispatch {
     -- load at or above host_load_ceiling blocks every new start independently
     -- of declared allotments.
 
+    -- RAM capacity gate: reserve max(effective declared cpu_mem,
+    -- predicted peak-RSS upper bound). Live host usage already includes the
+    -- resident portion of running jobs, so only each running reservation's
+    -- unmaterialized remainder is added before the candidate reservation.
+    -- The projected total must remain at or below 90% of physical RAM. If the
+    -- host memory probe is unavailable, admission fails open.
+
     -- GPU capacity gate: GPU jobs claim a device exclusively among our
     -- own jobs on this host. See GPUJobsAreExclusivePerDevice invariant.
     -- legacy: requires: candidate.gpu_class = null
@@ -1758,11 +1765,10 @@ rule QueueRunnerDispatch {
     -- gpu_mem_gb, and gpu_devices; they bypass the GPU gate and are
     -- governed by the CPU allotment and measured-load rules.
     --
-    -- Ordinary dispatch has no aggregate host-RAM reservation. A job's
-    -- CPU-memory requirement is a placement floor against total host RAM,
-    -- and memory-pressure sampling is telemetry. It does not reserve RAM
-    -- against other running jobs. A concurrent set can therefore exceed
-    -- physical RAM even when every job fits the host in isolation.
+    -- Ordinary dispatch has an aggregate host-RAM reservation. A job's
+    -- CPU-memory requirement remains a placement floor against total host RAM;
+    -- at dispatch the larger of that floor and predicted peak-RSS upper bound
+    -- is reserved against the concurrent set.
     -- NVIDIA device utilization and VRAM are observed through nvidia-smi.
     -- Apple/MPS utilization is neither measured nor reserved by the runner.
     --
@@ -2703,6 +2709,26 @@ invariant HostCPUAllotmentCapped {
         -- holds the head of the queue until a running job finishes or
         -- decays its allotment. Running jobs are never preempted to
         -- reclaim capacity.
+}
+
+invariant HostRAMAdmissionCapped {
+    true
+
+    -- At each successful dispatch, live host RAM plus the unmaterialized
+    -- remainder of running reservations plus the candidate reservation does
+    -- not exceed the host RAM target. Resident memory is counted by the live
+    -- metric and is therefore not counted again as a reservation.
+    -- legacy: for host in Hosts where host.memory_probe_available:
+    -- legacy: let unmaterialized = sum(max(j.ram_reservation - j.current_rss, 0)
+    -- legacy:     for j in host.running_jobs)
+    -- legacy: let candidate = host.most_recently_admitted_job
+    -- legacy: host.live_ram_used + unmaterialized + candidate.ram_reservation
+    -- legacy:     <= host.total_ram * 0.90
+
+    -- legacy annotation: @guidance
+        -- A rejected head remains queued and is reconsidered on later runner
+        -- ticks and immediately after running jobs finish. RAM blocking does
+        -- not create a scan-ahead exception to FIFO order.
 }
 
 invariant GPUJobsAreExclusivePerDevice {

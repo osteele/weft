@@ -494,12 +494,13 @@ func clampProbability(value float64) float64 {
 
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
 type PlacementMeta struct {
-	PredictedDurationS *float64 `json:"pred_dur_s,omitempty"`
-	PredictedRSSKB     *float64 `json:"pred_rss_kb,omitempty"`
-	PredictedGPUMemMiB *float64 `json:"pred_gpu_mib,omitempty"`
-	SelectedScore      float64  `json:"score"`
-	RunnerUpHost       string   `json:"runner_up,omitempty"`
-	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
+	PredictedDurationS  *float64 `json:"pred_dur_s,omitempty"`
+	PredictedRSSKB      *float64 `json:"pred_rss_kb,omitempty"`
+	PredictedRSSUpperKB *float64 `json:"pred_rss_upper_kb,omitempty"`
+	PredictedGPUMemMiB  *float64 `json:"pred_gpu_mib,omitempty"`
+	SelectedScore       float64  `json:"score"`
+	RunnerUpHost        string   `json:"runner_up,omitempty"`
+	RunnerUpScore       float64  `json:"runner_up_score,omitempty"`
 }
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked`

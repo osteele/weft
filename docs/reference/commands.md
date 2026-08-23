@@ -81,8 +81,9 @@ host based on GPU constraints, data locality, current utilization, and queue
 depth.
 
 By default, jobs are added to a queue and scheduled by the queue runner. It can
-run multiple jobs on a host while keeping declared CPU allotments under a
-target cap. Use `--immediate` (`-i`) to start a job immediately.
+run multiple jobs on a host while keeping declared CPU allotments and RAM
+reservations under host-wide targets. Use `--immediate` (`-i`) to start a job
+immediately.
 
 Use `start <job-id>` to start a queued job immediately.
 
@@ -663,7 +664,7 @@ cleared when the scan completes and is suppressed on non-TTY output.
 
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
-- Queue runner schedules queued jobs in FIFO order (subject to CPU allotments)
+- Queue runner schedules queued jobs in FIFO order (subject to CPU and RAM admission)
 - Saves job metadata and logs to `~/.cache/weft/logs/` on the remote host
 - Records the job in a local SQLite database (`~/.local/state/weft/jobs.db`)
 - Captures exit code when job completes
@@ -1977,6 +1978,9 @@ Manage job queues for CPU-capped execution on remote hosts.
 Jobs added to a queue are scheduled in FIFO order, and the queue runner can run
 multiple jobs per host. It admits a new job when the declared CPU allotments
 fit under the host target and measured host load is below its safety ceiling.
+It also reserves host RAM from `--cpu-mem` and the predictor's peak-RSS upper
+bound, whichever is larger, and holds a job when the concurrent set would
+exceed 90% of host RAM.
 NVIDIA GPU jobs must also obtain compatible device capacity and VRAM headroom.
 The CPU gate still applies to them, with a smaller default allotment for
 GPU-bound work. The runner does not measure or reserve Apple/MPS utilization.
@@ -1989,10 +1993,10 @@ utilization and VRAM when `nvidia-smi` is available. Apple/MPS utilization is
 not part of the benchmark idle probe. An idle-blocked benchmark at the head of
 the queue may let a later ordinary job run while it remains pending.
 
-The runner does not reserve aggregate host RAM for ordinary jobs. `--cpu-mem`
-requires a host with enough total memory for one job, but two individually
-eligible jobs can still exceed RAM when run together. Memory-pressure sampling
-is telemetry, not a dispatch gate.
+The RAM gate combines live host usage with the unmaterialized part of running
+reservations, so memory used by non-Weft processes counts without double-counting
+resident job memory. A host whose memory probes are unavailable remains usable;
+in that case the gate fails open and the existing placement checks still apply.
 
 The runner runs in a tmux session on the remote host and keeps working when you
 disconnect.

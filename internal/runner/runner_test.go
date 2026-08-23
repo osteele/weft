@@ -451,6 +451,32 @@ func TestEvaluateLoadedPendingJobAppliesCPUCapacityToEveryJob(t *testing.T) {
 	}
 }
 
+func TestEvaluateLoadedPendingJobAppliesRAMAdmission(t *testing.T) {
+	r, _ := initTestRunner(t)
+	r.cpuConfig.HostLoadCeiling = 0
+	r.hostMemoryStats = func() (int64, int64, int64) {
+		return 64 * gibKB, 36 * gibKB, 28 * gibKB
+	}
+	r.processRSSKB = func(int) int64 { return 28 * gibKB }
+	if err := writeJobFile(r.queueDir, &opsqueue.CommandJob{ID: 900, Dir: t.TempDir(), Cmd: "true"}); err != nil {
+		t.Fatalf("write running job: %v", err)
+	}
+	r.state.AddRunning("900", RunningJobState{LocalAllotment: 20, RAMReservationKB: 32 * gibKB, FinalRSSKB: 28 * gibKB})
+
+	cpu := 20
+	job := &opsqueue.CommandJob{ID: 901, Dir: t.TempDir(), Cmd: "true", CPU: &cpu, RAMReservationKB: 24 * gibKB}
+	decision := r.evaluateLoadedPendingJob(job.ID, job, false)
+	if decision.canStart || !strings.HasPrefix(decision.reason, "ram gate:") {
+		t.Fatalf("decision = %+v, want RAM gate rejection", decision)
+	}
+
+	job.RAMReservationKB = 16 * gibKB
+	decision = r.evaluateLoadedPendingJob(job.ID, job, false)
+	if !decision.canStart {
+		t.Fatalf("16 GiB job should fit: %s", decision.reason)
+	}
+}
+
 func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testing.T) {
 	r, oplogPath := initTestRunner(t)
 	r.gpuInv = &GPUInventory{
