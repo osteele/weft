@@ -99,15 +99,21 @@ use its fallback without leaving work that Weft might execute later.
 Pass a stable external assignment ID with `--idempotency-key`; retrying that ID
 returns the existing job instead of submitting a duplicate. Agent workers can
 be selected with `--agent codex` (equivalent to
-`--require-capability agent:codex`). Provisioned capabilities and admission
-limits are explicit host configuration:
+`--require-capability agent:codex`). Provisioned capabilities are explicit
+host configuration:
 
 ```toml
 [hosts.studio]
 capabilities = ["agent:codex", "agent:gemini", "agent:opencode", "agent:kimi"]
+```
 
-[hosts.studio.agent_concurrency]
-"*" = 2
+Capability admission is uncapped when `agent_concurrency` is absent. The queue
+runner still applies its CPU, NVIDIA GPU, exclusive-job, and benchmark gates.
+Add limits only when the authenticated worker pool needs a bound independent
+of those execution gates:
+
+[hosts.agent-worker.agent_concurrency]
+"*" = 4
 codex = 2
 gemini = 1
 opencode = 1
@@ -115,7 +121,8 @@ kimi = 1
 ```
 
 The `"*"` entry caps all authenticated-agent jobs together; named entries add
-stricter per-CLI limits.
+stricter per-CLI limits. Queued, starting, running, and paused jobs consume
+slots so admission reserves worker capacity before execution.
 
 The receipt contains the job ID, placement decision, selected host, immutable
 source pin, immediate-acceptance flag, and deduplication status. Human progress

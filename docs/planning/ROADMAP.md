@@ -326,11 +326,10 @@ keep placement reactive (global, speculative, correctable — and free of the
 distributed-state ownership problem), and add a **host-local start-admission
 ledger** at the point that already serializes job starts.
 
-- **Home: the host-resident queue runner** (`internal/queuerunner`), which
-  already sequences starts and defers them (`internal/queuejob/start.go`). It is
-  the kubelet-equivalent: one owner per host, serialized start decisions. The
-  cloud agent's `runJobSequence` (`cmd/agent/jobloop.go`) is the same admission
-  point for instances that run jobs concurrently.
+- **Home: the host-resident queue runner** (`internal/runner`), which already
+  serializes dispatch decisions while tracking several running jobs. It is the
+  kubelet-equivalent: one owner per host and one start-admission decision at a
+  time.
 - **Derived, not stateful.** At each start decision compute
   `committed = Σ reservation over jobs currently running on this host`; admit iff
   `committed + nonweft_used + next ≤ hostRAM × factor`, else hold the job and

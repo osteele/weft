@@ -32,31 +32,31 @@ import (
 var queueCmd = &cobra.Command{
 	Use:     "queue",
 	Aliases: []string{"queues"},
-	Short:   "Manage job queues for sequential execution on remote hosts",
-	Long: `Manage job queues that run sequentially on remote hosts.
+	Short:   "Manage job queues on remote hosts",
+	Long: `Manage job queues on remote hosts.
 
-Jobs added to a queue run one after another without requiring the local
-machine to stay connected. The queue runner runs in the background on
-the remote host.
+Jobs can run concurrently when the host's CPU, GPU, exclusivity, and benchmark
+gates permit. The queue runner stays active without requiring the local machine
+to remain connected.
 
 Subcommands:
   add     Add a job to the queue
   edit    Alias for 'weft edit'
   remove  Remove a queued job before it starts
   start   Start the queue runner
-  stop    Stop the queue runner after current job
+  stop    Stop the queue runner after running jobs finish
   list    List jobs in the queue
   status  Show queue runner status
-  update  Update the queue runner script on a host`,
+  update  Update the queue runner agent on a host`,
 }
 
 var queueAddCmd = &cobra.Command{
 	Use:   "add [host] <command>",
 	Short: "Add a job to the queue",
-	Long: `Add a job to a remote queue for sequential execution.
+	Long: `Add a job to a remote queue for managed execution.
 
-The job will be executed when the queue runner reaches it. Jobs run
-in FIFO order.
+The queue runner considers jobs in FIFO order and can run several jobs when
+resource gates permit.
 
 Examples:
   weft queue add cool30 'python train.py --epochs 100'
@@ -73,7 +73,7 @@ var queueStartCmd = &cobra.Command{
 	Short: "Start the queue runner on a remote host",
 	Long: `Start the queue runner on a remote host.
 
-The queue runner processes jobs from the queue file sequentially.
+The queue runner schedules jobs from the queue subject to resource gates.
 It continues running even when you disconnect.
 
 This command is idempotent - safe to call multiple times.
@@ -87,11 +87,11 @@ Examples:
 
 var queueStopCmd = &cobra.Command{
 	Use:   "stop [host]",
-	Short: "Stop the queue runner after current job",
-	Long: `Stop the queue runner after the current job completes.
+	Short: "Stop the queue runner after running jobs finish",
+	Long: `Stop the queue runner after all running jobs complete.
 
-This sends a stop signal that the runner will detect after the current
-job finishes. The runner will exit gracefully.
+This sends a stop signal that prevents new starts. The runner exits gracefully
+after every running job finishes.
 
 Examples:
   weft queue stop cool30
@@ -103,7 +103,7 @@ Examples:
 var queueListCmd = &cobra.Command{
 	Use:   "list [host]",
 	Short: "List jobs in the queue",
-	Long: `Show jobs waiting in the queue and the currently running job.
+	Long: `Show jobs waiting in the queue and all currently running jobs.
 
 Examples:
   weft queue list cool30
@@ -128,11 +128,11 @@ Examples:
 
 var queueUpdateCmd = &cobra.Command{
 	Use:   "update [host]",
-	Short: "Update the queue runner script on a remote host",
-	Long: `Update the queue runner script on a remote host.
+	Short: "Update the queue runner agent on a remote host",
+	Long: `Deploy the current queue runner agent on a remote host.
 
-If the script was updated and the runner is currently running, the command
-will attempt a short restart so the new version is picked up.
+If the binary changed and the runner is active, it re-execs into the new
+version while preserving pending and running job state.
 
 Examples:
   weft queue update cool30
@@ -161,7 +161,8 @@ var queueFrontCmd = &cobra.Command{
 	Short: "Move a queued job to the front of the queue",
 	Long: `Move a queued job to the front of the queue so it runs next.
 
-The job will run immediately after the currently running job completes.
+The job becomes the next pending candidate. It starts when the runner's
+resource gates permit.
 Only works for jobs that haven't started yet (status: queued).
 
 Examples:
@@ -792,7 +793,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	stopFile := opsqueue.StopFilePath()
 	stopExists, _, _ := ssh.Run(host, fmt.Sprintf("test -f %s && echo yes || echo no", stopFile))
 	if strings.TrimSpace(stopExists) == "yes" {
-		fmt.Println("\nSTOP signal pending - runner will exit after current job")
+		fmt.Println("\nSTOP signal pending - runner will exit after all running jobs finish")
 	}
 
 	return nil

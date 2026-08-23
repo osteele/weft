@@ -24,6 +24,8 @@
 external entity Host {
     name: String
     gpu_specs: List<GPUSpec>
+    capabilities: Set<String>
+    agent_concurrency: Map<String, Integer>
 }
 
 value GPUSpec {
@@ -87,9 +89,9 @@ entity Job {
     gpu_mem_max_gb: Integer?    -- legacy field; ignored by placement
     gpu_devices: String?        -- CUDA_VISIBLE_DEVICES allocation
 
-    -- CPU allotment (percent of host CPU) requested by the user. null
-    -- means "unset" — the runner applies config.default_cpu_allotment
-    -- at dispatch. Value 0 is not used; use null to indicate unset.
+    -- CPU allotment (percent of host CPU) requested by the user. null means
+    -- "unset"; the runner derives an allotment from the host CPU count and
+    -- the configured cores-per-job default at dispatch. Value 0 is not used.
     -- Edited via the TUI in edit mode on queued jobs; not exposed on
     -- the CLI.
     cpu_allotment: Integer?
@@ -116,6 +118,8 @@ entity Job {
     -- Execution backend
     backend: Backend
     submitter_session: String? -- opaque id resolved at CLI submission time
+    required_capabilities: Set<String> -- durable placement requirements;
+                                       -- authenticated workers use agent:<name>
 
     -- Mutable state
     status: Status
@@ -533,10 +537,14 @@ config {
     -- window shapes) are implementation details of the runner and are
     -- not pinned by the spec.
     host_cpu_utilization_target: Integer = 80    -- percent of host CPU
-    default_cpu_allotment: Integer = 20          -- percent, applied when
-                                                 -- Job.cpu_allotment is null
+    default_cpu_allotment_cores: Integer = 7     -- converted to host percent
+                                                 -- when Job.cpu_allotment is null
+    default_gpu_cpu_allotment_cores: Integer = 2 -- GPU-bound job default,
+                                                 -- also converted to host percent
     min_cpu_allotment: Integer = 10
     max_cpu_allotment: Integer = 100
+    host_load_ceiling: Integer = 130             -- one-minute load average as
+                                                 -- percent of host CPU count
     warmup_duration: Duration = 2.minutes        -- new-dispatch gating window
 }
 
@@ -1726,13 +1734,13 @@ rule QueueRunnerDispatch {
     -- legacy: requires: host.running_jobs.all(j =>
     -- legacy: now >= j.latest_attempt.start_time + config.warmup_duration)
 
-    -- CPU capacity gate (CPU-only jobs): the sum of local allotments
-    -- for running jobs plus the initial allotment for the candidate job
-    -- must not exceed the host utilization target.
-    -- legacy: let initial = candidate.cpu_allotment ?? config.default_cpu_allotment
-    -- legacy: requires: candidate.gpu_class != null
-    -- legacy: or (sum(j.local_cpu_allotment for j in host.running_jobs)
-    -- legacy: + initial <= config.host_cpu_utilization_target)
+    -- CPU capacity gate: the sum of local allotments for running jobs plus
+    -- the initial allotment for the candidate must not exceed the host target.
+    -- This applies to CPU and GPU jobs. An unset CPU allotment is derived from
+    -- default_cpu_allotment_cores for ordinary jobs or
+    -- default_gpu_cpu_allotment_cores for GPU jobs. Measured one-minute host
+    -- load at or above host_load_ceiling blocks every new start independently
+    -- of declared allotments.
 
     -- GPU capacity gate: GPU jobs claim a device exclusively among our
     -- own jobs on this host. See GPUJobsAreExclusivePerDevice invariant.
@@ -1744,11 +1752,19 @@ rule QueueRunnerDispatch {
     -- legacy: ensures: candidate.warmup_until = now + config.warmup_duration
 
     -- legacy annotation: @guidance
-    -- CPU jobs and GPU jobs can run concurrently on the same host as
-    -- long as they use disjoint resources (GPU device vs CPU cores).
+    -- CPU jobs and GPU jobs can run concurrently on the same host when the
+    -- combined CPU allotment fits and every GPU job passes the device gate.
     -- CPU-only jobs are identified by the absence of gpu_class,
     -- gpu_mem_gb, and gpu_devices; they bypass the GPU gate and are
-    -- governed solely by the CPU allotment rules.
+    -- governed by the CPU allotment and measured-load rules.
+    --
+    -- Ordinary dispatch has no aggregate host-RAM reservation. A job's
+    -- CPU-memory requirement is a placement floor against total host RAM,
+    -- and memory-pressure sampling is telemetry. It does not reserve RAM
+    -- against other running jobs. A concurrent set can therefore exceed
+    -- physical RAM even when every job fits the host in isolation.
+    -- NVIDIA device utilization and VRAM are observed through nvidia-smi.
+    -- Apple/MPS utilization is neither measured nor reserved by the runner.
     --
     -- If total local allotment already exceeds the target (e.g. after
     -- adaptive increases on currently running jobs), the runner does
@@ -1758,6 +1774,19 @@ rule QueueRunnerDispatch {
     -- Shared hosts: the exclusivity rule applies only to our own
     -- jobs. Other users' jobs on the same GPU are tolerated; we do
     -- not wait for a device to be fully vacant before starting.
+}
+
+rule BenchmarkIsolationDispatch {
+    when: BenchmarkDispatchEvaluated(job, host)
+    requires: job.tags.contains(benchmark_isolation)
+    requires: BenchmarkHostIdle(host)
+
+    -- The runner starts a benchmark-isolation job only when no Weft job is
+    -- running and consecutive host-idle samples satisfy the configured CPU,
+    -- RAM, and, when nvidia-smi is available, NVIDIA GPU-utilization and VRAM
+    -- thresholds. Apple/MPS utilization is not sampled. The same job then
+    -- blocks other starts until it finishes. An idle-blocked benchmark at the
+    -- head may be bypassed by a later eligible non-benchmark job.
 }
 
 rule AdaptiveCPUAllotment {
@@ -1794,7 +1823,7 @@ rule CPUAllotmentEditApplied {
     -- the new value as local_cpu_allotment immediately and resets any
     -- adaptive state (hysteresis counters, sample buffers) so the next
     -- adjustment decision starts from a clean observation window.
-    ensures: Job.local_cpu_allotment = new_value ?? config.default_cpu_allotment
+    ensures: Job.local_cpu_allotment = new_value ?? DefaultCPUAllotment(Job)
     ensures: AdaptiveStateReset(Job)
 }
 
@@ -2665,7 +2694,7 @@ invariant HostCPUAllotmentCapped {
     -- jobs may push the running sum over the target; the invariant
     -- describes the admission gate, not the steady-state sum.
     for host in Hosts:
-        let admitted = host.running_jobs.filter(j => j.gpu_class = null)
+        let admitted = host.running_jobs
         -- legacy: sum(j.local_cpu_allotment for j in admitted)
             <= config.host_cpu_utilization_target
 

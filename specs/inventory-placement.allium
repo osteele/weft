@@ -51,6 +51,14 @@ entity Host {
     cpu_factor: Decimal
     gpu_factor: Decimal
 
+    -- Explicitly provisioned service capabilities. Authenticated coding-agent
+    -- workers use the agent:<name> namespace. An empty agent_concurrency map
+    -- leaves capability admission uncapped; execution remains subject to the
+    -- host-resident runner's resource gates.
+    capabilities: Set<String>
+    agent_concurrency: Map<String, Integer> -- "*" is the shared agent limit;
+                                            -- names are per-agent limits
+
     hf_cache_dir: String?       -- resolved HF hub cache path on the host
     setup_timeout: Duration     -- max duration for setup commands (uv sync etc.)
 
@@ -591,6 +599,7 @@ value Constraints {
     provider: String?           -- rental provider name ("" = on-prem first)
     inputs: List<String>        -- asset refs (see Data locality below)
     tags: Set<jobs/Tag>         -- rental/inventory/benchmark_isolation/compute_intensive
+    required_capabilities: Set<String>
     preferred_instance_ids: List<Integer>   -- soft hint for instance reuse
     self_job: jobs/Job?         -- the persisted job these constraints were
                                 -- resolved from (null for submit-time
@@ -664,6 +673,7 @@ rule BuildConstraintsFromJob {
     -- provider: provider,
     -- inputs: job.inputs,
     -- tags: tags,
+    -- required_capabilities: job.required_capabilities,
     -- self_job: job
     -- legacy: )
 
@@ -705,7 +715,21 @@ rule EvaluateEligibility {
     --    eligible only for jobs that explicitly name them.
     requires: not target.opt_in_only or target.explicitly_named
 
-    -- 1a. Machine pin. A pinned job (--affinity) is eligible only on a target
+    -- 1a. Declared service capabilities. Presence is a hard compatibility
+    -- check. Optional authenticated-agent limits are an availability check:
+    -- "*" caps all agent jobs together and a named entry adds a per-agent
+    -- cap. Queued, starting, running, and paused jobs consume slots. One job
+    -- consumes the shared slot once even if it requires several agent
+    -- capabilities. Rechecking a persisted job excludes itself. During
+    -- concurrent online-only submissions, lower job ID wins, so every caller
+    -- reaches the same deterministic admission result after recording.
+    requires: c.required_capabilities.all(capability =>
+        host.capabilities.contains(capability))
+    if c.required_capabilities.any(capability => capability starts_with "agent:"):
+        requires: AuthenticatedAgentCapacityAvailable(
+            host, c.required_capabilities, c.self_job)
+
+    -- 1b. Machine pin. A pinned job (--affinity) is eligible only on a target
     --     whose provider machine identity matches a pin. Targets with no
     --     machine identity fail closed — which excludes every on-prem host,
     --     since a pin names a provider physical machine and no inventory host
@@ -716,7 +740,7 @@ rule EvaluateEligibility {
         requires: target.machine_key != null
             and c.machine_affinity.any(ref => MachineRefKey(ref) = target.machine_key)
 
-    -- 1b. Host-axis floors. Declared host RAM (--cpu-mem, effective) and CPU
+    -- 1c. Host-axis floors. Declared host RAM (--cpu-mem, effective) and CPU
     --     cores (--cpu-cores) are hard floors against inventory facts; an
     --     inventory file omitting the fact (0) does not disqualify the host,
     --     matching the cloud paths' unknown-RAM policy. Interconnect is

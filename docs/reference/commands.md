@@ -80,7 +80,9 @@ The host is optional; the local placement engine automatically selects the best
 host based on GPU constraints, data locality, current utilization, and queue
 depth.
 
-By default, jobs are added to a queue and scheduled by the queue runner. It can run multiple jobs on a host while keeping total CPU usage under a target cap. Use `--immediate` (`-i`) to start a job immediately.
+By default, jobs are added to a queue and scheduled by the queue runner. It can
+run multiple jobs on a host while keeping declared CPU allotments under a
+target cap. Use `--immediate` (`-i`) to start a job immediately.
 
 Use `start <job-id>` to start a queued job immediately.
 
@@ -1972,7 +1974,28 @@ to be available to the account that runs the queue agent.
 
 Manage job queues for CPU-capped execution on remote hosts.
 
-Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments and GPU memory reservations can be set via `weft job describe --cpu <percent>` and `--gpu-mem <gb>`.
+Jobs added to a queue are scheduled in FIFO order, and the queue runner can run
+multiple jobs per host. It admits a new job when the declared CPU allotments
+fit under the host target and measured host load is below its safety ceiling.
+NVIDIA GPU jobs must also obtain compatible device capacity and VRAM headroom.
+The CPU gate still applies to them, with a smaller default allotment for
+GPU-bound work. The runner does not measure or reserve Apple/MPS utilization.
+CPU allotments and NVIDIA GPU memory reservations can be set via
+`weft job describe --cpu <percent>` and `--gpu-mem <gb>`.
+
+`exclusive` and `benchmark-isolation` jobs run alone. A benchmark job also
+waits for consecutive idle checks covering CPU and RAM, plus NVIDIA GPU
+utilization and VRAM when `nvidia-smi` is available. Apple/MPS utilization is
+not part of the benchmark idle probe. An idle-blocked benchmark at the head of
+the queue may let a later ordinary job run while it remains pending.
+
+The runner does not reserve aggregate host RAM for ordinary jobs. `--cpu-mem`
+requires a host with enough total memory for one job, but two individually
+eligible jobs can still exceed RAM when run together. Memory-pressure sampling
+is telemetry, not a dispatch gate.
+
+The runner runs in a tmux session on the remote host and keeps working when you
+disconnect.
 
 #### weft queue add
 
@@ -2086,7 +2109,7 @@ setup_timeout: 90m
 
 #### weft queue stop
 
-Stop the queue runner after the current job completes.
+Stop the queue runner after all running jobs complete.
 
 ```bash
 weft queue stop [flags] <host>
@@ -2099,7 +2122,7 @@ weft queue stop titan
 
 #### weft queue list
 
-Show jobs waiting in the queue and the currently running job.
+Show jobs waiting in the queue and all jobs currently running.
 
 ```bash
 weft queue list [flags] <host>
@@ -2123,14 +2146,13 @@ weft queue status [flags] <host>
 weft queue status titan
 ```
 
-#### weft queue upgrade
+#### weft queue update
 
-Redeploy and restart the queue runner if the remote script is out of date. The
-CLI records a build number on the first line of the embedded script, compares
-it with the version on the host, and restarts the runner only when needed.
+Deploy the current agent binary and start or restart the queue runner when
+needed. Pending and running job state is preserved across the runner re-exec.
 
 ```bash
-weft queue upgrade titan
+weft queue update titan
 ```
 
 #### Queue Workflow Example

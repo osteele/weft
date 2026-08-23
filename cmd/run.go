@@ -41,7 +41,7 @@ import (
 var runCmd = &cobra.Command{
 	Use:   "run [flags] <command>",
 	Short: "Queue a job on a remote host",
-	Long: `Queue a job on a remote host for sequential execution.
+	Long: `Queue a job for managed execution on a remote host.
 
 If --host is omitted, automatic placement selects the best host based on
 GPU constraints (--gpu, --gpu-class, --gpu-mem) and data locality (--input).

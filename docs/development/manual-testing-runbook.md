@@ -32,9 +32,9 @@ weft list --status completed --limit 1
 
 **Expected**: Job transitions from `queued` -> `running` -> `completed`.
 
-#### 2. Multiple Sequential Jobs
+#### 2. Multiple Queued Jobs
 
-**Purpose**: Verify multiple jobs run in sequence without getting stuck.
+**Purpose**: Verify multiple jobs are scheduled without getting stuck.
 
 ```bash
 # Queue 3 jobs
@@ -49,7 +49,9 @@ weft status --wait 10
 weft list --status completed --limit 3
 ```
 
-**Expected**: All 3 jobs complete in order. No jobs get stuck in `queued` state.
+**Expected**: All three jobs complete. Their execution may overlap when CPU
+allotments fit the host target; FIFO governs which eligible pending job is
+considered first, not completion order.
 
 #### 3. Job Cancellation (Queued)
 
@@ -156,8 +158,8 @@ ssh studio 'ps aux | grep weft-agent' | grep -v grep
 # Check current remote agent version
 ssh studio '~/.cache/weft/bin/weft-agent --version'
 
-# Deploy with force-upgrade
-weft queue start --install studio
+# Deploy the current agent and restart the runner if needed
+weft queue update studio
 
 # Verify updated
 ssh studio '~/.cache/weft/bin/weft-agent --version'

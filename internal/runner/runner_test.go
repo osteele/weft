@@ -399,6 +399,58 @@ func TestWarmupActiveUsesInjectedClock(t *testing.T) {
 	}
 }
 
+func TestEvaluateLoadedPendingJobAppliesCPUCapacityToEveryJob(t *testing.T) {
+	r, _ := initTestRunner(t)
+	r.cpuConfig.HostLoadCeiling = 0
+	r.gpuInv = &GPUInventory{}
+	runningID := int64(900)
+	if err := writeJobFile(r.queueDir, &opsqueue.CommandJob{
+		ID:  runningID,
+		Dir: t.TempDir(),
+		Cmd: "true",
+	}); err != nil {
+		t.Fatalf("write running job: %v", err)
+	}
+	r.state.AddRunning("900", RunningJobState{LocalAllotment: 50})
+
+	for _, tt := range []struct {
+		name         string
+		cpu          int
+		gpuClass     string
+		wantCanStart bool
+	}{
+		{name: "ordinary job fits", cpu: 30, wantCanStart: true},
+		{name: "ordinary job exceeds target", cpu: 31, wantCanStart: false},
+		{name: "gpu job still fits CPU target", cpu: 30, gpuClass: "a100", wantCanStart: true},
+		{name: "gpu job still obeys CPU target", cpu: 31, gpuClass: "a100", wantCanStart: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &opsqueue.CommandJob{
+				ID:       901,
+				Dir:      t.TempDir(),
+				Cmd:      "true",
+				CPU:      &tt.cpu,
+				GPUClass: tt.gpuClass,
+			}
+			if tt.gpuClass != "" {
+				r.gpuInv = &GPUInventory{
+					Devices: []GPUInfo{{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80}},
+					DeviceMemSnapshot: map[string]DeviceMemInfo{
+						"0": {TotalMiB: 80 * 1024},
+					},
+				}
+			}
+			decision := r.evaluateLoadedPendingJob(job.ID, job, false)
+			if decision.canStart != tt.wantCanStart {
+				t.Fatalf("canStart = %v, reason = %q, want %v", decision.canStart, decision.reason, tt.wantCanStart)
+			}
+			if !tt.wantCanStart && !strings.HasPrefix(decision.reason, "cpu gate:") {
+				t.Fatalf("reason = %q, want CPU gate", decision.reason)
+			}
+		})
+	}
+}
+
 func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testing.T) {
 	r, oplogPath := initTestRunner(t)
 	r.gpuInv = &GPUInventory{
