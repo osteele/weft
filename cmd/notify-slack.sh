@@ -7,11 +7,9 @@
 #   notify-slack.sh <session-name> <exit-code> <host> [metadata-file]
 #
 # Configuration:
-#   Set WEFT_SLACK_WEBHOOK environment variable, or
-#   Create ~/.config/weft/config with: SLACK_WEBHOOK=https://hooks.slack.com/...
+#   Weft deploys the webhook to ~/.config/weft/notify-slack.env.
 #
 # Environment Variables:
-#   WEFT_SLACK_WEBHOOK     Slack webhook URL (required)
 #   WEFT_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
 #   WEFT_SLACK_MIN_DURATION  Minimum job duration in seconds to trigger notification (default: 15)
 #   WEFT_SLACK_VERBOSE=1   Include directory and command in message
@@ -29,11 +27,12 @@ EXIT_CODE="$2"
 HOST="$3"
 METADATA_FILE="${4:-}"
 
-# Get webhook URL from environment or config file
-WEBHOOK_URL="${WEFT_SLACK_WEBHOOK:-}"
-
-if [ -z "$WEBHOOK_URL" ] && [ -f ~/.config/weft/config ]; then
-    WEBHOOK_URL=$(grep '^SLACK_WEBHOOK=' ~/.config/weft/config 2>/dev/null | cut -d= -f2- || true)
+# Read the webhook only in this short-lived notification helper. The queue
+# runner and job process do not inherit it.
+NOTIFY_CONFIG="$HOME/.config/weft/notify-slack.env"
+WEBHOOK_URL=""
+if [ -f "$NOTIFY_CONFIG" ]; then
+    WEBHOOK_URL=$(grep '^WEFT_SLACK_WEBHOOK=' "$NOTIFY_CONFIG" 2>/dev/null | cut -d= -f2- || true)
 fi
 
 if [ -z "$WEBHOOK_URL" ]; then

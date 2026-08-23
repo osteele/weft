@@ -36,7 +36,7 @@ func TestEnsureQueueRunnerStartedSurfacesAgentDeployFailure(t *testing.T) {
 	loadConfigFunc = func() (*config.Config, error) { return &config.Config{}, nil }
 	getSlackWebhookFunc = func() string { return "" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
-	buildRunnerEnvPrefixFunc = func(webhook string) string { return "" }
+	buildRunnerEnvPrefixFunc = func() string { return "" }
 	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
 		t.Fatal("runner should not start when agent deploy fails")
 		return false, nil
@@ -98,7 +98,7 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 	}
 	getSlackWebhookFunc = func() string { return "" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
-	buildRunnerEnvPrefixFunc = func(webhook string) string { return "WEBHOOK=1 " }
+	buildRunnerEnvPrefixFunc = func() string { return "NOTIFY_MODE=1 " }
 
 	rcloneCalled := false
 	ensureRcloneConfigFunc = func(host string, cfg cloud.R2Config) error {
@@ -113,8 +113,8 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 		if host != "studio" {
 			t.Fatalf("host = %q, want studio", host)
 		}
-		if envPrefix != "WEBHOOK=1 " {
-			t.Fatalf("envPrefix = %q, want WEBHOOK=1 ", envPrefix)
+		if envPrefix != "NOTIFY_MODE=1 " {
+			t.Fatalf("envPrefix = %q, want NOTIFY_MODE=1 ", envPrefix)
 		}
 		if r2Bucket != "test-bucket" {
 			t.Fatalf("r2Bucket = %q, want test-bucket", r2Bucket)
@@ -172,9 +172,9 @@ func TestEnsureQueueRunnerStartedPassesBenchmarkEnvPrefix(t *testing.T) {
 	loadConfigFunc = func() (*config.Config, error) { return &config.Config{}, nil }
 	getSlackWebhookFunc = func() string { return "https://hooks.example/test" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
-	buildRunnerEnvPrefixFunc = func(webhook string) string { return "WEBHOOK=1 " }
+	buildRunnerEnvPrefixFunc = func() string { return "NOTIFY_MODE=1 " }
 	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
-		if envPrefix != "WEBHOOK=1 WEFT_BENCHMARK_CPU=15 WEFT_BENCHMARK_RAM=35 " {
+		if envPrefix != "NOTIFY_MODE=1 WEFT_BENCHMARK_CPU=15 WEFT_BENCHMARK_RAM=35 " {
 			t.Fatalf("envPrefix = %q", envPrefix)
 		}
 		return true, nil

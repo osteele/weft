@@ -429,6 +429,7 @@ covered in [Artifact Store](artifacts.md).
 | `~/.cache/weft/logs/{id}-{ts}.meta` | Metadata |
 | `~/.cache/weft/logs/{id}-{ts}.pid` | Process ID |
 | `~/.cache/weft/bin/notify-slack.sh` | Notification script (deployed at runtime) |
+| `~/.config/weft/notify-slack.env` | Notification credential, mode `0600` (deployed at runtime) |
 
 ## Design Decisions
 

@@ -69,7 +69,7 @@ func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOpti
 
 	slackWebhook := getSlackWebhookFunc()
 	deployNotifyScriptFunc(host, slackWebhook)
-	envVars := buildRunnerEnvPrefixFunc(slackWebhook)
+	envVars := buildRunnerEnvPrefixFunc()
 
 	var setupTimeout time.Duration
 	if spec != nil {

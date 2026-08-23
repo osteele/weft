@@ -137,8 +137,8 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	// Step 6: Deploy Slack notify script
 	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying Slack notifications...", nextStep(), totalSteps)
 	slackWebhook := slack.GetWebhook()
+	slack.DeployNotifyScript(host, slackWebhook)
 	if slackWebhook != "" {
-		slack.DeployNotifyScript(host, slackWebhook)
 		fmt.Fprintf(os.Stderr, " ok\n")
 	} else {
 		fmt.Fprintf(os.Stderr, " skipped (no webhook)\n")
@@ -150,7 +150,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		if !agentReady {
 			fmt.Fprintf(os.Stderr, " skipped (agent unavailable)\n")
 		} else {
-			envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
+			envVars := slack.BuildRunnerEnvPrefix()
 			envVars += spec.BenchmarkEnvPrefix()
 			runner := queuerunner.NewRunner(host)
 			started, runnerErr := runner.EnsureStartedForHost(envVars, r2Bucket, r2QueueHost, spec.SetupTimeoutDuration())
