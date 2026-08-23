@@ -157,7 +157,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	expandedDir := ExpandTilde(workingDir)
 
 	// Write metadata
-	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, phases.WrapperStart, "")
+	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, phases.WrapperStart, "", nil)
 	WriteLogHeader(paths, cfg.JobID, workingDir, command, "")
 	if cfg.SetupPrewarmLog != "" {
 		appendPrewarmLog(paths.Log, cfg.SetupPrewarmLog)

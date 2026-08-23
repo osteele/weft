@@ -41,12 +41,13 @@ func batchStatus(jobIDs []int64) {
 		// Check if current
 		if state.Current != nil && *state.Current == jobID {
 			gpuDevs := gpuDevicesForJob(state, idStr)
+			source := sourceExecutionStatus(logDir, jobID)
 			processState := checkProcessState(logDir, jobID)
 			switch processState {
 			case "paused":
-				fmt.Printf("JOB|%d|PAUSED|%s\n", jobID, gpuDevs)
+				fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, source)
 			default:
-				fmt.Printf("JOB|%d|CURRENT|%s\n", jobID, gpuDevs)
+				fmt.Printf("JOB|%d|CURRENT|%s%s\n", jobID, gpuDevs, source)
 			}
 			continue
 		}
@@ -62,12 +63,13 @@ func batchStatus(jobIDs []int64) {
 		// Check if running (in running map but not current)
 		if _, ok := state.Running[idStr]; ok {
 			gpuDevs := gpuDevicesForJob(state, idStr)
+			source := sourceExecutionStatus(logDir, jobID)
 			processState := checkProcessState(logDir, jobID)
 			switch processState {
 			case "paused":
-				fmt.Printf("JOB|%d|PAUSED|%s\n", jobID, gpuDevs)
+				fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, source)
 			default:
-				fmt.Printf("JOB|%d|RUNNING|%s\n", jobID, gpuDevs)
+				fmt.Printf("JOB|%d|RUNNING|%s%s\n", jobID, gpuDevs, source)
 			}
 			continue
 		}
@@ -81,7 +83,7 @@ func batchStatus(jobIDs []int64) {
 		if _, err := os.Stat(preflightFile); err == nil {
 			ts := fileMtime(preflightFile)
 			fr := readFailureReason(logDir, jobID)
-			fmt.Printf("JOB|%d|PREFLIGHT_REJECTED|%d|%s\n", jobID, ts, fr)
+			fmt.Printf("JOB|%d|PREFLIGHT_REJECTED|%d|%s|%s\n", jobID, ts, fr, version)
 			continue
 		}
 
@@ -94,7 +96,7 @@ func batchStatus(jobIDs []int64) {
 			mtime := fileMtime(statusFile)
 			fr := readFailureReason(logDir, jobID)
 			runID := completionRunID(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s\n", jobID, exitCode, mtime, runID, fr)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s%s\n", jobID, exitCode, mtime, runID, fr, sourceExecutionStatus(logDir, jobID))
 			continue
 		}
 
@@ -102,7 +104,7 @@ func batchStatus(jobIDs []int64) {
 		if finished, ok := state.Finished[idStr]; ok {
 			fr := readFailureReason(logDir, jobID)
 			runID := completionRunID(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s\n", jobID, finished.ExitCode, finished.FinishedAt, runID, fr)
+			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s%s\n", jobID, finished.ExitCode, finished.FinishedAt, runID, fr, sourceExecutionStatus(logDir, jobID))
 			continue
 		}
 
@@ -111,13 +113,43 @@ func batchStatus(jobIDs []int64) {
 		processState := checkProcessState(logDir, jobID)
 		switch processState {
 		case "paused":
-			fmt.Printf("JOB|%d|PAUSED|%s\n", jobID, gpuDevs)
+			fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, sourceExecutionStatus(logDir, jobID))
 		case "running":
-			fmt.Printf("JOB|%d|RUNNING|%s\n", jobID, gpuDevs)
+			fmt.Printf("JOB|%d|RUNNING|%s%s\n", jobID, gpuDevs, sourceExecutionStatus(logDir, jobID))
 		default:
 			fmt.Printf("JOB|%d|DEAD\n", jobID)
 		}
 	}
+}
+
+// sourceExecutionStatus appends additive, pipe-delimited worker provenance.
+// Older clients ignore these fields; newer clients persist them on the
+// attempt. Values are machine-generated identifiers and never contain pipes.
+func sourceExecutionStatus(logDir string, jobID int64) string {
+	data, err := os.ReadFile(filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)))
+	if err != nil {
+		return ""
+	}
+	meta := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			meta[key] = value
+		}
+	}
+	if meta["source_dispatch_mode"] == "" {
+		return ""
+	}
+	return fmt.Sprintf("|%s|%s|%s|%s|%s|%s|%s|%s",
+		meta["source_dispatch_mode"],
+		meta["source_identity_kind"],
+		meta["source_dispatched_sha256"],
+		meta["source_verified_sha256"],
+		meta["source_verification"],
+		meta["source_verified_at"],
+		meta["agent_version"],
+		meta["source_root_count"],
+	)
 }
 
 func jobPayloadExists(stateFile string, jobID int64) bool {

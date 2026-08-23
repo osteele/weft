@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -111,6 +112,63 @@ func TestResolveJobSource_RejectsNonCloudAttempt(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "source inspection is only available for cloud attempts") {
 		t.Fatalf("error = %q", err)
+	}
+}
+
+func TestListPinnedSourceIncludesRootsAndBlobs(t *testing.T) {
+	projectTar := makeSourceTarball(t, map[string]string{
+		"README.md":        "readme\n",
+		"scripts/train.py": "print('ok')\n",
+	})
+	siblingTar := makeSourceTarball(t, map[string]string{
+		"pyproject.toml": "[project]\n",
+	})
+	store := &fakeSourceStore{objects: map[string][]byte{
+		"roots/project.tar.gz": projectTar,
+		"roots/lib.tar.gz":     siblingTar,
+	}}
+	pin := &db.JobSourcePinMetadata{Roots: []db.JobSourcePinRootMetadata{
+		{MountRel: ".", MountBasename: "project", R2Key: "roots/project.tar.gz"},
+		{MountRel: "../lib", MountBasename: "lib", R2Key: "roots/lib.tar.gz", Blobs: []dataplane.SourceBlob{{RelPath: "weights.bin"}}},
+	}}
+	var out bytes.Buffer
+	if err := listPinnedSource(context.Background(), store, pin, "", &out); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSpace(out.String()), "\n")
+	want := []string{"../lib/pyproject.toml", "../lib/weights.bin", "README.md", "scripts/train.py"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("listing = %v, want %v", got, want)
+	}
+}
+
+func TestInspectSourceMetadataComparesMatchingIdentityKinds(t *testing.T) {
+	pin := &db.JobSourcePinMetadata{Hash: "manifest-a", Roots: []db.JobSourcePinRootMetadata{{MountRel: ".", Hash: "root-a", R2Key: "root.tar.gz"}}}
+	attempt := db.JobAttempt{AttemptNumber: 2}
+	source := &db.JobSourceMetadata{Pin: pin, Execution: &db.JobSourceExecutionMetadata{
+		IdentityKind: db.SourceIdentityManifestV2, DispatchedSHA256: "manifest-a", VerifiedSHA256: "manifest-a", Verification: db.SourceVerificationVerified,
+	}}
+	got := inspectSourceMetadata(42, attempt, source)
+	if got.APIVersion != "weft.source.inspect.v1" || got.Verdict != db.SourceVerificationVerified || len(got.Roots) != 1 {
+		t.Fatalf("inspection = %+v", got)
+	}
+
+	source.Execution.IdentityKind = db.SourceIdentityCanonicalTar
+	got = inspectSourceMetadata(42, attempt, source)
+	if got.Verdict != db.SourceVerificationLegacyUnverifiable {
+		t.Fatalf("cross-kind verdict = %q, want legacy-unverifiable", got.Verdict)
+	}
+}
+
+func TestInspectSourceMetadataClassifiesTerminalAttemptWithoutWorkerRecordAsLegacy(t *testing.T) {
+	source := &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "manifest-a"}}
+	terminal := inspectSourceMetadata(42, db.JobAttempt{AttemptNumber: 1, Status: db.StatusCompleted}, source)
+	if terminal.Verdict != db.SourceVerificationLegacyUnverifiable {
+		t.Fatalf("terminal verdict = %q", terminal.Verdict)
+	}
+	pending := inspectSourceMetadata(42, db.JobAttempt{AttemptNumber: 2, Status: db.StatusQueued}, source)
+	if pending.Verdict != db.SourceVerificationPending {
+		t.Fatalf("queued verdict = %q", pending.Verdict)
 	}
 }
 

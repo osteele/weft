@@ -48,6 +48,7 @@ type Runner struct {
 	processesMu    sync.Mutex
 	lastSampleTime time.Time
 	nowFunc        func() time.Time
+	AgentVersion   string
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
@@ -648,6 +649,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// Pinned jobs materialize and verify their complete submit-time source
 	// closure. Legacy Layer D jobs materialize one content-addressed tarball.
 	// Both run from per-job directories and bypass the shared-tree marker.
+	var sourceExecution *SourceExecutionMetadata
 	if job.SourceManifest != nil {
 		if r.EnsureSourceManifestFromR2 == nil {
 			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_unavailable: source_manifest=%s but the runner has no manifest materializer", job.SourceManifest.SHA256))
@@ -658,6 +660,16 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
 		}
 		expandedDir = manifestDir
+		sourceExecution = &SourceExecutionMetadata{
+			DispatchMode:     "pinned_inventory_manifest",
+			IdentityKind:     "source_manifest_v2",
+			DispatchedSHA256: job.SourceManifest.SHA256,
+			VerifiedSHA256:   job.SourceManifest.SHA256,
+			Verification:     "verified",
+			VerifiedAt:       r.now().Unix(),
+			AgentVersion:     r.AgentVersion,
+			RootCount:        len(job.SourceManifest.Roots),
+		}
 	} else if job.SourceR2Key != "" {
 		if r.EnsureSourceFromR2 == nil {
 			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key))
@@ -667,6 +679,14 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
 		}
 		expandedDir = perJobDir
+		sourceExecution = &SourceExecutionMetadata{
+			DispatchMode:     "legacy_r2_tarball",
+			IdentityKind:     "canonical_tar_sha256",
+			DispatchedSHA256: job.SourceSHA,
+			Verification:     "legacy-unverifiable",
+			AgentVersion:     r.AgentVersion,
+			RootCount:        1,
+		}
 	} else if job.SourceSHA != "" {
 		// Preflight (Layer A+C): per-job source provenance check. Runs
 		// before startTime is stamped so a rejection isn't recorded as a
@@ -682,6 +702,16 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		if markerSHA != job.SourceSHA {
 			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker=%s", job.SourceSHA, markerSHA)
 			return r.rejectPreflight(jobID, paths, msg)
+		}
+		sourceExecution = &SourceExecutionMetadata{
+			DispatchMode:     "live_rsync_marker",
+			IdentityKind:     "canonical_tar_sha256",
+			DispatchedSHA256: job.SourceSHA,
+			VerifiedSHA256:   markerSHA,
+			Verification:     "verified",
+			VerifiedAt:       r.now().Unix(),
+			AgentVersion:     r.AgentVersion,
+			RootCount:        1,
 		}
 	}
 
@@ -699,7 +729,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	fmt.Printf("==========================================\n")
 
 	// Write metadata
-	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, startTime, job.SourceSHA)
+	WriteMetaFile(paths, jobID, job.Dir, command, job.Desc, startTime, job.SourceSHA, sourceExecution)
 
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command, job.SourceSHA)

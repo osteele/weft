@@ -625,6 +625,7 @@ func TestStartJob_R2IsolatedSourceFetchFailureRejectsPreflight(t *testing.T) {
 
 func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
 	r, _ := initTestRunner(t)
+	r.AgentVersion = "agent-test"
 	jobID := int64(711)
 	projectDir := t.TempDir()
 	manifestCalls := 0
@@ -657,6 +658,21 @@ func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
 	}
 	if manifestCalls != 1 || legacyCalls != 0 {
 		t.Fatalf("manifest calls = %d, legacy calls = %d; want 1, 0", manifestCalls, legacyCalls)
+	}
+	meta, err := os.ReadFile(NewJobPaths(r.logDir, jobID).Meta)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	for _, want := range []string{
+		"source_dispatch_mode=pinned_inventory_manifest",
+		"source_identity_kind=source_manifest_v2",
+		"source_verified_sha256=" + strings.Repeat("a", 64),
+		"source_verification=verified",
+		"agent_version=agent-test",
+	} {
+		if !strings.Contains(string(meta), want) {
+			t.Fatalf("metadata missing %q:\n%s", want, meta)
+		}
 	}
 }
 

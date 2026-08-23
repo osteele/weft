@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ type queueBatchStatus struct {
 	RunID         int64
 	GPUDevices    string
 	FailureReason string
+	AgentVersion  string
+	Source        *db.JobSourceExecutionMetadata
 }
 
 // BatchSyncQueueRunnerJobs performs a batched sync for queue-runner jobs on one host/queue.
@@ -60,6 +63,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 		if !ok {
 			continue
 		}
+		syncSourceExecutionMetadata(database, job, status)
 
 		switch status.State {
 		case queueStateQueued:
@@ -306,7 +310,9 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 				// in field 5 before COMPLETED lines included run_id.
 				failureReason = strings.TrimSpace(parts[5])
 			}
-			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, RunID: runID, FailureReason: failureReason}
+			status := queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, RunID: runID, FailureReason: failureReason}
+			status.Source = parseBatchSourceExecution(parts, 7)
+			results[id] = status
 		case "PREFLIGHT_REJECTED":
 			// Format: JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
 			var mtime int64
@@ -317,19 +323,23 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 			if len(parts) >= 5 && parts[4] != "" {
 				failureReason = strings.TrimSpace(parts[4])
 			}
-			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason}
+			agentVersion := ""
+			if len(parts) >= 6 {
+				agentVersion = strings.TrimSpace(parts[5])
+			}
+			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason, AgentVersion: agentVersion}
 		case "CURRENT", "RUNNING":
 			gpuDevs := ""
 			if len(parts) >= 4 {
 				gpuDevs = parts[3]
 			}
-			results[id] = queueBatchStatus{State: queueStateRunning, GPUDevices: gpuDevs}
+			results[id] = queueBatchStatus{State: queueStateRunning, GPUDevices: gpuDevs, Source: parseBatchSourceExecution(parts, 4)}
 		case "PAUSED":
 			gpuDevs := ""
 			if len(parts) >= 4 {
 				gpuDevs = parts[3]
 			}
-			results[id] = queueBatchStatus{State: queueStatePaused, GPUDevices: gpuDevs}
+			results[id] = queueBatchStatus{State: queueStatePaused, GPUDevices: gpuDevs, Source: parseBatchSourceExecution(parts, 4)}
 		case "QUEUED":
 			results[id] = queueBatchStatus{State: queueStateQueued}
 		case "DEAD":
@@ -338,6 +348,78 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 	}
 
 	return results, nil
+}
+
+func parseBatchSourceExecution(parts []string, offset int) *db.JobSourceExecutionMetadata {
+	if len(parts) < offset+8 || strings.TrimSpace(parts[offset]) == "" {
+		return nil
+	}
+	verifiedAt, _ := strconv.ParseInt(parts[offset+5], 10, 64)
+	rootCount, _ := strconv.Atoi(parts[offset+7])
+	return &db.JobSourceExecutionMetadata{
+		DispatchMode:     strings.TrimSpace(parts[offset]),
+		IdentityKind:     strings.TrimSpace(parts[offset+1]),
+		DispatchedSHA256: strings.TrimSpace(parts[offset+2]),
+		VerifiedSHA256:   strings.TrimSpace(parts[offset+3]),
+		Verification:     strings.TrimSpace(parts[offset+4]),
+		VerifiedAt:       verifiedAt,
+		AgentVersion:     strings.TrimSpace(parts[offset+6]),
+		RootCount:        rootCount,
+	}
+}
+
+func syncSourceExecutionMetadata(database *sql.DB, job *db.Job, status queueBatchStatus) {
+	if job == nil {
+		return
+	}
+	execution := status.Source
+	if execution == nil && status.State == queueStatePreflightRejected && job.Metadata != nil && job.Metadata.Source != nil && job.Metadata.Source.Pin != nil {
+		pin := job.Metadata.Source.Pin
+		verification := db.SourceVerificationPending
+		switch {
+		case strings.Contains(status.FailureReason, "mismatch"):
+			verification = db.SourceVerificationMismatch
+		case strings.Contains(status.FailureReason, "unavailable"), strings.Contains(status.FailureReason, "fetch_failed"):
+			verification = db.SourceVerificationObjectsUnavailable
+		}
+		execution = &db.JobSourceExecutionMetadata{
+			DispatchMode:     "pinned_inventory_manifest",
+			IdentityKind:     db.SourceIdentityManifestV2,
+			DispatchedSHA256: pin.Hash,
+			Verification:     verification,
+			RootCount:        len(pin.Roots),
+			AgentVersion:     status.AgentVersion,
+		}
+	}
+	if execution == nil {
+		return
+	}
+	copy := *execution
+	if job.Metadata != nil && job.Metadata.Source != nil && job.Metadata.Source.Pin != nil {
+		copy.SubmittedIdentityKind = db.SourceIdentityManifestV2
+		copy.SubmittedSHA256 = job.Metadata.Source.Pin.Hash
+		if copy.IdentityKind == copy.SubmittedIdentityKind {
+			if copy.DispatchedSHA256 != copy.SubmittedSHA256 || (copy.VerifiedSHA256 != "" && copy.VerifiedSHA256 != copy.SubmittedSHA256) {
+				copy.Verification = db.SourceVerificationMismatch
+			}
+		}
+	}
+	meta := job.Metadata
+	if meta == nil {
+		meta = &db.JobMetadata{}
+	}
+	if meta.Source == nil {
+		meta.Source = &db.JobSourceMetadata{}
+	}
+	if reflect.DeepEqual(meta.Source.Execution, &copy) {
+		return
+	}
+	meta.Source.Execution = &copy
+	if err := db.SetJobMetadata(database, job.ID, meta); err != nil {
+		slog.Warn("failed to update source execution metadata", "component", "sync", "job_id", job.ID, "error", err)
+		return
+	}
+	job.Metadata = meta
 }
 
 // syncGPUDevicesToMetadata persists the assigned GPU devices to the job's metadata

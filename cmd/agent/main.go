@@ -119,6 +119,7 @@ func runQueue(args []string) {
 	cfg := runner.DefaultConfig()
 	cfg.SetupTimeout = parsed.SetupTimeout
 	r := runner.New(cfg)
+	r.AgentVersion = version
 	if parsed.R2Bucket != "" {
 		setupInventoryR2(r, parsed.R2Bucket)
 		// Wire the Layer D R2-isolated source fallback: when the dispatcher

@@ -2630,6 +2630,27 @@ func SetJobMetadata(db dbExecer, jobID int64, meta *JobMetadata) error {
 	return nil
 }
 
+// SetJobAttemptMetadata updates one exact attempt. This is used when delayed
+// external evidence names an attempt ID that may no longer be the latest.
+func SetJobAttemptMetadata(db dbExecer, jobID, attemptID int64, meta *JobMetadata) error {
+	value, err := encodeJobMetadata(meta)
+	if err != nil {
+		return err
+	}
+	res, err := db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = ? AND job_id = ?`, value, attemptID, jobID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("SetJobAttemptMetadata: attempt %d for job %d not found", attemptID, jobID)
+	}
+	return nil
+}
+
 // AddJobTag adds a tag to a job if it doesn't already exist.
 func AddJobTag(db *sql.DB, jobID int64, tag string) error {
 	tag = CanonicalizeTag(tag)

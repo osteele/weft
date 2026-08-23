@@ -42,4 +42,7 @@ func TestEmitRunReceiptIsVersionedJSON(t *testing.T) {
 	if got.APIVersion != runReceiptAPIVersion || got.JobID != "wj42" || got.SourcePin != "sha256:source" || !got.AcceptedImmediately {
 		t.Fatalf("receipt = %+v", got)
 	}
+	if got.SourceIdentityKind != db.SourceIdentityManifestV2 || got.ExecutionSource == nil || got.ExecutionSource.DispatchMode != "pinned_inventory_manifest" || got.ExecutionSource.Verification != db.SourceVerificationPending {
+		t.Fatalf("source receipt = %+v", got)
+	}
 }

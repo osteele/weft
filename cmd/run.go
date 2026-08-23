@@ -2122,7 +2122,31 @@ func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
 	if source == nil || len(source.Roots) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "Source:      %s\n", shortHash(source.Hash))
+	identityKind := "legacy/unknown"
+	closureHash := source.Hash
+	if source.Pin != nil {
+		identityKind = db.SourceIdentityManifestV2
+		closureHash = source.Pin.Hash
+	}
+	fmt.Fprintf(w, "Source closure: %s (%s)\n", shortHash(closureHash), identityKind)
+	if source.Execution != nil {
+		fmt.Fprintf(w, "Dispatch mode:  %s\n", source.Execution.DispatchMode)
+		fmt.Fprintf(w, "Agent verification: %s", source.Execution.Verification)
+		if source.Execution.VerifiedSHA256 != "" {
+			fmt.Fprintf(w, " %s", shortHash(source.Execution.VerifiedSHA256))
+		}
+		if source.Execution.VerifiedAt > 0 {
+			fmt.Fprintf(w, " at %s", time.Unix(source.Execution.VerifiedAt, 0).Format(time.RFC3339))
+		}
+		if source.Execution.AgentVersion != "" {
+			fmt.Fprintf(w, " (agent %s)", source.Execution.AgentVersion)
+		}
+		fmt.Fprintln(w)
+	} else if source.Pin != nil {
+		fmt.Fprintln(w, "Dispatch mode:  not recorded")
+		fmt.Fprintln(w, "Agent verification: not recorded (legacy agent or pending dispatch)")
+	}
+	fmt.Fprintf(w, "Roots:          %d\n", len(source.Roots))
 	for i, root := range source.Roots {
 		label := root.MountRel
 		if i == 0 {

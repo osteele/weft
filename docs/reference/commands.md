@@ -1188,12 +1188,14 @@ Inspect the exact source snapshot uploaded to R2 for a cloud job attempt.
 
 ```bash
 weft source ls <job-id> [prefix] [flags]
+weft source inspect <job-id> [flags]
 weft source cat <job-id> [path] [flags]
 weft source diff <job-a> <job-b> [path] [flags]
 ```
 
 **Flags:**
 - `--attempt N`: Use a specific attempt number (default: latest)
+- `--json`: Emit the versioned `weft.source.inspect.v1` record (`inspect` only)
 - `--attempt-a N`: For `diff`, use a specific attempt for the first job
 - `--attempt-b N`: For `diff`, use a specific attempt for the second job
 
@@ -1201,8 +1203,21 @@ When `path` is omitted, `cat` tries to print the script referenced by the job
 command. Pass an explicit path if the command references multiple scripts or no
 script can be inferred.
 
+`source inspect` compares the submit-time closure with the identity observed by
+the worker, but only when both records use the same identity kind. Its verdict
+distinguishes verified, mismatch, unavailable R2 objects, legacy attempts that
+cannot be compared, and attempts still awaiting worker verification. It also
+reports dispatch mode, agent version, verification time, and every pinned root.
+
+For pinned inventory jobs, `source ls` reads each root tarball and diverted blob
+entry named by the stored manifest. Legacy rsync attempts have no immutable file
+inventory, so the command reports that limitation explicitly instead of
+inspecting the current checkout.
+
 **Examples:**
 ```bash
+weft source inspect wj1443
+weft source inspect wj1443 --json
 weft source ls wj1443
 weft source ls wj1443 scripts/
 weft source cat wj1443

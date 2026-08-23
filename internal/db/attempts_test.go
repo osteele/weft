@@ -826,6 +826,13 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 			CloudAfter:         []JobDependencyRef{{JobID: 1046}},
 			ResolvedCloudAfter: []JobDependencyResolvedRef{{JobID: 1046, RunID: 2048}},
 		},
+		Source: &JobSourceMetadata{
+			Hash: "manifest-a",
+			Pin:  &JobSourcePinMetadata{Hash: "manifest-a", Roots: []JobSourcePinRootMetadata{{Hash: "root-a", R2Key: "root.tar.gz"}}},
+			Execution: &JobSourceExecutionMetadata{
+				DispatchMode: "pinned_inventory_manifest", Verification: SourceVerificationVerified,
+			},
+		},
 	}
 	if err := SetJobMetadata(database, jobID, meta); err != nil {
 		t.Fatalf("SetJobMetadata: %v", err)
@@ -854,6 +861,12 @@ func TestSetJobLaunchID_PreservesCloudDependencyMetadata(t *testing.T) {
 	}
 	if got := job.Metadata.Dependencies.ResolvedCloudAfter; len(got) != 0 {
 		t.Fatalf("resolved_cloud_after = %v, want not carried forward", got)
+	}
+	if job.Metadata.Source == nil || job.Metadata.Source.Pin == nil || job.Metadata.Source.Pin.Hash != "manifest-a" {
+		t.Fatalf("source pin was not carried forward: %+v", job.Metadata.Source)
+	}
+	if job.Metadata.Source.Execution != nil {
+		t.Fatalf("source execution evidence crossed attempt boundary: %+v", job.Metadata.Source.Execution)
 	}
 }
 

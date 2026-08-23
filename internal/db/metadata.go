@@ -30,10 +30,38 @@ type JobAgentMetadata struct {
 
 // JobSourceMetadata records the ordered source-root identity for a job.
 type JobSourceMetadata struct {
-	Hash     string                  `json:"hash,omitempty"`
-	Roots    []JobSourceRootMetadata `json:"roots,omitempty"`
-	Warnings []string                `json:"warnings,omitempty"`
-	Pin      *JobSourcePinMetadata   `json:"pin,omitempty"`
+	Hash      string                      `json:"hash,omitempty"`
+	Roots     []JobSourceRootMetadata     `json:"roots,omitempty"`
+	Warnings  []string                    `json:"warnings,omitempty"`
+	Pin       *JobSourcePinMetadata       `json:"pin,omitempty"`
+	Execution *JobSourceExecutionMetadata `json:"execution,omitempty"`
+}
+
+const (
+	SourceIdentityManifestV2   = "source_manifest_v2"
+	SourceIdentityCanonicalTar = "canonical_tar_sha256"
+
+	SourceVerificationPending            = "pending"
+	SourceVerificationVerified           = "verified"
+	SourceVerificationMismatch           = "mismatch"
+	SourceVerificationLegacyUnverifiable = "legacy-unverifiable"
+	SourceVerificationObjectsUnavailable = "objects-unavailable"
+)
+
+// JobSourceExecutionMetadata records the source identity dispatched for one
+// attempt and the worker's observed verification of that identity. Submitted
+// and executed hashes are only comparable when their identity kinds match.
+type JobSourceExecutionMetadata struct {
+	SubmittedIdentityKind string `json:"submitted_identity_kind,omitempty"`
+	SubmittedSHA256       string `json:"submitted_sha256,omitempty"`
+	DispatchMode          string `json:"dispatch_mode,omitempty"`
+	IdentityKind          string `json:"identity_kind,omitempty"`
+	DispatchedSHA256      string `json:"dispatched_sha256,omitempty"`
+	VerifiedSHA256        string `json:"verified_sha256,omitempty"`
+	Verification          string `json:"verification,omitempty"`
+	VerifiedAt            int64  `json:"verified_at,omitempty"`
+	AgentVersion          string `json:"agent_version,omitempty"`
+	RootCount             int    `json:"root_count,omitempty"`
 }
 
 // JobSourcePinMetadata is the immutable cloud source manifest captured before

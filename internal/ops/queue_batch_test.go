@@ -1,11 +1,46 @@
 package ops
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
+
+func TestParseBatchSourceExecution(t *testing.T) {
+	parts := strings.Split("JOB|42|RUNNING|0|pinned_inventory_manifest|source_manifest_v2|submitted|verified|verified|123|agent-1|2", "|")
+	got := parseBatchSourceExecution(parts, 4)
+	if got == nil || got.DispatchMode != "pinned_inventory_manifest" || got.VerifiedAt != 123 || got.AgentVersion != "agent-1" || got.RootCount != 2 {
+		t.Fatalf("source execution = %+v", got)
+	}
+}
+
+func TestBatchSyncPersistsAttemptSourceVerification(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "source verification")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := &db.JobMetadata{Source: &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "manifest-a", Roots: []db.JobSourcePinRootMetadata{{Hash: "root-a"}}}}}
+	if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+	statuses := map[int64]queueBatchStatus{jobID: {State: queueStateQueued, Source: &db.JobSourceExecutionMetadata{
+		DispatchMode: "pinned_inventory_manifest", IdentityKind: db.SourceIdentityManifestV2, DispatchedSHA256: "manifest-a", VerifiedSHA256: "manifest-a", Verification: db.SourceVerificationVerified,
+	}}}
+	if _, err := applyBatchStatuses(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetJobByID(database, jobID)
+	if got.Metadata == nil || got.Metadata.Source == nil || got.Metadata.Source.Execution == nil || got.Metadata.Source.Execution.Verification != db.SourceVerificationVerified {
+		t.Fatalf("metadata = %+v", got.Metadata)
+	}
+	if got.Metadata.Source.Execution.SubmittedIdentityKind != db.SourceIdentityManifestV2 {
+		t.Fatalf("execution = %+v", got.Metadata.Source.Execution)
+	}
+}
 
 // TestBatchSyncDeadReportDoesNotKillRecentlyQueuedJob validates the fix for the
 // race condition where the TUI's batch sync marks recently-queued jobs as dead.

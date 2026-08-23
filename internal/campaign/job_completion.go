@@ -225,6 +225,9 @@ func checkAndSyncJobCompleteRun(ctx context.Context, r2c *r2.Client, database *s
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
 		return false
 	}
+	if source == SourceResults {
+		persistCloudSourceVerification(database, jobID, runID, failureReason, markerLastModified)
+	}
 	launchID := recordResult.LaunchID
 
 	// Log cloud job completion/failure to local ops log
@@ -368,6 +371,7 @@ func creditManifestCompletions(database *sql.DB, instanceID int64, manifest *run
 				"job_id", summary.JobID, "error", err)
 			continue
 		}
+		persistCloudSourceVerification(database, summary.JobID, runID, "", marker)
 		if recordResult.Transitioned {
 			oplog.LogJob(oplog.OpJobComplete, summary.JobID, db.LaunchHost(instanceID),
 				oplog.WithDetailf("cloud exit=0 source=%s", SourceManifest))

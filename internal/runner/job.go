@@ -273,8 +273,20 @@ func nextArchiveSeq(logDir string, jobID int64) int {
 	}
 }
 
+// SourceExecutionMetadata describes the source identity observed by the worker.
+type SourceExecutionMetadata struct {
+	DispatchMode     string
+	IdentityKind     string
+	DispatchedSHA256 string
+	VerifiedSHA256   string
+	Verification     string
+	VerifiedAt       int64
+	AgentVersion     string
+	RootCount        int
+}
+
 // WriteMetaFile writes the job metadata file.
-func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description string, startTime int64, sourceSHA string) error {
+func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description string, startTime int64, sourceSHA string, source *SourceExecutionMetadata) error {
 	hostname, _ := os.Hostname()
 	var lines []string
 	lines = append(lines, fmt.Sprintf("job_id=%d", jobID))
@@ -287,6 +299,18 @@ func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description
 	}
 	if sourceSHA != "" {
 		lines = append(lines, fmt.Sprintf("source_sha256=%s", sourceSHA))
+	}
+	if source != nil {
+		lines = append(lines,
+			fmt.Sprintf("source_dispatch_mode=%s", source.DispatchMode),
+			fmt.Sprintf("source_identity_kind=%s", source.IdentityKind),
+			fmt.Sprintf("source_dispatched_sha256=%s", source.DispatchedSHA256),
+			fmt.Sprintf("source_verified_sha256=%s", source.VerifiedSHA256),
+			fmt.Sprintf("source_verification=%s", source.Verification),
+			fmt.Sprintf("source_verified_at=%d", source.VerifiedAt),
+			fmt.Sprintf("source_root_count=%d", source.RootCount),
+			fmt.Sprintf("agent_version=%s", source.AgentVersion),
+		)
 	}
 	return os.WriteFile(paths.Meta, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }

@@ -28,10 +28,12 @@ import (
 
 var sourceCmd = &cobra.Command{
 	Use:   "source",
-	Short: "Inspect cloud job source snapshots",
-	Long: `Inspect the exact source tarball uploaded to R2 for a cloud job attempt.
+	Short: "Inspect job source snapshots and execution provenance",
+	Long: `Inspect the immutable source closure submitted for a job attempt.
 
 Examples:
+	weft source inspect wj1443
+	weft source inspect wj1443 --json
   weft source ls wj1443
   weft source ls wj1443 scripts/
   weft source cat wj1443
@@ -61,10 +63,18 @@ var sourceDiffCmd = &cobra.Command{
 	RunE:  runSourceDiff,
 }
 
+var sourceInspectCmd = &cobra.Command{
+	Use:   "inspect <job-id>",
+	Short: "Inspect submitted and executed source identities",
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runSourceInspect,
+}
+
 var (
 	sourceAttempt  int
 	sourceAttemptA int
 	sourceAttemptB int
+	sourceJSON     bool
 )
 
 const sourceCmdTimeout = 2 * time.Minute
@@ -74,8 +84,11 @@ func init() {
 	sourceCmd.AddCommand(sourceLsCmd)
 	sourceCmd.AddCommand(sourceCatCmd)
 	sourceCmd.AddCommand(sourceDiffCmd)
+	sourceCmd.AddCommand(sourceInspectCmd)
 	addSourceAttemptFlag(sourceLsCmd)
 	addSourceAttemptFlag(sourceCatCmd)
+	addSourceAttemptFlag(sourceInspectCmd)
+	sourceInspectCmd.Flags().BoolVar(&sourceJSON, "json", false, "Emit versioned JSON")
 	sourceDiffCmd.Flags().IntVar(&sourceAttemptA, "attempt-a", 0, "Use a specific attempt number for the first job (default: latest)")
 	sourceDiffCmd.Flags().IntVar(&sourceAttemptB, "attempt-b", 0, "Use a specific attempt number for the second job (default: latest)")
 }
@@ -121,6 +134,23 @@ func runSourceLs(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	_, attempt, sourceMeta, err := lookupJobSourceMetadata(database, jobID, sourceAttempt)
+	if err != nil {
+		return err
+	}
+	if sourceMeta != nil && sourceMeta.Pin != nil {
+		client, err := newSourceStore()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sourceCmdTimeout)
+		defer cancel()
+		return listPinnedSource(ctx, client, sourceMeta.Pin, prefix, cmd.OutOrStdout())
+	}
+	if attempt.LaunchID == nil {
+		return fmt.Errorf("job %s attempt #%d has no immutable source inventory; legacy rsync attempts cannot be listed", ids.FormatJobID(jobID), attempt.AttemptNumber)
+	}
+
 	client, err := newSourceStore()
 	if err != nil {
 		return err
@@ -138,6 +168,183 @@ func runSourceLs(cmd *cobra.Command, args []string) error {
 	}
 	defer body.Close()
 	return listSourceTarball(body, prefix, cmd.OutOrStdout())
+}
+
+type sourceIdentityView struct {
+	Kind   string `json:"identity_kind"`
+	SHA256 string `json:"sha256"`
+}
+
+type sourceRootView struct {
+	MountRel      string `json:"mount_rel"`
+	MountBasename string `json:"mount_basename"`
+	SHA256        string `json:"sha256"`
+	R2Key         string `json:"r2_key"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
+	BlobCount     int    `json:"blob_count,omitempty"`
+}
+
+type sourceInspection struct {
+	APIVersion string                         `json:"api_version"`
+	JobID      string                         `json:"job_id"`
+	Attempt    int                            `json:"attempt"`
+	Verdict    string                         `json:"verdict"`
+	Submitted  *sourceIdentityView            `json:"submitted_source,omitempty"`
+	Execution  *db.JobSourceExecutionMetadata `json:"execution_source,omitempty"`
+	Roots      []sourceRootView               `json:"roots,omitempty"`
+}
+
+func runSourceInspect(cmd *cobra.Command, args []string) error {
+	jobID, err := parseSingleJobID(args[0])
+	if err != nil {
+		return err
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	_, attempt, source, err := lookupJobSourceMetadata(database, jobID, sourceAttempt)
+	if err != nil {
+		return err
+	}
+	view := inspectSourceMetadata(jobID, attempt, source)
+	if sourceJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(view)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Job:                %s attempt #%d\n", view.JobID, view.Attempt)
+	fmt.Fprintf(cmd.OutOrStdout(), "Verdict:            %s\n", view.Verdict)
+	if view.Submitted != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Submitted closure:  %s %s\n", view.Submitted.Kind, view.Submitted.SHA256)
+	}
+	if view.Execution != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Dispatch mode:      %s\n", view.Execution.DispatchMode)
+		fmt.Fprintf(cmd.OutOrStdout(), "Executed identity:  %s %s\n", view.Execution.IdentityKind, view.Execution.DispatchedSHA256)
+		fmt.Fprintf(cmd.OutOrStdout(), "Agent verification: %s", view.Execution.Verification)
+		if view.Execution.VerifiedSHA256 != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), " %s", view.Execution.VerifiedSHA256)
+		}
+		if view.Execution.AgentVersion != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), " (agent %s)", view.Execution.AgentVersion)
+		}
+		fmt.Fprintln(cmd.OutOrStdout())
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Roots:              %d\n", len(view.Roots))
+	for _, root := range view.Roots {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s  %s\n", root.MountRel, root.SHA256, root.R2Key)
+	}
+	return nil
+}
+
+func lookupJobSourceMetadata(database *sql.DB, jobID int64, attemptNumber int) (*db.Job, db.JobAttempt, *db.JobSourceMetadata, error) {
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return nil, db.JobAttempt{}, nil, fmt.Errorf("get job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	if job == nil {
+		return nil, db.JobAttempt{}, nil, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+	}
+	attempt, err := selectSourceAttempt(database, jobID, attemptNumber)
+	if err != nil {
+		return nil, db.JobAttempt{}, nil, err
+	}
+	if attempt.Metadata != nil && attempt.Metadata.Source != nil {
+		return job, attempt, attempt.Metadata.Source, nil
+	}
+	if attemptNumber == 0 && job.Metadata != nil {
+		return job, attempt, job.Metadata.Source, nil
+	}
+	return job, attempt, nil, nil
+}
+
+func inspectSourceMetadata(jobID int64, attempt db.JobAttempt, source *db.JobSourceMetadata) sourceInspection {
+	view := sourceInspection{APIVersion: "weft.source.inspect.v1", JobID: ids.FormatJobID(jobID), Attempt: attempt.AttemptNumber, Verdict: db.SourceVerificationLegacyUnverifiable}
+	if source == nil {
+		return view
+	}
+	if source.Pin != nil {
+		view.Submitted = &sourceIdentityView{Kind: db.SourceIdentityManifestV2, SHA256: source.Pin.Hash}
+		for _, root := range source.Pin.Roots {
+			view.Roots = append(view.Roots, sourceRootView{MountRel: root.MountRel, MountBasename: root.MountBasename, SHA256: root.Hash, R2Key: root.R2Key, SizeBytes: root.SizeBytes, BlobCount: len(root.Blobs)})
+		}
+	}
+	if source.Execution == nil {
+		if view.Submitted != nil && !db.IsTerminalStatus(attempt.Status) {
+			view.Verdict = db.SourceVerificationPending
+		}
+		return view
+	}
+	execution := *source.Execution
+	view.Execution = &execution
+	switch execution.Verification {
+	case db.SourceVerificationMismatch, db.SourceVerificationObjectsUnavailable:
+		view.Verdict = execution.Verification
+	case db.SourceVerificationVerified:
+		if view.Submitted != nil && execution.IdentityKind == view.Submitted.Kind && execution.DispatchedSHA256 == view.Submitted.SHA256 && execution.VerifiedSHA256 == view.Submitted.SHA256 {
+			view.Verdict = db.SourceVerificationVerified
+		}
+	case db.SourceVerificationPending:
+		view.Verdict = db.SourceVerificationPending
+	}
+	return view
+}
+
+func listPinnedSource(ctx context.Context, store sourceObjectStore, pin *db.JobSourcePinMetadata, prefix string, out io.Writer) error {
+	prefix = cleanSourcePath(prefix)
+	seen := make(map[string]struct{})
+	var names []string
+	for _, root := range pin.Roots {
+		body, err := store.GetObjectReader(ctx, root.R2Key)
+		if err != nil {
+			return fmt.Errorf("fetch pinned source root from R2 key %s: %w", root.R2Key, err)
+		}
+		err = readSourceTarball(body, func(hdr *tar.Header, tr *tar.Reader) error {
+			name := manifestSourcePath(root.MountRel, hdr.Name)
+			if hdr.Typeflag == tar.TypeReg {
+				_, _ = io.Copy(io.Discard, tr)
+			}
+			if sourcePathMatchesPrefix(name, prefix) {
+				seen[name] = struct{}{}
+			}
+			return nil
+		})
+		closeErr := body.Close()
+		if err != nil {
+			return fmt.Errorf("list pinned source root %s: %w", root.R2Key, err)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		for _, blob := range root.Blobs {
+			name := manifestSourcePath(root.MountRel, blob.RelPath)
+			if sourcePathMatchesPrefix(name, prefix) {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	for name := range seen {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		fmt.Fprintln(out, name)
+	}
+	return nil
+}
+
+func manifestSourcePath(mountRel, name string) string {
+	name = cleanSourcePath(name)
+	if mountRel == "" || mountRel == "." {
+		return name
+	}
+	return path.Join(filepath.ToSlash(mountRel), name)
+}
+
+func sourcePathMatchesPrefix(name, prefix string) bool {
+	return name != "" && (prefix == "" || name == prefix || strings.HasPrefix(name, prefix+"/"))
 }
 
 func runSourceCat(cmd *cobra.Command, args []string) error {

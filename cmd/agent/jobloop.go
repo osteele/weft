@@ -1307,7 +1307,7 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 		slog.Warn("archive prior artifacts before prewarm-failure write", "component", "agent", "job_id", job.ID, "error", err)
 	}
 	now := time.Now().Unix()
-	_ = runner.WriteMetaFile(paths, job.ID, job.Dir, job.Command, "", now, "")
+	_ = runner.WriteMetaFile(paths, job.ID, job.Dir, job.Command, "", now, "", nil)
 	_ = runner.WriteLogHeader(paths, job.ID, job.Dir, job.Command, "")
 	if prewarm.logPath != "" {
 		appendPrewarmLogForFailure(paths.Log, prewarm.logPath)

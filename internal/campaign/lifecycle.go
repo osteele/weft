@@ -2482,6 +2482,9 @@ func LaunchInstance(
 			return failLaunchBeforeCreate("cloud-after pin persistence failed", err)
 		}
 		agentJob.SourceMounts = sourceMountsForJob(group, job, localToRemote, r2Assets.JobSourceManifests, r2Assets.SourceManifests)
+		if err := persistCloudSourceDispatch(database, job, r2Assets.AgentVersion); err != nil {
+			return failLaunchBeforeCreate("source provenance persistence failed", err)
+		}
 		checkpointNeeds, err := resolveTransportableCheckpointNeeds(ctx, database, r2Assets.Client, job)
 		if err != nil {
 			return failLaunchBeforeCreate("checkpoint needs resolution failed", err)

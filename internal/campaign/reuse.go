@@ -1193,6 +1193,10 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 	}
 	opCtx, opCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer opCancel()
+	agentVersion := ""
+	if live, liveErr := db.GetLaunchLiveState(database, instanceID); liveErr == nil && live != nil {
+		agentVersion = live.AgentVersion
+	}
 
 	// Upload sources and build payload
 	for _, job := range claimedJobs {
@@ -1272,6 +1276,13 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 		agentJob.CloudAfter = cloudAfter
 		agentJob.RestagedOutputs = restagedOutputs
 		agentJob.SourceMounts = sourceMountsFromManifest(sourceUpload.Manifest, remoteDir)
+		if err := persistCloudSourceDispatch(database, job, agentVersion); err != nil {
+			rollbackErr := rollbackClaims()
+			if rollbackErr != nil {
+				return fmt.Errorf("persist source provenance for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
+			}
+			return fmt.Errorf("persist source provenance for job %s: %w", ids.FormatJobID(job.ID), err)
+		}
 		payload.Jobs = append(payload.Jobs, agentJob)
 		for _, mount := range agentJob.SourceMounts {
 			payload.Sources = append(payload.Sources, controlplane.SourceUpdate{

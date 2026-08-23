@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/dataplane"
 )
 
 const stalePendingPlacementNoLaunchMaxAgeSeconds = int64(120)
@@ -440,8 +442,8 @@ func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID 
 	if err != nil {
 		return 0, err
 	}
-	if err := carryForwardDependencyMetadata(execer, jobID, attemptID); err != nil {
-		return 0, fmt.Errorf("carry forward dependency metadata for job %d: %w", jobID, err)
+	if err := carryForwardPersistentMetadata(execer, jobID, attemptID); err != nil {
+		return 0, fmt.Errorf("carry forward persistent metadata for job %d: %w", jobID, err)
 	}
 	return attemptID, nil
 }
@@ -500,8 +502,8 @@ func CreateMoveTargetAttempt(database *sql.DB, intentID, jobID int64, host strin
 	if err != nil {
 		return 0, err
 	}
-	if err := carryForwardDependencyMetadata(tx, jobID, attemptID); err != nil {
-		return 0, fmt.Errorf("carry forward dependency metadata for job %d: %w", jobID, err)
+	if err := carryForwardPersistentMetadata(tx, jobID, attemptID); err != nil {
+		return 0, fmt.Errorf("carry forward persistent metadata for job %d: %w", jobID, err)
 	}
 	if _, err := tx.Exec(
 		`UPDATE move_intents
@@ -690,49 +692,74 @@ func isNoStartCloudDetour(a placementDisplayAttempt) bool {
 	}
 }
 
-// carryForwardDependencyMetadata copies dependency metadata from the previous
-// attempt to a new attempt. This preserves cloud dependency semantics
-// (CloudNeeds/CloudAfter) across attempt rollovers (launch assignment, retry,
-// requeue) without carrying stale telemetry/resource stats into the new run.
-func carryForwardDependencyMetadata(execer dbExecer, jobID, newAttemptID int64) error {
-	var raw sql.NullString
+// carryForwardPersistentMetadata copies persistent submission metadata to a
+// new attempt. Source execution evidence is deliberately cleared because it
+// belongs to the attempt that observed it.
+func carryForwardPersistentMetadata(execer dbExecer, jobID, newAttemptID int64) error {
+	var previousRaw, submissionRaw sql.NullString
 	err := execer.QueryRow(
-		`SELECT job_metadata
-		 FROM job_attempts
-		 WHERE job_id = ? AND id != ?
-		 ORDER BY attempt_number DESC
-		 LIMIT 1`,
-		jobID, newAttemptID,
-	).Scan(&raw)
-	if err == sql.ErrNoRows || !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		`SELECT
+			(SELECT job_metadata FROM job_attempts WHERE job_id = j.id AND id != ? ORDER BY attempt_number DESC LIMIT 1),
+			j.job_metadata
+		 FROM jobs j WHERE j.id = ?`,
+		newAttemptID,
+		jobID,
+	).Scan(&previousRaw, &submissionRaw)
+	if err == sql.ErrNoRows {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
-	previous := decodeJobMetadata(raw)
-	if previous == nil || previous.Dependencies == nil {
-		return nil
-	}
-	deps := &JobDependencyMetadata{}
-	if len(previous.Dependencies.CloudAfter) > 0 {
+	previous := decodeJobMetadata(previousRaw)
+	submission := decodeJobMetadata(submissionRaw)
+	meta := &JobMetadata{}
+	if previous != nil && previous.Dependencies != nil {
+		deps := &JobDependencyMetadata{}
 		deps.CloudAfter = append([]JobDependencyRef(nil), previous.Dependencies.CloudAfter...)
-	}
-	if len(previous.Dependencies.CloudNeeds) > 0 {
 		deps.CloudNeeds = append([]string(nil), previous.Dependencies.CloudNeeds...)
+		if len(deps.CloudAfter) > 0 || len(deps.CloudNeeds) > 0 {
+			meta.Dependencies = deps
+		}
 	}
-	if len(deps.CloudAfter) == 0 && len(deps.CloudNeeds) == 0 {
+	source := (*JobSourceMetadata)(nil)
+	if previous != nil {
+		source = previous.Source
+	}
+	if source == nil && submission != nil {
+		source = submission.Source
+	}
+	meta.Source = clonePersistentJobSource(source)
+	if meta.Dependencies == nil && meta.Source == nil {
 		return nil
 	}
 
-	meta := &JobMetadata{Dependencies: deps}
 	encoded, err := encodeJobMetadata(meta)
 	if err != nil {
 		return err
 	}
 	_, err = execer.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = ?`, encoded, newAttemptID)
 	return err
+}
+
+func clonePersistentJobSource(source *JobSourceMetadata) *JobSourceMetadata {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.Execution = nil
+	clone.Roots = append([]JobSourceRootMetadata(nil), source.Roots...)
+	clone.Warnings = append([]string(nil), source.Warnings...)
+	if source.Pin != nil {
+		pin := *source.Pin
+		pin.Roots = append([]JobSourcePinRootMetadata(nil), source.Pin.Roots...)
+		for i := range pin.Roots {
+			pin.Roots[i].Blobs = append([]dataplane.SourceBlob(nil), pin.Roots[i].Blobs...)
+		}
+		clone.Pin = &pin
+	}
+	return &clone
 }
 
 // CloseAttempt marks the current open attempt for a job as ended.
@@ -1152,6 +1179,7 @@ type JobAttempt struct {
 	FailureReason string
 	CloudOutcome  string
 	Backend       string
+	Metadata      *JobMetadata
 }
 
 // ListAttempts returns non-abandoned attempts for a job, newest first.
@@ -1160,7 +1188,7 @@ func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
 		SELECT id, job_id, attempt_number, host, launch_id, status,
 		       queued_at, start_time, end_time, exit_code,
 		       COALESCE(error_message, ''), COALESCE(failure_reason, ''),
-		       COALESCE(cloud_outcome, ''), COALESCE(backend, '')
+		       COALESCE(cloud_outcome, ''), COALESCE(backend, ''), job_metadata
 		FROM job_attempts
 		WHERE job_id = ? AND abandoned_at IS NULL
 		ORDER BY attempt_number DESC`, jobID)
@@ -1173,10 +1201,11 @@ func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
 	for rows.Next() {
 		var a JobAttempt
 		var launchID, queuedAt, startTime, endTime, exitCode sql.NullInt64
+		var metadata sql.NullString
 		if err := rows.Scan(
 			&a.ID, &a.JobID, &a.AttemptNumber, &a.Host, &launchID, &a.Status,
 			&queuedAt, &startTime, &endTime, &exitCode,
-			&a.ErrorMessage, &a.FailureReason, &a.CloudOutcome, &a.Backend,
+			&a.ErrorMessage, &a.FailureReason, &a.CloudOutcome, &a.Backend, &metadata,
 		); err != nil {
 			return nil, err
 		}
@@ -1184,6 +1213,7 @@ func ListAttempts(database *sql.DB, jobID int64) ([]JobAttempt, error) {
 			v := launchID.Int64
 			a.LaunchID = &v
 		}
+		a.Metadata = decodeJobMetadata(metadata)
 		if queuedAt.Valid {
 			v := queuedAt.Int64
 			a.QueuedAt = &v

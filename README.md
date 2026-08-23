@@ -153,12 +153,18 @@ Pause autopilot first if you need manual offer or cost control while it is
 running. See [Cloud GPU Instances](docs/guides/instances.md#coordinating-with-the-autopilot)
 for the pause and resume sequence.
 
-Inspect the exact source snapshot used by a cloud job:
+Inspect the submitted source closure and the worker's execution verification:
 
 ```bash
+weft source inspect wj42
 weft source ls wj42
 weft source cat wj42 scripts/train.py
 ```
+
+`source inspect` works for inventory and cloud attempts and reports whether the
+worker verified the same identity that submission pinned. `source ls` reads a
+pinned inventory directly from its stored R2 manifest; attempts that predate
+immutable source pinning report that no authoritative listing is available.
 
 Job IDs appear as `wj<N>` in output. Commands accept both `wj42` and `42`, and
 many commands accept ranges such as `wj42:47`.
