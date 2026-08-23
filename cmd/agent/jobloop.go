@@ -1634,6 +1634,20 @@ func patchPhaseUploadWindow(logDir string, jobID, uploadStart, uploadEnd int64) 
 // os.RemoveAll of its snapshot, which must not delete or be fed files from
 // the new attempt.
 func snapshotLogDir(logDir string, jobID, runID int64) (string, error) {
+	return snapshotLogDirMatching(logDir, jobID, runID, func(string) bool { return true })
+}
+
+// snapshotInventoryJobLogDir snapshots only the current attempt's primary
+// files. Inventory runners keep every job's logs in one long-lived directory,
+// unlike rental workers, whose log directory is cleaned between jobs.
+func snapshotInventoryJobLogDir(logDir string, jobID, runID int64) (string, error) {
+	prefix := strconv.FormatInt(jobID, 10) + "."
+	return snapshotLogDirMatching(logDir, jobID, runID, func(name string) bool {
+		return strings.HasPrefix(name, prefix)
+	})
+}
+
+func snapshotLogDirMatching(logDir string, jobID, runID int64, include func(string) bool) (string, error) {
 	snapshot := filepath.Join(os.TempDir(), fmt.Sprintf("weft-logs-job-%d-%d", jobID, runID))
 	if err := os.MkdirAll(snapshot, 0o755); err != nil {
 		return "", err
@@ -1647,6 +1661,9 @@ func snapshotLogDir(logDir string, jobID, runID int64) (string, error) {
 			continue // log dir is flat
 		}
 		name := entry.Name()
+		if !include(name) {
+			continue
+		}
 		src := filepath.Join(logDir, name)
 		dst := filepath.Join(snapshot, name)
 		data, err := os.ReadFile(src)

@@ -50,6 +50,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 	if err != nil {
 		if hostUsesR2Queue(host) {
 			updated := syncMissingR2Completions(database, jobs, nil)
+			updated += syncInventoryPublicationReports(database, jobs)
 			if updated > 0 {
 				return updated, nil
 			}
@@ -63,6 +64,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 	}
 	if hostUsesR2Queue(host) {
 		updated += syncMissingR2Completions(database, jobs, statuses)
+		updated += syncInventoryPublicationReports(database, jobs)
 	}
 	return updated, nil
 }

@@ -3,6 +3,9 @@ package db
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -151,5 +154,72 @@ func TestMissingLegacyPublicationIsUnknownNotAbsent(t *testing.T) {
 	}
 	if got.UnknownReason == "" || got.Sequence != 0 {
 		t.Fatalf("legacy provenance = %+v", got)
+	}
+}
+
+func TestCompletionUploadSummariesProvideLegacyPublicationEvidence(t *testing.T) {
+	database := setupTestDB(t)
+	const jobID = int64(4204)
+	insertTestJob(t, database, jobID, "true", "/tmp", StatusQueued)
+	attemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	data := []byte(`{
+		"exit_code": 0,
+		"end_time": 100,
+		"output_upload": {"status": "ok", "completed_at_unix": 105},
+		"results_upload": {"status": "ok", "completed_at_unix": 110}
+	}`)
+	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.completion.json", jobID)), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := IngestCloudJobPublicationReport(database, dir, fmt.Sprintf("%d", jobID), jobID, attemptID)
+	if err != nil || !updated {
+		t.Fatalf("legacy evidence ingestion = %v, %v", updated, err)
+	}
+	got, err := GetAttemptPublicationState(database, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExecutionState != PublicationExecutionComplete || got.RequiredArtifactsState != PublicationStateReady || got.DrainState != PublicationStateReady {
+		t.Fatalf("derived facets = %+v", got)
+	}
+	if got.RequiredArtifactsReadyAt == nil || *got.RequiredArtifactsReadyAt != 105 || got.DrainCompletedAt == nil || *got.DrainCompletedAt != 110 {
+		t.Fatalf("derived readiness times = %+v", got)
+	}
+	if got.UnknownReason != "" || got.Detail == "" {
+		t.Fatalf("derived provenance = %+v", got)
+	}
+}
+
+func TestCompletionArtifactEvidenceDoesNotInferDrainWithoutResultsSummary(t *testing.T) {
+	data := []byte(`{
+		"end_time": 100,
+		"output_upload": {"status": "ok", "completed_at_unix": 105}
+	}`)
+	got, ok := publicationStateFromCompletionUploads(data, 7, 9)
+	if !ok {
+		t.Fatal("positive artifact upload evidence was ignored")
+	}
+	if got.RequiredArtifactsState != PublicationStateReady || got.DrainState != PublicationStateUnknown {
+		t.Fatalf("derived facets = %+v", got)
+	}
+	if got.UnknownReason == "" {
+		t.Fatalf("missing drain evidence was not explained: %+v", got)
+	}
+}
+
+func TestCompletionFailedUploadIsNotPublicationEvidence(t *testing.T) {
+	data := []byte(`{
+		"end_time": 100,
+		"output_upload": {"status": "partial", "completed_at_unix": 105},
+		"results_upload": {"status": "ok", "completed_at_unix": 110}
+	}`)
+	if got, ok := publicationStateFromCompletionUploads(data, 7, 9); ok || got != nil {
+		t.Fatalf("non-positive upload summary produced publication evidence: %+v", got)
 	}
 }

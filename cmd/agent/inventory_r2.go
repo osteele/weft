@@ -71,7 +71,7 @@ func (m *inventoryPostJobManager) WaitForAll() {
 }
 
 func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
-	logSnapshot, err := snapshotLogDir(capture.LogDir, capture.JobID, capture.RunID)
+	logSnapshot, err := snapshotInventoryJobLogDir(capture.LogDir, capture.JobID, capture.RunID)
 	if err != nil {
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(capture.JobID),
 			oplog.WithDetail("inventory post-job snapshot"), oplog.WithError(err))

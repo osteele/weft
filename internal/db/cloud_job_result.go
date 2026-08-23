@@ -74,7 +74,73 @@ func IngestCloudJobPublicationReport(database *sql.DB, tmpDir, jobIDStr string, 
 	}
 	updated, err := IngestAttemptPublicationReport(database, data, jobID, attemptID)
 	if err != nil && strings.Contains(err.Error(), "publication report is absent") {
-		return false, nil
+		state, ok := publicationStateFromCompletionUploads(data, jobID, attemptID)
+		if !ok {
+			return false, nil
+		}
+		return UpsertAttemptPublicationState(database, state)
 	}
 	return updated, err
+}
+
+// publicationStateFromCompletionUploads preserves the positive publication
+// evidence written by agents that predate the standalone publication report.
+// An `ok` output summary proves the required artifact upload phase completed;
+// paired `ok` output and results summaries prove the legacy drain completed.
+// Missing or non-ok summaries remain unknown rather than being inferred from
+// execution success or from the existence of an individual artifact object.
+func publicationStateFromCompletionUploads(data []byte, jobID, attemptID int64) (*AttemptPublicationState, bool) {
+	type uploadSummary struct {
+		Status          string `json:"status"`
+		CompletedAtUnix int64  `json:"completed_at_unix"`
+	}
+	var completion struct {
+		EndTime       int64          `json:"end_time"`
+		OutputUpload  *uploadSummary `json:"output_upload"`
+		ResultsUpload *uploadSummary `json:"results_upload"`
+	}
+	if json.Unmarshal(data, &completion) != nil || completion.OutputUpload == nil || completion.OutputUpload.Status != "ok" {
+		return nil, false
+	}
+
+	observedAt := max(completion.EndTime, completion.OutputUpload.CompletedAtUnix)
+	if completion.ResultsUpload != nil {
+		observedAt = max(observedAt, completion.ResultsUpload.CompletedAtUnix)
+	}
+	if observedAt <= 0 {
+		return nil, false
+	}
+
+	state := &AttemptPublicationState{
+		AttemptID:                attemptID,
+		JobID:                    jobID,
+		Sequence:                 1,
+		ObservedAt:               observedAt,
+		ExecutionState:           PublicationExecutionComplete,
+		RequiredArtifactsState:   PublicationStateReady,
+		RequiredArtifactsReadyAt: publicationInt64Ptr(completion.OutputUpload.CompletedAtUnix),
+		DrainState:               PublicationStateUnknown,
+		UnknownReason:            "standalone publication report was not observed",
+		Detail:                   "artifact readiness derived from completion upload summaries",
+	}
+	if completion.EndTime > 0 {
+		state.ExecutionCompletedAt = publicationInt64Ptr(completion.EndTime)
+	}
+	if completion.ResultsUpload != nil && completion.ResultsUpload.Status == "ok" {
+		state.DrainState = PublicationStateReady
+		state.DrainCompletedAt = publicationInt64Ptr(max(
+			completion.OutputUpload.CompletedAtUnix,
+			completion.ResultsUpload.CompletedAtUnix,
+		))
+		state.UnknownReason = ""
+		state.Detail = "publication readiness derived from completion upload summaries"
+	}
+	return state, true
+}
+
+func publicationInt64Ptr(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }

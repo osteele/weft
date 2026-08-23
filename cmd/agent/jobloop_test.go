@@ -967,6 +967,40 @@ func TestSnapshotLogDir_IncludesLogFiles(t *testing.T) {
 	}
 }
 
+func TestSnapshotInventoryJobLogDir_ExcludesOtherJobsAndArchivedAttempts(t *testing.T) {
+	logDir := t.TempDir()
+	for name, content := range map[string]string{
+		"42.log":               "current log\n",
+		"42.completion.json":   `{"exit_code":0}`,
+		"42-1.log":             "older attempt\n",
+		"41.log":               "other job\n",
+		"agent-operations.log": "shared diagnostics\n",
+	} {
+		if err := os.WriteFile(filepath.Join(logDir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	snapshot, err := snapshotInventoryJobLogDir(logDir, 42, 7)
+	if err != nil {
+		t.Fatalf("snapshotInventoryJobLogDir: %v", err)
+	}
+	defer os.RemoveAll(snapshot)
+
+	entries, err := os.ReadDir(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	want := []string{"42.completion.json", "42.log"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("snapshot files = %v, want %v", names, want)
+	}
+}
+
 // Regression test: snapshot dirs must be keyed by job ID + run ID so that a
 // second attempt of the same job on the same instance does not share a
 // directory with the first attempt's still-uploading snapshot. The first
