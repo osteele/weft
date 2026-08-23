@@ -37,7 +37,7 @@ func TestEnsureQueueRunnerStartedSurfacesAgentDeployFailure(t *testing.T) {
 	getSlackWebhookFunc = func() string { return "" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
 	buildRunnerEnvPrefixFunc = func(webhook string) string { return "" }
-	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
 		t.Fatal("runner should not start when agent deploy fails")
 		return false, nil
 	}
@@ -85,6 +85,7 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 	}
 	loadConfigFunc = func() (*config.Config, error) {
 		return &config.Config{
+			Hosts: map[string]config.HostConfig{"studio": {QueueTransport: "r2_pull"}},
 			Vastai: config.VastaiConfig{
 				R2: config.R2Config{
 					Bucket:          "test-bucket",
@@ -108,7 +109,7 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 		return nil
 	}
 
-	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
 		if host != "studio" {
 			t.Fatalf("host = %q, want studio", host)
 		}
@@ -117,6 +118,9 @@ func TestEnsureQueueRunnerStartedPassesConfiguredR2Bucket(t *testing.T) {
 		}
 		if r2Bucket != "test-bucket" {
 			t.Fatalf("r2Bucket = %q, want test-bucket", r2Bucket)
+		}
+		if r2QueueHost != "studio" {
+			t.Fatalf("r2QueueHost = %q, want studio", r2QueueHost)
 		}
 		return true, nil
 	}
@@ -169,7 +173,7 @@ func TestEnsureQueueRunnerStartedPassesBenchmarkEnvPrefix(t *testing.T) {
 	getSlackWebhookFunc = func() string { return "https://hooks.example/test" }
 	deployNotifyScriptFunc = func(host, webhook string) {}
 	buildRunnerEnvPrefixFunc = func(webhook string) string { return "WEBHOOK=1 " }
-	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
 		if envPrefix != "WEBHOOK=1 WEFT_BENCHMARK_CPU=15 WEFT_BENCHMARK_RAM=35 " {
 			t.Fatalf("envPrefix = %q", envPrefix)
 		}

@@ -285,6 +285,13 @@ func formatSize(b int64) string {
 
 // shouldExclude returns true if the given path should be excluded from the tarball.
 func shouldExclude(relPath string, info os.FileInfo, excludes []string) bool {
+	// Exclude patterns describe entries inside the source root. Applying a
+	// basename pattern to the root itself can erase the entire snapshot when a
+	// project ignores a same-named build product (for example, repo `weft` with
+	// a `.gitignore` entry `weft`).
+	if relPath == "." {
+		return false
+	}
 	name := info.Name()
 	for _, pattern := range excludes {
 		// Match against basename

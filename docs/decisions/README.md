@@ -27,6 +27,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0014](0014-key-source-archives-by-canonical-tar-identity.md) | Key source archives by canonical tar identity | accepted |
 | [0015](0015-make-fallback-submission-an-explicit-admission-contract.md) | Make fallback submission an explicit admission contract | accepted |
 | [0016](0016-run-inventory-queue-jobs-from-the-submitted-source-closure.md) | Run inventory queue jobs from the submitted source closure | accepted |
+| [0017](0017-use-host-addressed-r2-mailboxes-for-isolated-inventory-hosts.md) | Use host-addressed R2 mailboxes for isolated inventory hosts | accepted |
 
 ## Adding one
 

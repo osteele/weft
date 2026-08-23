@@ -103,12 +103,15 @@ func TestParseRunQueueArgs(t *testing.T) {
 	})
 
 	t.Run("accepts explicit default queue for compatibility", func(t *testing.T) {
-		args, err := parseRunQueueArgs([]string{"default", "--r2-bucket=test-bucket"})
+		args, err := parseRunQueueArgs([]string{"default", "--r2-bucket=test-bucket", "--r2-queue-host=studio"})
 		if err != nil {
 			t.Fatalf("parseRunQueueArgs() error = %v", err)
 		}
 		if args.R2Bucket != "test-bucket" {
 			t.Fatalf("parseRunQueueArgs() r2Bucket = %q, want test-bucket", args.R2Bucket)
+		}
+		if args.R2QueueHost != "studio" {
+			t.Fatalf("parseRunQueueArgs() r2QueueHost = %q, want studio", args.R2QueueHost)
 		}
 	})
 

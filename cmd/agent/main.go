@@ -133,6 +133,14 @@ func runQueue(args []string) {
 			return fetchSourceManifestToDir(bucket, manifest, perJobRoot)
 		}
 	}
+	if parsed.R2QueueHost != "" {
+		if parsed.R2Bucket == "" {
+			fmt.Fprintln(os.Stderr, "run-queue: --r2-queue-host requires --r2-bucket")
+			os.Exit(2)
+		}
+		stop := startInventoryQueueR2(parsed.R2Bucket, parsed.R2QueueHost, cfg.QueueDir, version)
+		defer stop()
+	}
 	if err := r.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)
 		os.Exit(1)
@@ -141,6 +149,7 @@ func runQueue(args []string) {
 
 type runQueueArgs struct {
 	R2Bucket     string
+	R2QueueHost  string
 	SetupTimeout time.Duration
 }
 
@@ -150,6 +159,8 @@ func parseRunQueueArgs(args []string) (runQueueArgs, error) {
 		switch {
 		case strings.HasPrefix(arg, "--r2-bucket="):
 			result.R2Bucket = arg[len("--r2-bucket="):]
+		case strings.HasPrefix(arg, "--r2-queue-host="):
+			result.R2QueueHost = arg[len("--r2-queue-host="):]
 		case strings.HasPrefix(arg, "--setup-timeout="):
 			d, err := time.ParseDuration(arg[len("--setup-timeout="):])
 			if err != nil {

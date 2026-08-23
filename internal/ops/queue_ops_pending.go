@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -128,10 +129,54 @@ func applyQueueUpdate(job *db.Job, envVars []string, depSpec string, timeout tim
 		return fmt.Errorf("job is nil")
 	}
 	entry := queueEntryForJob(job, envVars, depSpec)
+	if hostUsesR2Queue(job.Host) {
+		resolvedEnv, err := secrets.ResolveEnvVars(entry.EnvVars)
+		if err != nil {
+			return err
+		}
+		entry.EnvVars = resolvedEnv
+		if job.LatestRunID != nil {
+			entry.RunID = *job.LatestRunID
+		}
+		manifest, pinned, err := pinnedQueueSourceManifest(job)
+		if err != nil {
+			return err
+		}
+		if pinned {
+			entry.SourceManifest = manifest
+			entry.SourceSHA256 = manifest.SHA256
+			entry.SourceR2Key = dataplane.SourceClosureReceiptV2(manifest.SHA256)
+		}
+		return appendQueueCommand(job.Host, opsqueue.NewAddCommand(entry), opsqueue.AppendCommandOptions{Timeout: timeout})
+	}
 	return writeQueueJobFile(job.Host, entry, timeout)
 }
 
 func applyQueuePriority(host string, jobID int64, timeout time.Duration) (bool, error) {
+	if hostUsesR2Queue(host) {
+		state, err := fetchR2RunnerState(host)
+		if err != nil {
+			return false, fmt.Errorf("%w: %v", errQueueConnection, err)
+		}
+		position := -1
+		for i, id := range state.Pending {
+			if id == jobID {
+				position = i
+				break
+			}
+		}
+		if position < 0 {
+			return false, fmt.Errorf("job %s not found in queue", ids.FormatJobID(jobID))
+		}
+		if position == 0 {
+			return false, nil
+		}
+		cmd := opsqueue.NewPriorityCommand(jobID)
+		if err := appendQueueCommand(host, cmd, opsqueue.AppendCommandOptions{Timeout: timeout}); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	stateFile := opsqueue.StateFilePath()
 	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
 	stdout, stderr, err := ssh.RunWithTimeout(host, checkCmd, timeout)
@@ -154,7 +199,7 @@ func applyQueuePriority(host string, jobID int64, timeout time.Duration) (bool, 
 	}
 
 	cmd := opsqueue.NewPriorityCommand(jobID)
-	if err := opsqueue.AppendCommand(host, cmd, opsqueue.AppendCommandOptions{Timeout: timeout}); err != nil {
+	if err := appendQueueCommand(host, cmd, opsqueue.AppendCommandOptions{Timeout: timeout}); err != nil {
 		if isQueueConnectionError(err) {
 			return false, fmt.Errorf("%w: %s", errQueueConnection, err.Error())
 		}

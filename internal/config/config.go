@@ -699,6 +699,11 @@ type HostConfig struct {
 
 	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
 	Backend string `yaml:"backend" toml:"backend"`
+	// QueueTransport selects how queue-runner commands reach this host.
+	// Empty and "ssh" use the normal direct SSH append. "r2_pull" is for
+	// inventory hosts whose daemon has outbound R2 access but is not directly
+	// reachable from the controller.
+	QueueTransport string `yaml:"queue_transport" toml:"queue_transport"`
 	// Shared marks an inventory host as multi-tenant, so benchmark auto-placement
 	// avoids it unless the job is explicitly inventory-tagged.
 	Shared bool `yaml:"shared" toml:"shared"`
@@ -1039,6 +1044,18 @@ func (c *Config) HostBackend(host string) string {
 	}
 	if cfg, ok := c.Hosts[host]; ok {
 		return strings.ToLower(strings.TrimSpace(cfg.Backend))
+	}
+	return ""
+}
+
+// HostQueueTransport returns the configured queue transport for a host.
+// The empty value deliberately means the established direct-SSH path.
+func (c *Config) HostQueueTransport(host string) string {
+	if c == nil || host == "" {
+		return ""
+	}
+	if cfg, ok := c.Hosts[host]; ok {
+		return strings.ToLower(strings.TrimSpace(cfg.QueueTransport))
 	}
 	return ""
 }

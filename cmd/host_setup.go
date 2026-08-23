@@ -118,9 +118,12 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 5: Deploy rclone config (if R2 configured)
 	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying rclone config...", nextStep(), totalSteps)
-	var r2Bucket string
+	var r2Bucket, r2QueueHost string
 	if cfg, cfgErr := config.Load(); cfgErr == nil && cfg.Vastai.R2.Bucket != "" {
 		r2Bucket = cfg.Vastai.R2.Bucket
+		if cfg.HostQueueTransport(host) == "r2_pull" {
+			r2QueueHost = host
+		}
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		if rcloneErr := agentdeploy.EnsureRcloneConfig(host, r2Cfg); rcloneErr != nil {
 			fmt.Fprintf(os.Stderr, " warning: %v\n", rcloneErr)
@@ -150,7 +153,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 			envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 			envVars += spec.BenchmarkEnvPrefix()
 			runner := queuerunner.NewRunner(host)
-			started, runnerErr := runner.EnsureStarted(envVars, r2Bucket, spec.SetupTimeoutDuration())
+			started, runnerErr := runner.EnsureStartedForHost(envVars, r2Bucket, r2QueueHost, spec.SetupTimeoutDuration())
 			if runnerErr != nil {
 				fmt.Fprintf(os.Stderr, " warning: %v\n", runnerErr)
 			} else if started {

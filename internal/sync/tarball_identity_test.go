@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
@@ -11,6 +12,46 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSourceTarballDoesNotExcludeSameNamedRoot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "weft")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, _, err := createSourceTarballWithWorkers(dir, []string{"weft"}, nil, nil, MaxSourceTarballBytes, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	compressed, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compressed.Close()
+	gz, err := gzip.NewReader(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name == "go.mod" {
+			return
+		}
+	}
+	t.Fatal("go.mod missing from source tarball")
+}
 
 func TestSourceTarballHashUsesCanonicalTarBytes(t *testing.T) {
 	dir := t.TempDir()

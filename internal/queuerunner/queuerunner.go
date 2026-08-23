@@ -14,9 +14,18 @@ const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
 
 // RunnerCommand builds the command to start the Go queue runner.
 func RunnerCommand(envPrefix, r2Bucket string, setupTimeout time.Duration) string {
+	return RunnerCommandForHost(envPrefix, r2Bucket, "", setupTimeout)
+}
+
+// RunnerCommandForHost builds a queue-runner command and enables the
+// host-addressed R2 inbox when r2QueueHost is non-empty.
+func RunnerCommandForHost(envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) string {
 	cmd := fmt.Sprintf("%s%s %s run-queue", envPrefix, agentenv.ShellPathAssignment(), agentBinaryPath)
 	if r2Bucket != "" {
 		cmd += fmt.Sprintf(" --r2-bucket=%s", r2Bucket)
+	}
+	if r2QueueHost != "" {
+		cmd += fmt.Sprintf(" --r2-queue-host=%s", r2QueueHost)
 	}
 	if setupTimeout > 0 {
 		cmd += fmt.Sprintf(" --setup-timeout=%s", setupTimeout)
@@ -82,7 +91,13 @@ func (r *Runner) SessionName() string { return RunnerSessionName() }
 
 // EnsureStarted ensures the runner is active, starting tmux if needed.
 func (r *Runner) EnsureStarted(envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
-	runnerCmd := RunnerCommand(envPrefix, r2Bucket, setupTimeout)
+	return r.EnsureStartedForHost(envPrefix, r2Bucket, "", setupTimeout)
+
+}
+
+// EnsureStartedForHost starts the runner with an optional R2 queue address.
+func (r *Runner) EnsureStartedForHost(envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
+	runnerCmd := RunnerCommandForHost(envPrefix, r2Bucket, r2QueueHost, setupTimeout)
 	return EnsureRunnerStarted(r.host, runnerCmd)
 }
 

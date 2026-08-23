@@ -188,6 +188,18 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 // Returns SyncResult indicating whether the job was updated and whether the host was contacted.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
 func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult, err error) {
+	if job != nil && job.UsesQueueRunner() && hostUsesR2Queue(job.Host) {
+		updated, err := BatchSyncQueueRunnerJobs(database, job.Host, []*db.Job{job}, opts.Timeout)
+		if err != nil {
+			// Missing or stale R2 state is unknown, not a failed job and not a
+			// reason to prevent a later durable inbox write in the same host-sync
+			// pass. The dispatcher records its own publish failure if R2 itself is
+			// unavailable.
+			slog.Debug("R2 inventory runner state unavailable", "component", "sync", "host", job.Host, "job_id", job.ID, "error", err)
+			return SyncResult{}, nil
+		}
+		return SyncResult{Updated: updated > 0, HostContacted: true}, nil
+	}
 	oldStatus := job.Status
 	defer func() {
 		if err != nil || !result.Updated {

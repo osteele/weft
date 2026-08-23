@@ -5,6 +5,29 @@ and cloud instances. Authoritative behavior lives in
 `specs/source-data-sync.allium` (source snapshots, provenance, prestaging)
 and `specs/upload-drain.allium` (agent-side result uploads).
 
+## Inventory queue transport
+
+Inventory hosts normally receive queue commands by direct SSH append. A host
+configured with `queue_transport = "r2_pull"` instead uses a host-addressed R2
+mailbox under `inventory/v1/hosts/<host>/`. The controller writes versioned
+command envelopes to `inbox/`; the host daemon, using outbound access only,
+appends each command to the same local JSONL queue used by SSH dispatch, writes
+an acknowledgement, and removes the inbox object. Delivery is at least once;
+queue operations and attempt IDs provide idempotence across a crash between
+the local append and acknowledgement.
+
+The daemon also replaces `state.json` with a timestamped runner-state envelope
+every two seconds. The controller accepts it only while fresh and treats a
+missing, malformed, wrong-host, wrong-version, or older-than-30-seconds snapshot
+as unknown. It never infers an empty queue from stale R2 data. Completed jobs
+continue through the existing inventory result markers and completion records.
+
+This transport does not perform placement and does not introduce a relay: the
+controller still owns the job database and writes directly to the selected
+host's mailbox. It reuses the submit-time R2 source closure described below, so
+dispatch requires neither SSH nor rsync. Legacy unpinned jobs and inventory
+jobs with `--needs` still require the direct-host staging path.
+
 ## Source sync: the working tree, not commits
 
 Weft ships the working directory's **filesystem state**. Uncommitted edits are
@@ -115,6 +138,7 @@ before the next job starts (`SharedWorkdirUploadBarrierBeforeNextJob`).
 | `internal/cloudsync` | Cloud-side sync helpers |
 | `internal/r2upload` | Upload drain, stall detection, failure markers |
 | `internal/r2`, `internal/r2keys`, `internal/dataplane` | R2 client and key conventions |
+| `internal/inventoryqueue` | Versioned host-addressed inventory mailbox and runner-state protocol |
 | `internal/prestage`, `internal/dataloc` | HF asset prestaging and locality |
 | `internal/ops/host_sync.go` | Dispatch-time source/data staging for on-prem queues |
 | `cmd/agent/upload_drain.go`, `cmd/agent/bgwork.go` | Agent-side drain wiring and background uploads |

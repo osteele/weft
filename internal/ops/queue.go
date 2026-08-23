@@ -81,7 +81,7 @@ func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sour
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
-	return opsqueue.AppendCommand(job.Host, addCmd, opts)
+	return appendQueueCommand(job.Host, addCmd, opts)
 }
 
 // pinnedQueueSourceManifest converts durable submit-time metadata into the

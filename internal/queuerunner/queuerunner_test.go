@@ -18,3 +18,12 @@ func TestRunnerCommandAddsUserToolPath(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerCommandForHostEnablesR2Queue(t *testing.T) {
+	cmd := RunnerCommandForHost("", "jobs", "studio", 0)
+	for _, want := range []string{"--r2-bucket=jobs", "--r2-queue-host=studio"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("RunnerCommandForHost() = %q, missing %q", cmd, want)
+		}
+	}
+}

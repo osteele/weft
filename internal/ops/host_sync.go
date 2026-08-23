@@ -285,6 +285,16 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	if !result.HostContacted {
 		return result, nil
 	}
+	// An R2-pull inventory host is contacted through its fresh state object and
+	// inbox writes. Everything below this point is optional SSH maintenance
+	// (restart discovery, draft cleanup, runner startup, cache scanning), which
+	// must not turn successful outbound-only dispatch into an SSH dependency.
+	if hostUsesR2Queue(host) {
+		if err := db.RecordHostSync(database, host, time.Now()); err != nil {
+			syncLog.Debug("failed to record host sync time", "host", host, "error", err)
+		}
+		return result, nil
+	}
 
 	if mode != SyncModeStatus {
 		// Step 3: Check for restarted jobs (failed/dead queue-runner jobs that may be running again)
@@ -427,6 +437,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 // former maps to (nil, nil); the latter is an error so callers do not
 // redispatch every synced job as missing from runner state.
 func fetchRemoteRunnerState(host string, timeout time.Duration) (*opsqueue.RunnerState, error) {
+	if hostUsesR2Queue(host) {
+		return fetchR2RunnerState(host)
+	}
 	const noFileSentinel = "__WEFT_NO_STATE_FILE__"
 	cmd := fmt.Sprintf(`if [ -e %s ]; then cat %s; else echo %s; fi`,
 		opsqueue.StateFilePath(), opsqueue.StateFilePath(), noFileSentinel)
@@ -590,6 +603,9 @@ type remoteJobPayload struct {
 func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) (map[int64]remoteJobPayload, error) {
 	if len(jobs) == 0 {
 		return nil, nil
+	}
+	if hostUsesR2Queue(host) {
+		return nil, fmt.Errorf("R2 inventory state does not expose pending payloads")
 	}
 	ids := make([]string, 0, len(jobs))
 	seen := make(map[int64]struct{}, len(jobs))
@@ -816,7 +832,16 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		seenStage[job.ID] = true
 		allQueued = append(allQueued, job)
 	}
-	stageFailures := stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client)
+	stageFailures := make(map[int64]error)
+	if !hostUsesR2Queue(host) {
+		stageFailures = stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client)
+	} else {
+		for _, job := range allQueued {
+			if job != nil && len(job.Needs) > 0 {
+				stageFailures[job.ID] = fmt.Errorf("R2-pull inventory hosts do not yet stage --needs artifacts")
+			}
+		}
+	}
 	for jobID, err := range stageFailures {
 		syncLog.Debug("artifact needs staging failed", "job_id", jobID, "host", host, "error", err)
 		recordFailure(jobID, "artifact needs staging failed", err)

@@ -22,9 +22,9 @@ var (
 	getSlackWebhookFunc      = slack.GetWebhook
 	deployNotifyScriptFunc   = slack.DeployNotifyScript
 	buildRunnerEnvPrefixFunc = slack.BuildRunnerEnvPrefix
-	ensureRunnerStartedFunc  = func(host, envPrefix, r2Bucket string, setupTimeout time.Duration) (bool, error) {
+	ensureRunnerStartedFunc  = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
 		runner := queuerunner.NewRunner(host)
-		return runner.EnsureStarted(envPrefix, r2Bucket, setupTimeout)
+		return runner.EnsureStartedForHost(envPrefix, r2Bucket, r2QueueHost, setupTimeout)
 	}
 )
 
@@ -56,9 +56,12 @@ func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOpti
 		}
 	}
 
-	var r2Bucket string
+	var r2Bucket, r2QueueHost string
 	if cfg, err := loadConfigFunc(); err == nil && cfg != nil && cfg.Vastai.R2.Bucket != "" {
 		r2Bucket = cfg.Vastai.R2.Bucket
+		if cfg.HostQueueTransport(host) == "r2_pull" {
+			r2QueueHost = host
+		}
 		if err := ensureRcloneConfigFunc(host, cfg.Vastai.R2.ToCloudR2Config()); err != nil {
 			slog.Warn("failed to deploy rclone config", "host", host, "error", err)
 		}
@@ -74,7 +77,7 @@ func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOpti
 		setupTimeout = spec.SetupTimeoutDuration()
 	}
 
-	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket, setupTimeout)
+	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket, r2QueueHost, setupTimeout)
 	if err != nil {
 		return false, fmt.Errorf("queue runner start failed: %w", err)
 	}

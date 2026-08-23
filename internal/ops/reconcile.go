@@ -451,7 +451,10 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 func removeFromQueueFile(host string, jobID int64, timeout time.Duration) error {
 	cancelCmd := opsqueue.NewCancelCommand(jobID)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
-	if err := opsqueue.AppendCommand(host, cancelCmd, opts); err != nil {
+	if err := appendQueueCommand(host, cancelCmd, opts); err != nil {
+		if hostUsesR2Queue(host) {
+			return err
+		}
 		var qaErr *opsqueue.QueueAppendError
 		if e, ok := err.(*opsqueue.QueueAppendError); ok {
 			qaErr = e

@@ -22,7 +22,10 @@ type queueBatchStatus struct {
 	FailureReason string
 	AgentVersion  string
 	Source        *db.JobSourceExecutionMetadata
+	FromR2        bool
 }
+
+var syncJobStatusFromR2ForBatch = syncJobStatusFromR2
 
 // BatchSyncQueueRunnerJobs performs a batched sync for queue-runner jobs on one host/queue.
 // This avoids per-job SSH calls by fetching queue state in a single command.
@@ -45,10 +48,47 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 
 	statuses, err := fetchQueueBatchStatus(host, jobIDs, timeout)
 	if err != nil {
+		if hostUsesR2Queue(host) {
+			updated := syncMissingR2Completions(database, jobs, nil)
+			if updated > 0 {
+				return updated, nil
+			}
+		}
 		return 0, err
 	}
 
-	return applyBatchStatuses(database, jobIDs, jobByID, statuses, timeout)
+	updated, err := applyBatchStatuses(database, jobIDs, jobByID, statuses, timeout)
+	if err != nil {
+		return updated, err
+	}
+	if hostUsesR2Queue(host) {
+		updated += syncMissingR2Completions(database, jobs, statuses)
+	}
+	return updated, nil
+}
+
+// syncMissingR2Completions closes jobs whose terminal runner entry aged out of
+// the daemon's 24-hour state window while the controller was offline. Only
+// previously-dispatched attempts are eligible; a brand-new queued row should
+// not perform a speculative completion lookup before its first inbox write.
+func syncMissingR2Completions(database *sql.DB, jobs []*db.Job, statuses map[int64]queueBatchStatus) int {
+	updated := 0
+	for _, job := range jobs {
+		if job == nil || job.LastSyncedStatus == "" {
+			continue
+		}
+		if _, observed := statuses[job.ID]; observed {
+			continue
+		}
+		result, err := syncJobStatusFromR2ForBatch(database, job)
+		if err != nil {
+			continue
+		}
+		if result.Updated {
+			updated++
+		}
+	}
+	return updated
 }
 
 // applyBatchStatuses processes pre-fetched batch statuses for a set of jobs.
@@ -91,7 +131,13 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 		case queueStateRunning:
 			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
-				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+				if status.FromR2 && status.Mtime > 0 {
+					if err := db.UpdateStartTime(database, job.ID, status.Mtime); err != nil {
+						slog.Warn("failed to update start time from R2 runner state", "component", "sync", "job_id", job.ID, "error", err)
+					} else {
+						job.StartTime = status.Mtime
+					}
+				} else if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 					slog.Warn("failed to update start time", "component", "sync", "job_id", job.ID, "error", err)
 				}
 			}
@@ -180,6 +226,17 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 			updated++
 		default:
 			if status.ExitCode != nil {
+				if status.FromR2 {
+					result, err := syncJobStatusFromR2(database, job)
+					if err != nil {
+						slog.Debug("R2 runner reported completion before result marker was readable", "component", "sync", "job_id", job.ID, "error", err)
+						continue
+					}
+					if result.Updated {
+						updated++
+					}
+					continue
+				}
 				if status.RunID != 0 && job.LatestRunID != nil && status.RunID != *job.LatestRunID {
 					slog.Debug("ignoring stale completed queue status", "component", "sync", "job_id", job.ID, "remote_run_id", status.RunID, "latest_run_id", *job.LatestRunID)
 					continue
@@ -249,6 +306,50 @@ func recordPreflightDispatchBlock(database *sql.DB, jobID int64, detail string) 
 }
 
 func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (map[int64]queueBatchStatus, error) {
+	if hostUsesR2Queue(host) {
+		state, err := fetchR2RunnerState(host)
+		if err != nil {
+			return nil, err
+		}
+		results := make(map[int64]queueBatchStatus, len(jobIDs))
+		wanted := make(map[int64]struct{}, len(jobIDs))
+		for _, id := range jobIDs {
+			wanted[id] = struct{}{}
+		}
+		for _, id := range state.Pending {
+			if _, ok := wanted[id]; ok {
+				results[id] = queueBatchStatus{State: queueStateQueued, FromR2: true}
+			}
+		}
+		if state.Current != nil {
+			if _, ok := wanted[*state.Current]; ok {
+				results[*state.Current] = queueBatchStatus{State: queueStateRunning, FromR2: true}
+			}
+		}
+		for idText, running := range state.Running {
+			id, err := strconv.ParseInt(idText, 10, 64)
+			if err != nil {
+				continue
+			}
+			if _, ok := wanted[id]; ok {
+				results[id] = queueBatchStatus{
+					State: queueStateRunning, RunID: running.RunID, Mtime: running.StartedAt,
+					GPUDevices: strings.Join(running.GPUDevices, ","), FromR2: true,
+				}
+			}
+		}
+		for idText, finished := range state.Finished {
+			id, err := strconv.ParseInt(idText, 10, 64)
+			if err != nil {
+				continue
+			}
+			if _, ok := wanted[id]; ok {
+				exitCode := finished.ExitCode
+				results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: finished.FinishedAt, FromR2: true}
+			}
+		}
+		return results, nil
+	}
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
