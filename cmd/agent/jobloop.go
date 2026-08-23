@@ -785,7 +785,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	drainCancels()
 
 	// Drain incoming jobs requests while jobs execute, not just between them:
-	// the ack is what lets the coordinator confirm a pending move and cancel
+	// the ack is what lets the controller confirm a pending move and cancel
 	// the source, so it must not wait behind a multi-hour job.
 	var newJobsPoller *jobRequestPoller
 	if !cfg.DisableJobPolling {

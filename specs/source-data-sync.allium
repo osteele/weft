@@ -1240,7 +1240,7 @@ rule RequireHFCacheDir {
 }
 
 -- A declared input on a job dispatched to the local machine (the studio
--- coordinator host itself, for example) does not need prestaging — the
+-- dispatching host itself, for example) does not need prestaging — the
 -- asset either already lives in the local HF cache or will be downloaded
 -- to it by the command using its standard tooling. The spec records this
 -- case explicitly rather than silently relying on the local_host skip

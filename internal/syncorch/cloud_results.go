@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/notify"
@@ -799,7 +799,7 @@ func syncCompletedJobAtRun(
 			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final telemetry import failed: %v\n", ids.FormatJobID(jobID), err)
 		}
 
-		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
+		if timings := cloudsync.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
 			// Phase timings are best-effort telemetry (not job status): the
 			// authoritative completion was already recorded above, and these
 			// values are re-derived from R2 on a later sync pass, so a dropped
@@ -812,7 +812,7 @@ func syncCompletedJobAtRun(
 			}
 		}
 
-		coordinator.WriteVastaiLogsToCache(jobID, tmpDir)
+		cloudsync.WriteVastaiLogsToCache(jobID, tmpDir)
 	}
 
 	if verbose {

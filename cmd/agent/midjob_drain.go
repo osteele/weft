@@ -11,7 +11,7 @@ import (
 
 // midJobDrainInterval is how often the poller drains R2 jobs requests while a
 // job is executing. Draining mid-job acks the request immediately, so the
-// coordinator can confirm a pending move and stop the source without waiting
+// controller can confirm a pending move and stop the source without waiting
 // for the current job to finish; execution of the accepted jobs still waits
 // behind the current job.
 const midJobDrainInterval = 45 * time.Second

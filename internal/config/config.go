@@ -107,9 +107,6 @@ type Config struct {
 	// Registry holds private Docker registry credentials keyed by registry host.
 	Registry map[string]RegistryConfig `yaml:"registry" toml:"registry"`
 
-	// CoordinatorHost is the host where the coordinator daemon runs.
-	CoordinatorHost string `yaml:"coordinator_host" toml:"coordinator_host"`
-
 	// Campaign holds cloud campaign defaults
 	Campaign CampaignConfig `yaml:"campaign" toml:"campaign"`
 
@@ -1681,8 +1678,8 @@ func (c *Config) SubmitterSessionEnvVars() []string {
 // path. A long-lived daemon or autopilot must not: it may have inherited the
 // environment of whichever agent session happened to start it, and would then
 // stamp every job it records with that one session, misattributing all of
-// them. Job-recording paths that run in such a process (the coordinator relay)
-// build their parameters from the wire and correctly leave this empty.
+// them. Other job-recording paths must build their parameters from explicit
+// inputs and leave this empty.
 func (c *Config) SubmitterSession() string {
 	return submitterSessionFrom(c.SubmitterSessionEnvVars(), os.Getenv)
 }

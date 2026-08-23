@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/osteele/weft/internal/degraded"
@@ -39,13 +37,6 @@ type apiGPU struct {
 	MemUsed     string `json:"mem_used,omitempty"`
 	MemTotal    string `json:"mem_total,omitempty"`
 	Temperature int    `json:"temperature,omitempty"`
-}
-
-// apiCoordinatorState is the JSON representation of the coordinator state.
-type apiCoordinatorState struct {
-	Running    bool   `json:"running"`
-	QueueDepth int    `json:"queue_depth,omitempty"`
-	PID        string `json:"pid,omitempty"`
 }
 
 func (s *Server) handleAPIHosts(w http.ResponseWriter, _ *http.Request) {
@@ -181,21 +172,6 @@ func mergeLiveGPUs(apiGPUs []apiGPU, liveGPUs []hostinfo.GPUInfo) {
 			apiGPUs[i].MemTotal = totalMemTotal
 		}
 	}
-}
-
-func (s *Server) handleAPICoordinator(w http.ResponseWriter, _ *http.Request) {
-	state := apiCoordinatorState{}
-
-	// Check if coordinator PID file exists
-	home, _ := os.UserHomeDir()
-	pidFile := filepath.Join(home, ".cache", "weft", "coordinator.pid")
-	data, err := os.ReadFile(pidFile)
-	if err == nil {
-		state.PID = string(data)
-		state.Running = true
-	}
-
-	writeJSON(w, state)
 }
 
 func (s *Server) handleAPIOplog(w http.ResponseWriter, _ *http.Request) {

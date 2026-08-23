@@ -49,22 +49,13 @@ const (
 	OpAgentHeartbeat  = "agent.heartbeat"
 	OpAgentPanic      = "agent.panic"
 
-	// Coordinator operations
-	OpCoordinatorStart    = "coordinator.start"
-	OpCoordinatorStop     = "coordinator.stop"
-	OpCoordinatorDispatch = "coordinator.dispatched"
-	OpCoordinatorDeferred = "coordinator.deferred"
-	OpCoordinatorRetry    = "coordinator.retry"
-	OpCoordinatorError    = "coordinator.error"
-
 	// Placement telemetry
 	OpPlacementDecided = "placement.decided"
 	OpHostMetrics      = "host.metrics"
 
 	// Auto-remediation operations
-	OpCoordinatorDiagnosis   = "coordinator.diagnosis"
-	OpCoordinatorRemediation = "coordinator.remediation"
-	OpCoordinatorAgentInvoke = "coordinator.agent.invoke"
+	OpRemediationDiagnosis = "remediation.diagnosis"
+	OpRemediationApplied   = "remediation.applied"
 
 	// Agent R2/cloud operations
 	OpR2Get    = "r2.get"

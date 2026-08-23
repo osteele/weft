@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
@@ -83,15 +82,6 @@ func (m Model) createJob() tea.Cmd {
 			CPUAllotment: cpuAllotment,
 			GPUMemGB:     gpuMemGB,
 			GPUMemMaxGB:  gpuMemMaxGB,
-		}
-		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return jobCreatedMsg{err: err}
-		} else if relayClient != nil {
-			jobID, _, err := m.relaySubmitJob(database, params)
-			if err != nil {
-				return jobCreatedMsg{err: err}
-			}
-			return jobCreatedMsg{jobID: jobID}
 		}
 		// Queue job for sequential execution via queue runner
 		result, err := ops.QueueJob(database, params, ops.DefaultOptions())
@@ -232,43 +222,6 @@ func (m Model) editJob() tea.Cmd {
 		job.GPU = gpuInput
 		job.CPUAllotment = newAllotment
 		job.DepSpec = depSpec
-
-		if !editWasDraft && (descriptionChanged || operationalChange) {
-			if _, relayClient, err := m.coordinatorRelay(); err != nil {
-				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
-			} else if relayClient != nil {
-				payload := &coordinatorrelay.UpdateJobPayload{}
-				if descriptionChanged {
-					payload.Description = &job.Description
-				}
-				if workingDirChanged {
-					payload.WorkingDir = &job.WorkingDir
-				}
-				if commandChanged {
-					payload.Command = &job.Command
-				}
-				if envChanged {
-					payload.EnvVars = job.EnvVars
-					if len(job.EnvVars) == 0 {
-						payload.ClearEnv = true
-					}
-				}
-				if gpuChanged {
-					payload.GPU = tuiStringPtr(job.GPU)
-				}
-				if cpuChanged {
-					payload.CPUAllotment = job.CPUAllotment
-				}
-				if depSpecChanged {
-					payload.DepSpec = &job.DepSpec
-				}
-				if _, err := m.relayUpdateJob(job, payload); err != nil {
-					return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
-				}
-				logTUIEditAudit(job, updates, false)
-				return jobEditedMsg{jobID: jobID, host: job.Host}
-			}
-		}
 
 		if !editWasDraft && operationalChange {
 			result, err := ops.RequestQueueUpdate(database, job, ops.OptionsForMode(ops.TimeoutFast))

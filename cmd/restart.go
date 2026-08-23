@@ -976,54 +976,6 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled/completed jobs can be retried", effectiveStatus)
 	}
 
-	cfg, relayClient, err := loadCoordinatorRelay()
-	if err != nil {
-		return err
-	}
-	if relayEnabled(cfg, relayClient) {
-		var updates []string
-		if err := withRestartTx(database, func(tx *sql.Tx) error {
-			var err error
-			updates, err = applyRestartOverrides(tx, job, overrides)
-			if err != nil {
-				return err
-			}
-			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
-				return err
-			}
-			if job.HasTag(db.ProcessedTag) {
-				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
-					return fmt.Errorf("remove processed tag: %w", err)
-				}
-			}
-			// Refresh here since the relay path bypasses ops.RequeueJob.
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
-				return err
-			}
-			if err := db.RequeueByIDTx(tx, jobID); err != nil {
-				return fmt.Errorf("update status to queued: %w", err)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		_ = logcache.Delete(jobID)
-		ack, err := relayRequeueJob(cfg, relayClient, job)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Restarted job %s via legacy relay\n", ids.FormatJobID(jobID))
-		fmt.Printf("  Status: %s → queued\n", oldStatus)
-		printRestartModeLine()
-		for _, update := range updates {
-			fmt.Printf("  %s\n", update)
-		}
-		if ack != nil && ack.Message != "" {
-			fmt.Printf("  relay: %s\n", ack.Message)
-		}
-		return nil
-	}
-
 	retryHost, retryLaunchID, err := resolveRetryTarget(database, job)
 	if err != nil {
 		return err

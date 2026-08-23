@@ -132,7 +132,7 @@ enum MoveIntentState { open | confirmed | canceled | obsoleted }
 -- Unified move protocol
 -- ==========================================================================
 
--- All placement-to-placement moves share one coordinator protocol. The
+-- All placement-to-placement moves share one orchestration protocol. The
 -- source and destination differ only by adapter:
 --
 --   Source adapters:
@@ -144,13 +144,13 @@ enum MoveIntentState { open | confirmed | canceled | obsoleted }
 --     cloud new      -> create launch, then submit the job payload
 --     on-prem host   -> enqueue the job through the host queue protocol
 --
--- The coordinator MUST NOT make the destination authoritative at request
+-- The move protocol MUST NOT make the destination authoritative at request
 -- time. It first opens MoveIntent, asks the destination to accept the job,
 -- and waits for destination acceptance. Only after acceptance is confirmed
 -- does it stop the source and switch DB-visible job status/info/artifact
 -- authority to the destination attempt.
 
-rule UnifiedMoveCoordinator {
+rule UnifiedMoveProtocol {
     when: UserRequestsMove(job, target)
 
     ensures:
@@ -172,13 +172,13 @@ rule UnifiedMoveCoordinator {
 }
 
 rule MovePathSharing {
-    -- These four path families MUST share the same coordinator state machine:
+    -- These four path families MUST share the same move state machine:
     -- cloud -> cloud, cloud -> on-prem, on-prem -> cloud, and on-prem -> on-prem.
     -- The implementation should not grow separate correctness logic for each
     -- pair. Pair-specific code is limited to SourceAdapter and
     -- DestinationAdapter operations.
     for path in {cloud_to_cloud, cloud_to_host, host_to_cloud, host_to_host}:
-        -- legacy: path.uses = UnifiedMoveCoordinator
+        -- legacy: path.uses = UnifiedMoveProtocol
 }
 
 rule DestinationAcceptanceBeforeSourceStop {
@@ -319,7 +319,7 @@ rule UserForceMovesRunningJob {
     -- let sourceSnapshot = capture(job.host, job.latest_attempt.start_time)
     -- legacy: if job.host is inventory_host
     -- legacy: ExecuteMoveOption(job, target, MoveIntentFor(job, target))
-    -- legacy: using UnifiedMoveCoordinator
+    -- legacy: using UnifiedMoveProtocol
     -- if DestinationAccepted(MoveIntentFor(job, target))
     -- legacy: and sourceSnapshot exists:
     -- legacy: SSHKillQueueRunnerJob(sourceSnapshot)
@@ -329,7 +329,7 @@ rule UserForceMovesRunningJob {
     -- Implementation:
     --   cmd/job.go --force flag →
     --   orchestration.ResolveEligibleJobsWithForce(allowRunning = force) →
-    --   orchestration move coordinator. Inner status guards
+    --   orchestration move protocol. Inner status guards
     --   (isMoveAdmissibleStatus) admit running jobs. Post-acceptance
     --   source stop uses cloud R2 markers or on-prem SSH kill depending
     --   on the source adapter.
@@ -445,7 +445,7 @@ rule MoveToNewRetryLoop {
 
 rule ExistingRunningRentalMoveWaitsForTargetAck {
     -- The R2 grace request is a durable request, not acceptance. The
-    -- coordinator records the request id and leaves the move open until
+    -- controller records the request id and leaves the move open until
     -- sync observes the corresponding ack. Running rental agents drain
     -- jobs requests on a background interval WHILE a job executes (the
     -- accepted jobs still run after the current job), so the ack — and

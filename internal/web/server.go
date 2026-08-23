@@ -91,7 +91,6 @@ func (s *Server) Start() (string, error) {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/cluster", s.handleCluster)
 	mux.HandleFunc("/api/hosts", s.handleAPIHosts)
-	mux.HandleFunc("/api/coordinator", s.handleAPICoordinator)
 	mux.HandleFunc("/api/oplog", s.handleAPIOplog)
 	s.server = &http.Server{
 		Handler: mux,

@@ -224,24 +224,6 @@ func DonorReady(instanceID int64) string {
 	return fmt.Sprintf("donor/%d/.ready", instanceID)
 }
 
-// Coordinator relay keys
-
-func CoordinatorRelayRequest(requestID string) string {
-	return fmt.Sprintf("coordinator/v1/inbox/%s.json", requestID)
-}
-
-func CoordinatorRelayAck(requestID string) string {
-	return fmt.Sprintf("coordinator/v1/acks/%s.json", requestID)
-}
-
-func CoordinatorRelayInboxPrefix() string {
-	return "coordinator/v1/inbox/"
-}
-
-func CoordinatorRelayAckPrefix() string {
-	return "coordinator/v1/acks/"
-}
-
 // Federated R2 blackboard keys
 
 func BlackboardPrefix() string {

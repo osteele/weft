@@ -1,4 +1,4 @@
-package services
+package remediation
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -89,7 +88,7 @@ func (r *Remediator) CheckFailedJobs() int {
 			continue
 		}
 
-		ctx := remediation.RemediationContext{
+		ctx := RemediationContext{
 			DB:         r.database,
 			Job:        jl.job,
 			LogContent: jl.logContent,
@@ -97,18 +96,18 @@ func (r *Remediator) CheckFailedJobs() int {
 			Config:     r.appConfig,
 		}
 
-		result := remediation.AttemptRemediation(ctx)
+		result := AttemptRemediation(ctx)
 		if result == nil {
 			continue
 		}
 		processed++
 
-		oplog.LogJob(oplog.OpCoordinatorDiagnosis, jl.job.ID, jl.job.Host,
+		oplog.LogJob(oplog.OpRemediationDiagnosis, jl.job.ID, jl.job.Host,
 			oplog.WithDetailf("pattern=%s category=%s", result.Diagnosis.Pattern, result.Diagnosis.Category))
 
 		if result.Retried {
 			r.logger.Info("remediated job", "job_id", jl.job.ID, "action", result.Action)
-			oplog.LogJob(oplog.OpCoordinatorRemediation, jl.job.ID, jl.job.Host,
+			oplog.LogJob(oplog.OpRemediationApplied, jl.job.ID, jl.job.Host,
 				oplog.WithDetailf("action=%s", result.Action))
 		} else {
 			r.logger.Info("diagnosed job", "job_id", jl.job.ID, "message", result.Diagnosis.Message, "action", result.Action)

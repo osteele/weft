@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
@@ -289,54 +288,6 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	needsRemoteUpdate := effectiveStatus == db.StatusQueued && job.Host != "" &&
 		(hasDescription || cmd.Flags().Changed("project") || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU)
 	if needsRemoteUpdate {
-		relayCfg, relayClient, err := loadCoordinatorRelay()
-		if err != nil {
-			return err
-		}
-		if relayEnabled(relayCfg, relayClient) {
-			payload := &coordinatorrelay.UpdateJobPayload{}
-			if hasDescription {
-				payload.Description = &description
-			}
-			if cmd.Flags().Changed("project") || describeDirectory != "" || describeCommand != "" {
-				payload.Project = &job.Project
-			}
-			if describeDirectory != "" {
-				payload.WorkingDir = &job.WorkingDir
-			}
-			if describeCommand != "" || gpuValue != "" {
-				payload.Command = &job.Command
-			}
-			if gpuValue != "" || hasGPUClass {
-				payload.GPU = stringPtr(job.GPU)
-			}
-			if hasGPUClass {
-				payload.GPUClass = stringPtr(job.GPUClass)
-			}
-			if hasGPUMem {
-				payload.GPUMemGB = job.GPUMemGB
-			}
-			if hasCPU {
-				payload.CPUAllotment = job.CPUAllotment
-			}
-			ack, err := relayUpdateJob(relayCfg, relayClient, job, payload)
-			if err != nil {
-				return err
-			}
-			if len(updates) == 0 {
-				fmt.Printf("No changes made to job %s\n", ids.FormatJobID(jobID))
-			} else {
-				fmt.Printf("Updated job %s via legacy relay:\n", ids.FormatJobID(jobID))
-				for _, u := range updates {
-					fmt.Printf("  %s\n", u)
-				}
-			}
-			if ack != nil && ack.Message != "" {
-				fmt.Printf("  relay: %s\n", ack.Message)
-			}
-			return nil
-		}
-
 		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
 		if err != nil {
 			return err

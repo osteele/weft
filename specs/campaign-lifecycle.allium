@@ -2008,7 +2008,7 @@ rule BeginLaunching {
 
         -- Provider credentials fall back to the provider's standard
         -- config file. Agent launchers (autopilot sync loop,
-        -- interactive CLI, or legacy coordinator path) MUST load provider credentials
+        -- interactive CLI, or another execution path) MUST load provider credentials
         -- from the provider's conventional config path when the
         -- corresponding environment variable is absent — e.g. RunPod
         -- loads RUNPOD_API_KEY from ~/.runpod/config.toml if not in
@@ -4880,7 +4880,7 @@ invariant TerminalInstancesHaveEndTime {
 invariant SucceededTerminationIntentBoundsEndTime {
     -- The destroy-success timestamp is the lifecycle event, not the time a
     -- later CLI/TUI reconcile pass happened to observe the persisted intent.
-    -- Reconcile can lag by hours because there is no always-on coordinator;
+    -- Reconcile can lag by hours because there is no always-on placement service;
     -- using reconcile time inflates uptime and derived cost by that idle gap.
     -- Migration 00041 repairs historical rows where the recorded ended_at is
     -- later than a succeeded termination intent's destroy timestamp.

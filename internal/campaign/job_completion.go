@@ -36,7 +36,7 @@ const (
 // transition away from a job.
 //
 // Phase timings and log caching are deferred to the full sync pass to avoid
-// an import cycle with internal/coordinator.
+// an import cycle with cloud result synchronization.
 //
 // Returns true if completion was recorded.
 func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID int64) bool {

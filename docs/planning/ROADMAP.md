@@ -1,9 +1,5 @@
 # Campaign System Roadmap
 
-> Status note: this is a planning document. Older bullets may mention a
-> coordinator service; current operation uses local CLI/TUI sync, autopilot,
-> and durable agents instead of an always-on coordinator daemon.
-
 Gaps between weft's campaign system and llm-performance-models' Vast.ai
 management. Filling these would let llm-performance-models run on top of weft
 instead of maintaining its own provisioning infrastructure.
@@ -50,7 +46,7 @@ coordination concerns.
 Preferred direction:
 
 1. Keep R2 as data plane storage.
-2. Use Cloudflare Queues for coordinator command ingestion.
+2. Use Cloudflare Queues for control-command ingestion.
 3. Use Durable Objects (per instance) for ordered mutable control state.
 4. Use R2 event notifications to drive result ingestion.
 
@@ -78,7 +74,7 @@ cache expires still pays the full cost.
 
 A long-lived predictor daemon would eliminate the cold-start entirely:
 
-- Start once (on demand or via launchd alongside the coordinator).
+- Start once (on demand or via launchd alongside the Weft daemon).
 - Expose status + prediction RPCs over a Unix socket.
 - Keep the job-estimator Python process warm with loaded models.
 - `weft run` queries the daemon instead of shelling out.
@@ -575,8 +571,7 @@ The cloud sync was changed to gate on per-attempt `.processed` markers (see
 - **Prune legacy job-scoped `.processed` markers.** Legacy cloud sync wrote
   `jobs/X/.processed` after processing a job. Those keys are now inert (no
   reader consults them at the job grain), but they remain in R2. A background
-  sweep — e.g. inside the existing `coordinator.vastaiSweep` or a periodic
-  janitor — could delete `jobs/X/.processed` whenever any
+  periodic janitor could delete `jobs/X/.processed` whenever any
   `jobs/X/runs/*/.processed` key exists. Safe to defer indefinitely; the keys
   are small and harmless.
 
@@ -627,7 +622,7 @@ genuinely useful for "is wj2257 making progress or stuck."
   hour of samples for ≤5 running jobs is sub-millisecond.
 
 - **Audit the agent ↔ schema seam.** The agent writes termination intents to
-  R2 with reason strings that the coordinator later inserts into SQLite.
+  R2 with reason strings that synchronization later inserts into SQLite.
   `cmd/agent/upload_drain_test.go::TestRecordDrainOutcomeStallTriggersSelfDestruct`
   stops at the `uploadStallSelfDestructHook` boundary because the real path
   shells out to rclone. Either (a) drive the post-hook path with a fake
@@ -640,7 +635,7 @@ genuinely useful for "is wj2257 making progress or stuck."
 ## Spec coverage for agent subsystems
 
 `specs/upload-drain.allium` is the first Allium spec that covers an
-agent-internal subsystem rather than coordinator-visible lifecycle. It was
+agent-internal subsystem rather than externally visible lifecycle. It was
 written after the wi3333 / wi3334 upload-stall regression, which would have
 been prevented by the spec's `HeartbeatResetsOnAnyStderrLine` invariant.
 The agent has accumulated several other subsystems whose behavior currently
@@ -677,7 +672,7 @@ kept current.
   surfaced in `weft instance diagnose`.
 
 Priority order is roughly the order of past production surprises:
-jobloop and grace-wait first (most cross-coupling with coordinator
+jobloop and grace-wait first (most cross-coupling with orchestration
 state), then heartbeat (rarely changes, well-understood), then
 prewarm (newer, still evolving), then onstart-probe.
 

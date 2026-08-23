@@ -7,7 +7,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/ops"
@@ -87,19 +86,6 @@ func (m Model) requeueJobCmd(job *db.Job, mkMsg func(int64, bool, error) tea.Msg
 		if job.Command == "" {
 			return mkMsg(job.ID, false, fmt.Errorf("job missing command"))
 		}
-		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return mkMsg(job.ID, false, err)
-		} else if relayClient != nil {
-			// Relay path: update DB locally, then notify the legacy relay target.
-			if err := db.RequeueByID(database, job.ID); err != nil {
-				return mkMsg(job.ID, false, err)
-			}
-			if _, err := m.relayRequeueJob(job); err != nil {
-				return mkMsg(job.ID, false, err)
-			}
-			return mkMsg(job.ID, false, nil)
-		}
-		// Non-relay path: ops.RequeueJob handles DB + remote queue
 		result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
 		if err != nil {
 			return mkMsg(job.ID, false, err)
@@ -138,20 +124,6 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}
-		} else if relayClient != nil {
-			ack, err := m.relaySimpleCommand(coordinatorrelay.OpQueuePriority, job.ID)
-			if err != nil {
-				return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}
-			}
-			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
-			moved := true
-			if ack != nil && ack.Message == "already at front" {
-				moved = false
-			}
-			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, moved: moved}
-		}
 		result, err := ops.RequestQueuePriority(database, job, ops.OptionsForMode(ops.TimeoutFast))
 		if err != nil {
 			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}

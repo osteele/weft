@@ -232,7 +232,7 @@ config {
 -- ========================================================================== 
 
 -- R2-pull is an addressed transport for an already-selected inventory host,
--- not a placement service and not a coordinator relay.
+-- not a placement service and not an indirect relay.
 rule R2PullInventoryQueue {
     when: host.queue_transport = r2_pull
 
@@ -1187,7 +1187,7 @@ rule SyncRecordsCloudCompletion {
         --     checkAndSyncJobCompleteRun and the manifest-credit loop.
         --   internal/syncorch/cloud_results.go syncCompletedJobAtRun applies
         --     the same rejection-then-mark-processed branch.
-        --   The deprecated internal/coordinator/vastai_sweep.go UPDATE excludes
+        --   Older cloud-result UPDATE logic excluded
         --     abandoned attempts (abandoned_at IS NULL) and, when zero rows
         --     match, marks the run's .complete and the job-scoped completed
         --     markers processed.
@@ -1218,7 +1218,7 @@ invariant ProcessedMarkerIsPerAttempt {
     -- legacy annotation: @guidance
         -- Implementation: HasUnprocessedComplete in internal/r2/client.go;
         -- used by repair/broad-scan helpers in internal/syncorch/cloud_results.go and
-        -- the deprecated internal/coordinator/vastai_sweep.go. Pairing helper:
+        -- older cloud-result processing. Pairing helper:
         -- r2.PairedProcessedKey(completeKey).
         --
         -- Regression: TestJobMarkers_HasUnprocessedComplete_NewAttemptAfter
@@ -1903,7 +1903,7 @@ rule TUIPeriodicSync {
 -- ==========================================================================
 
 -- Cloud sync lease: prevents redundant provider API calls when multiple
--- commands, TUIs, monitors, or legacy coordinator paths run simultaneously.
+-- commands, TUIs, monitors, or background synchronization run simultaneously.
 rule CloudSyncLease {
     when: CloudSyncRequested()
 
@@ -1924,7 +1924,7 @@ rule CloudSyncLease {
         -- Scope: "sync:cloud:reconcile"
         -- TTL: 180 seconds
         -- Owner: "{hostname}:{pid}:{nanotime}" by default, unless a caller
-        --   supplies a narrower owner for a legacy coordinator path.
+        --   supplies a narrower owner for a background synchronization path.
         -- internal/syncorch.SyncCloud applies this lease by default for
         --   normal database-backed cloud sync callers. Tests and narrow
         --   maintenance paths may opt out explicitly with DisableLease.

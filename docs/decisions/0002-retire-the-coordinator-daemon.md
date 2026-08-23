@@ -23,7 +23,7 @@ coordinator owned placement scoring, data pre-staging (rsync), and queue
 dispatch. The laptop submitted work as intent files over SSH; the coordinator
 watched an intent directory with fsnotify, enriched each intent with a placement
 decision, and dispatched. The design is described in
-[`docs/design/coordinator-architecture.md`](../design/coordinator-architecture.md).
+`docs/design/coordinator-architecture.md`.
 
 By the time of the decision, the coordinator was already documented as
 **optional**. The README stated: "The coordinator is optional. If it is
@@ -103,7 +103,7 @@ local process structure.
 
 - Commit `a450f4a20` (2026-06-05) — the deprecation, spanning README, `cmd/coordinator.go`,
   `docs/design/architecture.md`, `docs/reference/commands.md`, and the justfile.
-- [`docs/design/coordinator-architecture.md`](../design/coordinator-architecture.md)
+- `docs/design/coordinator-architecture.md`
   — the retired design, including its own decisions on SSH + JSONL intents and
   the coordinator/edge-agent authority split.
 - [`docs/design/architecture.md`](../design/architecture.md) § Overview — the

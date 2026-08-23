@@ -378,13 +378,6 @@ deploy-agent host="":
     fi
     go run . queue update "${HOST}"
 
-# Deprecated: the coordinator daemon is no longer part of normal operation.
-deploy-coordinator host="studio":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "deploy-coordinator is deprecated; use 'just build', 'just deploy-agent <host>', and 'weft sync --full <host>' instead." >&2
-    exit 1
-
 # Clean build artifacts
 clean:
     rm -f weft

@@ -14,7 +14,6 @@ import (
 	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -942,19 +941,6 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %s is not queued on an inventory host", ids.FormatJobID(jobID))
 	}
 
-	relayCfg, relayClient, err := loadCoordinatorRelay()
-	if err != nil {
-		return err
-	}
-	if relayEnabled(relayCfg, relayClient) {
-		if _, err := relaySimpleCommand(relayClient, coordinatorrelay.OpQueuePriority, jobID); err != nil {
-			return err
-		}
-		_ = db.SetQueuedAtBefore(database, jobID, job.Host)
-		fmt.Printf("Job %s submitted via legacy relay to move to the front on %s\n", ids.FormatJobID(jobID), job.TargetDisplay())
-		return nil
-	}
-
 	result, err := ops.RequestQueuePriority(database, job, ops.DefaultOptions())
 	if err != nil {
 		return err
@@ -1500,65 +1486,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	deferredUpdate := false
-	if !editWasDraft {
-		relayCfg, relayClient, err := loadCoordinatorRelay()
-		if err != nil {
-			return err
-		}
-		if relayEnabled(relayCfg, relayClient) {
-			var ack *coordinatorrelay.Ack
-			if wasRequeued {
-				ack, err = relayRequeueJob(relayCfg, relayClient, job)
-			} else {
-				update := &coordinatorrelay.UpdateJobPayload{
-					WorkingDir:   &job.WorkingDir,
-					Command:      &job.Command,
-					Project:      &job.Project,
-					EnvVars:      append([]string(nil), job.EnvVars...),
-					Tags:         append([]string(nil), job.Tags...),
-					GPU:          stringPtr(job.GPU),
-					GPUClass:     stringPtr(job.GPUClass),
-					GPUMemGB:     job.GPUMemGB,
-					DepSpec:      stringPtr(job.DepSpec),
-					Inputs:       append([]string(nil), job.Inputs...),
-					Outputs:      append([]string(nil), job.Outputs...),
-					OutputDirs:   append([]string(nil), job.OutputDirs...),
-					Produces:     append([]string(nil), job.Produces...),
-					Needs:        append([]string(nil), job.Needs...),
-					CPUAllotment: job.CPUAllotment,
-				}
-				if len(job.Tags) == 0 {
-					update.ClearTags = true
-				}
-				if cmd.Flags().Changed("message") {
-					update.Description = &job.Description
-				}
-				ack, err = relayUpdateJob(relayCfg, relayClient, job, update)
-			}
-			if err != nil {
-				return err
-			}
-			fmt.Printf("Updated job %s via legacy relay\n", ids.FormatJobID(jobID))
-			for _, update := range updates {
-				fmt.Printf("  %s\n", update)
-			}
-			if ack != nil && ack.Message != "" {
-				fmt.Printf("  relay: %s\n", ack.Message)
-			}
-			detail := "edit"
-			if wasRequeued {
-				detail = "edit retry"
-			}
-			if len(updates) > 0 {
-				detail += ": " + strings.Join(updates, "; ")
-			}
-			oplog.Log(oplog.OpCLICommand, oplog.WithDetail(detail), oplog.WithJobID(jobID))
-			if wasRequeued {
-				ensureDaemonForWork(os.Stderr)
-			}
-			return nil
-		}
-	}
 
 	if editWasDraft {
 		job.DepSpec = depSpec

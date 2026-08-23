@@ -1,6 +1,6 @@
 # Federated R2 Blackboard
 
-This note describes a coordinator-free placement path where cloud agents use R2
+This note describes a decentralized placement path where cloud agents use R2
 as a shared blackboard. It complements the existing autopilot design rather
 than replacing it.
 
@@ -16,7 +16,7 @@ Related design notes:
 The first version lets cloud agents discover and reserve unplaced rental work
 when autopilot is not actively driving placement. It must not require remote
 agents to access the local SQLite database, and it must not introduce an
-always-on coordinator service.
+always-on placement service.
 
 SQLite remains the source of truth. R2 carries exported job specs, claims,
 assignments, agent heartbeats, and events. A claim is only a reservation; a
@@ -132,7 +132,7 @@ The early pieces are useful even before agents claim jobs:
 ## Non-goals
 
 V1 does not make R2 the authoritative job database, does not let agents start a
-job from a claim alone, and does not require an always-on coordinator.
+job from a claim alone, and does not require an always-on placement service.
 
 On-prem agents are out of scope for v1. They can participate later if they get
 R2 credentials and a local blackboard loop, but the first version is cloud-only

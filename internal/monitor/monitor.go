@@ -15,13 +15,13 @@ import (
 	"github.com/fsnotify/fsnotify"
 	hostsyncapp "github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuerunner"
+	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/syncorch"
@@ -145,9 +145,9 @@ type Monitor struct {
 
 	hostRefreshing sync.Map // host name → struct{}, guards concurrent refreshHostInfo
 
-	// Optional embedded legacy services
+	// Optional embedded services
 	appConfig  *config.Config
-	remediator *services.Remediator
+	remediator *remediation.Remediator
 	svcCancel  context.CancelFunc
 }
 
@@ -165,8 +165,7 @@ func New(database *sql.DB, cfg Config) *Monitor {
 }
 
 // EnableRemediation starts the remediator service that diagnoses failed jobs
-// and attempts auto-remediation. This enables shared diagnostics without
-// requiring the deprecated coordinator daemon.
+// and attempts auto-remediation.
 func (m *Monitor) EnableRemediation(appConfig *config.Config) {
 	logger := slog.Default().With("component", "remediator")
 	m.EnableRemediationWithLogger(appConfig, logger)
@@ -178,7 +177,7 @@ func (m *Monitor) EnableRemediationWithLogger(appConfig *config.Config, logger *
 		logger = slog.Default().With("component", "remediator")
 	}
 	m.appConfig = appConfig
-	m.remediator = services.NewRemediator(m.db, logger, appConfig, 30*time.Second)
+	m.remediator = remediation.NewRemediator(m.db, logger, appConfig, 30*time.Second)
 }
 
 // Config returns the monitor configuration.

@@ -1,8 +1,7 @@
 # Weft Architecture
 
-This document describes the architecture and design of weft. The earlier
-coordinator daemon design is deprecated; current operation uses local CLI/TUI
-placement and durable remote agents.
+This document describes the architecture and design of weft. Current operation
+uses local CLI/TUI placement and durable remote agents.
 
 Per-subsystem deep dives live in [docs/architecture/](../architecture/):
 [placement](../architecture/placement.md),
@@ -39,9 +38,8 @@ components:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The legacy coordinator daemon is deprecated. The CLI/TUI performs placement
-scoring and direct SSH dispatch; remote agents continue running already queued
-jobs when the laptop disconnects.
+The CLI/TUI performs placement scoring and dispatch; remote agents continue
+running already queued jobs when the laptop disconnects.
 
 ### Facades vs Core
 
@@ -65,7 +63,7 @@ The local SQLite database remains the correctness boundary for writes. CLI
 commands, the TUI, daemon socket handlers, autopilot, and sync code may all
 write to the same database; correctness comes from SQLite transactions, WAL
 serialization, busy-timeout retry loops, and operation-level idempotency. The
-daemon is not a universal single-writer coordinator.
+daemon does not own every database write.
 
 The daemon's `WriteExecutor` serializes mutation requests that arrive through
 the daemon socket, currently job submission and tag updates. This keeps socket
@@ -73,8 +71,7 @@ handlers from competing with each other for SQLite's single writer slot, but
 it does not order direct CLI writes or daemon-internal autopilot/sync writes.
 Multi-step CLI mutations that must not be observed halfway through, such as
 `weft restart`, must use an explicit transaction around their local database
-updates and must not hold that transaction across SSH, provider, or relay
-calls.
+updates and must not hold that transaction across SSH, provider, or R2 calls.
 
 ## Job States
 
@@ -120,7 +117,6 @@ weft/
 │   ├── root.go            # Root command, default command handling
 │   ├── run.go             # Start jobs (supports --from, --timeout, --input, --output)
 │   ├── host.go            # Host inventory and data locality commands
-│   ├── coordinator.go     # Deprecated coordinator cleanup/status commands
 │   ├── sync.go            # Sync job statuses + deploy agent binary
 │   ├── queue.go           # Queue commands (add, start, stop, list)
 │   ├── tui.go             # Launch interactive TUI
@@ -148,7 +144,6 @@ weft/
 │   └── ...                # progress, llm, queuejob, plan, etc.
 └── docs/
     ├── architecture.md    # This document
-    ├── coordinator-architecture.md  # Deprecated historical coordinator design
     └── workflow-guide.md  # Common workflows with examples
 ```
 

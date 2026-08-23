@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -94,61 +92,6 @@ func TestHandleAPIHosts_GPUFields(t *testing.T) {
 		}
 	}
 	t.Error("cool100 not found in /api/hosts response")
-}
-
-func TestHandleAPICoordinator_NotRunning(t *testing.T) {
-	s := newTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/coordinator", nil)
-	w := httptest.NewRecorder()
-
-	s.handleAPICoordinator(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
-
-	var state apiCoordinatorState
-	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-
-	// Without a coordinator running, should report not running
-	// (unless one happens to be running on this machine, which is unlikely in CI)
-	if state.Running && state.PID == "" {
-		t.Error("running=true but no PID")
-	}
-}
-
-func TestHandleAPICoordinator_Running(t *testing.T) {
-	s := newTestServer(t)
-
-	// Create a temporary PID file
-	tmpDir := t.TempDir()
-	pidFile := filepath.Join(tmpDir, "coordinator.pid")
-	os.WriteFile(pidFile, []byte("12345"), 0644)
-
-	// Override the home dir check by testing the handler logic directly
-	// We'll test that a valid PID file produces running=true
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "12345" {
-		t.Fatalf("PID file content: got %q, want 12345", string(data))
-	}
-
-	// The actual handler reads from ~/.cache/weft/coordinator.pid,
-	// so we just verify the response format
-	req := httptest.NewRequest(http.MethodGet, "/api/coordinator", nil)
-	w := httptest.NewRecorder()
-	s.handleAPICoordinator(w, req)
-
-	var state apiCoordinatorState
-	json.Unmarshal(w.Body.Bytes(), &state)
-	// Just verify it returns valid JSON with expected fields
-	if w.Code != http.StatusOK {
-		t.Fatalf("status: got %d, want 200", w.Code)
-	}
 }
 
 func TestHandleAPIOplog_EmptyLog(t *testing.T) {

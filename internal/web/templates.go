@@ -121,30 +121,6 @@ const clusterTemplate = `<!doctype html>
         padding-top: 8px;
         border-top: 1px solid var(--border);
       }
-      .coord-panel {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 14px 16px;
-        background: var(--panel);
-        display: flex;
-        gap: 24px;
-        align-items: center;
-      }
-      .coord-status {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-weight: 600;
-      }
-      .coord-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        display: inline-block;
-      }
-      .coord-dot.running { background: var(--accent); }
-      .coord-dot.stopped { background: var(--danger); }
-      .coord-detail { font-size: 13px; color: var(--muted); }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -181,15 +157,6 @@ const clusterTemplate = `<!doctype html>
       </div>
     </header>
     <main>
-      <section>
-        <h2>Coordinator</h2>
-        <div class="coord-panel" id="coord-panel">
-          <div class="coord-status">
-            <span class="coord-dot stopped" id="coord-dot"></span>
-            <span id="coord-label">loading…</span>
-          </div>
-        </div>
-      </section>
       <section>
         <h2>Hosts</h2>
         <div class="host-grid" id="host-grid"></div>
@@ -269,18 +236,6 @@ const clusterTemplate = `<!doctype html>
         });
       }
 
-      function renderCoordinator(state) {
-        var dot = document.getElementById('coord-dot');
-        var label = document.getElementById('coord-label');
-        if (state.running) {
-          dot.className = 'coord-dot running';
-          label.textContent = 'Running (PID ' + state.pid + ')';
-        } else {
-          dot.className = 'coord-dot stopped';
-          label.textContent = 'Not running';
-        }
-      }
-
       function renderOplog(entries) {
         var body = document.getElementById('oplog-body');
         if (!entries || entries.length === 0) {
@@ -307,12 +262,10 @@ const clusterTemplate = `<!doctype html>
       function refresh() {
         Promise.all([
           fetchJSON('/api/hosts'),
-          fetchJSON('/api/coordinator'),
           fetchJSON('/api/oplog')
         ]).then(function(results) {
           renderHosts(results[0]);
-          renderCoordinator(results[1]);
-          renderOplog(results[2]);
+          renderOplog(results[1]);
           document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
         }).catch(function() {});
       }

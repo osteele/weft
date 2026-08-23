@@ -164,13 +164,6 @@ func SourceTarball(hash string) string   { return dataplane.SourceTarball(hash) 
 func SourceTarballV2(hash string) string { return dataplane.SourceTarballV2(hash) }
 func NamedAsset(sha256Hex string) string { return dataplane.NamedAsset(sha256Hex) }
 
-func CoordinatorRelayRequest(requestID string) string {
-	return controlplane.CoordinatorRelayRequest(requestID)
-}
-func CoordinatorRelayAck(requestID string) string { return controlplane.CoordinatorRelayAck(requestID) }
-func CoordinatorRelayInboxPrefix() string         { return controlplane.CoordinatorRelayInboxPrefix() }
-func CoordinatorRelayAckPrefix() string           { return controlplane.CoordinatorRelayAckPrefix() }
-
 func BlackboardPrefix() string                   { return controlplane.BlackboardPrefix() }
 func BlackboardAutopilotState() string           { return controlplane.BlackboardAutopilotState() }
 func BlackboardJobsPrefix() string               { return controlplane.BlackboardJobsPrefix() }

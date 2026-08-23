@@ -1,8 +1,6 @@
 # Future Ideas
 
 Ideas for future enhancements that are not currently prioritized.
-Older ideas may mention a coordinator service as an optional/historical design;
-current operation uses local CLI/TUI sync, autopilot, and durable agents.
 
 ## Disk Full Recovery
 

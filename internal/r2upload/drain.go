@@ -8,7 +8,7 @@
 // self-destruct.
 //
 // On stall/ceiling/error the caller can write a structured failure marker
-// (see [WriteFailureMarker]) so the coordinator and CLI can surface
+// (see [WriteFailureMarker]) so the controller and CLI can surface
 // "upload truncated: stall|ceiling|error" rather than the log silently
 // disappearing with the instance.
 package r2upload
