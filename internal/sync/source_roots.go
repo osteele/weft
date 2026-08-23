@@ -3,7 +3,6 @@ package sync
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -378,27 +377,16 @@ func buildSourceManifestForInputsAndCommands(projectRoot string, inputs []string
 }
 
 func manifestHash(roots []SourceRoot) (string, error) {
-	type rootIdentity struct {
-		MountBasename string                 `json:"mount_basename"`
-		Hash          string                 `json:"hash"`
-		R2Key         string                 `json:"r2_key"`
-		Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
-	}
-	ids := make([]rootIdentity, 0, len(roots))
+	ids := make([]dataplane.SourceManifestRoot, 0, len(roots))
 	for _, root := range roots {
-		ids = append(ids, rootIdentity{
+		ids = append(ids, dataplane.SourceManifestRoot{
 			MountBasename: root.MountBasename,
 			Hash:          root.Hash,
 			R2Key:         root.R2Key,
 			Blobs:         root.Blobs,
 		})
 	}
-	data, err := json.Marshal(ids)
-	if err != nil {
-		return "", fmt.Errorf("marshal source root manifest: %w", err)
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return dataplane.SourceManifestSHA256(ids)
 }
 
 func findLargeSourceBlobs(localDir string, excludes []string, workerLimit int) ([]dataplane.SourceBlob, []string, map[string]struct{}, error) {

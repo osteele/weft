@@ -36,6 +36,22 @@ func TestQueueCommandSerialization(t *testing.T) {
 				DepSpec:     "455:success",
 			}),
 		},
+		{
+			name: "add pinned source manifest",
+			cmd: NewAddCommand(QueueEntry{
+				JobID:       789,
+				Command:     "true",
+				SourceR2Key: "source-closures/v2/sha256/guard.json",
+				SourceManifest: &SourceManifest{
+					SHA256: strings.Repeat("a", 64),
+					Roots: []SourceRoot{{
+						MountBasename: "project",
+						Hash:          strings.Repeat("b", 64),
+						R2Key:         "sources/project.tar.gz",
+					}},
+				},
+			}),
+		},
 		{name: "priority command", cmd: NewPriorityCommand(123)},
 		{name: "cancel command", cmd: NewCancelCommand(456)},
 		{name: "stop command", cmd: NewStopCommand()},
@@ -57,6 +73,11 @@ func TestQueueCommandSerialization(t *testing.T) {
 			}
 			if roundTrip.Op != tt.cmd.Op {
 				t.Fatalf("op = %q, want %q", roundTrip.Op, tt.cmd.Op)
+			}
+			if tt.cmd.Job != nil && tt.cmd.Job.SourceManifest != nil {
+				if roundTrip.Job == nil || roundTrip.Job.SourceManifest == nil || roundTrip.Job.SourceManifest.SHA256 != tt.cmd.Job.SourceManifest.SHA256 {
+					t.Fatalf("source manifest did not survive round trip: %#v", roundTrip.Job)
+				}
 			}
 		})
 	}

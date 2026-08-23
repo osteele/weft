@@ -623,6 +623,43 @@ func TestStartJob_R2IsolatedSourceFetchFailureRejectsPreflight(t *testing.T) {
 	}
 }
 
+func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(711)
+	projectDir := t.TempDir()
+	manifestCalls := 0
+	legacyCalls := 0
+	r.EnsureSourceManifestFromR2 = func(gotJobID int64, manifest opsqueue.SourceManifest, perJobRoot string) (string, error) {
+		manifestCalls++
+		if gotJobID != jobID || manifest.SHA256 != strings.Repeat("a", 64) {
+			t.Fatalf("manifest hook args = (%d, %#v)", gotJobID, manifest)
+		}
+		return projectDir, nil
+	}
+	r.EnsureSourceFromR2 = func(_ int64, _, _ string) error {
+		legacyCalls++
+		return nil
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:          jobID,
+		Dir:         "/live/tree/that/must/not/be-used",
+		Cmd:         "true",
+		SourceSHA:   strings.Repeat("a", 64),
+		SourceR2Key: "source-closures/v2/sha256/guard.json",
+		SourceManifest: &opsqueue.SourceManifest{
+			SHA256: strings.Repeat("a", 64),
+			Roots:  []opsqueue.SourceRoot{{MountBasename: "project", Hash: strings.Repeat("b", 64), R2Key: "sources/project.tar.gz"}},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("startJob: %v", err)
+	}
+	if manifestCalls != 1 || legacyCalls != 0 {
+		t.Fatalf("manifest calls = %d, legacy calls = %d; want 1, 0", manifestCalls, legacyCalls)
+	}
+}
+
 // TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists verifies that
 // refreshRunningJobs does not mark a job as orphaned when the waitForJob
 // goroutine is still tracking the process (i.e., the process has exited

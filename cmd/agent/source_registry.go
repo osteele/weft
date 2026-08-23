@@ -1,10 +1,12 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -16,6 +18,9 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/dataplane"
+	"github.com/osteele/weft/internal/opsqueue"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 // sourceCacheDir returns the directory where the agent keeps the most recent
@@ -377,6 +382,157 @@ func fetchSourceTarballToDir(bucket, r2Key, perJobDir string) error {
 	// a kill+resubmit during a grace window) can find the tarball again.
 	sources.record(perJobDir, r2Key)
 	slog.Info("staged R2-isolated source", "component", "agent", "per_job_dir", perJobDir, "r2_key", r2Key)
+	return nil
+}
+
+// fetchSourceManifestToDir materializes every root in an immutable source
+// closure under one per-job parent. The first root is the project working
+// directory; later roots are adjacent siblings, preserving ../path imports.
+func fetchSourceManifestToDir(bucket string, manifest opsqueue.SourceManifest, perJobRoot string) (string, error) {
+	if bucket == "" {
+		return "", fmt.Errorf("no R2 bucket configured")
+	}
+	if perJobRoot == "" {
+		return "", fmt.Errorf("empty per-job source root")
+	}
+	if err := validateQueueSourceManifest(manifest); err != nil {
+		return "", err
+	}
+
+	for _, root := range manifest.Roots {
+		if err := ensurePinnedSourceTarballCached(bucket, root); err != nil {
+			return "", fmt.Errorf("prepare source root %s: %w", root.MountBasename, err)
+		}
+	}
+	var blobs []controlplane.SourceBlob
+	for _, root := range manifest.Roots {
+		blobs = append(blobs, root.Blobs...)
+	}
+	if err := ensureSourceBlobsCached(bucket, blobs); err != nil {
+		return "", fmt.Errorf("prepare source blobs: %w", err)
+	}
+
+	if err := os.RemoveAll(perJobRoot); err != nil {
+		return "", fmt.Errorf("clean per-job source root: %w", err)
+	}
+	if err := os.MkdirAll(perJobRoot, 0o755); err != nil {
+		return "", fmt.Errorf("create per-job source root: %w", err)
+	}
+	for _, root := range manifest.Roots {
+		rootDir := filepath.Join(perJobRoot, root.MountBasename)
+		if err := os.MkdirAll(rootDir, 0o755); err != nil {
+			return "", fmt.Errorf("create source root %s: %w", root.MountBasename, err)
+		}
+		if err := srcsync.ExtractTarball(sourceCachePath(root.R2Key), rootDir); err != nil {
+			return "", fmt.Errorf("extract source root %s: %w", root.MountBasename, err)
+		}
+		if err := materializeSourceBlobs(rootDir, root.Blobs); err != nil {
+			return "", fmt.Errorf("materialize source root %s blobs: %w", root.MountBasename, err)
+		}
+	}
+
+	projectDir := filepath.Join(perJobRoot, manifest.Roots[0].MountBasename)
+	slog.Info("staged pinned source manifest", "component", "agent", "per_job_dir", projectDir, "source_manifest_sha256", manifest.SHA256, "roots", len(manifest.Roots))
+	return projectDir, nil
+}
+
+func validateQueueSourceManifest(manifest opsqueue.SourceManifest) error {
+	manifestHash, err := normalizeSHA256(manifest.SHA256)
+	if err != nil {
+		return fmt.Errorf("source manifest: %w", err)
+	}
+	if len(manifest.Roots) == 0 {
+		return fmt.Errorf("source manifest has no roots")
+	}
+	identities := make([]dataplane.SourceManifestRoot, 0, len(manifest.Roots))
+	basenames := make(map[string]struct{}, len(manifest.Roots))
+	for i, root := range manifest.Roots {
+		if root.MountBasename == "" || root.MountBasename == "." || root.MountBasename == ".." || strings.ContainsAny(root.MountBasename, "/\\") {
+			return fmt.Errorf("source root %d has unsafe mount basename %q", i, root.MountBasename)
+		}
+		if _, exists := basenames[root.MountBasename]; exists {
+			return fmt.Errorf("source root %d duplicates mount basename %q", i, root.MountBasename)
+		}
+		basenames[root.MountBasename] = struct{}{}
+		rootHash, err := normalizeSHA256(root.Hash)
+		if err != nil {
+			return fmt.Errorf("source root %d: %w", i, err)
+		}
+		if !safeSlashRelativePath(root.R2Key) {
+			return fmt.Errorf("source root %d has unsafe r2_key %q", i, root.R2Key)
+		}
+		if _, err := validateSourceBlobs(root.Blobs); err != nil {
+			return fmt.Errorf("source root %d blobs: %w", i, err)
+		}
+		identities = append(identities, dataplane.SourceManifestRoot{
+			MountBasename: root.MountBasename,
+			Hash:          rootHash,
+			R2Key:         root.R2Key,
+			Blobs:         root.Blobs,
+		})
+	}
+	actual, err := dataplane.SourceManifestSHA256(identities)
+	if err != nil {
+		return err
+	}
+	if actual != manifestHash {
+		return fmt.Errorf("source manifest SHA-256 %s does not match payload %s", manifestHash, actual)
+	}
+	return nil
+}
+
+func ensurePinnedSourceTarballCached(bucket string, root opsqueue.SourceRoot) error {
+	cachePath := sourceCachePath(root.R2Key)
+	if _, err := os.Stat(cachePath); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect cache: %w", err)
+		}
+		if err := downloadSourceToCache(bucket, root.R2Key, cachePath); err != nil {
+			return fmt.Errorf("download tarball: %w", err)
+		}
+	}
+	if err := verifySourceTarballSHA256(cachePath, root.Hash); err != nil {
+		// A partial prior download or local cache corruption is recoverable.
+		// Fetch once more from the immutable object before rejecting the job.
+		if removeErr := os.Remove(cachePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("discard invalid cached tarball %s: %w", root.R2Key, removeErr)
+		}
+		if downloadErr := downloadSourceToCache(bucket, root.R2Key, cachePath); downloadErr != nil {
+			return fmt.Errorf("redownload tarball %s after verification failure: %w", root.R2Key, downloadErr)
+		}
+		if retryErr := verifySourceTarballSHA256(cachePath, root.Hash); retryErr != nil {
+			return fmt.Errorf("verify tarball %s after redownload: %w", root.R2Key, retryErr)
+		}
+	}
+	return nil
+}
+
+func verifySourceTarballSHA256(filename, expected string) error {
+	want, err := normalizeSHA256(expected)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("open gzip stream: %w", err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, gr); err != nil {
+		_ = gr.Close()
+		return fmt.Errorf("hash canonical tar stream: %w", err)
+	}
+	if err := gr.Close(); err != nil {
+		return fmt.Errorf("close gzip stream: %w", err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if got != want {
+		return fmt.Errorf("canonical tar SHA-256 %s, want %s", got, want)
+	}
 	return nil
 }
 

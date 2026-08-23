@@ -11,8 +11,8 @@
 --   - Multi-root source snapshots: declared sibling roots mounted adjacent
 --     to the project with one content-addressed tarball per root and one
 --     manifest hash for the complete source identity.
---   - On-prem source sync: rsync over SSH to inventory hosts, with reuse of
---     recently-synced snapshots.
+--   - On-prem source staging: immutable manifest materialization for pinned
+--     jobs and rsync compatibility for rows that predate pinning.
 --   - Cloud source staging: R2 upload of the source tarball keyed by content
 --     hash, extracted by the agent at instance startup.
 --   - Data input classification: separating --input values into HF-style
@@ -44,13 +44,13 @@ use "./campaign-lifecycle.allium" as cloud
 
 -- DispatchEntry is the on-host queue entry the dispatcher writes for a job.
 -- Owned by the queue runner / dispatcher (internal/opsqueue), not by this
--- spec, but referenced here because the source-staging mode (rsync + per-job
--- marker vs. R2-isolated tarball) is recorded on it. source_sha256 and
--- source_r2_key live only on the queue entry, not on the persistent Job row.
+-- spec, but referenced here because the source-staging mode is recorded on it.
+-- These fields live only on the queue entry; the durable pin lives on the Job.
 external entity DispatchEntry {
     job: jobs/Job
-    source_sha256: String?          -- SHA the dispatcher queued the job with
-    source_r2_key: String?          -- exact recorded v1 or v2 source object key
+    source_sha256: String?          -- manifest SHA for pinned jobs; legacy snapshot SHA otherwise
+    source_r2_key: String?          -- legacy tarball key or fail-closed closure-receipt guard
+    source_manifest: SourceRootManifest?
 }
 
 -- DataAsset identifies a piece of named, addressable data (an HF model,
@@ -664,7 +664,26 @@ rule EnforceSourceSizeLimit {
 -- Rules: on-prem source sync
 -- ==========================================================================
 
--- Send a snapshot to an inventory host over rsync+ssh. --delete is used so
+-- A submit-time-pinned inventory job runs from the same immutable closure its
+-- receipt identifies. The live working tree is not consulted after submission.
+rule MaterializePinnedSourceOnPrem {
+    when: DispatchToOnPremHost(job, host, snapshot)
+    requires: job.source_pin != null
+    requires: host.backend != slurm
+
+	ensures:
+		DispatchEntry{job: job}.source_manifest = job.source_pin
+		and DispatchEntry{job: job}.source_sha256 = job.source_pin.manifest_hash
+		and not exists RsyncInvocation{for_job: job}
+		and RunnerValidatesManifestHash(job.source_pin)
+		and for root in job.source_pin.roots:
+			RunnerValidatesCanonicalTarHash(root.snapshot.content_hash)
+			and RunnerMaterializes(root.snapshot, root.blobs)
+		and JobWorkingDirectory(job) = PerJobSourceRoot(job, job.source_pin.roots[0])
+}
+
+-- Compatibility path for rows created before submit-time pinning. Send the
+-- current snapshot to an inventory host over rsync+ssh. --delete is used so
 -- remote sources mirror local sources exactly; the remote sources directory
 -- is treated as weft's own scratch space, not a place the user edits.
 --
@@ -678,6 +697,7 @@ rule SyncSourceToOnPremHost {
     when: DispatchToOnPremHost(job, host, snapshot)
     requires: host.name != "" and not IsLocalHost(host)
     requires: job.working_dir != ""
+    requires: job.source_pin = null
     -- R2-isolated jobs bypass rsync entirely; their source is extracted
     -- from a content-addressed tarball into a per-job dir on the runner side.
     requires: DispatchEntry{job: job}.source_r2_key = null
@@ -789,11 +809,9 @@ rule ResyncAfterRemediation {
 -- The job remains queued in Weft's view, so the autopilot or
 -- user can replan it.
 --
--- R2-isolated jobs (queue entry has source_r2_key) skip the marker
--- comparison entirely: the SHA is implicit in the R2 key. The runner
--- instead invokes EnsureSourceFromR2 to extract the tarball into a
--- per-job source dir; failure to extract is itself a preflight rejection
--- with reason r2_isolated_source_unavailable.
+-- Pinned manifest jobs validate and materialize the complete closure first.
+-- Legacy R2-isolated jobs then retain the single-tarball path. Only legacy
+-- rsync jobs use the marker comparison.
 rule RunnerPreflightProvenanceCheck {
     when: EvaluateRunnerPreflightProvenanceCheck()
 
@@ -805,7 +823,7 @@ rule RunnerPreflightProvenanceCheck {
     -- let marker = PerJobSourceMarker{job: job, host: host,
     -- working_dir: job.working_dir}
 
-    -- R2-isolated mode bypasses the marker comparison.
+    -- Pinned-manifest and legacy R2-isolated modes bypass marker comparison.
     -- if entry.source_r2_key != null:
     -- ensures:
     -- legacy: if EnsureSourceFromR2(job, entry.source_r2_key) succeeds:
@@ -839,7 +857,8 @@ rule RunnerPreflightProvenanceCheck {
     --   internal/runner/runner.go    — rejectPreflight,
     --                                  WritePreflightRejectedFile
     --   internal/opsqueue/queue.go   — CommandJob.SourceSHA,
-    --                                  CommandJob.SourceR2Key
+--                                  CommandJob.SourceR2Key,
+--                                  CommandJob.SourceManifest
 }
 
 -- Record a preflight rejection. No JobAttempt fields are mutated here;
@@ -1696,17 +1715,24 @@ invariant SourceMarkersExcludedFromRsync {
         exists ExcludePattern{pattern: pattern, origin: builtin}
 }
 
--- An R2-isolated dispatch (source_r2_key set) MUST NOT rsync the working
--- dir or write a per-job marker for that dispatch; the source comes from
--- the content-addressed tarball and the SHA is implicit in the key.
+-- An isolated dispatch MUST NOT rsync the working dir or write a per-job
+-- marker. Pinned jobs use the complete manifest; legacy fallback jobs use a
+-- single content-addressed tarball.
 invariant R2IsolatedDispatchSkipsRsync {
-    for entry in DispatchEntries where entry.source_r2_key != null:
+    for entry in DispatchEntries where entry.source_manifest != null or entry.source_r2_key != null:
         not exists RsyncInvocation{
             host: entry.job.host,
             working_dir: entry.job.working_dir,
             for_job: entry.job
         }
         and not exists PerJobSourceMarker{job: entry.job}
+}
+
+invariant PinnedInventoryDispatchUsesSubmittedClosure {
+	for job in jobs/Jobs where job.target_kind = inventory_host and job.source_pin != null and job.host.backend != slurm:
+		DispatchEntry{job: job}.source_manifest.manifest_hash = job.source_pin.manifest_hash
+		and JobExecutedSourceManifest(job).manifest_hash = job.source_pin.manifest_hash
+		and not exists LiveWorkingTreeRead{for_job: job, after: job.submitted_at}
 }
 
 -- Syncing to the machine weft is running on is a no-op. Rsyncing a
@@ -1739,7 +1765,7 @@ invariant R2SourceObjectsContentAddressed {
 -- never derives a historical key with the current v2 constructor, and adopting
 -- v2 does not authorize deleting or rewriting v1 objects.
 invariant HistoricalSourceKeysRemainRetrievable {
-	for entry in DispatchEntries where entry.source_r2_key != null:
+	for entry in DispatchEntries where entry.source_r2_key != null and entry.source_manifest = null:
 		RetrievedSourceKey(entry.job) = entry.source_r2_key
 
 	-- legacy annotation: @guidance

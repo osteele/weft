@@ -32,21 +32,25 @@ type CommandJob struct {
 	// check and instead download + extract the exact recorded v1 or v2 source
 	// key from R2 into a per-job dir. Used by Layer D as a content-fidelity
 	// fallback after a per-job marker failure.
-	SourceR2Key  string   `json:"source_r2_key,omitempty"`
-	Env          []string `json:"env,omitempty"`
-	Deps         string   `json:"deps,omitempty"`
-	CPU          *int     `json:"cpu,omitempty"`
-	GPU          string   `json:"gpu,omitempty"`       // CUDA_VISIBLE_DEVICES value (e.g. "0" or "0,1")
-	GPUClass     string   `json:"gpu_class,omitempty"` // GPU class name (e.g. "A100") — resolved to device at runtime
-	GPUCount     int      `json:"gpu_count,omitempty"` // Exact GPU count requested on this host
-	GPUMem       *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
-	Interconnect string   `json:"interconnect,omitempty"`
-	CPUCores     int      `json:"cpu_cores,omitempty"`
-	Tags         []string `json:"tags,omitempty"`
-	OutputDirs   []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
-	Outputs      []string `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
-	Produces     []string `json:"produces,omitempty"`    // artifact specs this job produces
-	Needs        []string `json:"needs,omitempty"`       // artifact specs this job needs
+	SourceR2Key string `json:"source_r2_key,omitempty"`
+	// SourceManifest supersedes SourceR2Key for submit-time-pinned jobs and
+	// carries the complete multi-root source closure. SourceR2Key remains set
+	// as a fail-closed compatibility guard for older runners.
+	SourceManifest *SourceManifest `json:"source_manifest,omitempty"`
+	Env            []string        `json:"env,omitempty"`
+	Deps           string          `json:"deps,omitempty"`
+	CPU            *int            `json:"cpu,omitempty"`
+	GPU            string          `json:"gpu,omitempty"`       // CUDA_VISIBLE_DEVICES value (e.g. "0" or "0,1")
+	GPUClass       string          `json:"gpu_class,omitempty"` // GPU class name (e.g. "A100") — resolved to device at runtime
+	GPUCount       int             `json:"gpu_count,omitempty"` // Exact GPU count requested on this host
+	GPUMem         *int            `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
+	Interconnect   string          `json:"interconnect,omitempty"`
+	CPUCores       int             `json:"cpu_cores,omitempty"`
+	Tags           []string        `json:"tags,omitempty"`
+	OutputDirs     []string        `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
+	Outputs        []string        `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
+	Produces       []string        `json:"produces,omitempty"`    // artifact specs this job produces
+	Needs          []string        `json:"needs,omitempty"`       // artifact specs this job needs
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -75,27 +79,28 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        OpAdd,
 		Job: &CommandJob{
-			ID:           entry.JobID,
-			RunID:        entry.RunID,
-			Dir:          entry.WorkingDir,
-			Cmd:          entry.Command,
-			Desc:         entry.Description,
-			SourceSHA:    entry.SourceSHA256,
-			SourceR2Key:  entry.SourceR2Key,
-			Env:          entry.EnvVars,
-			Deps:         entry.DepSpec,
-			CPU:          entry.CPUAllotment,
-			GPU:          entry.GPU,
-			GPUClass:     entry.GPUClass,
-			GPUCount:     entry.GPUCount,
-			GPUMem:       entry.GPUMemGB,
-			Interconnect: entry.Interconnect,
-			CPUCores:     entry.CPUCores,
-			Tags:         entry.Tags,
-			OutputDirs:   entry.OutputDirs,
-			Outputs:      entry.Outputs,
-			Produces:     entry.Produces,
-			Needs:        entry.Needs,
+			ID:             entry.JobID,
+			RunID:          entry.RunID,
+			Dir:            entry.WorkingDir,
+			Cmd:            entry.Command,
+			Desc:           entry.Description,
+			SourceSHA:      entry.SourceSHA256,
+			SourceR2Key:    entry.SourceR2Key,
+			SourceManifest: entry.SourceManifest,
+			Env:            entry.EnvVars,
+			Deps:           entry.DepSpec,
+			CPU:            entry.CPUAllotment,
+			GPU:            entry.GPU,
+			GPUClass:       entry.GPUClass,
+			GPUCount:       entry.GPUCount,
+			GPUMem:         entry.GPUMemGB,
+			Interconnect:   entry.Interconnect,
+			CPUCores:       entry.CPUCores,
+			Tags:           entry.Tags,
+			OutputDirs:     entry.OutputDirs,
+			Outputs:        entry.Outputs,
+			Produces:       entry.Produces,
+			Needs:          entry.Needs,
 		},
 	}
 }

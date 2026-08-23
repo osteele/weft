@@ -12,13 +12,18 @@ included; files that exist only in another git/jj revision are not. This
 is the single most common source of "works here, fails there" confusion; see
 `docs/guides/workflow-guide.md` § "Source sync".
 
-Two transport paths share the same snapshot semantics:
+The submit-time source closure is the execution identity on every queue-runner
+target:
 
-- **On-prem** (`internal/sync/sources.go`): rsync with `DefaultExcludes`
-  (VCS dirs, caches, `.weft-source*.sha256` markers) plus
-  `.gitignore`/`.weftignore`. rsync's delta transfer makes re-syncing an
-  unchanged tree near-free, so there is no DB-side "recently synced" skip
-  cache (the spec's `HostSourceState` is documented as superseded).
+- **Inventory queue runners** (`internal/ops/host_sync.go`): jobs with a
+  submit-time pin receive the complete source manifest in their queue payload.
+  The agent verifies the manifest hash and each canonical-tar hash, downloads
+  every root and diverted blob, and runs from a per-job directory. Changes to
+  the submitter's working tree after `weft run` therefore cannot change the
+  executed source. Queue runners that predate manifest support fail closed on
+  the closure-receipt compatibility key rather than running a partial root.
+  Rows created before submit-time pinning retain the legacy rsync path with
+  `DefaultExcludes`, `.gitignore`, and `.weftignore`.
 - **Cloud** (`internal/sync/r2upload.go`): submission captures and uploads an
   immutable source manifest before the job row becomes visible. After `local:` overlays are applied,
   regular files of at least 8 MiB are diverted into raw content-addressed
@@ -68,11 +73,11 @@ was synced (`provenance.go`):
   so a peer job re-syncing the same directory cannot invalidate this job's
   preflight.
 
-The queue runner's preflight (`internal/runner/runner.go`) verifies the
-per-job marker against the queued SHA before starting; persistent mismatch
-escalates the job to **R2-isolated dispatch** (the job runs from its own
-content-addressed tarball, skipping the shared rsync tree; see
-`EscalateToR2IsolatedSource` in the spec and `internal/ops/host_sync.go`).
+For pinned inventory jobs, the queue runner's preflight
+(`internal/runner/runner.go`) verifies and materializes the immutable manifest.
+For legacy rsync jobs, it verifies the per-job marker against the queued SHA;
+persistent mismatch escalates the job to the older single-tarball
+**R2-isolated dispatch** fallback.
 
 ## Data inputs
 

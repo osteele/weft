@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -53,22 +54,37 @@ type QueueEntry struct {
 	// when this job is queued in R2-isolated mode (Layer D fallback after a
 	// per-job marker failure). Empty for jobs that run against the shared
 	// working dir.
-	SourceR2Key  string
-	EnvVars      []string
-	DepSpec      string
-	CPUAllotment *int
-	GPU          string
-	GPUClass     string
-	GPUCount     int
-	GPUMemGB     *int
-	Interconnect string
-	CPUCores     int
-	Tags         []string
-	OutputDirs   []string
-	Outputs      []string
-	Produces     []string
-	Needs        []string
+	SourceR2Key string
+	// SourceManifest identifies the complete immutable source closure for a
+	// submit-time-pinned job. When present, the runner materializes every root
+	// and diverted blob instead of consulting the submitter's live working tree.
+	SourceManifest *SourceManifest
+	EnvVars        []string
+	DepSpec        string
+	CPUAllotment   *int
+	GPU            string
+	GPUClass       string
+	GPUCount       int
+	GPUMemGB       *int
+	Interconnect   string
+	CPUCores       int
+	Tags           []string
+	OutputDirs     []string
+	Outputs        []string
+	Produces       []string
+	Needs          []string
 }
+
+// SourceManifest is the queue protocol representation of an immutable source
+// closure. Roots are ordered with the project working directory first and
+// sibling path dependencies after it.
+type SourceManifest struct {
+	SHA256 string       `json:"sha256"`
+	Roots  []SourceRoot `json:"roots"`
+}
+
+// SourceRoot identifies one content-addressed archive and its diverted blobs.
+type SourceRoot = dataplane.SourceManifestRoot
 
 // AppendQueueEntryOptions configures the queue append operation
 type AppendQueueEntryOptions struct {

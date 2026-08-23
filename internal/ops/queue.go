@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -34,36 +35,87 @@ func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256
 // job (Layer D fallback): it downloads the tarball, extracts into a per-job
 // dir, and skips the marker check.
 func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
+	return appendJobToQueueWithSourceManifest(job, timeout, sourceSHA256, sourceR2Key, nil)
+}
+
+func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest) error {
+	pinned, ok, err := pinnedQueueSourceManifest(job)
+	if err != nil {
+		return err
+	}
+	if ok {
+		sourceManifest = pinned
+		sourceSHA256 = pinned.SHA256
+		// Older runners ignore source_manifest. Point their already-supported
+		// source_r2_key at the closure receipt JSON so they reject extraction
+		// instead of silently running an incomplete single-root snapshot.
+		sourceR2Key = dataplane.SourceClosureReceiptV2(pinned.SHA256)
+	}
 	var runID int64
 	if job.LatestRunID != nil {
 		runID = *job.LatestRunID
 	}
 	entry := opsqueue.QueueEntry{
-		JobID:        job.ID,
-		RunID:        runID,
-		WorkingDir:   job.WorkingDir,
-		Command:      job.Command,
-		Description:  job.Description,
-		SourceSHA256: sourceSHA256,
-		SourceR2Key:  sourceR2Key,
-		EnvVars:      job.EnvVars,
-		DepSpec:      job.DepSpec,
-		CPUAllotment: job.CPUAllotment,
-		GPU:          job.GPU,
-		GPUClass:     job.GPUClass,
-		GPUCount:     job.RequestedGPUCount(),
-		GPUMemGB:     job.GPUMemGB,
-		Interconnect: job.RequestedInterconnect(),
-		CPUCores:     job.RequestedCPUCores(),
-		Tags:         job.Tags,
-		OutputDirs:   job.OutputDirs,
-		Outputs:      job.Outputs,
-		Produces:     job.Produces,
-		Needs:        job.Needs,
+		JobID:          job.ID,
+		RunID:          runID,
+		WorkingDir:     job.WorkingDir,
+		Command:        job.Command,
+		Description:    job.Description,
+		SourceSHA256:   sourceSHA256,
+		SourceR2Key:    sourceR2Key,
+		SourceManifest: sourceManifest,
+		EnvVars:        job.EnvVars,
+		DepSpec:        job.DepSpec,
+		CPUAllotment:   job.CPUAllotment,
+		GPU:            job.GPU,
+		GPUClass:       job.GPUClass,
+		GPUCount:       job.RequestedGPUCount(),
+		GPUMemGB:       job.GPUMemGB,
+		Interconnect:   job.RequestedInterconnect(),
+		CPUCores:       job.RequestedCPUCores(),
+		Tags:           job.Tags,
+		OutputDirs:     job.OutputDirs,
+		Outputs:        job.Outputs,
+		Produces:       job.Produces,
+		Needs:          job.Needs,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
 	return opsqueue.AppendCommand(job.Host, addCmd, opts)
+}
+
+// pinnedQueueSourceManifest converts durable submit-time metadata into the
+// queue protocol without consulting the current working tree.
+func pinnedQueueSourceManifest(job *db.Job) (*opsqueue.SourceManifest, bool, error) {
+	if job == nil || job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Pin == nil {
+		return nil, false, nil
+	}
+	pin := job.Metadata.Source.Pin
+	if strings.TrimSpace(pin.Hash) == "" {
+		return nil, true, fmt.Errorf("job %d pinned source manifest has no hash", job.ID)
+	}
+	if len(pin.Roots) == 0 {
+		return nil, true, fmt.Errorf("job %d pinned source manifest has no roots", job.ID)
+	}
+	manifest := &opsqueue.SourceManifest{SHA256: pin.Hash, Roots: make([]opsqueue.SourceRoot, 0, len(pin.Roots))}
+	for i, root := range pin.Roots {
+		if strings.TrimSpace(root.MountBasename) == "" {
+			return nil, true, fmt.Errorf("job %d pinned source root %d has no mount basename", job.ID, i)
+		}
+		if strings.TrimSpace(root.Hash) == "" {
+			return nil, true, fmt.Errorf("job %d pinned source root %d has no hash", job.ID, i)
+		}
+		if strings.TrimSpace(root.R2Key) == "" {
+			return nil, true, fmt.Errorf("job %d pinned source root %d has no R2 key", job.ID, i)
+		}
+		manifest.Roots = append(manifest.Roots, opsqueue.SourceRoot{
+			MountBasename: root.MountBasename,
+			Hash:          root.Hash,
+			R2Key:         root.R2Key,
+			Blobs:         append([]dataplane.SourceBlob(nil), root.Blobs...),
+		})
+	}
+	return manifest, true, nil
 }
 
 // UpdateQueueEntryParams contains parameters for updating an existing queue entry

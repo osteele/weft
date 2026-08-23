@@ -3,6 +3,8 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/dataplane"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestSourceRegistry_RecordAndLookup(t *testing.T) {
@@ -79,6 +83,104 @@ func TestSourceCachePath_Stable(t *testing.T) {
 	if filepath.Dir(a) != sourceCacheDir() {
 		t.Errorf("cache path not under sourceCacheDir: %q", a)
 	}
+}
+
+func TestFetchSourceManifestMaterializesPinnedRootsAndBlobs(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "project.tar.gz", map[string]string{"version.txt": "submitted\n"})
+	writeSourceTarball(t, objectDir, "sibling.tar.gz", map[string]string{"lib.txt": "sibling\n"})
+	blobContent := "immutable payload\n"
+	blobHash := contentSHA256(blobContent)
+	writeFakeR2Object(t, objectDir, "assets/"+blobHash, blobContent)
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	roots := []opsqueue.SourceRoot{
+		{
+			MountBasename: "project",
+			Hash:          canonicalTarballSHA256(t, filepath.Join(objectDir, "project.tar.gz")),
+			R2Key:         "sources/project.tar.gz",
+			Blobs: []dataplane.SourceBlob{{
+				R2Key: "assets/" + blobHash, RelPath: "data/input.bin", SHA256: blobHash,
+			}},
+		},
+		{
+			MountBasename: "sibling",
+			Hash:          canonicalTarballSHA256(t, filepath.Join(objectDir, "sibling.tar.gz")),
+			R2Key:         "sources/sibling.tar.gz",
+		},
+	}
+	manifest := opsqueue.SourceManifest{SHA256: queueSourceManifestSHA256(t, roots), Roots: roots}
+	perJobRoot := filepath.Join(t.TempDir(), "source")
+	projectDir, err := fetchSourceManifestToDir("test-bucket", manifest, perJobRoot)
+	if err != nil {
+		t.Fatalf("fetchSourceManifestToDir: %v", err)
+	}
+	if projectDir != filepath.Join(perJobRoot, "project") {
+		t.Fatalf("project dir = %q", projectDir)
+	}
+	checks := map[string]string{
+		filepath.Join(projectDir, "version.txt"):        "submitted\n",
+		filepath.Join(projectDir, "data", "input.bin"):  blobContent,
+		filepath.Join(perJobRoot, "sibling", "lib.txt"): "sibling\n",
+	}
+	for filename, want := range checks {
+		got, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatalf("read %s: %v", filename, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", filename, got, want)
+		}
+	}
+}
+
+func TestFetchSourceManifestRejectsTamperedRoot(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "project.tar.gz", map[string]string{"version.txt": "tampered\n"})
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	roots := []opsqueue.SourceRoot{{
+		MountBasename: "project",
+		Hash:          strings.Repeat("a", 64),
+		R2Key:         "sources/project.tar.gz",
+	}}
+	manifest := opsqueue.SourceManifest{SHA256: queueSourceManifestSHA256(t, roots), Roots: roots}
+	_, err := fetchSourceManifestToDir("test-bucket", manifest, filepath.Join(t.TempDir(), "source"))
+	if err == nil || !strings.Contains(err.Error(), "canonical tar SHA-256") {
+		t.Fatalf("error = %v, want canonical tar SHA mismatch", err)
+	}
+}
+
+func canonicalTarballSHA256(t *testing.T, filename string) string {
+	t.Helper()
+	f, err := os.Open(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, gr); err != nil {
+		t.Fatal(err)
+	}
+	if err := gr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func queueSourceManifestSHA256(t *testing.T, roots []opsqueue.SourceRoot) string {
+	t.Helper()
+	data, err := dataplane.SourceManifestSHA256(roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestEnsureSourceFreshMountsRepairsMissingSibling(t *testing.T) {

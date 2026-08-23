@@ -886,7 +886,21 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			job.Backend = backend
 		}
 
-		// Layer D: R2-isolated source fallback. When a job has previously
+		pinnedManifest, hasPinnedSource, pinErr := pinnedQueueSourceManifest(job)
+		if pinErr != nil {
+			recordFailure(job.ID, "pinned source invalid", pinErr)
+			continue
+		}
+
+		// Submit-time-pinned jobs always run from their immutable R2 closure.
+		// The submitter's working tree may have changed while the job waited
+		// for placement, so rsyncing it here would break the receipt's source
+		// integrity guarantee.
+		usePinnedClosure := hasPinnedSource && backend != db.BackendSlurm
+		useR2Source := usePinnedClosure
+		sourceR2Key := ""
+
+		// Layer D: R2-isolated source fallback. When a legacy job has previously
 		// failed the runner's preflight provenance check (per-job marker
 		// from Layer C didn't hold — e.g. because rsync --delete reaped it
 		// before our exclude pattern shipped, or because the working dir
@@ -907,8 +921,6 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		//       sources than originally queued. The alternative is the
 		//       job sitting queued forever, which is what happens to
 		//       jobs that failed under the pre-92be8b4f1 runner.
-		useR2Source := false
-		sourceR2Key := ""
 		escalateToR2 := func(reasonTag string) {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			r2c, r2Err := getR2Client()
@@ -928,7 +940,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			syncLog.Info("escalated to R2-isolated source mode",
 				"job_id", job.ID, "host", host, "r2_key", key, "reason", reasonTag)
 		}
-		if backend != db.BackendSlurm && job.WorkingDir != "" {
+		if !usePinnedClosure && backend != db.BackendSlurm && job.WorkingDir != "" {
 			provFails, perr := db.CountJobDispatchFailuresMatching(database, job.ID, "source_provenance_mismatch")
 			if perr != nil {
 				syncLog.Debug("count prior provenance failures failed", "job_id", job.ID, "error", perr)
@@ -1129,7 +1141,9 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}
 
 		sourceSHA256 := ""
-		if job.WorkingDir != "" {
+		if usePinnedClosure {
+			sourceSHA256 = pinnedManifest.SHA256
+		} else if job.WorkingDir != "" {
 			sourceSHA256 = sourceSHAByDir[workdir.ToTildeRelative(job.WorkingDir)]
 		}
 		// Stamp the per-job source marker. The runner reads this file (not

@@ -128,6 +128,9 @@ func runQueue(args []string) {
 		r.EnsureSourceFromR2 = func(_ int64, r2Key, perJobDir string) error {
 			return fetchSourceTarballToDir(bucket, r2Key, perJobDir)
 		}
+		r.EnsureSourceManifestFromR2 = func(_ int64, manifest opsqueue.SourceManifest, perJobRoot string) (string, error) {
+			return fetchSourceManifestToDir(bucket, manifest, perJobRoot)
+		}
 	}
 	if err := r.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)

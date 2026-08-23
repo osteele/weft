@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -498,6 +499,65 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	}
 	if !contacted {
 		t.Error("expected contacted=true")
+	}
+}
+
+func TestEnsureQueuedJobsOnRemote_UsesPinnedClosureAfterWorkingTreeChanges(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workingDir := t.TempDir()
+	pinHash := strings.Repeat("a", 64)
+	rootHash := strings.Repeat("b", 64)
+	jobID, err := RecordQueuedJob(database, QueueJobParams{
+		Host:       "test-host",
+		WorkingDir: workingDir,
+		Command:    "cat version.txt",
+		Metadata: &db.JobMetadata{Source: &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{
+			Hash: pinHash,
+			Roots: []db.JobSourcePinRootMetadata{{
+				MountBasename: "project",
+				Hash:          rootHash,
+				R2Key:         "sources/v2/sha256/" + rootHash + ".tar.gz",
+				Blobs: []dataplane.SourceBlob{{
+					R2Key: "assets/blob", RelPath: "data/blob.bin", SHA256: strings.Repeat("c", 64),
+				}},
+			}},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobBackend(database, jobID, db.BackendQueueRunner); err != nil {
+		t.Fatalf("set backend: %v", err)
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		t.Fatal("pinned job consulted the changed live working tree")
+		return nil
+	}))
+	var addCommand string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		switch {
+		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
+			return "__WEFT_NO_STATE_FILE__\n", "", 0
+		case strings.Contains(command, `"op":"add"`):
+			addCommand = command
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, 5*time.Second, slog.Default())
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+	if ensured != 1 {
+		t.Fatalf("ensured = %d, want 1", ensured)
+	}
+	for _, want := range []string{`"source_manifest"`, pinHash, rootHash, `"data/blob.bin"`} {
+		if !strings.Contains(addCommand, want) {
+			t.Fatalf("queue add command does not contain %q:\n%s", want, addCommand)
+		}
 	}
 }
 

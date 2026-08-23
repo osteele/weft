@@ -71,6 +71,11 @@ type Runner struct {
 	// SourceR2Key fall back to the shared working dir with a debug log.
 	EnsureSourceFromR2 func(jobID int64, r2Key, perJobDir string) error
 
+	// EnsureSourceManifestFromR2 materializes a complete submit-time source
+	// closure and returns its project working directory. It takes precedence
+	// over the legacy single-tarball hook when SourceManifest is present.
+	EnsureSourceManifestFromR2 func(jobID int64, manifest opsqueue.SourceManifest, perJobRoot string) (string, error)
+
 	// Shutdown
 	stopCh chan struct{}
 }
@@ -640,12 +645,20 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		slog.Warn("archive prior attempt artifacts", "component", "runner", "job_id", jobID, "error", err)
 	}
 
-	// Preflight (Layer D): R2-isolated source. When the dispatcher
-	// escalated this job to R2-isolated mode after a prior provenance
-	// failure, download + extract the original tarball into a per-job dir
-	// and run from there. Bypasses the marker comparison since the SHA is
-	// implicit in the content-addressed R2 key.
-	if job.SourceR2Key != "" {
+	// Pinned jobs materialize and verify their complete submit-time source
+	// closure. Legacy Layer D jobs materialize one content-addressed tarball.
+	// Both run from per-job directories and bypass the shared-tree marker.
+	if job.SourceManifest != nil {
+		if r.EnsureSourceManifestFromR2 == nil {
+			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_unavailable: source_manifest=%s but the runner has no manifest materializer", job.SourceManifest.SHA256))
+		}
+		perJobRoot := perJobSourceDir(jobID)
+		manifestDir, err := r.EnsureSourceManifestFromR2(jobID, *job.SourceManifest, perJobRoot)
+		if err != nil {
+			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
+		}
+		expandedDir = manifestDir
+	} else if job.SourceR2Key != "" {
 		if r.EnsureSourceFromR2 == nil {
 			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key))
 		}
@@ -974,7 +987,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
 	cleanupDir := ""
-	if rj.Data.SourceR2Key != "" && r.PostJobManager != nil {
+	if usesIsolatedSource(rj.Data) && r.PostJobManager != nil {
 		cleanupDir = filepath.Dir(perJobSourceDir(jobID))
 	}
 	if r.PostJobManager != nil {
@@ -1004,7 +1017,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	removePerJobSourceMarker(rj.Data.Dir, jobID)
 	// In R2-isolated mode the runtime source lives under a per-job dir we
 	// own; remove it now so ~/.cache/weft/jobs/ doesn't grow unbounded.
-	if rj.Data.SourceR2Key != "" && cleanupDir == "" {
+	if usesIsolatedSource(rj.Data) && cleanupDir == "" {
 		removePerJobSourceDir(jobID)
 	}
 
@@ -1017,6 +1030,10 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 func perJobSourceDir(jobID int64) string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "weft", "jobs", fmt.Sprintf("%d", jobID), "source")
+}
+
+func usesIsolatedSource(job *opsqueue.CommandJob) bool {
+	return job != nil && (job.SourceManifest != nil || job.SourceR2Key != "")
 }
 
 // removePerJobSourceDir removes ~/.cache/weft/jobs/<id>/ for R2-isolated

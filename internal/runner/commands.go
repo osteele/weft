@@ -227,6 +227,12 @@ func mergeResourceFields(job, existing *opsqueue.CommandJob) {
 	if job.SourceSHA == "" && existing.SourceSHA != "" {
 		job.SourceSHA = existing.SourceSHA
 	}
+	if job.SourceR2Key == "" && existing.SourceR2Key != "" {
+		job.SourceR2Key = existing.SourceR2Key
+	}
+	if job.SourceManifest == nil && existing.SourceManifest != nil {
+		job.SourceManifest = existing.SourceManifest
+	}
 	if job.CPU == nil && existing.CPU != nil {
 		job.CPU = existing.CPU
 	}
