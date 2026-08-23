@@ -1220,6 +1220,92 @@ func TestSyncArtifactsForJob_FallsBackToConventionOutputs(t *testing.T) {
 	}
 }
 
+func TestSyncArtifactsForPinnedJobUsesRecordedRuntimeDirectory(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "~/code/project", "echo hi", "pinned inventory")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		Source: &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "manifest-a"}},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	previousLocal := syncLocalJobArtifacts
+	previousCompletion := completionRecordFunc
+	previousOutputs := syncJobOutputsFunc
+	t.Cleanup(func() {
+		syncLocalJobArtifacts = previousLocal
+		completionRecordFunc = previousCompletion
+		syncJobOutputsFunc = previousOutputs
+	})
+
+	runtimeDir := "/Users/agent/.cache/weft/jobs/1/source/project"
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return &runner.CompletionRecord{RuntimeWorkingDir: runtimeDir}, nil
+	}
+	syncLocalJobArtifacts = func(_ *sql.DB, got *db.Job, _ time.Duration) (artifacts.SyncResult, error) {
+		if got.WorkingDir != runtimeDir {
+			t.Fatalf("artifact working dir = %q, want %q", got.WorkingDir, runtimeDir)
+		}
+		return artifacts.SyncResult{Added: 1}, nil
+	}
+	syncJobOutputsFunc = func(*sql.DB, *db.Job) (artifacts.SyncResult, error) {
+		t.Fatal("convention output fallback must not run when the runtime manifest succeeds")
+		return artifacts.SyncResult{}, nil
+	}
+
+	if err := syncArtifactsForJob(database, job, nil, time.Second); err != nil {
+		t.Fatalf("syncArtifactsForJob: %v", err)
+	}
+}
+
+func TestSyncArtifactsForPinnedJobPrefersR2(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "~/code/project", "echo hi", "pinned inventory")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		Source: &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "manifest-a"}},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	previousCloud := syncCloudJobArtifactsFunc
+	previousLocal := syncLocalJobArtifacts
+	t.Cleanup(func() {
+		syncCloudJobArtifactsFunc = previousCloud
+		syncLocalJobArtifacts = previousLocal
+	})
+
+	cloudCalled := false
+	syncCloudJobArtifactsFunc = func(*sql.DB, *r2.Client, *db.Job) (artifacts.SyncResult, error) {
+		cloudCalled = true
+		return artifacts.SyncResult{Added: 1}, nil
+	}
+	syncLocalJobArtifacts = func(*sql.DB, *db.Job, time.Duration) (artifacts.SyncResult, error) {
+		t.Fatal("host fallback must not run when R2 sync succeeds")
+		return artifacts.SyncResult{}, nil
+	}
+
+	if err := syncArtifactsForJob(database, job, &r2.Client{}, time.Second); err != nil {
+		t.Fatalf("syncArtifactsForJob: %v", err)
+	}
+	if !cloudCalled {
+		t.Fatal("expected R2 sync path")
+	}
+}
+
 func TestRunArtifactSync_PrintsZeroConventionOutputs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -1513,16 +1599,20 @@ func TestSyncJobOutputsSyncsCompletionRecordFiles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	workDir := t.TempDir()
+	runtimeDir := "/Users/agent/.cache/weft/jobs/42/source/project"
 	job := syncJobOutputsTestJob(t, database, workDir, time.Now().Add(-time.Hour).Unix())
 	stubSyncJobOutputsRemote(t)
 	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
 		return &runner.CompletionRecord{
-			ExitCode:    0,
-			OutputFiles: []runner.OutputFile{{RelPath: "output/result.json", SizeBytes: 2}},
+			ExitCode:          0,
+			RuntimeWorkingDir: runtimeDir,
+			OutputFiles:       []runner.OutputFile{{RelPath: "output/result.json", SizeBytes: 2}},
 		}, nil
 	}
 	var syncedPaths []string
+	var syncedRemoteDir string
 	syncOutputFilesBackFunc = func(host, remoteDir, localDir string, files []string, totalSizeMB, maxMB int) error {
+		syncedRemoteDir = remoteDir
 		syncedPaths = files
 		path := filepath.Join(localDir, "output", "result.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1541,12 +1631,52 @@ func TestSyncJobOutputsSyncsCompletionRecordFiles(t *testing.T) {
 	if len(syncedPaths) != 1 || syncedPaths[0] != "output/result.json" {
 		t.Fatalf("synced paths = %v", syncedPaths)
 	}
+	if syncedRemoteDir != runtimeDir {
+		t.Fatalf("remote dir = %q, want recorded runtime dir %q", syncedRemoteDir, runtimeDir)
+	}
 	entry, err := db.FindArtifactByNameOrPath(database, job.ID, "output/result.json")
 	if err != nil {
 		t.Fatalf("FindArtifactByNameOrPath: %v", err)
 	}
 	if entry.Path != "output/result.json" {
 		t.Fatalf("artifact path = %q", entry.Path)
+	}
+}
+
+func TestSyncJobOutputsPinnedJobRefusesSharedWorkingDirFallback(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Setenv("HOME", t.TempDir())
+
+	job := syncJobOutputsTestJob(t, database, t.TempDir(), time.Now().Add(-time.Hour).Unix())
+	if err := db.SetJobMetadata(database, job.ID, &db.JobMetadata{
+		Source: &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "manifest-a"}},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	job, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	stubSyncJobOutputsRemote(t)
+	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
+		return &runner.CompletionRecord{
+			ExitCode:    0,
+			OutputFiles: []runner.OutputFile{{RelPath: "output/result.json", SizeBytes: 2}},
+		}, nil
+	}
+	var warning string
+	syncOutputWarnf = func(format string, args ...any) { warning = fmt.Sprintf(format, args...) }
+
+	result, err := syncJobOutputs(database, job)
+	if err != nil {
+		t.Fatalf("syncJobOutputs: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("Added = %d, want 0", result.Added)
+	}
+	if !strings.Contains(warning, "refusing to inspect the shared working directory") {
+		t.Fatalf("warning = %q, want safe pinned-source refusal", warning)
 	}
 }
 
@@ -1558,15 +1688,19 @@ func TestSyncJobOutputsRemoteDiscoveryFallback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	workDir := t.TempDir()
+	runtimeDir := "/Users/agent/.cache/weft/jobs/42/source/project"
 	start := time.Now().Add(-time.Hour).Unix()
 	end := start + 600
 	job := syncJobOutputsTestJob(t, database, workDir, start)
 	stubSyncJobOutputsRemote(t)
 	completionRecordFunc = func(*db.Job) (*runner.CompletionRecord, error) {
-		return &runner.CompletionRecord{ExitCode: 0, StartTime: start, EndTime: end}, nil
+		return &runner.CompletionRecord{ExitCode: 0, StartTime: start, EndTime: end, RuntimeWorkingDir: runtimeDir}, nil
 	}
 	var gotLower, gotUpper time.Time
 	discoverRemoteJobOutputFilesFunc = func(job *db.Job, lower, upper time.Time) ([]runner.OutputFile, error) {
+		if job.WorkingDir != runtimeDir {
+			t.Fatalf("discovery working dir = %q, want %q", job.WorkingDir, runtimeDir)
+		}
 		gotLower, gotUpper = lower, upper
 		return []runner.OutputFile{{RelPath: "output/found.json", SizeBytes: 2}}, nil
 	}
@@ -2068,7 +2202,6 @@ func TestRunArtifactListOnPremEmptyShowsHostOutputHint(t *testing.T) {
 	out := outBuf.String()
 	for _, want := range []string{
 		"No cached artifacts.",
-		"On-prem job outputs are not uploaded to R2.",
 		"cool30:/mnt/project/output/",
 		"weft artifact sync " + ids.FormatJobID(jobID),
 	} {
@@ -2089,12 +2222,28 @@ func TestArtifactNotFoundMessageForOnPremNamesHostOutputLocations(t *testing.T) 
 	got := artifactNotFoundMessage(job, "metrics.json", true, false)
 	for _, want := range []string{
 		"checked local cache, R2, cool30 via artifact sync",
-		"on-prem outputs are not uploaded to R2",
 		"cool30:/mnt/project/output/",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("message missing %q, got %q", want, got)
 		}
+	}
+}
+
+func TestArtifactNotFoundMessagePinnedJobOmitsSharedCheckoutLocations(t *testing.T) {
+	job := &db.Job{
+		ID:         42,
+		Host:       "studio",
+		WorkingDir: "~/code/project",
+		OutputDirs: []string{"output/"},
+		Metadata: &db.JobMetadata{Source: &db.JobSourceMetadata{
+			Pin: &db.JobSourcePinMetadata{Hash: "manifest-a"},
+		}},
+	}
+
+	got := artifactNotFoundMessage(job, "metrics.json", true, false)
+	if strings.Contains(got, "studio:~/code/project/output/") {
+		t.Fatalf("message guessed shared-checkout path for pinned job: %q", got)
 	}
 }
 
@@ -2410,7 +2559,7 @@ func TestSyncJobOutputsWarnsWhenR2SyncDegrades(t *testing.T) {
 	if _, err := syncJobOutputs(database, job); err != nil {
 		t.Fatalf("syncJobOutputs: %v", err)
 	}
-	if !strings.Contains(warning, "falling back to the host's working tree") {
+	if !strings.Contains(warning, "falling back to the host's recorded runtime directory") {
 		t.Fatalf("warning = %q, want R2 degradation notice", warning)
 	}
 }

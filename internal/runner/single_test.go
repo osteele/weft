@@ -186,6 +186,7 @@ func TestWriteCompletionRecordIncludesFinalRSS(t *testing.T) {
 	err := WriteCompletionRecord(paths, ExitInfo{ExitCode: 0}, RunningJobState{
 		FinalRSSKB:    12345,
 		PeakRSSFromTS: 20000,
+		DiskPath:      "/runtime/jobs/77/source/project",
 	}, "", "", 100, 130, nil)
 	if err != nil {
 		t.Fatalf("WriteCompletionRecord: %v", err)
@@ -200,6 +201,9 @@ func TestWriteCompletionRecordIncludesFinalRSS(t *testing.T) {
 	}
 	if rec.FinalRSSKB != 12345 {
 		t.Fatalf("final_rss_kb = %d, want 12345", rec.FinalRSSKB)
+	}
+	if rec.RuntimeWorkingDir != "/runtime/jobs/77/source/project" {
+		t.Fatalf("runtime_working_dir = %q, want attempt directory", rec.RuntimeWorkingDir)
 	}
 }
 

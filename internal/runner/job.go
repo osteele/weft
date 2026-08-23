@@ -641,6 +641,8 @@ type PublicationReport struct {
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
+	RuntimeWorkingDir string `json:"runtime_working_dir,omitempty"`
+
 	RunID            int64               `json:"run_id,omitempty"`
 	ExitCode         int                 `json:"exit_code"`
 	Signal           string              `json:"signal,omitempty"`
@@ -738,6 +740,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		EndTime:          endTime,
 		OutputFiles:      outputFiles,
 	}
+	rec.RuntimeWorkingDir = rs.DiskPath
 	if ei.Signaled {
 		rec.Signal = fmt.Sprintf("%d", int(ei.Signal))
 		rec.SignalName = ei.SignalName()

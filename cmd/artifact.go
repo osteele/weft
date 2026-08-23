@@ -290,7 +290,28 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2%s (skipped %d)\n", ids.FormatJobID(jobID), result.Added, syncDestinationNote(jobID, result.Added), result.Skipped)
 			continue
 		}
-		result, err := syncLocalJobArtifacts(database, job, NormalSyncTimeout)
+		if jobUsesAttemptScopedSource(job) && r2Client != nil {
+			result, syncErr := syncCloudJobArtifactsFunc(database, r2Client, job)
+			if syncErr == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d artifacts from R2%s (skipped %d)\n", ids.FormatJobID(jobID), result.Added, syncDestinationNote(jobID, result.Added), result.Skipped)
+				continue
+			}
+			if !errors.Is(syncErr, artifacts.ErrManifestMissing) {
+				syncOutputWarnf("warning: job %s: R2 artifact sync failed (%v); trying the host runtime directory\n",
+					ids.FormatJobID(job.ID), syncErr)
+			}
+		}
+		artifactJob, ok := hostArtifactJob(job)
+		if !ok {
+			outResult, syncErr := syncJobOutputsFunc(database, job)
+			if syncErr == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Job %s: synced %d convention-based outputs%s\n", ids.FormatJobID(jobID), outResult.Added, syncDestinationNote(jobID, outResult.Added))
+				continue
+			}
+			errorsList = append(errorsList, fmt.Sprintf("job %s: convention-based output sync failed: %v", ids.FormatJobID(jobID), syncErr))
+			continue
+		}
+		result, err := syncLocalJobArtifacts(database, artifactJob, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				// Try convention-based output sync instead
@@ -365,7 +386,25 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 			}
 			continue
 		}
-		result, err := syncOutstandingJobArtifacts(database, job, NormalSyncTimeout)
+		if jobUsesAttemptScopedSource(job) && r2Client != nil {
+			cloudResult, syncErr := syncCloudJobArtifacts(database, r2Client, job)
+			if syncErr == nil {
+				if cloudResult.Added > 0 {
+					syncedJobs++
+					totalAdded += cloudResult.Added
+					totalSkipped += cloudResult.Skipped
+				}
+				continue
+			}
+			if !errors.Is(syncErr, artifacts.ErrManifestMissing) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to sync R2 artifacts for job %s: %v\n", ids.FormatJobID(job.ID), syncErr)
+			}
+		}
+		artifactJob, ok := hostArtifactJob(job)
+		if !ok {
+			continue
+		}
+		result, err := syncOutstandingJobArtifacts(database, artifactJob, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
 				continue
@@ -534,7 +573,7 @@ func warnOnFailedCloudOutputUpload(cmd *cobra.Command, jobID int64) {
 	if rec.OutputUpload.Status != runner.UploadStatusFailed && rec.OutputUpload.Status != runner.UploadStatusPartial {
 		return
 	}
-	fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: Output upload failed — outputs were not uploaded to R2 (disk may have been full)")
+	fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: Output upload did not complete — some outputs may be missing from R2")
 	for _, d := range rec.OutputUpload.Dirs {
 		if d.Status != runner.UploadStatusFailed && d.Status != runner.UploadStatusPartial {
 			continue
@@ -2340,9 +2379,9 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 	return results, nil
 }
 
-// syncJobOutputs rsyncs convention-based output directories from a remote host
-// to the local working dir. For cloud jobs, it downloads outputs from R2
-// instead. The result count is the number of files downloaded or copied.
+// syncJobOutputs retrieves convention-based output directories from R2 or the
+// remote attempt's recorded runtime directory. The result count is the number
+// of files downloaded or copied.
 //
 // Attribution rule (spec: Attribution in specs/job-lifecycle.allium): files
 // are registered as a job's outputs only on remote evidence — the runner's
@@ -2360,7 +2399,7 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return cloudResult, nil
 	}
 	if cloudErr != nil && !errors.Is(cloudErr, errR2NotConfigured) {
-		syncOutputWarnf("warning: job %s: R2 output sync failed (%v); falling back to the host's working tree, which a later job may have overwritten\n",
+		syncOutputWarnf("warning: job %s: R2 output sync failed (%v); falling back to the host's recorded runtime directory\n",
 			ids.FormatJobID(job.ID), cloudErr)
 	}
 
@@ -2371,12 +2410,6 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
 		return artifacts.SyncResult{}, nil
-	}
-
-	if result, err := syncRecordedJobOutputAssets(database, job); err != nil {
-		return artifacts.SyncResult{}, err
-	} else if result.Added > 0 {
-		return result, nil
 	}
 
 	// A confirmed-absent record leaves rec nil and lets discovery run below;
@@ -2399,6 +2432,23 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		if err := db.UpdateStartTime(database, job.ID, rec.StartTime); err == nil {
 			job.StartTime = rec.StartTime
 		}
+	}
+
+	remoteDir := job.WorkingDir
+	if rec != nil && strings.TrimSpace(rec.RuntimeWorkingDir) != "" {
+		remoteDir = rec.RuntimeWorkingDir
+	} else if jobUsesAttemptScopedSource(job) {
+		syncOutputWarnf("warning: job %s used an attempt-scoped source, but its completion record does not identify the runtime directory; refusing to inspect the shared working directory\n",
+			ids.FormatJobID(job.ID))
+		return artifacts.SyncResult{}, nil
+	}
+	remoteJob := *job
+	remoteJob.WorkingDir = remoteDir
+
+	if result, err := syncRecordedJobOutputAssets(database, &remoteJob); err != nil {
+		return artifacts.SyncResult{}, err
+	} else if result.Added > 0 {
+		return result, nil
 	}
 
 	lower := outputSyncThreshold(job)
@@ -2425,7 +2475,7 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 			}
 			return storeLocalOutputFiles(database, job.ID, localDir, files)
 		}
-		discovered, err := discoverRemoteJobOutputFilesFunc(job, lower, upper)
+		discovered, err := discoverRemoteJobOutputFilesFunc(&remoteJob, lower, upper)
 		if err != nil {
 			return artifacts.SyncResult{}, err
 		}
@@ -2435,7 +2485,7 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 		return artifacts.SyncResult{}, nil
 	}
 	totalMB := runner.TotalSizeMB(outputFiles)
-	if err := syncOutputFilesBackFunc(job.Host, job.WorkingDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
+	if err := syncOutputFilesBackFunc(job.Host, remoteDir, localDir, outputFilePaths(outputFiles), totalMB, 0); err != nil {
 		return artifacts.SyncResult{}, err
 	}
 	// rsync -a preserves mtimes, so the synced copies carry the remote
@@ -2447,6 +2497,38 @@ func syncJobOutputs(database *sql.DB, job *db.Job) (artifacts.SyncResult, error)
 			ids.FormatJobID(job.ID), dropped)
 	}
 	return storeLocalOutputFiles(database, job.ID, localDir, windowed)
+}
+
+func jobUsesAttemptScopedSource(job *db.Job) bool {
+	if job == nil || job.Metadata == nil || job.Metadata.Source == nil {
+		return false
+	}
+	source := job.Metadata.Source
+	if source.Pin != nil {
+		return true
+	}
+	if source.Execution == nil {
+		return false
+	}
+	switch source.Execution.DispatchMode {
+	case "pinned_inventory_manifest", "legacy_r2_tarball":
+		return true
+	default:
+		return false
+	}
+}
+
+func hostArtifactJob(job *db.Job) (*db.Job, bool) {
+	if !jobUsesAttemptScopedSource(job) {
+		return job, true
+	}
+	rec, err := completionRecordFunc(job)
+	if err != nil || rec == nil || strings.TrimSpace(rec.RuntimeWorkingDir) == "" {
+		return nil, false
+	}
+	copyJob := *job
+	copyJob.WorkingDir = rec.RuntimeWorkingDir
+	return &copyJob, true
 }
 
 func syncRecordedJobOutputAssets(database *sql.DB, job *db.Job) (artifacts.SyncResult, error) {
@@ -2856,7 +2938,6 @@ func artifactNotFoundMessage(job *db.Job, token string, r2Checked, r2ListFailed 
 		msg += "; the R2 listing failed, so it may exist in R2 but could not be confirmed"
 	}
 	if job != nil && job.HasInventoryHost() {
-		msg += "; on-prem outputs are not uploaded to R2"
 		if locations := inventoryOutputLocations(job); len(locations) > 0 {
 			msg += "; expected output locations include " + strings.Join(locations, ", ")
 		}
@@ -2865,11 +2946,11 @@ func artifactNotFoundMessage(job *db.Job, token string, r2Checked, r2ListFailed 
 }
 
 func writeInventoryArtifactHint(cmd *cobra.Command, job *db.Job) {
-	fmt.Fprintln(cmd.OutOrStdout(), "On-prem job outputs are not uploaded to R2.")
 	if locations := inventoryOutputLocations(job); len(locations) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations include %s.\n", strings.Join(locations, ", "))
+		fmt.Fprintln(cmd.OutOrStdout(), "Inspect those files over SSH if artifact sync cannot retrieve them.")
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Run `weft artifact sync %s` to pull host outputs into the local artifact cache, or inspect the files over SSH.\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Run `weft artifact sync %s` to retry R2 and host-backed retrieval.\n", ids.FormatJobID(job.ID))
 }
 
 func writeNoCloudArtifactsYetHint(cmd *cobra.Command, job *db.Job) {
@@ -2886,17 +2967,17 @@ func writeNoCloudArtifactsYetHint(cmd *cobra.Command, job *db.Job) {
 // outputs after `list` already ran the same host discovery that get/cat perform
 // on a cache miss. It deliberately omits the "run `weft artifact sync`" advice —
 // that sync just ran and found nothing — and instead states the conclusion and
-// where to look over SSH.
+// where to look over SSH when the job used a shared working tree.
 func writeNoAttributableOutputsHint(cmd *cobra.Command, job *db.Job) {
 	fmt.Fprintf(cmd.OutOrStdout(), "No outputs attributable to job %s in its run window.\n", ids.FormatJobID(job.ID))
 	if locations := inventoryOutputLocations(job); len(locations) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Expected output locations: %s.\n", strings.Join(locations, ", "))
-		fmt.Fprintln(cmd.OutOrStdout(), "If files exist there, inspect them over SSH; on-prem outputs are not uploaded to R2.")
+		fmt.Fprintln(cmd.OutOrStdout(), "If files exist there, inspect them over SSH.")
 	}
 }
 
 func inventoryOutputLocations(job *db.Job) []string {
-	if job == nil || !job.HasInventoryHost() {
+	if job == nil || !job.HasInventoryHost() || jobUsesAttemptScopedSource(job) {
 		return nil
 	}
 	root := strings.TrimSpace(job.EffectiveWorkingDir())
@@ -2952,7 +3033,26 @@ func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, tim
 		}
 		return nil
 	}
-	_, err := syncLocalJobArtifacts(database, job, timeout)
+
+	// Current inventory jobs run from pinned, attempt-scoped sources and
+	// publish declared artifacts to the same R2 layout as rental jobs. Prefer
+	// that durable copy before consulting the runtime directory.
+	if jobUsesAttemptScopedSource(job) && r2Client != nil {
+		if _, r2Err := syncCloudJobArtifactsFunc(database, r2Client, job); r2Err == nil {
+			return nil
+		} else if !errors.Is(r2Err, artifacts.ErrManifestMissing) {
+			syncOutputWarnf("warning: job %s: R2 artifact sync failed (%v); trying the host runtime directory\n",
+				ids.FormatJobID(job.ID), r2Err)
+		}
+	}
+
+	artifactJob, ok := hostArtifactJob(job)
+	if !ok {
+		_, err := syncJobOutputsFunc(database, job)
+		return err
+	}
+
+	_, err := syncLocalJobArtifacts(database, artifactJob, timeout)
 	if errors.Is(err, artifacts.ErrManifestMissing) {
 		_, err = syncJobOutputsFunc(database, job)
 	} else if err != nil && hasFilesystemOutputDeclarations(job) {
