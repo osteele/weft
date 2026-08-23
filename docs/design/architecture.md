@@ -498,7 +498,7 @@ covered in [Artifact Store](artifacts.md).
 
 ## Queue System
 
-The queue system allows jobs to run on a remote host without requiring the local machine to stay connected. The queue runner can run multiple jobs concurrently while keeping total CPU usage under a target cap; per-job CPU allotments come from the database (default when unset).
+The queue system allows jobs to run on a remote host without requiring the local machine to stay connected. The queue runner can run multiple jobs concurrently while keeping CPU allotments and RAM commitments under host targets. Per-job CPU allotments come from the database (default when unset) and adapt to observed process-tree use after warm-up; RAM reservations use the larger of declared host memory and predicted peak RSS.
 
 ### Queue Architecture
 

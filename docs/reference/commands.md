@@ -1981,6 +1981,10 @@ fit under the host target and measured host load is below its safety ceiling.
 It also reserves host RAM from `--cpu-mem` and the predictor's peak-RSS upper
 bound, whichever is larger, and holds a job when the concurrent set would
 exceed 90% of host RAM.
+After a two-minute warm-up, the runner observes each job's full process tree and
+adapts its CPU allotment when persistent 15-second samples show sustained over-
+or under-use. This can release capacity for another queued job without treating
+a short startup spike as steady demand.
 NVIDIA GPU jobs must also obtain compatible device capacity and VRAM headroom.
 The CPU gate still applies to them, with a smaller default allotment for
 GPU-bound work. The runner does not measure or reserve Apple/MPS utilization.

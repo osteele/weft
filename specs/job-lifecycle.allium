@@ -1800,11 +1800,11 @@ rule AdaptiveCPUAllotment {
     requires: job.status = running
     requires: now >= job.warmup_until
 
-    -- The runner adjusts local_cpu_allotment based on observed CPU use.
-    -- A move (up or down) only fires when the observation has held for
-    -- a majority of recent windows — transient spikes do not change the
-    -- allotment. Specific step sizes and window shapes are runner
-    -- implementation details.
+    -- The runner samples the complete process tree every 15 seconds and
+    -- normalizes summed per-core CPU use by the host CPU count. Sampling for
+    -- allotment control begins after a 120-second warm-up. Each decision uses
+    -- the most recent four samples (60 seconds), and a move fires when at least
+    -- three of the last five window decisions agree.
     if job.observation_persistently_above(job.local_cpu_allotment):
         -- legacy: ensures: job.local_cpu_allotment increases
                  -- legacy: bounded by config.max_cpu_allotment
@@ -1819,6 +1819,10 @@ rule AdaptiveCPUAllotment {
         -- allotment. Decreases use a dead-band below the current
         -- allotment so jobs that land slightly under their allotment
         -- are not immediately decayed.
+        -- Persistent over-use raises the allotment toward observed average
+        -- plus 10 percentage points, capped by remaining host headroom and a
+        -- 100% per-job maximum. Persistent use more than 10 points below the
+        -- allotment decays it by 10 points, with a 10% minimum.
 }
 
 rule CPUAllotmentEditApplied {

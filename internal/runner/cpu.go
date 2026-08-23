@@ -100,7 +100,43 @@ func (cfg CPUConfig) SampleCount() int {
 	if cfg.SampleInterval <= 0 {
 		return 4
 	}
-	return cfg.SampleWindow / cfg.SampleInterval
+	return max(cfg.SampleWindow/cfg.SampleInterval, 1)
+}
+
+// CPUAllotmentState is the replayable state consumed by one CPU observation.
+type CPUAllotmentState struct {
+	WarmupUntil    int64
+	LocalAllotment int
+	Samples        []int
+	OverHist       []int
+	UnderHist      []int
+}
+
+// ApplyCPUObservation advances the adaptive allotment controller by one host-
+// normalized process-tree CPU sample. Samples before WarmupUntil are ignored.
+func (cfg CPUConfig) ApplyCPUObservation(state CPUAllotmentState, atUnix int64, hostPct, totalAllotment int) (CPUAllotmentState, bool) {
+	if atUnix < state.WarmupUntil {
+		return state, false
+	}
+	next := CPUAllotmentState{
+		WarmupUntil:    state.WarmupUntil,
+		LocalAllotment: state.LocalAllotment,
+		Samples:        append([]int(nil), state.Samples...),
+		OverHist:       append([]int(nil), state.OverHist...),
+		UnderHist:      append([]int(nil), state.UnderHist...),
+	}
+	next.Samples = appendBounded(next.Samples, max(hostPct, 0), cfg.SampleCount())
+	allotment, overHist, underHist := cfg.AdjustAllotment(
+		next.LocalAllotment, next.Samples, next.OverHist, next.UnderHist, totalAllotment,
+	)
+	changed := allotment != next.LocalAllotment
+	next.LocalAllotment = allotment
+	next.OverHist = overHist
+	next.UnderHist = underHist
+	if changed {
+		next.Samples = nil
+	}
+	return next, changed
 }
 
 // AdjustAllotment determines if and how to adjust a job's allotment based on

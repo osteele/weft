@@ -88,3 +88,12 @@ func TestAdjustAllotment_RespectsMinAllotment(t *testing.T) {
 		t.Errorf("expected minimum %d, got %d", cfg.MinAllotment, newAllotment)
 	}
 }
+
+func TestSampleCountHasMinimumOfOne(t *testing.T) {
+	cfg := DefaultCPUConfig()
+	cfg.SampleWindow = 5
+	cfg.SampleInterval = 15
+	if got := cfg.SampleCount(); got != 1 {
+		t.Fatalf("SampleCount = %d, want 1", got)
+	}
+}

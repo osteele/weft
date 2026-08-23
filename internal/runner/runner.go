@@ -37,6 +37,7 @@ type Runner struct {
 	ramTargetPercent int
 	hostMemoryStats  func() (totalKB, usedKB, availableKB int64)
 	processRSSKB     func(pid int) int64
+	observeJobCPU    func(jobID int64, cpuCount int) (hostPct int, ok bool)
 
 	// File paths
 	commandsFile string
@@ -127,7 +128,7 @@ func DefaultConfig() Config {
 
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
-	return &Runner{
+	runner := &Runner{
 		queueDir:         cfg.QueueDir,
 		logDir:           cfg.LogDir,
 		setupTimeout:     cfg.SetupTimeout,
@@ -147,6 +148,8 @@ func New(cfg Config) *Runner {
 		nowFunc:          time.Now,
 		stopCh:           make(chan struct{}),
 	}
+	runner.observeJobCPU = runner.observeRunningJobCPU
+	return runner
 }
 
 func (r *Runner) now() time.Time {
@@ -1419,34 +1422,35 @@ func (r *Runner) adjustRunningJobAllotments() {
 
 	for _, jobIDStr := range r.state.RunningIDs() {
 		jobID := mustParseInt64(jobIDStr)
-		paths := NewJobPaths(r.logDir, jobID)
-
 		rs, ok := r.state.GetRunning(jobIDStr)
 		if !ok || rs.WarmupUntil > now.Unix() {
 			continue
 		}
 
-		pid, ok := ReadPIDFile(paths.PID)
-		if !ok || !CheckPIDAlive(pid) {
+		hostPct, ok := r.observeJobCPU(jobID, r.cpuCount)
+		if !ok {
 			continue
 		}
 
-		hostPct := ProcCPUHostPct(pid, r.cpuCount)
-		rs.Samples = appendBounded(rs.Samples, hostPct, r.cpuConfig.SampleCount())
-
-		newAllotment, newOverHist, newUnderHist := r.cpuConfig.AdjustAllotment(
-			rs.LocalAllotment, rs.Samples, rs.OverHist, rs.UnderHist, r.state.TotalAllotment())
-		if newAllotment != rs.LocalAllotment {
-			if newAllotment > rs.LocalAllotment {
-				oplog.LogJob("job.allotment_increase", jobID, "", oplog.WithDetailf("cpu=%d", newAllotment))
+		oldAllotment := rs.LocalAllotment
+		next, changed := r.cpuConfig.ApplyCPUObservation(CPUAllotmentState{
+			WarmupUntil:    rs.WarmupUntil,
+			LocalAllotment: rs.LocalAllotment,
+			Samples:        rs.Samples,
+			OverHist:       rs.OverHist,
+			UnderHist:      rs.UnderHist,
+		}, now.Unix(), hostPct, r.state.TotalAllotment())
+		if changed {
+			if next.LocalAllotment > oldAllotment {
+				oplog.LogJob("job.allotment_increase", jobID, "", oplog.WithDetailf("cpu=%d", next.LocalAllotment))
 			} else {
-				oplog.LogJob("job.allotment_decay", jobID, "", oplog.WithDetailf("cpu=%d", newAllotment))
+				oplog.LogJob("job.allotment_decay", jobID, "", oplog.WithDetailf("cpu=%d", next.LocalAllotment))
 			}
-			rs.LocalAllotment = newAllotment
-			rs.Samples = nil
 		}
-		rs.OverHist = newOverHist
-		rs.UnderHist = newUnderHist
+		rs.LocalAllotment = next.LocalAllotment
+		rs.Samples = next.Samples
+		rs.OverHist = next.OverHist
+		rs.UnderHist = next.UnderHist
 
 		r.state.SetRunning(jobIDStr, rs)
 		updated = true
@@ -1455,6 +1459,15 @@ func (r *Runner) adjustRunningJobAllotments() {
 	if updated {
 		r.saveState()
 	}
+}
+
+func (r *Runner) observeRunningJobCPU(jobID int64, cpuCount int) (int, bool) {
+	paths := NewJobPaths(r.logDir, jobID)
+	pid, ok := ReadPIDFile(paths.PID)
+	if !ok || !CheckPIDAlive(pid) {
+		return 0, false
+	}
+	return ProcCPUHostPct(pid, cpuCount), true
 }
 
 // saveState saves the runner state to disk, logging any error.

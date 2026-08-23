@@ -399,6 +399,28 @@ func TestWarmupActiveUsesInjectedClock(t *testing.T) {
 	}
 }
 
+func TestAdjustRunningJobAllotmentsUsesInjectedObservation(t *testing.T) {
+	r, _ := initTestRunner(t)
+	r.cpuConfig.SampleInterval = 1
+	r.cpuConfig.SampleWindow = 1
+	r.cpuConfig.HysteresisThreshold = 1
+	r.cpuConfig.HysteresisWindow = 1
+	r.observeJobCPU = func(jobID int64, cpuCount int) (int, bool) {
+		if jobID != 900 || cpuCount != r.cpuCount {
+			t.Fatalf("observation request = job %d, cores %d", jobID, cpuCount)
+		}
+		return 5, true
+	}
+	r.state.AddRunning("900", RunningJobState{WarmupUntil: r.now().Add(-time.Second).Unix(), LocalAllotment: 50})
+
+	r.adjustRunningJobAllotments()
+
+	state, ok := r.state.GetRunning("900")
+	if !ok || state.LocalAllotment != 40 {
+		t.Fatalf("running state = %+v, want allotment 40", state)
+	}
+}
+
 func TestEvaluateLoadedPendingJobAppliesCPUCapacityToEveryJob(t *testing.T) {
 	r, _ := initTestRunner(t)
 	r.cpuConfig.HostLoadCeiling = 0

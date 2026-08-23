@@ -48,9 +48,10 @@ driver, CUDA, GPU architecture, and cloud-image requirements from the project's
 GPU, model, and configuration sweeps.
 
 An inventory host can run several jobs concurrently when its CPU, RAM, and GPU
-admission gates allow it. The queue runner combines live RAM use with declared
-or predicted per-job reservations, preventing concurrent model-load commitments
-from exceeding its host target. See
+admission gates allow it. The queue runner adapts CPU allotments from observed
+process-tree use and combines live RAM use with declared or predicted per-job
+reservations, preventing concurrent model-load commitments from exceeding its
+host target. See
 [Host-local RAM admission](docs/architecture/ram-admission.md).
 
 ## Interfaces
