@@ -30,6 +30,23 @@ multi-node MPI scheduling remain outside Weft's scope. See
 [Comparison to SkyPilot](docs/design/comparison-to-skypilot.md) for the design
 boundaries.
 
+## Operating Model
+
+The **control machine** is the computer where you run the Weft CLI; it owns the
+job ledger and placement policy. An **inventory host** is a workstation or
+server you already control, normally named by an SSH target. A **rental** is a
+temporary Vast.ai or RunPod instance. Each execution host runs a persistent
+Weft **agent** that owns its queue and job processes.
+
+At submission, Weft records an immutable **source closure**: the working tree
+and any local path dependencies needed by the job. **R2** is the object store
+used for rental data exchange and for inventory hosts that can reach R2 but
+cannot accept inbound SSH; it is optional when every inventory host uses direct
+SSH. **Autopilot** is the local daemon component that places unassigned jobs and
+manages rental launches. See
+[Architecture](docs/design/architecture.md) and
+[Network Resilience](docs/guides/network-resilience.md) for the detailed paths.
+
 ## Job Lifecycle
 
 | Stage | What Weft handles |
@@ -82,6 +99,13 @@ weft autopilot status --quiet
 
 ## Quick Start
 
+Install Git and Go 1.25.7 or newer. Ensure Go's binary directory is on your
+`PATH`; for the current shell:
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
 ```bash
 go install github.com/osteele/weft@latest
 ```
@@ -94,29 +118,68 @@ cd weft
 go install .
 ```
 
-Set up each on-prem host before submitting work. The setup command verifies SSH
-access, installs or checks required tools, records the host's hardware, deploys
-the agent, and starts its queue runner:
+Verify the installation. A binary installed with the commands above currently
+identifies itself as a development build:
+
+```console
+$ weft version
+weft dev
+```
+
+Set up each on-prem host before submitting work. In this guide, `atlas` is an
+example SSH target; replace it with a hostname or alias from `~/.ssh/config`.
+Confirm that key-based SSH works first:
 
 ```bash
-weft host setup atlas
+ssh atlas
+```
+
+The remote account needs permission to install packages through `apt-get` and
+`sudo` on Linux or Homebrew on macOS. If the required tools are already present,
+use `--skip-prerequisites`. Setup records the host's hardware, deploys the agent,
+and starts its queue runner:
+
+```console
+$ weft host setup atlas
+...
+Setup complete. Host atlas is ready.
 ```
 
 Cloud workflows need the provider CLI and credentials for the provider you use.
 See [Cloud GPU Instances](docs/guides/instances.md) for setup.
 
-Submit a job and let Weft choose a host:
+Submit a dependency-free smoke job to that host. Weft prints a durable job ID;
+use that ID in later commands:
+
+```console
+$ weft run --host atlas -m "Smoke test" 'printf "hello from weft\n"'
+Job #123 queued on atlas
+
+$ weft status wj123 --wait
+Job ID:   wj123
+Host:     atlas
+Status:   completed
+...
+Exit:     0
+
+$ weft log wj123
+hello from weft
+```
+
+Replace `wj123` with the ID printed by your submission. For longer jobs, use the
+live log, job list, or TUI:
+
+```bash
+weft log wj123 -f
+weft job list --running
+weft tui
+```
+
+Once the smoke job works, omit `--host` to let Weft choose a compatible target.
+For example, this requests an NVIDIA GPU with at least 24 GB of VRAM:
 
 ```bash
 weft run --gpu "nvidia>=24GB" -m "Train" 'uv run python train.py'
-```
-
-Watch it from the terminal:
-
-```bash
-weft log wj42 -f
-weft job list --running
-weft tui
 ```
 
 Declare data dependencies so placement can prefer hosts that already have the
