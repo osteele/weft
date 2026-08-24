@@ -116,6 +116,8 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
 	cmd.Flags().StringVar(&listProject, "project", "", "Filter by project name")
 	cmd.Flags().BoolVar(&listProcessed, "processed", false, "Show only jobs with the processed tag")
+	// This is the wide unprocessed-history population, including killed and
+	// canceled rows. See QuerySessionUnprocessedInbox in specs/job-lifecycle.allium.
 	cmd.Flags().BoolVar(&listUnprocessed, "unprocessed", false, "Show only jobs without the processed tag")
 	cmd.Flags().BoolVar(&listRental, "rental", false, "Show jobs tagged for rental placement or assigned to rental instances")
 	cmd.Flags().BoolVar(&listInventory, "inventory", false, "Show inventory-only jobs and jobs assigned to inventory hosts")

@@ -54,7 +54,8 @@ entity Job {
     -- Immutable spec (set at submission)
     command: String
     working_dir: String
-    project: String
+    project: String             -- overridable logical owner, not an execution-path basename
+    project_root: String?       -- canonical absolute root of the proven logical owner
     description: String?
     inputs: List<String>        -- data dependencies (e.g. "hf:meta-llama/Meta-Llama-3-8B")
     outputs: List<String>       -- declared output assets
@@ -398,14 +399,44 @@ enum SessionInboxScope {
     unscoped | scoped_empty | scoped_nonempty
 }
 
+enum UnprocessedDisposition {
+    completed_ok | completed_error | infra_suspected | dead
+}
+
+rule ResolveJobProjectRootAtSubmission {
+    when: SubmitJob(command, working_dir, options)
+
+    -- legacy annotation: @guidance
+	-- Derive a candidate root from the local submission directory before
+	-- working_dir is abbreviated for remote portability. Canonicalize it
+	-- with an absolute path and resolved symlinks. Persist the candidate
+	-- only when its basename exactly equals the resolved logical project
+	-- name. An explicit project-name override therefore normally leaves
+	-- project_root null; the execution directory is not a fallback for
+	-- ownership.
+	--
+	-- Legacy repair applies the same proof after resolving a stored
+	-- working_dir to a local path and finding an enclosing .git or .jj
+	-- root. Missing paths and basename mismatches remain null.
+}
+
 rule QuerySessionUnprocessedInbox {
     when: QuerySessionUnprocessedInbox(session_id, project, now)
 
     -- legacy annotation: @guidance
-        -- The query owns the same 14-day terminal-inbox predicate as the
-        -- ordinary unprocessed surface: completed, failed, or dead;
-        -- untombstoned; and lacking the exact processed tag. Killed and
-        -- canceled jobs remain terminal but are not inbox rows.
+		-- "Wide unprocessed history" is the population selected by
+		-- `weft list --unprocessed`: every job lacking the processed tag,
+		-- including canceled and killed jobs. "Terminal-inbox unprocessed"
+		-- is the narrower population selected here: completed, failed, or
+		-- dead; untombstoned; within 14 days; and lacking the exact processed
+		-- tag. Canceled and killed jobs are deliberately not inbox rows.
+		-- These names distinguish existing intended populations; neither is
+		-- a synonym for the other.
+		--
+		-- The 14-day window uses the same available timestamp chain as each
+		-- row's age provenance: positive end_time, then positive start_time,
+		-- then positive created_at. A row is included without an age bound
+		-- only when none of those timestamps is usable.
         --
         -- A non-empty session id matches Job.submitter_session by exact
         -- string equality. Prefixes, normalization, launcher ancestry, and
@@ -421,10 +452,58 @@ rule QuerySessionUnprocessedInbox {
         --
         -- The machine contract is versioned and carries scope, completed /
         -- failed / total counts, and for each job its wj id, effective
-        -- status, project, age in seconds, and the timestamp field used as
-        -- age provenance. Human status, info, log, artifact-list, completion,
-        -- and session-startup surfaces may render the actionable reminder.
-        -- JSON, TSV, cat, and artifact get/cat stdout remain byte-pure.
+	-- status, project, optional project_root, age in seconds, and the
+	-- timestamp field used as age provenance. Human status, info, log,
+	-- artifact-list, completion, and session-startup surfaces may render
+	-- the actionable reminder only when their actual destination writer is
+	-- a terminal. Unknown and non-terminal destinations suppress it. The
+	-- requested session-unprocessed JSON remains available on any stream;
+	-- unsolicited reminders never pollute machine-readable output.
+}
+
+rule QueryGroupedSessionUnprocessedInbox {
+    when: QueryGroupedSessionUnprocessedInbox(group_by, now)
+
+    -- legacy annotation: @guidance
+	-- This is an all-sessions query by construction. It must not resolve,
+	-- accept, or filter by the calling session id, and it must not inherit
+	-- the partial-index proof predicates used by the exact-session query.
+	-- Jobs with a null or empty submitter_session are included in a null
+	-- submitter_session bucket with unattributed_session = true.
+	--
+	-- Membership is exactly IsInboxJob: unprocessed, untombstoned jobs in
+	-- the 14-day window whose effective status is completed, failed, or
+	-- dead. Killed and canceled jobs remain excluded. Every member has one
+	-- action-uniform disposition: dead when effective status is dead;
+	-- completed_ok when exit_code is zero; infra_suspected when the exact
+	-- failure_reason equals one of disk_full, oom, gpu_oom, segfault,
+	-- aborted, killed_sigkill, killed_sigterm, killed_gpu_idle,
+	-- killed_stdout_silence, setup_timeout, run_timeout,
+	-- cuda_driver_too_old, infra_prewarm_download_failed,
+	-- infra_cloud_artifact_stage_failed, infra_torch_preflight_failed, or
+	-- infra_cuda_hardware_fault; completed_error otherwise. In particular,
+	-- torch_preflight_environment_failed and torch_preflight_import_failed
+	-- are user-attributable per ClassifyInfraFailure and do not qualify.
+	-- Dynamic signal_<name> reasons do not qualify.
+	--
+	-- failure_reason is not a closed enum in storage: it also contains
+	-- free-form prose and multi-line logs. The predicate is therefore an
+	-- explicit allowlist of constants matched by exact equality, never a
+	-- prefix, substring, or negative/fallback test. Unknown reasons
+	-- deliberately under-claim as completed_error: asking a user to read
+	-- program output for an unrecognized infrastructure failure is safer
+	-- than directing them to inspect a host for their own program error.
+	-- Every member lands in exactly one disposition bucket.
+	--
+	-- Group identity is the tuple (project_root, project,
+	-- submitter_session). A null project_root is emitted as its own
+	-- explicit bucket and is excluded from every rooted per-project
+	-- count. It must never be assigned to the named project by inference.
+	-- Raw non-empty submitter_session values are preserved exactly.
+	--
+	-- The machine document has kind = unprocessed_groups, version = 1,
+	-- scope.state = all_sessions, and an explicit groups array. Empty and
+	-- null buckets are represented in the document rather than omitted.
 }
 
 -- Job processes launched by the weft runner get a small set of WEFT_*

@@ -88,6 +88,32 @@ func TestPrintJobsJSON(t *testing.T) {
 	}
 }
 
+func TestJobsJSONKeepsRenderedStatusAndAddsRawStatusCode(t *testing.T) {
+	exitZero := 0
+	jobs := []*db.Job{{ID: 91, Status: db.StatusCompleted, ExitCode: &exitZero}}
+	cols, err := resolveColumns(nil, defaultJSONColumnKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := printJobsJSON(&buf, jobs, cols); err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &rows); err != nil {
+		t.Fatalf("JSON must remain a top-level array: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := rows[0]["status"]; got != "completed ok" {
+		t.Fatalf("rendered status = %v, want %q", got, "completed ok")
+	}
+	if got := rows[0]["status_code"]; got != db.StatusCompleted {
+		t.Fatalf("status_code = %v, want %q", got, db.StatusCompleted)
+	}
+}
+
 func TestPrintJobsTSV(t *testing.T) {
 	jobs := []*db.Job{
 		{

@@ -443,6 +443,7 @@ table jobs
   col 34 submit_token TEXT notnull=0 default=<none> pk=0
   col 35 cancel_requested_at INTEGER notnull=0 default=<none> pk=0
   col 36 submitter_session TEXT notnull=0 default=<none> pk=0
+  col 37 project_root TEXT notnull=0 default=<none> pk=0
   unique-index (submit_token) origin=c partial=1
 table launch_live_state
   col 0 launch_id INTEGER notnull=0 default=<none> pk=1

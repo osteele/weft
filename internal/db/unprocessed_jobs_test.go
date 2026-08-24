@@ -139,8 +139,8 @@ func seedUnprocessedInboxTestJobs(t *testing.T, database *sql.DB) inboxTestSeed 
 	seed.inbox[conflicting] = "completed with pending_status=running (terminal wins)"
 
 	inWindow := terminal(StatusCompleted, &exitZero)
-	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = ?`, now-86400, inWindow); err != nil {
-		t.Fatalf("set start_time: %v", err)
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ? WHERE job_id = ?`, now-86400, now-86400, inWindow); err != nil {
+		t.Fatalf("set in-window attempt times: %v", err)
 	}
 	seed.inbox[inWindow] = "completed one day ago"
 
@@ -187,8 +187,8 @@ func seedUnprocessedInboxTestJobs(t *testing.T, database *sql.DB) inboxTestSeed 
 	seed.excluded[terminalWins] = "killed with pending_status=completed (terminal wins)"
 
 	old := terminal(StatusCompleted, &exitZero)
-	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = ?`, now-31*86400, old); err != nil {
-		t.Fatalf("set old start_time: %v", err)
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ? WHERE job_id = ?`, now-31*86400, now-31*86400, old); err != nil {
+		t.Fatalf("set old attempt times: %v", err)
 	}
 	seed.excluded[old] = "completed 31 days ago (outside the window)"
 
@@ -383,6 +383,51 @@ func TestUnprocessedTerminalJobsSQLPrefilterDropsNonInboxRows(t *testing.T) {
 	t.Logf("plan:\n%s", plan)
 	if !strings.Contains(plan, "idx_jobs_submitter_session") {
 		t.Errorf("session inbox query does not use idx_jobs_submitter_session:\n%s", plan)
+	}
+}
+
+func recordCompletedInboxJobWithUnknownAttemptTimes(t *testing.T, database *sql.DB, createdAt int64) int64 {
+	t.Helper()
+	jobID, err := RecordQueued(database, "cool30", "/tmp/inbox-age", "echo ok", "inbox age")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := SetJobSubmitterSession(database, jobID, inboxTestSession); err != nil {
+		t.Fatalf("set submitter session: %v", err)
+	}
+	exitZero := 0
+	if err := CloseAttempt(database, jobID, StatusCompleted, &exitZero, time.Now().Unix()); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = NULL, end_time = NULL WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("clear attempt times: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, createdAt, jobID); err != nil {
+		t.Fatalf("set created_at: %v", err)
+	}
+	return jobID
+}
+
+func TestUnprocessedTerminalJobsAgeUsesAvailableProvenance(t *testing.T) {
+	database := SetupTestDB(t)
+	oldID := recordCompletedInboxJobWithUnknownAttemptTimes(t, database, time.Now().AddDate(0, 0, -30).Unix())
+	unknownID := recordCompletedInboxJobWithUnknownAttemptTimes(t, database, 0)
+
+	result, err := ListUnprocessedTerminalJobs(database, 14, inboxTestSession)
+	if err != nil {
+		t.Fatalf("list inbox: %v", err)
+	}
+	foundUnknown := false
+	for _, job := range result.Jobs {
+		switch job.ID {
+		case oldID:
+			t.Fatalf("old job %d included despite usable created_at", oldID)
+		case unknownID:
+			foundUnknown = true
+		}
+	}
+	if !foundUnknown {
+		t.Fatalf("job %d with no usable age timestamp was omitted", unknownID)
 	}
 }
 

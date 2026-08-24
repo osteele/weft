@@ -12,6 +12,19 @@ import (
 
 var repoRootResolver = DetectRepoRoot
 
+// CanonicalPath returns an absolute path with symlinks resolved.
+func CanonicalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(real), nil
+}
+
 // ProjectDir resolves the local project directory for a submission.
 // It prefers the enclosing repo root (jj, repo, git) and falls back to the
 // provided directory, or the current working directory when dir is empty.
@@ -53,6 +66,30 @@ func ProjectName(dir string) string {
 		return ""
 	}
 	return name
+}
+
+// VerifiedProjectRoot derives a canonical owning root from the local
+// submission directory. The root is returned only when its basename proves
+// that it belongs to project; see ResolveJobProjectRootAtSubmission in
+// specs/job-lifecycle.allium.
+func VerifiedProjectRoot(project, dir string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return ""
+	}
+	root, err := ProjectDir(dir)
+	if err != nil || root == "" {
+		return ""
+	}
+	root = DetectRepoRoot(root)
+	if root == "" {
+		return ""
+	}
+	root, err = CanonicalPath(root)
+	if err != nil || filepath.Base(root) != project {
+		return ""
+	}
+	return root
 }
 
 // ResolveLocal converts a tilde-prefixed working directory back to a local
@@ -138,6 +175,19 @@ func localProjectDir(dir string) (string, error) {
 // DetectRepoRoot returns the root directory of the repository containing dir,
 // trying jj, repo, and git in order. Returns "" if no repo root is found.
 func DetectRepoRoot(dir string) string {
+	if canonical, err := CanonicalPath(dir); err == nil {
+		for current := canonical; ; current = filepath.Dir(current) {
+			for _, marker := range []string{".jj", ".git"} {
+				if _, err := os.Lstat(filepath.Join(current, marker)); err == nil {
+					return current
+				}
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+		}
+	}
 	for _, spec := range []struct {
 		name string
 		args []string

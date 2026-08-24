@@ -26,7 +26,7 @@ func TestRunSetsJobEnvVars(t *testing.T) {
 		t.Fatalf("notify command did not run: %v", err)
 	}
 	got := string(data)
-	for _, want := range []string{"123", db.StatusCompleted, "|0|", "/home/user/proj", "test sweep"} {
+	for _, want := range []string{"123", db.StatusCompleted, "|0|", "/home/user/proj", "Job wj123 completed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("captured env %q missing %q", got, want)
 		}

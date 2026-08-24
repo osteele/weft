@@ -77,7 +77,8 @@ type Job struct {
 	OutputDirs           []string // Convention-based output directories from .weft.toml
 	Produces             []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs                []string // Artifact specs this job needs (e.g., "output/model.pt:100")
-	Project              string   // Basename of working directory (stored at creation time)
+	Project              string   // Overridable logical owner of the job (stored at creation time)
+	ProjectRoot          string   // Canonical absolute root of Project; empty when ownership is unproven
 	Priority             int      // Scheduling priority; 0 is normal, higher values run first
 	CreatedAt            int64    // When the job was created/queued (0 for legacy jobs)
 	QueuedAt             int64    // When job was added to remote queue (for queue ordering)
@@ -97,6 +98,7 @@ type Job struct {
 	// opaque string. Empty means the submission was not attributable to a
 	// session, which is a normal value rather than an error.
 	SubmitterSession     string
+	RawAttemptStatus     string `json:"-"` // Authoritative attempt enum before job_status exit-code normalization
 	LaunchID             *int64 // Cloud instance ID if this job is part of a cloud instance
 	CampaignJobIndex     *int   // Position within a cloud campaign sequence, if assigned
 	LatestRunID          *int64 // Latest execution attempt row for this logical job
@@ -1182,6 +1184,9 @@ func startupRepair(db *sql.DB) error {
 
 	// Repair placeholder project values (e.g., ".") from older job submissions.
 	if err := repairPlaceholderProjects(db); err != nil {
+		return err
+	}
+	if err := backfillProjectRoots(db); err != nil {
 		return err
 	}
 
@@ -2792,7 +2797,12 @@ func SetJobProject(db dbExecer, jobID int64, project string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, normalized, jobID)
+	root := workdir.VerifiedProjectRoot(normalized, workingDir)
+	var rootValue interface{}
+	if root != "" {
+		rootValue = root
+	}
+	_, err = db.Exec(`UPDATE jobs SET project = ?, project_root = ? WHERE id = ?`, normalized, rootValue, jobID)
 	return err
 }
 
@@ -2892,6 +2902,68 @@ func backfillRecentProjects(db *sql.DB) error {
 		}
 	}
 	return rows.Err()
+}
+
+var projectRepoRootResolver = workdir.DetectRepoRoot
+
+// backfillProjectRoots repairs legacy jobs from local filesystem evidence.
+// Per-row filesystem failures are soft; SQL failures still surface as startup
+// repair failures. See ResolveJobProjectRootAtSubmission in job-lifecycle.allium.
+func backfillProjectRoots(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, working_dir, project FROM jobs WHERE project_root IS NULL AND TRIM(COALESCE(project, '')) != ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type repair struct {
+		id   int64
+		root string
+	}
+	var repairs []repair
+	rootByDir := make(map[string]string)
+	for rows.Next() {
+		var id int64
+		var workingDir, project string
+		if err := rows.Scan(&id, &workingDir, &project); err != nil {
+			return err
+		}
+		localDir := workdir.ResolveLocal(workingDir)
+		if localDir == "" {
+			continue
+		}
+		realDir, err := workdir.CanonicalPath(localDir)
+		if err != nil {
+			continue
+		}
+		root, cached := rootByDir[realDir]
+		if !cached {
+			root = projectRepoRootResolver(realDir)
+			if root != "" {
+				root, err = workdir.CanonicalPath(root)
+				if err != nil {
+					root = ""
+				}
+			}
+			rootByDir[realDir] = root
+		}
+		if root == "" || filepath.Base(root) != project {
+			continue
+		}
+		repairs = append(repairs, repair{id: id, root: root})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, repair := range repairs {
+		if _, err := db.Exec(`UPDATE jobs SET project_root = ? WHERE id = ?`, repair.root, repair.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func repairPlaceholderProjects(db *sql.DB) error {
@@ -5489,4 +5561,79 @@ func PopulateSubmitterSessions(db *sql.DB, jobs []*Job) error {
 		}
 	}
 	return nil
+}
+
+// PopulateProjectRoots fills in Job.ProjectRoot from the owning jobs row in
+// one query. Empty means the owning root has not been proven.
+func PopulateProjectRoots(db *sql.DB, jobs []*Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*Job, len(jobs))
+	ids := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := byID[job.ID]; ok {
+			continue
+		}
+		byID[job.ID] = job
+		ids = append(ids, job.ID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id, project_root FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
+	if err != nil {
+		return fmt.Errorf("read project roots: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var root sql.NullString
+		if err := rows.Scan(&id, &root); err != nil {
+			return fmt.Errorf("scan project root: %w", err)
+		}
+		if job := byID[id]; job != nil {
+			job.ProjectRoot = root.String
+		}
+	}
+	return rows.Err()
+}
+
+// PopulateRawAttemptStatuses retains the authoritative attempt enum before
+// job_status normalizes completed attempts with non-zero exits to failed.
+func PopulateRawAttemptStatuses(db *sql.DB, jobs []*Job) error {
+	byAttemptID := make(map[int64][]*Job)
+	ids := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil || job.LatestRunID == nil {
+			continue
+		}
+		id := *job.LatestRunID
+		if _, ok := byAttemptID[id]; !ok {
+			ids = append(ids, id)
+		}
+		byAttemptID[id] = append(byAttemptID[id], job)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id, status FROM job_attempts WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
+	if err != nil {
+		return fmt.Errorf("read raw attempt statuses: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var status string
+		if err := rows.Scan(&id, &status); err != nil {
+			return fmt.Errorf("scan raw attempt status: %w", err)
+		}
+		for _, job := range byAttemptID[id] {
+			job.RawAttemptStatus = status
+		}
+	}
+	return rows.Err()
 }

@@ -62,12 +62,18 @@ const (
 	ExitCodeStdoutSilenceKill     = 126
 	KillReasonGPUIdle             = "gpu-idle"
 	KillReasonStdoutSilence       = "stdout-silence"
-	FailureReasonGPUIdle          = "killed_gpu_idle"
-	FailureReasonStdoutSilence    = "killed_stdout_silence"
-	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
-	FailureReasonDiskFull         = "disk_full"
-	FailureReasonSetupTimeout     = "setup_timeout"
-	FailureReasonRunTimeout       = "run_timeout"
+	FailureReasonGPUIdle          = db.FailureReasonGPUIdle
+	FailureReasonStdoutSilence    = db.FailureReasonStdoutSilence
+	FailureReasonCUDADriverTooOld = db.FailureReasonCUDADriverTooOld
+	FailureReasonDiskFull         = db.FailureReasonDiskFull
+	FailureReasonOOM              = db.FailureReasonOOM
+	FailureReasonGPUOOM           = db.FailureReasonGPUOOM
+	FailureReasonSegfault         = db.FailureReasonSegfault
+	FailureReasonAborted          = db.FailureReasonAborted
+	FailureReasonKilledSIGKILL    = db.FailureReasonKilledSIGKILL
+	FailureReasonKilledSIGTERM    = db.FailureReasonKilledSIGTERM
+	FailureReasonSetupTimeout     = db.FailureReasonSetupTimeout
+	FailureReasonRunTimeout       = db.FailureReasonRunTimeout
 )
 
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
@@ -84,20 +90,20 @@ func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
 	}
 	if ei.Signaled {
 		if checkDiskFull() {
-			return "disk_full"
+			return FailureReasonDiskFull
 		}
 		switch ei.Signal {
 		case syscall.SIGKILL:
 			if checkDmesgOOM() {
-				return "oom"
+				return FailureReasonOOM
 			}
-			return "killed_sigkill"
+			return FailureReasonKilledSIGKILL
 		case syscall.SIGSEGV:
-			return "segfault"
+			return FailureReasonSegfault
 		case syscall.SIGTERM:
-			return "killed_sigterm"
+			return FailureReasonKilledSIGTERM
 		case syscall.SIGABRT:
-			return "aborted"
+			return FailureReasonAborted
 		default:
 			return fmt.Sprintf("signal_%s", strings.ToLower(ei.Signal.String()))
 		}
@@ -758,30 +764,30 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 func DetectFailureReason(exitCode int) string {
 	// Disk exhaustion can surface through many exit codes/signals.
 	if checkDiskFull() {
-		return "disk_full"
+		return FailureReasonDiskFull
 	}
 
 	// Exit code 137 = SIGKILL (classic OOM killer)
 	if exitCode == 137 {
 		if checkDmesgOOM() {
-			return "oom"
+			return FailureReasonOOM
 		}
-		return "oom" // SIGKILL is almost always OOM
+		return FailureReasonOOM // SIGKILL is almost always OOM
 	}
 
 	// Exit code 139 = SIGSEGV
 	if exitCode == 139 {
-		return "segfault"
+		return FailureReasonSegfault
 	}
 
 	// Check dmesg for OOM regardless of exit code (best-effort, requires permissions)
 	if checkDmesgOOM() {
-		return "oom"
+		return FailureReasonOOM
 	}
 
 	// Check nvidia-smi for GPU OOM (only on Linux where nvidia-smi is available)
 	if checkGPUOOM() {
-		return "gpu_oom"
+		return FailureReasonGPUOOM
 	}
 
 	if exitCode == 1 {

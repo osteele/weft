@@ -40,6 +40,20 @@ func ListUnprocessedTerminalJobs(db *sql.DB, maxAgeDays int, submitterSession st
 	}, nil
 }
 
+// ListAllUnprocessedTerminalJobs returns inbox candidates across every
+// submitter session, including jobs with no recorded session. It intentionally
+// has no session parameter or partial-index predicate; see
+// QueryGroupedSessionUnprocessedInbox in specs/job-lifecycle.allium.
+func ListAllUnprocessedTerminalJobs(db *sql.DB, maxAgeDays int) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM job_status JOIN jobs AS inbox_jobs ON inbox_jobs.id = job_status.id WHERE job_status.tombstoned = 0`, qualifiedJobSelectColumns("job_status"))
+	query, args := appendUnprocessedTerminalPredicate(query, nil, maxAgeDays)
+	jobs, err := queryJobs(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return FilterJobsByTags(jobs, nil, "unprocessed"), nil
+}
+
 func unprocessedTerminalJobsQuery(maxAgeDays int, submitterSession string) (string, []interface{}) {
 	// The IS NOT NULL / != '' terms are redundant against the bound
 	// parameter and must stay. idx_jobs_submitter_session is a partial
@@ -47,11 +61,21 @@ func unprocessedTerminalJobsQuery(maxAgeDays int, submitterSession string) (stri
 	// only where the query proves the index's WHERE clause. A bound
 	// parameter could be null or empty, so equality alone does not prove
 	// it and the planner falls back to scanning jobs.
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0 AND id IN (SELECT id FROM jobs WHERE submitter_session = ? AND submitter_session IS NOT NULL AND submitter_session != '')`, qualifiedJobSelectColumns("job_status"))
-	args := []interface{}{submitterSession}
+	query := fmt.Sprintf(`SELECT %s FROM job_status JOIN jobs AS inbox_jobs ON inbox_jobs.id = job_status.id WHERE job_status.tombstoned = 0 AND inbox_jobs.submitter_session = ? AND inbox_jobs.submitter_session IS NOT NULL AND inbox_jobs.submitter_session != ''`, qualifiedJobSelectColumns("job_status"))
+	return appendUnprocessedTerminalPredicate(query, []interface{}{submitterSession}, maxAgeDays)
+}
+
+func appendUnprocessedTerminalPredicate(query string, args []interface{}, maxAgeDays int) (string, []interface{}) {
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
-		query += ` AND (start_time > ? OR start_time IS NULL OR start_time = 0)`
+		// Keep the window's timestamp basis identical to sessioninbox.ageProvenance.
+		const ageTimestamp = `(CASE
+			WHEN job_status.end_time > 0 THEN job_status.end_time
+			WHEN job_status.start_time > 0 THEN job_status.start_time
+			WHEN inbox_jobs.created_at > 0 THEN inbox_jobs.created_at
+			ELSE NULL
+		END)`
+		query += ` AND (` + ageTimestamp + ` > ? OR ` + ageTimestamp + ` IS NULL)`
 		args = append(args, cutoff)
 	}
 	// Effective status (Job.EffectiveStatus): a terminal status wins
@@ -60,9 +84,9 @@ func unprocessedTerminalJobsQuery(maxAgeDays int, submitterSession string) (stri
 	// it does not appear here. job_attempts.status is NOT NULL by schema, so
 	// the NOT IN disjunct is total. Killed and canceled fall out of both
 	// disjuncts.
-	query += ` AND (status IN ('completed', 'failed', 'dead')` +
-		` OR (status NOT IN ('completed', 'dead', 'failed', 'killed', 'canceled')` +
-		` AND pending_status IN ('completed', 'failed', 'dead')))`
+	query += ` AND (job_status.status IN ('completed', 'failed', 'dead')` +
+		` OR (job_status.status NOT IN ('completed', 'dead', 'failed', 'killed', 'canceled')` +
+		` AND job_status.pending_status IN ('completed', 'failed', 'dead')))`
 	// A row is definitely processed when its tags contain the exact JSON
 	// element "processed" — CanonicalizeTag maps no alias to "processed" and
 	// never lowercases, so the comparison is exact. The backslash disjunct
@@ -70,7 +94,7 @@ func unprocessedTerminalJobsQuery(maxAgeDays int, submitterSession string) (stri
 	// because an escaped quote could otherwise fake the quoted substring.
 	// Legacy comma-separated encodings carry no quotes and never match, so
 	// they also fall through to Go.
-	query += ` AND (tags IS NULL OR tags NOT LIKE '%"processed"%' OR tags LIKE '%\%')`
-	query += ` ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`
+	query += ` AND (job_status.tags IS NULL OR job_status.tags NOT LIKE '%"processed"%' OR job_status.tags LIKE '%\%')`
+	query += ` ORDER BY CASE WHEN job_status.status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, job_status.id DESC`
 	return query, args
 }

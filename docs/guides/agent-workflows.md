@@ -48,7 +48,11 @@ The `[notifications] command` in `config.toml` runs once per job reaching a
 terminal status, with job context in environment variables: `WEFT_JOB_ID`,
 `WEFT_JOB_STATUS`, `WEFT_JOB_EXIT_CODE`, `WEFT_JOB_DIR`,
 `WEFT_JOB_DESCRIPTION`, `WEFT_JOB_HOST`, `WEFT_JOB_SUMMARY`, and
-`WEFT_JOB_SUBMITTER_SESSION`.
+`WEFT_JOB_SESSION_NOTE`, and `WEFT_JOB_SUBMITTER_SESSION`.
+
+`WEFT_JOB_SUMMARY` is only the job-completion fact and is safe to broadcast to
+the project. `WEFT_JOB_SESSION_NOTE` is the project-scoped unprocessed count for
+the submitting session; do not broadcast it to other recipients.
 
 `WEFT_JOB_SUBMITTER_SESSION` identifies the agent session that submitted the
 job, so a notifier can wake that one session instead of every session working
@@ -79,6 +83,9 @@ Several commands are intended for scripts and agents:
 - `weft autopilot status --quiet` returns exit codes for idle, running, stale,
   and paused autopilot states.
 - `weft autopilot status --json` exposes the same state as structured JSON.
+- `weft session unprocessed --group-by project,session` returns the versioned
+  all-sessions grouped inbox, including explicit unattributed-session and
+  unknown-project-root buckets.
 - `weft plan submit --wait <duration>` gives bounded execution for plan-driven
   batches.
 - `weft status --wait --wait-timeout <duration>` gives bounded blocking

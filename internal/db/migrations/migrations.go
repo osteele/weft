@@ -171,11 +171,17 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddJobSubmitterSession},
 		&goose.GoFunc{RunDB: dropAddJobSubmitterSession},
 	)
+	// Go-only: guarded column add, per the addResultsVerifyDetail note above.
+	addJobProjectRoot := goose.NewGoMigration(
+		52,
+		&goose.GoFunc{RunDB: applyAddJobProjectRoot},
+		&goose.GoFunc{RunDB: dropAddJobProjectRoot},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -469,6 +475,26 @@ func applyAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
 
 func dropAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN submitter_session`)
+	return nil
+}
+
+// applyAddJobProjectRoot adds jobs.project_root, the canonical absolute path
+// of the logical owning project's root.
+func applyAddJobProjectRoot(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "jobs", "project_root")
+	if err != nil {
+		return fmt.Errorf("inspect jobs.project_root: %w", err)
+	}
+	if !exists {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN project_root TEXT`); err != nil {
+			return fmt.Errorf("add jobs.project_root: %w", err)
+		}
+	}
+	return nil
+}
+
+func dropAddJobProjectRoot(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN project_root`)
 	return nil
 }
 
@@ -966,7 +992,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

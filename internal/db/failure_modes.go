@@ -28,6 +28,21 @@ const (
 	// failures stay failed for diagnosis instead of looping.
 	AutoRequeueMaxInfraFailureAttempts = 3
 
+	// Runner-detected forensic reasons live here so lower-level consumers can
+	// match them without importing runner and creating a package cycle.
+	FailureReasonDiskFull         = "disk_full"
+	FailureReasonOOM              = "oom"
+	FailureReasonGPUOOM           = "gpu_oom"
+	FailureReasonSegfault         = "segfault"
+	FailureReasonAborted          = "aborted"
+	FailureReasonKilledSIGKILL    = "killed_sigkill"
+	FailureReasonKilledSIGTERM    = "killed_sigterm"
+	FailureReasonGPUIdle          = "killed_gpu_idle"
+	FailureReasonStdoutSilence    = "killed_stdout_silence"
+	FailureReasonSetupTimeout     = "setup_timeout"
+	FailureReasonRunTimeout       = "run_timeout"
+	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
+
 	// FailureReasonInfraPrewarmDownloadFailed marks a weft-owned input staging
 	// failure that happened before the user command started. Launch
 	// normalization treats this as retryable when the launch itself ends with

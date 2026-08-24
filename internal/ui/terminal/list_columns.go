@@ -60,6 +60,10 @@ func allColumnDefs() []columnDef {
 			value: func(job *db.Job) string { return formatJobListStatus(job) },
 		},
 		{
+			key: "status_code", title: "STATUS_CODE", width: 14,
+			value: func(job *db.Job) string { return job.EffectiveStatus() },
+		},
+		{
 			key: "started", title: "TIME", width: 11,
 			value: func(job *db.Job) string { return formatJobListTime(job) },
 			jsonValue: func(job *db.Job) any {
@@ -165,7 +169,7 @@ func columnDefMap() map[string]columnDef {
 var defaultTableColumnKeys = []string{"check", "id", "priority", "host", "status", "started", "project", "description"}
 
 // defaultJSONColumnKeys returns the column keys used in JSON output by default.
-var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu", "submitter_session"}
+var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "status_code", "started", "project", "dir", "description", "command", "exit_code", "duration", "tags", "gpu", "submitter_session"}
 
 // defaultTSVColumnKeys returns the column keys used in TSV output by default
 // (same as the wide table but without the checkmark column).

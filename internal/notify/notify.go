@@ -4,11 +4,9 @@
 // variables. The intended use is pushing job-completion events to local
 // agents (e.g. `agent-mail notify`), but the mechanism is generic.
 //
-// WEFT_JOB_SUBMITTER_SESSION carries the agent session that submitted the job,
-// so the command can address the notification to that session rather than
-// broadcasting to every session in the project. It is empty when the submitter
-// exported no session id, which the command must treat as "no addressee" —
-// weft does not interpret the value.
+// WEFT_JOB_SUMMARY is the broadcast-safe completion fact. The separately
+// exported WEFT_JOB_SESSION_NOTE is scoped to the submitting session and must
+// not be broadcast to other project participants.
 //
 // Callers invoke JobTerminal only at transition points (after a
 // transition-validated DB update succeeds), so each terminal transition
@@ -57,7 +55,7 @@ func JobTerminal(database *sql.DB, jobID int64, finalStatus string, exitCode *in
 		slog.Warn("notify: submitter session lookup failed", "component", "notify",
 			"job_id", jobID, "error", err)
 	}
-	query, err := sessioninbox.Load(database, "", submitterSession, time.Now())
+	query, err := sessioninbox.Load(database, job.Project, submitterSession, time.Now())
 	if err != nil {
 		slog.Warn("notify: unprocessed session inbox lookup failed", "component", "notify",
 			"job_id", jobID, "error", err)
@@ -74,15 +72,12 @@ func Run(command string, job *db.Job, finalStatus string, exitCode *int, submitt
 	run(command, job, finalStatus, exitCode, submitterSession, "")
 }
 
-func run(command string, job *db.Job, finalStatus string, exitCode *int, submitterSession, reminder string) {
+func run(command string, job *db.Job, finalStatus string, exitCode *int, submitterSession, sessionNote string) {
 	exitStr := ""
 	if exitCode != nil {
 		exitStr = fmt.Sprintf("%d", *exitCode)
 	}
 	summary := buildSummary(job, finalStatus, exitCode)
-	if reminder != "" {
-		summary += "\n" + reminder
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
@@ -95,6 +90,7 @@ func run(command string, job *db.Job, finalStatus string, exitCode *int, submitt
 		"WEFT_JOB_DESCRIPTION="+job.Description,
 		"WEFT_JOB_HOST="+job.Host,
 		"WEFT_JOB_SUMMARY="+summary,
+		"WEFT_JOB_SESSION_NOTE="+sessionNote,
 		"WEFT_JOB_SUBMITTER_SESSION="+submitterSession,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -108,13 +104,5 @@ func buildSummary(job *db.Job, finalStatus string, exitCode *int) string {
 	if exitCode != nil && *exitCode != 0 {
 		verb = fmt.Sprintf("%s (exit %d)", finalStatus, *exitCode)
 	}
-	desc := job.Description
-	if desc == "" {
-		desc = job.Command
-	}
-	if desc != "" {
-		return fmt.Sprintf("Job %s %s on %s: %s",
-			ids.FormatJobID(job.ID), verb, job.Host, desc)
-	}
-	return fmt.Sprintf("Job %s %s on %s", ids.FormatJobID(job.ID), verb, job.Host)
+	return fmt.Sprintf("Job %s %s", ids.FormatJobID(job.ID), verb)
 }
