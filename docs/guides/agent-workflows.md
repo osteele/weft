@@ -106,8 +106,11 @@ use its fallback without leaving work that Weft might execute later.
 Pass a stable external assignment ID with `--idempotency-key`; retrying that ID
 returns the existing job instead of submitting a duplicate. Agent workers can
 be selected with `--agent codex` (equivalent to
-`--require-capability agent:codex`). The recognized agent names are `claude`,
-`codex`, `gemini`, `opencode`, and `kimi`.
+`--require-capability agent:codex`). Weft does not validate the name — `--agent`
+accepts any string and prefixes `agent:`. Required capabilities are a hard
+eligibility filter, so a name no host declares makes every target ineligible and
+the job never places, rather than failing at submission. The names in use today
+are `claude`, `codex`, `gemini`, `opencode`, and `kimi`.
 
 Provisioned capabilities are explicit host configuration — weft does not probe
 for them, so a capability a host does not declare is invisible to placement even
