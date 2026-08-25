@@ -463,7 +463,7 @@ func init() {
 	runCmd.Flags().BoolVar(&runIfOnline, "if-online", false, "Submit immediately to an online inventory host, or create no job")
 	runCmd.Flags().BoolVar(&runIfOnline, "no-queue", false, "Alias for --if-online")
 	runCmd.Flags().BoolVar(&runJSON, "json", false, "Print a versioned JSON submission receipt")
-	runCmd.Flags().StringVar(&runAgent, "agent", "", "Require an authenticated agent CLI on the host (codex, gemini, opencode, or kimi)")
+	runCmd.Flags().StringVar(&runAgent, "agent", "", "Require an authenticated agent CLI on the host (claude, codex, gemini, opencode, or kimi)")
 	runCmd.Flags().StringSliceVar(&runCapabilities, "require-capability", nil, "Require a host capability label; can be repeated")
 	runCmd.Flags().StringVar(&runIdempotencyKey, "idempotency-key", "", "Caller assignment ID used to deduplicate submission retries")
 	addJobAddFlagAliases(runCmd)

@@ -106,8 +106,12 @@ use its fallback without leaving work that Weft might execute later.
 Pass a stable external assignment ID with `--idempotency-key`; retrying that ID
 returns the existing job instead of submitting a duplicate. Agent workers can
 be selected with `--agent codex` (equivalent to
-`--require-capability agent:codex`). Provisioned capabilities are explicit
-host configuration:
+`--require-capability agent:codex`). The recognized agent names are `claude`,
+`codex`, `gemini`, `opencode`, and `kimi`.
+
+Provisioned capabilities are explicit host configuration — weft does not probe
+for them, so a capability a host does not declare is invisible to placement even
+when the CLI is installed and authenticated there:
 
 ```toml
 [hosts.studio]

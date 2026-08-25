@@ -3,8 +3,10 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -108,6 +110,10 @@ var hostListRentalsFlag = "on"
 // `weft uj` so the same key bindings (J jobs, i instances, q quit) work.
 var hostListTUIFlag bool
 
+// hostListJSONFlag selects the machine-readable surface described by
+// HostListMachineSurface in specs/inventory-placement.allium.
+var hostListJSONFlag bool
+
 var hostLoadCmd = &cobra.Command{
 	Use:   "load <host>",
 	Short: "Show current load and resource usage",
@@ -137,6 +143,7 @@ func init() {
 	hostCmd.AddCommand(hostInfoCmd)
 	hostCmd.AddCommand(hostJobsCmd)
 	hostCmd.AddCommand(hostListCmd)
+	hostListCmd.Flags().BoolVar(&hostListJSONFlag, "json", false, "Print hosts as JSON for machine consumers")
 	hostCmd.AddCommand(hostLoadCmd)
 	hostCmd.AddCommand(hostDiscoverCmd)
 	hostCmd.AddCommand(hostDoctorCmd)
@@ -691,6 +698,10 @@ func runHostList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if hostListJSONFlag {
+		return writeHostListJSON(cmd.OutOrStdout(), rows)
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "TYPE\tNAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
 	for _, row := range rows {
@@ -698,6 +709,68 @@ func runHostList(cmd *cobra.Command, args []string) error {
 			row.Type, row.Name, row.OSArch, row.CPU, row.Memory, row.GPUs)
 	}
 	return w.Flush()
+}
+
+// hostListJSONEnvelope is the machine-readable host surface. Add fields
+// additively; bump Version only for a change that breaks a reader which
+// refuses unrecognized shapes. See HostListMachineSurface in
+// specs/inventory-placement.allium.
+type hostListJSONEnvelope struct {
+	Kind    string            `json:"kind"`
+	Version int               `json:"version"`
+	Hosts   []hostListJSONRow `json:"hosts"`
+}
+
+// hostListJSONRow omits the table's OS/CPU/memory/GPU columns, and pairs
+// ssh_target with ssh_identity_file because the target alone does not identify
+// a working connection. Both constraints and their reasons are recorded in
+// HostListMachineSurface in specs/inventory-placement.allium.
+type hostListJSONRow struct {
+	Type            string   `json:"type"`
+	Name            string   `json:"name"`
+	SSHTarget       string   `json:"ssh_target,omitempty"`
+	SSHIdentityFile string   `json:"ssh_identity_file,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+}
+
+func writeHostListJSON(w io.Writer, rows []hostListRow) error {
+	envelope := hostListJSONEnvelope{
+		Kind:    "host_list",
+		Version: 1,
+		Hosts:   make([]hostListJSONRow, 0, len(rows)),
+	}
+	for _, row := range rows {
+		envelope.Hosts = append(envelope.Hosts, hostListJSONRow{
+			Type:            row.Type,
+			Name:            row.Name,
+			SSHTarget:       row.SSHTarget,
+			SSHIdentityFile: row.SSHIdentityFile,
+			Capabilities:    row.Capabilities,
+		})
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(envelope)
+}
+
+// applyHostConfigFields fills the configured-only fields on inventory rows,
+// leaving rentals empty. The config is a parameter so the caller decides what
+// an unreadable one means; loadHostListRows fails rather than yielding rows
+// with the fields omitted. See HostListMachineSurface in
+// specs/inventory-placement.allium.
+func applyHostConfigFields(rows []hostListRow, cfg *config.Config) {
+	for i := range rows {
+		if rows[i].Type != "host" {
+			continue
+		}
+		hostCfg, ok := cfg.Hosts[rows[i].Name]
+		if !ok {
+			continue
+		}
+		rows[i].Capabilities = append([]string(nil), hostCfg.Capabilities...)
+		rows[i].SSHTarget = ssh.HostTarget(rows[i].Name)
+		rows[i].SSHIdentityFile = ssh.HostIdentityFile(rows[i].Name)
+	}
 }
 
 // runHostListTUI opens the interactive hosts panel.
@@ -742,6 +815,13 @@ type hostListRow struct {
 	CPU    string
 	Memory string
 	GPUs   string
+
+	// Configured, never probed; empty means no configured value rather than
+	// an absent fact. See HostListMachineSurface in
+	// specs/inventory-placement.allium.
+	Capabilities    []string
+	SSHTarget       string
+	SSHIdentityFile string
 }
 
 func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, error) {
@@ -841,6 +921,11 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 		}
 	}
 
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	applyHostConfigFields(rows, cfg)
 	return rows, nil
 }
 

@@ -87,6 +87,58 @@ value GPUSpec {
     memory_gb: parse_memory_gb(memory)
 }
 
+-- The machine-readable projection of the host list, for tools that dispatch
+-- to weft and must not read its private state to do so.
+rule HostListMachineSurface {
+    when: QueryHostList(rentals_mode, json_output)
+
+    -- legacy annotation: @guidance
+        -- The JSON envelope carries kind "host_list" and an integer version.
+        -- Fields are added additively. The version is bumped only for a change
+        -- that would break a reader which refuses shapes it does not
+        -- recognize, and such a reader is the intended kind: a consumer that
+        -- parses optimistically turns an unrecognized document into a
+        -- plausible-looking undercount, which reads as good news.
+        --
+        -- The surface publishes name, type, capabilities, ssh_target, and
+        -- ssh_identity_file. It deliberately omits the OS, CPU, memory, and
+        -- GPU columns of the text table. Those are display strings carrying
+        -- placeholders such as "unknown" and an em dash; publishing them would
+        -- promote a formatting choice into a contract that cannot be changed.
+        -- Hardware belongs on this surface only as typed fields, never as the
+        -- table's rendered text.
+        --
+        -- ssh_target is not sufficient to reach a host on its own, and must be
+        -- published together with ssh_identity_file. Weft pins its key as a
+        -- command-line argument, so the same target string resolved through
+        -- ssh_config alone can select a different IdentityFile and fail
+        -- against the same account. Observed: hosts.studio.ssh_user is
+        -- "agent", making the target agent@studio, while the ssh_config Host
+        -- block for studio names the operator's key and IdentitiesOnly yes.
+        --
+        -- Capabilities are declared by operator configuration and are never
+        -- probed. A capability a host does not declare is invisible to
+        -- placement even when the tool is installed and authenticated there,
+        -- so an absent capability is not evidence that the host lacks it.
+        --
+        -- capabilities, ssh_target, and ssh_identity_file are absent for
+        -- rental rows by construction — a rental is not a configured host and
+        -- is reached with per-launch credentials — and for any host with no
+        -- hosts.<name> config entry. Absent means weft holds no configured
+        -- value. It never means the host lacks the capability, and never means
+        -- no key is required. This is the same asymmetry recorded in
+        -- docs/decisions/0020: missing evidence is not an absent fact.
+        --
+        -- An unreadable config fails the query rather than yielding rows with
+        -- the configured fields omitted. Silently omitting them would make a
+        -- host weft could not read indistinguishable from a host that declares
+        -- nothing, which is precisely the confusion the previous paragraph
+        -- forbids consumers from making.
+        --
+        -- Implementation: cmd/host.go, internal/ssh/pool.go HostTarget and
+        -- HostIdentityFile.
+}
+
 -- A normalized execution target is the durable placement identity for a job
 -- attempt. Inventory targets reference a Host; rental targets reference a
 -- CloudInstance from campaign-lifecycle.allium.

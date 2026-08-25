@@ -161,6 +161,27 @@ func hostTarget(host string) string {
 	return host
 }
 
+// HostTarget is the SSH destination weft uses for host, "user@host" when
+// hosts.<name>.ssh_user is set and the bare name otherwise. Callers that
+// publish it must publish HostIdentityFile with it; the target alone does not
+// identify a working connection. See HostListMachineSurface in
+// specs/inventory-placement.allium.
+func HostTarget(host string) string {
+	return hostTarget(host)
+}
+
+// HostIdentityFile is the key weft pins for host, or "" when weft passes
+// through to ssh defaults. Precedence matches identityArgs.
+func HostIdentityFile(host string) string {
+	if sshUserByHost[host] == "" {
+		return ""
+	}
+	if identity := sshIdentityByHost[host]; identity != "" {
+		return identity
+	}
+	return sshIdentityFile
+}
+
 // SetMinConnectTimeout raises the SSH connect timeout to at least the given
 // duration. It has no effect if the current timeout is already larger. This
 // must be called before the first SSH operation (the pool is created lazily).
