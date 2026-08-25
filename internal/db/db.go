@@ -1186,6 +1186,9 @@ func startupRepair(db *sql.DB) error {
 	if err := repairPlaceholderProjects(db); err != nil {
 		return err
 	}
+	if err := repairFailureReasons(db); err != nil {
+		return err
+	}
 	if err := backfillProjectRoots(db); err != nil {
 		return err
 	}
@@ -2471,6 +2474,7 @@ func SetJobRemoteID(db *sql.DB, jobID int64, remoteID string) error {
 
 // SetJobRemoteState sets the backend-specific state and optional failure reason.
 func SetJobRemoteState(db *sql.DB, jobID int64, remoteState, failureReason string) error {
+	failureReason = SanitizeFailureReason(failureReason)
 	_, err := db.Exec(`UPDATE job_attempts SET remote_state = ?, failure_reason = ? WHERE id = `+latestOpenAttemptSubquery, remoteState, failureReason, jobID)
 	return err
 }
@@ -2998,6 +3002,64 @@ func repairPlaceholderProjectsInTable(db *sql.DB, table string) error {
 		}
 	}
 	return rows.Err()
+}
+
+// repairFailureReasons moves legacy diagnostics out of the closed
+// failure_reason vocabulary. See specs/job-lifecycle.allium.
+func repairFailureReasons(db *sql.DB) error {
+	// Superset filter: every vocabulary token is free of spaces and newlines,
+	// so no invalid row can escape it, while a valid signal_* token containing
+	// spaces only costs one redundant IsKnownFailureReason call. This keeps the
+	// predicate quiet once the legacy rows are repaired, rather than rescanning
+	// every attempt on every open.
+	rows, err := db.Query(`SELECT id, COALESCE(failure_reason, '') FROM job_attempts
+		WHERE failure_reason IS NOT NULL
+		  AND (failure_reason LIKE '% %' OR failure_reason LIKE '%' || char(10) || '%')`)
+	if err != nil {
+		return err
+	}
+	type repair struct {
+		id     int64
+		old    string
+		reason string
+	}
+	var repairs []repair
+	for rows.Next() {
+		var id int64
+		var reason string
+		if err := rows.Scan(&id, &reason); err != nil {
+			rows.Close()
+			return err
+		}
+		if IsKnownFailureReason(reason) {
+			continue
+		}
+		mapped := FailureReasonError
+		if reason == "launch completed but job results were not synced from R2" {
+			mapped = FailureReasonR2ResultsNotSynced
+		}
+		repairs = append(repairs, repair{id: id, old: reason, reason: mapped})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, repair := range repairs {
+		if _, err := db.Exec(`
+			UPDATE job_attempts
+			SET error_message = CASE
+					WHEN TRIM(COALESCE(error_message, '')) = '' THEN ?
+					ELSE error_message
+				END,
+				failure_reason = ?
+			WHERE id = ?`, repair.old, repair.reason, repair.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListQueuedJobsWithDependency returns queued jobs whose dependency list references depID.

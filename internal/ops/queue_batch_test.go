@@ -16,6 +16,23 @@ func TestParseBatchSourceExecution(t *testing.T) {
 	}
 }
 
+func TestParseQueueBatchStatusSanitizesRemoteFailureReason(t *testing.T) {
+	statuses := parseQueueBatchStatusOutput("JOB|42|COMPLETED|1|123|7|legacy prose|shifted|source|fields|that|look|valid|123|agent|1\n", 1)
+	if got := statuses[42].FailureReason; got != db.FailureReasonError {
+		t.Fatalf("failure reason = %q, want %q", got, db.FailureReasonError)
+	}
+	if statuses[42].Source != nil {
+		t.Fatalf("untrusted reason populated shifted source metadata: %+v", statuses[42].Source)
+	}
+	statuses = parseQueueBatchStatusOutput("JOB|43|PREFLIGHT_REJECTED|123|legacy prose|shifted-agent-version\n", 1)
+	if got := statuses[43].FailureReason; got != db.FailureReasonError {
+		t.Fatalf("preflight failure reason = %q, want %q", got, db.FailureReasonError)
+	}
+	if statuses[43].AgentVersion != "" {
+		t.Fatalf("untrusted reason populated shifted agent version %q", statuses[43].AgentVersion)
+	}
+}
+
 func TestBatchSyncPersistsAttemptSourceVerification(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "source verification")
@@ -201,7 +218,7 @@ func TestBatchSyncPreflightRejectedRecordsReasonAndDispatchBlock(t *testing.T) {
 
 	job, _ := db.GetJobByID(database, jobID)
 	jobByID := map[int64]*db.Job{jobID: job}
-	reason := "source_provenance_mismatch: expected=abc123, marker=def456"
+	reason := db.FailureReasonSourceProvenanceMismatch
 	statuses := map[int64]queueBatchStatus{
 		jobID: {State: queueStatePreflightRejected, FailureReason: reason, Mtime: time.Now().Unix()},
 	}

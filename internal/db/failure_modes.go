@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -30,18 +31,31 @@ const (
 
 	// Runner-detected forensic reasons live here so lower-level consumers can
 	// match them without importing runner and creating a package cycle.
-	FailureReasonDiskFull         = "disk_full"
-	FailureReasonOOM              = "oom"
-	FailureReasonGPUOOM           = "gpu_oom"
-	FailureReasonSegfault         = "segfault"
-	FailureReasonAborted          = "aborted"
-	FailureReasonKilledSIGKILL    = "killed_sigkill"
-	FailureReasonKilledSIGTERM    = "killed_sigterm"
-	FailureReasonGPUIdle          = "killed_gpu_idle"
-	FailureReasonStdoutSilence    = "killed_stdout_silence"
-	FailureReasonSetupTimeout     = "setup_timeout"
-	FailureReasonRunTimeout       = "run_timeout"
-	FailureReasonCUDADriverTooOld = "cuda_driver_too_old"
+	FailureReasonDiskFull            = "disk_full"
+	FailureReasonOOM                 = "oom"
+	FailureReasonGPUOOM              = "gpu_oom"
+	FailureReasonSegfault            = "segfault"
+	FailureReasonAborted             = "aborted"
+	FailureReasonKilledSIGKILL       = "killed_sigkill"
+	FailureReasonKilledSIGTERM       = "killed_sigterm"
+	FailureReasonGPUIdle             = "killed_gpu_idle"
+	FailureReasonStdoutSilence       = "killed_stdout_silence"
+	FailureReasonSetupTimeout        = "setup_timeout"
+	FailureReasonRunTimeout          = "run_timeout"
+	FailureReasonCUDADriverTooOld    = "cuda_driver_too_old"
+	FailureReasonError               = "error"
+	FailureReasonPrewarmFailed       = "prewarm_failed"
+	FailureReasonArtifactStageFailed = "artifact_stage_failed"
+	FailureReasonR2ResultsNotSynced  = "infra_r2_results_not_synced"
+	FailureReasonSourceRestoreFailed = "source_restore_failed"
+
+	FailureReasonGPUCountPreflightFailed     = "gpu_count_preflight_failed"
+	FailureReasonPinnedSourceUnavailable     = "pinned_source_unavailable"
+	FailureReasonPinnedSourceFetchFailed     = "pinned_source_fetch_failed"
+	FailureReasonR2IsolatedSourceUnavailable = "r2_isolated_source_unavailable"
+	FailureReasonR2IsolatedSourceFetchFailed = "r2_isolated_source_fetch_failed"
+	FailureReasonSourceProvenanceMismatch    = "source_provenance_mismatch"
+	FailureReasonCloudAfterFailed            = "cloud_after_failed"
 
 	// FailureReasonInfraPrewarmDownloadFailed marks a weft-owned input staging
 	// failure that happened before the user command started. Launch
@@ -76,6 +90,59 @@ const (
 	// timeout(1)'s convention. runner.ExitCodeSetupTimeout aliases this value.
 	ExitCodeSetupTimeout = 124
 )
+
+var dynamicFailureReasonPattern = regexp.MustCompile(`^(?:exit_-?\d+|signal_[a-z0-9 ]+)$`)
+
+// IsKnownFailureReason reports whether reason satisfies the closed vocabulary
+// in specs/job-lifecycle.allium. Empty means that no failure was classified.
+func IsKnownFailureReason(reason string) bool {
+	if reason == "" {
+		return true
+	}
+	switch reason {
+	case FailureReasonDiskFull,
+		FailureReasonOOM,
+		FailureReasonGPUOOM,
+		FailureReasonSegfault,
+		FailureReasonAborted,
+		FailureReasonKilledSIGKILL,
+		FailureReasonKilledSIGTERM,
+		FailureReasonGPUIdle,
+		FailureReasonStdoutSilence,
+		FailureReasonSetupTimeout,
+		FailureReasonRunTimeout,
+		FailureReasonCUDADriverTooOld,
+		FailureReasonError,
+		FailureReasonPrewarmFailed,
+		FailureReasonArtifactStageFailed,
+		FailureReasonR2ResultsNotSynced,
+		FailureReasonSourceRestoreFailed,
+		FailureReasonGPUCountPreflightFailed,
+		FailureReasonPinnedSourceUnavailable,
+		FailureReasonPinnedSourceFetchFailed,
+		FailureReasonR2IsolatedSourceUnavailable,
+		FailureReasonR2IsolatedSourceFetchFailed,
+		FailureReasonSourceProvenanceMismatch,
+		FailureReasonCloudAfterFailed,
+		FailureReasonInfraPrewarmDownloadFailed,
+		FailureReasonInfraCloudArtifactStageFailed,
+		FailureReasonInfraCUDAHardwareFault,
+		FailureReasonInfraTorchPreflightFailed,
+		FailureReasonTorchPreflightEnvironmentFailed,
+		FailureReasonTorchPreflightImportFailed:
+		return true
+	}
+	return dynamicFailureReasonPattern.MatchString(reason)
+}
+
+// SanitizeFailureReason confines the wire and storage value to the vocabulary
+// specified in specs/job-lifecycle.allium.
+func SanitizeFailureReason(reason string) string {
+	if IsKnownFailureReason(reason) {
+		return reason
+	}
+	return FailureReasonError
+}
 
 var infraFailureReasons = []string{
 	FailureReasonInfraPrewarmDownloadFailed,

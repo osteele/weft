@@ -225,6 +225,9 @@ func TestAddDispositionKnownForensicReasonsAreInfraSuspected(t *testing.T) {
 		db.FailureReasonInfraCloudArtifactStageFailed,
 		db.FailureReasonInfraTorchPreflightFailed,
 		db.FailureReasonInfraCUDAHardwareFault,
+		db.FailureReasonR2ResultsNotSynced,
+		db.FailureReasonPrewarmFailed,
+		db.FailureReasonArtifactStageFailed,
 	}
 	exitOne := 1
 	for _, reason := range reasons {

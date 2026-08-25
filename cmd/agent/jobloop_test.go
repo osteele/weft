@@ -71,7 +71,7 @@ func TestRecordEarlyJobFailureWritesReasonAndUploadsResults(t *testing.T) {
 	logDir := t.TempDir()
 	jobID := int64(77)
 	runID := int64(88)
-	reason := "cloud_after_incomplete: producer job 5 run 50 has not completed"
+	reason := db.FailureReasonCloudAfterFailed
 
 	prevUpload := uploadJobResultsForAgent
 	prevPut := r2PutForAgent
@@ -354,6 +354,27 @@ func TestRecordPrewarmFailureWritesMachineReason(t *testing.T) {
 	}
 	if completion.FailureReason != db.FailureReasonInfraPrewarmDownloadFailed {
 		t.Fatalf("completion failure reason = %q, want %q", completion.FailureReason, db.FailureReasonInfraPrewarmDownloadFailed)
+	}
+}
+
+func TestRecordPrewarmFailureUsesGenericTokenAndLogsError(t *testing.T) {
+	logDir := t.TempDir()
+	job := cloud.AgentJob{ID: 78, Dir: "/tmp", Command: "false"}
+	prewarm := setupPrewarmResult{
+		exitInfo: runner.ExitInfo{ExitCode: 1},
+		err:      errors.New("hf prewarm failed exit 1: exit status 1"),
+	}
+	recordPrewarmFailure(jobSequenceConfig{LogDir: logDir}, job, prewarm)
+	paths := runner.NewJobPaths(logDir, job.ID)
+	if got := runner.ReadFailureReasonFile(paths.FailureReason); got != db.FailureReasonPrewarmFailed {
+		t.Fatalf("failure reason = %q, want %q", got, db.FailureReasonPrewarmFailed)
+	}
+	data, err := os.ReadFile(paths.Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), prewarm.err.Error()) {
+		t.Fatalf("log = %q, want prewarm error", data)
 	}
 }
 
@@ -740,7 +761,8 @@ func TestRunSetupPrewarmFailsOnSourceRecoveryError(t *testing.T) {
 	if result.err == nil {
 		t.Fatal("runSetupPrewarm returned no error after source recovery failure")
 	}
-	if !result.infraFailure || !strings.Contains(result.failureReason, missingKey) || !strings.Contains(result.failureReason, "data/prewarm.bin") {
+	if !result.infraFailure || result.failureReason != db.FailureReasonSourceRestoreFailed ||
+		!strings.Contains(result.err.Error(), missingKey) || !strings.Contains(result.err.Error(), "data/prewarm.bin") {
 		t.Fatalf("prewarm result = %+v, want attributable infrastructure failure", result)
 	}
 }
@@ -786,8 +808,15 @@ func TestRunJobSequenceSourceRecoveryFailurePreventsCommand(t *testing.T) {
 		t.Fatalf("command marker stat error = %v, want command not run", err)
 	}
 	reason := runner.ReadFailureReasonFile(runner.NewJobPaths(logDir, job.ID).FailureReason)
-	if !strings.Contains(reason, missingKey) || !strings.Contains(reason, "data/job.bin") {
-		t.Fatalf("failure reason = %q, want failing blob key and relative path", reason)
+	if reason != db.FailureReasonSourceRestoreFailed {
+		t.Fatalf("failure reason = %q, want %q", reason, db.FailureReasonSourceRestoreFailed)
+	}
+	logData, err := os.ReadFile(runner.NewJobPaths(logDir, job.ID).Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), missingKey) || !strings.Contains(string(logData), "data/job.bin") {
+		t.Fatalf("log = %q, want failing blob key and relative path", logData)
 	}
 }
 
@@ -1078,11 +1107,15 @@ func TestEnsureFailureArtifacts_WritesStubsWhenMissing(t *testing.T) {
 	ensureFailureArtifacts(logDir, jobID, runner.ExitInfo{ExitCode: 0}, runErr)
 
 	reason := runner.ReadFailureReasonFile(paths.FailureReason)
-	if reason == "" {
-		t.Fatal("expected failure_reason file to be written")
+	if reason != db.FailureReasonError {
+		t.Fatalf("failure_reason = %q, want %q", reason, db.FailureReasonError)
 	}
-	if !strings.Contains(reason, "start process") {
-		t.Fatalf("failure_reason = %q, want it to mention start process", reason)
+	logData, err := os.ReadFile(paths.Log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "start process") {
+		t.Fatalf("log = %q, want start-process diagnostic", logData)
 	}
 
 	data, err := os.ReadFile(paths.Completion)
@@ -1106,7 +1139,7 @@ func TestEnsureFailureArtifacts_LeavesExistingArtifactsAlone(t *testing.T) {
 	jobID := int64(100)
 	paths := runner.NewJobPaths(logDir, jobID)
 
-	if err := runner.WriteFailureReasonFile(paths, "preexisting"); err != nil {
+	if err := runner.WriteFailureReasonFile(paths, db.FailureReasonOOM); err != nil {
 		t.Fatalf("seed failure_reason: %v", err)
 	}
 	seedCompletion := []byte(`{"exit_code":137,"failure_reason":"oom"}` + "\n")
@@ -1116,7 +1149,7 @@ func TestEnsureFailureArtifacts_LeavesExistingArtifactsAlone(t *testing.T) {
 
 	ensureFailureArtifacts(logDir, jobID, runner.ExitInfo{ExitCode: 137}, nil)
 
-	if got := runner.ReadFailureReasonFile(paths.FailureReason); got != "preexisting" {
+	if got := runner.ReadFailureReasonFile(paths.FailureReason); got != db.FailureReasonOOM {
 		t.Errorf("failure_reason was overwritten: got %q", got)
 	}
 	got, err := os.ReadFile(paths.Completion)
@@ -1143,12 +1176,8 @@ func TestEnsureFailureArtifacts_NoOpOnSuccess(t *testing.T) {
 	}
 }
 
-// Verifies that the per-job failure_reason persisted by recordPrewarmFailure
-// (via prewarm.err.Error()) is single-line — the multi-line prewarm log tail
-// must live on setupPrewarmResult.logTail (operator stderr only), never
-// inside the err that becomes the DB failure_reason column. Embedded
-// newlines in failure_reason corrupted the TUI footer and `weft info`'s
-// `Reason:` line (see specs/job-lifecycle.allium § FailureReason).
+// Verifies that the prewarm headline and multi-line tail remain distinct
+// diagnostics before recordPrewarmFailure writes both to the job log.
 func TestSetupPrewarmResult_ErrorIsSingleLine(t *testing.T) {
 	// Synthesize a failed prewarm by writing a multi-line script into the
 	// prewarm log and feeding it to prewarmLogTail directly. The headline

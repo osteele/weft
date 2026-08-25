@@ -987,12 +987,15 @@ func TestMarkStuckJobDead_DoesNotOverwriteTerminalStatus(t *testing.T) {
 	if err := MarkStuckJobDead(database, attemptID); err != nil {
 		t.Fatalf("MarkStuckJobDead on running attempt: %v", err)
 	}
-	var got string
-	if err := database.QueryRow(`SELECT status FROM job_attempts WHERE id = ?`, attemptID).Scan(&got); err != nil {
+	var got, failureReason string
+	if err := database.QueryRow(`SELECT status, COALESCE(failure_reason, '') FROM job_attempts WHERE id = ?`, attemptID).Scan(&got, &failureReason); err != nil {
 		t.Fatalf("query attempt: %v", err)
 	}
 	if got != StatusDead {
 		t.Fatalf("status after stuck-job dead = %q, want %q", got, StatusDead)
+	}
+	if failureReason != FailureReasonR2ResultsNotSynced {
+		t.Fatalf("failure reason = %q, want %q", failureReason, FailureReasonR2ResultsNotSynced)
 	}
 
 	// A late completion lands on the same attempt; the fallback must not

@@ -631,14 +631,14 @@ rule RemoteJobResumed {
 -- The agent's `batch-status` subcommand, called by Weft over SSH, detects
 -- the runner's preflight rejection sentinel
 -- (<jobid>.preflight_rejected in the agent's log dir) and emits a wire
--- line distinct from COMPLETED, carrying the failure_reason text the
+-- line distinct from COMPLETED, carrying the failure_reason token the
 -- runner wrote alongside the sentinel.
 --
 -- Wire format:
 --   JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
 --
 -- Distinct from:
---   JOB|<id>|COMPLETED|<exit_code>|<mtime>[|<failure_reason>]
+--   JOB|<id>|COMPLETED|<exit_code>|<mtime>|<run_id>|<failure_reason><source_execution_fields>
 rule AgentBatchStatusReportsPreflightRejection {
     when: AgentBatchStatusInvoked(host, job_ids)
 
@@ -652,6 +652,15 @@ rule AgentBatchStatusReportsPreflightRejection {
             )
 
     -- legacy annotation: @guidance
+        -- The positional, pipe-delimited, single-line wire format has no
+        -- escaping layer and therefore cannot carry unbounded text. `|` would
+        -- shift subsequent source-execution fields and a newline would split
+        -- the record. `readFailureReason` in cmd/agent/batchstatus.go and the
+        -- orchestrator parser in internal/ops/queue_batch.go both apply the
+        -- closed-vocabulary sanitizer; runner artifact writers apply it before
+        -- this read boundary. Prose diagnostics belong in the uploaded job log
+        -- / error_message, never in failure_reason.
+        --
         -- Implementation anchor:
         --   cmd/agent/batchstatus.go    — detects <jobid>.preflight_rejected
         --                                 and prints the PREFLIGHT_REJECTED

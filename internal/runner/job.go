@@ -74,6 +74,7 @@ const (
 	FailureReasonKilledSIGTERM    = db.FailureReasonKilledSIGTERM
 	FailureReasonSetupTimeout     = db.FailureReasonSetupTimeout
 	FailureReasonRunTimeout       = db.FailureReasonRunTimeout
+	FailureReasonError            = db.FailureReasonError
 )
 
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
@@ -461,7 +462,7 @@ func ReadPreflightRejectedFile(path string) int64 {
 
 // WriteFailureReasonFile writes a failure reason file for a failed job.
 func WriteFailureReasonFile(paths JobPaths, reason string) error {
-	return writeReasonFile(paths.FailureReason, reason)
+	return writeReasonFile(paths.FailureReason, db.SanitizeFailureReason(reason))
 }
 
 // ReadFailureReasonFile reads the failure reason from a file. Returns empty string if not found.
@@ -724,6 +725,7 @@ func (m *InstanceCompletionManifest) AllUploadsOK() bool {
 
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.
 func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, killReason, failureReason string, startTime, endTime int64, outputFiles []OutputFile) error {
+	failureReason = db.SanitizeFailureReason(failureReason)
 	peakRSS := rs.RusagePeakRSS
 	if peakRSS == 0 && rs.PeakRSSFromTS > 0 {
 		peakRSS = rs.PeakRSSFromTS
@@ -791,7 +793,7 @@ func DetectFailureReason(exitCode int) string {
 	}
 
 	if exitCode == 1 {
-		return "error"
+		return FailureReasonError
 	}
 	return fmt.Sprintf("exit_%d", exitCode)
 }

@@ -174,7 +174,7 @@ func dispatchBlockedReasonsFromEvents(database *sql.DB, floorByJob map[int64]int
 }
 
 func dispatchFailurePersistsAfterOK(detail string) bool {
-	return strings.HasPrefix(strings.TrimSpace(detail), "r2_isolated_source_fetch_failed:")
+	return strings.TrimSpace(detail) == db.FailureReasonR2IsolatedSourceFetchFailed
 }
 
 func displayDispatchBlockedDetail(detail string) string {

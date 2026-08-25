@@ -362,7 +362,7 @@ func latestDispatchBlock(database *sql.DB, jobID int64, floor int64, now time.Ti
 }
 
 func dispatchFailurePersistsAfterOK(detail string) bool {
-	return strings.HasPrefix(strings.TrimSpace(detail), "r2_isolated_source_fetch_failed:")
+	return strings.TrimSpace(detail) == db.FailureReasonR2IsolatedSourceFetchFailed
 }
 
 func SummaryLine(x Explanation) string {

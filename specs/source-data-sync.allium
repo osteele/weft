@@ -801,10 +801,11 @@ rule ResyncAfterRemediation {
 --
 -- On rejection the runner writes two sidecar files in the agent's log
 -- directory and emits OpJobStartFailed (NOT OpJobStart):
---   * <jobid>.failure_reason  — text content
---     "source_provenance_mismatch: expected=<X>, marker=<Y>"
+--   * <jobid>.failure_reason  — closed token
+--     "source_provenance_mismatch"
 --   * <jobid>.preflight_rejected — sentinel carrying the rejection ts
--- The status file, meta file, and log header are NOT written. The job
+-- The expected/observed marker detail is written to the job log. The status
+-- file, meta file, and log header are NOT written. The job
 -- file is removed from the runner queue so the runner does not retry it.
 -- The job remains queued in Weft's view, so the autopilot or
 -- user can replan it.
@@ -832,8 +833,7 @@ rule RunnerPreflightProvenanceCheck {
     -- PreflightRejected(
     -- legacy: job: job,
     -- outcome: r2_isolated_source_unavailable,
-    -- reason: "r2_isolated_source_unavailable: "
-    -- + entry.source_r2_key
+    -- reason: r2_isolated_source_unavailable
     -- legacy: )
 
     -- Normal mode: per-job marker must exist and match.
@@ -841,9 +841,7 @@ rule RunnerPreflightProvenanceCheck {
     -- ensures: PreflightRejected(
     -- job: job,
     -- outcome: source_provenance_mismatch,
-    -- reason: "source_provenance_mismatch: expected="
-    -- + entry.source_sha256 + ", marker="
-    -- + (marker.expected_sha ?? "<missing>")
+    -- reason: source_provenance_mismatch
     -- )
 
     -- else:
@@ -870,6 +868,7 @@ rule PreflightRejected {
 
     ensures:
         PreflightFailureReasonWritten(job: job, reason: reason)
+        PreflightDiagnosticWrittenToJobLog(job: job)
         PreflightSentinelWritten(job: job, rejected_at: now)
         OpJobStartFailedLogged(job: job, reason: reason)
         RunnerQueueFileRemoved(job: job)

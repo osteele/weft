@@ -261,17 +261,11 @@ func slurmStateToLocal(job *db.Job, info *slurmInfo) string {
 func normalizeSlurmFailure(state string) string {
 	switch strings.ToUpper(strings.TrimSpace(state)) {
 	case "TIMEOUT":
-		return "timeout"
+		return db.FailureReasonRunTimeout
 	case "OUT_OF_MEMORY":
-		return "oom"
-	case "NODE_FAIL":
-		return "node_fail"
-	case "PREEMPTED":
-		return "preempted"
-	case "CANCELLED", "CANCELLED+", "CANCELLED_BY_USER":
-		return "canceled"
-	case "FAILED":
-		return "failed"
+		return db.FailureReasonOOM
+	case "NODE_FAIL", "PREEMPTED", "CANCELLED", "CANCELLED+", "CANCELLED_BY_USER", "FAILED":
+		return db.FailureReasonError
 	default:
 		return ""
 	}

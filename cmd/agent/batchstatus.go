@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -178,7 +179,7 @@ func readFailureReason(logDir string, jobID int64) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return db.SanitizeFailureReason(strings.TrimSpace(string(data)))
 }
 
 func completionRunID(logDir string, jobID int64) int64 {

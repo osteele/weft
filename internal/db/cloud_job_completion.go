@@ -71,6 +71,7 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 // preflight status read, because concurrent sync/reconcile processes can both
 // observe the old state before either writes.
 func RecordCloudJobCompletionWithTransition(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason, killReason string, markerLastModified time.Time, runID int64) (CloudJobCompletionResult, error) {
+	failureReason = SanitizeFailureReason(failureReason)
 	return RetryOnDatabaseLockedValue(context.Background(), "record cloud job completion", func() (CloudJobCompletionResult, error) {
 		if recordCloudCompletionLockHook != nil {
 			if err := recordCloudCompletionLockHook(); err != nil {
@@ -504,11 +505,11 @@ func MarkStuckJobDead(database *sql.DB, attemptID int64) error {
 	_, err := database.Exec(
 		`UPDATE job_attempts
 		 SET status = ?, end_time = COALESCE(end_time, ?),
-		     failure_reason = 'launch completed but job results were not synced from R2',
+		     failure_reason = ?,
 		     cloud_outcome = ?
 		 WHERE id = ?
 		   AND status IN (?, ?, ?)`,
-		StatusDead, time.Now().Unix(), AttemptOutcomeOrphaned, attemptID,
+		StatusDead, time.Now().Unix(), FailureReasonR2ResultsNotSynced, AttemptOutcomeOrphaned, attemptID,
 		StatusStarting, StatusRunning, StatusPaused,
 	)
 	return err

@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -646,7 +647,8 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	paths := NewJobPaths(r.logDir, jobID)
 	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
-		return r.rejectPreflight(jobID, paths, fmt.Sprintf("gpu_count_preflight_failed: requested=%d visible=%d", requested, len(gpuDevices)))
+		detail := fmt.Sprintf("gpu_count_preflight_failed: requested=%d visible=%d", requested, len(gpuDevices))
+		return r.rejectPreflight(jobID, paths, db.FailureReasonGPUCountPreflightFailed, detail)
 	}
 
 	// Expand ~ in working directory (needed for the preflight marker read).
@@ -670,12 +672,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	var sourceExecution *SourceExecutionMetadata
 	if job.SourceManifest != nil {
 		if r.EnsureSourceManifestFromR2 == nil {
-			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_unavailable: source_manifest=%s but the runner has no manifest materializer", job.SourceManifest.SHA256))
+			detail := fmt.Sprintf("pinned_source_unavailable: source_manifest=%s but the runner has no manifest materializer", job.SourceManifest.SHA256)
+			return r.rejectPreflight(jobID, paths, db.FailureReasonPinnedSourceUnavailable, detail)
 		}
 		perJobRoot := perJobSourceDir(jobID)
 		manifestDir, err := r.EnsureSourceManifestFromR2(jobID, *job.SourceManifest, perJobRoot)
 		if err != nil {
-			return r.rejectPreflight(jobID, paths, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
+			return r.rejectPreflight(jobID, paths, db.FailureReasonPinnedSourceFetchFailed, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
 		}
 		expandedDir = manifestDir
 		sourceExecution = &SourceExecutionMetadata{
@@ -690,11 +693,12 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	} else if job.SourceR2Key != "" {
 		if r.EnsureSourceFromR2 == nil {
-			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key))
+			detail := fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key)
+			return r.rejectPreflight(jobID, paths, db.FailureReasonR2IsolatedSourceUnavailable, detail)
 		}
 		perJobDir := perJobSourceDir(jobID)
 		if err := r.EnsureSourceFromR2(jobID, job.SourceR2Key, perJobDir); err != nil {
-			return r.rejectPreflight(jobID, paths, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
+			return r.rejectPreflight(jobID, paths, db.FailureReasonR2IsolatedSourceFetchFailed, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
 		}
 		expandedDir = perJobDir
 		sourceExecution = &SourceExecutionMetadata{
@@ -715,11 +719,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		markerSHA, err := srcsync.ReadSourceMarkerForJob(expandedDir, jobID)
 		if err != nil {
 			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker unreadable in %s (%v)", job.SourceSHA, expandedDir, err)
-			return r.rejectPreflight(jobID, paths, msg)
+			return r.rejectPreflight(jobID, paths, db.FailureReasonSourceProvenanceMismatch, msg)
 		}
 		if markerSHA != job.SourceSHA {
 			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker=%s", job.SourceSHA, markerSHA)
-			return r.rejectPreflight(jobID, paths, msg)
+			return r.rejectPreflight(jobID, paths, db.FailureReasonSourceProvenanceMismatch, msg)
 		}
 		sourceExecution = &SourceExecutionMetadata{
 			DispatchMode:     "live_rsync_marker",
@@ -960,7 +964,8 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 // won't be re-attempted on the next sweep. The batch-status
 // reconciler picks up the sentinel and closes the attempt with NULL
 // timestamps and the populated failure reason.
-func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason string) error {
+func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason, detail string) error {
+	appendSetupLog(paths.Log, []byte("weft: "+detail+"\n"))
 	if err := WriteFailureReasonFile(paths, reason); err != nil {
 		slog.Warn("preflight reject: write failure_reason failed",
 			"component", "runner", "job_id", jobID, "error", err)
@@ -969,9 +974,9 @@ func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason string) err
 		slog.Warn("preflight reject: write sentinel failed",
 			"component", "runner", "job_id", jobID, "error", err)
 	}
-	oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(reason))
+	oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(detail))
 	removeJobFile(r.queueDir, jobID)
-	return fmt.Errorf("preflight rejected: %s", reason)
+	return fmt.Errorf("preflight rejected: %s", detail)
 }
 
 func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob, runDir string) {
@@ -1218,7 +1223,7 @@ func (r *Runner) refreshRunningJobs() {
 			rs, _ := r.state.GetRunning(jobIDStr)
 			WriteRusageFile(paths, rs)
 			endTime := r.now().Unix()
-			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, "stopped", rs.StartedAt, endTime, nil)
+			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, FailureReasonError, rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 			r.state.RemoveRunning(jobIDStr)
 			CleanupPIDFiles(paths)
@@ -1305,7 +1310,7 @@ func (r *Runner) refreshRunningJobs() {
 		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 		endTime := r.now().Unix()
 		rs, _ := r.state.GetRunning(jobIDStr)
-		WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
+		WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, FailureReasonError, rs.StartedAt, endTime, nil)
 		WriteRusageFile(paths, rs)
 		r.state.RecordFinished(jobIDStr, 1, endTime)
 		r.state.RemoveRunning(jobIDStr)

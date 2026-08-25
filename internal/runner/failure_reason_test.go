@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -63,6 +64,32 @@ func TestWriteAndReadFailureReasonFile(t *testing.T) {
 	// Verify file exists
 	if _, err := os.Stat(paths.FailureReason); err != nil {
 		t.Errorf("failure_reason file should exist: %v", err)
+	}
+}
+
+func TestFailureReasonArtifactWritersSanitizeProse(t *testing.T) {
+	tmpDir := t.TempDir()
+	paths := NewJobPaths(tmpDir, 124)
+	prose := "prewarm failed|source metadata\ncontinuation"
+	if err := WriteFailureReasonFile(paths, prose); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadFailureReasonFile(paths.FailureReason); got != db.FailureReasonError {
+		t.Fatalf("failure reason file = %q, want %q", got, db.FailureReasonError)
+	}
+	if err := WriteCompletionRecord(paths, ExitInfo{ExitCode: 1}, RunningJobState{}, "", prose, 1, 2, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record CompletionRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.FailureReason != db.FailureReasonError {
+		t.Fatalf("completion failure_reason = %q, want %q", record.FailureReason, db.FailureReasonError)
 	}
 }
 

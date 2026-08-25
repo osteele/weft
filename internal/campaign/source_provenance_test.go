@@ -66,7 +66,7 @@ func TestCloudSourceRestoreFailureIsNotReportedVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 	attempts, _ := db.ListAttempts(database, jobID)
-	persistCloudSourceVerification(database, jobID, attempts[0].ID, "source_restore_failed: object missing", time.Unix(456, 0))
+	persistCloudSourceVerification(database, jobID, attempts[0].ID, db.FailureReasonSourceRestoreFailed, time.Unix(456, 0))
 	attempts, _ = db.ListAttempts(database, jobID)
 	if got := attempts[0].Metadata.Source.Execution.Verification; got != db.SourceVerificationObjectsUnavailable {
 		t.Fatalf("verification = %q", got)

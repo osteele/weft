@@ -11,8 +11,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/runner"
 )
+
+func TestReadFailureReasonSanitizesWireField(t *testing.T) {
+	logDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(logDir, "42.failure_reason"), []byte("prose|shifted\ncontinuation"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFailureReason(logDir, 42); got != db.FailureReasonError {
+		t.Fatalf("readFailureReason = %q, want %q", got, db.FailureReasonError)
+	}
+}
 
 // TestBatchStatusExitCodeWithSignalSuffix validates that exit codes are correctly
 // parsed from status file content that may contain signal suffixes like

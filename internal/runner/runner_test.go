@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -607,14 +608,15 @@ func TestStartJob_SourceProvenanceMismatchFails(t *testing.T) {
 	// structured token so explain.ForJob and the diagnose surface can
 	// quote it back to the user.
 	reason := ReadFailureReasonFile(paths.FailureReason)
-	if !strings.HasPrefix(reason, "source_provenance_mismatch:") {
-		t.Fatalf("failure_reason = %q, want source_provenance_mismatch prefix", reason)
+	if reason != db.FailureReasonSourceProvenanceMismatch {
+		t.Fatalf("failure_reason = %q, want %q", reason, db.FailureReasonSourceProvenanceMismatch)
 	}
-	if !strings.Contains(reason, "expected=expected-hash") {
-		t.Fatalf("failure_reason = %q, want expected=expected-hash", reason)
+	logData, err := os.ReadFile(paths.Log)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(reason, "marker=different") {
-		t.Fatalf("failure_reason = %q, want marker=different", reason)
+	if !strings.Contains(string(logData), "expected=expected-hash") || !strings.Contains(string(logData), "marker=different") {
+		t.Fatalf("log = %q, want provenance details", logData)
 	}
 }
 
@@ -718,8 +720,8 @@ func TestStartJob_R2IsolatedSourceFetchFailureRejectsPreflight(t *testing.T) {
 		t.Fatalf("preflight sentinel missing: %v", statErr)
 	}
 	reason := ReadFailureReasonFile(paths.FailureReason)
-	if !strings.HasPrefix(reason, "r2_isolated_source_fetch_failed") {
-		t.Fatalf("failure_reason = %q, want r2_isolated_source_fetch_failed prefix", reason)
+	if reason != db.FailureReasonR2IsolatedSourceFetchFailed {
+		t.Fatalf("failure_reason = %q, want %q", reason, db.FailureReasonR2IsolatedSourceFetchFailed)
 	}
 }
 

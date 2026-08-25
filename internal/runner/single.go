@@ -334,7 +334,8 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		now := time.Now().Unix()
 		phases.RunEnd = now
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
-		failureReason := fmt.Sprintf("start_process: %v", err)
+		appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: start_process: %v\n", err)))
+		failureReason := FailureReasonError
 		WriteFailureReasonFile(paths, failureReason)
 		WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.RunStart, now, nil)
 		WritePhasesFile(paths, phases)

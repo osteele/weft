@@ -371,7 +371,11 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 		return nil, err
 	}
 
-	results := make(map[int64]queueBatchStatus, len(jobIDs))
+	return parseQueueBatchStatusOutput(stdout, len(jobIDs)), nil
+}
+
+func parseQueueBatchStatusOutput(stdout string, capacity int) map[int64]queueBatchStatus {
+	results := make(map[int64]queueBatchStatus, capacity)
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || !strings.HasPrefix(line, "JOB|") {
@@ -401,20 +405,27 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 			}
 			var runID int64
 			failureReason := ""
+			failureReasonTrusted := true
 			if len(parts) >= 7 {
 				if parts[5] != "" {
 					runID, _ = strconv.ParseInt(parts[5], 10, 64)
 				}
 				if parts[6] != "" {
-					failureReason = strings.TrimSpace(parts[6])
+					rawReason := strings.TrimSpace(parts[6])
+					failureReasonTrusted = db.IsKnownFailureReason(rawReason)
+					failureReason = db.SanitizeFailureReason(rawReason)
 				}
 			} else if len(parts) >= 6 && parts[5] != "" {
 				// TODO(remove after 2026-06-12): legacy agents emitted failure_reason
 				// in field 5 before COMPLETED lines included run_id.
-				failureReason = strings.TrimSpace(parts[5])
+				rawReason := strings.TrimSpace(parts[5])
+				failureReasonTrusted = db.IsKnownFailureReason(rawReason)
+				failureReason = db.SanitizeFailureReason(rawReason)
 			}
 			status := queueBatchStatus{ExitCode: &exitCode, Mtime: mtime, RunID: runID, FailureReason: failureReason}
-			status.Source = parseBatchSourceExecution(parts, 7)
+			if failureReasonTrusted {
+				status.Source = parseBatchSourceExecution(parts, 7)
+			}
 			results[id] = status
 		case "PREFLIGHT_REJECTED":
 			// Format: JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
@@ -423,11 +434,14 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 				mtime, _ = strconv.ParseInt(parts[3], 10, 64)
 			}
 			failureReason := ""
+			failureReasonTrusted := true
 			if len(parts) >= 5 && parts[4] != "" {
-				failureReason = strings.TrimSpace(parts[4])
+				rawReason := strings.TrimSpace(parts[4])
+				failureReasonTrusted = db.IsKnownFailureReason(rawReason)
+				failureReason = db.SanitizeFailureReason(rawReason)
 			}
 			agentVersion := ""
-			if len(parts) >= 6 {
+			if failureReasonTrusted && len(parts) >= 6 {
 				agentVersion = strings.TrimSpace(parts[5])
 			}
 			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason, AgentVersion: agentVersion}
@@ -450,7 +464,7 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 		}
 	}
 
-	return results, nil
+	return results
 }
 
 func parseBatchSourceExecution(parts []string, offset int) *db.JobSourceExecutionMetadata {
@@ -479,10 +493,13 @@ func syncSourceExecutionMetadata(database *sql.DB, job *db.Job, status queueBatc
 	if execution == nil && status.State == queueStatePreflightRejected && job.Metadata != nil && job.Metadata.Source != nil && job.Metadata.Source.Pin != nil {
 		pin := job.Metadata.Source.Pin
 		verification := db.SourceVerificationPending
-		switch {
-		case strings.Contains(status.FailureReason, "mismatch"):
+		switch status.FailureReason {
+		case db.FailureReasonSourceProvenanceMismatch:
 			verification = db.SourceVerificationMismatch
-		case strings.Contains(status.FailureReason, "unavailable"), strings.Contains(status.FailureReason, "fetch_failed"):
+		case db.FailureReasonPinnedSourceUnavailable,
+			db.FailureReasonPinnedSourceFetchFailed,
+			db.FailureReasonR2IsolatedSourceUnavailable,
+			db.FailureReasonR2IsolatedSourceFetchFailed:
 			verification = db.SourceVerificationObjectsUnavailable
 		}
 		execution = &db.JobSourceExecutionMetadata{

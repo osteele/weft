@@ -280,9 +280,8 @@ func addDisposition(counts *Dispositions, job *db.Job) {
 	counts.CompletedError++
 }
 
-// isInfraSuspectedReason intentionally under-claims. failure_reason also
-// stores arbitrary prose and log tails, so only exact machine-generated
-// constants qualify; unknown text remains completed_error.
+// isInfraSuspectedReason is an exact-match diagnosis allowlist over the closed
+// vocabulary in specs/job-lifecycle.allium. Generic error is not an infra diagnosis.
 func isInfraSuspectedReason(reason string) bool {
 	switch reason {
 	case db.FailureReasonDiskFull,
@@ -300,7 +299,10 @@ func isInfraSuspectedReason(reason string) bool {
 		db.FailureReasonInfraPrewarmDownloadFailed,
 		db.FailureReasonInfraCloudArtifactStageFailed,
 		db.FailureReasonInfraTorchPreflightFailed,
-		db.FailureReasonInfraCUDAHardwareFault:
+		db.FailureReasonInfraCUDAHardwareFault,
+		db.FailureReasonR2ResultsNotSynced,
+		db.FailureReasonPrewarmFailed,
+		db.FailureReasonArtifactStageFailed:
 		return true
 	}
 	return false

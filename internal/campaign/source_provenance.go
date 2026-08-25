@@ -3,7 +3,6 @@ package campaign
 import (
 	"database/sql"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
@@ -41,11 +40,8 @@ func persistCloudSourceVerification(database *sql.DB, jobID, attemptID int64, fa
 		if execution.DispatchMode != "pinned_cloud_manifest" {
 			return
 		}
-		if strings.HasPrefix(failureReason, "source_restore_failed:") {
+		if failureReason == db.FailureReasonSourceRestoreFailed {
 			execution.Verification = db.SourceVerificationObjectsUnavailable
-			if strings.Contains(failureReason, "mismatch") || strings.Contains(failureReason, "does not match") {
-				execution.Verification = db.SourceVerificationMismatch
-			}
 		} else {
 			execution.VerifiedSHA256 = execution.DispatchedSHA256
 			execution.Verification = db.SourceVerificationVerified

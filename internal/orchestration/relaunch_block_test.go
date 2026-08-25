@@ -557,7 +557,7 @@ func TestHydrateInventoryDispatchBlockedReasons_R2PreflightFailureSurvivesOK(t *
 		EventKind:  db.EventQueueDispatchFailed,
 		JobID:      jobID,
 		OccurredAt: now + 60,
-		Detail:     `r2_isolated_source_fetch_failed: download tarball: exec: "rclone": executable file not found in $PATH`,
+		Detail:     db.FailureReasonR2IsolatedSourceFetchFailed,
 	}); err != nil {
 		t.Fatalf("InsertLifecycleEvent failed: %v", err)
 	}

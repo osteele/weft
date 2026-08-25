@@ -368,7 +368,7 @@ func TestLatestInventoryDispatchBlockR2PreflightFailureSurvivesOK(t *testing.T) 
 	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-1*time.Hour).Unix(), jobID); err != nil {
 		t.Fatalf("set queued_at: %v", err)
 	}
-	detail := `r2_isolated_source_fetch_failed: download tarball: exec: "rclone": executable file not found in $PATH`
+	detail := db.FailureReasonR2IsolatedSourceFetchFailed
 	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 		OccurredAt: now.Add(-10 * time.Minute).Unix(),
 		EventKind:  db.EventQueueDispatchFailed,

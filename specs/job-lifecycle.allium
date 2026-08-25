@@ -329,7 +329,7 @@ entity JobAttempt {
     --   start_time    = null
     --   exit_code     = null
     --   end_time      = 0       (CloseAttempt was called with endTime=0)
-    --   failure_reason non-empty (e.g. "source_provenance_mismatch: ...")
+    --   failure_reason non-empty (e.g. "source_provenance_mismatch")
     -- See source-data-sync.allium § RunnerPreflightProvenanceCheck for the
     -- runner-side semantics and status-sync.allium §
     -- PreflightRejectionReconciled for the sync-side closure.
@@ -480,19 +480,18 @@ rule QueryGroupedSessionUnprocessedInbox {
 	-- aborted, killed_sigkill, killed_sigterm, killed_gpu_idle,
 	-- killed_stdout_silence, setup_timeout, run_timeout,
 	-- cuda_driver_too_old, infra_prewarm_download_failed,
-	-- infra_cloud_artifact_stage_failed, infra_torch_preflight_failed, or
-	-- infra_cuda_hardware_fault; completed_error otherwise. In particular,
+	-- infra_cloud_artifact_stage_failed, infra_torch_preflight_failed,
+	-- infra_cuda_hardware_fault, infra_r2_results_not_synced,
+	-- prewarm_failed, or artifact_stage_failed; completed_error otherwise.
+	-- In particular,
 	-- torch_preflight_environment_failed and torch_preflight_import_failed
 	-- are user-attributable per ClassifyInfraFailure and do not qualify.
 	-- Dynamic signal_<name> reasons do not qualify.
 	--
-	-- failure_reason is not a closed enum in storage: it also contains
-	-- free-form prose and multi-line logs. The predicate is therefore an
+	-- failure_reason is a closed vocabulary. The disposition predicate is an
 	-- explicit allowlist of constants matched by exact equality, never a
-	-- prefix, substring, or negative/fallback test. Unknown reasons
-	-- deliberately under-claim as completed_error: asking a user to read
-	-- program output for an unrecognized infrastructure failure is safer
-	-- than directing them to inspect a host for their own program error.
+	-- prefix, substring, or negative/fallback test. The generic `error` token
+	-- remains completed_error because it carries no infra diagnosis.
 	-- Every member lands in exactly one disposition bucket.
 	--
 	-- Group identity is the tuple (project_root, project,
@@ -545,7 +544,8 @@ enum Backend { queue_runner | slurm | vastai | skypilot }
 -- logs unless a later integration explicitly imports those artifacts.
 enum ExternalExecutor { skypilot }
 
--- Failure reasons detected by the runner from exit info and system probes.
+-- Failure reasons are a closed vocabulary detected by the runner or assigned
+-- by lifecycle boundaries.
 -- Dynamic values: "signal_<name>" for other signals, "exit_<N>" for
 -- unrecognized non-zero exit codes.
 -- infra_prewarm_download_failed: weft-owned input staging (HF prewarm)
@@ -559,9 +559,49 @@ enum FailureReason {
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
                     | cuda_driver_too_old
-                    | setup_timeout
+                    | setup_timeout | run_timeout
+                    | prewarm_failed | artifact_stage_failed
+                    | infra_r2_results_not_synced
+                    | source_restore_failed
+                    | gpu_count_preflight_failed
+                    | pinned_source_unavailable
+                    | pinned_source_fetch_failed
+                    | r2_isolated_source_unavailable
+                    | r2_isolated_source_fetch_failed
+                    | source_provenance_mismatch
+                    | cloud_after_failed
                     | infra_prewarm_download_failed
+                    | infra_cloud_artifact_stage_failed
                     | infra_cuda_hardware_fault
+                    | infra_torch_preflight_failed
+                    | torch_preflight_environment_failed
+                    | torch_preflight_import_failed
+}
+
+rule FailureReasonVocabularyBoundaries {
+    when: FailureReasonProduced(raw_reason)
+
+    ensures: StoredFailureReason = SanitizeFailureReason(raw_reason)
+    ensures: WireFailureReason = SanitizeFailureReason(raw_reason)
+
+    -- legacy annotation: @guidance
+        -- `job_attempts.failure_reason` contains only the declared enum,
+        -- `exit_-?N`, `signal_<lowercase name>`, or empty. Unknown input maps
+        -- to `error`; sanitization is total and never emits `|` or a newline.
+        --
+        -- The inventory batch-status protocol is positional and pipe-delimited
+        -- with one record per line. It has no escaping layer, so it cannot
+        -- carry unbounded diagnostic text: `|` shifts later source-execution
+        -- fields and a newline splits the record. Sanitize both when writing
+        -- runner artifacts/completion records and when reading them for wire
+        -- emission or ingestion. This second boundary also contains artifacts
+        -- written by older agents.
+        --
+        -- Prose, command errors, tracebacks, and log tails belong in the job
+        -- log or `job_attempts.error_message`, never in `failure_reason`.
+        -- Startup repair moves each legacy unknown reason to `error_message`
+        -- only when that field is empty, then maps the reason by an explicit
+        -- legacy-value table; all other unknown values become `error`.
 }
 
 -- The in-flight "this job is being placed" signal lives on
@@ -2087,21 +2127,11 @@ rule DetectFailureReason {
 --   * prepareUVSyncEnvironment returns the fallback reason as a 4th value
 --     so the caller can surface it (the predicate alone is invisible).
 
--- failure_reason is a single-line classification, never a multi-line
--- diagnostic dump. Writers must keep it to one line of free-form text
--- (typically a FailureReason enum value or short headline). The prewarm
--- log tail, tracebacks, and other multi-line context belong in the job
--- log file (already uploaded to R2 and surfaced by `weft log` and `weft
--- info`'s `prewarm log tail:` section). Embedded newlines in
--- failure_reason corrupt the TUI footer line, the `Reason:` line in
--- weft info / weft status, and the `Job:` line in the list TUI — these
--- are fixed-height single-line UI elements that scroll the surrounding
--- layout off-screen when fed multi-line content.
--- Implementation: setupPrewarmResult.logTail in cmd/agent/jobloop.go
--- carries the multi-line tail separately from err (which is single-line);
--- humanizeFailureReason in cmd/campaign_diagnose.go and the FailureReason
--- branch in internal/ui/terminal/list_selected_detail.go's
--- appendJobStatusParts defensively wrap with firstLine.
+-- failure_reason is the closed, single-line classification specified by
+-- FailureReasonVocabularyBoundaries, never a diagnostic dump. Prewarm log
+-- tails, tracebacks, and other prose belong in the job log / error_message.
+-- Display-side first-line wrapping remains compatibility defense for legacy
+-- databases; it is not permission for current writers to store prose.
 
 -- `weft job info`, `weft job status`, and `weft list --show` must
 -- surface every locally derivable diagnostic signal for a failed job.

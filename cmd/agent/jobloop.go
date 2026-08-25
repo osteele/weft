@@ -842,7 +842,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 
-			recordEarlyJobFailure(cfg, job, reason, 1)
+			appendFailureDiagnostic(cfg.LogDir, job.ID, reason)
+			recordEarlyJobFailure(cfg, job, db.FailureReasonCloudAfterFailed, 1)
 			continue
 		}
 
@@ -860,6 +861,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			result.AnyFailed = true
 			result.AnyInfraFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
+			appendFailureDiagnostic(cfg.LogDir, job.ID, fmt.Sprintf("source recovery failed: %v", err))
 			recordEarlyJobFailure(cfg, job, reason, 1)
 			continue
 		}
@@ -875,8 +877,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			exitCode := 1
 			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, exitCode, err.Error())
 			if failureReason == "" {
-				failureReason = "artifact_stage_failed"
+				failureReason = db.FailureReasonArtifactStageFailed
 			}
+			appendFailureDiagnostic(cfg.LogDir, job.ID, fmt.Sprintf("cloud artifact staging failed: %v", err))
 			recordEarlyJobFailure(cfg, job, failureReason, exitCode)
 			if infra && cfg.SelfDestructCmd != "" && !cfg.ConcurrentSlot {
 				terminateInstanceWithReason(
@@ -1312,11 +1315,12 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 	if prewarm.logPath != "" {
 		appendPrewarmLogForFailure(paths.Log, prewarm.logPath)
 	}
-	reason := "prewarm_failed"
+	reason := db.FailureReasonPrewarmFailed
 	if prewarm.failureReason != "" {
 		reason = prewarm.failureReason
-	} else if prewarm.err != nil {
-		reason = prewarm.err.Error()
+	}
+	if prewarm.err != nil {
+		appendFailureDiagnostic(cfg.LogDir, job.ID, fmt.Sprintf("prewarm failed: %v", prewarm.err))
 	}
 	ei := prewarm.exitInfo
 	ei.ExitCode = prewarmFailureExitCode(prewarm)
@@ -1373,8 +1377,23 @@ func recordEarlyJobFailure(cfg jobSequenceConfig, job cloud.AgentJob, reason str
 	_ = writeJobAttemptComplete(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir, job.ID, job.RunID, exitCode)
 }
 
-func sourceRecoveryFailureReason(err error) string {
-	return fmt.Sprintf("source_restore_failed: %v", err)
+func sourceRecoveryFailureReason(_ error) string {
+	return db.FailureReasonSourceRestoreFailed
+}
+
+func appendFailureDiagnostic(logDir string, jobID int64, detail string) {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return
+	}
+	_ = os.MkdirAll(logDir, 0o755)
+	path := runner.NewJobPaths(logDir, jobID).Log
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintln(f, "weft: "+detail)
 }
 
 func appendPrewarmLogForFailure(jobLog, prewarmLog string) {
@@ -1689,7 +1708,8 @@ func ensureFailureArtifacts(logDir string, jobID int64, ei runner.ExitInfo, runE
 
 	reason := ""
 	if runErr != nil {
-		reason = runErr.Error()
+		appendFailureDiagnostic(logDir, jobID, runErr.Error())
+		reason = db.FailureReasonError
 	}
 	if reason == "" {
 		reason = runner.DetectFailureReasonFromExitInfo(ei)

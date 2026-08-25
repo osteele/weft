@@ -13,8 +13,9 @@
 --
 -- Excludes:
 --   - FailureReason classification from exit signals / OOM-kill detection
---     (see job-lifecycle.allium § value FailureReason — that enum is
---     stored on the attempt; a DiagnosisPattern is derived from log text)
+--     (see job-lifecycle.allium § value FailureReason — that closed enum is
+--     stored on the attempt; prose remains in the job log / error_message,
+--     and a DiagnosisPattern is derived from that diagnostic text)
 --   - Auto-remediation and retry policy (what to DO with a diagnosis)
 --   - Rendering of diagnoses (see job-lifecycle.allium's diagnostic
 --     surfaces guidance: printJobLocalDiagnostics et al.)
