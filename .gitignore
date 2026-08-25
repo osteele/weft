@@ -64,5 +64,8 @@ _apalache-out/
 # Test project virtual environments
 testdata/campaign/*/.venv/
 
-# Working artifacts written by weft jobs / local notebooks
+# Working artifacts written by weft jobs / local notebooks.
+# Convention-based output collection watches both spellings, so both are
+# ignored — see "Convention-Based Output Collection" in CLAUDE.md.
 /output/
+/outputs/
