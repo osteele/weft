@@ -110,11 +110,14 @@ rule HostListMachineSurface {
         --
         -- ssh_target is not sufficient to reach a host on its own, and must be
         -- published together with ssh_identity_file. Weft pins its key as a
-        -- command-line argument, so the same target string resolved through
-        -- ssh_config alone can select a different IdentityFile and fail
-        -- against the same account. Observed: hosts.studio.ssh_user is
-        -- "agent", making the target agent@studio, while the ssh_config Host
-        -- block for studio names the operator's key and IdentitiesOnly yes.
+        -- command-line argument; a consumer that does not gets whichever key
+        -- ssh_config selects for that target. A command-line user@ overrides
+        -- User but not IdentityFile, so a Host block written for a different
+        -- account can offer the wrong key under IdentitiesOnly unless some
+        -- Match block happens to cover the pair. Whether one does is operator
+        -- configuration this surface neither controls nor observes, and it can
+        -- change between one consumer's run and the next. Publishing the key
+        -- is what makes the target usable without depending on it.
         --
         -- Capabilities are declared by operator configuration and are never
         -- probed. A capability a host does not declare is invisible to
