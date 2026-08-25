@@ -120,9 +120,20 @@ rule HostListMachineSurface {
         -- is what makes the target usable without depending on it.
         --
         -- Capabilities are declared by operator configuration and are never
-        -- probed. A capability a host does not declare is invisible to
-        -- placement even when the tool is installed and authenticated there,
-        -- so an absent capability is not evidence that the host lacks it.
+        -- probed, so a declared label is an assertion, not an observation.
+        -- Neither direction of it is evidence about the host:
+        --
+        --   absent  -- invisible to placement even when the tool is installed
+        --              and authenticated there. Not evidence the host lacks it.
+        --   present -- matched by EvaluateEligibility as a hard filter, with no
+        --              check that the tool is there or usable. Not evidence the
+        --              host has it. A label whose tool is absent, or installed
+        --              but not signed in, routes work to a host where it fails.
+        --
+        -- The two cost differently. An absent label forfeits a placement that
+        -- could have happened, and the job simply never schedules. A present
+        -- one buys a dispatch that cannot work. Consumers publishing or acting
+        -- on this set must not treat either direction as settled.
         --
         -- capabilities, ssh_target, and ssh_identity_file are absent for
         -- rental rows by construction — a rental is not a configured host and
