@@ -73,6 +73,53 @@ entity Host {
         -- Implementation: internal/inventory/inventory.go
 }
 
+-- A capability label's prefix, not its name, is what selects weft-side
+-- behaviour. This is a protocol: a namespace weft branches on is part of
+-- weft's contract, and one it does not branch on is inert by construction.
+rule CapabilityNamespaceProtocol {
+    when: MatchCapabilityNamespace(label)
+
+    -- legacy annotation: @guidance
+        -- Today there is exactly one behavioural namespace.
+        --
+        --   agent:<name>  A required capability here consumes an agent
+        --                 concurrency slot, admitted through
+        --                 AuthenticatedAgentCapacityAvailable and bounded by
+        --                 Host.agent_concurrency ("*" is the shared limit,
+        --                 names are per-agent limits). The name after the
+        --                 prefix is opaque to weft: it is matched by exact
+        --                 equality and never interpreted.
+        --
+        -- Every other label is matched by equality and carries no behaviour.
+        -- A namespace weft does not branch on is inert, so a new prefix is
+        -- inert until weft is changed to recognise it. `tool:foo` today is
+        -- an ordinary label: eligible-if-declared, no slot, no admission.
+        --
+        -- To admit a new behavioural namespace, state three things here
+        -- before adding the branch:
+        --
+        --   1. Whether a label in it consumes a concurrency slot, and against
+        --      which limit. Silence is not a default; an unstated answer is
+        --      how a namespace inherits semantics it did not want.
+        --   2. Which code paths branch on the prefix. Prefix matching is a
+        --      protocol only while every site that does it is enumerable;
+        --      once it is load-bearing in places nobody can list, it is drift.
+        --      Today: EvaluateEligibility here, internal/placement/target.go
+        --      and internal/placement/placement.go.
+        --   3. Who owns the vocabulary inside it. weft owns the prefix and
+        --      its behaviour; it does not own the names, and must not acquire
+        --      an opinion about what any particular label denotes.
+        --
+        -- Behaviour attaches to the prefix rather than to a per-capability
+        -- table on purpose: a table would require weft to hold a fact about
+        -- each capability, which is the domain knowledge weft is kept free
+        -- of. The prefix carries the fact instead, and carries it for a class.
+        --
+        -- Implementation: cmd/run_receipt.go normalizeRunCapabilities,
+        -- internal/hostcap.Normalize, internal/placement/target.go,
+        -- internal/placement/placement.go.
+}
+
 -- One external observer's latest finding for one host capability label.
 entity HostCapabilityObservation {
     host: String
