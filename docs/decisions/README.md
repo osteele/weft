@@ -28,11 +28,59 @@ for planned work, [`docs/planning/`](../planning/).
 | [0015](0015-make-fallback-submission-an-explicit-admission-contract.md) | Make fallback submission an explicit admission contract | accepted |
 | [0016](0016-run-inventory-queue-jobs-from-the-submitted-source-closure.md) | Run inventory queue jobs from the submitted source closure | accepted |
 | [0017](0017-use-host-addressed-r2-mailboxes-for-isolated-inventory-hosts.md) | Use host-addressed R2 mailboxes for isolated inventory hosts | accepted |
-| [0018](0018-delete-the-retired-coordinator-implementation.md) | Delete the retired coordinator implementation | accepted |
+| 0018 | ~~Delete the retired coordinator implementation~~ — withdrawn, see below | withdrawn |
 | [0019](0019-admit-concurrent-jobs-with-host-local-ram-reservations.md) | Admit concurrent jobs with host-local RAM reservations | accepted |
 | [0020](0020-keep-unattributed-sessions-inclusive-and-unproven-project-roots-unassigned.md) | Keep unattributed sessions inclusive and unproven project roots unassigned | accepted |
 | [0021](0021-keep-host-capability-observations-advisory.md) | Keep host capability observations advisory | accepted |
 | [0022](0022-attach-capability-behaviour-to-the-namespace-prefix.md) | Attach capability behaviour to the namespace prefix | accepted |
+
+## 0018, withdrawn
+
+0018 recorded that the retired coordinator's code and surfaces were deleted. It
+was an action, not a decision: once done, nothing was left for a future reader
+to undo by mistake, and its one durable clause — design any future placement
+service from current requirements rather than from the deleted one — restates
+[0002](0002-retire-the-coordinator-daemon.md).
+
+It also claimed to supersede 0002, which is wrong in substance as well as in
+bookkeeping: 0002 remains `accepted` with no `superseded-by`, and 0018 confirmed
+0002 rather than reversing it.
+
+The file is removed rather than left in place, because a record that does not
+carry a decision costs every other record some of the attention they are meant
+to command. The number is not reused. The content is in the repository history,
+which is where a withdrawn record belongs — a record does not need to double as
+its own archive.
+
+The deletion it described is complete: no `cmd/coordinator*.go`, no
+`docs/design/coordinator-architecture.md`, and both `internal/coordinator*`
+trees hold no files. 0002 and 0017 carry the constraints that remain live.
+
+## What earns a record
+
+A decision earns a record when **a future reader could reasonably undo it by
+mistake**. That is the operative test, and it sharpens the three conditions in
+[0001](0001-record-architecture-decisions.md) — architectural, contested,
+durable — rather than replacing them. A decision can satisfy all three and
+still need no record, because nobody would think to reverse it; the mistake has
+to be *available*. Where the two readings differ, this one governs.
+
+Consequences of applying it:
+
+- Prefer a code comment plus an invariant note for a local choice. A directory
+  that records everything signals nothing, so each record has to earn attention
+  it takes from the others.
+- **A rule that gains clauses belongs in a spec, not here.** Records are
+  immutable and are superseded rather than amended, so filing a growing rule as
+  a record makes it harder to amend than the code it governs. Records fix a
+  position; specs evolve in place. A position that *reverses* is exactly what a
+  superseding record is for.
+- **An action taken is not a decision.** Once a deletion or migration is done,
+  there is nothing left to undo by mistake. The durable constraint it served
+  belongs in the record that decided it.
+- Do not restate a record's content in a spec and the spec's content in a
+  record. Where both exist, the spec says what the system does and the record
+  says which alternative was rejected and why.
 
 ## Adding one
 

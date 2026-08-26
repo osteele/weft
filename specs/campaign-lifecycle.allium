@@ -4636,11 +4636,22 @@ rule AutoPilotBlockedReasonIsAuthoritative {
         -- existing rental. Reuse is opportunistic, so a reuse failure is
         -- expected and is not on its own a reason a job is unplaced.
         --
-        -- fillReusableInstances and submitAutoPilotReuseAssignments collect
-        -- these diagnostics into a separate map (reuse_diagnostics), never the
-        -- blocked_reasons map directly. Were they written into blocked_reasons
-        -- ahead of the launch path, the launch path's "set reason only if
-        -- absent" guards would skip — masking the real reason.
+        -- Reuse diagnostics reach a job's verdict through
+        -- VerdictBuilder.AddReuseDiagnostic, which files them as trailing
+        -- detail that can never become the primary reason. There is no map to
+        -- write directly: every write site picks a typed entry point —
+        -- SetLaunchBlocker (the first authoritative reason wins), AddBlocker
+        -- (later gates join as secondary fragments), ReplaceLaunchBlocker (a
+        -- fresher re-evaluation supersedes), AddReuseDiagnostic — and one
+        -- Settle produces the flat reason and the persisted structured form
+        -- under the precedence above.
+        --
+        -- The typing is what enforces that precedence, and it replaced a
+        -- mechanism that could not. While these diagnostics shared a map with
+        -- authoritative reasons, a reuse failure arriving first made the
+        -- launch path's "set reason only if absent" guard skip, masking the
+        -- real reason. A direct map write beside the builder reintroduces that
+        -- class, which is why there is no map. See docs/decisions/0006.
         --
         -- BuildAutoPlacementPlan must classify every candidate as reuse,
         -- launch, or blocked with a concrete offer/capacity reason. Missing
