@@ -2929,25 +2929,41 @@ rule JobListMachineSurface {
         -- version 1, a selection object, and the existing jobs row projection.
         -- The row fields and their values are unchanged by the envelope.
         --
-        -- selection is always present, even when neither bound elides a row.
-        -- It carries max_age_days, limit, older_hidden, limit_hidden, and
-        -- complete. complete is true exactly when both hidden counts are zero;
-        -- consumers should use it instead of inferring completeness from the
-        -- number of returned jobs.
+        -- selection is always present. It carries complete, order, and a
+        -- constraints list. Each constraint has kind, value, hidden, and
+        -- requested fields. The closed kind vocabulary in version 1 is
+        -- max_age_days, limit, and host_sync_window. A constraint appears only
+        -- when it was applied; an unapplied constraint is absent rather than
+        -- present with a null value. An empty list means no constraint narrowed
+        -- the caller-defined set.
         --
-        -- max_age_days is 7 when the default recency window is applied and
-        -- null when no max-age bound is applied, including with --all, --since,
-        -- search, and explicit job IDs. limit is the positive --limit bound and
-        -- null with --limit 0, when no limit bound is applied. Null means the
-        -- corresponding bound is absent, never unknown. older_hidden and
-        -- limit_hidden are the counts elided by those respective bounds.
+        -- hidden is the number of matching rows elided by that constraint. Zero
+        -- means the count was taken and no rows were elided; null means the
+        -- constraint was applied but its effect was not counted. complete is
+        -- derived from the constraints list: it is true exactly when every
+        -- constraint has hidden 0, and false for any non-zero or null hidden
+        -- count. Consumers should use complete instead of inferring
+        -- completeness from the number of returned jobs.
+        --
+        -- requested says whether the caller requested the constraint. The
+        -- max_age_days and limit constraints represent caller-visible defaults
+        -- or flags and have requested true. host_sync_window has requested false:
+        -- absent --host, --all-hosts, and --queued, weft may restrict inventory
+        -- jobs to hosts synced within the 172800-second window without the
+        -- caller asking. Cloud and unplaced jobs remain in scope under that
+        -- constraint. If the recent-host lookup returns no hosts, the existing
+        -- collector applies no freshness filter and omits this constraint.
+        -- Search and explicit job IDs do not apply max_age_days; --all or
+        -- --since also removes it, and --limit 0 removes limit.
         --
         -- Before applying the positive limit, this CLI path sorts the fully
         -- filtered rows by job ID descending, so the newest submissions are the
-        -- rows that survive and limit_hidden counts the older matching rows
-        -- omitted from the document. `--format json` uses this same path: the
-        -- ordering is part of what its selection object means, not merely table
-        -- presentation. With no limit the rows remain newest-first.
+        -- rows that survive and the limit constraint's hidden count records the
+        -- older matching rows omitted from the document. `--format json` uses
+        -- this same path: the ordering is part of what its selection object
+        -- means, not merely table presentation. order has the closed vocabulary
+        -- newest_first and active_first. With no limit the rows retain the
+        -- reported order.
         --
         -- The shared collector does not impose that ordering by default. TUI
         -- job lists, project listings, and job watch retain the SQL active-first
@@ -2955,11 +2971,14 @@ rule JobListMachineSurface {
         -- show a different subset. Implementation: cmd/list.go —
         -- renderListPlain, listNewestFirst, applyListLimit.
         --
-        -- Fields are added additively without changing version 1. The version
-        -- is bumped only for a change that breaks a reader which refuses
-        -- unrecognized versions. This surface carries completeness in-band
-        -- because machine consumers may read stdout alone; the existing stderr
-        -- notices remain human-facing supplements and do not replace it.
+        -- This constraint-list shape replaces the earlier field-per-constraint
+        -- selection object while version remains 1. The envelope shipped before
+        -- it had consumers, so the breaking shape change is free. Future
+        -- vocabulary additions change the meaning of version 1 and therefore
+        -- require the same declared-and-validated discipline as today's values.
+        -- This surface carries completeness in-band because machine consumers
+        -- may read stdout alone; the existing stderr notices remain human-facing
+        -- supplements and do not replace it.
         --
         -- Implementation: cmd/list.go — jobListJSONEnvelope,
         -- currentJobListJSONSelection, writeJobListJSON.

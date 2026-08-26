@@ -412,12 +412,13 @@ func syncSkyForList(parent context.Context, database *sql.DB) []string {
 const defaultListMaxAgeDays = 7
 
 // listOlderHiddenCount records how many jobs matched the current list filters
-// but were hidden by the default recency window (0 when the window is not
-// active or nothing older matched). collectJobsForList sets it; renderListPlain
-// reads it to warn that older jobs exist, so the cutoff does not read as
-// "these jobs are gone". It is a package-level var to match the surrounding
-// list-flag state rather than thread an extra return value through every caller.
-var listOlderHiddenCount int
+// but were hidden by the default recency window. The companion known bit keeps
+// a failed count distinct from zero. See JobListMachineSurface in
+// specs/job-lifecycle.allium.
+var (
+	listOlderHiddenCount      int
+	listOlderHiddenCountKnown bool
+)
 
 // listLimitHiddenCount records how many jobs matched the current list filters
 // but were dropped by --limit. Set by collectJobsForList, read by
@@ -428,6 +429,14 @@ var listLimitHiddenCount int
 // collectJobsForList. See JobListMachineSurface in specs/job-lifecycle.allium.
 var listMaxAgeDaysApplied int
 
+// listHostSyncWindowApplied and listHostSyncWindowHiddenCount describe the
+// implicit freshness constraint applied by collectJobsForList. See
+// JobListMachineSurface in specs/job-lifecycle.allium.
+var (
+	listHostSyncWindowApplied     bool
+	listHostSyncWindowHiddenCount int
+)
+
 // listNewestFirst makes collectJobsForList order by job ID descending before
 // applying --limit, so the most recently submitted jobs are the ones that
 // survive the cap. Only the CLI's plain list path sets it: that surface answers
@@ -435,6 +444,10 @@ var listMaxAgeDaysApplied int
 // useful sort key. The TUI, project listings, and job watch leave it false and
 // keep the SQL ordering, which puts active jobs first.
 var listNewestFirst bool
+
+// listOrderApplied captures the ordering in force when collectJobsForList
+// selects its rows. See JobListMachineSurface in specs/job-lifecycle.allium.
+var listOrderApplied = jobListJSONOrderActiveFirst
 
 // sortJobsNewestFirst orders jobs by job ID descending.
 func sortJobsNewestFirst(jobs []*db.Job) {
@@ -459,8 +472,15 @@ func applyListLimit(jobs []*db.Job) []*db.Job {
 
 func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	listOlderHiddenCount = 0
+	listOlderHiddenCountKnown = false
 	listLimitHiddenCount = 0
 	listMaxAgeDaysApplied = 0
+	listHostSyncWindowApplied = false
+	listHostSyncWindowHiddenCount = 0
+	listOrderApplied = jobListJSONOrderActiveFirst
+	if listNewestFirst {
+		listOrderApplied = jobListJSONOrderNewestFirst
+	}
 	statusFilter, processedFilter, failedOnly, err := listFilters()
 	if err != nil {
 		return nil, err
@@ -492,6 +512,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	}
 
 	hostFilterHosts := []string{}
+	hostSyncWindowApplies := false
 	if listHost != "" {
 		hostFilterHosts = []string{listHost}
 	} else if listQueued {
@@ -503,7 +524,11 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 			return nil, fmt.Errorf("list recent hosts: %w", err)
 		}
 		if len(recentHosts) > 0 {
+			// An empty lookup preserves the collector's existing no-filter behavior;
+			// record the constraint only when applied. See JobListMachineSurface.
 			hostFilterHosts = recentHosts
+			hostSyncWindowApplies = true
+			listHostSyncWindowApplied = true
 		}
 	}
 
@@ -520,7 +545,6 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs = jobsWithEffectiveStatus(jobs, statusFilter)
 		jobs = filterJobsByFailureState(jobs, failedOnly)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
-		jobs = db.FilterByFreshStatus(jobs, hostFilterHosts)
 		jobs = filterJobsByHostFlag(jobs)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		jobs = db.FilterJobsByProject(jobs, listProject)
@@ -529,6 +553,11 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs, err = applyPostListFilters(jobs)
 		if err != nil {
 			return nil, err
+		}
+		if hostSyncWindowApplies {
+			beforeHostWindow := len(jobs)
+			jobs = db.FilterByFreshStatus(jobs, hostFilterHosts)
+			listHostSyncWindowHiddenCount = beforeHostWindow - len(jobs)
 		}
 		return applyListLimit(jobs), nil
 	}
@@ -558,7 +587,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	// recent jobs); --limit is applied last, after the filters. Bounding the
 	// SQL query by --limit here would let filters drop rows and silently
 	// under-fill the result below the requested limit.
-	raw, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, 0, maxAgeDays, listTags, processedFilter)
+	raw, err := db.ListJobsWithMaxAge(database, statusFilter, "", 0, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
@@ -566,15 +595,28 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	if hostSyncWindowApplies {
+		beforeHostWindow := len(jobs)
+		jobs = db.FilterByFreshStatus(jobs, hostFilterHosts)
+		listHostSyncWindowHiddenCount = beforeHostWindow - len(jobs)
+	}
 
 	// When the recency window is active, jobs that started before it are hidden
 	// and --limit will never reveal them. Count the hidden matches so the caller
 	// can say so — otherwise the cutoff reads as "these jobs were deleted".
 	if maxAgeDays > 0 {
-		allRaw, allErr := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, 0, 0, listTags, processedFilter)
-		all, filterErr := applyGoFilters(allRaw)
-		if allErr == nil && filterErr == nil && len(all) > len(jobs) {
-			listOlderHiddenCount = len(all) - len(jobs)
+		allRaw, allErr := db.ListJobsWithMaxAge(database, statusFilter, "", 0, 0, listTags, processedFilter)
+		if allErr == nil {
+			all, filterErr := applyGoFilters(allRaw)
+			if filterErr == nil {
+				if hostSyncWindowApplies {
+					all = db.FilterByFreshStatus(all, hostFilterHosts)
+				}
+				listOlderHiddenCountKnown = true
+				if len(all) > len(jobs) {
+					listOlderHiddenCount = len(all) - len(jobs)
+				}
+			}
 		}
 	}
 
@@ -1075,6 +1117,34 @@ func printJobsWithSelection(database *sql.DB, jobs []*db.Job, selection jobListJ
 
 const jobListJSONVersion = 1
 
+type jobListJSONConstraintKind string
+
+const (
+	jobListJSONConstraintMaxAgeDays     jobListJSONConstraintKind = "max_age_days"
+	jobListJSONConstraintLimit          jobListJSONConstraintKind = "limit"
+	jobListJSONConstraintHostSyncWindow jobListJSONConstraintKind = "host_sync_window"
+)
+
+func (kind jobListJSONConstraintKind) valid() bool {
+	switch kind {
+	case jobListJSONConstraintMaxAgeDays, jobListJSONConstraintLimit, jobListJSONConstraintHostSyncWindow:
+		return true
+	default:
+		return false
+	}
+}
+
+type jobListJSONOrder string
+
+const (
+	jobListJSONOrderNewestFirst jobListJSONOrder = "newest_first"
+	jobListJSONOrderActiveFirst jobListJSONOrder = "active_first"
+)
+
+func (order jobListJSONOrder) valid() bool {
+	return order == jobListJSONOrderNewestFirst || order == jobListJSONOrderActiveFirst
+}
+
 // jobListJSONEnvelope is the versioned job-list machine surface. Selection is
 // never omitted. See JobListMachineSurface in specs/job-lifecycle.allium.
 type jobListJSONEnvelope struct {
@@ -1084,35 +1154,100 @@ type jobListJSONEnvelope struct {
 	Jobs      json.RawMessage      `json:"jobs"`
 }
 
+type jobListJSONConstraint struct {
+	Kind      jobListJSONConstraintKind `json:"kind"`
+	Value     *int                      `json:"value"`
+	Hidden    *int                      `json:"hidden"`
+	Requested bool                      `json:"requested"`
+}
+
 type jobListJSONSelection struct {
-	MaxAgeDays  *int `json:"max_age_days"`
-	Limit       *int `json:"limit"`
-	OlderHidden int  `json:"older_hidden"`
-	LimitHidden int  `json:"limit_hidden"`
-	Complete    bool `json:"complete"`
+	Complete    bool                    `json:"complete"`
+	Order       jobListJSONOrder        `json:"order"`
+	Constraints []jobListJSONConstraint `json:"constraints"`
 }
 
 func currentJobListJSONSelection() jobListJSONSelection {
-	var maxAgeDays *int
+	constraints := make([]jobListJSONConstraint, 0, 3)
 	if listMaxAgeDaysApplied > 0 {
-		value := listMaxAgeDaysApplied
-		maxAgeDays = &value
+		constraint := newJobListJSONConstraint(
+			jobListJSONConstraintMaxAgeDays, listMaxAgeDaysApplied, listOlderHiddenCount, true,
+		)
+		if !listOlderHiddenCountKnown {
+			constraint.Hidden = nil
+		}
+		constraints = append(constraints, constraint)
 	}
-	var limit *int
 	if listLimit > 0 {
-		value := listLimit
-		limit = &value
+		constraints = append(constraints, newJobListJSONConstraint(
+			jobListJSONConstraintLimit, listLimit, listLimitHiddenCount, true,
+		))
 	}
-	return jobListJSONSelection{
-		MaxAgeDays:  maxAgeDays,
-		Limit:       limit,
-		OlderHidden: listOlderHiddenCount,
-		LimitHidden: listLimitHiddenCount,
-		Complete:    listOlderHiddenCount == 0 && listLimitHiddenCount == 0,
+	if listHostSyncWindowApplied {
+		constraints = append(constraints, newJobListJSONConstraint(
+			jobListJSONConstraintHostSyncWindow,
+			int(defaultHostSyncWindow/time.Second),
+			listHostSyncWindowHiddenCount,
+			false,
+		))
 	}
+	return newJobListJSONSelection(listOrderApplied, constraints)
+}
+
+func newJobListJSONConstraint(kind jobListJSONConstraintKind, value, hidden int, requested bool) jobListJSONConstraint {
+	return jobListJSONConstraint{Kind: kind, Value: &value, Hidden: &hidden, Requested: requested}
+}
+
+// newJobListJSONSelection derives completeness from every applied constraint;
+// adding a constraint cannot leave Complete stale. See JobListMachineSurface
+// in specs/job-lifecycle.allium.
+func newJobListJSONSelection(order jobListJSONOrder, constraints []jobListJSONConstraint) jobListJSONSelection {
+	if constraints == nil {
+		constraints = []jobListJSONConstraint{}
+	}
+	complete := true
+	for _, constraint := range constraints {
+		if constraint.Hidden == nil || *constraint.Hidden != 0 {
+			complete = false
+		}
+	}
+	return jobListJSONSelection{Complete: complete, Order: order, Constraints: constraints}
+}
+
+func (selection jobListJSONSelection) validate() error {
+	if !selection.Order.valid() {
+		return fmt.Errorf("invalid job-list order %q", selection.Order)
+	}
+	complete := true
+	seen := make(map[jobListJSONConstraintKind]struct{}, len(selection.Constraints))
+	for _, constraint := range selection.Constraints {
+		if !constraint.Kind.valid() {
+			return fmt.Errorf("invalid job-list constraint kind %q", constraint.Kind)
+		}
+		if _, ok := seen[constraint.Kind]; ok {
+			return fmt.Errorf("duplicate job-list constraint kind %q", constraint.Kind)
+		}
+		seen[constraint.Kind] = struct{}{}
+		if constraint.Value == nil {
+			return fmt.Errorf("job-list constraint %q has no value", constraint.Kind)
+		}
+		if constraint.Requested != (constraint.Kind != jobListJSONConstraintHostSyncWindow) {
+			return fmt.Errorf("job-list constraint %q has invalid requested value", constraint.Kind)
+		}
+		if constraint.Hidden == nil || *constraint.Hidden != 0 {
+			complete = false
+		}
+	}
+	if selection.Complete != complete {
+		return fmt.Errorf("job-list selection complete is not derived from its constraints")
+	}
+	return nil
 }
 
 func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, selection jobListJSONSelection) error {
+	if err := selection.validate(); err != nil {
+		return err
+	}
 	var rows bytes.Buffer
 	if err := terminal.PrintJobsJSON(&rows, jobs, cols); err != nil {
 		return fmt.Errorf("encode job-list rows: %w", err)
