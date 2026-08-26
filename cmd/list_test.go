@@ -1192,8 +1192,8 @@ func TestListLimitNoticeStaysOutOfMachineStdout(t *testing.T) {
 		// The capped run legitimately holds fewer rows; what must not differ is
 		// the presence of anything that is not a data row.
 		for _, line := range strings.Split(strings.TrimSpace(capped), "\n") {
-			if strings.Contains(line, "hidden") || strings.Contains(line, "--limit") {
-				t.Errorf("%s stdout has a non-data line: %q", format, line)
+			if strings.Contains(line, "hidden by --limit") || strings.Contains(line, "pass --limit") {
+				t.Errorf("%s stdout has a human notice: %q", format, line)
 			}
 		}
 		if uncapped == "" {

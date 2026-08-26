@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -255,7 +257,7 @@ func renderListPlain(database *sql.DB, args []string) error {
 		fmt.Fprintf(os.Stderr, "%d more %s hidden by --limit %d — pass --limit 0 to include them.\n",
 			listLimitHiddenCount, pluralize("job", listLimitHiddenCount), listLimit)
 	}
-	return printJobs(database, jobs)
+	return printJobsWithSelection(database, jobs, currentJobListJSONSelection())
 }
 
 func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
@@ -422,6 +424,10 @@ var listOlderHiddenCount int
 // renderListPlain, so a capped listing does not read as "this is everything".
 var listLimitHiddenCount int
 
+// listMaxAgeDaysApplied records the default recency bound actually used by
+// collectJobsForList. See JobListMachineSurface in specs/job-lifecycle.allium.
+var listMaxAgeDaysApplied int
+
 // listNewestFirst makes collectJobsForList order by job ID descending before
 // applying --limit, so the most recently submitted jobs are the ones that
 // survive the cap. Only the CLI's plain list path sets it: that surface answers
@@ -454,6 +460,7 @@ func applyListLimit(jobs []*db.Job) []*db.Job {
 func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	listOlderHiddenCount = 0
 	listLimitHiddenCount = 0
+	listMaxAgeDaysApplied = 0
 	statusFilter, processedFilter, failedOnly, err := listFilters()
 	if err != nil {
 		return nil, err
@@ -531,6 +538,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	if listAll || listSince != "" {
 		maxAgeDays = 0
 	}
+	listMaxAgeDaysApplied = maxAgeDays
 
 	// applyGoFilters runs the in-Go filter chain that the SQL query cannot
 	// express. Sharing it between the display fetch and the hidden-older count
@@ -1007,7 +1015,14 @@ func printJobAttemptSummary(database *sql.DB, job *db.Job) {
 	}
 }
 
+// printJobs renders with the selection bounds of the collection in flight. Every
+// JSON caller carries one; there is no unenveloped shape. See
+// JobListMachineSurface in specs/job-lifecycle.allium.
 func printJobs(database *sql.DB, jobs []*db.Job) error {
+	return printJobsWithSelection(database, jobs, currentJobListJSONSelection())
+}
+
+func printJobsWithSelection(database *sql.DB, jobs []*db.Job, selection jobListJSONSelection) error {
 	applyAttemptOutcomeOverrides(database, jobs)
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
 
@@ -1036,7 +1051,7 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultJSONColumnKeys); err != nil {
 			return err
 		}
-		return terminal.PrintJobsJSON(os.Stdout, jobs, cols)
+		return writeJobListJSON(os.Stdout, jobs, cols, selection)
 	case "tsv", "tab":
 		cols, err := terminal.ResolveColumns(listColumns, terminal.DefaultTSVColumnKeys)
 		if err != nil {
@@ -1056,6 +1071,61 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 	default:
 		return fmt.Errorf("unknown format %q (use table, json, or tsv)", listFormat)
 	}
+}
+
+const jobListJSONVersion = 1
+
+// jobListJSONEnvelope is the versioned job-list machine surface. Selection is
+// never omitted. See JobListMachineSurface in specs/job-lifecycle.allium.
+type jobListJSONEnvelope struct {
+	Kind      string               `json:"kind"`
+	Version   int                  `json:"version"`
+	Selection jobListJSONSelection `json:"selection"`
+	Jobs      json.RawMessage      `json:"jobs"`
+}
+
+type jobListJSONSelection struct {
+	MaxAgeDays  *int `json:"max_age_days"`
+	Limit       *int `json:"limit"`
+	OlderHidden int  `json:"older_hidden"`
+	LimitHidden int  `json:"limit_hidden"`
+	Complete    bool `json:"complete"`
+}
+
+func currentJobListJSONSelection() jobListJSONSelection {
+	var maxAgeDays *int
+	if listMaxAgeDaysApplied > 0 {
+		value := listMaxAgeDaysApplied
+		maxAgeDays = &value
+	}
+	var limit *int
+	if listLimit > 0 {
+		value := listLimit
+		limit = &value
+	}
+	return jobListJSONSelection{
+		MaxAgeDays:  maxAgeDays,
+		Limit:       limit,
+		OlderHidden: listOlderHiddenCount,
+		LimitHidden: listLimitHiddenCount,
+		Complete:    listOlderHiddenCount == 0 && listLimitHiddenCount == 0,
+	}
+}
+
+func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, selection jobListJSONSelection) error {
+	var rows bytes.Buffer
+	if err := terminal.PrintJobsJSON(&rows, jobs, cols); err != nil {
+		return fmt.Errorf("encode job-list rows: %w", err)
+	}
+	envelope := jobListJSONEnvelope{
+		Kind:      "job_list",
+		Version:   jobListJSONVersion,
+		Selection: selection,
+		Jobs:      json.RawMessage(bytes.TrimSpace(rows.Bytes())),
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(envelope)
 }
 
 // populateSubmitterSessionColumn fills in the submitter session when the

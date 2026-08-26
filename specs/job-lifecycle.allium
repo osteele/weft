@@ -2864,6 +2864,39 @@ invariant GPUJobsAreExclusivePerDevice {
     -- this to avoid stacking our own jobs' VRAM on a device.
 }
 
+-- The machine-readable projection of `weft list jobs`, including the bounds
+-- that selected the published rows.
+rule JobListMachineSurface {
+    when: QueryJobList(json_output)
+
+    -- legacy annotation: @guidance
+        -- The JSON document is an envelope with kind "job_list", integer
+        -- version 1, a selection object, and the existing jobs row projection.
+        -- The row fields and their values are unchanged by the envelope.
+        --
+        -- selection is always present, even when neither bound elides a row.
+        -- It carries max_age_days, limit, older_hidden, limit_hidden, and
+        -- complete. complete is true exactly when both hidden counts are zero;
+        -- consumers should use it instead of inferring completeness from the
+        -- number of returned jobs.
+        --
+        -- max_age_days is 7 when the default recency window is applied and
+        -- null when no max-age bound is applied, including with --all, --since,
+        -- search, and explicit job IDs. limit is the positive --limit bound and
+        -- null with --limit 0, when no limit bound is applied. Null means the
+        -- corresponding bound is absent, never unknown. older_hidden and
+        -- limit_hidden are the counts elided by those respective bounds.
+        --
+        -- Fields are added additively without changing version 1. The version
+        -- is bumped only for a change that breaks a reader which refuses
+        -- unrecognized versions. This surface carries completeness in-band
+        -- because machine consumers may read stdout alone; the existing stderr
+        -- notices remain human-facing supplements and do not replace it.
+        --
+        -- Implementation: cmd/list.go — jobListJSONEnvelope,
+        -- currentJobListJSONSelection, writeJobListJSON.
+}
+
 -- ==========================================================================
 -- TUI views
 -- ==========================================================================

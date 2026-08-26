@@ -98,9 +98,12 @@ func watchJobsPlainAll(database *sql.DB, opts terminal.WatchPlainOptions) error 
 				break
 			}
 		}
+		// Captured here rather than inside RenderText: the bounds belong to the
+		// collection that produced these rows, not to whenever the closure runs.
+		selection := currentJobListJSONSelection()
 		return terminal.WatchPlainStep{
 			Jobs:       jobs,
-			RenderText: func() error { return printJobs(database, jobs) },
+			RenderText: func() error { return printJobsWithSelection(database, jobs, selection) },
 			HasActive:  hasActive,
 		}, nil
 	}
