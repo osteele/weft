@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostcap"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/spf13/cobra"
 )
@@ -81,24 +81,7 @@ func plannedSourceDispatchMode(job *db.Job) string {
 }
 
 func normalizeRunCapabilities(agent string, capabilities []string) ([]string, error) {
-	if name := strings.ToLower(strings.TrimSpace(agent)); name != "" {
-		name = strings.TrimPrefix(name, "agent:")
-		capabilities = append(capabilities, "agent:"+name)
-	}
-	seen := make(map[string]struct{}, len(capabilities))
-	result := make([]string, 0, len(capabilities))
-	for _, capability := range capabilities {
-		capability = strings.ToLower(strings.TrimSpace(capability))
-		if capability == "" || strings.ContainsAny(capability, "\r\n\t ") {
-			return nil, fmt.Errorf("invalid empty or whitespace-containing host capability %q", capability)
-		}
-		if _, ok := seen[capability]; ok {
-			continue
-		}
-		seen[capability] = struct{}{}
-		result = append(result, capability)
-	}
-	return result, nil
+	return hostcap.Normalize(agent, capabilities)
 }
 
 func sourcePinFromMetadata(source *db.JobSourceMetadata) string {

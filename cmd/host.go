@@ -146,6 +146,7 @@ func init() {
 	hostListCmd.Flags().BoolVar(&hostListJSONFlag, "json", false, "Print hosts as JSON for machine consumers")
 	hostCmd.AddCommand(hostLoadCmd)
 	hostCmd.AddCommand(hostDiscoverCmd)
+	hostCmd.AddCommand(hostCapabilityCmd)
 	hostCmd.AddCommand(hostDoctorCmd)
 	hostCmd.AddCommand(hostSetupCmd)
 
@@ -726,11 +727,20 @@ type hostListJSONEnvelope struct {
 // a working connection. Both constraints and their reasons are recorded in
 // HostListMachineSurface in specs/inventory-placement.allium.
 type hostListJSONRow struct {
-	Type            string   `json:"type"`
-	Name            string   `json:"name"`
-	SSHTarget       string   `json:"ssh_target,omitempty"`
-	SSHIdentityFile string   `json:"ssh_identity_file,omitempty"`
-	Capabilities    []string `json:"capabilities,omitempty"`
+	Type                   string                             `json:"type"`
+	Name                   string                             `json:"name"`
+	SSHTarget              string                             `json:"ssh_target,omitempty"`
+	SSHIdentityFile        string                             `json:"ssh_identity_file,omitempty"`
+	Capabilities           []string                           `json:"capabilities,omitempty"`
+	CapabilityObservations []hostCapabilityObservationJSONRow `json:"capability_observations,omitempty"`
+}
+
+type hostCapabilityObservationJSONRow struct {
+	Label      string `json:"label"`
+	Observed   bool   `json:"observed"`
+	Source     string `json:"source"`
+	ObservedAt int64  `json:"observed_at"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 func writeHostListJSON(w io.Writer, rows []hostListRow) error {
@@ -740,34 +750,42 @@ func writeHostListJSON(w io.Writer, rows []hostListRow) error {
 		Hosts:   make([]hostListJSONRow, 0, len(rows)),
 	}
 	for _, row := range rows {
-		envelope.Hosts = append(envelope.Hosts, hostListJSONRow{
+		jsonRow := hostListJSONRow{
 			Type:            row.Type,
 			Name:            row.Name,
 			SSHTarget:       row.SSHTarget,
 			SSHIdentityFile: row.SSHIdentityFile,
 			Capabilities:    row.Capabilities,
-		})
+		}
+		for _, observation := range row.CapabilityObservations {
+			jsonRow.CapabilityObservations = append(jsonRow.CapabilityObservations, hostCapabilityObservationJSONRow{
+				Label:      observation.Label,
+				Observed:   observation.Observed,
+				Source:     observation.Source,
+				ObservedAt: observation.ObservedAt.Unix(),
+				Detail:     observation.Detail,
+			})
+		}
+		envelope.Hosts = append(envelope.Hosts, jsonRow)
 	}
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(envelope)
 }
 
-// applyHostConfigFields fills the configured-only fields on inventory rows,
-// leaving rentals empty. The config is a parameter so the caller decides what
-// an unreadable one means; loadHostListRows fails rather than yielding rows
-// with the fields omitted. See HostListMachineSurface in
+// applyHostConfigFields fills the SSH fields on configured inventory rows,
+// leaving rentals and unconfigured hosts empty. Effective capabilities already
+// come from inventory.LoadHosts. See HostListMachineSurface in
 // specs/inventory-placement.allium.
 func applyHostConfigFields(rows []hostListRow, cfg *config.Config) {
 	for i := range rows {
 		if rows[i].Type != "host" {
 			continue
 		}
-		hostCfg, ok := cfg.Hosts[rows[i].Name]
+		_, ok := cfg.Hosts[rows[i].Name]
 		if !ok {
 			continue
 		}
-		rows[i].Capabilities = append([]string(nil), hostCfg.Capabilities...)
 		rows[i].SSHTarget = ssh.HostTarget(rows[i].Name)
 		rows[i].SSHIdentityFile = ssh.HostIdentityFile(rows[i].Name)
 	}
@@ -816,12 +834,13 @@ type hostListRow struct {
 	Memory string
 	GPUs   string
 
-	// Configured, never probed; empty means no configured value rather than
-	// an absent fact. See HostListMachineSurface in
+	// Declared capabilities and advisory observations remain separate. See
+	// HostCapabilityObservation and HostListMachineSurface in
 	// specs/inventory-placement.allium.
-	Capabilities    []string
-	SSHTarget       string
-	SSHIdentityFile string
+	Capabilities           []string
+	CapabilityObservations []db.HostCapabilityObservation
+	SSHTarget              string
+	SSHIdentityFile        string
 }
 
 func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, error) {
@@ -840,9 +859,19 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 
 	cachedByName := map[string]*db.CachedHostInfo{}
 	recentHosts := map[string]struct{}{}
-	database, err := db.Open()
-	if err == nil {
+	database, databaseErr := db.Open()
+	if databaseErr != nil && hostListJSONFlag {
+		return nil, fmt.Errorf("open database for host observations: %w", databaseErr)
+	}
+	observationsByHost := map[string][]db.HostCapabilityObservation{}
+	if databaseErr == nil {
 		defer database.Close()
+		if hostListJSONFlag {
+			observationsByHost, err = db.ListAllHostCapabilityObservations(database)
+			if err != nil {
+				return nil, fmt.Errorf("load host capability observations: %w", err)
+			}
+		}
 
 		for _, name := range listRecentHostNames(database, now.Add(-defaultHostSyncWindow)) {
 			if name != "" && !db.IsLaunchHost(name) {
@@ -926,6 +955,13 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	applyHostConfigFields(rows, cfg)
+	if hostListJSONFlag {
+		for i := range rows {
+			if rows[i].Type == "host" {
+				rows[i].CapabilityObservations = observationsByHost[rows[i].Name]
+			}
+		}
+	}
 	return rows, nil
 }
 
@@ -986,12 +1022,13 @@ func hostListRowFromSpec(spec inventory.HostSpec) hostListRow {
 	}
 
 	return hostListRow{
-		Type:   "host",
-		Name:   spec.Name,
-		OSArch: osArch,
-		CPU:    cpu,
-		Memory: memory,
-		GPUs:   gpus,
+		Type:         "host",
+		Name:         spec.Name,
+		OSArch:       osArch,
+		CPU:          cpu,
+		Memory:       memory,
+		GPUs:         gpus,
+		Capabilities: append([]string(nil), spec.Capabilities...),
 	}
 }
 

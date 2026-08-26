@@ -73,6 +73,52 @@ entity Host {
         -- Implementation: internal/inventory/inventory.go
 }
 
+-- One external observer's latest finding for one host capability label.
+entity HostCapabilityObservation {
+    host: String
+    label: String
+    source: String
+    observed: Boolean
+    detail: String?
+    observed_at: Timestamp
+
+    -- legacy annotation: @guidance
+        -- Weft never probes service capabilities. An observer records a
+        -- finding through `weft host capability observe`; the row is keyed by
+        -- (host, label, source), so re-observing replaces only that source's
+        -- opinion. Recording an observation does not create a Host or an
+        -- execution target.
+        --
+        -- Observations are advisory. They never add to, remove from, or filter
+        -- Host.capabilities, and therefore never alter placement eligibility.
+        -- Weft will knowingly dispatch to a host whose declared capability an
+        -- observer recorded as absent: allowing a stale or broken prober to
+        -- remove hosts from rotation is the less safe failure mode.
+        --
+        -- source has the closed shape probe:<name>, where name matches
+        -- ^[a-z0-9][a-z0-9._-]{0,63}$. label uses the same lowercase and
+        -- whitespace rules as required capability labels. Neither weft nor its
+        -- consumers may parse, match, or branch on detail; only the typed
+        -- fields are protocol.
+        --
+        -- detail is deliberately open and deliberately temporary. It exists to
+        -- observe what recorders actually put there, and is to be replaced by
+        -- a closed vocabulary once that is known, migrating the rows that
+        -- exist rather than discarding them. Read an open detail as a stage,
+        -- not as a settled design. The 256-byte cap enforces that reading: it
+        -- is enough for a short human-readable note and too small to carry a
+        -- payload format, so nothing can come to depend on a shape here that
+        -- closing the field would break.
+        --
+        -- No observation row means nobody recorded a look. It is not evidence
+        -- that the capability is present or absent. A recorded observed=false
+        -- is timestamped negative evidence from that source, but remains
+        -- advisory and may become stale.
+        --
+        -- Implementation: cmd/host_capability.go,
+        -- internal/db/host_capability_observations.go.
+}
+
 -- A group of identical GPUs on a host. Multiple GPUSpecs may appear on
 -- one host when hardware is heterogeneous (e.g. cool100 has A100s +
 -- 2080 Tis).
@@ -100,13 +146,17 @@ rule HostListMachineSurface {
         -- parses optimistically turns an unrecognized document into a
         -- plausible-looking undercount, which reads as good news.
         --
-        -- The surface publishes name, type, capabilities, ssh_target, and
-        -- ssh_identity_file. It deliberately omits the OS, CPU, memory, and
-        -- GPU columns of the text table. Those are display strings carrying
-        -- placeholders such as "unknown" and an em dash; publishing them would
-        -- promote a formatting choice into a contract that cannot be changed.
-        -- Hardware belongs on this surface only as typed fields, never as the
-        -- table's rendered text.
+        -- The surface publishes name, type, capabilities, ssh_target,
+        -- ssh_identity_file, and capability_observations. Each observation
+        -- carries label, observed, source, observed_at, and optional detail.
+        -- capability_observations is absent when no observation is recorded;
+        -- adding it does not bump version 1 because fields are additive. The
+        -- surface deliberately omits the OS, CPU, memory, and GPU columns of
+        -- the text table. Those are display strings carrying placeholders such
+        -- as "unknown" and an em dash; publishing them would promote a
+        -- formatting choice into a contract that cannot be changed. Hardware
+        -- belongs on this surface only as typed fields, never as the table's
+        -- rendered text.
         --
         -- ssh_target is not sufficient to reach a host on its own, and must be
         -- published together with ssh_identity_file. Weft pins its key as a
@@ -119,9 +169,11 @@ rule HostListMachineSurface {
         -- change between one consumer's run and the next. Publishing the key
         -- is what makes the target usable without depending on it.
         --
-        -- Capabilities are declared by operator configuration and are never
-        -- probed, so a declared label is an assertion, not an observation.
-        -- Neither direction of it is evidence about the host:
+        -- Capabilities are declared by operator configuration. Weft never
+        -- probes them; external observers write separate advisory observations
+        -- through the host capability CLI. A declared label is still an
+        -- assertion, not an observation. Neither direction of it is evidence
+        -- about the host:
         --
         --   absent  -- invisible to placement even when the tool is installed
         --              and authenticated there. Not evidence the host lacks it.
@@ -134,20 +186,26 @@ rule HostListMachineSurface {
         -- could have happened, and the job simply never schedules. A present
         -- one buys a dispatch that cannot work. Consumers publishing or acting
         -- on this set must not treat either direction as settled.
+        -- Observations do not change this set or eligibility. Consumers may
+        -- use the typed observation fields as evidence with source and age,
+        -- but must never parse detail or treat a missing observation as a
+        -- negative finding.
         --
         -- capabilities, ssh_target, and ssh_identity_file are absent for
         -- rental rows by construction — a rental is not a configured host and
-        -- is reached with per-launch credentials — and for any host with no
-        -- hosts.<name> config entry. Absent means weft holds no configured
-        -- value. It never means the host lacks the capability, and never means
-        -- no key is required. This is the same asymmetry recorded in
-        -- docs/decisions/0020: missing evidence is not an absent fact.
+        -- is reached with per-launch credentials. For inventory rows,
+        -- capabilities comes from the effective merged HostSpec and is absent
+        -- when that set is empty; the SSH fields are absent when there is no
+        -- hosts.<name> config entry. Absence means weft holds no declared or
+        -- configured value. It never means the host lacks the capability, and
+        -- never means no key is required. This is the same asymmetry recorded
+        -- in docs/decisions/0020: missing evidence is not an absent fact.
         --
-        -- An unreadable config fails the query rather than yielding rows with
-        -- the configured fields omitted. Silently omitting them would make a
-        -- host weft could not read indistinguishable from a host that declares
-        -- nothing, which is precisely the confusion the previous paragraph
-        -- forbids consumers from making.
+        -- An unreadable config or observation store fails the JSON query rather
+        -- than yielding rows with fields omitted. Silently omitting them would
+        -- make unavailable evidence indistinguishable from a host that declares
+        -- or observes nothing, which is precisely the confusion the previous
+        -- paragraph forbids consumers from making.
         --
         -- Implementation: cmd/host.go, internal/ssh/pool.go HostTarget and
         -- HostIdentityFile.

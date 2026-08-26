@@ -31,6 +31,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0018](0018-delete-the-retired-coordinator-implementation.md) | Delete the retired coordinator implementation | accepted |
 | [0019](0019-admit-concurrent-jobs-with-host-local-ram-reservations.md) | Admit concurrent jobs with host-local RAM reservations | accepted |
 | [0020](0020-keep-unattributed-sessions-inclusive-and-unproven-project-roots-unassigned.md) | Keep unattributed sessions inclusive and unproven project roots unassigned | accepted |
+| [0021](0021-keep-host-capability-observations-advisory.md) | Keep host capability observations advisory | accepted |
 
 ## Adding one
 

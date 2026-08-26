@@ -218,6 +218,14 @@ table failure_label_reviews
   col 7 reviewed_at INTEGER notnull=0 default=<none> pk=0
   fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=NO ACTION
+table host_capability_observations
+  col 0 host TEXT notnull=1 default=<none> pk=1
+  col 1 label TEXT notnull=1 default=<none> pk=2
+  col 2 source TEXT notnull=1 default=<none> pk=3
+  col 3 observed INTEGER notnull=1 default=<none> pk=0
+  col 4 detail TEXT notnull=0 default=<none> pk=0
+  col 5 observed_at INTEGER notnull=1 default=<none> pk=0
+  unique-index (host,label,source) origin=pk partial=0
 table host_contention_obs
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 host TEXT notnull=1 default=<none> pk=0
