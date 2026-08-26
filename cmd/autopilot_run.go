@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -107,7 +108,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 	// must do it itself.
 	cfg, cfgErr := config.Load()
 	if cfgErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: load config for cloud sync: %v\n", cfgErr)
+		fmt.Fprintf(os.Stderr, "warning: load config for cloud sync: %s\n", secrets.RedactText(cfgErr.Error()))
 	}
 
 	label := autopilotRunLabel
@@ -124,7 +125,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", snapshotErr)
+		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))
 	}
 
 	pass := 0
@@ -183,7 +184,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 			ev.Note = "another runner holds the autopilot pass slot"
 		}
 		if outcome == outcomeError {
-			ev.Error = runErr.Error()
+			ev.Error = secrets.RedactText(runErr.Error())
 		}
 		if autopilotRunInterval > 0 {
 			wait = autopilotRunInterval
@@ -194,7 +195,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
 			wakeSnapshot = nextSnapshot
 		} else {
-			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(err.Error()))
 		}
 
 		if autopilotRunOnce {
@@ -295,7 +296,7 @@ func waitForAutopilotInvalidation(ctx context.Context, p autopilotWaitParams) (a
 		Backstop:      orchestration.AutopilotQuietBackstop,
 		Debounce:      autopilotLifecycleDebounce,
 		OnError: func(err error) {
-			fmt.Fprintf(os.Stderr, "warning: %s wake state: %v\n", label, err)
+			fmt.Fprintf(os.Stderr, "warning: %s wake state: %s\n", label, secrets.RedactText(err.Error()))
 		},
 	}
 	if p.syncCfg != nil {

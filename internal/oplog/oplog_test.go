@@ -71,6 +71,20 @@ func TestFileLogger(t *testing.T) {
 	}
 }
 
+func TestOptionsRedactCredentials(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	entry := Entry{}
+	WithDetail("url=https://example.test?api_key=" + secret)(&entry)
+	WithError(errors.New("invalid token " + secret))(&entry)
+
+	if strings.Contains(entry.Detail, secret) || strings.Contains(entry.Error, secret) {
+		t.Fatalf("entry contains credential: %+v", entry)
+	}
+	if !strings.Contains(entry.Detail, "<redacted>") || !strings.Contains(entry.Error, "<redacted>") {
+		t.Fatalf("entry is missing redaction marker: %+v", entry)
+	}
+}
+
 func TestCLICommandIncludesAuditContext(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
@@ -110,6 +124,21 @@ func TestCLICommandIncludesAuditContext(t *testing.T) {
 	}
 	if audit.CWD == "" {
 		t.Fatal("audit cwd is empty")
+	}
+}
+
+func TestCaptureAuditRedactsCredentialArguments(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	oldArgs := os.Args
+	os.Args = []string{"weft", "provider", "--api-key", secret}
+	t.Cleanup(func() { os.Args = oldArgs })
+
+	audit := CaptureAudit("cli")
+	if strings.Contains(strings.Join(audit.Argv, " "), secret) {
+		t.Fatalf("audit argv contains credential: %q", audit.Argv)
+	}
+	if audit.Argv[3] != "<redacted>" {
+		t.Fatalf("audit argv = %q, want redacted flag value", audit.Argv)
 	}
 }
 

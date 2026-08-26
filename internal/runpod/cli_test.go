@@ -62,6 +62,17 @@ Flags:
 	}
 }
 
+func TestCleanRunpodctlErrorDetailRedactsToken(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	got := cleanRunpodctlErrorDetail([]byte("request failed with token " + token))
+	if strings.Contains(got, token) {
+		t.Fatalf("cleanRunpodctlErrorDetail contains token: %q", got)
+	}
+	if !strings.Contains(got, "token <redacted>") {
+		t.Fatalf("cleanRunpodctlErrorDetail = %q, want redaction marker", got)
+	}
+}
+
 func TestRunOutputTimeoutIsProviderCommandTimeout(t *testing.T) {
 	runner := newCLIRunner("runpodctl")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

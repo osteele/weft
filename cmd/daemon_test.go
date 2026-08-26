@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -14,6 +15,24 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/syncorch"
 )
+
+func TestEmitDaemonPassRedactsCredentials(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	out := captureStdout(t, func() {
+		emitDaemonPass(daemonPassResult{
+			pass:    1,
+			started: time.Now(),
+			outcome: outcomeError,
+			runErr:  errors.New("request failed with api_key=" + secret),
+		}, time.Minute)
+	})
+	if strings.Contains(out, secret) {
+		t.Fatalf("daemon output contains API key: %q", out)
+	}
+	if !strings.Contains(out, "api_key=<redacted>") {
+		t.Fatalf("daemon output = %q, want redaction marker", out)
+	}
+}
 
 func setupDaemonTestDB(t *testing.T) *sql.DB {
 	t.Helper()

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/util"
 )
 
@@ -719,7 +720,7 @@ func (c *Client) runWithTimeout(commandTimeout time.Duration, args ...string) ([
 			return nil, fmt.Errorf("%w: vastai %s timed out after %s", cloud.ErrProviderCommandTimeout, strings.Join(prefix, " "), timeout)
 		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			detail := strings.TrimSpace(stderr.String())
+			detail := secrets.RedactText(strings.TrimSpace(stderr.String()))
 			if detail == "" {
 				detail = fmt.Sprintf("exit %d (no stderr)", exitErr.ExitCode())
 			}

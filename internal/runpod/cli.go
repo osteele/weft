@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/secrets"
 )
 
 type cliRunner struct {
@@ -110,7 +111,7 @@ func cleanRunpodctlErrorDetail(stream []byte) string {
 	if idx := strings.Index(detail, "\nUsage:"); idx >= 0 {
 		detail = strings.TrimSpace(detail[:idx])
 	}
-	return detail
+	return secrets.RedactText(detail)
 }
 
 func firstRunpodctlJSONError(detail string) string {

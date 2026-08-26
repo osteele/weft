@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
@@ -292,7 +293,7 @@ func init() {
 
 func printCommandError(cmd *cobra.Command, err error) {
 	stream := cmd.ErrOrStderr()
-	fmt.Fprintf(stream, "Error: %v\n", err)
+	fmt.Fprintf(stream, "Error: %s\n", secrets.RedactText(err.Error()))
 	if db.IsDatabaseLocked(err) {
 		fmt.Fprintln(stream, "Hint: database lock contention is usually transient; retry shortly. Cloud instances are reconciled by sync/watch and orphan sweep (`weft sync` can force a pass).")
 	}

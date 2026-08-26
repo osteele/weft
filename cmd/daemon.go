@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/orchestration"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/spf13/cobra"
 )
@@ -147,7 +148,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 
 	cfg, cfgErr := config.Load()
 	if cfgErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: load config: %v\n", cfgErr)
+		fmt.Fprintf(os.Stderr, "warning: load config: %s\n", secrets.RedactText(cfgErr.Error()))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -171,7 +172,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
-		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", snapshotErr)
+		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))
 	}
 
 	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
@@ -189,7 +190,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
 			wakeSnapshot = nextSnapshot
 		} else {
-			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(err.Error()))
 		}
 
 		// State the autopilot reads moved while this iteration ran — usually
@@ -331,7 +332,7 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		Verbose:           verbose,
 	})
 	for _, warning := range syncResult.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", secrets.RedactText(warning))
 	}
 
 	// The outcome describes what the autopilot pass did, not what sync found.
@@ -477,7 +478,7 @@ func emitDaemonPass(p daemonPassResult, wait time.Duration) {
 		parts = append(parts, fmt.Sprintf("slow=%s", strings.Join(syncResult.HostsSlow, ",")))
 	}
 	if p.runErr != nil && !errors.Is(p.runErr, orchestration.ErrAutopilotPaused) && !errors.Is(p.runErr, orchestration.ErrAutopilotBusy) {
-		parts = append(parts, fmt.Sprintf("err=%q", p.runErr.Error()))
+		parts = append(parts, fmt.Sprintf("err=%q", secrets.RedactText(p.runErr.Error())))
 	}
 	fmt.Printf("[%s] %s (next in %s)\n", time.Now().Format("15:04:05"), strings.Join(parts, " "), wait.Truncate(time.Second))
 }

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osteele/weft/internal/secrets"
 )
 
 // Operation type constants for semantic logging
@@ -119,14 +121,14 @@ type Option func(*Entry)
 // WithDetail adds detail text to the entry.
 func WithDetail(detail string) Option {
 	return func(e *Entry) {
-		e.Detail = detail
+		e.Detail = secrets.RedactText(detail)
 	}
 }
 
 // WithDetailf adds formatted detail text to the entry.
 func WithDetailf(format string, args ...any) Option {
 	return func(e *Entry) {
-		e.Detail = fmt.Sprintf(format, args...)
+		e.Detail = secrets.RedactText(fmt.Sprintf(format, args...))
 	}
 }
 
@@ -134,7 +136,7 @@ func WithDetailf(format string, args ...any) Option {
 func WithError(err error) Option {
 	return func(e *Entry) {
 		if err != nil {
-			e.Error = err.Error()
+			e.Error = secrets.RedactText(err.Error())
 		}
 	}
 }
@@ -142,7 +144,7 @@ func WithError(err error) Option {
 // WithErrorStr adds an error string to the entry.
 func WithErrorStr(errStr string) Option {
 	return func(e *Entry) {
-		e.Error = errStr
+		e.Error = secrets.RedactText(errStr)
 	}
 }
 
@@ -170,6 +172,7 @@ func WithJobID(jobID int64) Option {
 // WithAudit records explicit audit context on an operation.
 func WithAudit(a Audit) Option {
 	return func(e *Entry) {
+		a.Argv = secrets.RedactArgs(a.Argv)
 		e.Audit = &a
 	}
 }
@@ -187,7 +190,7 @@ func CaptureAudit(source string) Audit {
 	a := Audit{
 		Source: source,
 		CWD:    wd,
-		Argv:   append([]string(nil), os.Args...),
+		Argv:   secrets.RedactArgs(os.Args),
 	}
 	if agent, envName, sessionEnv, sessionID := detectCodingAgent(); agent != "" {
 		a.Agent = agent

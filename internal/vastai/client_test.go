@@ -474,6 +474,28 @@ func TestCreateInstanceCLITimeoutIsProviderCommandTimeout(t *testing.T) {
 	}
 }
 
+func TestCLIErrorRedactsAPIKeyFromStderr(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "vastai")
+	const apiKey = "0123456789abcdef0123456789abcdef"
+	script := "#!/bin/sh\nprintf '%s\\n' 'request failed: https://console.vast.ai/api/v0/instances?owner=me&api_key=" + apiKey + "' >&2\nexit 1\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	c := &Client{CLIPath: stub}
+	_, err := c.ListAllInstances()
+	if err == nil {
+		t.Fatal("ListAllInstances error = nil, want CLI failure")
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("ListAllInstances error contains API key: %q", err)
+	}
+	if !strings.Contains(err.Error(), "api_key=<redacted>") {
+		t.Fatalf("ListAllInstances error = %q, want redaction marker", err)
+	}
+}
+
 // TestRunWithTimeoutHonorsPerCallTimeout verifies that runWithTimeout's
 // commandTimeout parameter actually governs the deadline when the test-only
 // CLITimeout override is not set. This is the mechanism CreateInstance and
