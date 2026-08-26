@@ -700,6 +700,61 @@ rule SubmitJob {
     -- legacy: )
 }
 
+rule OnlineOnlyAdmissionContract {
+    when: SubmitJobOnlineOnly(command, working_dir, options)
+
+    requires: options.target_kind = inventory_host
+    requires: LiveInventoryPlacementEvaluated(options)
+
+    if ExistingJobForSubmitToken(options.idempotency_key):
+        ensures: AdmissionDecision() = deduplicated
+        ensures: not NewJobCreated()
+
+    else if not EligibleReachableInventoryHostExists(options):
+        ensures: AdmissionDecision() = not_accepted
+        ensures: not NewJobCreated()
+
+    else:
+        ensures: ProvisionalJobCreated(job, command, working_dir)
+
+        if RemoteQueueAcknowledged(job):
+            ensures: AdmissionDecision() = accepted_immediately
+            ensures: Job.exists(job)
+
+        if not RemoteQueueAcknowledged(job) or PostRecordAdmissionLost(job):
+            ensures: Job.deleted(job)
+            ensures: AdmissionDecision() = not_accepted
+
+    -- legacy annotation: @guidance
+        -- `weft run --if-online` (`--no-queue` is an alias) is an admission
+        -- mode for callers that own a fallback executor. It performs live
+        -- inventory placement and accepts only after the selected host's queue
+        -- acknowledges the job; it never converts an unacknowledged submission
+        -- into ordinary durable queued work. The JSON receipt's online-only
+        -- states are accepted_immediately, not_accepted, and deduplicated.
+        -- Only not_accepted tells the caller it may execute its fallback.
+        --
+        -- Placement and reachability rejection happen before the Job row is
+        -- recorded. A capability-slot race is checked again after recording;
+        -- losing it deletes that provisional local Job. Failure to establish
+        -- the remote queue acknowledgment also deletes the local Job before
+        -- returning not_accepted. Cleanup is db.DeleteJob, not cancellation or
+        -- tombstoning. If that deletion itself fails, the command returns a
+        -- cleanup error instead of claiming a safe not_accepted result.
+        -- Source pinning can precede admission and is not the Job record this
+        -- cleanup removes.
+        --
+        -- Retaining an unacknowledged local Job would let Weft's durable queue
+        -- execute it after the caller had selected its own fallback, creating a
+        -- double-execution hazard. Ordinary SubmitJob deliberately keeps its
+        -- durable queue semantics; this removal belongs only to online-only
+        -- admission. See decision 0015 for why submit-then-cancel was rejected.
+        --
+        -- Implementation: cmd/run.go — runRun (`runIfOnline`, the post-record
+        -- CheckHostConstraintsWithActiveJobs check, ops.SyncHost acknowledgment,
+        -- and db.DeleteJob cleanup); cmd/run_receipt.go — runSubmissionReceipt.
+}
+
 rule WarnWhenUVPythonBypassesPEP723Environment {
     when: SubmitJob(command, working_dir, options)
     -- legacy: requires: command invokes script as `uv run python <script.py>`
@@ -2886,6 +2941,19 @@ rule JobListMachineSurface {
         -- null with --limit 0, when no limit bound is applied. Null means the
         -- corresponding bound is absent, never unknown. older_hidden and
         -- limit_hidden are the counts elided by those respective bounds.
+        --
+        -- Before applying the positive limit, this CLI path sorts the fully
+        -- filtered rows by job ID descending, so the newest submissions are the
+        -- rows that survive and limit_hidden counts the older matching rows
+        -- omitted from the document. `--format json` uses this same path: the
+        -- ordering is part of what its selection object means, not merely table
+        -- presentation. With no limit the rows remain newest-first.
+        --
+        -- The shared collector does not impose that ordering by default. TUI
+        -- job lists, project listings, and job watch retain the SQL active-first
+        -- order before their own limits, so those surfaces can deliberately
+        -- show a different subset. Implementation: cmd/list.go —
+        -- renderListPlain, listNewestFirst, applyListLimit.
         --
         -- Fields are added additively without changing version 1. The version
         -- is bumped only for a change that breaks a reader which refuses

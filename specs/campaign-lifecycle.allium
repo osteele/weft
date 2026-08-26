@@ -444,6 +444,10 @@ config {
     -- whose distribution is the bimodal one described above. See
     -- DudVastDetection.
     dud_vast_timeout_ceiling: Duration = 15.minutes
+    -- Ceilings on the same learned threshold when it stands in for the two
+    -- pre-running watchdog windows. See PreRunningWatchdogCeilings.
+    max_empty_status_time_ceiling: Duration = 10.minutes
+    max_pre_running_status_time_ceiling: Duration = 30.minutes
     -- How long after the provider reports `running` weft waits before
     -- asking the container whether its OnStart script was installed.
     -- Providers write the start script before starting sshd, so an
@@ -2441,6 +2445,51 @@ rule LaunchingPhaseTimeout {
         -- internal/campaign/instance_check.go.
 }
 
+rule PreRunningWatchdogCeilings {
+    when: EvaluatePreRunningWatchdogThresholds(instance)
+
+    if BootstrapSurvival(instance).terminate_learned:
+        ensures: EffectiveMaxEmptyStatusTime(instance) = min(
+            BootstrapSurvival(instance).terminate_after,
+            config.max_empty_status_time_ceiling
+        )
+        ensures: EffectiveMaxPreRunningStatusTime(instance) = min(
+            BootstrapSurvival(instance).terminate_after,
+            config.max_pre_running_status_time_ceiling
+        )
+
+    -- legacy annotation: @guidance
+        -- Both watchdogs borrow db.ComputeBootstrapSurvival, whose successful
+        -- observations run from provider_running_at to the first job wrapper
+        -- start. The empty-status watchdog is waiting for any provider status,
+        -- and the stale-non-running watchdog is waiting for the provider to
+        -- reach running. Each awaited event precedes the borrowed curve's
+        -- origin, so the intervals are disjoint: learned data may extend the
+        -- legacy windows, but may not define either one without a ceiling.
+        -- This differs from DudVastDetection: that rule borrows an ill-fitting
+        -- later-event distribution, while these rules borrow a distribution
+        -- that starts only after their awaited events have already occurred.
+        -- See decision 0010 for the rejected unclamped alternative.
+        --
+        -- Both ceilings are calibrated against the
+        -- launched_at-to-provider_running_at distribution summarized beside
+        -- config.launching_phase_timeout (n=4270 on 2026-08-18). The
+        -- 10-minute empty-status ceiling clears that distribution's p90 with
+        -- margin; reaching any non-empty status is a strict prefix of reaching
+        -- running, so the distribution is an upper bound for a first-status
+        -- event whose timestamp is not stored. The 30-minute stale-non-running
+        -- ceiling sits above the observed provider p99s (23.0 minutes on
+        -- vast.ai and 25.8 minutes on RunPod), allowing provisioning and image
+        -- pull while bounding wedged rentals. The two windows remain distinct
+        -- because they await distinct events.
+        --
+        -- Implementation: internal/campaign/instance_check.go —
+        -- effectiveMaxEmptyStatusTime,
+        -- effectiveMaxPreRunningStatusTime; constants and calibration:
+        -- internal/campaign/reconcile.go — maxEmptyStatusTimeCeiling,
+        -- maxPreRunningStatusTimeCeiling.
+}
+
 rule SetupStall {
     when: SetupPhaseStalled(instance)
     requires: instance.status = running
@@ -3599,6 +3648,48 @@ rule AutoPilotPass {
 -- Autopilot dispatch policy
 -- --------------------------------------------------------------------------
 
+enum BlockerKind {
+    unclassified | market | budget | backoff | precondition
+}
+
+rule TypedBlockerRecheckCadence {
+    when: SettleBlockedVerdict()
+
+    -- legacy annotation: @guidance
+        -- Recheck cadence is primarily a property of BlockerKind, not of the
+        -- rendered reason. market maps to recheck_market; backoff maps to
+        -- recheck_deadline; budget and precondition map to recheck_none.
+        -- VerdictBuilder.Need takes the strongest need across the primary and
+        -- secondary typed blockers, and the autopilot settles that aggregate
+        -- onto GroupedAutoPilotResult.Recheck. ClassifyPass turns it into the
+        -- refined blocked-market, blocked-deadline, or blocked-none outcome;
+        -- TimerRunsPass keys directly on that outcome without re-parsing the
+        -- reason text.
+        --
+        -- The string classifier in internal/blockreason/market.go is retained
+        -- in two live roles. First, KindUnclassified raw boundaries such as
+        -- provider errors and relaunch-event reasons, plus pass results with no
+        -- settled typed need, fall back through Recheck / RecheckFor. That path
+        -- stays one-sided: an unrecognized reason maps to recheck_market rather
+        -- than treating failure to classify as evidence that no timer is
+        -- needed. Second, VerdictBuilder.Need scans reuse diagnostics for a
+        -- nested backoff countdown and raises the verdict to recheck_deadline
+        -- even when its primary typed blocker is budget or precondition.
+        --
+        -- Recheck, RecheckFor, and the nested-countdown scan are therefore not
+        -- dead compatibility code. Deleting the classifier as redundant would
+        -- remove the safety fallback for untyped boundaries; deleting the
+        -- countdown scan would strand a job whose database-observable launch
+        -- blocker hides an elapsing reuse deadline until the quiet backstop.
+        -- See decision 0007 for why the all-string design was rejected.
+        --
+        -- Implementation: internal/blockreason/verdict.go — BlockerKind,
+        -- BlockerKind.RecheckNeed, VerdictBuilder.Need;
+        -- internal/blockreason/market.go — Recheck, RecheckFor;
+        -- internal/orchestration/autopilot.go — passAccum epilogue;
+        -- internal/orchestration/dispatch.go — ClassifyPass, TimerRunsPass.
+}
+
 -- Between passes, a runner waits for evidence that replanning would produce a
 -- different answer. Replanning unchanged state costs provider API calls and
 -- returns the same plan, so the wait ends on one of three things: an observed
@@ -3624,7 +3715,7 @@ rule AutoPilotDispatchPolicy {
     -- is written when it does), or market (only a fresh provider query
     -- resolves it). Suppressing the timer for the latter two strands the job.
     if outcome = blocked:
-        let need = Max(blocked_reasons.map(Recheck))
+        let need = SettledRecheckNeed(blocked_reasons)
         ensures: TimerRunsPass() = (need != recheck_none)
 
         -- The cooldown follows the need. A deadline blocker is waiting out a
@@ -3639,10 +3730,12 @@ rule AutoPilotDispatchPolicy {
         -- backoff, or every backoff would expire into a further wait.
         ensures: AutopilotCooldownBackoff <= LongestRetryBackoff()
 
-    -- Classification is one-sided: a reason counts as database-observable only
-    -- when it is recognized as such. An unrecognized reason keeps the timer.
+    -- The retained string fallback is one-sided: an untyped reason counts as
+    -- database-observable only when recognized. An unrecognized reason keeps
+    -- the timer.
     ensures:
-        for reason in blocked_reasons where not Recognized(reason):
+        for reason in blocked_reasons
+            where RequiresStringFallback(reason) and not Recognized(reason):
             Recheck(reason) = recheck_market
 
     -- The backstop covers more than missed wake-ups. Parts of a pass advance
@@ -3655,14 +3748,11 @@ rule AutoPilotDispatchPolicy {
     -- legacy annotation: @guidance
         -- Policy: internal/orchestration/dispatch.go — ClassifyPass,
         -- TimerRunsPass, WakeSnapshot/ReadWakeSnapshot, WaitForInvalidation.
-        -- Reason classification: internal/blockreason/market.go — Recheck /
-        -- RecheckFor, returning RecheckNone, RecheckDeadline, or
-        -- RecheckMarket. Database-observable reasons are the run-rate budget
-        -- verdicts, "no rental headroom" (the budget gate's launch-side
-        -- verdict), and reuse rejections.
-        -- Retry-backoff countdowns are checked across the whole reason
-        -- rather than per part, because they arrive nested inside otherwise
-        -- database-observable reuse summaries.
+        -- Typed classification: internal/blockreason/verdict.go —
+        -- BlockerKind.RecheckNeed and VerdictBuilder.Need. Boundary fallback:
+        -- internal/blockreason/market.go — Recheck / RecheckFor, returning
+        -- RecheckNone, RecheckDeadline, or RecheckMarket. See
+        -- TypedBlockerRecheckCadence for the division between the two paths.
         -- Polling deadline blockers is an interim: see
         -- docs/planning/ROADMAP.md "Deadline-aware autopilot wake-ups" for
         -- the structural fix, where a pass reports its earliest deadline and
