@@ -32,6 +32,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0019](0019-admit-concurrent-jobs-with-host-local-ram-reservations.md) | Admit concurrent jobs with host-local RAM reservations | accepted |
 | [0020](0020-keep-unattributed-sessions-inclusive-and-unproven-project-roots-unassigned.md) | Keep unattributed sessions inclusive and unproven project roots unassigned | accepted |
 | [0021](0021-keep-host-capability-observations-advisory.md) | Keep host capability observations advisory | accepted |
+| [0022](0022-attach-capability-behaviour-to-the-namespace-prefix.md) | Attach capability behaviour to the namespace prefix | accepted |
 
 ## Adding one
 
