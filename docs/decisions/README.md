@@ -59,32 +59,21 @@ trees hold no files. 0002 and 0017 carry the constraints that remain live.
 ## What earns a record
 
 A decision earns a record when **a future reader could reasonably undo it by
-mistake**. That is the operative test, and it sharpens the three conditions in
+mistake**.
+
+That test sharpens the three conditions in
 [0001](0001-record-architecture-decisions.md) — architectural, contested,
 durable — rather than replacing them. A decision can satisfy all three and
 still need no record, because nobody would think to reverse it; the mistake has
 to be *available*. Where the two readings differ, this one governs.
 
-Consequences of applying it:
-
-- Prefer a code comment plus an invariant note for a local choice. A directory
-  that records everything signals nothing, so each record has to earn attention
-  it takes from the others.
-- **A rule that gains clauses belongs in a spec, not here.** Records are
-  immutable and are superseded rather than amended, so filing a growing rule as
-  a record makes it harder to amend than the code it governs. Records fix a
-  position; specs evolve in place. A position that *reverses* is exactly what a
-  superseding record is for.
-- **An action taken is not a decision.** Once a deletion or migration is done,
-  there is nothing left to undo by mistake. The durable constraint it served
-  belongs in the record that decided it.
-- Do not restate a record's content in a spec and the spec's content in a
-  record. Where both exist, the spec says what the system does and the record
-  says which alternative was rejected and why.
-
 ## Adding one
 
-See [0001](0001-record-architecture-decisions.md) for the full scheme. In short:
-`NNNN-lowercase-hyphenated-decision.md`, next free number, title states the
-position rather than the question, never rename or renumber, supersede rather
-than edit.
+`NNNN-lowercase-hyphenated-decision.md`, next free number, title stating the
+position rather than the question. Numbers are never renamed, renumbered, or
+reused. Match the shape of a recent record.
+
+A record is not edited to flip its outcome — a change of position earns a new
+record naming the one it supersedes. A record that says something *untrue* is
+corrected in place, since the repository history already holds every prior
+version. The `decision-records` skill carries the rest of the convention.
