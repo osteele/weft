@@ -167,6 +167,7 @@ func TestTryPlaceOntoExistingInstances_PassesThroughWhenNoReuseCandidate(t *test
 
 func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *testing.T) {
 	database := db.SetupTestDB(t)
+	sourceDir := t.TempDir()
 	launchID, err := db.CreateLaunch(database, &db.Launch{
 		Status:          db.LaunchStatusRunning,
 		Provider:        "vastai",
@@ -179,7 +180,7 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 	if err != nil {
 		t.Fatalf("create launch: %v", err)
 	}
-	producerID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo producer", "producer", "nvidia")
+	producerID, err := db.RecordQueuedWithGPU(database, "", sourceDir, "echo producer", "producer", "nvidia")
 	if err != nil {
 		t.Fatalf("create producer: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestTryPlaceOntoExistingInstances_CoLocatesConsumerWithRunningProducer(t *t
 	if err := db.UpdateQueuedToRunning(database, producerID); err != nil {
 		t.Fatalf("UpdateQueuedToRunning producer: %v", err)
 	}
-	consumerID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo consumer", "consumer", "nvidia")
+	consumerID, err := db.RecordQueuedWithGPU(database, "", sourceDir, "echo consumer", "consumer", "nvidia")
 	if err != nil {
 		t.Fatalf("create consumer: %v", err)
 	}
@@ -358,6 +359,7 @@ func TestTryPlaceOntoExistingInstances_AfterAnyFailedProducerPlaces(t *testing.T
 // of jobs submitted to the instance.
 func reusePassRetryFixture(t *testing.T, database *sql.DB, attempts int, lastEnd time.Time) (*db.Job, *int) {
 	t.Helper()
+	sourceDir := t.TempDir()
 
 	if _, err := db.CreateLaunch(database, &db.Launch{
 		Status:          db.LaunchStatusRunning,
@@ -380,7 +382,7 @@ func reusePassRetryFixture(t *testing.T, database *sql.DB, attempts int, lastEnd
 		t.Fatalf("create failed launch: %v", err)
 	}
 
-	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo retry", "retry", "nvidia")
+	jobID, err := db.RecordQueuedWithGPU(database, "", sourceDir, "echo retry", "retry", "nvidia")
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}

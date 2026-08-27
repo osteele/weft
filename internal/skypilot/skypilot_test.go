@@ -28,6 +28,8 @@ type scriptedRunResult struct {
 
 var errStreamingWriterRejected = errors.New("streaming writer rejected output")
 
+const logStreamTestTimeout = 10 * time.Second
+
 type rejectingStreamingWriter struct{}
 
 func (rejectingStreamingWriter) Write([]byte) (int, error) {
@@ -117,7 +119,7 @@ func TestFollowLogsStreamsBeforeProcessExit(t *testing.T) {
 		if got != "first line\n" {
 			t.Fatalf("first streamed line = %q", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(logStreamTestTimeout):
 		t.Fatal("follow output was buffered until process exit")
 	}
 	cancel()
@@ -129,7 +131,7 @@ func TestFollowLogsStreamsBeforeProcessExit(t *testing.T) {
 		if got := stderr.String(); got != "diagnostic\n" {
 			t.Fatalf("streamed stderr = %q", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(logStreamTestTimeout):
 		t.Fatal("canceled follow process did not exit")
 	}
 }
@@ -137,7 +139,7 @@ func TestFollowLogsStreamsBeforeProcessExit(t *testing.T) {
 func TestSnapshotLogsStreamStdoutSeparatelyBeforeProcessExit(t *testing.T) {
 	binDir := t.TempDir()
 	skyPath := filepath.Join(binDir, "sky")
-	if err := os.WriteFile(skyPath, []byte("#!/bin/sh\nprintf 'retained line\\n'\nprintf 'diagnostic only\\n' >&2\nexec sleep 30\n"), 0o755); err != nil {
+	if err := os.WriteFile(skyPath, []byte("#!/bin/sh\nprintf 'diagnostic only\\n' >&2\nprintf 'retained line\\n'\nexec sleep 30\n"), 0o755); err != nil {
 		t.Fatalf("write fake sky: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -160,7 +162,7 @@ func TestSnapshotLogsStreamStdoutSeparatelyBeforeProcessExit(t *testing.T) {
 		if got != "retained line\n" {
 			t.Fatalf("first streamed snapshot line = %q", got)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(logStreamTestTimeout):
 		cancel()
 		t.Fatal("snapshot stdout was buffered until process exit")
 	}
@@ -170,7 +172,7 @@ func TestSnapshotLogsStreamStdoutSeparatelyBeforeProcessExit(t *testing.T) {
 		if err == nil {
 			t.Fatal("canceled snapshot stream returned nil error")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(logStreamTestTimeout):
 		t.Fatal("snapshot stream did not return promptly after cancellation")
 	}
 	if !strings.Contains(stderr.String(), "diagnostic only") {

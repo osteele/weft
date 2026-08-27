@@ -31,9 +31,7 @@ case "$auth" in
 esac
 exit 0
 `
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub curl: %v", err)
-	}
+	writeExecutableStub(t, path, script)
 }
 
 func TestCloudClientSearchOffersMapsDatacenterDriver(t *testing.T) {

@@ -71,6 +71,17 @@ const createInstanceJSON = `{
   "success": true
 }`
 
+func writeExecutableStub(t *testing.T, path, script string) {
+	t.Helper()
+	pending := path + ".tmp"
+	if err := os.WriteFile(pending, []byte(script), 0o755); err != nil {
+		t.Fatalf("write executable stub: %v", err)
+	}
+	if err := os.Rename(pending, path); err != nil {
+		t.Fatalf("publish executable stub: %v", err)
+	}
+}
+
 func TestParseSearchOffers(t *testing.T) {
 	var offers []Offer
 	if err := json.Unmarshal([]byte(searchOffersJSON), &offers); err != nil {
@@ -126,9 +137,7 @@ func TestSearchOffersPricesRequestedStorage(t *testing.T) {
 printf '%s\n' "$@" > "$VAST_ARGS_FILE"
 printf '[]\n'
 `
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	t.Setenv("VAST_ARGS_FILE", argsPath)
 
 	c := &Client{CLIPath: stub}
@@ -247,9 +256,7 @@ func TestCreateInstanceEmptyOutputIsProviderRejected(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -266,9 +273,7 @@ func TestCreateInstanceProviderErrorJSONIsProviderRejected(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"error 404/3603: no_such_ask\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -285,9 +290,7 @@ func TestCreateInstanceSuccessWithoutContractIDIsProviderRejected(t *testing.T) 
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": true, \"new_contract\": 0}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	inst, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -307,9 +310,7 @@ func TestShowAndListInstancesRejectNullResponse(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' 'null'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	if _, err := c.ShowInstance(12345); err == nil || errors.Is(err, cloud.ErrInstanceNotFound) {
@@ -327,9 +328,7 @@ func TestCreateInstanceAccountCreditExhaustedFromCLIMessage(t *testing.T) {
 	// vastai surfaces credit-exhaustion as a plain-text CLI error on stdout
 	// even though the CLI exits non-zero. Simulate the exit-1 + stderr path.
 	script := "#!/bin/sh\necho 'failed with error 400: Your account lacks credit; see the billing page.' >&2\nexit 1\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -346,9 +345,7 @@ func TestCreateInstanceEmptyResponseWithExhaustedCreditIsAccountCreditExhausted(
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	prev := probeCreditBalance
 	probeCreditBalance = func(_ *Client) (float64, error) { return 0, nil }
 	t.Cleanup(func() { probeCreditBalance = prev })
@@ -368,9 +365,7 @@ func TestCreateInstanceEmptyResponseWithProbeFailureFallsBackToProviderRejected(
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	prev := probeCreditBalance
 	probeCreditBalance = func(_ *Client) (float64, error) {
 		return 0, errors.New("show user: network unreachable")
@@ -392,9 +387,7 @@ func TestCreateInstanceSuccessFalseWithCreditMessageIsAccountCreditExhausted(t *
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"Your account lacks credit\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -431,9 +424,7 @@ func TestCreateInstanceProviderRejectionLeadsWithReason(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"error 404/3603: no_such_ask\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -457,9 +448,7 @@ func TestCreateInstanceCLITimeoutIsProviderCommandTimeout(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nsleep 1\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub, CLITimeout: 10 * time.Millisecond}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -479,9 +468,7 @@ func TestCLIErrorRedactsAPIKeyFromStderr(t *testing.T) {
 	stub := filepath.Join(dir, "vastai")
 	const apiKey = "0123456789abcdef0123456789abcdef"
 	script := "#!/bin/sh\nprintf '%s\\n' 'request failed: https://console.vast.ai/api/v0/instances?owner=me&api_key=" + apiKey + "' >&2\nexit 1\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ListAllInstances()
@@ -503,13 +490,9 @@ func TestCLIErrorRedactsAPIKeyFromStderr(t *testing.T) {
 func TestRunWithTimeoutHonorsPerCallTimeout(t *testing.T) {
 	dir := t.TempDir()
 	stubSleep := filepath.Join(dir, "vastai_sleep")
-	if err := os.WriteFile(stubSleep, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stubSleep, "#!/bin/sh\nsleep 1\n")
 	stubFast := filepath.Join(dir, "vastai_fast")
-	if err := os.WriteFile(stubFast, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stubFast, "#!/bin/sh\nexit 0\n")
 
 	// Per-call timeout shorter than the stub's sleep should fire as a provider
 	// command timeout, even though the default cliTimeout (30s) would not.
@@ -558,9 +541,7 @@ func TestInstancePollHonorsCLITimeoutOverride(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nsleep 1\n"), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, "#!/bin/sh\nsleep 1\n")
 	c := &Client{CLIPath: stub, CLITimeout: 10 * time.Millisecond}
 
 	if _, err := c.ShowInstance(12345); !errors.Is(err, cloud.ErrProviderCommandTimeout) {
@@ -591,9 +572,7 @@ printf '%s\n' 'Warning: Unrecognized field: bogus_field, see list of recognized 
 printf '%s\n' '{"error": true, "status_code": 400, "msg": "bogus_field is not a valid search key"}' >&2
 exit 0
 `
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.SearchOffers(OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 8, NumGPUs: 1})
@@ -636,9 +615,7 @@ func TestSearchOffersCarriesProviderErrorWithFingerprint(t *testing.T) {
 printf '%s\n' '{"error": true, "status_code": 400, "msg": " ask_contract_offers.driver_vers gte None: query values can'"'"'t be None"}' >&2
 exit 0
 `
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	c := &Client{CLIPath: stub}
 	_, err := c.SearchOffers(OfferConstraints{GPUClass: "nvidia", MinGPUMemGB: 10, NumGPUs: 1, MinDriverVersion: 535})
 	if err == nil {
@@ -710,9 +687,7 @@ func TestAvailableRejectsProviderErrorJSON(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"owner: Extra inputs are not permitted\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	err := c.Available()
@@ -729,9 +704,7 @@ func TestShowUserProviderErrorJSON(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\": true, \"status_code\": 400, \"msg\": \"owner: Extra inputs are not permitted\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ShowUser()
@@ -751,9 +724,7 @@ func TestShowUserEmptyOutput(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ShowUser()
@@ -773,9 +744,7 @@ func TestSearchOffersEmptyOutput(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nexit 0\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.SearchOffers(OfferConstraints{})
@@ -795,9 +764,7 @@ func TestSearchOffersRejectsMissingIdentity(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"gpu_name\": \"RTX 4090\"}]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	offers, err := c.SearchOffers(OfferConstraints{})
@@ -813,9 +780,7 @@ func TestSearchOffersRejectsNullResponse(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' 'null'\n"), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, "#!/bin/sh\nprintf '%s\\n' 'null'\n")
 
 	c := &Client{CLIPath: stub}
 	offers, err := c.SearchOffers(OfferConstraints{})
@@ -836,9 +801,7 @@ cat <<'JSON'
 ]
 JSON
 `
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	offers, err := c.SearchOffers(OfferConstraints{MinCUDAVersion: "12.8"})
@@ -1244,9 +1207,7 @@ func TestDestroyInstancePassesYesFlag(t *testing.T) {
 	argsFile := filepath.Join(dir, "args.txt")
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	c := &Client{CLIPath: stub}
 	if err := c.DestroyInstance(12345); err != nil {
 		t.Fatalf("DestroyInstance: %v", err)
@@ -1266,9 +1227,7 @@ func TestChangeBidPassesPrice(t *testing.T) {
 	argsFile := filepath.Join(dir, "args.txt")
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nprintf '{\"success\": true}\\n'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	c := &Client{CLIPath: stub}
 	if err := c.ChangeBid(12345, 0.20); err != nil {
 		t.Fatalf("ChangeBid: %v", err)
@@ -1292,9 +1251,7 @@ func TestDestroyInstanceIdempotentWhenNotFound(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf 'Instance 39145397 not found\\n' >&2\nexit 1\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	c := &Client{CLIPath: stub}
 	if err := c.DestroyInstance(39145397); err != nil {
 		t.Fatalf("DestroyInstance: expected nil for already-gone instance, got %v", err)
@@ -1309,9 +1266,7 @@ func TestDestroyInstanceErrorsOnUnrelatedFailure(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf 'Internal server error\\n' >&2\nexit 1\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 	c := &Client{CLIPath: stub}
 	if err := c.DestroyInstance(39145397); err == nil {
 		t.Fatalf("DestroyInstance: expected error for unrelated failure, got nil")
@@ -1323,9 +1278,7 @@ func TestShowInstanceRejectsZeroIDRow(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"actual_status\": \"running\"}]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ShowInstance(12345)
@@ -1339,9 +1292,7 @@ func TestListAllInstancesRejectsZeroIDRow(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[{\"id\": 0, \"actual_status\": \"running\"}]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ListAllInstances()
@@ -1355,9 +1306,7 @@ func TestShowInstanceReturnsNotFoundFromEmptyInventory(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ShowInstance(12345)
@@ -1371,9 +1320,7 @@ func TestListAllInstancesAcceptsEmptyInventory(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	instances, err := c.ListAllInstances()
@@ -1390,9 +1337,7 @@ func TestShowInstanceReturnsParseErrorForMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[{not json'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ShowInstance(12345)
@@ -1409,9 +1354,7 @@ func TestListAllInstancesReturnsParseErrorForMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[{not json'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.ListAllInstances()
@@ -1425,9 +1368,7 @@ func TestCreateInstanceRejectsJSONArrayResponse(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '[]'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -1441,9 +1382,7 @@ func TestCreateInstanceRejectsSuccessWithoutContractID(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": true}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	_, err := c.CreateInstance(12345, CreateOpts{Image: "ubuntu"})
@@ -1460,9 +1399,7 @@ func TestChangeBidRejectsSuccessFalse(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{\"success\": false, \"msg\": \"instance not running\"}'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	err := c.ChangeBid(12345, 0.20)
@@ -1479,9 +1416,7 @@ func TestChangeBidRejectsMalformedJSON(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "vastai")
 	script := "#!/bin/sh\nprintf '%s\\n' '{not json'\n"
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
+	writeExecutableStub(t, stub, script)
 
 	c := &Client{CLIPath: stub}
 	err := c.ChangeBid(12345, 0.20)
