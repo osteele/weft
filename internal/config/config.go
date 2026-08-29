@@ -211,6 +211,9 @@ type AgentBuilder struct {
 	Host      string `yaml:"host" toml:"host"`
 	RemoteDir string `yaml:"remote_dir" toml:"remote_dir"`
 	GoBin     string `yaml:"go_bin" toml:"go_bin"`
+	// IdentityFile pins a file-backed SSH identity and disables ssh-agent use.
+	// Empty falls back to cloud.ssh.identity_file.
+	IdentityFile string `yaml:"identity_file" toml:"identity_file"`
 
 	// Fly builder settings.
 	App        string `yaml:"app" toml:"app"`

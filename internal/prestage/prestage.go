@@ -171,11 +171,13 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 // connection error, it falls back to a pull (SSH into target, rsync from source),
 // which works when the target can reach the source but not vice versa.
 func runTransfer(ctx context.Context, t Transfer, targetHost string, hfCacheDir string) error {
+	const peerConnectTimeout = 15 * time.Second
+	rsyncSSH := shellQuote(ssh.BatchModeRsyncCommand(peerConnectTimeout, "ConnectionAttempts=1"))
 	destPath := filepath.Join(hfCacheDir, filepath.Base(t.RemotePath))
 	srcPath := rsyncDirectoryContents(t.RemotePath)
 	dstPath := rsyncDirectoryContents(destPath)
 
-	pushCmd := fmt.Sprintf("rsync -az --timeout=300 %s %s",
+	pushCmd := fmt.Sprintf("rsync -az --timeout=300 -e %s %s %s", rsyncSSH,
 		shellQuote(srcPath), rsyncRemoteArg(targetHost, dstPath))
 	_, stderr, err := ssh.RunWithContext(ctx, t.SourceHost, pushCmd)
 	if err == nil {
@@ -189,8 +191,8 @@ func runTransfer(ctx context.Context, t Transfer, targetHost string, hfCacheDir 
 		return pushErr
 	}
 
-	pullCmd := fmt.Sprintf("mkdir -p %s && rsync -az --timeout=300 %s %s",
-		shellQuote(destPath), rsyncRemoteArg(t.SourceHost, srcPath), shellQuote(dstPath))
+	pullCmd := fmt.Sprintf("mkdir -p %s && rsync -az --timeout=300 -e %s %s %s",
+		shellQuote(destPath), rsyncSSH, rsyncRemoteArg(t.SourceHost, srcPath), shellQuote(dstPath))
 	_, stderr2, err2 := ssh.RunWithContext(ctx, targetHost, pullCmd)
 	if err2 != nil {
 		// Report both errors so it's clear what was tried
@@ -204,7 +206,7 @@ func rsyncDirectoryContents(path string) string {
 }
 
 func rsyncRemoteArg(host, path string) string {
-	return host + ":" + shellQuote(path)
+	return ssh.RsyncTarget(host) + ":" + shellQuote(path)
 }
 
 func shellQuote(s string) string {

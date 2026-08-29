@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -1054,6 +1056,66 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 	}
 	if entries[0].Host != "test-host" {
 		t.Fatalf("host = %q, want test-host", entries[0].Host)
+	}
+}
+
+func TestEnsureHFInputsAvailable_FallsBackAfterDonorConnectionFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+	t.Cleanup(inventory.SetHosts([]inventory.HostSpec{{
+		Name: "target-host", HFCacheDir: "/home/test/.cache/huggingface/hub",
+	}}))
+	asset := dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "bert-base-uncased"}
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host: "donor-host", Asset: asset,
+		Path: "/donor/cache/hub/models--bert-base-uncased", SizeBytes: 2048,
+		LastSeen: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scanCount := 0
+	donorCalls := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if host == "donor-host" {
+			donorCalls++
+			return "", "ssh: connect to host target-host port 22: Operation timed out", 255
+		}
+		if host != "target-host" {
+			t.Fatalf("unexpected host %q", host)
+		}
+		switch {
+		case strings.Contains(command, "df -Pk"):
+			return "20971520\n", "", 0
+		case strings.Contains(command, "nohup") && strings.Contains(command, "cmd.sh"):
+			return "OK\n", "", 0
+		case strings.Contains(command, `if [ -f "$D/status" ]`):
+			return "STATUS=0\n---STDERR---\n", "", 0
+		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
+			scanCount++
+			if scanCount >= 2 {
+				return "2048\tok\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", 0
+			}
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+	t.Cleanup(dataloc.SetDetachedPollIntervalForTest(time.Millisecond))
+
+	if err := ensureHFInputsAvailable(database, "target-host", []string{"hf:bert-base-uncased"}, 5*time.Second); err != nil {
+		t.Fatalf("ensureHFInputsAvailable: %v", err)
+	}
+	if donorCalls == 0 {
+		t.Fatal("prestage donor was not attempted")
+	}
+	entries, err := dataloc.FindAssetHosts(database, asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(entries, func(entry dataloc.HostDataEntry) bool {
+		return entry.Host == "target-host"
+	}) {
+		t.Fatalf("target asset entry missing after fallback: %+v", entries)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/ssh"
 	_ "modernc.org/sqlite"
@@ -192,6 +193,11 @@ func TestPlan_TotalBytes_Empty(t *testing.T) {
 }
 
 func TestRunTransferPullCopiesDirectoryContents(t *testing.T) {
+	ssh.Configure(&config.Config{Hosts: map[string]config.HostConfig{
+		"host-alpha": {SSHUser: "agent"},
+	}})
+	t.Cleanup(func() { ssh.Configure(&config.Config{}) })
+
 	var calls []struct {
 		host    string
 		command string
@@ -221,7 +227,10 @@ func TestRunTransferPullCopiesDirectoryContents(t *testing.T) {
 	}
 
 	push := calls[0].command
-	if !strings.Contains(push, "'/cache/hub/models--microsoft--phi-1/' host-alpha:'/target/hub/models--microsoft--phi-1/'") {
+	if !strings.Contains(push, "-e 'ssh -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=1'") {
+		t.Fatalf("push command = %q, want non-interactive bounded SSH", push)
+	}
+	if !strings.Contains(push, "'/cache/hub/models--microsoft--phi-1/' agent@host-alpha:'/target/hub/models--microsoft--phi-1/'") {
 		t.Fatalf("push command = %q, want source and destination directory contents", push)
 	}
 
@@ -231,5 +240,8 @@ func TestRunTransferPullCopiesDirectoryContents(t *testing.T) {
 	}
 	if !strings.Contains(pull, "host-beta:'/cache/hub/models--microsoft--phi-1/' '/target/hub/models--microsoft--phi-1/'") {
 		t.Fatalf("pull command = %q, want source contents copied into destination directory", pull)
+	}
+	if !strings.Contains(pull, "-e 'ssh -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=1'") {
+		t.Fatalf("pull command = %q, want non-interactive bounded SSH", pull)
 	}
 }

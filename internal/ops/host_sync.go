@@ -1889,7 +1889,12 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 		return err
 	}
 	if err := prestage.Execute(database, plan, stageTimeout); err != nil {
-		return err
+		// A donor is only an optimization. Its failure says nothing about the
+		// target host's availability, so continue to the direct-download rung
+		// instead of attributing the donor error to the target and aborting the
+		// entire host dispatch pass.
+		slog.Warn("HF prestage transfer failed; falling back to target download",
+			"host", host, "error", err)
 	}
 	if len(plan.Transfers) > 0 {
 		scanHFCacheDuringSync(database, host, stageTimeout)

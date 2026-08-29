@@ -136,8 +136,12 @@ func resolveBuilders(goos, goarch string) ([]config.AgentBuilder, error) {
 	}
 
 	cfg, err := config.Load()
+	defaultIdentity := ""
+	if err == nil && cfg != nil {
+		defaultIdentity = cfg.Cloud.SSH.ExpandedIdentityFile()
+	}
 	if err == nil && cfg != nil && len(cfg.AgentBuild.LinuxAMD64Builders) > 0 {
-		return normalizeBuilders(cfg.AgentBuild.LinuxAMD64Builders), nil
+		return normalizeBuilders(cfg.AgentBuild.LinuxAMD64Builders, defaultIdentity), nil
 	}
 
 	// Compatibility fallback: existing WEFT_* environment variables.
@@ -156,11 +160,12 @@ func resolveBuilders(goos, goarch string) ([]config.AgentBuilder, error) {
 	var out []config.AgentBuilder
 	if host := env("WEFT_LINUX_BUILDER_HOST"); host != "" {
 		out = append(out, config.AgentBuilder{
-			Type:      "ssh",
-			Name:      "linux-ssh-builder",
-			Host:      host,
-			RemoteDir: envOrDefault(env("WEFT_LINUX_BUILDER_DIR"), "~/.cache/weft/agent-build"),
-			GoBin:     envOrDefault(env("WEFT_LINUX_BUILDER_GO"), "/usr/local/go/bin/go"),
+			Type:         "ssh",
+			Name:         "linux-ssh-builder",
+			Host:         host,
+			RemoteDir:    envOrDefault(env("WEFT_LINUX_BUILDER_DIR"), "~/.cache/weft/agent-build"),
+			GoBin:        envOrDefault(env("WEFT_LINUX_BUILDER_GO"), "/usr/local/go/bin/go"),
+			IdentityFile: envOrDefault(env("WEFT_LINUX_BUILDER_IDENTITY_FILE"), defaultIdentity),
 		})
 	}
 	if app := env("WEFT_FLY_BUILDER_APP"); app != "" && env("WEFT_FLY_BUILDER_MACHINE") != "" {
@@ -175,10 +180,10 @@ func resolveBuilders(goos, goarch string) ([]config.AgentBuilder, error) {
 			ZigVersion: envOrDefault(env("WEFT_FLY_BUILDER_ZIG_VERSION"), "0.13.0"),
 		})
 	}
-	return normalizeBuilders(out), nil
+	return normalizeBuilders(out, defaultIdentity), nil
 }
 
-func normalizeBuilders(in []config.AgentBuilder) []config.AgentBuilder {
+func normalizeBuilders(in []config.AgentBuilder, defaultIdentity string) []config.AgentBuilder {
 	out := make([]config.AgentBuilder, 0, len(in))
 	for _, b := range in {
 		nb := b
@@ -187,6 +192,7 @@ func normalizeBuilders(in []config.AgentBuilder) []config.AgentBuilder {
 		nb.Host = strings.TrimSpace(nb.Host)
 		nb.RemoteDir = strings.TrimSpace(nb.RemoteDir)
 		nb.GoBin = strings.TrimSpace(nb.GoBin)
+		nb.IdentityFile = strings.TrimSpace(nb.IdentityFile)
 		nb.App = strings.TrimSpace(nb.App)
 		nb.Machine = strings.TrimSpace(nb.Machine)
 		nb.BaseDir = strings.TrimSpace(nb.BaseDir)
@@ -199,6 +205,7 @@ func normalizeBuilders(in []config.AgentBuilder) []config.AgentBuilder {
 			}
 			nb.RemoteDir = envOrDefault(nb.RemoteDir, "~/.cache/weft/agent-build")
 			nb.GoBin = envOrDefault(nb.GoBin, "/usr/local/go/bin/go")
+			nb.IdentityFile = config.ExpandUserPath(envOrDefault(nb.IdentityFile, defaultIdentity))
 		case "fly":
 			if nb.App == "" || nb.Machine == "" {
 				continue
@@ -230,14 +237,14 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 		return fmt.Errorf("locate repo root: %w", err)
 	}
 	onProgress("connecting to ssh builder")
-	if err := quickCheckSSHBuilder(builder.Host); err != nil {
+	if err := quickCheckSSHBuilder(builder); err != nil {
 		return err
 	}
 	remoteDir := envOrDefault(builder.RemoteDir, "~/.cache/weft/agent-build")
 	remoteGo := envOrDefault(builder.GoBin, "/usr/local/go/bin/go")
 	remoteOut := filepath.Join(remoteDir, fmt.Sprintf("weft-agent-%s-%s", goos, goarch))
 
-	rsyncSSH := rsyncSSHCommand()
+	rsyncSSH := rsyncSSHCommand(builder)
 	onProgress("syncing source")
 	args := []string{
 		"-az", "--delete",
@@ -260,7 +267,7 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	buildCmd := fmt.Sprintf("cd %s && CGO_ENABLED=1 GOOS=%s GOARCH=%s %s build -buildvcs=false -ldflags %s -o %s ./cmd/agent",
 		shellQuote(remoteDir), goos, goarch, shellQuote(remoteGo),
 		shellQuote("-X main.version="+version), shellQuote(remoteOut))
-	sshArgs := append(sshBaseArgs(builder.Host), buildCmd)
+	sshArgs := append(sshBaseArgs(builder), buildCmd)
 	if out, err := runCommandCapture("", nil, "ssh", sshArgs...); err != nil {
 		return fmt.Errorf("remote build: %s", strings.TrimSpace(out))
 	}
@@ -284,8 +291,8 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	return nil
 }
 
-func quickCheckSSHBuilder(host string) error {
-	args := append(sshBaseArgs(host), "true")
+func quickCheckSSHBuilder(builder config.AgentBuilder) error {
+	args := append(sshBaseArgs(builder), "true")
 	if out, err := runCommandCapture("", nil, "ssh", args...); err != nil {
 		return fmt.Errorf("connect ssh builder: %s", strings.TrimSpace(out))
 	}
@@ -294,12 +301,26 @@ func quickCheckSSHBuilder(host string) error {
 
 const builderSSHTimeout = 3 * time.Second
 
-func sshBaseArgs(host string) []string {
-	return append(ssh.BatchModeArgs(builderSSHTimeout, "ConnectionAttempts=1"), host)
+func builderSSHOptionArgs(builder config.AgentBuilder) []string {
+	args := ssh.BatchModeArgs(builderSSHTimeout, "ConnectionAttempts=1")
+	args = append(args, "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes")
+	if identity := config.ExpandUserPath(strings.TrimSpace(builder.IdentityFile)); identity != "" {
+		args = append(args, "-i", identity)
+	}
+	return args
 }
 
-func rsyncSSHCommand() string {
-	return ssh.BatchModeRsyncCommand(builderSSHTimeout, "ConnectionAttempts=1")
+func sshBaseArgs(builder config.AgentBuilder) []string {
+	return append(builderSSHOptionArgs(builder), builder.Host)
+}
+
+func rsyncSSHCommand(builder config.AgentBuilder) string {
+	args := builderSSHOptionArgs(builder)
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return "ssh " + strings.Join(quoted, " ")
 }
 
 func runCommandCapture(dir string, env []string, name string, args ...string) (string, error) {
