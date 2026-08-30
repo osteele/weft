@@ -2054,6 +2054,29 @@ rule ActivitySubscriptionJobFeed {
         -- against snapshot.time using the timestamp with matching semantics.
         ensures: not exists row.duration
 
+    -- Instance lifecycle and current activity are separate facts. Consumers
+    -- display the semantic activity field and retain the raw phase only as
+    -- provenance; they do not reproduce agent phase parsing downstream.
+    for row in ActivityInstanceRows:
+        ensures: row.status = row.instance.stored_launch_status
+        ensures: row.phase = row.instance.last_observed_agent_phase
+        ensures: row.activity_status = InstanceActivityStatus(row.status, row.phase)
+
+        if IsTerminalInstanceStatus(row.status):
+            ensures: row.activity_status = row.status
+
+        if row.status = running and PhaseVerb(row.phase) in {
+            finalizing,
+            uploading,
+            uploading_results,
+            post_job_cleanup,
+            post_job_uploads_drained,
+        }:
+            ensures: row.activity_status = finalizing
+
+        if row.status = running and row.phase = destroying:
+            ensures: row.activity_status = self_destructing
+
     -- legacy annotation: @guidance
         -- The canonical socket request and the API-v1 field table live in
         -- docs/design/daemon-subscription-api.md. Implementation:

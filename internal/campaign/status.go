@@ -309,6 +309,11 @@ const (
 	PhaseDiskFull         = "disk-full"
 	PhaseGrace            = "grace"
 	PhaseDestroying       = "destroying"
+	PhasePostJobCleanup   = "post_job_cleanup"
+	PhasePostJobDrained   = "post_job_uploads_drained"
+
+	InstanceActivityFinalizing      = "finalizing"
+	InstanceActivitySelfDestructing = "self_destructing"
 )
 
 // findJobInSlice returns the first job in the slice matching the given ID, or nil.
@@ -390,6 +395,41 @@ func DisplayPhase(jobs []*db.Job, phase string) (string, string) {
 		jobStatuses[job.ID] = job.Status
 	}
 	return displayPhase(jobStatuses, jobs, phase)
+}
+
+// InstanceActivityStatus refines a nonterminal launch status with the agent's
+// execution phase. The launch row remains authoritative for terminal state;
+// phase only distinguishes activity within a live rental.
+func InstanceActivityStatus(launchStatus, phase string) string {
+	if db.IsTerminalLaunchStatus(launchStatus) {
+		return launchStatus
+	}
+	phase = strings.TrimSpace(phase)
+	switch phase {
+	case PhaseDestroying:
+		return InstanceActivitySelfDestructing
+	case PhaseGrace, PhaseDiskFull:
+		return phase
+	}
+	verb := phase
+	if parsed, _, ok := ParsePhaseJobID(phase); ok {
+		verb = parsed
+	}
+	switch verb {
+	case PhaseFinalizing, PhaseUploading, PhaseUploadingResults, PhasePostJobCleanup, PhasePostJobDrained:
+		return InstanceActivityFinalizing
+	default:
+		return launchStatus
+	}
+}
+
+// InstanceActivityLabel renders the stable machine activity status for compact
+// CLI surfaces.
+func InstanceActivityLabel(activity string) string {
+	if activity == InstanceActivitySelfDestructing {
+		return "self-destructing"
+	}
+	return activity
 }
 
 func fallbackRunningPhase(jobStatuses map[int64]string, jobs []*db.Job) (phase string, verb string) {
@@ -880,6 +920,10 @@ func InstancePhaseLabel(phase string) string {
 			return fmt.Sprintf("uploading outputs (job %s)", jobID)
 		case PhaseUploadingResults:
 			return fmt.Sprintf("uploading logs/results (job %s)", jobID)
+		case PhasePostJobCleanup:
+			return fmt.Sprintf("cleaning up after job %s", jobID)
+		case PhasePostJobDrained:
+			return fmt.Sprintf("finalizing job %s", jobID)
 		case PhaseDiskFull:
 			return fmt.Sprintf("disk full (job %s)", jobID)
 		}

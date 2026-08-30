@@ -77,6 +77,40 @@ func TestJobViewActivityContract(t *testing.T) {
 	}
 }
 
+func TestInstanceViewPublishesAgentActivity(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+		LaunchID: launchID, InstancePhase: "post_job_uploads_drained:6399",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := BuildSnapshot(database, SnapshotOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, ok := snapshot.Instances[launchID]
+	if !ok {
+		t.Fatalf("snapshot omitted launch %d", launchID)
+	}
+	if view.Status != db.LaunchStatusRunning || view.ActivityStatus != "finalizing" || view.Phase != "post_job_uploads_drained:6399" {
+		t.Fatalf("instance view = %+v", view)
+	}
+
+	before := &Snapshot{Jobs: map[int64]JobView{}, Instances: map[int64]InstanceView{
+		launchID: {ID: launchID, Status: db.LaunchStatusRunning, ActivityStatus: db.LaunchStatusRunning},
+	}}
+	after := &Snapshot{Jobs: map[int64]JobView{}, Instances: map[int64]InstanceView{launchID: view}}
+	delta := DiffSnapshots(before, after)
+	if len(delta.InstChanged) != 1 {
+		t.Fatalf("instance activity delta = %+v, want one change", delta.InstChanged)
+	}
+}
+
 func TestJobStateSinceUsesOnlyMatchingSemanticTimestamp(t *testing.T) {
 	end := int64(2_000)
 	job := &db.Job{StartTime: 1_000, QueuedAt: 900, EndTime: &end}

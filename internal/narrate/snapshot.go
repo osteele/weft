@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/jobview"
@@ -86,7 +87,9 @@ type JobVCSView struct {
 type InstanceView struct {
 	ID                int64  `json:"id"`
 	CampaignID        *int64 `json:"campaign_id,omitempty"`
-	Status            string `json:"status"`
+	Status            string `json:"status"`          // authoritative launch lifecycle status
+	ActivityStatus    string `json:"activity_status"` // stable semantic refinement for live status surfaces
+	Phase             string `json:"phase,omitempty"` // raw agent phase, for provenance and debugging
 	Provider          string `json:"provider,omitempty"`
 	GPUSpec           string `json:"gpu_spec,omitempty"`
 	GPUDisplay        string `json:"gpu_display,omitempty"`
@@ -139,11 +142,24 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
-	launchIDs := make([]int64, 0, len(jobs))
+	instances, err := db.ListNonTerminalLaunches(database)
+	if err != nil {
+		return nil, fmt.Errorf("list launches: %w", err)
+	}
+	launchIDSet := make(map[int64]struct{}, len(jobs)+len(instances))
 	for _, j := range jobs {
 		if j != nil && j.LaunchID != nil && *j.LaunchID > 0 {
-			launchIDs = append(launchIDs, *j.LaunchID)
+			launchIDSet[*j.LaunchID] = struct{}{}
 		}
+	}
+	for _, inst := range instances {
+		if inst != nil && inst.ID > 0 {
+			launchIDSet[inst.ID] = struct{}{}
+		}
+	}
+	launchIDs := make([]int64, 0, len(launchIDSet))
+	for launchID := range launchIDSet {
+		launchIDs = append(launchIDs, launchID)
 	}
 	liveByLaunch, err := db.GetLaunchLiveStates(database, launchIDs)
 	if err != nil {
@@ -157,12 +173,8 @@ func BuildSnapshot(database *sql.DB, opts SnapshotOptions) (*Snapshot, error) {
 		snap.Jobs[j.ID] = jobToView(database, j, liveByLaunch, placementStatusByJob[j.ID])
 	}
 
-	instances, err := db.ListNonTerminalLaunches(database)
-	if err != nil {
-		return nil, fmt.Errorf("list launches: %w", err)
-	}
 	for _, inst := range instances {
-		snap.Instances[inst.ID] = instanceToView(inst)
+		snap.Instances[inst.ID] = instanceToView(inst, liveByLaunch[inst.ID])
 	}
 
 	apState, err := db.LoadAutopilotState(database)
@@ -297,11 +309,17 @@ func cloneIntPtr(v *int) *int {
 	return &out
 }
 
-func instanceToView(c *db.Launch) InstanceView {
+func instanceToView(c *db.Launch, live *db.LaunchLiveState) InstanceView {
+	phase := ""
+	if live != nil {
+		phase = live.InstancePhase
+	}
 	return InstanceView{
 		ID:                c.ID,
 		CampaignID:        c.CampaignID,
 		Status:            c.Status,
+		ActivityStatus:    campaign.InstanceActivityStatus(c.Status, phase),
+		Phase:             phase,
 		Provider:          c.Provider,
 		GPUSpec:           c.GPUSpec,
 		GPUDisplay:        c.DisplayGPUBrief(),
@@ -408,7 +426,7 @@ func (d *Delta) ResolveRemovedInstances(database *sql.DB) error {
 	}
 	for _, id := range d.InstRemoved {
 		if l, ok := launches[id]; ok {
-			d.InstTerminated = append(d.InstTerminated, instanceToView(l))
+			d.InstTerminated = append(d.InstTerminated, instanceToView(l, nil))
 		}
 	}
 	d.InstRemoved = nil
@@ -550,6 +568,9 @@ func jobChanged(a, b JobView) bool {
 
 func instChanged(a, b InstanceView) bool {
 	if a.Status != b.Status {
+		return true
+	}
+	if a.ActivityStatus != b.ActivityStatus || a.Phase != b.Phase {
 		return true
 	}
 	if a.TerminationReason != b.TerminationReason {

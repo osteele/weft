@@ -756,6 +756,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		}
 	}
 	launchByID, _ := db.GetLaunchesByIDs(database, launchIDs)
+	liveByLaunch, _ := db.GetLaunchLiveStates(database, launchIDs)
 	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -763,16 +764,13 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 
 	now := time.Now()
 	for _, target := range targets {
-		statusStr := string(target.Status)
-		if target.Status == db.ExecutionTargetRunning && target.LaunchID != nil {
-			if launch := launchByID[*target.LaunchID]; launch != nil && !launch.IsAgentReady() {
-				if launch.BootstrapDeadlineExceeded(now) {
-					statusStr = "no-agent"
-				} else {
-					statusStr = "bootstrapping"
-				}
-			}
+		var launch *db.Launch
+		var live *db.LaunchLiveState
+		if target.LaunchID != nil {
+			launch = launchByID[*target.LaunchID]
+			live = liveByLaunch[*target.LaunchID]
 		}
+		statusStr := executionTargetStatus(target, launch, live, now)
 		if target.Cordoned {
 			statusStr += " [cordoned]"
 		}
@@ -804,6 +802,31 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	}
 	w.Flush()
 	return nil
+}
+
+func executionTargetStatus(target *db.ExecutionTarget, launch *db.Launch, live *db.LaunchLiveState, now time.Time) string {
+	if target == nil {
+		return "unknown"
+	}
+	statusStr := string(target.Status)
+	if target.Status != db.ExecutionTargetRunning || launch == nil {
+		return statusStr
+	}
+	phase := ""
+	if live != nil {
+		phase = live.InstancePhase
+	}
+	activity := campaign.InstanceActivityStatus(launch.Status, phase)
+	if activity != launch.Status {
+		return campaign.InstanceActivityLabel(activity)
+	}
+	if launch.IsAgentReady() {
+		return statusStr
+	}
+	if launch.BootstrapDeadlineExceeded(now) {
+		return "no-agent"
+	}
+	return "bootstrapping"
 }
 
 func executionTargetDisplayID(target *db.ExecutionTarget) string {

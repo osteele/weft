@@ -15,6 +15,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func TestExecutionTargetStatusUsesInstanceActivity(t *testing.T) {
+	now := time.Now()
+	ready := now.Add(-time.Minute).Unix()
+	target := &db.ExecutionTarget{Status: db.ExecutionTargetRunning}
+	launch := &db.Launch{Status: db.LaunchStatusRunning, AgentReadyAtUnix: &ready}
+
+	tests := []struct {
+		phase string
+		want  string
+	}{
+		{"running:42", "running"},
+		{"post_job_uploads_drained:42", "finalizing"},
+		{"destroying", "self-destructing"},
+	}
+	for _, tt := range tests {
+		live := &db.LaunchLiveState{InstancePhase: tt.phase}
+		if got := executionTargetStatus(target, launch, live, now); got != tt.want {
+			t.Fatalf("phase %q status = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
 func TestMarkReleasedInstanceFailed_ClosesUnresolvedJobsAsFailed(t *testing.T) {
 	database := db.SetupTestDB(t)
 

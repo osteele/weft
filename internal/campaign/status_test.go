@@ -251,6 +251,28 @@ func TestIsActiveInstancePhase(t *testing.T) {
 	}
 }
 
+func TestInstanceActivityStatus(t *testing.T) {
+	tests := []struct {
+		name, launchStatus, phase, want string
+	}{
+		{"running job", db.LaunchStatusRunning, "running:42", db.LaunchStatusRunning},
+		{"runner finalizing", db.LaunchStatusRunning, "finalizing:42", InstanceActivityFinalizing},
+		{"output upload", db.LaunchStatusRunning, "uploading:42", InstanceActivityFinalizing},
+		{"result upload", db.LaunchStatusRunning, "uploading-results:42", InstanceActivityFinalizing},
+		{"post-job cleanup", db.LaunchStatusRunning, "post_job_cleanup:42", InstanceActivityFinalizing},
+		{"uploads drained", db.LaunchStatusRunning, "post_job_uploads_drained:42", InstanceActivityFinalizing},
+		{"destroying", db.LaunchStatusRunning, PhaseDestroying, InstanceActivitySelfDestructing},
+		{"terminal row wins", db.LaunchStatusCompleted, PhaseDestroying, db.LaunchStatusCompleted},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := InstanceActivityStatus(tt.launchStatus, tt.phase); got != tt.want {
+				t.Fatalf("InstanceActivityStatus(%q, %q) = %q, want %q", tt.launchStatus, tt.phase, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDisplayPhase_ReconcilesWithDBStatus(t *testing.T) {
 	tests := []struct {
 		name      string

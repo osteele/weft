@@ -251,7 +251,15 @@ an `activity` payload:
     "snapshot": {
       "time": "2026-04-27T10:30:00Z",
       "jobs": {},
-      "instances": {},
+      "instances": {
+        "7616": {
+          "id": 7616,
+          "status": "running",
+          "activity_status": "finalizing",
+          "phase": "post_job_uploads_drained:6399",
+          "provider": "vastai"
+        }
+      },
       "autopilot": {"state": "idle"}
     },
     "delta": {},
@@ -293,6 +301,13 @@ an `activity` payload:
   }
 }
 ```
+
+For instance rows, `status` is the authoritative persisted launch lifecycle.
+`activity_status` is the stable semantic state for display clients and may
+refine a live `running` launch to `finalizing` or `self_destructing`. `phase`
+is the raw agent observation included for provenance and diagnostics; clients
+must not mechanically parse it to recreate Weft's activity semantics. Terminal
+launch status always wins over a stale live phase.
 
 Activity snapshots are emitted on change. When nothing changed, the daemon
 still re-emits a full snapshot one heartbeat interval (45 seconds, subject to
