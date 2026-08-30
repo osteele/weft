@@ -5355,6 +5355,53 @@ invariant PausedAutopilotTakesNoActions {
         -- dispatch to known destinations.
 }
 
+-- The machine-readable projection of autopilot state, for tools that dispatch
+-- to weft and must not read its private state to decide whether work is held.
+rule AutopilotStatusMachineSurface {
+    when: QueryAutopilotStatus(json_output)
+
+    -- legacy annotation: @guidance
+        -- The JSON document carries kind "autopilot_status" and an integer
+        -- version, matching HostListMachineSurface in
+        -- specs/inventory-placement.allium and the job-list surface in
+        -- specs/job-lifecycle.allium. Fields are added additively. The version
+        -- is bumped only for a change that would break a reader which refuses
+        -- shapes it does not recognize, and such a reader is the intended
+        -- kind: a consumer that parses optimistically turns an unrecognized
+        -- document into a plausible-looking "nothing is held", which reads as
+        -- good news.
+        --
+        -- kind and version are emitted on every path, including the never-run
+        -- state where no autopilot row exists. A consumer must be able to
+        -- recognize the shape before it can interpret any field in it, so a
+        -- state carrying no data still carries its identity.
+        --
+        -- This surface is the authoritative answer to "why is this job not
+        -- running, and is it still waiting on something?". The alternative --
+        -- a consumer keeping its own note of why a job was held -- has no way
+        -- to notice when the held job's real state changes underneath it, and
+        -- goes stale silently. The surface exists so that note is unnecessary.
+        --
+        -- Absence on this surface is not evidence of absence, and the
+        -- distinction is load-bearing for two collection fields:
+        --
+        --   blocked_on_price_authorization -- absent when no job is held on
+        --       price. Held jobs remain queued with their offered rate,
+        --       anchor, and market median recorded; see PriceAuthorizationGate.
+        --   orphan_streaks -- absent when no job is in a launch-orphan loop.
+        --
+        -- Both are omitted rather than emitted empty, so a missing key is
+        -- indistinguishable at the point of parse from a key that was renamed.
+        -- The silent reading is the dangerous one: a consumer concludes
+        -- nothing is held and stops looking. state and stale_after_seconds are
+        -- always emitted and carry no omission, so a consumer that checks one
+        -- of them first can tell "shape understood, nothing held" from "shape
+        -- not understood". Consumers must tolerate unrecognized fields, since
+        -- additive growth is the expected direction of change.
+        --
+        -- Implementation: cmd/autopilot.go buildAutopilotStateView.
+}
+
 -- ==========================================================================
 -- Open Questions
 -- ==========================================================================

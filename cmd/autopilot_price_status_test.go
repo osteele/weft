@@ -118,3 +118,32 @@ func TestAutopilotStateViewJSONIncludesPriceAuthorizationBlocks(t *testing.T) {
 		}
 	}
 }
+
+// The machine surface must carry kind and version on every path, including the
+// never-run state, so a consumer can refuse a shape it does not recognize.
+// See AutopilotStatusMachineSurface in specs/campaign-lifecycle.allium.
+func TestAutopilotStatusJSONCarriesKindAndVersion(t *testing.T) {
+	for name, state := range map[string]*db.AutopilotState{
+		"never-run": nil,
+		"paused":    {Paused: true, PausedBy: "osteele"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view := buildAutopilotStateView(state)
+			if view.Kind != autopilotStatusJSONKind {
+				t.Errorf("Kind = %q, want %q", view.Kind, autopilotStatusJSONKind)
+			}
+			if view.Version != autopilotStatusJSONVersion {
+				t.Errorf("Version = %d, want %d", view.Version, autopilotStatusJSONVersion)
+			}
+			data, err := json.Marshal(view)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			for _, want := range []string{`"kind":"autopilot_status"`, `"version":1`} {
+				if !strings.Contains(string(data), want) {
+					t.Errorf("json missing %s: %s", want, data)
+				}
+			}
+		})
+	}
+}

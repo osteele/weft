@@ -172,9 +172,19 @@ func init() {
 	autopilotPauseCmd.Flags().StringVar(&autopilotPauseBy, "by", "", "Who is pausing (defaults to $USER)")
 }
 
+const (
+	autopilotStatusJSONKind    = "autopilot_status"
+	autopilotStatusJSONVersion = 1
+)
+
 // autopilotStateView is the JSON shape returned by `weft autopilot status --json`.
-// Stable contract — agents may parse this. Timestamps are RFC3339.
+// Stable contract — agents may parse this. Timestamps are RFC3339. Add fields
+// additively; bump Version only for a change that breaks a reader which refuses
+// unrecognized shapes. See AutopilotStatusMachineSurface in
+// specs/campaign-lifecycle.allium.
 type autopilotStateView struct {
+	Kind               string               `json:"kind"`
+	Version            int                  `json:"version"`
 	State              autopilotStateName   `json:"state"`
 	Paused             bool                 `json:"paused"`
 	PausedAt           *string              `json:"paused_at,omitempty"`
@@ -220,6 +230,8 @@ func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 	now := time.Now()
 	staleAfter := orchestration.AutopilotPassStaleAfter
 	view := autopilotStateView{
+		Kind:              autopilotStatusJSONKind,
+		Version:           autopilotStatusJSONVersion,
 		StaleAfterSeconds: int64(staleAfter / time.Second),
 	}
 	if state == nil {
