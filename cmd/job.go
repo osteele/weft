@@ -39,25 +39,7 @@ var jobCmd = &cobra.Command{
 All job-related operations are available under this subcommand. Common
 operations (run, log, kill) also have top-level shortcuts.
 
-Available subcommands:
-  run       Start a new job on a remote host
-  log       View job log output
-  kill      Kill a running job
-  status    Check status of one or more jobs
-  describe  Set or update job description
-  info      Show detailed job information
-  show      Alias for info
-  inspect   Print normalized job metadata
-  diff      Compare job metadata and attempts
-  anomalies List recent jobs that look worth reviewing
-  churn     Group recent retry/churn clusters
-  recommend Suggest Weft improvements from recent job history
-  restart   Requeue a killed, dead, failed, canceled, or completed job
-  retry     Alias for restart
-  list      List and search job history
-  watch     Watch job status changes
-  move      Move a queued job to a different host
-  unplace   Move a queued job back to the unplaced pool`,
+The info subcommand also accepts show as an alias, and restart accepts retry.`,
 }
 
 // Job run subcommand - delegates to main run command

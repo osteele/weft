@@ -25,12 +25,7 @@ Without arguments, watches all cloud instances and on-prem jobs (same as
 "weft watch instance" or "weft watch system"). Use a subcommand to watch a
 specific resource type.
 
-Subcommands:
-  jobs        Watch job status changes (TUI or plain)
-  campaign    Watch a campaign
-  instance    Watch cloud instances
-  system      Watch all system state (alias for instance)
-  project     Watch a project`,
+The system subcommand is an alias for instance.`,
 	RunE: runWatchCommand,
 }
 

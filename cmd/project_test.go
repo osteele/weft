@@ -70,7 +70,7 @@ func TestErrNoJobsForProjectWording(t *testing.T) {
 	}
 
 	// Project with jobs but filters excluded all of them: no cwd hint.
-	msg := errNoJobsForProject(database, "alpha").Error()
+	msg := errNoJobsForProject(database, "alpha", nil).Error()
 	if !strings.Contains(msg, "matching the current filters") {
 		t.Errorf("message for known project missing filters clause: %q", msg)
 	}
@@ -79,8 +79,54 @@ func TestErrNoJobsForProjectWording(t *testing.T) {
 	}
 
 	// Project with no jobs at all: keep the cwd hint.
-	msg = errNoJobsForProject(database, "nonexistent").Error()
+	msg = errNoJobsForProject(database, "nonexistent", nil).Error()
 	if !strings.Contains(msg, "is the current directory a known project?") {
 		t.Errorf("message for unknown project missing cwd hint: %q", msg)
 	}
+}
+
+func TestUnknownProjectArgumentSuggestsAvailableSubcommands(t *testing.T) {
+	db.SetupTestDB(t)
+
+	previousProject, previousNoSync := listProject, listNoSync
+	listProject, listNoSync = "", true
+	t.Cleanup(func() {
+		listProject, listNoSync = previousProject, previousNoSync
+	})
+
+	err := runProjectList(projectCmd, []string{"status"})
+	if err == nil {
+		t.Fatal("weft project status unexpectedly succeeded")
+	}
+	message := err.Error()
+	if !strings.Contains(message, `"status"`) {
+		t.Errorf("error does not name the unknown word: %q", message)
+	}
+	if !strings.Contains(message, "available subcommands") {
+		t.Errorf("error does not mention available subcommands: %q", message)
+	}
+	for _, subcommand := range projectCmd.Commands() {
+		if subcommand.Hidden || subcommand.Name() == "help" {
+			continue
+		}
+		if !strings.Contains(message, subcommand.Name()) {
+			t.Errorf("error does not name available subcommand %q: %q", subcommand.Name(), message)
+		}
+	}
+}
+
+func TestLongHelpDoesNotEnumerateSubcommands(t *testing.T) {
+	headings := []string{"Available subcommands:", "Subcommands:"}
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		for _, heading := range headings {
+			if strings.Contains(cmd.Long, heading) {
+				t.Errorf("%s Long help contains %q; cobra generates the command list from the real command tree", cmd.CommandPath(), heading)
+			}
+		}
+		for _, subcommand := range cmd.Commands() {
+			walk(subcommand)
+		}
+	}
+	walk(rootCmd)
 }

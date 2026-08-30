@@ -120,7 +120,7 @@ func runProjectWatchPlain(cmd *cobra.Command, database *sql.DB, project string, 
 		}
 		groups = terminal.FilterProjectGroups(groups, project)
 		if first && len(groups) == 0 && project != "" {
-			return terminal.WatchPlainStep{}, errNoJobsForProject(database, project)
+			return terminal.WatchPlainStep{}, errNoJobsForProject(database, project, nil)
 		}
 		first = false
 

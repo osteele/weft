@@ -10,8 +10,7 @@ var cloudCmd = &cobra.Command{
 Deprecated: use 'weft instance' subcommands instead. This group is kept for
 backwards compatibility.
 
-Available subcommands:
-  watch  Watch the full active system state (use 'weft instance watch' instead)`,
+Use 'weft instance watch' instead of 'weft cloud watch'.`,
 }
 
 var cloudWatchCmd = &cobra.Command{

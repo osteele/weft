@@ -6,11 +6,7 @@ var estimationCmd = &cobra.Command{
 	Use:   "estimation",
 	Short: "Manage the job duration and resource estimation system",
 	Long: `Manage the job estimation system, which predicts job duration and
-resource usage from historical data.
-
-Subcommands:
-  train   Retrain job-estimator models from historical data
-  status  Show predictor model readiness and refresh state`,
+resource usage from historical data.`,
 }
 
 var estimationTrainCmd = &cobra.Command{

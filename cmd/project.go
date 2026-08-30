@@ -21,12 +21,7 @@ var projectCmd = &cobra.Command{
 	Long: `View jobs grouped by project.
 
 Defaults to the current directory's project. Pass a project name to override.
-
-Available subcommands:
-  list    List projects with summary stats (default)
-  jobs    List jobs grouped by project
-  watch   Watch active and recent jobs grouped by project
-  launch  Launch cloud instances for unplaced jobs in this project`,
+Without a subcommand, lists projects with summary stats.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runProjectList,
 }
@@ -111,10 +106,19 @@ func resolveProjectArg(args []string) (string, error) {
 	return project, nil
 }
 
-func errNoJobsForProject(database *sql.DB, project string) error {
+func errNoJobsForProject(database *sql.DB, project string, subcommandParent *cobra.Command) error {
 	hasAny, err := db.ProjectHasAnyJobs(database, project)
 	if err == nil && hasAny {
 		return fmt.Errorf("no jobs found for project %q matching the current filters", project)
+	}
+	if subcommandParent != nil {
+		var names []string
+		for _, subcommand := range subcommandParent.Commands() {
+			if !subcommand.Hidden && subcommand.Name() != "help" {
+				names = append(names, subcommand.Name())
+			}
+		}
+		return fmt.Errorf("no jobs found for project %q; if %q was intended as a subcommand, available subcommands are: %s", project, project, strings.Join(names, ", "))
 	}
 	return fmt.Errorf("no jobs found for project %q; is the current directory a known project?", project)
 }
@@ -150,6 +154,7 @@ func runProjectLaunch(cmd *cobra.Command, args []string) error {
 }
 
 func runProjectList(cmd *cobra.Command, args []string) error {
+	projectFromArg := listProject == "" && len(args) > 0
 	if err := defaultProjectFilter(args); err != nil {
 		return err
 	}
@@ -167,7 +172,11 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(jobs) == 0 && listProject != "" {
-		return errNoJobsForProject(database, listProject)
+		var subcommandParent *cobra.Command
+		if projectFromArg && cmd.HasSubCommands() {
+			subcommandParent = cmd
+		}
+		return errNoJobsForProject(database, listProject, subcommandParent)
 	}
 	return terminal.WriteListPlainOutput(terminal.RenderProjectListPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }
@@ -197,7 +206,7 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(jobs) == 0 && listProject != "" {
-		return errNoJobsForProject(database, listProject)
+		return errNoJobsForProject(database, listProject, nil)
 	}
 	return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }

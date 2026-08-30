@@ -36,15 +36,6 @@ var listCmd = &cobra.Command{
 	Short:   "List jobs, campaigns, instances, hosts, queues, artifacts, or projects",
 	Long: `List resources. Without a subcommand, lists jobs (same as "weft list jobs").
 
-Subcommands:
-  jobs        List and search job history (default)
-  campaigns   List campaigns with instance counts
-  instances   List cloud instances
-  hosts       List known hosts
-  queues      List job queues
-  artifacts   List job output artifacts
-  projects    List projects with summary stats
-
 Examples:
   weft list                    # Recent jobs (last 7 days)
   weft list jobs --running     # Running jobs only

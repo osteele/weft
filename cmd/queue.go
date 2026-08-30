@@ -37,17 +37,7 @@ var queueCmd = &cobra.Command{
 
 Jobs can run concurrently when the host's CPU, GPU, exclusivity, and benchmark
 gates permit. The queue runner stays active without requiring the local machine
-to remain connected.
-
-Subcommands:
-  add     Add a job to the queue
-  edit    Alias for 'weft edit'
-  remove  Remove a queued job before it starts
-  start   Start the queue runner
-  stop    Stop the queue runner after running jobs finish
-  list    List jobs in the queue
-  status  Show queue runner status
-  update  Update the queue runner agent on a host`,
+to remain connected.`,
 }
 
 var queueAddCmd = &cobra.Command{

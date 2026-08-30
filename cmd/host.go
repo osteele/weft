@@ -37,12 +37,7 @@ var hostCmd = &cobra.Command{
 	Use:     "host",
 	Aliases: []string{"hosts"},
 	Short:   "Show information about remote hosts",
-	Long: `Show information about remote hosts including system info, active jobs, and load.
-
-Available subcommands:
-  info      Show system information (CPU, memory, GPUs)
-  jobs      List active jobs on host
-  load      Show current load and resource usage`,
+	Long:    `Show information about remote hosts including system info, active jobs, and load.`,
 }
 
 var hostInfoCmd = &cobra.Command{
