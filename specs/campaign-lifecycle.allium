@@ -5402,6 +5402,56 @@ rule AutopilotStatusMachineSurface {
         -- Implementation: cmd/autopilot.go buildAutopilotStateView.
 }
 
+-- The machine-readable projection of tripped runaway-breaker scopes.
+rule AutopilotBlockedMachineSurface {
+    when: QueryAutopilotBlocked(json_output)
+
+    -- legacy annotation: @guidance
+        -- The JSON envelope carries kind "autopilot_blocked" and an integer
+        -- version, on the same terms as AutopilotStatusMachineSurface.
+        --
+        -- scopes is emitted even when empty, unlike the collection fields on
+        -- the status surface. An empty list is this surface's entire answer --
+        -- "no scope is tripped" -- and that answer must be distinguishable
+        -- from a document the consumer failed to understand. A surface whose
+        -- only payload is a problem list cannot omit that list, because the
+        -- omission and the all-clear would be the same document.
+        --
+        -- jobs within a scope keeps omitempty: a tripped scope is already
+        -- evidence that something is wrong, so an absent job list degrades the
+        -- detail rather than inverting the conclusion.
+        --
+        -- Implementation: cmd/autopilot.go runAutopilotBlocked.
+}
+
+-- The machine-readable projection of job telemetry.
+rule TelemetryMachineSurface {
+    when: QueryJobTelemetry(json_output)
+
+    -- legacy annotation: @guidance
+        -- The JSON envelope carries kind "job_telemetry", an integer version,
+        -- and results: a list that is always present and always a list,
+        -- including for a single job and for no jobs.
+        --
+        -- This replaces a shape whose top-level JSON type depended on the
+        -- data: a bare object for exactly one result and a bare array
+        -- otherwise. A consumer had to branch on the parsed type before it
+        -- could read anything, and the single-job case -- the common one for
+        -- an agent querying one job -- silently differed from the batch case
+        -- it was most likely tested against. A surface whose type varies with
+        -- cardinality cannot be consumed safely, and no version field can
+        -- describe it, because the document does not have one shape to
+        -- version.
+        --
+        -- The change breaks a reader that expected the bare single-result
+        -- object. That break is the reason the envelope carries a version:
+        -- version 1 is this shape, and a reader that refuses what it does not
+        -- recognize now fails loudly where it previously read a plausible
+        -- document with the wrong structure.
+        --
+        -- Implementation: cmd/telemetry.go runTelemetry.
+}
+
 -- ==========================================================================
 -- Open Questions
 -- ==========================================================================

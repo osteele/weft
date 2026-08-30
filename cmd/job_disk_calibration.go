@@ -95,7 +95,10 @@ type diskCalibrationReport struct {
 	WholeEstimate        *residualSummary `json:"whole_estimate"`
 	CurrentEmpiricalMult float64          `json:"current_empirical_multiplier"`
 	WholeUndersizedCount int              `json:"whole_estimate_undersized_count"`
-	WholeUndersizedJobs  []int64          `json:"whole_estimate_undersized_launches,omitempty"`
+	// Absent when nothing was undersized. whole_estimate_undersized_count is
+	// always emitted and is the field to test: it distinguishes "none" from a
+	// shape this consumer does not understand.
+	WholeUndersizedJobs []int64 `json:"whole_estimate_undersized_launches,omitempty"`
 
 	LaunchesTotal        int `json:"launches_with_telemetry"`
 	ExcludedUntrusted    int `json:"excluded_untrustworthy_termination"`

@@ -496,9 +496,28 @@ func runAutopilotBudgetReset(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+const (
+	autopilotBlockedJSONKind    = "autopilot_blocked"
+	autopilotBlockedJSONVersion = 1
+)
+
+// autopilotBlockedEnvelope is the versioned envelope for
+// `weft autopilot blocked --json`. See AutopilotBlockedMachineSurface in
+// specs/campaign-lifecycle.allium.
+type autopilotBlockedEnvelope struct {
+	Kind    string             `json:"kind"`
+	Version int                `json:"version"`
+	Scopes  []blockedScopeView `json:"scopes"`
+}
+
 // blockedScopeView is the JSON shape for `weft autopilot blocked --json`.
 // Stable contract: ops scripts may parse this to alert on long-tripped
 // scopes or to enumerate affected jobs.
+//
+// `scopes` is emitted even when empty: an empty list is the "no scope is
+// tripped" answer, and omitting it would make that answer indistinguishable
+// from a renamed key. `jobs` within a scope keeps omitempty because a tripped
+// scope is already evidence of the problem the list details.
 type blockedScopeView struct {
 	Scope      string   `json:"scope"`
 	CampaignID int64    `json:"campaign_id,omitempty"`
@@ -553,7 +572,11 @@ func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
 	if autopilotBlockedJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(map[string]any{"scopes": views}); err != nil {
+		if err := enc.Encode(autopilotBlockedEnvelope{
+			Kind:    autopilotBlockedJSONKind,
+			Version: autopilotBlockedJSONVersion,
+			Scopes:  views,
+		}); err != nil {
 			return err
 		}
 	} else if len(views) == 0 {

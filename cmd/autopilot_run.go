@@ -78,15 +78,19 @@ const (
 )
 
 type autopilotRunPassEvent struct {
-	Pass           int              `json:"pass"`
-	StartedAt      string           `json:"started_at"`
-	DurationMS     int64            `json:"duration_ms"`
-	Outcome        autopilotOutcome `json:"outcome"`
-	Placed         int              `json:"placed"`
-	Rebalanced     int              `json:"rebalanced"`
-	Launched       int              `json:"launched"`
-	OverloadMoved  int              `json:"overload_moved"`
-	LaunchedClass  string           `json:"launched_class,omitempty"`
+	Pass          int              `json:"pass"`
+	StartedAt     string           `json:"started_at"`
+	DurationMS    int64            `json:"duration_ms"`
+	Outcome       autopilotOutcome `json:"outcome"`
+	Placed        int              `json:"placed"`
+	Rebalanced    int              `json:"rebalanced"`
+	Launched      int              `json:"launched"`
+	OverloadMoved int              `json:"overload_moved"`
+	LaunchedClass string           `json:"launched_class,omitempty"`
+	// Absent when no job is blocked. A consumer must not read a missing key
+	// as "nothing is blocked" without first confirming it recognizes the
+	// document shape, because a renamed key is indistinguishable from an
+	// empty one here and the silent reading is the reassuring one.
 	BlockedReasons map[int64]string `json:"blocked_reasons,omitempty"`
 	Error          string           `json:"error,omitempty"`
 	NextWaitMS     int64            `json:"next_wait_ms"`

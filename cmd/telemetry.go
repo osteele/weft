@@ -45,6 +45,24 @@ func init() {
 	}
 }
 
+const (
+	telemetryJSONKind    = "job_telemetry"
+	telemetryJSONVersion = 1
+)
+
+// telemetryEnvelope is the versioned envelope for `weft telemetry --json`.
+// `results` is always a list and always emitted, including for a single job
+// and for none. Emitting a bare object for one result and a bare array
+// otherwise made the document's top-level type depend on the data, so a
+// consumer had to branch on the JSON type and the common single-job case
+// silently differed from the batch case. See TelemetryMachineSurface in
+// specs/campaign-lifecycle.allium.
+type telemetryEnvelope struct {
+	Kind    string            `json:"kind"`
+	Version int               `json:"version"`
+	Results []telemetryOutput `json:"results"`
+}
+
 type telemetryOutput struct {
 	JobID      int64                   `json:"job_id"`
 	Job        string                  `json:"job"`
@@ -163,10 +181,14 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 	if telemetryJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if len(jsonResults) == 1 {
-			return enc.Encode(jsonResults[0])
+		if jsonResults == nil {
+			jsonResults = []telemetryOutput{}
 		}
-		return enc.Encode(jsonResults)
+		return enc.Encode(telemetryEnvelope{
+			Kind:    telemetryJSONKind,
+			Version: telemetryJSONVersion,
+			Results: jsonResults,
+		})
 	}
 	return nil
 }
