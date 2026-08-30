@@ -204,6 +204,8 @@ func formatActualStatusWithLookup(job *db.Job, lookup queueblock.Lookup) string 
 		return "✗ killed"
 	case db.StatusCanceled:
 		return "✗ canceled"
+	case db.StatusSkipped:
+		return "↷ skipped"
 	case db.StatusDraft:
 		return "✎ draft"
 	default:

@@ -204,6 +204,8 @@ func formatActualStatus(job *db.Job) string {
 		return "✗ killed"
 	case db.StatusCanceled:
 		return "✗ canceled"
+	case db.StatusSkipped:
+		return "↷ skipped"
 	case db.StatusDraft:
 		return "✎ draft"
 	default:

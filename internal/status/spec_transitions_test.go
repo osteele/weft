@@ -213,7 +213,7 @@ func TestSpec_UndeclaredTransitionsAreRejected(t *testing.T) {
 }
 
 func TestSpec_TerminalStatesHaveNoNonAuthoritativeOutbound(t *testing.T) {
-	terminalStates := []string{Completed, Dead, Failed, Killed, Canceled, Draft}
+	terminalStates := []string{Completed, Dead, Failed, Killed, Canceled, Skipped, Draft}
 	for _, s := range terminalStates {
 		t.Run(s, func(t *testing.T) {
 			allowed := AllowedFrom(s, false)

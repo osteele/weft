@@ -308,11 +308,13 @@ const (
 	PhaseUploadingResults = "uploading-results"
 	PhaseDiskFull         = "disk-full"
 	PhaseGrace            = "grace"
+	PhaseHandoff          = "handoff"
 	PhaseDestroying       = "destroying"
 	PhasePostJobCleanup   = "post_job_cleanup"
 	PhasePostJobDrained   = "post_job_uploads_drained"
 
 	InstanceActivityFinalizing      = "finalizing"
+	InstanceActivityHandoff         = "handoff"
 	InstanceActivitySelfDestructing = "self_destructing"
 )
 
@@ -341,7 +343,7 @@ func ParsePhaseJobID(phase string) (string, int64, bool) {
 func isActiveInstancePhase(phase string) bool {
 	phase = strings.TrimSpace(phase)
 	switch phase {
-	case PhaseGrace, PhaseDestroying, PhaseDiskFull:
+	case PhaseGrace, PhaseHandoff, PhaseDestroying, PhaseDiskFull:
 		return true
 	}
 
@@ -362,7 +364,7 @@ func isActiveInstancePhase(phase string) bool {
 func displayPhase(jobStatuses map[int64]string, jobs []*db.Job, r2Phase string) (phase string, verb string) {
 	r2Phase = strings.TrimSpace(r2Phase)
 	switch r2Phase {
-	case PhaseGrace, PhaseDestroying, PhaseDiskFull:
+	case PhaseGrace, PhaseHandoff, PhaseDestroying, PhaseDiskFull:
 		return r2Phase, r2Phase
 	}
 
@@ -408,6 +410,8 @@ func InstanceActivityStatus(launchStatus, phase string) string {
 	switch phase {
 	case PhaseDestroying:
 		return InstanceActivitySelfDestructing
+	case PhaseHandoff:
+		return InstanceActivityHandoff
 	case PhaseGrace, PhaseDiskFull:
 		return phase
 	}
@@ -1158,7 +1162,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 // This covers both job statuses (completed, failed) and attempt outcomes (orphaned, canceled).
 func IsJobTerminal(displayStatus string) bool {
 	switch displayStatus {
-	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled,
+	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusSkipped,
 		db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled:
 		return true
 	}

@@ -162,7 +162,7 @@ func ClassifyBucket(job *db.Job, input ClassifyInput) Bucket {
 			return BucketLaunching
 		}
 		return BucketQueued
-	case db.StatusKilled, db.StatusCanceled:
+	case db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		return BucketKilledCanceled
 	case db.StatusFailed, db.StatusDead:
 		return BucketFailures

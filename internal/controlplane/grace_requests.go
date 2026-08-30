@@ -23,7 +23,16 @@ const (
 	GraceCommandExtend         GraceCommandKind = "extend"
 	GraceCommandRelease        GraceCommandKind = "release"
 	GraceCommandCancelAttempts GraceCommandKind = "cancel_attempts"
+	GraceCommandSuccessHandoff GraceCommandKind = "success_handoff"
 )
+
+// SuccessHandoffRequest keeps a successfully completed rental alive until
+// Deadline while the scheduler decides whether to reuse it. The request is
+// durable in R2 and carries no job claim or execution attempt.
+type SuccessHandoffRequest struct {
+	Deadline       string  `json:"deadline"`
+	DeferredJobIDs []int64 `json:"deferred_job_ids,omitempty"`
+}
 
 // GraceCancelAttemptsRequest tells the agent on `instanceID` to skip any
 // pending or running job whose attempt (run) id is in AttemptIDs. Used by
@@ -147,6 +156,14 @@ func GraceCancelAttemptsRequestKey(instanceID int64, requestID string) string {
 	return fmt.Sprintf("%s%s.json", GraceCancelAttemptsPrefix(instanceID), requestID)
 }
 
+func SuccessHandoffPrefix(instanceID int64) string {
+	return fmt.Sprintf("grace/%d/success_handoff/", instanceID)
+}
+
+func SuccessHandoffRequestKey(instanceID int64, requestID string) string {
+	return fmt.Sprintf("%s%s.json", SuccessHandoffPrefix(instanceID), requestID)
+}
+
 func GraceCommandAckKey(instanceID int64, requestID string) string {
 	return fmt.Sprintf("%s%s.json", GraceCommandAcksPrefix(instanceID), requestID)
 }
@@ -192,6 +209,28 @@ func SendGraceCancelAttempts(ctx context.Context, store GraceStore, instanceID i
 	}
 	if err := store.PutObject(ctx, GraceCancelAttemptsRequestKey(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
 		return fmt.Errorf("write cancel-attempts request: %w", err)
+	}
+	return nil
+}
+
+// SendSuccessHandoff records a durable success-side lease. It deliberately
+// does not wait for an acknowledgment: autopilot passes must not block behind
+// a running canary, and the request remains available for the agent to consume
+// after a restart.
+func SendSuccessHandoff(ctx context.Context, store GraceStore, instanceID int64, requestID string, deadline time.Time, deferredJobIDs []int64) error {
+	if instanceID <= 0 || requestID == "" || !deadline.After(time.Now()) {
+		return fmt.Errorf("valid instance, request ID, and future deadline are required")
+	}
+	payload := SuccessHandoffRequest{
+		Deadline:       deadline.UTC().Format(time.RFC3339Nano),
+		DeferredJobIDs: deferredJobIDs,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode success handoff request: %w", err)
+	}
+	if err := store.PutObject(ctx, SuccessHandoffRequestKey(instanceID, requestID), bytes.NewReader(data), "application/json"); err != nil {
+		return fmt.Errorf("write success handoff request: %w", err)
 	}
 	return nil
 }

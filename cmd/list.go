@@ -704,7 +704,7 @@ func filterActiveJobs(jobs []*db.Job) []*db.Job {
 			continue
 		}
 		switch job.EffectiveStatus() {
-		case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+		case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 			continue
 		default:
 			filtered = append(filtered, job)

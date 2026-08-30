@@ -184,13 +184,32 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddHFPrewarmTransferMetrics},
 		&goose.GoFunc{RunDB: dropAddHFPrewarmTransferMetrics},
 	)
+	refreshJobStatusForDependencySkips := goose.NewGoMigration(
+		56,
+		&goose.GoFunc{RunDB: applyRefreshJobStatusForDependencySkips},
+		&goose.GoFunc{RunDB: applyRefreshJobStatusForDependencySkips},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips),
 		goose.WithDisableGlobalRegistry(true),
 	)
+}
+
+func applyRefreshJobStatusForDependencySkips(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `DROP VIEW IF EXISTS job_status; DROP VIEW IF EXISTS authoritative_job_attempts`); err != nil {
+		return fmt.Errorf("drop authoritative views: %w", err)
+	}
+	sqlBytes, err := fs.ReadFile(sqlMigrations, "sql/current_authoritative_views.sql")
+	if err != nil {
+		return fmt.Errorf("read authoritative views: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
+		return fmt.Errorf("refresh authoritative views: %w", err)
+	}
+	return nil
 }
 
 // applyAddOnStartProbeSeenColumn adds launches.first_onstart_probe_seen_unix
@@ -1026,7 +1045,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

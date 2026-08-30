@@ -1106,7 +1106,7 @@ func jobSnapshots(database *sql.DB, jobIDs []int64) ([]JobSnapshot, bool, error)
 
 func isWaitTerminalStatus(s string) bool {
 	switch s {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		return true
 	default:
 		return false

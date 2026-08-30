@@ -943,7 +943,8 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			la.exit_code,
 			CASE
 				-- User-level overrides always win
-				WHEN j.requested_status = 'canceled' THEN 'canceled'
+		WHEN j.requested_status = 'skipped' THEN 'skipped'
+		WHEN j.requested_status = 'canceled' THEN 'canceled'
 				WHEN j.requested_status = 'killed' THEN 'killed'
 				WHEN j.requested_status = 'draft' THEN 'draft'
 				-- No attempt: check if user wants to run or job is new
@@ -993,11 +994,11 @@ CREATE VIEW IF NOT EXISTS job_status AS
 					END
 				ELSE la.status
 			END AS status,
-			la.error_message,
+	CASE WHEN j.requested_status = 'skipped' THEN j.placement_reasons ELSE la.error_message END AS error_message,
 			COALESCE(la.backend, j.backend) AS backend,
 			la.remote_id,
 			la.remote_state,
-			la.failure_reason,
+	CASE WHEN j.requested_status = 'skipped' THEN 'dependency_failed' ELSE la.failure_reason END AS failure_reason,
 			j.gpu,
 			j.gpu_class,
 			j.cpu_allotment,

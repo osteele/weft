@@ -195,6 +195,41 @@ func hasGraceReleaseRequest(bucket string, instanceID int64) (bool, error) {
 	return true, nil
 }
 
+// activeSuccessHandoffDeadline reads durable success-handoff leases. Active
+// requests remain in R2 so an agent restart cannot forget an acknowledged
+// hold; expired and malformed requests are acknowledged and removed.
+func activeSuccessHandoffDeadline(bucket string, instanceID int64) (time.Time, error) {
+	requests, err := listGraceRequests(bucket, controlplane.SuccessHandoffPrefix(instanceID))
+	if err != nil {
+		return time.Time{}, err
+	}
+	now := time.Now()
+	var latest time.Time
+	for _, req := range requests {
+		var payload controlplane.SuccessHandoffRequest
+		if err := json.Unmarshal([]byte(req.Body), &payload); err != nil {
+			ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandSuccessHandoff, false, fmt.Sprintf("invalid handoff payload: %v", err))
+			_ = graceR2Delete(bucket, req.Key)
+			continue
+		}
+		deadline, err := time.Parse(time.RFC3339Nano, payload.Deadline)
+		if err != nil {
+			ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandSuccessHandoff, false, fmt.Sprintf("invalid handoff deadline: %v", err))
+			_ = graceR2Delete(bucket, req.Key)
+			continue
+		}
+		if !deadline.After(now) {
+			_ = graceR2Delete(bucket, req.Key)
+			continue
+		}
+		ackGraceRequest(bucket, instanceID, req.RequestID, controlplane.GraceCommandSuccessHandoff, true, "lease active")
+		if deadline.After(latest) {
+			latest = deadline
+		}
+	}
+	return latest, nil
+}
+
 func ackGraceRequest(bucket string, instanceID int64, requestID string, kind controlplane.GraceCommandKind, accepted bool, message string) {
 	if requestID == "" {
 		return

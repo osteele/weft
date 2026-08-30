@@ -506,7 +506,7 @@ func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Dura
 
 func jobTerminal(job *db.Job) bool {
 	switch job.Status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		return true
 	default:
 		return false

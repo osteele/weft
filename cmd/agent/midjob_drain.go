@@ -66,6 +66,12 @@ func (p *jobRequestPoller) drain(onPhase func(string)) {
 		return
 	}
 	p.pending = append(p.pending, jobs...)
+	// Ack success-side leases while the canary is still running. The lease
+	// object remains in R2, so the eventual handoff and an agent restart both
+	// recover the same deadline.
+	if _, err := activeSuccessHandoffDeadline(p.bucket, p.instanceID); err != nil {
+		fmt.Fprintf(os.Stderr, "drain success handoff requests: %v\n", err)
+	}
 }
 
 // Take drains R2 once more (with phase reporting) and returns everything

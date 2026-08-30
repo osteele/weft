@@ -56,6 +56,7 @@ const (
 	FailureReasonR2IsolatedSourceFetchFailed = "r2_isolated_source_fetch_failed"
 	FailureReasonSourceProvenanceMismatch    = "source_provenance_mismatch"
 	FailureReasonCloudAfterFailed            = "cloud_after_failed"
+	FailureReasonDependencyFailed            = "dependency_failed"
 
 	// FailureReasonInfraPrewarmDownloadFailed marks a weft-owned input staging
 	// failure that happened before the user command started. Launch
@@ -124,6 +125,7 @@ func IsKnownFailureReason(reason string) bool {
 		FailureReasonR2IsolatedSourceFetchFailed,
 		FailureReasonSourceProvenanceMismatch,
 		FailureReasonCloudAfterFailed,
+		FailureReasonDependencyFailed,
 		FailureReasonInfraPrewarmDownloadFailed,
 		FailureReasonInfraCloudArtifactStageFailed,
 		FailureReasonInfraCUDAHardwareFault,

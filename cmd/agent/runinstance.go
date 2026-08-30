@@ -260,7 +260,7 @@ func runInstance(args []string) {
 		}
 	}
 
-	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
+	sequenceCfg := jobSequenceConfig{
 		R2Bucket:                 r2Bucket,
 		InstanceID:               instanceIDInt,
 		PhaseKey:                 phaseKey,
@@ -280,27 +280,44 @@ func runInstance(args []string) {
 		PublicationWorkers:       manifest.Publication.Workers,
 		PublicationQueueCapacity: manifest.Publication.QueueCapacity,
 		PublicationMaxRetained:   manifest.Publication.MaxRetainedBytes,
-	})
-	anyFailed = seqResult.AnyFailed
+	}
+	jobs := manifest.Jobs
+	for {
+		seqResult := runJobSequence(jobs, sequenceCfg)
+		anyFailed = seqResult.AnyFailed
 
-	// Grace period or self-destruct
-	if anyFailed && !seqResult.AnyInfraFailed && gracePeriod > 0 {
-		fmt.Printf("Jobs failed. Entering grace period (%s).\n", gracePeriod)
-		graceWaitLoop(graceWaitConfig{
-			InstanceID:          instanceID,
-			R2Bucket:            r2Bucket,
-			Timeout:             gracePeriod,
-			SelfDestructCmd:     manifest.SelfDestructCmd,
-			LogDir:              logDir,
-			SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
-		})
-	} else {
+		if anyFailed && !seqResult.AnyInfraFailed && gracePeriod > 0 {
+			fmt.Printf("Jobs failed. Entering grace period (%s).\n", gracePeriod)
+			graceWaitLoop(graceWaitConfig{
+				InstanceID:          instanceID,
+				R2Bucket:            r2Bucket,
+				Timeout:             gracePeriod,
+				SelfDestructCmd:     manifest.SelfDestructCmd,
+				LogDir:              logDir,
+				SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
+			})
+			return
+		}
+		if !anyFailed {
+			jobs = successHandoffWait(successHandoffWaitConfig{
+				InstanceID: instanceIDInt,
+				R2Bucket:   r2Bucket,
+				PhaseKey:   phaseKey,
+				MaxTime:    maxTime,
+				StartTime:  startTime,
+				OnPhase:    onPhase,
+			})
+			if len(jobs) > 0 {
+				continue
+			}
+		}
 		terminalStatus, terminationReason := terminalOutcomeForSequence(seqResult)
 		selfDestruct(selfDestructOpts{
 			Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: manifest.SelfDestructCmd,
 			TerminalStatus: terminalStatus, TerminationReason: terminationReason,
 			Phase: currentPhase.Get(), CompletionManifest: seqResult.CompletionManifest,
 		})
+		return
 	}
 }
 

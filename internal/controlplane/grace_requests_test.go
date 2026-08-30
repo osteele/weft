@@ -123,6 +123,25 @@ func TestSendGraceJobPayloadNoAckReturnsRequestID(t *testing.T) {
 	}
 }
 
+func TestSendSuccessHandoffWritesDurableLease(t *testing.T) {
+	store := &fakeGraceStore{}
+	deadline := time.Now().Add(2 * time.Minute)
+	if err := SendSuccessHandoff(context.Background(), store, 12, "deferred-demand", deadline, []int64{101, 102}); err != nil {
+		t.Fatalf("SendSuccessHandoff: %v", err)
+	}
+	data, err := store.GetObject(context.Background(), SuccessHandoffRequestKey(12, "deferred-demand"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload SuccessHandoffRequest
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.DeferredJobIDs) != 2 || payload.DeferredJobIDs[0] != 101 {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
 func TestCheckGraceCommandAckReadsAndDeletesAck(t *testing.T) {
 	store := &fakeGraceStore{objects: make(map[string][]byte)}
 	const (

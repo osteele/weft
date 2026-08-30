@@ -239,6 +239,7 @@ func TestIsActiveInstancePhase(t *testing.T) {
 		{"uploading-results:7", true},
 		{"disk-full:7", true},
 		{"grace", true},
+		{"handoff", true},
 		{"destroying", true},
 		{"post_job_uploads_drained:3583", false},
 		{"ready_for_next_job", false},
@@ -262,6 +263,7 @@ func TestInstanceActivityStatus(t *testing.T) {
 		{"post-job cleanup", db.LaunchStatusRunning, "post_job_cleanup:42", InstanceActivityFinalizing},
 		{"uploads drained", db.LaunchStatusRunning, "post_job_uploads_drained:42", InstanceActivityFinalizing},
 		{"destroying", db.LaunchStatusRunning, PhaseDestroying, InstanceActivitySelfDestructing},
+		{"handoff", db.LaunchStatusRunning, PhaseHandoff, InstanceActivityHandoff},
 		{"terminal row wins", db.LaunchStatusCompleted, PhaseDestroying, db.LaunchStatusCompleted},
 	}
 	for _, tt := range tests {

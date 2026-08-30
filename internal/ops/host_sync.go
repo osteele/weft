@@ -538,7 +538,7 @@ func shouldPruneStalePending(job *db.Job, host string) (bool, string) {
 	}
 	es := job.EffectiveStatus()
 	switch es {
-	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		// Terminal in the DB's view; the runner has no business
 		// trying to start it.
 		return true, "db_terminal:" + es

@@ -161,7 +161,7 @@ entity Job {
     -- supersede an abandoned move attempt.
     physical_latest_attempt: attempts.max_by(a => a.attempt_number)
     is_placed: host != null
-    is_terminal: status in {completed, failed, dead, killed, canceled, draft}
+    is_terminal: status in {completed, failed, dead, killed, canceled, skipped, draft}
     -- User-visible derived status (see value DisplayStatus). Reports
     -- `orphaned` when this job's latest attempt closed terminally but the
     -- backing instance/launch failed or was canceled; otherwise mirrors the
@@ -202,7 +202,7 @@ entity Job {
 
     -- Status
     -- legacy: status: draft | pending_placement | queued | starting | running
-          -- legacy: | paused | completed | failed | dead | killed | canceled
+		  -- legacy: | paused | completed | failed | dead | killed | canceled | skipped
 
     transitions status {
         -- Normal forward flow
@@ -252,6 +252,7 @@ entity Job {
         canceled -> paused
         canceled -> queued
         canceled -> failed
+		skipped -> queued
 
         -- Authoritative overrides (R2 completion corrects race conditions).
         -- Edges annotated "-- authoritative" may only be taken by an
@@ -277,7 +278,7 @@ entity Job {
         -- rather than reporting a self-failure, so ingestion keeps the
         -- user's killed/canceled status (backfilling exit metadata) instead
         -- of taking this edge (db.RecordCloudJobCompletion).
-        terminal: completed, dead, failed, killed, canceled, draft
+		terminal: completed, dead, failed, killed, canceled, skipped, draft
     }
 }
 

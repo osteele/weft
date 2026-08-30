@@ -33,7 +33,7 @@ func (v *focusView) Render(width, height int, snap Snapshot, _ bool) string {
 		switch j.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting:
 			running = append(running, j)
-		case db.StatusCompleted, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+		case db.StatusCompleted, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 			if j.EndTime != nil && *j.EndTime >= recentCutoff {
 				recent = append(recent, j)
 			}

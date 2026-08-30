@@ -10,10 +10,46 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/controlplane"
 )
+
+func TestActiveSuccessHandoffDeadlineAcknowledgesAndRetainsLease(t *testing.T) {
+	instanceID := int64(58)
+	prefix := controlplane.SuccessHandoffPrefix(instanceID)
+	deadline := time.Now().Add(2 * time.Minute).UTC()
+	payload, _ := json.Marshal(controlplane.SuccessHandoffRequest{Deadline: deadline.Format(time.RFC3339Nano), DeferredJobIDs: []int64{91}})
+	var deleted []string
+	var ack controlplane.GraceCommandAck
+
+	prevList, prevGet, prevPut, prevDelete := graceR2List, graceR2Get, graceR2Put, graceR2Delete
+	t.Cleanup(func() { graceR2List, graceR2Get, graceR2Put, graceR2Delete = prevList, prevGet, prevPut, prevDelete })
+	graceR2List = func(_ string, gotPrefix string) ([]string, error) {
+		if gotPrefix != prefix {
+			t.Fatalf("prefix = %q, want %q", gotPrefix, prefix)
+		}
+		return []string{"deferred-demand.json"}, nil
+	}
+	graceR2Get = func(_ string, _ string) (string, error) { return string(payload), nil }
+	graceR2Put = func(_ string, _ string, content string) error { return json.Unmarshal([]byte(content), &ack) }
+	graceR2Delete = func(_ string, key string) error { deleted = append(deleted, key); return nil }
+
+	got, err := activeSuccessHandoffDeadline("bucket", instanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Format(time.RFC3339Nano) != deadline.Format(time.RFC3339Nano) {
+		t.Fatalf("deadline = %s, want %s", got, deadline)
+	}
+	if !ack.Accepted || ack.Kind != controlplane.GraceCommandSuccessHandoff {
+		t.Fatalf("ack = %+v", ack)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("active durable lease was deleted: %v", deleted)
+	}
+}
 
 func TestDrainGraceJobRequestsAggregatesQueuedPayloads(t *testing.T) {
 	instanceID := int64(55)

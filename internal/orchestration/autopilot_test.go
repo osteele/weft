@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -27,6 +28,65 @@ import (
 type groupedAutoPilotPassTestOptions struct {
 	realFillReusableInstances bool
 	placeInventory            func(*sql.DB, *config.Config, []*db.Job) ([]*db.Job, int)
+}
+
+func TestSendDeferredDemandHandoffDoesNotClaimBlockedChild(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, DiskGB: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID, err := db.RecordQueued(database, "", t.TempDir(), "sleep 10", "canary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobLaunchID(database, parentID, launchID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, time.Now().Unix(), parentID); err != nil {
+		t.Fatal(err)
+	}
+	childID, err := db.RecordQueued(database, "", t.TempDir(), "echo sweep", "sweep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET dep_spec = ? WHERE id = ?`, fmt.Sprint(parentID), childID); err != nil {
+		t.Fatal(err)
+	}
+	child, err := db.GetJobByID(database, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := db.GetLaunch(database, launchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cap, ok := campaign.NewInstanceCapacity(launch, 1)
+	if !ok {
+		t.Fatal("launch is not reusable")
+	}
+
+	previous := autoPilotSendSuccessHandoff
+	t.Cleanup(func() { autoPilotSendSuccessHandoff = previous })
+	var gotLaunch int64
+	var gotJobs []int64
+	autoPilotSendSuccessHandoff = func(_ context.Context, _ controlplane.GraceStore, instanceID int64, _ string, _ time.Time, jobIDs []int64) error {
+		gotLaunch = instanceID
+		gotJobs = append([]int64(nil), jobIDs...)
+		return nil
+	}
+	sendDeferredDemandHandoffs(context.Background(), database, &r2.Client{}, []*db.Job{child}, []campaign.InstanceCapacity{cap})
+
+	if gotLaunch != launchID || len(gotJobs) != 1 || gotJobs[0] != childID {
+		t.Fatalf("handoff = launch %d jobs %v, want launch %d child %d", gotLaunch, gotJobs, launchID, childID)
+	}
+	refreshed, err := db.GetJobByID(database, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.LaunchID != nil || refreshed.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("blocked child was claimed: launch=%v status=%s", refreshed.LaunchID, refreshed.EffectiveStatus())
+	}
 }
 
 func blockedRelaunchResult(scope []int64, reason string) *campaign.RelaunchResult {

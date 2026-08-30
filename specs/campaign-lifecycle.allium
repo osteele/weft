@@ -937,6 +937,43 @@ rule DependencyGatesRentalLaunch {
         -- Deferred jobs are re-evaluated on the next launch pass.
 }
 
+rule DeferredDependencyDemandAndSuccessHandoff {
+    when: AutoPilotTick(unplaced_jobs)
+
+    for job in unplaced_jobs where StrictDependencyIsRunning(job):
+		ensures: job.launch_id = null
+		ensures: NoExecutionAttemptCreated(job)
+		let producer = StrictDependencyProducer(job)
+		if producer.rental.is_live
+		   and PlacementCompatible(job, producer.rental)
+		   and IncrementalDiskFits(job, producer.rental):
+			ensures: DeferredDemandVisible(job, producer.rental)
+			ensures: DurableBoundedSuccessHandoffLease(producer.rental)
+}
+
+rule SuccessfulProducerEntersBoundedHandoff {
+    when: ProducerCompletesSuccessfullyWithActiveHandoffLease(producer)
+
+    ensures: producer.rental.phase = "handoff"
+    ensures: NormalPlacementPlannerChoosesReuseOrFreshCapacity()
+    ensures: HandoffExpiresOrCanBeReleased()
+}
+
+rule TerminalStrictDependencySkipsDescendants {
+    when: StrictDependencyTerminatesWithJobOutcome(parent)
+
+    for child in TransitiveStrictDescendants(parent) where child.is_unplaced:
+		ensures: child.status = skipped
+		ensures: child.failure_reason = "dependency_failed"
+		ensures: NoNewAttemptCreated(child)
+}
+
+rule RetryableInfrastructureKeepsStrictDescendantsDeferred {
+    when: RetryableInfrastructureOutcome(parent)
+
+    ensures: StrictDescendantsRemainDeferred(parent)
+}
+
 rule StaleCloudAfterPinsAreReconciled {
     when: EvaluateStaleCloudAfterPinsAreReconciled()
 

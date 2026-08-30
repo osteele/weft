@@ -75,6 +75,8 @@ func (m Model) formatStatusValue(job *db.Job, status string) string {
 		return "✖ killed"
 	case db.StatusCanceled:
 		return "✖ canceled"
+	case db.StatusSkipped:
+		return "↷ skipped"
 	case db.StatusDraft:
 		return "  Draft"
 	case db.StatusPendingPlacement:

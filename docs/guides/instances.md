@@ -582,6 +582,16 @@ The grace period is tracked in the database (`grace_period_seconds`,
 `grace_started_at`, `grace_deadline`) and the instance status changes to
 `grace` during the wait.
 
+## Successful scheduling handoff
+
+Failure grace is distinct from the short `handoff` phase after a successful
+job. When autopilot has observed compatible strict `--after` descendants, it
+writes a bounded lease before the producer finishes. The agent then keeps the
+rental alive while those newly eligible jobs are considered alongside fresh
+capacity. The lease creates no child attempt or placement claim, expires
+automatically, respects the rental time limit, and can be released through the
+same instance release control.
+
 ## Watch TUI single-job launch
 
 For launching a single job without the batch flow, use the TUI:

@@ -879,7 +879,7 @@ func logContentHasExitMarker(content string) bool {
 
 func isWaitTerminalStatus(status string) bool {
 	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		return true
 	default:
 		return false

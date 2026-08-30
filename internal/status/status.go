@@ -17,6 +17,7 @@ const (
 	Failed           = "failed"
 	Killed           = "killed"
 	Canceled         = "canceled"
+	Skipped          = "skipped"
 	Paused           = "paused"
 	Draft            = "draft"
 	PendingPlacement = "pending_placement"
@@ -26,7 +27,7 @@ const (
 func AllStatuses() []string {
 	return []string{
 		Starting, Running, Completed, Dead, Queued,
-		Failed, Killed, Canceled, Paused, Draft, PendingPlacement,
+		Failed, Killed, Canceled, Skipped, Paused, Draft, PendingPlacement,
 	}
 }
 
@@ -38,6 +39,7 @@ var terminalStatuses = map[string]bool{
 	Failed:    true,
 	Killed:    true,
 	Canceled:  true,
+	Skipped:   true,
 	Draft:     true,
 }
 
@@ -114,6 +116,7 @@ var transitions = []TransitionRule{
 
 	// --- From terminal states (restart/requeue paths) ---
 	{From: Completed, To: Queued, UpdatesSynced: false},
+	{From: Skipped, To: Queued, UpdatesSynced: false},
 	{From: Failed, To: Running, UpdatesSynced: false},
 	{From: Failed, To: Paused, UpdatesSynced: false},
 	{From: Failed, To: Queued, UpdatesSynced: false},

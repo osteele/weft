@@ -34,6 +34,7 @@ for planned work, [`docs/planning/`](../planning/).
 | [0021](0021-keep-host-capability-observations-advisory.md) | Keep host capability observations advisory | accepted |
 | [0022](0022-attach-capability-behaviour-to-the-namespace-prefix.md) | Attach capability behaviour to the namespace prefix | accepted |
 | [0023](0023-prepare-only-the-environment-the-command-can-import.md) | Prepare only the environment the command can import | accepted |
+| [0024](0024-keep-blocked-dependencies-unassigned-and-hold-successful-rentals.md) | Keep blocked dependencies unassigned and hold successful rentals | accepted |
 
 ## 0018, withdrawn
 

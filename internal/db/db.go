@@ -891,6 +891,7 @@ const (
 	StatusFailed           = status.Failed
 	StatusKilled           = status.Killed
 	StatusCanceled         = status.Canceled
+	StatusSkipped          = status.Skipped
 	StatusPaused           = status.Paused
 	StatusDraft            = status.Draft
 	StatusPendingPlacement = status.PendingPlacement

@@ -997,7 +997,7 @@ func launchEndedBeforeLogArchive(launch *db.Launch, jobStatus string) bool {
 	if launch == nil {
 		return false
 	}
-	if jobStatus == db.StatusKilled || jobStatus == db.StatusCanceled || jobStatus == db.StatusDead {
+	if jobStatus == db.StatusKilled || jobStatus == db.StatusCanceled || jobStatus == db.StatusSkipped || jobStatus == db.StatusDead {
 		return true
 	}
 	switch launch.TerminationReason {
@@ -1218,7 +1218,7 @@ func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
 
 func shouldPreferCachedLog(status string) bool {
 	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 		return true
 	default:
 		return false

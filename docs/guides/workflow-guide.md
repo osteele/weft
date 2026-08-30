@@ -1328,9 +1328,17 @@ You can chain downstream jobs to rental/ephemeral producers with `--after`,
 For rentals, `--after` acts as a **placement gate** rather than a co-location
 constraint: the downstream job is held back from rental launch until its
 upstream succeeds (or, for `--after-any`, terminates). Dependent jobs may
-still land on different instances with different GPU specs — if you want
-them on the same instance, declare the data edge with `--input`/`--output`
-or `--needs`/`--produces` so the launcher groups them by affinity.
+still land on different instances with different GPU specs.
+
+Submit a canary and its strict descendants up front when you want validation
+to gate a sweep. While the canary runs, Weft treats compatible descendants as
+deferred demand without assigning them or creating attempts. It may hold a
+successful canary rental briefly in the visible `handoff` phase, then use the
+normal placement planner to choose reuse for some descendants and fresh
+parallel capacity for others. Reuse is a preference, not a co-location
+promise. A terminal failed, killed, or canceled strict dependency marks its
+unplaced descendants `skipped`; retryable infrastructure failures leave them
+deferred for the producer retry.
 
 ```bash
 # Producer on a rental instance
@@ -1350,10 +1358,9 @@ laptop$ weft run \
   'uv run python eval.py'
 ```
 
-When the producer is already assigned to a live reusable rental, autopilot
-prefers placing the consumer onto that same rental queue. The rental agent then
-starts the consumer automatically after the producer completes and the needed
-artifact exists, without waiting for another autopilot pass.
+When the dependency succeeds and the producer rental remains reusable,
+autopilot may place the consumer onto that same rental queue. The artifact
+edge still controls whether the needed file is local or staged from R2.
 
 When same-rental co-location is not available, weft waits for completion and
 artifact upload, then stages needed files from cloud artifact storage before

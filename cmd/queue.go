@@ -247,6 +247,7 @@ var requeueableStatuses = map[string]bool{
 	db.StatusDead:      true,
 	db.StatusFailed:    true,
 	db.StatusCanceled:  true,
+	db.StatusSkipped:   true,
 	db.StatusCompleted: true,
 }
 

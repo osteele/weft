@@ -1723,6 +1723,16 @@ invariant PlacementReasonsExplainUnplaced {
         result.reasons.length > 0
 }
 
+invariant DeferredDemandInfluencesPlacementWithoutClaiming {
+    -- A strict --after descendant may contribute compatibility, locality,
+    -- incremental-disk, remaining-lifetime, and fan-out evidence while its
+    -- producer is live. Planning evidence is not assignment: the blocked job
+    -- owns no launch or execution attempt until the dependency succeeds.
+    for job in Jobs where StrictDependencyIsRunning(job):
+		job.launch_id = null
+		not HasExecutionAttemptForDependencyReservation(job)
+}
+
 invariant PredictorNeverBlocksPlacement {
     -- The run-time predictor (estimate_run_time, line 672) is an
     -- out-of-process `uv run job-estimator` call. It is an optimization,

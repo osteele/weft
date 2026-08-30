@@ -43,6 +43,13 @@ When placement is active, Weft considers destinations in this order:
 3. New cloud instances, scored by the active strategy profile and provider
    offers.
 
+Strict `--after` descendants remain unassigned while their producer runs, but
+their compatibility, declared-input locality, incremental disk, and remaining
+rental lifetime can inform planning. A compatible producer rental may enter a
+bounded `handoff` phase after success; the ordinary planner then chooses reuse
+versus new parallel capacity. This deferred demand never creates an attempt or
+guarantees co-location.
+
 If no inventory host fits, a rental-eligible job can remain queued as
 unplaced until the autopilot or a manual launch assigns it to an instance.
 

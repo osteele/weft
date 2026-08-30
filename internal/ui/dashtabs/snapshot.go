@@ -269,7 +269,7 @@ func deriveCounts(jobs []*db.Job) StatusCounts {
 			c.Completed++
 		case db.StatusFailed:
 			c.Failed++
-		case db.StatusKilled, db.StatusCanceled:
+		case db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
 			c.Killed++
 		default:
 			c.Other++

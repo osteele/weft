@@ -77,3 +77,42 @@ func TestHydrateWaitingOnJobDependencyReasons(t *testing.T) {
 		t.Fatalf("QueueBlockedReason = %q, want dependency wait", job.QueueBlockedReason)
 	}
 }
+
+func TestPropagateTerminalDependencySkipsStrictDescendants(t *testing.T) {
+	database := db.SetupTestDB(t)
+	parentID, err := db.RecordJobStarting(database, "cool30", "/tmp/p", "false", "canary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordCompletionByID(database, parentID, 1, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	strictID, err := db.RecordQueued(database, "", "/tmp/p", "echo strict", "strict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	anyID, err := db.RecordQueued(database, "", "/tmp/p", "echo any", "any")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET dep_spec = CASE id WHEN ? THEN ? WHEN ? THEN ? END WHERE id IN (?, ?)`,
+		strictID, strconv.FormatInt(parentID, 10), anyID, strconv.FormatInt(parentID, 10)+":any", strictID, anyID); err != nil {
+		t.Fatal(err)
+	}
+
+	skipped, err := PropagateTerminalDependencySkips(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 1 || skipped[0] != strictID {
+		t.Fatalf("skipped = %v, want [%d]", skipped, strictID)
+	}
+	strict, _ := db.GetJobByID(database, strictID)
+	if strict.EffectiveStatus() != db.StatusSkipped || strict.FailureReason != db.FailureReasonDependencyFailed {
+		t.Fatalf("strict = status %q failure %q", strict.EffectiveStatus(), strict.FailureReason)
+	}
+	any, _ := db.GetJobByID(database, anyID)
+	if any.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("after-any status = %q, want queued", any.EffectiveStatus())
+	}
+}

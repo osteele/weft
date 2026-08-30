@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/explain"
@@ -68,6 +69,10 @@ var autoPilotCheckProviderCreditHealth = CheckProviderCreditHealth
 
 var autoPilotRelaunch = RelaunchOrphanedJobs
 var autoPilotSubmitJobsToInstance = campaign.SubmitJobsToInstance
+var autoPilotSendSuccessHandoff = controlplane.SendSuccessHandoff
+
+const deferredDemandHandoffWindow = 2 * time.Minute
+
 var autoPilotPlaceComputeIntensive = placeComputeIntensiveOnPremBeforeRental
 var autoPilotPlaceInventory = placeInventoryOnPrem
 var autoPilotLaunchMoveIntentRetry = launchMoveIntentRetry
@@ -519,6 +524,11 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		oplog.Log("auto_pilot.cloud_after_pin_reconciled",
 			oplog.WithDetailf("jobs=%d job_ids=%v", len(reset.JobIDs), reset.JobIDs))
 	}
+	if skipped, err := queueblock.PropagateTerminalDependencySkips(database); err != nil {
+		oplog.Log("auto_pilot.dependency_skip_error", oplog.WithError(err))
+	} else if len(skipped) > 0 {
+		oplog.Log("auto_pilot.dependency_skipped", oplog.WithDetailf("jobs=%v", skipped))
+	}
 
 	// Complete cancels whose work started anyway. A cancel writes local state
 	// and cannot recall a launch already dispatched — the job travels in the
@@ -700,6 +710,11 @@ func runGroupedAutoPilotPassWithOptions(ctx context.Context, database *sql.DB, s
 		if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(jobs)); ok {
 			capacities = append(capacities, cap)
 		}
+	}
+	if handoffCapacities, handoffErr := campaign.FindReusableInstances(database); handoffErr != nil {
+		oplog.Log("auto_pilot.success_handoff_capacity_error", oplog.WithError(handoffErr))
+	} else {
+		sendDeferredDemandHandoffs(ctx, database, r2Client, unplaced, handoffCapacities)
 	}
 
 	var plan campaign.AutoPlacementPlan
@@ -1073,6 +1088,10 @@ func fillReusableInstances(
 	if err != nil {
 		return 0, fmt.Errorf("list unplaced jobs for reuse fill: %w", err)
 	}
+	capacities, err := campaign.FindReusableInstances(database)
+	if err != nil {
+		return 0, fmt.Errorf("find reusable instances: %w", err)
+	}
 	candidates := make([]*db.Job, 0, len(jobs))
 	for _, job := range jobs {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasTag(db.TagInventory) {
@@ -1094,12 +1113,9 @@ func fillReusableInstances(
 		}
 		candidates = append(candidates, job)
 	}
+	sendDeferredDemandHandoffs(ctx, database, r2Client, jobs, capacities)
 	if len(candidates) == 0 {
 		return 0, nil
-	}
-	capacities, err := campaign.FindReusableInstances(database)
-	if err != nil {
-		return 0, fmt.Errorf("find reusable instances: %w", err)
 	}
 	if len(capacities) == 0 {
 		return 0, nil
@@ -1117,6 +1133,44 @@ func fillReusableInstances(
 		}
 	}
 	return placed, nil
+}
+
+func sendDeferredDemandHandoffs(ctx context.Context, database *sql.DB, r2Client *r2.Client, jobs []*db.Job, capacities []campaign.InstanceCapacity) {
+	if database == nil || r2Client == nil || len(jobs) == 0 || len(capacities) == 0 {
+		return
+	}
+	capacityByLaunch := make(map[int64]campaign.InstanceCapacity, len(capacities))
+	for _, cap := range capacities {
+		if cap.Instance != nil {
+			capacityByLaunch[cap.Instance.ID] = cap
+		}
+	}
+	deferredByLaunch := map[int64][]int64{}
+	for _, job := range jobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if _, blocked := queueblock.WaitingOnJobDependencyReason(database, job); !blocked {
+			continue
+		}
+		for _, launchID := range queueblock.StrictDependencyLaunchIDs(database, job) {
+			cap, ok := capacityByLaunch[launchID]
+			if !ok {
+				continue
+			}
+			if compatible, _ := campaign.MatchJobToInstanceWithUV(job, cap, r2Client); compatible {
+				deferredByLaunch[launchID] = append(deferredByLaunch[launchID], job.ID)
+			}
+		}
+	}
+	deadline := time.Now().Add(deferredDemandHandoffWindow)
+	for launchID, jobIDs := range deferredByLaunch {
+		if err := autoPilotSendSuccessHandoff(ctx, r2Client, launchID, "deferred-demand", deadline, jobIDs); err != nil {
+			oplog.Log("auto_pilot.success_handoff_error", oplog.WithError(err), oplog.WithDetailf("instance=%s jobs=%v", ids.FormatInstanceID(launchID), jobIDs))
+			continue
+		}
+		oplog.Log("auto_pilot.success_handoff", oplog.WithDetailf("instance=%s jobs=%v deadline=%s", ids.FormatInstanceID(launchID), jobIDs, deadline.UTC().Format(time.RFC3339)))
+	}
 }
 
 func reuseRejectionReason(job *db.Job, capacities []campaign.InstanceCapacity, r2Client *r2.Client) string {
