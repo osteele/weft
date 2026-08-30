@@ -2902,9 +2902,9 @@ rule StructuredJobProgressStalls {
     requires: now - instance.live_state.job_progress_changed_at >= config.running_stall_timeout
 
     ensures: instance.status = failed
-    ensures: instance.termination_reason = phase_stall
+    ensures: instance.termination_reason = job_failure
     ensures: instance.ended_at = now
-    ensures: job.status = queued
+    ensures: job.status = failed
 
     -- legacy annotation: @guidance
         -- The progress timestamp changes only when the structured
@@ -2916,6 +2916,9 @@ rule StructuredJobProgressStalls {
         -- The rule is opt-in through instrumentation: no Progress report
         -- means unknown task progress, not confirmed absence. Such jobs stay
         -- bounded by their explicit max-time and max-spend controls.
+        -- Once an instrumented running task violates this progress contract,
+        -- the failure belongs to the job rather than the rental. It is terminal
+        -- and must not enter infrastructure relaunch policy.
         -- Implementation: launch_live_state.job_progress_changed_at and
         -- internal/campaign/instance_check.go rule 5c.
 }
@@ -3491,6 +3494,8 @@ rule RunawayBreakerTrips {
 rule RunawayBreakerClears {
     when: UserRetry(job) or AutoProbeCompleted(instance)
     requires: RunawayBreakerIsTripped(scope)
+    if AutoProbeCompleted(instance):
+        requires: AutoProbeWasLaunchedForActiveTrip(instance)
 
     ensures: RunawayBreakerResumed(scope)
 
@@ -3502,7 +3507,8 @@ rule RunawayBreakerClears {
         -- 1 hour): a single cheap eligible unplaced job, scoped to one
         -- launch, bypassing the breaker check. Probe success resets the
         -- breaker and emits relaunch.auto_probe_resumed alongside the
-        -- usual relaunch.runaway_resumed event. Probe failure or an
+        -- usual relaunch.runaway_resumed event. A successful probe from an
+        -- earlier trip is not evidence for a later trip. Probe failure or an
         -- in-flight probe leaves the breaker tripped; the next probe
         -- cannot fire until the interval has elapsed since the last
         -- relaunch.auto_probe_launched event, bounding probe spend during

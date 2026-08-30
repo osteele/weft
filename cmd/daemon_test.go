@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -121,6 +122,30 @@ func TestRunDaemonPrePassSyncTimesOut(t *testing.T) {
 	case <-workerStopped:
 	default:
 		t.Fatal("daemonSyncAll was still running after runDaemonPrePassSync returned")
+	}
+}
+
+func TestRunDaemonPassReusesReconciler(t *testing.T) {
+	database := setupDaemonTestDB(t)
+	oldSyncAll := daemonSyncAll
+	t.Cleanup(func() { daemonSyncAll = oldSyncAll })
+
+	reconciler := campaign.NewReconciler()
+	var seen []any
+	daemonSyncAll = func(_ *sql.DB, _ *config.Config, opts syncorch.SyncOptions) syncorch.SyncResult {
+		seen = append(seen, opts.Reconciler)
+		return syncorch.SyncResult{AllCompleted: true}
+	}
+
+	runDaemonPass(context.Background(), database, nil, reconciler, 1, false)
+	runDaemonPass(context.Background(), database, nil, reconciler, 2, false)
+	if len(seen) != 2 {
+		t.Fatalf("sync calls = %d, want 2", len(seen))
+	}
+	for i, got := range seen {
+		if got != reconciler {
+			t.Fatalf("sync call %d reconciler = %p, want %p", i+1, got, reconciler)
+		}
 	}
 }
 

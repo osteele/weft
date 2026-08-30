@@ -950,11 +950,10 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 				return InstanceAction{
 					Kind:              ActionRunningStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
-					TerminationReason: db.TerminationReasonPhaseStall,
+					TerminationReason: db.TerminationReasonJobFailure,
 					StallMessage:      fmt.Sprintf("structured job progress unchanged for %s — terminating instance", progressAge.Truncate(time.Second)),
 					DestroyProvider:   true,
-					ResetJobs:         true,
-					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+					AttemptOutcome:    db.AttemptOutcomeFailed,
 				}
 			}
 			if progressAge >= runningStaleWarn {

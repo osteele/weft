@@ -14,6 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/blockreason"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
@@ -132,6 +133,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))
 	}
 
+	reconciler := campaign.NewReconciler()
 	pass := 0
 	for {
 		if ctx.Err() != nil {
@@ -159,7 +161,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 		// timeout: if sync exceeds it, sync continues in the background
 		// while the pass proceeds with the partially-synced view.
 		if cfg != nil {
-			syncCloudStateWithTimeout(cfg, database, nil, NormalCloudSyncTimeout, false)
+			syncCloudStateWithTimeout(cfg, database, reconciler, NormalCloudSyncTimeout, false)
 		}
 
 		started := time.Now()
@@ -223,6 +225,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 			wait:          wait,
 			timerRunsPass: autopilotTimerRunsPass(outcome, blockedReasons),
 			syncCfg:       cfg,
+			reconciler:    reconciler,
 			label:         "autopilot run",
 		})
 		if reason == autopilotWakeDone {
@@ -277,6 +280,8 @@ type autopilotWaitParams struct {
 	// that produced no other local write.
 	syncCfg *config.Config
 
+	reconciler *campaign.Reconciler
+
 	label string
 }
 
@@ -305,7 +310,7 @@ func waitForAutopilotInvalidation(ctx context.Context, p autopilotWaitParams) (a
 	}
 	if p.syncCfg != nil {
 		opts.OnQuietTimeout = func(context.Context) bool {
-			result, completed := syncCloudStateWithTimeout(p.syncCfg, p.database, nil, NormalCloudSyncTimeout, false)
+			result, completed := syncCloudStateWithTimeout(p.syncCfg, p.database, p.reconciler, NormalCloudSyncTimeout, false)
 			return !completed || result.Updated > 0
 		}
 	}

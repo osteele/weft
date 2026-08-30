@@ -2350,10 +2350,28 @@ func MaybeAutoResumeBreaker(database *sql.DB) error {
 	if database == nil {
 		return nil
 	}
-	probeLaunchID, err := latestAutoProbeLaunchID(database)
-	if err != nil || probeLaunchID == 0 {
+	trippedEvent, err := latestRunawayEventByID(database, db.EventRelaunchRunawayTripped, true)
+	if err != nil {
 		return err
 	}
+	resumedEvent, err := latestRunawayEventByID(database, db.EventRelaunchRunawayResumed, true)
+	if err != nil {
+		return err
+	}
+	if trippedEvent == nil || (resumedEvent != nil && trippedEvent.ID <= resumedEvent.ID) {
+		return nil
+	}
+
+	probeEvent, err := latestRunawayEventByID(database, db.EventRelaunchAutoProbeLaunched, false)
+	if err != nil || probeEvent == nil || probeEvent.LaunchID == 0 {
+		return err
+	}
+	// A probe is evidence for only the trip that caused it. Event IDs preserve
+	// insertion order even when the trip and probe share a one-second timestamp.
+	if probeEvent.ID <= trippedEvent.ID {
+		return nil
+	}
+	probeLaunchID := probeEvent.LaunchID
 	launch, err := db.GetLaunch(database, probeLaunchID)
 	if err != nil || launch == nil {
 		return err
@@ -2370,13 +2388,6 @@ func MaybeAutoResumeBreaker(database *sql.DB) error {
 		healthy = completedJobs > 0
 	}
 	if !healthy {
-		return nil
-	}
-	// Only reset if breaker is actually tripped (avoid spurious resume
-	// events when the breaker was already cleared by a manual reset).
-	trippedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayTripped, 0, "")
-	resumedAt := latestRunawayEventAt(database, db.EventRelaunchRunawayResumed, 0, "")
-	if trippedAt <= resumedAt {
 		return nil
 	}
 	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
@@ -2469,26 +2480,27 @@ func MaybeLaunchAutoProbe(cfg RelaunchConfig) (int64, error) {
 	return probeLaunchID, nil
 }
 
-// latestAutoProbeLaunchID returns the launch_id of the most recent
-// auto-probe event (0 if none).
-func latestAutoProbeLaunchID(database *sql.DB) (int64, error) {
-	row := database.QueryRow(
-		`SELECT launch_id FROM lifecycle_events
-		 WHERE event_kind = ? AND launch_id IS NOT NULL
-		 ORDER BY occurred_at DESC LIMIT 1`,
-		db.EventRelaunchAutoProbeLaunched,
-	)
-	var id sql.NullInt64
-	if err := row.Scan(&id); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
+// latestRunawayEventByID returns the newest event of kind by insertion order.
+// When globalOnly is true, campaign- and project-scoped events are excluded.
+func latestRunawayEventByID(database *sql.DB, kind string, globalOnly bool) (*db.LifecycleEvent, error) {
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{
+		Kind:  kind,
+		Limit: 500,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var latest *db.LifecycleEvent
+	for i := range events {
+		event := &events[i]
+		if globalOnly && (event.CampaignID != 0 || !eventMatchesRunawayProject(*event, "")) {
+			continue
 		}
-		return 0, err
+		if latest == nil || event.ID > latest.ID {
+			latest = event
+		}
 	}
-	if !id.Valid {
-		return 0, nil
-	}
-	return id.Int64, nil
+	return latest, nil
 }
 
 // pickAutoProbeJob returns one cheap eligible unplaced job for use as a

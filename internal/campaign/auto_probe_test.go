@@ -126,6 +126,45 @@ func TestMaybeAutoResumeBreaker_ResumesWhenProbeJobCompleted(t *testing.T) {
 	}
 }
 
+func TestMaybeAutoResumeBreaker_DoesNotReuseProbeFromEarlierTrip(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchAutoProbeLaunched,
+		LaunchID:  launchID,
+		Detail:    fmt.Sprintf("launch_id=%d", launchID),
+	}); err != nil {
+		t.Fatalf("probe-launched event: %v", err)
+	}
+	if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchRunawayTripped,
+		Detail:    "project=<all>; later trip",
+	}); err != nil {
+		t.Fatalf("trip event: %v", err)
+	}
+
+	if err := MaybeAutoResumeBreaker(database); err != nil {
+		t.Fatalf("MaybeAutoResumeBreaker: %v", err)
+	}
+
+	var resumes int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM lifecycle_events WHERE event_kind = ?`,
+		db.EventRelaunchRunawayResumed,
+	).Scan(&resumes); err != nil {
+		t.Fatalf("count resume events: %v", err)
+	}
+	if resumes != 0 {
+		t.Fatalf("runaway resume count = %d, want 0 for a probe older than the active trip", resumes)
+	}
+}
+
 func TestProvidersFromTripDetail(t *testing.T) {
 	cases := []struct {
 		name   string

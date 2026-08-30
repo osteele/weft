@@ -2475,8 +2475,79 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 	if !action.DestroyProvider {
 		t.Fatal("expected DestroyProvider = true")
 	}
-	if !action.ResetJobs {
-		t.Fatal("expected ResetJobs = true")
+	if action.TerminationReason != db.TerminationReasonJobFailure {
+		t.Fatalf("termination reason = %q, want %q", action.TerminationReason, db.TerminationReasonJobFailure)
+	}
+	if action.ResetJobs {
+		t.Fatal("expected ResetJobs = false for a job failure")
+	}
+	if action.AttemptOutcome != db.AttemptOutcomeFailed {
+		t.Fatalf("attempt outcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeFailed)
+	}
+}
+
+func TestExecuteAction_RunningStallFailsJobWithoutRequeue(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "provider-running-stall"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "echo test", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+	if err := db.UpdateStartTime(database, jobID, time.Now().Add(-time.Hour).Unix()); err != nil {
+		t.Fatalf("UpdateStartTime: %v", err)
+	}
+
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	action := InstanceAction{
+		Kind:              ActionRunningStalled,
+		TerminalStatus:    db.LaunchStatusFailed,
+		TerminationReason: db.TerminationReasonJobFailure,
+		StallMessage:      "structured job progress unchanged for 1h0m0s — terminating instance",
+		DestroyProvider:   true,
+		AttemptOutcome:    db.AttemptOutcomeFailed,
+	}
+	reconciled, terminated := ExecuteAction(database, &cloud.MockClient{ProviderVal: cloud.ProviderVastai}, launch, action)
+	if !reconciled || !terminated {
+		t.Fatalf("ExecuteAction = (%v, %v), want (true, true)", reconciled, terminated)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusFailed {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusFailed)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("job launch = %v, want failed launch %d", job.LaunchID, instanceID)
+	}
+	attempts, err := db.ListAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("ListAttempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].CloudOutcome != db.AttemptOutcomeFailed {
+		t.Fatalf("attempt outcome = %q, want %q", attempts[0].CloudOutcome, db.AttemptOutcomeFailed)
 	}
 }
 

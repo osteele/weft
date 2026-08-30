@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/daemonapi"
@@ -176,6 +177,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
+	reconciler := campaign.NewReconciler()
 	pass := 0
 	runAutopilot := true
 	incompleteSyncStreak := 0
@@ -185,7 +187,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		}
 		pass++
 		before := wakeSnapshot
-		passResult := runDaemonPass(ctx, database, cfg, pass, runAutopilot)
+		passResult := runDaemonPass(ctx, database, cfg, reconciler, pass, runAutopilot)
 		incompleteSyncStreak = nextIncompleteSyncStreak(incompleteSyncStreak, passResult.syncIncomplete)
 		if nextSnapshot, err := readAutopilotWakeSnapshot(database); err == nil {
 			wakeSnapshot = nextSnapshot
@@ -304,7 +306,7 @@ func daemonPrePassHostTimeout() time.Duration {
 	return FastSyncHostTimeout
 }
 
-func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pass int, runAutopilot bool) daemonPassResult {
+func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, pass int, runAutopilot bool) daemonPassResult {
 	started := time.Now()
 	var (
 		result *orchestration.GroupedAutoPilotResult
@@ -327,6 +329,7 @@ func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, pa
 		HostTimeout:       daemonPrePassHostTimeout(),
 		CloudMode:         syncorch.CloudBounded,
 		CloudTimeout:      NormalCloudSyncTimeout,
+		Reconciler:        reconciler,
 		StartQueueRunner:  true,
 		EnsureQueueRunner: ensureQueueRunnerStarted,
 		Verbose:           verbose,
