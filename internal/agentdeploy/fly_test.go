@@ -1,6 +1,7 @@
 package agentdeploy
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -13,5 +14,17 @@ func TestFlyRemoteShellCommand_WrapsScriptInBashLoginCommand(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "set -euo pipefail") {
 		t.Fatalf("wrapped command does not include script content: %q", cmd)
+	}
+}
+
+func TestFlyDownloadArgs_UsePortableRsyncProgress(t *testing.T) {
+	args := flyDownloadArgs("rsh", "/remote/agent", "/local/agent")
+	if !slices.Contains(args, "--progress") {
+		t.Fatalf("download args must report progress, got: %q", args)
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--info=") {
+			t.Fatalf("download args must work with Apple rsync, got GNU-only option: %q", arg)
+		}
 	}
 }

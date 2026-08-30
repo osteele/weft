@@ -171,7 +171,7 @@ GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64`,
 	tmp := outputPath + ".tmp"
 	onProgress("downloading")
 	fmt.Fprintln(output, "Downloading agent binary from Fly builder...")
-	if err := runCmd(output, "", env, "rsync", "-az", "--info=progress2", "-e", rshScript, "placeholder:"+remoteOutput, tmp); err != nil {
+	if err := runCmd(output, "", env, "rsync", flyDownloadArgs(rshScript, remoteOutput, tmp)...); err != nil {
 		return "", fmt.Errorf("download Fly build output: %w", err)
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {
@@ -183,6 +183,10 @@ GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64`,
 		return "", fmt.Errorf("install agent binary: %w", err)
 	}
 	return outputPath, nil
+}
+
+func flyDownloadArgs(rshScript, remoteOutput, localOutput string) []string {
+	return []string{"-az", "--progress", "-e", rshScript, "placeholder:" + remoteOutput, localOutput}
 }
 
 func runFlySSHConsole(output io.Writer, env []string, app, machine, script string) error {
