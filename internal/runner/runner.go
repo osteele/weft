@@ -816,6 +816,28 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 	envVars = append(envVars, WeftGPUShapeEnv(job, gpuDevices)...)
 
+	// Setup is part of the active attempt. Publish the running reservation
+	// before entering the synchronous setup command so status transports do
+	// not keep reporting the old pending snapshot for the duration of a slow
+	// environment build.
+	allotment := r.jobAllotment(job)
+	gpuMemGB := GetJobGPUMem(job, DefaultGPUMemGB)
+	telemetryPolicy := TelemetryPolicyForJob(job)
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		RunID:                    job.RunID,
+		StartedAt:                startTime,
+		WarmupUntil:              startTime + int64(r.cpuConfig.WarmupDuration),
+		LocalAllotment:           allotment,
+		Samples:                  []int{},
+		GPUDevices:               gpuDevices,
+		GPUMemGB:                 gpuMemGB,
+		RAMReservationKB:         job.RAMReservationKB,
+		DiskPath:                 expandedDir,
+		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
+		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
+	})
+	r.saveState()
+
 	// Run environment setup as a separate phase. Use expandedDir, not
 	// job.Dir: in R2-isolated mode the latter still points at the
 	// user-facing dir while the extracted sources live under expandedDir.
@@ -846,6 +868,8 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithError(err))
 		slog.Warn("job start failed", "component", "runner", "job_id", jobID, "error", err)
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
+		r.state.RemoveRunning(jobIDStr)
+		r.saveState()
 		return fmt.Errorf("start process: %w", err)
 	}
 
@@ -863,24 +887,6 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// cleanup operate on the directory where the job actually ran.
 	go r.waitForJob(jobID, proc, paths, startTime, rj, expandedDir)
 
-	// Update running state
-	allotment := r.jobAllotment(job)
-	gpuMemGB := GetJobGPUMem(job, DefaultGPUMemGB)
-	telemetryPolicy := TelemetryPolicyForJob(job)
-
-	r.state.AddRunning(jobIDStr, RunningJobState{
-		RunID:                    job.RunID,
-		StartedAt:                startTime,
-		WarmupUntil:              startTime + int64(r.cpuConfig.WarmupDuration),
-		LocalAllotment:           allotment,
-		Samples:                  []int{},
-		GPUDevices:               gpuDevices,
-		GPUMemGB:                 gpuMemGB,
-		RAMReservationKB:         job.RAMReservationKB,
-		DiskPath:                 expandedDir,
-		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
-		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
-	})
 	if r.telemetryConfig.Enabled {
 		rs, _ := r.state.GetRunning(jobIDStr)
 		SampleJob(proc.PID, proc.PGID, r.cpuCount, paths, &rs, "multi")
@@ -952,6 +958,7 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
 
+	r.state.RemoveRunning(jobIDStr)
 	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
 	CleanupPIDFiles(paths)
 	removeJobFile(r.queueDir, jobID)

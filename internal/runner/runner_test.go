@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1132,5 +1133,78 @@ func TestStartJob_SetupFailureWritesCompletionAndCleansDebris(t *testing.T) {
 		t.Fatal("finished state not recorded after setup failure")
 	} else if f.ExitCode != 9 {
 		t.Fatalf("finished exit code = %d, want 9", f.ExitCode)
+	}
+}
+
+func TestStartJobPublishesRunningStateDuringSetup(t *testing.T) {
+	r, _ := initTestRunner(t)
+	cleanupRunnerProcesses(t, r)
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "pixi.toml"), []byte("[project]\n"), 0644); err != nil {
+		t.Fatalf("write pixi.toml: %v", err)
+	}
+	ready := filepath.Join(workDir, "setup-ready")
+	release := filepath.Join(workDir, "setup-release")
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir fake bin dir: %v", err)
+	}
+	fakePixi := "#!/bin/sh\n" +
+		"touch \"$WEFT_TEST_SETUP_READY\"\n" +
+		"i=0\n" +
+		"while [ ! -f \"$WEFT_TEST_SETUP_RELEASE\" ] && [ \"$i\" -lt 200 ]; do\n" +
+		"  sleep 0.01\n" +
+		"  i=$((i + 1))\n" +
+		"done\n" +
+		"test -f \"$WEFT_TEST_SETUP_RELEASE\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "pixi"), []byte(fakePixi), 0755); err != nil {
+		t.Fatalf("write fake pixi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("WEFT_TEST_SETUP_READY", ready)
+	t.Setenv("WEFT_TEST_SETUP_RELEASE", release)
+
+	jobID := int64(812)
+	job := &opsqueue.CommandJob{ID: jobID, RunID: 91, Dir: workDir, Cmd: "true"}
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.startJob(jobID, job, nil) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("setup command did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	state, err := LoadState(r.stateFile)
+	if err != nil {
+		t.Fatalf("load published runner state: %v", err)
+	}
+	running, ok := state.GetRunning(fmt.Sprintf("%d", jobID))
+	if !ok {
+		t.Fatal("job remained absent from published running state during setup")
+	}
+	if running.RunID != 91 || running.StartedAt == 0 {
+		t.Fatalf("published running state = %+v", running)
+	}
+	if slices.Contains(state.PendingSnapshot(), jobID) {
+		t.Fatal("job remained pending after setup began")
+	}
+
+	if err := os.WriteFile(release, []byte("ready\n"), 0644); err != nil {
+		t.Fatalf("release setup: %v", err)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("start job: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("startJob did not return after setup release")
 	}
 }
