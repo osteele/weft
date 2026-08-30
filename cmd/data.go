@@ -947,6 +947,9 @@ func derivePublishTargetPath(srcPath string) string {
 	if err != nil {
 		return filepath.Base(srcPath)
 	}
+	if canonicalPath, err := workdir.CanonicalPath(absPath); err == nil {
+		absPath = canonicalPath
+	}
 	root := workdir.DetectRepoRoot(absPath)
 	if root == "" {
 		root = workdir.DetectRepoRoot(filepath.Dir(absPath))

@@ -294,6 +294,30 @@ func TestDerivePublishTargetPathFromRelativeRepoPath(t *testing.T) {
 	}
 }
 
+func TestDerivePublishTargetPathFromSymlinkedRepoPath(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("create repo: %v", err)
+	}
+	src := filepath.Join(repo, "data", "train.py")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatalf("create data directory: %v", err)
+	}
+	if err := os.WriteFile(src, []byte("pass\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	alias := filepath.Join(parent, "repo-alias")
+	if err := os.Symlink(repo, alias); err != nil {
+		t.Fatalf("create repo symlink: %v", err)
+	}
+
+	got := derivePublishTargetPath(filepath.Join(alias, "data", "train.py"))
+	if got != "data/train.py" {
+		t.Fatalf("target path = %q, want %q", got, "data/train.py")
+	}
+}
+
 func TestRunDataPublishDefaultsToRelativeRepoPath(t *testing.T) {
 	r2Client := &fakeDataPublishR2{objects: make(map[string][]byte)}
 	setupDataPublishTest(t, r2Client)
