@@ -144,13 +144,15 @@ func TestExtractPhaseTimings_StructuredUploadMetrics(t *testing.T) {
 	jobID := int64(42)
 
 	phases := map[string]any{
-		"wrapper_start": 1000,
-		"setup_start":   1005,
-		"setup_end":     1010,
-		"run_start":     1010,
-		"run_end":       1020,
-		"upload_start":  1021,
-		"upload_end":    1024,
+		"wrapper_start":                   1000,
+		"setup_start":                     1005,
+		"setup_end":                       1010,
+		"run_start":                       1010,
+		"run_end":                         1020,
+		"upload_start":                    1021,
+		"upload_end":                      1024,
+		"hf_prewarm_download_bytes":       7_500_000,
+		"hf_prewarm_download_duration_ms": 2500,
 	}
 	phaseData, err := json.Marshal(phases)
 	if err != nil {
@@ -159,7 +161,6 @@ func TestExtractPhaseTimings_StructuredUploadMetrics(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("%d.phases.json", jobID)), phaseData, 0644); err != nil {
 		t.Fatalf("write phases: %v", err)
 	}
-
 	completion := map[string]any{
 		"max_gpu_mem_mib": 2048,
 		"output_upload": map[string]any{
@@ -185,6 +186,12 @@ func TestExtractPhaseTimings_StructuredUploadMetrics(t *testing.T) {
 	timings := ExtractPhaseTimings(jobID, tmpDir)
 	if timings == nil {
 		t.Fatal("expected non-nil timings")
+	}
+	if timings.HFPrewarmDownloadedBytes == nil || *timings.HFPrewarmDownloadedBytes != 7_500_000 {
+		t.Fatalf("HFPrewarmDownloadedBytes = %v, want 7500000", timings.HFPrewarmDownloadedBytes)
+	}
+	if timings.HFPrewarmDurationMS == nil || *timings.HFPrewarmDurationMS != 2500 {
+		t.Fatalf("HFPrewarmDurationMS = %v, want 2500", timings.HFPrewarmDurationMS)
 	}
 	if timings.UploadStart == nil || *timings.UploadStart != 1021 {
 		t.Fatalf("UploadStart = %v, want 1021", timings.UploadStart)

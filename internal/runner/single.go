@@ -21,17 +21,19 @@ import (
 
 // SingleJobConfig configures a single-shot job execution.
 type SingleJobConfig struct {
-	JobID           int64
-	Job             opsqueue.CommandJob
-	LogDir          string
-	WorkingDir      string             // Override job.Dir if non-empty
-	SampleInterval  time.Duration      // Default 1s
-	MaxTime         time.Duration      // If >0, kill the job after this duration
-	SetupTimeout    time.Duration      // If >0, kill the setup command after this duration (default 20m)
-	SetupPrewarmed  bool               // If true, skip the detected setup command
-	SetupPrewarmLog string             // Optional setup prewarm log to append to this job log
-	SkipProbes      bool               // Skip cache size probes (useful in tests)
-	OnPhase         func(phase string) // Called at phase transitions: "setup", "running"
+	JobID                    int64
+	Job                      opsqueue.CommandJob
+	LogDir                   string
+	WorkingDir               string             // Override job.Dir if non-empty
+	SampleInterval           time.Duration      // Default 1s
+	MaxTime                  time.Duration      // If >0, kill the job after this duration
+	SetupTimeout             time.Duration      // If >0, kill the setup command after this duration (default 20m)
+	SetupPrewarmed           bool               // If true, skip the detected setup command
+	SetupPrewarmLog          string             // Optional setup prewarm log to append to this job log
+	HFPrewarmDownloadedBytes int64              // Bytes added to the HF cache before runner setup
+	HFPrewarmDuration        time.Duration      // Wall time spent successfully staging HF inputs
+	SkipProbes               bool               // Skip cache size probes (useful in tests)
+	OnPhase                  func(phase string) // Called at phase transitions: "setup", "running"
 
 	// Hang-detection watchdogs. Zero disables. See specs/job-lifecycle.allium
 	// rules GPUIdleKillsJob and StdoutSilenceKillsJob.
@@ -131,7 +133,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	// Phase timing
-	var phases PhaseTiming
+	phases := PhaseTiming{
+		HFPrewarmDownloadedBytes: cfg.HFPrewarmDownloadedBytes,
+		HFPrewarmDurationMS:      cfg.HFPrewarmDuration.Milliseconds(),
+	}
 	phases.WrapperStart = time.Now().Unix()
 
 	// Discover hardware

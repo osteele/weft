@@ -336,6 +336,8 @@ table job_phase_timings
   col 23 results_upload_files INTEGER notnull=0 default=<none> pk=0
   col 24 results_upload_retries INTEGER notnull=0 default=<none> pk=0
   col 25 results_upload_duration_ms INTEGER notnull=0 default=<none> pk=0
+  col 26 hf_prewarm_download_bytes INTEGER notnull=0 default=<none> pk=0
+  col 27 hf_prewarm_download_duration_ms INTEGER notnull=0 default=<none> pk=0
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=NO ACTION
 table job_telemetry_gpus
   col 0 job_id INTEGER notnull=1 default=<none> pk=0

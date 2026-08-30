@@ -16,6 +16,46 @@ import (
 	"github.com/osteele/weft/internal/status"
 )
 
+func TestRecordCloudDownloadObservationUsesAgentPrewarmMetrics(t *testing.T) {
+	database := db.SetupTestDB(t)
+	bytes := int64(600_000_000)
+	durationMS := int64(3000)
+	recordCloudDownloadObservation(database, "vastai", "Sichuan", &db.JobPhaseTimings{
+		HFPrewarmDownloadedBytes: &bytes,
+		HFPrewarmDurationMS:      &durationMS,
+	})
+
+	var gotBytes, gotDurationMS int64
+	var gotSource, gotDest string
+	if err := database.QueryRow(`SELECT source_key, dest_key, bytes_transferred, duration_ms FROM transfer_observations`).Scan(
+		&gotSource, &gotDest, &gotBytes, &gotDurationMS,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if gotSource != "hf" || gotDest != "cloud:vastai:Sichuan" || gotBytes != bytes || gotDurationMS != durationMS {
+		t.Fatalf("observation = (%q, %q, %d, %d), want (hf, cloud:vastai:Sichuan, %d, %d)",
+			gotSource, gotDest, gotBytes, gotDurationMS, bytes, durationMS)
+	}
+}
+
+func TestRecordCloudDownloadObservationSkipsCachedPrewarm(t *testing.T) {
+	database := db.SetupTestDB(t)
+	bytes := int64(0)
+	durationMS := int64(3000)
+	recordCloudDownloadObservation(database, "vastai", "Sichuan", &db.JobPhaseTimings{
+		HFPrewarmDownloadedBytes: &bytes,
+		HFPrewarmDurationMS:      &durationMS,
+	})
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM transfer_observations`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("observation count = %d, want 0 for a cache hit", count)
+	}
+}
+
 func TestListCloudAttemptSyncCandidates_AttemptScoped(t *testing.T) {
 	database := db.SetupTestDB(t)
 

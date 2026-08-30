@@ -879,6 +879,14 @@ func settleCompletedAttempt(ctx context.Context, r2Client *r2.Client, jobID, run
 // phase timings and records it as a transfer observation. Only records for cold
 // starts where significant data was downloaded during setup.
 func recordCloudDownloadObservation(database *sql.DB, provider, datacenter string, timings *db.JobPhaseTimings) {
+	if timings.HFPrewarmDownloadedBytes != nil && timings.HFPrewarmDurationMS != nil && datacenter != "" &&
+		*timings.HFPrewarmDownloadedBytes > 0 && *timings.HFPrewarmDurationMS > 0 {
+		src := transferbw.HFEndpoint()
+		dst := transferbw.CloudEndpoint(provider, datacenter, "")
+		_ = transferbw.RecordObservation(database, src, dst, *timings.HFPrewarmDownloadedBytes,
+			time.Duration(*timings.HFPrewarmDurationMS)*time.Millisecond)
+		return
+	}
 	if timings.CacheHFPostBytes == nil || timings.SetupStart == nil || timings.SetupEnd == nil || datacenter == "" {
 		return
 	}

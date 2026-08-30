@@ -511,16 +511,18 @@ func WriteHeartbeat(paths JobPaths, epoch int64) error {
 
 // PhaseTiming records wall-clock timestamps for each execution phase.
 type PhaseTiming struct {
-	WrapperStart int64       `json:"wrapper_start"`
-	SetupStart   int64       `json:"setup_start"`
-	SetupEnd     int64       `json:"setup_end"`
-	RunStart     int64       `json:"run_start"`
-	RunEnd       int64       `json:"run_end"`
-	UploadStart  int64       `json:"upload_start,omitempty"`
-	UploadEnd    int64       `json:"upload_end,omitempty"`
-	CachePre     *CacheProbe `json:"cache_pre,omitempty"`
-	CachePost    *CacheProbe `json:"cache_post,omitempty"`
-	SetupSeconds *int64      `json:"setup_seconds,omitempty"`
+	WrapperStart             int64       `json:"wrapper_start"`
+	SetupStart               int64       `json:"setup_start"`
+	SetupEnd                 int64       `json:"setup_end"`
+	RunStart                 int64       `json:"run_start"`
+	RunEnd                   int64       `json:"run_end"`
+	UploadStart              int64       `json:"upload_start,omitempty"`
+	UploadEnd                int64       `json:"upload_end,omitempty"`
+	CachePre                 *CacheProbe `json:"cache_pre,omitempty"`
+	CachePost                *CacheProbe `json:"cache_post,omitempty"`
+	SetupSeconds             *int64      `json:"setup_seconds,omitempty"`
+	HFPrewarmDownloadedBytes int64       `json:"hf_prewarm_download_bytes,omitempty"`
+	HFPrewarmDurationMS      int64       `json:"hf_prewarm_download_duration_ms,omitempty"`
 }
 
 // WritePhasesFile writes a phases.json file alongside other job log files.

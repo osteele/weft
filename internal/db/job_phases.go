@@ -36,6 +36,10 @@ type JobPhaseTimings struct {
 	// uv sync timing
 	UVSyncSeconds *int64 // total uv sync time (seconds)
 
+	// Agent-side HF input staging, which occurs before runner setup begins.
+	HFPrewarmDownloadedBytes *int64
+	HFPrewarmDurationMS      *int64
+
 	// Disk usage at job completion (bytes)
 	DiskUsedBytes  *int64 // root filesystem used bytes (post-job)
 	DiskTotalBytes *int64 // root filesystem total bytes
@@ -56,8 +60,9 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		  results_upload_files, results_upload_retries, results_upload_duration_ms,
 		  cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
 		  uv_sync_seconds, disk_used_bytes, disk_total_bytes,
-		  peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util,
+		  hf_prewarm_download_bytes, hf_prewarm_download_duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(job_id) DO UPDATE SET
 		  wrapper_start = COALESCE(excluded.wrapper_start, job_phase_timings.wrapper_start),
 		  setup_start = COALESCE(excluded.setup_start, job_phase_timings.setup_start),
@@ -83,7 +88,9 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		  disk_total_bytes = COALESCE(excluded.disk_total_bytes, job_phase_timings.disk_total_bytes),
 		  peak_gpu_mem_mib = COALESCE(excluded.peak_gpu_mem_mib, job_phase_timings.peak_gpu_mem_mib),
 		  mean_gpu_util = COALESCE(excluded.mean_gpu_util, job_phase_timings.mean_gpu_util),
-		  peak_gpu_util = COALESCE(excluded.peak_gpu_util, job_phase_timings.peak_gpu_util)`,
+		  peak_gpu_util = COALESCE(excluded.peak_gpu_util, job_phase_timings.peak_gpu_util),
+		  hf_prewarm_download_bytes = COALESCE(excluded.hf_prewarm_download_bytes, job_phase_timings.hf_prewarm_download_bytes),
+		  hf_prewarm_download_duration_ms = COALESCE(excluded.hf_prewarm_download_duration_ms, job_phase_timings.hf_prewarm_download_duration_ms)`,
 		t.JobID, t.WrapperStart, t.SetupStart, t.SetupEnd, t.RunStart, t.RunEnd,
 		t.UploadStart, t.UploadEnd, t.UploadResultsBytes, t.UploadWorkspaceBytes,
 		t.OutputUploadFiles, t.OutputUploadRetries, t.OutputUploadDuration,
@@ -91,6 +98,7 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		t.CacheHFBytes, t.CacheUVBytes, t.CacheUVPostBytes, t.CacheHFPostBytes,
 		t.UVSyncSeconds, t.DiskUsedBytes, t.DiskTotalBytes,
 		t.PeakGPUMemMiB, t.MeanGPUUtil, t.PeakGPUUtil,
+		t.HFPrewarmDownloadedBytes, t.HFPrewarmDurationMS,
 	)
 	return err
 }
@@ -104,7 +112,8 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 		        results_upload_files, results_upload_retries, results_upload_duration_ms,
 		        cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
 		        uv_sync_seconds, disk_used_bytes, disk_total_bytes,
-		        peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util
+		        peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util,
+		        hf_prewarm_download_bytes, hf_prewarm_download_duration_ms
 		 FROM job_phase_timings WHERE job_id = ?`, jobID,
 	)
 
@@ -117,6 +126,7 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 		&t.CacheHFBytes, &t.CacheUVBytes, &t.CacheUVPostBytes, &t.CacheHFPostBytes,
 		&t.UVSyncSeconds, &t.DiskUsedBytes, &t.DiskTotalBytes,
 		&t.PeakGPUMemMiB, &t.MeanGPUUtil, &t.PeakGPUUtil,
+		&t.HFPrewarmDownloadedBytes, &t.HFPrewarmDurationMS,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

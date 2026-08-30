@@ -875,13 +875,43 @@ func stubPrewarmRunner(t *testing.T, fn func(string, int64, string, []string, ru
 	t.Helper()
 	oldRunner := runSetupCommand
 	oldBackoff := hfPrewarmBackoffFunc
+	oldProbe := probeCacheSizesForEnv
 	runSetupCommand = func(script string, jobID int64, workDir string, env []string, paths runner.JobPaths, timeout, _ time.Duration) (runner.ExitInfo, error) {
 		return fn(script, jobID, workDir, env, paths, timeout)
 	}
 	hfPrewarmBackoffFunc = func(int) time.Duration { return 0 }
+	probeCacheSizesForEnv = func([]string) runner.CacheProbe { return runner.CacheProbe{} }
 	return func() {
 		runSetupCommand = oldRunner
 		hfPrewarmBackoffFunc = oldBackoff
+		probeCacheSizesForEnv = oldProbe
+	}
+}
+
+func TestHFPrewarmMeasuresSuccessfulCacheGrowth(t *testing.T) {
+	restore := stubPrewarmRunner(t, func(_ string, _ int64, _ string, _ []string, _ runner.JobPaths, _ time.Duration) (runner.ExitInfo, error) {
+		return runner.ExitInfo{}, nil
+	})
+	defer restore()
+
+	probes := []int64{1_000, 6_001_000}
+	probeCacheSizesForEnv = func([]string) runner.CacheProbe {
+		value := probes[0]
+		probes = probes[1:]
+		return runner.CacheProbe{HFBytes: value}
+	}
+	job := cloud.AgentJob{ID: 6264, Command: "echo hi", Dir: t.TempDir(), Inputs: []string{"hf:org/model"}}
+	assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
+
+	result := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, job.Dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID))
+	if !result.ok {
+		t.Fatalf("prewarm failed: %v", result.err)
+	}
+	if result.hfDownloadedBytes != 6_000_000 {
+		t.Fatalf("downloaded bytes = %d, want 6000000", result.hfDownloadedBytes)
+	}
+	if result.hfDownloadDuration <= 0 {
+		t.Fatalf("download duration = %s, want positive", result.hfDownloadDuration)
 	}
 }
 
@@ -942,11 +972,16 @@ func TestHFPrewarmStallXetFallback(t *testing.T) {
 func TestHFPrewarmPassesStallTimeout(t *testing.T) {
 	var gotStall time.Duration
 	oldRunner := runSetupCommand
+	oldProbe := probeCacheSizesForEnv
 	runSetupCommand = func(_ string, _ int64, _ string, _ []string, _ runner.JobPaths, _, stallTimeout time.Duration) (runner.ExitInfo, error) {
 		gotStall = stallTimeout
 		return runner.ExitInfo{}, nil
 	}
-	defer func() { runSetupCommand = oldRunner }()
+	probeCacheSizesForEnv = func([]string) runner.CacheProbe { return runner.CacheProbe{} }
+	defer func() {
+		runSetupCommand = oldRunner
+		probeCacheSizesForEnv = oldProbe
+	}()
 
 	dir := t.TempDir()
 	job := cloud.AgentJob{ID: 6263, Command: "echo hi", Dir: dir, Inputs: []string{"hf:org/model"}}

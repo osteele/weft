@@ -1594,6 +1594,43 @@ rule HFAssetsPrestagedOnCloud {
         -- hfPrewarmTextHasXetWriterError.
 }
 
+-- Agent prewarm occurs before the runner's setup clock and cache-before
+-- probe. Its successful cold-cache transfers therefore carry their own
+-- byte and elapsed-time measurement into the job phase record; otherwise
+-- the bandwidth learner would incorrectly observe a zero-byte setup.
+rule SuccessfulCloudHFPrewarmFeedsBandwidthLearning {
+    when: CloudHFPrewarmSucceeded(job)
+
+    let downloaded = HFCacheBytesAfterPrewarm(job) - HFCacheBytesBeforePrewarm(job)
+    let duration = CloudHFPrewarmElapsed(job)
+
+    ensures:
+        if downloaded > 0 and duration > 0:
+            JobPhaseTimingRecorded(
+                job: job,
+                hf_prewarm_download_bytes: downloaded,
+                hf_prewarm_download_duration: duration
+            )
+            TransferObservationLogged(
+                source: huggingface,
+                destination: job.cloud_instance.datacenter,
+                bytes: downloaded,
+                duration: duration,
+                ok: true,
+                at: now
+            )
+        else:
+            -- A cache hit contains no transfer-rate evidence.
+            NoHFPrewarmBandwidthObservation(job)
+
+    -- legacy annotation: @guidance
+        -- cmd/agent/jobloop.go measures cache growth around the complete
+        -- retry sequence; internal/runner persists it in phases.json;
+        -- internal/cloudsync extracts it into job_phase_timings; and
+        -- internal/syncorch/cloud_results.go prefers that explicit
+        -- measurement over the legacy runner-setup cache delta.
+}
+
 rule CloudPrewarmRespectsJobOrder {
     when: AgentRunsCampaign(instance)
 

@@ -55,7 +55,9 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 			DiskUsedBytes  int64 `json:"disk_used_bytes"`
 			DiskTotalBytes int64 `json:"disk_total_bytes"`
 		} `json:"cache_post"`
-		SetupSeconds *int64 `json:"setup_seconds"`
+		SetupSeconds             *int64 `json:"setup_seconds"`
+		HFPrewarmDownloadedBytes int64  `json:"hf_prewarm_download_bytes"`
+		HFPrewarmDurationMS      int64  `json:"hf_prewarm_download_duration_ms"`
 	}
 	if err := json.Unmarshal(data, &phases); err != nil {
 		return nil
@@ -98,6 +100,12 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 		}
 	}
 	t.UVSyncSeconds = phases.SetupSeconds
+	if phases.HFPrewarmDownloadedBytes > 0 {
+		t.HFPrewarmDownloadedBytes = &phases.HFPrewarmDownloadedBytes
+	}
+	if phases.HFPrewarmDurationMS > 0 {
+		t.HFPrewarmDurationMS = &phases.HFPrewarmDurationMS
+	}
 
 	// Also try to read completion.json for peak metrics
 	completionPath := filepath.Join(tmpDir, fmt.Sprintf("%d.completion.json", jobID))

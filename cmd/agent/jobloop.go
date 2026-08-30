@@ -157,7 +157,11 @@ type setupPrewarmResult struct {
 	logPath  string
 	setupRan bool
 	didWork  bool
-	err      error
+	// Successful HF staging is measured before the runner's own cache probe,
+	// so carry it into the job phase record explicitly.
+	hfDownloadedBytes  int64
+	hfDownloadDuration time.Duration
+	err                error
 	// failureReason is the single-line, machine-readable reason persisted
 	// for this failed prewarm. Empty means use err.Error().
 	failureReason string
@@ -187,8 +191,9 @@ const hfPrewarmMaxAttempts = 3
 const hfPrewarmStallTimeout = 10 * time.Minute
 
 var (
-	runSetupCommand      = runner.RunSetupCommandWithStallTimeout
-	hfPrewarmBackoffFunc = hfPrewarmBackoff
+	runSetupCommand       = runner.RunSetupCommandWithStallTimeout
+	hfPrewarmBackoffFunc  = hfPrewarmBackoff
+	probeCacheSizesForEnv = runner.ProbeCacheSizesForEnv
 )
 
 type setupPrewarm struct {
@@ -433,32 +438,45 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	env = appendAgentJobEnv(env, job)
 
 	didWork := false
+	var hfDownloadedBytes int64
+	var hfDownloadDuration time.Duration
 	explicitAssets, bestEffortAssets := splitHFInputAssets(job.Inputs, job.BestEffortInputs)
 	if len(explicitAssets) > 0 {
 		didWork = true
-		if result := runHFDownloadPrewarm(job, cfg, workDir, env, explicitAssets, paths); !result.ok {
+		result := runHFDownloadPrewarm(job, cfg, workDir, env, explicitAssets, paths)
+		if !result.ok {
 			return result
 		}
+		hfDownloadedBytes += result.hfDownloadedBytes
+		hfDownloadDuration += result.hfDownloadDuration
 	}
 	if len(bestEffortAssets) > 0 {
 		didWork = true
-		if result := runHFDownloadPrewarm(job, cfg, workDir, env, bestEffortAssets, paths); !result.ok {
+		result := runHFDownloadPrewarm(job, cfg, workDir, env, bestEffortAssets, paths)
+		if !result.ok {
 			appendBestEffortHFPrewarmWarning(paths.Log, bestEffortAssets, result.err)
+		} else {
+			hfDownloadedBytes += result.hfDownloadedBytes
+			hfDownloadDuration += result.hfDownloadDuration
 		}
+	}
+	success := setupPrewarmResult{
+		ok: true, didWork: didWork, logPath: paths.Log,
+		hfDownloadedBytes: hfDownloadedBytes, hfDownloadDuration: hfDownloadDuration,
 	}
 
 	if !includeSetup {
-		return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+		return success
 	}
 
 	setupCmd := runner.DetectSetupCommand(workDir)
 	if setupCmd == "" {
-		return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+		return success
 	}
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(workDir, job.Command)
 		if runner.SetupSkipReason(setupCmd, workDir, job.Command, scriptMeta) != "" {
-			return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
+			return success
 		}
 	}
 	didWork = true
@@ -480,7 +498,9 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 			err:      fmt.Errorf("setup prewarm exit %d", ei.ExitCode),
 		}
 	}
-	return setupPrewarmResult{ok: true, didWork: true, setupRan: true, logPath: paths.Log}
+	success.didWork = true
+	success.setupRan = true
+	return success
 }
 
 func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, baseEnv []string, assets []dataloc.DataAsset, paths runner.JobPaths) setupPrewarmResult {
@@ -488,6 +508,9 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 	timeout := pickSetupTimeout(cfg)
 	disableXet := false
 	var last setupPrewarmResult
+	initialEnv := hfDownloadPrewarmEnv(baseEnv, job.Inputs)
+	preBytes := probeCacheSizesForEnv(initialEnv).HFBytes
+	startedAt := time.Now()
 	for attempt := 1; attempt <= hfPrewarmMaxAttempts; attempt++ {
 		env := hfDownloadPrewarmEnv(baseEnv, job.Inputs)
 		if disableXet {
@@ -497,7 +520,15 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 			attempt, hfPrewarmMaxAttempts, hfPrewarmXetSuffix(disableXet)))
 		ei, err := runSetupCommand(script, job.ID, workDir, env, paths, timeout, hfPrewarmStallTimeout)
 		if err == nil {
-			return setupPrewarmResult{ok: true, didWork: true, logPath: paths.Log}
+			postBytes := probeCacheSizesForEnv(env).HFBytes
+			downloaded := postBytes - preBytes
+			if downloaded < 0 {
+				downloaded = 0
+			}
+			return setupPrewarmResult{
+				ok: true, didWork: true, logPath: paths.Log,
+				hfDownloadedBytes: downloaded, hfDownloadDuration: time.Since(startedAt),
+			}
 		}
 		failureReason, infra := db.ClassifyInfraFailure(db.PhasePrewarmDownload, ei.ExitCode, "")
 		last = setupPrewarmResult{
@@ -915,6 +946,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 		if prewarm.ok {
 			jobCfg.SetupPrewarmed = prewarm.setupRan
+			jobCfg.HFPrewarmDownloadedBytes = prewarm.hfDownloadedBytes
+			jobCfg.HFPrewarmDuration = prewarm.hfDownloadDuration
 			if prewarm.didWork {
 				jobCfg.SetupPrewarmLog = prewarm.logPath
 			}

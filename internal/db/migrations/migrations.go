@@ -177,11 +177,18 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddJobProjectRoot},
 		&goose.GoFunc{RunDB: dropAddJobProjectRoot},
 	)
+	// Go-only: these columns may already exist in a current-schema fixture
+	// whose goose version was rewound to exercise upgrade recovery.
+	addHFPrewarmTransferMetrics := goose.NewGoMigration(
+		55,
+		&goose.GoFunc{RunDB: applyAddHFPrewarmTransferMetrics},
+		&goose.GoFunc{RunDB: dropAddHFPrewarmTransferMetrics},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -495,6 +502,33 @@ func applyAddJobProjectRoot(ctx context.Context, db *sql.DB) error {
 
 func dropAddJobProjectRoot(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN project_root`)
+	return nil
+}
+
+func applyAddHFPrewarmTransferMetrics(ctx context.Context, db *sql.DB) error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"hf_prewarm_download_bytes", `ALTER TABLE job_phase_timings ADD COLUMN hf_prewarm_download_bytes INTEGER`},
+		{"hf_prewarm_download_duration_ms", `ALTER TABLE job_phase_timings ADD COLUMN hf_prewarm_download_duration_ms INTEGER`},
+	} {
+		exists, err := columnExists(ctx, db, "job_phase_timings", col.name)
+		if err != nil {
+			return fmt.Errorf("inspect job_phase_timings.%s: %w", col.name, err)
+		}
+		if !exists {
+			if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("add job_phase_timings.%s: %w", col.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func dropAddHFPrewarmTransferMetrics(ctx context.Context, db *sql.DB) error {
+	_, _ = db.ExecContext(ctx, `ALTER TABLE job_phase_timings DROP COLUMN hf_prewarm_download_duration_ms`)
+	_, _ = db.ExecContext(ctx, `ALTER TABLE job_phase_timings DROP COLUMN hf_prewarm_download_bytes`)
 	return nil
 }
 
@@ -992,7 +1026,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus
