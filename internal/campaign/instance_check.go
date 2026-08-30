@@ -934,37 +934,13 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		}
 	}
 
-	// 5c. Running task stall: structured progress has not changed. Agent
-	// heartbeat is deliberately irrelevant here: it proves the control plane is
-	// alive, not that the user's task is advancing. Uninstrumented jobs do not
-	// enter this watchdog; their explicit runtime and spend limits remain the
-	// bound.
-	if ci.Status == db.LaunchStatusRunning && p.JobProgressChangedAt != nil {
-		verb, phaseJobID, ok := ParsePhaseJobID(p.InstancePhase)
-		if ok && verb == PhaseRunning && phaseJobID == p.JobProgressID && p.JobProgressPct >= 0 {
-			progressAge := p.Now.Sub(*p.JobProgressChangedAt)
-			if progressAge >= runningStaleTerminate {
-				if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("structured job progress unchanged for %s", progressAge.Truncate(time.Second))); ok {
-					return action
-				}
-				return InstanceAction{
-					Kind:              ActionRunningStalled,
-					TerminalStatus:    db.LaunchStatusFailed,
-					TerminationReason: db.TerminationReasonJobFailure,
-					StallMessage:      fmt.Sprintf("structured job progress unchanged for %s — terminating instance", progressAge.Truncate(time.Second)),
-					DestroyProvider:   true,
-					AttemptOutcome:    db.AttemptOutcomeFailed,
-				}
-			}
-			if progressAge >= runningStaleWarn {
-				remaining := runningStaleTerminate - progressAge
-				return InstanceAction{
-					Kind:         ActionDisplayOnly,
-					StallMessage: fmt.Sprintf("structured job progress unchanged for %s (terminating in %s)", progressAge.Truncate(time.Second), remaining.Truncate(time.Second)),
-				}
-			}
-		}
-	}
+	// Structured job progress deliberately does not terminate an instance. It is
+	// a scrape of an output convention, so an unrecognized format is
+	// indistinguishable from a stalled task, and the job never agreed to the
+	// convention. Running-phase stalls are caught by directly observed signals:
+	// the agent's stdout-silence and GPU-idle watchdogs, heartbeat staleness,
+	// provider status, and the rental's time and spend budgets.
+	// See docs/decisions/0025-progress-parsing-never-terminates-an-instance.md.
 
 	// 6. Failed self-destruct: jobs reached a terminal state but the instance is lingering.
 	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal {

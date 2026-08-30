@@ -2930,35 +2930,30 @@ rule OnStartChainWatchdog {
         -- persists FirstOnStartProbeSeenUnix set-once on first probe sighting.
 }
 
-rule StructuredJobProgressStalls {
-    when: EvaluateStructuredJobProgressStalls(instance, job, live_state)
-    requires: instance.phase = running(job)
-    requires: instance.live_state.active_job = job
-    requires: instance.live_state.job_progress != null
-    requires: instance.live_state.job_progress_changed_at != null
-    requires: now - instance.live_state.job_progress_changed_at >= config.running_stall_timeout
-
-    ensures: instance.status = failed
-    ensures: instance.termination_reason = job_failure
-    ensures: instance.ended_at = now
-    ensures: job.status = failed
-
-    -- legacy annotation: @guidance
-        -- The progress timestamp changes only when the structured
-        -- (job, phase, percent) tuple changes. Repeated Progress lines with
-        -- the same value, log growth, CPU/GPU activity, and agent heartbeats
-        -- do not reset it. A fresh heartbeat therefore does not suppress a
-        -- confirmed task stall.
-        --
-        -- The rule is opt-in through instrumentation: no Progress report
-        -- means unknown task progress, not confirmed absence. Such jobs stay
-        -- bounded by their explicit max-time and max-spend controls.
-        -- Once an instrumented running task violates this progress contract,
-        -- the failure belongs to the job rather than the rental. It is terminal
-        -- and must not enter infrastructure relaunch policy.
-        -- Implementation: launch_live_state.job_progress_changed_at and
-        -- internal/campaign/instance_check.go rule 5c.
-}
+-- Structured job progress is a presentation signal: progress bars, ETA
+-- estimates, status display. It deliberately terminates nothing.
+--
+-- The value is a scrape of an output convention rather than an observation of
+-- the job. A job reports progress only when its output happens to match a
+-- recognized pattern, so an unrecognized format is indistinguishable from a
+-- stalled task, and weft never sees the difference -- an unparsed line is
+-- discarded silently and looks exactly like a job that printed nothing. The
+-- job never agreed to the convention, and a third-party library printing its
+-- own dialect can supply or withhold the signal on the job's behalf.
+--
+-- An earlier rule terminated an instance whose progress tuple had not changed
+-- for an hour. It was written as opt-in -- no progress report meaning unknown
+-- rather than absent -- but a job that emitted one recognized value early
+-- (often incidentally, from a library's tqdm bar) and then reported in an
+-- unrecognized format for the rest of its run was treated as having opted in
+-- and then stalled. Jobs were terminated while working.
+--
+-- Running-phase stalls are caught by directly observed evidence instead:
+-- StdoutSilenceKillsJob and GPUIdleKillsJob in specs/job-lifecycle.allium,
+-- heartbeat staleness, provider status, and the rental time and spend budgets.
+-- Their absence means the thing itself was absent, not unrecognized.
+--
+-- See docs/decisions/0025-progress-parsing-never-terminates-an-instance.md.
 
 rule HeartbeatStaleWarningAfterReady {
     when: EvaluateHeartbeatStaleWarningAfterReady(instance, provider_instance)
@@ -3256,7 +3251,48 @@ rule DiskFullDetected {
 
 -- ==========================================================================
 -- User-initiated termination
--- ==========================================================================
+-- ===========================================================================
+
+rule LastAssignedJobStoppedCancelsInstance {
+    when: UserKill(job) or UserCancel(job)
+    requires: job.cloud_instance != null
+
+    let instance = job.cloud_instance
+
+    requires: instance.status in {planned, launching, running, paused, grace}
+    requires: instance.jobs.count > 0
+    requires: instance.jobs.all(j => j.is_terminal)
+
+    ensures: instance.termination_reason = canceled
+    ensures: DurableDestroyIntent(instance)
+    ensures:
+        instance.provider_instance_id != null implies
+            ProviderDestroyRequested(instance)
+    ensures:
+        ProviderDestroyConfirmed(instance) implies
+            (instance.status = canceled and instance.ended_at != null)
+
+    -- legacy annotation: @guidance
+        -- Killing a job that is already assigned to a provisioning rental is
+        -- valid. The job's terminal intent is recorded immediately, and its
+        -- per-job R2 marker prevents the immutable launch payload from
+        -- starting it later. When this was the last non-terminal assigned
+        -- job, Weft records the instance destroy intent in the same serialized
+        -- database boundary used by placement. New reuse claims reject that
+        -- intent. LaunchInstance skips provider creation if it has not begun;
+        -- if provider creation is already in flight, it destroys the returned
+        -- resource immediately after recording its ID. Otherwise job control
+        -- destroys it directly. Provider errors leave the launch non-terminal
+        -- with the durable intent active for the reconciler to retry. Terminal
+        -- job intents are never reset or requeued by this cancellation.
+        --
+        -- A launch with zero membership is not covered: jobless hedge probes
+        -- have an intentional lifecycle and cannot be inferred to be empty
+        -- work from absence alone. Implementation:
+        -- db.RecordEmptyLaunchDestroyIntent,
+        -- orchestration.CancelLaunchIfNoActiveJobs, and
+        -- campaign.finishLaunchTerminationRequestedDuringCreate.
+}
 
 rule UserTerminatesInstance {
     when: UserTerminate(instance)

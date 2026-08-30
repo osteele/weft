@@ -2442,7 +2442,10 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 	}
 }
 
-func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
+func TestCheckInstance_StaleStructuredProgressDoesNotTerminate(t *testing.T) {
+	// Progress parsing is a scrape of an output convention, so an unrecognized
+	// format is indistinguishable from a stalled task. It must never terminate
+	// an instance. See docs/decisions/0025-progress-parsing-never-terminates-an-instance.md.
 	launchedAt := time.Now().Add(-90 * time.Minute).Unix()
 	progressChangedAt := time.Now().Add(-65 * time.Minute)
 	r := &Reconciler{
@@ -2459,30 +2462,18 @@ func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
 		},
 		ProviderInst:         &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:        "running:531",
-		HeartbeatAge:         30 * time.Second, // liveness does not prove task progress
+		HeartbeatAge:         30 * time.Second,
 		JobProgressID:        531,
 		JobProgressPct:       25,
 		JobProgressChangedAt: &progressChangedAt,
 		JobState:             JobState{HasStartedJob: true},
 		Now:                  time.Now(),
 	})
-	if action.Kind != ActionRunningStalled {
-		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
+	if action.Kind == ActionRunningStalled {
+		t.Fatalf("stale structured progress terminated the instance: %+v", action)
 	}
-	if action.TerminalStatus != db.LaunchStatusFailed {
-		t.Fatalf("terminal status = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
-	}
-	if !action.DestroyProvider {
-		t.Fatal("expected DestroyProvider = true")
-	}
-	if action.TerminationReason != db.TerminationReasonJobFailure {
-		t.Fatalf("termination reason = %q, want %q", action.TerminationReason, db.TerminationReasonJobFailure)
-	}
-	if action.ResetJobs {
-		t.Fatal("expected ResetJobs = false for a job failure")
-	}
-	if action.AttemptOutcome != db.AttemptOutcomeFailed {
-		t.Fatalf("attempt outcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeFailed)
+	if action.DestroyProvider {
+		t.Fatalf("stale structured progress destroyed the provider instance: %+v", action)
 	}
 }
 
@@ -2520,7 +2511,7 @@ func TestExecuteAction_RunningStallFailsJobWithoutRequeue(t *testing.T) {
 		Kind:              ActionRunningStalled,
 		TerminalStatus:    db.LaunchStatusFailed,
 		TerminationReason: db.TerminationReasonJobFailure,
-		StallMessage:      "structured job progress unchanged for 1h0m0s — terminating instance",
+		StallMessage:      "campaign agent exited while instance was still running — terminating instance",
 		DestroyProvider:   true,
 		AttemptOutcome:    db.AttemptOutcomeFailed,
 	}
@@ -2628,37 +2619,6 @@ func TestCheckInstance_ProviderUnknownDefersSetupStallUntilBound(t *testing.T) {
 	params.ProviderStatusUnknownFor = stalePauseTimeout
 	if action := NewReconciler().CheckInstance(params); action.Kind != ActionSetupStalled {
 		t.Fatalf("bounded interruptible action = %+v, want setup-stalled adjudication", action)
-	}
-}
-
-func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
-	launchedAt := time.Now().Add(-45 * time.Minute).Unix()
-	progressChangedAt := time.Now().Add(-25 * time.Minute)
-	r := &Reconciler{
-		firstDeadAt:        make(map[int64]time.Time),
-		probeFailures:      make(map[int64]probeFailureState),
-		lastProviderStatus: make(map[int64]string),
-		deadConfirmTime:    -1,
-	}
-	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.Launch{
-			ID:         1,
-			Status:     db.LaunchStatusRunning,
-			LaunchedAt: &launchedAt,
-		},
-		ProviderInst:         &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		InstancePhase:        "running:531",
-		JobProgressID:        531,
-		JobProgressPct:       25,
-		JobProgressChangedAt: &progressChangedAt,
-		JobState:             JobState{HasStartedJob: true},
-		Now:                  time.Now(),
-	})
-	if action.Kind != ActionDisplayOnly {
-		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d) for warn phase", action.Kind, ActionDisplayOnly)
-	}
-	if action.StallMessage == "" {
-		t.Fatal("expected non-empty stall message")
 	}
 }
 

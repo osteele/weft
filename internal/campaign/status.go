@@ -109,14 +109,6 @@ func effectiveHeartbeatStaleThreshold(agentReadyAtUnix *int64, now time.Time) ti
 	return heartbeatStaleThreshold
 }
 
-// Running-task stall thresholds: trigger when a job's structured progress
-// tuple has remained unchanged for this long. Heartbeat and GPU utilization
-// are liveness/activity signals, not evidence of semantic task progress.
-const (
-	runningStaleWarn      = 20 * time.Minute
-	runningStaleTerminate = 60 * time.Minute
-)
-
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
 	observationUnknown bool
