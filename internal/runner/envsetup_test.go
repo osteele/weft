@@ -185,27 +185,34 @@ func TestPyprojectDependsOnTorch_FalseWhenMissing(t *testing.T) {
 	}
 }
 
-func TestShouldSkipSetup(t *testing.T) {
+func TestSetupSkipReason(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "train.py")
+	if err := os.WriteFile(script, []byte("# /// script\n# dependencies = []\n# ///\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
 	isolated := &dataloc.ScriptMeta{Isolated: true}
 	notIsolated := &dataloc.ScriptMeta{GPU: "nvidia"}
 
 	tests := []struct {
 		name     string
 		setupCmd string
+		command  string
 		meta     *dataloc.ScriptMeta
-		want     bool
+		wantSkip bool
 	}{
-		{"uv sync + isolated", "uv sync", isolated, true},
-		{"uv sync + not isolated", "uv sync", notIsolated, false},
-		{"uv sync + nil meta", "uv sync", nil, false},
-		{"pixi install + isolated", "pixi install", isolated, false},
-		{"empty setup + isolated", "", isolated, false},
+		{"uv sync + isolated", "uv sync", "python train.py", isolated, true},
+		{"uv sync + inferred PEP 723", "uv sync", "uv run train.py", notIsolated, true},
+		{"uv sync + PEP 723 through Python", "uv sync", "uv run python train.py", notIsolated, false},
+		{"uv sync + nil meta", "uv sync", "python train.py", nil, false},
+		{"pixi install + isolated", "pixi install", "python train.py", isolated, false},
+		{"empty setup + isolated", "", "python train.py", isolated, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ShouldSkipSetup(tt.setupCmd, tt.meta)
-			if got != tt.want {
-				t.Errorf("got %v, want %v", got, tt.want)
+			got := SetupSkipReason(tt.setupCmd, dir, tt.command, tt.meta)
+			if (got != "") != tt.wantSkip {
+				t.Errorf("reason = %q, wantSkip %v", got, tt.wantSkip)
 			}
 		})
 	}

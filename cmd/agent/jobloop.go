@@ -267,7 +267,7 @@ func setupPrewarmEligible(currentDir string, job cloud.AgentJob, nextDir string)
 	}
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(nextDir, job.Command)
-		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+		if runner.SetupSkipReason(setupCmd, nextDir, job.Command, scriptMeta) != "" {
 			return false
 		}
 	}
@@ -379,7 +379,7 @@ func setupWeight(job cloud.AgentJob) int {
 	}
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(workDir, job.Command)
-		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+		if runner.SetupSkipReason(setupCmd, workDir, job.Command, scriptMeta) != "" {
 			return 0
 		}
 	}
@@ -457,7 +457,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	}
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(workDir, job.Command)
-		if runner.ShouldSkipSetup(setupCmd, scriptMeta) {
+		if runner.SetupSkipReason(setupCmd, workDir, job.Command, scriptMeta) != "" {
 			return setupPrewarmResult{ok: true, didWork: didWork, logPath: paths.Log}
 		}
 	}

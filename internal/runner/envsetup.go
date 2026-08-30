@@ -58,15 +58,20 @@ func DetectSetupCommand(workingDir string) string {
 	return ""
 }
 
-// ShouldSkipSetup reports whether the detected setup command should be skipped
-// because the script's [tool.weft] metadata declares `isolated = true`.
-// An isolated script manages its own dependencies via PEP 723 inline metadata
-// and does not need a project-level `uv sync`.
-func ShouldSkipSetup(setupCmd string, meta *dataloc.ScriptMeta) bool {
+// SetupSkipReason reports why the detected project setup is irrelevant to the
+// command's runtime environment. Unknown or compound command shapes retain the
+// detected setup; only proven ownership suppresses it. See decision 0023.
+func SetupSkipReason(setupCmd, workingDir, command string, meta *dataloc.ScriptMeta) string {
 	if setupCmd != "uv sync" {
-		return false
+		return ""
 	}
-	return meta != nil && meta.Isolated
+	if meta != nil && meta.Isolated {
+		return "script metadata declares isolated = true"
+	}
+	if script := dataloc.DirectUVRunPEP723Script(workingDir, command); script != "" {
+		return fmt.Sprintf("direct uv run selects PEP 723 script environment for %s", script)
+	}
+	return ""
 }
 
 // WarnIfWorkdirMissingEnv writes a warning to the job's log file when no

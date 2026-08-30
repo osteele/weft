@@ -38,6 +38,16 @@ escalates SIGTERM→SIGKILL with a grace window
 (`runner.KillProcessGroupWithGrace`, `DefaultKillGrace`) so jobs can flush
 checkpoints, and records `kill_reason=user_kill`.
 
+## Setup follows runtime environment ownership
+
+The runner prepares only an environment the job command can import. A direct
+`uv run script.py` whose target has PEP 723 metadata executes in uv's script
+environment, so the runner skips an otherwise detected project `uv sync`.
+Inference is conservative: compound or ambiguous commands retain project setup
+unless `[tool.weft] isolated = true` explicitly suppresses it. The recognition
+rules live in `specs/job-lifecycle.allium`; decision 0023 fixes the ownership
+boundary they implement.
+
 ## Authoritative R2 completions
 
 The agent's `.complete` marker (exit code; full metadata in

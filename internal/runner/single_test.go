@@ -180,6 +180,62 @@ func TestRunSingleJob_AppendsPrewarmLogWithoutSkippingSetup(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_SkipsProjectSetupForDirectPEP723Script(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "pyproject.toml"), []byte("[project]\nname='p'\nversion='0.1.0'\n"), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "uv.lock"), []byte("version = 1\nrevision = 3\nrequires-python = '>=3.11'\n"), 0o644); err != nil {
+		t.Fatalf("write uv.lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "script.py"), []byte("# /// script\n# dependencies = []\n# ///\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "uv"), []byte("#!/bin/sh\necho \"$*\" >> \"$UV_CALLS\"\n[ \"$1\" = run ] || exit 91\necho script ran\n"), 0o755); err != nil {
+		t.Fatalf("write fake uv: %v", err)
+	}
+	callsPath := filepath.Join(t.TempDir(), "uv-calls")
+	logDir := t.TempDir()
+	cfg := SingleJobConfig{
+		JobID:      45,
+		Job:        opsqueue.CommandJob{Cmd: "uv run script.py", Env: []string{"PATH=" + binDir + ":" + os.Getenv("PATH"), "UV_CALLS=" + callsPath}},
+		WorkingDir: workDir,
+		LogDir:     logDir,
+		SkipProbes: true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read uv calls: %v", err)
+	}
+	if got := strings.TrimSpace(string(calls)); got != "run script.py" {
+		t.Fatalf("uv calls = %q, want only the script invocation", got)
+	}
+	logData, err := os.ReadFile(NewJobPaths(logDir, 45).Log)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "skipping project uv sync: direct uv run selects PEP 723 script environment for script.py") {
+		t.Fatalf("log missing setup skip reason: %s", log)
+	}
+	if strings.Contains(log, "setup command: uv sync") {
+		t.Fatalf("project setup ran before script: %s", log)
+	}
+}
+
 func TestWriteCompletionRecordIncludesFinalRSS(t *testing.T) {
 	logDir := t.TempDir()
 	paths := NewJobPaths(logDir, 77)

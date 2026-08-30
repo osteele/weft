@@ -173,9 +173,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	setupCmd := DetectSetupCommand(expandedDir)
 	if setupCmd == "uv sync" {
-		if ShouldSkipSetup(setupCmd, scriptMeta) {
-			slog.Info("skipping uv sync: script metadata declares isolated = true",
-				"component", "runner", "job_id", cfg.JobID)
+		if reason := SetupSkipReason(setupCmd, expandedDir, command, scriptMeta); reason != "" {
+			slog.Info("skipping project uv sync",
+				"component", "runner", "job_id", cfg.JobID, "reason", reason)
+			appendSetupLog(paths.Log, []byte("weft: skipping project uv sync: "+reason+"\n"))
 			setupCmd = ""
 		}
 	}

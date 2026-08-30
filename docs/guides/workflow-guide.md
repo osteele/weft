@@ -564,12 +564,18 @@ existing reusable instances with unknown launch capabilities.
 `weft retry`, weft re-reads script metadata and refreshes GPU defaults from it.
 Use `weft retry --gpu/--gpu-class/--gpu-mem/--gpu-mem-strict` when you want explicit overrides.
 
-**Setup phase skipping:** Add `isolated = true` to the `[tool.weft]` table
-to skip the `uv sync` setup phase. Use this only for truly self-contained
-scripts whose PEP 723 `dependencies` list everything they need — `uv run`
-creates an isolated environment that does **not** include the project's
-packages. Scripts that import from the project package must not set
-`isolated = true`.
+**Setup environment ownership:** For a direct `uv run script.py` invocation,
+Weft recognizes the script's PEP 723 block and skips project-level `uv sync`
+automatically. That project environment cannot be imported by the script
+environment, so preparing it would only add setup time, disk use, and another
+failure path. The job log records why project setup was skipped.
+
+Use `isolated = true` in `[tool.weft]` only as an explicit override for a
+self-contained command whose environment ownership Weft cannot infer. A script
+that needs the project package must declare it in the script environment (for
+example through PEP 723 `[tool.uv.sources]`) or deliberately run in the project
+environment. Running project `uv sync` first does not make that package visible
+to a PEP 723 script environment. See decision 0023.
 
 ### GPU architecture upper bound (auto-inferred from torch pin)
 

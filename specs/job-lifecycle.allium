@@ -775,6 +775,31 @@ rule WarnWhenUVPythonBypassesPEP723Environment {
         -- `weft run` and `weft queue add`.
 }
 
+rule DirectPEP723ScriptOwnsSetupEnvironment {
+    when: PrepareJobEnvironment(command, working_dir, detected_setup)
+    requires: IsUVSyncSetup(detected_setup)
+    requires: DirectUVRunPEP723Script(command, working_dir)
+
+    ensures: ProjectSetupSkipped(
+        reason: "direct uv run selects PEP 723 script environment"
+    )
+    ensures: JobLogExplainsProjectSetupSkip(command)
+
+    -- legacy annotation: @guidance
+        -- uv guarantees that a directly invoked script with inline metadata
+        -- runs in an environment isolated from the project. Project `uv sync`
+        -- therefore prepares packages the job cannot import and must not be a
+        -- prerequisite for running the script. This rule is deliberately
+        -- conservative: a compound command may contain another step that
+        -- needs the project environment, so ambiguous shapes retain detected
+        -- setup unless [tool.weft] isolated = true explicitly suppresses it.
+        -- A script that needs project code declares that code in its own
+        -- dependency environment; syncing the project first cannot leak it
+        -- into uv's PEP 723 environment. Implementation:
+        -- internal/dataloc/uv_command.go DirectUVRunPEP723Script;
+        -- internal/runner/envsetup.go SetupSkipReason. See decision 0023.
+}
+
 rule EditJobRentalPolicy {
     when: EvaluateEditJobRentalPolicy()
 

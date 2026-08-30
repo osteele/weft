@@ -785,9 +785,10 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	setupCmd := DetectSetupCommand(expandedDir)
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
-		if ShouldSkipSetup(setupCmd, scriptMeta) {
-			slog.Info("skipping uv sync: script metadata declares isolated = true",
-				"component", "runner", "job_id", jobID)
+		if reason := SetupSkipReason(setupCmd, expandedDir, command, scriptMeta); reason != "" {
+			slog.Info("skipping project uv sync",
+				"component", "runner", "job_id", jobID, "reason", reason)
+			appendSetupLog(paths.Log, []byte("weft: skipping project uv sync: "+reason+"\n"))
 			setupCmd = ""
 		}
 	}
