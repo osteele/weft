@@ -1407,6 +1407,25 @@ rule ReconcilePass {
     ensures: OrphanSweepCompleted()
 }
 
+rule InstanceCleanupAuditUsesThreeStateEvidence {
+	when: UserAuditsInstance(instance)
+
+    if instance.provider_instance_id = null:
+        ensures: instance.audit_resource_state = unknown
+    else if provider.observation = confirmed_not_found:
+        ensures: instance.audit_resource_state = gone
+    else if provider.observation = confirmed_present:
+        ensures: instance.audit_resource_state = remaining
+    else:
+        ensures: instance.audit_resource_state = unknown
+
+    -- legacy annotation: @guidance
+        -- A launch row proves that Weft intended to create a rental; it does
+        -- not prove that the provider accepted one. In particular,
+        -- provider_status=not_recorded must not be rendered as remaining.
+        -- Implementation: cmd/instance.go auditResourceState.
+}
+
 -- The terminal-launch job repair must converge: one pass resolves every
 -- candidate it selects, so the next pass selects none of them again.
 rule OrphanedCloudJobsResetConverges {

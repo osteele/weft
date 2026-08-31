@@ -169,6 +169,27 @@ func TestRunInstanceAuditReportsRemainingProviderResource(t *testing.T) {
 	}
 }
 
+func TestAuditResourceStateRequiresPositiveProviderEvidence(t *testing.T) {
+	tests := []struct {
+		name string
+		obs  instanceAuditProviderObservation
+		want string
+	}{
+		{"provider id not recorded", instanceAuditProviderObservation{status: "not_recorded"}, "unknown"},
+		{"provider lookup returned nil", instanceAuditProviderObservation{status: "unknown"}, "unknown"},
+		{"provider lookup failed", instanceAuditProviderObservation{err: cloud.ErrInstanceNotFound}, "unknown"},
+		{"confirmed absent", instanceAuditProviderObservation{status: "not_found"}, "gone"},
+		{"confirmed running", instanceAuditProviderObservation{status: cloud.ProviderStatusRunning}, "remaining"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := auditResourceState(tt.obs); got != tt.want {
+				t.Fatalf("auditResourceState(%+v) = %q, want %q", tt.obs, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJoinNonEmpty(t *testing.T) {
 	cases := []struct {
 		name string

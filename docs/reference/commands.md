@@ -1553,6 +1553,11 @@ a `remaining` / `gone` / `unknown` resource summary. It is read-only; use
 `weft cleanup --provider ... --force` or `weft instance terminate ...` for
 actual cleanup.
 
+A rental row without a recorded provider instance ID reports `unknown`, not
+`remaining`: Weft has neither a provider resource to query nor positive evidence
+that a resource still exists. Provider `not_found` is the distinct, confirmed
+`gone` result.
+
 Cordoning lets the current job finish without the autopilot routing new
 work to the instance — useful when an instance has a stale agent or you
 want to drain just one instance without pausing the autopilot globally.

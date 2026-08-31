@@ -364,7 +364,7 @@ func auditProviderStatusLabel(obs instanceAuditProviderObservation) string {
 }
 
 func auditResourceState(obs instanceAuditProviderObservation) string {
-	if obs.err != nil || obs.status == "" || obs.status == "unknown" {
+	if obs.err != nil || obs.status == "" || obs.status == "unknown" || obs.status == "not_recorded" {
 		return "unknown"
 	}
 	switch obs.status {
