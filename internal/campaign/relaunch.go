@@ -369,10 +369,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (rr *RelaunchResult, rerr error) {
 
 	eligibleCount = len(eligible)
 	slog.Info("eligible orphaned jobs for relaunch", "component", "relaunch", "count", eligibleCount)
-	_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
-		EventKind: db.EventRelaunchEligible,
-		JobCount:  eligibleCount,
-	})
+	for _, job := range eligible {
+		_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+			EventKind: db.EventRelaunchEligible,
+			JobID:     job.ID,
+			GPUSpec:   job.GPUClass,
+			JobCount:  1,
+		})
+	}
 
 	// Group by GPU requirements and estimate disk.
 	// Auto-relaunch can transiently mark scoped jobs as pending_placement to

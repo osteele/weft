@@ -3390,6 +3390,10 @@ rule RelaunchAfterInfraFailure {
         -- submitAutoPilotReuseAssignments); the eligibility loop in
         -- RelaunchOrphanedJobs re-evaluates the same limits and records
         -- the skip events.
+		-- Relaunch eligibility is recorded once per job with lifecycle-event
+		-- job_id provenance. The pass summary remains an aggregate event: a
+		-- multi-job pass cannot truthfully carry one job_id. Historical
+		-- relaunch.eligible rows may be aggregate rows with job_id absent.
 }
 
 -- ==========================================================================

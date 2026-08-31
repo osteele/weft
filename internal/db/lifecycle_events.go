@@ -12,6 +12,8 @@ import (
 // Naming convention: <subsystem>.<action>[.<detail>]
 const (
 	// Relaunch decisions (from RelaunchOrphanedJobs)
+	// EventRelaunchEligible is emitted once per eligible job. JobID is required
+	// for new rows; legacy aggregate rows have JobID=0 and JobCount>1.
 	EventRelaunchEligible           = "relaunch.eligible"
 	EventRelaunchSkippedMaxAttempts = "relaunch.skipped.max_attempts"
 	EventRelaunchSkippedNoOffers    = "relaunch.skipped.no_offers"

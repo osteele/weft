@@ -674,3 +674,43 @@ func TestRelaunchOrphanedJobs_ActivePassWritesSummary(t *testing.T) {
 		t.Fatalf("pass-summary events = %d, want 1 for an active pass", got)
 	}
 }
+
+func TestRelaunchEligibleEventsIdentifyEachJob(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	want := map[int64]bool{}
+	for _, description := range []string{"first", "second"} {
+		jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", description, "nvidia")
+		if err != nil {
+			t.Fatalf("queue %s job: %v", description, err)
+		}
+		if err := db.AddJobTag(database, jobID, db.TagRental); err != nil {
+			t.Fatalf("tag %s job: %v", description, err)
+		}
+		want[jobID] = true
+	}
+
+	if _, err := RelaunchOrphanedJobs(RelaunchConfig{Database: database, IncludeFreshUnplaced: true}); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	events, err := db.ListLifecycleEvents(database, db.LifecycleEventFilter{Kind: db.EventRelaunchEligible})
+	if err != nil {
+		t.Fatalf("list eligible events: %v", err)
+	}
+	if len(events) != len(want) {
+		t.Fatalf("eligible event count = %d, want %d: %+v", len(events), len(want), events)
+	}
+	for _, event := range events {
+		if !want[event.JobID] {
+			t.Fatalf("eligible event has job_id %d, want one of %v", event.JobID, want)
+		}
+		if event.JobCount != 1 {
+			t.Fatalf("eligible event for job %d has job_count %d, want 1", event.JobID, event.JobCount)
+		}
+		delete(want, event.JobID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing eligible events for jobs %v", want)
+	}
+}
