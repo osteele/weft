@@ -153,6 +153,57 @@ func TestForJobExplainsQueuedRentalTarget(t *testing.T) {
 	}
 }
 
+func TestForJobExplainsEveryLifecycleStatusHonestly(t *testing.T) {
+	tests := []struct {
+		status string
+		reason string
+		action string
+	}{
+		{db.StatusPendingPlacement, "placement is in progress", "wait for placement to finish"},
+		{db.StatusStarting, "job is starting", "monitor startup"},
+		{db.StatusRunning, "job is running", "monitor progress"},
+		{db.StatusPaused, "job is paused", "resume, retry, or inspect the job"},
+		{db.StatusCompleted, "job completed", "inspect outputs"},
+		{db.StatusFailed, "job failed", "inspect log or retry"},
+		{db.StatusDead, "job failed", "inspect log or retry"},
+		{db.StatusKilled, "job was killed", "retry if the work is still needed"},
+		{db.StatusCanceled, "job was canceled", "retry if the work is still needed"},
+		{db.StatusSkipped, "job was skipped", "inspect dependencies or retry"},
+		{db.StatusDraft, "job is a draft and is not queued", "queue or edit the job"},
+		{"orphaned", "latest attempt was orphaned from its execution target", "inspect instance history or retry"},
+		{"future_status", "job status is future_status; no specific explanation is available", "inspect job and attempt history"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			job := &db.Job{ID: 42, Host: "host-alpha", Status: tt.status}
+			x := ForJob(nil, job, time.Unix(20_000, 0))
+			if x.PrimaryReason != tt.reason {
+				t.Fatalf("PrimaryReason = %q, want %q", x.PrimaryReason, tt.reason)
+			}
+			if x.SuggestedAction != tt.action {
+				t.Fatalf("SuggestedAction = %q, want %q", x.SuggestedAction, tt.action)
+			}
+			if strings.Contains(x.PrimaryReason, "no blocker detected") {
+				t.Fatalf("PrimaryReason makes a false no-blocker claim: %q", x.PrimaryReason)
+			}
+		})
+	}
+}
+
+func TestForJobUsesRecordedTerminalReason(t *testing.T) {
+	job := &db.Job{
+		ID:            42,
+		Host:          "host-alpha",
+		Status:        db.StatusCanceled,
+		FailureReason: db.FailureReasonCUDADriverTooOld,
+	}
+	x := ForJob(nil, job, time.Unix(20_000, 0))
+	if x.PrimaryReason != db.FailureReasonCUDADriverTooOld {
+		t.Fatalf("PrimaryReason = %q, want recorded reason", x.PrimaryReason)
+	}
+}
+
 func TestForJobSuggestsDiskReportForDiskFullRental(t *testing.T) {
 	database := db.SetupTestDB(t)
 	launchID, err := db.CreateLaunch(database, &db.Launch{Status: db.LaunchStatusRunning, Provider: "vastai"})

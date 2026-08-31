@@ -629,6 +629,20 @@ enum DisplayStatus {
                     | orphaned
 }
 
+rule JobDiagnosisDoesNotTreatUnhandledStatusAsNoBlocker {
+    when: UserRequestsJobDiagnosis(job)
+
+	ensures: HonestStatusExplanation(job.display_status)
+
+    -- legacy annotation: @guidance
+        -- A lifecycle status is itself evidence. Diagnosis must explain every
+        -- known status, including terminal and derived `orphaned` states. If a
+        -- newer status reaches an older client, report that the status has no
+        -- specific explanation and direct the user to attempt history; do not
+        -- turn an unhandled switch branch into a confident negative claim.
+        -- Implementation: internal/explain.ForJob.
+}
+
 -- Placement scoring result
 value PlacementResult {
     target: ExecutionTarget?
@@ -2562,7 +2576,6 @@ rule UserRequeuesJob {
         -- target, otherwise unplaced. A stored or explicit host is a
         -- concrete placement and wins over tags, including stale `rental`
         -- tags left from an earlier cloud attempt.
-        --
         -- If no concrete target exists, the new attempt is unplaced
         -- (host='', launch_id=NULL) and the scheduler re-places it on the
         -- next sweep. Prior cloud attempts are marked
@@ -2581,8 +2594,8 @@ rule UserRequeuesJob {
         -- `requested_status='queued'`; the on-prem branch now does the
         -- same after creating its fresh queued attempt.
         --
-        -- Implementation: cmd/restart.go resolveRetryTarget applies the
-        -- precedence above. internal/db/db.go RequeueFreshAttemptByTarget
+		-- Implementation: cmd/restart.go resolveRetryTarget applies the
+		-- precedence above. internal/db/db.go RequeueFreshAttemptByTarget
         -- creates a fresh queued attempt with the resolved inventory host
         -- or live launch target; RequeueFreshAttemptByID is the unplaced
         -- fallback.

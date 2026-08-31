@@ -142,9 +142,21 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 	case db.StatusQueued:
 		x.PrimaryReason = queuedReason(job)
 		x.SuggestedAction = queuedSuggestedAction(job)
+	case db.StatusPendingPlacement:
+		x.PrimaryReason = "placement is in progress"
+		x.SuggestedAction = "wait for placement to finish"
+	case db.StatusStarting:
+		x.PrimaryReason = "job is starting"
+		x.SuggestedAction = "monitor startup"
 	case db.StatusRunning:
 		x.PrimaryReason = "job is running"
 		x.SuggestedAction = "monitor progress"
+	case db.StatusPaused:
+		x.PrimaryReason = "job is paused"
+		x.SuggestedAction = "resume, retry, or inspect the job"
+	case db.StatusCompleted:
+		x.PrimaryReason = "job completed"
+		x.SuggestedAction = "inspect outputs"
 	case db.StatusFailed, db.StatusDead:
 		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "job failed")
 		if latestLaunchTerminatedWith(database, job, db.TerminationReasonDiskFull) {
@@ -152,9 +164,28 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 		} else {
 			x.SuggestedAction = "inspect log or retry"
 		}
+	case db.StatusKilled:
+		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "job was killed")
+		x.SuggestedAction = "retry if the work is still needed"
+	case db.StatusCanceled:
+		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "job was canceled")
+		x.SuggestedAction = "retry if the work is still needed"
+	case db.StatusSkipped:
+		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "job was skipped")
+		x.SuggestedAction = "inspect dependencies or retry"
+	case db.StatusDraft:
+		x.PrimaryReason = "job is a draft and is not queued"
+		x.SuggestedAction = "queue or edit the job"
+	case "orphaned":
+		x.PrimaryReason = firstNonEmpty(job.FailureReason, job.ErrorMessage, "latest attempt was orphaned from its execution target")
+		x.SuggestedAction = "inspect instance history or retry"
 	default:
-		x.PrimaryReason = "no blocker detected"
-		x.SuggestedAction = "none"
+		status := job.EffectiveStatus()
+		if status == "" {
+			status = "unknown"
+		}
+		x.PrimaryReason = fmt.Sprintf("job status is %s; no specific explanation is available", status)
+		x.SuggestedAction = "inspect job and attempt history"
 	}
 	return x
 }
