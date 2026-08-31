@@ -279,3 +279,40 @@ import torch
 		t.Fatalf("command = %q, want no interpreter request when the script declares no bound", got)
 	}
 }
+
+// A direct `uv run script.py` runs in the script's environment, so setup skips
+// the project sync (decision 0023). The preflight must not then probe the
+// project environment nothing populated — with --no-sync it would import from
+// an empty venv and fail by construction, killing a job whose real environment
+// is fine.
+func TestShouldRunTorchPreflight_SkipsProjectEnvForDirectUVRunScript(t *testing.T) {
+	dir := t.TempDir()
+	// A project that declares torch: this is what makes JobUsesTorch true and
+	// previously dragged the preflight into the project environment.
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"),
+		[]byte("[project]\nname = \"p\"\ndependencies = [\"torch>=2.6,<2.7\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An orchestrator script that declares no dependencies of its own.
+	script := "orchestrate.py"
+	if err := os.WriteFile(filepath.Join(dir, script),
+		[]byte("# /// script\n# dependencies = []\n# ///\nprint('hi')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := dataloc.DirectUVRunPEP723Script(dir, "uv run "+script); got == "" {
+		t.Fatalf("fixture does not read as a direct uv run of a PEP 723 script")
+	}
+	if shouldRunTorchPreflight(dir, "uv run "+script, nil) {
+		t.Error("preflight ran for a command whose environment is the script env, not the project env")
+	}
+
+	// A command that is NOT script-owned still gets the preflight from the
+	// project's torch declaration — the guard must not disable it wholesale.
+	if !shouldRunTorchPreflight(dir, "python train.py", nil) {
+		t.Error("preflight skipped for a project-env command that declares torch")
+	}
+}

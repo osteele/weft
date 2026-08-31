@@ -799,6 +799,21 @@ rule DirectPEP723ScriptOwnsSetupEnvironment {
         -- into uv's PEP 723 environment. Implementation:
         -- internal/dataloc/uv_command.go DirectUVRunPEP723Script;
         -- internal/runner/envsetup.go SetupSkipReason. See decision 0023.
+        --
+        -- The same ownership decides what may be probed. Every runner check
+        -- that inspects an environment before the command runs must target
+        -- the environment the command will import from, never the project
+        -- environment this rule declined to populate. The torch preflight
+        -- reads the project's torch declaration to decide whether to run, so
+        -- without this it probed the project environment through
+        -- `uv run --no-sync` for a script-owned command: unable to install,
+        -- uv materializes an empty venv and the import fails by construction,
+        -- failing a job whose real environment was never examined. A script
+        -- declaring torch is probed in its own environment; one declaring
+        -- none is not probed at all, because there is nothing to probe until
+        -- uv builds that environment at run time.
+        -- Implementation: internal/runner/torch_preflight.go
+        -- shouldRunTorchPreflight.
 }
 
 rule EditJobRentalPolicy {

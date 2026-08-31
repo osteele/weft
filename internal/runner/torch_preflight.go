@@ -166,6 +166,15 @@ func shouldRunTorchPreflight(workingDir, jobCommand string, scriptMeta *dataloc.
 	if scriptMeta != nil && scriptMeta.Isolated {
 		return false
 	}
+	// The project environment is not this command's environment. Setup already
+	// declined to populate it (SetupSkipReason, decision 0023), so probing it
+	// would import from an empty venv and fail by construction. A script that
+	// declares torch itself is served by the script-deps branch above; one that
+	// declares none — an orchestrator shelling out to an inner PEP 723 script,
+	// say — has no torch to probe ahead of time and must not be blocked on it.
+	if dataloc.DirectUVRunPEP723Script(workingDir, jobCommand) != "" {
+		return false
+	}
 	runtime, _ := placement.ResolveEffectiveRuntime(workingDir, jobCommand, placement.EffectiveRuntimeOptions{FloorMode: placement.RuntimeFloorFamily})
 	if placement.RuntimeImageOwnsTorch(runtime.Image) {
 		return false
