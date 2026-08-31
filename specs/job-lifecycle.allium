@@ -2576,6 +2576,14 @@ rule UserRequeuesJob {
         -- target, otherwise unplaced. A stored or explicit host is a
         -- concrete placement and wins over tags, including stale `rental`
         -- tags left from an earlier cloud attempt.
+		-- A live rental target is not retained when the latest failure is
+		-- positive evidence that the target itself is incompatible: its CUDA
+		-- driver is too old, it exposes fewer GPUs than advertised, or a
+		-- weft-owned CUDA device probe found a hardware/runtime fault. The retry
+		-- returns to the unplaced pool so placement cannot immediately repeat
+		-- the same deterministic failure. Explicit inventory-host targets keep
+		-- their normal retry semantics; changing one requires user intent.
+        --
         -- If no concrete target exists, the new attempt is unplaced
         -- (host='', launch_id=NULL) and the scheduler re-places it on the
         -- next sweep. Prior cloud attempts are marked
@@ -2594,8 +2602,10 @@ rule UserRequeuesJob {
         -- `requested_status='queued'`; the on-prem branch now does the
         -- same after creating its fresh queued attempt.
         --
-		-- Implementation: cmd/restart.go resolveRetryTarget applies the
-		-- precedence above. internal/db/db.go RequeueFreshAttemptByTarget
+        -- Implementation: cmd/restart.go resolveRetryTarget applies the
+		-- precedence above and db.IsRentalTargetIncompatibleFailureReason
+		-- defines the narrow exclusion class. internal/db/db.go
+		-- RequeueFreshAttemptByTarget
         -- creates a fresh queued attempt with the resolved inventory host
         -- or live launch target; RequeueFreshAttemptByID is the unplaced
         -- fallback.

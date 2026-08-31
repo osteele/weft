@@ -81,6 +81,30 @@ func TestSanitizeFailureReasonClosedVocabulary(t *testing.T) {
 	}
 }
 
+func TestIsRentalTargetIncompatibleFailureReason(t *testing.T) {
+	for _, reason := range []string{
+		FailureReasonCUDADriverTooOld,
+		FailureReasonGPUCountPreflightFailed,
+		FailureReasonInfraCUDAHardwareFault,
+		FailureReasonInfraTorchPreflightFailed,
+	} {
+		if !IsRentalTargetIncompatibleFailureReason(reason) {
+			t.Errorf("IsRentalTargetIncompatibleFailureReason(%q) = false", reason)
+		}
+	}
+	for _, reason := range []string{
+		FailureReasonGPUOOM,
+		FailureReasonDiskFull,
+		FailureReasonSetupTimeout,
+		FailureReasonInfraPrewarmDownloadFailed,
+		FailureReasonError,
+	} {
+		if IsRentalTargetIncompatibleFailureReason(reason) {
+			t.Errorf("IsRentalTargetIncompatibleFailureReason(%q) = true", reason)
+		}
+	}
+}
+
 func TestRepairFailureReasonsIsLosslessAndIdempotent(t *testing.T) {
 	database := SetupTestDB(t)
 	type seeded struct {

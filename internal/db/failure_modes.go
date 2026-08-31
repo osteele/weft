@@ -236,6 +236,23 @@ func IsInfraFailureReason(reason string) bool {
 	return false
 }
 
+// IsRentalTargetIncompatibleFailureReason reports whether the recorded failure
+// is positive evidence that retrying on the same rental target is unsafe. Keep
+// this narrower than infrastructure failure: transient staging or network
+// failures can succeed on a still-live instance, while these reasons describe
+// the instance's driver, advertised GPU inventory, or CUDA device itself.
+func IsRentalTargetIncompatibleFailureReason(reason string) bool {
+	switch reason {
+	case FailureReasonCUDADriverTooOld,
+		FailureReasonGPUCountPreflightFailed,
+		FailureReasonInfraCUDAHardwareFault,
+		FailureReasonInfraTorchPreflightFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // InfraFailureReasons returns the failure_reason values that mark an attempt
 // as infrastructure-side. Callers that need SQL predicates should build them
 // from this list so query behavior stays aligned with IsInfraFailureReason.

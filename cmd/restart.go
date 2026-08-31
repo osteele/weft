@@ -1115,6 +1115,9 @@ func resolveRetryTarget(database *sql.DB, job *db.Job) (string, *int64, error) {
 	if job.HasInventoryHost() {
 		return job.Host, nil, nil
 	}
+	if db.IsRentalTargetIncompatibleFailureReason(job.FailureReason) {
+		return "", nil, nil
+	}
 	if job.LaunchID == nil || *job.LaunchID <= 0 {
 		return "", nil, nil
 	}

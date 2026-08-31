@@ -751,6 +751,43 @@ func TestRestartLiveRentalJobKeepsLaunchTarget(t *testing.T) {
 	}
 }
 
+func TestResolveRetryTargetRejectsIncompatibleLiveRental(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "incompatible rental retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("set launch: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ?, failure_reason = ? WHERE job_id = ? AND end_time IS NULL`,
+		db.StatusFailed, int64(1000), db.AttemptOutcomeFailed, db.FailureReasonCUDADriverTooOld, jobID,
+	); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	host, gotLaunchID, err := resolveRetryTarget(database, job)
+	if err != nil {
+		t.Fatalf("resolveRetryTarget: %v", err)
+	}
+	if host != "" || gotLaunchID != nil {
+		t.Fatalf("target = host %q launch %v, want unplaced", host, gotLaunchID)
+	}
+}
+
 func TestRestartLiveRentalJobWithStoredPlacementHostKeepsHost(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "studio", t.TempDir(), "python train.py", "live rental retry")
