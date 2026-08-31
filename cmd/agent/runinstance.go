@@ -298,7 +298,7 @@ func runInstance(args []string) {
 			})
 			return
 		}
-		if !anyFailed {
+		if !anyFailed && !seqResult.AnyCanceled {
 			jobs = successHandoffWait(successHandoffWaitConfig{
 				InstanceID: instanceIDInt,
 				R2Bucket:   r2Bucket,
@@ -820,9 +820,53 @@ func runJobWithProgress(r2Bucket string, jobID, runID, instanceID int64, logDir 
 	return runner.RunSingleJob(cfg)
 }
 
-// startKillPoller polls R2 for a kill signal targeting the current job.
-// When the CLI writes the job ID to instance/<id>/kill-job, the poller
-// reads the pgid file from logDir and sends SIGTERM/SIGKILL to the process group.
+var (
+	killR2Get    = r2Get
+	killR2Delete = r2Delete
+)
+
+// findJobKillRequest checks the durable per-job request first, then the legacy
+// per-instance mailbox used by older clients. It leaves the request in place
+// until the caller has either skipped the job or signaled its process group.
+func findJobKillRequest(r2Bucket string, instanceID, jobID int64) (string, bool, error) {
+	key := r2keys.InstanceKillJobRequest(instanceID, jobID)
+	value, err := killR2Get(r2Bucket, key)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(value) != "" {
+		return key, true, nil
+	}
+
+	legacyKey := r2keys.InstanceKillJob(instanceID)
+	value, err = killR2Get(r2Bucket, legacyKey)
+	if err != nil {
+		return "", false, err
+	}
+	targetJobID, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || targetJobID != jobID {
+		return "", false, nil
+	}
+	return legacyKey, true, nil
+}
+
+// consumeJobKillRequest removes a request after the caller has committed to
+// skipping a job that has not started.
+func consumeJobKillRequest(r2Bucket string, instanceID, jobID int64) (bool, error) {
+	key, requested, err := findJobKillRequest(r2Bucket, instanceID, jobID)
+	if err != nil || !requested {
+		return requested, err
+	}
+	if err := killR2Delete(r2Bucket, key); err != nil {
+		fmt.Fprintf(os.Stderr, "delete kill signal for job %d: %v\n", jobID, err)
+	}
+	return true, nil
+}
+
+// startKillPoller polls R2 for a kill signal targeting the current job and
+// sends SIGTERM/SIGKILL to its process group. runJobSequence performs the same
+// check before dispatch so a request written during provisioning prevents the
+// command from starting at all.
 func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) func() {
 	var once sync.Once
 	done := make(chan struct{})
@@ -837,24 +881,19 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 			case <-done:
 				return
 			case <-ticker.C:
-				val, err := r2Get(r2Bucket, r2keys.InstanceKillJob(instanceID))
+				key, requested, err := findJobKillRequest(r2Bucket, instanceID, jobID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "poll kill signal for job %d: %v\n", jobID, err)
 					continue
 				}
-				if val == "" {
+				if !requested {
 					continue
 				}
-				targetJobID, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
-				if err != nil || targetJobID != jobID {
-					continue
-				}
-
-				fmt.Printf("Kill signal received for job %d via R2\n", jobID)
-				oplog.Log(oplog.OpJobKill, oplog.WithJobID(jobID), oplog.WithDetail("kill signal from R2"))
 
 				pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
 				if pgid, ok := runner.ReadPIDFile(pgidPath); ok {
+					fmt.Printf("Kill signal received for job %d via R2\n", jobID)
+					oplog.Log(oplog.OpJobKill, oplog.WithJobID(jobID), oplog.WithDetail("kill signal from R2"))
 					// Graceful escalation: SIGTERM now, SIGKILL after the
 					// grace window. This gives the job a chance to flush
 					// checkpoints and lets the bash exit-capture trap write
@@ -862,10 +901,11 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 					// the kill-reason file.
 					runner.KillProcessGroupWithGrace(pgid, runner.DefaultKillGrace,
 						runner.NewJobPaths(logDir, jobID), runner.KillReasonUserKill)
+					if err := killR2Delete(r2Bucket, key); err != nil {
+						fmt.Fprintf(os.Stderr, "delete kill signal for job %d: %v\n", jobID, err)
+					}
+					return
 				}
-
-				r2Delete(r2Bucket, r2keys.InstanceKillJob(instanceID))
-				return
 			}
 		}
 	})

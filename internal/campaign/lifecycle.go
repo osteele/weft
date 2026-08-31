@@ -2152,6 +2152,108 @@ func runGroupLaunchWithReplan(
 // nil when the caller doesn't intend to allow cross-provider fallback
 // (e.g. the relaunch path and TUI single-shot launches, which already
 // pass nil for replacementOffer).
+func launchTerminationAttemptDisposition(status string) (string, bool) {
+	switch status {
+	case db.LaunchStatusCompleted:
+		return db.AttemptOutcomeCompleted, false
+	case db.LaunchStatusFailed:
+		return db.AttemptOutcomeOrphaned, true
+	default:
+		return db.AttemptOutcomeCancelled, true
+	}
+}
+
+// finishLaunchTerminationBeforeCreate stops a launch whose last job was
+// canceled before the provider request begins.
+func finishLaunchTerminationBeforeCreate(database *sql.DB, instanceID int64) (bool, error) {
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		return false, err
+	}
+	if ci == nil {
+		return false, fmt.Errorf("launch %d not found before provider create", instanceID)
+	}
+	if db.IsTerminalLaunchStatus(ci.Status) {
+		return true, nil
+	}
+	if !ci.HasActiveTerminationIntent() {
+		return false, nil
+	}
+
+	intent := ci.TerminationIntent
+	intent.State = instanceintent.StateSucceeded
+	intent.LastError = ""
+	outcome, resetJobs := launchTerminationAttemptDisposition(intent.TerminalStatus)
+	if _, err := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+		Status:               intent.TerminalStatus,
+		TerminationReason:    intent.TerminationReason,
+		TerminationDetail:    "provider creation skipped because the launch had no remaining work",
+		ResetJobs:            resetJobs,
+		AttemptOutcome:       outcome,
+		TerminationRequested: true,
+		TerminationIntent:    intent,
+	}); err != nil {
+		return true, fmt.Errorf("finish launch canceled before provider create: %w", err)
+	}
+	oplog.Log(oplog.OpLaunchTerminated, oplog.WithDetailf(
+		"launch_id=%d reason=%s detail=provider creation skipped after all jobs stopped",
+		instanceID, intent.TerminationReason))
+	return true, nil
+}
+
+// finishLaunchTerminationRequestedDuringCreate closes the race where a user
+// stops every assigned job while CreateInstance is still in flight. The job
+// control path can record intent before a provider ID exists; once creation
+// returns, the launch must destroy that resource instead of continuing setup.
+func finishLaunchTerminationRequestedDuringCreate(database *sql.DB, client cloud.Client, instanceID int64, providerID string) (bool, error) {
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		return false, err
+	}
+	if ci == nil {
+		return false, fmt.Errorf("launch %d not found after provider create", instanceID)
+	}
+	if db.IsTerminalLaunchStatus(ci.Status) {
+		return true, nil
+	}
+	if !ci.HasActiveTerminationIntent() {
+		return false, nil
+	}
+
+	intent, err := db.RecordLaunchDestroyIntentWithProviderID(
+		database, instanceID, ci.TerminationIntent.TerminalStatus,
+		ci.TerminationIntent.TerminationReason, providerID,
+	)
+	if err != nil {
+		return true, fmt.Errorf("refresh launch destroy intent after provider create: %w", err)
+	}
+	if err := client.DestroyInstance(providerID); err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
+		intent.LastError = err.Error()
+		_ = db.UpdateLaunchTerminationIntent(database, instanceID, intent)
+		return true, fmt.Errorf("destroy provider instance after launch cancellation: %w", err)
+	}
+	intent.State = instanceintent.StateSucceeded
+	intent.DestroySucceededAtUnix = time.Now().Unix()
+	intent.ProviderInstanceID = providerID
+	status := intent.TerminalStatus
+	reason := intent.TerminationReason
+	outcome, resetJobs := launchTerminationAttemptDisposition(status)
+	if _, err := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+		Status:            status,
+		TerminationReason: reason,
+		TerminationDetail: strings.TrimSpace(intent.Detail),
+		ResetJobs:         resetJobs,
+		AttemptOutcome:    outcome,
+		TerminationIntent: intent,
+	}); err != nil {
+		return true, fmt.Errorf("finish canceled launch after provider create: %w", err)
+	}
+	oplog.Log(oplog.OpLaunchTerminated, oplog.WithDetailf(
+		"launch_id=%d provider=%s provider_instance_id=%s reason=%s detail=termination requested during provider create",
+		instanceID, client.Provider(), providerID, reason))
+	return true, nil
+}
+
 func LaunchInstance(
 	client cloud.Client,
 	clients []cloud.Client,
@@ -2615,6 +2717,9 @@ func LaunchInstance(
 		group.GPUSpec(),
 		createOpts.Label,
 	))
+	if stopped, err := finishLaunchTerminationBeforeCreate(database, instanceID); stopped {
+		return instanceID, err
+	}
 
 	// Create cloud instance. createInstanceWithReplacement may swap client
 	// mid-retry if the replacement offer is from a different provider, and
@@ -2766,6 +2871,9 @@ func LaunchInstance(
 			return instanceID, errors.Join(fmt.Errorf("record provider instance ID: %w", err), fmt.Errorf("destroy unrecorded provider instance: %w", destroyErr))
 		}
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
+	}
+	if stopped, err := finishLaunchTerminationRequestedDuringCreate(database, client, instanceID, providerInstID); stopped {
+		return instanceID, err
 	}
 	if err := db.UpdateLaunchInstanceMetadata(database, instanceID, inst); err != nil {
 		slog.Debug("record provider instance metadata failed", "launch_id", instanceID, "error", err)

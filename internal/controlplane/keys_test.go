@@ -23,6 +23,9 @@ func TestInstanceObservabilityKeys(t *testing.T) {
 	if got := InstanceAgentDied(42); got != "instance/42/agent-died.json" {
 		t.Fatalf("InstanceAgentDied = %q", got)
 	}
+	if got := InstanceKillJobRequest(42, 17); got != "instance/42/kill-jobs/17" {
+		t.Fatalf("InstanceKillJobRequest = %q", got)
+	}
 }
 
 func TestBlackboardKeys(t *testing.T) {

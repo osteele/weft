@@ -112,13 +112,6 @@ func TestRunInstanceAuditReportsRemainingProviderResource(t *testing.T) {
 	if err := db.SetLaunchProviderID(database, instanceID, "vast-123"); err != nil {
 		t.Fatalf("SetLaunchProviderID: %v", err)
 	}
-	if err := db.UpdateLaunchTerminationIntent(database, instanceID, &instanceintent.Marker{
-		State:                instanceintent.StateDestroying,
-		RequestedAtUnix:      now - 40,
-		DestroyStartedAtUnix: started,
-	}); err != nil {
-		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
-	}
 	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(instanceID), "/tmp", "echo test", "audit", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
@@ -132,6 +125,13 @@ func TestRunInstanceAuditReportsRemainingProviderResource(t *testing.T) {
 	exitCode := 0
 	if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, now); err != nil {
 		t.Fatalf("CloseAttempt: %v", err)
+	}
+	if err := db.UpdateLaunchTerminationIntent(database, instanceID, &instanceintent.Marker{
+		State:                instanceintent.StateDestroying,
+		RequestedAtUnix:      now - 40,
+		DestroyStartedAtUnix: started,
+	}); err != nil {
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
 	}
 
 	origObserve := instanceAuditObserveProvider

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
 
@@ -60,17 +62,32 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 		return "", err
 	}
-	return SignalCloudJobKill(context.Background(), jobID, inst.ID, targetStatus)
+	empty, emptyErr := CancelLaunchIfNoActiveJobs(database, inst.ID)
+	if empty.Requested {
+		// The launch-level destroy intent supersedes the per-job signal. Record
+		// it before any network call so an empty launch cannot be held open by
+		// an unavailable R2 control channel.
+		if empty.Destroyed {
+			return fmt.Sprintf("Job %s %s; rental instance %s had no remaining work and was terminated",
+				ids.FormatJobID(jobID), targetStatus, ids.FormatInstanceID(inst.ID)), emptyErr
+		}
+		return fmt.Sprintf("Job %s %s; rental instance %s has no remaining work and termination is pending provider identity",
+			ids.FormatJobID(jobID), targetStatus, ids.FormatInstanceID(inst.ID)), emptyErr
+	}
+	message, signalErr := signalCloudJobKillForControl(context.Background(), jobID, inst.ID, targetStatus)
+	return message, errors.Join(signalErr, emptyErr)
 }
 
-// SignalCloudJobKill writes the per-instance kill marker the agent polls.
+var signalCloudJobKillForControl = SignalCloudJobKill
+
+// SignalCloudJobKill writes the durable per-job kill marker the agent polls.
 //
-// This is the one channel that reaches a running agent: the agent reads
-// r2keys.InstanceKillJob rather than the database, so a local status write
-// alone never stops work already dispatched. Callers that have established the
-// job should not be running are expected to reach this directly — the
-// job-level helpers above refuse a job whose effective status is already
-// terminal, which is exactly the state a cancelled-but-running job is in.
+// This is the one channel that reaches a running agent: the agent reads R2
+// rather than the database, so a local status write alone never stops work
+// already dispatched. Callers that have established the job should not be
+// running are expected to reach this directly — the job-level helpers above
+// refuse a job whose effective status is already terminal, which is exactly
+// the state a cancelled-but-running job is in.
 //
 // Recording the job's intent belongs to the caller, so a caller that must not
 // escalate until the marker is known to be written can order the two itself.
@@ -84,12 +101,29 @@ func SignalCloudJobKill(ctx context.Context, jobID, launchID int64, targetStatus
 		return "", fmt.Errorf("R2 client is not configured")
 	}
 
-	killKey := r2keys.InstanceKillJob(launchID)
-	if err := r2Client.PutObject(ctx, killKey, strings.NewReader(fmt.Sprintf("%d", jobID)), "text/plain"); err != nil {
+	if err := writeCloudJobKillSignals(ctx, r2Client, jobID, launchID); err != nil {
 		return "", fmt.Errorf("write kill signal to R2: %w", err)
 	}
 	return fmt.Sprintf("Job %s %s on rental instance (kill signal sent)", ids.FormatJobID(jobID), targetStatus), nil
 }
+
+type killSignalObjectPutter interface {
+	PutObject(context.Context, string, io.Reader, string) error
+}
+
+func writeCloudJobKillSignals(ctx context.Context, r2Client killSignalObjectPutter, jobID, launchID int64) error {
+	body := fmt.Sprintf("%d", jobID)
+	if err := r2Client.PutObject(ctx, r2keys.InstanceKillJobRequest(launchID, jobID), strings.NewReader(body), "text/plain"); err != nil {
+		return err
+	}
+	// Compatibility for agents launched before per-job keys were introduced.
+	// This mailbox can still be overwritten, so new agents treat it only as a
+	// fallback; failure here does not invalidate the durable per-job request.
+	_ = r2Client.PutObject(ctx, r2keys.InstanceKillJob(launchID), strings.NewReader(body), "text/plain")
+	return nil
+}
+
+var _ killSignalObjectPutter = (*r2.Client)(nil)
 
 // KillOrCancelJob routes cloud jobs through cloud control and non-cloud jobs through ops.
 func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode ops.TimeoutMode) (ops.Result, error) {

@@ -2209,6 +2209,84 @@ func TestGetActiveLaunchJobCounts_OnlyCountsNonTerminalJobs(t *testing.T) {
 	}
 }
 
+func TestRecordEmptyLaunchDestroyIntentWaitsForLastTerminalJob(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobIDs := make([]int64, 0, 2)
+	for range 2 {
+		jobID, err := RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+		if err != nil {
+			t.Fatalf("RecordQueuedWithGPU: %v", err)
+		}
+		if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID: %v", err)
+		}
+		jobIDs = append(jobIDs, jobID)
+	}
+
+	if err := UpdateStatusAndLastSynced(database, jobIDs[0], StatusKilled); err != nil {
+		t.Fatalf("kill first job: %v", err)
+	}
+	if _, requested, err := RecordEmptyLaunchDestroyIntent(database, instanceID, LaunchStatusCancelled, TerminationReasonCancelled, "all jobs stopped"); err != nil || requested {
+		t.Fatalf("intent with one queued job = (requested=%v, err=%v), want false, nil", requested, err)
+	}
+
+	if err := UpdateStatusAndLastSynced(database, jobIDs[1], StatusKilled); err != nil {
+		t.Fatalf("kill second job: %v", err)
+	}
+	intent, requested, err := RecordEmptyLaunchDestroyIntent(database, instanceID, LaunchStatusCancelled, TerminationReasonCancelled, "all jobs stopped")
+	if err != nil || !requested || intent == nil {
+		t.Fatalf("intent after last kill = (%+v, %v, %v), want marker, true, nil", intent, requested, err)
+	}
+	launch, err := GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if !launch.HasActiveTerminationIntent() {
+		t.Fatalf("launch termination intent = %+v, want active", launch.TerminationIntent)
+	}
+
+	newJobID, err := RecordQueuedWithGPU(database, "", t.TempDir(), "echo late", "late", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(late): %v", err)
+	}
+	if err := SetJobLaunchID(database, newJobID, instanceID); !errors.Is(err, ErrLaunchNotAcceptingJobs) {
+		t.Fatalf("late SetJobLaunchID error = %v, want ErrLaunchNotAcceptingJobs", err)
+	}
+}
+
+func TestRecordEmptyLaunchDestroyIntentDoesNotCancelJoblessProbe(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, requested, err := RecordEmptyLaunchDestroyIntent(database, instanceID, LaunchStatusCancelled, TerminationReasonCancelled, "all jobs stopped"); err != nil || requested {
+		t.Fatalf("jobless intent = (requested=%v, err=%v), want false, nil", requested, err)
+	}
+}
+
+func TestSetJobLaunchIDFailsClosedOnMalformedTerminationIntent(t *testing.T) {
+	database := setupTestDB(t)
+	instanceID, err := CreateLaunch(database, &Launch{Status: LaunchStatusLaunching, Provider: "vastai"})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE launches SET termination_intent_json = '{' WHERE id = ?`, instanceID); err != nil {
+		t.Fatalf("write malformed termination intent: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err == nil || !strings.Contains(err.Error(), "decode launch") {
+		t.Fatalf("SetJobLaunchID error = %v, want malformed intent rejection", err)
+	}
+}
+
 func TestNormalizeTerminalLaunchJobs_FailedInstanceOrphansRunningJobs(t *testing.T) {
 	database := setupTestDB(t)
 

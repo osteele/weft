@@ -14,8 +14,8 @@ import (
 
 var killCmd = &cobra.Command{
 	Use:   "kill <job-id>...",
-	Short: "Kill one or more running jobs",
-	Long: `Kill running jobs by their IDs.
+	Short: "Kill one or more running or queued jobs",
+	Long: `Kill running or queued jobs by their IDs.
 
 Examples:
   weft kill 42

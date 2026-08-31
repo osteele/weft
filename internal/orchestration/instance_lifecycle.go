@@ -23,6 +23,74 @@ func TerminateInstancesParallel(database *sql.DB, instanceIDs []int64) (int, []e
 
 type storedProviderClientFactory func(string) (cloud.Client, error)
 
+// EmptyLaunchCancellation reports whether stopping a job made its launch
+// empty and whether the provider resource was destroyed immediately.
+type EmptyLaunchCancellation struct {
+	Requested bool
+	Destroyed bool
+}
+
+// CancelLaunchIfNoActiveJobs durably cancels a launch when every job still
+// assigned to it is terminal. A launch whose provider ID is not known yet
+// keeps the destroy intent pending; the launch path or reconciler completes it
+// as soon as provider identity becomes available.
+func CancelLaunchIfNoActiveJobs(database *sql.DB, instanceID int64) (EmptyLaunchCancellation, error) {
+	return cancelLaunchIfNoActiveJobs(database, instanceID, newCloudClientForStoredProvider)
+}
+
+func cancelLaunchIfNoActiveJobs(database *sql.DB, instanceID int64, clientForProvider storedProviderClientFactory) (EmptyLaunchCancellation, error) {
+	const detail = "all assigned jobs were stopped before the rental could do more work"
+	intent, requested, err := db.RecordEmptyLaunchDestroyIntent(
+		database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled, detail,
+	)
+	if stderrors.Is(err, db.ErrLaunchTerminal) {
+		return EmptyLaunchCancellation{}, nil
+	}
+	if err != nil || !requested {
+		return EmptyLaunchCancellation{}, err
+	}
+	result := EmptyLaunchCancellation{Requested: true}
+
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		return result, fmt.Errorf("reload instance %s after cancellation request: %w", ids.FormatInstanceID(instanceID), err)
+	}
+	if ci == nil {
+		return result, fmt.Errorf("instance %s disappeared after cancellation request", ids.FormatInstanceID(instanceID))
+	}
+	providerID := ci.EffectiveProviderID()
+	if providerID == "" {
+		return result, nil
+	}
+	client, err := clientForProvider(ci.Provider)
+	if err != nil {
+		intent.LastError = err.Error()
+		_ = db.UpdateLaunchTerminationIntent(database, instanceID, intent)
+		return result, fmt.Errorf("resolve provider for empty instance %s: %w", ids.FormatInstanceID(instanceID), err)
+	}
+	if err := client.DestroyInstance(providerID); err != nil && !stderrors.Is(err, cloud.ErrInstanceNotFound) {
+		intent.LastError = err.Error()
+		_ = db.UpdateLaunchTerminationIntent(database, instanceID, intent)
+		return result, fmt.Errorf("destroy empty %s instance %s: %w", ci.Provider, providerID, err)
+	}
+	intent.State = instanceintent.StateSucceeded
+	intent.DestroySucceededAtUnix = time.Now().Unix()
+	intent.ProviderInstanceID = providerID
+	if _, err := db.ApplyLaunchTerminalTransition(database, instanceID, db.LaunchTerminalTransition{
+		Status:               db.LaunchStatusCancelled,
+		TerminationReason:    db.TerminationReasonCancelled,
+		TerminationDetail:    detail,
+		ResetJobs:            true,
+		AttemptOutcome:       db.AttemptOutcomeCancelled,
+		TerminationRequested: true,
+		TerminationIntent:    intent,
+	}); err != nil {
+		return result, fmt.Errorf("record empty instance %s canceled: %w", ids.FormatInstanceID(instanceID), err)
+	}
+	result.Destroyed = true
+	return result, nil
+}
+
 func terminateInstancesParallel(database *sql.DB, instanceIDs []int64, clientForProvider storedProviderClientFactory) (int, []error) {
 	var mu sync.Mutex
 	var terminated int

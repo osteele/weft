@@ -55,6 +55,97 @@ func TestTerminateInstancesParallel_StampsTerminationRequestedAt(t *testing.T) {
 	}
 }
 
+func TestCancelLaunchIfNoActiveJobsDefersUntilProviderIDExists(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusLaunching, Provider: string(cloud.ProviderVastai),
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.SetRequestedStatus(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("SetRequestedStatus: %v", err)
+	}
+	if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("kill job: %v", err)
+	}
+
+	result, err := cancelLaunchIfNoActiveJobs(database, instanceID, func(string) (cloud.Client, error) {
+		t.Fatal("provider client requested before provider ID was known")
+		return nil, nil
+	})
+	if err != nil || !result.Requested || result.Destroyed {
+		t.Fatalf("cancellation = (%+v, %v), want requested and deferred", result, err)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusLaunching || !launch.HasActiveTerminationIntent() {
+		t.Fatalf("launch = status %q intent %+v, want launching with durable intent", launch.Status, launch.TerminationIntent)
+	}
+}
+
+func TestCancelLaunchIfNoActiveJobsDestroysKnownProviderInstance(t *testing.T) {
+	database := db.SetupTestDB(t)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status: db.LaunchStatusLaunching, Provider: string(cloud.ProviderVastai),
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "provider-empty"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", t.TempDir(), "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.SetRequestedStatus(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("SetRequestedStatus: %v", err)
+	}
+	if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("kill job: %v", err)
+	}
+	var destroyed string
+	result, err := cancelLaunchIfNoActiveJobs(database, instanceID, func(provider string) (cloud.Client, error) {
+		return &cloud.MockClient{
+			ProviderVal:         cloud.Provider(provider),
+			DestroyInstanceFunc: func(providerID string) error { destroyed = providerID; return nil },
+		}, nil
+	})
+	if err != nil || !result.Requested || !result.Destroyed {
+		t.Fatalf("cancellation = (%+v, %v), want requested and destroyed", result, err)
+	}
+	if destroyed != "provider-empty" {
+		t.Fatalf("destroyed provider ID = %q, want provider-empty", destroyed)
+	}
+	launch, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunch: %v", err)
+	}
+	if launch.Status != db.LaunchStatusCancelled || launch.TerminationReason != db.TerminationReasonCancelled {
+		t.Fatalf("launch = %s/%s, want canceled/canceled", launch.Status, launch.TerminationReason)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.EffectiveStatus() != db.StatusKilled {
+		t.Fatalf("job status = %q, want killed", job.EffectiveStatus())
+	}
+}
+
 func TestTerminateInstancesParallel_MissingProviderIDFailsClosed(t *testing.T) {
 	database := db.SetupTestDB(t)
 	instanceID, err := db.CreateLaunch(database, &db.Launch{

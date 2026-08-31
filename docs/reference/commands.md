@@ -1882,7 +1882,10 @@ For a per-job read-only cleanup check, use `weft instance audit <job-id>`.
 
 ### weft kill
 
-Kill a running job.
+Kill a running job or retract a queued job. A queued rental job may be killed
+while its instance is still provisioning; the agent will skip it before start.
+If this leaves the instance with no non-terminal assigned jobs, Weft cancels
+the instance instead of allowing it to finish launching idle.
 
 ```bash
 weft kill <job-id>

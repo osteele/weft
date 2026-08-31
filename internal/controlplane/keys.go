@@ -214,6 +214,13 @@ func InstanceKillJob(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/kill-job", instanceID)
 }
 
+// InstanceKillJobRequest is the durable, non-overwriting kill request for one
+// job. InstanceKillJob is retained as a compatibility mailbox for agents that
+// predate per-job requests.
+func InstanceKillJobRequest(instanceID, jobID int64) string {
+	return fmt.Sprintf("instance/%d/kill-jobs/%d", instanceID, jobID)
+}
+
 // Bootstrap/runtime coordination keys
 
 func BootstrapStage(instanceID int64) string {

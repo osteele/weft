@@ -768,8 +768,31 @@ type jobSequenceResult struct {
 // with the next job's execution. Benchmark jobs act as a barrier — all
 // background work must finish before a benchmark job starts.
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
+	var result jobSequenceResult
+	remaining := make([]cloud.AgentJob, 0, len(jobs))
+	for _, job := range jobs {
+		requested, err := consumeJobKillRequest(cfg.R2Bucket, cfg.InstanceID, job.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "check pre-start kill signal for job %d: %v\n", job.ID, err)
+			remaining = append(remaining, job)
+			continue
+		}
+		if requested {
+			fmt.Printf("--- Job %d killed before start; skipping ---\n", job.ID)
+			oplog.LogJob(oplog.OpJobKill, job.ID, "", oplog.WithDetail("kill request observed before start"))
+			result.AnyCanceled = true
+			continue
+		}
+		remaining = append(remaining, job)
+	}
+	jobs = remaining
+	if len(jobs) == 0 {
+		return result
+	}
 	if canRunSlottedJobsConcurrently(jobs) {
-		return runSlottedJobSequence(jobs, cfg)
+		slotted := runSlottedJobSequence(jobs, cfg)
+		mergeJobSequenceResult(&result, slotted, nil)
+		return result
 	}
 	jobs = orderJobsForSetupOverlap(jobs)
 
@@ -779,10 +802,11 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	// shortfall at the runner's gpu_count_preflight after prewarm spend. The
 	// runner check remains as the final availability guard.
 	if checkGPUCount(cfg.R2Bucket, cfg.InstanceID, maxRequestedGPUCount(jobs), cfg.SelfDestructCmd) {
-		return jobSequenceResult{AnyFailed: true, AnyInfraFailed: true}
+		result.AnyFailed = true
+		result.AnyInfraFailed = true
+		return result
 	}
 
-	var result jobSequenceResult
 	bgm := cfg.BGWorkManager
 	ownsBGWork := bgm == nil
 	if bgm == nil {
@@ -830,6 +854,15 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		if _, canceled := canceledAttempts[job.RunID]; canceled {
 			fmt.Printf("--- Job %d (run %d) canceled by orchestrator; skipping ---\n", job.ID, job.RunID)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetailf("attempt %d canceled by orchestrator", job.RunID))
+			result.AnyCanceled = true
+			continue
+		}
+		requested, err := consumeJobKillRequest(cfg.R2Bucket, cfg.InstanceID, job.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "check pre-start kill signal for job %d: %v\n", job.ID, err)
+		} else if requested {
+			fmt.Printf("--- Job %d killed before start; skipping ---\n", job.ID)
+			oplog.LogJob(oplog.OpJobKill, job.ID, "", oplog.WithDetail("kill request observed before start"))
 			result.AnyCanceled = true
 			continue
 		}

@@ -2303,6 +2303,10 @@ rule UserKillsJob {
 
     ensures: job.status = killed
     ensures: KillProducesStatusFile(job)
+    if job.cloud_instance != null:
+        ensures:
+            DurablePerJobKillRequest(job.cloud_instance, job) or
+                DurableDestroyIntent(job.cloud_instance)
     -- legacy annotation: @guidance
         -- Sends SIGTERM to the wrapper's process group, waits
         -- config.kill_grace_period (0.5s in the queue-runner path), then
@@ -2453,10 +2457,12 @@ rule CancelCompletesAgainstDispatchAlreadyInFlight {
         -- build the user had deliberately cancelled into the corrected run's
         -- output directory, with nothing marking them superseded.
         --
-        -- The channel is the per-instance kill marker the agent polls
-        -- (r2keys.InstanceKillJob), the same one `weft kill` uses — a local
-        -- status write alone never reaches a running agent. The job-level
-        -- kill helpers cannot be reused here: they refuse a job whose
+        -- The channel is the per-job kill marker the agent polls
+        -- (r2keys.InstanceKillJobRequest), the same one `weft kill` uses — a
+        -- local status write alone never reaches a running agent. The legacy
+        -- per-instance singleton is written only for compatibility; it cannot
+        -- represent several jobs killed during one provisioning window. The
+        -- job-level kill helpers cannot be reused here: they refuse a job whose
         -- effective status is already terminal, which is exactly the state a
         -- cancelled-but-running job is in, so the sweep reaches
         -- SignalCloudJobKill directly.

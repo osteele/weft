@@ -446,6 +446,10 @@ func notTerminalLaunchClause() (string, []any) {
 // after the user terminated the instance) must not revive the row.
 var ErrLaunchTerminal = errors.New("launch already in terminal status")
 
+// ErrLaunchNotAcceptingJobs reports that placement raced a launch whose
+// provider destruction has already been requested.
+var ErrLaunchNotAcceptingJobs = errors.New("launch is not accepting jobs")
+
 // errIfTerminalSkipped classifies a guarded non-terminal status UPDATE that
 // matched zero rows. If the row exists and is terminal, the write was
 // (correctly) skipped and ErrLaunchTerminal is returned so callers can notice
@@ -1901,6 +1905,23 @@ func setJobLaunchIDOnce(database *sql.DB, jobID, instanceID int64, allowSupersed
 		return err
 	}
 
+	var intentJSON sql.NullString
+	if err := tx.QueryRow(`SELECT termination_intent_json FROM launches WHERE id = ?`, instanceID).Scan(&intentJSON); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if intentJSON.Valid && strings.TrimSpace(intentJSON.String) != "" {
+		var marker instanceintent.Marker
+		if err := json.Unmarshal([]byte(intentJSON.String), &marker); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("decode launch %d termination intent: %w", instanceID, err)
+		}
+		if marker.IsActive() {
+			tx.Rollback()
+			return fmt.Errorf("launch %d: %w", instanceID, ErrLaunchNotAcceptingJobs)
+		}
+	}
+
 	if !allowSupersede {
 		// Reject if the job is already claimed by an active launch.
 		// Abandoned attempts no longer hold logical ownership, even when their
@@ -2222,12 +2243,27 @@ func RecordLaunchDestroyIntent(database *sql.DB, instanceID int64, status, reaso
 	return RecordLaunchDestroyIntentWithProviderID(database, instanceID, status, reason, "")
 }
 
+// RecordEmptyLaunchDestroyIntent records a cancellation intent only when the
+// launch still owns at least one job and every currently assigned job is
+// terminal. The membership check and intent write share one transaction, so a
+// reuse claim cannot turn an observed empty launch back into a busy one between
+// those operations.
+func RecordEmptyLaunchDestroyIntent(database *sql.DB, instanceID int64, status, reason, detail string) (*instanceintent.Marker, bool, error) {
+	return recordLaunchDestroyIntent(database, instanceID, status, reason, detail, "", true)
+}
+
 // RecordLaunchDestroyIntentWithProviderID is the recovery form used when a
 // provider resource exists but the launch's provider-ID column could not be
 // updated. The intent JSON is a separate durable path and carries enough
 // identity for reconciliation to retry or confirm the expected destroy.
 func RecordLaunchDestroyIntentWithProviderID(database *sql.DB, instanceID int64, status, reason, providerID string) (*instanceintent.Marker, error) {
+	marker, _, err := recordLaunchDestroyIntent(database, instanceID, status, reason, "", providerID, false)
+	return marker, err
+}
+
+func recordLaunchDestroyIntent(database *sql.DB, instanceID int64, status, reason, detail, providerID string, requireAllJobsTerminal bool) (*instanceintent.Marker, bool, error) {
 	var recorded *instanceintent.Marker
+	var requested bool
 	err := RetryOnDatabaseLocked(context.Background(), "record launch destroy intent", func() error {
 		tx, err := database.Begin()
 		if err != nil {
@@ -2241,6 +2277,38 @@ func RecordLaunchDestroyIntentWithProviderID(database *sql.DB, instanceID int64,
 		if IsTerminalLaunchStatus(launch.Status) {
 			return ErrLaunchTerminal
 		}
+		if requireAllJobsTerminal {
+			rows, err := tx.Query(`
+				SELECT js.status
+				FROM job_status js
+				JOIN job_attempts ja ON ja.id = js.latest_run_id
+				WHERE ja.launch_id = ? AND js.tombstoned = 0`, instanceID)
+			if err != nil {
+				return err
+			}
+			jobCount := 0
+			allTerminal := true
+			for rows.Next() {
+				var jobStatus string
+				if err := rows.Scan(&jobStatus); err != nil {
+					rows.Close()
+					return err
+				}
+				jobCount++
+				if !IsTerminalStatus(jobStatus) {
+					allTerminal = false
+				}
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			if jobCount == 0 || !allTerminal {
+				return tx.Commit()
+			}
+		}
 		now := time.Now().Unix()
 		marker := instanceintent.Marker{}
 		if launch.TerminationIntent != nil {
@@ -2248,6 +2316,9 @@ func RecordLaunchDestroyIntentWithProviderID(database *sql.DB, instanceID int64,
 		}
 		marker.TerminalStatus = status
 		marker.TerminationReason = reason
+		if detail != "" {
+			marker.Detail = detail
+		}
 		if providerID != "" {
 			marker.ProviderInstanceID = providerID
 		}
@@ -2280,9 +2351,10 @@ func RecordLaunchDestroyIntentWithProviderID(database *sql.DB, instanceID int64,
 			return err
 		}
 		recorded = &marker
+		requested = true
 		return nil
 	})
-	return recorded, err
+	return recorded, requested, err
 }
 
 // ApplyLaunchTerminalTransition commits the launch row, job/attempt state, and

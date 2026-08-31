@@ -506,6 +506,15 @@ Termination destroys the provider instance, resets associated jobs to
 unplaced (queued with no host), and updates the instance status to
 `canceled`.
 
+An individual job may also be killed while it is queued on a provisioning
+instance. If the instance still has other work, Weft records a distinct durable
+kill request for that job so several queued kills cannot overwrite one another,
+and the agent checks the request before starting the command. If no non-terminal
+jobs remain assigned, Weft records a durable instance cancellation instead.
+Provider creation is skipped if it has not begun; if it is already in flight,
+the returned provider instance is destroyed as soon as its ID becomes
+available.
+
 ### Cordoning (drain without terminating)
 
 Cordon an instance when its current job should finish but no new jobs should

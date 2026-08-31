@@ -151,6 +151,9 @@ func JobAttemptUploadFailure(jobID, runID int64) string {
 }
 
 func InstanceKillJob(instanceID int64) string { return controlplane.InstanceKillJob(instanceID) }
+func InstanceKillJobRequest(instanceID, jobID int64) string {
+	return controlplane.InstanceKillJobRequest(instanceID, jobID)
+}
 func BootstrapScript(instanceID int64) string { return dataplane.BootstrapScript(instanceID) }
 func BootstrapStage(instanceID int64) string  { return controlplane.BootstrapStage(instanceID) }
 func DonorReady(instanceID int64) string      { return controlplane.DonorReady(instanceID) }
