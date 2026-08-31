@@ -1950,6 +1950,12 @@ func FormatScoreRejectionDetail(scores []Score, limit int) string {
 	return b.String()
 }
 
+// DriverMajor returns the major component of a dotted NVIDIA driver version
+// ("550.90.07" -> 550), or 0 when the version is empty or unparseable. Callers
+// outside placement use it to compare an observed driver against a declared
+// floor without reimplementing the parse.
+func DriverMajor(version string) int { return driverMajor(version) }
+
 func driverMajor(version string) int {
 	version = strings.TrimSpace(version)
 	if version == "" {

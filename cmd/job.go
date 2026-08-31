@@ -1243,6 +1243,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if reason := humanizeFailureReason(job.FailureReason); reason != "" {
 			fmt.Printf("Reason:      %s\n", reason)
 		}
+		if hint := driverFloorSatisfiedHint(database, job); hint != "" {
+			fmt.Print(hint)
+		}
 		if job.FailureReason == "killed_stdout_silence" {
 			fmt.Printf("Hint:        Emit a periodic progress line so the silence watchdog sees output.\n")
 			fmt.Printf("             Weft parses any of these formats and displays the parsed progress:\n")
@@ -1783,6 +1786,42 @@ func driverFloorLine(job *db.Job) string {
 		return strings.TrimSpace(fmt.Sprintf(">=%d %s", driver, detail))
 	}
 	return detail
+}
+
+// driverFloorSatisfiedHint explains a driver-too-old failure on a machine that
+// met the job's declared floor. `weft info` prints that floor a few lines from
+// the failure reason, and the adjacency reads as "the floor you declared was
+// violated" — which sends the reader to the declaration instead of to the
+// runtime that actually demanded more. The floor is a placement constraint on
+// the machine; the failing requirement comes from the CUDA build the
+// environment resolved, which the declaration does not bound.
+//
+// Returns empty unless weft can show the floor was met: an unknown observed
+// driver is not evidence either way, and no hint is better than a wrong one.
+func driverFloorSatisfiedHint(database *sql.DB, job *db.Job) string {
+	if job == nil || job.FailureReason != db.FailureReasonCUDADriverTooOld || job.LaunchID == nil {
+		return ""
+	}
+	floor := cloudRuntimeFloorForJobInfo(job)
+	if floor.Req.MinDriverVersion <= 0 && floor.Req.MinCUDAVersion == "" {
+		return ""
+	}
+	launch, err := db.GetLaunch(database, *job.LaunchID)
+	if err != nil || launch == nil || launch.DriverVersion == "" {
+		return ""
+	}
+	observed := placement.DriverMajor(launch.DriverVersion)
+	if observed <= 0 || (floor.Req.MinDriverVersion > 0 && observed < floor.Req.MinDriverVersion) {
+		return ""
+	}
+	machine := fmt.Sprintf("driver %s", launch.DriverVersion)
+	if launch.CUDAVersion > 0 {
+		machine += fmt.Sprintf(" (CUDA %.1f)", launch.CUDAVersion)
+	}
+	return fmt.Sprintf("Hint:        the machine ran %s and met this job's declared floor, so the\n"+
+		"             declaration is not the cause. The requirement that failed came from the\n"+
+		"             CUDA build the environment resolved; pin an upper bound on torch to keep\n"+
+		"             the resolved build within reach of the drivers you rent.\n", machine)
 }
 
 func cloudRuntimeFloorForJobInfo(job *db.Job) placement.RuntimeFloor {
