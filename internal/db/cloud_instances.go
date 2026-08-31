@@ -59,8 +59,13 @@ const (
 	TerminationReasonBootstrapTimeout = "bootstrap_timeout"
 	TerminationReasonCancelled        = "canceled"
 	TerminationReasonPhaseStall       = "phase_stall"
-	TerminationReasonPreempted        = "preempted"
-	TerminationReasonUnknown          = "unknown"
+	// TerminationReasonSpendCapReached marks an instance stopped because it
+	// reached the spend ceiling its jobs declared. Deliberately not retryable
+	// and not infrastructure: relaunching would spend past the same ceiling,
+	// and the stop is a user policy decision rather than a fault.
+	TerminationReasonSpendCapReached = "spend_cap_reached"
+	TerminationReasonPreempted       = "preempted"
+	TerminationReasonUnknown         = "unknown"
 	// TerminationReasonWeftBug labels failures attributable to a
 	// weft-side defect rather than the machine, network, or provider.
 	// Excluded from the survival model so a class of self-inflicted

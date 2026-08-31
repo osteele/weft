@@ -363,6 +363,42 @@ func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Cl
 	return matchJobToInstance(job, cap, r2Client)
 }
 
+// matchRentalPolicy keeps a job off a rental whose ceilings are looser than the
+// job declared. The launch path applies a job's --max-spend/--max-time to the
+// instance it creates (applyJobRentalPolicy); reuse creates no instance, so a
+// job joining an existing one inherits that instance's ceilings instead of its
+// own. Without this check a job declaring $2.50 could run on a rental launched
+// with no ceiling at all and spend without bound, and the declaration would
+// appear in `weft info` the whole time.
+//
+// A stricter instance ceiling is admissible: being stopped earlier than asked
+// still honors "spend no more than this".
+func matchRentalPolicy(job *db.Job, inst *db.Launch) (bool, string) {
+	if job == nil || inst == nil || job.CLIResourceOverrides == nil {
+		return true, ""
+	}
+	o := job.CLIResourceOverrides
+	if o.MaxSpendCents != nil && *o.MaxSpendCents > 0 {
+		if inst.MaxSpendCents <= 0 {
+			return false, "job declares a spend ceiling; instance has none"
+		}
+		if inst.MaxSpendCents > *o.MaxSpendCents {
+			return false, fmt.Sprintf("instance spend ceiling $%.2f exceeds the job's $%.2f",
+				float64(inst.MaxSpendCents)/100, float64(*o.MaxSpendCents)/100)
+		}
+	}
+	if o.MaxTimeSeconds != nil && *o.MaxTimeSeconds > 0 {
+		if inst.MaxTimeSeconds <= 0 {
+			return false, "job declares a time ceiling; instance has none"
+		}
+		if inst.MaxTimeSeconds > *o.MaxTimeSeconds {
+			return false, fmt.Sprintf("instance time ceiling %s exceeds the job's %s",
+				time.Duration(inst.MaxTimeSeconds)*time.Second, time.Duration(*o.MaxTimeSeconds)*time.Second)
+		}
+	}
+	return true, ""
+}
+
 func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
 
@@ -373,6 +409,9 @@ func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) 
 		return false, reason
 	}
 	if ok, reason := matchProviderIntent(job, inst); !ok {
+		return false, reason
+	}
+	if ok, reason := matchRentalPolicy(job, inst); !ok {
 		return false, reason
 	}
 

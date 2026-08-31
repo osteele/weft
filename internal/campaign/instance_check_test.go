@@ -3957,3 +3957,71 @@ func TestCheckInstance_DudDetection_StandsDownWhilePreRunning(t *testing.T) {
 		t.Fatalf("rule 4d fired on an instance the provider still reports as %q: %q", cloud.ProviderStatusCreated, action.StallMessage)
 	}
 }
+
+func TestCheckInstance_SpendCap(t *testing.T) {
+	launchedAt := time.Now().Add(-2 * time.Hour).Unix()
+	newReconciler := func() *Reconciler {
+		return &Reconciler{
+			firstDeadAt:        make(map[int64]time.Time),
+			probeFailures:      make(map[int64]probeFailureState),
+			lastProviderStatus: make(map[int64]string),
+			deadConfirmTime:    -1,
+		}
+	}
+	// 2h elapsed at $2.00/hr = $4.00 spent.
+	launch := func(maxSpendCents, ratePerHourCents int) *db.Launch {
+		return &db.Launch{
+			ID:               1,
+			Status:           db.LaunchStatusRunning,
+			LaunchedAt:       &launchedAt,
+			MaxSpendCents:    maxSpendCents,
+			CostPerHourCents: ratePerHourCents,
+		}
+	}
+	check := func(ci *db.Launch) InstanceAction {
+		return newReconciler().CheckInstance(CheckInstanceParams{
+			CI:            ci,
+			ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
+			InstancePhase: "running:531",
+			HeartbeatAge:  30 * time.Second,
+			JobState:      JobState{HasStartedJob: true},
+			Now:           time.Now(),
+		})
+	}
+
+	t.Run("terminates once observed spend reaches the ceiling", func(t *testing.T) {
+		action := check(launch(250, 200)) // $4.00 spent against a $2.50 ceiling
+		if action.Kind != ActionSpendCapReached {
+			t.Fatalf("action.Kind = %d, want ActionSpendCapReached (%d)", action.Kind, ActionSpendCapReached)
+		}
+		if action.TerminationReason != db.TerminationReasonSpendCapReached {
+			t.Errorf("termination reason = %q, want %q", action.TerminationReason, db.TerminationReasonSpendCapReached)
+		}
+		if !action.DestroyProvider {
+			t.Error("expected DestroyProvider = true")
+		}
+		if action.ResetJobs {
+			t.Error("jobs must not be requeued: relaunching would spend past the same ceiling")
+		}
+	})
+
+	t.Run("stays under the ceiling", func(t *testing.T) {
+		if action := check(launch(1000, 200)); action.Kind == ActionSpendCapReached {
+			t.Fatalf("terminated at $4.00 against a $10.00 ceiling: %+v", action)
+		}
+	})
+
+	t.Run("unknown rate is not evidence of staying under", func(t *testing.T) {
+		// No hourly rate: spend is unknown, not zero. Terminating here would
+		// destroy work on the strength of a missing rate.
+		if action := check(launch(250, 0)); action.Kind == ActionSpendCapReached {
+			t.Fatalf("terminated on unknown spend: %+v", action)
+		}
+	})
+
+	t.Run("no ceiling declared", func(t *testing.T) {
+		if action := check(launch(0, 200)); action.Kind == ActionSpendCapReached {
+			t.Fatalf("terminated with no ceiling declared: %+v", action)
+		}
+	})
+}

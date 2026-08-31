@@ -39,6 +39,7 @@ const (
 	ActionHedgeCull                                // hedge cohort sibling reached ready first -> destroy this loser
 	ActionTerminalLivePhase                        // live phase reports running job that is already terminal in DB
 	ActionStaleHeartbeat                           // heartbeat stale + agent probe dead/unreachable -> fail (reconciler-only)
+	ActionSpendCapReached                          // observed spend reached the declared ceiling -> destroy
 )
 
 // graceShutdownTimeout is how long after the grace deadline Weft
@@ -388,7 +389,7 @@ func isDestructiveLivenessAction(kind InstanceActionKind) bool {
 	switch kind {
 	case ActionEmptyStatusTimeout, ActionBootstrapStalled, ActionSetupStalled,
 		ActionRunningStalled, ActionIdleAfterReadyTimeout, ActionTerminalLivePhase,
-		ActionStaleHeartbeat:
+		ActionStaleHeartbeat, ActionSpendCapReached:
 		return true
 	default:
 		return false
@@ -411,6 +412,31 @@ func (r *Reconciler) checkInstance(p CheckInstanceParams) (action InstanceAction
 		action.ObservedProviderIntendedStatus = p.ProviderInst.IntendedStatus
 		action.ObservedProviderStatusMsg = p.ProviderInst.StatusMsg
 	}()
+
+	// 0. Spend ceiling reached. Checked before the phase rules because an
+	// instance burns money in every phase, not only while running.
+	//
+	// Only positive evidence terminates. launchElapsedAndSpendCents returns 0
+	// both for an instance that has spent nothing and for one whose hourly rate
+	// weft does not know, and those are not the same fact — so a zero is
+	// treated as unknown spend and never as proof of staying under the
+	// ceiling. Terminating on unknown spend would destroy work on the strength
+	// of a missing rate.
+	if ci.MaxSpendCents > 0 && !db.IsTerminalLaunchStatus(ci.Status) {
+		if _, spentCents := launchElapsedAndSpendCents(ci, p.Now); spentCents > 0 && spentCents >= ci.MaxSpendCents {
+			if action, ok := deferTerminationForUnknownStatus(p, fmt.Sprintf("spend $%.2f reached the $%.2f ceiling", float64(spentCents)/100, float64(ci.MaxSpendCents)/100)); ok {
+				return action
+			}
+			return InstanceAction{
+				Kind:              ActionSpendCapReached,
+				TerminalStatus:    db.LaunchStatusFailed,
+				TerminationReason: db.TerminationReasonSpendCapReached,
+				StallMessage:      fmt.Sprintf("spend $%.2f reached the declared $%.2f ceiling — terminating instance", float64(spentCents)/100, float64(ci.MaxSpendCents)/100),
+				DestroyProvider:   true,
+				AttemptOutcome:    db.AttemptOutcomeFailed,
+			}
+		}
+	}
 
 	// 1. Grace expiry: deadline has passed.
 	// The instance entered grace because a job failed. Don't reset jobs to

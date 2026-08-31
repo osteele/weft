@@ -2511,3 +2511,34 @@ func TestSubmitJobsToInstanceForMoveOrdersSamePayloadCloudAfter(t *testing.T) {
 		t.Fatalf("consumer cloud_after = %#v, want producer %d", got.Jobs[1].CloudAfter, producerID)
 	}
 }
+
+func TestMatchRentalPolicy(t *testing.T) {
+	ptr := func(v int) *int { return &v }
+	tests := []struct {
+		name     string
+		job      *db.CLIResourceOverrides
+		instance *db.Launch
+		want     bool
+	}{
+		{"job declares nothing", nil, &db.Launch{}, true},
+		{"instance ceiling equals the job's", &db.CLIResourceOverrides{MaxSpendCents: ptr(250)}, &db.Launch{MaxSpendCents: 250}, true},
+		{"instance ceiling is stricter", &db.CLIResourceOverrides{MaxSpendCents: ptr(250)}, &db.Launch{MaxSpendCents: 100}, true},
+		{"instance ceiling is looser", &db.CLIResourceOverrides{MaxSpendCents: ptr(250)}, &db.Launch{MaxSpendCents: 1000}, false},
+		{"instance has no spend ceiling", &db.CLIResourceOverrides{MaxSpendCents: ptr(250)}, &db.Launch{}, false},
+		{"instance time ceiling is looser", &db.CLIResourceOverrides{MaxTimeSeconds: ptr(18000)}, &db.Launch{MaxTimeSeconds: 36000}, false},
+		{"instance has no time ceiling", &db.CLIResourceOverrides{MaxTimeSeconds: ptr(18000)}, &db.Launch{}, false},
+		{"instance time ceiling is stricter", &db.CLIResourceOverrides{MaxTimeSeconds: ptr(18000)}, &db.Launch{MaxTimeSeconds: 3600}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &db.Job{CLIResourceOverrides: tt.job}
+			got, reason := matchRentalPolicy(job, tt.instance)
+			if got != tt.want {
+				t.Errorf("matchRentalPolicy = (%v, %q), want %v", got, reason, tt.want)
+			}
+			if !got && reason == "" {
+				t.Error("rejection carried no reason")
+			}
+		})
+	}
+}

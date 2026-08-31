@@ -59,7 +59,10 @@ action, unknown is never sufficient. An unparsed line is unknown.
 - A job that hangs while printing recognized progress values is no longer
   caught by the progress rule. It is caught by stdout silence and GPU idleness
   if it is genuinely inactive, and by the rental time and spend budgets
-  otherwise. A job that hangs while actively printing and using the GPU is not
+  otherwise — the time ceiling as a per-job deadline the agent arms from the
+  remaining instance budget, the spend ceiling in the reconciler once observed
+  spend reaches it, and both carried onto a reused rental by its admission
+  check. A job that hangs while actively printing and using the GPU is not
   detectable by weft at all, and is the user's to bound with an in-script
   ceiling.
 - Weft loses its only task-level stall signal. The remaining signals are
