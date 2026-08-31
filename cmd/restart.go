@@ -928,6 +928,9 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 		}
 		_ = logcache.Delete(jobID)
 		fmt.Printf("Reset job %s to queued\n", ids.FormatJobID(jobID))
+		if note := retryDriverFloorNote(database, job); note != "" {
+			fmt.Print(note)
+		}
 		printRestartModeLine()
 		for _, update := range updates {
 			fmt.Printf("  %s\n", update)
@@ -1099,6 +1102,40 @@ func removeJobTagFromLoaded(database restartExecer, job *db.Job, tag string) err
 	}
 	job.Tags = updated
 	return nil
+}
+
+// retryDriverFloorNote warns when re-placement is unlikely to help. A
+// driver-incompatibility failure sends the job back to the unplaced pool, and
+// placement then selects against the job's driver floor — so if the machine
+// that just failed ALREADY met that floor, the replacement is chosen by the
+// same criterion that just proved insufficient and can fail identically.
+//
+// This is the residual of wb94: re-placing beats re-pinning to the machine that
+// failed, but it is not a fix when the floor itself is the under-specified
+// thing. Weft says so rather than letting the user discover it one rental at a
+// time.
+//
+// Silent unless weft can show the floor was met, and only for the reasons where
+// the driver floor is the selection criterion — a broken card
+// (infra_cuda_hardware_fault) or a GPU-count shortfall really is fixed by a
+// different machine.
+func retryDriverFloorNote(database *sql.DB, job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	switch job.FailureReason {
+	case db.FailureReasonCUDADriverTooOld, db.FailureReasonInfraTorchPreflightFailed:
+	default:
+		return ""
+	}
+	machine, ok := driverFloorAlreadySatisfied(database, job)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("  note: the previous machine ran %s and already met this job's driver\n"+
+		"        floor, so a replacement selected against the same floor can fail the\n"+
+		"        same way. Raise the floor, or pin torch to a build the drivers you\n"+
+		"        rent can run.\n", machine)
 }
 
 func resolveRetryTarget(database *sql.DB, job *db.Job) (string, *int64, error) {

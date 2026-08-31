@@ -1664,3 +1664,57 @@ func TestPersistentAttemptMetadata_DropsDerivedOnlyDisk(t *testing.T) {
 		t.Fatalf("persistentAttemptMetadata kept a derived-only disk record: %+v", out)
 	}
 }
+
+func TestRetryDriverFloorNote(t *testing.T) {
+	database := db.SetupTestDB(t)
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:        db.LaunchStatusFailed,
+		DriverVersion: "550.90.07",
+		CUDAVersion:   12.8,
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	job := func(reason string) *db.Job {
+		return &db.Job{
+			FailureReason:        reason,
+			GPUClass:             "nvidia",
+			LaunchID:             &launchID,
+			CLIResourceOverrides: &db.CLIResourceOverrides{MinCUDAVersion: "12.4"},
+		}
+	}
+
+	// The machine met the floor: re-placement selects by that same floor, so
+	// warn that it can fail identically.
+	for _, reason := range []string{
+		db.FailureReasonCUDADriverTooOld,
+		db.FailureReasonInfraTorchPreflightFailed,
+	} {
+		note := retryDriverFloorNote(database, job(reason))
+		if note == "" {
+			t.Errorf("%s: no note when the failed machine already met the floor", reason)
+			continue
+		}
+		if !strings.Contains(note, "550.90.07") || !strings.Contains(note, "already met") {
+			t.Errorf("%s: note does not name the machine or the finding: %q", reason, note)
+		}
+	}
+
+	// A different machine genuinely fixes these two, so no note.
+	for _, reason := range []string{
+		db.FailureReasonInfraCUDAHardwareFault,
+		db.FailureReasonGPUCountPreflightFailed,
+	} {
+		if note := retryDriverFloorNote(database, job(reason)); note != "" {
+			t.Errorf("%s: warned where a fresh machine does help: %q", reason, note)
+		}
+	}
+
+	// Below the floor: the floor was the story, replacement should help.
+	if err := db.UpdateLaunchDriverVersion(database, launchID, "470.10.01"); err != nil {
+		t.Fatalf("UpdateLaunchDriverVersion: %v", err)
+	}
+	if note := retryDriverFloorNote(database, job(db.FailureReasonCUDADriverTooOld)); note != "" {
+		t.Errorf("warned for a machine below the floor: %q", note)
+	}
+}
