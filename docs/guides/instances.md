@@ -732,11 +732,13 @@ instances:
   insufficient (< 20). Each threshold may be learned or remain at its default
   (warn at 15m, terminate at 25m). Termination requires a recorded setup start;
   unknown phase timing is not replaced with launch age.
-- **Structured task-progress stall**: After a running job first emits a
-  recognized `Progress:` value, warn when that value has not changed for 20
-  minutes and terminate after 60 minutes. Repeated values and ordinary log
-  growth do not count as progress. Uninstrumented jobs remain bounded by their
-  explicit runtime and spend ceilings.
+- **Structured task progress does not terminate anything.** `Progress:` values
+  drive progress bars and ETA estimates only. Parsing them is a scrape of an
+  output convention, so an unrecognized format cannot be told apart from a
+  stalled task; a running job is bounded instead by the stdout-silence and
+  GPU-idle watchdogs below, by heartbeat and provider status, and by its
+  explicit runtime and spend ceilings. See
+  `docs/decisions/0025-progress-parsing-never-terminates-an-instance.md`.
 - **Heartbeat stale**: Agent heartbeat is older than 5 minutes (8 minutes in
   the early-life window). This is a control-plane liveness warning, not a claim
   that the task is stalled. The reconciler's SSH probe logic handles actual
