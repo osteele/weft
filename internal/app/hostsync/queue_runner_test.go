@@ -188,3 +188,51 @@ func TestEnsureQueueRunnerStartedPassesBenchmarkEnvPrefix(t *testing.T) {
 		t.Fatal("started = false, want true")
 	}
 }
+
+func TestEnsureQueueRunnerStartedRestartsRunningAgentAfterDeploy(t *testing.T) {
+	originalFindHostSpec := findHostSpecFunc
+	originalEnsureAgentUpToDate := ensureAgentUpToDateFunc
+	originalLoadConfig := loadConfigFunc
+	originalGetSlackWebhook := getSlackWebhookFunc
+	originalDeployNotifyScript := deployNotifyScriptFunc
+	originalBuildRunnerEnvPrefix := buildRunnerEnvPrefixFunc
+	originalEnsureRunnerStarted := ensureRunnerStartedFunc
+	originalRestartRunner := restartRunnerFunc
+	t.Cleanup(func() {
+		findHostSpecFunc = originalFindHostSpec
+		ensureAgentUpToDateFunc = originalEnsureAgentUpToDate
+		loadConfigFunc = originalLoadConfig
+		getSlackWebhookFunc = originalGetSlackWebhook
+		deployNotifyScriptFunc = originalDeployNotifyScript
+		buildRunnerEnvPrefixFunc = originalBuildRunnerEnvPrefix
+		ensureRunnerStartedFunc = originalEnsureRunnerStarted
+		restartRunnerFunc = originalRestartRunner
+	})
+
+	findHostSpecFunc = func(host string) *inventory.HostSpec {
+		return &inventory.HostSpec{Name: host, OS: "linux", Arch: "amd64"}
+	}
+	ensureAgentUpToDateFunc = func(string, inventory.HostSpec, agentdeploy.EnsureAgentOptions) (bool, error) {
+		return true, nil
+	}
+	loadConfigFunc = func() (*config.Config, error) { return &config.Config{}, nil }
+	getSlackWebhookFunc = func() string { return "" }
+	deployNotifyScriptFunc = func(string, string) {}
+	buildRunnerEnvPrefixFunc = func() string { return "" }
+	ensureRunnerStartedFunc = func(string, string, string, string, time.Duration) (bool, error) {
+		return false, nil // already running
+	}
+	restarted := false
+	restartRunnerFunc = func(host string) error {
+		restarted = host == "studio"
+		return nil
+	}
+
+	started, err := EnsureQueueRunnerStarted("studio")
+	if err != nil {
+		t.Fatalf("EnsureQueueRunnerStarted: %v", err)
+	}
+	if !started || !restarted {
+		t.Fatalf("started=%v restarted=%v, want true/true", started, restarted)
+	}
+}

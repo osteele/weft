@@ -15,6 +15,7 @@ import (
 // Compatible with the bash runner's state format.
 type State struct {
 	mu             sync.RWMutex
+	Capabilities   []string                    `json:"capabilities,omitempty"`
 	Cursor         string                      `json:"cursor"`
 	CursorLine     int                         `json:"cursor_line"`
 	Pending        []int64                     `json:"pending"`
@@ -25,6 +26,12 @@ type State struct {
 
 	// StopRequested is not persisted — it's set from the command log each time.
 	StopRequested bool `json:"-"`
+}
+
+func (s *State) SetCapabilities(capabilities []string) {
+	s.mu.Lock()
+	s.Capabilities = slices.Clone(capabilities)
+	s.mu.Unlock()
 }
 
 // RunningJobState captures per-job runtime state for concurrent execution.

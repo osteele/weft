@@ -26,6 +26,9 @@ var (
 		runner := queuerunner.NewRunner(host)
 		return runner.EnsureStartedForHost(envPrefix, r2Bucket, r2QueueHost, setupTimeout)
 	}
+	restartRunnerFunc = func(host string) error {
+		return queuerunner.NewRunner(host).SendRestartSignal()
+	}
 )
 
 // EnsureQueueRunnerStarted ensures the queue runner is present and running.
@@ -50,8 +53,11 @@ func EnsureQueueRunnerStartedQuiet(host string) (bool, error) {
 
 func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOptions) (bool, error) {
 	spec := findHostSpecFunc(host)
+	deployed := false
 	if spec != nil {
-		if _, err := ensureAgentUpToDateFunc(host, *spec, agentOpts); err != nil {
+		var err error
+		deployed, err = ensureAgentUpToDateFunc(host, *spec, agentOpts)
+		if err != nil {
 			return false, fmt.Errorf("agent deploy failed: %w", err)
 		}
 	}
@@ -80,6 +86,12 @@ func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOpti
 	started, err := ensureRunnerStartedFunc(host, envVars, r2Bucket, r2QueueHost, setupTimeout)
 	if err != nil {
 		return false, fmt.Errorf("queue runner start failed: %w", err)
+	}
+	if deployed && !started {
+		if err := restartRunnerFunc(host); err != nil {
+			return false, fmt.Errorf("queue runner restart after agent update failed: %w", err)
+		}
+		return true, nil
 	}
 	return started, nil
 }

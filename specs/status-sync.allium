@@ -250,6 +250,21 @@ rule R2PullInventoryQueue {
     -- this transport and fail visibly.
 }
 
+-- Payload-bearing jobs fail closed at remote dispatch until the active runner
+-- publishes support for the payload staging protocol. Durable local admission
+-- is still allowed while a host is offline; the job remains queued with a
+-- visible deferred reason, and full host sync updates/restarts the agent before
+-- a later pass publishes the add command. An old runner must never receive and
+-- silently ignore a payload field it does not implement.
+rule InventoryPayloadDispatchRequiresRunnerCapability {
+    when: DispatchInventoryJob(job, host)
+    requires: job.payloads.length > 0
+
+    if not host.runner.capabilities.contains("job-payload-v1"):
+        ensures: not JobAppendedToRunnerQueue(host, job)
+        ensures: LifecycleEvent(job, "queue.dispatch.deferred", "agent update required before payload dispatch")
+}
+
 -- Every ssh and rsync invocation that weft spawns for on-prem sync, source
 -- sync, output pull, or agent deploy must be non-interactive: BatchMode=yes
 -- plus a bounded ConnectTimeout. Without BatchMode=yes, ssh opens /dev/tty

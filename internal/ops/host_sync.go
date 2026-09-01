@@ -290,6 +290,19 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// (restart discovery, draft cleanup, runner startup, cache scanning), which
 	// must not turn successful outbound-only dispatch into an SSH dependency.
 	if hostUsesR2Queue(host) {
+		if mode == SyncModeFull && !opts.NoQueueStart && ensureQueueRunner != nil {
+			started, needed, err := ensureR2PayloadRunnerCapability(database, host, activeJobs, ensureQueueRunner)
+			if err != nil {
+				if !ssh.IsConnectionError(err.Error()) {
+					result.QueueRunnerError = err.Error()
+				}
+			} else if needed {
+				result.HostContacted = true
+				if started {
+					result.QueueStarted = true
+				}
+			}
+		}
 		if err := db.RecordHostSync(database, host, time.Now()); err != nil {
 			syncLog.Debug("failed to record host sync time", "host", host, "error", err)
 		}
@@ -429,6 +442,27 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	}
 
 	return result, nil
+}
+
+// ensureR2PayloadRunnerCapability upgrades an R2-pull runner only when queued
+// work needs the payload protocol. Other R2 sync remains outbound-only and
+// never acquires an incidental SSH dependency.
+func ensureR2PayloadRunnerCapability(database *sql.DB, host string, activeJobs []*db.Job, ensureQueueRunner EnsureQueueRunnerFunc) (started, needed bool, err error) {
+	for _, job := range activeJobs {
+		if job == nil || !job.UsesQueueRunner() || job.Status != db.StatusQueued {
+			continue
+		}
+		payloads, listErr := db.ListJobPayloads(database, job.ID)
+		if listErr != nil {
+			return false, false, listErr
+		}
+		if len(payloads) == 0 {
+			continue
+		}
+		started, err := ensureQueueRunner(host)
+		return started, true, err
+	}
+	return false, false, nil
 }
 
 // fetchRemoteRunnerState reads the runner's state.json from the remote
@@ -977,6 +1011,17 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				return ensured, contacted, err
 			}
 			job.Backend = backend
+		}
+		if job.Backend != db.BackendSlurm {
+			jobPayloads, payloadListErr := queuePayloadsForJob(database, job.ID)
+			if payloadListErr != nil {
+				recordFailure(job.ID, "payload capability check failed", payloadListErr)
+				continue
+			}
+			if len(jobPayloads) > 0 && !state.Supports(opsqueue.CapabilityJobPayloadV1) {
+				recordDeferred(job.ID, "queue runner lacks job-payload-v1 capability; agent update required before dispatch", nil)
+				continue
+			}
 		}
 
 		pinnedManifest, hasPinnedSource, pinErr := pinnedQueueSourceManifest(job)

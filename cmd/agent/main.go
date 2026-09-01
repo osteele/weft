@@ -139,6 +139,9 @@ func runQueue(args []string) {
 			})
 		}
 	}
+	if r.EnsurePayloadsFromR2 != nil {
+		r.Capabilities = append(r.Capabilities, opsqueue.CapabilityJobPayloadV1)
+	}
 	if parsed.R2QueueHost != "" {
 		if parsed.R2Bucket == "" {
 			fmt.Fprintln(os.Stderr, "run-queue: --r2-queue-host requires --r2-bucket")

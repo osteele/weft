@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestState_PendingOperations(t *testing.T) {
@@ -78,6 +81,7 @@ func TestState_SaveLoad(t *testing.T) {
 	path := filepath.Join(dir, "state.json")
 
 	s := NewState()
+	s.SetCapabilities([]string{opsqueue.CapabilityJobPayloadV1})
 	s.Cursor = "2024-01-01T00:00:00Z"
 	s.CursorLine = 5
 	s.AddPending(10)
@@ -105,6 +109,9 @@ func TestState_SaveLoad(t *testing.T) {
 
 	if loaded.Cursor != s.Cursor {
 		t.Errorf("cursor: got %q, want %q", loaded.Cursor, s.Cursor)
+	}
+	if !slices.Contains(loaded.Capabilities, opsqueue.CapabilityJobPayloadV1) {
+		t.Fatalf("capabilities = %v", loaded.Capabilities)
 	}
 	if loaded.CursorLine != s.CursorLine {
 		t.Errorf("cursor_line: got %d, want %d", loaded.CursorLine, s.CursorLine)

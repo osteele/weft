@@ -20,6 +20,8 @@ const (
 	OpRestart  = "restart"  // Re-exec to pick up new script version
 )
 
+const CapabilityJobPayloadV1 = "job-payload-v1"
+
 // CommandJob contains job data for an add command.
 type CommandJob struct {
 	ID        int64  `json:"id"`
@@ -220,12 +222,25 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 
 // RunnerState represents the queue runner's internal state.
 type RunnerState struct {
-	Cursor     string                         `json:"cursor"`
-	CursorLine int                            `json:"cursor_line"`
-	Pending    []int64                        `json:"pending"`
-	Current    *int64                         `json:"current"`
-	Running    map[string]RunnerJobState      `json:"running,omitempty"`
-	Finished   map[string]RunnerFinishedState `json:"finished,omitempty"`
+	Capabilities []string                       `json:"capabilities,omitempty"`
+	Cursor       string                         `json:"cursor"`
+	CursorLine   int                            `json:"cursor_line"`
+	Pending      []int64                        `json:"pending"`
+	Current      *int64                         `json:"current"`
+	Running      map[string]RunnerJobState      `json:"running,omitempty"`
+	Finished     map[string]RunnerFinishedState `json:"finished,omitempty"`
+}
+
+func (s *RunnerState) Supports(capability string) bool {
+	if s == nil {
+		return false
+	}
+	for _, candidate := range s.Capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
 }
 
 // RunnerFinishedState records the runner's terminal entry for a job. The

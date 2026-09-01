@@ -58,6 +58,7 @@ type Runner struct {
 	lastSampleTime     time.Time
 	nowFunc            func() time.Time
 	AgentVersion       string
+	Capabilities       []string
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
@@ -191,6 +192,7 @@ func (r *Runner) Run() error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	r.state.SetCapabilities(r.Capabilities)
 
 	// Write PID file
 	os.WriteFile(r.pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)

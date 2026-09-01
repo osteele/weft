@@ -545,6 +545,72 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	}
 }
 
+func TestEnsureQueuedJobsOnRemote_DefersPayloadForIncapableRunner(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "test-host", "", "true", "payload job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobBackend(database, jobID, db.BackendQueueRunner); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	if err := db.InsertJobPayload(database, db.JobPayload{
+		JobID: jobID, Name: "prompt", StoredPath: "payloads/" + digest,
+		SizeBytes: 7, SHA256: digest, R2Key: "assets/" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return `{"pending":[],"current":null,"capabilities":[]}` + "\n", "", 0
+		}
+		if strings.Contains(command, `"op":"add"`) {
+			appendCount++
+		}
+		return "", "", 0
+	})
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", time.Second, time.Second, slog.Default())
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+	if ensured != 0 || appendCount != 0 {
+		t.Fatalf("ensured=%d appendCount=%d, want 0/0", ensured, appendCount)
+	}
+}
+
+func TestEnsureR2PayloadRunnerCapabilityInitiatesUpgrade(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "", "true", "payload job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("b", 64)
+	if err := db.InsertJobPayload(database, db.JobPayload{
+		JobID: jobID, Name: "prompt", StoredPath: "payloads/" + digest,
+		SizeBytes: 7, SHA256: digest, R2Key: "assets/" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	started, needed, err := ensureR2PayloadRunnerCapability(database, "studio", []*db.Job{job}, func(host string) (bool, error) {
+		called = host == "studio"
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || !started || !needed {
+		t.Fatalf("called=%v started=%v needed=%v, want true/true/true", called, started, needed)
+	}
+}
+
 func TestEnsureQueuedJobsOnRemote_UsesPinnedClosureAfterWorkingTreeChanges(t *testing.T) {
 	database := db.SetupTestDB(t)
 	workingDir := t.TempDir()
