@@ -596,8 +596,11 @@ func isJobInRunnerState(jobID int64, state *opsqueue.RunnerState) bool {
 }
 
 type remoteJobPayload struct {
-	exists bool
-	runID  int64
+	observed bool
+	exists   bool
+	runID    int64
+	runIDOK  bool
+	detail   string
 }
 
 func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) (map[int64]remoteJobPayload, error) {
@@ -630,31 +633,50 @@ func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) 
 		return nil, err
 	}
 
-	payloads := make(map[int64]remoteJobPayload, len(ids))
+	payloads, parseErr := parseRemoteJobPayloads(stdout, seen)
+	return payloads, parseErr
+}
+
+// parseRemoteJobPayloads preserves one observation per requested job. A bad
+// row makes only that job unknown; it must not erase positive observations for
+// independent jobs in the same probe.
+func parseRemoteJobPayloads(stdout string, requested map[int64]struct{}) (map[int64]remoteJobPayload, error) {
+	payloads := make(map[int64]remoteJobPayload, len(requested))
+	for jobID := range requested {
+		payloads[jobID] = remoteJobPayload{detail: "probe returned no row"}
+	}
+	var parseErrs []error
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		parts := strings.SplitN(line, "\t", 2)
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("parse remote job payload probe line %q", line)
+			parseErrs = append(parseErrs, fmt.Errorf("parse remote job payload probe line %q", line))
+			continue
 		}
 		jobID, err := strconv.ParseInt(parts[0], 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("parse remote job payload id %q: %w", parts[0], err)
+			parseErrs = append(parseErrs, fmt.Errorf("parse remote job payload id %q: %w", parts[0], err))
+			continue
+		}
+		if _, ok := requested[jobID]; !ok {
+			parseErrs = append(parseErrs, fmt.Errorf("unexpected remote job payload id %d", jobID))
+			continue
 		}
 		if parts[1] == "MISSING" {
-			payloads[jobID] = remoteJobPayload{}
+			payloads[jobID] = remoteJobPayload{observed: true}
 			continue
 		}
 		runID, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil {
-			payloads[jobID] = remoteJobPayload{exists: true, runID: -1}
+			payloads[jobID] = remoteJobPayload{observed: true, exists: true, detail: "payload run_id is unreadable"}
+			parseErrs = append(parseErrs, fmt.Errorf("parse remote job %d payload run_id %q: %w", jobID, parts[1], err))
 			continue
 		}
-		payloads[jobID] = remoteJobPayload{exists: true, runID: runID}
+		payloads[jobID] = remoteJobPayload{observed: true, exists: true, runID: runID, runIDOK: true}
 	}
-	return payloads, nil
+	return payloads, errors.Join(parseErrs...)
 }
 
 func queuedJobMaterializedInRunner(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload) bool {
@@ -675,7 +697,7 @@ func queuedJobMaterializedInRunner(job *db.Job, state *opsqueue.RunnerState, pay
 		return false
 	}
 	payload, ok := payloads[job.ID]
-	if !ok || !payload.exists {
+	if !ok || !payload.observed || !payload.exists || !payload.runIDOK {
 		return false
 	}
 	return runIDsCompatible(job.LatestRunID, payload.runID)
@@ -688,20 +710,19 @@ func runIDsCompatible(want *int64, got int64) bool {
 // shouldRedispatchSyncedJob decides whether a job whose last_synced_status is
 // already "queued" must be reset and re-appended to the remote queue.
 //
-// Re-dispatch is destructive after the archive-on-add change: re-adding a job
-// the runner already holds re-executes it (see isJobInRunnerState). It therefore
-// requires POSITIVE evidence that the runner no longer has the job, never mere
-// absence of evidence:
+// Re-dispatch requires a positive per-job observation, never mere absence of
+// evidence. A confirmed-missing payload restores the whole dispatch; a valid
+// payload whose ID is absent from state repairs lost admission. The runner's
+// duplicate-add fences protect a concurrently live or matching terminal run.
 //
 //   - state.json positively shows the job as Finished/Running/Current, or as
 //     Pending with a matching payload run_id → materialized, leave it.
-//   - The payload probe failed while state.json exists → the runner snapshot
-//     cannot prove that an absent or pending entry is stale. This is the normal
-//     R2-pull case: state publication and inbox consumption are asynchronous,
-//     and the R2 snapshot does not expose job payload files. Unknown is not
-//     absence, so leave the durable dispatch in place.
-//   - The job is absent from state.json entirely (or state itself is the
-//     no-state-file sentinel) → confirmed absent, re-dispatch.
+//   - A per-job payload observation of MISSING positively confirms absence and
+//     permits re-dispatch. A present but mismatched pending payload is likewise
+//     replaced by the intended attempt.
+//   - A failed transport, omitted row, malformed row, or R2 snapshot without a
+//     payload observation is unknown, never absence. Leave the durable dispatch
+//     in place and surface that uncertainty.
 //
 // The payload probe is consulted ONLY for the Pending branch. A failed probe
 // must never veto the state-only Finished/Running/Current branches: doing so
@@ -715,13 +736,45 @@ func shouldRedispatchSyncedJob(job *db.Job, state *opsqueue.RunnerState, payload
 	if queuedJobMaterializedInRunner(job, state, payloads) {
 		return false // runner positively holds it
 	}
-	if payloadErr != nil && state != nil {
-		// A runner snapshot without a successful payload probe cannot prove
-		// absence. In particular, an R2 state snapshot may have been published
-		// immediately before the daemon consumed the durable inbox request.
+	payload, ok := payloads[job.ID]
+	if !ok || !payload.observed {
+		// A runner snapshot without a per-job payload observation cannot prove
+		// absence. payloadErr is batch diagnostic context only; valid rows from
+		// the same probe remain independently actionable.
 		return false
 	}
-	return true // confirmed absent from the runner's state
+	if state != nil && slices.Contains(state.Pending, job.ID) {
+		if !payload.exists {
+			return true
+		}
+		return payload.runIDOK && !runIDsCompatible(job.LatestRunID, payload.runID)
+	}
+	if !payload.exists {
+		return true
+	}
+	return payload.runIDOK
+}
+
+func syncedJobPublicationUnknownReason(job *db.Job, state *opsqueue.RunnerState, payloads map[int64]remoteJobPayload, payloadErr error) string {
+	if job == nil || queuedJobMaterializedInRunner(job, state, payloads) {
+		return ""
+	}
+	payload, ok := payloads[job.ID]
+	if !ok || !payload.observed {
+		if payloadErr != nil {
+			return "remote queue publication status unknown: " + payloadErr.Error()
+		}
+		if ok && payload.detail != "" {
+			return "remote queue publication status unknown: " + payload.detail
+		}
+		return "remote queue publication status unknown: no per-job observation"
+	}
+	if payload.exists {
+		if !payload.runIDOK && payload.detail != "" {
+			return "remote queue publication status unknown: " + payload.detail
+		}
+	}
+	return ""
 }
 
 // ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
@@ -777,10 +830,22 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		}
 		for _, job := range syncedJobs {
 			if !shouldRedispatchSyncedJob(job, state, payloads, payloadErr) {
+				if reason := syncedJobPublicationUnknownReason(job, state, payloads, payloadErr); reason != "" {
+					_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+						EventKind: db.EventQueueDispatchDeferred,
+						JobID:     job.ID,
+						Detail:    truncateDispatchDetail(reason),
+					}, dispatchEventDedupeWindow)
+				}
 				continue // runner has it, or its pending run_id is unknown — leave it
 			}
 			// Runner confirmed the job absent. Reset so it gets re-dispatched below.
 			syncLog.Debug("job missing from runner state, re-dispatching", "job_id", job.ID, "host", host)
+			_, _ = db.InsertLifecycleEventDedup(database, &db.LifecycleEvent{
+				EventKind: db.EventQueueDispatchDeferred,
+				JobID:     job.ID,
+				Detail:    "remote queue publication missing; re-dispatching",
+			}, dispatchEventDedupeWindow)
 			if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
 				syncLog.Debug("failed to reset last_synced_status", "job_id", job.ID, "error", err)
 				continue

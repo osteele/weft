@@ -70,7 +70,7 @@ func TestIsJobInRunnerState_FinishedCountsAsPresent(t *testing.T) {
 
 // TestShouldRedispatchSyncedJob guards the regression where a failed payload
 // probe re-dispatched jobs the runner had already finished. fetchRemoteJobPayloads
-// fails the entire batch on one malformed line; the old guard gated the whole
+// used to fail the entire batch on one malformed line; the old guard gated the whole
 // materialization check on payloadErr == nil, so a probe error re-ran every
 // synced job — including ones state.json positively shows as Finished. The
 // state-only branches (Finished/Running/Current) must NOT depend on the payload
@@ -123,10 +123,18 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 			wantRedispatch: false,
 		},
 		{
-			name:           "job absent from state is re-dispatched even without probe error",
+			name:           "job absent from state with confirmed missing payload is re-dispatched",
 			job:            absentJob,
 			state:          state,
-			payloads:       map[int64]remoteJobPayload{},
+			payloads:       map[int64]remoteJobPayload{99: {observed: true}},
+			payloadErr:     nil,
+			wantRedispatch: true,
+		},
+		{
+			name:           "job absent from state with valid payload repairs lost admission",
+			job:            absentJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{99: {observed: true, exists: true, runID: 7, runIDOK: true}},
 			payloadErr:     nil,
 			wantRedispatch: true,
 		},
@@ -134,7 +142,7 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 			name:           "pending job with confirmed-missing payload is re-dispatched",
 			job:            pendingJob,
 			state:          state,
-			payloads:       map[int64]remoteJobPayload{5: {}}, // exists=false: MISSING sentinel
+			payloads:       map[int64]remoteJobPayload{5: {observed: true}}, // exists=false: MISSING sentinel
 			payloadErr:     nil,
 			wantRedispatch: true,
 		},
@@ -142,17 +150,25 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 			name:           "pending job with matching payload is materialized",
 			job:            pendingJob,
 			state:          state,
-			payloads:       map[int64]remoteJobPayload{5: {exists: true, runID: 7}},
+			payloads:       map[int64]remoteJobPayload{5: {observed: true, exists: true, runID: 7, runIDOK: true}},
 			payloadErr:     nil,
 			wantRedispatch: false,
 		},
 		{
-			name:           "nil state (no state file) re-dispatches",
+			name:           "pending job with unreadable run id remains unknown",
+			job:            pendingJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{5: {observed: true, exists: true, detail: "payload run_id is unreadable"}},
+			payloadErr:     probeErr,
+			wantRedispatch: false,
+		},
+		{
+			name:           "nil state with failed probe remains unknown",
 			job:            finishedJob,
 			state:          nil,
 			payloads:       nil,
 			payloadErr:     probeErr,
-			wantRedispatch: true,
+			wantRedispatch: false,
 		},
 	}
 	for _, tc := range cases {
@@ -161,6 +177,23 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 				t.Errorf("shouldRedispatchSyncedJob = %v, want %v", got, tc.wantRedispatch)
 			}
 		})
+	}
+}
+
+func TestParseRemoteJobPayloads_PreservesIndependentObservations(t *testing.T) {
+	requested := map[int64]struct{}{5: {}, 42: {}, 99: {}}
+	got, err := parseRemoteJobPayloads("5\t7\nmalformed\n42\tMISSING\n", requested)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("parse error = %v, want malformed-row diagnostic", err)
+	}
+	if p := got[5]; !p.observed || !p.exists || !p.runIDOK || p.runID != 7 {
+		t.Fatalf("job 5 observation = %+v", p)
+	}
+	if p := got[42]; !p.observed || p.exists {
+		t.Fatalf("job 42 observation = %+v, want confirmed missing", p)
+	}
+	if p := got[99]; p.observed || p.detail == "" {
+		t.Fatalf("job 99 observation = %+v, want unknown with diagnostic", p)
 	}
 }
 

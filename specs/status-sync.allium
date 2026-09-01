@@ -342,31 +342,45 @@ rule DispatchQueuedExplicitTargets {
 -- any that the runner no longer knows about. This catches runner crashes,
 -- agent restarts, and glibc-mismatch reinstalls where the runner's local
 -- queue state was lost while the DB still records the dispatch as synced.
--- AppendJobToQueue / AddPending are idempotent, so re-dispatching a job the
--- runner does in fact still hold is a no-op.
+-- Re-dispatch is permitted only from a positive per-job observation. A
+-- confirmed-missing payload restores the dispatch; a valid payload with no
+-- state membership repairs lost admission through the runner's idempotent,
+-- live/terminal-fenced add path. A transport failure, malformed batch row,
+-- omitted row, or asynchronous R2 snapshot is unknown and remains queued with
+-- a visible deferred diagnostic.
+-- Probe rows are independent: one malformed job must not discard valid
+-- present/missing observations for its siblings.
 rule RedispatchMissingQueuedJobs {
     when: RunnerStateReconciled(host)
 
     let state = FetchRemoteRunnerState(host)
-    -- If state is unavailable (SSH failed, runner not started), the next
-    -- sync cycle retries; we do not infer "runner has nothing".
-    if state != null:
-        for job in jobs/Jobs
-            where job.host.name = host
-            and job.status = queued
-            and job.latest_attempt.last_synced_status = queued
-            and not JobInRunnerState(job.id, state):
+    let payloads = FetchPerJobRunnerPayloadObservations(host)
+    for job in jobs/Jobs
+        where job.host.name = host
+        and job.status = queued
+        and job.latest_attempt.last_synced_status = queued
+        and not JobInRunnerState(job.id, state):
+            let payload = PayloadObservation(payloads, job.id)
+            if payload = confirmed_missing:
                 ensures: job.latest_attempt.last_synced_status = null
                 ensures: JobReDispatchedToRunner(host, job)
+            if payload = confirmed_present_with_valid_attempt:
+                ensures: job.latest_attempt.last_synced_status = null
+                ensures: JobReDispatchedToRunner(host, job)
+            if payload = unknown:
+                ensures: LifecycleEvent(job, "queue.dispatch.deferred", "remote queue publication status unknown")
+                ensures: job.latest_attempt.last_synced_status = queued
 
     -- legacy annotation: @guidance
         -- Implementation anchor:
-        --   internal/ops/host_sync.go syncQueueRunnerForHost
+        --   internal/ops/host_sync.go ensureQueuedJobsOnRemote
         --     - db.ListSyncedQueuedJobs(database, host) yields the
         --       candidate set (status=queued, last_synced_status=queued).
         --     - fetchRemoteRunnerState(host, timeout) reads state.json.
-        --     - isJobInRunnerState(jobID, state) checks pending, current,
-        --       and running maps.
+        --     - queuedJobMaterializedInRunner checks pending/current/running/
+        --       finished state plus the attempt run_id in the job payload.
+        --     - fetchRemoteJobPayloads returns a three-state observation per
+        --       job; parse failures do not poison sibling rows.
         --     - db.ResetLastSyncedStatus(jobID) clears the synced marker
         --       so the dispatcher treats the job as unsynced on this pass.
 }
