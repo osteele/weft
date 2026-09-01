@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/telemetryarchive"
 )
 
 // syncJobTimeseries fetches the timeseries JSONL from a remote host and inserts
@@ -16,6 +17,19 @@ import (
 func syncJobTimeseries(database *sql.DB, job *db.Job, timeout time.Duration) error {
 	if job == nil {
 		return nil
+	}
+	if db.IsTerminalStatus(job.Status) && job.LatestRunID != nil {
+		obj, objErr := db.GetRawTelemetryObject(database, *job.LatestRunID, db.TimeseriesRawKind)
+		summary, summaryErr := db.GetTimeseriesSummaryByRun(database, *job.LatestRunID)
+		if objErr != nil {
+			return objErr
+		}
+		if summaryErr != nil {
+			return summaryErr
+		}
+		if obj != nil && summary != nil {
+			return nil
+		}
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -51,7 +65,13 @@ func syncJobTimeseries(database *sql.DB, job *db.Job, timeout time.Duration) err
 		return err
 	}
 	if job.LatestRunID != nil {
-		return db.RefreshTimeseriesSummaryFromRows(database, job.ID, *job.LatestRunID)
+		if err := db.RefreshTimeseriesSummaryFromRows(database, job.ID, *job.LatestRunID); err != nil {
+			return err
+		}
+		if db.IsTerminalStatus(job.Status) {
+			allSamples := db.ParseTimeseriesJSONL(stdout, 0, tenant)
+			return telemetryarchive.FinalizeTimeseries(database, job.ID, *job.LatestRunID, []byte(stdout), allSamples, telemetryarchive.RemoteCopy{})
+		}
 	}
 	return nil
 }

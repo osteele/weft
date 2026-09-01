@@ -6,7 +6,55 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/telemetryarchive"
 )
+
+func TestCollectTelemetryOutputReadsArchivedRollupAndRawObject(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job.LatestRunID == nil {
+		t.Fatalf("job = %+v, %v", job, err)
+	}
+	runID := *job.LatestRunID
+	samples := []db.TelemetrySample{{
+		Ts: 10, ElapsedS: 1, ProcRSSKB: 42,
+		GPUs: []db.TelemetryGPUSample{{GPUIndex: "0", GPUUtilPct: float64PtrTelemetry(75)}},
+	}}
+	if err := db.InsertTelemetrySamples(database, jobID, samples); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := telemetryarchive.EncodeRich(samples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollup := db.BuildRichTelemetryRollup(jobID, runID, samples, 1, []string{"0"})
+	if err := telemetryarchive.FinalizeRich(database, jobID, runID, raw, rollup, telemetryarchive.RemoteCopy{}); err != nil {
+		t.Fatal(err)
+	}
+
+	withoutRaw, err := collectTelemetryOutputForRun(database, jobID, runID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutRaw.Samples != 1 || withoutRaw.Summary == nil || withoutRaw.RawSamples != nil {
+		t.Fatalf("summary output = %+v", withoutRaw)
+	}
+	withRaw, err := collectTelemetryOutputForRun(database, jobID, runID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withRaw.RawSamples == nil || len(*withRaw.RawSamples) != 1 || (*withRaw.RawSamples)[0].ProcRSSKB != 42 {
+		t.Fatalf("raw output = %+v", withRaw.RawSamples)
+	}
+}
 
 func TestCollectTelemetryOutputUsesLatestRun(t *testing.T) {
 	database := db.SetupTestDB(t)

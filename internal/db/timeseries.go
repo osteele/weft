@@ -29,7 +29,10 @@ type TimeseriesSample struct {
 	Tenant         string `json:"tenant,omitempty"`
 }
 
-const TimeseriesRawKind = "timeseries"
+const (
+	TimeseriesRawKind = "timeseries"
+	TelemetryRawKind  = "telemetry"
+)
 
 // TimeseriesSummary holds derived values for one job attempt. It is small
 // enough to keep in SQLite even when raw samples live in R2/cache.
@@ -50,17 +53,26 @@ type TimeseriesSummary struct {
 	Tenant             string  `json:"tenant,omitempty"`
 }
 
-// TimeseriesRawObject records the durable R2 object for raw per-sample data.
-type TimeseriesRawObject struct {
-	JobID       int64
-	AttemptID   int64
-	Kind        string
-	R2Key       string
-	SizeBytes   int64
-	ETag        string
-	ConfirmedAt int64
-	CreatedAt   int64
+// RawTelemetryObject records a verified durable object for one raw per-sample
+// stream. StoredPath is relative to Weft's durable artifact data root; R2Key
+// identifies the optional remote copy.
+type RawTelemetryObject struct {
+	JobID         int64
+	AttemptID     int64
+	Kind          string
+	R2Key         string
+	StoredPath    string
+	SizeBytes     int64
+	SHA256        string
+	ETag          string
+	SchemaVersion int
+	ConfirmedAt   int64
+	CreatedAt     int64
 }
+
+// TimeseriesRawObject is retained for source compatibility with the original
+// timeseries-only object catalog.
+type TimeseriesRawObject = RawTelemetryObject
 
 // ParseTimeseriesJSONL parses raw JSONL samples, skipping malformed lines and
 // samples at or before minTS. Tenant, when non-empty, overrides file content.
@@ -290,10 +302,13 @@ func RefreshTimeseriesSummaryFromRows(database *sql.DB, jobID, runID int64) erro
 	return UpsertTimeseriesSummary(database, SummarizeTimeseries(jobID, runID, samples))
 }
 
-// UpsertTimeseriesRawObject records a confirmed durable raw object.
-func UpsertTimeseriesRawObject(database *sql.DB, obj TimeseriesRawObject) error {
+// UpsertRawTelemetryObject records a confirmed durable raw object.
+func UpsertRawTelemetryObject(database *sql.DB, obj RawTelemetryObject) error {
 	if obj.Kind == "" {
 		obj.Kind = TimeseriesRawKind
+	}
+	if obj.SchemaVersion == 0 {
+		obj.SchemaVersion = 1
 	}
 	now := time.Now().Unix()
 	if obj.ConfirmedAt == 0 {
@@ -304,15 +319,20 @@ func UpsertTimeseriesRawObject(database *sql.DB, obj TimeseriesRawObject) error 
 	}
 	_, err := database.Exec(`
 		INSERT INTO job_timeseries_raw_objects (
-			job_id, attempt_id, kind, r2_key, size_bytes, etag, confirmed_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			job_id, attempt_id, kind, r2_key, stored_path, size_bytes, sha256,
+			etag, schema_version, confirmed_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(attempt_id, kind) DO UPDATE SET
 			job_id = excluded.job_id,
 			r2_key = excluded.r2_key,
+			stored_path = COALESCE(excluded.stored_path, job_timeseries_raw_objects.stored_path),
 			size_bytes = excluded.size_bytes,
+			sha256 = COALESCE(excluded.sha256, job_timeseries_raw_objects.sha256),
 			etag = excluded.etag,
+			schema_version = excluded.schema_version,
 			confirmed_at = excluded.confirmed_at`,
-		obj.JobID, obj.AttemptID, obj.Kind, obj.R2Key, obj.SizeBytes, nullString(obj.ETag), obj.ConfirmedAt, obj.CreatedAt,
+		obj.JobID, obj.AttemptID, obj.Kind, obj.R2Key, nullString(obj.StoredPath), obj.SizeBytes,
+		nullString(obj.SHA256), nullString(obj.ETag), obj.SchemaVersion, obj.ConfirmedAt, obj.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert timeseries raw object: %w", err)
@@ -320,27 +340,43 @@ func UpsertTimeseriesRawObject(database *sql.DB, obj TimeseriesRawObject) error 
 	return nil
 }
 
-// GetTimeseriesRawObject returns durable raw-object metadata for one attempt.
-func GetTimeseriesRawObject(database *sql.DB, runID int64, kind string) (*TimeseriesRawObject, error) {
+func UpsertTimeseriesRawObject(database *sql.DB, obj TimeseriesRawObject) error {
+	return UpsertRawTelemetryObject(database, obj)
+}
+
+// GetRawTelemetryObject returns durable raw-object metadata for one attempt.
+func GetRawTelemetryObject(database *sql.DB, runID int64, kind string) (*RawTelemetryObject, error) {
 	if kind == "" {
 		kind = TimeseriesRawKind
 	}
 	row := database.QueryRow(`
-		SELECT job_id, attempt_id, kind, r2_key, size_bytes, etag, confirmed_at, created_at
+		SELECT job_id, attempt_id, kind, r2_key, stored_path, size_bytes, sha256,
+		       etag, schema_version, confirmed_at, created_at
 		  FROM job_timeseries_raw_objects
 		 WHERE attempt_id = ? AND kind = ?`, runID, kind)
-	var obj TimeseriesRawObject
-	var etag sql.NullString
-	if err := row.Scan(&obj.JobID, &obj.AttemptID, &obj.Kind, &obj.R2Key, &obj.SizeBytes, &etag, &obj.ConfirmedAt, &obj.CreatedAt); err != nil {
+	var obj RawTelemetryObject
+	var storedPath, sha256Digest, etag sql.NullString
+	if err := row.Scan(&obj.JobID, &obj.AttemptID, &obj.Kind, &obj.R2Key, &storedPath,
+		&obj.SizeBytes, &sha256Digest, &etag, &obj.SchemaVersion, &obj.ConfirmedAt, &obj.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get timeseries raw object: %w", err)
 	}
+	if storedPath.Valid {
+		obj.StoredPath = storedPath.String
+	}
+	if sha256Digest.Valid {
+		obj.SHA256 = sha256Digest.String
+	}
 	if etag.Valid {
 		obj.ETag = etag.String
 	}
 	return &obj, nil
+}
+
+func GetTimeseriesRawObject(database *sql.DB, runID int64, kind string) (*TimeseriesRawObject, error) {
+	return GetRawTelemetryObject(database, runID, kind)
 }
 
 // DeleteTimeseriesByRun removes raw SQLite samples after durable R2 retention

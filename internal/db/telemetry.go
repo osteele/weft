@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // TelemetrySample represents one raw telemetry sample for a job run.
@@ -36,6 +37,131 @@ type TelemetryGPUSample struct {
 	GPUPCIeRxMiBS  *float64 `json:"gpu_pcie_rx_mib_s,omitempty"`
 	GPUSMClockMHz  *uint32  `json:"gpu_sm_clock_mhz,omitempty"`
 	GPUMemClockMHz *uint32  `json:"gpu_mem_clock_mhz,omitempty"`
+}
+
+// RichTelemetryRollup is the compact per-attempt representation retained in
+// SQLite after the raw telemetry stream has moved to durable object storage.
+type RichTelemetryRollup struct {
+	JobID       int64
+	AttemptID   int64
+	SampleCount int
+	TSMin       int64
+	TSMax       int64
+	Summary     *JobTelemetrySummary
+	GPUStats    *GPUTelemetryStats
+}
+
+// BuildRichTelemetryRollup derives every value needed by ordinary telemetry
+// and job-info reads, so those surfaces do not need the raw stream.
+func BuildRichTelemetryRollup(jobID, attemptID int64, samples []TelemetrySample, wallDuration float64, assignedGPUIndices []string) *RichTelemetryRollup {
+	if len(samples) == 0 {
+		return nil
+	}
+	ordered := append([]TelemetrySample(nil), samples...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Ts < ordered[j].Ts })
+	return &RichTelemetryRollup{
+		JobID:       jobID,
+		AttemptID:   attemptID,
+		SampleCount: len(ordered),
+		TSMin:       ordered[0].Ts,
+		TSMax:       ordered[len(ordered)-1].Ts,
+		Summary:     SummarizeTelemetry(ordered, wallDuration, assignedGPUIndices),
+		GPUStats:    ComputeGPUTelemetryStatsFromGPUSamples(ordered),
+	}
+}
+
+// BuildRichTelemetryRollupForJob resolves attempt-scoped duration and device
+// assignments before deriving a rollup. Historical attempts must not inherit a
+// later retry's wall-clock bounds.
+func BuildRichTelemetryRollupForJob(database *sql.DB, jobID, attemptID int64, samples []TelemetrySample) (*RichTelemetryRollup, error) {
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, fmt.Errorf("job %d not found", jobID)
+	}
+	var wallDuration float64
+	attempts, err := ListAttempts(database, jobID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range attempts {
+		attempt := attempts[i]
+		if attempt.ID == attemptID && attempt.StartTime != nil && attempt.EndTime != nil && *attempt.EndTime > *attempt.StartTime {
+			wallDuration = float64(*attempt.EndTime - *attempt.StartTime)
+			break
+		}
+	}
+	var assigned []string
+	if job.Metadata != nil && job.Metadata.Resource != nil {
+		assigned = splitCSVStrings(job.Metadata.Resource.GPUDevices)
+	}
+	return BuildRichTelemetryRollup(jobID, attemptID, samples, wallDuration, assigned), nil
+}
+
+func UpsertRichTelemetryRollup(database *sql.DB, rollup *RichTelemetryRollup) error {
+	if rollup == nil || rollup.AttemptID == 0 || rollup.Summary == nil {
+		return nil
+	}
+	summaryJSON, err := json.Marshal(rollup.Summary)
+	if err != nil {
+		return fmt.Errorf("encode rich telemetry summary: %w", err)
+	}
+	var gpuJSON interface{}
+	if rollup.GPUStats != nil {
+		data, err := json.Marshal(rollup.GPUStats)
+		if err != nil {
+			return fmt.Errorf("encode rich GPU telemetry summary: %w", err)
+		}
+		gpuJSON = string(data)
+	}
+	_, err = database.Exec(`
+		INSERT INTO job_telemetry_summaries (
+			job_id, attempt_id, sample_count, ts_min, ts_max,
+			summary_json, gpu_stats_json, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(attempt_id) DO UPDATE SET
+			job_id = excluded.job_id,
+			sample_count = excluded.sample_count,
+			ts_min = excluded.ts_min,
+			ts_max = excluded.ts_max,
+			summary_json = excluded.summary_json,
+			gpu_stats_json = excluded.gpu_stats_json,
+			updated_at = excluded.updated_at`,
+		rollup.JobID, rollup.AttemptID, rollup.SampleCount, rollup.TSMin, rollup.TSMax,
+		string(summaryJSON), gpuJSON, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("upsert rich telemetry summary: %w", err)
+	}
+	return nil
+}
+
+func GetRichTelemetryRollup(database *sql.DB, attemptID int64) (*RichTelemetryRollup, error) {
+	row := database.QueryRow(`
+		SELECT job_id, attempt_id, sample_count, ts_min, ts_max,
+		       summary_json, gpu_stats_json
+		  FROM job_telemetry_summaries
+		 WHERE attempt_id = ?`, attemptID)
+	var rollup RichTelemetryRollup
+	var summaryJSON string
+	var gpuJSON sql.NullString
+	if err := row.Scan(&rollup.JobID, &rollup.AttemptID, &rollup.SampleCount,
+		&rollup.TSMin, &rollup.TSMax, &summaryJSON, &gpuJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get rich telemetry summary: %w", err)
+	}
+	if err := json.Unmarshal([]byte(summaryJSON), &rollup.Summary); err != nil {
+		return nil, fmt.Errorf("decode rich telemetry summary: %w", err)
+	}
+	if gpuJSON.Valid && strings.TrimSpace(gpuJSON.String) != "" {
+		if err := json.Unmarshal([]byte(gpuJSON.String), &rollup.GPUStats); err != nil {
+			return nil, fmt.Errorf("decode rich GPU telemetry summary: %w", err)
+		}
+	}
+	return &rollup, nil
 }
 
 // InsertTelemetrySamples bulk-inserts telemetry for a job's latest run.
@@ -235,27 +361,40 @@ func RefreshJobTelemetrySummary(database *sql.DB, jobID int64) error {
 		return err
 	}
 
-	var wallDuration float64
-	if job.StartTime > 0 && job.EndTime != nil && *job.EndTime > job.StartTime {
-		wallDuration = float64(*job.EndTime - job.StartTime)
+	rollup, err := BuildRichTelemetryRollupForJob(database, jobID, *job.LatestRunID, samples)
+	if err != nil {
+		return err
 	}
-
-	assigned := splitCSVStrings("")
-	if job.Metadata != nil && job.Metadata.Resource != nil {
-		assigned = splitCSVStrings(job.Metadata.Resource.GPUDevices)
-	}
-
-	summary := SummarizeTelemetry(samples, wallDuration, assigned)
-	if summary == nil {
+	if rollup == nil {
 		return nil
+	}
+	if err := UpsertRichTelemetryRollup(database, rollup); err != nil {
+		return err
 	}
 
 	meta := job.Metadata
 	if meta == nil {
 		meta = &JobMetadata{}
 	}
-	meta.Telemetry = summary
+	meta.Telemetry = rollup.Summary
 	return SetJobMetadata(database, jobID, meta)
+}
+
+// DeleteTelemetryByRun removes raw rich telemetry after a verified durable
+// object and its per-attempt summary have both been recorded.
+func DeleteTelemetryByRun(database *sql.DB, runID int64) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("begin telemetry prune: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM job_telemetry_gpus WHERE attempt_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete telemetry GPU rows: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM job_telemetry_samples WHERE attempt_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete telemetry sample rows: %w", err)
+	}
+	return tx.Commit()
 }
 
 // SummarizeTelemetry converts raw samples into a compact per-run summary.

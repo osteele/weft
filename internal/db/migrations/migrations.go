@@ -189,11 +189,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyRefreshJobStatusForDependencySkips},
 		&goose.GoFunc{RunDB: applyRefreshJobStatusForDependencySkips},
 	)
+	addRawTelemetryStorage := goose.NewGoMigration(
+		58,
+		&goose.GoFunc{RunDB: applyAddRawTelemetryStorage},
+		&goose.GoFunc{RunDB: dropAddRawTelemetryStorage},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -1020,6 +1025,64 @@ func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, 
 	return exists > 0, err
 }
 
+func applyAddRawTelemetryStorage(ctx context.Context, db *sql.DB) error {
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{"stored_path", `ALTER TABLE job_timeseries_raw_objects ADD COLUMN stored_path TEXT`},
+		{"sha256", `ALTER TABLE job_timeseries_raw_objects ADD COLUMN sha256 TEXT`},
+		{"schema_version", `ALTER TABLE job_timeseries_raw_objects ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1`},
+	} {
+		exists, err := columnExists(ctx, db, "job_timeseries_raw_objects", column.name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := db.ExecContext(ctx, column.sql); err != nil {
+				return fmt.Errorf("add job_timeseries_raw_objects.%s: %w", column.name, err)
+			}
+		}
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS job_telemetry_summaries (
+			job_id INTEGER NOT NULL,
+			attempt_id INTEGER NOT NULL PRIMARY KEY,
+			sample_count INTEGER NOT NULL DEFAULT 0,
+			ts_min INTEGER NOT NULL DEFAULT 0,
+			ts_max INTEGER NOT NULL DEFAULT 0,
+			summary_json TEXT NOT NULL,
+			gpu_stats_json TEXT,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY (attempt_id) REFERENCES job_attempts(id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_job_telemetry_summaries_job
+			ON job_telemetry_summaries(job_id)`); err != nil {
+		return fmt.Errorf("create rich telemetry summaries: %w", err)
+	}
+	return nil
+}
+
+func dropAddRawTelemetryStorage(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		DROP INDEX IF EXISTS idx_job_telemetry_summaries_job;
+		DROP TABLE IF EXISTS job_telemetry_summaries`); err != nil {
+		return err
+	}
+	for _, name := range []string{"schema_version", "sha256", "stored_path"} {
+		exists, err := columnExists(ctx, db, "job_timeseries_raw_objects", name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE job_timeseries_raw_objects DROP COLUMN `+name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // HasPending reports whether any migration has not yet been applied to db.
 func HasPending(ctx context.Context, db *sql.DB) (bool, error) {
 	p, err := newProvider(db)
@@ -1045,7 +1108,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

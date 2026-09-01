@@ -80,6 +80,9 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 func JobAttemptRawTimeseries(jobID, runID int64) string {
 	return dataplane.JobAttemptRawTimeseries(jobID, runID)
 }
+func JobAttemptRawTelemetry(jobID, runID int64) string {
+	return dataplane.JobAttemptRawTelemetry(jobID, runID)
+}
 func JobAttemptLegacyResultTimeseries(jobID, runID int64) string {
 	return dataplane.JobAttemptLegacyResultTimeseries(jobID, runID)
 }

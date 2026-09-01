@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/telemetryarchive"
 	"github.com/osteele/weft/internal/transferbw"
 )
 
@@ -640,6 +641,13 @@ func syncOneCompletedJobMarker(
 			slog.Warn("failed to evaluate cloud completion backfill need", "component", "sync", "job_id", jobID, "error", backfillErr)
 			return completedMarkerResult{}
 		}
+		if !needsBackfill && latestRunID.Valid {
+			needsBackfill, backfillErr = db.AttemptHasRawTelemetryRows(database, latestRunID.Int64)
+			if backfillErr != nil {
+				slog.Warn("failed to evaluate cloud telemetry archival need", "component", "sync", "job_id", jobID, "error", backfillErr)
+				return completedMarkerResult{}
+			}
+		}
 		if !needsBackfill {
 			if latestRunID.Valid {
 				deferSettlement, settleErr := shouldDeferCompletionSettlement(database, latestRunID.Int64, launchID)
@@ -787,16 +795,35 @@ func syncCompletedJobAtRun(
 		}
 	}
 
+	rawRetentionReady := true
 	if haveDownload {
 		timeseriesPath := filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID))
-		if err := preserveCloudTimeseriesObject(ctx, r2Client, database, jobID, runID, timeseriesPath); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %s raw timeseries retention failed: %v\n", ids.FormatJobID(jobID), err)
+		if info, statErr := os.Stat(timeseriesPath); statErr == nil && info.Size() > 0 {
+			if err := preserveCloudTimeseriesObject(ctx, r2Client, database, jobID, runID, timeseriesPath); err != nil {
+				rawRetentionReady = false
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s raw timeseries retention failed: %v\n", ids.FormatJobID(jobID), err)
+				}
+			} else if err := importCloudTimeseriesFile(database, jobID, runID, timeseriesPath, "single"); err != nil {
+				rawRetentionReady = false
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s final timeseries import failed: %v\n", ids.FormatJobID(jobID), err)
+				}
+			}
 		}
-		if err := importCloudTimeseriesFile(database, jobID, runID, timeseriesPath, "single"); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final timeseries import failed: %v\n", ids.FormatJobID(jobID), err)
-		}
-		if err := importCloudTelemetryFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: cloud job %s final telemetry import failed: %v\n", ids.FormatJobID(jobID), err)
+		telemetryPath := filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))
+		if info, statErr := os.Stat(telemetryPath); statErr == nil && info.Size() > 0 {
+			if err := preserveCloudTelemetryObject(ctx, r2Client, database, jobID, runID, telemetryPath); err != nil {
+				rawRetentionReady = false
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s raw telemetry retention failed: %v\n", ids.FormatJobID(jobID), err)
+				}
+			} else if err := importCloudTelemetryFile(database, jobID, runID, telemetryPath); err != nil {
+				rawRetentionReady = false
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: cloud job %s final telemetry import failed: %v\n", ids.FormatJobID(jobID), err)
+				}
+			}
 		}
 
 		if timings := cloudsync.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
@@ -830,7 +857,7 @@ func syncCompletedJobAtRun(
 				"component", "sync", "job_id", jobID, "run_id", runID, "error", settleErr)
 			deferSettlement = true
 		}
-		if !deferSettlement {
+		if !deferSettlement && rawRetentionReady {
 			settleCompletedAttempt(ctx, r2Client, jobID, runID, observedCompleteKeys)
 		}
 	}
@@ -1241,6 +1268,14 @@ func syncCloudInstanceOpslog(ctx context.Context, r2Client *r2.Client, instanceI
 }
 
 func preserveCloudTimeseriesObject(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID, runID int64, path string) error {
+	return preserveCloudRawTelemetryObject(ctx, r2Client, database, jobID, runID, db.TimeseriesRawKind, r2keys.JobAttemptRawTimeseries(jobID, runID), path)
+}
+
+func preserveCloudTelemetryObject(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID, runID int64, path string) error {
+	return preserveCloudRawTelemetryObject(ctx, r2Client, database, jobID, runID, db.TelemetryRawKind, r2keys.JobAttemptRawTelemetry(jobID, runID), path)
+}
+
+func preserveCloudRawTelemetryObject(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID, runID int64, kind, key, path string) error {
 	if r2Client == nil || runID <= 0 {
 		return nil
 	}
@@ -1248,7 +1283,6 @@ func preserveCloudTimeseriesObject(ctx context.Context, r2Client *r2.Client, dat
 	if err != nil || len(data) == 0 {
 		return nil
 	}
-	key := r2keys.JobAttemptRawTimeseries(jobID, runID)
 	if err := r2Client.PutObject(ctx, key, bytes.NewReader(data), "application/x-ndjson"); err != nil {
 		return err
 	}
@@ -1256,10 +1290,10 @@ func preserveCloudTimeseriesObject(ctx context.Context, r2Client *r2.Client, dat
 	if err != nil {
 		return err
 	}
-	return db.UpsertTimeseriesRawObject(database, db.TimeseriesRawObject{
+	return db.UpsertRawTelemetryObject(database, db.RawTelemetryObject{
 		JobID:     jobID,
 		AttemptID: runID,
-		Kind:      db.TimeseriesRawKind,
+		Kind:      kind,
 		R2Key:     key,
 		SizeBytes: info.SizeBytes,
 		ETag:      info.ETag,
@@ -1281,19 +1315,17 @@ func importCloudTimeseriesFile(database *sql.DB, jobID, runID int64, path, tenan
 	}
 	if runID > 0 {
 		allSamples := db.ParseTimeseriesJSONL(string(data), 0, tenant)
-		if err := db.UpsertTimeseriesSummary(database, db.SummarizeTimeseries(jobID, runID, allSamples)); err != nil {
-			return err
-		}
-		if obj, err := db.GetTimeseriesRawObject(database, runID, db.TimeseriesRawKind); err != nil {
+		if obj, err := db.GetRawTelemetryObject(database, runID, db.TimeseriesRawKind); err != nil {
 			return err
 		} else if obj != nil && obj.SizeBytes > 0 {
-			return db.DeleteTimeseriesByRun(database, runID)
+			return telemetryarchive.FinalizeTimeseries(database, jobID, runID, data, allSamples, telemetryarchive.RemoteCopy{R2Key: obj.R2Key, ETag: obj.ETag})
 		}
+		return db.UpsertTimeseriesSummary(database, db.SummarizeTimeseries(jobID, runID, allSamples))
 	}
 	return nil
 }
 
-func importCloudTelemetryFile(database *sql.DB, jobID int64, path string) error {
+func importCloudTelemetryFile(database *sql.DB, jobID, runID int64, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return nil
@@ -1306,5 +1338,20 @@ func importCloudTelemetryFile(database *sql.DB, jobID int64, path string) error 
 	if err := db.InsertTelemetrySamples(database, jobID, samples); err != nil {
 		return err
 	}
-	return db.RefreshJobTelemetrySummary(database, jobID)
+	if err := db.RefreshJobTelemetrySummary(database, jobID); err != nil {
+		return err
+	}
+	obj, err := db.GetRawTelemetryObject(database, runID, db.TelemetryRawKind)
+	if err != nil {
+		return err
+	}
+	if obj == nil || obj.SizeBytes <= 0 {
+		return nil
+	}
+	allSamples := db.ParseTelemetrySamplesJSONL(string(data), 0)
+	rollup, err := db.BuildRichTelemetryRollupForJob(database, jobID, runID, allSamples)
+	if err != nil {
+		return err
+	}
+	return telemetryarchive.FinalizeRich(database, jobID, runID, data, rollup, telemetryarchive.RemoteCopy{R2Key: obj.R2Key, ETag: obj.ETag})
 }

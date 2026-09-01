@@ -360,8 +360,8 @@ Directories are not supported.
 ### weft db
 
 Manage the local jobs database (`~/.local/state/weft/jobs.db`, or
-`$XDG_STATE_HOME/weft/jobs.db`): take consistent
-snapshots, prune old snapshots.
+`$XDG_STATE_HOME/weft/jobs.db`): take consistent snapshots, archive terminal
+raw telemetry, and prune old snapshots.
 
 Configuration remains under `~/.config/weft` (or `$XDG_CONFIG_HOME/weft`).
 Durable local artifacts live under `~/.local/share/weft/artifacts` (or
@@ -406,6 +406,34 @@ weft db snapshot --out ~/Analysis/jobs-2026-04-30.db
 
 For periodic backups, drive this from `launchd` or `cron` — weft does not
 ship a backup daemon. A daily snapshot via launchd is one plist.
+
+#### `weft db archive-telemetry`
+
+```bash
+weft db archive-telemetry [--apply] [--compact] [--limit N]
+```
+
+Move terminal raw timeseries and rich resource telemetry from relational
+SQLite rows into verified, job/run-scoped objects under the durable data
+store. Compact per-attempt summaries remain in SQLite, so ordinary status and
+estimation reads do not fetch raw objects. New rental finalization also retains
+an R2 copy; historical backfill always retains a local durable copy and
+preserves any known R2 location. Active-attempt rows are never selected.
+
+The command is resumable and defaults to a dry run. An apply run first writes a
+consistent database snapshot. `--compact` runs `VACUUM` after archival to
+reclaim freed pages and may need to wait for other database writers.
+
+```bash
+# Count eligible attempts and rows
+weft db archive-telemetry
+
+# Process a bounded batch
+weft db archive-telemetry --apply --limit 100
+
+# Complete archival and reclaim the database pages
+weft db archive-telemetry --apply --compact
+```
 
 #### `weft db gc`
 

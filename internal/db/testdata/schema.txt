@@ -379,6 +379,16 @@ table job_telemetry_samples
   col 10 proc_net_rx_bps REAL notnull=0 default=<none> pk=0
   col 11 proc_net_tx_bps REAL notnull=0 default=<none> pk=0
   unique-index (attempt_id,ts) origin=pk partial=0
+table job_telemetry_summaries
+  col 0 job_id INTEGER notnull=1 default=<none> pk=0
+  col 1 attempt_id INTEGER notnull=1 default=<none> pk=1
+  col 2 sample_count INTEGER notnull=1 default=0 pk=0
+  col 3 ts_min INTEGER notnull=1 default=0 pk=0
+  col 4 ts_max INTEGER notnull=1 default=0 pk=0
+  col 5 summary_json TEXT notnull=1 default=<none> pk=0
+  col 6 gpu_stats_json TEXT notnull=0 default=<none> pk=0
+  col 7 updated_at INTEGER notnull=1 default=<none> pk=0
+  fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
 table job_timeseries
   col 0 job_id INTEGER notnull=1 default=<none> pk=1
   col 1 ts INTEGER notnull=1 default=<none> pk=2
@@ -407,6 +417,9 @@ table job_timeseries_raw_objects
   col 5 etag TEXT notnull=0 default=<none> pk=0
   col 6 confirmed_at INTEGER notnull=1 default=<none> pk=0
   col 7 created_at INTEGER notnull=1 default=<none> pk=0
+  col 8 stored_path TEXT notnull=0 default=<none> pk=0
+  col 9 sha256 TEXT notnull=0 default=<none> pk=0
+  col 10 schema_version INTEGER notnull=1 default=1 pk=0
   fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
   unique-index (attempt_id,kind) origin=pk partial=0
 table job_timeseries_summaries

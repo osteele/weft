@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/spf13/cobra"
@@ -199,6 +200,7 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 // than each choosing its own subset.
 type runTelemetrySources struct {
 	Rollup        *db.TimeseriesSummary
+	RichRollup    *db.RichTelemetryRollup
 	LegacySamples []db.TimeseriesSample
 	RichSamples   []db.TelemetrySample
 }
@@ -216,15 +218,21 @@ func loadRunTelemetry(database *sql.DB, runID int64) (runTelemetrySources, error
 			return runTelemetrySources{}, fmt.Errorf("get latest-run timeseries: %w", err)
 		}
 	}
-	sources.RichSamples, err = db.GetTelemetryByRun(database, runID)
+	sources.RichRollup, err = db.GetRichTelemetryRollup(database, runID)
 	if err != nil {
-		return runTelemetrySources{}, fmt.Errorf("get latest-run telemetry: %w", err)
+		return runTelemetrySources{}, fmt.Errorf("get latest-run telemetry summary: %w", err)
+	}
+	if sources.RichRollup == nil {
+		sources.RichSamples, err = db.GetTelemetryByRun(database, runID)
+		if err != nil {
+			return runTelemetrySources{}, fmt.Errorf("get latest-run telemetry: %w", err)
+		}
 	}
 	return sources, nil
 }
 
 // gpuStats takes each field from the first source that reports it, so no
-// single source's blind spot becomes the attempt's: the rollup carries neither
+// single source's blind spot becomes the attempt's. Older rollups carry neither
 // clocks nor minima, and the per-device rows carry no temperature.
 //
 // Order matters. The timeseries sources come first because their utilisation
@@ -237,8 +245,57 @@ func (s runTelemetrySources) gpuStats() *db.GPUTelemetryStats {
 	return db.MergeGPUTelemetryStats(
 		db.ComputeGPUTelemetryStats(s.LegacySamples),
 		db.GPUTelemetryStatsFromTimeseriesSummary(s.Rollup),
+		richRollupGPUStats(s.RichRollup),
 		db.ComputeGPUTelemetryStatsFromGPUSamples(s.RichSamples),
 	)
+}
+
+func richRollupGPUStats(rollup *db.RichTelemetryRollup) *db.GPUTelemetryStats {
+	if rollup == nil {
+		return nil
+	}
+	return rollup.GPUStats
+}
+
+func loadRawRichTelemetry(database *sql.DB, runID int64) ([]db.TelemetrySample, error) {
+	var objectErr error
+	obj, err := db.GetRawTelemetryObject(database, runID, db.TelemetryRawKind)
+	if err != nil {
+		return nil, err
+	}
+	if obj != nil {
+		if obj.StoredPath != "" && obj.SHA256 != "" {
+			data, err := artifacts.ReadSystemBlob(obj.StoredPath, obj.SizeBytes, obj.SHA256)
+			if err == nil {
+				return db.ParseTelemetrySamplesJSONL(string(data), 0), nil
+			}
+			objectErr = err
+		}
+		if obj.R2Key != "" {
+			data, err := fetchR2TimeseriesObjectFunc(obj.R2Key)
+			if err == nil {
+				if obj.SHA256 == "" {
+					return db.ParseTelemetrySamplesJSONL(string(data), 0), nil
+				}
+				if err := artifacts.VerifyBlobBytes(data, obj.SizeBytes, obj.SHA256); err == nil {
+					return db.ParseTelemetrySamplesJSONL(string(data), 0), nil
+				} else {
+					objectErr = err
+				}
+			}
+			if err != nil {
+				objectErr = err
+			}
+		}
+	}
+	samples, err := db.GetTelemetryByRun(database, runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(samples) == 0 && objectErr != nil {
+		return nil, objectErr
+	}
+	return samples, nil
 }
 
 func collectTelemetryOutput(database *sql.DB, jobID int64) (telemetryOutput, error) {
@@ -293,10 +350,20 @@ func collectTelemetryOutputForRun(database *sql.DB, jobID, requestedRunID int64,
 	}
 	legacySummary, legacySamples, richSamples := sources.Rollup, sources.LegacySamples, sources.RichSamples
 	if includeSamples {
+		if len(richSamples) == 0 && sources.RichRollup != nil {
+			richSamples, err = loadRawRichTelemetry(database, runID)
+			if err != nil {
+				return telemetryOutput{}, fmt.Errorf("load raw telemetry: %w", err)
+			}
+		}
 		out.RawSamples = &richSamples
 	}
 
-	if len(richSamples) > 0 {
+	if sources.RichRollup != nil {
+		out.TimeMin = sources.RichRollup.TSMin
+		out.TimeMax = sources.RichRollup.TSMax
+		out.Samples = sources.RichRollup.SampleCount
+	} else if len(richSamples) > 0 {
 		out.TimeMin = richSamples[0].Ts
 		out.TimeMax = richSamples[len(richSamples)-1].Ts
 		out.Samples = len(richSamples)
@@ -322,6 +389,8 @@ func collectTelemetryOutputForRun(database *sql.DB, jobID, requestedRunID int64,
 			wallDuration = float64(*job.EndTime - job.StartTime)
 		}
 		out.Summary = db.SummarizeTelemetry(richSamples, wallDuration, splitTelemetryGPUDevices(job))
+	} else if sources.RichRollup != nil {
+		out.Summary = sources.RichRollup.Summary
 	}
 
 	return out, nil

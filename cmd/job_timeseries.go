@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2keys"
@@ -28,9 +29,10 @@ var jobTimeseriesCmd = &cobra.Command{
 	Long: `Streams the agent's per-sample timeseries (CPU, RSS, GPU, disk free/total,
 GPU temp, etc.) for a job's most recent run.
 
-Raw telemetry is retained in R2 and cached locally under ~/.cache/weft; SQLite
-keeps compact summaries for ordinary status and estimation queries. Use --raw
-for the JSONL file as the agent wrote it. Use --summary for high-water marks only.`,
+Raw telemetry is retained as a durable local object and rental telemetry also
+retains its R2 location; SQLite keeps compact summaries for ordinary status and
+estimation queries. Use --raw for the JSONL file as the agent wrote it. Use
+--summary for high-water marks only.`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runJobTimeseries,
 }
@@ -155,16 +157,45 @@ func loadRawTimeseries(database *sql.DB, jobID, runID int64) ([]byte, string, er
 	var fetchErr error
 	if obj, err := db.GetTimeseriesRawObject(database, runID, db.TimeseriesRawKind); err != nil {
 		return nil, "", err
-	} else if obj != nil && obj.R2Key != "" {
-		if data, ok := timeseriescache.Read(jobID, runID, obj.ETag); ok {
-			return data, "cache", nil
+	} else if obj != nil {
+		if obj.StoredPath != "" && obj.SHA256 != "" {
+			if data, err := artifacts.ReadSystemBlob(obj.StoredPath, obj.SizeBytes, obj.SHA256); err == nil {
+				return data, "artifact", nil
+			} else {
+				fetchErr = err
+			}
 		}
-		data, err := fetchR2TimeseriesObjectFunc(obj.R2Key)
-		if err == nil {
-			_ = timeseriescache.Write(jobID, runID, obj.ETag, data)
-			return data, "r2", nil
+		if obj.R2Key == "" {
+			// The local object was the only durable copy. Preserve its
+			// verification error unless legacy relational rows still exist.
+		} else if data, ok := timeseriescache.Read(jobID, runID, obj.ETag); ok {
+			if obj.SHA256 == "" {
+				return data, "cache", nil
+			}
+			if err := artifacts.VerifyBlobBytes(data, obj.SizeBytes, obj.SHA256); err == nil {
+				return data, "cache", nil
+			} else {
+				fetchErr = err
+			}
+		} else {
+			data, err := fetchR2TimeseriesObjectFunc(obj.R2Key)
+			if err == nil {
+				if obj.SHA256 != "" {
+					if err := artifacts.VerifyBlobBytes(data, obj.SizeBytes, obj.SHA256); err != nil {
+						fetchErr = err
+					} else {
+						_ = timeseriescache.Write(jobID, runID, obj.ETag, data)
+						return data, "r2", nil
+					}
+				} else {
+					_ = timeseriescache.Write(jobID, runID, obj.ETag, data)
+					return data, "r2", nil
+				}
+			}
+			if err != nil {
+				fetchErr = err
+			}
 		}
-		fetchErr = err
 	}
 
 	if data, key, err := loadLegacyRawTimeseriesFromR2(jobID, runID); err == nil && len(data) > 0 {

@@ -218,7 +218,13 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		if raw, _, err := loadRawTimeseries(database, run.JobID, run.RunID); err == nil && len(raw) > 0 {
 			rec.Timeseries = db.ParseTimeseriesJSONL(string(raw), 0, "")
 		}
-		if telemetrySamples, err := db.GetTelemetryByRun(database, run.RunID); err == nil && len(telemetrySamples) > 0 {
+		if rollup, err := db.GetRichTelemetryRollup(database, run.RunID); err == nil && rollup != nil {
+			if rec.TelemetryV2 == nil {
+				rec.TelemetryV2 = &trainingTelemetryV2{}
+			}
+			rec.TelemetryV2.Summary = rollup.Summary
+		}
+		if telemetrySamples, err := loadRawRichTelemetry(database, run.RunID); err == nil && len(telemetrySamples) > 0 {
 			if rec.TelemetryV2 == nil {
 				rec.TelemetryV2 = &trainingTelemetryV2{}
 			}

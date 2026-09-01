@@ -1,19 +1,21 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/telemetryarchive"
 	"github.com/spf13/cobra"
 )
 
 var dbCmd = &cobra.Command{
 	Use:   "db",
 	Short: "Manage the local jobs database",
-	Long: `Manage $XDG_STATE_HOME/weft/jobs.db: take snapshots, prune old snapshots,
-inspect the schema.
+	Long: `Manage $XDG_STATE_HOME/weft/jobs.db: take snapshots, archive terminal
+raw telemetry, prune old snapshots, and inspect the schema.
 
 Automatic snapshots are written to $XDG_STATE_HOME/weft/backups/ before any schema
 migration. Manual snapshots can be taken at any time with "weft db snapshot".`,
@@ -50,20 +52,139 @@ be deleted.`,
 	RunE: runDBGC,
 }
 
+var dbArchiveTelemetryCmd = &cobra.Command{
+	Use:   "archive-telemetry",
+	Short: "Move terminal raw telemetry out of the operational database",
+	Long: `Preserve terminal per-sample telemetry as verified job/run-scoped objects,
+retain compact per-attempt summaries in SQLite, then prune the raw relational
+rows. The command is resumable and runs as a dry run unless --apply is passed.
+
+An apply run writes a consistent database snapshot before changing rows. Pass
+--compact to reclaim freed SQLite pages after archival; compaction may need to
+wait for other database writers.`,
+	Args: usageArgs(cobra.NoArgs),
+	RunE: runDBArchiveTelemetry,
+}
+
 var (
-	dbSnapshotOut string
-	dbGCKeep      int
-	dbGCApply     bool
+	dbSnapshotOut             string
+	dbGCKeep                  int
+	dbGCApply                 bool
+	dbArchiveTelemetryApply   bool
+	dbArchiveTelemetryCompact bool
+	dbArchiveTelemetryLimit   int
 )
 
 func init() {
 	rootCmd.AddCommand(dbCmd)
 	dbCmd.AddCommand(dbSnapshotCmd)
 	dbCmd.AddCommand(dbGCCmd)
+	dbCmd.AddCommand(dbArchiveTelemetryCmd)
 
 	dbSnapshotCmd.Flags().StringVar(&dbSnapshotOut, "out", "", "Destination path (default: $XDG_STATE_HOME/weft/backups/jobs.db.snapshot-<timestamp>.db)")
 	dbGCCmd.Flags().IntVar(&dbGCKeep, "keep", 10, "Number of newest snapshots to keep")
 	dbGCCmd.Flags().BoolVar(&dbGCApply, "apply", false, "Delete files (without this flag, only preview)")
+	dbArchiveTelemetryCmd.Flags().BoolVar(&dbArchiveTelemetryApply, "apply", false, "Archive and prune rows (without this flag, only preview)")
+	dbArchiveTelemetryCmd.Flags().BoolVar(&dbArchiveTelemetryCompact, "compact", false, "VACUUM the database after archival")
+	dbArchiveTelemetryCmd.Flags().IntVar(&dbArchiveTelemetryLimit, "limit", 0, "Maximum attempts to process (0 means all)")
+}
+
+func runDBArchiveTelemetry(cmd *cobra.Command, _ []string) error {
+	if dbArchiveTelemetryLimit < 0 {
+		return usageErrorf("--limit must be >= 0")
+	}
+	if dbArchiveTelemetryCompact && !dbArchiveTelemetryApply {
+		return usageErrorf("--compact requires --apply")
+	}
+	database, err := db.Open()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	candidates, err := db.ListTelemetryArchiveCandidates(database, dbArchiveTelemetryLimit)
+	if err != nil {
+		return err
+	}
+	var timeseriesRows, richRows int64
+	for _, candidate := range candidates {
+		timeseriesRows += candidate.TimeseriesSamples
+		richRows += candidate.RichSamples
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Terminal attempts: %d\nTimeseries rows: %d\nRich telemetry rows: %d\n",
+		len(candidates), timeseriesRows, richRows)
+	if !dbArchiveTelemetryApply {
+		fmt.Fprintln(cmd.OutOrStdout(), "Dry run: no rows changed. Pass --apply to archive and prune.")
+		return nil
+	}
+	if len(candidates) == 0 && !dbArchiveTelemetryCompact {
+		return nil
+	}
+	snapshot := db.ManualSnapshotPath()
+	if err := db.Snapshot(database, snapshot); err != nil {
+		return fmt.Errorf("pre-archive snapshot: %w", err)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Snapshot: %s\n", snapshot)
+	for i, candidate := range candidates {
+		if err := archiveTelemetryCandidate(database, candidate); err != nil {
+			return fmt.Errorf("archive job wj%d attempt %d: %w", candidate.JobID, candidate.AttemptID, err)
+		}
+		if (i+1)%100 == 0 || i+1 == len(candidates) {
+			fmt.Fprintf(cmd.OutOrStdout(), "Archived %d/%d attempts\n", i+1, len(candidates))
+		}
+	}
+	if dbArchiveTelemetryCompact {
+		fmt.Fprintln(cmd.OutOrStdout(), "Compacting database...")
+		if err := db.Compact(database); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func archiveTelemetryCandidate(database *sql.DB, candidate db.TelemetryArchiveCandidate) error {
+	if candidate.TimeseriesSamples > 0 {
+		samples, err := db.GetTimeseriesByRun(database, candidate.AttemptID)
+		if err != nil {
+			return err
+		}
+		raw, err := telemetryarchive.EncodeTimeseries(samples)
+		if err != nil {
+			return err
+		}
+		remote := telemetryarchive.RemoteCopy{}
+		if obj, err := db.GetRawTelemetryObject(database, candidate.AttemptID, db.TimeseriesRawKind); err != nil {
+			return err
+		} else if obj != nil {
+			remote = telemetryarchive.RemoteCopy{R2Key: obj.R2Key, ETag: obj.ETag}
+		}
+		if err := telemetryarchive.FinalizeTimeseries(database, candidate.JobID, candidate.AttemptID, raw, samples, remote); err != nil {
+			return err
+		}
+	}
+	if candidate.RichSamples > 0 {
+		samples, err := db.GetTelemetryByRun(database, candidate.AttemptID)
+		if err != nil {
+			return err
+		}
+		raw, err := telemetryarchive.EncodeRich(samples)
+		if err != nil {
+			return err
+		}
+		rollup, err := db.BuildRichTelemetryRollupForJob(database, candidate.JobID, candidate.AttemptID, samples)
+		if err != nil {
+			return err
+		}
+		remote := telemetryarchive.RemoteCopy{}
+		if obj, err := db.GetRawTelemetryObject(database, candidate.AttemptID, db.TelemetryRawKind); err != nil {
+			return err
+		} else if obj != nil {
+			remote = telemetryarchive.RemoteCopy{R2Key: obj.R2Key, ETag: obj.ETag}
+		}
+		if err := telemetryarchive.FinalizeRich(database, candidate.JobID, candidate.AttemptID, raw, rollup, remote); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runDBSnapshot(cmd *cobra.Command, _ []string) error {

@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/telemetryarchive"
 )
 
 // syncJobTelemetry fetches richer telemetry JSONL from a remote host and imports
@@ -16,6 +17,19 @@ import (
 func syncJobTelemetry(database *sql.DB, job *db.Job, timeout time.Duration) error {
 	if job == nil {
 		return nil
+	}
+	if db.IsTerminalStatus(job.Status) && job.LatestRunID != nil {
+		obj, objErr := db.GetRawTelemetryObject(database, *job.LatestRunID, db.TelemetryRawKind)
+		rollup, rollupErr := db.GetRichTelemetryRollup(database, *job.LatestRunID)
+		if objErr != nil {
+			return objErr
+		}
+		if rollupErr != nil {
+			return rollupErr
+		}
+		if obj != nil && rollup != nil {
+			return nil
+		}
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -42,6 +56,16 @@ func syncJobTelemetry(database *sql.DB, job *db.Job, timeout time.Duration) erro
 	}
 	if err := db.RefreshJobTelemetrySummary(database, job.ID); err != nil {
 		return fmt.Errorf("refresh telemetry summary: %w", err)
+	}
+	if db.IsTerminalStatus(job.Status) && job.LatestRunID != nil {
+		allSamples := db.ParseTelemetrySamplesJSONL(stdout, 0)
+		rollup, err := db.BuildRichTelemetryRollupForJob(database, job.ID, *job.LatestRunID, allSamples)
+		if err != nil {
+			return fmt.Errorf("build telemetry rollup: %w", err)
+		}
+		if err := telemetryarchive.FinalizeRich(database, job.ID, *job.LatestRunID, []byte(stdout), rollup, telemetryarchive.RemoteCopy{}); err != nil {
+			return fmt.Errorf("archive telemetry: %w", err)
+		}
 	}
 	if err := upsertTelemetryPhaseMetrics(database, job, samples); err != nil {
 		return fmt.Errorf("upsert telemetry phase metrics: %w", err)

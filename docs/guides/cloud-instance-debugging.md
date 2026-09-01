@@ -131,8 +131,11 @@ parsing approach instead.
 
 The agent uploads status markers, logs, and per-sample telemetry to R2.
 Per-job telemetry (CPU, RSS, GPU, **disk free/total**, GPU temp) is captured
-on every sample tick and stored on R2; it is not imported into the local
-DB. Fetch it from R2 when you need to investigate a specific run.
+on every sample tick. SQLite may hold transient raw rows while an attempt is
+active, but terminal sync preserves the immutable JSONL under the durable data
+store (and R2 for rental jobs), records a compact per-attempt summary, and then
+prunes those rows. Ordinary `weft info` and telemetry summaries therefore need
+only SQLite; explicit raw inspection fetches the verified object.
 
 **Per-instance keys** (replace `<id>` with the launch ID):
 
@@ -150,6 +153,7 @@ instance/<id>/termination-intent.json
 
 ```
 jobs/<job>/runs/<run>/telemetry/timeseries.jsonl       # durable raw per-sample timeseries
+jobs/<job>/runs/<run>/telemetry/resource.jsonl         # durable rich CPU/GPU telemetry
 jobs/<job>/runs/<run>/timeseries.jsonl                 # live checkpoint while running
 jobs/<job>/runs/<run>/results/<job>.telemetry.jsonl    # finer-grained
 jobs/<job>/runs/<run>/results/<job>.log                # stdout/stderr

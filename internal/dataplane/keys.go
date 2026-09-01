@@ -141,6 +141,10 @@ func JobAttemptRawTimeseries(jobID, runID int64) string {
 	return fmt.Sprintf("%s/telemetry/timeseries.jsonl", JobRunPrefix(jobID, runID))
 }
 
+func JobAttemptRawTelemetry(jobID, runID int64) string {
+	return fmt.Sprintf("%s/telemetry/resource.jsonl", JobRunPrefix(jobID, runID))
+}
+
 // JobAttemptLegacyResultTimeseries returns the old results-bundle timeseries
 // key kept only for fallback reads of objects produced before raw retention.
 func JobAttemptLegacyResultTimeseries(jobID, runID int64) string {

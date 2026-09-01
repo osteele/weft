@@ -1034,6 +1034,28 @@ rule ParallelCloudSyncPhases {
         -- RepairHistoricalCloudCompletions.
 }
 
+-- Raw telemetry is durable job data, not permanent operational database
+-- state. Active attempts may retain relational rows for live summaries; a
+-- terminal attempt may discard them only after its immutable stream and
+-- per-attempt rollup are both positively recorded.
+rule TerminalTelemetryArchivesBeforePrune {
+    when: SyncTerminalAttemptTelemetry(attempt, raw_stream)
+
+    if DurableTelemetryObjectVerified(attempt, raw_stream)
+       and TelemetrySummaryRecorded(attempt):
+        ensures: RawTelemetryRowsPruned(attempt)
+    else:
+        ensures: RawTelemetryRowsRetained(attempt)
+
+    -- legacy annotation: @guidance
+        -- Object absence, an R2 error, a local write failure, or malformed
+        -- JSONL is not permission to prune. Ordinary info/summary reads use
+        -- the per-attempt rollup; explicit raw reads resolve the verified
+        -- local object, then R2, then legacy relational rows.
+        -- Implementation: internal/telemetryarchive, internal/db/telemetry.go,
+        -- internal/db/timeseries.go, and cmd/telemetry.go.
+}
+
 -- Sync current cloud attempts from exact R2 marker keys derived from the DB.
 rule SyncActiveCloudAttemptsFromR2 {
     when: JobCompletionSyncRequested()

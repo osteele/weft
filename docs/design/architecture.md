@@ -419,6 +419,7 @@ covered in [Artifact Store](artifacts.md).
 | `~/.config/weft/config.toml` | Configuration |
 | `~/.config/weft/config` | Legacy config (Slack webhook) |
 | `~/.local/share/weft/artifacts/` | Durable local artifacts (`$XDG_DATA_HOME/weft/artifacts/`) |
+| `~/.local/share/weft/artifacts/system/{timeseries,telemetry}/sha256/` | Verified terminal raw telemetry objects |
 
 ### Remote (Server)
 
@@ -446,6 +447,13 @@ covered in [Artifact Store](artifacts.md).
 - **Single file**: Easy backup, portability
 - **modernc.org/sqlite**: Pure Go, no CGO required
 - **Local queries**: Fast filtering, searching, cleanup
+
+SQLite retains operational state and compact per-attempt telemetry summaries,
+not terminal raw sample history. Raw JSONL is immutable job data: terminal sync
+places it in the durable artifact data root (and R2 for rentals), records its
+digest and location in SQLite, and prunes the relational sample rows only after
+positive verification. Active attempts may retain rows temporarily for live
+status.
 
 ### Why Bubble Tea for TUI?
 
