@@ -52,6 +52,7 @@ type CommandJob struct {
 	Outputs          []string        `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
 	Produces         []string        `json:"produces,omitempty"`    // artifact specs this job produces
 	Needs            []string        `json:"needs,omitempty"`       // artifact specs this job needs
+	Payloads         []Payload       `json:"payloads,omitempty"`
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -103,6 +104,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Outputs:          entry.Outputs,
 			Produces:         entry.Produces,
 			Needs:            entry.Needs,
+			Payloads:         entry.Payloads,
 		},
 	}
 }

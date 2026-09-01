@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudneeds"
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/r2"
@@ -66,6 +67,22 @@ func newCloudAgentJob(job *db.Job, remoteDir string) (cloud.AgentJob, error) {
 		return cloud.AgentJob{}, fmt.Errorf("job %s produced invalid run_id=%d", ids.FormatJobID(job.ID), agentJob.RunID)
 	}
 	return agentJob, nil
+}
+
+func attachAgentJobPayloads(database *sql.DB, jobID int64, agentJob *cloud.AgentJob) error {
+	if agentJob == nil {
+		return fmt.Errorf("agent job is nil")
+	}
+	rows, err := db.ListJobPayloads(database, jobID)
+	if err != nil {
+		return err
+	}
+	for _, payload := range rows {
+		agentJob.Payloads = append(agentJob.Payloads, dataplane.JobPayload{
+			Name: payload.Name, SizeBytes: payload.SizeBytes, SHA256: payload.SHA256, R2Key: payload.R2Key,
+		})
+	}
+	return nil
 }
 
 func remoteDirForAgentJob(job *db.Job, localToRemote map[string]string) string {

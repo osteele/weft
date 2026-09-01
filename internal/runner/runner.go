@@ -81,6 +81,9 @@ type Runner struct {
 	// closure and returns its project working directory. It takes precedence
 	// over the legacy single-tarball hook when SourceManifest is present.
 	EnsureSourceManifestFromR2 func(jobID int64, manifest opsqueue.SourceManifest, perJobRoot string) (string, error)
+	// EnsurePayloadsFromR2 stages logical-job input artifacts and returns the
+	// owner-private directory to expose as WEFT_PAYLOAD_DIR.
+	EnsurePayloadsFromR2 func(jobID int64, payloads []opsqueue.Payload) (string, error)
 
 	// Shutdown
 	stopCh chan struct{}
@@ -737,6 +740,18 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
+	payloadDir := ""
+	if len(job.Payloads) > 0 {
+		if r.EnsurePayloadsFromR2 == nil {
+			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, "payload staging unavailable: runner has no R2 payload materializer")
+		}
+		stagedDir, payloadErr := r.EnsurePayloadsFromR2(jobID, job.Payloads)
+		if payloadErr != nil {
+			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("payload staging failed: %v", payloadErr))
+		}
+		payloadDir = stagedDir
+	}
+
 	startTime := r.now().Unix()
 
 	oplog.LogJob(oplog.OpJobStart, jobID, "", oplog.WithDetailf("cmd=%s", command))
@@ -809,6 +824,9 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// Apply job env vars (override dotenv)
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, jobID)
+	if payloadDir != "" {
+		envVars = append(envVars, "WEFT_PAYLOAD_DIR="+payloadDir)
+	}
 
 	// Inject resolved GPU device
 	if len(gpuDevices) > 0 && job.GPUClass != "" {

@@ -63,6 +63,28 @@ cause is that the working copy was moved off the revision that holds the file.
 
 ## Declaring data dependencies
 
+### Admission-time file payloads
+
+Use `--payload NAME=PATH` for a single file whose exact bytes must be bound to
+the logical job at submission time:
+
+```bash
+laptop$ weft run --payload config=./private-eval.json 'python evaluate.py'
+```
+
+Weft reads, copies, hashes, and uploads the file before accepting the job. Later
+changes or deletion of `./private-eval.json` do not affect retries, restarts, or
+host migration. Every attempt receives the same bytes at
+`$WEFT_PAYLOAD_DIR/config`. Payload names are safe single path components;
+duplicates, directories, missing files, and unreadable files are rejected.
+
+`weft info JOB` prints each payload's name, byte size, SHA-256 digest, and a
+retrieval command without printing its contents. Retrieve the original bytes
+with `weft artifact get JOB payload:config` or stream them with
+`weft artifact cat JOB payload:config`. Payloads are job-scoped input artifacts,
+not permanent named assets and not attempt-scoped outputs. Their byte sizes are
+included in rental disk estimates.
+
 Jobs that need HuggingFace models, datasets, or other data assets should declare
 them with `--input`. Weft uses these declarations to:
 

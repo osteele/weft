@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strconv"
@@ -1141,6 +1142,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)
+		if err := printJobPayloads(os.Stdout, database, job.ID); err != nil {
+			errorsList = append(errorsList, err.Error())
+		}
 		if len(job.EnvVars) > 0 {
 			fmt.Printf("Env Vars:    %s\n", formatEnvVarsForDisplay(job.EnvVars))
 		}
@@ -1335,6 +1339,25 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 	if len(errorsList) > 0 {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
+func printJobPayloads(w io.Writer, database *sql.DB, jobID int64) error {
+	if w == nil || database == nil || jobID <= 0 {
+		return nil
+	}
+	payloads, err := db.ListJobPayloads(database, jobID)
+	if err != nil {
+		return fmt.Errorf("read payloads for job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	fmt.Fprintln(w, "Payloads:")
+	for _, payload := range payloads {
+		fmt.Fprintf(w, "  %s  %d bytes  sha256:%s\n", payload.Name, payload.SizeBytes, payload.SHA256)
+		fmt.Fprintf(w, "    retrieve: weft artifact get %s payload:%s\n", ids.FormatJobID(jobID), payload.Name)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/artifactspec"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/dataplane"
@@ -19,14 +20,14 @@ import (
 )
 
 // AppendJobToQueue adds an existing job to the remote queue.
-func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
-	return AppendJobToQueueWithSource(job, timeout, "")
+func AppendJobToQueue(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	return AppendJobToQueueWithSource(database, job, timeout, "")
 }
 
 // AppendJobToQueueWithSource adds an existing job to the remote queue and
 // includes an optional source snapshot hash for provenance checks.
-func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256 string) error {
-	return AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, "")
+func AppendJobToQueueWithSource(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256 string) error {
+	return AppendJobToQueueWithSourceAndR2(database, job, timeout, sourceSHA256, "")
 }
 
 // AppendJobToQueueWithSourceAndR2 adds an existing job to the remote queue
@@ -34,11 +35,11 @@ func AppendJobToQueueWithSource(job *db.Job, timeout time.Duration, sourceSHA256
 // sourceR2Key is non-empty, the runner switches to R2-isolated mode for this
 // job (Layer D fallback): it downloads the tarball, extracts into a per-job
 // dir, and skips the marker check.
-func AppendJobToQueueWithSourceAndR2(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
-	return appendJobToQueueWithSourceManifest(job, timeout, sourceSHA256, sourceR2Key, nil)
+func AppendJobToQueueWithSourceAndR2(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
+	return appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil)
 }
 
-func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest) error {
+func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest) error {
 	pinned, ok, err := pinnedQueueSourceManifest(job)
 	if err != nil {
 		return err
@@ -55,11 +56,15 @@ func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sour
 	if job.LatestRunID != nil {
 		runID = *job.LatestRunID
 	}
+	payloads, err := queuePayloadsForJob(database, job.ID)
+	if err != nil {
+		return fmt.Errorf("list job payloads: %w", err)
+	}
 	entry := opsqueue.QueueEntry{
 		JobID:            job.ID,
 		RunID:            runID,
 		WorkingDir:       job.WorkingDir,
-		Command:          job.Command,
+		Command:          payloadGuardedCommand(job.Command, payloads),
 		Description:      job.Description,
 		SourceSHA256:     sourceSHA256,
 		SourceR2Key:      sourceR2Key,
@@ -79,10 +84,33 @@ func appendJobToQueueWithSourceManifest(job *db.Job, timeout time.Duration, sour
 		Outputs:          job.Outputs,
 		Produces:         job.Produces,
 		Needs:            job.Needs,
+		Payloads:         payloads,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
 	return appendQueueCommand(job.Host, addCmd, opts)
+}
+
+// payloadGuardedCommand makes a payload-bearing queue entry fail closed on an
+// older inventory agent that ignores the payloads JSON field. Current agents
+// stage the files and set WEFT_PAYLOAD_DIR before invoking this command.
+func payloadGuardedCommand(command string, payloads []opsqueue.Payload) string {
+	if len(payloads) == 0 {
+		return command
+	}
+	return `if [ -z "${WEFT_PAYLOAD_DIR:-}" ]; then echo "weft: payload staging unavailable; update the host agent" >&2; exit 78; fi; ` + command
+}
+
+func queuePayloadsForJob(database *sql.DB, jobID int64) ([]opsqueue.Payload, error) {
+	rows, err := db.ListJobPayloads(database, jobID)
+	if err != nil {
+		return nil, err
+	}
+	payloads := make([]opsqueue.Payload, 0, len(rows))
+	for _, payload := range rows {
+		payloads = append(payloads, opsqueue.Payload{Name: payload.Name, SizeBytes: payload.SizeBytes, SHA256: payload.SHA256, R2Key: payload.R2Key})
+	}
+	return payloads, nil
 }
 
 func jobRAMReservationKB(job *db.Job) int64 {
@@ -172,6 +200,9 @@ type QueueJobParams struct {
 	CLIOverrides     *db.CLIResourceOverrides
 	MaxComputeCap    string
 	SubmitToken      string
+	// Payloads are immutable input artifacts captured before admission. The
+	// association rows are inserted in the same transaction as the job.
+	Payloads []db.JobPayload
 	// SubmitterSession is the opaque agent-session id of the submitter, used
 	// to address the completion notification back to the session that asked
 	// for the job. Only callers running in the submitting process may set it
@@ -226,6 +257,9 @@ func recordQueuedJob(ctx context.Context, database *sql.DB, explicitJobID int64,
 	}
 	if err := dataloc.ValidateExplicitHFInputs(params.Inputs, params.BestEffortInputs); err != nil {
 		return 0, fmt.Errorf("inputs: %w", err)
+	}
+	if err := validateJobPayloads(params.Payloads); err != nil {
+		return 0, err
 	}
 
 	// Extract GPU from env vars if not explicitly set
@@ -323,6 +357,9 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 		if jobID, ok, err := db.FindJobIDBySubmitToken(tx, submitToken); err != nil {
 			return 0, fmt.Errorf("lookup submit token: %w", err)
 		} else if ok {
+			if err := requireMatchingPayloads(tx, jobID, params.Payloads); err != nil {
+				return 0, err
+			}
 			return jobID, nil
 		}
 	}
@@ -436,8 +473,52 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 			return 0, fmt.Errorf("record job metadata: %w", err)
 		}
 	}
+	for _, payload := range params.Payloads {
+		payload.JobID = jobID
+		if err := db.InsertJobPayload(tx, payload); err != nil {
+			return 0, fmt.Errorf("record payload: %w", err)
+		}
+	}
 
 	return jobID, nil
+}
+
+func validateJobPayloads(payloads []db.JobPayload) error {
+	seen := make(map[string]struct{}, len(payloads))
+	for _, payload := range payloads {
+		if err := artifacts.ValidatePayloadName(payload.Name); err != nil {
+			return err
+		}
+		if payload.StoredPath == "" || payload.SHA256 == "" || payload.R2Key == "" || payload.SizeBytes < 0 {
+			return fmt.Errorf("payload %q has incomplete capture metadata", payload.Name)
+		}
+		if _, ok := seen[payload.Name]; ok {
+			return fmt.Errorf("duplicate payload name %q", payload.Name)
+		}
+		seen[payload.Name] = struct{}{}
+	}
+	return nil
+}
+
+func requireMatchingPayloads(tx *sql.Tx, jobID int64, submitted []db.JobPayload) error {
+	existing, err := db.ListJobPayloads(tx, jobID)
+	if err != nil {
+		return fmt.Errorf("read payloads for idempotent job %d: %w", jobID, err)
+	}
+	if len(existing) != len(submitted) {
+		return fmt.Errorf("idempotency key already belongs to job %d with different payloads", jobID)
+	}
+	byName := make(map[string]db.JobPayload, len(existing))
+	for _, payload := range existing {
+		byName[payload.Name] = payload
+	}
+	for _, payload := range submitted {
+		prior, ok := byName[payload.Name]
+		if !ok || prior.SizeBytes != payload.SizeBytes || prior.SHA256 != payload.SHA256 {
+			return fmt.Errorf("idempotency key already belongs to job %d with different payload %q", jobID, payload.Name)
+		}
+	}
+	return nil
 }
 
 func mergeJobMetadata(meta *db.JobMetadata, disk *db.JobDiskMetadata, bestEffortInputs []string) *db.JobMetadata {
@@ -523,7 +604,7 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 		}, nil
 	}
 
-	if err := AppendJobToQueue(job, opts.Timeout); err != nil {
+	if err := AppendJobToQueue(database, job, opts.Timeout); err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{
 				Success:  true,

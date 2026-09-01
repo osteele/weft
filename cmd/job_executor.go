@@ -118,6 +118,7 @@ type queueJobOptions struct {
 	OutputDirs       []string // Convention-based output directories from .weft.toml
 	Produces         []string // Artifact specs this job produces
 	Needs            []string // Artifact specs this job needs
+	Payloads         []db.JobPayload
 	CloudAfter       []db.JobDependencyRef
 	CloudNeeds       []string
 	Disk             *db.JobDiskMetadata
@@ -295,6 +296,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		OutputDirs:       opts.OutputDirs,
 		Produces:         opts.Produces,
 		Needs:            opts.Needs,
+		Payloads:         opts.Payloads,
 		Metadata:         buildJobExecutorMetadata(opts.CloudAfter, opts.CloudNeeds, opts.Source),
 		Disk:             opts.Disk,
 		CLIOverrides:     cliOverrides,

@@ -52,6 +52,16 @@ func TestQueueCommandSerialization(t *testing.T) {
 				},
 			}),
 		},
+		{
+			name: "add admission payload",
+			cmd: NewAddCommand(QueueEntry{
+				JobID:   790,
+				Command: "true",
+				Payloads: []Payload{{
+					Name: "config", SizeBytes: 7, SHA256: strings.Repeat("c", 64), R2Key: "assets/hash",
+				}},
+			}),
+		},
 		{name: "priority command", cmd: NewPriorityCommand(123)},
 		{name: "cancel command", cmd: NewCancelCommand(456)},
 		{name: "stop command", cmd: NewStopCommand()},
@@ -77,6 +87,11 @@ func TestQueueCommandSerialization(t *testing.T) {
 			if tt.cmd.Job != nil && tt.cmd.Job.SourceManifest != nil {
 				if roundTrip.Job == nil || roundTrip.Job.SourceManifest == nil || roundTrip.Job.SourceManifest.SHA256 != tt.cmd.Job.SourceManifest.SHA256 {
 					t.Fatalf("source manifest did not survive round trip: %#v", roundTrip.Job)
+				}
+			}
+			if tt.cmd.Job != nil && len(tt.cmd.Job.Payloads) > 0 {
+				if roundTrip.Job == nil || len(roundTrip.Job.Payloads) != 1 || roundTrip.Job.Payloads[0].SHA256 != tt.cmd.Job.Payloads[0].SHA256 {
+					t.Fatalf("payload did not survive round trip: %#v", roundTrip.Job)
 				}
 			}
 		})

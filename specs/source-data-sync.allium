@@ -51,6 +51,7 @@ external entity DispatchEntry {
     source_sha256: String?          -- manifest SHA for pinned jobs; legacy snapshot SHA otherwise
     source_r2_key: String?          -- legacy tarball key or fail-closed closure-receipt guard
     source_manifest: SourceRootManifest?
+    payloads: List<jobs/JobPayloadArtifact>
 }
 
 -- DataAsset identifies a piece of named, addressable data (an HF model,
@@ -153,6 +154,7 @@ contract AgentStagingContract {
 	source_root_manifest_present: (manifest_hash: String) -> Boolean
     manifest_present: (instance_id: String) -> Boolean
     need_object_present: (r2_key: String) -> Boolean
+    payload_object_present: (r2_key: String) -> Boolean
 
     -- legacy annotation: @invariant SourceHashMatchesManifest
         -- The source_hash referenced by the manifest served to the agent
@@ -185,6 +187,19 @@ contract AgentStagingContract {
         -- The manifest enumerates both the source tarball and every
         -- cross-instance input the job depends on. The agent trusts the
         -- manifest; inputs omitted from it are invisible to the job.
+
+    -- legacy annotation: @invariant PayloadsStagedBeforeSetup
+		-- Every admitted JobPayloadArtifact is present in both inventory
+		-- queue entries and rental AgentJob descriptions with the same name,
+		-- size, SHA-256, and R2 key. Before setup or command execution, the
+		-- agent downloads and verifies each object, creates an owner-private
+		-- payload directory, chmods each file to 0600, and exposes the
+		-- directory as WEFT_PAYLOAD_DIR. Mode 0600 protects contents from
+		-- other users; it does not prevent the job owner from rewriting the
+		-- staged copy. Staged paths are WEFT_PAYLOAD_DIR/<name> only.
+		-- Rental reuse rejects agents predating this wire field. Inventory
+		-- queue entries also carry a command guard so an older runner that
+		-- ignores unknown JSON fields fails before the user command executes.
 }
 
 -- ==========================================================================

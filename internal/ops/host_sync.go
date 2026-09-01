@@ -1190,7 +1190,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				syncLog.Debug("per-job source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
 			}
 		}
-		if err := AppendJobToQueueWithSourceAndR2(job, timeout, sourceSHA256, sourceR2Key); err != nil {
+		if err := AppendJobToQueueWithSourceAndR2(database, job, timeout, sourceSHA256, sourceR2Key); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				recordDeferred(job.ID, "queue append deferred (host unreachable)", err)
 				return ensured, contacted, nil

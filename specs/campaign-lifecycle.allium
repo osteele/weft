@@ -1797,6 +1797,7 @@ rule FreshRentalDiskEstimate {
         estimate_gb >= DefaultMinDiskGB
         estimate_gb >= ExplicitDiskFloorGB(group)
         estimate_gb >= EstimatedDeclaredAndObservedInputsGB(group)
+            + AdmissionPayloadBytesGB(group)
             + EstimatedUVSyncGB(group)
             + ImageAndSetupOverheadGB(group)
             + ExplicitRuntimeDiskGB(group)

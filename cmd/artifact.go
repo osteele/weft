@@ -874,6 +874,9 @@ func serveCachedArtifact(cmd *cobra.Command, entry *db.Artifact, destFor func(st
 // A row that matches but whose transfer fails surfaces the transfer's real
 // cause; "not found" is reported only when every source misses (wb20).
 func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job *db.Job, token string, multiple, stream bool) error {
+	if strings.HasPrefix(token, "payload:") {
+		return deliverPayloadToken(cmd, database, jobID, strings.TrimPrefix(token, "payload:"), multiple, stream)
+	}
 	if err := externalArtifactUnsupported(job); err != nil {
 		return err
 	}
@@ -964,6 +967,74 @@ func deliverArtifactToken(cmd *cobra.Command, database *sql.DB, jobID int64, job
 		}
 	}
 	return errors.New(artifactNotFoundMessage(job, token, r2Client != nil, resolution.r2ListErr != nil))
+}
+
+func deliverPayloadToken(cmd *cobra.Command, database *sql.DB, jobID int64, name string, multiple, stream bool) error {
+	if err := artifacts.ValidatePayloadName(name); err != nil {
+		return err
+	}
+	payload, err := db.GetJobPayload(database, jobID, name)
+	if err != nil {
+		if errors.Is(err, db.ErrJobPayloadNotFound) {
+			return fmt.Errorf("payload %q not found for job %s", name, ids.FormatJobID(jobID))
+		}
+		return err
+	}
+	localPath, err := artifacts.LocalPathFromStored(payload.StoredPath)
+	if err != nil {
+		return err
+	}
+	matches, err := artifacts.VerifyPayloadFile(localPath, payload.SizeBytes, payload.SHA256)
+	if err != nil {
+		return err
+	}
+	if !matches {
+		store := buildArtifactR2Client()
+		if store == nil {
+			return fmt.Errorf("payload %q is not cached locally and R2 is not configured", name)
+		}
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o700); err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(localPath), ".payload-download-*")
+		if err != nil {
+			return err
+		}
+		tmpPath := tmp.Name()
+		if closeErr := tmp.Close(); closeErr != nil {
+			_ = os.Remove(tmpPath)
+			return closeErr
+		}
+		defer os.Remove(tmpPath)
+		if _, err := store.DownloadObjectToFileWithIdleTimeout(context.Background(), payload.R2Key, tmpPath, artifactTimeout); err != nil {
+			return fmt.Errorf("download payload %q: %w", name, err)
+		}
+		matches, err := artifacts.VerifyPayloadFile(tmpPath, payload.SizeBytes, payload.SHA256)
+		if err != nil {
+			return err
+		}
+		if !matches {
+			return fmt.Errorf("payload %q failed size or SHA-256 verification", name)
+		}
+		if err := os.Chmod(tmpPath, 0o600); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpPath, localPath); err != nil {
+			return err
+		}
+	}
+	if stream {
+		return copyToWriter(localPath, cmd.OutOrStdout())
+	}
+	dest, err := resolveArtifactOutputPathForJob(name, artifactOutput, jobID, multiple)
+	if err != nil {
+		return err
+	}
+	if err := copyFile(localPath, dest); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+	return nil
 }
 
 func cachedArtifactMayPredateFinalUpload(entry *db.Artifact, job *db.Job) bool {

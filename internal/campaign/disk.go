@@ -341,9 +341,9 @@ func commandDepIncrementalEnvGB(job *db.Job) int {
 }
 
 // EstimateGroupDisk computes the required disk space in GB for an instance group
-// based on the deduplicated HF input footprint, deduplicated uv sync footprint,
-// explicit runtime headroom, and fixed project overhead. Returns at least
-// DefaultMinDiskGB.
+// based on the deduplicated HF input footprint, admission payloads,
+// deduplicated uv sync footprint, explicit runtime headroom, and fixed project
+// overhead. Returns at least DefaultMinDiskGB.
 //
 // The returned anomalies slice carries any historical telemetry samples that
 // exceeded DiskTelemetryPlausibilityBytes and were rejected. Callers should
@@ -382,10 +382,12 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 
 	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
 	sourceBytes := estimateGroupSourceRootBytes(group)
+	payloadBytes := estimateGroupPayloadBytes(group, localDB)
 
 	inputDiskGB := int(math.Ceil(float64(hfBytes+unresolvedFallbackBytes) / 1e9 * HFCacheMultiplier))
 	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
 	inputDiskGB += int(math.Ceil(float64(sourceBytes) / 1e9))
+	inputDiskGB += int(math.Ceil(float64(payloadBytes) / 1e9))
 	inputDiskGB += overhead
 	inputDiskGB += cmdHeavyGB
 	inputDiskGB += groupRuntimeDiskGB(group)
@@ -415,6 +417,28 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 		diskGB = capGB
 	}
 	return diskGB, anomalies
+}
+
+func estimateGroupPayloadBytes(group InstanceGroup, localDB *sql.DB) int64 {
+	if localDB == nil {
+		return 0
+	}
+	var total int64
+	for _, job := range group.Jobs {
+		if job == nil || job.ID <= 0 {
+			continue
+		}
+		payloads, err := db.ListJobPayloads(localDB, job.ID)
+		if err != nil {
+			slog.Warn("read job payload sizes failed; payload bytes omitted from disk estimate",
+				"component", "disk", "job_id", job.ID, "error", err)
+			continue
+		}
+		for _, payload := range payloads {
+			total += payload.SizeBytes
+		}
+	}
+	return total
 }
 
 func estimateGroupSourceRootBytes(group InstanceGroup) int64 {

@@ -47,6 +47,47 @@ func TestRecordQueuedJob_Basic(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedJobPayloadFailureRollsBackJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	if _, err := database.Exec(`CREATE TRIGGER reject_payload BEFORE INSERT ON job_payloads BEGIN SELECT RAISE(ABORT, 'payload rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RecordQueuedJob(database, QueueJobParams{
+		Host: "host-alpha", WorkingDir: "/tmp/project", Command: "true",
+		Payloads: []db.JobPayload{{Name: "config", StoredPath: "payloads/hash", SizeBytes: 1, SHA256: strings.Repeat("a", 64), R2Key: "assets/hash"}},
+	})
+	if err == nil {
+		t.Fatal("RecordQueuedJob succeeded")
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM jobs`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("jobs after failed payload admission = %d", count)
+	}
+}
+
+func TestRecordQueuedJobIdempotencyRequiresMatchingPayload(t *testing.T) {
+	database := db.SetupTestDB(t)
+	base := QueueJobParams{
+		Host: "host-alpha", WorkingDir: "/tmp/project", Command: "true", SubmitToken: "payload-token",
+		Payloads: []db.JobPayload{{Name: "config", StoredPath: "payloads/hash", SizeBytes: 1, SHA256: strings.Repeat("a", 64), R2Key: "assets/hash"}},
+	}
+	first, err := RecordQueuedJob(database, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RecordQueuedJob(database, base)
+	if err != nil || second != first {
+		t.Fatalf("matching resubmission = %d, %v", second, err)
+	}
+	base.Payloads[0].SHA256 = strings.Repeat("b", 64)
+	if _, err := RecordQueuedJob(database, base); err == nil || !strings.Contains(err.Error(), "different payload") {
+		t.Fatalf("changed resubmission error = %v", err)
+	}
+}
+
 func TestRecordQueuedJob_PersistsBestEffortInputs(t *testing.T) {
 	database := db.SetupTestDB(t)
 

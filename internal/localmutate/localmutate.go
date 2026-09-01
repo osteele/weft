@@ -74,7 +74,7 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 			err = fmt.Errorf("daemon reported a successful submission without a job id")
 		}
 		if err != nil {
-			if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
+			if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken, params.Payloads); ok {
 				return jobID, nil
 			}
 			if strings.TrimSpace(params.SubmitToken) != "" {
@@ -82,7 +82,7 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 				if directErr == nil {
 					return jobID, nil
 				}
-				if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken); ok {
+				if jobID, ok := findSubmittedJobByToken(database, params.SubmitToken, params.Payloads); ok {
 					return jobID, nil
 				}
 				return 0, fmt.Errorf("submit via daemon failed: %w; direct fallback failed: %v", err, directErr)
@@ -96,12 +96,26 @@ func RecordQueuedJob(ctx context.Context, database *sql.DB, params ops.QueueJobP
 	return ops.RecordQueuedJob(database, params)
 }
 
-func findSubmittedJobByToken(database *sql.DB, token string) (int64, bool) {
+func findSubmittedJobByToken(database *sql.DB, token string, submitted []db.JobPayload) (int64, bool) {
 	jobID, ok, err := db.FindJobIDBySubmitToken(database, token)
-	if err != nil {
+	if err != nil || !ok {
 		return 0, false
 	}
-	return jobID, ok
+	existing, err := db.ListJobPayloads(database, jobID)
+	if err != nil || len(existing) != len(submitted) {
+		return 0, false
+	}
+	byName := make(map[string]db.JobPayload, len(existing))
+	for _, payload := range existing {
+		byName[payload.Name] = payload
+	}
+	for _, payload := range submitted {
+		prior, exists := byName[payload.Name]
+		if !exists || prior.SizeBytes != payload.SizeBytes || prior.SHA256 != payload.SHA256 {
+			return 0, false
+		}
+	}
+	return jobID, true
 }
 
 func SetProcessedTag(ctx context.Context, database *sql.DB, jobID int64, processed bool) error {

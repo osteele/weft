@@ -102,6 +102,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--after-any ID`: Start job after another job completes, success or failure. Same gating behavior as `--after` for rentals
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
+- `--payload NAME=PATH`: Capture one regular file as an immutable, job-scoped input artifact (repeatable). `NAME` must be one safe path component. Weft copies and hashes the bytes before accepting the job, stores them under the existing content-addressed artifact/R2 namespace, and stages them at `$WEFT_PAYLOAD_DIR/NAME` for every attempt on inventory and rental hosts. The staging directory is owner-private and files have mode `0600`; the job owner can still rewrite its staged copy.
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`, or project output directories). Recorded on successful completion for downstream jobs; repeat it for extra files or directories outside the conventional `output/` and `outputs/` directories
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`, `h100-pcie`, `h100-hbm3`)
 - `--gpu-class CLASS`: Require a specific GPU class, variant, or generation (e.g., `a100`, `gh200`, `h100-sxm`, `ampere+`)
@@ -542,6 +543,7 @@ remote cleanup.
 - `WEFT_JOB_ID` — the job ID
 - `WEFT_ARTIFACT_MANIFEST` — path to the artifact manifest (default: `~/.cache/weft/artifacts/<job-id>.json`)
 - `WEFT_ARTIFACT_ROOT` — artifact root directory (default: `.`)
+- `WEFT_PAYLOAD_DIR` — owner-private directory containing admission-time payloads, one file per `--payload NAME=PATH`
 - `RJ_JOB_ID`, `RJ_ARTIFACT_MANIFEST`, `RJ_ARTIFACT_ROOT` — legacy aliases (same values)
 
 **Examples:**
@@ -562,6 +564,10 @@ weft artifact get wj2073 output/selectivity_results.json -o ./results.json
 # Write artifact or output file to stdout
 weft artifact get wj2073 selectivity_results -o -
 weft artifact cat wj2073 selectivity_results | jq '.metric'
+
+# Retrieve an admission-time input artifact by its typed namespace
+weft artifact get wj2073 payload:config -o ./config
+weft artifact cat wj2073 payload:config
 
 # Resolve latest job by tag
 weft artifact get --tag exp-012 --latest selectivity_results -o ./results.json

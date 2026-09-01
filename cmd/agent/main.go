@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/agentenv"
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -131,6 +132,11 @@ func runQueue(args []string) {
 		}
 		r.EnsureSourceManifestFromR2 = func(_ int64, manifest opsqueue.SourceManifest, perJobRoot string) (string, error) {
 			return fetchSourceManifestToDir(bucket, manifest, perJobRoot)
+		}
+		r.EnsurePayloadsFromR2 = func(jobID int64, payloads []opsqueue.Payload) (string, error) {
+			return artifacts.StagePayloads(jobID, payloads, func(key, destination string) error {
+				return copyCloudNeedFromR2(bucket, key, destination)
+			})
 		}
 	}
 	if parsed.R2QueueHost != "" {

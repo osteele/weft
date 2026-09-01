@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/campaign"
@@ -31,6 +33,7 @@ import (
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
@@ -149,6 +152,7 @@ var (
 	runHFToken         bool
 	runHFTokenFrom     string
 	runSecretVars      []string
+	runPayloads        []string
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -164,6 +168,110 @@ const (
 
 var validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 var pinRunSourceSnapshotFunc = pinRunSourceSnapshot
+
+type runPayloadDeclaration struct {
+	Name string
+	Path string
+}
+
+type runPayloadObjectStore interface {
+	ObjectExists(context.Context, string) (bool, error)
+	PutObject(context.Context, string, io.Reader, string) error
+}
+
+var buildRunPayloadObjectStore = func() (runPayloadObjectStore, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	return buildR2Client(cfg)
+}
+
+func parseRunPayloadDeclarations(values []string) ([]runPayloadDeclaration, error) {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]runPayloadDeclaration, 0, len(values))
+	for _, value := range values {
+		name, sourcePath, ok := strings.Cut(value, "=")
+		if !ok || strings.TrimSpace(sourcePath) == "" {
+			return nil, fmt.Errorf("--payload %q must use NAME=PATH", value)
+		}
+		name = strings.TrimSpace(name)
+		if err := artifacts.ValidatePayloadName(name); err != nil {
+			return nil, fmt.Errorf("--payload: %w", err)
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("--payload: duplicate name %q", name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, runPayloadDeclaration{Name: name, Path: sourcePath})
+	}
+	return out, nil
+}
+
+func captureRunPayloads(ctx context.Context, declarations []runPayloadDeclaration) ([]db.JobPayload, error) {
+	if len(declarations) == 0 {
+		return nil, nil
+	}
+	store, err := buildRunPayloadObjectStore()
+	if err != nil {
+		return nil, fmt.Errorf("prepare payload storage: %w", err)
+	}
+	if store == nil {
+		return nil, fmt.Errorf("prepare payload storage: R2 is not configured")
+	}
+	payloads := make([]db.JobPayload, 0, len(declarations))
+	for _, declaration := range declarations {
+		storedPath, size, digest, err := artifacts.CapturePayload(declaration.Path)
+		if err != nil {
+			return nil, fmt.Errorf("capture --payload %s=%s: %w", declaration.Name, declaration.Path, err)
+		}
+		key := r2keys.NamedAsset(digest)
+		exists, err := store.ObjectExists(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("check payload %q in R2: %w", declaration.Name, err)
+		}
+		if !exists {
+			localPath, err := artifacts.LocalPathFromStored(storedPath)
+			if err != nil {
+				return nil, err
+			}
+			file, err := os.Open(localPath)
+			if err != nil {
+				return nil, fmt.Errorf("open captured payload %q: %w", declaration.Name, err)
+			}
+			uploadErr := store.PutObject(ctx, key, file, "application/octet-stream")
+			closeErr := file.Close()
+			if uploadErr != nil {
+				return nil, fmt.Errorf("upload payload %q: %w", declaration.Name, uploadErr)
+			}
+			if closeErr != nil {
+				return nil, fmt.Errorf("close payload %q: %w", declaration.Name, closeErr)
+			}
+		}
+		payloads = append(payloads, db.JobPayload{
+			Name: declaration.Name, StoredPath: storedPath, SizeBytes: size,
+			SHA256: digest, R2Key: key,
+		})
+	}
+	sort.Slice(payloads, func(i, j int) bool { return payloads[i].Name < payloads[j].Name })
+	return payloads, nil
+}
+
+func requireRunPayloadMatch(database *sql.DB, jobID int64, submitted []db.JobPayload) error {
+	existing, err := db.ListJobPayloads(database, jobID)
+	if err != nil {
+		return err
+	}
+	if len(existing) != len(submitted) {
+		return fmt.Errorf("idempotency key already belongs to job %d with different payloads", jobID)
+	}
+	for i := range existing {
+		if existing[i].Name != submitted[i].Name || existing[i].SizeBytes != submitted[i].SizeBytes || existing[i].SHA256 != submitted[i].SHA256 {
+			return fmt.Errorf("idempotency key already belongs to job %d with different payload %q", jobID, submitted[i].Name)
+		}
+	}
+	return nil
+}
 
 type cloudReuseSubmitOutcome int
 
@@ -348,6 +456,7 @@ type draftRunParams struct {
 	MaxComputeCap    string
 	CLIOverrides     *db.CLIResourceOverrides
 	Inputs           []string
+	Payloads         []db.JobPayload
 	BestEffortInputs []string
 	Outputs          []string
 	OutputDirs       []string
@@ -372,6 +481,7 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 		GPUMemGB:         params.GPUMemGB,
 		GPUMemMaxGB:      params.GPUMemMaxGB,
 		Inputs:           params.Inputs,
+		Payloads:         params.Payloads,
 		BestEffortInputs: params.BestEffortInputs,
 		Outputs:          params.Outputs,
 		OutputDirs:       params.OutputDirs,
@@ -404,6 +514,9 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 	fmt.Fprintf(w, "  Command: %s\n", params.Command)
 	if params.Description != "" {
 		fmt.Fprintf(w, "  Description: %s\n", params.Description)
+	}
+	if err := printRunPayloadReceipt(w, database, jobID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -458,6 +571,7 @@ func init() {
 	runCmd.Flags().StringSliceVar(&runOutputs, "output", nil, "Output data asset (e.g., checkpoint:llama-ft-v1), can be repeated")
 	runCmd.Flags().StringSliceVar(&runProduces, "produces", nil, "Artifact path this job produces (repeatable, e.g., output/model.pt or output/model.pt:100)")
 	runCmd.Flags().StringSliceVar(&runNeeds, "needs", nil, "Artifact path:version this job needs (repeatable, e.g., output/model.pt:100)")
+	runCmd.Flags().StringArrayVar(&runPayloads, "payload", nil, "Immutable input artifact NAME=PATH (repeatable)")
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
 	runCmd.Flags().BoolVar(&runNoSync, "no-sync", false, "Skip source sync before submission")
 	runCmd.Flags().BoolVar(&runIfOnline, "if-online", false, "Submit immediately to an online inventory host, or create no job")
@@ -504,6 +618,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if key := strings.TrimSpace(runIdempotencyKey); strings.ContainsAny(key, "\r\n") || len(key) > 200 {
 		return fmt.Errorf("--idempotency-key must be at most 200 characters and contain no newlines")
+	}
+	payloadDeclarations, err := parseRunPayloadDeclarations(runPayloads)
+	if err != nil {
+		return err
 	}
 
 	// Handle --kill mode
@@ -1196,16 +1314,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// needs_classify.go does the actual routing at launch time).
 	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
 
+	var capturedPayloads []db.JobPayload
+	if !runDryRun {
+		endPayloadCapture := rec.Phase("payload", "capturing immutable input artifacts")
+		capturedPayloads, err = captureRunPayloads(context.Background(), payloadDeclarations)
+		endPayloadCapture()
+		if err != nil {
+			return err
+		}
+	}
+
 	if runIdempotencyKey != "" {
 		if existingID, ok, lookupErr := db.FindJobIDBySubmitToken(database, submitToken); lookupErr != nil {
 			return fmt.Errorf("look up idempotency key: %w", lookupErr)
 		} else if ok {
+			if err := requireRunPayloadMatch(database, existingID, capturedPayloads); err != nil {
+				return err
+			}
 			existing, getErr := db.GetJobByID(database, existingID)
 			if getErr != nil {
 				return fmt.Errorf("read idempotent submission: %w", getErr)
 			}
 			if runJSON {
-				return emitRunReceipt(cmd, runReceiptForJob(existing, "deduplicated", false, true, runIdempotencyKey))
+				return emitRunReceiptForJob(cmd, database, existing, "deduplicated", false, true, runIdempotencyKey)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Job %s already exists for idempotency key %q\n", ids.FormatJobID(existingID), runIdempotencyKey)
 			return nil
@@ -1287,6 +1418,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUMemMaxGB:      resolvedGPUMemMaxGB,
 			DepSpec:          encodeQueueDependencies(buildRunDependencies()),
 			Inputs:           runInputs,
+			Payloads:         capturedPayloads,
 			BestEffortInputs: bestEffortInputs,
 			Outputs:          runOutputs,
 			OutputDirs:       outputDirs,
@@ -1448,7 +1580,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			if recorded.Metadata == nil || recorded.Metadata.SubmissionNonce != submissionNonce {
 				if runJSON {
-					return emitRunReceipt(cmd, runReceiptForJob(recorded, "deduplicated", false, true, runIdempotencyKey))
+					return emitRunReceiptForJob(cmd, database, recorded, "deduplicated", false, true, runIdempotencyKey)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Job %s already exists for idempotency key %q\n", ids.FormatJobID(jobID), runIdempotencyKey)
 				return nil
@@ -1513,7 +1645,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 			ensureDaemonForWork(os.Stderr)
 			if runJSON {
-				return emitRunReceipt(cmd, runReceiptForJob(job, "accepted_immediately", true, false, runIdempotencyKey))
+				return emitRunReceiptForJob(cmd, database, job, "accepted_immediately", true, false, runIdempotencyKey)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Job %s accepted immediately on %s\n", ids.FormatJobID(jobID), host)
 			if runWait {
@@ -1535,7 +1667,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if accepted {
 				if runJSON {
 					job, _ := db.GetJobByID(database, jobID)
-					return emitRunReceipt(cmd, runReceiptForJob(job, "accepted_immediately", true, false, runIdempotencyKey))
+					return emitRunReceiptForJob(cmd, database, job, "accepted_immediately", true, false, runIdempotencyKey)
 				}
 				return nil
 			}
@@ -1546,7 +1678,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			ensureDaemonForWork(os.Stderr)
 			if runJSON {
 				job, _ := db.GetJobByID(database, jobID)
-				return emitRunReceipt(cmd, runReceiptForJob(job, "queued", false, false, runIdempotencyKey))
+				return emitRunReceiptForJob(cmd, database, job, "queued", false, false, runIdempotencyKey)
 			}
 			printAutoPlacementPending(cmd.OutOrStdout(), database, jobID, autoPlacementPendingReason)
 			return nil
@@ -1612,7 +1744,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if acceptedImmediately {
 				decision = "accepted_immediately"
 			}
-			return emitRunReceipt(cmd, runReceiptForJob(job, decision, acceptedImmediately, false, runIdempotencyKey))
+			return emitRunReceiptForJob(cmd, database, job, decision, acceptedImmediately, false, runIdempotencyKey)
 		}
 
 		// wait/follow handlers call os.Exit, which would bypass the deferred
@@ -1648,6 +1780,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			MaxComputeCap:    persistMaxComputeCap,
 			CLIOverrides:     cliOverrides,
 			Inputs:           runInputs,
+			Payloads:         capturedPayloads,
 			BestEffortInputs: bestEffortInputs,
 			Outputs:          runOutputs,
 			OutputDirs:       outputDirs,
@@ -1763,6 +1896,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			OutputDirs:       outputDirs,
 			Produces:         runProduces,
 			Needs:            resolvedNeeds,
+			Payloads:         capturedPayloads,
 			CloudAfter:       cloudAfter,
 			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 			Disk:             diskMeta,
@@ -1787,6 +1921,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		printDiskPreview(os.Stdout, diskMeta)
 		printSourceRootsPreview(os.Stdout, sourceMeta, remoteSourceRootForPreview(workingDir, host))
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
+		if err := printRunPayloadReceipt(os.Stdout, database, jobID); err != nil {
+			return err
+		}
 
 		syncHostWithProgress(database, host, runNoSync, rec)
 		return nil
@@ -1920,6 +2057,20 @@ func printRunSubmissionExpectation(w io.Writer, database *sql.DB, jobID int64) {
 			fmt.Fprintf(w, "  %s: %s\n", line.Label, line.Value)
 		}
 	}
+	if err := printRunPayloadReceipt(w, database, jobID); err != nil {
+		fmt.Fprintf(w, "  Payload metadata unavailable: %v\n", err)
+	}
+}
+
+func printRunPayloadReceipt(w io.Writer, database *sql.DB, jobID int64) error {
+	payloads, err := db.ListJobPayloads(database, jobID)
+	if err != nil {
+		return fmt.Errorf("read payloads for job %s: %w", ids.FormatJobID(jobID), err)
+	}
+	for _, payload := range payloads {
+		fmt.Fprintf(w, "  Payload: %s (%d bytes, sha256:%s)\n", payload.Name, payload.SizeBytes, payload.SHA256)
+	}
+	return nil
 }
 
 func waitForAutoPlacement(database *sql.DB, jobID int64, timeout time.Duration) *db.Job {

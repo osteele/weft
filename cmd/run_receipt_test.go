@@ -32,7 +32,7 @@ func TestEmitRunReceiptIsVersionedJSON(t *testing.T) {
 			Pin: &db.JobSourcePinMetadata{Hash: "sha256:source"},
 		}},
 	}
-	if err := emitRunReceipt(cmd, runReceiptForJob(job, "accepted_immediately", true, false, "assignment-7")); err != nil {
+	if err := emitRunReceiptForJob(cmd, nil, job, "accepted_immediately", true, false, "assignment-7"); err != nil {
 		t.Fatal(err)
 	}
 	var got runSubmissionReceipt

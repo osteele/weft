@@ -514,7 +514,7 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 		}
 		return fmt.Errorf("stage artifact needs: unknown failure")
 	}
-	return queueAppender(job, timeout, sourceSHA256, "")
+	return queueAppender(database, job, timeout, sourceSHA256, "")
 }
 
 // QueueJobToRemote applies the standard on-prem queue dispatch path for an

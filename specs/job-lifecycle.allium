@@ -34,6 +34,14 @@ value GPUSpec {
     count: Integer
 }
 
+value JobPayloadArtifact {
+    name: String
+    size_bytes: Integer
+    sha256: String
+    r2_key: String
+    stored_path: String
+}
+
 -- A CloudInstance is managed by the campaign lifecycle spec.
 -- Jobs reference it for placement but don't control its lifecycle.
 external entity CloudInstance {
@@ -65,6 +73,8 @@ entity Job {
                                 -- classified at placement/launch time as either same-instance
                                 -- co-location (cloud_after on the consumer's agent manifest) or
                                 -- cross-instance R2 staging (cloud_needs on the manifest).
+	payloads: List<JobPayloadArtifact> -- immutable admission-time input artifacts;
+	                                   -- logical-job-scoped, never attempt-selected
     tags: Set<Tag>
     env_vars: List<String>
     dep_spec: String?           -- host-local dependency on another job (e.g. "42" or "42:any")
@@ -713,6 +723,28 @@ rule SubmitJob {
     -- created_at: now,
     -- retry_count: 0
     -- legacy: )
+}
+
+rule AdmissionTimePayloadArtifacts {
+    when: EvaluateAdmissionTimePayloadArtifacts()
+
+    -- legacy: requires: every --payload declaration has form NAME=PATH
+    -- legacy: requires: NAME is a unique safe single path component
+    -- legacy: requires: PATH is a readable regular file
+    -- legacy: ensures: each payload's bytes are copied and SHA-256 hashed before Job acceptance
+    -- legacy: ensures: Job creation and every payload association become visible in one DB transaction
+    -- legacy: ensures: a failed association leaves no runnable Job
+    -- legacy: ensures: retries, restarts, and host migration preserve payload name, size, SHA-256, and bytes
+    -- legacy: ensures: output Artifact rows remain attempt-scoped and latest-attempt selection never hides or rebinds payloads
+    -- legacy: ensures: an idempotency key resolves to an existing Job only when its payload name/size/SHA-256 set agrees exactly
+    -- legacy: ensures: submission receipts and Job info expose payload metadata and retrieval instructions, never contents
+
+    -- legacy annotation: @guidance
+		-- Payload bytes reuse the local artifact store and the existing
+		-- content-addressed R2 assets/<sha256> namespace. job_payloads owns
+		-- the job/name reference; it is not a permanent user-named asset and
+		-- has no attempt_id. `weft artifact get|cat JOB payload:NAME` resolves
+		-- this namespace before output-artifact latest-attempt selection.
 }
 
 rule OnlineOnlyAdmissionContract {

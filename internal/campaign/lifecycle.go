@@ -2576,6 +2576,9 @@ func LaunchInstance(
 		if err != nil {
 			return failLaunchBeforeCreate("agent job payload failed", fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err))
 		}
+		if err := attachAgentJobPayloads(database, job.ID, &agentJob); err != nil {
+			return failLaunchBeforeCreate("payload resolution failed", err)
+		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(ctx, database, r2Assets.Client, job, instanceID)
 		if err != nil {
 			return failLaunchBeforeCreate("cloud needs resolution failed", err)

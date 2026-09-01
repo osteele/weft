@@ -1495,7 +1495,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
 				slog.Warn("failed to remove remote completion files", "component", "edit", "job_id", job.ID, "error", err)
 			}
-			if err := ops.AppendJobToQueue(job, timeout); err != nil {
+			if err := ops.AppendJobToQueue(database, job, timeout); err != nil {
 				fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.TargetDisplay())
 				deferredUpdate = true
 			} else {

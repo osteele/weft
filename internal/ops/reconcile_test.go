@@ -81,7 +81,7 @@ func TestApplyQueueToRemoteStagesNeedsBeforeAppend(t *testing.T) {
 		return nil
 	}
 	prevAppender := queueAppender
-	queueAppender = func(job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
+	queueAppender = func(_ *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
 		calls = append(calls, "append")
 		if sourceSHA256 != "source-sha" {
 			t.Fatalf("source sha = %q, want source-sha", sourceSHA256)

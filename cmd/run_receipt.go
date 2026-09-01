@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 
@@ -23,6 +24,13 @@ type runSubmissionReceipt struct {
 	AcceptedImmediately bool                           `json:"accepted_immediately"`
 	Deduplicated        bool                           `json:"deduplicated,omitempty"`
 	IdempotencyKey      string                         `json:"idempotency_key,omitempty"`
+	Payloads            []runPayloadReceipt            `json:"payloads,omitempty"`
+}
+
+type runPayloadReceipt struct {
+	Name      string `json:"name"`
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
 }
 
 func emitRunReceipt(cmd *cobra.Command, receipt runSubmissionReceipt) error {
@@ -30,7 +38,15 @@ func emitRunReceipt(cmd *cobra.Command, receipt runSubmissionReceipt) error {
 	return json.NewEncoder(cmd.OutOrStdout()).Encode(receipt)
 }
 
-func runReceiptForJob(job *db.Job, decision string, accepted, deduplicated bool, key string) runSubmissionReceipt {
+func emitRunReceiptForJob(cmd *cobra.Command, database *sql.DB, job *db.Job, decision string, accepted, deduplicated bool, key string) error {
+	receipt, err := runReceiptForJob(database, job, decision, accepted, deduplicated, key)
+	if err != nil {
+		return err
+	}
+	return emitRunReceipt(cmd, receipt)
+}
+
+func runReceiptForJob(database *sql.DB, job *db.Job, decision string, accepted, deduplicated bool, key string) (runSubmissionReceipt, error) {
 	receipt := runSubmissionReceipt{
 		PlacementDecision:   decision,
 		AcceptedImmediately: accepted,
@@ -38,10 +54,19 @@ func runReceiptForJob(job *db.Job, decision string, accepted, deduplicated bool,
 		IdempotencyKey:      key,
 	}
 	if job == nil {
-		return receipt
+		return receipt, nil
 	}
 	receipt.JobID = ids.FormatJobID(job.ID)
 	receipt.SelectedHost = job.Host
+	if database != nil {
+		payloads, err := db.ListJobPayloads(database, job.ID)
+		if err != nil {
+			return runSubmissionReceipt{}, err
+		}
+		for _, payload := range payloads {
+			receipt.Payloads = append(receipt.Payloads, runPayloadReceipt{Name: payload.Name, SizeBytes: payload.SizeBytes, SHA256: payload.SHA256})
+		}
+	}
 	if job.Metadata != nil && job.Metadata.Source != nil {
 		if job.Metadata.Source.Pin != nil {
 			receipt.SourcePin = job.Metadata.Source.Pin.Hash
@@ -67,7 +92,7 @@ func runReceiptForJob(job *db.Job, decision string, accepted, deduplicated bool,
 			}
 		}
 	}
-	return receipt
+	return receipt, nil
 }
 
 func plannedSourceDispatchMode(job *db.Job) string {

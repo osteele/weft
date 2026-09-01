@@ -1461,6 +1461,7 @@ func resetRunGlobals(t *testing.T) {
 	runHFToken = false
 	runHFTokenFrom = ""
 	runSecretVars = nil
+	runPayloads = nil
 	validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
 }
 

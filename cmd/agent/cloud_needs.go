@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/oplog"
@@ -20,6 +21,15 @@ import (
 )
 
 var copyCloudNeedFromR2Func = copyCloudNeedFromR2
+
+func stageCloudPayloads(bucket string, job *cloud.AgentJob) (string, error) {
+	if job == nil || len(job.Payloads) == 0 {
+		return "", nil
+	}
+	return artifacts.StagePayloads(job.ID, job.Payloads, func(key, destination string) error {
+		return copyCloudNeedFromR2Func(bucket, key, destination)
+	})
+}
 
 func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.CloudNeed) error {
 	if len(needs) == 0 {

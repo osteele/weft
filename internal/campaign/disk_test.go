@@ -27,6 +27,25 @@ func TestEstimateGroupDisk_NoInputs(t *testing.T) {
 	}
 }
 
+func TestEstimateGroupDiskIncludesAdmissionPayloadBytes(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "true", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	if err := db.InsertJobPayload(database, db.JobPayload{
+		JobID: jobID, Name: "dataset", StoredPath: "payloads/" + digest,
+		SizeBytes: 60_000_000_000, SHA256: digest, R2Key: "assets/" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	disk, _ := EstimateGroupDisk(InstanceGroup{Jobs: []*db.Job{{ID: jobID, Command: "true"}}}, database, nil)
+	if disk < 69 {
+		t.Fatalf("disk = %dGB, want at least 69GB including the 60GB payload and base overhead", disk)
+	}
+}
+
 func TestEstimateGroupDisk_MinFloor(t *testing.T) {
 	// Even with small inputs, should return at least DefaultMinDiskGB
 	group := InstanceGroup{

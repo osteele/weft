@@ -1278,6 +1278,13 @@ func submitJobsToInstanceImpl(ctx context.Context, database *sql.DB, r2Client *r
 			}
 			return fmt.Errorf("build agent job payload for job %s: %w", ids.FormatJobID(job.ID), err)
 		}
+		if err := attachAgentJobPayloads(database, job.ID, &agentJob); err != nil {
+			rollbackErr := rollbackClaims()
+			if rollbackErr != nil {
+				return fmt.Errorf("resolve payloads for job %s: %w (rollback: %v)", ids.FormatJobID(job.ID), err, rollbackErr)
+			}
+			return fmt.Errorf("resolve payloads for job %s: %w", ids.FormatJobID(job.ID), err)
+		}
 		cloudNeeds, cloudAfter, err := resolveCloudNeedsForJob(opCtx, database, r2Client, job, instanceID)
 		if err != nil {
 			rollbackErr := rollbackClaims()

@@ -930,20 +930,27 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			continue
 		}
 		doneUsingSource := activeSourceWorkdirs.beginMounts(job.ID, jobMounts)
-		if err := stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds); err != nil {
-			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, err)
-			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
+		payloadDir, stageErr := stageCloudPayloads(cfg.R2Bucket, &job)
+		if stageErr == nil && payloadDir != "" {
+			job.Env = append(job.Env, "WEFT_PAYLOAD_DIR="+payloadDir)
+		}
+		if stageErr == nil {
+			stageErr = stageCloudNeeds(cfg.R2Bucket, job.ID, workDir, job.CloudNeeds)
+		}
+		if stageErr != nil {
+			fmt.Fprintf(os.Stderr, "cloud artifact staging failed for job %d: %v\n", job.ID, stageErr)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(stageErr))
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 			doneUsingSource()
 
 			// Mark job complete with failure even when command did not start.
 			exitCode := 1
-			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, exitCode, err.Error())
+			failureReason, infra := db.ClassifyInfraFailure(db.PhaseCloudArtifactStaging, exitCode, stageErr.Error())
 			if failureReason == "" {
 				failureReason = db.FailureReasonArtifactStageFailed
 			}
-			appendFailureDiagnostic(cfg.LogDir, job.ID, fmt.Sprintf("cloud artifact staging failed: %v", err))
+			appendFailureDiagnostic(cfg.LogDir, job.ID, fmt.Sprintf("cloud artifact staging failed: %v", stageErr))
 			recordEarlyJobFailure(cfg, job, failureReason, exitCode)
 			if infra && cfg.SelfDestructCmd != "" && !cfg.ConcurrentSlot {
 				terminateInstanceWithReason(
@@ -951,7 +958,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 					fmt.Sprintf("artifact_stage_infra_failure:%d", job.ID),
 					job.ID,
 					db.TerminationReasonInfraFailure,
-					err.Error(),
+					stageErr.Error(),
 				)
 			}
 			continue
