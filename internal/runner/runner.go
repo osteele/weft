@@ -48,12 +48,16 @@ type Runner struct {
 	runnerLog    string
 
 	// Runtime state
-	processes      map[string]*Process // jobID -> process
-	hookStopFuncs  map[string]func()   // jobID -> stop function from OnJobStart
-	processesMu    sync.Mutex
-	lastSampleTime time.Time
-	nowFunc        func() time.Time
-	AgentVersion   string
+	processes     map[string]*Process // jobID -> process
+	hookStopFuncs map[string]func()   // jobID -> stop function from OnJobStart
+	// finalizingWorkdirs gates reuse while a terminal attempt is being handed
+	// to the post-job manager. It is deliberately separate from Running: a
+	// blocked publication admission must not retain CPU/GPU scheduler capacity.
+	finalizingWorkdirs map[string]int
+	processesMu        sync.Mutex
+	lastSampleTime     time.Time
+	nowFunc            func() time.Time
+	AgentVersion       string
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
@@ -133,24 +137,25 @@ func DefaultConfig() Config {
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
 	runner := &Runner{
-		queueDir:         cfg.QueueDir,
-		logDir:           cfg.LogDir,
-		setupTimeout:     cfg.SetupTimeout,
-		commandsFile:     filepath.Join(cfg.QueueDir, opsqueue.CommandsFileName()),
-		stateFile:        filepath.Join(cfg.QueueDir, opsqueue.StateFileName()),
-		currentFile:      filepath.Join(cfg.QueueDir, opsqueue.CurrentFileName()),
-		pidFile:          filepath.Join(cfg.QueueDir, opsqueue.PidFileName()),
-		runnerLog:        filepath.Join(cfg.QueueDir, opsqueue.RunnerLogName()),
-		cpuConfig:        DefaultCPUConfig(),
-		telemetryConfig:  DefaultTelemetryConfig(),
-		benchCfg:         DefaultBenchmarkConfig(),
-		ramTargetPercent: defaultRAMUtilizationTarget,
-		hostMemoryStats:  HostMemoryStatsKB,
-		processRSSKB:     ProcCurrentRSSKB,
-		processes:        make(map[string]*Process),
-		hookStopFuncs:    make(map[string]func()),
-		nowFunc:          time.Now,
-		stopCh:           make(chan struct{}),
+		queueDir:           cfg.QueueDir,
+		logDir:             cfg.LogDir,
+		setupTimeout:       cfg.SetupTimeout,
+		commandsFile:       filepath.Join(cfg.QueueDir, opsqueue.CommandsFileName()),
+		stateFile:          filepath.Join(cfg.QueueDir, opsqueue.StateFileName()),
+		currentFile:        filepath.Join(cfg.QueueDir, opsqueue.CurrentFileName()),
+		pidFile:            filepath.Join(cfg.QueueDir, opsqueue.PidFileName()),
+		runnerLog:          filepath.Join(cfg.QueueDir, opsqueue.RunnerLogName()),
+		cpuConfig:          DefaultCPUConfig(),
+		telemetryConfig:    DefaultTelemetryConfig(),
+		benchCfg:           DefaultBenchmarkConfig(),
+		ramTargetPercent:   defaultRAMUtilizationTarget,
+		hostMemoryStats:    HostMemoryStatsKB,
+		processRSSKB:       ProcCurrentRSSKB,
+		processes:          make(map[string]*Process),
+		hookStopFuncs:      make(map[string]func()),
+		finalizingWorkdirs: make(map[string]int),
+		nowFunc:            time.Now,
+		stopCh:             make(chan struct{}),
 	}
 	runner.observeJobCPU = runner.observeRunningJobCPU
 	return runner
@@ -360,6 +365,11 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 		jobID: jobID,
 		job:   job,
 		rj:    rj,
+	}
+
+	if r.PostJobManager != nil && r.postJobFinalizationPending(job) {
+		decision.reason = "post-job gate: prior terminal attempt is still entering publication"
+		return decision
 	}
 
 	if waitForPostJob && r.PostJobManager != nil {
@@ -909,7 +919,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	if r.telemetryConfig.Enabled {
 		rs, _ := r.state.GetRunning(jobIDStr)
 		SampleJob(proc.PID, proc.PGID, r.cpuCount, paths, &rs, "multi")
-		r.state.SetRunning(jobIDStr, rs)
+		r.state.UpdateRunningAttempt(jobIDStr, rs, rs)
 	}
 
 	return nil
@@ -963,24 +973,26 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 		f.Close()
 	}
 
+	rs, _ := r.state.GetRunning(jobIDStr)
 	killReason := ReadKillReasonFile(paths.KillReason)
-	WriteCompletionRecord(paths, ei, RunningJobState{}, killReason, failureReason, startTime, endTime, nil)
+	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime, nil)
+	if r.state.FinishRunningAttempt(jobIDStr, rs, ei.ExitCode, endTime) {
+		oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d setup=true", rs.RunID, ei.ExitCode))
+		r.saveState()
+	}
 
 	r.processesMu.Lock()
 	stopFn := r.hookStopFuncs[jobIDStr]
 	delete(r.hookStopFuncs, jobIDStr)
 	r.processesMu.Unlock()
+	CleanupPIDFiles(paths)
+	removeJobFile(r.queueDir, jobID)
 	if stopFn != nil {
 		stopFn()
 	}
 	if r.OnJobFinish != nil {
 		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
-
-	r.state.RemoveRunning(jobIDStr)
-	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
-	CleanupPIDFiles(paths)
-	removeJobFile(r.queueDir, jobID)
 }
 
 // rejectPreflight records a preflight rejection without ever marking the
@@ -1088,12 +1100,36 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	killReason := ReadKillReasonFile(paths.KillReason)
 	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime, outputFiles)
 
-	// Stop live log uploader, then call OnJobFinish (best-effort)
+	// Execution is terminal once the completion record exists. Release the
+	// scheduler slot before any network publication, queue admission, log
+	// draining, or cleanup callback can block. The attempt fence prevents a
+	// delayed waiter from releasing a newer retry of the same logical job.
+	expected := RunningJobState{RunID: rj.Data.RunID, StartedAt: startTime}
+	if r.PostJobManager != nil {
+		r.beginPostJobFinalization(runDir)
+	}
+	released := r.state.FinishRunningAttempt(jobIDStr, expected, ei.ExitCode, endTime)
+	if released {
+		oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d", rj.Data.RunID, ei.ExitCode))
+		r.saveState()
+	}
+
+	// The process has been observed through Wait, so local supervisor cleanup
+	// no longer owns capacity. Delete only this exact process pointer: a newer
+	// retry may already have installed its own supervisor under the same job ID.
+	r.processesMu.Lock()
+	if r.processes[jobIDStr] == proc {
+		delete(r.processes, jobIDStr)
+	}
+	r.processesMu.Unlock()
+	CleanupPIDFiles(paths)
+	removeJobFile(r.queueDir, jobID)
+	removePerJobSourceMarker(rj.Data.Dir, jobID)
+
+	// Stop live log uploader, then hand durable publication work off. These
+	// steps are intentionally downstream of slot release.
 	if stopFn != nil {
 		stopFn()
-	}
-	if r.OnJobFinish != nil {
-		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
 	cleanupDir := ""
 	if usesIsolatedSource(rj.Data) && r.PostJobManager != nil {
@@ -1110,20 +1146,11 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			OutputDirs: rj.Data.OutputDirs,
 			CleanupDir: cleanupDir,
 		})
+		r.endPostJobFinalization(runDir)
 	}
-
-	// Record finished and remove from running
-	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
-	r.state.RemoveRunning(jobIDStr)
-
-	// Cleanup
-	r.processesMu.Lock()
-	delete(r.processes, jobIDStr)
-	r.processesMu.Unlock()
-
-	CleanupPIDFiles(paths)
-	removeJobFile(r.queueDir, jobID)
-	removePerJobSourceMarker(rj.Data.Dir, jobID)
+	if r.OnJobFinish != nil {
+		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+	}
 	// In R2-isolated mode the runtime source lives under a per-job dir we
 	// own; remove it now so ~/.cache/weft/jobs/ doesn't grow unbounded.
 	if usesIsolatedSource(rj.Data) && cleanupDir == "" {
@@ -1131,6 +1158,33 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	}
 
 	r.saveState()
+}
+
+func (r *Runner) beginPostJobFinalization(workdir string) {
+	workdir = ExpandTilde(workdir)
+	r.processesMu.Lock()
+	r.finalizingWorkdirs[workdir]++
+	r.processesMu.Unlock()
+}
+
+func (r *Runner) endPostJobFinalization(workdir string) {
+	workdir = ExpandTilde(workdir)
+	r.processesMu.Lock()
+	if r.finalizingWorkdirs[workdir] <= 1 {
+		delete(r.finalizingWorkdirs, workdir)
+	} else {
+		r.finalizingWorkdirs[workdir]--
+	}
+	r.processesMu.Unlock()
+}
+
+func (r *Runner) postJobFinalizationPending(job *opsqueue.CommandJob) bool {
+	r.processesMu.Lock()
+	defer r.processesMu.Unlock()
+	if HasBenchmarkTag(&RunnerJob{Data: job}) {
+		return len(r.finalizingWorkdirs) > 0
+	}
+	return r.finalizingWorkdirs[ExpandTilde(job.Dir)] > 0
 }
 
 // perJobSourceDir returns the per-job working directory used in R2-isolated
@@ -1177,6 +1231,24 @@ func (r *Runner) refreshRunningJobs() {
 	for _, jobIDStr := range r.state.RunningIDs() {
 		jobID := mustParseInt64(jobIDStr)
 		paths := NewJobPaths(r.logDir, jobID)
+		rs, ok := r.state.GetRunning(jobIDStr)
+		if !ok {
+			continue
+		}
+
+		// A matching completion record is authoritative terminal evidence. It
+		// releases occupancy even if a stale in-memory waiter remains after a
+		// callback blocked, or after restart lost the original observation.
+		if rec, err := ReadCompletionRecord(paths); err == nil && completionMatchesRunningAttempt(rec, rs) {
+			if r.state.FinishRunningAttempt(jobIDStr, rs, rec.ExitCode, rec.EndTime) {
+				oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d recovered=true", rec.RunID, rec.ExitCode))
+				CleanupPIDFiles(paths)
+				changed = true
+			}
+			continue
+		} else if err != nil && !os.IsNotExist(err) {
+			slog.Warn("completion record unreadable; terminality unknown", "component", "runner", "job_id", jobID, "error", err)
+		}
 
 		// Check if status file appeared (job completed outside our wait goroutine).
 		// This covers two cases: (1) the bash wrapper captured the exit code
@@ -1190,7 +1262,6 @@ func (r *Runner) refreshRunningJobs() {
 				exitCode, _ := ReadStatusFile(paths.Status)
 				ei := ExitInfo{ExitCode: exitCode}
 				endTime := r.now().Unix()
-				rs, _ := r.state.GetRunning(jobIDStr)
 				if exitCode == 0 {
 					oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered)"))
 					slog.Info("job completed (recovered)", "component", "runner", "job_id", jobID)
@@ -1203,8 +1274,7 @@ func (r *Runner) refreshRunningJobs() {
 				outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
 				WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 				WriteRusageFile(paths, rs)
-				r.state.RecordFinished(jobIDStr, exitCode, endTime)
-				r.state.RemoveRunning(jobIDStr)
+				r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
 				CleanupPIDFiles(paths)
 				changed = true
 			}
@@ -1246,12 +1316,10 @@ func (r *Runner) refreshRunningJobs() {
 			stoppedEI := ExitInfo{ExitCode: 1}
 			WriteStatusFile(paths, stoppedEI)
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
-			rs, _ := r.state.GetRunning(jobIDStr)
 			WriteRusageFile(paths, rs)
 			endTime := r.now().Unix()
 			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, FailureReasonError, rs.StartedAt, endTime, nil)
-			r.state.RecordFinished(jobIDStr, 1, endTime)
-			r.state.RemoveRunning(jobIDStr)
+			r.state.FinishRunningAttempt(jobIDStr, rs, 1, endTime)
 			CleanupPIDFiles(paths)
 			changed = true
 			continue
@@ -1312,7 +1380,6 @@ func (r *Runner) refreshRunningJobs() {
 		if exitCode, ok := ReadStatusFile(paths.Status); ok {
 			ei := ExitInfo{ExitCode: exitCode}
 			endTime := r.now().Unix()
-			rs, _ := r.state.GetRunning(jobIDStr)
 			if exitCode == 0 {
 				oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetail("exit=0 (recovered after orphan check)"))
 			} else {
@@ -1323,8 +1390,7 @@ func (r *Runner) refreshRunningJobs() {
 			outputFiles := r.discoverRecoveredOutputs(jobID, exitCode, rs, paths)
 			WriteCompletionRecord(paths, ei, rs, "", "", rs.StartedAt, endTime, outputFiles)
 			WriteRusageFile(paths, rs)
-			r.state.RecordFinished(jobIDStr, exitCode, endTime)
-			r.state.RemoveRunning(jobIDStr)
+			r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
 			CleanupPIDFiles(paths)
 			changed = true
 			continue
@@ -1335,11 +1401,9 @@ func (r *Runner) refreshRunningJobs() {
 		WriteStatusFile(paths, orphanEI)
 		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 		endTime := r.now().Unix()
-		rs, _ := r.state.GetRunning(jobIDStr)
 		WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, FailureReasonError, rs.StartedAt, endTime, nil)
 		WriteRusageFile(paths, rs)
-		r.state.RecordFinished(jobIDStr, 1, endTime)
-		r.state.RemoveRunning(jobIDStr)
+		r.state.FinishRunningAttempt(jobIDStr, rs, 1, endTime)
 		CleanupPIDFiles(paths)
 		changed = true
 	}
@@ -1347,6 +1411,13 @@ func (r *Runner) refreshRunningJobs() {
 	if changed {
 		r.saveState()
 	}
+}
+
+func completionMatchesRunningAttempt(rec CompletionRecord, running RunningJobState) bool {
+	if running.RunID != 0 || rec.RunID != 0 {
+		return running.RunID != 0 && running.RunID == rec.RunID
+	}
+	return running.StartedAt != 0 && running.StartedAt == rec.StartTime
 }
 
 // discoverRecoveredOutputs discovers convention-based output files for a job
@@ -1438,8 +1509,9 @@ func (r *Runner) sampleRunningJobs() {
 			}
 		}
 
-		r.state.SetRunning(jobIDStr, rs)
-		updated = true
+		if r.state.UpdateRunningAttempt(jobIDStr, rs, rs) {
+			updated = true
+		}
 	}
 
 	if updated {
@@ -1483,8 +1555,9 @@ func (r *Runner) adjustRunningJobAllotments() {
 		rs.OverHist = next.OverHist
 		rs.UnderHist = next.UnderHist
 
-		r.state.SetRunning(jobIDStr, rs)
-		updated = true
+		if r.state.UpdateRunningAttempt(jobIDStr, rs, rs) {
+			updated = true
+		}
 	}
 
 	if updated {
@@ -1505,7 +1578,7 @@ func (r *Runner) observeRunningJobCPU(jobID int64, cpuCount int) (int, bool) {
 // All callers use this instead of r.state.Save directly so that
 // write failures (e.g. NFS unavailability) are never silently swallowed.
 func (r *Runner) saveState() {
-	if err := r.state.Save(r.stateFile); err != nil {
+	if err := r.state.saveAt(r.stateFile, r.now()); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: save state: %v\n", err)
 		oplog.Log("queue.save_state_failed", oplog.WithError(err))
 	}

@@ -675,6 +675,19 @@ type CompletionRecord struct {
 	Publication      *PublicationReport  `json:"publication,omitempty"`
 }
 
+// ReadCompletionRecord reads the durable terminal record for one attempt.
+func ReadCompletionRecord(paths JobPaths) (CompletionRecord, error) {
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		return CompletionRecord{}, err
+	}
+	var rec CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return CompletionRecord{}, fmt.Errorf("parse completion record: %w", err)
+	}
+	return rec, nil
+}
+
 // InstanceCompletionManifest is the structured payload written to the R2
 // completion marker (campaigns/<instanceID>/.complete) when an instance
 // self-destructs. It replaces the legacy bare exit-code string ("0") and

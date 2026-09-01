@@ -214,6 +214,58 @@ func TestState_TotalAllotment(t *testing.T) {
 	}
 }
 
+func TestState_StaleAttemptUpdateCannotRestoreReleasedSlot(t *testing.T) {
+	s := NewState()
+	first := RunningJobState{RunID: 11, StartedAt: 100, LocalAllotment: 25}
+	s.AddRunning("42", first)
+
+	if !s.FinishRunningAttempt("42", first, 0, 200) {
+		t.Fatal("expected first attempt to release its slot")
+	}
+	stale := first
+	stale.LocalAllotment = 50
+	if s.UpdateRunningAttempt("42", first, stale) {
+		t.Fatal("stale sampler restored a released slot")
+	}
+	if s.RunningCount() != 0 {
+		t.Fatalf("running count = %d, want 0", s.RunningCount())
+	}
+
+	second := RunningJobState{RunID: 12, StartedAt: 300, LocalAllotment: 30}
+	s.AddRunning("42", second)
+	if s.UpdateRunningAttempt("42", first, stale) {
+		t.Fatal("stale sampler updated a newer attempt")
+	}
+	got, ok := s.GetRunning("42")
+	if !ok || got.RunID != second.RunID || got.LocalAllotment != second.LocalAllotment {
+		t.Fatalf("new attempt changed: %+v", got)
+	}
+	if s.FinishRunningAttempt("42", first, 1, 400) {
+		t.Fatal("old waiter released a newer attempt")
+	}
+}
+
+func TestState_UnfencedAttemptCanUpdateButCannotReleaseSlot(t *testing.T) {
+	s := NewState()
+	legacy := RunningJobState{LocalAllotment: 25}
+	s.AddRunning("42", legacy)
+
+	updated := legacy
+	updated.LocalAllotment = 40
+	if !s.UpdateRunningAttempt("42", legacy, updated) {
+		t.Fatal("legacy unfenced entry rejected an in-place observation update")
+	}
+	if got, _ := s.GetRunning("42"); got.LocalAllotment != 40 {
+		t.Fatalf("local allotment = %d, want 40", got.LocalAllotment)
+	}
+	if s.FinishRunningAttempt("42", updated, 0, 200) {
+		t.Fatal("unfenced terminal observation released scheduler occupancy")
+	}
+	if s.RunningCount() != 1 {
+		t.Fatalf("running count = %d, want 1", s.RunningCount())
+	}
+}
+
 func TestState_PruneFinished(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

@@ -1184,6 +1184,35 @@ rule ReleasedOnTerminal {
     -- legacy: ensures: not exists(r: ActiveReservation { job = attempt.job })
 }
 
+-- ActiveReservation is DB placement accounting. The inventory runner also
+-- owns a narrower, host-local occupancy lease while a command is executing.
+-- That lease is fenced by the attempt's run_id (with started_at as the legacy
+-- fence when no run_id was recorded), so a late sampler or waiter from an old
+-- attempt cannot restore or release capacity owned by a newer retry.
+rule RunnerOccupancyLeaseIsAttemptFenced {
+    when: RunnerAttemptStarted(attempt, supervisor)
+
+    ensures: RunnerOccupancyHeld(
+        job: attempt.job,
+        fence: attempt.run_id ?? attempt.started_at,
+        supervisor: supervisor
+    )
+}
+
+-- Execution terminality and post-exit cleanup are separate facts. Once the
+-- wrapper has been waited and a matching completion record is durable, CPU,
+-- RAM, and GPU occupancy is released before log upload, artifact publication,
+-- descendant cleanup, or pipe draining. Those later operations retain their
+-- own bounded workdir/publication gates and diagnostics, never an execution
+-- slot. On restart, a matching completion record repairs any stale running
+-- entry; a completion record from another attempt is not evidence.
+rule RunnerOccupancyReleasedOnObservedTerminalExecution {
+    when: MatchingCompletionRecordObserved(attempt)
+
+    ensures: not RunnerOccupancyHeld(job: attempt.job, fence: attempt.run_id ?? attempt.started_at)
+    ensures: PostExitCleanupTrackedSeparately(attempt)
+}
+
 -- Placement must not over-subscribe a concurrent-execution target's
 -- matching devices. This is a PLANNING invariant: the free-capacity clause
 -- (EvaluateEligibility 3b) keeps the sum of reservations within the

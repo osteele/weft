@@ -118,10 +118,17 @@ func LoadState(path string) (*State, error) {
 
 // Save writes state to a JSON file, pruning finished entries older than 24h.
 func (s *State) Save(path string) error {
+	return s.saveAt(path, time.Now())
+}
+
+// saveAt is Save with an explicit clock value. Runner-owned persistence uses
+// the runner clock so terminal records and their retention cutoff share the
+// same time domain.
+func (s *State) saveAt(path string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.pruneFinished()
+	s.pruneFinished(now)
 
 	data, err := json.Marshal(s)
 	if err != nil {
@@ -157,9 +164,9 @@ func (s *State) Save(path string) error {
 	return nil
 }
 
-// pruneFinished removes finished entries older than 24 hours.
-func (s *State) pruneFinished() {
-	cutoff := time.Now().Unix() - 86400
+// pruneFinished removes finished entries older than 24 hours relative to now.
+func (s *State) pruneFinished(now time.Time) {
+	cutoff := now.Unix() - 86400
 	for id, f := range s.Finished {
 		if f.FinishedAt < cutoff {
 			delete(s.Finished, id)
@@ -320,13 +327,32 @@ func (s *State) GetRunning(jobID string) (RunningJobState, bool) {
 	return rs, ok
 }
 
-// SetRunning updates the running-state entry for a job.
-func (s *State) SetRunning(jobID string, state RunningJobState) {
+// UpdateRunningAttempt updates runtime observations only while the same
+// attempt still owns the scheduler slot. A sampler can race terminal cleanup;
+// refusing a missing or different attempt prevents its stale snapshot from
+// resurrecting released occupancy.
+func (s *State) UpdateRunningAttempt(jobID string, expected, updated RunningJobState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Running[jobID] = state
+	current, ok := s.Running[jobID]
+	if !ok || !sameRunningAttemptForUpdate(current, expected) {
+		return false
+	}
+	s.Running[jobID] = updated
 	s.clearPendingReasonLocked(jobID)
 	s.updateCurrentLocked()
+	return true
+}
+
+func sameRunningAttemptForUpdate(current, expected RunningJobState) bool {
+	if sameRunningAttempt(current, expected) {
+		return true
+	}
+	// Legacy state predates attempt fencing. Permit observations to update an
+	// existing unfenced entry, but never terminal release: only a nonzero fence
+	// is strong enough for FinishRunningAttempt to release capacity.
+	return current.RunID == 0 && expected.RunID == 0 &&
+		current.StartedAt == 0 && expected.StartedAt == 0
 }
 
 // AddRunning adds a job to the running set.
@@ -343,6 +369,28 @@ func (s *State) RemoveRunning(jobID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removeRunningLocked(jobID)
+}
+
+// FinishRunningAttempt atomically records terminal state and releases the
+// scheduler slot, fenced by the attempt identity observed by the supervisor.
+// A late waiter from an older attempt must never release a newer attempt.
+func (s *State) FinishRunningAttempt(jobID string, expected RunningJobState, exitCode int, finishedAt int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.Running[jobID]
+	if !ok || !sameRunningAttempt(current, expected) {
+		return false
+	}
+	s.recordFinishedLocked(jobID, exitCode, finishedAt)
+	s.removeRunningLocked(jobID)
+	return true
+}
+
+func sameRunningAttempt(current, expected RunningJobState) bool {
+	if current.RunID != 0 || expected.RunID != 0 {
+		return current.RunID != 0 && current.RunID == expected.RunID
+	}
+	return current.StartedAt != 0 && current.StartedAt == expected.StartedAt
 }
 
 // RecordFinished records a job's terminal state.

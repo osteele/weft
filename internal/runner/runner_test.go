@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -828,6 +829,93 @@ func TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists(t *testing.T) {
 	// No completion record should exist
 	if _, err := os.Stat(paths.Completion); err == nil {
 		t.Fatal("completion record was written; refreshRunningJobs should not have treated this as an orphan")
+	}
+}
+
+func TestRefreshRunningJobs_MatchingCompletionReleasesSlotDespiteWaiter(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(385)
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	paths := NewJobPaths(r.logDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	rs := RunningJobState{RunID: 73, StartedAt: r.now().Unix() - 10}
+	r.state.AddRunning(jobIDStr, rs)
+	if err := WriteCompletionRecord(paths, ExitInfo{ExitCode: 0}, rs, "", "", rs.StartedAt, r.now().Unix(), nil); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+	r.processesMu.Lock()
+	r.processes[jobIDStr] = &Process{PID: 1999999999, PGID: 1999999999}
+	r.processesMu.Unlock()
+
+	r.refreshRunningJobs()
+
+	if _, ok := r.state.GetRunning(jobIDStr); ok {
+		t.Fatal("matching completion record retained scheduler occupancy")
+	}
+	if finished, ok := r.state.Finished[jobIDStr]; !ok || finished.ExitCode != 0 {
+		t.Fatalf("finished state = %+v, present=%v", finished, ok)
+	}
+}
+
+func TestRefreshRunningJobs_StaleCompletionCannotReleaseNewAttempt(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(386)
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	paths := NewJobPaths(r.logDir, jobID)
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	current := RunningJobState{RunID: 82, StartedAt: r.now().Unix() - 5}
+	stale := RunningJobState{RunID: 81, StartedAt: current.StartedAt - 10}
+	r.state.AddRunning(jobIDStr, current)
+	if err := WriteCompletionRecord(paths, ExitInfo{ExitCode: 0}, stale, "", "", stale.StartedAt, current.StartedAt-1, nil); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+	r.processesMu.Lock()
+	r.processes[jobIDStr] = &Process{PID: 1999999999, PGID: 1999999999}
+	r.processesMu.Unlock()
+
+	r.refreshRunningJobs()
+
+	got, ok := r.state.GetRunning(jobIDStr)
+	if !ok || got.RunID != current.RunID {
+		t.Fatalf("current attempt was released by stale completion: %+v, present=%v", got, ok)
+	}
+}
+
+func TestWaitForJob_ReleasesSlotBeforeFinishHook(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(387)
+	job := &opsqueue.CommandJob{ID: jobID, RunID: 91, Dir: t.TempDir(), Cmd: "true"}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	r.OnJobFinish = func(int64, string, int) {
+		close(entered)
+		<-release
+		close(done)
+	}
+
+	if err := r.startJob(jobID, job, nil); err != nil {
+		t.Fatalf("startJob: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finish hook was not reached")
+	}
+	if _, ok := r.state.GetRunning(strconv.FormatInt(jobID, 10)); ok {
+		t.Fatal("terminal job retained its slot while finish hook was blocked")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("finish hook did not return")
 	}
 }
 
