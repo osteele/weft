@@ -49,14 +49,8 @@ type SourceMount struct {
 	Blobs         []dataplane.SourceBlob `json:"blobs,omitempty"`
 }
 
-// CloudNeed is a resolved cloud artifact dependency for an agent job.
-// R2Key points to the exact object in R2 that should be copied to Path.
-type CloudNeed struct {
-	Spec        string `json:"spec,omitempty"`
-	Path        string `json:"path"`
-	R2Key       string `json:"r2_key"`
-	ContentType string `json:"content_type,omitempty"`
-}
+// CloudNeed is a resolved artifact dependency for a rental agent job.
+type CloudNeed = dataplane.ArtifactNeed
 
 // CloudAfterRef identifies a same-instance --needs producer attempt, evaluated
 // by the agent when both jobs run on the same rental instance. The submit-time

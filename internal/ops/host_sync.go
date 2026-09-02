@@ -291,7 +291,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// must not turn successful outbound-only dispatch into an SSH dependency.
 	if hostUsesR2Queue(host) {
 		if mode == SyncModeFull && !opts.NoQueueStart && ensureQueueRunner != nil {
-			started, needed, err := ensureR2PayloadRunnerCapability(database, host, activeJobs, ensureQueueRunner)
+			started, needed, err := ensureR2RunnerCapabilities(database, host, activeJobs, ensureQueueRunner)
 			if err != nil {
 				if !ssh.IsConnectionError(err.Error()) {
 					result.QueueRunnerError = err.Error()
@@ -444,10 +444,10 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	return result, nil
 }
 
-// ensureR2PayloadRunnerCapability upgrades an R2-pull runner only when queued
-// work needs the payload protocol. Other R2 sync remains outbound-only and
+// ensureR2RunnerCapabilities upgrades an R2-pull runner when queued work
+// requires an agent-side protocol. Other R2 sync remains outbound-only and
 // never acquires an incidental SSH dependency.
-func ensureR2PayloadRunnerCapability(database *sql.DB, host string, activeJobs []*db.Job, ensureQueueRunner EnsureQueueRunnerFunc) (started, needed bool, err error) {
+func ensureR2RunnerCapabilities(database *sql.DB, host string, activeJobs []*db.Job, ensureQueueRunner EnsureQueueRunnerFunc) (started, needed bool, err error) {
 	for _, job := range activeJobs {
 		if job == nil || !job.UsesQueueRunner() || job.Status != db.StatusQueued {
 			continue
@@ -456,7 +456,7 @@ func ensureR2PayloadRunnerCapability(database *sql.DB, host string, activeJobs [
 		if listErr != nil {
 			return false, false, listErr
 		}
-		if len(payloads) == 0 {
+		if len(payloads) == 0 && !hasNamedAssetNeed(job.Needs) {
 			continue
 		}
 		started, err := ensureQueueRunner(host)
@@ -939,8 +939,8 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		stageFailures = stageArtifactNeedsForHost(database, host, allQueued, timeout, getR2Client)
 	} else {
 		for _, job := range allQueued {
-			if job != nil && len(job.Needs) > 0 {
-				stageFailures[job.ID] = fmt.Errorf("R2-pull inventory hosts do not yet stage --needs artifacts")
+			if job != nil && hasNonNamedAssetNeed(job.Needs) {
+				stageFailures[job.ID] = fmt.Errorf("R2-pull inventory hosts do not yet stage producer-job --needs artifacts")
 			}
 		}
 	}
@@ -1137,6 +1137,12 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 			if !useR2Source && failedAttempts >= 1 {
 				escalateToR2("legacy failed attempt")
 			}
+		}
+
+		if hasNamedAssetNeed(job.Needs) && (hostUsesR2Queue(host) || useR2Source) &&
+			!state.Supports(opsqueue.CapabilityArtifactNeedV1) {
+			recordDeferred(job.ID, "queue runner lacks artifact-need-v1 capability; agent update required before dispatch", nil)
+			continue
 		}
 
 		// Sync sources, deduplicated by remote path.
@@ -1486,20 +1492,18 @@ func collectPendingNeeds(database *sql.DB, job *db.Job) ([]pendingNeed, error) {
 	}
 	var pending []pendingNeed
 	for _, spec := range job.Needs {
-		// Named-asset form: resolve to a pre-computed R2 key from named_assets.
-		// Path comes from the asset's target_path recorded at publish time.
-		if name, ok := parseAssetNeedSpec(spec); ok {
-			asset, err := db.GetNamedAssetByName(database, name)
-			if err != nil {
-				return nil, fmt.Errorf("resolve --needs %q: %w", spec, err)
-			}
+		need, ok, err := resolveNamedAssetNeed(database, spec)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			pending = append(pending, pendingNeed{
-				spec:             spec,
-				path:             asset.TargetPath,
-				markerName:       filepath.Base(artifacts.NamedAssetSatisfiedFile("", name)),
-				remotePath:       strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(asset.TargetPath, "/"),
-				contentType:      asset.ContentType,
-				preResolvedR2Key: r2keys.NamedAsset(asset.ContentHash),
+				spec:             need.Spec,
+				path:             need.Path,
+				markerName:       filepath.Base(artifacts.NamedAssetSatisfiedFile("", nameOfAssetNeed(need.Spec))),
+				remotePath:       strings.TrimSuffix(remoteBase, "/") + "/" + strings.TrimPrefix(need.Path, "/"),
+				contentType:      need.ContentType,
+				preResolvedR2Key: need.R2Key,
 			})
 			continue
 		}
@@ -1536,6 +1540,60 @@ func parseAssetNeedSpec(spec string) (string, bool) {
 		return "", false
 	}
 	return spec[len(prefix):], true
+}
+
+func nameOfAssetNeed(spec string) string {
+	name, _ := parseAssetNeedSpec(spec)
+	return name
+}
+
+func resolveNamedAssetNeed(database *sql.DB, spec string) (opsqueue.ArtifactNeed, bool, error) {
+	name, ok := parseAssetNeedSpec(spec)
+	if !ok {
+		return opsqueue.ArtifactNeed{}, false, nil
+	}
+	asset, err := db.GetNamedAssetByName(database, name)
+	if err != nil {
+		return opsqueue.ArtifactNeed{}, true, fmt.Errorf("resolve --needs %q: %w", spec, err)
+	}
+	return opsqueue.ArtifactNeed{
+		Spec:        spec,
+		Path:        asset.TargetPath,
+		R2Key:       r2keys.NamedAsset(asset.ContentHash),
+		ContentType: asset.ContentType,
+	}, true, nil
+}
+
+func resolveNamedAssetNeeds(database *sql.DB, specs []string) ([]opsqueue.ArtifactNeed, error) {
+	var needs []opsqueue.ArtifactNeed
+	for _, spec := range specs {
+		need, ok, err := resolveNamedAssetNeed(database, spec)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			needs = append(needs, need)
+		}
+	}
+	return needs, nil
+}
+
+func hasNamedAssetNeed(specs []string) bool {
+	for _, spec := range specs {
+		if _, ok := parseAssetNeedSpec(spec); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNonNamedAssetNeed(specs []string) bool {
+	for _, spec := range specs {
+		if _, ok := parseAssetNeedSpec(spec); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // stageArtifactNeedsForHost ensures rental-produced --needs artifacts for

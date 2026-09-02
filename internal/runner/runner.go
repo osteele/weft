@@ -89,6 +89,9 @@ type Runner struct {
 	// EnsurePayloadsFromR2 stages logical-job input artifacts and returns the
 	// owner-private directory to expose as WEFT_PAYLOAD_DIR.
 	EnsurePayloadsFromR2 func(jobID int64, payloads []opsqueue.Payload) (string, error)
+	// EnsureArtifactNeedsFromR2 stages controller-resolved dependencies into the
+	// runtime working directory after any isolated source has been materialized.
+	EnsureArtifactNeedsFromR2 func(jobID int64, workDir string, needs []opsqueue.ArtifactNeed) error
 
 	// Shutdown
 	stopCh chan struct{}
@@ -569,7 +572,7 @@ func (r *Runner) tryStartAfterGatedBenchmark(candidateIDs []int64) bool {
 		if !decision.canStart {
 			continue
 		}
-		if depResult := CheckDependencies(decision.job.Deps, decision.job.Needs, r.logDir); depResult.Result != DepOK {
+		if depResult := checkJobDependencies(decision.job, r.logDir); depResult.Result != DepOK {
 			continue
 		}
 		r.state.RemovePending(jobID)
@@ -630,7 +633,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	// Check dependencies
-	depResult := CheckDependencies(job.Deps, job.Needs, r.logDir)
+	depResult := checkJobDependencies(job, r.logDir)
 	switch depResult.Result {
 	case DepWaiting:
 		fmt.Printf("Job %s: waiting for dependencies\n", ids.FormatJobID(jobID))
@@ -752,6 +755,20 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 
+	artifactNeedsStaged := false
+	if len(job.ArtifactNeeds) > 0 {
+		if r.EnsureArtifactNeedsFromR2 == nil {
+			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, "artifact staging unavailable: runner has no R2 artifact materializer")
+		}
+		if err := r.EnsureArtifactNeedsFromR2(jobID, expandedDir, job.ArtifactNeeds); err != nil {
+			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact staging failed: %v", err))
+		}
+		if err := writeArtifactNeedSatisfiedMarkers(r.logDir, job.ArtifactNeeds); err != nil {
+			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact marker write failed: %v", err))
+		}
+		artifactNeedsStaged = true
+	}
+
 	payloadDir := ""
 	if len(job.Payloads) > 0 {
 		if r.EnsurePayloadsFromR2 == nil {
@@ -838,6 +855,9 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	envVars = artifacts.MergeEnvVars(envVars, jobID)
 	if payloadDir != "" {
 		envVars = append(envVars, "WEFT_PAYLOAD_DIR="+payloadDir)
+	}
+	if artifactNeedsStaged {
+		envVars = append(envVars, "WEFT_ARTIFACT_NEEDS_STAGED=1")
 	}
 
 	// Inject resolved GPU device

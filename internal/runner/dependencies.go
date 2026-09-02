@@ -2,8 +2,11 @@ package runner
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // DepResult describes the outcome of checking a job's dependencies.
@@ -32,6 +35,17 @@ type DepCheckResult struct {
 // Artifact needs format: "path:version" where version is the producer job ID.
 // Both job-ID deps and artifact needs must be satisfied for DepOK.
 func CheckDependencies(depsSpec string, needs []string, logDir string) DepCheckResult {
+	return checkDependencies(depsSpec, needs, nil, logDir)
+}
+
+func checkJobDependencies(job *opsqueue.CommandJob, logDir string) DepCheckResult {
+	if job == nil {
+		return DepCheckResult{Result: DepOK}
+	}
+	return checkDependencies(job.Deps, job.Needs, job.ArtifactNeeds, logDir)
+}
+
+func checkDependencies(depsSpec string, needs []string, stageable []opsqueue.ArtifactNeed, logDir string) DepCheckResult {
 	// Check job-ID based dependencies
 	if depsSpec != "" {
 		entries := strings.Split(depsSpec, ",")
@@ -77,6 +91,9 @@ func CheckDependencies(depsSpec string, needs []string, logDir string) DepCheckR
 		}
 
 		if parsed.IsAsset() {
+			if artifactNeedIsStageable(spec, stageable) {
+				continue
+			}
 			satisfiedPath := NamedAssetSatisfiedFile(logDir, parsed.AssetName)
 			exitCode, found := ReadStatusFile(satisfiedPath)
 			if !found {
@@ -105,6 +122,35 @@ func CheckDependencies(depsSpec string, needs []string, logDir string) DepCheckR
 	}
 
 	return DepCheckResult{Result: DepOK}
+}
+
+func artifactNeedIsStageable(spec string, needs []opsqueue.ArtifactNeed) bool {
+	for _, need := range needs {
+		if need.Spec == spec {
+			return true
+		}
+	}
+	return false
+}
+
+func writeArtifactNeedSatisfiedMarkers(logDir string, needs []opsqueue.ArtifactNeed) error {
+	for _, need := range needs {
+		parsed, err := ParseNeedsSpec(need.Spec)
+		if err != nil {
+			return fmt.Errorf("parse artifact need %q: %w", need.Spec, err)
+		}
+		if !parsed.IsAsset() {
+			return fmt.Errorf("artifact need %q is not a named asset", need.Spec)
+		}
+		marker := NamedAssetSatisfiedFile(logDir, parsed.AssetName)
+		if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+			return fmt.Errorf("create artifact need marker directory: %w", err)
+		}
+		if err := os.WriteFile(marker, []byte("0\n"), 0o644); err != nil {
+			return fmt.Errorf("write artifact need marker for %q: %w", need.Spec, err)
+		}
+	}
+	return nil
 }
 
 // parseDepEntry parses "id:mode" or just "id" (defaults to "success").

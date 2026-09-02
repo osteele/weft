@@ -60,11 +60,29 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 	if err != nil {
 		return fmt.Errorf("list job payloads: %w", err)
 	}
+	artifactNeeds := []opsqueue.ArtifactNeed(nil)
+	if hostUsesR2Queue(job.Host) || sourceManifest != nil || sourceR2Key != "" {
+		artifactNeeds, err = resolveNamedAssetNeeds(database, job.Needs)
+		if err != nil {
+			return err
+		}
+	}
+	if len(artifactNeeds) > 0 {
+		state, stateErr := fetchRemoteRunnerState(job.Host, timeout)
+		if stateErr != nil {
+			return fmt.Errorf("read queue runner capabilities: %w", stateErr)
+		}
+		if state != nil && !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
+			return fmt.Errorf("queue runner lacks artifact-need-v1 capability; agent update required before dispatch")
+		}
+	}
+	command := payloadGuardedCommand(job.Command, payloads)
+	command = artifactNeedsGuardedCommand(command, artifactNeeds)
 	entry := opsqueue.QueueEntry{
 		JobID:            job.ID,
 		RunID:            runID,
 		WorkingDir:       job.WorkingDir,
-		Command:          payloadGuardedCommand(job.Command, payloads),
+		Command:          command,
 		Description:      job.Description,
 		SourceSHA256:     sourceSHA256,
 		SourceR2Key:      sourceR2Key,
@@ -84,6 +102,7 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		Outputs:          job.Outputs,
 		Produces:         job.Produces,
 		Needs:            job.Needs,
+		ArtifactNeeds:    artifactNeeds,
 		Payloads:         payloads,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
@@ -99,6 +118,16 @@ func payloadGuardedCommand(command string, payloads []opsqueue.Payload) string {
 		return command
 	}
 	return `if [ -z "${WEFT_PAYLOAD_DIR:-}" ]; then echo "weft: payload staging unavailable; update the host agent" >&2; exit 78; fi; ` + command
+}
+
+// artifactNeedsGuardedCommand makes a structured-needs queue entry fail closed
+// on an older inventory agent that ignores artifact_needs. Current agents stage
+// the assets into the runtime working directory and set the guard variable.
+func artifactNeedsGuardedCommand(command string, needs []opsqueue.ArtifactNeed) string {
+	if len(needs) == 0 {
+		return command
+	}
+	return `if [ "${WEFT_ARTIFACT_NEEDS_STAGED:-}" != 1 ]; then echo "weft: artifact staging unavailable; update the host agent" >&2; exit 78; fi; ` + command
 }
 
 func queuePayloadsForJob(database *sql.DB, jobID int64) ([]opsqueue.Payload, error) {

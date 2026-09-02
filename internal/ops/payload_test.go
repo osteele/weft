@@ -75,3 +75,73 @@ func TestAppendJobToQueueWiresPayloadGuard(t *testing.T) {
 		t.Fatalf("queued command = %#v", sent.Job)
 	}
 }
+
+func TestAppendIsolatedJobResolvesNamedAssetForAgentStaging(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "python train.py", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("b", 64)
+	if err := db.UpsertNamedAsset(database, db.NamedAsset{
+		Name:        "trace",
+		ContentHash: digest,
+		ContentType: "file",
+		TargetPath:  "data/trace.jsonl",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"asset:trace"}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLoad := loadQueueConfig
+	originalAppend := appendQueueCommandSSH
+	t.Cleanup(func() {
+		loadQueueConfig = originalLoad
+		appendQueueCommandSSH = originalAppend
+	})
+	loadQueueConfig = func() (*config.Config, error) { return &config.Config{}, nil }
+	var sent opsqueue.QueueCommand
+	appendQueueCommandSSH = func(_ string, command opsqueue.QueueCommand, _ opsqueue.AppendCommandOptions) error {
+		sent = command
+		return nil
+	}
+	supportsArtifactNeeds := false
+	mockSSHFunc(t, func(_, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			capabilities := "[]"
+			if supportsArtifactNeeds {
+				capabilities = `["artifact-need-v1"]`
+			}
+			return `{"capabilities":` + capabilities + `,"pending":[]}` + "\n", "", 0
+		}
+		return "", "", 0
+	})
+
+	err = AppendJobToQueueWithSourceAndR2(database, job, time.Second, digest, "sources/snapshot.tar.gz")
+	if err == nil || !strings.Contains(err.Error(), "artifact-need-v1") {
+		t.Fatalf("incompatible runner error = %v", err)
+	}
+	if sent.Job != nil {
+		t.Fatal("job was appended before runner capability was confirmed")
+	}
+	supportsArtifactNeeds = true
+
+	if err := AppendJobToQueueWithSourceAndR2(database, job, time.Second, digest, "sources/snapshot.tar.gz"); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Job == nil || len(sent.Job.ArtifactNeeds) != 1 {
+		t.Fatalf("queued artifact needs = %#v", sent.Job)
+	}
+	need := sent.Job.ArtifactNeeds[0]
+	if need.Spec != "asset:trace" || need.Path != "data/trace.jsonl" || need.R2Key != "assets/"+digest {
+		t.Fatalf("queued artifact need = %#v", need)
+	}
+	if !strings.Contains(sent.Job.Cmd, "WEFT_ARTIFACT_NEEDS_STAGED") || !strings.HasSuffix(sent.Job.Cmd, job.Command) {
+		t.Fatalf("queued command = %q", sent.Job.Cmd)
+	}
+}

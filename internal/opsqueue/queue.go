@@ -74,11 +74,15 @@ type QueueEntry struct {
 	Outputs          []string
 	Produces         []string
 	Needs            []string
+	ArtifactNeeds    []ArtifactNeed
 	Payloads         []Payload
 }
 
 // Payload is the queue protocol identity of one immutable job input artifact.
 type Payload = dataplane.JobPayload
+
+// ArtifactNeed is the queue protocol identity of one R2-backed dependency.
+type ArtifactNeed = dataplane.ArtifactNeed
 
 // SourceManifest is the queue protocol representation of an immutable source
 // closure. Roots are ordered with the project working directory first and

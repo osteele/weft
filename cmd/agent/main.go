@@ -138,9 +138,15 @@ func runQueue(args []string) {
 				return copyCloudNeedFromR2(bucket, key, destination)
 			})
 		}
+		r.EnsureArtifactNeedsFromR2 = func(jobID int64, workDir string, needs []opsqueue.ArtifactNeed) error {
+			return stageArtifactNeeds(bucket, jobID, workDir, needs)
+		}
 	}
 	if r.EnsurePayloadsFromR2 != nil {
 		r.Capabilities = append(r.Capabilities, opsqueue.CapabilityJobPayloadV1)
+	}
+	if r.EnsureArtifactNeedsFromR2 != nil {
+		r.Capabilities = append(r.Capabilities, opsqueue.CapabilityArtifactNeedV1)
 	}
 	if parsed.R2QueueHost != "" {
 		if parsed.R2Bucket == "" {

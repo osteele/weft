@@ -21,6 +21,7 @@ const (
 )
 
 const CapabilityJobPayloadV1 = "job-payload-v1"
+const CapabilityArtifactNeedV1 = "artifact-need-v1"
 
 // CommandJob contains job data for an add command.
 type CommandJob struct {
@@ -54,6 +55,7 @@ type CommandJob struct {
 	Outputs          []string        `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
 	Produces         []string        `json:"produces,omitempty"`    // artifact specs this job produces
 	Needs            []string        `json:"needs,omitempty"`       // artifact specs this job needs
+	ArtifactNeeds    []ArtifactNeed  `json:"artifact_needs,omitempty"`
 	Payloads         []Payload       `json:"payloads,omitempty"`
 }
 
@@ -106,6 +108,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Outputs:          entry.Outputs,
 			Produces:         entry.Produces,
 			Needs:            entry.Needs,
+			ArtifactNeeds:    entry.ArtifactNeeds,
 			Payloads:         entry.Payloads,
 		},
 	}

@@ -62,6 +62,16 @@ func TestQueueCommandSerialization(t *testing.T) {
 				}},
 			}),
 		},
+		{
+			name: "add resolved artifact need",
+			cmd: NewAddCommand(QueueEntry{
+				JobID:   791,
+				Command: "true",
+				ArtifactNeeds: []ArtifactNeed{{
+					Spec: "asset:trace", Path: "data/trace.jsonl", R2Key: "assets/sha256/hash",
+				}},
+			}),
+		},
 		{name: "priority command", cmd: NewPriorityCommand(123)},
 		{name: "cancel command", cmd: NewCancelCommand(456)},
 		{name: "stop command", cmd: NewStopCommand()},
@@ -92,6 +102,11 @@ func TestQueueCommandSerialization(t *testing.T) {
 			if tt.cmd.Job != nil && len(tt.cmd.Job.Payloads) > 0 {
 				if roundTrip.Job == nil || len(roundTrip.Job.Payloads) != 1 || roundTrip.Job.Payloads[0].SHA256 != tt.cmd.Job.Payloads[0].SHA256 {
 					t.Fatalf("payload did not survive round trip: %#v", roundTrip.Job)
+				}
+			}
+			if tt.cmd.Job != nil && len(tt.cmd.Job.ArtifactNeeds) > 0 {
+				if roundTrip.Job == nil || len(roundTrip.Job.ArtifactNeeds) != 1 || roundTrip.Job.ArtifactNeeds[0].Path != tt.cmd.Job.ArtifactNeeds[0].Path {
+					t.Fatalf("artifact need did not survive round trip: %#v", roundTrip.Job)
 				}
 			}
 		})

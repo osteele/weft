@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestCheckDependencies_Empty(t *testing.T) {
@@ -117,6 +119,22 @@ func TestCheckDependencies_NamedAssetWaiting(t *testing.T) {
 	result := CheckDependencies("", []string{"asset:trace-v1"}, dir)
 	if result.Result != DepWaiting {
 		t.Errorf("expected Waiting, got %v", result.Result)
+	}
+}
+
+func TestCheckJobDependencies_AllowsAgentStagedNamedAsset(t *testing.T) {
+	job := &opsqueue.CommandJob{
+		Needs: []string{"asset:trace-v1"},
+		ArtifactNeeds: []opsqueue.ArtifactNeed{{
+			Spec:  "asset:trace-v1",
+			Path:  "data/trace.jsonl",
+			R2Key: "assets/sha256/abc",
+		}},
+	}
+
+	result := checkJobDependencies(job, t.TempDir())
+	if result.Result != DepOK {
+		t.Errorf("expected resolved named asset to be stageable, got %v", result.Result)
 	}
 }
 

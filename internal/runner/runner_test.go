@@ -780,6 +780,66 @@ func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
 	}
 }
 
+func TestStartJob_PinnedManifestStagesNamedAssetInRuntimeDirectory(t *testing.T) {
+	r, _ := initTestRunner(t)
+	cleanupRunnerProcesses(t, r)
+	jobID := int64(712)
+	var runtimeDir string
+
+	r.EnsureSourceManifestFromR2 = func(_ int64, _ opsqueue.SourceManifest, perJobRoot string) (string, error) {
+		runtimeDir = filepath.Join(perJobRoot, "project")
+		if err := os.RemoveAll(perJobRoot); err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+			return "", err
+		}
+		return runtimeDir, nil
+	}
+	r.EnsureArtifactNeedsFromR2 = func(_ int64, workDir string, needs []opsqueue.ArtifactNeed) error {
+		if workDir != runtimeDir {
+			return fmt.Errorf("artifact workdir = %q, want %q", workDir, runtimeDir)
+		}
+		target := filepath.Join(workDir, needs[0].Path)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, []byte("banked"), 0o644)
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:  jobID,
+		Dir: "/shared/tree/that-must-not-be-used",
+		Cmd: `test -f output/exp_142/gpt2/slot_decomposition.json && test "${WEFT_ARTIFACT_NEEDS_STAGED:-}" = 1`,
+		SourceManifest: &opsqueue.SourceManifest{
+			SHA256: strings.Repeat("a", 64),
+			Roots:  []opsqueue.SourceRoot{{MountBasename: "project", Hash: strings.Repeat("b", 64), R2Key: "sources/project.tar.gz"}},
+		},
+		Needs: []string{"asset:exp142-gpt2"},
+		ArtifactNeeds: []opsqueue.ArtifactNeed{{
+			Spec:  "asset:exp142-gpt2",
+			Path:  "output/exp_142/gpt2/slot_decomposition.json",
+			R2Key: "assets/sha256/content",
+		}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("startJob: %v", err)
+	}
+
+	paths := NewJobPaths(r.logDir, jobID)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if exitCode, ok := ReadStatusFile(paths.Status); ok {
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0", exitCode)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("job did not write a status file")
+}
+
 // TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists verifies that
 // refreshRunningJobs does not mark a job as orphaned when the waitForJob
 // goroutine is still tracking the process (i.e., the process has exited

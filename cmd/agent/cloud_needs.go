@@ -32,6 +32,18 @@ func stageCloudPayloads(bucket string, job *cloud.AgentJob) (string, error) {
 }
 
 func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.CloudNeed) error {
+	if err := stageArtifactNeeds(bucket, jobID, workDir, needs); err != nil {
+		return err
+	}
+	for _, need := range needs {
+		if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stageArtifactNeeds(bucket string, jobID int64, workDir string, needs []cloud.CloudNeed) error {
 	if len(needs) == 0 {
 		return nil
 	}
@@ -40,12 +52,12 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 		expandedWorkDir = workDir
 	}
 	if expandedWorkDir == "" {
-		return fmt.Errorf("cloud artifact staging: empty working dir")
+		return fmt.Errorf("artifact staging: empty working dir")
 	}
 
-	fmt.Printf("Job %d: cloud artifact staging start (%d artifact%s)\n", jobID, len(needs), pluralSuffix(len(needs)))
+	fmt.Printf("Job %d: artifact staging start (%d artifact%s)\n", jobID, len(needs), pluralSuffix(len(needs)))
 	oplog.LogJob(oplog.OpJobSync, jobID, "",
-		oplog.WithDetailf("cloud artifact staging start (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
+		oplog.WithDetailf("artifact staging start (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
 	)
 
 	for _, need := range needs {
@@ -53,19 +65,19 @@ func stageCloudNeeds(bucket string, jobID int64, workDir string, needs []cloud.C
 		if strings.TrimSpace(label) == "" {
 			label = need.Path
 		}
-		fmt.Printf("Job %d: cloud artifact staging attempt: %s\n", jobID, label)
-		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging attempt: %s", label))
+		fmt.Printf("Job %d: artifact staging attempt: %s\n", jobID, label)
+		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("artifact staging attempt: %s", label))
 		if err := stageOneCloudNeed(bucket, jobID, expandedWorkDir, need, label); err != nil {
 			return err
 		}
 
-		fmt.Printf("Job %d: cloud artifact staging success: %s\n", jobID, label)
-		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging success: %s", label))
+		fmt.Printf("Job %d: artifact staging success: %s\n", jobID, label)
+		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("artifact staging success: %s", label))
 	}
 
-	fmt.Printf("Job %d: cloud artifact staging complete (%d artifact%s)\n", jobID, len(needs), pluralSuffix(len(needs)))
+	fmt.Printf("Job %d: artifact staging complete (%d artifact%s)\n", jobID, len(needs), pluralSuffix(len(needs)))
 	oplog.LogJob(oplog.OpJobSync, jobID, "",
-		oplog.WithDetailf("cloud artifact staging complete (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
+		oplog.WithDetailf("artifact staging complete (%d artifact%s)", len(needs), pluralSuffix(len(needs))),
 	)
 	return nil
 }
@@ -81,16 +93,13 @@ func stageOneCloudNeed(bucket string, jobID int64, expandedWorkDir string, need 
 		defer os.Remove(copyTarget)
 	}
 	if err := copyCloudNeedFromR2Func(bucket, need.R2Key, copyTarget); err != nil {
-		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("cloud artifact staging fail: %s", label), oplog.WithError(err))
-		return fmt.Errorf("cloud artifact staging failed for %q: %w", label, err)
+		oplog.LogJob(oplog.OpJobSync, jobID, "", oplog.WithDetailf("artifact staging fail: %s", label), oplog.WithError(err))
+		return fmt.Errorf("artifact staging failed for %q: %w", label, err)
 	}
 	if need.ContentType == "directory" {
 		if err := extractCloudNeedArchive(copyTarget, targetPath); err != nil {
 			return fmt.Errorf("extract cloud directory asset %q: %w", label, err)
 		}
-	}
-	if err := writeCloudNeedSatisfiedMarker(jobID, need.Spec); err != nil {
-		return err
 	}
 	return nil
 }

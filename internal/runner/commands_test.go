@@ -359,6 +359,9 @@ func TestWriteJobFileMergesGPUFields(t *testing.T) {
 		OutputDirs: []string{"out/"},
 		Produces:   []string{"model.pt"},
 		Needs:      []string{"data.csv:1"},
+		ArtifactNeeds: []opsqueue.ArtifactNeed{{
+			Spec: "asset:data", Path: "data.csv", R2Key: "assets/hash",
+		}},
 	}
 	if err := writeJobFile(dir, job1); err != nil {
 		t.Fatalf("first writeJobFile: %v", err)
@@ -379,6 +382,9 @@ func TestWriteJobFileMergesGPUFields(t *testing.T) {
 		t.Fatalf("ReadJobFile: %v", err)
 	}
 	assertResourceFields(t, got, "2", "a100", 80, []string{"out/"}, []string{"model.pt"}, []string{"data.csv:1"})
+	if len(got.ArtifactNeeds) != 1 || got.ArtifactNeeds[0].Spec != "asset:data" {
+		t.Fatalf("ArtifactNeeds = %#v, want preserved asset:data", got.ArtifactNeeds)
+	}
 }
 
 func TestWriteJobFileNewDataTakesPrecedence(t *testing.T) {

@@ -1514,10 +1514,11 @@ rule OnPremStagingFromR2 {
 --   → `--input asset:NAME` mirrored into `--needs asset:NAME` at submission
 --   → needs resolution reads the named_assets row and yields the
 --     pre-computed R2 key assets/<content_hash>
---   → the host-sync dispatcher stages the bytes onto the host at
---     target_path and writes the satisfied marker before dispatch. Directory
---     assets are stored as deterministic tar.gz archives and extracted into
---     target_path.
+--   → shared-tree SSH dispatch stages before publication; R2-pull dispatch and
+--     isolated-source jobs carry the resolved key, target, and content type in
+--     the queue entry so the agent stages after source materialization
+--   → the file or extracted directory appears at target_path in the actual
+--     runtime working directory before setup and command execution.
 -- This is the wb29 fix: previously asset: inputs were neither staged nor
 -- blocking, so the command ran and failed with missing_file.
 -- Submit validates every referenced asset:NAME against named_assets before
@@ -1532,22 +1533,26 @@ rule OnPremNamedAssetStagingFromR2 {
         let asset_row = NamedAssetByName(NameOf(need))
 
         ensures:
-            ArtifactBytesPresentOnHost(host, job.working_dir / asset_row.target_path)
+            ArtifactBytesPresentOnHost(host, RuntimeWorkingDir(job) / asset_row.target_path)
             SatisfiedMarkerWritten(host, NameOf(need), asset_row.target_path,
                                    exit_code: 0)
+            JobSetupStarts(job) only_after ArtifactBytesPresentOnHost(
+                host, RuntimeWorkingDir(job) / asset_row.target_path)
 
     -- legacy annotation: @guidance
         -- Implementation anchor:
         --   cmd/run.go                        — auto-mirror of --input
         --                                       asset:NAME into --needs
-        --   internal/ops/host_sync.go         — parseAssetNeedSpec,
-        --     collectPendingNeeds (named-asset branch resolving
-        --     db.GetNamedAssetByName → pendingNeed.preResolvedR2Key =
-        --     r2keys.NamedAsset(content_hash)), stageArtifactNeedsForHost,
-        --     stageMissingNeeds
-        -- Shares the probe/lease/atomic-rename machinery of
-        -- OnPremStagingFromR2; the only difference is key resolution
-        -- (named_assets row instead of producer-attempt R2 lookup).
+        --   internal/ops/host_sync.go         — named-asset resolution and
+        --     shared-tree SSH staging
+        --   internal/ops/queue.go             — resolved artifact_needs queue
+        --     protocol for R2-pull and isolated-source execution
+        --   internal/runner/runner.go          — agent staging after source
+        --     materialization and before setup
+        --   cmd/agent/cloud_needs.go           — shared R2 copy/extract logic
+        -- The structured agent path is required for submit-time-pinned jobs:
+        -- source-manifest materialization replaces the per-job source tree, so
+        -- controller-side staging into the shared tree is not visible there.
 }
 
 -- HF models and datasets declared on a cloud-bound job are staged by the

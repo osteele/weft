@@ -260,6 +260,9 @@ func mergeResourceFields(job, existing *opsqueue.CommandJob) {
 	if len(job.Needs) == 0 && len(existing.Needs) > 0 {
 		job.Needs = existing.Needs
 	}
+	if len(job.ArtifactNeeds) == 0 && len(existing.ArtifactNeeds) > 0 {
+		job.ArtifactNeeds = existing.ArtifactNeeds
+	}
 }
 
 // removeJobFile removes the job data file from the queue directory.

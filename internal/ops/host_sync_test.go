@@ -581,7 +581,7 @@ func TestEnsureQueuedJobsOnRemote_DefersPayloadForIncapableRunner(t *testing.T) 
 	}
 }
 
-func TestEnsureR2PayloadRunnerCapabilityInitiatesUpgrade(t *testing.T) {
+func TestEnsureR2RunnerCapabilitiesInitiatesPayloadUpgrade(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "studio", "", "true", "payload job")
 	if err != nil {
@@ -599,7 +599,33 @@ func TestEnsureR2PayloadRunnerCapabilityInitiatesUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	started, needed, err := ensureR2PayloadRunnerCapability(database, "studio", []*db.Job{job}, func(host string) (bool, error) {
+	started, needed, err := ensureR2RunnerCapabilities(database, "studio", []*db.Job{job}, func(host string) (bool, error) {
+		called = host == "studio"
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || !started || !needed {
+		t.Fatalf("called=%v started=%v needed=%v, want true/true/true", called, started, needed)
+	}
+}
+
+func TestEnsureR2RunnerCapabilitiesInitiatesNamedAssetUpgrade(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "", "true", "asset job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"asset:trace"}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	started, needed, err := ensureR2RunnerCapabilities(database, "studio", []*db.Job{job}, func(host string) (bool, error) {
 		called = host == "studio"
 		return true, nil
 	})
