@@ -232,6 +232,90 @@ func TestBatchStatus_CompletedIncludesRunID(t *testing.T) {
 	}
 }
 
+func TestBatchStatus_MatchingCompletionWinsOverActiveRunnerState(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	current := int64(42)
+	state := runner.NewState()
+	state.Current = &current
+	state.Running["42"] = runner.RunningJobState{RunID: 1042}
+	state.Running["43"] = runner.RunningJobState{RunID: 1043}
+	if err := state.Save(filepath.Join(queueDir, "default.state.json")); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	for jobID, runID := range map[int64]int64{42: 1042, 43: 1043} {
+		if err := os.WriteFile(filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)), []byte("0\n"), 0644); err != nil {
+			t.Fatalf("write status file: %v", err)
+		}
+		rec, err := json.Marshal(runner.CompletionRecord{RunID: runID, ExitCode: 0, EndTime: 1700000000})
+		if err != nil {
+			t.Fatalf("marshal completion: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)), rec, 0644); err != nil {
+			t.Fatalf("write completion: %v", err)
+		}
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42, 43})
+	})
+
+	for _, jobID := range []int64{42, 43} {
+		want := fmt.Sprintf("JOB|%d|COMPLETED|0|", jobID)
+		if !strings.Contains(output, want) {
+			t.Fatalf("batchStatus output = %q, want line containing %q", output, want)
+		}
+	}
+}
+
+func TestBatchStatus_StaleCompletionDoesNotOverrideActiveAttempt(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatalf("mkdir queue dir: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	current := int64(42)
+	state := runner.NewState()
+	state.Current = &current
+	state.Running["42"] = runner.RunningJobState{RunID: 1042}
+	if err := state.Save(filepath.Join(queueDir, "default.state.json")); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.status"), []byte("0\n"), 0644); err != nil {
+		t.Fatalf("write status file: %v", err)
+	}
+	rec, err := json.Marshal(runner.CompletionRecord{RunID: 41, ExitCode: 0, EndTime: 1700000000})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "42.completion.json"), rec, 0644); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+
+	output := captureStdout(t, func() {
+		batchStatus([]int64{42})
+	})
+
+	if got := strings.TrimSpace(output); got != "JOB|42|CURRENT|" {
+		t.Fatalf("batchStatus output = %q, want current attempt", got)
+	}
+}
+
 func TestBatchStatus_PendingPayloadWinsOverStaleStatusFile(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

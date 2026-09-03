@@ -39,8 +39,13 @@ func batchStatus(jobIDs []int64) {
 	for _, jobID := range jobIDs {
 		idStr := strconv.FormatInt(jobID, 10)
 
-		// Check if current
+		// A matching completion record is authoritative even when the runner
+		// has not yet released its persisted execution slot.
 		if state.Current != nil && *state.Current == jobID {
+			running := state.Running[idStr]
+			if reportCompletedStatusFile(logDir, jobID, running.RunID) {
+				continue
+			}
 			gpuDevs := gpuDevicesForJob(state, idStr)
 			source := sourceExecutionStatus(logDir, jobID)
 			processState := checkProcessState(logDir, jobID)
@@ -62,7 +67,10 @@ func batchStatus(jobIDs []int64) {
 		}
 
 		// Check if running (in running map but not current)
-		if _, ok := state.Running[idStr]; ok {
+		if running, ok := state.Running[idStr]; ok {
+			if reportCompletedStatusFile(logDir, jobID, running.RunID) {
+				continue
+			}
 			gpuDevs := gpuDevicesForJob(state, idStr)
 			source := sourceExecutionStatus(logDir, jobID)
 			processState := checkProcessState(logDir, jobID)
@@ -89,15 +97,7 @@ func batchStatus(jobIDs []int64) {
 		}
 
 		// Check status file
-		statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
-		if statusContent, err := os.ReadFile(statusFile); err == nil {
-			exitCodeStr := strings.TrimSpace(string(statusContent))
-			var exitCode int
-			fmt.Sscanf(exitCodeStr, "%d", &exitCode)
-			mtime := fileMtime(statusFile)
-			fr := readFailureReason(logDir, jobID)
-			runID := completionRunID(logDir, jobID)
-			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s%s\n", jobID, exitCode, mtime, runID, fr, sourceExecutionStatus(logDir, jobID))
+		if reportCompletedStatusFile(logDir, jobID, 0) {
 			continue
 		}
 
@@ -171,6 +171,26 @@ func terminalArtifactExists(logDir string, jobID int64) bool {
 		}
 	}
 	return false
+}
+
+func reportCompletedStatusFile(logDir string, jobID, expectedRunID int64) bool {
+	statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
+	statusContent, err := os.ReadFile(statusFile)
+	if err != nil {
+		return false
+	}
+	runID := completionRunID(logDir, jobID)
+	if expectedRunID != 0 && runID != expectedRunID {
+		return false
+	}
+	var exitCode int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(statusContent)), "%d", &exitCode); err != nil {
+		return false
+	}
+	mtime := fileMtime(statusFile)
+	failureReason := readFailureReason(logDir, jobID)
+	fmt.Printf("JOB|%d|COMPLETED|%d|%d|%d|%s%s\n", jobID, exitCode, mtime, runID, failureReason, sourceExecutionStatus(logDir, jobID))
+	return true
 }
 
 func readFailureReason(logDir string, jobID int64) string {
