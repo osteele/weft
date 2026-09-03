@@ -92,6 +92,19 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 	return nil
 }
 
+// RecordJobAttemptCompletion records completion only if attemptID still owns
+// the logical job.
+func RecordJobAttemptCompletion(database *sql.DB, jobID, attemptID int64, exitCode int, startTime, endTime int64) error {
+	transitioned, err := db.RecordAttemptCompletionWithTransition(database, jobID, attemptID, exitCode, startTime, endTime)
+	if err != nil {
+		return err
+	}
+	if transitioned {
+		notify.JobTerminal(database, jobID, terminalStatusForExit(exitCode), &exitCode)
+	}
+	return nil
+}
+
 // terminalStatusForExit maps an exit code to the terminal status used for
 // notifications, mirroring the oplog complete/fail branching.
 func terminalStatusForExit(exitCode int) string {

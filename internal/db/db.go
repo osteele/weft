@@ -1541,6 +1541,70 @@ func RecordCompletionByIDWithTransition(db *sql.DB, id int64, exitCode int, endT
 	return false, UpdateAttemptCompletion(db, id, exitCode, endTime)
 }
 
+var ErrCompletionAttemptNotCurrent = errors.New("completion attempt is not current")
+
+// RecordAttemptCompletionWithTransition records authoritative completion only
+// when attemptID is still the job's latest authoritative attempt.
+func RecordAttemptCompletionWithTransition(database *sql.DB, jobID, attemptID int64, exitCode int, startTime, endTime int64) (bool, error) {
+	return RetryOnDatabaseLockedValue(context.Background(), "record attempt completion", func() (bool, error) {
+		tx, err := database.Begin()
+		if err != nil {
+			return false, err
+		}
+		defer tx.Rollback()
+
+		var fromStatus string
+		err = tx.QueryRow(
+			`SELECT status
+			   FROM authoritative_job_attempts
+			  WHERE job_id = ? AND id = ?`,
+			jobID, attemptID,
+		).Scan(&fromStatus)
+		if err == sql.ErrNoRows {
+			return false, fmt.Errorf("%w: job %d run %d", ErrCompletionAttemptNotCurrent, jobID, attemptID)
+		}
+		if err != nil {
+			return false, err
+		}
+		if _, err := status.ValidateTransition(fromStatus, StatusCompleted, true); err != nil {
+			return false, err
+		}
+
+		cloudOutcome := AttemptOutcomeCompleted
+		if exitCode != 0 {
+			cloudOutcome = AttemptOutcomeFailed
+		}
+		result, err := tx.Exec(
+			`UPDATE job_attempts
+			    SET status = ?, exit_code = ?, start_time = COALESCE(start_time, NULLIF(?, 0)), end_time = ?,
+			        last_synced_status = ?, pending_status = NULL, session_name = NULL,
+			        cloud_outcome = CASE
+			            WHEN launch_id IS NULL THEN cloud_outcome
+			            WHEN cloud_outcome IS NULL THEN ?
+			            ELSE cloud_outcome
+			        END
+			  WHERE id = ? AND job_id = ?
+			    AND id = `+latestAuthoritativeAttemptSubquery,
+			StatusCompleted, exitCode, startTime, endTime, StatusCompleted, cloudOutcome,
+			attemptID, jobID, jobID,
+		)
+		if err != nil {
+			return false, err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if updated == 0 {
+			return false, fmt.Errorf("%w: job %d run %d", ErrCompletionAttemptNotCurrent, jobID, attemptID)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return !IsTerminalStatus(fromStatus), nil
+	})
+}
+
 // MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID.
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
 // Also updates last_synced_status since this is detecting remote state.

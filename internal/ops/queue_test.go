@@ -11,6 +11,24 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+func TestQueueEntryForJobCarriesAttemptRunID(t *testing.T) {
+	runID := int64(41721)
+	entry := queueEntryForJob(&db.Job{
+		ID:          6665,
+		Host:        "studio",
+		WorkingDir:  "/tmp/project",
+		Command:     "uv run train.py",
+		LatestRunID: &runID,
+	}, nil, "")
+	if entry.RunID != runID {
+		t.Fatalf("queue entry run ID = %d, want %d", entry.RunID, runID)
+	}
+	commandJob := commandJobForQueueEntry(entry)
+	if commandJob.RunID != runID {
+		t.Fatalf("queue file run ID = %d, want %d", commandJob.RunID, runID)
+	}
+}
+
 func TestQueueJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mockSSHFunc(t, func(host, command string) (string, string, int) {

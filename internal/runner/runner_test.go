@@ -951,10 +951,17 @@ func TestWaitForJob_ReleasesSlotBeforeFinishHook(t *testing.T) {
 	r, _ := initTestRunner(t)
 	jobID := int64(387)
 	job := &opsqueue.CommandJob{ID: jobID, RunID: 91, Dir: t.TempDir(), Cmd: "true"}
+	started := make(chan int64, 1)
+	r.OnJobStart = func(_ int64, runID int64, _ string) func() {
+		started <- runID
+		return nil
+	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
-	r.OnJobFinish = func(int64, string, int) {
+	finished := make(chan int64, 1)
+	r.OnJobFinish = func(_ int64, runID int64, _ string, _ int) {
+		finished <- runID
 		close(entered)
 		<-release
 		close(done)
@@ -964,9 +971,25 @@ func TestWaitForJob_ReleasesSlotBeforeFinishHook(t *testing.T) {
 		t.Fatalf("startJob: %v", err)
 	}
 	select {
+	case runID := <-started:
+		if runID != job.RunID {
+			t.Fatalf("start hook run ID = %d, want %d", runID, job.RunID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("start hook was not reached")
+	}
+	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("finish hook was not reached")
+	}
+	select {
+	case runID := <-finished:
+		if runID != job.RunID {
+			t.Fatalf("finish hook run ID = %d, want %d", runID, job.RunID)
+		}
+	default:
+		t.Fatal("finish hook did not report a run ID")
 	}
 	if _, ok := r.state.GetRunning(strconv.FormatInt(jobID, 10)); ok {
 		t.Fatal("terminal job retained its slot while finish hook was blocked")

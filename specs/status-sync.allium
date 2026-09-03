@@ -394,6 +394,9 @@ rule RedispatchMissingQueuedJobs {
         --     - fetchRemoteRunnerState(host, timeout) reads state.json.
         --     - queuedJobMaterializedInRunner checks pending/current/running/
         --       finished state plus the attempt run_id in the job payload.
+        --     - queueEntryForJob carries latest_attempt.id through both the
+        --       SSH queue file and R2-pull command payload; neither transport
+        --       may collapse a current inventory attempt to run_id=0.
         --     - fetchRemoteJobPayloads returns a three-state observation per
         --       job; parse failures do not poison sibling rows.
         --     - db.ResetLastSyncedStatus(jobID) clears the synced marker
@@ -1260,11 +1263,11 @@ rule SyncRecordsCloudCompletion {
 
 invariant ProcessedMarkerIsPerAttempt {
     -- The "already ingested" gate on R2 .complete markers is per-attempt,
-    -- not per-job. Each .complete marker is paired with a .processed marker
-    -- at the same prefix:
+    -- not per-job. Inventory and rental agents use the same key shape:
     --   jobs/<jobID>/runs/<runID>/.complete ↔ jobs/<jobID>/runs/<runID>/.processed
-    --   jobs/<jobID>/.complete              ↔ jobs/<jobID>/.processed
-    --     (inventory form; runID=0 collapses via key constructor)
+    --
+    -- Job-scoped jobs/<jobID>/.complete and completion records whose embedded
+    -- run_id differs from the key are never evidence for a current attempt.
     --
     -- The explicit repair loop processes a job whenever any of its observed
     -- .complete markers lacks the matching .processed marker. A .processed
@@ -1361,18 +1364,20 @@ rule AgentReportsHeartbeat {
         --   3. On the periodic 30-second tick during the run.
 }
 
--- Agent writes per-job completion marker.
+-- Agent writes a per-attempt completion marker.
 rule AgentReportsJobComplete {
     when: AgentJobFinished(instance, job, exit_code)
 
-    ensures: R2JobCompleteWritten(job, exit_code)
+    ensures: R2JobCompleteWritten(job, job.latest_attempt.id, exit_code)
 
     -- legacy annotation: @guidance
         -- Written to: jobs/<jobID>/runs/<runID>/.complete
         -- Contains exit code as plain text.
         -- Written synchronously before agent moves to next job.
-        -- The runID is the job_attempts.id assigned by claimJobForLaunch
-        -- before the agent payload is built. See R2RunIDFromDB invariant.
+        -- Rental payloads and inventory runner lifecycle hooks both carry the
+        -- job_attempts.id assigned before execution begins. The completion
+        -- record at the same run prefix must embed that identical run_id.
+        -- See R2RunIDFromDB invariant.
 }
 
 -- Agent writes completion manifest when all jobs finish.

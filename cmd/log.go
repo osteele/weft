@@ -1478,8 +1478,11 @@ func printPostLogDiagnostics(job *db.Job) {
 // tryLogFromR2 attempts to fetch a log from R2 for an inventory host job.
 // Returns nil on success (output already printed), error if R2 fetch fails.
 func tryLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
-	// Inventory hosts use runID=0
-	if err := fetchAndDisplayLogFromR2Func(cmd, database, job, 0); err != nil {
+	runID := currentJobRunID(job)
+	if runID == nil {
+		return fmt.Errorf("job %s has no current attempt for R2 log fallback", ids.FormatJobID(job.ID))
+	}
+	if err := fetchAndDisplayLogFromR2Func(cmd, database, job, *runID); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log snapshot for job %s.\n", ids.FormatJobID(job.ID))

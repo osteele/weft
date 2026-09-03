@@ -65,8 +65,8 @@ type Runner struct {
 	benchmarkLastReason string
 
 	// Lifecycle hooks (optional, best-effort)
-	OnJobStart  func(jobID int64, logPath string) func() // returns stop function for live upload
-	OnJobFinish func(jobID int64, logDir string, exitCode int)
+	OnJobStart  func(jobID, runID int64, logPath string) func() // returns stop function for live upload
+	OnJobFinish func(jobID, runID int64, logDir string, exitCode int)
 
 	// PostJobManager coordinates post-job artifact capture with subsequent
 	// starts. Runners call WaitForWorkdir before starting a job, then
@@ -802,7 +802,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	// Call OnJobStart hook (best-effort)
 	if r.OnJobStart != nil {
-		if stopFn := r.OnJobStart(jobID, paths.Log); stopFn != nil {
+		if stopFn := r.OnJobStart(jobID, job.RunID, paths.Log); stopFn != nil {
 			r.processesMu.Lock()
 			r.hookStopFuncs[jobIDStr] = stopFn
 			r.processesMu.Unlock()
@@ -1013,7 +1013,7 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 		stopFn()
 	}
 	if r.OnJobFinish != nil {
-		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+		r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
 }
 
@@ -1171,7 +1171,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		r.endPostJobFinalization(runDir)
 	}
 	if r.OnJobFinish != nil {
-		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+		r.OnJobFinish(jobID, rj.Data.RunID, filepath.Dir(paths.Log), ei.ExitCode)
 	}
 	// In R2-isolated mode the runtime source lives under a per-job dir we
 	// own; remove it now so ~/.cache/weft/jobs/ doesn't grow unbounded.

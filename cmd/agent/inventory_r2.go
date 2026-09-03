@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"time"
@@ -21,24 +20,33 @@ func setupInventoryR2(r *runner.Runner, r2Bucket string) {
 		return
 	}
 
-	r.OnJobStart = func(jobID int64, logPath string) func() {
+	r.OnJobStart = func(jobID, runID int64, logPath string) func() {
+		if runID <= 0 {
+			oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
+				oplog.WithDetail("inventory .started"), oplog.WithError(fmt.Errorf("missing run ID")))
+			return nil
+		}
 		// Write .started marker asynchronously to avoid blocking job startup
 		fatalAgentGo("inventory-started-marker", func() {
 			ts := fmt.Sprintf("%d", time.Now().Unix())
-			if err := r2Put(r2Bucket, r2keys.JobStarted(jobID), ts); err != nil {
+			if err := r2Put(r2Bucket, r2keys.JobAttemptStarted(jobID, runID), ts); err != nil {
 				oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
 					oplog.WithDetail("inventory .started"), oplog.WithError(err))
 			}
 		})
-		// Start live log uploader (reuse existing; runID=0 for inventory jobs)
-		return startLogUploader(r2Bucket, jobID, 0, logPath)
+		return startLogUploader(r2Bucket, jobID, runID, logPath)
 	}
 
-	r.OnJobFinish = func(jobID int64, logDir string, exitCode int) {
+	r.OnJobFinish = func(jobID, runID int64, logDir string, exitCode int) {
+		if runID <= 0 {
+			oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
+				oplog.WithDetail("inventory .complete"), oplog.WithError(fmt.Errorf("missing run ID")))
+			return
+		}
 		// Write .complete marker with exit code. Post-job output/result
 		// uploads run through the shared post-job manager below, which also
 		// provides the same-workdir barrier before the next job starts.
-		if err := r2Put(r2Bucket, r2keys.JobComplete(jobID), fmt.Sprintf("%d", exitCode)); err != nil {
+		if err := r2Put(r2Bucket, r2keys.JobAttemptComplete(jobID, runID), fmt.Sprintf("%d", exitCode)); err != nil {
 			oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
 				oplog.WithDetail("inventory .complete"), oplog.WithError(err))
 		}
@@ -71,6 +79,11 @@ func (m *inventoryPostJobManager) WaitForAll() {
 }
 
 func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
+	if capture.RunID <= 0 {
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(capture.JobID),
+			oplog.WithDetail("inventory post-job snapshot"), oplog.WithError(fmt.Errorf("missing run ID")))
+		return
+	}
 	logSnapshot, err := snapshotInventoryJobLogDir(capture.LogDir, capture.JobID, capture.RunID)
 	if err != nil {
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(capture.JobID),
@@ -90,21 +103,4 @@ func (m *inventoryPostJobManager) StartPostJob(capture runner.PostJobCapture) {
 		outputDirs:            capture.OutputDirs,
 		cleanupDir:            capture.CleanupDir,
 	})
-}
-
-// uploadInventoryJobResults uploads the job's log directory to R2 via rclone copy.
-func uploadInventoryJobResults(bucket string, jobID int64, logDir string) {
-	prefix := r2keys.JobResultsPrefix(jobID)
-	dest := fmt.Sprintf("r2:%s/%s", bucket, prefix)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	cmd := exec.CommandContext(ctx, "rclone", "copy", logDir+"/", dest)
-	if err := cmd.Run(); err != nil {
-		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-			oplog.WithDetailf("inventory results dir=%s", runner.NewJobPaths(logDir, jobID).Log),
-			oplog.WithError(err), oplog.WithDuration(time.Since(start)))
-	}
 }

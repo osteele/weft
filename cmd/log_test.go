@@ -560,6 +560,26 @@ func TestRunLogFromR2UsesOnlyLatestAttempt(t *testing.T) {
 	}
 }
 
+func TestTryLogFromR2UsesCurrentInventoryAttempt(t *testing.T) {
+	runID := int64(36532)
+	job := &db.Job{ID: 4214, Host: "studio", LatestRunID: &runID}
+
+	orig := fetchAndDisplayLogFromR2Func
+	defer func() { fetchAndDisplayLogFromR2Func = orig }()
+	var gotRunID int64
+	fetchAndDisplayLogFromR2Func = func(_ *cobra.Command, _ *sql.DB, _ *db.Job, fetchedRunID int64) error {
+		gotRunID = fetchedRunID
+		return nil
+	}
+
+	if err := tryLogFromR2(&cobra.Command{Use: "log"}, nil, job); err != nil {
+		t.Fatalf("tryLogFromR2: %v", err)
+	}
+	if gotRunID != runID {
+		t.Fatalf("run ID = %d, want %d", gotRunID, runID)
+	}
+}
+
 func TestRunLogForAttempt_RejectsUnknownAttempt(t *testing.T) {
 	resetLogModeState()
 	defer resetLogModeState()

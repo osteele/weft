@@ -58,7 +58,7 @@ func hasCUDAEnvVar(envVars []string) bool {
 }
 
 func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.QueueEntry {
-	return opsqueue.QueueEntry{
+	entry := opsqueue.QueueEntry{
 		JobID:            job.ID,
 		WorkingDir:       job.WorkingDir,
 		Command:          job.Command,
@@ -79,6 +79,10 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.Qu
 		Produces:         job.Produces,
 		Needs:            job.Needs,
 	}
+	if job.LatestRunID != nil {
+		entry.RunID = *job.LatestRunID
+	}
+	return entry
 }
 
 func writeQueueJobFile(host string, entry opsqueue.QueueEntry, timeout time.Duration) error {
@@ -87,25 +91,7 @@ func writeQueueJobFile(host string, entry opsqueue.QueueEntry, timeout time.Dura
 		return err
 	}
 	entry.EnvVars = resolvedEnv
-	job := opsqueue.CommandJob{
-		ID:               entry.JobID,
-		Dir:              entry.WorkingDir,
-		Cmd:              entry.Command,
-		Desc:             entry.Description,
-		Env:              entry.EnvVars,
-		Deps:             entry.DepSpec,
-		CPU:              entry.CPUAllotment,
-		GPU:              entry.GPU,
-		GPUClass:         entry.GPUClass,
-		GPUMem:           entry.GPUMemGB,
-		GPUCount:         entry.GPUCount,
-		Interconnect:     entry.Interconnect,
-		CPUCores:         entry.CPUCores,
-		RAMReservationKB: entry.RAMReservationKB,
-		Tags:             entry.Tags,
-		Produces:         entry.Produces,
-		Needs:            entry.Needs,
-	}
+	job := commandJobForQueueEntry(entry)
 	payload, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("marshal queue job: %w", err)
@@ -129,6 +115,29 @@ func writeQueueJobFile(host string, entry opsqueue.QueueEntry, timeout time.Dura
 	return nil
 }
 
+func commandJobForQueueEntry(entry opsqueue.QueueEntry) opsqueue.CommandJob {
+	return opsqueue.CommandJob{
+		ID:               entry.JobID,
+		RunID:            entry.RunID,
+		Dir:              entry.WorkingDir,
+		Cmd:              entry.Command,
+		Desc:             entry.Description,
+		Env:              entry.EnvVars,
+		Deps:             entry.DepSpec,
+		CPU:              entry.CPUAllotment,
+		GPU:              entry.GPU,
+		GPUClass:         entry.GPUClass,
+		GPUMem:           entry.GPUMemGB,
+		GPUCount:         entry.GPUCount,
+		Interconnect:     entry.Interconnect,
+		CPUCores:         entry.CPUCores,
+		RAMReservationKB: entry.RAMReservationKB,
+		Tags:             entry.Tags,
+		Produces:         entry.Produces,
+		Needs:            entry.Needs,
+	}
+}
+
 func applyQueueUpdate(job *db.Job, envVars []string, depSpec string, timeout time.Duration) error {
 	if job == nil {
 		return fmt.Errorf("job is nil")
@@ -140,9 +149,6 @@ func applyQueueUpdate(job *db.Job, envVars []string, depSpec string, timeout tim
 			return err
 		}
 		entry.EnvVars = resolvedEnv
-		if job.LatestRunID != nil {
-			entry.RunID = *job.LatestRunID
-		}
 		manifest, pinned, err := pinnedQueueSourceManifest(job)
 		if err != nil {
 			return err
