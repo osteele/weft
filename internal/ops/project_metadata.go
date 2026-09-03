@@ -15,11 +15,17 @@ type dbExecer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// RefreshProjectDerivedMetadata updates a job's stored inputs and output dirs
-// from the current project config and source scans, while preserving any
-// existing explicit input declarations already recorded on the job.
-func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
-	jobID, command := job.ID, job.Command
+type ProjectDerivedMetadata struct {
+	Inputs           []string
+	BestEffortInputs []string
+	OutputDirs       []string
+	MaxComputeCap    string
+}
+
+// ComputeProjectDerivedMetadata reads current project and script declarations
+// without mutating the job or database.
+func ComputeProjectDerivedMetadata(job *db.Job) ProjectDerivedMetadata {
+	command := job.Command
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 
 	inputs := mergeStringSlices(config.ProjectInputs(localDir), explicitJobInputs(job))
@@ -35,28 +41,63 @@ func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
 	// Re-correct hf:-misprefixed datasets so a restart/requeue does not
 	// reintroduce the raw hf: form from PEP-723 metadata.
 	inputs, _ = dataloc.NormalizeMisprefixedHFDatasets(inputs)
-	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
-		return fmt.Errorf("refresh job inputs: %w", err)
-	}
-	if err := setJobBestEffortInputs(database, job, bestEffortInputs); err != nil {
-		return fmt.Errorf("refresh best-effort inputs: %w", err)
-	}
 
-	if err := db.SetJobOutputDirs(database, jobID, config.ProjectOutputDirs(localDir)); err != nil {
-		return fmt.Errorf("refresh job output dirs: %w", err)
-	}
-
-	// The torch-derived arch cap applies only to GPU jobs; refreshing a
-	// CPU-only job clears any stale inert cap rather than recomputing one.
 	maxCap := ""
 	if job.RequestsGPU() {
 		maxCap = ResolveProjectMaxComputeCap(localDir, command)
 	}
-	if err := db.SetJobMaxComputeCap(database, jobID, maxCap); err != nil {
+	return ProjectDerivedMetadata{
+		Inputs:           inputs,
+		BestEffortInputs: bestEffortInputs,
+		OutputDirs:       config.ProjectOutputDirs(localDir),
+		MaxComputeCap:    maxCap,
+	}
+}
+
+// ApplyProjectDerivedMetadata updates only the in-memory job.
+func ApplyProjectDerivedMetadata(job *db.Job, derived ProjectDerivedMetadata) {
+	job.Inputs = append([]string(nil), derived.Inputs...)
+	job.BestEffortInputs = append([]string(nil), derived.BestEffortInputs...)
+	job.OutputDirs = append([]string(nil), derived.OutputDirs...)
+	job.MaxComputeCap = derived.MaxComputeCap
+
+	meta := job.Metadata
+	if meta != nil {
+		copied := *meta
+		meta = &copied
+	} else if len(derived.BestEffortInputs) > 0 {
+		meta = &db.JobMetadata{}
+	}
+	if meta != nil {
+		meta.BestEffortInputs = append([]string(nil), derived.BestEffortInputs...)
+		job.Metadata = meta
+	}
+}
+
+// PersistProjectDerivedMetadata writes fields already applied to job.
+func PersistProjectDerivedMetadata(database dbExecer, job *db.Job) error {
+	if err := db.SetJobInputs(database, job.ID, job.Inputs); err != nil {
+		return fmt.Errorf("refresh job inputs: %w", err)
+	}
+	if err := db.SetJobMetadata(database, job.ID, job.Metadata); err != nil {
+		return fmt.Errorf("refresh best-effort inputs: %w", err)
+	}
+	if err := db.SetJobOutputDirs(database, job.ID, job.OutputDirs); err != nil {
+		return fmt.Errorf("refresh job output dirs: %w", err)
+	}
+	if err := db.SetJobMaxComputeCap(database, job.ID, job.MaxComputeCap); err != nil {
 		return fmt.Errorf("refresh max_compute_cap: %w", err)
 	}
-
 	return nil
+}
+
+// RefreshProjectDerivedMetadata updates a job's stored inputs and output dirs
+// from the current project config and source scans, while preserving any
+// existing explicit input declarations already recorded on the job.
+func RefreshProjectDerivedMetadata(database dbExecer, job *db.Job) error {
+	derived := ComputeProjectDerivedMetadata(job)
+	ApplyProjectDerivedMetadata(job, derived)
+	return PersistProjectDerivedMetadata(database, job)
 }
 
 func explicitJobInputs(job *db.Job) []string {
@@ -75,21 +116,6 @@ func explicitJobInputs(job *db.Job) []string {
 		out = append(out, input)
 	}
 	return out
-}
-
-func setJobBestEffortInputs(database dbExecer, job *db.Job, inputs []string) error {
-	meta := job.Metadata
-	if meta == nil {
-		if len(inputs) == 0 {
-			return nil
-		}
-		meta = &db.JobMetadata{}
-	} else {
-		copied := *meta
-		meta = &copied
-	}
-	meta.BestEffortInputs = append([]string(nil), inputs...)
-	return db.SetJobMetadata(database, job.ID, meta)
 }
 
 // ResolveProjectMaxComputeCap resolves the persisted cap encoding for project

@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -703,6 +706,114 @@ func TestRunEditFailedJobSuggestsRetry(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q missing %q", msg, want)
 		}
+	}
+}
+
+func TestRunEditRetryRequeuesTerminalJobWithFreshSource(t *testing.T) {
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "new.py"), []byte(`# /// script
+#
+# [tool.weft]
+# inputs = ["hf:new-model"]
+# ///
+print("new")
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := database.Exec(
+		`INSERT INTO jobs (working_dir, command, description, tombstoned) VALUES (?, ?, ?, 0)`,
+		dir, "uv run old.py", "retry",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, status, queued_at, start_time, end_time, exit_code) VALUES (?, 1, ?, 1000, 1100, 1234, 1)`,
+		jobID, db.StatusFailed,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Source: &db.JobSourceMetadata{
+		Pin: &db.JobSourcePinMetadata{Hash: "stale"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Metadata == nil || initial.Metadata.Source == nil || initial.Metadata.Source.Pin == nil {
+		t.Fatalf("initial source metadata = %+v, want pinned source", initial.Metadata)
+	}
+
+	originalPinSource := pinRunSourceSnapshotFunc
+	t.Cleanup(func() { pinRunSourceSnapshotFunc = originalPinSource })
+	pinCalled := false
+	pinRunSourceSnapshotFunc = func(_ context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
+		pinCalled = true
+		if localDir != dir {
+			t.Fatalf("localDir = %q, want %q", localDir, dir)
+		}
+		if got, want := strings.Join(inputs, ","), "hf:new-model"; got != want {
+			t.Fatalf("inputs = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(commands, ","), "uv run new.py"; got != want {
+			t.Fatalf("commands = %q, want %q", got, want)
+		}
+		return &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "fresh"}}, nil
+	}
+
+	resetEditState()
+	edit := newEditTestCommand()
+	if err := edit.Flags().Set("retry", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.Flags().Set("command", "uv run new.py"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.Flags().Set("clear-depends", "true"); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := runEdit(edit, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !pinCalled {
+		t.Fatal("source pin refresh was not called")
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("status = %q, want queued", job.Status)
+	}
+	if job.Command != "uv run new.py" {
+		t.Fatalf("command = %q, want updated command", job.Command)
+	}
+	if got, want := strings.Join(job.Inputs, ","), "hf:new-model"; got != want {
+		t.Fatalf("persisted inputs = %q, want %q", got, want)
+	}
+	pinHash := ""
+	if job.Metadata != nil && job.Metadata.Source != nil && job.Metadata.Source.Pin != nil {
+		pinHash = job.Metadata.Source.Pin.Hash
+	}
+	if pinHash != "fresh" {
+		t.Fatalf("source pin hash = %q, want fresh", pinHash)
+	}
+	var attempts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 

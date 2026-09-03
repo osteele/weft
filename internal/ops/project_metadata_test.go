@@ -39,6 +39,9 @@ func TestRefreshProjectDerivedMetadata_CapOnlyForGPUJobs(t *testing.T) {
 	if err := RefreshProjectDerivedMetadata(database, job); err != nil {
 		t.Fatalf("RefreshProjectDerivedMetadata: %v", err)
 	}
+	if job.MaxComputeCap != "" {
+		t.Errorf("in-memory MaxComputeCap = %q after CPU-job refresh, want cleared", job.MaxComputeCap)
+	}
 	refreshed, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
@@ -61,6 +64,9 @@ func TestRefreshProjectDerivedMetadata_CapOnlyForGPUJobs(t *testing.T) {
 	}
 	if err := RefreshProjectDerivedMetadata(database, gpuJob); err != nil {
 		t.Fatalf("RefreshProjectDerivedMetadata: %v", err)
+	}
+	if gpuJob.MaxComputeCap != "12.0" {
+		t.Errorf("in-memory MaxComputeCap = %q for GPU job, want %q", gpuJob.MaxComputeCap, "12.0")
 	}
 	gpuRefreshed, err := db.GetJobByID(database, gpuJobID)
 	if err != nil {

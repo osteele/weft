@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,6 +106,149 @@ func TestEnsureDispatchAfterRestart(t *testing.T) {
 			t.Fatalf("expected a visible ensure line, got %q", buf.String())
 		}
 	})
+}
+
+func TestRestartFromScratchRefreshesPinnedSource(t *testing.T) {
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(`# /// script
+#
+# [tool.weft]
+# inputs = ["hf:retry-model"]
+# uv-args = ["--no-project"]
+# ///
+print("train")
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := db.RecordQueued(database, "", dir, "uv run train.py", "retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Source: &db.JobSourceMetadata{
+		Pin: &db.JobSourcePinMetadata{Hash: "stale"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var attemptsBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attemptsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	originalPinSource := pinRunSourceSnapshotFunc
+	originalFromScratch := restartFromScratch
+	t.Cleanup(func() {
+		pinRunSourceSnapshotFunc = originalPinSource
+		restartFromScratch = originalFromScratch
+	})
+	pinRunSourceSnapshotFunc = func(_ context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {
+		if localDir != dir {
+			t.Fatalf("localDir = %q, want %q", localDir, dir)
+		}
+		if got, want := strings.Join(inputs, ","), "hf:retry-model"; got != want {
+			t.Fatalf("inputs = %q, want %q", got, want)
+		}
+		if got, want := strings.Join(commands, ","), "uv run --no-project train.py"; got != want {
+			t.Fatalf("commands = %q, want %q", got, want)
+		}
+		return &db.JobSourceMetadata{Pin: &db.JobSourcePinMetadata{Hash: "fresh"}}, nil
+	}
+	restartFromScratch = true
+
+	captureStdout(t, func() {
+		if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+			t.Fatalf("restartJob: %v", err)
+		}
+	})
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("status = %q, want queued", job.Status)
+	}
+	if job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Pin == nil || job.Metadata.Source.Pin.Hash != "fresh" {
+		t.Fatalf("source metadata = %+v, want fresh pin", job.Metadata)
+	}
+	if got, want := strings.Join(job.Inputs, ","), "hf:retry-model"; got != want {
+		t.Fatalf("persisted inputs = %q, want %q", got, want)
+	}
+	if got, want := job.Command, "uv run --no-project train.py"; got != want {
+		t.Fatalf("persisted command = %q, want %q", got, want)
+	}
+	var attempts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != attemptsBefore+1 {
+		t.Fatalf("attempts = %d, want %d", attempts, attemptsBefore+1)
+	}
+}
+
+func TestRestartSourcePinFailureDoesNotMutateJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte(`# /// script
+#
+# [tool.weft]
+# inputs = ["hf:new-model"]
+# ///
+print("train")
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := db.RecordQueued(database, "", dir, "uv run train.py", "retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobInputs(database, jobID, []string{"hf:old-model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Source: &db.JobSourceMetadata{
+		Pin: &db.JobSourcePinMetadata{Hash: "stale"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var attemptsBefore int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attemptsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	originalPinSource := pinRunSourceSnapshotFunc
+	originalFromScratch := restartFromScratch
+	t.Cleanup(func() {
+		pinRunSourceSnapshotFunc = originalPinSource
+		restartFromScratch = originalFromScratch
+	})
+	pinRunSourceSnapshotFunc = func(_ context.Context, _ string, inputs []string, _ []string) (*db.JobSourceMetadata, error) {
+		if got, want := strings.Join(inputs, ","), "hf:old-model,hf:new-model"; got != want {
+			t.Fatalf("inputs = %q, want %q", got, want)
+		}
+		return nil, fmt.Errorf("injected source pin failure")
+	}
+	restartFromScratch = true
+
+	if err := restartJob(database, jobID, restartOverrides{}); err == nil || !strings.Contains(err.Error(), "injected source pin failure") {
+		t.Fatalf("restartJob error = %v, want source pin failure", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(job.Inputs, ","), "hf:old-model"; got != want {
+		t.Fatalf("persisted inputs = %q after failed restart, want %q", got, want)
+	}
+	if job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Pin == nil || job.Metadata.Source.Pin.Hash != "stale" {
+		t.Fatalf("source metadata = %+v after failed restart, want stale pin unchanged", job.Metadata)
+	}
+	var attemptsAfter int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, jobID).Scan(&attemptsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if attemptsAfter != attemptsBefore {
+		t.Fatalf("attempts = %d after failed restart, want %d", attemptsAfter, attemptsBefore)
+	}
 }
 
 func TestRestartJobRejectsSkyPilotWithoutMutation(t *testing.T) {

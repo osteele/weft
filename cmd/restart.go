@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -735,6 +736,82 @@ func cloneJobMetadata(source *db.JobMetadata) *db.JobMetadata {
 	return &clone
 }
 
+func refreshPinnedRetrySource(job *db.Job, workingDir string, inputs []string, command string) (bool, error) {
+	if job.Metadata == nil || job.Metadata.Source == nil || job.Metadata.Source.Pin == nil {
+		return false, nil
+	}
+	source, err := pinRunSourceSnapshotFunc(
+		context.Background(),
+		workdir.ResolveLocal(workingDir),
+		inputs,
+		[]string{command},
+	)
+	if err != nil {
+		return false, fmt.Errorf("refresh source closure: %w", err)
+	}
+	meta := cloneJobMetadata(job.Metadata)
+	meta.Source = source
+	job.Metadata = meta
+	return true, nil
+}
+
+func retrySourceCommand(job *db.Job) string {
+	meta, err := dataloc.ScanScriptMeta(workdir.ResolveLocal(job.WorkingDir), job.Command)
+	if err != nil {
+		slog.Warn("script metadata error", "error", err)
+		return job.Command
+	}
+	if meta == nil {
+		return job.Command
+	}
+	command := dataloc.ApplyUvArgs(job.Command, meta.UvArgs)
+	if meta.PreInstall != "" && !strings.HasPrefix(command, meta.PreInstall) {
+		command = meta.PreInstall + " && " + command
+	}
+	return command
+}
+
+type retryProjectSourcePreparation struct {
+	workingDir string
+	command    string
+	inputs     []string
+	source     *db.JobSourceMetadata
+}
+
+func prepareRetryProjectAndSource(job *db.Job) (*retryProjectSourcePreparation, error) {
+	prepared := *job
+	prepared.Command = retrySourceCommand(job)
+	ops.ApplyProjectDerivedMetadata(&prepared, ops.ComputeProjectDerivedMetadata(&prepared))
+	refreshed, err := refreshPinnedRetrySource(&prepared, prepared.WorkingDir, prepared.Inputs, prepared.Command)
+	if err != nil {
+		return nil, err
+	}
+	result := &retryProjectSourcePreparation{}
+	if refreshed {
+		result.workingDir = prepared.WorkingDir
+		result.command = prepared.Command
+		result.inputs = append([]string(nil), prepared.Inputs...)
+		result.source = prepared.Metadata.Source
+	}
+	return result, nil
+}
+
+func persistPreparedRetryProject(tx *sql.Tx, job *db.Job, prepared *retryProjectSourcePreparation) error {
+	ops.ApplyProjectDerivedMetadata(job, ops.ComputeProjectDerivedMetadata(job))
+	if prepared.source != nil {
+		if job.WorkingDir != prepared.workingDir || job.Command != prepared.command || !slices.Equal(job.Inputs, prepared.inputs) {
+			return fmt.Errorf("retry source inputs changed while preparing the transaction")
+		}
+		meta := cloneJobMetadata(job.Metadata)
+		if meta == nil {
+			meta = &db.JobMetadata{}
+		}
+		meta.Source = prepared.source
+		job.Metadata = meta
+	}
+	return ops.PersistProjectDerivedMetadata(tx, job)
+}
+
 func persistentAttemptMetadata(meta *db.JobMetadata) *db.JobMetadata {
 	if meta == nil {
 		return nil
@@ -807,6 +884,10 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 				return err
 			}
 		}
+		preparedRetry, err := prepareRetryProjectAndSource(job)
+		if err != nil {
+			return err
+		}
 
 		var updates []string
 		if err := withRestartTx(database, func(tx *sql.Tx) error {
@@ -818,7 +899,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
+			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
 				return err
 			}
 			if len(updates) > 0 {
@@ -887,6 +968,10 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 	if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 		return err
 	}
+	preparedRetry, err := prepareRetryProjectAndSource(job)
+	if err != nil {
+		return err
+	}
 
 	// Cloud jobs: reset to unplaced (the original instance is gone)
 	if job.IsLaunchJob() {
@@ -904,13 +989,13 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
+			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
+				return err
+			}
 			if job.HasTag(db.ProcessedTag) {
 				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
 					return fmt.Errorf("remove processed tag: %w", err)
 				}
-			}
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
-				return err
 			}
 			if retryHost != "" || retryLaunchID != nil {
 				if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
@@ -949,13 +1034,13 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
+			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
+				return err
+			}
 			if job.HasTag(db.ProcessedTag) {
 				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
 					return fmt.Errorf("remove processed tag: %w", err)
 				}
-			}
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
-				return err
 			}
 			if err := db.ResetJobToUnplacedTx(tx, jobID, job); err != nil {
 				return err
@@ -994,16 +1079,19 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
+			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
+				return err
+			}
 			if job.HasTag(db.ProcessedTag) {
 				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
 					return fmt.Errorf("remove processed tag: %w", err)
 				}
 			}
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
-				return err
-			}
 			if err := db.RequeueFreshAttemptByTargetTx(tx, jobID, retryHost, retryLaunchID); err != nil {
 				return fmt.Errorf("create fresh queued attempt: %w", err)
+			}
+			if err := db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+				return fmt.Errorf("carry retry metadata: %w", err)
 			}
 			return nil
 		}); err != nil {
@@ -1035,16 +1123,19 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 			if err := validatePinnedHostQueueGate(job.Host, placement.ConstraintsFromJob(job)); err != nil {
 				return err
 			}
+			if err := persistPreparedRetryProject(tx, job, preparedRetry); err != nil {
+				return err
+			}
 			if job.HasTag(db.ProcessedTag) {
 				if err := removeJobTagFromLoaded(tx, job, db.ProcessedTag); err != nil {
 					return fmt.Errorf("remove processed tag: %w", err)
 				}
 			}
-			if err := ops.RefreshProjectDerivedMetadata(tx, job); err != nil {
-				return err
-			}
 			if err := db.RequeueByIDTx(tx, jobID); err != nil {
 				return fmt.Errorf("update status to queued: %w", err)
+			}
+			if err := db.SetJobMetadata(tx, jobID, persistentAttemptMetadata(job.Metadata)); err != nil {
+				return fmt.Errorf("carry retry metadata: %w", err)
 			}
 			message = fmt.Sprintf("Job %s requeued locally; source sync + dispatch will run on next host sync", ids.FormatJobID(job.ID))
 			return nil

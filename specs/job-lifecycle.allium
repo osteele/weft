@@ -2602,6 +2602,16 @@ rule UserRequeuesJob {
         -- exit_code != 0 keeps the job visible as 'failed' in listings and
         -- the autopilot never re-places it.
         --
+        -- Jobs with a submit-time source pin are pinned again from the current
+        -- working tree before the fresh queued attempt is created. Command,
+        -- directory, and input edits supplied with `weft edit --retry`
+        -- participate in that closure. Retaining the previous attempt's
+        -- immutable closure would make an explicit repair retry execute
+        -- known-stale bytes. Legacy unpinned jobs retain their dispatch-time
+        -- source-sync behavior. Implementation: cmd/restart.go
+        -- refreshPinnedRetrySource; cmd/queue.go supplies the requested edit
+        -- values before requeue.
+        --
         -- Retry resolves the fresh attempt target in this order:
         -- explicit retry command target, stored jobs.placement_host,
         -- current inventory-host target, current live rental-instance
@@ -2745,6 +2755,7 @@ rule AutoRequeueOnInfraFailure {
 rule RetryReplaysSubmissionIntent {
     when: UserRequeue(job) or UserRetryUnplaced(job)
     requires: job.has_script_pep723_block
+
 
     -- On retry, resource fields (gpu, gpu_class, gpu_mem, provider-specific
     -- placement overrides such as runpod_cloud_type) are recomputed by

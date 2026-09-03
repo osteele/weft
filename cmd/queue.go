@@ -1081,7 +1081,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
+	if effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft && !statusChanged {
 		// Allow display-only edits on running/starting jobs: tags that do not
 		// affect placement (e.g. 'processed') and the description/message.
 		nonDisplayFieldChanged := cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
@@ -1105,10 +1105,39 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	// Handle status change first (requeue), since other field updates require job to be queued
 	var wasRequeued bool
 	var oldStatus string
+	previousInputs := append([]string(nil), job.Inputs...)
 	if statusChanged && editStatus == db.StatusQueued {
 		oldStatus = job.Status
+		if cmd.Flags().Changed("directory") {
+			job.WorkingDir = editDirectory
+		}
+		if cmd.Flags().Changed("command") {
+			job.Command = editCommand
+		}
+		retryInputs := previousInputs
+		if inputsChanged {
+			retryInputs = nil
+			if !editClearInputs {
+				retryInputs = editInputs
+			}
+		}
+		job.Inputs = retryInputs
 		if err := ops.RefreshProjectDerivedMetadata(database, job); err != nil {
 			return err
+		}
+		// Explicit --input edits retain their existing replacement semantics;
+		// otherwise use the current project/script-derived inputs.
+		if inputsChanged {
+			job.Inputs = retryInputs
+		}
+		sourceRefreshed, err := refreshPinnedRetrySource(job, job.WorkingDir, job.Inputs, job.Command)
+		if err != nil {
+			return err
+		}
+		if sourceRefreshed {
+			if err := db.SetJobMetadata(database, jobID, job.Metadata); err != nil {
+				return fmt.Errorf("store refreshed source closure: %w", err)
+			}
 		}
 		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
@@ -1360,7 +1389,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	previousInputs := append([]string(nil), job.Inputs...)
 	newInputs := job.Inputs
 	if inputsChanged {
 		if !editClearInputs {
@@ -1468,9 +1496,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if meta.Dependencies != nil && len(meta.Dependencies.CloudAfter) == 0 && len(meta.Dependencies.CloudNeeds) == 0 {
 			meta.Dependencies = nil
 		}
-		if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil {
-			meta = nil
-		}
+		meta = persistentOrNonEmptyJobMetadata(meta)
 		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
 			return fmt.Errorf("update cloud dependency metadata: %w", err)
 		}
