@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
 )
 
@@ -27,9 +28,9 @@ const torchPreflightPythonCode = `import sys; print('` + torchPreflightPythonSta
 
 const torchPreflightCommand = `python -c "` + torchPreflightPythonCode + `"`
 
-// torchPreflightTimeout caps the preflight at a short wall-clock budget.
-// The check itself takes ~1-3s on a healthy host; we allow 30s so cold
-// venv interpreter starts don't false-positive as failures.
+// torchPreflightTimeout bounds checks whose runtime environment is already
+// prepared. Creating a PEP 723 script environment uses the setup budget
+// instead; dependency installation is setup work, not probe latency.
 const torchPreflightTimeout = 30 * time.Second
 
 // TorchPreflightFailureStage identifies the furthest runner-owned boundary
@@ -67,10 +68,7 @@ func preflightEnv(envVars []string) []string {
 // either `python` or `python3` because several cloud base images ship only
 // the latter.
 func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []string, paths JobPaths, setupTimeout time.Duration) (ExitInfo, TorchPreflightFailureStage, error) {
-	deadline := torchPreflightTimeout
-	if setupTimeout > 0 && setupTimeout < deadline {
-		deadline = setupTimeout
-	}
+	deadline := torchPreflightDeadline(workingDir, jobCommand, setupTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
@@ -106,6 +104,19 @@ func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []str
 	}
 	stage := torchPreflightFailureStage(output.String())
 	return ei, stage, fmt.Errorf("torch preflight failed during %s stage (exit %d): %w", stage, ei.ExitCode, runErr)
+}
+
+func torchPreflightDeadline(workingDir, jobCommand string, setupTimeout time.Duration) time.Duration {
+	if len(torchPreflightScriptDeps(workingDir, jobCommand)) > 0 {
+		if setupTimeout > 0 {
+			return setupTimeout
+		}
+		return inventory.DefaultSetupTimeout
+	}
+	if setupTimeout > 0 && setupTimeout < torchPreflightTimeout {
+		return setupTimeout
+	}
+	return torchPreflightTimeout
 }
 
 func torchPreflightFailureStage(output string) TorchPreflightFailureStage {

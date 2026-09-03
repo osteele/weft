@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 )
 
 // TestPreflightEnv_InheritsHomeFromOsEnviron is a regression test for the
@@ -131,6 +132,32 @@ func TestRunTorchPreflightTimeoutFailsClosedAtObservedStage(t *testing.T) {
 	}
 	if strings.Contains(logText, "continuing") {
 		t.Fatalf("log = %q, timeout must fail closed", logText)
+	}
+}
+
+func TestTorchPreflightDeadlineUsesSetupBudgetForScriptEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "train.py"), `# /// script
+# dependencies = ["torch>=2.2,<2.7", "transformers>=4.44"]
+# ///
+import torch
+`)
+
+	if got := torchPreflightDeadline(dir, "uv run train.py", time.Hour); got != time.Hour {
+		t.Fatalf("torchPreflightDeadline() = %s, want setup budget %s", got, time.Hour)
+	}
+	if got := torchPreflightDeadline(dir, "uv run train.py", 0); got != inventory.DefaultSetupTimeout {
+		t.Fatalf("torchPreflightDeadline() = %s, want default setup budget %s", got, inventory.DefaultSetupTimeout)
+	}
+}
+
+func TestTorchPreflightDeadlineCapsPreparedEnvironmentProbe(t *testing.T) {
+	dir := t.TempDir()
+	if got := torchPreflightDeadline(dir, "python train.py", time.Hour); got != torchPreflightTimeout {
+		t.Fatalf("torchPreflightDeadline() = %s, want probe budget %s", got, torchPreflightTimeout)
+	}
+	if got := torchPreflightDeadline(dir, "python train.py", 2*time.Second); got != 2*time.Second {
+		t.Fatalf("torchPreflightDeadline() = %s, want tighter setup budget %s", got, 2*time.Second)
 	}
 }
 

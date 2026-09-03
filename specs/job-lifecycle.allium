@@ -858,6 +858,10 @@ rule DirectPEP723ScriptOwnsSetupEnvironment {
         -- declaring torch is probed in its own environment; one declaring
         -- none is not probed at all, because there is nothing to probe until
         -- uv builds that environment at run time.
+        -- Materializing a PEP 723 dependency environment is setup work and
+        -- uses the job's setup timeout. The short torch-probe timeout applies
+        -- only once the environment is already prepared; it must not reject a
+        -- cold but valid script while uv downloads its declared dependencies.
         -- Implementation: internal/runner/torch_preflight.go
         -- shouldRunTorchPreflight.
 }
