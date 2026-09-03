@@ -58,8 +58,8 @@ func preflightEnv(envVars []string) []string {
 // runTorchPreflight runs a small Python snippet that imports torch and
 // initializes CUDA. On failure, the command's stderr is appended to the
 // job log and captured alongside runner-owned stage markers. Returns an empty
-// stage on success and the furthest reached stage on failure. A timeout remains
-// advisory and returns no error.
+// stage on success and the furthest reached stage on failure, including
+// timeout. Timeouts fail closed because continuing would bypass the CUDA gate.
 //
 // The preflight uses `uv run --no-sync` when uv.lock is present so the
 // project's resolved torch is exercised (not whatever happens to be on
@@ -95,11 +95,10 @@ func runTorchPreflight(jobID int64, workingDir, jobCommand string, envVars []str
 		return ExitInfo{}, "", nil
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		// A timed-out preflight is suspicious but not by itself proof of
-		// driver mismatch — treat it as advisory and let the user command
-		// run. Surface it in the log and continue.
-		appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: torch preflight timed out after %s; continuing\n", deadline)))
-		return ExitInfo{}, "", nil
+		stage := torchPreflightFailureStage(output.String())
+		ei := ExitInfo{ExitCode: 124}
+		appendSetupLog(paths.Log, []byte(fmt.Sprintf("weft: torch preflight timed out during %s stage after %s\n", stage, deadline)))
+		return ei, stage, fmt.Errorf("torch preflight timed out during %s stage after %s: %w", stage, deadline, ctx.Err())
 	}
 	ei := ExtractExitInfo(runErr)
 	if ei.ExitCode == 0 {

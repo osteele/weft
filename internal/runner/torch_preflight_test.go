@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
@@ -92,6 +93,44 @@ func TestTorchPreflightFailureStage(t *testing.T) {
 				t.Fatalf("torchPreflightFailureStage(%q) = %q, want %q", tt.output, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunTorchPreflightTimeoutFailsClosedAtObservedStage(t *testing.T) {
+	dir := t.TempDir()
+	logDir := t.TempDir()
+	fakeBin := t.TempDir()
+	fakeBash := filepath.Join(fakeBin, "bash")
+	script := "#!/bin/sh\nprintf '%s\\n' '" + torchPreflightPythonStartedMarker + "' '" + torchPreflightTorchImportedMarker + "'\nexec sleep 10\n"
+	if err := os.WriteFile(fakeBash, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ei, stage, err := runTorchPreflight(42, dir, "python train.py", nil, NewJobPaths(logDir, 42), 2*time.Second)
+	if err == nil {
+		t.Fatal("runTorchPreflight returned nil error after timeout")
+	}
+	if ei.ExitCode != 124 {
+		t.Fatalf("exit code = %d, want 124", ei.ExitCode)
+	}
+	logData, readErr := os.ReadFile(NewJobPaths(logDir, 42).Log)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	logText := string(logData)
+	if stage != TorchPreflightFailureCUDA {
+		t.Fatalf("stage = %q, want %q; log = %q", stage, TorchPreflightFailureCUDA, logText)
+	}
+	reason, infra := db.ClassifyInfraFailure(torchPreflightFailurePhase(stage), ei.ExitCode, logText)
+	if !infra || reason != db.FailureReasonInfraTorchPreflightFailed {
+		t.Fatalf("classification = (%q, %t), want (%q, true)", reason, infra, db.FailureReasonInfraTorchPreflightFailed)
+	}
+	if !strings.Contains(logText, "torch preflight timed out during cuda stage") {
+		t.Fatalf("log = %q, want CUDA-stage timeout", logText)
+	}
+	if strings.Contains(logText, "continuing") {
+		t.Fatalf("log = %q, timeout must fail closed", logText)
 	}
 }
 
