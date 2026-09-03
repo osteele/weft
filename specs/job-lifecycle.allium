@@ -431,6 +431,17 @@ rule ResolveJobProjectRootAtSubmission {
 	-- root. Missing paths and basename mismatches remain null.
 }
 
+rule ResolveJobSubmitterSessionAtSubmission {
+    when: SubmitJob(command, working_dir, options)
+
+    ensures:
+        HasNonEmptySubmitterSessionOption(options) implies
+            StoredSubmitterSession() = Trim(options.submitter_session)
+        not HasNonEmptySubmitterSessionOption(options) implies
+            StoredSubmitterSession() = FirstConfiguredSubmitterSessionEnvironmentValue()
+        StoredSubmitterSessionIsOpaque()
+}
+
 rule QuerySessionUnprocessedInbox {
     when: QuerySessionUnprocessedInbox(session_id, project, now)
 

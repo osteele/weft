@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/notify"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/ssh"
@@ -102,6 +104,7 @@ func Execute() error {
 	rootCmd.SilenceUsage = true
 
 	executedCmd, err := rootCmd.ExecuteC()
+	drainConfiguredLifecycleHooks(cfg)
 	if err == nil {
 		return nil
 	}
@@ -118,6 +121,30 @@ func Execute() error {
 
 	printCommandError(executedCmd, err)
 	return err
+}
+
+func drainConfiguredLifecycleHooks(cfg *config.Config) {
+	if cfg == nil || len(cfg.Events.Hooks) == 0 || os.Getenv("WEFT_EVENT_ID") != "" {
+		return
+	}
+	database, err := db.Open()
+	if err != nil {
+		slog.Warn("lifecycle hook retry drain: open database", "error", err)
+		return
+	}
+	defer database.Close()
+
+	dispatchConfiguredLifecycleHooks(database, cfg)
+}
+
+func dispatchConfiguredLifecycleHooks(database *sql.DB, cfg *config.Config) {
+	if database == nil || cfg == nil || len(cfg.Events.Hooks) == 0 {
+		return
+	}
+	// The legacy notification command remains tied to the terminal transition
+	// that invoked it. Retry drains only run structured hooks.
+	eventConfig := &config.Config{Events: cfg.Events}
+	notify.DispatchLifecycleEvents(database, eventConfig)
 }
 
 func rewriteRootArgs(args []string, cfg *config.Config) []string {

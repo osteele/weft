@@ -1,0 +1,108 @@
+-- allium: 3
+-- lifecycle-hooks.allium
+--
+-- Scope: durable delivery of Weft job-attempt lifecycle facts to configured
+-- local hooks. Review-cycle semantics remain owned by agent-review.
+
+use "./job-lifecycle.allium" as jobs
+
+enum HookDisposition { handled | ignored | retry | rejected }
+enum DeliveryState { pending | delivered | rejected }
+
+entity JobLifecycleEvent {
+    event_id: String
+    job: jobs/Job
+    event_sequence: Integer
+    attempt: jobs/JobAttempt
+    event_kind: String
+    status: String
+    occurred_at: Timestamp
+    project: String
+    project_root: String
+    submitter_session: String
+}
+
+entity LifecycleHook {
+    id: String
+    command: List<String>
+    registered_at: Timestamp
+}
+
+entity HookDelivery {
+    event: JobLifecycleEvent
+    hook: LifecycleHook
+    state: DeliveryState
+    attempts: Integer
+    next_attempt_at: Timestamp
+    lease_token: String?
+    lease_until: Timestamp?
+    disposition: HookDisposition?
+}
+
+invariant EventIdentityIsStable {
+    for event in JobLifecycleEvent:
+        event.event_id != ""
+        event.event_sequence > 0
+        event.attempt.id > 0
+        event.attempt.attempt_number > 0
+}
+
+invariant DeliveryIdentityIsPerHook {
+    for event in JobLifecycleEvent:
+        for hook in LifecycleHook:
+            count(HookDelivery where delivery.event = event and delivery.hook = hook) <= 1
+}
+
+rule RecordAttemptStatusTransition {
+    when: AttemptStatusChanges(attempt, old_status, new_status)
+    ensures:
+        LifecycleEventRecorded(
+            attempt,
+            ExpectedEventKind(new_status),
+            new_status
+        )
+        EventWasCommittedWithStatusTransition(attempt)
+}
+
+rule DeliverEventToHook {
+    when: DueDeliveryClaimed(delivery, lease_token)
+    requires: delivery.state = pending
+    ensures:
+        HookReceivesJSONOnStdin(delivery.hook, delivery.event)
+        HookAcknowledgesVersion("weft-hook-ack/v1")
+        Acknowledgement(handled) implies delivery.state = delivered
+        Acknowledgement(ignored) implies delivery.state = delivered
+        Acknowledgement(retry) implies delivery.state = pending
+        Acknowledgement(rejected) implies delivery.state = rejected
+        StaleLeaseCannotFinishDelivery(lease_token)
+}
+
+invariant HookFailureIsIsolated {
+    for delivery in HookDelivery where delivery.state = pending:
+        delivery does not change delivery.event.job.status
+        delivery does not change OtherHookDeliveries(delivery)
+}
+
+invariant DeliveryIsAtLeastOnce {
+    for delivery in HookDelivery where delivery.state = pending:
+        DeliveryRetainedDurablyUntilFinalAcknowledgement(delivery)
+        DeliveryMayBeInvokedMoreThanOnce(delivery)
+}
+
+rule RetryDueDeliveries {
+    when: WeftDaemonReconciliationPass() or WeftCLICommandCompletes()
+    ensures:
+        EveryDuePendingStructuredHookDeliveryIsEligibleForClaim()
+        LegacyNotificationDeliveryIsNotDrainedOutsideItsTerminalTransition()
+}
+
+rule LegacyNotificationCompatibility {
+    when: LegacyNotificationHookReceives(event)
+    ensures:
+        event.event_kind = "job.terminal"
+        event.attempt = event.job.latest_attempt
+        event.submitter_session.starts_with("agent-review-daemon/") implies
+            Acknowledgement(ignored)
+        not event.submitter_session.starts_with("agent-review-daemon/") implies
+            LegacyNotificationEnvironmentIsPreserved(event)
+}

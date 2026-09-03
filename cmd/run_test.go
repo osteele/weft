@@ -1069,6 +1069,7 @@ func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	runDir = dir
 	runDescription = "draft without host"
 	runGPU = "a100>=80GB"
+	runSubmitterSessionOverride = "agent-review-daemon/v1/draft-42"
 
 	cmd := newRunTestCommand()
 	var out bytes.Buffer
@@ -1100,6 +1101,13 @@ func TestRunDraftWithoutHostRecordsDraft(t *testing.T) {
 	}
 	if job.Project != filepath.Base(dir) {
 		t.Fatalf("project = %q, want %q", job.Project, filepath.Base(dir))
+	}
+	session, err := db.JobSubmitterSession(readDB, job.ID)
+	if err != nil {
+		t.Fatalf("job submitter session: %v", err)
+	}
+	if session != runSubmitterSessionOverride {
+		t.Fatalf("submitter session = %q, want %q", session, runSubmitterSessionOverride)
 	}
 	if job.GPUClass != "a100" {
 		t.Fatalf("gpu_class = %q, want a100", job.GPUClass)
@@ -1424,6 +1432,7 @@ func resetRunGlobals(t *testing.T) {
 	runDir = ""
 	runDescription = ""
 	runProject = ""
+	runSubmitterSessionOverride = ""
 	runDraft = false
 	runFollow = false
 	runWait = false

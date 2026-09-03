@@ -304,6 +304,22 @@ table job_attempts
   unique-index (job_id,attempt_number) origin=u partial=0
   check ( cloud_outcome IS NULL OR cloud_outcome IN ('completed','failed','canceled','orphaned','superseded','preempted') )
   check (status IN ('starting', 'running', 'completed', 'dead', 'queued', 'failed', 'killed', 'canceled', 'paused', 'draft', 'pending_placement'))
+table job_lifecycle_events
+  col 0 event_id TEXT notnull=0 default=<none> pk=1
+  col 1 job_id INTEGER notnull=1 default=<none> pk=0
+  col 2 event_sequence INTEGER notnull=1 default=<none> pk=0
+  col 3 attempt_id INTEGER notnull=1 default=<none> pk=0
+  col 4 attempt_number INTEGER notnull=1 default=<none> pk=0
+  col 5 event_kind TEXT notnull=1 default=<none> pk=0
+  col 6 status TEXT notnull=1 default=<none> pk=0
+  col 7 occurred_at INTEGER notnull=1 default=<none> pk=0
+  col 8 project TEXT notnull=1 default=<none> pk=0
+  col 9 project_root TEXT notnull=1 default=<none> pk=0
+  col 10 submitter_session TEXT notnull=1 default=<none> pk=0
+  fk job_id -> jobs(id) on_update=NO ACTION on_delete=CASCADE
+  unique-index (event_id) origin=pk partial=0
+  unique-index (job_id,attempt_id,event_kind,status) origin=c partial=1
+  unique-index (job_id,event_sequence) origin=c partial=0
 table job_open_attempts
   col 0 job_id INTEGER notnull=1 default=<none> pk=0
   col 1 attempt_id INTEGER notnull=1 default=<none> pk=1
@@ -575,6 +591,25 @@ table lifecycle_events
   col 10 attempt_number INTEGER notnull=0 default=<none> pk=0
   col 11 max_attempts INTEGER notnull=0 default=<none> pk=0
   col 12 disk_gb INTEGER notnull=0 default=<none> pk=0
+table lifecycle_hook_deliveries
+  col 0 event_id TEXT notnull=1 default=<none> pk=1
+  col 1 hook_id TEXT notnull=1 default=<none> pk=2
+  col 2 state TEXT notnull=1 default='pending' pk=0
+  col 3 disposition TEXT notnull=0 default=<none> pk=0
+  col 4 attempts INTEGER notnull=1 default=0 pk=0
+  col 5 next_attempt_at INTEGER notnull=1 default=0 pk=0
+  col 6 lease_token TEXT notnull=0 default=<none> pk=0
+  col 7 lease_until INTEGER notnull=0 default=<none> pk=0
+  col 8 last_error TEXT notnull=0 default=<none> pk=0
+  col 9 delivered_at INTEGER notnull=0 default=<none> pk=0
+  col 10 updated_at INTEGER notnull=1 default=<none> pk=0
+  fk event_id -> job_lifecycle_events(event_id) on_update=NO ACTION on_delete=CASCADE
+  unique-index (event_id,hook_id) origin=pk partial=0
+  check (state IN ('pending', 'delivered', 'rejected'))
+table lifecycle_hook_registrations
+  col 0 hook_id TEXT notnull=0 default=<none> pk=1
+  col 1 registered_at INTEGER notnull=1 default=<none> pk=0
+  unique-index (hook_id) origin=pk partial=0
 table llm_calls
   col 0 id INTEGER notnull=0 default=<none> pk=1
   col 1 ts_unix INTEGER notnull=1 default=<none> pk=0
@@ -773,6 +808,10 @@ trigger job_attempts_clear_satisfied_pending_on_running_insert
   sql CREATE TRIGGER job_attempts_clear_satisfied_pending_on_running_insert AFTER INSERT ON job_attempts WHEN NEW.status = 'running' AND NEW.pending_status IN ('queued','pending_placement','running','starting') BEGIN UPDATE job_attempts SET pending_status = NULL, pending_at = NULL WHERE id = NEW.id; END
 trigger job_attempts_clear_satisfied_pending_on_running_update
   sql CREATE TRIGGER job_attempts_clear_satisfied_pending_on_running_update AFTER UPDATE OF status ON job_attempts WHEN NEW.status = 'running' AND OLD.status != NEW.status AND NEW.pending_status IN ('queued','pending_placement','running','starting') BEGIN UPDATE job_attempts SET pending_status = NULL, pending_at = NULL WHERE id = NEW.id; END
+trigger job_attempts_lifecycle_status_insert
+  sql CREATE TRIGGER job_attempts_lifecycle_status_insert AFTER INSERT ON job_attempts FOR EACH ROW BEGIN INSERT INTO job_lifecycle_events ( event_id, job_id, event_sequence, attempt_id, attempt_number, event_kind, status, occurred_at, project, project_root, submitter_session ) SELECT lower(hex(randomblob(16))), NEW.job_id, (SELECT COALESCE(MAX(event_sequence), 0) + 1 FROM job_lifecycle_events WHERE job_id = NEW.job_id), NEW.id, NEW.attempt_number, CASE WHEN NEW.status IN ('completed', 'failed', 'dead', 'killed', 'canceled', 'skipped') THEN 'job.terminal' ELSE 'job.status_changed' END, CASE WHEN NEW.status = 'completed' AND NEW.exit_code IS NOT NULL AND NEW.exit_code != 0 THEN 'failed' ELSE NEW.status END, COALESCE(NEW.end_time, unixepoch()), COALESCE(j.project, ''), COALESCE(j.project_root, ''), COALESCE(j.submitter_session, '') FROM jobs AS j WHERE j.id = NEW.job_id; END
+trigger job_attempts_lifecycle_status_update
+  sql CREATE TRIGGER job_attempts_lifecycle_status_update AFTER UPDATE OF status ON job_attempts FOR EACH ROW WHEN NEW.status != OLD.status BEGIN INSERT INTO job_lifecycle_events ( event_id, job_id, event_sequence, attempt_id, attempt_number, event_kind, status, occurred_at, project, project_root, submitter_session ) SELECT lower(hex(randomblob(16))), NEW.job_id, (SELECT COALESCE(MAX(event_sequence), 0) + 1 FROM job_lifecycle_events WHERE job_id = NEW.job_id), NEW.id, NEW.attempt_number, CASE WHEN NEW.status IN ('completed', 'failed', 'dead', 'killed', 'canceled', 'skipped') THEN 'job.terminal' ELSE 'job.status_changed' END, -- Mirror job_status view normalization: completed + nonzero -- exit is the failed terminal status everywhere downstream. CASE WHEN NEW.status = 'completed' AND NEW.exit_code IS NOT NULL AND NEW.exit_code != 0 THEN 'failed' ELSE NEW.status END, COALESCE(NEW.end_time, unixepoch()), COALESCE(j.project, ''), COALESCE(j.project_root, ''), COALESCE(j.submitter_session, '') FROM jobs AS j WHERE j.id = NEW.job_id; END
 trigger job_attempts_open_state_close_or_move
   sql CREATE TRIGGER job_attempts_open_state_close_or_move AFTER UPDATE OF job_id, end_time ON job_attempts FOR EACH ROW WHEN OLD.end_time IS NULL AND (NEW.end_time IS NOT NULL OR NEW.job_id != OLD.job_id) BEGIN DELETE FROM job_open_attempts WHERE attempt_id = OLD.id; END
 trigger job_attempts_open_state_delete

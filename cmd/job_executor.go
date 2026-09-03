@@ -100,6 +100,7 @@ type queueJobOptions struct {
 	Command          string
 	Description      string
 	Project          string
+	SubmitterSession string
 	EnvVars          []string
 	Tags             []string
 	GPU              string // Explicit GPU setting (extracted from EnvVars or set directly)
@@ -205,6 +206,13 @@ func submitterSession() string {
 	return cfg.SubmitterSession()
 }
 
+func effectiveSubmitterSession(explicit string) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	return submitterSession()
+}
+
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	gpu := opts.GPU
 	if gpu == "" {
@@ -301,7 +309,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Disk:             opts.Disk,
 		CLIOverrides:     cliOverrides,
 		MaxComputeCap:    opts.MaxComputeCap,
-		SubmitterSession: submitterSession(),
+		SubmitterSession: effectiveSubmitterSession(opts.SubmitterSession),
 	}
 
 	jobID, err := ops.RecordQueuedJob(database, params)

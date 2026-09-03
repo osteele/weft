@@ -2396,7 +2396,20 @@ func RecordQueuedWithGPUAndIDTx(tx *sql.Tx, id int64, host, workingDir, command,
 	return err
 }
 
+// SubmissionIdentity carries the routing metadata lifecycle events snapshot
+// from the jobs row. It must be present in the initial INSERT, because the
+// attempt row is created immediately afterwards and its lifecycle trigger
+// reads these columns: a later UPDATE would leave the queued event empty.
+type SubmissionIdentity struct {
+	Project          string
+	SubmitterSession string
+}
+
 func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
+	return recordQueuedWithIdentity(db, id, host, workingDir, command, description, gpu, explicitID, SubmissionIdentity{})
+}
+
+func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, description, gpu string, explicitID bool, ident SubmissionIdentity) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
@@ -2413,18 +2426,31 @@ func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, descr
 	if host == "" {
 		requestedStatus = StatusQueued
 	}
+	var project, projectRoot, session any
+	if ident.Project != "" {
+		project = ident.Project
+		if root := workdir.VerifiedProjectRoot(ident.Project, workingDir); root != "" {
+			projectRoot = root
+		}
+	}
+	if strings.TrimSpace(ident.SubmitterSession) != "" {
+		session = strings.TrimSpace(ident.SubmitterSession)
+	}
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			 	working_dir = excluded.working_dir,
 			 	command = excluded.command,
 			 	description = excluded.description,
 			 	gpu = excluded.gpu,
 			 	placement_host = excluded.placement_host,
-			 	requested_status = excluded.requested_status`,
-			id, workingDir, command, description, now, gpu, host, requestedStatus,
+			 	requested_status = excluded.requested_status,
+			 	project = COALESCE(excluded.project, jobs.project),
+			 	project_root = COALESCE(excluded.project_root, jobs.project_root),
+			 	submitter_session = COALESCE(excluded.submitter_session, jobs.submitter_session)`,
+			id, workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
 		)
 		if err != nil {
 			return 0, err
@@ -2438,9 +2464,9 @@ func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, descr
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		workingDir, command, description, now, gpu, host, requestedStatus,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
 	)
 	if err != nil {
 		return 0, err
@@ -2458,6 +2484,19 @@ func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, descr
 	return jobID, nil
 }
 
+// RecordQueuedWithIdentityTx records a queued job inside tx, persisting the
+// submission identity in the same INSERT the lifecycle trigger snapshots.
+func RecordQueuedWithIdentityTx(tx *sql.Tx, host, workingDir, command, description, gpu string, ident SubmissionIdentity) (int64, error) {
+	return recordQueuedWithIdentity(tx, 0, host, workingDir, command, description, gpu, false, ident)
+}
+
+// RecordQueuedWithIdentityAndIDTx is the explicit-ID form of
+// RecordQueuedWithIdentityTx.
+func RecordQueuedWithIdentityAndIDTx(tx *sql.Tx, id int64, host, workingDir, command, description, gpu string, ident SubmissionIdentity) error {
+	_, err := recordQueuedWithIdentity(tx, id, host, workingDir, command, description, gpu, true, ident)
+	return err
+}
+
 // RecordDraftJobWithGPU records a job that should remain in draft locally.
 func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, gpu string) (int64, error) {
 	return RecordDraftJob(db, host, workingDir, command, description, gpu, "")
@@ -2473,7 +2512,17 @@ func RecordDraftJobWithGPUTx(tx *sql.Tx, host, workingDir, command, description,
 	return recordDraftJob(tx, host, workingDir, command, description, gpu, "")
 }
 
+// RecordDraftJobWithIdentityTx records a draft job inside tx with its
+// submission identity persisted in the initial INSERT.
+func RecordDraftJobWithIdentityTx(tx *sql.Tx, host, workingDir, command, description, gpu string, ident SubmissionIdentity) (int64, error) {
+	return recordDraftJobWithIdentity(tx, host, workingDir, command, description, gpu, "", ident)
+}
+
 func recordDraftJob(db dbExecer, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
+	return recordDraftJobWithIdentity(db, host, workingDir, command, description, gpu, depSpec, SubmissionIdentity{})
+}
+
+func recordDraftJobWithIdentity(db dbExecer, host, workingDir, command, description, gpu, depSpec string, ident SubmissionIdentity) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
@@ -2483,10 +2532,20 @@ func recordDraftJob(db dbExecer, host, workingDir, command, description, gpu, de
 		return 0, err
 	}
 	createdAt := time.Now().Unix()
+	var project, projectRoot, session any
+	if ident.Project != "" {
+		project = ident.Project
+		if root := workdir.VerifiedProjectRoot(ident.Project, workingDir); root != "" {
+			projectRoot = root
+		}
+	}
+	if strings.TrimSpace(ident.SubmitterSession) != "" {
+		session = strings.TrimSpace(ident.SubmitterSession)
+	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, dep_spec, placement_host)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		workingDir, command, description, createdAt, gpu, depSpec, host,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, dep_spec, placement_host, project, project_root, submitter_session)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, createdAt, gpu, depSpec, host, project, projectRoot, session,
 	)
 	if err != nil {
 		return 0, err

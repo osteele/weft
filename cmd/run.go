@@ -99,60 +99,61 @@ Examples:
 }
 
 var (
-	runHost            string
-	runDir             string
-	runDescription     string
-	runProject         string
-	runDraft           bool
-	runFollow          bool
-	runWait            bool
-	runNoWait          bool // explicit no-op flag for tooling compatibility
-	runKillJobID       int64
-	runKillJobIDRaw    string
-	runFrom            int64
-	runFromRaw         string
-	runEnvVars         []string
-	runTags            []string
-	runAfter           int64
-	runAfterRaw        string
-	runAfterAny        int64
-	runAfterAnyRaw     string
-	runGPU             string
-	runAffinity        []string
-	runGPUCount        int
-	runGPUMem          int
-	runGPUMemStrict    bool
-	runInterconnect    string
-	runCPUCores        int
-	runCPUMem          int
-	runCPUMemStrict    bool
-	runDiskGB          int
-	runDiskMaxGB       int
-	runRuntimeDiskGB   int
-	runGPUClass        string
-	runCUDADriverMin   string
-	runProvider        string
-	runRunpodCloudType string
-	runMaxHourlyRate   string
-	runMaxSpend        string
-	runMaxTime         string
-	runGracePeriod     string
-	runMinSurvival     float64
-	runInputs          []string
-	runOutputs         []string
-	runProduces        []string
-	runNeeds           []string
-	runDryRun          bool
-	runNoSync          bool
-	runIfOnline        bool
-	runJSON            bool
-	runAgent           string
-	runCapabilities    []string
-	runIdempotencyKey  string
-	runHFToken         bool
-	runHFTokenFrom     string
-	runSecretVars      []string
-	runPayloads        []string
+	runHost                     string
+	runDir                      string
+	runDescription              string
+	runProject                  string
+	runDraft                    bool
+	runSubmitterSessionOverride string
+	runFollow                   bool
+	runWait                     bool
+	runNoWait                   bool // explicit no-op flag for tooling compatibility
+	runKillJobID                int64
+	runKillJobIDRaw             string
+	runFrom                     int64
+	runFromRaw                  string
+	runEnvVars                  []string
+	runTags                     []string
+	runAfter                    int64
+	runAfterRaw                 string
+	runAfterAny                 int64
+	runAfterAnyRaw              string
+	runGPU                      string
+	runAffinity                 []string
+	runGPUCount                 int
+	runGPUMem                   int
+	runGPUMemStrict             bool
+	runInterconnect             string
+	runCPUCores                 int
+	runCPUMem                   int
+	runCPUMemStrict             bool
+	runDiskGB                   int
+	runDiskMaxGB                int
+	runRuntimeDiskGB            int
+	runGPUClass                 string
+	runCUDADriverMin            string
+	runProvider                 string
+	runRunpodCloudType          string
+	runMaxHourlyRate            string
+	runMaxSpend                 string
+	runMaxTime                  string
+	runGracePeriod              string
+	runMinSurvival              float64
+	runInputs                   []string
+	runOutputs                  []string
+	runProduces                 []string
+	runNeeds                    []string
+	runDryRun                   bool
+	runNoSync                   bool
+	runIfOnline                 bool
+	runJSON                     bool
+	runAgent                    string
+	runCapabilities             []string
+	runIdempotencyKey           string
+	runHFToken                  bool
+	runHFTokenFrom              string
+	runSecretVars               []string
+	runPayloads                 []string
 
 	submitJobsToInstanceFunc = campaign.SubmitJobsToInstance
 )
@@ -454,6 +455,7 @@ type draftRunParams struct {
 	GPUMemGB         *int
 	GPUMemMaxGB      *int
 	MaxComputeCap    string
+	SubmitterSession string
 	CLIOverrides     *db.CLIResourceOverrides
 	Inputs           []string
 	Payloads         []db.JobPayload
@@ -491,7 +493,7 @@ func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunPara
 		Metadata:         metadata,
 		CLIOverrides:     params.CLIOverrides,
 		MaxComputeCap:    params.MaxComputeCap,
-		SubmitterSession: submitterSession(),
+		SubmitterSession: effectiveSubmitterSession(params.SubmitterSession),
 	})
 	if err != nil {
 		return fmt.Errorf("record draft job: %w", err)
@@ -529,6 +531,7 @@ func init() {
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
 	runCmd.Flags().StringVar(&runProject, "project", "", "Project name (default: repo root name for the working directory)")
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
+	runCmd.Flags().StringVar(&runSubmitterSessionOverride, "submitter-session", "", "Opaque submitter session recorded for lifecycle routing (default: detect from environment)")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
@@ -933,7 +936,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		submitToken = "external:" + runIdempotencyKey
 		submissionNonce = uuid.NewString()
 	}
-	runSubmitterSession := submitterSession()
+	runSubmitterSession := effectiveSubmitterSession(runSubmitterSessionOverride)
 	requiredCapabilities, err := normalizeRunCapabilities(runAgent, runCapabilities)
 	if err != nil {
 		return err
@@ -1771,6 +1774,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Command:          command,
 			Description:      runDescription,
 			ProjectName:      projectName,
+			SubmitterSession: runSubmitterSession,
 			EnvVars:          runEnvVars,
 			Tags:             runTags,
 			GPU:              gpu,
@@ -1879,6 +1883,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Command:          command,
 			Description:      runDescription,
 			Project:          projectName,
+			SubmitterSession: runSubmitterSession,
 			EnvVars:          runEnvVars,
 			Tags:             runTags,
 			GPU:              gpu,

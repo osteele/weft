@@ -307,6 +307,7 @@ func daemonPrePassHostTimeout() time.Duration {
 }
 
 func runDaemonPass(ctx context.Context, database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, pass int, runAutopilot bool) daemonPassResult {
+	dispatchConfiguredLifecycleHooks(database, cfg)
 	started := time.Now()
 	var (
 		result *orchestration.GroupedAutoPilotResult

@@ -121,6 +121,8 @@ type Config struct {
 
 	// Notifications configures a local command run when a job reaches a terminal status.
 	Notifications NotificationsConfig `yaml:"notifications" toml:"notifications"`
+	// Events configures durable, independently acknowledged lifecycle hooks.
+	Events EventsConfig `yaml:"events" toml:"events"`
 
 	// Telemetry controls durable scheduling-analysis logs.
 	Telemetry TelemetryConfig `yaml:"telemetry" toml:"telemetry"`
@@ -256,6 +258,19 @@ var defaultSubmitterSessionEnvVars = []string{"CLAUDE_CODE_SESSION_ID", "CODEX_T
 // Bool returns a pointer to v for tri-state config fields.
 func Bool(v bool) *bool {
 	return &v
+}
+
+// EventsConfig configures durable lifecycle-event delivery.
+type EventsConfig struct {
+	Hooks []EventHookConfig `yaml:"hooks" toml:"hooks"`
+}
+
+// EventHookConfig is one argv-executed lifecycle-event consumer. ID is the
+// durable delivery identity; changing a command without changing its ID resumes
+// that hook's existing pending deliveries.
+type EventHookConfig struct {
+	ID      string   `yaml:"id" toml:"id"`
+	Command []string `yaml:"command" toml:"command"`
 }
 
 // NotificationsConfig configures local job-completion notifications.

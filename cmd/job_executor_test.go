@@ -37,6 +37,28 @@ func TestQueueJob_PersistsGPUMemMaxGB(t *testing.T) {
 	}
 }
 
+func TestQueueJobExplicitSubmitterSessionOverridesEnvironment(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "interactive-session")
+	database := db.SetupTestDB(t)
+
+	result, err := queueJob(database, queueJobOptions{
+		Host:             "test-host",
+		WorkingDir:       "/tmp/project",
+		Command:          "true",
+		SubmitterSession: " agent-review-daemon/v1/assignment-42 ",
+	})
+	if err != nil {
+		t.Fatalf("queueJob failed: %v", err)
+	}
+	session, err := db.JobSubmitterSession(database, result.JobID)
+	if err != nil {
+		t.Fatalf("JobSubmitterSession failed: %v", err)
+	}
+	if session != "agent-review-daemon/v1/assignment-42" {
+		t.Fatalf("submitter session = %q", session)
+	}
+}
+
 func TestQueueJobPEP723HostAxisReachesPinnedHostGate(t *testing.T) {
 	inventory.UseTestHosts(t)
 	database := db.SetupTestDB(t)

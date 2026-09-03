@@ -149,6 +149,33 @@ func TestRunDaemonPassReusesReconciler(t *testing.T) {
 	}
 }
 
+func TestRunDaemonPassRetriesLifecycleHooks(t *testing.T) {
+	database := setupDaemonTestDB(t)
+	now := time.Now()
+	if _, err := db.ClaimLifecycleHookDeliveries(database, "daemon-test", 0, 0, now, time.Minute, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.RecordQueued(database, "test-host", t.TempDir(), "true", "daemon event"); err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir() + "/handled"
+	cfg := &config.Config{Events: config.EventsConfig{Hooks: []config.EventHookConfig{{
+		ID:      "daemon-test",
+		Command: []string{"sh", "-c", `cat >/dev/null; : > "$1"; printf '%s\n' '{"schema_version":"weft-hook-ack/v1","disposition":"handled"}'`, "hook", out},
+	}}}}
+
+	oldSyncAll := daemonSyncAll
+	t.Cleanup(func() { daemonSyncAll = oldSyncAll })
+	daemonSyncAll = func(_ *sql.DB, _ *config.Config, _ syncorch.SyncOptions) syncorch.SyncResult {
+		return syncorch.SyncResult{AllCompleted: true}
+	}
+
+	runDaemonPass(context.Background(), database, cfg, campaign.NewReconciler(), 1, false)
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("daemon pass did not retry hook delivery: %v", err)
+	}
+}
+
 func TestReleaseDaemonAutopilotClaimClearsStoppedDaemonPID(t *testing.T) {
 	database := setupDaemonTestDB(t)
 	const daemonPID = 4242

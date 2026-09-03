@@ -42,9 +42,42 @@ working instead of blocking on `status --wait`.
 See [Claude Code Channels](claude-code-channels.md) for installation and the
 event payload shape.
 
-## Job-Completion Notifications
+## Job Lifecycle Hooks
 
-The `[notifications] command` in `config.toml` runs once per job reaching a
+Use repeated `[[events.hooks]]` entries for durable machine-to-machine event
+delivery. Each hook has a stable ID and an argument-vector command:
+
+```toml
+[[events.hooks]]
+id = "review-ingest"
+command = ["agent-review", "daemon", "hook"]
+```
+
+Weft writes one `weft-job-event/v1` JSON object to the command's standard input.
+The object contains a stable `event_id`, the public `job_id`, a per-job
+`event_sequence`, attempt ID and number, event kind and status, occurrence time,
+project name and root, and the opaque submitter session. Commands run directly;
+Weft does not pass the argument vector through a shell.
+
+The hook returns one `weft-hook-ack/v1` JSON object on standard output. Its
+`disposition` is one of:
+
+- `handled`: processing completed.
+- `ignored`: the event is intentionally outside this hook's scope.
+- `retry`: processing should be attempted again, optionally after
+  `retry_after_seconds`.
+- `rejected`: the event is permanently invalid for this hook.
+
+Delivery is tracked independently for each `(event_id, hook ID)`. A hook failure
+does not block another hook or change job state. Pending delivery is durable and
+at least once: a crashed or retrying hook can receive the same `event_id` again,
+so consumers must commit idempotently before returning `handled`.
+The resident Weft daemon retries due deliveries on each reconciliation pass;
+ordinary CLI invocations also drain due structured-hook deliveries.
+
+### Legacy Job-Completion Command
+
+The `[notifications] command` compatibility hook runs once per job reaching a
 terminal status, with job context in environment variables: `WEFT_JOB_ID`,
 `WEFT_JOB_STATUS`, `WEFT_JOB_EXIT_CODE`, `WEFT_JOB_DIR`,
 `WEFT_JOB_DESCRIPTION`, `WEFT_JOB_HOST`, `WEFT_JOB_SUMMARY`, and
@@ -67,6 +100,11 @@ plain shell, or one recorded by a process that is not the submitter. Treat
 empty as "no addressee" and fall back to whatever unaddressed delivery you
 would otherwise have done, rather than dropping the notification; the session
 that submitted a long job may well have exited before it finished.
+
+Submitter sessions beginning with `agent-review-daemon/` are reserved for
+review-worker jobs. Weft records their lifecycle events for structured hooks
+but skips the legacy notification command, preventing worker completion from
+being mistaken for a user job notification.
 
 With [agent-mail](https://github.com/osteele/agent-mail), which broadcasts on
 an empty or unresolvable `--session`:

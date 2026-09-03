@@ -91,6 +91,10 @@ Use `start <job-id>` to start a queued job immediately.
 - `-i, --immediate`: Start job immediately instead of queuing
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
+- `--submitter-session ID`: Record an opaque routing identity instead of
+  detecting one from the configured submitter-session environment variables.
+  Integration processes use this to distinguish their child jobs from jobs
+  submitted by the interactive session they inherited.
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `--tag TAG`: Tag to attach to the job (can be repeated). Most tags are user-defined; reserved scheduler tags such as `rental`, `inventory`, `benchmark-isolation`, `exclusive`, `interruptible`, and `cpu-intensive` are described in the [Placement guide](../guides/placement.md#reserved-tags).
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)

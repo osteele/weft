@@ -393,25 +393,30 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 		}
 	}
 
-	// Record job with queued status
+	// Record job with queued status. Project, project_root, and
+	// submitter_session go into the initial INSERT: the attempt created
+	// immediately afterwards fires a lifecycle trigger that snapshots those
+	// columns, so writing them later in this transaction would leave the
+	// queued event with empty routing metadata.
+	ident := db.SubmissionIdentity{Project: project, SubmitterSession: params.SubmitterSession}
 	var jobID int64
 	if draft {
 		if explicitID {
 			return 0, fmt.Errorf("record draft job with explicit ID is not supported")
 		}
 		var err error
-		jobID, err = db.RecordDraftJobWithGPUTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
+		jobID, err = db.RecordDraftJobWithIdentityTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu, ident)
 		if err != nil {
 			return 0, fmt.Errorf("record draft job: %w", err)
 		}
 	} else if explicitID {
 		jobID = explicitJobID
-		if err := db.RecordQueuedWithGPUAndIDTx(tx, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu); err != nil {
+		if err := db.RecordQueuedWithIdentityAndIDTx(tx, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu, ident); err != nil {
 			return 0, fmt.Errorf("record job: %w", err)
 		}
 	} else {
 		var err error
-		jobID, err = db.RecordQueuedWithGPUTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
+		jobID, err = db.RecordQueuedWithIdentityTx(tx, params.Host, params.WorkingDir, params.Command, params.Description, gpu, ident)
 		if err != nil {
 			return 0, fmt.Errorf("record job: %w", err)
 		}
@@ -426,11 +431,6 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	}
 	if err := db.SetJobDepSpec(tx, jobID, params.DepSpec); err != nil {
 		return 0, fmt.Errorf("record dependencies: %w", err)
-	}
-	if project != "" {
-		if err := db.SetJobProject(tx, jobID, project); err != nil {
-			return 0, fmt.Errorf("record project: %w", err)
-		}
 	}
 	if params.CPUAllotment != nil {
 		if err := db.SetJobCPUAllotment(tx, jobID, params.CPUAllotment); err != nil {
@@ -465,11 +465,6 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	if submitToken != "" {
 		if err := db.SetJobSubmitToken(tx, jobID, submitToken); err != nil {
 			return 0, fmt.Errorf("record submit token: %w", err)
-		}
-	}
-	if strings.TrimSpace(params.SubmitterSession) != "" {
-		if err := db.SetJobSubmitterSession(tx, jobID, params.SubmitterSession); err != nil {
-			return 0, fmt.Errorf("record submitter session: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {
