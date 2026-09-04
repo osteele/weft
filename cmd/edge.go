@@ -33,6 +33,7 @@ func init() {
 	edgeKeyAddCmd.Flags().String("public-key", "", "Base64 ed25519 public key (required)")
 	edgeKeyAddCmd.Flags().Float64("spend-ceiling", 0, "Spend granted to this plan, in USD")
 	edgeKeyAddCmd.Flags().String("project", "", "Project whose ownership window gates renewal")
+	edgeKeyListCmd.Flags().Bool("json", false, "Print machine-readable JSON")
 	edgeKeyRevokeCmd.Flags().Bool("compromised", false,
 		"Repudiate the key's past signatures as well as refusing new ones")
 }
@@ -558,8 +559,20 @@ var edgeKeyListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		printKeyringProblems(ring)
 		keys := ring.List()
+		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			// Machine-readable so a consumer reads the facts rather than
+			// parsing the display line, which carries the same values in a
+			// shape that is not a contract.
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(edgeKeyListJSON{
+				SchemaVersion: "weft.edge-keys/v1",
+				Keys:          keys,
+				Problems:      ring.Problems,
+			})
+		}
+		printKeyringProblems(ring)
 		if len(keys) == 0 {
 			fmt.Println("No edge keys registered.")
 			return nil
@@ -682,4 +695,16 @@ func edgeLeaseConfig(cfg *config.Config) (edge.LeaseConfig, error) {
 		return edge.LeaseConfig{}, err
 	}
 	return lease, nil
+}
+
+// edgeKeyListJSON is the machine-readable shape of `weft edge key list --json`.
+//
+// Problems is included rather than printed to stderr because a consumer
+// deciding whether to renew a lease must be able to tell "this key is absent"
+// from "this key file could not be read" — the same false-absence distinction
+// the rest of this package keeps.
+type edgeKeyListJSON struct {
+	SchemaVersion string     `json:"schema_version"`
+	Keys          []edge.Key `json:"keys"`
+	Problems      []string   `json:"problems,omitempty"`
 }

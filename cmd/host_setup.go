@@ -228,6 +228,22 @@ command -v apt-get >/dev/null 2>&1 && echo apt-get || (command -v brew >/dev/nul
 		installed = append(installed, "uv")
 	}
 
+	// The CLI, not just the agent. A host acting as an edge runs
+	// `weft edge key mint` locally, because its private key is generated where
+	// it will be used and never travels. A cross-platform host cannot be
+	// served yet; that is reported without failing the rest of setup, since
+	// every other component installed fine and the CLI is only needed for edge
+	// submission.
+	if spec := inventory.FindHost(host); spec != nil {
+		cliInstalled, err := agentdeploy.EnsureCLIOnHost(host, *spec)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "warning: weft CLI not installed on %s: %v\n", host, err)
+		case cliInstalled:
+			installed = append(installed, "weft CLI")
+		}
+	}
+
 	return installed, nil
 }
 

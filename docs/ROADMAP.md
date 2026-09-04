@@ -81,11 +81,27 @@ before it starts:
   a state snapshot reads as *status unknown* rather than as an error. A partial
   migration would present as an intermittently wedged host, not as a permission
   failure.
+- **Distinguish never-written from unreadable.** When these writes move to
+  presigned URLs, the status surface gains a new way to be absent: a URL that
+  was never minted, versus one that was minted and whose write failed, versus a
+  snapshot that exists and cannot be read. Today all three arrive as "no
+  snapshot", which the controller reads as *unknown*. The migration is the
+  moment to give them distinct states rather than reproduce the false-absence
+  shape in a new place.
 - **URL lifetime versus job duration.** A presigned URL expires; a job does not
   necessarily finish first. Result upload needs either a lifetime that bounds
   the longest job or a way to obtain a fresh URL mid-job.
 
 This earns a decision record when it is designed, not before.
+
+### Cross-platform CLI installation
+
+`weft host setup` installs the CLI to `~/.local/bin/weft` by copying the running
+binary, which is correct only when the host matches this machine's platform. A
+Linux host is refused with an explanation rather than served, so an edge on
+Linux cannot mint its own key yet. Closing this needs either cross-compilation
+of the CLI alongside the agent, or the native-on-host build path the agent
+already falls back to.
 
 ### Reconcile the two spend limits
 
