@@ -672,23 +672,21 @@ func TestRenewRefusesARevokedKey(t *testing.T) {
 // The window floor is set by clock skew, not by security: below it, ordinary
 // host drift produces spurious refusals.
 func TestLeaseWindowFloorIsEnforced(t *testing.T) {
-	if err := (LeaseConfig{Window: time.Minute, Interval: time.Second}).Validate(); err == nil {
+	if err := (LeaseConfig{Window: time.Minute}).Validate(); err == nil {
 		t.Fatal("accepted a lease window below the clock-skew floor")
-	}
-	if err := (LeaseConfig{Window: time.Hour, Interval: 2 * time.Hour}).Validate(); err == nil {
-		t.Fatal("accepted a renewal interval longer than the window, " +
-			"where one missed renewal ends the plan")
 	}
 	if err := DefaultLeaseConfig().Validate(); err != nil {
 		t.Fatalf("default lease config is invalid: %v", err)
 	}
 }
 
-// The default gives three chances to miss a renewal before authority lapses.
-func TestDefaultLeaseSurvivesMissedRenewals(t *testing.T) {
-	cfg := DefaultLeaseConfig()
-	if missed := int(cfg.Window / cfg.Interval); missed < 3 {
-		t.Errorf("default lease tolerates only %d missed renewals, want at least 3", missed)
+// The window is a crash backstop, so it must be long enough that a plan running
+// normally is not interrupted by it. Nothing renews automatically, so a window
+// shorter than a working day would lapse live plans and require manual repair.
+func TestDefaultWindowIsABackstopNotAHeartbeat(t *testing.T) {
+	if w := DefaultLeaseConfig().Window; w < 12*time.Hour {
+		t.Errorf("default window is %s; with no automatic renewal a short window "+
+			"lapses plans that are merely running long", w)
 	}
 }
 

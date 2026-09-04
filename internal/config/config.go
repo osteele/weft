@@ -456,11 +456,13 @@ type EdgeConfig struct {
 	// It is also per submission, with no running total, so it bounds what one
 	// submission may commit rather than what a plan may spend in aggregate.
 	MaxSpendUSD float64 `yaml:"max_spend_usd" toml:"max_spend_usd"`
-	// LeaseWindowHours is how long a renewal grants authority for (default 6).
+	// LeaseWindowHours is how long a plan's authority lasts before it lapses
+	// (default 24).
+	//
+	// Nothing renews automatically. The window is a backstop for a plan that
+	// never terminates explicitly; a plan that legitimately outruns it is
+	// extended by hand with `weft edge key renew`.
 	LeaseWindowHours float64 `yaml:"lease_window_hours" toml:"lease_window_hours"`
-	// LeaseRenewIntervalHours is how often the hub renews while it can see the
-	// plan running (default 1).
-	LeaseRenewIntervalHours float64 `yaml:"lease_renew_interval_hours" toml:"lease_renew_interval_hours"`
 
 	// Expectation envelopes, per job class, so the wait command can say
 	// whether an elapsed time is normal without a code change.

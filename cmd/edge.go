@@ -32,7 +32,7 @@ func init() {
 	edgeKeyAddCmd.Flags().String("host", "", "Host this key is bound to (required)")
 	edgeKeyAddCmd.Flags().String("public-key", "", "Base64 ed25519 public key (required)")
 	edgeKeyAddCmd.Flags().Float64("spend-ceiling", 0, "Spend granted to this plan, in USD")
-	edgeKeyAddCmd.Flags().String("project", "", "Project whose ownership window gates renewal")
+	edgeKeyAddCmd.Flags().String("project", "", "Project this plan belongs to (recorded as provenance; gates nothing)")
 	edgeKeyListCmd.Flags().Bool("json", false, "Print machine-readable JSON")
 	edgeKeyRevokeCmd.Flags().Bool("compromised", false,
 		"Repudiate the key's past signatures as well as refusing new ones")
@@ -63,17 +63,16 @@ func edgeRuntime(transportOverride string) (*edge.Runtime, *config.Config, error
 				"submitted work off the hub: %w", err)
 	}
 	rt, err := edge.NewRuntime(transport, edge.RuntimeConfig{
-		Role:                    cfg.Edge.Role,
-		SigningKeyPath:          edgePlanKeyPath(cfg, cfg.Edge.PlanID),
-		PlanID:                  cfg.Edge.PlanID,
-		SubmitterHost:           cfg.Edge.SubmitterHost,
-		KeyringDir:              edgeKeyringDir(cfg),
-		SeenDir:                 edgeSeenDir(cfg),
-		AllowedTargets:          cfg.Edge.AllowedTargets,
-		MaxSpendUSD:             cfg.Edge.MaxSpendUSD,
-		HubHost:                 hostname,
-		LeaseWindowHours:        cfg.Edge.LeaseWindowHours,
-		LeaseRenewIntervalHours: cfg.Edge.LeaseRenewIntervalHours,
+		Role:             cfg.Edge.Role,
+		SigningKeyPath:   edgePlanKeyPath(cfg, cfg.Edge.PlanID),
+		PlanID:           cfg.Edge.PlanID,
+		SubmitterHost:    cfg.Edge.SubmitterHost,
+		KeyringDir:       edgeKeyringDir(cfg),
+		SeenDir:          edgeSeenDir(cfg),
+		AllowedTargets:   cfg.Edge.AllowedTargets,
+		MaxSpendUSD:      cfg.Edge.MaxSpendUSD,
+		HubHost:          hostname,
+		LeaseWindowHours: cfg.Edge.LeaseWindowHours,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -174,16 +173,31 @@ var edgeDoctorCmd = &cobra.Command{
 			keys := rt.Keyring.List()
 			fmt.Printf("Keyring:   %d key(s)\n", len(keys))
 			now := time.Now()
+			lapsed, soon := 0, 0
 			for _, k := range keys {
 				fmt.Printf("           %s\n", describeKey(k, now))
+				if k.RevokedAt != nil || k.NotAfter.IsZero() {
+					continue
+				}
+				switch {
+				case now.After(k.NotAfter):
+					lapsed++
+				case k.NotAfter.Sub(now) < nearLapse:
+					soon++
+				}
+			}
+			// Nothing renews on its own, so a lapse is a state a person
+			// resolves rather than a symptom of a stopped renewer.
+			if lapsed > 0 || soon > 0 {
+				fmt.Printf("           %d lapsed, %d lapsing within %s — extend a still-running plan with `weft edge key renew <key-id>`\n",
+					lapsed, soon, nearLapse)
 			}
 			spend := fmt.Sprintf("$%.2f", rt.Policy.MaxSpendUSD)
 			if rt.Policy.MaxSpendUSD == 0 {
 				spend = "unset (no spending authorized)"
 			}
 			fmt.Printf("Policy:    targets %v, max spend %s\n", rt.Policy.AllowedTargets, spend)
-			fmt.Printf("Lease:     %s window renewed every %s (%d missed renewals tolerated)\n",
-				rt.Lease.Window, rt.Lease.Interval, int(rt.Lease.Window/rt.Lease.Interval))
+			fmt.Printf("Lease:     %s window, not renewed automatically\n", rt.Lease.Window)
 			if len(keys) == 0 {
 				fmt.Println("\nNo keys registered. Mint one on the edge and register it here:")
 				fmt.Println("  ssh agent@<edge> 'weft edge key mint --plan <plan-id>'")
@@ -244,13 +258,21 @@ var edgeDoctorCmd = &cobra.Command{
 	},
 }
 
+// nearLapse is how close to expiry a key is worth calling out. Nothing renews
+// automatically, so this is the warning a person acts on before a live plan
+// loses its authority.
+const nearLapse = 2 * time.Hour
+
 func describeKey(k edge.Key, now time.Time) string {
 	state := "active"
 	switch {
 	case k.RevokedAt != nil:
 		state = "REVOKED " + k.RevokedAt.UTC().Format(time.RFC3339)
 	case !k.NotAfter.IsZero() && now.After(k.NotAfter):
-		state = "lapsed " + k.NotAfter.UTC().Format(time.RFC3339)
+		state = "LAPSED " + k.NotAfter.UTC().Format(time.RFC3339)
+	case !k.NotAfter.IsZero() && k.NotAfter.Sub(now) < nearLapse:
+		state = fmt.Sprintf("lapses in %s (%s)",
+			k.NotAfter.Sub(now).Round(time.Minute), k.NotAfter.UTC().Format(time.RFC3339))
 	case !k.NotAfter.IsZero():
 		state = "valid until " + k.NotAfter.UTC().Format(time.RFC3339)
 	}
@@ -679,17 +701,12 @@ func printKeyringProblems(ring *edge.Keyring) {
 
 // edgeLeaseConfig builds the lease from configuration and validates it.
 //
-// One helper for every caller: add, renew, and runtime assembly previously
-// derived this separately, and only two of them validated, so a too-short
-// window produced a key that could be created but never renewed while the
-// hub's own diagnostic command refused to start.
+// One helper for every caller — add, renew, and runtime assembly — so they
+// cannot disagree about what a valid lease configuration is.
 func edgeLeaseConfig(cfg *config.Config) (edge.LeaseConfig, error) {
 	lease := edge.DefaultLeaseConfig()
 	if cfg.Edge.LeaseWindowHours > 0 {
 		lease.Window = time.Duration(cfg.Edge.LeaseWindowHours * float64(time.Hour))
-	}
-	if cfg.Edge.LeaseRenewIntervalHours > 0 {
-		lease.Interval = time.Duration(cfg.Edge.LeaseRenewIntervalHours * float64(time.Hour))
 	}
 	if err := lease.Validate(); err != nil {
 		return edge.LeaseConfig{}, err

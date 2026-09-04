@@ -40,17 +40,6 @@ never run against a bucket, because the separate inbound bucket that decision
 it — that is the first real exercise of the R2 path, and no test can substitute
 for it.
 
-### Renewal loop
-
-`Key.Project` is written and read by nothing. The protocol document marks the
-project-ownership gate as specified-not-implemented for this reason. The loop
-would renew a key's lease only while `research-site status --json` reports the
-key's project still owned by the remote host and settled, skipping while a
-handoff is in flight.
-
-Until it exists, renewal is manual via `weft edge key renew`, and a plan's
-authority lapses unless someone renews it.
-
 ## Artifact store hardening
 
 ### Remove standing write credentials from inventory hosts

@@ -38,13 +38,11 @@ type Key struct {
 	PublicKey string `json:"public_key"`
 	// PlanID names the plan execution this key was minted for.
 	PlanID string `json:"plan_id,omitempty"`
-	// Project is the project whose ownership window is intended to bound
-	// renewal, at project granularity because that is what the hub can observe.
+	// Project records which project a plan belongs to. It is provenance and
+	// gates nothing: no code branches on it, and none is intended to.
 	//
-	// No code reads this yet: renewal is manual, and the loop that would gate
-	// on project ownership is not built. It is carried so that loop has the
-	// association when it arrives, and the protocol doc marks the gate as
-	// specified-not-implemented rather than describing it as a live control.
+	// It is here so a human or a tool reading the keyring can tell which plan
+	// a key serves without consulting another system.
 	Project   string    `json:"project,omitempty"`
 	NotBefore time.Time `json:"not_before"`
 	NotAfter  time.Time `json:"not_after"`
@@ -292,27 +290,44 @@ func SaveKey(dir string, k Key) error {
 	return nil
 }
 
-// LeaseConfig governs how a plan's submission authority is renewed.
+// LeaseConfig governs how long a plan's submission authority lasts.
 //
-// The window's lower bound is set by clock skew, not by security. Verification
-// refuses a submission dated in the future and bounds staleness by TTL, so with
-// hour-scale windows a few minutes of drift between hosts is harmless, while
-// with minute-scale windows it becomes a refusal storm. Shortening the window
-// past that floor buys nothing and breaks working submissions.
+// The window is a backstop, not the primary control. Authority normally ends
+// when the plan explicitly terminates, by submitting a signed plan-ended
+// request. The window exists for the case where nothing terminates it — a
+// crashed session, an abandoned plan, a machine that went away — so that
+// authority expires by omission rather than requiring an action that may never
+// come.
+//
+// It bounds forgetting, not theft. Against someone holding a stolen key the
+// window buys nothing while the plan is live, because whatever would extend the
+// legitimate key extends the stolen one identically. What it collects is
+// authority nobody is using and nobody remembered to close.
+//
+// Nothing renews automatically. `weft edge key renew` is the manual instrument
+// for a plan that legitimately outruns one window.
 type LeaseConfig struct {
-	// Window is how long a renewal grants authority for.
+	// Window is how long a grant lasts before it lapses.
 	Window time.Duration
-	// Interval is how often the hub renews while it can see the plan running.
-	Interval time.Duration
 }
 
-// MinLeaseWindow is the clock-skew floor described on LeaseConfig.
+// MinLeaseWindow is a clock-skew floor.
+//
+// Verification refuses a submission dated in the future and bounds staleness by
+// TTL, so at hour scale a few minutes of drift between hosts is harmless while
+// at minute scale it becomes a refusal storm. The floor is unlikely to bind
+// given the default window, but the hazard it guards is real and independent of
+// how long the window is.
 const MinLeaseWindow = time.Hour
 
-// DefaultLeaseConfig is a six-hour window renewed hourly, so a plan survives
-// three consecutive missed renewals before its authority lapses.
+// DefaultLeaseConfig is a single day.
+//
+// A crash backstop does not need fine granularity: the cost of collecting
+// abandoned authority a few hours later is small, and the cost of lapsing a
+// live plan that simply ran long is an interruption someone has to notice and
+// repair by hand.
 func DefaultLeaseConfig() LeaseConfig {
-	return LeaseConfig{Window: 6 * time.Hour, Interval: time.Hour}
+	return LeaseConfig{Window: 24 * time.Hour}
 }
 
 // Validate rejects a configuration that would make renewal fragile.
@@ -322,15 +337,6 @@ func (c LeaseConfig) Validate() error {
 			"edge lease window %s is below the %s clock-skew floor; "+
 				"shorter windows cause spurious refusals from ordinary host drift",
 			c.Window, MinLeaseWindow)
-	}
-	if c.Interval <= 0 {
-		return fmt.Errorf("edge lease renewal interval must be positive, got %s", c.Interval)
-	}
-	if c.Interval >= c.Window {
-		return fmt.Errorf(
-			"edge lease renewal interval %s must be shorter than the window %s, "+
-				"or a single missed renewal ends the plan's authority",
-			c.Interval, c.Window)
 	}
 	return nil
 }
