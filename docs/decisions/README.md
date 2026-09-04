@@ -36,6 +36,9 @@ for planned work, [`docs/planning/`](../planning/).
 | [0023](0023-prepare-only-the-environment-the-command-can-import.md) | Prepare only the environment the command can import | accepted |
 | [0024](0024-keep-blocked-dependencies-unassigned-and-hold-successful-rentals.md) | Keep blocked dependencies unassigned and hold successful rentals | accepted |
 | [0025](0025-progress-parsing-never-terminates-an-instance.md) | Progress parsing never terminates an instance | accepted |
+| [0026](0026-isolate-edge-submissions-in-their-own-bucket.md) | Isolate edge submissions in their own bucket | accepted |
+| [0027](0027-a-signature-authenticates-the-writer-and-never-authorizes-the-work.md) | A signature authenticates the writer and never authorizes the work | accepted |
+| [0028](0028-autonomous-processes-use-agent-accounts-never-personal-ones.md) | Autonomous processes use agent accounts, never personal ones | accepted |
 
 ## 0018, withdrawn
 
@@ -69,6 +72,20 @@ That test sharpens the three conditions in
 durable — rather than replacing them. A decision can satisfy all three and
 still need no record, because nobody would think to reverse it; the mistake has
 to be *available*. Where the two readings differ, this one governs.
+
+## Two tiers
+
+Depth follows **reversibility**, not importance.
+
+| Shape | Tier | Where |
+| --- | --- | --- |
+| Hard to reverse, or a deliberate absence | Full record | `NNNN-slug.md` |
+| Everything else that passes the gate | One-line entry | [`log.md`](log.md) |
+
+Both tiers require naming the credible alternative that lost, and what the
+decision costs. A log entry needs no permission and can be promoted to a full
+record later, keeping its original wording; that is what lets the full-record
+bar stay high without silencing smaller decisions.
 
 ## Adding one
 

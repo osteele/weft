@@ -23,6 +23,9 @@ var UnknownTOMLKeys []string
 
 // Config holds application configuration
 type Config struct {
+	// Edge configures edge/hub submission. Absent means hub with edge
+	// submission disabled, which is the behavior of every existing install.
+	Edge EdgeConfig `yaml:"edge" toml:"edge"`
 	// DefaultCommand is the command to run when no arguments are provided
 	// Valid values: "help", "watch", "list", "tui", "web"
 	DefaultCommand string `yaml:"default_command" toml:"default_command"`
@@ -398,6 +401,97 @@ type VastaiConfig struct {
 	R2 R2Config `yaml:"r2" toml:"r2"`
 	// SyncTimeout is the timeout in seconds for R2 sync checks (default: 5)
 	SyncTimeout int `yaml:"sync_timeout" toml:"sync_timeout"`
+}
+
+// EdgeConfig configures this installation's role in edge submission.
+//
+// The zero value is a hub with edge submission disabled. An installation with
+// no [edge] section in its config therefore behaves exactly as it did before
+// this feature existed: nothing polls, nothing signs, and no new store is
+// contacted.
+type EdgeConfig struct {
+	// Role is "hub" (default) or "edge".
+	Role string `yaml:"role" toml:"role"`
+	// Inbound is the submission bucket, deliberately separate from the results
+	// bucket so that an edge's credentials grant no access to artifacts.
+	// See decision 0026.
+	Inbound R2Config `yaml:"inbound" toml:"inbound"`
+
+	// Edge-side settings.
+
+	// SigningKeyDir holds one subdirectory per plan, each with that plan's
+	// private key. It is a directory rather than a file because keys are per
+	// plan execution: a single fixed path would make the key this edge signs
+	// with independent of the plan it was minted for, and the hub derives the
+	// key id from the plan.
+	//
+	// It must be outside any synced project tree: that tree is
+	// version-controlled and travels back to the hub, so a key inside it lands
+	// in history on both machines.
+	SigningKeyDir string `yaml:"signing_key_dir" toml:"signing_key_dir"`
+	// PlanID is the plan execution this edge is currently running. It selects
+	// which key under SigningKeyDir is used.
+	PlanID string `yaml:"plan_id" toml:"plan_id"`
+	// SubmitterHost is the name this edge submits under. It must match the
+	// host bound to its key on the hub.
+	SubmitterHost string `yaml:"submitter_host" toml:"submitter_host"`
+
+	// Hub-side settings.
+
+	// KeyringDir holds one JSON file per accepted key.
+	KeyringDir string `yaml:"keyring_dir" toml:"keyring_dir"`
+	// SeenDir holds the replay seen-set.
+	SeenDir string `yaml:"seen_dir" toml:"seen_dir"`
+	// AllowedTargets are the execution targets edge work may run on. This
+	// hub's own host can never appear here.
+	AllowedTargets []string `yaml:"allowed_targets" toml:"allowed_targets"`
+	// MaxSpendUSD is the hub's half of the ceiling on a single edge
+	// submission. The effective ceiling is the lower of this and the grant on
+	// the submitting plan's key, and if either is unset the effective ceiling
+	// is zero, which authorizes nothing rather than everything.
+	//
+	// It governs ADMISSION: a submission declaring more than the effective
+	// ceiling is refused. It does not yet cap any dollar, because nothing
+	// downstream reads the resulting authorization — see docs/ROADMAP.md.
+	// It is also per submission, with no running total, so it bounds what one
+	// submission may commit rather than what a plan may spend in aggregate.
+	MaxSpendUSD float64 `yaml:"max_spend_usd" toml:"max_spend_usd"`
+	// LeaseWindowHours is how long a renewal grants authority for (default 6).
+	LeaseWindowHours float64 `yaml:"lease_window_hours" toml:"lease_window_hours"`
+	// LeaseRenewIntervalHours is how often the hub renews while it can see the
+	// plan running (default 1).
+	LeaseRenewIntervalHours float64 `yaml:"lease_renew_interval_hours" toml:"lease_renew_interval_hours"`
+
+	// Expectation envelopes, per job class, so the wait command can say
+	// whether an elapsed time is normal without a code change.
+	Expect map[string]ExpectConfig `yaml:"expect" toml:"expect"`
+}
+
+// ExpectConfig declares how long work of some class is expected to take, and
+// when an agent should stop waiting and escalate.
+//
+// The triggers are configured constants in every statistics regime, so agent
+// behavior does not depend on how much history has accumulated. Statistics
+// sharpen "is this normal"; the constants answer "when do I act".
+type ExpectConfig struct {
+	// TypicalMinutes is the declared envelope used when no samples exist.
+	TypicalMinutes float64 `yaml:"typical_minutes" toml:"typical_minutes"`
+	// EscalateAfterMinutes is the elapsed ceiling.
+	EscalateAfterMinutes float64 `yaml:"escalate_after_minutes" toml:"escalate_after_minutes"`
+	// StallAfterMinutes fires when a phase has not changed for this long,
+	// catching a wedged submission that the elapsed ceiling would not reach
+	// until much later.
+	StallAfterMinutes float64 `yaml:"stall_after_minutes" toml:"stall_after_minutes"`
+}
+
+// IsEdge reports whether this installation submits to a hub rather than
+// running one.
+func (c EdgeConfig) IsEdge() bool { return strings.EqualFold(c.Role, "edge") }
+
+// Enabled reports whether any edge behavior is configured at all. A hub with no
+// inbound bucket neither polls nor contacts a second store.
+func (c EdgeConfig) Enabled() bool {
+	return c.IsEdge() || c.Inbound.Bucket != ""
 }
 
 // R2Config holds Cloudflare R2 credentials and bucket settings.
