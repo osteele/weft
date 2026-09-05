@@ -61,7 +61,15 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 	)
 	_, stderr, err := sshRunWithTimeoutFunc(host, buildCmd, 10*time.Minute)
 	if err != nil {
-		return fmt.Errorf("build: %s", strings.TrimSpace(stderr))
+		// Name the snapshot. weft syncs the working tree, not committed state,
+		// so a build can fail on a mid-edit combination that exists in no
+		// commit — and a reader who assumes otherwise looks for a revision
+		// that reproduces it and finds none.
+		return fmt.Errorf(
+			"build of the synced working tree failed on %s (a working-tree snapshot, "+
+				"not a commit — uncommitted edits are included and no revision need "+
+				"reproduce it): %s",
+			host, strings.TrimSpace(stderr))
 	}
 
 	return nil
