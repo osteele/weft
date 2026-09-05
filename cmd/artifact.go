@@ -3228,6 +3228,7 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
 	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
 	result := artifacts.SyncResult{}
+	var failures []string
 	for _, spec := range manifest.Artifacts {
 		if strings.TrimSpace(spec.Path) == "" {
 			result.Skipped++
@@ -3247,7 +3248,14 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 		objectKeys = append(objectKeys, filesPrefix+relPath)
 		size, sha, err := downloadCloudArtifactKeys(store, objectKeys, localPath, artifactTimeout)
 		if err != nil {
-			return result, fmt.Errorf("download artifact %s: %w", spec.Path, err)
+			// One unfetchable entry must not withhold the rest. A declared
+			// output that was never written is a real thing to report, but
+			// aborting means the artifacts that DO exist are not retrieved
+			// either, and `artifact get` can still fetch them one by one —
+			// so the sync was refusing to do what the user could do by hand.
+			failures = append(failures, fmt.Sprintf("%s: %v", spec.Path, err))
+			result.Skipped++
+			continue
 		}
 
 		// Stamp the run whose manifest was found, not latest_run_id
@@ -3264,6 +3272,18 @@ func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectS
 			return result, err
 		}
 		result.Added++
+	}
+	if len(failures) > 0 {
+		// Only a total failure is an error. Anything else is a partial sync,
+		// which is more useful than none and is reported rather than hidden.
+		if result.Added == 0 {
+			return result, fmt.Errorf("no artifacts could be downloaded for job %s: %s",
+				ids.FormatJobID(job.ID), strings.Join(failures, "; "))
+		}
+		syncOutputWarnf("warning: job %s: %d of %d declared artifacts could not be downloaded "+
+			"and were skipped; the rest were synced: %s\n",
+			ids.FormatJobID(job.ID), len(failures), len(manifest.Artifacts),
+			strings.Join(failures, "; "))
 	}
 	return result, nil
 }

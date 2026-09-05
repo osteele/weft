@@ -69,17 +69,31 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 	return updated, nil
 }
 
-// syncMissingR2Completions closes jobs whose terminal runner entry aged out of
-// the daemon's 24-hour state window while the controller was offline. Only
-// previously-dispatched attempts are eligible; a brand-new queued row should
-// not perform a speculative completion lookup before its first inbox write.
+// syncMissingR2Completions closes jobs whose completion the runner's own state
+// does not reflect.
+//
+// Two cases, and the second is why a job the runner still reports is checked
+// rather than skipped. A terminal runner entry can age out of the daemon's
+// 24-hour state window while the controller is offline. And a runner can go on
+// reporting an attempt as running after its worker has exited and written a
+// completion record — the worker's record is positive evidence that the attempt
+// ended, while the runner's entry is only evidence of what the runner last
+// noticed. Trusting the runner over the record is how completed jobs held their
+// queue slots for hours, head-blocking the host behind them.
+//
+// Only presence is acted on. A missing completion record says nothing: an
+// attempt that has not finished has none either, so absence is left alone.
+//
+// Only previously-dispatched attempts are eligible; a brand-new queued row
+// should not perform a speculative completion lookup before its first inbox
+// write.
 func syncMissingR2Completions(database *sql.DB, jobs []*db.Job, statuses map[int64]queueBatchStatus) int {
 	updated := 0
 	for _, job := range jobs {
 		if job == nil || job.LastSyncedStatus == "" {
 			continue
 		}
-		if _, observed := statuses[job.ID]; observed {
+		if observed, ok := statuses[job.ID]; ok && observed.State != queueStateRunning {
 			continue
 		}
 		result, err := syncJobStatusFromR2ForBatch(database, job)

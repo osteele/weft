@@ -131,7 +131,7 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 	}
 }
 
-func TestSyncMissingR2CompletionsChecksOnlyDispatchedUnobservedJobs(t *testing.T) {
+func TestSyncMissingR2CompletionsChecksDispatchedAndRunningJobs(t *testing.T) {
 	originalSync := syncJobStatusFromR2ForBatch
 	t.Cleanup(func() { syncJobStatusFromR2ForBatch = originalSync })
 	var checked []int64
@@ -140,15 +140,43 @@ func TestSyncMissingR2CompletionsChecksOnlyDispatchedUnobservedJobs(t *testing.T
 		return SyncResult{Updated: true}, nil
 	}
 	jobs := []*db.Job{
-		{ID: 41, LastSyncedStatus: db.StatusQueued},
-		{ID: 42, LastSyncedStatus: db.StatusRunning},
-		{ID: 43},
+		{ID: 41, LastSyncedStatus: db.StatusQueued},  // unobserved: aged out of the runner window
+		{ID: 42, LastSyncedStatus: db.StatusRunning}, // observed running: may already have finished
+		{ID: 43, LastSyncedStatus: db.StatusQueued},  // observed queued: not started, nothing to close
+		{ID: 44}, // never dispatched: no speculative lookup
 	}
-	statuses := map[int64]queueBatchStatus{42: {State: queueStateRunning}}
+	statuses := map[int64]queueBatchStatus{
+		42: {State: queueStateRunning},
+		43: {State: queueStateQueued},
+	}
+	if got := syncMissingR2Completions(nil, jobs, statuses); got != 2 {
+		t.Fatalf("syncMissingR2Completions() = %d, want 2", got)
+	}
+	if len(checked) != 2 || checked[0] != 41 || checked[1] != 42 {
+		t.Fatalf("completion checks = %v, want [41 42]", checked)
+	}
+}
+
+// A runner that still reports an attempt as running is reporting what it last
+// noticed, not whether the worker exited. The worker's completion record is
+// positive evidence that it did, and skipping the check for observed-running
+// jobs is how completed work held its queue slot for hours and head-blocked
+// every job behind it.
+func TestARunningJobStillConsultsItsCompletionRecord(t *testing.T) {
+	originalSync := syncJobStatusFromR2ForBatch
+	t.Cleanup(func() { syncJobStatusFromR2ForBatch = originalSync })
+	checked := false
+	syncJobStatusFromR2ForBatch = func(_ *sql.DB, job *db.Job) (SyncResult, error) {
+		checked = true
+		return SyncResult{Updated: true}, nil
+	}
+	jobs := []*db.Job{{ID: 6782, LastSyncedStatus: db.StatusRunning}}
+	statuses := map[int64]queueBatchStatus{6782: {State: queueStateRunning}}
+
 	if got := syncMissingR2Completions(nil, jobs, statuses); got != 1 {
-		t.Fatalf("syncMissingR2Completions() = %d, want 1", got)
+		t.Fatalf("a running job with a completion record was not closed: got %d", got)
 	}
-	if len(checked) != 1 || checked[0] != 41 {
-		t.Fatalf("completion checks = %v, want [41]", checked)
+	if !checked {
+		t.Fatal("the completion record of a job the runner calls running was never consulted")
 	}
 }
