@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/osteele/weft/internal/secrets"
+
 	"github.com/osteele/weft/internal/scripts"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -43,7 +45,7 @@ func getConfigValue(envVar, fileKey string) string {
 		return ""
 	}
 
-	content, err := os.ReadFile(filepath.Join(home, ".config", "weft", "config"))
+	content, err := secrets.ReadCredentialFile(filepath.Join(home, ".config", "weft", "config"))
 	if err != nil {
 		return ""
 	}

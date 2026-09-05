@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/secrets"
 )
 
 const (
@@ -144,7 +146,7 @@ func lookupLegacyAPIKey(keys ...string) string {
 	if err != nil {
 		return ""
 	}
-	content, err := os.ReadFile(filepath.Join(home, ".config", "weft", "config"))
+	content, err := secrets.ReadCredentialFile(filepath.Join(home, ".config", "weft", "config"))
 	if err != nil {
 		return ""
 	}
