@@ -48,6 +48,16 @@ var edgeCmd = &cobra.Command{
 
 // edgeRuntime assembles the runtime for this installation's configured role.
 func edgeRuntime(transportOverride string) (*edge.Runtime, *config.Config, error) {
+	return edgeRuntimeOpts(transportOverride, false)
+}
+
+// edgeRuntimeForDiagnostics assembles the runtime even when this edge has no
+// signing key yet, so `doctor` can report that rather than fail on it.
+func edgeRuntimeForDiagnostics(transportOverride string) (*edge.Runtime, *config.Config, error) {
+	return edgeRuntimeOpts(transportOverride, true)
+}
+
+func edgeRuntimeOpts(transportOverride string, allowMissingSigner bool) (*edge.Runtime, *config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, nil, err
@@ -63,16 +73,17 @@ func edgeRuntime(transportOverride string) (*edge.Runtime, *config.Config, error
 				"submitted work off the hub: %w", err)
 	}
 	rt, err := edge.NewRuntime(transport, edge.RuntimeConfig{
-		Role:             cfg.Edge.Role,
-		SigningKeyPath:   edgePlanKeyPath(cfg, cfg.Edge.PlanID),
-		PlanID:           cfg.Edge.PlanID,
-		SubmitterHost:    cfg.Edge.SubmitterHost,
-		KeyringDir:       edgeKeyringDir(cfg),
-		SeenDir:          edgeSeenDir(cfg),
-		AllowedTargets:   cfg.Edge.AllowedTargets,
-		MaxSpendUSD:      cfg.Edge.MaxSpendUSD,
-		HubHost:          hostname,
-		LeaseWindowHours: cfg.Edge.LeaseWindowHours,
+		Role:               cfg.Edge.Role,
+		SigningKeyPath:     edgePlanKeyPath(cfg, cfg.Edge.PlanID),
+		PlanID:             cfg.Edge.PlanID,
+		SubmitterHost:      cfg.Edge.SubmitterHost,
+		KeyringDir:         edgeKeyringDir(cfg),
+		SeenDir:            edgeSeenDir(cfg),
+		AllowedTargets:     cfg.Edge.AllowedTargets,
+		MaxSpendUSD:        cfg.Edge.MaxSpendUSD,
+		HubHost:            hostname,
+		LeaseWindowHours:   cfg.Edge.LeaseWindowHours,
+		AllowMissingSigner: allowMissingSigner,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -156,7 +167,7 @@ var edgeDoctorCmd = &cobra.Command{
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		override, _ := cmd.Flags().GetString("transport")
-		rt, _, err := edgeRuntime(override)
+		rt, _, err := edgeRuntimeForDiagnostics(override)
 		if err != nil {
 			return err
 		}
@@ -167,7 +178,14 @@ var edgeDoctorCmd = &cobra.Command{
 		fmt.Printf("Transport: %s\n", rt.Transport.Name())
 
 		if rt.Role == "edge" {
-			fmt.Printf("Signing:   key %s as host %s\n", rt.Signer.KeyID(), rt.SubmitterHost)
+			switch {
+			case rt.Signer != nil:
+				fmt.Printf("Signing:   key %s as host %s\n", rt.Signer.KeyID(), rt.SubmitterHost)
+			default:
+				fmt.Printf("Signing:   no key yet for host %s\n", rt.SubmitterHost)
+				fmt.Println("           mint one with `weft edge key mint --plan <plan-id>`,")
+				fmt.Println("           then register its public half on the hub with `weft edge key add`")
+			}
 		} else {
 			printKeyringProblems(rt.Keyring)
 			keys := rt.Keyring.List()

@@ -695,6 +695,12 @@ func isNoStartCloudDetour(a placementDisplayAttempt) bool {
 // carryForwardPersistentMetadata copies persistent submission metadata to a
 // new attempt. Source execution evidence is deliberately cleared because it
 // belongs to the attempt that observed it.
+//
+// Declared placement constraints are submission facts and must survive every
+// new attempt. A requirement that is absent from an attempt is not evaluated
+// at all, so dropping one does not merely relax placement — it removes the
+// check, and the job is then placed as though it had never constrained
+// anything.
 func carryForwardPersistentMetadata(execer dbExecer, jobID, newAttemptID int64) error {
 	var previousRaw, submissionRaw sql.NullString
 	err := execer.QueryRow(
@@ -731,7 +737,17 @@ func carryForwardPersistentMetadata(execer dbExecer, jobID, newAttemptID int64) 
 		source = submission.Source
 	}
 	meta.Source = clonePersistentJobSource(source)
-	if meta.Dependencies == nil && meta.Source == nil {
+
+	agent := (*JobAgentMetadata)(nil)
+	if previous != nil {
+		agent = previous.Agent
+	}
+	if agent == nil && submission != nil {
+		agent = submission.Agent
+	}
+	meta.Agent = clonePersistentJobAgent(agent)
+
+	if meta.Dependencies == nil && meta.Source == nil && meta.Agent == nil {
 		return nil
 	}
 
@@ -1370,4 +1386,16 @@ func JobsStartedAfterCancel(database *sql.DB) ([]CancelledJobStart, error) {
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// clonePersistentJobAgent copies the declared agent requirements for a new
+// attempt. Required capabilities describe what the submission asked for, not
+// what any one attempt observed, so they are carried rather than reset.
+func clonePersistentJobAgent(src *JobAgentMetadata) *JobAgentMetadata {
+	if src == nil || len(src.RequiredCapabilities) == 0 {
+		return nil
+	}
+	return &JobAgentMetadata{
+		RequiredCapabilities: append([]string(nil), src.RequiredCapabilities...),
+	}
 }

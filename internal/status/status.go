@@ -203,3 +203,16 @@ type InvalidTransitionError struct {
 func (e *InvalidTransitionError) Error() string {
 	return fmt.Sprintf("invalid status transition %s -> %s: %s", e.From, e.To, e.Reason)
 }
+
+// All returns every stored job status, in a stable order.
+//
+// This is the vocabulary a filter may accept. It deliberately excludes
+// conditions that are rendered rather than stored — "blocked" is derived at
+// display time from queue state, so it is not a value any row holds and a
+// filter on it can never match.
+func All() []string {
+	return []string{
+		Draft, PendingPlacement, Queued, Starting, Running,
+		Completed, Failed, Dead, Killed, Canceled, Skipped, Paused,
+	}
+}

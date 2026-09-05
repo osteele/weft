@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/syncorch"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/util"
@@ -730,6 +731,9 @@ func listFilters() (statusFilter, processedFilter string, failedOnly bool, err e
 		processedFilter = "unprocessed"
 	}
 	if listStatus != "" && listStatus != "processed" && listStatus != "unprocessed" {
+		if err := validateStatusFilter(listStatus); err != nil {
+			return "", "", false, err
+		}
 		statusFilter = listStatus
 	}
 	if listRunning {
@@ -1511,4 +1515,28 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 			continue
 		}
 	}
+}
+
+// validateStatusFilter rejects a status this vocabulary does not contain.
+//
+// Without it any string is accepted and matches nothing, so a filter on a
+// value that is not a stored status returns an empty list that is
+// indistinguishable from a genuine absence. `blocked` is the case that cost
+// two sessions a wrong conclusion: it is a condition rendered in the detail
+// view, never a stored status, so filtering on it always returned nothing.
+func validateStatusFilter(value string) error {
+	for _, known := range status.All() {
+		if value == known {
+			return nil
+		}
+	}
+	if value == "blocked" {
+		return usageErrorf(
+			"%q is a condition shown by `weft status <job>`, not a stored job status, "+
+				"so it cannot be filtered on.\nQueued jobs that cannot dispatch are %q; "+
+				"use `weft status <job>` to see why a particular one is held.\nValid statuses: %s",
+			value, status.Queued, strings.Join(status.All(), ", "))
+	}
+	return usageErrorf("unknown job status %q; valid statuses: %s",
+		value, strings.Join(status.All(), ", "))
 }

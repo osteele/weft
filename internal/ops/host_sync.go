@@ -1019,7 +1019,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				continue
 			}
 			if len(jobPayloads) > 0 && !state.Supports(opsqueue.CapabilityJobPayloadV1) {
-				recordDeferred(job.ID, "queue runner lacks job-payload-v1 capability; agent update required before dispatch", nil)
+				recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityJobPayloadV1), nil)
 				continue
 			}
 		}
@@ -1141,7 +1141,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 
 		if hasNamedAssetNeed(job.Needs) && (hostUsesR2Queue(host) || useR2Source) &&
 			!state.Supports(opsqueue.CapabilityArtifactNeedV1) {
-			recordDeferred(job.ID, "queue runner lacks artifact-need-v1 capability; agent update required before dispatch", nil)
+			recordDeferred(job.ID, capabilityRemedy(host, opsqueue.CapabilityArtifactNeedV1), nil)
 			continue
 		}
 
@@ -2120,4 +2120,16 @@ func scanHFCacheDuringSync(database *sql.DB, host string, timeout time.Duration)
 		entry.LastSeen = now
 		_ = dataloc.RecordAsset(database, entry)
 	}
+}
+
+// capabilityRemedy names the command that resolves a missing runner capability.
+//
+// The remedy lives under `queue`, while the condition is about the agent, so a
+// reader who looks under `weft host` or for `weft agent update` finds nothing.
+// Naming the exact command is the difference between a condition an operator
+// can clear and one they escalate.
+func capabilityRemedy(host, capability string) string {
+	return fmt.Sprintf(
+		"queue runner lacks %s capability; run `weft queue update %s` to deploy a current agent",
+		capability, host)
 }

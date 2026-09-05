@@ -89,6 +89,24 @@ func ForJob(database *sql.DB, job *db.Job, now time.Time) Explanation {
 			startedAt = block.OccurredAt
 		}
 		age := now.Sub(startedAt)
+		// A job that requires host capabilities cannot be routed around by
+		// replanning: the requirement follows it to the unplaced pool, so the
+		// only hosts it can reach are the ones already advertising the
+		// capability — often just the blocked one. Suggesting replan there
+		// sends an operator to an action that cannot help and, for tooling
+		// installed per host, hands the job to a target that cannot run it.
+		if required := requiredCapabilities(job); len(required) > 0 {
+			x.Options = append(x.Options,
+				Option{Label: "wait", Detail: "keep retrying dispatch on " + job.TargetDisplay()},
+			)
+			x.Evidence = append(x.Evidence, Evidence{
+				Label: "requires",
+				Value: strings.Join(required, ", ") + " (replan cannot route around this)",
+			})
+			x.SuggestedAction = "clear the dispatch block on " + job.TargetDisplay() +
+				"; this job's required capabilities are not satisfied elsewhere"
+			return x
+		}
 		x.Options = append(x.Options,
 			Option{Label: "wait", Detail: "keep retrying dispatch on " + job.TargetDisplay()},
 			Option{Label: "replan", Detail: "return the job to the unplaced pool for host or rental placement"},
@@ -505,4 +523,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// requiredCapabilities returns the host capabilities a job declared.
+//
+// These bind placement wherever the job goes, so they are the reason a
+// capability-blocked job cannot be helped by returning it to the pool.
+func requiredCapabilities(job *db.Job) []string {
+	if job == nil || job.Metadata == nil || job.Metadata.Agent == nil {
+		return nil
+	}
+	return job.Metadata.Agent.RequiredCapabilities
 }

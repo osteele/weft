@@ -15,6 +15,9 @@ type Runtime struct {
 	// Edge side.
 	Signer        *Signer
 	SubmitterHost string
+	// SignerMissing explains why no signing key is loaded, when diagnostics
+	// asked to proceed without one.
+	SignerMissing string
 	// Hub side.
 	Keyring *Keyring
 	Policy  *Policy
@@ -40,6 +43,10 @@ type RuntimeConfig struct {
 	MaxSpendUSD      float64
 	HubHost          string
 	LeaseWindowHours float64
+	// AllowMissingSigner lets diagnostics assemble an edge runtime before any
+	// key has been minted. The first command run on a new edge is `doctor`,
+	// and it must be able to report what is missing rather than fail on it.
+	AllowMissingSigner bool
 }
 
 func (c RuntimeConfig) IsEdge() bool { return strings.EqualFold(c.Role, "edge") }
@@ -64,7 +71,14 @@ func NewRuntime(t Transport, cfg RuntimeConfig) (*Runtime, error) {
 		}
 		signer, err := LoadSigner(cfg.SigningKeyPath)
 		if err != nil {
-			return nil, err
+			if !cfg.AllowMissingSigner {
+				return nil, err
+			}
+			// Reported by the caller as a missing key rather than an error, so
+			// a fresh edge can be diagnosed before it has one.
+			rt.SubmitterHost = cfg.SubmitterHost
+			rt.SignerMissing = err.Error()
+			return rt, nil
 		}
 		// The key id encodes the plan it was minted for, and the hub derives
 		// the same id independently. A mismatch means this edge would sign

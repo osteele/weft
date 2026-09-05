@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -85,6 +87,13 @@ func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer, o
 	for _, builder := range builders {
 		err := runBuilder(version, goos, goarch, outputPath, builder, output, onProgress)
 		if err == nil {
+			// Report what was tried and failed even though this one worked.
+			// Discarding it is how a builder that has been broken for months
+			// stays invisible: every run still produces a binary, so nothing
+			// ever says which builder produced it or that another is down.
+			for _, attempt := range attempts {
+				fmt.Fprintf(output, "warning: agent builder failed but a later builder succeeded: %s\n", attempt)
+			}
 			return nil
 		}
 		label := builder.Type
@@ -104,7 +113,7 @@ func buildOnDemand(version, goos, goarch, outputPath string, output io.Writer, o
 func runBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer, onProgress BuildProgressFunc) error {
 	switch strings.ToLower(strings.TrimSpace(builder.Type)) {
 	case "ssh":
-		return buildViaSSHBuilder(version, goos, goarch, outputPath, builder, onProgress)
+		return buildViaSSHBuilder(version, goos, goarch, outputPath, builder, output, onProgress)
 	case "fly":
 		var captured bytes.Buffer
 		_, err := BuildViaFlyBuilderWithProgress(version, goos, goarch, outputPath, builder, io.MultiWriter(&captured, output), onProgress)
@@ -159,14 +168,29 @@ func resolveBuilders(goos, goarch string) ([]config.AgentBuilder, error) {
 
 	var out []config.AgentBuilder
 	if host := env("WEFT_LINUX_BUILDER_HOST"); host != "" {
-		out = append(out, config.AgentBuilder{
-			Type:         "ssh",
-			Name:         "linux-ssh-builder",
-			Host:         host,
-			RemoteDir:    envOrDefault(env("WEFT_LINUX_BUILDER_DIR"), "~/.cache/weft/agent-build"),
-			GoBin:        envOrDefault(env("WEFT_LINUX_BUILDER_GO"), "/usr/local/go/bin/go"),
-			IdentityFile: envOrDefault(env("WEFT_LINUX_BUILDER_IDENTITY_FILE"), defaultIdentity),
-		})
+		// A builder receives a full source sync and runs compiles, so the host
+		// must have been chosen deliberately. An explicitly configured host is
+		// deliberate by definition; anything weft derived on its own must be an
+		// inventory host. The guard exists for a future path that defaults or
+		// falls back to a reachable host, which is how build load would reach
+		// infrastructure nobody chose.
+		//
+		// A refused builder is skipped rather than fatal. Builders are
+		// independent, and letting one bad entry disable the others would turn
+		// a degraded configuration into no builds at all.
+		if reason := builderHostRefusal(host, true); reason != "" {
+			fmt.Fprintf(os.Stderr,
+				"warning: skipping ssh agent builder %q: %s\n", host, reason)
+		} else {
+			out = append(out, config.AgentBuilder{
+				Type:         "ssh",
+				Name:         "linux-ssh-builder",
+				Host:         host,
+				RemoteDir:    envOrDefault(env("WEFT_LINUX_BUILDER_DIR"), "~/.cache/weft/agent-build"),
+				GoBin:        envOrDefault(env("WEFT_LINUX_BUILDER_GO"), "/usr/local/go/bin/go"),
+				IdentityFile: envOrDefault(env("WEFT_LINUX_BUILDER_IDENTITY_FILE"), defaultIdentity),
+			})
+		}
 	}
 	if app := env("WEFT_FLY_BUILDER_APP"); app != "" && env("WEFT_FLY_BUILDER_MACHINE") != "" {
 		out = append(out, config.AgentBuilder{
@@ -228,16 +252,20 @@ func envOrDefault(v, fallback string) string {
 	return v
 }
 
-func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, onProgress BuildProgressFunc) error {
+func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config.AgentBuilder, output io.Writer, onProgress BuildProgressFunc) error {
 	if onProgress == nil {
 		onProgress = func(string) {}
 	}
+	if output == nil {
+		output = io.Discard
+	}
+	fmt.Fprintf(output, "Building via ssh builder %s...\n", builder.Host)
 	root, err := RepoRoot()
 	if err != nil {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
 	onProgress("connecting to ssh builder")
-	if err := quickCheckSSHBuilder(builder); err != nil {
+	if err := quickCheckSSHBuilder(builder, moduleGoVersion()); err != nil {
 		return err
 	}
 	remoteDir := envOrDefault(builder.RemoteDir, "~/.cache/weft/agent-build")
@@ -245,6 +273,14 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	remoteOut := filepath.Join(remoteDir, fmt.Sprintf("weft-agent-%s-%s", goos, goarch))
 
 	rsyncSSH := rsyncSSHCommand(builder)
+	// rsync will not create a destination's parent chain, so a host that has
+	// never built — or whose cache was cleaned — fails here rather than
+	// bootstrapping. Create it first.
+	mkdirArgs := append(sshBaseArgs(builder), "mkdir -p "+shellQuote(remoteDir))
+	if out, err := runCommandCapture("", nil, "ssh", mkdirArgs...); err != nil {
+		return fmt.Errorf("create build directory on %s: %s", builder.Host, strings.TrimSpace(out))
+	}
+
 	onProgress("syncing source")
 	args := []string{
 		"-az", "--delete",
@@ -291,12 +327,89 @@ func buildViaSSHBuilder(version, goos, goarch, outputPath string, builder config
 	return nil
 }
 
-func quickCheckSSHBuilder(builder config.AgentBuilder) error {
-	args := append(sshBaseArgs(builder), "true")
-	if out, err := runCommandCapture("", nil, "ssh", args...); err != nil {
+// quickCheckSSHBuilder verifies the builder can actually build before anything
+// is sent to it.
+//
+// Reachability was never the failing condition. A builder can answer `ssh host
+// true` while having no room for the sources, no toolchain able to compile this
+// module, or a toolchain that must download hundreds of megabytes first. Each
+// of those is one round trip to detect and, undetected, is paid as a full
+// source sync followed by a failure.
+func quickCheckSSHBuilder(builder config.AgentBuilder, goVersion string) error {
+	goBin := envOrDefault(builder.GoBin, "/usr/local/go/bin/go")
+	// Probe $HOME rather than the build directory: the build directory may not
+	// exist yet on a host that has never built, and df on a missing path prints
+	// nothing, which would fail the probe for a host that is perfectly able to
+	// build.
+	probe := fmt.Sprintf(
+		"df -Pk \"$HOME\" 2>/dev/null | awk 'NR==2{print $4}'; %s version 2>&1 || echo NO_TOOLCHAIN",
+		shellQuote(goBin))
+	args := append(sshBaseArgs(builder), probe)
+	out, err := runCommandCapture("", nil, "ssh", args...)
+	if err != nil {
 		return fmt.Errorf("connect ssh builder: %s", strings.TrimSpace(out))
 	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 2 {
+		return fmt.Errorf("ssh builder %s did not answer the capability probe: %q",
+			builder.Host, strings.TrimSpace(out))
+	}
+	freeKB, convErr := strconv.ParseInt(strings.TrimSpace(lines[0]), 10, 64)
+	if convErr == nil && freeKB < minBuilderFreeKB {
+		return fmt.Errorf(
+			"ssh builder %s has %.1f GB free, below the %.1f GB a build of this module needs; "+
+				"refusing to sync sources it cannot compile",
+			builder.Host, float64(freeKB)/1048576, float64(minBuilderFreeKB)/1048576)
+	}
+	toolchain := strings.TrimSpace(lines[len(lines)-1])
+	if strings.Contains(toolchain, "NO_TOOLCHAIN") {
+		return fmt.Errorf("ssh builder %s has no Go toolchain at %s", builder.Host, goBin)
+	}
+	if goVersion != "" && !toolchainSatisfies(toolchain, goVersion) {
+		return fmt.Errorf(
+			"ssh builder %s reports %q but this module needs go %s; it would download a full "+
+				"toolchain on every cold build",
+			builder.Host, toolchain, goVersion)
+	}
 	return nil
+}
+
+// minBuilderFreeKB is the headroom a build of this module needs beyond whatever
+// caches already exist.
+//
+// Calibrated to catch the condition that actually caused harm — a builder run
+// against a nearly full disk, which fails after the sources have been sent —
+// without refusing a host that can build. A host with warm module and compile
+// caches and a matching toolchain needs far less than a cold one; the toolchain
+// probe covers the cold case separately, since a mismatched toolchain is what
+// turns a build into a several-hundred-megabyte download.
+const minBuilderFreeKB = 1024 * 1024
+
+// toolchainSatisfies reports whether a remote `go version` line is at least the
+// version this module requires. A lower toolchain still builds, by downloading
+// the required one first, which is a large per-cold-build cost rather than a
+// working configuration.
+func toolchainSatisfies(versionLine, required string) bool {
+	fields := strings.Fields(versionLine)
+	if len(fields) < 3 || !strings.HasPrefix(fields[2], "go") {
+		return true
+	}
+	return !semverLess(strings.TrimPrefix(fields[2], "go"), required)
+}
+
+func semverLess(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		an, aerr := strconv.Atoi(as[i])
+		bn, berr := strconv.Atoi(bs[i])
+		if aerr != nil || berr != nil {
+			return false
+		}
+		if an != bn {
+			return an < bn
+		}
+	}
+	return false
 }
 
 const builderSSHTimeout = 3 * time.Second
@@ -341,4 +454,67 @@ func shellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+// moduleGoVersion reads the go directive from this module's go.mod, which is
+// the toolchain a builder must be able to satisfy without downloading one.
+func moduleGoVersion() string {
+	root, err := RepoRoot()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "go" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// builderHostRefusal reports why a host must not be used as a build host, or
+// "" when it is acceptable.
+//
+// explicit means an operator named this host in configuration. That is a
+// deliberate choice and is honoured even for a host weft does not otherwise
+// manage — the operator accepts responsibility for its disk and toolchain, and
+// the disk and toolchain probes still run before anything is sent to it.
+//
+// A host weft selected for itself must be in the inventory, so that a default,
+// a fallback, or an expansion to "the first reachable host" cannot quietly turn
+// unrelated infrastructure into a build host.
+func builderHostRefusal(host string, explicit bool) string {
+	if explicit {
+		return ""
+	}
+	resolved := resolveSSHHostName(host)
+	for _, candidate := range []string{host, resolved} {
+		if candidate != "" && inventory.FindHost(candidate) != nil {
+			return ""
+		}
+	}
+	if resolved != "" && resolved != host {
+		return fmt.Sprintf(
+			"it was not explicitly configured and resolves to %q, which is not in the host "+
+				"inventory (~/.config/weft/hosts/)", resolved)
+	}
+	return "it was not explicitly configured and is not in the host inventory " +
+		"(~/.config/weft/hosts/)"
+}
+
+// resolveSSHHostName returns the HostName an ssh alias expands to.
+func resolveSSHHostName(host string) string {
+	out, err := runCommandCapture("", nil, "ssh", "-G", host)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "hostname" {
+			return fields[1]
+		}
+	}
+	return ""
 }
