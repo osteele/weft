@@ -1379,3 +1379,78 @@ func TestStartJobPublishesRunningStateDuringSetup(t *testing.T) {
 		t.Fatal("startJob did not return after setup release")
 	}
 }
+
+// TestRefreshRunningJobs_Regression_MarkerNotWrittenOnRecovery anchors a regression
+// test to the real recorded failure of job 6994, run 42051. The worker exited with
+// code 0 (so the bash wrapper wrote exit=0 to the status file), but because the
+// runner was restarted (simulated by having no in-memory waiter tracking the job),
+// it was finalized through a recovery path in refreshRunningJobs that failed to call
+// OnJobFinish. Consequently, the completion marker was never written to R2.
+func TestRefreshRunningJobs_Regression_MarkerNotWrittenOnRecovery(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(6994)
+	runID := int64(42051)
+	jobIDStr := "6994"
+	paths := NewJobPaths(r.logDir, jobID)
+
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	// The worker exited with exit code 0, captured by the wrapper in the status file
+	if err := os.WriteFile(paths.Status, []byte("0\n"), 0644); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	// Add the job to running state, but do NOT add to r.processes, simulating
+	// a runner restart where the in-memory wait goroutines are lost.
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: time.Now().Add(-10 * time.Minute).Unix(),
+		RunID:     runID,
+	})
+
+	// Setup a hook to capture OnJobFinish being triggered on recovery
+	var calledJobID, calledRunID int64
+	var calledExitCode int
+	var calledLogDir string
+	finishHookChan := make(chan struct{}, 1)
+
+	r.OnJobFinish = func(jID, rID int64, logDir string, exitCode int) {
+		calledJobID = jID
+		calledRunID = rID
+		calledLogDir = logDir
+		calledExitCode = exitCode
+		finishHookChan <- struct{}{}
+	}
+
+	// Run recovery/reconciliation loop
+	r.refreshRunningJobs()
+
+	// Assert that OnJobFinish was called to write the completion marker
+	select {
+	case <-finishHookChan:
+		// success
+	default:
+		t.Fatal("OnJobFinish hook was not called during recovered status file finalization")
+	}
+
+	if calledJobID != jobID {
+		t.Errorf("OnJobFinish jobID = %d, want %d", calledJobID, jobID)
+	}
+	if calledRunID != runID {
+		t.Errorf("OnJobFinish runID = %d, want %d", calledRunID, runID)
+	}
+	if calledExitCode != 0 {
+		t.Errorf("OnJobFinish exitCode = %d, want 0", calledExitCode)
+	}
+	expectedLogDir := filepath.Dir(paths.Log)
+	if calledLogDir != expectedLogDir {
+		t.Errorf("OnJobFinish logDir = %q, want %q", calledLogDir, expectedLogDir)
+	}
+
+	// Job should have been successfully removed from running state
+	if _, exists := r.state.Running[jobIDStr]; exists {
+		t.Fatal("job should have been removed from running state after recovery")
+	}
+}

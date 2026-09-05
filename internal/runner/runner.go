@@ -1266,6 +1266,9 @@ func (r *Runner) refreshRunningJobs() {
 				oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d recovered=true", rec.RunID, rec.ExitCode))
 				CleanupPIDFiles(paths)
 				changed = true
+				if r.OnJobFinish != nil {
+					r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), rec.ExitCode)
+				}
 			}
 			continue
 		} else if err != nil && !os.IsNotExist(err) {
@@ -1299,6 +1302,9 @@ func (r *Runner) refreshRunningJobs() {
 				r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
 				CleanupPIDFiles(paths)
 				changed = true
+				if r.OnJobFinish != nil {
+					r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+				}
 			}
 			continue
 		}
@@ -1344,6 +1350,9 @@ func (r *Runner) refreshRunningJobs() {
 			r.state.FinishRunningAttempt(jobIDStr, rs, 1, endTime)
 			CleanupPIDFiles(paths)
 			changed = true
+			if r.OnJobFinish != nil {
+				r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), 1)
+			}
 			continue
 		}
 
@@ -1415,6 +1424,9 @@ func (r *Runner) refreshRunningJobs() {
 			r.state.FinishRunningAttempt(jobIDStr, rs, exitCode, endTime)
 			CleanupPIDFiles(paths)
 			changed = true
+			if r.OnJobFinish != nil {
+				r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), exitCode)
+			}
 			continue
 		}
 
@@ -1428,6 +1440,9 @@ func (r *Runner) refreshRunningJobs() {
 		r.state.FinishRunningAttempt(jobIDStr, rs, 1, endTime)
 		CleanupPIDFiles(paths)
 		changed = true
+		if r.OnJobFinish != nil {
+			r.OnJobFinish(jobID, rs.RunID, filepath.Dir(paths.Log), 1)
+		}
 	}
 
 	if changed {
