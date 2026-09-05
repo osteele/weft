@@ -44,6 +44,7 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 	}
 
 	onProgress("syncing source for native agent build")
+	syncedAt := time.Now()
 	if err := rsyncSourcesToHostFunc(root, host); err != nil {
 		return fmt.Errorf("rsync sources: %w", err)
 	}
@@ -65,11 +66,13 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 		// so a build can fail on a mid-edit combination that exists in no
 		// commit — and a reader who assumes otherwise looks for a revision
 		// that reproduces it and finds none.
+		// Name the tree state. Without it a reader takes the compiler at its
+		// word and searches for a source defect, when the subject is a tree
+		// that was synced at a particular moment and matches no revision.
 		return fmt.Errorf(
-			"build of the synced working tree failed on %s (a working-tree snapshot, "+
-				"not a commit — uncommitted edits are included and no revision need "+
-				"reproduce it): %s",
-			host, strings.TrimSpace(stderr))
+			"build failed on %s of a working tree synced at %s (a snapshot, not a commit: "+
+				"uncommitted edits are included and no revision need reproduce this): %s",
+			host, syncedAt.Format(time.RFC3339), strings.TrimSpace(stderr))
 	}
 
 	return nil
@@ -80,6 +83,12 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 func rsyncSourcesToHost(localRoot, host string) error {
 	args := []string{
 		"-az", "--delete",
+		// Stage every updated file and rename them into place together at the
+		// end. Without this the build tree is observable mid-transfer, so a
+		// build can compile a new caller against a not-yet-copied callee — a
+		// combination that exists in no revision, which is why checking
+		// committed history for it finds nothing.
+		"--delay-updates",
 		"-e", ssh.BatchModeRsyncCommandForHost(host, 15*time.Second),
 		"--exclude=.git/", "--exclude=.jj/", "--exclude=.claude/",
 		"--exclude=.gocache/", "--exclude=.gomodcache/", "--exclude=.cache/",
