@@ -135,10 +135,16 @@ var specificCauseRules = []failurePatternRule{
 		re:         regexp.MustCompile(`(?is)(?:engine core|engine_core|vllm).*?(?:CUDA|cu12[0-9]|driver|wheel).*?(?:mismatch|incompatible|too old|failed)|(?:CUDA|driver).*?(?:too old|insufficient|incompatible).*?(?:vllm|engine core|engine_core|wheel)`),
 	},
 	{
-		patternID:  "cuda_driver_too_old",
-		category:   "environment",
-		message:    "NVIDIA driver is too old for the selected CUDA runtime",
-		solution:   "Retry with placement restricted to a provider/host that reports compatible CUDA support, or use a PyTorch/runtime image built for the host's older CUDA driver.",
+		patternID: "cuda_driver_too_old",
+		category:  "environment",
+		message:   "Resolved CUDA runtime needs a newer driver than the host provides",
+		solution: "Check the resolved torch version before suspecting placement: an unpinned torch " +
+			"resolves to the newest build, which can require a newer driver than any available host, " +
+			"and that failure looks identical to a host that fell short of a declared floor. Compare " +
+			"the found driver version below against the floor the job declared — if the found version " +
+			"already meets it, placement was correct and the binding constraint is the wheel. Pin an " +
+			"upper bound (for example torch<2.7) in that case. Otherwise restrict placement to a host " +
+			"reporting compatible CUDA support, or use a runtime image built for the older driver.",
 		confidence: 0.98,
 		re:         regexp.MustCompile(`(?is)NVIDIA driver on your system is too old\s*\(found version\s+([0-9]+)\)|driver version is insufficient for CUDA runtime version`),
 		details: func(match []string, logContent string) map[string]any {
