@@ -360,11 +360,14 @@ var edgeCommandModes = map[string]edgeModeEntry{
 // EdgeGateError is returned by the edge-mode gate for a command the edge
 // refused to run. The gate has already printed the user-facing line (text on
 // stderr, or the JSON shape on stdout); Execute must not print it again, and
-// main maps the error to ExitCode.
+// main maps the error to ExitCode. ViewAgeS carries the hub view's age in
+// seconds when a blocked outcome knows it (the stale-section case); it is nil
+// whenever no publication time was available to measure.
 type EdgeGateError struct {
 	Outcome  string // "disabled" or "blocked"
 	Detail   string // the reason or cause, as printed
 	ExitCode int
+	ViewAgeS *float64
 }
 
 func (e *EdgeGateError) Error() string {
@@ -380,9 +383,10 @@ func (e *EdgeGateError) Error() string {
 // the word "edge" appears in ordinary command output.
 type edgeGateJSON struct {
 	Edge struct {
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason,omitempty"`
-		Cause   string `json:"cause,omitempty"`
+		Outcome  string   `json:"outcome"`
+		Reason   string   `json:"reason,omitempty"`
+		Cause    string   `json:"cause,omitempty"`
+		ViewAgeS *float64 `json:"view_age_s,omitempty"`
 	} `json:"edge"`
 }
 
@@ -436,11 +440,25 @@ func applyEdgeGate(cfg *config.Config, args []string) error {
 			ExitCode: edgeExitDisabled,
 		})
 	case edgeModeMirror:
-		return edgeBlock(resolved, args, &EdgeGateError{
-			Outcome:  "blocked",
-			Detail:   edgeCauseNoViewReader,
-			ExitCode: edgeExitBlocked,
-		})
+		if _, served := edgeMirrorServed[path]; !served {
+			// A mirror command with no view section yet blocks honestly rather
+			// than falling through to the ledger.
+			return edgeBlock(resolved, args, &EdgeGateError{
+				Outcome:  "blocked",
+				Detail:   edgeCauseNoViewReader,
+				ExitCode: edgeExitBlocked,
+			})
+		}
+		runtime, err := newEdgeMirrorRuntime(cfg, edgeAllowStale, args)
+		if err != nil {
+			return edgeBlock(resolved, args, &EdgeGateError{
+				Outcome:  "blocked",
+				Detail:   err.Error(),
+				ExitCode: edgeExitBlocked,
+			})
+		}
+		activeEdgeMirror = runtime
+		return nil
 	case edgeModeSubmit:
 		return edgeBlock(resolved, args, &EdgeGateError{
 			Outcome:  "blocked",
@@ -462,6 +480,7 @@ func edgeBlock(cmd *cobra.Command, args []string, gateErr *EdgeGateError) error 
 			shape.Edge.Reason = gateErr.Detail
 		} else {
 			shape.Edge.Cause = gateErr.Detail
+			shape.Edge.ViewAgeS = gateErr.ViewAgeS
 		}
 		data, err := json.Marshal(shape)
 		if err != nil {
@@ -494,21 +513,44 @@ func edgeHelpRequested(args []string) bool {
 	return false
 }
 
-// edgeJSONRequested reports whether the command declares a --json flag and
-// the invocation set it true.
+// edgeJSONRequested reports whether the invocation asks for machine-readable
+// output: --json on a command that declares it, or --format json on a command
+// that declares a format flag (`weft list` and `weft jobs list` take the
+// latter, and that is the surface agents actually use).
 func edgeJSONRequested(cmd *cobra.Command, args []string) bool {
-	if cmd.Flags().Lookup("json") == nil {
-		return false
-	}
+	jsonFlag := cmd.Flags().Lookup("json") != nil
+	formatFlag := cmd.Flags().Lookup("format") != nil
 	for _, a := range args {
 		if a == "--" {
 			return false
 		}
-		if a == "--json" {
-			return true
+		if jsonFlag {
+			if a == "--json" {
+				return true
+			}
+			if rest, ok := strings.CutPrefix(a, "--json="); ok {
+				return rest == "true"
+			}
 		}
-		if rest, ok := strings.CutPrefix(a, "--json="); ok {
-			return rest == "true"
+		if formatFlag {
+			if a == "--format" {
+				// The value is the next argument; look for it in the rest of
+				// the scan rather than ending the search here.
+				continue
+			}
+			if rest, ok := strings.CutPrefix(a, "--format="); ok {
+				return rest == "json"
+			}
+		}
+	}
+	if formatFlag {
+		for i, a := range args {
+			if a == "--" {
+				return false
+			}
+			if a == "--format" && i+1 < len(args) {
+				return args[i+1] == "json"
+			}
 		}
 	}
 	return false

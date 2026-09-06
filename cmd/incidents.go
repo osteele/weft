@@ -4,13 +4,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edgeview"
 	"github.com/spf13/cobra"
 )
 
@@ -36,6 +37,9 @@ Examples:
   weft incidents --json`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if activeEdgeMirror != nil {
+			return runIncidentsEdge(cmd, args, activeEdgeMirror)
+		}
 		database, err := db.OpenForReading()
 		if err != nil {
 			return err
@@ -46,12 +50,26 @@ Examples:
 		if err != nil {
 			return err
 		}
-		if incidentsJSON {
-			return writeIncidentsJSON(os.Stdout, incs)
-		}
-		writeIncidentsTable(os.Stdout, incs)
-		return nil
+		return renderIncidents(cmd.OutOrStdout(), incidentsView{Incidents: incs}, incidentsJSON)
 	},
+}
+
+// incidentsView is the incidents model: the serializable projection the hub
+// renders and publishes, and the edge decodes and renders. Source is set only
+// on the edge, where every rendered fact carries its provenance.
+type incidentsView struct {
+	Incidents []IncidentSummary    `json:"incidents"`
+	Source    *edgeview.Provenance `json:"source,omitempty"`
+}
+
+// renderIncidents is the render step shared by the hub (Source nil) and the
+// edge (Source set): JSON or table from the same model.
+func renderIncidents(w io.Writer, view incidentsView, asJSON bool) error {
+	if asJSON {
+		return writeIncidentsJSON(w, view)
+	}
+	writeIncidentsTable(w, view.Incidents)
+	return nil
 }
 
 // IncidentSummary captures one distinct upstream error class across multiple
@@ -78,6 +96,13 @@ func collectIncidents(database *sql.DB) ([]IncidentSummary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
 	}
+	return collectIncidentsFromJobs(jobs), nil
+}
+
+// collectIncidentsFromJobs is the pure bucketing half of the incidents model:
+// it turns unplaced jobs into incident summaries without touching the ledger,
+// so the hub, the publisher, and the edge all group identically.
+func collectIncidentsFromJobs(jobs []*db.Job) []IncidentSummary {
 	type bucket struct {
 		jobIDs      []int64
 		message     string
@@ -138,18 +163,16 @@ func collectIncidents(database *sql.DB) ([]IncidentSummary, error) {
 		}
 		return out[i].Fingerprint < out[j].Fingerprint
 	})
-	return out, nil
+	return out
 }
 
-func writeIncidentsJSON(w *os.File, incs []IncidentSummary) error {
+func writeIncidentsJSON(w io.Writer, view incidentsView) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(struct {
-		Incidents []IncidentSummary `json:"incidents"`
-	}{Incidents: incs})
+	return enc.Encode(view)
 }
 
-func writeIncidentsTable(w *os.File, incs []IncidentSummary) {
+func writeIncidentsTable(w io.Writer, incs []IncidentSummary) {
 	if len(incs) == 0 {
 		fmt.Fprintln(w, "No active placement incidents.")
 		return

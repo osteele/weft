@@ -324,6 +324,15 @@ func dumpGoroutines() {
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable debug-level logging")
+	// --allow-stale is a no-op off the edge role: a hub renders its own
+	// ledger, which is never stale to itself.
+	rootCmd.PersistentFlags().BoolVar(&edgeAllowStale, "allow-stale", false,
+		"On an edge, render a hub view section that is older than the freshness bound, marked with its age")
+	rootCmd.PersistentFlags().StringVar(&edgeViewTransportOverride, "edge-view-transport", "",
+		"Read the hub view from this directory instead of the configured store")
+	if err := rootCmd.PersistentFlags().MarkHidden("edge-view-transport"); err != nil {
+		panic(err)
+	}
 	rootCmd.AddCommand(versionCmd)
 }
 

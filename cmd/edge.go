@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/appdirs"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/edge"
+	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/spf13/cobra"
 )
@@ -91,30 +93,43 @@ func edgeRuntimeOpts(transportOverride string, allowMissingSigner bool) (*edge.R
 	return rt, cfg, nil
 }
 
-// edgeTransport builds the object store. A directory override selects the
-// filesystem transport, which runs the identical protocol with verification
-// fully enabled — it is a real transport, not a bypass.
+// edgeTransport builds the object store for the submission channel.
 func edgeTransport(cfg *config.Config, override string) (edge.Transport, error) {
+	return edgeStoreTransport("inbound", cfg.Edge.Inbound, override)
+}
+
+// edgeViewTransport builds the object store for the hub view.
+func edgeViewTransport(cfg *config.Config, override string) (edge.Transport, error) {
+	return edgeStoreTransport("view", cfg.Edge.View.R2(), override)
+}
+
+// edgeStoreTransport builds an object store for one edge channel. A directory
+// override selects the filesystem transport, which runs the identical protocol
+// with verification fully enabled — it is a real transport, not a bypass.
+// Inbound and view share this so the two channels cannot drift apart in how a
+// store is chosen.
+func edgeStoreTransport(purpose string, cfg config.R2Config, override string) (edge.Transport, error) {
 	if override != "" {
 		return edge.NewFSTransport(override)
 	}
-	if cfg.Edge.Inbound.Bucket == "" {
+	if cfg.Bucket == "" {
 		return nil, fmt.Errorf(
-			"no edge inbound bucket configured.\n" +
-				"Set [edge.inbound] in ~/.config/weft/config.toml, or pass --transport <dir> " +
-				"to use the filesystem transport.\n" +
-				"The inbound bucket is deliberately separate from the results bucket; see decision 0026.")
+			"no edge %s bucket configured.\n"+
+				"Set [edge.%s] in ~/.config/weft/config.toml, or pass --transport <dir> "+
+				"to use the filesystem transport.\n"+
+				"The %s bucket is deliberately separate from the results bucket; see decision 0026.",
+			purpose, purpose, purpose)
 	}
-	// The inbound bucket is a separate store from results, so it gets its own
-	// client rather than reusing the results one.
+	// Each channel's bucket is a separate store from results, so it gets its
+	// own client rather than reusing the results one.
 	client, err := r2.New(r2.Config{
-		AccountID:       cfg.Edge.Inbound.AccountID,
-		AccessKeyID:     cfg.Edge.Inbound.AccessKeyID,
-		SecretAccessKey: cfg.Edge.Inbound.SecretAccessKey,
-		Bucket:          cfg.Edge.Inbound.Bucket,
+		AccountID:       cfg.AccountID,
+		AccessKeyID:     cfg.AccessKeyID,
+		SecretAccessKey: cfg.SecretAccessKey,
+		Bucket:          cfg.Bucket,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build inbound R2 client: %w", err)
+		return nil, fmt.Errorf("build %s R2 client: %w", purpose, err)
 	}
 	return edge.NewR2Transport(client)
 }
@@ -167,8 +182,17 @@ var edgeDoctorCmd = &cobra.Command{
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		override, _ := cmd.Flags().GetString("transport")
-		rt, _, err := edgeRuntimeForDiagnostics(override)
+		rt, cfg, err := edgeRuntimeForDiagnostics(override)
 		if err != nil {
+			if loaded, loadErr := config.Load(); loadErr == nil {
+				role := loaded.Edge.Role
+				if role == "" {
+					role = "hub"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Role:      %s\n", role)
+				fmt.Fprintln(cmd.OutOrStdout(), "Transport: unavailable")
+				printEdgeViewDoctor(cmd, loaded, role, override)
+			}
 			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
@@ -176,6 +200,7 @@ var edgeDoctorCmd = &cobra.Command{
 
 		fmt.Printf("Role:      %s\n", rt.Role)
 		fmt.Printf("Transport: %s\n", rt.Transport.Name())
+		printEdgeViewDoctor(cmd, cfg, rt.Role, override)
 
 		if rt.Role == "edge" {
 			switch {
@@ -274,6 +299,74 @@ var edgeDoctorCmd = &cobra.Command{
 		fmt.Println("`weft edge wait` cannot succeed until an acknowledgement writer exists.")
 		return nil
 	},
+}
+
+func printEdgeViewDoctor(cmd *cobra.Command, cfg *config.Config, role, override string) {
+	fmt.Fprintln(cmd.OutOrStdout())
+	if role != "edge" {
+		if cfg == nil || !cfg.Edge.View.Configured() {
+			fmt.Fprintln(cmd.OutOrStdout(), "View:      not configured")
+			return
+		}
+		state, err := loadEdgeViewPublishState()
+		if err != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "View:      publisher state unreadable: %v\n", err)
+			return
+		}
+		if state.LastSuccessfulPublish.IsZero() {
+			fmt.Fprintln(cmd.OutOrStdout(), "View:      no successful publish recorded")
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "View:      last published %s ago (%s)\n",
+				edgeview.FormatAge(time.Since(state.LastSuccessfulPublish)), state.LastSuccessfulPublish.UTC().Format(time.RFC3339))
+		}
+		if state.PublishError != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "View error: %s\n", state.PublishError)
+		}
+		for _, name := range sortedStringMapKeys(state.SectionErrors) {
+			fmt.Fprintf(cmd.OutOrStdout(), "View section %s: FAILED: %s\n", name, state.SectionErrors[name])
+		}
+		return
+	}
+
+	transport, err := edgeViewTransport(cfg, override)
+	if err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "View:      unavailable: %v\n", err)
+		return
+	}
+	manifest, err := edgeview.NewReader(transport).Manifest(cmd.Context())
+	if err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "View:      unavailable: %s\n", edgeViewCause(err))
+		return
+	}
+	now := time.Now()
+	bound := cfg.Edge.View.StaleAfter()
+	manifestAge := now.Sub(manifest.PublishedAt)
+	fmt.Fprintf(cmd.OutOrStdout(), "View manifest: present, age %s (bound %s, %s)\n",
+		edgeview.FormatAge(manifestAge), edgeview.FormatAge(bound), freshnessLabel(manifestAge, bound))
+	for _, name := range edgeViewSectionNames(manifest) {
+		age := now.Sub(manifest.Sections[name].PublishedAt)
+		fmt.Fprintf(cmd.OutOrStdout(), "View section %s: age %s (bound %s, %s)\n",
+			name, edgeview.FormatAge(age), edgeview.FormatAge(bound), freshnessLabel(age, bound))
+	}
+	for _, name := range sortedStringMapKeys(manifest.Errors) {
+		fmt.Fprintf(cmd.OutOrStdout(), "View section %s: FAILED: %s\n", name, manifest.Errors[name])
+	}
+}
+
+func freshnessLabel(age, bound time.Duration) string {
+	if bound > 0 && age > bound {
+		return "stale"
+	}
+	return "fresh"
+}
+
+func sortedStringMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // nearLapse is how close to expiry a key is worth calling out. Nothing renews

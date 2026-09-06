@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/orchestration"
@@ -209,6 +212,8 @@ type autopilotStateView struct {
 	// Incidents lists active placement incidents (fingerprints affecting ≥2
 	// unplaced jobs) — see `weft incidents` for the dedicated CLI.
 	Incidents []IncidentSummary `json:"incidents,omitempty"`
+	// Source is set only on an edge, where the view carries its provenance.
+	Source *edgeview.Provenance `json:"source,omitempty"`
 }
 
 // orphanStreakView reports a job stuck in a launch-orphan loop. Surfaces the
@@ -300,16 +305,16 @@ func autopilotStateExitCode(view autopilotStateView) int {
 	}
 }
 
-func runAutopilotStatus(cmd *cobra.Command, args []string) error {
-	database, err := db.OpenForReading()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
+// buildAutopilotStatusModel is the model step of `weft autopilot status`:
+// every ledger read the view needs, returning the fully populated view. The
+// auxiliary queries are error-tolerant by design: orphan streaks, price
+// blocks, and incidents are advisory layers on top of the autopilot's own
+// state, and a failure in one must not blank the status surface — the fields
+// stay empty, which for them is a true empty (no streaks found), not unknown.
+func buildAutopilotStatusModel(database *sql.DB) (autopilotStateView, error) {
 	state, err := db.LoadAutopilotState(database)
 	if err != nil {
-		return fmt.Errorf("load autopilot state: %w", err)
+		return autopilotStateView{}, fmt.Errorf("load autopilot state: %w", err)
 	}
 	view := buildAutopilotStateView(state)
 	if streaks, err := db.JobsWithOrphanStreaks(database, orphanStreakThreshold); err == nil {
@@ -328,6 +333,31 @@ func runAutopilotStatus(cmd *cobra.Command, args []string) error {
 	if incs, err := collectIncidents(database); err == nil && len(incs) > 0 {
 		view.Incidents = incs
 	}
+	return view, nil
+}
+
+// writeAutopilotStatusJSON is the single JSON serializer for the autopilot
+// status view, used by the hub's --json, the view publisher, and the edge.
+func writeAutopilotStatusJSON(w io.Writer, view autopilotStateView) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(view)
+}
+
+func runAutopilotStatus(cmd *cobra.Command, args []string) error {
+	if activeEdgeMirror != nil {
+		return runAutopilotStatusEdge(cmd, args, activeEdgeMirror)
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	view, err := buildAutopilotStatusModel(database)
+	if err != nil {
+		return err
+	}
 
 	if autopilotStatusQuiet {
 		exitCode := autopilotStateExitCode(view)
@@ -337,9 +367,7 @@ func runAutopilotStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	if autopilotStatusJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(view)
+		return writeAutopilotStatusJSON(os.Stdout, view)
 	}
 
 	fmt.Println(formatAutopilotStatusText(view))

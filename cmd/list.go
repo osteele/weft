@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/degraded"
+	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/queueblock"
@@ -117,7 +118,7 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listInventory, "inventory", false, "Show inventory-only jobs and jobs assigned to inventory hosts")
 	cmd.Flags().BoolVar(&listCloud, "cloud", false, "Alias for --rental")
 	cmd.Flags().MarkHidden("cloud")
-	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
+	cmd.Flags().IntVar(&listLimit, "limit", defaultListLimit, "Limit results")
 	cmd.Flags().BoolVar(&listSync, "sync", false, "Refresh job statuses before listing")
 	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Use cached job statuses (default; overrides --sync)")
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
@@ -152,6 +153,10 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	if err := validateListGroupingOptions(); err != nil {
 		return err
+	}
+
+	if activeEdgeMirror != nil {
+		return runListEdge(cmd, args, activeEdgeMirror)
 	}
 
 	openDB := db.OpenForReading
@@ -237,19 +242,62 @@ func plainListShouldSync() bool {
 func renderListPlain(database *sql.DB, args []string) error {
 	listNewestFirst = true
 	defer func() { listNewestFirst = false }()
-	jobs, err := collectJobsForList(database, args)
+	model, err := buildJobListModel(database, args)
 	if err != nil {
 		return err
 	}
-	if listOlderHiddenCount > 0 {
-		fmt.Fprintf(os.Stderr, "%d older %s hidden by the default %d-day window — pass --all to include them.\n",
-			listOlderHiddenCount, pluralize("job", listOlderHiddenCount), defaultListMaxAgeDays)
+	printListSelectionNotes(os.Stderr, model.Selection)
+	return printJobListModel(database, model)
+}
+
+// printListSelectionNotes reports, on w, the rows the collection hid, so a
+// capped or windowed listing does not read as "this is everything". The notes
+// come from the selection metadata, not from collection-time state, so the
+// edge prints the same notes from the published model.
+func printListSelectionNotes(w io.Writer, selection jobListJSONSelection) {
+	for _, constraint := range selection.Constraints {
+		if constraint.Hidden == nil || *constraint.Hidden == 0 || constraint.Value == nil {
+			continue
+		}
+		switch constraint.Kind {
+		case jobListJSONConstraintMaxAgeDays:
+			fmt.Fprintf(w, "%d older %s hidden by the default %d-day window — pass --all to include them.\n",
+				*constraint.Hidden, pluralize("job", *constraint.Hidden), *constraint.Value)
+		case jobListJSONConstraintLimit:
+			fmt.Fprintf(w, "%d more %s hidden by --limit %d — pass --limit 0 to include them.\n",
+				*constraint.Hidden, pluralize("job", *constraint.Hidden), *constraint.Value)
+		}
 	}
-	if listLimitHiddenCount > 0 {
-		fmt.Fprintf(os.Stderr, "%d more %s hidden by --limit %d — pass --limit 0 to include them.\n",
-			listLimitHiddenCount, pluralize("job", listLimitHiddenCount), listLimit)
+}
+
+// jobListView is the job-list model: rows fully populated (every overlay the
+// renderers read applied), with the selection bounds of the collection that
+// produced them. The hub renders and publishes it; the edge decodes and
+// renders it. Source is set only on the edge.
+type jobListView struct {
+	Selection jobListJSONSelection `json:"selection"`
+	Jobs      []*db.Job            `json:"jobs"`
+	Source    *edgeview.Provenance `json:"source,omitempty"`
+}
+
+// buildJobListModel is the model step of `weft list`: collect the rows the
+// flags select, apply every overlay the renderers read (attempt-outcome
+// overrides, queue-blocked reasons, submitter sessions), and capture the
+// selection bounds. The render step needs no database after this returns.
+func buildJobListModel(database *sql.DB, args []string) (*jobListView, error) {
+	jobs, err := collectJobsForList(database, args)
+	if err != nil {
+		return nil, err
 	}
-	return printJobsWithSelection(database, jobs, currentJobListJSONSelection())
+	applyAttemptOutcomeOverrides(database, jobs)
+	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
+	// The model is rendered without a database — as the hub view, on an edge —
+	// so the submitter session is populated unconditionally here rather than
+	// per-format at render time.
+	if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
+		return nil, err
+	}
+	return &jobListView{Jobs: jobs, Selection: currentJobListJSONSelection()}, nil
 }
 
 func runListTUI(cmd *cobra.Command, readDB *sql.DB, args []string) error {
@@ -402,6 +450,12 @@ func syncSkyForList(parent context.Context, database *sql.DB) []string {
 // --since widens the horizon. --limit caps within this window; it does not
 // widen it.
 const defaultListMaxAgeDays = 7
+
+// defaultListLimit is the row cap a bare `weft job list` applies. The hub view
+// publishes exactly this bounded default listing, so on an edge a larger
+// --limit reaches beyond what the view carries and is refused with that
+// bound named.
+const defaultListLimit = 50
 
 // listOlderHiddenCount records how many jobs matched the current list filters
 // but were hidden by the default recency window. The companion known bit keeps
@@ -899,7 +953,7 @@ func showJob(database *sql.DB, id int64) error {
 		fmt.Printf("Best Effort:  %s\n", strings.Join(job.BestEffortInputs, ", "))
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
-	printExternalBindingSummary(database, job, "External:     ", "              ")
+	printExternalBindingSummary(os.Stdout, database, job, "External:     ", "              ")
 	fmt.Printf("Start Time:   %s\n", util.FormatUnixTimeOr(job.StartTime, "2006-01-02 15:04:05", util.EmptyCellCLI))
 	if job.EndTime != nil {
 		fmt.Printf("End Time:     %s\n", time.Unix(*job.EndTime, 0).Format("2006-01-02 15:04:05"))
@@ -915,7 +969,7 @@ func showJob(database *sql.DB, id int64) error {
 	if progress := jobProgressSummary(database, job); progress != "" {
 		fmt.Printf("Progress:     %s\n", progress)
 	}
-	printJobLocalDiagnostics(database, job)
+	printJobLocalDiagnostics(os.Stdout, database, job)
 	printJobMoveSummary(database, job)
 	printJobAttemptSummary(database, job)
 
@@ -942,13 +996,13 @@ func namedAssetInputPaths(database *sql.DB, inputs []string) ([]string, error) {
 	return paths, nil
 }
 
-func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nextPrefix string) {
+func printExternalBindingSummary(w io.Writer, database *sql.DB, job *db.Job, firstPrefix, nextPrefix string) {
 	if database == nil || job == nil || job.Backend != db.BackendSkyPilot {
 		return
 	}
 	binding, err := db.GetExternalJobBindingByJobID(database, job.ID)
 	if err != nil {
-		fmt.Printf("%sSkyPilot (binding unavailable)\n", firstPrefix)
+		fmt.Fprintf(w, "%sSkyPilot (binding unavailable)\n", firstPrefix)
 		return
 	}
 	for i, line := range externalBindingSummaryLines(job, binding, time.Now()) {
@@ -956,7 +1010,7 @@ func printExternalBindingSummary(database *sql.DB, job *db.Job, firstPrefix, nex
 		if i == 0 {
 			prefix = firstPrefix
 		}
-		fmt.Printf("%s%s\n", prefix, line)
+		fmt.Fprintf(w, "%s%s\n", prefix, line)
 	}
 }
 
@@ -1062,6 +1116,16 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 func printJobsWithSelection(database *sql.DB, jobs []*db.Job, selection jobListJSONSelection) error {
 	applyAttemptOutcomeOverrides(database, jobs)
 	queueblock.Apply(jobs, queueblock.Fetch(jobs, 5*time.Second))
+	return printJobListModel(database, &jobListView{Jobs: jobs, Selection: selection})
+}
+
+// printJobListModel is the render step: the model is fully populated, and the
+// only database use left is the grouped-status layout, which reads launch
+// state the model does not carry. That layout is hub-only; the edge refuses
+// --group-by rather than rendering it from a partial picture.
+func printJobListModel(database *sql.DB, model *jobListView) error {
+	jobs := model.Jobs
+	selection := model.Selection
 
 	if listGroupBy == "status" {
 		if groupedUnprocessedViewExcludesCanceled() {
@@ -1088,7 +1152,7 @@ func printJobsWithSelection(database *sql.DB, jobs []*db.Job, selection jobListJ
 		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultJSONColumnKeys); err != nil {
 			return err
 		}
-		return writeJobListJSON(os.Stdout, jobs, cols, selection)
+		return writeJobListJSON(os.Stdout, jobs, cols, selection, nil)
 	case "tsv", "tab":
 		cols, err := terminal.ResolveColumns(listColumns, terminal.DefaultTSVColumnKeys)
 		if err != nil {
@@ -1142,11 +1206,14 @@ func (order jobListJSONOrder) valid() bool {
 
 // jobListJSONEnvelope is the versioned job-list machine surface. Selection is
 // never omitted. See JobListMachineSurface in specs/job-lifecycle.allium.
+// Source is set only when the bytes are rendered on an edge, where every
+// rendered fact carries its provenance.
 type jobListJSONEnvelope struct {
 	Kind      string               `json:"kind"`
 	Version   int                  `json:"version"`
 	Selection jobListJSONSelection `json:"selection"`
 	Jobs      json.RawMessage      `json:"jobs"`
+	Source    *edgeview.Provenance `json:"source,omitempty"`
 }
 
 type jobListJSONConstraint struct {
@@ -1239,7 +1306,10 @@ func (selection jobListJSONSelection) validate() error {
 	return nil
 }
 
-func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, selection jobListJSONSelection) error {
+// writeJobListJSON is the single JSON serializer for a job listing: the hub's
+// --format json (source nil), the edge's (source set), and any caller in
+// between all produce the envelope through this one function.
+func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, selection jobListJSONSelection, source *edgeview.Provenance) error {
 	if err := selection.validate(); err != nil {
 		return err
 	}
@@ -1252,6 +1322,7 @@ func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, se
 		Version:   jobListJSONVersion,
 		Selection: selection,
 		Jobs:      json.RawMessage(bytes.TrimSpace(rows.Bytes())),
+		Source:    source,
 	}
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

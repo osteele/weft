@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -128,7 +129,7 @@ func TestAttemptProvenanceSurfacesExplicitLogCommand(t *testing.T) {
 	}
 
 	infoOut := captureStdout(t, func() {
-		printAttemptsSection(&cobra.Command{}, database, job)
+		printAttemptsSection(os.Stdout, os.Stderr, database, job)
 	})
 	wantLogCommand := fmt.Sprintf("weft log wj%d --attempt %d", job.ID, failed.AttemptNumber)
 	if !strings.Contains(infoOut, wantLogCommand) {

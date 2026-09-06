@@ -429,6 +429,7 @@ func init() {
 		cmd.Flags().BoolVar(&jobInfoSync, "sync", false, "Perform full sync (30s timeout)")
 		cmd.Flags().BoolVar(&jobInfoNoSync, "no-sync", false, "Skip syncing job statuses")
 		cmd.Flags().BoolVar(&jobInfoAllAttempts, "all-attempts", false, "List every attempt (default: collapse same-host runs)")
+		cmd.Flags().BoolVar(&jobInfoJSON, "json", false, "Print machine-readable JSON")
 	}
 
 	// Copy flags from run command to job run
@@ -979,6 +980,7 @@ var (
 	jobInfoSync        bool
 	jobInfoNoSync      bool
 	jobInfoAllAttempts bool
+	jobInfoJSON        bool
 )
 
 var quickSyncJobsFunc = targetedSyncJobs
@@ -986,6 +988,9 @@ var runJobInfoFromInfoFunc = runJobInfo
 var runInstanceStatusFromInfoFunc = runInstanceStatus
 
 func runInfo(cmd *cobra.Command, args []string) error {
+	if activeEdgeMirror != nil {
+		return runJobInfoEdge(cmd, args, activeEdgeMirror)
+	}
 	// info/show is a read-only router. Route to instances only when an explicit
 	// wi prefix is present; bare numerics (and wj IDs) resolve to jobs, since an
 	// instance is always wi-prefixed and a bare number is never an instance.
@@ -1000,11 +1005,16 @@ func runInfo(cmd *cobra.Command, args []string) error {
 	if err := run(cmd, args); err != nil {
 		return err
 	}
-	writeSessionUnprocessedReminderFor(cmd.OutOrStdout())
+	if !jobInfoJSON {
+		writeSessionUnprocessedReminderFor(cmd.OutOrStdout())
+	}
 	return nil
 }
 
 func runJobInfo(cmd *cobra.Command, args []string) error {
+	if activeEdgeMirror != nil {
+		return runJobInfoEdge(cmd, args, activeEdgeMirror)
+	}
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
 		return err
@@ -1049,6 +1059,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 	var errorsList []string
 	printed := 0
+	views := make([]jobPresentationView, 0, len(jobIDs))
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
@@ -1059,286 +1070,29 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %s not found", ids.FormatJobID(jobID)))
 			continue
 		}
+		view, err := buildJobInfoPresentation(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, err.Error())
+			continue
+		}
+		views = append(views, view)
+		if jobInfoJSON {
+			continue
+		}
 		if printed > 0 {
-			fmt.Println("---")
+			fmt.Fprintln(cmd.OutOrStdout(), "---")
 		}
 		printed++
-		hydrateQueueBlockedReasons([]*db.Job{job})
-		display := queueblock.Display(job, nil)
-
-		// Show full job details
-		fmt.Printf("Job ID:      %s\n", ids.FormatJobID(job.ID))
-		fmt.Printf("Host:        %s\n", job.TargetDisplay())
-		printJobLifecycleProof(database, job)
-		// Show status with waiting info. Tombstoned annotation comes
-		// inline so the operator notices it before reading further —
-		// otherwise a tombstoned job looks identical to an active queued
-		// one and the autopilot's "ignored" decision is invisible.
-		tombstone := ""
-		if job.Tombstoned {
-			tombstone = " [tombstoned, ignored by autopilot]"
-		}
-		if display.Kind != "" {
-			fmt.Printf("Status:      %s%s\n", display.Status, tombstone)
-			// A placement-avenue failure carries a structured launch/reuse
-			// breakdown — print every avenue, not just the truncated head of
-			// the joined flat string. Single-cause blockers fall through to
-			// the merged flat reasons.
-			if s := blockreason.ForJob(job); s.IsPlacementFailure() {
-				fmt.Printf("Reason:      %s\n", s.Summary)
-				for _, line := range s.DetailLines() {
-					fmt.Printf("             %s\n", line)
-				}
-			} else {
-				reasons := blockedReasonDetailLines(database, job, display.Reason)
-				for i, reason := range reasons {
-					if i == 0 {
-						fmt.Printf("Reason:      %s\n", reason)
-					} else {
-						fmt.Printf("             %s\n", reason)
-					}
-				}
-			}
-		} else {
-			statusText := job.EffectiveStatus()
-			if statusText == db.StatusQueued && job.TargetKind() == db.JobTargetUnplaced {
-				// Bare "queued" reads as "queued on <last attempt's
-				// instance>" when an attempt table follows. Spell out
-				// that the job is not placed and is waiting for the
-				// autopilot to assign a target.
-				statusText = "queued (unplaced — awaiting placement)"
-			}
-			fmt.Printf("Status:      %s%s\n", statusText, tombstone)
-		}
-		maybeWarnStaleRunning(os.Stdout, job)
-		printExternalBindingSummary(database, job, "External:    ", "             ")
-		printPlacementLines(queuedPlacementLines(database, job), 12)
-		if job.Priority > 0 {
-			fmt.Printf("Priority:    %d\n", job.Priority)
-		}
-		// If the autopilot has paused this job's scope via the runaway
-		// breaker, surface the trip details here. The canned blocked
-		// reason ("paused: repeated launch failures without progress")
-		// gives no actionable info; the structured trip metrics tell
-		// the operator which threshold actually fired.
-		if job.EffectiveStatus() == "queued" {
-			if info, err := campaign.LookupRunawayBreakerForJob(database, job); err == nil && info != nil {
-				age := time.Since(info.TrippedAt).Truncate(time.Second)
-				fmt.Printf("Blocked by:  runaway-breaker (%s), tripped %s ago\n", info.ScopeLabel(), age)
-				fmt.Printf("             %s\n", info.MetricsLine())
-				fmt.Printf("             reset: weft autopilot blocked --unblock\n")
-			}
-		}
-		x := explain.ForJob(database, job, time.Now())
-		if explanationHasHighConfidenceBlocker(x) {
-			fmt.Printf("%-12s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
-		}
-		if x.SuggestedAction != "" && x.SuggestedAction != "none" {
-			fmt.Printf("Explain:     %s\n", x.SuggestedAction)
-		}
-		if explanationHasHighConfidenceBlocker(x) {
-			printDiagnoseJobHint("Diagnose", 12, job.ID)
-		}
-		fmt.Printf("Description: %s\n", job.Description)
-		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
-		fmt.Printf("Command:     %s\n", job.Command)
-		if err := printJobPayloads(os.Stdout, database, job.ID); err != nil {
-			errorsList = append(errorsList, err.Error())
-		}
-		if len(job.EnvVars) > 0 {
-			fmt.Printf("Env Vars:    %s\n", formatEnvVarsForDisplay(job.EnvVars))
-		}
-		if job.Metadata != nil {
-			printDiskPreview(os.Stdout, job.Metadata.Disk)
-			printJobSourceMetadata(os.Stdout, job.Metadata.Source)
-		}
-		if tags := job.DisplayTags(); len(tags) > 0 {
-			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
-		}
-		now := time.Now()
-		liveRentalTiming := job.LaunchID != nil && !db.IsTerminalStatus(job.EffectiveStatus())
-		elapsed := estimate.JobElapsedDuration(job, now)
-		if elapsed > 0 {
-			if liveRentalTiming {
-				fmt.Printf("Elapsed:     %s (provisional; start time may be reconciled)\n", db.FormatDuration(int64(elapsed.Seconds())))
-			} else {
-				fmt.Printf("Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
-			}
-		}
-		estimateTotal, hasEstimate := estimate.JobTimeEstimate(job, database, now)
-		if hasEstimate {
-			fmt.Printf("Est. Time:   %s\n", estimateTotal.FormatWithBounds())
-			if elapsed > 0 {
-				eta := estimate.Remaining(estimateTotal, elapsed)
-				fmt.Printf("ETA:         %s\n", eta.FormatWithBounds())
-			}
-		}
-
-		// Show effective command/directory if different
-		effectiveCmd := job.EffectiveCommand()
-		effectiveDir := job.EffectiveWorkingDir()
-		if effectiveCmd != job.Command {
-			fmt.Printf("  (effective: %s)\n", effectiveCmd)
-		}
-		if effectiveDir != job.WorkingDir {
-			fmt.Printf("  (effective dir: %s)\n", effectiveDir)
-		}
-
-		// Show GPU if present
-		if gpuDev := job.GPUDevice(); gpuDev != "" {
-			if job.GPUClass != "" {
-				fmt.Printf("GPU:         %s (class: %s)\n", gpuDev, job.GPUClass)
-			} else {
-				fmt.Printf("GPU:         %s\n", gpuDev)
-			}
-		} else if job.GPUClass != "" {
-			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
-		}
-		printDeliveredGPU(database, job)
-		printInterconnect(database, job)
-		if job.CLIResourceOverrides != nil && len(job.CLIResourceOverrides.MachineAffinity) > 0 {
-			fmt.Printf("Pinned to:   %s (machine affinity)\n",
-				strings.Join(job.CLIResourceOverrides.MachineAffinity, ", "))
-			if job.EffectiveStatus() == db.StatusQueued {
-				fmt.Printf("             a pinned job waits for that machine to reappear; \"queued\" here is expected, not stuck\n")
-			}
-		}
-		if policy := formatJobRentalPolicy(job); policy != "" {
-			fmt.Printf("Rental policy: %s\n", policy)
-		}
-		// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
-		// CPU-only job must not display an inert "Arch cap" that reads as
-		// the placement blocker.
-		if job.RequestsGPU() {
-			if job.MaxComputeCap != "" && job.MaxComputeCap != placement.MaxComputeCapAny {
-				fmt.Printf("Arch cap:    sm_%s (excludes GPUs with higher compute capability)\n", job.MaxComputeCap)
-			}
-			if line := driverFloorLine(job); line != "" {
-				fmt.Printf("Driver floor: %s\n", line)
-			}
-		}
-
-		// Show timing info
-		// Show created/queued time if different from start time
-		if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
-			label := "Created"
-			if job.EffectiveStatus() == db.StatusQueued {
-				label = "Queued"
-			}
-			fmt.Printf("%-12s %s\n", label+":", formatUnixTime(job.CreatedAt))
-		}
-		if job.StartTime > 0 {
-			if liveRentalTiming {
-				fmt.Printf("Started:     %s (provisional; may be reconciled)\n", formatUnixTime(job.StartTime))
-			} else {
-				fmt.Printf("Started:     %s\n", formatUnixTime(job.StartTime))
-			}
-		}
-		if job.EndTime != nil {
-			fmt.Printf("Ended:       %s\n", formatUnixTime(*job.EndTime))
-			if job.StartTime > 0 {
-				duration := *job.EndTime - job.StartTime
-				fmt.Printf("Duration:    %s\n", db.FormatDuration(duration))
-			}
-		}
-		if job.ExitCode != nil {
-			fmt.Printf("Exit Code:   %d\n", *job.ExitCode)
-		}
-		if reason := humanizeFailureReason(job.FailureReason); reason != "" {
-			fmt.Printf("Reason:      %s\n", reason)
-		}
-		if hint := driverFloorSatisfiedHint(database, job); hint != "" {
-			fmt.Print(hint)
-		}
-		if job.FailureReason == "killed_stdout_silence" {
-			fmt.Printf("Hint:        Emit a periodic progress line so the silence watchdog sees output.\n")
-			fmt.Printf("             Weft parses any of these formats and displays the parsed progress:\n")
-			fmt.Printf("               Progress: 42%%\n")
-			fmt.Printf("               Progress: 9/14\n")
-			fmt.Printf("               Progress: 9 of 14\n")
-			fmt.Printf("             You can also write checkpoints to the job's output dir so the run can be resumed.\n")
-		}
-		if job.ErrorMessage != "" {
-			fmt.Printf("Error:       %s\n", job.ErrorMessage)
-		}
-		printJobLocalDiagnostics(database, job)
-		if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
-			if rentalSummary.Provisional {
-				fmt.Printf("Cost:        $%.2f (provisional; %s to date, finalized after teardown)\n", rentalSummary.Cost, rentalSummary.Basis)
-			} else {
-				fmt.Printf("Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
-			}
-		}
-		if progress := jobProgressSummary(database, job); progress != "" {
-			fmt.Printf("Progress:    %s\n", progress)
-		}
-
-		printAttemptsSection(cmd, database, job)
-
-		// Resource usage
-		if job.Metadata != nil && job.Metadata.Resource != nil {
-			r := job.Metadata.Resource
-			if r.UserCPUSecs != nil || r.SysCPUSecs != nil {
-				userStr := "0s"
-				sysStr := "0s"
-				if r.UserCPUSecs != nil {
-					userStr = db.FormatDuration(int64(*r.UserCPUSecs))
-				}
-				if r.SysCPUSecs != nil {
-					sysStr = db.FormatDuration(int64(*r.SysCPUSecs))
-				}
-				fmt.Printf("CPU Time:    %s user, %s sys\n", userStr, sysStr)
-			}
-			if r.PeakRSSKB != nil {
-				fmt.Printf("Peak Memory: %s\n", formatMemoryKB(*r.PeakRSSKB))
-			}
-			if r.MaxGPUMemMiB != nil {
-				fmt.Printf("GPU Memory:  %d MiB (peak)\n", *r.MaxGPUMemMiB)
-			}
-		}
-
-		// Telemetry summary for benchmark jobs
-		if job.HasTag(db.TagBenchmark) {
-			var stats *db.GPUTelemetryStats
-			if job.LatestRunID != nil {
-				sources, telErr := loadRunTelemetry(database, *job.LatestRunID)
-				if telErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry: %v\n", telErr)
-				} else {
-					stats = sources.gpuStats()
-				}
-			}
-			if stats == nil {
-				// Jobs recorded before attempts were tracked have timeseries
-				// rows scoped to the job rather than to a run.
-				samples, telErr := db.GetTimeseries(database, job.ID)
-				if telErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry: %v\n", telErr)
-				} else if len(samples) > 0 {
-					stats = db.ComputeGPUTelemetryStats(samples)
-				}
-			}
-			if stats != nil {
-				fmt.Println()
-				fmt.Println("Telemetry:")
-				if stats.TempMax != nil && stats.TempMean != nil {
-					fmt.Printf("  GPU Temp:  %d°C peak, %.0f°C mean\n", *stats.TempMax, *stats.TempMean)
-				}
-				if stats.UtilMean != nil {
-					fmt.Printf("  GPU Util:  %.0f%% mean\n", *stats.UtilMean)
-				}
-				if stats.ClockMean != nil {
-					fmt.Printf("  GPU Clock: %.0f MHz mean\n", *stats.ClockMean)
-				}
-				if stats.Throttled != nil && *stats.Throttled {
-					fmt.Printf("  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
-				}
-			}
+		if err := renderJobPresentation(cmd.OutOrStdout(), cmd.ErrOrStderr(), view); err != nil {
+			return err
 		}
 	}
 
 	if len(errorsList) > 0 {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	if jobInfoJSON {
+		return writeJobPresentationJSON(cmd.OutOrStdout(), views)
 	}
 	return nil
 }
@@ -1362,7 +1116,7 @@ func printJobPayloads(w io.Writer, database *sql.DB, jobID int64) error {
 	return nil
 }
 
-func printJobLifecycleProof(database *sql.DB, job *db.Job) {
+func printJobLifecycleProof(w io.Writer, database *sql.DB, job *db.Job) {
 	if job == nil {
 		return
 	}
@@ -1370,10 +1124,10 @@ func printJobLifecycleProof(database *sql.DB, job *db.Job) {
 	if launchID := jobLifecycleLaunchID(database, job); launchID != nil {
 		launch, err := db.GetLaunch(database, *launchID)
 		if err != nil || launch == nil {
-			fmt.Printf("Lifecycle:   target_kind=%s instance_id=%s\n", targetKind, ids.FormatInstanceID(*launchID))
+			fmt.Fprintf(w, "Lifecycle:   target_kind=%s instance_id=%s\n", targetKind, ids.FormatInstanceID(*launchID))
 			return
 		}
-		fmt.Printf("Lifecycle:   target_kind=%s provider=%s instance_id=%s provider_instance_id=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
+		fmt.Fprintf(w, "Lifecycle:   target_kind=%s provider=%s instance_id=%s provider_instance_id=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
 			lifecycleTargetKind(job, launch),
 			lifecycleValue(launch.Provider),
 			ids.FormatInstanceID(launch.ID),
@@ -1384,7 +1138,7 @@ func printJobLifecycleProof(database *sql.DB, job *db.Job) {
 		)
 		return
 	}
-	fmt.Printf("Lifecycle:   target_kind=%s\n", targetKind)
+	fmt.Fprintf(w, "Lifecycle:   target_kind=%s\n", targetKind)
 }
 
 // printDeliveredGPU reports the hardware a rental actually provided, and warns
@@ -1394,7 +1148,7 @@ func printJobLifecycleProof(database *sql.DB, job *db.Job) {
 // `>=NGB` predicate. A trailing memory token in the class name binds neither —
 // it is stripped before matching — so `--gpu a100-sxm4-80gb` can be served by a
 // 40GB card with nothing in the job's own output contradicting the request.
-func printDeliveredGPU(database *sql.DB, job *db.Job) {
+func printDeliveredGPU(w io.Writer, database *sql.DB, job *db.Job) {
 	launch := jobLaunch(database, job)
 	if launch == nil {
 		return
@@ -1403,9 +1157,9 @@ func printDeliveredGPU(database *sql.DB, job *db.Job) {
 	if delivered == "" {
 		return
 	}
-	fmt.Printf("Delivered:   %s\n", delivered)
+	fmt.Fprintf(w, "Delivered:   %s\n", delivered)
 	if warning := gpuMemorySuffixWarning(job.GPUClass, launch.GPUMemGB); warning != "" {
-		fmt.Print(warning)
+		fmt.Fprint(w, warning)
 	}
 }
 
@@ -1530,40 +1284,40 @@ func formatUnixTime(t int64) string {
 
 // printAttemptsSection prints a per-attempt history table for jobs with
 // multiple attempts.
-func printAttemptsSection(cmd *cobra.Command, database *sql.DB, job *db.Job) {
+func printAttemptsSection(w io.Writer, errW io.Writer, database *sql.DB, job *db.Job) {
 	attempts, err := db.ListAttempts(database, job.ID)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: list attempts: %v\n", err)
+		fmt.Fprintf(errW, "warning: list attempts: %v\n", err)
 		return
 	}
 	if len(attempts) == 0 {
 		return
 	}
 	now := time.Now().Unix()
-	fmt.Println()
-	fmt.Printf("Attempts:    %d\n", len(attempts))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Attempts:    %d\n", len(attempts))
 	provenance, provenanceErr := loadAttemptDisplayProvenance(database, job)
 	if provenanceErr == nil && provenance.currentUnstarted {
-		fmt.Printf("Current:     retry queued; no current attempt has started (target: %s)\n", job.TargetDisplay())
+		fmt.Fprintf(w, "Current:     retry queued; no current attempt has started (target: %s)\n", job.TargetDisplay())
 		if provenance.latestStarted != nil {
 			started := provenance.latestStarted
-			fmt.Printf("Evidence:    #%d %s on %s (latest started attempt)\n",
+			fmt.Fprintf(w, "Evidence:    #%d %s on %s (latest started attempt)\n",
 				started.AttemptNumber, attemptStatus(*started), attemptTarget(*started))
-			printAttemptLogHint(job.ID, started)
+			printAttemptLogHint(w, job.ID, started)
 		}
 	}
 	if latest := attempts[0]; latest.StartTime != nil {
-		fmt.Printf("Latest:      #%d started %s on %s\n", latest.AttemptNumber, formatUnixTime(*latest.StartTime), attemptTarget(latest))
+		fmt.Fprintf(w, "Latest:      #%d started %s on %s\n", latest.AttemptNumber, formatUnixTime(*latest.StartTime), attemptTarget(latest))
 	} else if latest := attempts[0]; isAttemptPreflightRejected(latest) {
-		fmt.Printf("Latest:      #%d preflight-rejected on %s\n", latest.AttemptNumber, attemptTarget(latest))
+		fmt.Fprintf(w, "Latest:      #%d preflight-rejected on %s\n", latest.AttemptNumber, attemptTarget(latest))
 	}
 	if previous := previousInstanceList(attempts); previous != "" {
-		fmt.Printf("Previous:    %s\n", previous)
+		fmt.Fprintf(w, "Previous:    %s\n", previous)
 	}
 	if len(attempts) < 2 {
 		return
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  #\tWhen\tTarget\tStatus\tExit\tDuration\tOutcome")
 	if jobInfoAllAttempts {
 		for _, a := range attempts {
@@ -1881,7 +1635,7 @@ func cloudRuntimeFloorForJobInfo(job *db.Job) placement.RuntimeFloor {
 // cannot distinguish one NVLink domain from several bridged islands. The line
 // says which of those it is showing, so a surprising result can be argued
 // with afterwards instead of reconstructed by probing from inside the job.
-func printInterconnect(database *sql.DB, job *db.Job) {
+func printInterconnect(w io.Writer, database *sql.DB, job *db.Job) {
 	requested := job.RequestedInterconnect()
 	launch := jobLaunch(database, job)
 	if launch == nil {
@@ -1909,10 +1663,10 @@ func printInterconnect(database *sql.DB, job *db.Job) {
 	if len(parts) == 0 {
 		return
 	}
-	fmt.Printf("Interconnect: %s\n", strings.Join(parts, " · "))
+	fmt.Fprintf(w, "Interconnect: %s\n", strings.Join(parts, " · "))
 
 	if warning := interconnectTopologyWarning(requested, name, job.RequestedGPUCount()); warning != "" {
-		fmt.Print(warning)
+		fmt.Fprint(w, warning)
 	}
 }
 
@@ -1948,4 +1702,280 @@ func interconnectTopologyWarning(requested, deliveredName string, numGPUs int) s
 		"    present between pairs but not between every pair. Collective\n"+
 		"    timings from a bridged host are not comparable with a single-domain\n"+
 		"    host. Use --interconnect nvlink-uniform to require every pair.\n", numGPUs)
+}
+
+func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) error {
+	hydrateQueueBlockedReasons([]*db.Job{job})
+	display := queueblock.Display(job, nil)
+
+	// Show full job details
+	fmt.Fprintf(w, "Job ID:      %s\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(w, "Host:        %s\n", job.TargetDisplay())
+	printJobLifecycleProof(w, database, job)
+	// Show status with waiting info. Tombstoned annotation comes
+	// inline so the operator notices it before reading further —
+	// otherwise a tombstoned job looks identical to an active queued
+	// one and the autopilot's "ignored" decision is invisible.
+	tombstone := ""
+	if job.Tombstoned {
+		tombstone = " [tombstoned, ignored by autopilot]"
+	}
+	if display.Kind != "" {
+		fmt.Fprintf(w, "Status:      %s%s\n", display.Status, tombstone)
+		// A placement-avenue failure carries a structured launch/reuse
+		// breakdown — print every avenue, not just the truncated head of
+		// the joined flat string. Single-cause blockers fall through to
+		// the merged flat reasons.
+		if s := blockreason.ForJob(job); s.IsPlacementFailure() {
+			fmt.Fprintf(w, "Reason:      %s\n", s.Summary)
+			for _, line := range s.DetailLines() {
+				fmt.Fprintf(w, "             %s\n", line)
+			}
+		} else {
+			reasons := blockedReasonDetailLines(database, job, display.Reason)
+			for i, reason := range reasons {
+				if i == 0 {
+					fmt.Fprintf(w, "Reason:      %s\n", reason)
+				} else {
+					fmt.Fprintf(w, "             %s\n", reason)
+				}
+			}
+		}
+	} else {
+		statusText := job.EffectiveStatus()
+		if statusText == db.StatusQueued && job.TargetKind() == db.JobTargetUnplaced {
+			// Bare "queued" reads as "queued on <last attempt's
+			// instance>" when an attempt table follows. Spell out
+			// that the job is not placed and is waiting for the
+			// autopilot to assign a target.
+			statusText = "queued (unplaced — awaiting placement)"
+		}
+		fmt.Fprintf(w, "Status:      %s%s\n", statusText, tombstone)
+	}
+	maybeWarnStaleRunning(w, job)
+	printExternalBindingSummary(w, database, job, "External:    ", "             ")
+	printPlacementLines(w, queuedPlacementLines(database, job), 12)
+	if job.Priority > 0 {
+		fmt.Fprintf(w, "Priority:    %d\n", job.Priority)
+	}
+	// If the autopilot has paused this job's scope via the runaway
+	// breaker, surface the trip details here. The canned blocked
+	// reason ("paused: repeated launch failures without progress")
+	// gives no actionable info; the structured trip metrics tell
+	// the operator which threshold actually fired.
+	if job.EffectiveStatus() == "queued" {
+		if info, err := campaign.LookupRunawayBreakerForJob(database, job); err == nil && info != nil {
+			age := time.Since(info.TrippedAt).Truncate(time.Second)
+			fmt.Fprintf(w, "Blocked by:  runaway-breaker (%s), tripped %s ago\n", info.ScopeLabel(), age)
+			fmt.Fprintf(w, "             %s\n", info.MetricsLine())
+			fmt.Fprintf(w, "             reset: weft autopilot blocked --unblock\n")
+		}
+	}
+	x := explain.ForJob(database, job, time.Now())
+	if explanationHasHighConfidenceBlocker(x) {
+		fmt.Fprintf(w, "%-12s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
+	}
+	if x.SuggestedAction != "" && x.SuggestedAction != "none" {
+		fmt.Fprintf(w, "Explain:     %s\n", x.SuggestedAction)
+	}
+	if explanationHasHighConfidenceBlocker(x) {
+		printDiagnoseJobHint(w, "Diagnose", 12, job.ID)
+	}
+	fmt.Fprintf(w, "Description: %s\n", job.Description)
+	fmt.Fprintf(w, "Directory:   %s\n", job.DisplayWorkingDir())
+	fmt.Fprintf(w, "Command:     %s\n", job.Command)
+	if err := printJobPayloads(w, database, job.ID); err != nil {
+		return err
+	}
+	if len(job.EnvVars) > 0 {
+		fmt.Fprintf(w, "Env Vars:    %s\n", formatEnvVarsForDisplay(job.EnvVars))
+	}
+	if job.Metadata != nil {
+		printDiskPreview(w, job.Metadata.Disk)
+		printJobSourceMetadata(w, job.Metadata.Source)
+	}
+	if tags := job.DisplayTags(); len(tags) > 0 {
+		fmt.Fprintf(w, "Tags:        %s\n", strings.Join(tags, ", "))
+	}
+	now := time.Now()
+	liveRentalTiming := job.LaunchID != nil && !db.IsTerminalStatus(job.EffectiveStatus())
+	elapsed := estimate.JobElapsedDuration(job, now)
+	if elapsed > 0 {
+		if liveRentalTiming {
+			fmt.Fprintf(w, "Elapsed:     %s (provisional; start time may be reconciled)\n", db.FormatDuration(int64(elapsed.Seconds())))
+		} else {
+			fmt.Fprintf(w, "Elapsed:     %s\n", db.FormatDuration(int64(elapsed.Seconds())))
+		}
+	}
+	estimateTotal, hasEstimate := estimate.JobTimeEstimate(job, database, now)
+	if hasEstimate {
+		fmt.Fprintf(w, "Est. Time:   %s\n", estimateTotal.FormatWithBounds())
+		if elapsed > 0 {
+			eta := estimate.Remaining(estimateTotal, elapsed)
+			fmt.Fprintf(w, "ETA:         %s\n", eta.FormatWithBounds())
+		}
+	}
+
+	// Show effective command/directory if different
+	effectiveCmd := job.EffectiveCommand()
+	effectiveDir := job.EffectiveWorkingDir()
+	if effectiveCmd != job.Command {
+		fmt.Fprintf(w, "  (effective: %s)\n", effectiveCmd)
+	}
+	if effectiveDir != job.WorkingDir {
+		fmt.Fprintf(w, "  (effective dir: %s)\n", effectiveDir)
+	}
+
+	// Show GPU if present
+	if gpuDev := job.GPUDevice(); gpuDev != "" {
+		if job.GPUClass != "" {
+			fmt.Fprintf(w, "GPU:         %s (class: %s)\n", gpuDev, job.GPUClass)
+		} else {
+			fmt.Fprintf(w, "GPU:         %s\n", gpuDev)
+		}
+	} else if job.GPUClass != "" {
+		fmt.Fprintf(w, "GPU Class:   %s\n", job.GPUClass)
+	}
+	printDeliveredGPU(w, database, job)
+	printInterconnect(w, database, job)
+	if job.CLIResourceOverrides != nil && len(job.CLIResourceOverrides.MachineAffinity) > 0 {
+		fmt.Fprintf(w, "Pinned to:   %s (machine affinity)\n",
+			strings.Join(job.CLIResourceOverrides.MachineAffinity, ", "))
+		if job.EffectiveStatus() == db.StatusQueued {
+			fmt.Fprintf(w, "             a pinned job waits for that machine to reappear; \"queued\" here is expected, not stuck\n")
+		}
+	}
+	if policy := formatJobRentalPolicy(job); policy != "" {
+		fmt.Fprintf(w, "Rental policy: %s\n", policy)
+	}
+	// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
+	// CPU-only job must not display an inert "Arch cap" that reads as
+	// the placement blocker.
+	if job.RequestsGPU() {
+		if job.MaxComputeCap != "" && job.MaxComputeCap != placement.MaxComputeCapAny {
+			fmt.Fprintf(w, "Arch cap:    sm_%s (excludes GPUs with higher compute capability)\n", job.MaxComputeCap)
+		}
+		if line := driverFloorLine(job); line != "" {
+			fmt.Fprintf(w, "Driver floor: %s\n", line)
+		}
+	}
+
+	// Show timing info
+	// Show created/queued time if different from start time
+	if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
+		label := "Created"
+		if job.EffectiveStatus() == db.StatusQueued {
+			label = "Queued"
+		}
+		fmt.Fprintf(w, "%-12s %s\n", label+":", formatUnixTime(job.CreatedAt))
+	}
+	if job.StartTime > 0 {
+		if liveRentalTiming {
+			fmt.Fprintf(w, "Started:     %s (provisional; may be reconciled)\n", formatUnixTime(job.StartTime))
+		} else {
+			fmt.Fprintf(w, "Started:     %s\n", formatUnixTime(job.StartTime))
+		}
+	}
+	if job.EndTime != nil {
+		fmt.Fprintf(w, "Ended:       %s\n", formatUnixTime(*job.EndTime))
+		if job.StartTime > 0 {
+			duration := *job.EndTime - job.StartTime
+			fmt.Fprintf(w, "Duration:    %s\n", db.FormatDuration(duration))
+		}
+	}
+	if job.ExitCode != nil {
+		fmt.Fprintf(w, "Exit Code:   %d\n", *job.ExitCode)
+	}
+	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
+		fmt.Fprintf(w, "Reason:      %s\n", reason)
+	}
+	if hint := driverFloorSatisfiedHint(database, job); hint != "" {
+		fmt.Fprint(w, hint)
+	}
+	if job.FailureReason == "killed_stdout_silence" {
+		fmt.Fprintf(w, "Hint:        Emit a periodic progress line so the silence watchdog sees output.\n")
+		fmt.Fprintf(w, "             Weft parses any of these formats and displays the parsed progress:\n")
+		fmt.Fprintf(w, "               Progress: 42%%\n")
+		fmt.Fprintf(w, "               Progress: 9/14\n")
+		fmt.Fprintf(w, "               Progress: 9 of 14\n")
+		fmt.Fprintf(w, "             You can also write checkpoints to the job's output dir so the run can be resumed.\n")
+	}
+	if job.ErrorMessage != "" {
+		fmt.Fprintf(w, "Error:       %s\n", job.ErrorMessage)
+	}
+	printJobLocalDiagnostics(w, database, job)
+	if rentalSummary, ok := estimate.RentalCostSummary(database, job, now); ok {
+		if rentalSummary.Provisional {
+			fmt.Fprintf(w, "Cost:        $%.2f (provisional; %s to date, finalized after teardown)\n", rentalSummary.Cost, rentalSummary.Basis)
+		} else {
+			fmt.Fprintf(w, "Cost:        $%.2f (%s)\n", rentalSummary.Cost, rentalSummary.Basis)
+		}
+	}
+	if progress := jobProgressSummary(database, job); progress != "" {
+		fmt.Fprintf(w, "Progress:    %s\n", progress)
+	}
+
+	printAttemptsSection(w, errW, database, job)
+
+	// Resource usage
+	if job.Metadata != nil && job.Metadata.Resource != nil {
+		r := job.Metadata.Resource
+		if r.UserCPUSecs != nil || r.SysCPUSecs != nil {
+			userStr := "0s"
+			sysStr := "0s"
+			if r.UserCPUSecs != nil {
+				userStr = db.FormatDuration(int64(*r.UserCPUSecs))
+			}
+			if r.SysCPUSecs != nil {
+				sysStr = db.FormatDuration(int64(*r.SysCPUSecs))
+			}
+			fmt.Fprintf(w, "CPU Time:    %s user, %s sys\n", userStr, sysStr)
+		}
+		if r.PeakRSSKB != nil {
+			fmt.Fprintf(w, "Peak Memory: %s\n", formatMemoryKB(*r.PeakRSSKB))
+		}
+		if r.MaxGPUMemMiB != nil {
+			fmt.Fprintf(w, "GPU Memory:  %d MiB (peak)\n", *r.MaxGPUMemMiB)
+		}
+	}
+
+	// Telemetry summary for benchmark jobs
+	if job.HasTag(db.TagBenchmark) {
+		var stats *db.GPUTelemetryStats
+		if job.LatestRunID != nil {
+			sources, telErr := loadRunTelemetry(database, *job.LatestRunID)
+			if telErr != nil {
+				fmt.Fprintf(errW, "warning: telemetry: %v\n", telErr)
+			} else {
+				stats = sources.gpuStats()
+			}
+		}
+		if stats == nil {
+			// Jobs recorded before attempts were tracked have timeseries
+			// rows scoped to the job rather than to a run.
+			samples, telErr := db.GetTimeseries(database, job.ID)
+			if telErr != nil {
+				fmt.Fprintf(errW, "warning: telemetry: %v\n", telErr)
+			} else if len(samples) > 0 {
+				stats = db.ComputeGPUTelemetryStats(samples)
+			}
+		}
+		if stats != nil {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "Telemetry:")
+			if stats.TempMax != nil && stats.TempMean != nil {
+				fmt.Fprintf(w, "  GPU Temp:  %d°C peak, %.0f°C mean\n", *stats.TempMax, *stats.TempMean)
+			}
+			if stats.UtilMean != nil {
+				fmt.Fprintf(w, "  GPU Util:  %.0f%% mean\n", *stats.UtilMean)
+			}
+			if stats.ClockMean != nil {
+				fmt.Fprintf(w, "  GPU Clock: %.0f MHz mean\n", *stats.ClockMean)
+			}
+			if stats.Throttled != nil && *stats.Throttled {
+				fmt.Fprintf(w, "  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
+			}
+		}
+	}
+	return nil
 }

@@ -2294,8 +2294,32 @@ hub cannot currently be reached from the edge.
 Commands not listed below either work locally (`help`, `completion`,
 `aliases`, `version`, `plan show`, `plan validate`, `sync inspect`,
 `bug tracker`, `build-agents`, and everything under `weft edge`) or are
-routed through the hub (reads such as `list`, `status`, `info`, `log`, and
-submissions such as `run`, `cancel`, `edit`).
+routed through the hub.
+
+The hub view serves these mirror commands:
+
+- `weft list`, `weft list jobs`, and `weft job list`
+- `weft status JOB` and `weft job status JOB`
+- `weft info JOB`, `weft show JOB`, and `weft job info JOB`
+- `weft log JOB` and `weft job log JOB`
+- `weft host list` and `weft list hosts`
+- `weft autopilot status`
+- `weft incidents`
+
+Other mirror-classified commands remain blocked until their view sections are
+implemented. Submit-classified commands such as `run`, `cancel`, and `edit`
+remain blocked until the submission path is connected end to end.
+
+Each mirrored text result ends with its source and publication age:
+
+```text
+source: hub studio-hub via R2, published 12s ago
+```
+
+JSON results carry the same fields under `source`. A stale section is blocked
+by default. Pass the global `--allow-stale` flag for diagnosis when rendering
+the last published value is preferable; Weft prints a warning with the age and
+configured freshness bound. Automation should not use this flag.
 
 ### Disabled on an edge
 
@@ -2343,9 +2367,9 @@ exit code 21, with the first line of stderr:
 hub not reachable from this edge: <cause>
 ```
 
-The cause is always about what the hub last published or what this binary
-can do — an edge never connects to the hub, so a blocked point never means
-a failed connection.
+The cause is always about what the hub last published or what this binary can
+do. An edge never connects to the hub, so a blocked point never means a failed
+connection.
 
 ### JSON form
 

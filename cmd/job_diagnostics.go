@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -13,16 +14,16 @@ import (
 // job info` and `weft job status`. See specs/job-lifecycle.allium —
 // new local-only signals SHOULD extend this so both verbs grow
 // together.
-func printJobLocalDiagnostics(database *sql.DB, job *db.Job) {
+func printJobLocalDiagnostics(w io.Writer, database *sql.DB, job *db.Job) {
 	for _, line := range jobPublicationDiagnosticLines(database, job) {
-		fmt.Println(line)
+		fmt.Fprintln(w, line)
 	}
 	if !hasFailureSignal(job) {
 		return
 	}
-	printDiagnosisSummary(job)
-	printLaunchTerminationDetail(database, job)
-	printJobPhasesAndPeaks(database, job)
+	printDiagnosisSummary(w, job)
+	printLaunchTerminationDetail(w, database, job)
+	printJobPhasesAndPeaks(w, database, job)
 }
 
 func jobPublicationDiagnosticLines(database *sql.DB, job *db.Job) []string {
@@ -103,7 +104,7 @@ func hasFailureSignal(job *db.Job) bool {
 	return false
 }
 
-func printLaunchTerminationDetail(database *sql.DB, job *db.Job) {
+func printLaunchTerminationDetail(w io.Writer, database *sql.DB, job *db.Job) {
 	if database == nil || job == nil || job.LaunchID == nil || *job.LaunchID == 0 {
 		return
 	}
@@ -112,11 +113,11 @@ func printLaunchTerminationDetail(database *sql.DB, job *db.Job) {
 		return
 	}
 	if launch.Status == db.LaunchStatusFailed || launch.Status == db.LaunchStatusGrace {
-		fmt.Printf("Termination: %s\n", launch.TerminationDetail)
+		fmt.Fprintf(w, "Termination: %s\n", launch.TerminationDetail)
 	}
 }
 
-func printJobPhasesAndPeaks(database *sql.DB, job *db.Job) {
+func printJobPhasesAndPeaks(w io.Writer, database *sql.DB, job *db.Job) {
 	if database == nil || job == nil {
 		return
 	}
@@ -125,9 +126,9 @@ func printJobPhasesAndPeaks(database *sql.DB, job *db.Job) {
 		return
 	}
 	if phases := formatPhaseDurations(t); phases != "" {
-		fmt.Printf("Phases:    %s\n", phases)
+		fmt.Fprintf(w, "Phases:    %s\n", phases)
 	}
 	if gpu := formatGPUMetrics(t); gpu != "" {
-		fmt.Printf("GPU stats: %s\n", gpu)
+		fmt.Fprintf(w, "GPU stats: %s\n", gpu)
 	}
 }

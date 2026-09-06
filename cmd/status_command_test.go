@@ -1330,6 +1330,7 @@ func restoreStatusFlags(t *testing.T) {
 	origNoSync := statusNoSync
 	origFast := statusFast
 	origWait := statusWait
+	origJSON := statusJSON
 	origWaitTimeout := statusWaitTimeout
 	origSSHTimeout := statusSSHTimeout
 	origDaemonLive := daemonLiveFunc
@@ -1339,6 +1340,7 @@ func restoreStatusFlags(t *testing.T) {
 		statusNoSync = origNoSync
 		statusFast = origFast
 		statusWait = origWait
+		statusJSON = origJSON
 		statusWaitTimeout = origWaitTimeout
 		statusSSHTimeout = origSSHTimeout
 		daemonLiveFunc = origDaemonLive
@@ -1348,6 +1350,7 @@ func restoreStatusFlags(t *testing.T) {
 	statusNoSync = false
 	statusFast = false
 	statusWait = false
+	statusJSON = false
 	statusWaitTimeout = 0
 	statusSSHTimeout = 0
 }
@@ -1357,16 +1360,22 @@ func restoreJobInfoFlags(t *testing.T) {
 
 	origSync := jobInfoSync
 	origNoSync := jobInfoNoSync
+	origJSON := jobInfoJSON
+	origAllAttempts := jobInfoAllAttempts
 	origDaemonLive := daemonLiveFunc
 
 	t.Cleanup(func() {
 		jobInfoSync = origSync
 		jobInfoNoSync = origNoSync
+		jobInfoJSON = origJSON
+		jobInfoAllAttempts = origAllAttempts
 		daemonLiveFunc = origDaemonLive
 	})
 
 	jobInfoSync = false
 	jobInfoNoSync = false
+	jobInfoJSON = false
+	jobInfoAllAttempts = false
 }
 
 func restoreInstanceStatusFlags(t *testing.T) {

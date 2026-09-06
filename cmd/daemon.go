@@ -171,6 +171,11 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	if changeSource != nil {
 		defer changeSource.Close()
 	}
+	if !cfg.Edge.IsEdge() && !cfg.Edge.View.Configured() {
+		fmt.Fprintln(os.Stderr, "edge view publisher not configured; set [edge.view] to publish mirror reads")
+	} else if shouldPublishEdgeView(cfg) {
+		go runEdgeViewPublisher(ctx, database, cfg)
+	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))

@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
@@ -685,26 +686,78 @@ func runHostList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if activeEdgeMirror != nil {
+		return runHostListEdge(cmd, args, activeEdgeMirror, mode)
+	}
+
 	if hostListTUIFlag {
 		return runHostListTUI()
 	}
 
-	rows, err := loadHostListRows(time.Now(), mode)
+	// The database is optional for the table surface (a hub with an
+	// unopened ledger still lists its inventory), but --json makes capability
+	// observations part of the contract, so there it is required.
+	database, databaseErr := db.Open()
+	if databaseErr != nil && hostListJSONFlag {
+		return fmt.Errorf("open database for host observations: %w", databaseErr)
+	}
+	if database != nil {
+		defer database.Close()
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	rows, err := loadHostListRows(time.Now(), database, cfg)
 	if err != nil {
 		return err
 	}
+	view := hostListView{Hosts: filterHostListRows(rows, mode)}
 
 	if hostListJSONFlag {
-		return writeHostListJSON(cmd.OutOrStdout(), rows)
+		return writeHostListJSON(cmd.OutOrStdout(), view)
 	}
+	return writeHostListTable(os.Stdout, view.Hosts)
+}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "TYPE\tNAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
+// hostListView is the host-list model: the serializable projection the hub
+// renders and publishes, and the edge decodes and renders. Source is set only
+// on the edge, where every rendered fact carries its provenance.
+type hostListView struct {
+	Hosts  []hostListRow        `json:"hosts"`
+	Source *edgeview.Provenance `json:"source,omitempty"`
+}
+
+// filterHostListRows applies the --rentals mode to a fully loaded row set.
+// The publisher always carries the full set; the filter is a render-time
+// choice, so the edge applies it locally.
+func filterHostListRows(rows []hostListRow, mode hostListRentalsMode) []hostListRow {
+	out := make([]hostListRow, 0, len(rows))
 	for _, row := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		switch mode {
+		case rentalsOnly:
+			if row.Type != "rental" {
+				continue
+			}
+		case rentalsOff:
+			if row.Type == "rental" {
+				continue
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// writeHostListTable renders the host rows as the tabular listing.
+func writeHostListTable(w io.Writer, rows []hostListRow) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "TYPE\tNAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
+	for _, row := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			row.Type, row.Name, row.OSArch, row.CPU, row.Memory, row.GPUs)
 	}
-	return w.Flush()
+	return tw.Flush()
 }
 
 // hostListJSONEnvelope is the machine-readable host surface. Add fields
@@ -715,6 +768,8 @@ type hostListJSONEnvelope struct {
 	Kind    string            `json:"kind"`
 	Version int               `json:"version"`
 	Hosts   []hostListJSONRow `json:"hosts"`
+	// Source is set only on an edge, where the view carries its provenance.
+	Source *edgeview.Provenance `json:"source,omitempty"`
 }
 
 // hostListJSONRow omits the table's OS/CPU/memory/GPU columns, and pairs
@@ -738,13 +793,14 @@ type hostCapabilityObservationJSONRow struct {
 	Detail     string `json:"detail,omitempty"`
 }
 
-func writeHostListJSON(w io.Writer, rows []hostListRow) error {
+func writeHostListJSON(w io.Writer, view hostListView) error {
 	envelope := hostListJSONEnvelope{
 		Kind:    "host_list",
 		Version: 1,
-		Hosts:   make([]hostListJSONRow, 0, len(rows)),
+		Hosts:   make([]hostListJSONRow, 0, len(view.Hosts)),
+		Source:  view.Source,
 	}
-	for _, row := range rows {
+	for _, row := range view.Hosts {
 		jsonRow := hostListJSONRow{
 			Type:            row.Type,
 			Name:            row.Name,
@@ -838,7 +894,12 @@ type hostListRow struct {
 	SSHIdentityFile        string
 }
 
-func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, error) {
+// loadHostListRows is the host-list model step: inventory files, the cached
+// and live ledger state, and capability observations, assembled into one
+// fully populated row set. database may be nil when the ledger cannot be
+// opened — the table surface tolerates that; the caller decides whether its
+// render contract requires the ledger.
+func loadHostListRows(now time.Time, database *sql.DB, cfg *config.Config) ([]hostListRow, error) {
 	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
@@ -854,18 +915,11 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 
 	cachedByName := map[string]*db.CachedHostInfo{}
 	recentHosts := map[string]struct{}{}
-	database, databaseErr := db.Open()
-	if databaseErr != nil && hostListJSONFlag {
-		return nil, fmt.Errorf("open database for host observations: %w", databaseErr)
-	}
 	observationsByHost := map[string][]db.HostCapabilityObservation{}
-	if databaseErr == nil {
-		defer database.Close()
-		if hostListJSONFlag {
-			observationsByHost, err = db.ListAllHostCapabilityObservations(database)
-			if err != nil {
-				return nil, fmt.Errorf("load host capability observations: %w", err)
-			}
+	if database != nil {
+		observationsByHost, err = db.ListAllHostCapabilityObservations(database)
+		if err != nil {
+			return nil, fmt.Errorf("load host capability observations: %w", err)
 		}
 
 		for _, name := range listRecentHostNames(database, now.Add(-defaultHostSyncWindow)) {
@@ -910,25 +964,23 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 	util.NaturalSortStrings(names)
 
 	rows := make([]hostListRow, 0, len(names))
-	if mode != rentalsOnly {
-		for _, name := range names {
-			if spec, ok := specByName[name]; ok {
-				rows = append(rows, hostListRowFromSpec(spec))
+	for _, name := range names {
+		if spec, ok := specByName[name]; ok {
+			rows = append(rows, hostListRowFromSpec(spec))
+			continue
+		}
+		if cached := cachedByName[name]; cached != nil {
+			host := hostinfo.HostFromCachedInfo(cached)
+			if host != nil {
+				host.Name = name
+				rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host, "")))
 				continue
 			}
-			if cached := cachedByName[name]; cached != nil {
-				host := hostinfo.HostFromCachedInfo(cached)
-				if host != nil {
-					host.Name = name
-					rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host, "")))
-					continue
-				}
-			}
-			rows = append(rows, hostListUnknownRow(name))
 		}
+		rows = append(rows, hostListUnknownRow(name))
 	}
 
-	if mode != rentalsOff && database != nil {
+	if database != nil {
 		launches, lerr := db.ListRunningLaunches(database)
 		if lerr == nil {
 			rentalRows := make([]hostListRow, 0, len(launches))
@@ -945,16 +997,10 @@ func loadHostListRows(now time.Time, mode hostListRentalsMode) ([]hostListRow, e
 		}
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
-	}
 	applyHostConfigFields(rows, cfg)
-	if hostListJSONFlag {
-		for i := range rows {
-			if rows[i].Type == "host" {
-				rows[i].CapabilityObservations = observationsByHost[rows[i].Name]
-			}
+	for i := range rows {
+		if rows[i].Type == "host" {
+			rows[i].CapabilityObservations = observationsByHost[rows[i].Name]
 		}
 	}
 	return rows, nil

@@ -28,7 +28,7 @@ func configureTestHosts(t *testing.T, hosts map[string]config.HostConfig) *confi
 func decodeHostListJSON(t *testing.T, rows []hostListRow) (map[string]any, string) {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := writeHostListJSON(&buf, rows); err != nil {
+	if err := writeHostListJSON(&buf, hostListView{Hosts: rows}); err != nil {
 		t.Fatalf("writeHostListJSON: %v", err)
 	}
 	var doc map[string]any
@@ -165,10 +165,6 @@ func TestLoadHostListRowsAttachesStoredCapabilityObservations(t *testing.T) {
 		filepath.Join(configDir, "config.yaml"),
 	)
 	t.Cleanup(restoreConfigPaths)
-	oldJSONFlag := hostListJSONFlag
-	hostListJSONFlag = true
-	t.Cleanup(func() { hostListJSONFlag = oldJSONFlag })
-
 	if err := db.RecordHostCapabilityObservation(database, db.HostCapabilityObservation{
 		Host:       "studio",
 		Label:      "agent:claude",
@@ -179,7 +175,11 @@ func TestLoadHostListRowsAttachesStoredCapabilityObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := loadHostListRows(time.Now(), rentalsOff)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := loadHostListRows(time.Now(), database, cfg)
 	if err != nil {
 		t.Fatalf("loadHostListRows: %v", err)
 	}
@@ -268,10 +268,11 @@ func TestLoadHostListRowsKeepsDisprovedCapabilityAdvisory(t *testing.T) {
 		t.Fatalf("record observation: %v", err)
 	}
 
-	hostListJSONFlag = true
-	t.Cleanup(func() { hostListJSONFlag = false })
-
-	rows, err := loadHostListRows(time.Unix(1_787_700_100, 0), rentalsOff)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := loadHostListRows(time.Unix(1_787_700_100, 0), database, cfg)
 	if err != nil {
 		t.Fatalf("loadHostListRows: %v", err)
 	}

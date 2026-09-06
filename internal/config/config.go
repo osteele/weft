@@ -416,6 +416,11 @@ type EdgeConfig struct {
 	// bucket so that an edge's credentials grant no access to artifacts.
 	// See decision 0026.
 	Inbound R2Config `yaml:"inbound" toml:"inbound"`
+	// View is the hub view bucket: the hub publishes a projection of its
+	// ledger to it, and edges read it with read-only credentials. It is
+	// separate from the inbox bucket so that no edge can overwrite the view
+	// every edge reads.
+	View EdgeViewConfig `yaml:"view" toml:"view"`
 
 	// Edge-side settings.
 
@@ -489,6 +494,93 @@ type ExpectConfig struct {
 // IsEdge reports whether this installation submits to a hub rather than
 // running one.
 func (c EdgeConfig) IsEdge() bool { return strings.EqualFold(c.Role, "edge") }
+
+// EdgeViewConfig configures the hub view: the bucket the hub publishes its
+// ledger projection to and edges read it from, plus the publication cadence
+// (hub side) and the freshness bound (edge side).
+//
+// PublishIntervalSeconds and StaleAfterMinutes are pointers so an explicit
+// zero is distinguishable from an unset key: the defaults are fine, but a
+// configured zero would silently disable the heartbeat or the freshness
+// check, so it is refused rather than defaulted.
+type EdgeViewConfig struct {
+	// AccountID is the Cloudflare account ID.
+	AccountID string `yaml:"account_id" toml:"account_id"`
+	// AccessKeyID is the R2 API access key.
+	AccessKeyID string `yaml:"access_key_id" toml:"access_key_id"`
+	// SecretAccessKey is the R2 API secret key.
+	SecretAccessKey string `yaml:"secret_access_key" toml:"secret_access_key"`
+	// Bucket is the R2 bucket carrying the view.
+	Bucket string `yaml:"bucket" toml:"bucket"`
+	// PublishIntervalSeconds is the hub's manifest heartbeat (default 60): the
+	// view is republished at this cadence even when nothing changed, so a
+	// quiet hub and a dead hub differ.
+	PublishIntervalSeconds *int `yaml:"publish_interval_seconds" toml:"publish_interval_seconds"`
+	// StaleAfterMinutes is the edge's freshness bound (default 5): a section
+	// older than this reads as "hub not reachable", never as an empty result.
+	StaleAfterMinutes *int `yaml:"stale_after_minutes" toml:"stale_after_minutes"`
+}
+
+// DefaultEdgeViewPublishInterval is the hub's manifest heartbeat.
+const DefaultEdgeViewPublishInterval = time.Minute
+
+// DefaultEdgeViewStaleAfter is the edge's freshness bound.
+const DefaultEdgeViewStaleAfter = 5 * time.Minute
+
+// Configured reports whether [edge.view] carries any setting at all.
+func (v EdgeViewConfig) Configured() bool {
+	return v.AccountID != "" || v.AccessKeyID != "" || v.SecretAccessKey != "" ||
+		v.Bucket != "" || v.PublishIntervalSeconds != nil || v.StaleAfterMinutes != nil
+}
+
+// R2 returns the store credentials for the view bucket.
+func (v EdgeViewConfig) R2() R2Config {
+	return R2Config{
+		AccountID:       v.AccountID,
+		AccessKeyID:     v.AccessKeyID,
+		SecretAccessKey: v.SecretAccessKey,
+		Bucket:          v.Bucket,
+	}
+}
+
+// PublishInterval is the hub's publication cadence, with its default.
+func (v EdgeViewConfig) PublishInterval() time.Duration {
+	if v.PublishIntervalSeconds != nil {
+		return time.Duration(*v.PublishIntervalSeconds) * time.Second
+	}
+	return DefaultEdgeViewPublishInterval
+}
+
+// StaleAfter is the edge's freshness bound, with its default.
+func (v EdgeViewConfig) StaleAfter() time.Duration {
+	if v.StaleAfterMinutes != nil {
+		return time.Duration(*v.StaleAfterMinutes) * time.Minute
+	}
+	return DefaultEdgeViewStaleAfter
+}
+
+// Validate refuses a configured [edge.view] whose cadence and bound cannot
+// work together: the edge's staleness bound must exceed the hub's publish
+// interval, or a live hub's sections read as unreachable between heartbeats.
+func (v EdgeViewConfig) Validate() error {
+	if !v.Configured() {
+		return nil
+	}
+	if v.PublishIntervalSeconds != nil && *v.PublishIntervalSeconds <= 0 {
+		return fmt.Errorf("edge.view.publish_interval_seconds must not be zero or negative: " +
+			"a zero heartbeat would make a live hub indistinguishable from a dead one")
+	}
+	if v.StaleAfterMinutes != nil && *v.StaleAfterMinutes <= 0 {
+		return fmt.Errorf("edge.view.stale_after_minutes must not be zero or negative: " +
+			"a zero freshness bound would make every published section read as unreachable")
+	}
+	if interval, bound := v.PublishInterval(), v.StaleAfter(); bound <= interval {
+		return fmt.Errorf("edge.view.stale_after_minutes (%s) must exceed edge.view.publish_interval_seconds (%s): "+
+			"the freshness bound must outlast the heartbeat or a live hub reads as unreachable",
+			bound, interval)
+	}
+	return nil
+}
 
 // Enabled reports whether any edge behavior is configured at all. A hub with no
 // inbound bucket neither polls nor contacts a second store.
@@ -1346,6 +1438,10 @@ func Load() (*Config, error) {
 		if err := yaml.Unmarshal(data, cfg); err != nil {
 			return cfg, err
 		}
+	}
+
+	if err := cfg.Edge.View.Validate(); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil

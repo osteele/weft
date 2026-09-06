@@ -32,15 +32,10 @@ package level, but "no second job" is not observable without job rows), and that
 a submission refused for each distinct reason surfaces that reason to the
 submitter.
 
-### Edge command parity, phases 2–4
+### Edge command parity, phases 3–4
 
-Phase 1 of `docs/planning/edge-command-parity.md` (the classification table, the
-root gate, and the ledger refusal) is in place. What remains:
-
-- **Hub view and mirror reads (phase 2).** The daemon publishes the view; the
-  mirror-classified commands (`list`, `status`, `info`, `log`, `host`,
-  `autopilot status`, `incidents`, and the rest of the mirror set) read it
-  instead of reporting "hub not reachable".
+The gate, ledger refusal, hub view, and first mirror reads from
+`docs/planning/edge-command-parity.md` are in place. What remains:
 - **Submission end to end (phase 3).** The submit command, the inbox poller,
   and provenance on the job row — the "End-to-end submission" item above.
 - **Control and fact payload kinds (phase 4).** `weft.job-control/v1` and

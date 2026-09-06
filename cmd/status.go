@@ -41,6 +41,7 @@ var (
 	statusNoSync      bool
 	statusFast        bool
 	statusWait        bool
+	statusJSON        bool
 	statusWaitTimeout time.Duration
 	statusSSHTimeout  time.Duration
 )
@@ -106,6 +107,7 @@ func addStatusFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
 	cmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
 	cmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
+	cmd.Flags().BoolVar(&statusJSON, "json", false, "Print machine-readable JSON")
 	cmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
 	cmd.Flags().DurationVar(&statusWaitTimeout, "timeout", 0, "Alias for --wait-timeout")
 	cmd.Flags().MarkHidden("timeout")
@@ -113,6 +115,9 @@ func addStatusFlags(cmd *cobra.Command) {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	if activeEdgeMirror != nil {
+		return runJobStatusEdge(cmd, args, activeEdgeMirror)
+	}
 	if len(args) > 0 && isTopLevelStatusCommand(cmd) {
 		kind, err := resolveStatusIDTargetKind(args)
 		if err != nil {
@@ -163,6 +168,9 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 
 	// No args: show all active jobs
 	if len(args) == 0 {
+		if statusJSON {
+			return fmt.Errorf("--json requires at least one job ID; use `weft list --active --format json` for the active-job overview")
+		}
 		if err := showActiveJobs(database); err != nil {
 			return err
 		}
@@ -247,6 +255,7 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	waitRequests := make([]jobStatusRequest, 0, len(jobIDs))
+	views := make([]jobPresentationView, 0, len(jobIDs))
 	waitInputInvalid := false
 	singleJob := len(jobIDs) == 1 && !statusWait
 	printed := 0
@@ -268,11 +277,21 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		view, err := buildJobStatusPresentation(database, jobID, singleJob)
+		if err != nil {
+			return err
+		}
+		views = append(views, view)
+		if statusJSON {
+			continue
+		}
 		if printed > 0 {
-			fmt.Println("---")
+			fmt.Fprintln(cmd.OutOrStdout(), "---")
 		}
 		printed++
-		printSingleJobStatus(database, jobID, job, singleJob, true)
+		if err := renderJobPresentation(cmd.OutOrStdout(), cmd.ErrOrStderr(), view); err != nil {
+			return err
+		}
 	}
 
 	if statusWait {
@@ -296,6 +315,12 @@ func runJobStatus(cmd *cobra.Command, args []string) error {
 		} else {
 			os.Exit(ExitFailed)
 		}
+	}
+	if statusJSON {
+		if err := writeJobPresentationJSON(cmd.OutOrStdout(), views); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	writeSessionUnprocessedReminder(database, cmd.OutOrStdout())
@@ -321,7 +346,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	// authoritative same-run evidence and can arrive after a transient failed
 	// mark, so explicit sync still gets a chance to repair them.
 	if isWaitTerminalStatus(job.EffectiveStatus()) && !(statusSync && job.HasInventoryHost() && job.UsesQueueRunner()) {
-		printJobStatusWithProvenance(database, job, exitOnComplete, provenance)
+		printJobStatusWithProvenance(os.Stdout, database, job, exitOnComplete, provenance)
 		return
 	}
 
@@ -962,83 +987,83 @@ func printJobStatusLineWithContext(database *sql.DB, job *db.Job) {
 
 func printJobStatus(database *sql.DB, job *db.Job, exitOnComplete bool) {
 	provenance, _ := loadAttemptDisplayProvenance(database, job)
-	printJobStatusWithProvenance(database, job, exitOnComplete, provenance)
+	printJobStatusWithProvenance(os.Stdout, database, job, exitOnComplete, provenance)
 }
 
-func printJobStatusWithProvenance(database *sql.DB, job *db.Job, exitOnComplete bool, provenance attemptDisplayProvenance) {
+func printJobStatusWithProvenance(w io.Writer, database *sql.DB, job *db.Job, exitOnComplete bool, provenance attemptDisplayProvenance) {
 	effectiveStatus := job.EffectiveStatus()
 	display := queueblock.Display(job, nil)
 	x := explain.ForJob(database, job, time.Now())
 
-	fmt.Printf("Job ID:   %s\n", ids.FormatJobID(job.ID))
-	fmt.Printf("Host:     %s\n", job.TargetDisplay())
+	fmt.Fprintf(w, "Job ID:   %s\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(w, "Host:     %s\n", job.TargetDisplay())
 	if display.Kind != "" {
-		fmt.Printf("Status:   %s\n", display.Status)
-		fmt.Printf("Reason:   %s\n", display.Reason)
+		fmt.Fprintf(w, "Status:   %s\n", display.Status)
+		fmt.Fprintf(w, "Reason:   %s\n", display.Reason)
 	} else {
-		fmt.Printf("Status:   %s\n", effectiveStatus)
+		fmt.Fprintf(w, "Status:   %s\n", effectiveStatus)
 	}
-	printStatusAttemptProvenance(provenance)
-	printPlacementLines(queuedPlacementLines(database, job), 10)
+	printStatusAttemptProvenance(w, provenance)
+	printPlacementLines(w, queuedPlacementLines(database, job), 10)
 	if explanationHasHighConfidenceBlocker(x) && x.PrimaryReason != display.Reason {
-		fmt.Printf("%-9s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
+		fmt.Fprintf(w, "%-9s %s\n", explanationBlockerLabel(x)+":", explanationBlockerSummary(x))
 	}
 	if x.SuggestedAction != "" && x.SuggestedAction != "none" {
-		fmt.Printf("Explain:  %s\n", x.SuggestedAction)
+		fmt.Fprintf(w, "Explain:  %s\n", x.SuggestedAction)
 	}
 
 	if job.EndTime != nil {
 		if job.StartTime > 0 {
 			duration := *job.EndTime - job.StartTime
-			fmt.Printf("Duration: %s\n", db.FormatDuration(duration))
+			fmt.Fprintf(w, "Duration: %s\n", db.FormatDuration(duration))
 		}
 	} else if effectiveStatus == db.StatusRunning && job.StartTime > 0 {
 		duration := time.Now().Unix() - job.StartTime
-		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
+		fmt.Fprintf(w, "Running:  %s\n", db.FormatDuration(duration))
 	}
-	maybeWarnStaleRunning(os.Stdout, job)
+	maybeWarnStaleRunning(w, job)
 	if effectiveStatus == db.StatusKilled {
-		fmt.Printf("Exit:     killed\n")
+		fmt.Fprintln(w, "Exit:     killed")
 	}
 	if effectiveStatus == db.StatusCanceled {
-		fmt.Printf("Exit:     canceled\n")
+		fmt.Fprintln(w, "Exit:     canceled")
 	}
 
 	if job.ExitCode != nil {
-		fmt.Printf("Exit:     %d\n", *job.ExitCode)
+		fmt.Fprintf(w, "Exit:     %d\n", *job.ExitCode)
 	}
 	if reason := humanizeFailureReason(job.FailureReason); reason != "" {
-		fmt.Printf("Reason:   %s\n", reason)
+		fmt.Fprintf(w, "Reason:   %s\n", reason)
 	}
 	if job.FailureReason == "killed_stdout_silence" {
-		fmt.Printf("Hint:     Emit a periodic progress line so the silence watchdog sees output.\n")
-		fmt.Printf("          Weft parses any of these formats and displays the parsed progress:\n")
-		fmt.Printf("            Progress: 42%%\n")
-		fmt.Printf("            Progress: 9/14\n")
-		fmt.Printf("            Progress: 9 of 14\n")
-		fmt.Printf("          You can also write checkpoints to the job's output dir so the run can be resumed.\n")
+		fmt.Fprintln(w, "Hint:     Emit a periodic progress line so the silence watchdog sees output.")
+		fmt.Fprintln(w, "          Weft parses any of these formats and displays the parsed progress:")
+		fmt.Fprintln(w, "            Progress: 42%")
+		fmt.Fprintln(w, "            Progress: 9/14")
+		fmt.Fprintln(w, "            Progress: 9 of 14")
+		fmt.Fprintln(w, "          You can also write checkpoints to the job's output dir so the run can be resumed.")
 	}
 
-	printJobLocalDiagnostics(database, job)
+	printJobLocalDiagnostics(w, database, job)
 
 	if explanationHasHighConfidenceBlocker(x) {
-		printDiagnoseJobHint("Diagnose", 9, job.ID)
+		printDiagnoseJobHint(w, "Diagnose", 9, job.ID)
 	}
-	fmt.Printf("Details:  weft info %s  # Show directory, command, env vars\n", ids.FormatJobID(job.ID))
+	fmt.Fprintf(w, "Details:  weft info %s  # Show directory, command, env vars\n", ids.FormatJobID(job.ID))
 
 	// Print usage hints
 	if exitOnComplete && usageHintsEnabled() {
-		fmt.Println()
+		fmt.Fprintln(w)
 		if launch, ok := latestJobLaunchWithTermination(database, job, db.TerminationReasonDiskFull); ok {
-			fmt.Printf("Hints:    weft instance disk-report %s  # Show disk-full report\n", ids.FormatInstanceID(launch.ID))
+			fmt.Fprintf(w, "Hints:    weft instance disk-report %s  # Show disk-full report\n", ids.FormatInstanceID(launch.ID))
 		} else if provenance.currentUnstarted && provenance.latestStarted != nil {
-			fmt.Printf("Hints:    weft log %s --attempt %d  # View latest started attempt\n",
+			fmt.Fprintf(w, "Hints:    weft log %s --attempt %d  # View latest started attempt\n",
 				ids.FormatJobID(job.ID), provenance.latestStarted.AttemptNumber)
 		} else {
-			fmt.Printf("Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
+			fmt.Fprintf(w, "Hints:    weft log %s        # View job output\n", ids.FormatJobID(job.ID))
 		}
 		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusQueued || effectiveStatus == db.StatusStarting {
-			fmt.Printf("          weft status %s --wait   # Don't exit until the job completes\n", ids.FormatJobID(job.ID))
+			fmt.Fprintf(w, "          weft status %s --wait   # Don't exit until the job completes\n", ids.FormatJobID(job.ID))
 		}
 	}
 
@@ -1230,28 +1255,28 @@ func printFailedJobSummary(job *db.Job) {
 // printDiagnosisSummary prints the structured diagnosis for a failed job.
 // Resolves via ResolveJobDiagnosis (stored → log-cache fallback) so the
 // summary appears regardless of whether the remediation pipeline ran.
-func printDiagnosisSummary(job *db.Job) {
+func printDiagnosisSummary(w io.Writer, job *db.Job) {
 	d := ResolveJobDiagnosis(job)
 	if d == nil {
 		return
 	}
 
-	fmt.Printf("Diagnosis: %s (%s)\n", d.Message, d.Pattern)
+	fmt.Fprintf(w, "Diagnosis: %s (%s)\n", d.Message, d.Pattern)
 	if d.Solution != "" {
-		fmt.Printf("Solution:  %s\n", d.Solution)
+		fmt.Fprintf(w, "Solution:  %s\n", d.Solution)
 	}
 	for _, line := range d.GPUOOMDetailLines() {
 		// 11-space hang indent matches the value column of "Diagnosis: ".
-		fmt.Printf("           %s\n", line)
+		fmt.Fprintf(w, "           %s\n", line)
 	}
 	if d.Remediable {
 		if job.RetryCount > 0 {
-			fmt.Printf("Remediation: auto-retried (retry #%d)\n", job.RetryCount)
+			fmt.Fprintf(w, "Remediation: auto-retried (retry #%d)\n", job.RetryCount)
 		} else {
-			fmt.Printf("Remediation: remediable but not retried\n")
+			fmt.Fprintf(w, "Remediation: remediable but not retried\n")
 		}
 	}
 	if len(d.MissingAssets) > 0 {
-		fmt.Printf("Missing:   %s\n", strings.Join(d.MissingAssets, ", "))
+		fmt.Fprintf(w, "Missing:   %s\n", strings.Join(d.MissingAssets, ", "))
 	}
 }

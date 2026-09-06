@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -41,27 +42,27 @@ func loadAttemptDisplayProvenance(database *sql.DB, job *db.Job) (attemptDisplay
 	return provenance, nil
 }
 
-func printStatusAttemptProvenance(provenance attemptDisplayProvenance) {
+func printStatusAttemptProvenance(w io.Writer, provenance attemptDisplayProvenance) {
 	if provenance.latest == nil {
 		return
 	}
 	if !provenance.currentUnstarted {
-		fmt.Printf("Attempt:  #%d\n", provenance.latest.AttemptNumber)
+		fmt.Fprintf(w, "Attempt:  #%d\n", provenance.latest.AttemptNumber)
 		return
 	}
-	fmt.Println("Attempt:  current retry has not started")
+	fmt.Fprintln(w, "Attempt:  current retry has not started")
 	if provenance.latestStarted != nil {
 		attempt := provenance.latestStarted
-		fmt.Printf("Evidence: #%d %s on %s (latest started attempt)\n",
+		fmt.Fprintf(w, "Evidence: #%d %s on %s (latest started attempt)\n",
 			attempt.AttemptNumber, attemptStatus(*attempt), attemptTarget(*attempt))
 	}
 }
 
-func printAttemptLogHint(jobID int64, attempt *db.JobAttempt) {
+func printAttemptLogHint(w io.Writer, jobID int64, attempt *db.JobAttempt) {
 	if attempt == nil {
 		return
 	}
-	fmt.Printf("Logs:        weft log %s --attempt %d\n", ids.FormatJobID(jobID), attempt.AttemptNumber)
+	fmt.Fprintf(w, "Logs:        weft log %s --attempt %d\n", ids.FormatJobID(jobID), attempt.AttemptNumber)
 }
 
 func jobForAttempt(job *db.Job, attempt *db.JobAttempt) *db.Job {

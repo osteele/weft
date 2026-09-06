@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -150,6 +151,9 @@ func validateLogArgs(cmd *cobra.Command, args []string) error {
 }
 
 func runLog(cmd *cobra.Command, args []string) error {
+	if activeEdgeMirror != nil {
+		return runLogEdge(cmd, args, activeEdgeMirror)
+	}
 	// Handle --events mode
 	if logEvents {
 		return runEventsLog(cmd)
@@ -299,9 +303,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	// before routing to cloud or on-prem log lookups, even if placement or
 	// prior launch attempts left R2 metadata behind.
 	if job.EffectiveStatus() == db.StatusQueued && job.StartTime == 0 {
-		fmt.Printf("Job %s has not started yet; no logs are available.\n", ids.FormatJobID(job.ID))
-		printPlacementLines(queuedPlacementLines(database, job), 12)
-		fmt.Printf("Attempts:    weft info %s --all-attempts\n", ids.FormatJobID(job.ID))
+		if _, err := io.WriteString(os.Stdout, queuedJobLogNotice(database, job)); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -328,7 +332,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
 			if isComplete || isDefaultTailView {
 				if defaultTailHint && !tailHintPrinted {
-					printDefaultTailHint(jobID)
+					printDefaultTailHint(os.Stdout, jobID)
 					tailHintPrinted = true
 				}
 				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
@@ -390,7 +394,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		runID := currentJobRunID(job)
 		if fullContent, cached := fetchAndCacheFullLog(job.Host, logFile, jobID, runID); cached {
 			if defaultTailHint && !tailHintPrinted {
-				printDefaultTailHint(jobID)
+				printDefaultTailHint(os.Stdout, jobID)
 				tailHintPrinted = true
 			}
 			output := filterLogContent(fullContent, logFrom, logTo, logLines, logGrep)
@@ -445,7 +449,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 	// Process carriage returns - progress bars use \r to overwrite lines
 	if defaultTailHint && !tailHintPrinted {
-		printDefaultTailHint(jobID)
+		printDefaultTailHint(os.Stdout, jobID)
 		tailHintPrinted = true
 	}
 	fmt.Print(processCarriageReturns(stdout))
@@ -526,7 +530,7 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
 			if isComplete || isDefaultTailView {
 				if shouldShowDefaultTailHint(cmd, false) {
-					printDefaultTailHint(job.ID)
+					printDefaultTailHint(os.Stdout, job.ID)
 				}
 				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
 				fmt.Print(processCarriageReturns(output))
@@ -624,7 +628,7 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 	}
 
 	if defaultTailHint {
-		printDefaultTailHint(job.ID)
+		printDefaultTailHint(os.Stdout, job.ID)
 	}
 
 	output := filterLogContent(out, logFrom, logTo, logLines, logGrep)
@@ -802,7 +806,7 @@ func fetchAndDisplayLogFromR2WithDatabase(cmd *cobra.Command, database *sql.DB, 
 	}
 
 	if shouldShowDefaultTailHint(cmd, false) {
-		printDefaultTailHint(job.ID)
+		printDefaultTailHint(os.Stdout, job.ID)
 	}
 
 	output := filterLogContent(fetched.Content, fetched.From, fetched.To, fetched.Lines, logGrep)
@@ -1358,8 +1362,8 @@ func shouldShowDefaultTailHint(cmd *cobra.Command, follow bool) bool {
 	return true
 }
 
-func printDefaultTailHint(jobID int64) {
-	fmt.Printf("(showing last %d lines; run 'weft log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
+func printDefaultTailHint(w io.Writer, jobID int64) {
+	fmt.Fprintf(w, "(showing last %d lines; run 'weft log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
 }
 
 func escapeShellArg(s string) string {
@@ -1472,7 +1476,7 @@ func printPostLogDiagnostics(job *db.Job) {
 	}
 	fmt.Println()
 	fmt.Println("--- diagnosis ---")
-	printDiagnosisSummary(job)
+	printDiagnosisSummary(os.Stdout, job)
 }
 
 // tryLogFromR2 attempts to fetch a log from R2 for an inventory host job.

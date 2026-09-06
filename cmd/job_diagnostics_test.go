@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"database/sql"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,11 +257,11 @@ func TestJobDiagnosticsToleratesNilDatabase(t *testing.T) {
 	launchID := int64(7290)
 	job := &db.Job{ID: 6269, Status: db.StatusFailed, LaunchID: &launchID}
 
-	printLaunchTerminationDetail(nil, job)
-	printJobPhasesAndPeaks(nil, job)
-	printJobLocalDiagnostics(nil, job)
-	printLaunchTerminationDetail(nil, nil)
-	printJobPhasesAndPeaks(nil, nil)
+	printLaunchTerminationDetail(io.Discard, nil, job)
+	printJobPhasesAndPeaks(io.Discard, nil, job)
+	printJobLocalDiagnostics(io.Discard, nil, job)
+	printLaunchTerminationDetail(io.Discard, nil, nil)
+	printJobPhasesAndPeaks(io.Discard, nil, nil)
 }
 
 // With a real handle the same helpers must reach their lookups and tolerate a
@@ -270,7 +271,7 @@ func TestJobDiagnosticsWithDatabaseHandlesMissingLaunch(t *testing.T) {
 	launchID := int64(7290)
 	job := &db.Job{ID: 6269, Status: db.StatusFailed, LaunchID: &launchID}
 
-	printLaunchTerminationDetail(database, job)
-	printJobPhasesAndPeaks(database, job)
-	printJobLocalDiagnostics(database, job)
+	printLaunchTerminationDetail(io.Discard, database, job)
+	printJobPhasesAndPeaks(io.Discard, database, job)
+	printJobLocalDiagnostics(io.Discard, database, job)
 }

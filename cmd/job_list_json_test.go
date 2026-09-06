@@ -279,7 +279,7 @@ func TestJobListJSONSelectionRejectsValuesOutsideClosedVocabularies(t *testing.T
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var output bytes.Buffer
-			if err := writeJobListJSON(&output, nil, nil, tc.selection); err == nil {
+			if err := writeJobListJSON(&output, nil, nil, tc.selection, nil); err == nil {
 				t.Fatal("writeJobListJSON accepted a value outside the closed vocabulary")
 			}
 			if output.Len() != 0 {

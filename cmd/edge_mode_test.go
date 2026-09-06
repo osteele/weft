@@ -98,6 +98,11 @@ func captureGate(t *testing.T, cfg *config.Config, args []string) (stdout, stder
 	// it cannot leak into other tests in this package.
 	resetRefusal := db.RefuseLocalLedger("edge-gate-test")
 	defer resetRefusal()
+	// The gate hands served mirror commands a process-level reader; reset it
+	// so one test's edge invocation cannot leak into another's.
+	prevMirror := activeEdgeMirror
+	activeEdgeMirror = nil
+	defer func() { activeEdgeMirror = prevMirror }()
 	resolved := findCmd(t, strings.TrimSpace(strings.Join(args, " ")))
 	var outBuf, errBuf bytes.Buffer
 	resolved.SetOut(&outBuf)
@@ -132,8 +137,68 @@ func TestEdgeGateDisabledCommand(t *testing.T) {
 }
 
 func TestEdgeGateMirrorCommandBlocked(t *testing.T) {
-	_, stderr, err := captureGate(t, edgeConfig("edge"), []string{"job", "list"})
+	// job predict is mirror-classified but has no view section in this build,
+	// so it still blocks with the phase 1 cause.
+	_, stderr, err := captureGate(t, edgeConfig("edge"), []string{"job", "predict", "wj1"})
 	assertBlocked(t, err, stderr, edgeCauseNoViewReader)
+}
+
+// Every mirror-classified command this build does not serve from the hub view
+// must still block with the phase 1 cause — never fall through to the ledger.
+func TestEdgeGateUnservedMirrorCommandsStillBlocked(t *testing.T) {
+	for path, entry := range edgeCommandModes {
+		if entry.mode != edgeModeMirror {
+			continue
+		}
+		if _, served := edgeMirrorServed[path]; served {
+			continue
+		}
+		_, _, err := captureGate(t, edgeConfig("edge"), strings.Fields(path))
+		var gateErr *EdgeGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("%s: error = %v, want *EdgeGateError", path, err)
+		}
+		if gateErr.Detail != edgeCauseNoViewReader {
+			t.Errorf("%s: cause = %q, want %q", path, gateErr.Detail, edgeCauseNoViewReader)
+		}
+	}
+}
+
+// A served mirror command on an edge with no [edge.view] configured blocks at
+// the gate saying so, rather than reaching for a database.
+func TestEdgeGateServedMirrorWithoutViewConfig(t *testing.T) {
+	_, stderr, err := captureGate(t, edgeConfig("edge"), []string{"host", "list"})
+	if err == nil {
+		t.Fatal("expected the gate to block host list without a view store")
+	}
+	var gateErr *EdgeGateError
+	if !errors.As(err, &gateErr) {
+		t.Fatalf("error type = %T, want *EdgeGateError", err)
+	}
+	if gateErr.ExitCode != edgeExitBlocked {
+		t.Errorf("exit code = %d, want %d", gateErr.ExitCode, edgeExitBlocked)
+	}
+	if !strings.Contains(stderr, "[edge.view]") {
+		t.Errorf("stderr = %q, want a cause naming [edge.view]", stderr)
+	}
+	if activeEdgeMirror != nil {
+		t.Error("a blocked command was handed a view reader")
+	}
+}
+
+// Every served entry must name a real mirror command; a typo here would send
+// a command back to the ledger refusal.
+func TestEdgeMirrorServedEntriesAreMirrorCommands(t *testing.T) {
+	for path := range edgeMirrorServed {
+		entry, ok := edgeCommandModes[path]
+		if !ok {
+			t.Errorf("%s: served but not classified", path)
+			continue
+		}
+		if entry.mode != edgeModeMirror {
+			t.Errorf("%s: served but classified %s", path, entry.mode)
+		}
+	}
 }
 
 func TestEdgeGateSubmitCommandBlocked(t *testing.T) {
@@ -186,8 +251,9 @@ func TestEdgeGateJSONOnDisabled(t *testing.T) {
 }
 
 func TestEdgeGateJSONOnBlocked(t *testing.T) {
-	// autopilot status declares --json and is a mirror command.
-	stdout, _, err := captureGate(t, edgeConfig("edge"), []string{"autopilot", "status", "--json"})
+	// source inspect declares --json and is a mirror command this build does
+	// not serve from the hub view.
+	stdout, _, err := captureGate(t, edgeConfig("edge"), []string{"source", "inspect", "--json"})
 	var gateErr *EdgeGateError
 	if !errors.As(err, &gateErr) {
 		t.Fatalf("error type = %T, want *EdgeGateError", err)
@@ -195,6 +261,34 @@ func TestEdgeGateJSONOnBlocked(t *testing.T) {
 	want := `{"edge":{"outcome":"blocked","cause":"` + edgeCauseNoViewReader + `"}}` + "\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestEdgeJSONRequested(t *testing.T) {
+	listCmd := findCmd(t, "list")
+	hostListCmd := findCmd(t, "host list")
+	daemonRun := findCmd(t, "daemon run")
+	cases := []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+		want bool
+	}{
+		{"json flag", hostListCmd, []string{"host", "list", "--json"}, true},
+		{"json flag false", hostListCmd, []string{"host", "list", "--json=false"}, false},
+		// The JSON surface agents use on list is --format json, not --json.
+		{"format json", listCmd, []string{"list", "--format", "json"}, true},
+		{"format=json", listCmd, []string{"list", "--format=json"}, true},
+		{"format table", listCmd, []string{"list", "--format", "table"}, false},
+		{"format json on command without the flag", daemonRun, []string{"daemon", "run", "--format", "json"}, false},
+		{"json after terminator", hostListCmd, []string{"host", "list", "--", "--json"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := edgeJSONRequested(tc.cmd, tc.args); got != tc.want {
+				t.Errorf("edgeJSONRequested(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 

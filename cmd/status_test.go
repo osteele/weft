@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,7 @@ func TestPrintDiagnosisSummary_GPUOOMMultiLine(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printDiagnosisSummary(job)
+		printDiagnosisSummary(os.Stdout, job)
 	})
 
 	for _, want := range []string{
@@ -228,7 +229,7 @@ func TestPrintDiagnosisSummary_NonGPUOOM_NoExtraLines(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printDiagnosisSummary(job)
+		printDiagnosisSummary(os.Stdout, job)
 	})
 
 	if strings.Contains(out, "main GPU process") || strings.Contains(out, "hint: increase --gpu-mem") {

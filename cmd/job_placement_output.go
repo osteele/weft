@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/osteele/weft/internal/blockreason"
@@ -202,8 +203,8 @@ func runningJobAhead(database *sql.DB, job *db.Job) *db.Job {
 	return nil
 }
 
-func printPlacementLines(lines []jobPlacementLine, labelWidth int) {
+func printPlacementLines(w io.Writer, lines []jobPlacementLine, labelWidth int) {
 	for _, line := range lines {
-		fmt.Printf("%-*s %s\n", labelWidth, line.Label+":", line.Value)
+		fmt.Fprintf(w, "%-*s %s\n", labelWidth, line.Label+":", line.Value)
 	}
 }

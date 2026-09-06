@@ -44,10 +44,12 @@ func assertJSONFieldSet(t *testing.T, surface string, v any, want []string) {
 }
 
 func TestMachineSurfaceFieldSets(t *testing.T) {
-	assertJSONFieldSet(t, "job_list envelope", jobListJSONEnvelope{}, []string{"jobs", "kind", "selection", "version"})
+	// "source" appears only in bytes rendered on an edge (omitted on the hub):
+	// additive, so no version bump.
+	assertJSONFieldSet(t, "job_list envelope", jobListJSONEnvelope{}, []string{"jobs", "kind", "selection", "source", "version"})
 	assertJSONFieldSet(t, "job_list selection", jobListJSONSelection{}, []string{"complete", "constraints", "order"})
 	assertJSONFieldSet(t, "job_list constraint", jobListJSONConstraint{}, []string{"hidden", "kind", "requested", "value"})
-	assertJSONFieldSet(t, "host_list envelope", hostListJSONEnvelope{}, []string{"hosts", "kind", "version"})
+	assertJSONFieldSet(t, "host_list envelope", hostListJSONEnvelope{}, []string{"hosts", "kind", "source", "version"})
 	assertJSONFieldSet(t, "host_list row", hostListJSONRow{}, []string{"capabilities", "capability_observations", "name", "ssh_identity_file", "ssh_target", "type"})
 	assertJSONFieldSet(t, "autopilot_status document", autopilotStateView{}, []string{
 		"active_binary_path", "active_binary_stale", "active_runner_host",
@@ -56,7 +58,7 @@ func TestMachineSurfaceFieldSets(t *testing.T) {
 		"heartbeat_at", "incidents", "kind", "last_pass_duration_ms",
 		"last_pass_error", "last_pass_finished_at", "last_pass_summary",
 		"orphan_streaks", "pass_age_seconds", "pass_started_at", "paused",
-		"paused_at", "paused_by", "paused_reason", "stale_after_seconds",
+		"paused_at", "paused_by", "paused_reason", "source", "stale_after_seconds",
 		"state", "version",
 	})
 	assertJSONFieldSet(t, "autopilot_status price block", priceAuthBlockView{}, []string{

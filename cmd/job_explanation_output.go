@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/osteele/weft/internal/explain"
@@ -39,6 +40,6 @@ func explanationBlockerLabel(x explain.Explanation) string {
 	return "Blocker"
 }
 
-func printDiagnoseJobHint(label string, labelWidth int, jobID int64) {
-	fmt.Printf("%-*s weft diagnose job %s  # Explain blocker and evidence\n", labelWidth, label+":", ids.FormatJobID(jobID))
+func printDiagnoseJobHint(w io.Writer, label string, labelWidth int, jobID int64) {
+	fmt.Fprintf(w, "%-*s weft diagnose job %s  # Explain blocker and evidence\n", labelWidth, label+":", ids.FormatJobID(jobID))
 }
