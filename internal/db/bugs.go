@@ -91,6 +91,9 @@ func SetBugDBPath(path string) func() {
 // or migrate the main jobs database, so bug reporting remains available when
 // jobs.db has a schema mismatch or other unrelated failure.
 func OpenBugDB() (*sql.DB, error) {
+	if err := localLedgerRefusedError("bug"); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(bugDBPath), 0755); err != nil {
 		return nil, fmt.Errorf("create bug database dir: %w", err)
 	}

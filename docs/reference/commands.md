@@ -2282,3 +2282,80 @@ weft budget
 # Check balance and open billing page
 weft budget --open
 ```
+
+## Running on an edge
+
+A host configured with `role = "edge"` under `[edge]` holds no job or bug
+database; the one ledger lives on the hub. Every command on an edge resolves
+to exactly one outcome: it runs as documented above with the hub as its
+source, or it reports that it is disabled on an edge, or it reports that the
+hub cannot currently be reached from the edge.
+
+Commands not listed below either work locally (`help`, `completion`,
+`aliases`, `version`, `plan show`, `plan validate`, `sync inspect`,
+`bug tracker`, `build-agents`, and everything under `weft edge`) or are
+routed through the hub (reads such as `list`, `status`, `info`, `log`, and
+submissions such as `run`, `cancel`, `edit`).
+
+### Disabled on an edge
+
+These commands exercise hub authority and are refused by role. The refusal
+is the first line of stderr, exit code 20:
+
+```text
+disabled on an edge: <reason>
+```
+
+| Command | Reason |
+| --- | --- |
+| `weft autopilot run` / `pause` / `resume` / `budget reset` | placement and instance lifecycle are decided on the hub |
+| `weft budget` | placement and instance lifecycle are decided on the hub |
+| `weft campaign launch` / `terminate` / `safety resume` | placement and instance lifecycle are decided on the hub |
+| `weft cordon` / `uncordon` (also `instance cordon` / `uncordon`) | placement and instance lifecycle are decided on the hub |
+| `weft instance launch` / `terminate` / `extend` / `release` / `new` / `submit` / `ssh` / `audit` / `disk-report` / `mark-credit-exhausted` / `mark-weft-bug` | placement and instance lifecycle are decided on the hub |
+| `weft job move` / `place` / `unplace` / `authorize-price` | placement and instance lifecycle are decided on the hub |
+| `weft launch` / `start` `campaign` or `instance` | placement and instance lifecycle are decided on the hub |
+| `weft move` (and `move jobs`) | placement and instance lifecycle are decided on the hub |
+| `weft new instance` | placement and instance lifecycle are decided on the hub |
+| `weft place` (and `job place`) | placement and instance lifecycle are decided on the hub |
+| `weft provider *` | placement and instance lifecycle are decided on the hub |
+| `weft queue *` (except `queue list` and `queue edit`) | host inventory is administered on the hub |
+| `weft rebalance` / `replan` | placement and instance lifecycle are decided on the hub |
+| `weft runpod *` / `sky *` | placement and instance lifecycle are decided on the hub |
+| `weft terminate` (and `terminate campaign` / `instance`) | placement and instance lifecycle are decided on the hub |
+| `weft host discover` / `setup` / `doctor` / `capability observe` / `jobs` / `load` / `data` | host inventory is administered on the hub |
+| `weft daemon *` | the daemon runs on the hub |
+| `weft channel install` / `serve`, `weft slack test` | the daemon runs on the hub |
+| `weft db *` | local state administration has no meaning on an edge |
+| `weft cleanup` (and `job cleanup`), `weft job repair *`, `weft retrain`, `weft estimation train`, `weft sync` | local state administration has no meaning on an edge |
+| `weft artifact add` / `sync` / `prune`, `weft data fetch` / `evict` | local state administration has no meaning on an edge |
+| `weft secret *` | local secrets never reach a job the hub runs |
+| `weft r2 *` | an edge's credentials have no access to the results store |
+| `weft dashboard`, `weft tui`, `weft web`, `weft narrate`, `weft watch *` (including `job watch`, `campaign watch`, `instance watch`, `project watch`, `system watch`, `cloud watch`) | interactive displays read the local ledger directly, which only the hub holds |
+
+### Hub not reachable
+
+Mirror (read) and submit commands on an edge need the hub's published view
+or the submission channel. When neither is available the command is blocked,
+exit code 21, with the first line of stderr:
+
+```text
+hub not reachable from this edge: <cause>
+```
+
+The cause is always about what the hub last published or what this binary
+can do — an edge never connects to the hub, so a blocked point never means
+a failed connection.
+
+### JSON form
+
+When the invoked command declares `--json` and it is passed, the blocked
+point is emitted on stdout instead:
+
+```json
+{"edge": {"outcome": "disabled", "reason": "…"}}
+{"edge": {"outcome": "blocked", "cause": "…"}}
+```
+
+A plan can branch on the exit code; a skill can grep the first line. An edge
+never prints an empty listing where the truth is that it could not look.

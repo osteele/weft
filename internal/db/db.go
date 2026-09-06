@@ -967,6 +967,11 @@ func looksLikeTestBinary(exe string, args []string) bool {
 
 // Open opens the database, creating it if necessary
 func Open() (*sql.DB, error) {
+	// Refusal precedes even the mkdir: on an edge there is no local ledger,
+	// and creating its directory tree would be the first step toward one.
+	if err := localLedgerRefusedError("job"); err != nil {
+		return nil, err
+	}
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -1043,6 +1048,9 @@ func OpenForReading() (*sql.DB, error) {
 // migrations. Use this as a fallback when Open() fails with SQLITE_BUSY or
 // SQLITE_READONLY, so read-only commands can still display data.
 func OpenReadOnly() (*sql.DB, error) {
+	if err := localLedgerRefusedError("job"); err != nil {
+		return nil, err
+	}
 	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
 	database, err := sql.Open("sqlite", connStr)
 	if err != nil {

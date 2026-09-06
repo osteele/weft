@@ -32,6 +32,21 @@ package level, but "no second job" is not observable without job rows), and that
 a submission refused for each distinct reason surfaces that reason to the
 submitter.
 
+### Edge command parity, phases 2–4
+
+Phase 1 of `docs/planning/edge-command-parity.md` (the classification table, the
+root gate, and the ledger refusal) is in place. What remains:
+
+- **Hub view and mirror reads (phase 2).** The daemon publishes the view; the
+  mirror-classified commands (`list`, `status`, `info`, `log`, `host`,
+  `autopilot status`, `incidents`, and the rest of the mirror set) read it
+  instead of reporting "hub not reachable".
+- **Submission end to end (phase 3).** The submit command, the inbox poller,
+  and provenance on the job row — the "End-to-end submission" item above.
+- **Control and fact payload kinds (phase 4).** `weft.job-control/v1` and
+  `weft.bug-report/v1`, moving the submit-classified control commands and
+  `bug report`/`note` from blocked to working.
+
 ### Verify the R2 transport against a real bucket
 
 The filesystem transport is exercised on every test run. The R2 transport has

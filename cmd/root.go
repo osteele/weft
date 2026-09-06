@@ -103,6 +103,10 @@ func Execute() error {
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 
+	if err := applyEdgeGate(cfg, os.Args[1:]); err != nil {
+		return err
+	}
+
 	executedCmd, err := rootCmd.ExecuteC()
 	drainConfiguredLifecycleHooks(cfg)
 	if err == nil {
@@ -111,6 +115,11 @@ func Execute() error {
 
 	if executedCmd == nil {
 		executedCmd = rootCmd
+	}
+
+	// The edge gate has already written its own output.
+	if isEdgeGateError(err) {
+		return err
 	}
 
 	// Log database lock errors to oplog for observability
