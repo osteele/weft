@@ -92,6 +92,31 @@ Linux cannot mint its own key yet. Closing this needs either cross-compilation
 of the CLI alongside the agent, or the native-on-host build path the agent
 already falls back to.
 
+### Consult memory pressure at placement
+
+`AssessHostLoad` (`internal/placement/overload.go`) classifies a host on CPU and
+GPU metrics, and `ReasonOverloaded` refuses placement on that basis alone.
+`MemPressureLevel` — normal, warn, critical — is computed in
+`internal/runner/resources.go:272` and read by nothing in `internal/placement`
+or `internal/orchestration`.
+
+So weft will place a job on a host whose memory is exhausted, provided its CPU
+looks calm. Measured on this machine on 2026-09-05: load 21 on 8 cores, a mild
+2.7x, while swap sat at 21205 MB of 22528 used and free pages at 32 MB. CPU load
+is a lagging and indirect proxy; the binding resource was memory the whole time,
+and a CPU threshold strict enough to catch it would refuse everything on a
+machine running many concurrent sessions.
+
+The signal already exists. What is missing is a path from the runner's
+measurement to the placement decision, and a threshold expressed in the terms
+the kernel already reports rather than re-derived from free pages.
+
+Two properties worth carrying from the equivalent gate in `coding-delegate`:
+an unreadable signal must refuse rather than admit, since a check that reads
+"cannot tell" as "fine" is the failure it exists to prevent; and any wait
+before retrying should be jittered, because independent pollers on a fixed
+backoff retry in lockstep and re-create the condition they waited out.
+
 ### Reconcile the two spend limits
 
 `[edge] max_spend_usd` gates edge submission admission; `spending_limit`
