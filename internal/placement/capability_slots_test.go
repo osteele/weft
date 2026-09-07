@@ -2,6 +2,7 @@ package placement
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
@@ -105,4 +106,14 @@ func TestCapabilityAdmissionIsUncappedWhenLimitsAreAbsent(t *testing.T) {
 	recordAgentCapabilityJob(t, database, host.Name, "agent:codex")
 
 	requireCapabilityEligibility(t, database, host, "agent:codex", 0, true)
+}
+
+func TestCheckHostConstraintsWithActiveJobsCheckedReturnsLookupError(t *testing.T) {
+	database := setupTestDB(t)
+	host := inventory.TestHosts()[0]
+
+	_, err := CheckHostConstraintsWithActiveJobsChecked(database, host, Constraints{GPUClass: "a100"})
+	if err == nil || !strings.Contains(err.Error(), "list active jobs on host-alpha") {
+		t.Fatalf("CheckHostConstraintsWithActiveJobsChecked error = %v, want active-job lookup error", err)
+	}
 }

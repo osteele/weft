@@ -2129,7 +2129,6 @@ func scanHFCacheDuringSync(database *sql.DB, host string, timeout time.Duration)
 // Naming the exact command is the difference between a condition an operator
 // can clear and one they escalate.
 func capabilityRemedy(host, capability string) string {
-	return fmt.Sprintf(
-		"queue runner lacks %s capability; run `weft queue update %s` to deploy a current agent",
-		capability, host)
+	return opsqueue.MissingRunnerCapabilityBlockDetail(capability,
+		fmt.Sprintf("run `weft queue update %s` to deploy a current agent", host))
 }

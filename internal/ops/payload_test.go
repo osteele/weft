@@ -123,7 +123,7 @@ func TestAppendIsolatedJobResolvesNamedAssetForAgentStaging(t *testing.T) {
 	})
 
 	err = AppendJobToQueueWithSourceAndR2(database, job, time.Second, digest, "sources/snapshot.tar.gz")
-	if err == nil || !strings.Contains(err.Error(), "artifact-need-v1") {
+	if err == nil || !opsqueue.IsMissingRunnerCapabilityBlock(err.Error()) {
 		t.Fatalf("incompatible runner error = %v", err)
 	}
 	if sent.Job != nil {

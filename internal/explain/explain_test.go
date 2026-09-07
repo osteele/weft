@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 )
 
 func TestForJobExplainsInventoryDispatchBlock(t *testing.T) {
@@ -48,6 +49,46 @@ func TestForJobExplainsInventoryDispatchBlock(t *testing.T) {
 	}
 	if !strings.Contains(x.SuggestedAction, "waiting") {
 		t.Fatalf("SuggestedAction = %q, want waiting wording", x.SuggestedAction)
+	}
+}
+
+func TestForJobSourceSyncBlockWithRequiredCapabilityAllowsReplan(t *testing.T) {
+	inventory.UseTestHosts(t)
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "python train.py", "queued", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{
+		Agent: &db.JobAgentMetadata{RequiredCapabilities: []string{"tool:agent-review"}},
+	}); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	now := time.Unix(20_000, 0)
+	if _, err := database.Exec(`UPDATE job_attempts SET queued_at = ? WHERE job_id = ?`, now.Add(-time.Hour).Unix(), jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+	for _, at := range []time.Time{now.Add(-20 * time.Minute), now.Add(-12 * time.Minute)} {
+		if err := db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			OccurredAt: at.Unix(),
+			EventKind:  db.EventQueueDispatchDeferred,
+			JobID:      jobID,
+			Detail:     "source sync deferred (host unreachable): ssh timeout",
+		}); err != nil {
+			t.Fatalf("InsertLifecycleEvent: %v", err)
+		}
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	x := ForJob(database, job, now)
+	if !x.AutoReplanAllowed {
+		t.Fatal("AutoReplanAllowed = false, want true")
+	}
+	if !hasOption(x, "replan") {
+		t.Fatalf("Options missing replan: %+v", x.Options)
 	}
 }
 

@@ -1226,14 +1226,42 @@ func CheckHostConstraintsWithActiveJobs(database *sql.DB, host inventory.HostSpe
 	return EvaluateEligibility(c, target)
 }
 
+// CheckHostConstraintsWithActiveJobsChecked applies the same constraints while
+// preserving active-job lookup errors for callers that must distinguish an
+// unavailable inventory view from an empty one.
+func CheckHostConstraintsWithActiveJobsChecked(database *sql.DB, host inventory.HostSpec, c Constraints) (Verdict, error) {
+	reservations, err := activeGPUReservationsChecked(database, host.Name)
+	if err != nil {
+		return Verdict{}, err
+	}
+	target := TargetSpecFromHostSpec(host, nil, reservations)
+	target.CapabilityAvailability, target.AgentSlotsRemaining, err = activeCapabilityAvailabilityChecked(database, host, c.SelfJobID)
+	if err != nil {
+		return Verdict{}, err
+	}
+	return EvaluateEligibility(c, target), nil
+}
+
+// CheckHostCapabilitiesWithActiveJobs applies required-capability matching and
+// configured capability-slot limits while preserving active-job lookup errors.
+func CheckHostCapabilitiesWithActiveJobs(database *sql.DB, host inventory.HostSpec, required []string, selfJobID int64) (Verdict, error) {
+	target := TargetSpecFromHostSpec(host, nil, nil)
+	var err error
+	target.CapabilityAvailability, target.AgentSlotsRemaining, err = activeCapabilityAvailabilityChecked(database, host, selfJobID)
+	if err != nil {
+		return Verdict{}, err
+	}
+	return EvaluateEligibility(Constraints{
+		RequiredCapabilities: required,
+		SelfJobID:            selfJobID,
+	}, target), nil
+}
+
 // activeGPUReservations derives the reservation slice consumed by
 // EvaluateEligibility. If active-job state cannot be read, placement degrades
 // to the historical "all matching GPUs free" approximation.
 func activeGPUReservations(database *sql.DB, host string) []GPUReservation {
-	if database == nil {
-		return nil
-	}
-	active, err := db.ListActiveJobs(database, host)
+	reservations, err := activeGPUReservationsChecked(database, host)
 	if err != nil {
 		// Planning approximation only: an unreadable active-job view (e.g. a
 		// partial schema in read-only tooling) degrades to "all matching
@@ -1242,12 +1270,37 @@ func activeGPUReservations(database *sql.DB, host string) []GPUReservation {
 			"component", "placement", "host", host, "error", err)
 		return nil
 	}
-	return GPUReservationsForJobs(active)
+	return reservations
+}
+
+func activeGPUReservationsChecked(database *sql.DB, host string) ([]GPUReservation, error) {
+	if database == nil {
+		return nil, nil
+	}
+	active, err := db.ListActiveJobs(database, host)
+	if err != nil {
+		return nil, fmt.Errorf("list active jobs on %s: %w", host, err)
+	}
+	return GPUReservationsForJobs(active), nil
 }
 
 func activeCapabilityAvailability(database *sql.DB, host inventory.HostSpec, selfJobID int64) (map[string]int, *int) {
+	available, totalRemaining, err := activeCapabilityAvailabilityChecked(database, host, selfJobID)
+	if err == nil {
+		return available, totalRemaining
+	}
+	for capability := range available {
+		available[capability] = 0
+	}
+	if totalRemaining != nil {
+		*totalRemaining = 0
+	}
+	return available, totalRemaining
+}
+
+func activeCapabilityAvailabilityChecked(database *sql.DB, host inventory.HostSpec, selfJobID int64) (map[string]int, *int, error) {
 	if len(host.AgentConcurrency) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	available := make(map[string]int, len(host.AgentConcurrency))
 	var totalRemaining *int
@@ -1261,17 +1314,11 @@ func activeCapabilityAvailability(database *sql.DB, host inventory.HostSpec, sel
 		available["agent:"+name] = limit
 	}
 	if database == nil {
-		return available, totalRemaining
+		return available, totalRemaining, nil
 	}
 	active, err := db.ListActiveJobs(database, host.Name)
 	if err != nil {
-		for capability := range available {
-			available[capability] = 0
-		}
-		if totalRemaining != nil {
-			*totalRemaining = 0
-		}
-		return available, totalRemaining
+		return available, totalRemaining, fmt.Errorf("list active jobs on %s: %w", host.Name, err)
 	}
 	for _, job := range active {
 		if job.ID == selfJobID || (selfJobID > 0 && job.ID > selfJobID) || job.Metadata == nil || job.Metadata.Agent == nil {
@@ -1289,7 +1336,7 @@ func activeCapabilityAvailability(database *sql.DB, host inventory.HostSpec, sel
 			}
 		}
 	}
-	return available, totalRemaining
+	return available, totalRemaining, nil
 }
 
 func freeGPUCapacityPassReason(target TargetSpec, c Constraints) []string {

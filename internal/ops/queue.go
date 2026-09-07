@@ -73,7 +73,10 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 			return fmt.Errorf("read queue runner capabilities: %w", stateErr)
 		}
 		if state != nil && !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
-			return fmt.Errorf("queue runner lacks artifact-need-v1 capability; agent update required before dispatch")
+			return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
+				opsqueue.CapabilityArtifactNeedV1,
+				"agent update required before dispatch",
+			))
 		}
 	}
 	command := payloadGuardedCommand(job.Command, payloads)
