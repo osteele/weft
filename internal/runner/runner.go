@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -617,6 +618,43 @@ func (r *Runner) annotateBenchmarkWarmupWait() {
 	r.saveState()
 }
 
+type processDeadlineState struct {
+	mu            sync.Mutex
+	timer         *time.Timer
+	processExited bool
+	timedOut      bool
+}
+
+func (s *processDeadlineState) start(timeout time.Duration, onTimeout func()) {
+	if timeout <= 0 {
+		return
+	}
+	s.timer = time.AfterFunc(timeout, func() {
+		s.mu.Lock()
+		if s.processExited {
+			s.mu.Unlock()
+			return
+		}
+		s.timedOut = true
+		s.mu.Unlock()
+		onTimeout()
+	})
+}
+
+func (s *processDeadlineState) finish() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	s.processExited = true
+	timedOut := s.timedOut
+	if s.timer != nil {
+		s.timer.Stop()
+	}
+	s.mu.Unlock()
+	return timedOut
+}
+
 func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUDevices []string) error {
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	command := job.Cmd
@@ -664,6 +702,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	paths := NewJobPaths(r.logDir, jobID)
+	wallStartedAt := time.Now()
 	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
 		detail := fmt.Sprintf("gpu_count_preflight_failed: requested=%d visible=%d", requested, len(gpuDevices))
 		return r.rejectPreflight(jobID, paths, db.FailureReasonGPUCountPreflightFailed, detail)
@@ -837,10 +876,22 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 	}
 	if setupCmd == direnvSetupCommand {
-		resolvedEnv, ei, err := resolveDirenvEnv(expandedDir, envVars, paths.Log)
+		timeout, wallLimited, expired := boundedPhaseTimeout(r.setupTimeout, inventory.DefaultSetupTimeout, wallStartedAt, time.Duration(job.WallTimeSeconds)*time.Second)
+		if expired {
+			ei := ExitInfo{ExitCode: 124}
+			appendSetupLog(paths.Log, []byte("weft: job wall time exceeded before direnv setup\n"))
+			WriteStatusFile(paths, ei)
+			r.finishFailedSetup(jobID, paths, ei, startTime, FailureReasonWallTimeout)
+			return fmt.Errorf("job wall time exceeded before direnv setup")
+		}
+		resolvedEnv, ei, err := resolveDirenvEnv(expandedDir, envVars, paths.Log, timeout)
 		if err != nil {
 			WriteStatusFile(paths, ei)
-			r.finishFailedSetup(jobID, paths, ei, startTime)
+			reason := ""
+			if wallLimited && ei.ExitCode == 124 {
+				reason = FailureReasonWallTimeout
+			}
+			r.finishFailedSetup(jobID, paths, ei, startTime, reason)
 			return fmt.Errorf("prepare .envrc environment: %w", err)
 		}
 		envVars = resolvedEnv
@@ -893,9 +944,21 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// job.Dir: in R2-isolated mode the latter still points at the
 	// user-facing dir while the extracted sources live under expandedDir.
 	if setupCmd != "" {
-		ei, setupErr := RunSetupCommand(setupCmd, jobID, expandedDir, envVars, paths, r.setupTimeout)
+		timeout, wallLimited, expired := boundedPhaseTimeout(r.setupTimeout, inventory.DefaultSetupTimeout, wallStartedAt, time.Duration(job.WallTimeSeconds)*time.Second)
+		if expired {
+			ei := ExitInfo{ExitCode: 124}
+			appendSetupLog(paths.Log, []byte("weft: job wall time exceeded before setup\n"))
+			WriteStatusFile(paths, ei)
+			r.finishFailedSetup(jobID, paths, ei, startTime, FailureReasonWallTimeout)
+			return fmt.Errorf("job wall time exceeded before setup")
+		}
+		ei, setupErr := RunSetupCommand(setupCmd, jobID, expandedDir, envVars, paths, timeout)
 		if setupErr != nil {
-			r.finishFailedSetup(jobID, paths, ei, startTime)
+			reason := ""
+			if wallLimited && ei.ExitCode == 124 {
+				reason = FailureReasonWallTimeout
+			}
+			r.finishFailedSetup(jobID, paths, ei, startTime, reason)
 			return setupErr
 		}
 		if setupCmd == "uv sync" {
@@ -904,6 +967,14 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	envVars = applyUVRunEnvAdditions(expandedDir, setupCmd, envVars, jobID, paths.Log)
+	if job.WallTimeSeconds > 0 && time.Since(wallStartedAt) >= time.Duration(job.WallTimeSeconds)*time.Second {
+		ei := ExitInfo{ExitCode: 124}
+		appendSetupLog(paths.Log, []byte("weft: job wall time exceeded before command start\n"))
+		WriteStatusFile(paths, ei)
+		r.finishFailedSetup(jobID, paths, ei, startTime, FailureReasonWallTimeout)
+		return fmt.Errorf("job wall time exceeded before command start")
+	}
+	appendSetupLog(paths.Log, []byte("weft: command starting\n"))
 
 	// Wrap the command so bash writes the exit code and log footer even if
 	// the Go runner crashes mid-job (e.g., during a runner restart).
@@ -933,10 +1004,19 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	r.processes[jobIDStr] = proc
 	r.processesMu.Unlock()
 
+	deadlineState := &processDeadlineState{}
+	if job.WallTimeSeconds > 0 {
+		remaining := time.Duration(job.WallTimeSeconds)*time.Second - time.Since(wallStartedAt)
+		deadlineState.start(remaining, func() {
+			slog.Warn("wall-time reached, sending SIGTERM", "component", "runner", "job_id", jobID, "wall_time_seconds", job.WallTimeSeconds, "pgid", proc.PGID)
+			KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, "")
+		})
+	}
+
 	// Start wait goroutine. Pass the resolved working dir (possibly the
 	// per-job R2-isolated source dir) so output discovery and per-job
 	// cleanup operate on the directory where the job actually ran.
-	go r.waitForJob(jobID, proc, paths, startTime, rj, expandedDir)
+	go r.waitForJob(jobID, proc, paths, startTime, rj, expandedDir, deadlineState)
 
 	if r.telemetryConfig.Enabled {
 		rs, _ := r.state.GetRunning(jobIDStr)
@@ -983,11 +1063,13 @@ func (r *Runner) evaluateRAMAdmission(job *opsqueue.CommandJob) RAMAdmissionDeci
 // records the finished state, and removes the PID files and queue payload that
 // would otherwise linger as debris. The status file has already been written
 // by the setup path (RunSetupCommand or the direnv branch).
-func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, startTime int64) {
+func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, startTime int64, failureReason string) {
 	jobIDStr := strconv.FormatInt(jobID, 10)
-	failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+	if failureReason == "" {
+		failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+	}
 	WriteFailureReasonFile(paths, failureReason)
-	oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
+	oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d reason=%s", ei.ExitCode, failureReason))
 
 	endTime := r.now().Unix()
 	if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
@@ -1039,18 +1121,25 @@ func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason, detail str
 	return fmt.Errorf("preflight rejected: %s", detail)
 }
 
-func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob, runDir string) {
+func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob, runDir string, deadlineState *processDeadlineState) {
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	err := proc.Cmd.Wait()
+	wallTimedOut := deadlineState.finish()
 	ei := ExtractExitInfo(err)
+	if wallTimedOut {
+		ei.ExitCode = 124
+		ei.Signaled = true
+		ei.Signal = syscall.SIGTERM
+	}
 	slog.Info("process exited", "component", "runner", "job_id", jobID, "exit_code", ei.ExitCode, "signaled", ei.Signaled, "error", err)
 
 	endTime := r.now().Unix()
 	duration := endTime - startTime
 
-	// Write status and log footer. The wrapper shell may have already
-	// written these (see WrapCommandWithExitCapture), so skip if present.
-	if _, statErr := os.Stat(paths.Status); statErr != nil {
+	// Write status and log footer. A wall deadline overrides the wrapper's
+	// SIGTERM status (143) with the portable timeout status (124). Otherwise,
+	// the wrapper may already have written both.
+	if _, statErr := os.Stat(paths.Status); wallTimedOut || statErr != nil {
 		WriteStatusFile(paths, ei)
 		WriteLogFooter(paths, ei)
 	}
@@ -1074,10 +1163,14 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		}
 	}
 
-	// On failure, detect the failure reason using signal-aware detection
+	// On failure, detect the failure reason using signal-aware detection.
 	var failureReason string
 	if ei.ExitCode != 0 {
-		failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+		if wallTimedOut {
+			failureReason = FailureReasonWallTimeout
+		} else {
+			failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+		}
 		WriteFailureReasonFile(paths, failureReason)
 	}
 

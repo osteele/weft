@@ -352,6 +352,7 @@ Supported keys (all optional):
 | `disk` / `disk-gb` | int or `"NGB"` | `--disk`      |
 | `runtime-disk` / `runtime-disk-gb` | int or `"NGB"` | `--runtime-disk` |
 | `disk-max` / `disk-max-gb` | int or `"NGB"` | `--disk-max` |
+| `wall-time` | duration string | `--wall-time` |
 | `gpu-arch-max`   | string      | *(no CLI flag — overrides auto-inferred GPU arch upper bound; see below)* |
 | `inputs`    | list of strings  | `--input`           |
 | `outputs`   | list of strings  | `--output`          |
@@ -371,6 +372,14 @@ CLI flags always override script metadata. Tags are additive (merged from both
 sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
+
+`--wall-time` bounds one job attempt from runner setup through command exit on
+both inventory hosts and rentals. The timer includes environment setup and
+package installation. It is distinct from `--max-time`, which bounds the
+lifetime of a rental instance and does not apply to inventory jobs. A wall-time
+expiry records `wall_timeout`; the job log prints `weft: command starting`
+immediately before launching the user command so a timeout before that marker is
+unambiguously pre-command work.
 
 `runpod-cloud-type = "secure"` is a per-job RunPod placement override. It
 records the job as RunPod-bound and searches/creates RunPod secure-cloud pods

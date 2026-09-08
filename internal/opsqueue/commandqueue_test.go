@@ -72,6 +72,14 @@ func TestQueueCommandSerialization(t *testing.T) {
 				}},
 			}),
 		},
+		{
+			name: "add wall deadline",
+			cmd: NewAddCommand(QueueEntry{
+				JobID:           792,
+				Command:         "true",
+				WallTimeSeconds: 3600,
+			}),
+		},
 		{name: "priority command", cmd: NewPriorityCommand(123)},
 		{name: "cancel command", cmd: NewCancelCommand(456)},
 		{name: "stop command", cmd: NewStopCommand()},
@@ -107,6 +115,11 @@ func TestQueueCommandSerialization(t *testing.T) {
 			if tt.cmd.Job != nil && len(tt.cmd.Job.ArtifactNeeds) > 0 {
 				if roundTrip.Job == nil || len(roundTrip.Job.ArtifactNeeds) != 1 || roundTrip.Job.ArtifactNeeds[0].Path != tt.cmd.Job.ArtifactNeeds[0].Path {
 					t.Fatalf("artifact need did not survive round trip: %#v", roundTrip.Job)
+				}
+			}
+			if tt.cmd.Job != nil && tt.cmd.Job.WallTimeSeconds > 0 {
+				if roundTrip.Job == nil || roundTrip.Job.WallTimeSeconds != tt.cmd.Job.WallTimeSeconds {
+					t.Fatalf("wall deadline did not survive round trip: %#v", roundTrip.Job)
 				}
 			}
 		})

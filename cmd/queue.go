@@ -231,6 +231,7 @@ var (
 	editMaxHourlyRate   string
 	editMaxSpend        string
 	editMaxTime         string
+	editWallTime        string
 	editGracePeriod     string
 	editProvider        string
 	editRunpodCloudType string
@@ -1075,6 +1076,17 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 	if err != nil {
 		return err
 	}
+	wallTimeChanged := cmd.Flags().Changed("wall-time")
+	wallTimeSeconds := 0
+	if wallTimeChanged {
+		parsedWallTime, parseErr := parseDurationCap("wall-time", editWallTime, true)
+		if parseErr != nil {
+			return parseErr
+		}
+		if parsedWallTime != nil {
+			wallTimeSeconds = *parsedWallTime
+		}
+	}
 	if spendCeilingCents != nil {
 		ceiling := *spendCeilingCents
 		rentalPolicyFlags.maxSpendCents = &ceiling
@@ -1092,8 +1104,8 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	needsChanged := cmd.Flags().Changed("needs") || editClearNeeds
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
-	fieldChanged = fieldChanged || tagsChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || gpuMemChanged || rentalPolicyChanged || wallTimeChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged ||
+		tagsChanged
 	if !fieldChanged {
 		return usageErrorf("no changes specified; use metadata, dependency, resource, rental-policy, or status flags")
 	}
@@ -1201,7 +1213,7 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 		// affect placement (e.g. 'processed') and the description/message.
 		nonDisplayFieldChanged := cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
 			envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
-			rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || placementTagChanges
+			rentalPolicyChanged || wallTimeChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged || placementTagChanges
 		displayOnlyChange := cmd.Flags().Changed("message") || (tagsChanged && !placementTagChanges)
 		if statusChanged || nonDisplayFieldChanged || !displayOnlyChange {
 			return editNonQueuedJobError(jobID, effectiveStatus)
@@ -1467,6 +1479,23 @@ func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCent
 			return fmt.Errorf("update rental policy: %w", err)
 		}
 		updates = append(updates, rentalPolicyUpdateMessages(cmd, rentalPolicyFlags)...)
+	}
+	if wallTimeChanged {
+		meta := cloneJobMetadata(job.Metadata)
+		if meta == nil {
+			meta = &db.JobMetadata{}
+		}
+		meta.WallTimeSeconds = wallTimeSeconds
+		meta = persistentOrNonEmptyJobMetadata(meta)
+		if err := db.SetJobMetadata(database, jobID, meta); err != nil {
+			return fmt.Errorf("update wall time: %w", err)
+		}
+		job.Metadata = meta
+		if wallTimeSeconds == 0 {
+			updates = append(updates, "wall time cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("wall time: %s", time.Duration(wallTimeSeconds)*time.Second))
+		}
 	}
 	if providerChanged {
 		normalizedProvider, providerErr := normalizeProviderFlag(editProvider)
@@ -1890,6 +1919,7 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")
 	cmd.Flags().StringVar(&editMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
 	cmd.Flags().StringVar(&editMaxTime, "max-time", "", "Maximum rental lifetime; 0 clears")
+	cmd.Flags().StringVar(&editWallTime, "wall-time", "", "Maximum job wall-clock time including setup; 0 clears")
 	cmd.Flags().StringVar(&editGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
 	cmd.Flags().StringVar(&editProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 	cmd.Flags().StringVar(&editRunpodCloudType, "runpod-cloud-type", "", "RunPod cloud type for rental placement: community or secure (use default/auto/none/clear to clear)")

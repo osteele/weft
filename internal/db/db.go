@@ -418,6 +418,15 @@ func (j *Job) RequestedRunpodCloudType() string {
 	return strings.TrimSpace(j.CLIResourceOverrides.RunpodCloudType)
 }
 
+// WallTime returns the job's wall-clock execution budget, including setup.
+// Zero means no per-job wall deadline.
+func (j *Job) WallTime() time.Duration {
+	if j == nil || j.Metadata == nil || j.Metadata.WallTimeSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(j.Metadata.WallTimeSeconds) * time.Second
+}
+
 // RequestedMinSurvival returns the per-job cloud offer survival floor. A nil
 // override keeps the caller's default; explicit values, including 0, replace it.
 func (j *Job) RequestedMinSurvival(defaultFloor float64) float64 {

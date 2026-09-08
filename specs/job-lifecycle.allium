@@ -78,6 +78,7 @@ entity Job {
     tags: Set<Tag>
     env_vars: List<String>
     dep_spec: String?           -- host-local dependency on another job (e.g. "42" or "42:any")
+    wall_time_seconds: Integer  -- optional whole-attempt budget; zero disables
     -- Launch-time derived manifest fields (not persisted on the job row):
     --   agent_job.cloud_after   -- populated when a producer of a --needs spec
     --                              shares the consumer's rental LaunchID and
@@ -514,7 +515,7 @@ rule QueryGroupedSessionUnprocessedInbox {
 	-- completed_ok when exit_code is zero; infra_suspected when the exact
 	-- failure_reason equals one of disk_full, oom, gpu_oom, segfault,
 	-- aborted, killed_sigkill, killed_sigterm, killed_gpu_idle,
-	-- killed_stdout_silence, setup_timeout, run_timeout,
+	-- killed_stdout_silence, setup_timeout, run_timeout, wall_timeout,
 	-- cuda_driver_too_old, infra_prewarm_download_failed,
 	-- infra_cloud_artifact_stage_failed, infra_torch_preflight_failed,
 	-- infra_cuda_hardware_fault, infra_r2_results_not_synced,
@@ -595,7 +596,7 @@ enum FailureReason {
                     | killed_sigkill | killed_sigterm
                     | killed_gpu_idle | killed_stdout_silence
                     | cuda_driver_too_old
-                    | setup_timeout | run_timeout
+                    | setup_timeout | run_timeout | wall_timeout
                     | prewarm_failed | artifact_stage_failed
                     | infra_r2_results_not_synced
                     | source_restore_failed
@@ -685,6 +686,26 @@ value PlacementResult {
     estimated_queue_drain: Duration?
     estimated_transfer_time: Duration?
     data_locality_score: Decimal?
+}
+
+rule JobWallDeadline {
+    when: ExecuteJob(job)
+    requires: job.wall_time_seconds > 0
+
+    ensures:
+        SetupCommandsUseRemainingWallBudget(job)
+        UserCommandUsesRemainingWallBudget(job)
+        WallBudgetExhaustedBeforeCommand(job) implies
+            JobFailed(job, reason: wall_timeout, exit_code: 124)
+        WallBudgetExpiresDuringSetupOrCommand(job) implies
+            JobFailed(job, reason: wall_timeout, exit_code: 124)
+}
+
+rule CommandStartIsObservable {
+    when: StartUserCommand(job)
+
+    ensures:
+        JobLogContainsBeforeProcessLaunch(job, "weft: command starting")
 }
 
 config {

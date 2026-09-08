@@ -139,6 +139,7 @@ var (
 	runMaxHourlyRate            string
 	runMaxSpend                 string
 	runMaxTime                  string
+	runWallTime                 string
 	runGracePeriod              string
 	runMinSurvival              float64
 	runInputs                   []string
@@ -468,10 +469,11 @@ type draftRunParams struct {
 	Needs            []string
 	Disk             *db.JobDiskMetadata
 	Source           *db.JobSourceMetadata
+	WallTimeSeconds  int
 }
 
 func recordDraftRunJob(cmd *cobra.Command, database *sql.DB, params draftRunParams) error {
-	metadata := &db.JobMetadata{Source: params.Source}
+	metadata := &db.JobMetadata{Source: params.Source, WallTimeSeconds: params.WallTimeSeconds}
 	jobID, err := ops.RecordDraftJob(database, ops.QueueJobParams{
 		Host:             params.Host,
 		WorkingDir:       params.WorkingDir,
@@ -568,6 +570,7 @@ func init() {
 	runCmd.Flags().StringVar(&runMaxHourlyRate, "max-hourly-rate", "", "Maximum rental offer rate in USD per hour; 0 clears")
 	runCmd.Flags().StringVar(&runMaxSpend, "max-spend", "", "Maximum total rental spend in USD; 0 clears")
 	runCmd.Flags().StringVar(&runMaxTime, "max-time", "", "Maximum rental lifetime (for example, 3h); 0 clears")
+	runCmd.Flags().StringVar(&runWallTime, "wall-time", "", "Maximum job wall-clock time including setup (for example, 2h); 0 clears")
 	runCmd.Flags().StringVar(&runGracePeriod, "grace-period", "", "Keep a failed rental alive for this duration; 0 disables, default clears")
 	runCmd.Flags().Float64Var(&runMinSurvival, "min-survival", 0.4, "Minimum Weft learned end-to-end survival probability (0-1; 0 disables; distinct from provider reliability)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
@@ -684,6 +687,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	effectiveWallTimeSeconds := 0
+	if cmd.Flags().Changed("wall-time") {
+		parsedWallTime, parseErr := parseDurationCap("wall-time", runWallTime, true)
+		if parseErr != nil {
+			return parseErr
+		}
+		if parsedWallTime != nil {
+			effectiveWallTimeSeconds = *parsedWallTime
+		}
+	}
 
 	// Open database early for --from support
 	var database *sql.DB
@@ -772,6 +785,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if runDiskMaxGB == 0 {
 				runDiskMaxGB = fromJob.Metadata.Disk.DiskMaxGB
 			}
+		}
+		if !cmd.Flags().Changed("wall-time") && fromJob.Metadata != nil {
+			effectiveWallTimeSeconds = fromJob.Metadata.WallTimeSeconds
 		}
 		if len(runEnvVars) == 0 {
 			runEnvVars = append([]string(nil), fromJob.EnvVars...)
@@ -1036,6 +1052,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if !cmd.Flags().Changed("disk-max") && runDiskMaxGB == 0 && meta.DiskMaxGB > 0 {
 			runDiskMaxGB = meta.DiskMaxGB
 			applied = append(applied, fmt.Sprintf("disk-max=%dGB", meta.DiskMaxGB))
+		}
+		if !cmd.Flags().Changed("wall-time") && meta.WallTime != "" {
+			parsedWallTime, parseErr := parseDurationCap("wall-time", meta.WallTime, true)
+			if parseErr != nil {
+				return fmt.Errorf("script metadata: %w", parseErr)
+			}
+			effectiveWallTimeSeconds = 0
+			if parsedWallTime != nil {
+				effectiveWallTimeSeconds = *parsedWallTime
+				applied = append(applied, fmt.Sprintf("wall-time=%s", time.Duration(effectiveWallTimeSeconds)*time.Second))
+			}
 		}
 		if len(meta.Inputs) > 0 {
 			runInputs = mergeDedup(runInputs, meta.Inputs)
@@ -1492,6 +1519,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 				Source:          sourceMeta,
 				Agent:           agentMetadata,
 				SubmissionNonce: submissionNonce,
+				WallTimeSeconds: effectiveWallTimeSeconds,
 			},
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
@@ -1857,6 +1885,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Needs:            resolvedNeeds,
 			Disk:             diskMeta,
 			Source:           sourceMeta,
+			WallTimeSeconds:  effectiveWallTimeSeconds,
 		})
 	}
 
@@ -1971,6 +2000,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUMemStrict:     true, // GPUMemGB is already resolved above; avoid re-applying headroom.
 			Disk:             diskMeta,
 			Source:           sourceMeta,
+			WallTimeSeconds:  effectiveWallTimeSeconds,
 			CLIOverrides:     cliOverrides,
 			MaxComputeCap:    persistMaxComputeCap,
 		})

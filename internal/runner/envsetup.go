@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -517,10 +518,23 @@ func ensureSystemSitePackagesVenv(workingDir, logPath string) error {
 
 // ResolveDirenvEnv evaluates .envrc and returns the exported environment.
 // The returned slice is a full environment suitable for passing to exec.Cmd.Env.
-func ResolveDirenvEnv(workingDir string, envVars []string, logPath string) ([]string, ExitInfo, error) {
+func ResolveDirenvEnv(workingDir string, envVars []string, logPath string, timeout time.Duration) ([]string, ExitInfo, error) {
 	baseEnv := mergeEnvVars(os.Environ(), envVars)
 
-	cmd := exec.Command("bash", "-lc", "direnv allow >/dev/null && direnv exec . env -0")
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "bash", "-lc", "direnv allow >/dev/null && direnv exec . env -0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.Dir = workingDir
 	cmd.Env = baseEnv
 
@@ -533,6 +547,11 @@ func ResolveDirenvEnv(workingDir string, envVars []string, logPath string) ([]st
 	if stderr.Len() > 0 {
 		appendSetupLog(logPath, stderr.Bytes())
 	}
+	if ctx.Err() == context.DeadlineExceeded {
+		ei := ExitInfo{ExitCode: 124}
+		appendSetupLog(logPath, []byte(fmt.Sprintf("weft: direnv setup timed out after %s\n", timeout)))
+		return nil, ei, fmt.Errorf("resolve direnv environment timed out after %s: %w", timeout, ctx.Err())
+	}
 	if err != nil {
 		return nil, ExtractExitInfo(err), fmt.Errorf("resolve direnv environment: %w", err)
 	}
@@ -543,6 +562,24 @@ func ResolveDirenvEnv(workingDir string, envVars []string, logPath string) ([]st
 	}
 
 	return resolved, ExitInfo{}, nil
+}
+
+func boundedPhaseTimeout(configured, fallback time.Duration, wallStart time.Time, wallBudget time.Duration) (timeout time.Duration, wallLimited, expired bool) {
+	timeout = configured
+	if timeout <= 0 {
+		timeout = fallback
+	}
+	if wallBudget <= 0 {
+		return timeout, false, false
+	}
+	remaining := wallBudget - time.Since(wallStart)
+	if remaining <= 0 {
+		return 0, true, true
+	}
+	if timeout <= 0 || remaining < timeout {
+		return remaining, true, false
+	}
+	return timeout, false, false
 }
 
 var resolveDirenvEnv = ResolveDirenvEnv

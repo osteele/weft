@@ -1405,12 +1405,47 @@ func TestEvaluateRecentOnPremPlacementEnforcesGPUCount(t *testing.T) {
 	}
 }
 
+func TestRunRunPersistsWallTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+	database.Close()
+
+	resetRunGlobals(t)
+	runDir = t.TempDir()
+	runDraft = true
+	runWallTime = "3m"
+
+	cmd := newRunTestCommand()
+	if err := cmd.Flags().Set("wall-time", runWallTime); err != nil {
+		t.Fatalf("set wall-time: %v", err)
+	}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := runRun(cmd, []string{"echo ready"}); err != nil {
+		t.Fatalf("runRun: %v\noutput:\n%s", err, out.String())
+	}
+
+	readDB, err := db.Open()
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer readDB.Close()
+	jobs, err := db.ListJobsWithMaxAge(readDB, "", "", 10, 0, nil, "")
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Metadata == nil || jobs[0].Metadata.WallTimeSeconds != 180 {
+		t.Fatalf("persisted jobs = %#v, want wall_time_seconds=180", jobs)
+	}
+}
+
 func newRunTestCommand() *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("provider", "", "")
 	cmd.Flags().Bool("gpu-mem-strict", false, "")
 	cmd.Flags().Int("disk", 0, "")
 	cmd.Flags().Int("runtime-disk", 0, "")
+	cmd.Flags().String("wall-time", "", "")
 	return cmd
 }
 
@@ -1463,6 +1498,7 @@ func resetRunGlobals(t *testing.T) {
 	runGPUClass = ""
 	runCUDADriverMin = ""
 	runProvider = ""
+	runWallTime = ""
 	runRunpodCloudType = ""
 	runInputs = nil
 	runOutputs = nil

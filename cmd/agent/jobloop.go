@@ -257,6 +257,9 @@ func (m *setupPrewarmManager) startNext(currentIndex int, jobs []cloud.AgentJob,
 }
 
 func setupPrewarmEligible(currentDir string, job cloud.AgentJob, nextDir string) bool {
+	if job.WallTimeSeconds > 0 {
+		return false
+	}
 	if nextDir == "" || nextDir == currentDir {
 		return false
 	}
@@ -371,6 +374,9 @@ func appendRemainingInOriginalOrder(ordered *[]cloud.AgentJob, original []cloud.
 }
 
 func setupWeight(job cloud.AgentJob) int {
+	if job.WallTimeSeconds > 0 {
+		return 0
+	}
 	if len(hfInputAssets(job.Inputs)) > 0 {
 		return 1
 	}
@@ -392,7 +398,7 @@ func setupWeight(job cloud.AgentJob) int {
 }
 
 func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobSequenceConfig) {
-	result := runSetupPrewarm(job, cfg, pw.workDir, true)
+	result := runSetupPrewarm(job, cfg, pw.workDir, true, time.Time{})
 	pw.done <- result
 	close(pw.done)
 
@@ -410,7 +416,7 @@ func (m *setupPrewarmManager) run(pw *setupPrewarm, job cloud.AgentJob, cfg jobS
 	}
 }
 
-func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool) setupPrewarmResult {
+func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, includeSetup bool, wallStartedAt time.Time) setupPrewarmResult {
 	jobMounts := expandedSourceMountsForJob(job)
 	if err := ensureSourceFreshMounts(cfg.R2Bucket, jobMounts); err != nil {
 		return setupPrewarmResult{
@@ -443,7 +449,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	explicitAssets, bestEffortAssets := splitHFInputAssets(job.Inputs, job.BestEffortInputs)
 	if len(explicitAssets) > 0 {
 		didWork = true
-		result := runHFDownloadPrewarm(job, cfg, workDir, env, explicitAssets, paths)
+		result := runHFDownloadPrewarm(job, cfg, workDir, env, explicitAssets, paths, wallStartedAt)
 		if !result.ok {
 			return result
 		}
@@ -452,7 +458,10 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	}
 	if len(bestEffortAssets) > 0 {
 		didWork = true
-		result := runHFDownloadPrewarm(job, cfg, workDir, env, bestEffortAssets, paths)
+		result := runHFDownloadPrewarm(job, cfg, workDir, env, bestEffortAssets, paths, wallStartedAt)
+		if result.failureReason == db.FailureReasonWallTimeout {
+			return result
+		}
 		if !result.ok {
 			appendBestEffortHFPrewarmWarning(paths.Log, bestEffortAssets, result.err)
 		} else {
@@ -480,8 +489,15 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		}
 	}
 	didWork = true
-	ei, err := runSetupCommand(setupCmd, job.ID, workDir, env, paths, pickSetupTimeout(cfg), 0)
+	timeout, wallLimited, expired := prewarmPhaseTimeout(job, cfg, wallStartedAt)
+	if expired {
+		return wallTimeoutPrewarmResult(paths.Log, "before environment setup")
+	}
+	ei, err := runSetupCommand(setupCmd, job.ID, workDir, env, paths, timeout, 0)
 	if err != nil {
+		if wallLimited && ei.ExitCode == 124 {
+			return wallTimeoutPrewarmResult(paths.Log, "during environment setup")
+		}
 		return setupPrewarmResult{
 			didWork:  true,
 			logPath:  paths.Log,
@@ -503,15 +519,46 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 	return success
 }
 
-func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, baseEnv []string, assets []dataloc.DataAsset, paths runner.JobPaths) setupPrewarmResult {
+func prewarmPhaseTimeout(job cloud.AgentJob, cfg jobSequenceConfig, wallStartedAt time.Time) (timeout time.Duration, wallLimited, expired bool) {
+	timeout = pickSetupTimeout(cfg)
+	if job.WallTimeSeconds <= 0 || wallStartedAt.IsZero() {
+		return timeout, false, false
+	}
+	remaining := time.Duration(job.WallTimeSeconds)*time.Second - time.Since(wallStartedAt)
+	if remaining <= 0 {
+		return 0, true, true
+	}
+	if timeout <= 0 || remaining < timeout {
+		return remaining, true, false
+	}
+	return timeout, false, false
+}
+
+func wallTimeoutPrewarmResult(logPath, stage string) setupPrewarmResult {
+	ei := runner.ExitInfo{ExitCode: 124}
+	err := fmt.Errorf("job wall time exceeded %s", stage)
+	appendPrewarmStatus(logPath, "weft: "+err.Error()+"\n")
+	return setupPrewarmResult{
+		didWork:       true,
+		logPath:       logPath,
+		exitInfo:      ei,
+		err:           err,
+		failureReason: db.FailureReasonWallTimeout,
+	}
+}
+
+func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, baseEnv []string, assets []dataloc.DataAsset, paths runner.JobPaths, wallStartedAt time.Time) setupPrewarmResult {
 	script := hfDownloadScript(assets)
-	timeout := pickSetupTimeout(cfg)
 	disableXet := false
 	var last setupPrewarmResult
 	initialEnv := hfDownloadPrewarmEnv(baseEnv, job.Inputs)
 	preBytes := probeCacheSizesForEnv(initialEnv).HFBytes
 	startedAt := time.Now()
 	for attempt := 1; attempt <= hfPrewarmMaxAttempts; attempt++ {
+		timeout, wallLimited, expired := prewarmPhaseTimeout(job, cfg, wallStartedAt)
+		if expired {
+			return wallTimeoutPrewarmResult(paths.Log, "before input prewarm")
+		}
 		env := hfDownloadPrewarmEnv(baseEnv, job.Inputs)
 		if disableXet {
 			env = append(env, "HF_HUB_DISABLE_XET=1")
@@ -519,6 +566,9 @@ func runHFDownloadPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir str
 		appendPrewarmStatus(paths.Log, fmt.Sprintf("weft: HF prewarm attempt %d/%d%s\n",
 			attempt, hfPrewarmMaxAttempts, hfPrewarmXetSuffix(disableXet)))
 		ei, err := runSetupCommand(script, job.ID, workDir, env, paths, timeout, hfPrewarmStallTimeout)
+		if wallLimited && ei.ExitCode == 124 {
+			return wallTimeoutPrewarmResult(paths.Log, "during input prewarm")
+		}
 		if err == nil {
 			postBytes := probeCacheSizesForEnv(env).HFBytes
 			downloaded := postBytes - preBytes
@@ -965,7 +1015,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		// Write .started marker to R2
-		attemptStartUnix := time.Now().Unix()
+		attemptStartedAt := time.Now()
+		attemptStartUnix := attemptStartedAt.Unix()
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", attemptStartUnix))
 		outputWindowStartUnix := outputWindowStartForJob(job, attemptStartUnix)
 		result.StartedJobCount++
@@ -982,8 +1033,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		jobCfg := singleJobConfigForAgentJob(job, cfg, workDir, jobMaxTime)
 		prewarm := setupPrewarms.waitFor(job)
 		if !prewarm.ok && prewarm.err == nil && len(hfInputAssets(job.Inputs)) > 0 {
-			prewarm = runSetupPrewarm(job, cfg, expandedWorkDir, false)
+			prewarm = runSetupPrewarm(job, cfg, expandedWorkDir, false, attemptStartedAt)
 		}
+		jobCfg.WallStartedAt = attemptStartedAt
 		if prewarm.ok {
 			jobCfg.SetupPrewarmed = prewarm.setupRan
 			jobCfg.HFPrewarmDownloadedBytes = prewarm.hfDownloadedBytes
@@ -1410,6 +1462,9 @@ func recordPrewarmFailure(cfg jobSequenceConfig, job cloud.AgentJob, prewarm set
 }
 
 func prewarmShouldTerminateAsInfra(prewarm setupPrewarmResult) bool {
+	if prewarm.failureReason == db.FailureReasonWallTimeout {
+		return false
+	}
 	if prewarm.infraFailure {
 		return true
 	}
@@ -1500,23 +1555,25 @@ func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workD
 	jobCfg := runner.SingleJobConfig{
 		JobID: job.ID,
 		Job: opsqueue.CommandJob{
-			Cmd:          job.Command,
-			Tags:         append([]string(nil), job.Tags...),
-			GPU:          job.GPU,
-			GPUClass:     job.GPUClass,
-			GPUCount:     job.GPUCount,
-			GPUMem:       gpuMem,
-			Interconnect: job.Interconnect,
-			CPUCores:     job.CPUCores,
-			OutputDirs:   append([]string(nil), job.OutputDirs...),
-			Outputs:      append([]string(nil), job.Outputs...),
-			Produces:     append([]string(nil), job.Produces...),
-			Needs:        append([]string(nil), job.Needs...),
-			Env:          env,
+			Cmd:             job.Command,
+			Tags:            append([]string(nil), job.Tags...),
+			GPU:             job.GPU,
+			GPUClass:        job.GPUClass,
+			GPUCount:        job.GPUCount,
+			GPUMem:          gpuMem,
+			Interconnect:    job.Interconnect,
+			CPUCores:        job.CPUCores,
+			WallTimeSeconds: job.WallTimeSeconds,
+			OutputDirs:      append([]string(nil), job.OutputDirs...),
+			Outputs:         append([]string(nil), job.Outputs...),
+			Produces:        append([]string(nil), job.Produces...),
+			Needs:           append([]string(nil), job.Needs...),
+			Env:             env,
 		},
 		LogDir:               cfg.LogDir,
 		WorkingDir:           workDir,
 		MaxTime:              jobMaxTime,
+		WallTime:             time.Duration(job.WallTimeSeconds) * time.Second,
 		SetupTimeout:         setupTimeout,
 		GPUIdleTimeout:       gpuIdle,
 		StdoutSilenceTimeout: stdoutSilence,

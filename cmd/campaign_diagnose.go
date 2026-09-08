@@ -297,6 +297,8 @@ func humanizeFailureReason(reason string) string {
 		return "torch preflight could not import torch"
 	case "run_timeout":
 		return "run phase exceeded its --max-time budget"
+	case "wall_timeout":
+		return "job exceeded its --wall-time budget, including setup"
 	case "killed_stdout_silence":
 		return "killed: no stdout output for the silence-watchdog timeout"
 	case "killed_gpu_idle":

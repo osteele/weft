@@ -23,6 +23,7 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 		BestEffortInputs: []string{"hf:org/auto"},
 		EnvVars:          []string{"UV_INDEX_URL=https://example.com/simple", "CUDA_HOME=/usr/local/cuda"},
 		LatestRunID:      &runID,
+		Metadata:         &db.JobMetadata{WallTimeSeconds: 5400},
 	}
 
 	got := newAgentJob(job, cloud.ProjectRootDir+"/repo")
@@ -38,6 +39,9 @@ func TestNewAgentJobPreservesArtifactMetadata(t *testing.T) {
 	}
 	if got.Priority != job.Priority {
 		t.Fatalf("priority = %d, want %d", got.Priority, job.Priority)
+	}
+	if got.WallTimeSeconds != job.Metadata.WallTimeSeconds {
+		t.Fatalf("wall time seconds = %d, want %d", got.WallTimeSeconds, job.Metadata.WallTimeSeconds)
 	}
 	if !reflect.DeepEqual(got.OutputDirs, job.OutputDirs) {
 		t.Fatalf("output dirs = %v, want %v", got.OutputDirs, job.OutputDirs)

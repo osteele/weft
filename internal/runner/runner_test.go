@@ -1454,3 +1454,46 @@ func TestRefreshRunningJobs_Regression_MarkerNotWrittenOnRecovery(t *testing.T) 
 		t.Fatal("job should have been removed from running state after recovery")
 	}
 }
+
+func TestStartJob_WallTimeStopsInventoryRun(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(813)
+	job := &opsqueue.CommandJob{
+		ID:              jobID,
+		RunID:           92,
+		Dir:             t.TempDir(),
+		Cmd:             "sleep 3",
+		WallTimeSeconds: 1,
+	}
+	if err := writeJobFile(r.queueDir, job); err != nil {
+		t.Fatalf("write job file: %v", err)
+	}
+	if err := r.startJob(jobID, job, nil); err != nil {
+		t.Fatalf("startJob: %v", err)
+	}
+
+	paths := NewJobPaths(r.logDir, jobID)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(paths.Completion); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("wall-timed job did not complete")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code, ok := ReadStatusFile(paths.Status); !ok || code != 124 {
+		t.Fatalf("status = (%d, %t), want (124, true)", code, ok)
+	}
+	if reason := ReadFailureReasonFile(paths.FailureReason); reason != FailureReasonWallTimeout {
+		t.Fatalf("failure reason = %q, want %q", reason, FailureReasonWallTimeout)
+	}
+	logData, err := os.ReadFile(paths.Log)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "weft: command starting\n") {
+		t.Fatalf("log lacks command-start marker:\n%s", logData)
+	}
+}

@@ -944,6 +944,7 @@ func resetEditState() {
 	editMaxHourlyRate = ""
 	editMaxSpend = ""
 	editMaxTime = ""
+	editWallTime = ""
 	editGracePeriod = ""
 	editProvider = ""
 	editRunpodCloudType = ""

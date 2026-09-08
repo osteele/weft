@@ -727,7 +727,7 @@ func TestRunSetupPrewarmBestEffortHFFailureWarnsAndContinues(t *testing.T) {
 		Command:          "python train.py",
 		Inputs:           []string{"hf:org/auto"},
 		BestEffortInputs: []string{"hf:org/auto"},
-	}, jobSequenceConfig{}, t.TempDir(), false)
+	}, jobSequenceConfig{}, t.TempDir(), false, time.Time{})
 
 	if !result.ok {
 		t.Fatalf("best-effort prewarm should continue, got result: %+v", result)
@@ -738,6 +738,56 @@ func TestRunSetupPrewarmBestEffortHFFailureWarnsAndContinues(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "weft: auto-detected input hf:org/auto failed to stage; continuing (best-effort)") {
 		t.Fatalf("missing best-effort warning:\n%s", string(data))
+	}
+}
+
+func TestRunSetupPrewarmWallTimeIsFatalWithoutRentalTermination(t *testing.T) {
+	restore := stubPrewarmRunner(t, func(_ string, _ int64, _ string, _ []string, _ runner.JobPaths, timeout time.Duration) (runner.ExitInfo, error) {
+		if timeout <= 0 || timeout >= time.Second {
+			t.Fatalf("prewarm timeout = %v, want remaining wall budget", timeout)
+		}
+		return runner.ExitInfo{ExitCode: 124}, errors.New("timed out")
+	})
+	defer restore()
+
+	job := cloud.AgentJob{
+		ID:              74,
+		RunID:           1,
+		Command:         "python train.py",
+		Inputs:          []string{"hf:org/explicit"},
+		WallTimeSeconds: 1,
+	}
+	result := runSetupPrewarm(job, jobSequenceConfig{}, t.TempDir(), false, time.Now().Add(-500*time.Millisecond))
+	if result.failureReason != db.FailureReasonWallTimeout || result.exitInfo.ExitCode != 124 {
+		t.Fatalf("prewarm result = %+v, want wall timeout", result)
+	}
+	if prewarmShouldTerminateAsInfra(result) {
+		t.Fatal("user wall deadline must not terminate the rental as infrastructure failure")
+	}
+	if weight := setupWeight(job); weight != 0 {
+		t.Fatalf("setupWeight = %d, want 0 so wall-bounded jobs do not prewarm before their attempt", weight)
+	}
+}
+
+func TestSetupPrewarmManagerDoesNotStartWallBoundedJobEarly(t *testing.T) {
+	currentDir := t.TempDir()
+	nextDir := t.TempDir()
+	jobs := []cloud.AgentJob{
+		{ID: 1, Dir: currentDir, Command: "echo current"},
+		{
+			ID:              2,
+			Dir:             nextDir,
+			Command:         "echo next",
+			Inputs:          []string{"hf:org/model"},
+			WallTimeSeconds: 60,
+		},
+	}
+	manager := newSetupPrewarmManager()
+
+	manager.startNext(0, jobs, jobSequenceConfig{}, currentDir)
+
+	if manager.active != nil {
+		t.Fatal("wall-bounded job started setup before its attempt wall clock")
 	}
 }
 
@@ -757,7 +807,7 @@ func TestRunSetupPrewarmFailsOnSourceRecoveryError(t *testing.T) {
 
 	result := runSetupPrewarm(cloud.AgentJob{
 		ID: 81, Dir: workDir, Command: "python main.py",
-	}, jobSequenceConfig{R2Bucket: "test-bucket"}, workDir, false)
+	}, jobSequenceConfig{R2Bucket: "test-bucket"}, workDir, false, time.Time{})
 	if result.err == nil {
 		t.Fatal("runSetupPrewarm returned no error after source recovery failure")
 	}
@@ -831,7 +881,7 @@ func TestRunSetupPrewarmExplicitHFFailureRemainsFatal(t *testing.T) {
 		RunID:   1,
 		Command: "python train.py",
 		Inputs:  []string{"hf:org/explicit"},
-	}, jobSequenceConfig{}, t.TempDir(), false)
+	}, jobSequenceConfig{}, t.TempDir(), false, time.Time{})
 
 	if result.ok {
 		t.Fatal("explicit HF prewarm failure should be fatal")
@@ -858,7 +908,7 @@ func TestRunSetupPrewarmBestEffortKeepsXetFallback(t *testing.T) {
 		Command:          "python train.py",
 		Inputs:           []string{"hf:org/auto"},
 		BestEffortInputs: []string{"hf:org/auto"},
-	}, jobSequenceConfig{}, t.TempDir(), false)
+	}, jobSequenceConfig{}, t.TempDir(), false, time.Time{})
 
 	if !result.ok {
 		t.Fatalf("best-effort prewarm should continue, got result: %+v", result)
@@ -903,7 +953,7 @@ func TestHFPrewarmMeasuresSuccessfulCacheGrowth(t *testing.T) {
 	job := cloud.AgentJob{ID: 6264, Command: "echo hi", Dir: t.TempDir(), Inputs: []string{"hf:org/model"}}
 	assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
 
-	result := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, job.Dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID))
+	result := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, job.Dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID), time.Time{})
 	if !result.ok {
 		t.Fatalf("prewarm failed: %v", result.err)
 	}
@@ -953,7 +1003,7 @@ func TestHFPrewarmStallXetFallback(t *testing.T) {
 			paths := runner.NewJobPaths(t.TempDir(), job.ID)
 			assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
 
-			res := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, paths)
+			res := runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, paths, time.Time{})
 			if !res.ok {
 				t.Fatalf("prewarm should have succeeded on the retry, got err=%v", res.err)
 			}
@@ -987,7 +1037,7 @@ func TestHFPrewarmPassesStallTimeout(t *testing.T) {
 	job := cloud.AgentJob{ID: 6263, Command: "echo hi", Dir: dir, Inputs: []string{"hf:org/model"}}
 	assets := []dataloc.DataAsset{{Kind: dataloc.AssetHFModel, ID: "org/model"}}
 
-	runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID))
+	runHFDownloadPrewarm(job, jobSequenceConfig{Provider: "vastai"}, dir, nil, assets, runner.NewJobPaths(t.TempDir(), job.ID), time.Time{})
 	if gotStall != hfPrewarmStallTimeout {
 		t.Fatalf("stall timeout passed to the runner = %s, want %s", gotStall, hfPrewarmStallTimeout)
 	}

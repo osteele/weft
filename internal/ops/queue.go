@@ -100,6 +100,7 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		Interconnect:     job.RequestedInterconnect(),
 		CPUCores:         job.RequestedCPUCores(),
 		RAMReservationKB: jobRAMReservationKB(job),
+		WallTimeSeconds:  int(job.WallTime() / time.Second),
 		Tags:             job.Tags,
 		OutputDirs:       job.OutputDirs,
 		Outputs:          job.Outputs,

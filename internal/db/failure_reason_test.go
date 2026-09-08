@@ -18,6 +18,7 @@ func TestSanitizeFailureReasonClosedVocabulary(t *testing.T) {
 		FailureReasonStdoutSilence,
 		FailureReasonSetupTimeout,
 		FailureReasonRunTimeout,
+		FailureReasonWallTimeout,
 		FailureReasonCUDADriverTooOld,
 		FailureReasonError,
 		FailureReasonPrewarmFailed,

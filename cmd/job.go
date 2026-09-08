@@ -1853,6 +1853,9 @@ func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) e
 	if policy := formatJobRentalPolicy(job); policy != "" {
 		fmt.Fprintf(w, "Rental policy: %s\n", policy)
 	}
+	if wallTime := job.WallTime(); wallTime > 0 {
+		fmt.Fprintf(w, "Wall time:   %s (includes setup)\n", wallTime)
+	}
 	// Torch-derived GPU-runtime constraints apply only to GPU jobs; a
 	// CPU-only job must not display an inert "Arch cap" that reads as
 	// the placement blocker.

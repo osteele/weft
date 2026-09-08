@@ -68,4 +68,8 @@ func TestHumanizeFailureReason_DistinguishesSetupAndRunTimeout(t *testing.T) {
 	if !strings.Contains(strings.ToLower(run), "run") || !strings.Contains(strings.ToLower(run), "budget") {
 		t.Errorf("run_timeout text should name the run budget; got %q", run)
 	}
+	wall := humanizeFailureReason("wall_timeout")
+	if wall == setup || wall == run || !strings.Contains(strings.ToLower(wall), "wall-time") || !strings.Contains(strings.ToLower(wall), "setup") {
+		t.Errorf("wall_timeout text should name the whole-job budget including setup; got %q", wall)
+	}
 }

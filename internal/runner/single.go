@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/remediation"
 )
@@ -27,6 +28,8 @@ type SingleJobConfig struct {
 	WorkingDir               string             // Override job.Dir if non-empty
 	SampleInterval           time.Duration      // Default 1s
 	MaxTime                  time.Duration      // If >0, kill the job after this duration
+	WallStartedAt            time.Time          // Optional earlier start for pre-run staging included in WallTime
+	WallTime                 time.Duration      // If >0, kill the job after this total duration, including setup
 	SetupTimeout             time.Duration      // If >0, kill the setup command after this duration (default 20m)
 	SetupPrewarmed           bool               // If true, skip the detected setup command
 	SetupPrewarmLog          string             // Optional setup prewarm log to append to this job log
@@ -113,6 +116,10 @@ func (t *watchdogActivityTracker) newProbe() func() bool {
 // completion records, and output discovery — the same as the queue runner
 // but without queue/scheduling logic.
 func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
+	wallStartedAt := cfg.WallStartedAt
+	if wallStartedAt.IsZero() {
+		wallStartedAt = time.Now()
+	}
 	if cfg.SampleInterval == 0 {
 		cfg.SampleInterval = time.Second
 	}
@@ -153,6 +160,19 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	paths := NewJobPaths(cfg.LogDir, cfg.JobID)
 
+	finishSetupFailure := func(ei ExitInfo, failure error, reason string) (ExitInfo, error) {
+		now := time.Now().Unix()
+		phases.SetupEnd = now
+		WriteStatusFile(paths, ei)
+		if reason == "" {
+			reason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
+		}
+		WriteFailureReasonFile(paths, reason)
+		WriteCompletionRecord(paths, ei, RunningJobState{}, "", reason, phases.SetupStart, now, nil)
+		WritePhasesFile(paths, phases)
+		return ei, failure
+	}
+
 	// Archive existing files
 	if err := ArchiveExistingFiles(cfg.LogDir, cfg.JobID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: archive prior artifacts for job %d: %v\n", cfg.JobID, err)
@@ -186,18 +206,18 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		}
 	}
 	if setupCmd == direnvSetupCommand {
-		resolvedEnv, ei, resolveErr := resolveDirenvEnv(expandedDir, envVars, paths.Log)
+		timeout, wallLimited, expired := boundedPhaseTimeout(cfg.SetupTimeout, inventory.DefaultSetupTimeout, wallStartedAt, cfg.WallTime)
+		if expired {
+			ei := ExitInfo{ExitCode: 124}
+			return finishSetupFailure(ei, fmt.Errorf("job wall time exceeded before direnv setup"), FailureReasonWallTimeout)
+		}
+		resolvedEnv, ei, resolveErr := resolveDirenvEnv(expandedDir, envVars, paths.Log, timeout)
 		if resolveErr != nil {
-			now := time.Now().Unix()
-			phases.SetupEnd = now
-			WriteStatusFile(paths, ei)
-
-			failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
-			WriteFailureReasonFile(paths, failureReason)
-			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
-			WritePhasesFile(paths, phases)
-
-			return ei, resolveErr
+			reason := ""
+			if wallLimited && ei.ExitCode == 124 {
+				reason = FailureReasonWallTimeout
+			}
+			return finishSetupFailure(ei, resolveErr, reason)
 		}
 		envVars = resolvedEnv
 		setupCmd = ""
@@ -280,19 +300,18 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			slog.Info("skipping setup command: setup already prewarmed",
 				"component", "runner", "job_id", cfg.JobID, "cmd", setupCmd)
 		} else {
-			ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, expandedDir, envVars, paths, cfg.SetupTimeout)
+			timeout, wallLimited, expired := boundedPhaseTimeout(cfg.SetupTimeout, inventory.DefaultSetupTimeout, wallStartedAt, cfg.WallTime)
+			if expired {
+				ei := ExitInfo{ExitCode: 124}
+				return finishSetupFailure(ei, fmt.Errorf("job wall time exceeded before setup"), FailureReasonWallTimeout)
+			}
+			ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, expandedDir, envVars, paths, timeout)
 			if setupErr != nil {
-				now := time.Now().Unix()
-				phases.SetupEnd = now
-
-				// Early return skips the normal completion writes below;
-				// without these the reconciler has no timestamps or logs.
-				failureReason := DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
-				WriteFailureReasonFile(paths, failureReason)
-				WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
-				WritePhasesFile(paths, phases)
-
-				return ei, setupErr
+				reason := ""
+				if wallLimited && ei.ExitCode == 124 {
+					reason = FailureReasonWallTimeout
+				}
+				return finishSetupFailure(ei, setupErr, reason)
 			}
 			if setupCmd == "uv sync" {
 				collectAndWriteUVManifest(cfg.JobID, expandedDir, cfg.LogDir)
@@ -312,16 +331,18 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// will classify the log on a hit; the gain here is wall-clock and a
 	// clearer phase attribution.
 	if len(gpuDevices) > 0 && shouldRunTorchPreflight(expandedDir, command, scriptMeta) {
-		ei, failureStage, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, cfg.SetupTimeout)
+		timeout, wallLimited, expired := boundedPhaseTimeout(cfg.SetupTimeout, inventory.DefaultSetupTimeout, wallStartedAt, cfg.WallTime)
+		if expired {
+			ei := ExitInfo{ExitCode: 124}
+			return finishSetupFailure(ei, fmt.Errorf("job wall time exceeded before torch preflight"), FailureReasonWallTimeout)
+		}
+		ei, failureStage, preflightErr := runTorchPreflight(cfg.JobID, expandedDir, command, envVars, paths, timeout)
 		if preflightErr != nil {
-			now := time.Now().Unix()
-			phases.SetupEnd = now
-			failureReason, _ := db.ClassifyInfraFailure(torchPreflightFailurePhase(failureStage), ei.ExitCode, "")
-			WriteStatusFile(paths, ei)
-			WriteFailureReasonFile(paths, failureReason)
-			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
-			WritePhasesFile(paths, phases)
-			return ei, preflightErr
+			reason, _ := db.ClassifyInfraFailure(torchPreflightFailurePhase(failureStage), ei.ExitCode, "")
+			if wallLimited && ei.ExitCode == 124 {
+				reason = FailureReasonWallTimeout
+			}
+			return finishSetupFailure(ei, preflightErr, reason)
 		}
 	}
 
@@ -332,6 +353,11 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	phases.RunStart = time.Now().Unix()
 
 	envVars = applyUVRunEnvAdditions(expandedDir, setupCmd, envVars, cfg.JobID, paths.Log)
+	if cfg.WallTime > 0 && time.Since(wallStartedAt) >= cfg.WallTime {
+		ei := ExitInfo{ExitCode: 124}
+		return finishSetupFailure(ei, fmt.Errorf("job wall time exceeded before command start"), FailureReasonWallTimeout)
+	}
+	appendSetupLog(paths.Log, []byte("weft: command starting\n"))
 
 	slog.Debug("launching process", "component", "runner", "job_id", cfg.JobID)
 	proc, err := StartProcess(command, workingDir, envVars, paths.Log)
@@ -351,12 +377,32 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	proc.WritePIDFiles(paths)
 
-	// Time budget enforcement: kill process group when deadline reached
+	// Time budget enforcement: kill the process group when the first run or
+	// whole-job deadline is reached.
 	var timedOut atomic.Bool
-	if cfg.MaxTime > 0 {
-		timer := time.AfterFunc(cfg.MaxTime, func() {
+	var wallTimedOut atomic.Bool
+	var processExitMu sync.Mutex
+	processExited := false
+	runBudget := cfg.MaxTime
+	timeoutLabel := "max-time"
+	if cfg.WallTime > 0 {
+		remaining := cfg.WallTime - time.Since(wallStartedAt)
+		if runBudget <= 0 || remaining < runBudget {
+			runBudget = remaining
+			timeoutLabel = "wall-time"
+		}
+	}
+	if runBudget > 0 {
+		timer := time.AfterFunc(runBudget, func() {
+			processExitMu.Lock()
+			if processExited {
+				processExitMu.Unlock()
+				return
+			}
 			timedOut.Store(true)
-			slog.Warn("max-time reached, sending SIGTERM", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime, "pgid", proc.PGID)
+			wallTimedOut.Store(timeoutLabel == "wall-time")
+			processExitMu.Unlock()
+			slog.Warn(timeoutLabel+" reached, sending SIGTERM", "component", "runner", "job_id", cfg.JobID, "timeout", runBudget, "pgid", proc.PGID)
 			KillProcessGroupWithGrace(proc.PGID, DefaultKillGrace, paths, "")
 		})
 		defer timer.Stop()
@@ -364,16 +410,6 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Closed after Wait() so background goroutines can exit promptly.
 	processDone := make(chan struct{})
-
-	// processExitMu serializes watchdog firing against process exit. Without
-	// it, a watchdog tick that lands just as the process exits cleanly can set
-	// its fired flag after Wait() has returned (but before the exit-info
-	// overrides below run), mislabeling a clean exit as a watchdog kill.
-	// Watchdogs check processExited and set their fired flag under this lock;
-	// the wait path sets processExited under the same lock immediately after
-	// Wait() returns, after which no watchdog can fire.
-	var processExitMu sync.Mutex
-	processExited := false
 
 	// Sampling loop in background
 	samplingDone := make(chan struct{})
@@ -540,12 +576,13 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	close(processDone)
 	ei := ExtractExitInfo(waitErr)
 
-	// Override exit info if we timed out (like GNU timeout exit code 124)
+	// Override exit info if either execution budget expired (like GNU timeout
+	// exit code 124).
 	if timedOut.Load() {
 		ei.ExitCode = 124
 		ei.Signaled = true
 		ei.Signal = syscall.SIGTERM
-		slog.Warn("job timed out", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime)
+		slog.Warn("job timed out", "component", "runner", "job_id", cfg.JobID, "wall_time", cfg.WallTime, "max_time", cfg.MaxTime)
 	}
 
 	// Override exit info if killed due to fatal log error
@@ -581,15 +618,17 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	WriteStatusFile(paths, ei)
 	WriteLogFooter(paths, ei)
 
-	// Failure detection. A run-phase MaxTime overrun forces exit 124, which the
-	// shared classifier would otherwise read as setup_timeout (124 is also the
-	// setup budget code). We know here that the run phase timed out, so label it
-	// run_timeout to keep the two distinguishable in `weft info`.
+	// Failure detection. Budget overruns force exit 124, which the shared
+	// classifier otherwise reads as setup_timeout. The execution path knows
+	// which budget expired.
 	var failureReason string
 	if ei.ExitCode != 0 {
-		if timedOut.Load() {
+		switch {
+		case wallTimedOut.Load():
+			failureReason = FailureReasonWallTimeout
+		case timedOut.Load():
 			failureReason = FailureReasonRunTimeout
-		} else {
+		default:
 			failureReason = DetectFailureReasonFromExitInfoAndLog(ei, paths.Log)
 		}
 		WriteFailureReasonFile(paths, failureReason)

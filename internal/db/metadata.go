@@ -21,6 +21,7 @@ type JobMetadata struct {
 	Reconciliation   *JobReconciliationMetadata `json:"reconciliation,omitempty"`
 	SubmissionNonce  string                     `json:"submission_nonce,omitempty"`
 	BestEffortInputs []string                   `json:"best_effort_inputs,omitempty"`
+	WallTimeSeconds  int                        `json:"wall_time_seconds,omitempty"`
 }
 
 // JobReconciliationMetadata records durable evidence about an attempt whose

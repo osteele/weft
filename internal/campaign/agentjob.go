@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudneeds"
@@ -36,6 +37,7 @@ func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 		GPUCount:         job.RequestedGPUCount(),
 		Interconnect:     job.RequestedInterconnect(),
 		CPUCores:         job.RequestedCPUCores(),
+		WallTimeSeconds:  int(job.WallTime() / time.Second),
 		OutputDirs:       append([]string(nil), job.OutputDirs...),
 		Outputs:          append([]string(nil), job.Outputs...),
 		Produces:         append([]string(nil), job.Produces...),

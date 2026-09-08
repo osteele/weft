@@ -74,6 +74,7 @@ const (
 	FailureReasonKilledSIGTERM    = db.FailureReasonKilledSIGTERM
 	FailureReasonSetupTimeout     = db.FailureReasonSetupTimeout
 	FailureReasonRunTimeout       = db.FailureReasonRunTimeout
+	FailureReasonWallTimeout      = db.FailureReasonWallTimeout
 	FailureReasonError            = db.FailureReasonError
 )
 

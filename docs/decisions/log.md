@@ -29,3 +29,11 @@ achieve Q, accepting D.*
   a live credential the default outcome when a plan is abandoned or a session
   crashes, accepting that the hub's availability becomes a liveness dependency
   of every executing plan.
+
+- **2026-09-09** — In the context of preventing jobs from hanging before their
+  user command starts, facing whether to reuse the rental-lifetime
+  `--max-time`, we decided on a distinct per-job `--wall-time` that applies to
+  inventory and rental execution, and neglected overloading the instance
+  lifetime policy, to bound setup and command time with one portable contract,
+  accepting another duration field in submission metadata and runner wire
+  formats.

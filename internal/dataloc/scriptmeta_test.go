@@ -79,6 +79,15 @@ import torch
 			want: &ScriptMeta{CPUMemGB: 64, CPUMemStrict: boolPtr(true)},
 		},
 		{
+			name: "wall time",
+			content: `# /// script
+# [tool.weft]
+# wall-time = "2h30m"
+# ///
+`,
+			want: &ScriptMeta{WallTime: "2h30m"},
+		},
+		{
 			name: "hf-offline",
 			content: `# /// script
 # [tool.weft]

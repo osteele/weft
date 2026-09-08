@@ -42,6 +42,7 @@ const (
 	FailureReasonStdoutSilence       = "killed_stdout_silence"
 	FailureReasonSetupTimeout        = "setup_timeout"
 	FailureReasonRunTimeout          = "run_timeout"
+	FailureReasonWallTimeout         = "wall_timeout"
 	FailureReasonCUDADriverTooOld    = "cuda_driver_too_old"
 	FailureReasonError               = "error"
 	FailureReasonPrewarmFailed       = "prewarm_failed"
@@ -112,6 +113,7 @@ func IsKnownFailureReason(reason string) bool {
 		FailureReasonStdoutSilence,
 		FailureReasonSetupTimeout,
 		FailureReasonRunTimeout,
+		FailureReasonWallTimeout,
 		FailureReasonCUDADriverTooOld,
 		FailureReasonError,
 		FailureReasonPrewarmFailed,

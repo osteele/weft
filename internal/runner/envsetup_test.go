@@ -594,3 +594,24 @@ func TestPythonVersionRequest_HandlesVariousFormats(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveDirenvEnvHonorsTimeout(t *testing.T) {
+	binDir := t.TempDir()
+	fakeDirenv := filepath.Join(binDir, "direnv")
+	if err := os.WriteFile(fakeDirenv, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatalf("write fake direnv: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	started := time.Now()
+	_, ei, err := ResolveDirenvEnv(t.TempDir(), nil, filepath.Join(t.TempDir(), "job.log"), 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("ResolveDirenvEnv unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("direnv timeout took %v, want less than 1s", elapsed)
+	}
+	if ei.ExitCode != 124 {
+		t.Fatalf("exit code = %d, want 124", ei.ExitCode)
+	}
+}

@@ -441,7 +441,7 @@ func TestRunSingleJob_DirenvEnvAppliedAndJobEnvOverrides(t *testing.T) {
 		t.Fatalf("write .envrc: %v", err)
 	}
 	originalResolveDirenvEnv := resolveDirenvEnv
-	resolveDirenvEnv = func(string, []string, string) ([]string, ExitInfo, error) {
+	resolveDirenvEnv = func(string, []string, string, time.Duration) ([]string, ExitInfo, error) {
 		return []string{"FOO=from_direnv"}, ExitInfo{}, nil
 	}
 	t.Cleanup(func() { resolveDirenvEnv = originalResolveDirenvEnv })
@@ -472,6 +472,76 @@ func TestRunSingleJob_DirenvEnvAppliedAndJobEnvOverrides(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "from_job") {
 		t.Fatalf("expected log to contain overridden direnv value, got %s", logData)
+	}
+}
+
+func TestRunSingleJob_WallTimeStopsRunAndMarksCommandStart(t *testing.T) {
+	logDir := t.TempDir()
+	cfg := SingleJobConfig{
+		JobID: 52,
+		Job: opsqueue.CommandJob{
+			Cmd: "sleep 2",
+		},
+		LogDir:         logDir,
+		WorkingDir:     t.TempDir(),
+		SampleInterval: 20 * time.Millisecond,
+		WallTime:       100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	started := time.Now()
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("wall deadline took %v, want less than 1s", elapsed)
+	}
+	if ei.ExitCode != 124 {
+		t.Fatalf("exit code = %d, want 124", ei.ExitCode)
+	}
+	paths := NewJobPaths(logDir, cfg.JobID)
+	if reason := ReadFailureReasonFile(paths.FailureReason); reason != FailureReasonWallTimeout {
+		t.Fatalf("failure reason = %q, want %q", reason, FailureReasonWallTimeout)
+	}
+	logData, readErr := os.ReadFile(paths.Log)
+	if readErr != nil {
+		t.Fatalf("read log: %v", readErr)
+	}
+	if !strings.Contains(string(logData), "weft: command starting\n") {
+		t.Fatalf("log lacks command-start marker:\n%s", logData)
+	}
+}
+
+func TestRunSingleJob_CommandStartMarkerPrecedesOutput(t *testing.T) {
+	logDir := t.TempDir()
+	cfg := SingleJobConfig{
+		JobID: 53,
+		Job: opsqueue.CommandJob{
+			Cmd: "printf 'USER_OUTPUT\\n'",
+		},
+		LogDir:         logDir,
+		WorkingDir:     t.TempDir(),
+		SampleInterval: 20 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+	logData, readErr := os.ReadFile(NewJobPaths(logDir, cfg.JobID).Log)
+	if readErr != nil {
+		t.Fatalf("read log: %v", readErr)
+	}
+	logText := string(logData)
+	marker := strings.Index(logText, "weft: command starting\n")
+	output := strings.LastIndex(logText, "USER_OUTPUT\n")
+	if marker < 0 || output < 0 || marker >= output {
+		t.Fatalf("command-start marker does not precede command output:\n%s", logText)
 	}
 }
 

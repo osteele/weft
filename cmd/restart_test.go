@@ -1909,6 +1909,14 @@ func TestPersistentAttemptMetadata_DropsDerivedOnlyDisk(t *testing.T) {
 	}
 }
 
+func TestPersistentAttemptMetadataPreservesWallTime(t *testing.T) {
+	meta := &db.JobMetadata{WallTimeSeconds: 7200}
+	out := persistentAttemptMetadata(meta)
+	if out == nil || out.WallTimeSeconds != 7200 {
+		t.Fatalf("persistentAttemptMetadata = %+v, want wall time 7200", out)
+	}
+}
+
 func TestRetryDriverFloorNote(t *testing.T) {
 	database := db.SetupTestDB(t)
 	launchID, err := db.CreateLaunch(database, &db.Launch{

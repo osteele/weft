@@ -56,6 +56,7 @@ type CommandJob struct {
 	Interconnect     string          `json:"interconnect,omitempty"`
 	CPUCores         int             `json:"cpu_cores,omitempty"`
 	RAMReservationKB int64           `json:"ram_reservation_kb,omitempty"`
+	WallTimeSeconds  int             `json:"wall_time_seconds,omitempty"`
 	Tags             []string        `json:"tags,omitempty"`
 	OutputDirs       []string        `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
 	Outputs          []string        `json:"outputs,omitempty"`     // declared output refs from PEP 723/CLI
@@ -109,6 +110,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Interconnect:     entry.Interconnect,
 			CPUCores:         entry.CPUCores,
 			RAMReservationKB: entry.RAMReservationKB,
+			WallTimeSeconds:  entry.WallTimeSeconds,
 			Tags:             entry.Tags,
 			OutputDirs:       entry.OutputDirs,
 			Outputs:          entry.Outputs,

@@ -69,6 +69,7 @@ type QueueEntry struct {
 	Interconnect     string
 	CPUCores         int
 	RAMReservationKB int64
+	WallTimeSeconds  int
 	Tags             []string
 	OutputDirs       []string
 	Outputs          []string

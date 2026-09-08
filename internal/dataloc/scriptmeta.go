@@ -23,6 +23,7 @@ type ScriptMeta struct {
 	CPUMemGB      int    // Minimum host/system RAM in GB (headroom may be applied by CLI)
 	CPUMemStrict  *bool  // Exact cpu-mem matching (no headroom), when explicitly set
 	DiskGB        int    // Total rental disk floor in GB
+	WallTime      string // Maximum job wall-clock time including setup (for example, "2h")
 	DiskMaxGB     int    // Total rental disk ceiling in GB; caps the estimator (see below)
 	RuntimeDiskGB int    // Extra scratch/cache disk headroom in GB
 	// GPUArchMax bounds the GPU's CUDA compute capability from above. Accepted
@@ -58,7 +59,7 @@ type ScriptMeta struct {
 func (m *ScriptMeta) isEmpty() bool {
 	return m.GPU == "" && m.GPUClass == "" && m.GPUCount == 0 && m.GPUMemGB == 0 && m.GPUMemStrict == nil &&
 		m.Interconnect == "" && m.CPUCores == 0 && m.CPUMemGB == 0 && m.CPUMemStrict == nil &&
-		m.DiskGB == 0 && m.DiskMaxGB == 0 && m.RuntimeDiskGB == 0 &&
+		m.DiskGB == 0 && m.DiskMaxGB == 0 && m.RuntimeDiskGB == 0 && m.WallTime == "" &&
 		m.GPUArchMax == "" &&
 		len(m.Inputs) == 0 && len(m.Outputs) == 0 && len(m.Tags) == 0 && m.Image == "" &&
 		m.MinDriver == "" && m.MinCUDA == "" && m.ImagePullSecret == "" && m.RunpodCloudType == "" &&
@@ -111,6 +112,7 @@ func ParseScriptMeta(content string) (*ScriptMeta, error) {
 			}
 			meta.CPUCores = parsePositiveInt(firstPresent(wt, "cpu-cores", "cpu_cores"))
 			meta.CPUMemGB = parseDiskGB(firstPresent(wt, "cpu-mem", "cpu-mem-gb", "cpu_mem_gb"))
+			meta.WallTime = firstStringValue(wt, "wall-time", "wall_time")
 			if v, ok := wt.Get("cpu-mem-strict").(bool); ok {
 				meta.CPUMemStrict = &v
 			}
