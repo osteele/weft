@@ -124,7 +124,7 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
 	cmd.Flags().StringVar(&listFormat, "format", "table", `Output format: "table", "json", "tsv" (alias: "tab")`)
 	cmd.Flags().BoolVar(&listNoTruncate, "no-truncate", false, "Disable column truncation in table mode")
-	cmd.Flags().StringSliceVar(&listColumns, "columns", nil, "Columns to display (comma-separated: id, host, status, started, project, dir, description, command, exit_code, duration, tags, gpu)")
+	cmd.Flags().StringSliceVar(&listColumns, "columns", nil, "Columns to display (comma-separated: id, host, status, started, project, dir, description, command, exit_code, duration, tags, gpu, submitter_session, kill_actor, kill_reason, killed_at)")
 }
 
 // addListFlags registers all list-related flags on a command.
@@ -926,6 +926,9 @@ func showJob(database *sql.DB, id int64) error {
 	if job == nil {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(id))
 	}
+	if err := db.PopulateKillAttributions(database, []*db.Job{job}); err != nil {
+		return fmt.Errorf("read kill attribution: %w", err)
+	}
 
 	fmt.Printf("Job ID:       %s\n", ids.FormatJobID(job.ID))
 	fmt.Printf("Target:       %s\n", job.TargetDisplay())
@@ -1152,7 +1155,7 @@ func printJobListModel(database *sql.DB, model *jobListView) error {
 		if err != nil {
 			return err
 		}
-		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultJSONColumnKeys); err != nil {
+		if err := populateJobAuxiliaryColumns(database, jobs, terminal.DefaultJSONColumnKeys); err != nil {
 			return err
 		}
 		return writeJobListJSON(os.Stdout, jobs, cols, selection, nil)
@@ -1161,14 +1164,14 @@ func printJobListModel(database *sql.DB, model *jobListView) error {
 		if err != nil {
 			return err
 		}
-		if err := populateSubmitterSessionColumn(database, jobs, terminal.DefaultTSVColumnKeys); err != nil {
+		if err := populateJobAuxiliaryColumns(database, jobs, terminal.DefaultTSVColumnKeys); err != nil {
 			return err
 		}
 		return terminal.PrintJobsTSV(os.Stdout, jobs, cols)
 	case "table", "":
 		// No table layout lists the column by default, so only an explicit
 		// --columns can ask for it.
-		if err := populateSubmitterSessionColumn(database, jobs, nil); err != nil {
+		if err := populateJobAuxiliaryColumns(database, jobs, nil); err != nil {
 			return err
 		}
 		return terminal.WriteListPlainOutput(terminal.RenderJobListPlainWithOptions(jobs, terminal.ListOutputWidth(), listColumns, listNoTruncate))
@@ -1332,20 +1335,25 @@ func writeJobListJSON(w io.Writer, jobs []*db.Job, cols []terminal.ColumnDef, se
 	return encoder.Encode(envelope)
 }
 
-// populateSubmitterSessionColumn fills in the submitter session when the
-// selected columns ask for it. The value is stored on the jobs table but is not
-// projected by the views job rows are read through, so it takes a second query
-// that is worth skipping when nothing renders it. defaultKeys mirrors the
-// fallback in terminal.ResolveColumns: an empty --columns selects them.
-func populateSubmitterSessionColumn(database *sql.DB, jobs []*db.Job, defaultKeys []string) error {
+// populateJobAuxiliaryColumns fills fields stored on jobs but deliberately
+// absent from the pinned job_status view. Queries run only when the selected
+// output columns need them.
+func populateJobAuxiliaryColumns(database *sql.DB, jobs []*db.Job, defaultKeys []string) error {
 	keys := listColumns
 	if len(keys) == 0 {
 		keys = defaultKeys
 	}
-	if !slices.Contains(keys, "submitter_session") {
-		return nil
+	if slices.Contains(keys, "submitter_session") {
+		if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
+			return err
+		}
 	}
-	return db.PopulateSubmitterSessions(database, jobs)
+	if slices.Contains(keys, "kill_actor") || slices.Contains(keys, "kill_reason") || slices.Contains(keys, "killed_at") {
+		if err := db.PopulateKillAttributions(database, jobs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func groupedUnprocessedViewExcludesCanceled() bool {

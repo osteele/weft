@@ -15,6 +15,7 @@ import (
 // new local-only signals SHOULD extend this so both verbs grow
 // together.
 func printJobLocalDiagnostics(w io.Writer, database *sql.DB, job *db.Job) {
+	printJobKillAttribution(w, database, job)
 	for _, line := range jobPublicationDiagnosticLines(database, job) {
 		fmt.Fprintln(w, line)
 	}
@@ -24,6 +25,32 @@ func printJobLocalDiagnostics(w io.Writer, database *sql.DB, job *db.Job) {
 	printDiagnosisSummary(w, job)
 	printLaunchTerminationDetail(w, database, job)
 	printJobPhasesAndPeaks(w, database, job)
+}
+
+func printJobKillAttribution(w io.Writer, database *sql.DB, job *db.Job) {
+	if database == nil || job == nil {
+		return
+	}
+	attribution := db.JobKillAttribution{
+		Actor:    job.KillActor,
+		Reason:   job.KillReason,
+		KilledAt: job.KilledAt,
+	}
+	if attribution.KilledAt == nil {
+		var err error
+		attribution, err = db.JobKillAttributionForJob(database, job.ID)
+		if err != nil {
+			return
+		}
+	}
+	if attribution.KilledAt == nil {
+		return
+	}
+	fmt.Fprintf(w, "Killed At:    %s\n", time.Unix(*attribution.KilledAt, 0).Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(w, "Kill Actor:   %s\n", attribution.Actor)
+	if attribution.Reason != "" {
+		fmt.Fprintf(w, "Kill Reason:  %s\n", attribution.Reason)
+	}
 }
 
 func jobPublicationDiagnosticLines(database *sql.DB, job *db.Job) []string {

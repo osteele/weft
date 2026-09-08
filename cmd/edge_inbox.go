@@ -296,6 +296,8 @@ func handleEdgeJobSubmission(ctx context.Context, database *sql.DB, deps edgeInb
 func controlCommand(payload *edge.WeftJobControlPayload) (*cobra.Command, error) {
 	cmd := &cobra.Command{Use: string(payload.Action)}
 	switch payload.Action {
+	case edge.ControlKill:
+		addKillFlags(cmd)
 	case edge.ControlRestart:
 		addRestartFlags(cmd)
 	case edge.ControlEdit:
@@ -321,6 +323,15 @@ func handleEdgeJobControl(database *sql.DB, deps edgeInboxDeps, admission *edge.
 	if err != nil {
 		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonMalformed, Detail: err.Error()}, nil
 	}
+	commandContext := cmd.Context()
+	if commandContext == nil {
+		commandContext = context.Background()
+	}
+	cmd.SetContext(context.WithValue(
+		commandContext,
+		killActorContextKey{},
+		fmt.Sprintf("edge:%s/%s", admission.SigningHost, admission.KeyID),
+	))
 	jobRef := ids.FormatJobID(payload.JobID)
 	job, err := db.GetJobByID(database, payload.JobID)
 	if err != nil {

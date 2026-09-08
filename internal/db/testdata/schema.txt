@@ -501,6 +501,9 @@ table jobs
   col 40 edge_signing_key_id TEXT notnull=0 default=<none> pk=0
   col 41 edge_deployment_source_digest TEXT notnull=0 default=<none> pk=0
   col 42 edge_submission_nonce TEXT notnull=0 default=<none> pk=0
+  col 43 kill_actor TEXT notnull=0 default=<none> pk=0
+  col 44 kill_reason TEXT notnull=0 default=<none> pk=0
+  col 45 killed_at INTEGER notnull=0 default=<none> pk=0
   unique-index (edge_submission_nonce) origin=c partial=1
   unique-index (submit_token) origin=c partial=1
 table launch_live_state

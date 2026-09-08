@@ -3,6 +3,8 @@ package ops
 import (
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -15,6 +17,18 @@ import (
 // pending_status remains for later reconciliation during sync.
 func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	return StopJob(database, job, db.StatusKilled, opts)
+}
+
+func killAttributionValues(attribution StopAttribution) (string, string, int64) {
+	actor := strings.TrimSpace(attribution.Actor)
+	if actor == "" {
+		actor = "weft"
+	}
+	requestedAt := attribution.RequestedAt
+	if requestedAt.IsZero() {
+		requestedAt = time.Now()
+	}
+	return actor, attribution.Reason, requestedAt.Unix()
 }
 
 // StopJob stops a live (running/starting/paused) job, recording targetStatus
@@ -46,7 +60,12 @@ func StopJob(database *sql.DB, job *db.Job, targetStatus string, opts ExecuteOpt
 	}
 	verb := noun + "ed"
 
-	if err := db.SetRequestedStatus(database, job.ID, targetStatus); err != nil {
+	if targetStatus == db.StatusKilled {
+		actor, reason, killedAt := killAttributionValues(opts.StopAttribution)
+		if err := db.SetKillRequestedStatus(database, job.ID, actor, reason, killedAt); err != nil {
+			return Result{}, fmt.Errorf("record kill intent: %w", err)
+		}
+	} else if err := db.SetRequestedStatus(database, job.ID, targetStatus); err != nil {
 		return Result{}, fmt.Errorf("set requested status: %w", err)
 	}
 
@@ -96,6 +115,41 @@ func StopJob(database *sql.DB, job *db.Job, targetStatus string, opts ExecuteOpt
 	default:
 		return Result{}, fmt.Errorf("job %s remains %s after %s request", ids.FormatJobID(job.ID), outcome.currentStatus, noun)
 	}
+}
+
+// KillQueuedJob prevents a queued job from starting and records the explicit
+// kill actor, reason, and request time. Hostless jobs transition locally;
+// inventory-host jobs retain the ordinary remote reconciliation path.
+func KillQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	if job == nil {
+		return Result{}, fmt.Errorf("job is nil")
+	}
+	if job.Backend == db.BackendSkyPilot {
+		return Result{}, fmt.Errorf("job %s is owned by SkyPilot; use external cancellation", ids.FormatJobID(job.ID))
+	}
+	if effectiveStatus := job.EffectiveStatus(); effectiveStatus != db.StatusQueued {
+		return Result{}, fmt.Errorf("job %s (status: %s): %w", ids.FormatJobID(job.ID), effectiveStatus, ErrNotQueued)
+	}
+	if job.HasInventoryHost() {
+		return StopJob(database, job, db.StatusKilled, opts)
+	}
+
+	actor, reason, killedAt := killAttributionValues(opts.StopAttribution)
+	if err := db.SetKillRequestedStatus(database, job.ID, actor, reason, killedAt); err != nil {
+		return Result{}, fmt.Errorf("record kill intent: %w", err)
+	}
+	if err := db.UpdateStatusAndLastSynced(database, job.ID, db.StatusKilled); err != nil {
+		return Result{}, err
+	}
+	if err := db.ClearPendingStatus(database, job.ID); err != nil {
+		return Result{}, err
+	}
+	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killed (hostless local transition)"))
+	return Result{
+		Success: true,
+		JobID:   job.ID,
+		Message: fmt.Sprintf("Job %s killed locally; if a launch was already dispatched it is stopped when the instance reports in", ids.FormatJobID(job.ID)),
+	}, nil
 }
 
 // CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.

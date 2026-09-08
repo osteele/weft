@@ -915,6 +915,40 @@ func TestEdgeControlOwnedJobIsPerformed(t *testing.T) {
 	}
 }
 
+func TestEdgeControlKillRecordsAuthenticatedActorAndReason(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	result := submitControlFixture(t, transport, signers["plan-owner"], jobID, "owned-kill",
+		edge.ControlKill, map[string]string{"reason": "obsolete experiment"})
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil {
+		t.Fatalf("pollEdgeInboxOnce: %v", err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.Accepted || !strings.Contains(ack.Detail, "kill completed") {
+		t.Fatalf("owned kill ack = %#v", ack)
+	}
+	attribution, err := db.JobKillAttributionForJob(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attribution.Actor != "edge:edge-alpha/edge-alpha-plan-owner" ||
+		attribution.Reason != "obsolete experiment" ||
+		attribution.KilledAt == nil {
+		t.Fatalf("kill attribution = %#v", attribution)
+	}
+}
+
 // This kills mutations that drop authenticated edit flags or fail to constrain
 // an edge edit whose job has no stored spend ceiling.
 func TestEdgeControlEditReplaysAuthenticatedFlags(t *testing.T) {

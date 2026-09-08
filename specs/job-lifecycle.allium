@@ -136,6 +136,12 @@ entity Job {
     status: Status
     created_at: Timestamp
     retry_count: Integer
+    -- Attribution for the most recent explicit kill request. kill_actor and
+    -- killed_at are present together; kill_reason is optional. Automatic
+    -- watchdog failures use failure_reason instead.
+    kill_actor: String?
+    kill_reason: String?
+    killed_at: Timestamp?
 
     -- Original submission intent: the resource-related CLI flags the user
     -- passed at `weft run` time. Replayed on retry so that edits to the
@@ -2386,6 +2392,10 @@ rule UserKillsJob {
     requires: job.status in {running, starting, queued, paused}
 
     ensures: job.status = killed
+    ensures: job.kill_actor = AuthenticatedEdgePrincipal or LocalActor
+             and job.killed_at = CurrentTime
+             and job.kill_reason = OptionalKillReason
+             and KillIntentAndAttributionPersistAtomically(job)
     ensures: KillProducesStatusFile(job)
     if job.cloud_instance != null:
         ensures:
@@ -3064,6 +3074,11 @@ rule JobListMachineSurface {
         -- The JSON document is an envelope with kind "job_list", integer
         -- version 1, a selection object, and the existing jobs row projection.
         -- The row fields and their values are unchanged by the envelope.
+        -- Every default job row includes kill_actor, kill_reason, and
+        -- killed_at. Each is null until an explicit kill request is recorded;
+        -- killed_at is an RFC3339 timestamp when present. `weft job info` and
+        -- `weft list --show` render the same attribution as Killed At, Kill
+        -- Actor, and optional Kill Reason fields.
         --
         -- selection is always present. It carries complete, order, and a
         -- constraints list. Each constraint has kind, value, hidden, and

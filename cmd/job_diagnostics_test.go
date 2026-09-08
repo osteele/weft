@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"database/sql"
 	"io"
 	"os"
@@ -21,6 +22,28 @@ func mustMarshalDiagnosis(t *testing.T, d *remediation.ErrorDiagnosis) string {
 		t.Fatalf("marshal diagnosis: %v", err)
 	}
 	return s
+}
+
+func TestPrintJobLocalDiagnosticsIncludesKillAttribution(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo smoke", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetKillRequestedStatus(database, jobID, "session:test", "obsolete experiment", 1_700_000_000); err != nil {
+		t.Fatalf("SetKillRequestedStatus: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	var output bytes.Buffer
+	printJobLocalDiagnostics(&output, database, job)
+	for _, want := range []string{"Killed At:", "Kill Actor:   session:test", "Kill Reason:  obsolete experiment"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("diagnostics missing %q:\n%s", want, output.String())
+		}
+	}
 }
 
 // TestResolveJobDiagnosis covers the stored→log-cache fallback matrix.

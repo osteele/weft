@@ -79,7 +79,7 @@ func runCancelWithParser(cmd *cobra.Command, args []string, parser func([]string
 			continue
 		}
 
-		result, err := orchestration.KillOrCancelJob(database, jobID, "canceled", ops.TimeoutNormal)
+		result, err := orchestration.KillOrCancelJob(database, jobID, "canceled", ops.TimeoutNormal, ops.StopAttribution{})
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue

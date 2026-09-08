@@ -9,9 +9,9 @@ import (
 	"github.com/osteele/weft/internal/ops"
 )
 
-func TestKillJobUsesEffectiveStatusForHostlessRunning(t *testing.T) {
-	// In the new model, a hostless job has no attempt and shows as "queued"
-	// from requested_status. KillJob should still cancel it.
+func TestKillJobKillsQueuedHostlessJob(t *testing.T) {
+	// A hostless job has no attempt and shows as queued from requested_status.
+	// Killing it records a killed terminal state rather than cancellation.
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "", "/tmp", "sleep 100", "test")
 	if err != nil {
@@ -19,7 +19,7 @@ func TestKillJobUsesEffectiveStatusForHostlessRunning(t *testing.T) {
 	}
 
 	service := NewServiceWithDB(database)
-	result, err := service.KillJob(jobID, ops.TimeoutFast)
+	result, err := service.KillJob(jobID, ops.TimeoutFast, ops.StopAttribution{})
 	if err != nil {
 		t.Fatalf("KillJob: %v", err)
 	}
@@ -31,8 +31,8 @@ func TestKillJobUsesEffectiveStatusForHostlessRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if job.EffectiveStatus() != db.StatusCanceled {
-		t.Fatalf("effective status = %q, want %q", job.EffectiveStatus(), db.StatusCanceled)
+	if job.EffectiveStatus() != db.StatusKilled {
+		t.Fatalf("effective status = %q, want %q", job.EffectiveStatus(), db.StatusKilled)
 	}
 }
 
@@ -41,7 +41,10 @@ func TestLocalExecutionControlsRejectExternalJobsWithoutMutation(t *testing.T) {
 		name string
 		run  func(*Service, int64) error
 	}{
-		{name: "kill", run: func(s *Service, id int64) error { _, err := s.KillJob(id, ops.TimeoutFast); return err }},
+		{name: "kill", run: func(s *Service, id int64) error {
+			_, err := s.KillJob(id, ops.TimeoutFast, ops.StopAttribution{})
+			return err
+		}},
 		{name: "draft", run: func(s *Service, id int64) error { _, err := s.DraftJob(id, ops.TimeoutFast); return err }},
 		{name: "pause", run: func(s *Service, id int64) error { _, err := s.PauseJob(id, ops.TimeoutFast); return err }},
 		{name: "resume", run: func(s *Service, id int64) error { _, err := s.ResumeJob(id, ops.TimeoutFast); return err }},

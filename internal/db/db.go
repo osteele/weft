@@ -98,6 +98,9 @@ type Job struct {
 	// opaque string. Empty means the submission was not attributable to a
 	// session, which is a normal value rather than an error.
 	SubmitterSession      string
+	KillActor             string
+	KillReason            string
+	KilledAt              *int64
 	EdgeSubmitterHost     string
 	EdgeSigningKeyID      string
 	EdgeDeploymentDigest  string
@@ -119,6 +122,14 @@ type Job struct {
 	LastSyncedStatus string  // Base: what remote was at last successful sync
 	PendingStatus    *string // Local: what user wants (nil = no pending change)
 	PendingAt        *int64  // When pending state was set
+}
+
+// JobKillAttribution records who requested a kill, why, and when. KilledAt is
+// the request time; it is retained when remote reconciliation is deferred.
+type JobKillAttribution struct {
+	Actor    string
+	Reason   string
+	KilledAt *int64
 }
 
 // JobTargetKind describes how a job is currently targeted.
@@ -2740,6 +2751,51 @@ func JobSubmitterSession(db dbExecer, jobID int64) (string, error) {
 		return "", err
 	}
 	return session.String, nil
+}
+
+// SetKillRequestedStatus atomically records kill intent and its attribution.
+// Actor is required because an unattributed deliberate kill is not auditable.
+func SetKillRequestedStatus(db dbExecer, jobID int64, actor, reason string, killedAt int64) error {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return fmt.Errorf("kill actor is required")
+	}
+	if killedAt <= 0 {
+		return fmt.Errorf("kill time is required")
+	}
+	var reasonValue any
+	if reason = strings.TrimSpace(reason); reason != "" {
+		reasonValue = reason
+	}
+	_, err := db.Exec(
+		`UPDATE jobs
+		 SET requested_status = ?, kill_actor = ?, kill_reason = ?, killed_at = ?
+		 WHERE id = ?`,
+		StatusKilled, actor, reasonValue, killedAt, jobID,
+	)
+	return err
+}
+
+// JobKillAttributionForJob reads kill attribution directly from the jobs row.
+// A nil KilledAt means no kill request has been recorded.
+func JobKillAttributionForJob(db dbExecer, jobID int64) (JobKillAttribution, error) {
+	var actor, reason sql.NullString
+	var killedAt sql.NullInt64
+	err := db.QueryRow(
+		`SELECT kill_actor, kill_reason, killed_at FROM jobs WHERE id = ?`,
+		jobID,
+	).Scan(&actor, &reason, &killedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return JobKillAttribution{}, nil
+	}
+	if err != nil {
+		return JobKillAttribution{}, err
+	}
+	attribution := JobKillAttribution{Actor: actor.String, Reason: reason.String}
+	if killedAt.Valid {
+		attribution.KilledAt = &killedAt.Int64
+	}
+	return attribution, nil
 }
 
 // SetJobEnvVars updates the stored environment variables for a job.
@@ -5810,6 +5866,54 @@ func PopulateSubmitterSessions(db *sql.DB, jobs []*Job) error {
 		}
 	}
 	return nil
+}
+
+// PopulateKillAttributions fills kill metadata without changing the pinned
+// job_status view. Jobs with no kill request retain empty fields and nil time.
+func PopulateKillAttributions(database *sql.DB, jobs []*Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	byID := make(map[int64][]*Job, len(jobs))
+	ids := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := byID[job.ID]; !ok {
+			ids = append(ids, job.ID)
+		}
+		byID[job.ID] = append(byID[job.ID], job)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := database.Query(
+		`SELECT id, kill_actor, kill_reason, killed_at FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`,
+		ids...,
+	)
+	if err != nil {
+		return fmt.Errorf("read kill attribution: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var actor, reason sql.NullString
+		var killedAt sql.NullInt64
+		if err := rows.Scan(&id, &actor, &reason, &killedAt); err != nil {
+			return fmt.Errorf("scan kill attribution: %w", err)
+		}
+		for _, job := range byID[id] {
+			job.KillActor = actor.String
+			job.KillReason = reason.String
+			job.KilledAt = nil
+			if killedAt.Valid {
+				value := killedAt.Int64
+				job.KilledAt = &value
+			}
+		}
+	}
+	return rows.Err()
 }
 
 // PopulateEdgeSubmissionProvenance fills authenticated edge origin fields from

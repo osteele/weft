@@ -157,6 +157,32 @@ func TestEdgeAuthorizedTargetsMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestJobKillAttributionMigrationIsIdempotent(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.ExecContext(ctx, `CREATE TABLE jobs (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create jobs: %v", err)
+	}
+	for range 2 {
+		if err := applyAddJobKillAttribution(ctx, database); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	for _, column := range []string{"kill_actor", "kill_reason", "killed_at"} {
+		exists, err := columnExists(ctx, database, "jobs", column)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", column, err)
+		}
+		if !exists {
+			t.Fatalf("jobs.%s was not added", column)
+		}
+	}
+}
+
 func TestUpRepairsCampaignAffinityColumnAfterAppliedV24(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sql.Open("sqlite", dbPath)

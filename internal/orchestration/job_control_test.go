@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
@@ -78,7 +79,12 @@ func TestKillOrCancelCloudJob_SetsRequestedStatusOnTerminalInstance(t *testing.T
 		t.Fatalf("SetRequestedStatus(queued): %v", err)
 	}
 
-	message, err := KillOrCancelCloudJob(database, jobID, db.StatusKilled)
+	requestedAt := time.Unix(1_700_000_100, 0)
+	message, err := KillOrCancelCloudJob(database, jobID, db.StatusKilled, ops.StopAttribution{
+		Actor:       "session:cloud-killer",
+		Reason:      "stalled",
+		RequestedAt: requestedAt,
+	})
 	if err != nil {
 		t.Fatalf("KillOrCancelCloudJob: %v", err)
 	}
@@ -92,6 +98,14 @@ func TestKillOrCancelCloudJob_SetsRequestedStatusOnTerminalInstance(t *testing.T
 	}
 	if updated.EffectiveStatus() != db.StatusKilled {
 		t.Fatalf("effective status = %q, want %q", updated.EffectiveStatus(), db.StatusKilled)
+	}
+	attribution, err := db.JobKillAttributionForJob(database, jobID)
+	if err != nil {
+		t.Fatalf("JobKillAttributionForJob: %v", err)
+	}
+	if attribution.Actor != "session:cloud-killer" || attribution.Reason != "stalled" ||
+		attribution.KilledAt == nil || *attribution.KilledAt != requestedAt.Unix() {
+		t.Fatalf("kill attribution = %+v", attribution)
 	}
 }
 
@@ -118,7 +132,7 @@ func TestKillOrCancelCloudJobCancelsEmptyLaunchingInstance(t *testing.T) {
 	}
 	t.Cleanup(func() { signalCloudJobKillForControl = previousSignal })
 
-	message, err := KillOrCancelCloudJob(database, jobID, db.StatusKilled)
+	message, err := KillOrCancelCloudJob(database, jobID, db.StatusKilled, ops.StopAttribution{})
 	if err != nil {
 		t.Fatalf("KillOrCancelCloudJob: %v", err)
 	}
@@ -152,7 +166,7 @@ func TestKillOrCancelJob_CancelRunningJobRecordsCanceled(t *testing.T) {
 	}
 	mockSSHSuccess(t)
 
-	result, err := KillOrCancelJob(database, jobID, db.StatusCanceled, ops.TimeoutFast)
+	result, err := KillOrCancelJob(database, jobID, db.StatusCanceled, ops.TimeoutFast, ops.StopAttribution{})
 	if err != nil {
 		t.Fatalf("KillOrCancelJob: %v", err)
 	}
@@ -183,7 +197,7 @@ func TestKillOrCancelJob_KillRunningJobRecordsKilled(t *testing.T) {
 	}
 	mockSSHSuccess(t)
 
-	result, err := KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
+	result, err := KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast, ops.StopAttribution{})
 	if err != nil {
 		t.Fatalf("KillOrCancelJob: %v", err)
 	}
@@ -208,7 +222,7 @@ func TestKillOrCancelJobCancelsDraftJobLocally(t *testing.T) {
 		t.Fatalf("RecordDraftJob: %v", err)
 	}
 
-	result, err := KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
+	result, err := KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast, ops.StopAttribution{})
 	if err != nil {
 		t.Fatalf("KillOrCancelJob: %v", err)
 	}

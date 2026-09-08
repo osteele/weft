@@ -21,7 +21,7 @@ import (
 
 // KillOrCancelCloudJob handles kill/cancel for cloud jobs.
 // Returns (message, nil) when handled, ("", nil) when not a cloud job.
-func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (string, error) {
+func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string, attribution ops.StopAttribution) (string, error) {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return "", fmt.Errorf("get job: %w", err)
@@ -32,7 +32,19 @@ func KillOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if !job.IsLaunchJob() {
 		return "", nil
 	}
-	if err := db.SetRequestedStatus(database, jobID, targetStatus); err != nil {
+	if targetStatus == db.StatusKilled {
+		actor := strings.TrimSpace(attribution.Actor)
+		if actor == "" {
+			actor = "weft"
+		}
+		requestedAt := attribution.RequestedAt
+		if requestedAt.IsZero() {
+			requestedAt = time.Now()
+		}
+		if err := db.SetKillRequestedStatus(database, jobID, actor, attribution.Reason, requestedAt.Unix()); err != nil {
+			return "", fmt.Errorf("record kill intent: %w", err)
+		}
+	} else if err := db.SetRequestedStatus(database, jobID, targetStatus); err != nil {
 		return "", fmt.Errorf("set requested status: %w", err)
 	}
 
@@ -126,8 +138,8 @@ func writeCloudJobKillSignals(ctx context.Context, r2Client killSignalObjectPutt
 var _ killSignalObjectPutter = (*r2.Client)(nil)
 
 // KillOrCancelJob routes cloud jobs through cloud control and non-cloud jobs through ops.
-func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode ops.TimeoutMode) (ops.Result, error) {
-	if msg, err := KillOrCancelCloudJob(database, jobID, targetStatus); err != nil {
+func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode ops.TimeoutMode, attribution ops.StopAttribution) (ops.Result, error) {
+	if msg, err := KillOrCancelCloudJob(database, jobID, targetStatus, attribution); err != nil {
 		return ops.Result{}, err
 	} else if msg != "" {
 		return ops.Result{Success: true, JobID: jobID, Message: msg}, nil
@@ -145,8 +157,12 @@ func KillOrCancelJob(database *sql.DB, jobID int64, targetStatus string, mode op
 	}
 
 	opts := ops.OptionsForMode(mode)
+	opts.StopAttribution = attribution
 	switch job.EffectiveStatus() {
 	case db.StatusQueued:
+		if targetStatus == db.StatusKilled {
+			return ops.KillQueuedJob(database, job, opts)
+		}
 		return ops.CancelQueuedJob(database, job, opts)
 	case db.StatusDraft:
 		if err := db.SetRequestedStatus(database, job.ID, db.StatusCanceled); err != nil {

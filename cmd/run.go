@@ -669,7 +669,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Handle --kill mode
 	if runKillJobID > 0 {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("kill"), oplog.WithJobID(runKillJobID))
-		result, err := killJobWithService(nil, runKillJobID, ops.TimeoutNormal)
+		result, err := killJobWithService(nil, runKillJobID, ops.TimeoutNormal, killAttribution(cmd))
 		if err != nil {
 			return err
 		}

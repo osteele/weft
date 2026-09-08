@@ -12,7 +12,8 @@ import (
 // Returns (message, nil) if the cloud job was handled, ("", nil) if the job is
 // not a cloud job (caller should proceed with normal logic), or ("", err) on failure.
 func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (string, error) {
-	return orchestration.KillOrCancelCloudJob(database, jobID, targetStatus)
+	attribution := defaultKillAttribution()
+	return orchestration.KillOrCancelCloudJob(database, jobID, targetStatus, attribution)
 }
 
 // isCloudJob checks if a job is a cloud job using an existing database connection.

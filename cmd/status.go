@@ -970,7 +970,10 @@ func printJobStatusLineWithContext(database *sql.DB, job *db.Job) {
 	if job == nil {
 		return
 	}
-	line := fmt.Sprintf("Job %s (%s): %s", ids.FormatJobID(job.ID), job.Host, job.EffectiveStatus())
+	line := fmt.Sprintf("Job %s: %s", ids.FormatJobID(job.ID), job.EffectiveStatus())
+	if job.Host != "" {
+		line = fmt.Sprintf("Job %s (%s): %s", ids.FormatJobID(job.ID), job.Host, job.EffectiveStatus())
+	}
 	if job.ExitCode != nil {
 		line = fmt.Sprintf("%s (exit %d)", line, *job.ExitCode)
 	}

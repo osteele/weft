@@ -97,7 +97,7 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	if len(planFile.Kill) > 0 {
 		for _, id := range planFile.Kill {
 			oplog.Log(oplog.OpCLICommand, oplog.WithDetail("plan kill"), oplog.WithJobID(id))
-			result, err := killJobWithService(coreSvc, id, ops.TimeoutNormal)
+			result, err := killJobWithService(coreSvc, id, ops.TimeoutNormal, killAttribution(cmd))
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to kill job %s: %v\n", ids.FormatJobID(id), err)
 			} else {

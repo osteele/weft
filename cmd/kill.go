@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/edge"
@@ -25,7 +26,37 @@ Examples:
 	RunE: runKill,
 }
 
+type killActorContextKey struct{}
+
+func addKillFlags(cmd *cobra.Command) {
+	cmd.Flags().String("reason", "", "Record why the job was killed")
+}
+
+func defaultKillAttribution() ops.StopAttribution {
+	actor := submitterSession()
+	if strings.TrimSpace(actor) == "" {
+		actor = ops.LocalActor()
+	}
+	return ops.StopAttribution{
+		Actor:       strings.TrimSpace(actor),
+		RequestedAt: time.Now(),
+	}
+}
+
+func killAttribution(cmd *cobra.Command) ops.StopAttribution {
+	attribution := defaultKillAttribution()
+	if commandContext := cmd.Context(); commandContext != nil {
+		if actor, _ := commandContext.Value(killActorContextKey{}).(string); strings.TrimSpace(actor) != "" {
+			attribution.Actor = strings.TrimSpace(actor)
+		}
+	}
+	reason, _ := cmd.Flags().GetString("reason")
+	attribution.Reason = strings.TrimSpace(reason)
+	return attribution
+}
+
 func init() {
+	addKillFlags(killCmd)
 	rootCmd.AddCommand(killCmd)
 }
 
@@ -43,6 +74,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	attribution := killAttribution(cmd)
 
 	var errors []string
 	for _, jobID := range jobIDs {
@@ -59,7 +91,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutNormal)
+		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutNormal, attribution)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %s: %v", ids.FormatJobID(jobID), err))
 			continue

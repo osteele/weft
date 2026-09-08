@@ -1093,13 +1093,16 @@ func TestPrintJobStatusLineIncludesQueuedContext(t *testing.T) {
 		printJobStatusLineWithContext(nil, job)
 	})
 	for _, want := range []string{
-		"Job wj4730 (): queued",
+		"Job wj4730: queued",
 		"Normal range: rental placement commonly takes 5-40m",
 		"Action: wait; autopilot owns placement",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status line missing %q, got:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "()") {
+		t.Fatalf("hostless status line contains empty parentheses: %q", out)
 	}
 }
 

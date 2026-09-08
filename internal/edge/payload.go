@@ -81,7 +81,7 @@ func ParseWeftJobControlPayload(data []byte) (*WeftJobControlPayload, *Refusal) 
 			return nil, refuse(ReasonMalformed, "job-control edit has spend authority without --max-spend")
 		}
 	}
-	if len(p.Flags) > 0 && p.Action != ControlRestart && p.Action != ControlEdit {
+	if len(p.Flags) > 0 && p.Action != ControlKill && p.Action != ControlRestart && p.Action != ControlEdit {
 		return nil, refuse(ReasonMalformed, "job-control action %q does not accept flags", p.Action)
 	}
 	allowedFlags := jobControlFlags[p.Action]
@@ -114,6 +114,9 @@ func editSpendCeiling(flags map[string]string) (float64, bool, error) {
 }
 
 var jobControlFlags = map[JobControlAction]map[string]bool{
+	ControlKill: {
+		"reason": true,
+	},
 	ControlRestart: {
 		"gpu": true, "gpu-class": true, "provider": true, "gpu-mem": true,
 		"disk": true, "runtime-disk": true, "disk-max": true, "min-survival": true,

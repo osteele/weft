@@ -22,7 +22,14 @@ func TestKillJob_Success(t *testing.T) {
 		{Contains: "tmux kill-session", Stdout: ""},
 	})
 
-	result, err := KillJob(database, job, DefaultOptions())
+	requestedAt := time.Unix(1_700_000_000, 0)
+	opts := DefaultOptions()
+	opts.StopAttribution = StopAttribution{
+		Actor:       "session:test-killer",
+		Reason:      "clearing a blocked queue",
+		RequestedAt: requestedAt,
+	}
+	result, err := KillJob(database, job, opts)
 	if err != nil {
 		t.Fatalf("KillJob failed: %v", err)
 	}
@@ -40,6 +47,16 @@ func TestKillJob_Success(t *testing.T) {
 	updatedJob, _ := db.GetJobByID(database, jobID)
 	if updatedJob.Status != db.StatusKilled {
 		t.Errorf("expected job status to be killed, got %s", updatedJob.Status)
+	}
+	attribution, err := db.JobKillAttributionForJob(database, jobID)
+	if err != nil {
+		t.Fatalf("JobKillAttributionForJob: %v", err)
+	}
+	if attribution.Actor != "session:test-killer" || attribution.Reason != "clearing a blocked queue" {
+		t.Fatalf("kill attribution = %+v", attribution)
+	}
+	if attribution.KilledAt == nil || *attribution.KilledAt != requestedAt.Unix() {
+		t.Fatalf("kill time = %v, want %d", attribution.KilledAt, requestedAt.Unix())
 	}
 }
 
@@ -357,6 +374,44 @@ func TestCancelQueuedJob_UnplacedNoAttempt(t *testing.T) {
 	}
 	if updatedJob.EffectiveStatus() != db.StatusCanceled {
 		t.Fatalf("expected effective status canceled, got %s", updatedJob.EffectiveStatus())
+	}
+}
+
+func TestKillQueuedJob_UnplacedRecordsAttribution(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	requestedAt := time.Unix(1_750_000_000, 0)
+
+	result, err := KillQueuedJob(database, job, ExecuteOptions{StopAttribution: StopAttribution{
+		Actor: "session:test", Reason: "obsolete experiment", RequestedAt: requestedAt,
+	}})
+	if err != nil {
+		t.Fatalf("KillQueuedJob: %v", err)
+	}
+	if !result.Success || result.Deferred || !strings.Contains(result.Message, "killed locally") {
+		t.Fatalf("result = %#v", result)
+	}
+	updatedJob, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID(updated): %v", err)
+	}
+	if updatedJob.Status != db.StatusKilled || updatedJob.EffectiveStatus() != db.StatusKilled {
+		t.Fatalf("job status = %q, effective = %q", updatedJob.Status, updatedJob.EffectiveStatus())
+	}
+	attribution, err := db.JobKillAttributionForJob(database, jobID)
+	if err != nil {
+		t.Fatalf("JobKillAttributionForJob: %v", err)
+	}
+	if attribution.Actor != "session:test" || attribution.Reason != "obsolete experiment" ||
+		attribution.KilledAt == nil || *attribution.KilledAt != requestedAt.Unix() {
+		t.Fatalf("kill attribution = %#v", attribution)
 	}
 }
 

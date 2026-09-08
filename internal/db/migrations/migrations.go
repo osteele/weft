@@ -209,11 +209,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddBugRecurrenceColumns},
 		&goose.GoFunc{RunDB: dropAddBugRecurrenceColumns},
 	)
+	addJobKillAttribution := goose.NewGoMigration(
+		64,
+		&goose.GoFunc{RunDB: applyAddJobKillAttribution},
+		&goose.GoFunc{RunDB: dropAddJobKillAttribution},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets, addBugRecurrenceColumns),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets, addBugRecurrenceColumns, addJobKillAttribution),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -554,6 +559,38 @@ func applyAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
 
 func dropAddJobSubmitterSession(ctx context.Context, db *sql.DB) error {
 	_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN submitter_session`)
+	return nil
+}
+
+// applyAddJobKillAttribution records the authenticated or local actor that
+// requested a kill, the optional operator reason, and the request time. These
+// fields describe intent even when remote reconciliation is deferred.
+func applyAddJobKillAttribution(ctx context.Context, db *sql.DB) error {
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{"kill_actor", `ALTER TABLE jobs ADD COLUMN kill_actor TEXT`},
+		{"kill_reason", `ALTER TABLE jobs ADD COLUMN kill_reason TEXT`},
+		{"killed_at", `ALTER TABLE jobs ADD COLUMN killed_at INTEGER`},
+	} {
+		exists, err := columnExists(ctx, db, "jobs", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect jobs.%s: %w", column.name, err)
+		}
+		if !exists {
+			if _, err := db.ExecContext(ctx, column.ddl); err != nil {
+				return fmt.Errorf("add jobs.%s: %w", column.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func dropAddJobKillAttribution(ctx context.Context, db *sql.DB) error {
+	for _, name := range []string{"killed_at", "kill_reason", "kill_actor"} {
+		_, _ = db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN `+name)
+	}
 	return nil
 }
 
@@ -1228,7 +1265,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61, 63}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61, 63, 64}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

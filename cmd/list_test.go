@@ -963,13 +963,54 @@ func TestPopulateSubmitterSessionColumnFollowsSelectedColumns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			listColumns = tc.columns
 			job := &db.Job{ID: jobID}
-			if err := populateSubmitterSessionColumn(database, []*db.Job{job}, tc.defaultKeys); err != nil {
+			if err := populateJobAuxiliaryColumns(database, []*db.Job{job}, tc.defaultKeys); err != nil {
 				t.Fatalf("populateSubmitterSessionColumn: %v", err)
 			}
 			if job.SubmitterSession != tc.want {
 				t.Fatalf("SubmitterSession = %q, want %q", job.SubmitterSession, tc.want)
 			}
 		})
+	}
+}
+
+func TestPopulateJobAuxiliaryColumnsLoadsKillAttribution(t *testing.T) {
+	restoreListFlags(t)
+	database, jobID := recordFailedJob(t, "kill-attribution-columns")
+	if err := db.SetKillRequestedStatus(database, jobID, "session:killer", "blocked queue", 1_700_000_000); err != nil {
+		t.Fatalf("SetKillRequestedStatus: %v", err)
+	}
+	listColumns = []string{"id", "kill_actor", "kill_reason", "killed_at"}
+	job := &db.Job{ID: jobID}
+	if err := populateJobAuxiliaryColumns(database, []*db.Job{job}, nil); err != nil {
+		t.Fatalf("populateJobAuxiliaryColumns: %v", err)
+	}
+	if job.KillActor != "session:killer" || job.KillReason != "blocked queue" {
+		t.Fatalf("kill attribution = actor %q reason %q", job.KillActor, job.KillReason)
+	}
+	if job.KilledAt == nil || *job.KilledAt != 1_700_000_000 {
+		t.Fatalf("KilledAt = %v", job.KilledAt)
+	}
+}
+
+func TestShowJobPrintsKillAttribution(t *testing.T) {
+	restoreListFlags(t)
+	database, jobID := recordFailedJob(t, "kill-attribution-info")
+	if err := db.SetKillRequestedStatus(database, jobID, "osteele@laptop", "clearing blocker", 1_700_000_000); err != nil {
+		t.Fatalf("SetKillRequestedStatus: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := showJob(database, jobID); err != nil {
+			t.Fatalf("showJob: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Killed At:    " + time.Unix(1_700_000_000, 0).Format("2006-01-02 15:04:05"),
+		"Kill Actor:   osteele@laptop",
+		"Kill Reason:  clearing blocker",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("showJob missing %q:\n%s", want, out)
+		}
 	}
 }
 

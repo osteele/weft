@@ -475,7 +475,10 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 	jobID := job.ID
 	cancelled := job.EffectiveStatus() == db.StatusQueued
 	return func() tea.Msg {
-		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast)
+		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast, ops.StopAttribution{
+			Actor:       ops.LocalActor(),
+			RequestedAt: time.Now(),
+		})
 		if err != nil {
 			return jobKilledMsg{jobID: jobID, err: err, cancelled: cancelled}
 		}
@@ -579,7 +582,10 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 
 	jobID := job.ID
 	return func() tea.Msg {
-		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast)
+		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast, ops.StopAttribution{
+			Actor:       ops.LocalActor(),
+			RequestedAt: time.Now(),
+		})
 		if err != nil {
 			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
 		}

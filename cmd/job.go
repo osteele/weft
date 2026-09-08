@@ -391,6 +391,7 @@ func init() {
 	// Register subcommands
 	jobCmd.AddCommand(jobRunCmd)
 	jobCmd.AddCommand(jobLogCmd)
+	addKillFlags(jobKillCmd)
 	jobCmd.AddCommand(jobKillCmd)
 	addStatusFlags(jobStatusCmd)
 	jobCmd.AddCommand(jobStatusCmd)

@@ -2,6 +2,8 @@
 package opscore
 
 import (
+	"os"
+	"strings"
 	"time"
 )
 
@@ -11,6 +13,28 @@ type Result struct {
 	Deferred bool   // Operation was queued for later (host unreachable)
 	JobID    int64  // Job ID (for create/restart operations)
 	Message  string // Human-readable result message
+}
+
+// StopAttribution identifies the requester of a deliberate stop. RequestedAt
+// is the local receipt time, not the later remote reconciliation time.
+type StopAttribution struct {
+	Actor       string
+	Reason      string
+	RequestedAt time.Time
+}
+
+// LocalActor identifies the local OS account and machine performing a control
+// action when no agent session supplies a stronger identity.
+func LocalActor() string {
+	username := strings.TrimSpace(os.Getenv("USER"))
+	if username == "" {
+		username = "unknown-user"
+	}
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	return username + "@" + strings.TrimSpace(hostname)
 }
 
 // TimeoutMode controls the timeout behavior for operations.
@@ -66,7 +90,8 @@ type ExecuteOptions struct {
 	// to the on-prem pool: the operation records this reason and does NOT
 	// promote the job to rental. Empty preserves the default move-to-cloud
 	// behavior (promote to rental + "manually moved to unplaced queue").
-	UnplaceReason string
+	UnplaceReason   string
+	StopAttribution StopAttribution
 }
 
 // DefaultOptions returns default execution options

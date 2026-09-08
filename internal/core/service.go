@@ -6,6 +6,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"time"
 )
 
 // Service owns job orchestration for both CLI and TUI facades. It encapsulates
@@ -58,9 +59,9 @@ func (s *Service) Job(jobID int64) (*db.Job, error) {
 	return s.loadJob(jobID)
 }
 
-// KillJob terminates running jobs or cancels queued ones. Timeout mode controls
-// how long the helper waits for reconciliation before deferring.
-func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode) (OperationResult, error) {
+// KillJob terminates active jobs or kills queued ones before they start.
+// Timeout mode controls how long the helper waits for reconciliation.
+func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode, attribution ops.StopAttribution) (OperationResult, error) {
 	job, err := s.loadJob(jobID)
 	if err != nil {
 		return OperationResult{}, err
@@ -70,11 +71,18 @@ func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode) (OperationResult, e
 	}
 
 	opts := ops.OptionsForMode(resolveMode(mode))
+	if attribution.Actor == "" {
+		attribution.Actor = ops.LocalActor()
+	}
+	if attribution.RequestedAt.IsZero() {
+		attribution.RequestedAt = time.Now()
+	}
+	opts.StopAttribution = attribution
 	var outcome ops.Result
 	effectiveStatus := job.EffectiveStatus()
 	switch effectiveStatus {
 	case db.StatusQueued:
-		outcome, err = ops.CancelQueuedJob(s.database, job, opts)
+		outcome, err = ops.KillQueuedJob(s.database, job, opts)
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		outcome, err = ops.KillJob(s.database, job, opts)
 	default:

@@ -1642,6 +1642,19 @@ func TestControlAndBugPayloadValidatorsRejectSchemaDriftAndMissingIdentity(t *te
 	if _, refusal := ParseWeftJobControlPayload(validEdit); refusal != nil {
 		t.Fatalf("control parser rejected matching edit spend authority: %v", refusal)
 	}
+	validKill, err := EncodeWeftJobControlPayload(WeftJobControlPayload{
+		RequestID: "kill-r", JobID: 1, Action: ControlKill,
+		Flags: map[string]string{"reason": "obsolete experiment"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, refusal := ParseWeftJobControlPayload(validKill); refusal != nil {
+		t.Fatalf("control parser rejected kill reason: %v", refusal)
+	}
+	if _, refusal := ParseWeftJobControlPayload([]byte(`{"request_id":"r","job_id":1,"action":"kill","flags":{"future":"value"}}`)); refusal == nil {
+		t.Fatal("control parser accepted an unknown kill flag")
+	}
 	if _, refusal := ParseWeftJobControlPayload([]byte(`{"request_id":"r","job_id":1,"action":"cancel","future":true}`)); refusal == nil {
 		t.Fatal("control parser accepted an unknown field")
 	}

@@ -66,7 +66,7 @@ func replanOneJob(database *sql.DB, jobID int64) error {
 
 	switch {
 	case job.IsRentalJob():
-		if _, err := orchestration.KillOrCancelJob(database, jobID, db.StatusCanceled, ops.TimeoutNormal); err != nil {
+		if _, err := orchestration.KillOrCancelJob(database, jobID, db.StatusCanceled, ops.TimeoutNormal, ops.StopAttribution{}); err != nil {
 			return err
 		}
 		if err := db.ResetJobToUnplaced(database, jobID); err != nil {

@@ -545,7 +545,10 @@ func requestWatchJobKill(ctx context.Context, database *sql.DB, jobID int64) tea
 			}
 			return watchKillDoneMsg{jobID: jobID, message: fmt.Sprintf("Cancel requested for SkyPilot job %s; awaiting terminal confirmation", ids.FormatJobID(jobID))}
 		}
-		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast)
+		result, err := orchestration.KillOrCancelJob(database, jobID, db.StatusKilled, ops.TimeoutFast, ops.StopAttribution{
+			Actor:       ops.LocalActor(),
+			RequestedAt: time.Now(),
+		})
 		if err != nil {
 			return watchKillDoneMsg{jobID: jobID, err: err}
 		}
