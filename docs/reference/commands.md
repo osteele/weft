@@ -2310,16 +2310,41 @@ Other mirror-classified commands remain blocked until their view sections are
 implemented. `weft run` and `weft job run` submit signed job requests through
 the inbound store. They capture the current working tree, so uncommitted files
 are part of the submitted source closure just as they are for a hub-local run.
-Other submit-classified commands remain blocked until their payload kind and
-hub handler are implemented.
 
-An admitted submission prints the hub-assigned job id, for example `wj123`. If
-the acknowledgement does not arrive within the configured admission wait, the
+The job-control payload serves these commands and their `weft job ...`
+spellings:
+
+- `cancel` and `kill`
+- `pause`, `resume`, and `unpause`
+- `restart`
+- `mark-processed` and `mark-unprocessed`
+- `edit` (including `queue edit`)
+
+Each control submission names one job. An accepted acknowledgement prints what
+the hub performed, such as `Job wj42: cancel completed`. A refused request
+prints the check and its detail. By default, a plan may control only jobs whose
+hub provenance names the same signing key. The hub can widen this with
+`[edge] allow_foreign_job_control = true`. Restart retains the ordinary spend
+boundary and is refused if the job's existing spend ceiling exceeds the plan's
+grant. `edit --max-spend` is checked against the same boundary, and an edit
+that requeues work cannot retain a ceiling above the grant.
+
+`weft bug report` and `weft bug note` submit fact records to the hub's separate
+bug database. Their accepted results match the hub form, such as `Reported
+wb12: source sync invariant` or `Added note to wb12`. The path does not require
+a terminal, so runtime invariant reporting can use it unattended.
+
+Submit-classified commands outside these lists remain blocked until their
+payload kind and hub handler are implemented.
+
+An admitted job submission prints the hub-assigned job id, for example
+`wj123`. Control and bug submissions print the hub's action detail. If the
+acknowledgement does not arrive within the configured admission wait, the
 command prints the submission nonce instead. The submission still stands: a
 missing acknowledgement is unknown, never failure. Use `weft edge wait NONCE`
-to wait again. Any command argument documented as a job id also accepts that
-nonce; on the edge it resolves through the acknowledgement, and on the hub it
-resolves through the admitted job row.
+to wait again. Any command argument documented as a job id also accepts a job
+submission nonce; on the edge it resolves through the acknowledgement, and on
+the hub it resolves through the admitted job row.
 
 The edge waits for `[edge.expect.job].typical_minutes`, sixty
 seconds by default; `[edge] admission_wait_seconds` overrides that bound. The

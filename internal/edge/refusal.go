@@ -40,11 +40,17 @@ const (
 	// ReasonPlanScopeMismatch marks a request that tried to act on a plan
 	// other than the one its key is bound to.
 	ReasonPlanScopeMismatch ReasonCode = "plan_scope_mismatch"
+	// ReasonJobControlAuthority marks a control request for a job outside the
+	// signing plan's authority.
+	ReasonJobControlAuthority ReasonCode = "job_control_authority"
 	// ReasonKeyNotBoundToPlan marks a key with no plan attempting a
 	// plan-scoped operation.
 	ReasonKeyNotBoundToPlan ReasonCode = "key_not_bound_to_plan"
 	ReasonOverSpendCeiling  ReasonCode = "over_spend_ceiling"
 	ReasonPayloadMismatch   ReasonCode = "payload_digest_mismatch"
+	// ReasonActionFailed reports a valid, authorized request whose operation
+	// could not be performed in the job or bug's current state.
+	ReasonActionFailed ReasonCode = "action_failed"
 )
 
 // Refusal is a terminal decision not to admit a submission.
@@ -86,7 +92,7 @@ func (r *Refusal) IsAuthenticationFailure() bool {
 func (r *Refusal) IsAuthorizationFailure() bool {
 	switch r.Code {
 	case ReasonTargetNotAllowed, ReasonOverSpendCeiling, ReasonPayloadMismatch,
-		ReasonPlanScopeMismatch, ReasonKeyNotBoundToPlan:
+		ReasonPlanScopeMismatch, ReasonKeyNotBoundToPlan, ReasonJobControlAuthority:
 		return true
 	}
 	return false

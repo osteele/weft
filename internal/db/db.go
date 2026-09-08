@@ -5842,6 +5842,21 @@ func FindJobIDByEdgeNonce(db dbExecer, nonce string) (int64, bool, error) {
 	return 0, false, err
 }
 
+// FindJobEdgeSigningKey returns the authenticated signing key recorded on a
+// job row. found=false means the job is confirmed absent. An empty key with
+// found=true identifies an ordinary hub-side job.
+func FindJobEdgeSigningKey(db dbExecer, jobID int64) (string, bool, error) {
+	var key sql.NullString
+	err := db.QueryRow(`SELECT edge_signing_key_id FROM jobs WHERE id = ? LIMIT 1`, jobID).Scan(&key)
+	if err == nil {
+		return key.String, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
 // PopulateProjectRoots fills in Job.ProjectRoot from the owning jobs row in
 // one query. Empty means the owning root has not been proven.
 func PopulateProjectRoots(db *sql.DB, jobs []*Job) error {

@@ -12,10 +12,14 @@ type Policy struct {
 	// AllowedTargets are the execution targets an edge submission may run on.
 	// The hub's own host must never appear here; NewPolicy enforces that.
 	AllowedTargets []string
-	// MaxSpendUSD is the hub's half of the ceiling on a single submission.
-	// Authorize refuses a submission declaring more than the effective
-	// ceiling; it does not itself constrain what any job later spends.
+	// MaxSpendUSD is the hub's half of the ceiling on a single submission or
+	// work-starting control. Authorization refuses a request declaring more
+	// than the effective ceiling; it does not itself constrain later spending.
 	MaxSpendUSD float64
+	// AllowForeignJobControl widens control authority to jobs admitted by a
+	// different signing key. The default is false, which confines each plan to
+	// jobs admitted from its own key.
+	AllowForeignJobControl bool
 	// hubNames are every name that denotes this hub, all refused as targets.
 	//
 	// One name is not enough. os.Hostname() returns a system name like
@@ -24,6 +28,11 @@ type Policy struct {
 	// match the name an operator would actually write in an allowlist.
 	hubNames []string
 }
+
+// JobControlProvenanceLookup returns the signing key recorded on a job row.
+// found=false is confirmed absence; an error means the lookup is unknown and
+// must not be turned into an authority refusal.
+type JobControlProvenanceLookup func(jobID int64) (signingKeyID string, found bool, err error)
 
 // NewPolicy builds a policy and rejects a configuration that would let edge
 // work execute on the hub itself.
@@ -61,7 +70,7 @@ func NewPolicy(hubHost string, allowedTargets []string, maxSpendUSD float64) (*P
 // decided, as distinct from who signed it.
 type Authorization struct {
 	// EffectiveSpendCeilingUSD is the lower of the requested ceiling and the
-	// grant, and is what an admitted submission is authorized to commit.
+	// grant, and is what an admitted request is authorized to commit.
 	//
 	// The inbox poller carries this value into the durable job request before
 	// the ordinary recording and placement path sees it.
@@ -136,34 +145,86 @@ func Authorize(v *VerifiedEnvelope, payload *WeftJobPayload, policy *Policy) (*A
 	// `> 0` rather than `== 0` matters: a negative value satisfies neither
 	// `> 0` nor `== 0`, and would otherwise fall through to the full hub
 	// maximum — failing open on the one path that spends money.
+	effective, refusal := authorizeSpend(v, payload.SpendCeilingUSD, policy)
+	if refusal != nil {
+		return nil, refusal
+	}
+
+	return &Authorization{EffectiveSpendCeilingUSD: effective, Targets: targets}, nil
+}
+
+// AuthorizeJobControl decides whether a verified plan may control a job.
+//
+// Ownership is established from the hub's durable job-row provenance. A valid
+// signature identifies the requester but never substitutes for this check.
+func AuthorizeJobControl(v *VerifiedEnvelope, payload *WeftJobControlPayload, policy *Policy, lookup JobControlProvenanceLookup) (*Authorization, *Refusal, error) {
+	if policy == nil {
+		return nil, refuse(ReasonJobControlAuthority,
+			"job-control authority check failed: no edge policy is configured for request %s", v.envelope.Nonce), nil
+	}
+	if payload == nil {
+		return nil, refuse(ReasonMalformed,
+			"submission %s has no job-control payload to authorize", v.envelope.Nonce), nil
+	}
+	if lookup == nil {
+		return nil, nil, fmt.Errorf("job-control authority for %s is unknown: no provenance lookup is configured", v.envelope.Nonce)
+	}
+	ownerKey, found, err := lookup(payload.JobID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("job-control authority for job %d is unknown: %w", payload.JobID, err)
+	}
+	if !found {
+		return nil, refuse(ReasonJobControlAuthority,
+			"job-control authority check failed: job %d is not present on this hub", payload.JobID), nil
+	}
+	if !policy.AllowForeignJobControl && ownerKey != v.keyID {
+		owner := ownerKey
+		if owner == "" {
+			owner = "a hub-local submission"
+		}
+		return nil, refuse(ReasonJobControlAuthority,
+			"job-control authority check failed: signature valid (key %s, plan %s), but job %d belongs to %s",
+			v.keyID, v.planLabel(), payload.JobID, owner), nil
+	}
+
+	auth := &Authorization{}
+	if payload.Action == ControlRestart || payload.Action == ControlEdit {
+		effective, refusal := authorizeSpend(v, payload.SpendCeilingUSD, policy)
+		if refusal != nil {
+			return nil, refusal, nil
+		}
+		auth.EffectiveSpendCeilingUSD = effective
+	}
+	return auth, nil, nil
+}
+
+func authorizeSpend(v *VerifiedEnvelope, requested float64, policy *Policy) (float64, *Refusal) {
 	ceiling := policy.MaxSpendUSD
 	if policy.MaxSpendUSD <= 0 || v.keyCeiling <= 0 {
 		ceiling = 0
 	} else if v.keyCeiling < ceiling {
 		ceiling = v.keyCeiling
 	}
-	if payload.SpendCeilingUSD < 0 {
-		return nil, refuse(ReasonOverSpendCeiling,
-			"submission %s declares a negative spend ceiling %.2f", env.Nonce, payload.SpendCeilingUSD)
+	if requested < 0 {
+		return 0, refuse(ReasonOverSpendCeiling,
+			"submission %s declares a negative spend ceiling %.2f", v.envelope.Nonce, requested)
 	}
-	if payload.SpendCeilingUSD > ceiling {
+	if requested > ceiling {
 		if ceiling == 0 {
-			return nil, refuse(ReasonOverSpendCeiling,
+			return 0, refuse(ReasonOverSpendCeiling,
 				"signature valid (key %s, host %s); this submission requests $%.2f but no spend is "+
 					"authorized: the hub's max_spend_usd and plan %s's grant are both unset, "+
 					"which permits nothing rather than everything",
-				v.keyID, v.host, payload.SpendCeilingUSD, v.planLabel())
+				v.keyID, v.host, requested, v.planLabel())
 		}
-		return nil, refuse(ReasonOverSpendCeiling,
+		return 0, refuse(ReasonOverSpendCeiling,
 			"signature valid (key %s, host %s); requested spend ceiling $%.2f exceeds the $%.2f granted to plan %s",
-			v.keyID, v.host, payload.SpendCeilingUSD, ceiling, v.planLabel())
+			v.keyID, v.host, requested, ceiling, v.planLabel())
 	}
-	effective := payload.SpendCeilingUSD
-	if effective == 0 || effective > ceiling {
-		effective = ceiling
+	if requested == 0 {
+		return ceiling, nil
 	}
-
-	return &Authorization{EffectiveSpendCeilingUSD: effective, Targets: targets}, nil
+	return requested, nil
 }
 
 func containsFold(haystack []string, needle string) bool {

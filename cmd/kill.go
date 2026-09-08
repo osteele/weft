@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -29,6 +30,9 @@ func init() {
 }
 
 func runKill(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlKill, ParseJobIDs)
+	}
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

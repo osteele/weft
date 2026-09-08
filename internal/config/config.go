@@ -456,17 +456,20 @@ type EdgeConfig struct {
 	// AllowedTargets are the execution targets edge work may run on. This
 	// hub's own host can never appear here.
 	AllowedTargets []string `yaml:"allowed_targets" toml:"allowed_targets"`
-	// MaxSpendUSD is the hub's half of the ceiling on a single edge
-	// submission. The effective ceiling is the lower of this and the grant on
-	// the submitting plan's key, and if either is unset the effective ceiling
-	// is zero, which authorizes nothing rather than everything.
+	// MaxSpendUSD is the hub's half of the ceiling on a single edge submission
+	// or work-starting control. The effective ceiling is the lower of this and
+	// the grant on the submitting plan's key, and if either is unset the
+	// effective ceiling is zero, which authorizes nothing rather than everything.
 	//
-	// It governs ADMISSION: a submission declaring more than the effective
+	// It governs ADMISSION: a request declaring more than the effective
 	// ceiling is refused. The inbox poller writes the effective value into the
 	// job's ordinary max-spend override, where rental enforcement reads it.
 	// It is also per submission, with no running total, so it bounds what one
 	// submission may commit rather than what a plan may spend in aggregate.
 	MaxSpendUSD float64 `yaml:"max_spend_usd" toml:"max_spend_usd"`
+	// AllowForeignJobControl lets a plan control jobs admitted under other keys.
+	// It defaults to false, preserving plan-scoped authority.
+	AllowForeignJobControl bool `yaml:"allow_foreign_job_control" toml:"allow_foreign_job_control"`
 	// LeaseWindowHours is how long a plan's authority lasts before it lapses
 	// (default 24).
 	//

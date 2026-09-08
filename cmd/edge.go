@@ -75,17 +75,18 @@ func edgeRuntimeOpts(transportOverride string, allowMissingSigner bool) (*edge.R
 				"submitted work off the hub: %w", err)
 	}
 	rt, err := edge.NewRuntime(transport, edge.RuntimeConfig{
-		Role:               cfg.Edge.Role,
-		SigningKeyPath:     edgePlanKeyPath(cfg, cfg.Edge.PlanID),
-		PlanID:             cfg.Edge.PlanID,
-		SubmitterHost:      cfg.Edge.SubmitterHost,
-		KeyringDir:         edgeKeyringDir(cfg),
-		SeenDir:            edgeSeenDir(cfg),
-		AllowedTargets:     cfg.Edge.AllowedTargets,
-		MaxSpendUSD:        cfg.Edge.MaxSpendUSD,
-		HubHost:            hostname,
-		LeaseWindowHours:   cfg.Edge.LeaseWindowHours,
-		AllowMissingSigner: allowMissingSigner,
+		Role:                   cfg.Edge.Role,
+		SigningKeyPath:         edgePlanKeyPath(cfg, cfg.Edge.PlanID),
+		PlanID:                 cfg.Edge.PlanID,
+		SubmitterHost:          cfg.Edge.SubmitterHost,
+		KeyringDir:             edgeKeyringDir(cfg),
+		SeenDir:                edgeSeenDir(cfg),
+		AllowedTargets:         cfg.Edge.AllowedTargets,
+		MaxSpendUSD:            cfg.Edge.MaxSpendUSD,
+		AllowForeignJobControl: cfg.Edge.AllowForeignJobControl,
+		HubHost:                hostname,
+		LeaseWindowHours:       cfg.Edge.LeaseWindowHours,
+		AllowMissingSigner:     allowMissingSigner,
 	})
 	if err != nil {
 		return nil, nil, err

@@ -6,6 +6,7 @@ import (
 
 	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -61,6 +62,9 @@ func init() {
 }
 
 func runPause(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlPause, ParseJobIDsForJobCommand)
+	}
 	service, err := core.NewService()
 	if err != nil {
 		return fmt.Errorf("initialize core service: %w", err)
@@ -96,6 +100,9 @@ func runPause(cmd *cobra.Command, args []string) error {
 }
 
 func runUnpause(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlUnpause, ParseJobIDsForJobCommand)
+	}
 	service, err := core.NewService()
 	if err != nil {
 		return fmt.Errorf("initialize core service: %w", err)

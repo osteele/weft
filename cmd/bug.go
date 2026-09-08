@@ -13,6 +13,7 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 )
 
@@ -125,7 +126,7 @@ func init() {
 	bugCloseCmd.Flags().StringVar(&bugCloseReason, "reason", "", "close reason")
 }
 
-func runBugReport(_ *cobra.Command, args []string) error {
+func runBugReport(cmd *cobra.Command, args []string) error {
 	title := strings.TrimSpace(bugReportTitle)
 	if title == "" {
 		title = strings.TrimSpace(strings.Join(args, " "))
@@ -133,6 +134,18 @@ func runBugReport(_ *cobra.Command, args []string) error {
 	jobID, err := parseOptionalBugJobID(bugReportJob)
 	if err != nil {
 		return err
+	}
+	if activeEdgeSubmit != nil {
+		reportID, err := edge.NewNonce(time.Now())
+		if err != nil {
+			return fmt.Errorf("create bug-report identity: %w", err)
+		}
+		return submitEdgeBugRecord(cmd, edge.WeftBugReportPayload{
+			ReportID: reportID, Action: edge.BugReportCreate, Title: title,
+			Kind: bugReportKind, Scope: bugReportScope, Likelihood: bugReportLikelihood,
+			Severity: bugReportSeverity, Fingerprint: bugReportFingerprint, JobID: jobID,
+			Host: bugReportHost, Summary: bugReportSummary, Detail: bugReportDetail, Note: bugReportNote,
+		})
 	}
 	tracker, err := currentBugTracker()
 	if err != nil {
@@ -153,7 +166,7 @@ func runBugReport(_ *cobra.Command, args []string) error {
 	})
 }
 
-func runBugNote(_ *cobra.Command, args []string) error {
+func runBugNote(cmd *cobra.Command, args []string) error {
 	note := strings.TrimSpace(strings.Join(args[1:], " "))
 	if bugNoteStdin {
 		data, err := io.ReadAll(os.Stdin)
@@ -161,6 +174,15 @@ func runBugNote(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("read stdin: %w", err)
 		}
 		note = strings.TrimRight(string(data), "\r\n")
+	}
+	if activeEdgeSubmit != nil {
+		reportID, err := edge.NewNonce(time.Now())
+		if err != nil {
+			return fmt.Errorf("create bug-note identity: %w", err)
+		}
+		return submitEdgeBugRecord(cmd, edge.WeftBugReportPayload{
+			ReportID: reportID, Action: edge.BugReportNote, BugID: args[0], Note: note,
+		})
 	}
 	tracker, err := currentBugTracker()
 	if err != nil {

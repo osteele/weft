@@ -17,6 +17,10 @@ type Admission struct {
 	SourceClosure []byte
 	// Job is the parsed payload for KindWeftJobSubmission.
 	Job *WeftJobPayload
+	// Control is the parsed payload for KindWeftJobControl.
+	Control *WeftJobControlPayload
+	// BugReport is the parsed payload for KindWeftBugReport.
+	BugReport *WeftBugReportPayload
 	// SigningHost is the authenticated identity, taken from the keyring entry
 	// rather than from the envelope's self-reported SubmitterHost. Both are
 	// recorded as provenance; only this one is evidence.
@@ -29,6 +33,8 @@ type AdmitOptions struct {
 	Verify VerifyOptions
 	Policy *Policy
 	Seen   SeenSet
+	// ControlJobs reads authenticated job-row provenance for control authority.
+	ControlJobs JobControlProvenanceLookup
 }
 
 // Admit runs the full hub-side pipeline for one submission object.
@@ -95,6 +101,8 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 	// it fails loudly rather than being admitted unvalidated.
 	var (
 		job           *WeftJobPayload
+		control       *WeftJobControlPayload
+		bugReport     *WeftBugReportPayload
 		auth          *Authorization
 		sourceClosure []byte
 	)
@@ -117,6 +125,24 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 				return nil, refusal, nil
 			}
 		}
+	case KindWeftJobControl:
+		control, refusal = ParseWeftJobControlPayload(payload)
+		if refusal != nil {
+			return nil, refusal, nil
+		}
+		auth, refusal, err = AuthorizeJobControl(verified, control, opts.Policy, opts.ControlJobs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if refusal != nil {
+			return nil, refusal, nil
+		}
+	case KindWeftBugReport:
+		bugReport, refusal = ParseWeftBugReportPayload(payload)
+		if refusal != nil {
+			return nil, refusal, nil
+		}
+		auth = &Authorization{}
 	case KindPlanEnded:
 		ended, refusal := ParsePlanEndedPayload(payload)
 		if refusal != nil {
@@ -162,6 +188,8 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 		Payload:       payload,
 		SourceClosure: sourceClosure,
 		Job:           job,
+		Control:       control,
+		BugReport:     bugReport,
 		SigningHost:   verified.SigningHost(),
 		KeyID:         verified.KeyID(),
 	}, nil, nil

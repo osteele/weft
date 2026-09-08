@@ -4,18 +4,8 @@ Planned and in-progress work. Completed work lives in the commit log, not here.
 
 ## Edge submission
 
-The protocol core, key management, diagnostics, hub view, and job submission
-path are in place.
-
-### Edge command parity, phase 4
-
-The gate, ledger refusal, hub view, first mirror reads, and end-to-end job
-submission from `docs/planning/edge-command-parity.md` are in place. What
-remains:
-
-- **Control and fact payload kinds.** `weft.job-control/v1` and
-  `weft.bug-report/v1`, moving the submit-classified control commands and
-  `bug report`/`note` from blocked to working.
+The protocol core, key management, diagnostics, hub view, job submission, and
+the control and fact payload kinds are in place.
 
 ### Verify the R2 transport against a real bucket
 

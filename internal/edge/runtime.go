@@ -33,16 +33,17 @@ type Runtime struct {
 // as a plain struct so internal/edge does not import internal/config and
 // create a cycle.
 type RuntimeConfig struct {
-	Role             string
-	SigningKeyPath   string
-	PlanID           string
-	SubmitterHost    string
-	KeyringDir       string
-	SeenDir          string
-	AllowedTargets   []string
-	MaxSpendUSD      float64
-	HubHost          string
-	LeaseWindowHours float64
+	Role                   string
+	SigningKeyPath         string
+	PlanID                 string
+	SubmitterHost          string
+	KeyringDir             string
+	SeenDir                string
+	AllowedTargets         []string
+	MaxSpendUSD            float64
+	AllowForeignJobControl bool
+	HubHost                string
+	LeaseWindowHours       float64
 	// AllowMissingSigner lets diagnostics assemble an edge runtime before any
 	// key has been minted. The first command run on a new edge is `doctor`,
 	// and it must be able to report what is missing rather than fail on it.
@@ -111,6 +112,7 @@ func NewRuntime(t Transport, cfg RuntimeConfig) (*Runtime, error) {
 		return nil, err
 	}
 	rt.Policy = policy
+	rt.Policy.AllowForeignJobControl = cfg.AllowForeignJobControl
 
 	if cfg.SeenDir != "" {
 		seen, err := NewFileSeenSet(cfg.SeenDir)

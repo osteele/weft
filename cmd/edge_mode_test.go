@@ -230,6 +230,21 @@ func TestEdgeSubmitServedEntriesAreSubmitCommands(t *testing.T) {
 	}
 }
 
+// This kills a mutation that leaves any phase-4 spelling behind the exact
+// edgeCauseNoSubmitPath gate while serving the others.
+func TestPhase4EdgeSubmitCommandsAreServed(t *testing.T) {
+	for _, path := range []string{
+		"bug note", "bug report", "cancel", "edit", "job cancel", "job kill",
+		"job mark-processed", "job mark-unprocessed", "job pause", "job restart",
+		"job resume", "job unpause", "kill", "mark-processed", "mark-unprocessed",
+		"pause", "pause job", "queue edit", "restart", "resume", "unpause", "unpause job",
+	} {
+		if _, ok := edgeSubmitServed[path]; !ok {
+			t.Errorf("%s remains unserved", path)
+		}
+	}
+}
+
 func assertBlocked(t *testing.T, err error, stderr, cause string) {
 	t.Helper()
 	if err == nil {

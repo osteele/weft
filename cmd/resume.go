@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -28,6 +29,9 @@ func init() {
 }
 
 func runResume(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlResume, ParseJobIDsForJobCommand)
+	}
 	service, err := core.NewService()
 	if err != nil {
 		return fmt.Errorf("initialize core service: %w", err)

@@ -18,6 +18,10 @@ type PayloadKind string
 const (
 	// KindWeftJobSubmission is a weft job submission.
 	KindWeftJobSubmission PayloadKind = "weft.job-submission/v1"
+	// KindWeftJobControl asks the hub to act on an existing job.
+	KindWeftJobControl PayloadKind = "weft.job-control/v1"
+	// KindWeftBugReport records a bug report or note on the hub.
+	KindWeftBugReport PayloadKind = "weft.bug-report/v1"
 	// KindPlanEnded asks the hub to close a plan's spend authority.
 	//
 	// It is the one thing an edge may assert about its own authority, because
@@ -72,6 +76,22 @@ func DefaultKindRegistry() *KindRegistry {
 	r.Register(KindWeftJobSubmission, KindPolicy{
 		TTL:               time.Hour,
 		ContentIdempotent: false,
+	})
+	// Control requests concern work in flight. Fifteen minutes accommodates
+	// ordinary poll delay and transient store trouble without letting an old
+	// cancel, edit, or restart surprise a job after its context has changed.
+	// RequestID makes the content identify one instruction, so retrying that
+	// instruction collapses while two deliberate instructions remain distinct.
+	r.Register(KindWeftJobControl, KindPolicy{
+		TTL:               15 * time.Minute,
+		ContentIdempotent: true,
+	})
+	// A bug report states a fact. It remains true however late the hub receives
+	// it, and dropping it would turn missing evidence into an apparent negative.
+	// ReportID makes each report or note identity-bearing for content deduping.
+	r.Register(KindWeftBugReport, KindPolicy{
+		NeverExpires:      true,
+		ContentIdempotent: true,
 	})
 	// Ending a plan twice is ending it once, so this kind dedupes on content.
 	// The TTL is generous because a late-arriving termination is still correct:

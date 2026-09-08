@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
@@ -954,6 +955,9 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 }
 
 func runEdit(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlEdit, ParseJobIDsForJobCommand)
+	}
 	jobID, err := resolveJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])

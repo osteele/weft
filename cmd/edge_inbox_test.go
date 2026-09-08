@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"os"
@@ -207,6 +208,71 @@ func TestSubmitEdgeJobPrintsRefusalCheckAndDetail(t *testing.T) {
 	want := "Refused: target_not_allowed: target detail verbatim\n"
 	if out.String() != want {
 		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+}
+
+// This kills the mutation that marks cancel as served at the gate but lets its
+// RunE continue into db.Open on an edge.
+func TestRunCancelEdgeBuildsControlPayloadWithoutLedger(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, _, err := edge.GenerateSigner("edge-alpha-plan-1", "edge-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := activeEdgeSubmit
+	activeEdgeSubmit = &edge.Runtime{Role: "edge", Transport: transport, Signer: signer, SubmitterHost: "edge-alpha"}
+	t.Cleanup(func() { activeEdgeSubmit = previous })
+	resetLedgerRefusal := db.RefuseLocalLedger("edge cancel seam test")
+	t.Cleanup(resetLedgerRefusal)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ackResult := make(chan error, 1)
+	go func() {
+		ackResult <- writeAckForFirstPointer(ctx, transport, func(nonce string) edge.Ack {
+			return edge.Ack{Version: 1, Nonce: nonce, Accepted: true, Detail: "Job wj42: cancel completed", AckedAt: time.Now()}
+		})
+	}()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := runCancelWithParser(cmd, []string{"wj42"}, ParseJobIDs); err != nil {
+		t.Fatalf("runCancelWithParser: %v", err)
+	}
+	if err := <-ackResult; err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "Job wj42: cancel completed\n" {
+		t.Fatalf("output = %q", out.String())
+	}
+	payloadKeys, err := transport.List(ctx, edge.PrefixPayload)
+	if err != nil || len(payloadKeys) != 1 {
+		t.Fatalf("payload keys=%v err=%v", payloadKeys, err)
+	}
+	data, err := transport.Get(ctx, payloadKeys[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, refusal := edge.ParseWeftJobControlPayload(data)
+	if refusal != nil || payload.JobID != 42 || payload.Action != edge.ControlCancel || payload.RequestID == "" {
+		t.Fatalf("payload=%#v refusal=%v", payload, refusal)
+	}
+}
+
+// This kills the mutation that signs an edit's --max-spend flag without the
+// matching numeric authority field checked during admission.
+func TestEdgeControlSpendCeilingMatchesEditFlag(t *testing.T) {
+	got, err := edgeControlSpendCeilingUSD(edge.ControlEdit, map[string]string{"max-spend": "$8.30"})
+	if err != nil || got != 8.30 {
+		t.Fatalf("edit spend ceiling = %.2f, err=%v; want 8.30", got, err)
+	}
+	got, err = edgeControlSpendCeilingUSD(edge.ControlCancel, map[string]string{"max-spend": "$99"})
+	if err != nil || got != 0 {
+		t.Fatalf("cancel spend ceiling = %.2f, err=%v; want 0", got, err)
 	}
 }
 
@@ -513,5 +579,276 @@ func TestEdgeSubmissionEndToEndFilesystem(t *testing.T) {
 	}
 	if _, err := transport.Get(ctx, edge.InboxKey(blocked.Nonce)); err != nil {
 		t.Fatalf("database failure consumed the standing pointer: %v", err)
+	}
+}
+
+func edgeControlFixture(t *testing.T, transport edge.Transport) (*edge.Runtime, map[string]*edge.Signer) {
+	t.Helper()
+	now := time.Now().UTC()
+	keyring := edge.NewKeyring()
+	signers := map[string]*edge.Signer{}
+	for _, plan := range []string{"plan-owner", "plan-foreign"} {
+		keyID := "edge-alpha-" + plan
+		signer, publicKey, err := edge.GenerateSigner(keyID, "edge-alpha")
+		if err != nil {
+			t.Fatal(err)
+		}
+		publicKey.PlanID = plan
+		publicKey.NotBefore = now.Add(-time.Hour)
+		publicKey.NotAfter = now.Add(time.Hour)
+		publicKey.SpendCeilingUSD = 10
+		if err := keyring.Add(publicKey); err != nil {
+			t.Fatal(err)
+		}
+		signers[plan] = signer
+	}
+	policy, err := edge.NewPolicy("hub-alpha", []string{"host-alpha"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen, err := edge.NewFileSeenSet(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &edge.Runtime{Transport: transport, Keyring: keyring, Policy: policy, Seen: seen, Kinds: edge.DefaultKindRegistry()}, signers
+}
+
+func recordEdgeOwnedJob(t *testing.T, database *sql.DB, signingKeyID string) int64 {
+	t.Helper()
+	jobID, err := ops.RecordQueuedJobContext(context.Background(), database, ops.QueueJobParams{
+		WorkingDir: "/tmp/edge-control", Command: "echo controlled",
+		EdgeProvenance: &db.EdgeSubmissionProvenance{
+			SubmitterHost: "edge-alpha", SigningKeyID: signingKeyID,
+			DeploymentSourceDigest: "sha256:deployment", Nonce: "original-submission",
+		},
+	})
+	if err != nil {
+		t.Fatalf("record edge-owned job: %v", err)
+	}
+	return jobID
+}
+
+func submitControlFixture(t *testing.T, transport edge.Transport, signer *edge.Signer, jobID int64, requestID string, action edge.JobControlAction, flags map[string]string) *edge.SubmitResult {
+	t.Helper()
+	payload, err := edge.EncodeWeftJobControlPayload(edge.WeftJobControlPayload{
+		RequestID: requestID, JobID: jobID, Action: action, Flags: flags,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := edge.Submit(context.Background(), transport, signer, edge.SubmitRequest{
+		SubmitterHost: "edge-alpha", DeploymentSourceDigest: "sha256:control",
+		Kind: edge.KindWeftJobControl, Payload: payload,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("submit control: %v", err)
+	}
+	return result
+}
+
+// This kills the mutation that treats a valid signature as job authority.
+// A different plan's key signs correctly but must still be refused by name.
+func TestEdgeControlForeignJobRefusedByAuthorityCheck(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	result := submitControlFixture(t, transport, signers["plan-foreign"], jobID, "foreign-control", edge.ControlCancel, nil)
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil {
+		t.Fatalf("pollEdgeInboxOnce: %v", err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Accepted || ack.ReasonCode != string(edge.ReasonJobControlAuthority) || !strings.Contains(ack.Detail, "job-control authority check failed") {
+		t.Fatalf("foreign control ack = %#v", ack)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.EffectiveStatus() != db.StatusQueued {
+		t.Fatalf("foreign control changed status to %q", job.EffectiveStatus())
+	}
+}
+
+// This kills the mutation that authorizes ownership but never dispatches the
+// admitted payload to the ordinary control handler.
+func TestEdgeControlOwnedJobIsPerformed(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	result := submitControlFixture(t, transport, signers["plan-owner"], jobID, "owned-control", edge.ControlCancel, nil)
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil {
+		t.Fatalf("pollEdgeInboxOnce: %v", err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.Accepted || !strings.Contains(ack.Detail, "cancel completed") {
+		t.Fatalf("owned control ack = %#v", ack)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.EffectiveStatus() != db.StatusCanceled {
+		t.Fatalf("owned control status = %q, want canceled", job.EffectiveStatus())
+	}
+}
+
+// This kills the mutation that drops authenticated edit flags while routing
+// the control action to the shared hub-side edit function.
+func TestEdgeControlEditReplaysAuthenticatedFlags(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	result := submitControlFixture(t, transport, signers["plan-owner"], jobID, "edit-control",
+		edge.ControlEdit, map[string]string{"message": "edited at the hub"})
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil {
+		t.Fatalf("pollEdgeInboxOnce: %v", err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil || !ack.Accepted {
+		t.Fatalf("edit ack=%#v err=%v", ack, err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job.Description != "edited at the hub" {
+		t.Fatalf("edited job=%#v err=%v", job, err)
+	}
+}
+
+// This kills the mutation that lets edit --retry reuse a job ceiling above
+// the requesting plan's grant merely because the payload requests no new cap.
+func TestEdgeControlRetryChecksRetainedSpendCeiling(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	retainedCents := 2000
+	if err := db.SetJobCLIResourceOverrides(database, jobID, &db.CLIResourceOverrides{MaxSpendCents: &retainedCents}); err != nil {
+		t.Fatal(err)
+	}
+	result := submitControlFixture(t, transport, signers["plan-owner"], jobID, "edit-retry-control",
+		edge.ControlEdit, map[string]string{"retry": "true"})
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil {
+		t.Fatalf("pollEdgeInboxOnce: %v", err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Accepted || ack.ReasonCode != string(edge.ReasonOverSpendCeiling) || !strings.Contains(ack.Detail, "retains a $20.00 ceiling") {
+		t.Fatalf("edit retry ack = %#v", ack)
+	}
+}
+
+// This kills the mutation that turns an untyped control execution error into
+// a terminal refusal. The result is unknown, so both seen keys roll back and
+// the pointer remains available for a later retry.
+func TestEdgeControlExecutionErrorRemainsUnknown(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := db.SetupTestDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+	jobID := recordEdgeOwnedJob(t, database, "edge-alpha-plan-owner")
+	result := submitControlFixture(t, transport, signers["plan-owner"], jobID, "invalid-resume",
+		edge.ControlResume, nil)
+
+	if _, err := pollEdgeInboxOnce(context.Background(), database, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err == nil {
+		t.Fatal("resume of a queued job produced a terminal result, want unknown error")
+	}
+	seen, err := hub.Seen.Seen(result.Nonce)
+	if err != nil || seen {
+		t.Fatalf("nonce seen=%t err=%v", seen, err)
+	}
+	seen, err = hub.Seen.Seen(edge.ContentSeenKey("edge-alpha-plan-owner", edge.KindWeftJobControl, result.PayloadDigest))
+	if err != nil || seen {
+		t.Fatalf("content seen=%t err=%v", seen, err)
+	}
+	if _, err := transport.Get(context.Background(), edge.InboxKey(result.Nonce)); err != nil {
+		t.Fatalf("unknown control lost its pointer: %v", err)
+	}
+}
+
+// This kills the mutation that routes fact payloads to the jobs database or
+// drops them after admission instead of writing the separate bug ledger.
+func TestEdgeBugReportAndNoteUseBugDatabase(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobsDB := db.SetupTestDB(t)
+	bugDB := db.SetupTestBugDB(t)
+	hub, signers := edgeControlFixture(t, transport)
+
+	reportPayload, _ := edge.EncodeWeftBugReportPayload(edge.WeftBugReportPayload{
+		ReportID: "report-identity", Action: edge.BugReportCreate,
+		Title: "edge invariant", Fingerprint: "edge-invariant", Detail: "runtime detail",
+	})
+	report, err := edge.Submit(context.Background(), transport, signers["plan-owner"], edge.SubmitRequest{
+		SubmitterHost: "edge-alpha", Kind: edge.KindWeftBugReport, Payload: reportPayload,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pollEdgeInboxOnce(context.Background(), jobsDB, edgeInboxDeps{Transport: transport, Runtime: hub, HubHost: "hub-alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	reportAck, err := edgeFetchAck(context.Background(), hub, report.Nonce)
+	if err != nil || !reportAck.Accepted || !strings.Contains(reportAck.Detail, "wb1") {
+		t.Fatalf("report ack=%#v err=%v", reportAck, err)
+	}
+
+	notePayload, _ := edge.EncodeWeftBugReportPayload(edge.WeftBugReportPayload{
+		ReportID: "note-identity", Action: edge.BugReportNote, BugID: "wb1", Note: "more evidence",
+	})
+	if _, err := edge.Submit(context.Background(), transport, signers["plan-owner"], edge.SubmitRequest{
+		SubmitterHost: "edge-alpha", Kind: edge.KindWeftBugReport, Payload: notePayload,
+	}, time.Now().UTC().Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pollEdgeInboxOnce(context.Background(), jobsDB, edgeInboxDeps{Transport: transport, Runtime: hub, HubHost: "hub-alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	bugs, err := db.ListBugs(bugDB, true)
+	if err != nil || len(bugs) != 1 || bugs[0].Title != "edge invariant" {
+		t.Fatalf("bugs=%#v err=%v", bugs, err)
+	}
+	notes, err := db.ListBugNotes(bugDB, bugs[0].ID)
+	if err != nil || len(notes) != 1 || notes[0].Body != "more evidence" {
+		t.Fatalf("notes=%#v err=%v", notes, err)
 	}
 }

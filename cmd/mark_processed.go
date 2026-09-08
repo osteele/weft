@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/localmutate"
 	"github.com/osteele/weft/internal/oplog"
@@ -34,11 +35,17 @@ func init() {
 	rootCmd.AddCommand(markUnprocessedCmd)
 }
 
-func runMarkProcessed(_ *cobra.Command, args []string) error {
+func runMarkProcessed(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlMarkProcessed, ParseJobIDsForJobCommand)
+	}
 	return setProcessedTag(args, true)
 }
 
-func runMarkUnprocessed(_ *cobra.Command, args []string) error {
+func runMarkUnprocessed(cmd *cobra.Command, args []string) error {
+	if activeEdgeSubmit != nil {
+		return submitEdgeJobControls(cmd, args, edge.ControlMarkUnprocessed, ParseJobIDsForJobCommand)
+	}
 	return setProcessedTag(args, false)
 }
 

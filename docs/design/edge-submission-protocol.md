@@ -193,6 +193,26 @@ they mean different things to different callers:
 A kind absent from the hub's registry is refused, never admitted under a
 default, so accepting a new caller is a deliberate act on the hub.
 
+The weft hub registers these kinds:
+
+| Kind | TTL | Content-idempotent | Identity and rationale |
+| --- | --- | --- | --- |
+| `weft.job-submission/v1` | 1 hour | No | Repeating the same command can deliberately create another job. The delivery nonce identifies each submission. |
+| `weft.job-control/v1` | 15 minutes | Yes | A control request concerns work in flight, so an old instruction is unsafe to apply after the job's context may have changed. `request_id` identifies one instruction: an exact retry collapses, while two deliberate requests remain distinct even when they name the same job and action. |
+| `weft.bug-report/v1` | Never expires | Yes | A report or note states a fact that does not become false in transit. Its `report_id` identifies that fact, so equal report fields from separate observations do not collapse. |
+| `weft.plan-ended/v1` | 24 hours | Yes | Ending an already-ended plan is harmless. The generous bound lets delayed termination close authority without making every termination record permanent. |
+
+Job control is plan-scoped by default. The hub reads the signing key id from
+the target job's durable provenance and requires it to equal the key that
+signed the verified control envelope. A confirmed missing job or a different
+key is refused with `job_control_authority`; an unreadable provenance lookup is
+unknown and remains pending. Hub configuration may set
+`allow_foreign_job_control = true` to widen this authority deliberately.
+Restart also passes through the same spend-ceiling authorization used for a
+job submission. An edit that changes `--max-spend` authenticates that value as
+an authority field, and an edit that requeues work cannot retain a ceiling
+above the requesting plan's grant.
+
 ## Verification order
 
 Strictly ordered. Each step runs only if every previous step passed.

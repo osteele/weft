@@ -488,7 +488,7 @@ func TestRefusalCodesAreDistinct(t *testing.T) {
 		ReasonKeyRevoked, ReasonBadSignature, ReasonMalformed, ReasonUnknownProtocol,
 		ReasonExpired, ReasonFutureDated, ReasonReplayed, ReasonTargetNotAllowed,
 		ReasonOverSpendCeiling, ReasonPayloadMismatch, ReasonUnknownKind,
-		ReasonHostMismatch,
+		ReasonHostMismatch, ReasonJobControlAuthority, ReasonActionFailed,
 	}
 	for _, code := range codes {
 		if code == "" {
@@ -1120,6 +1120,25 @@ func TestRuntimeRefusesAKeyFromAnotherPlan(t *testing.T) {
 	}
 }
 
+// This kills the mutation that parses the hub's widening switch but drops it
+// while constructing the authorization policy.
+func TestRuntimePropagatesForeignJobControlPolicy(t *testing.T) {
+	transport, err := NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewRuntime(transport, RuntimeConfig{
+		KeyringDir: t.TempDir(), SeenDir: t.TempDir(), HubHost: "hub-alpha",
+		AllowedTargets: []string{"host-alpha"}, MaxSpendUSD: 10, AllowForeignJobControl: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.Policy.AllowForeignJobControl {
+		t.Fatal("runtime dropped allow_foreign_job_control")
+	}
+}
+
 // Mutating a nil keyring must error rather than panic, on a path a signed
 // submission can reach.
 func TestNilKeyringMutatorsDoNotPanic(t *testing.T) {
@@ -1360,6 +1379,281 @@ func TestJobSubmissionsAreNotCollapsedByContent(t *testing.T) {
 	if _, refusal := h.admitNonce(second.Nonce); refusal != nil {
 		t.Fatalf("an identical second job was collapsed, but running the same command "+
 			"twice is legitimate: %s", refusal.Detail)
+	}
+}
+
+func controlRequest(requestID string, jobID int64, action JobControlAction) SubmitRequest {
+	payload, err := EncodeWeftJobControlPayload(WeftJobControlPayload{
+		RequestID: requestID, JobID: jobID, Action: action,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return SubmitRequest{
+		SubmitterHost: "studio", DeploymentSourceDigest: "sha256:deadbeef",
+		Kind: KindWeftJobControl, Payload: payload,
+	}
+}
+
+// This kills the mutation that drops request identity from content deduping:
+// two deliberate controls with equal job and action must both be admitted.
+func TestJobControlRequestIdentityKeepsDeliberateRequestsDistinct(t *testing.T) {
+	h := newHarness(t)
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "studio-test", true, nil }
+	first := h.submit(controlRequest("request-one", 42, ControlCancel))
+	object, _ := h.tr.Get(context.Background(), InboxKey(first.Nonce))
+	if _, refusal, err := Admit(context.Background(), h.tr, object, opts); err != nil || refusal != nil {
+		t.Fatalf("first control: refusal=%v err=%v", refusal, err)
+	}
+	second := h.submit(controlRequest("request-two", 42, ControlCancel))
+	object, _ = h.tr.Get(context.Background(), InboxKey(second.Nonce))
+	if _, refusal, err := Admit(context.Background(), h.tr, object, opts); err != nil || refusal != nil {
+		t.Fatalf("second deliberate control was collapsed: refusal=%v err=%v", refusal, err)
+	}
+}
+
+// This kills the mutation that disables content idempotency for controls:
+// an exact payload retry under a fresh delivery nonce must collapse.
+func TestJobControlExactPayloadRetryCollapses(t *testing.T) {
+	h := newHarness(t)
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "studio-test", true, nil }
+	for attempt := range 2 {
+		result := h.submit(controlRequest("one-instruction", 42, ControlCancel))
+		object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+		_, refusal, err := Admit(context.Background(), h.tr, object, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 0 && refusal != nil {
+			t.Fatalf("first control refused: %v", refusal)
+		}
+		if attempt == 1 && (refusal == nil || refusal.Code != ReasonDuplicateContent) {
+			t.Fatalf("exact retry refusal = %v, want %s", refusal, ReasonDuplicateContent)
+		}
+	}
+}
+
+// This kills mutations that skip or invert same-key ownership. The narrow
+// default admits the owning key and names the authority check for another key.
+func TestJobControlAuthorityRequiresOwningPlanKeyByDefault(t *testing.T) {
+	h := newHarness(t)
+	for name, owner := range map[string]string{"owned": "studio-test", "foreign": "other-plan-key"} {
+		t.Run(name, func(t *testing.T) {
+			opts := h.admitOpts()
+			opts.Seen, _ = NewFileSeenSet(t.TempDir())
+			opts.ControlJobs = func(int64) (string, bool, error) { return owner, true, nil }
+			result := h.submit(controlRequest("request-"+name, 42, ControlCancel))
+			object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+			admission, refusal, err := Admit(context.Background(), h.tr, object, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "owned" && (admission == nil || refusal != nil) {
+				t.Fatalf("owned control: admission=%v refusal=%v", admission, refusal)
+			}
+			if name == "foreign" {
+				if refusal == nil || refusal.Code != ReasonJobControlAuthority || !strings.Contains(refusal.Detail, "job-control authority check failed") {
+					t.Fatalf("foreign control refusal = %#v", refusal)
+				}
+			}
+		})
+	}
+}
+
+// This kills the mutation that ignores the hub's explicit widening policy.
+func TestJobControlAuthorityCanBeWidenedByHubPolicy(t *testing.T) {
+	h := newHarness(t)
+	h.policy.AllowForeignJobControl = true
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "other-plan-key", true, nil }
+	result := h.submit(controlRequest("widened-request", 42, ControlCancel))
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	admission, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if err != nil || refusal != nil || admission == nil {
+		t.Fatalf("widened control: admission=%v refusal=%v err=%v", admission, refusal, err)
+	}
+}
+
+// This kills the mutation that converts an unreadable provenance lookup into
+// confirmed absence. Unknown authority must remain retryable.
+func TestJobControlAuthorityLookupErrorIsUnknown(t *testing.T) {
+	h := newHarness(t)
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "", false, errors.New("database busy") }
+	result := h.submit(controlRequest("unknown-request", 42, ControlCancel))
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	admission, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if admission != nil || refusal != nil || err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("lookup result: admission=%v refusal=%v err=%v", admission, refusal, err)
+	}
+}
+
+// This kills the mutation that treats confirmed absence as an unknown lookup
+// and leaves a request for a nonexistent job pending forever.
+func TestJobControlConfirmedMissingJobIsAuthorityRefusal(t *testing.T) {
+	h := newHarness(t)
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "", false, nil }
+	result := h.submit(controlRequest("missing-job", 404, ControlCancel))
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	_, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if err != nil || refusal == nil || refusal.Code != ReasonJobControlAuthority || !strings.Contains(refusal.Detail, "not present") {
+		t.Fatalf("missing job refusal=%v err=%v", refusal, err)
+	}
+}
+
+// This kills the mutation that gives controls the job-submission TTL or no
+// TTL. A control instruction older than fifteen minutes must expire.
+func TestJobControlExpiresAfterFifteenMinutes(t *testing.T) {
+	h := newHarness(t)
+	result := h.submit(controlRequest("stale-control", 42, ControlCancel))
+	h.nowFunc = func() time.Time { return testNow().Add(15*time.Minute + time.Second) }
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "studio-test", true, nil }
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	_, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if err != nil || refusal == nil || refusal.Code != ReasonExpired {
+		t.Fatalf("stale control refusal=%v err=%v", refusal, err)
+	}
+}
+
+// This kills the mutation that lets a restart bypass the shared spend check.
+func TestJobControlRestartUsesSubmissionSpendCeiling(t *testing.T) {
+	h := newHarness(t)
+	h.policy.MaxSpendUSD = 3
+	payload, _ := EncodeWeftJobControlPayload(WeftJobControlPayload{
+		RequestID: "restart-request", JobID: 42, Action: ControlRestart, SpendCeilingUSD: 4,
+	})
+	result := h.submit(SubmitRequest{SubmitterHost: "studio", Kind: KindWeftJobControl, Payload: payload})
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "studio-test", true, nil }
+	_, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if err != nil || refusal == nil || refusal.Code != ReasonOverSpendCeiling {
+		t.Fatalf("restart refusal=%v err=%v", refusal, err)
+	}
+}
+
+// This kills the mutation that lets an edit raise a queued job's spend ceiling
+// without passing through the same spend authorization as a submission.
+func TestJobControlEditMaxSpendUsesSubmissionSpendCeiling(t *testing.T) {
+	h := newHarness(t)
+	h.policy.MaxSpendUSD = 3
+	payload, _ := EncodeWeftJobControlPayload(WeftJobControlPayload{
+		RequestID: "edit-spend-request", JobID: 42, Action: ControlEdit,
+		Flags: map[string]string{"max-spend": "4.00"}, SpendCeilingUSD: 4,
+	})
+	result := h.submit(SubmitRequest{SubmitterHost: "studio", Kind: KindWeftJobControl, Payload: payload})
+	object, _ := h.tr.Get(context.Background(), InboxKey(result.Nonce))
+	opts := h.admitOpts()
+	opts.ControlJobs = func(int64) (string, bool, error) { return "studio-test", true, nil }
+	_, refusal, err := Admit(context.Background(), h.tr, object, opts)
+	if err != nil || refusal == nil || refusal.Code != ReasonOverSpendCeiling {
+		t.Fatalf("edit spend refusal=%v err=%v", refusal, err)
+	}
+}
+
+// This kills mutations that leave either new kind on the hub default policy.
+func TestDefaultPoliciesPinControlAndBugSemantics(t *testing.T) {
+	registry := DefaultKindRegistry()
+	control, ok := registry.Lookup(KindWeftJobControl)
+	if !ok || control.TTL != 15*time.Minute || !control.ContentIdempotent || control.NeverExpires {
+		t.Fatalf("control policy = %#v, found=%t", control, ok)
+	}
+	bug, ok := registry.Lookup(KindWeftBugReport)
+	if !ok || !bug.NeverExpires || !bug.ContentIdempotent || bug.TTL != 0 {
+		t.Fatalf("bug policy = %#v, found=%t", bug, ok)
+	}
+}
+
+func bugFactRequest(reportID string) SubmitRequest {
+	payload, err := EncodeWeftBugReportPayload(WeftBugReportPayload{
+		ReportID: reportID, Action: BugReportCreate, Title: "same observation",
+	})
+	if err != nil {
+		panic(err)
+	}
+	return SubmitRequest{
+		SubmitterHost: "studio", DeploymentSourceDigest: "sha256:deadbeef",
+		Kind: KindWeftBugReport, Payload: payload,
+	}
+}
+
+// This kills the mutation that treats a fact kind's explicit no-expiry policy
+// as an unset TTL and applies the hub default.
+func TestBugReportFactRemainsAdmissibleWhenDeliveredLate(t *testing.T) {
+	h := newHarness(t)
+	result := h.submit(bugFactRequest("late-report"))
+	h.nowFunc = func() time.Time { return testNow().Add(365 * 24 * time.Hour) }
+	admission, refusal := h.admitNonce(result.Nonce)
+	if admission == nil || refusal != nil {
+		t.Fatalf("late fact admission=%v refusal=%v", admission, refusal)
+	}
+}
+
+// This kills the mutation that omits report_id from bug payload bytes. Two
+// separate observations with equal fields must not collide under content
+// idempotency.
+func TestBugReportIdentityKeepsEqualObservationsDistinct(t *testing.T) {
+	h := newHarness(t)
+	first := h.submit(bugFactRequest("report-one"))
+	if _, refusal := h.admitNonce(first.Nonce); refusal != nil {
+		t.Fatalf("first report refused: %v", refusal)
+	}
+	second := h.submit(bugFactRequest("report-two"))
+	if first.PayloadDigest == second.PayloadDigest {
+		t.Fatal("distinct report identities produced the same payload digest")
+	}
+	if _, refusal := h.admitNonce(second.Nonce); refusal != nil {
+		t.Fatalf("second report was collapsed: %v", refusal)
+	}
+}
+
+// This kills the mutation that disables content idempotency for fact records.
+// Re-delivering the same report identity and bytes must not record it twice.
+func TestBugReportExactPayloadRetryCollapses(t *testing.T) {
+	h := newHarness(t)
+	for attempt := range 2 {
+		result := h.submit(bugFactRequest("one-report"))
+		_, refusal := h.admitNonce(result.Nonce)
+		if attempt == 0 && refusal != nil {
+			t.Fatalf("first report refused: %v", refusal)
+		}
+		if attempt == 1 && (refusal == nil || refusal.Code != ReasonDuplicateContent) {
+			t.Fatalf("exact report retry refusal=%v, want %s", refusal, ReasonDuplicateContent)
+		}
+	}
+}
+
+// This kills mutations that accept future schema fields or omit the identity
+// required by content idempotency.
+func TestControlAndBugPayloadValidatorsRejectSchemaDriftAndMissingIdentity(t *testing.T) {
+	validEdit, err := EncodeWeftJobControlPayload(WeftJobControlPayload{
+		RequestID: "r", JobID: 1, Action: ControlEdit,
+		Flags: map[string]string{"max-spend": "$8.30"}, SpendCeilingUSD: 8.30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, refusal := ParseWeftJobControlPayload(validEdit); refusal != nil {
+		t.Fatalf("control parser rejected matching edit spend authority: %v", refusal)
+	}
+	if _, refusal := ParseWeftJobControlPayload([]byte(`{"request_id":"r","job_id":1,"action":"cancel","future":true}`)); refusal == nil {
+		t.Fatal("control parser accepted an unknown field")
+	}
+	if _, refusal := ParseWeftJobControlPayload([]byte(`{"job_id":1,"action":"cancel"}`)); refusal == nil {
+		t.Fatal("control parser accepted missing request_id")
+	}
+	if _, refusal := ParseWeftJobControlPayload([]byte(`{"request_id":"r","job_id":1,"action":"edit","flags":{"max-spend":"50"},"spend_ceiling_usd":5}`)); refusal == nil {
+		t.Fatal("control parser accepted mismatched edit spend authority")
+	}
+	if _, refusal := ParseWeftBugReportPayload([]byte(`{"report_id":"r","action":"report","title":"bug","future":true}`)); refusal == nil {
+		t.Fatal("bug parser accepted an unknown field")
+	}
+	if _, refusal := ParseWeftBugReportPayload([]byte(`{"action":"report","title":"bug"}`)); refusal == nil {
+		t.Fatal("bug parser accepted missing report_id")
 	}
 }
 

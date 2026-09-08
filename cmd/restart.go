@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
@@ -94,6 +95,12 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	overrides, err := parseRestartOverrides(cmd)
 	if err != nil {
 		return err
+	}
+	if activeEdgeSubmit != nil {
+		if restartUnplaced {
+			return fmt.Errorf("--unplaced requires a hub job lookup; name the jobs to restart from an edge")
+		}
+		return submitEdgeJobControls(cmd, args, edge.ControlRestart, ParseJobIDs)
 	}
 
 	database, err := db.Open()
