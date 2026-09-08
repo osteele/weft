@@ -140,6 +140,7 @@ func TestInventoryQueueR2BridgePublishesWorkerEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := opsqueue.RunnerState{
+		Pending: []int64{43},
 		Running: map[string]opsqueue.RunnerJobState{
 			"42": {RunID: 1042, StartedAt: 1_700_000_000},
 		},
@@ -150,6 +151,16 @@ func TestInventoryQueueR2BridgePublishesWorkerEvidence(t *testing.T) {
 	}
 	stateFile := filepath.Join(queueDir, opsqueue.StateFileName())
 	if err := os.WriteFile(stateFile, encoded, 0644); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(opsqueue.CommandJob{ID: 43, RunID: 1043, Cmd: "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(queueDir, "job-43.json"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(queueDir, "job-44.json"), []byte("{invalid"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	objects := map[string]string{}
@@ -169,5 +180,26 @@ func TestInventoryQueueR2BridgePublishesWorkerEvidence(t *testing.T) {
 	running := published.Runner.Running["42"]
 	if running.StatusFile != opsqueue.ObservationAbsent || running.Process != opsqueue.ObservationAbsent {
 		t.Fatalf("published evidence = status %q process %q, want both absent", running.StatusFile, running.Process)
+	}
+	if !published.Runner.PendingPayloadInventoryComplete || published.Runner.PendingPayloadInventoryError != "" {
+		t.Fatalf("payload inventory completeness = %v error %q", published.Runner.PendingPayloadInventoryComplete, published.Runner.PendingPayloadInventoryError)
+	}
+	payloadState, ok := published.Runner.PendingPayloads["43"]
+	if !ok || payloadState.Observation != opsqueue.ObservationPresent || payloadState.RunID != 1043 {
+		t.Fatalf("published job 43 payload = %+v, present=%v", payloadState, ok)
+	}
+	broken := published.Runner.PendingPayloads["44"]
+	if broken.Observation != opsqueue.ObservationUnknown || broken.Detail == "" {
+		t.Fatalf("published broken payload = %+v, want diagnostic unknown", broken)
+	}
+	if _, ok := published.Runner.PendingPayloads["45"]; ok {
+		t.Fatal("payload inventory fabricated an absent entry")
+	}
+}
+
+func TestObservePendingPayloadInventoryReportsDirectoryFailure(t *testing.T) {
+	payloads, complete, detail := observePendingPayloadInventory(filepath.Join(t.TempDir(), "missing"))
+	if complete || payloads != nil || detail == "" {
+		t.Fatalf("payload inventory = %+v complete=%v detail=%q, want incomplete diagnostic", payloads, complete, detail)
 	}
 }

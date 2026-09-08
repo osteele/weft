@@ -197,6 +197,57 @@ func TestParseRemoteJobPayloads_PreservesIndependentObservations(t *testing.T) {
 	}
 }
 
+func TestRemoteJobPayloadsFromCompleteRunnerState(t *testing.T) {
+	runID := int64(7)
+	jobs := []*db.Job{
+		{ID: 5, LatestRunID: &runID},
+		{ID: 42, LatestRunID: &runID},
+		{ID: 99, LatestRunID: &runID},
+	}
+	state := &opsqueue.RunnerState{
+		PendingPayloadInventoryComplete: true,
+		PendingPayloads: map[string]opsqueue.RunnerPayloadState{
+			"5":  {Observation: opsqueue.ObservationPresent, RunID: 7},
+			"42": {Observation: opsqueue.ObservationUnknown, Detail: "payload JSON is unreadable"},
+		},
+	}
+
+	got, err := remoteJobPayloadsFromRunnerState(jobs, state)
+	if err == nil || !strings.Contains(err.Error(), "job 42") {
+		t.Fatalf("payload conversion error = %v, want job 42 diagnostic", err)
+	}
+	if payload := got[5]; !payload.observed || !payload.exists || !payload.runIDOK || payload.runID != 7 {
+		t.Fatalf("job 5 payload = %+v, want matching present payload", payload)
+	}
+	if payload := got[42]; !payload.observed || !payload.exists || payload.runIDOK || payload.detail == "" {
+		t.Fatalf("job 42 payload = %+v, want present payload with unknown identity", payload)
+	}
+	if payload := got[99]; !payload.observed || payload.exists {
+		t.Fatalf("job 99 payload = %+v, want confirmed missing", payload)
+	}
+}
+
+func TestRemoteJobPayloadsFromLegacyRunnerStateRemainUnknown(t *testing.T) {
+	runID := int64(7)
+	jobs := []*db.Job{{ID: 5, LatestRunID: &runID}, {ID: 99, LatestRunID: &runID}}
+	state := &opsqueue.RunnerState{
+		PendingPayloads: map[string]opsqueue.RunnerPayloadState{
+			"5": {Observation: opsqueue.ObservationPresent, RunID: 7},
+		},
+	}
+
+	got, err := remoteJobPayloadsFromRunnerState(jobs, state)
+	if err == nil || !strings.Contains(err.Error(), "does not expose pending payloads") {
+		t.Fatalf("payload conversion error = %v, want legacy-state diagnostic", err)
+	}
+	if payload := got[5]; !payload.observed || !payload.exists || !payload.runIDOK {
+		t.Fatalf("job 5 payload = %+v, want independent present observation", payload)
+	}
+	if payload := got[99]; payload.observed || payload.detail == "" {
+		t.Fatalf("job 99 payload = %+v, want unknown omission", payload)
+	}
+}
+
 // TestShouldPruneStalePending exercises the classifier that decides whether
 // a runner-pending entry should be cancelled via host_sync's reverse
 // reconcile. The classifier is the contract surface — fixing it wrong

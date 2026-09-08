@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   worker process becomes `unresolved` after 15 minutes. This state releases
   placement capacity without inventing a terminal outcome, and accepts either
   late completion evidence or an explicit restart.
+- **R2-pull queue reconciliation**: Runner state includes a complete,
+  attempt-fenced payload inventory, allowing missing or stranded queued jobs
+  to be safely re-dispatched instead of repeating an unresolvable
+  publication-status warning.
 - **`queue add` command**: Fixed database error when adding jobs to queue
   (`NOT NULL constraint failed: jobs.start_time`). Queued jobs now correctly
   have NULL start_time until they begin running.

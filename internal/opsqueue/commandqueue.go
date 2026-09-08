@@ -231,13 +231,16 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 
 // RunnerState represents the queue runner's internal state.
 type RunnerState struct {
-	Capabilities []string                       `json:"capabilities,omitempty"`
-	Cursor       string                         `json:"cursor"`
-	CursorLine   int                            `json:"cursor_line"`
-	Pending      []int64                        `json:"pending"`
-	Current      *int64                         `json:"current"`
-	Running      map[string]RunnerJobState      `json:"running,omitempty"`
-	Finished     map[string]RunnerFinishedState `json:"finished,omitempty"`
+	Capabilities                    []string                       `json:"capabilities,omitempty"`
+	Cursor                          string                         `json:"cursor"`
+	CursorLine                      int                            `json:"cursor_line"`
+	Pending                         []int64                        `json:"pending"`
+	Current                         *int64                         `json:"current"`
+	Running                         map[string]RunnerJobState      `json:"running,omitempty"`
+	Finished                        map[string]RunnerFinishedState `json:"finished,omitempty"`
+	PendingPayloads                 map[string]RunnerPayloadState  `json:"pending_payloads,omitempty"`
+	PendingPayloadInventoryComplete bool                           `json:"pending_payload_inventory_complete,omitempty"`
+	PendingPayloadInventoryError    string                         `json:"pending_payload_inventory_error,omitempty"`
 }
 
 func (s *RunnerState) Supports(capability string) bool {
@@ -260,6 +263,15 @@ func (s *RunnerState) Supports(capability string) bool {
 type RunnerFinishedState struct {
 	ExitCode   int   `json:"exit_code"`
 	FinishedAt int64 `json:"finished_at"`
+}
+
+// RunnerPayloadState is one queue payload file observed while publishing the
+// complete inventory. Omission is confirmed absence only when the enclosing
+// RunnerState marks the inventory complete.
+type RunnerPayloadState struct {
+	Observation string `json:"observation"`
+	RunID       int64  `json:"run_id,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // RunnerJobState captures per-job runtime state for concurrent execution.

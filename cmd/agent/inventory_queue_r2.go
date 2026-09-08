@@ -171,6 +171,8 @@ func (b *inventoryQueueR2Bridge) publishState() error {
 		running.Process = processObservation(logDir, jobID)
 		state.Running[idText] = running
 	}
+	state.PendingPayloads, state.PendingPayloadInventoryComplete, state.PendingPayloadInventoryError =
+		observePendingPayloadInventory(filepath.Dir(b.stateFile))
 	envelope := inventoryqueue.State{
 		Version: inventoryqueue.Version, Host: b.host,
 		AgentVersion: b.agentVersion, UpdatedAt: b.now().UTC(), Runner: state,
@@ -184,4 +186,53 @@ func (b *inventoryQueueR2Bridge) publishState() error {
 		return err
 	}
 	return b.put(b.bucket, key, string(encoded))
+}
+
+func observePendingPayloadInventory(queueDir string) (map[string]opsqueue.RunnerPayloadState, bool, string) {
+	entries, err := os.ReadDir(queueDir)
+	if err != nil {
+		return nil, false, fmt.Sprintf("read queue directory: %v", err)
+	}
+	payloads := make(map[string]opsqueue.RunnerPayloadState)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "job-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		idText := strings.TrimSuffix(strings.TrimPrefix(name, "job-"), ".json")
+		jobID, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil || jobID <= 0 {
+			continue
+		}
+		observation := opsqueue.RunnerPayloadState{Observation: opsqueue.ObservationUnknown}
+		data, err := os.ReadFile(filepath.Join(queueDir, name))
+		if err != nil {
+			observation.Detail = fmt.Sprintf("read payload: %v", err)
+			payloads[idText] = observation
+			continue
+		}
+		var job opsqueue.CommandJob
+		if err := json.Unmarshal(data, &job); err != nil {
+			observation.Detail = "payload JSON is unreadable"
+			payloads[idText] = observation
+			continue
+		}
+		if job.ID != jobID {
+			observation.Detail = "payload job id does not match filename"
+			payloads[idText] = observation
+			continue
+		}
+		if job.RunID <= 0 {
+			observation.Detail = "payload run_id is missing"
+			payloads[idText] = observation
+			continue
+		}
+		observation.Observation = opsqueue.ObservationPresent
+		observation.RunID = job.RunID
+		payloads[idText] = observation
+	}
+	return payloads, true, ""
 }

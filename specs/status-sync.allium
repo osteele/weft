@@ -241,15 +241,19 @@ rule R2PullInventoryQueue {
     ensures: QueueCommandsPublished("inventory/v1/hosts/{host}/inbox")
     ensures: HostDaemonAppendsCommandsToLocalQueue(host)
     ensures: HostDaemonPublishesTimestampedRunnerState(host)
+    ensures: HostDaemonPublishesCompletePendingPayloadInventory(host)
 
     -- A controller write is durable dispatch. The daemon acknowledges only
     -- after its local JSONL append, then removes the inbox object. Delivery is
     -- at least once and queue operations must remain idempotent.
     -- Runner state older than 30 seconds, malformed, addressed to another
     -- host, or from another protocol version is unknown, never an empty queue.
-    -- Pinned source closures are materialized from R2; no SSH or rsync is
-    -- required. Legacy unpinned jobs and --needs staging are unsupported on
-    -- this transport and fail visibly.
+    -- Each fresh state envelope also contains a complete inventory of local
+    -- job payload files. Omission proves absence only when the envelope marks
+    -- that inventory complete; old agents and failed directory scans remain
+    -- unknown with a diagnostic. Pinned source closures are materialized from
+    -- R2; no SSH or rsync is required. Legacy unpinned jobs and --needs staging
+    -- are unsupported on this transport and fail visibly.
 }
 
 -- A missing completion marker cannot distinguish a live attempt from one whose
@@ -383,9 +387,10 @@ rule DispatchQueuedExplicitTargets {
 -- confirmed-missing payload restores the dispatch; a valid payload with no
 -- state membership repairs lost admission through the runner's idempotent,
 -- live/terminal-fenced add path. A transport failure, malformed batch row,
--- omitted row, or asynchronous R2 snapshot is unknown and remains queued with
--- a visible deferred diagnostic.
--- Probe rows are independent: one malformed job must not discard valid
+-- omitted SSH row, or R2 snapshot without a complete payload inventory is
+-- unknown and remains queued with a visible deferred diagnostic. Within a
+-- complete R2 inventory, an omitted payload is confirmed missing.
+-- Probe entries are independent: one malformed job must not discard valid
 -- present/missing observations for its siblings.
 rule RedispatchMissingQueuedJobs {
     when: RunnerStateReconciled(host)
@@ -420,7 +425,8 @@ rule RedispatchMissingQueuedJobs {
         --       SSH queue file and R2-pull command payload; neither transport
         --       may collapse a current inventory attempt to run_id=0.
         --     - fetchRemoteJobPayloads returns a three-state observation per
-        --       job; parse failures do not poison sibling rows.
+        --       job from SSH rows or the R2 state's complete payload inventory;
+        --       parse failures do not poison sibling rows.
         --     - db.ResetLastSyncedStatus(jobID) clears the synced marker
         --       so the dispatcher treats the job as unsynced on this pass.
 }

@@ -637,12 +637,12 @@ type remoteJobPayload struct {
 	detail   string
 }
 
-func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) (map[int64]remoteJobPayload, error) {
+func fetchRemoteJobPayloads(host string, jobs []*db.Job, state *opsqueue.RunnerState, timeout time.Duration) (map[int64]remoteJobPayload, error) {
 	if len(jobs) == 0 {
 		return nil, nil
 	}
 	if hostUsesR2Queue(host) {
-		return nil, fmt.Errorf("R2 inventory state does not expose pending payloads")
+		return remoteJobPayloadsFromRunnerState(jobs, state)
 	}
 	ids := make([]string, 0, len(jobs))
 	seen := make(map[int64]struct{}, len(jobs))
@@ -669,6 +669,59 @@ func fetchRemoteJobPayloads(host string, jobs []*db.Job, timeout time.Duration) 
 
 	payloads, parseErr := parseRemoteJobPayloads(stdout, seen)
 	return payloads, parseErr
+}
+
+func remoteJobPayloadsFromRunnerState(jobs []*db.Job, state *opsqueue.RunnerState) (map[int64]remoteJobPayload, error) {
+	payloads := make(map[int64]remoteJobPayload, len(jobs))
+	var inventoryErr error
+	if state == nil {
+		inventoryErr = fmt.Errorf("R2 inventory state does not expose pending payloads")
+	} else if !state.PendingPayloadInventoryComplete {
+		detail := strings.TrimSpace(state.PendingPayloadInventoryError)
+		if detail == "" {
+			detail = "R2 inventory state does not expose pending payloads"
+		}
+		inventoryErr = errors.New(detail)
+	}
+
+	var parseErrs []error
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if state == nil {
+			payloads[job.ID] = remoteJobPayload{detail: inventoryErr.Error()}
+			continue
+		}
+		observed, ok := state.PendingPayloads[strconv.FormatInt(job.ID, 10)]
+		if !ok {
+			if state.PendingPayloadInventoryComplete {
+				payloads[job.ID] = remoteJobPayload{observed: true}
+			} else {
+				payloads[job.ID] = remoteJobPayload{detail: inventoryErr.Error()}
+			}
+			continue
+		}
+		switch observed.Observation {
+		case opsqueue.ObservationPresent:
+			payload := remoteJobPayload{observed: true, exists: true, runID: observed.RunID, runIDOK: observed.RunID > 0}
+			if !payload.runIDOK {
+				payload.detail = "payload run_id is missing"
+				parseErrs = append(parseErrs, fmt.Errorf("job %d payload run_id is missing", job.ID))
+			}
+			payloads[job.ID] = payload
+		case opsqueue.ObservationAbsent:
+			payloads[job.ID] = remoteJobPayload{observed: true}
+		default:
+			detail := strings.TrimSpace(observed.Detail)
+			if detail == "" {
+				detail = "payload observation is unknown"
+			}
+			payloads[job.ID] = remoteJobPayload{observed: true, exists: true, detail: detail}
+			parseErrs = append(parseErrs, fmt.Errorf("job %d: %s", job.ID, detail))
+		}
+	}
+	return payloads, errors.Join(inventoryErr, errors.Join(parseErrs...))
 }
 
 // parseRemoteJobPayloads preserves one observation per requested job. A bad
@@ -858,7 +911,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	var payloads map[int64]remoteJobPayload
 	if stateErr == nil && len(syncedJobs) > 0 {
 		var payloadErr error
-		payloads, payloadErr = fetchRemoteJobPayloads(host, syncedJobs, timeout)
+		payloads, payloadErr = fetchRemoteJobPayloads(host, syncedJobs, state, timeout)
 		if payloadErr != nil {
 			syncLog.Debug("could not read runner job payloads", "host", host, "error", payloadErr)
 		}
