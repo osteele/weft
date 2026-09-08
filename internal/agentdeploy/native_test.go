@@ -83,6 +83,49 @@ func TestBuildOnHostWithProgressReportsNativePhases(t *testing.T) {
 	}
 }
 
+func TestBuildCLIOnHostBuildsCurrentSourceAtomically(t *testing.T) {
+	defer restoreNativeTestFuncs()()
+
+	var syncedRoot, syncedHost string
+	repoRootFunc = func() (string, error) { return "/repo", nil }
+	rsyncSourcesToHostFunc = func(root, host string) error {
+		syncedRoot, syncedHost = root, host
+		return nil
+	}
+	ensureGoOnHostFunc = func(host, goos, goarch string, onProgress BuildProgressFunc) (string, error) {
+		if host != "cool30" || goos != "linux" || goarch != "amd64" {
+			t.Fatalf("ensure Go target = %q %s/%s", host, goos, goarch)
+		}
+		return "/usr/local/go/bin/go", nil
+	}
+	var buildHost, buildCmd string
+	var buildTimeout time.Duration
+	sshRunWithTimeoutFunc = func(host, command string, timeout time.Duration) (string, string, error) {
+		buildHost, buildCmd, buildTimeout = host, command, timeout
+		return "", "", nil
+	}
+
+	if err := BuildCLIOnHost("cool30", "abc123def456", "linux", "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	if syncedRoot != "/repo" || syncedHost != "cool30" {
+		t.Fatalf("synced root/host = %q/%q", syncedRoot, syncedHost)
+	}
+	if buildHost != "cool30" || buildTimeout != 10*time.Minute {
+		t.Fatalf("build target/timeout = %q/%s", buildHost, buildTimeout)
+	}
+	for _, want := range []string{
+		"go build -buildvcs=false",
+		"-X github.com/osteele/weft/cmd.Version=abc123def456",
+		"-o ~/.local/bin/weft.tmp .",
+		"mv ~/.local/bin/weft.tmp ~/.local/bin/weft",
+	} {
+		if !strings.Contains(buildCmd, want) {
+			t.Fatalf("build command missing %q: %s", want, buildCmd)
+		}
+	}
+}
+
 func TestEnsureGoOnHostWithProgressReportsInstallPhase(t *testing.T) {
 	defer restoreNativeTestFuncs()()
 

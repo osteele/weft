@@ -101,7 +101,15 @@ type goListPackage struct {
 }
 
 func localAgentSourceVersion(repoRoot string) (string, error) {
-	files, err := agentSourceFiles(repoRoot)
+	files, err := sourceFilesForPackage(repoRoot, "./cmd/agent", "agent")
+	if err != nil {
+		return "", err
+	}
+	return hashVersionFromFiles(repoRoot, files)
+}
+
+func localCLISourceVersion(repoRoot string) (string, error) {
+	files, err := sourceFilesForPackage(repoRoot, ".", "CLI")
 	if err != nil {
 		return "", err
 	}
@@ -109,26 +117,25 @@ func localAgentSourceVersion(repoRoot string) (string, error) {
 }
 
 func agentSourceFiles(repoRoot string) ([]string, error) {
-	// `go list -deps -json ./cmd/agent` walks every transitive dependency
-	// and is regularly 10–20s on a cold build cache (Apple Silicon, no GOCACHE
-	// hits). With a 3-second budget the source-hash version path always lost
-	// to jjVersion in normal development, which meant uncommitted agent
-	// changes inherited the parent commit's version and `agentdeploy.EnsureBuilt`
-	// happily served a cached stale binary instead of rebuilding. 60s is
-	// generous but still bounded, and the timeout only matters on the rare
-	// first invocation per cache state.
+	return sourceFilesForPackage(repoRoot, "./cmd/agent", "agent")
+}
+
+func sourceFilesForPackage(repoRoot, packagePattern, label string) ([]string, error) {
+	// `go list -deps -json` can take 10–20s on a cold build cache. A short
+	// budget makes the source hash silently lose to a VCS fallback, which lets
+	// uncommitted changes inherit a stale deployed binary's version.
 	const goListTimeout = 60 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), goListTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./cmd/agent")
+	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", packagePattern)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("go list agent deps timed out after %s", goListTimeout)
+			return nil, fmt.Errorf("go list %s deps timed out after %s", label, goListTimeout)
 		}
-		return nil, fmt.Errorf("go list agent deps: %w", err)
+		return nil, fmt.Errorf("go list %s deps: %w", label, err)
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(out))
@@ -139,7 +146,7 @@ func agentSourceFiles(repoRoot string) ([]string, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("decode go list output: %w", err)
+			return nil, fmt.Errorf("decode go list %s output: %w", label, err)
 		}
 		if pkg.Dir == "" {
 			continue
@@ -193,7 +200,7 @@ func addExistingFile(path string, seen map[string]struct{}) error {
 
 func hashVersionFromFiles(repoRoot string, files []string) (string, error) {
 	if len(files) == 0 {
-		return "", fmt.Errorf("no source files for agent version hash")
+		return "", fmt.Errorf("no source files for version hash")
 	}
 	sorted := append([]string(nil), files...)
 	sort.Strings(sorted)

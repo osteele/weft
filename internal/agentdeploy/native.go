@@ -78,6 +78,38 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 	return nil
 }
 
+// BuildCLIOnHost builds the full weft CLI natively and atomically installs it
+// in the remote user's PATH. Native compilation avoids shipping a binary for
+// the wrong architecture or libc.
+func BuildCLIOnHost(host, version, goos, goarch string) error {
+	root, err := repoRootFunc()
+	if err != nil {
+		return fmt.Errorf("locate repo root: %w", err)
+	}
+
+	syncedAt := time.Now()
+	if err := rsyncSourcesToHostFunc(root, host); err != nil {
+		return fmt.Errorf("rsync sources: %w", err)
+	}
+	gobin, err := ensureGoOnHostFunc(host, goos, goarch, nil)
+	if err != nil {
+		return fmt.Errorf("ensure Go: %w", err)
+	}
+
+	tmp := RemoteCLIPath + ".tmp"
+	buildCmd := fmt.Sprintf(
+		`mkdir -p %s && cd %s && %s build -buildvcs=false -ldflags "-X github.com/osteele/weft/cmd.Version=%s" -o %s . && chmod +x %s && mv %s %s`,
+		RemoteCLIDir, remoteAgentBuildDir, gobin, version, tmp, tmp, tmp, RemoteCLIPath,
+	)
+	_, stderr, err := sshRunWithTimeoutFunc(host, buildCmd, 10*time.Minute)
+	if err != nil {
+		return fmt.Errorf(
+			"CLI build failed on %s from a working tree synced at %s (a snapshot, not a commit): %s",
+			host, syncedAt.Format(time.RFC3339), strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
 // rsyncSourcesToHost syncs the weft source tree to the remote host's build
 // directory, using the same exclusions as build-agent-on-fly.sh.
 func rsyncSourcesToHost(localRoot, host string) error {

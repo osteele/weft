@@ -26,11 +26,11 @@ var hostSetupCmd = &cobra.Command{
 	Use:   "setup <hostname>",
 	Short: "Set up a host for use with weft",
 	Long: `Perform full host setup: install prerequisites, discover hardware,
-deploy the agent binary, configure rclone, deploy Slack notifications,
-and start the queue runner.
+deploy the weft CLI and agent binary, configure rclone, deploy Slack
+notifications, and start the queue runner.
 
 Prerequisites include tmux, jq, rsync, rclone, curl, uv, and a Go toolchain
-for hosts that build the agent natively.
+for hosts that build weft components natively.
 
 Each step is best-effort — failures are warned about but don't stop
 subsequent steps (except SSH connectivity which fails fast).
@@ -55,8 +55,8 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("weft host setup is for on-prem inventory hosts. Cloud instances are provisioned by 'weft start instance' (see 'weft instance --help')")
 	}
 
-	// Count total steps (adjust for skipped steps)
-	totalSteps := 6
+	// Count total steps (adjust for skipped steps).
+	totalSteps := 7
 	if hostSetupSkipPrereqs {
 		totalSteps--
 	}
@@ -94,6 +94,20 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, " %s\n", formatDiscoverySummary(spec))
 	fmt.Fprintf(os.Stderr, "        Wrote %s\n", yamlPath)
+
+	// Step 3: Deploy the full CLI. This is independent of the prerequisite
+	// step: --skip-prerequisites skips system packages, not the executable an
+	// edge needs to mint its private key.
+	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying weft CLI...", nextStep(), totalSteps)
+	cliDeployed, cliErr := agentdeploy.EnsureCLIOnHost(host, spec)
+	switch {
+	case cliErr != nil:
+		fmt.Fprintf(os.Stderr, " warning: %v\n", cliErr)
+	case cliDeployed:
+		fmt.Fprintf(os.Stderr, " deployed\n")
+	default:
+		fmt.Fprintf(os.Stderr, " up to date\n")
+	}
 
 	// Step 4: Deploy agent binary
 	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying agent...", nextStep(), totalSteps)
@@ -226,22 +240,6 @@ command -v apt-get >/dev/null 2>&1 && echo apt-get || (command -v brew >/dev/nul
 	}
 	if uvInstalled {
 		installed = append(installed, "uv")
-	}
-
-	// The CLI, not just the agent. A host acting as an edge runs
-	// `weft edge key mint` locally, because its private key is generated where
-	// it will be used and never travels. A cross-platform host cannot be
-	// served yet; that is reported without failing the rest of setup, since
-	// every other component installed fine and the CLI is only needed for edge
-	// submission.
-	if spec := inventory.FindHost(host); spec != nil {
-		cliInstalled, err := agentdeploy.EnsureCLIOnHost(host, *spec)
-		switch {
-		case err != nil:
-			fmt.Fprintf(os.Stderr, "warning: weft CLI not installed on %s: %v\n", host, err)
-		case cliInstalled:
-			installed = append(installed, "weft CLI")
-		}
 	}
 
 	return installed, nil
