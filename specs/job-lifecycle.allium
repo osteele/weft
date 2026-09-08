@@ -235,6 +235,7 @@ entity Job {
         starting -> paused
         starting -> queued
         starting -> draft
+        starting -> unresolved
         running -> completed
         running -> failed
         running -> dead
@@ -243,11 +244,18 @@ entity Job {
         running -> paused
         running -> queued
         running -> draft
+        running -> unresolved
         paused -> running
         paused -> killed
         paused -> canceled
         paused -> failed
         paused -> queued
+        paused -> unresolved
+        unresolved -> running
+        unresolved -> paused
+        unresolved -> queued
+        unresolved -> completed
+        unresolved -> failed
 
         -- Restart/requeue paths (from terminal states)
         completed -> queued
@@ -633,7 +641,7 @@ rule FailureReasonVocabularyBoundaries {
 -- match.
 enum Status {
     draft | queued | starting | running
-             | paused | completed | failed | dead | killed | canceled
+             | paused | unresolved | completed | failed | dead | killed | canceled
 }
 
 -- User-visible derived status. This is NOT a stored attempt status and has
@@ -646,7 +654,7 @@ enum Status {
 -- the transition graph.
 enum DisplayStatus {
     draft | queued | starting | running
-                    | paused | completed | failed | dead | killed | canceled
+                    | paused | unresolved | completed | failed | dead | killed | canceled
                     | orphaned
 }
 

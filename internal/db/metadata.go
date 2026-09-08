@@ -11,15 +11,24 @@ import (
 
 // JobMetadata stores optional derived or cached metadata for a job.
 type JobMetadata struct {
-	CPU              *JobCPUStats           `json:"cpu,omitempty"`
-	Resource         *ResourceUsage         `json:"resource,omitempty"`
-	Telemetry        *JobTelemetrySummary   `json:"telemetry,omitempty"`
-	Dependencies     *JobDependencyMetadata `json:"dependencies,omitempty"`
-	Disk             *JobDiskMetadata       `json:"disk,omitempty"`
-	Source           *JobSourceMetadata     `json:"source,omitempty"`
-	Agent            *JobAgentMetadata      `json:"agent,omitempty"`
-	SubmissionNonce  string                 `json:"submission_nonce,omitempty"`
-	BestEffortInputs []string               `json:"best_effort_inputs,omitempty"`
+	CPU              *JobCPUStats               `json:"cpu,omitempty"`
+	Resource         *ResourceUsage             `json:"resource,omitempty"`
+	Telemetry        *JobTelemetrySummary       `json:"telemetry,omitempty"`
+	Dependencies     *JobDependencyMetadata     `json:"dependencies,omitempty"`
+	Disk             *JobDiskMetadata           `json:"disk,omitempty"`
+	Source           *JobSourceMetadata         `json:"source,omitempty"`
+	Agent            *JobAgentMetadata          `json:"agent,omitempty"`
+	Reconciliation   *JobReconciliationMetadata `json:"reconciliation,omitempty"`
+	SubmissionNonce  string                     `json:"submission_nonce,omitempty"`
+	BestEffortInputs []string                   `json:"best_effort_inputs,omitempty"`
+}
+
+// JobReconciliationMetadata records durable evidence about an attempt whose
+// remote execution outcome cannot be determined.
+type JobReconciliationMetadata struct {
+	StatusUnknownSince int64  `json:"status_unknown_since,omitempty"`
+	UnresolvedAt       int64  `json:"unresolved_at,omitempty"`
+	UnresolvedReason   string `json:"unresolved_reason,omitempty"`
 }
 
 // JobAgentMetadata stores durable worker capabilities requested by an

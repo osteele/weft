@@ -166,6 +166,22 @@ func TestSubscribeProjectWatchFiltersByProject(t *testing.T) {
 	}
 }
 
+func TestProjectWatchIncludesUnresolvedWithoutRemainingActive(t *testing.T) {
+	database := db.SetupTestDB(t)
+	insertWatchTestProjectJob(t, database, 203, "augur", db.StatusUnresolved)
+
+	jobs, active, err := projectWatchJobs(database, "augur", 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("unresolved job kept project watch active")
+	}
+	if len(jobs) != 1 || jobs[0].ID != 203 || jobs[0].Status != db.StatusUnresolved {
+		t.Fatalf("project watch jobs = %+v, want unresolved job 203", jobs)
+	}
+}
+
 func TestSubscribeActivityUsesNarrateSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 	insertWatchTestProjectJob(t, database, 301, "augur", db.StatusQueued)

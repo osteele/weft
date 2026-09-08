@@ -23,6 +23,12 @@ const (
 const CapabilityJobPayloadV1 = "job-payload-v1"
 const CapabilityArtifactNeedV1 = "artifact-need-v1"
 
+const (
+	ObservationPresent = "present"
+	ObservationAbsent  = "absent"
+	ObservationUnknown = "unknown"
+)
+
 // CommandJob contains job data for an add command.
 type CommandJob struct {
 	ID        int64  `json:"id"`
@@ -267,6 +273,8 @@ type RunnerJobState struct {
 	UnderCount     int      `json:"under_count"`
 	GPUDevices     []string `json:"gpu_devices,omitempty"`
 	GPUMemGB       int      `json:"gpu_mem_gb,omitempty"`
+	StatusFile     string   `json:"status_file,omitempty"`
+	Process        string   `json:"process,omitempty"`
 }
 
 // StateFileName returns the filename for the runner state file.

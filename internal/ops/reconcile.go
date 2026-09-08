@@ -29,7 +29,9 @@ type ReconcileResult struct {
 
 // ReconcileOptions configures reconciliation behavior.
 type ReconcileOptions struct {
-	Timeout time.Duration
+	Timeout           time.Duration
+	QueueUnknownAfter time.Duration
+	Now               func() time.Time
 }
 
 var queueSourceSync = syncQueueJobSources
@@ -617,37 +619,48 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 }
 
 // probeQueueRunnerJobStatus checks status for queue-runner managed jobs.
+type queueRunnerProbeObservation struct {
+	Status              string
+	UnresolvedCandidate bool
+	Positive            bool
+}
+
 func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, error) {
+	observation, err := probeQueueRunnerJobObservation(job, timeout)
+	return observation.Status, err
+}
+
+func probeQueueRunnerJobObservation(job *db.Job, timeout time.Duration) (queueRunnerProbeObservation, error) {
 	// Check if job is completed (has status file)
 	exitCode, _, found := queueRemoteClient.StatusFile(job.Host, job.ID, job.LatestRunID, timeout)
 	if found.IsSome() && found.Unwrap() {
 		if exitCode == 0 {
-			return db.StatusCompleted, nil
+			return queueRunnerProbeObservation{Status: db.StatusCompleted, Positive: true}, nil
 		}
-		return db.StatusFailed, nil
+		return queueRunnerProbeObservation{Status: db.StatusFailed, Positive: true}, nil
 	}
 
 	paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
 	if paused.IsSome() && paused.Unwrap() {
-		return db.StatusPaused, nil
+		return queueRunnerProbeObservation{Status: db.StatusPaused, Positive: true}, nil
 	}
 
 	// Check if job is current in queue runner
 	current := queueRemoteClient.CurrentJob(job.Host, job.ID, timeout)
-	if current.IsSome() && current.Unwrap() {
-		return db.StatusRunning, nil
-	}
 
 	// Check if job is still in queue file
 	queued := queueRemoteClient.InQueue(job.Host, job.ID, timeout)
 	if queued.IsSome() && queued.Unwrap() {
-		return db.StatusQueued, nil
+		return queueRunnerProbeObservation{Status: db.StatusQueued, Positive: true}, nil
 	}
 
 	// Check if process is running via PID
 	running := queueRemoteClient.ProcessRunning(job.Host, job.ID, timeout)
 	if running.IsSome() && running.Unwrap() {
-		return db.StatusRunning, nil
+		return queueRunnerProbeObservation{Status: db.StatusRunning, Positive: true}, nil
+	}
+	if current.IsSome() && current.Unwrap() && !(found.IsSome() && !found.Unwrap() && running.IsSome() && !running.Unwrap()) {
+		return queueRunnerProbeObservation{Status: db.StatusRunning}, nil
 	}
 
 	allDefinitelyAbsent := found.IsSome() && !found.Unwrap() &&
@@ -659,28 +672,34 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 		// A failed or incomplete lookup is unknown, not evidence that the job
 		// disappeared. Preserve the local status until every independent probe
 		// confirms absence.
-		return job.Status, nil
+		candidate := found.IsSome() && !found.Unwrap() &&
+			running.IsSome() && !running.Unwrap() &&
+			(job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusUnresolved)
+		return queueRunnerProbeObservation{Status: job.Status, UnresolvedCandidate: candidate}, nil
 	}
 
 	// If job has pending cancel/kill/draft status and no remote state, honor it.
 	if job.PendingStatus != nil {
 		switch *job.PendingStatus {
 		case db.StatusCanceled:
-			return db.StatusCanceled, nil
+			return queueRunnerProbeObservation{Status: db.StatusCanceled, Positive: true}, nil
 		case db.StatusKilled, db.StatusDead:
-			return db.StatusKilled, nil
+			return queueRunnerProbeObservation{Status: db.StatusKilled, Positive: true}, nil
 		case db.StatusDraft:
-			return db.StatusDraft, nil
+			return queueRunnerProbeObservation{Status: db.StatusDraft, Positive: true}, nil
 		case db.StatusRunning:
-			return db.StatusQueued, nil
+			return queueRunnerProbeObservation{Status: db.StatusQueued, Positive: true}, nil
 		}
 	}
 	if isQueuedAndActive(job) {
 		// Queue dispatch and runner state publication are not atomic. Keep the
 		// durable target queued so the host-sync redispatch path can converge it.
-		return db.StatusQueued, nil
+		return queueRunnerProbeObservation{Status: db.StatusQueued, Positive: true}, nil
 	}
-	return db.StatusDead, nil
+	if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusUnresolved {
+		return queueRunnerProbeObservation{Status: job.Status, UnresolvedCandidate: true}, nil
+	}
+	return queueRunnerProbeObservation{Status: db.StatusDead, Positive: true}, nil
 }
 
 // SyncAndReconcile probes remote state and reconciles with local state.
@@ -705,6 +724,25 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 			} else {
 				remoteStatus = job.Status
 			}
+		}
+	} else if job.UsesQueueRunner() {
+		observation, probeErr := probeQueueRunnerJobObservation(job, opts.Timeout)
+		err = probeErr
+		remoteStatus = observation.Status
+		if err == nil && observation.UnresolvedCandidate {
+			becameUnresolved, observeErr := observeQueueOutcomeUnresolved(database, job, syncNow(opts.Now), effectiveQueueUnknownAfter(opts.QueueUnknownAfter))
+			if observeErr != nil {
+				return nil, observeErr
+			}
+			if becameUnresolved {
+				return &ReconcileResult{Action: "update_db", OldStatus: oldStatus, NewStatus: db.StatusUnresolved, Resolution: queueOutcomeUnresolvedReason}, nil
+			}
+			return &ReconcileResult{Action: "none"}, nil
+		}
+		if err == nil && !observation.UnresolvedCandidate {
+			// Positive evidence resolves the observation. Unknown evidence
+			// breaks continuity and must not count toward the absence bound.
+			err = clearQueueOutcomeUnknown(database, job)
 		}
 	} else {
 		remoteStatus, err = ProbeRemoteStatus(job, opts.Timeout)

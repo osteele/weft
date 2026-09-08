@@ -19,6 +19,7 @@ const (
 	Canceled         = "canceled"
 	Skipped          = "skipped"
 	Paused           = "paused"
+	Unresolved       = "unresolved"
 	Draft            = "draft"
 	PendingPlacement = "pending_placement"
 )
@@ -27,7 +28,7 @@ const (
 func AllStatuses() []string {
 	return []string{
 		Starting, Running, Completed, Dead, Queued,
-		Failed, Killed, Canceled, Skipped, Paused, Draft, PendingPlacement,
+		Failed, Killed, Canceled, Skipped, Paused, Unresolved, Draft, PendingPlacement,
 	}
 }
 
@@ -97,6 +98,7 @@ var transitions = []TransitionRule{
 	{From: Starting, To: Killed, UpdatesSynced: true},
 	{From: Starting, To: Paused, UpdatesSynced: false},
 	{From: Starting, To: Queued, UpdatesSynced: false},
+	{From: Starting, To: Unresolved, UpdatesSynced: false},
 
 	// --- From running ---
 	{From: Running, To: Completed, UpdatesSynced: true},
@@ -106,6 +108,7 @@ var transitions = []TransitionRule{
 	{From: Running, To: Canceled, UpdatesSynced: true},
 	{From: Running, To: Paused, UpdatesSynced: false},
 	{From: Running, To: Queued, UpdatesSynced: false},
+	{From: Running, To: Unresolved, UpdatesSynced: false},
 
 	// --- From paused ---
 	{From: Paused, To: Running, UpdatesSynced: false},
@@ -113,6 +116,14 @@ var transitions = []TransitionRule{
 	{From: Paused, To: Canceled, UpdatesSynced: true},
 	{From: Paused, To: Failed, UpdatesSynced: true},
 	{From: Paused, To: Queued, UpdatesSynced: false},
+	{From: Paused, To: Unresolved, UpdatesSynced: false},
+
+	// --- From unresolved ---
+	{From: Unresolved, To: Running, UpdatesSynced: true},
+	{From: Unresolved, To: Paused, UpdatesSynced: true},
+	{From: Unresolved, To: Queued, UpdatesSynced: true},
+	{From: Unresolved, To: Completed, UpdatesSynced: true},
+	{From: Unresolved, To: Failed, UpdatesSynced: true},
 
 	// --- From terminal states (restart/requeue paths) ---
 	{From: Completed, To: Queued, UpdatesSynced: false},
@@ -213,6 +224,6 @@ func (e *InvalidTransitionError) Error() string {
 func All() []string {
 	return []string{
 		Draft, PendingPlacement, Queued, Starting, Running,
-		Completed, Failed, Dead, Killed, Canceled, Skipped, Paused,
+		Completed, Failed, Dead, Killed, Canceled, Skipped, Paused, Unresolved,
 	}
 }

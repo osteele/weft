@@ -17,6 +17,7 @@ func SyncQueueRunnerJobWithProber(
 	opts SyncOptions,
 ) (result SyncResult, err error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
+	unknownAfter := effectiveQueueUnknownAfter(opts.QueueUnknownAfter)
 
 	defer func() {
 		if err != nil || opts.SkipSamples {
@@ -67,9 +68,26 @@ func SyncQueueRunnerJobWithProber(
 		}
 	}
 
+	// Process evidence is collected before trusting queue-runner bookkeeping.
+	// A stale current/running entry must not keep an absent worker active forever.
+	processResult := prober.ProbeProcessRunning(job.ID)
+
 	// Probe 2: Check if job is the current job in queue runner
 	currentResult := prober.ProbeCurrent(job.ID)
+	if completedResult == remote.ProbeFalse && processResult == remote.ProbeFalse && currentResult == remote.ProbeTrue &&
+		(job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusUnresolved) {
+		becameUnresolved, err := observeQueueOutcomeUnresolved(database, job, syncNow(opts.Now), unknownAfter)
+		if err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
+		return SyncResult{Updated: becameUnresolved, HostContacted: true}, nil
+	}
 	if currentResult == remote.ProbeTrue {
+		if processResult == remote.ProbeTrue {
+			if err := clearQueueOutcomeUnknown(database, job); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+		}
 		recordQueueDispatchOK(database, job.ID)
 		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
 		if err != nil {
@@ -92,6 +110,14 @@ func SyncQueueRunnerJobWithProber(
 				return SyncResult{HostContacted: true}, err
 			}
 			return SyncResult{Updated: true, HostContacted: true}, nil
+		case db.StatusUnresolved:
+			if processResult != remote.ProbeTrue {
+				return SyncResult{HostContacted: true}, nil
+			}
+			if err := db.MarkRunningFromUnresolved(database, job.ID); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
 		return SyncResult{HostContacted: true}, nil
 	}
@@ -99,6 +125,9 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 3: Check if job is in queue file (waiting)
 	inQueueResult := prober.ProbeInQueue(job.ID)
 	if inQueueResult == remote.ProbeTrue {
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
 		recordQueueDispatchOK(database, job.ID)
 		if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 			if err := host.RemoveFromQueue(job.ID); err != nil {
@@ -115,7 +144,7 @@ func SyncQueueRunnerJobWithProber(
 		}
 
 		// Job is queued - if DB says running, fix it
-		if job.Status == db.StatusRunning {
+		if job.Status == db.StatusRunning || job.Status == db.StatusUnresolved {
 			if err := db.MarkQueuedByID(database, job.ID); err != nil {
 				return SyncResult{HostContacted: true}, err
 			}
@@ -127,6 +156,9 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 4: Check if process is paused via PID
 	pausedResult := prober.ProbeProcessPaused(job.ID)
 	if pausedResult == remote.ProbeTrue {
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
 		if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
@@ -141,14 +173,21 @@ func SyncQueueRunnerJobWithProber(
 				return SyncResult{HostContacted: true}, err
 			}
 			return SyncResult{Updated: true, HostContacted: true}, nil
+		case db.StatusUnresolved:
+			if err := db.MarkPausedFromUnresolved(database, job.ID); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		case db.StatusPaused:
 			return SyncResult{HostContacted: true}, nil
 		}
 	}
 
 	// Probe 5: Check if process is running via PID
-	processResult := prober.ProbeProcessRunning(job.ID)
 	if processResult == remote.ProbeTrue {
+		if err := clearQueueOutcomeUnknown(database, job); err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
 		recordQueueDispatchOK(database, job.ID)
 		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
 		if err != nil {
@@ -170,6 +209,11 @@ func SyncQueueRunnerJobWithProber(
 			return SyncResult{Updated: true, HostContacted: true}, nil
 		case db.StatusPaused:
 			if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+			return SyncResult{Updated: true, HostContacted: true}, nil
+		case db.StatusUnresolved:
+			if err := db.MarkRunningFromUnresolved(database, job.ID); err != nil {
 				return SyncResult{HostContacted: true}, err
 			}
 			return SyncResult{Updated: true, HostContacted: true}, nil
@@ -200,15 +244,15 @@ func SyncQueueRunnerJobWithProber(
 	// Queue-ensure for unsynced queued jobs is now handled by
 	// ensureQueuedJobsOnRemote in SyncHost, which runs after all sync paths.
 
-	// Only mark dead if ALL probes returned definitive false (not unknown)
+	// Only treat remote bookkeeping as absent when every probe returned a
+	// definitive false. Pending user intent and queued dispatch races still
+	// take precedence over unresolved-outcome handling.
 	allDefinitelyFalse := completedResult == remote.ProbeFalse &&
 		currentResult == remote.ProbeFalse &&
 		inQueueResult == remote.ProbeFalse &&
 		pausedResult == remote.ProbeFalse &&
 		processResult == remote.ProbeFalse
-
 	if allDefinitelyFalse {
-		// If job has pending cancel/kill status and no remote state, honor the pending status
 		if job.PendingStatus != nil {
 			switch *job.PendingStatus {
 			case db.StatusCanceled:
@@ -226,14 +270,36 @@ func SyncQueueRunnerJobWithProber(
 		if isQueuedAndActive(job) {
 			return SyncResult{HostContacted: true}, nil
 		}
+	}
+
+	// A status-file miss and a definitely absent process establish that this
+	// worker is not consuming compute. Missing or stale runner bookkeeping
+	// cannot establish the execution outcome, so age that evidence for a
+	// bounded interval and then release capacity as unresolved.
+	unresolvedCandidate := completedResult == remote.ProbeFalse &&
+		processResult == remote.ProbeFalse &&
+		pausedResult != remote.ProbeTrue && inQueueResult != remote.ProbeTrue &&
+		(job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusUnresolved)
+	if unresolvedCandidate {
+		becameUnresolved, err := observeQueueOutcomeUnresolved(database, job, syncNow(opts.Now), unknownAfter)
+		if err != nil {
+			return SyncResult{HostContacted: hostReachable}, err
+		}
+		return SyncResult{Updated: becameUnresolved, HostContacted: hostReachable}, nil
+	}
+
+	if allDefinitelyFalse {
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
-	// At least one probe returned unknown - don't change status
-	// Return whether host was actually reachable
+	// Unknown evidence breaks a run of confirmed absence. Reset the age anchor
+	// so an observer outage cannot count toward the bound.
+	if err := clearQueueOutcomeUnknown(database, job); err != nil {
+		return SyncResult{HostContacted: hostReachable}, err
+	}
 	return SyncResult{HostContacted: hostReachable}, nil
 }
 

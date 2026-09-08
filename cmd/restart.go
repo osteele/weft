@@ -28,7 +28,7 @@ import (
 var restartCmd = &cobra.Command{
 	Use:     "restart [job-id]...",
 	Aliases: []string{"retry"},
-	Short:   "Restart a killed, dead, failed, canceled, or completed job",
+	Short:   "Restart an unresolved or terminal job",
 	Long: `Restart a job by requeuing it with the same ID.
 
 The previous run is archived and the job is reset to queued status.
@@ -763,6 +763,10 @@ func cloneJobMetadata(source *db.JobMetadata) *db.JobMetadata {
 		disk := *source.Disk
 		clone.Disk = &disk
 	}
+	if source.Reconciliation != nil {
+		reconciliation := *source.Reconciliation
+		clone.Reconciliation = &reconciliation
+	}
 	return &clone
 }
 
@@ -871,7 +875,7 @@ func persistentOrNonEmptyJobMetadata(meta *db.JobMetadata) *db.JobMetadata {
 	if meta == nil {
 		return nil
 	}
-	if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil && meta.Disk == nil && meta.Source == nil && meta.Agent == nil && meta.SubmissionNonce == "" && len(meta.BestEffortInputs) == 0 {
+	if meta.CPU == nil && meta.Resource == nil && meta.Telemetry == nil && meta.Dependencies == nil && meta.Disk == nil && meta.Source == nil && meta.Agent == nil && meta.Reconciliation == nil && meta.SubmissionNonce == "" && len(meta.BestEffortInputs) == 0 {
 		return nil
 	}
 	return meta
@@ -1091,7 +1095,7 @@ func restartJob(database *sql.DB, jobID int64, overrides restartOverrides) error
 
 	// Requeue with same ID (archives the previous run)
 	if !requeueableStatuses[effectiveStatus] {
-		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled/completed jobs can be retried", effectiveStatus)
+		return fmt.Errorf("cannot retry job with status '%s'; only unresolved or terminal jobs can be retried", effectiveStatus)
 	}
 
 	retryHost, retryLaunchID, err := resolveRetryTarget(database, job)

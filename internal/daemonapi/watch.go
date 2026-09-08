@@ -605,12 +605,18 @@ func projectWatchJobs(database *sql.DB, project string, recentWindow time.Durati
 		}
 		activeJobs = append(activeJobs, jobs...)
 	}
+	hasActiveJobs := len(activeJobs) > 0
+	unresolvedJobs, err := db.ListJobsByStatuses(database, []string{db.StatusUnresolved}, "", project, 0, nil, "")
+	if err != nil {
+		return nil, false, fmt.Errorf("list unresolved jobs: %w", err)
+	}
+	activeJobs = append(activeJobs, unresolvedJobs...)
 	recentJobs, err := db.ListRecentTerminalJobs(database, now.Add(-recentWindow).Unix())
 	if err != nil {
 		return nil, false, fmt.Errorf("list recent terminal jobs: %w", err)
 	}
 	recentJobs = filterProjectJobs(recentJobs, project)
-	return watchevents.DedupeJobsByID(activeJobs, recentJobs), len(activeJobs) > 0, nil
+	return watchevents.DedupeJobsByID(activeJobs, recentJobs), hasActiveJobs, nil
 }
 
 func runActivitySubscriptionLoop(parent context.Context, database *sql.DB, encoder *json.Encoder, id string, sub SubscriptionRequest, budgetCentsPerHour int, runawayBreakers *runawayBreakerCache, inputs *activityInputsCache, heartbeat time.Duration) {

@@ -18,6 +18,7 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		{ID: 1, Status: db.StatusRunning, Host: "cool30", Project: "proj", Description: "run a"},
 		{ID: 2, Status: db.StatusStarting, Host: "cool30", Project: "proj", Description: "run b"},
 		{ID: 3, Status: db.StatusQueued, Host: "cool30", Project: "proj", Description: "queue"},
+		{ID: 12, Status: db.StatusUnresolved, Host: "cool30", Project: "proj", Description: "outcome unknown"},
 		{ID: 10, Status: db.StatusPendingPlacement, Host: "", Project: "proj", Description: "needs placement"},
 		{ID: 11, Status: db.StatusQueued, Host: "", Project: "proj", Description: "still unplaced"},
 		{ID: 4, Status: db.StatusCompleted, ExitCode: testIntPtr(0), Host: "cool30", Project: "proj", Description: "ok"},
@@ -32,6 +33,7 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 
 	wantOrder := []string{
 		"Running (2):",
+		"Unresolved (1):",
 		"Queued (1):",
 		"Unplaced (2):",
 		"Completed (1):",
@@ -53,6 +55,9 @@ func TestRenderJobListGroupedStatusPlainSectionsAndOrder(t *testing.T) {
 		last = idx
 	}
 
+	if !strings.Contains(out, "- ⌂ wj12 — proj outcome unknown") {
+		t.Fatalf("missing unresolved line in output:\n%s", out)
+	}
 	if !strings.Contains(out, "- ⌂ wj4 — proj ok — completed ok") {
 		t.Fatalf("missing completion line in output:\n%s", out)
 	}

@@ -107,6 +107,7 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 			Pending: []int64{41},
 			Running: map[string]opsqueue.RunnerJobState{
 				"42": {RunID: 7, StartedAt: 1234, GPUDevices: []string{"0", "1"}},
+				"44": {RunID: 8, StartedAt: 2345, StatusFile: opsqueue.ObservationAbsent, Process: opsqueue.ObservationAbsent},
 			},
 			Finished: map[string]opsqueue.RunnerFinishedState{
 				"43": {ExitCode: 3, FinishedAt: 5678},
@@ -116,7 +117,7 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 	store := &fakeInventoryQueueStore{objects: map[string][]byte{key: encoded}}
 	newInventoryQueueStore = func() (inventoryQueueStore, error) { return store, nil }
 
-	statuses, err := fetchQueueBatchStatus("studio", []int64{41, 42, 43}, time.Second)
+	statuses, err := fetchQueueBatchStatus("studio", []int64{41, 42, 43, 44}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +129,9 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 	}
 	if statuses[43].ExitCode == nil || *statuses[43].ExitCode != 3 || statuses[43].Mtime != 5678 {
 		t.Fatalf("unexpected finished status: %+v", statuses[43])
+	}
+	if statuses[44].State != queueStateUnresolvedCandidate || statuses[44].RunID != 8 || !statuses[44].FromR2 {
+		t.Fatalf("unexpected absent-worker status: %+v", statuses[44])
 	}
 }
 
@@ -178,5 +182,105 @@ func TestARunningJobStillConsultsItsCompletionRecord(t *testing.T) {
 	}
 	if !checked {
 		t.Fatal("the completion record of a job the runner calls running was never consulted")
+	}
+}
+
+func TestApplyBatchStatusesBoundsAbsentR2WorkerAsUnresolved(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "missing R2 worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := *job.LatestRunID
+	statuses := map[int64]queueBatchStatus{
+		jobID: {State: queueStateUnresolvedCandidate, RunID: attemptID, FromR2: true},
+	}
+	t0 := time.Unix(2_000_000, 0)
+	bound := time.Minute
+
+	updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, bound, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 0 {
+		t.Fatalf("first absent observation updated %d jobs, want 0", updated)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err = applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, bound, t0.Add(bound))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated != 1 {
+		t.Fatalf("bounded absent observation updated %d jobs, want 1", updated)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusUnresolved || job.LatestRunID == nil || *job.LatestRunID != attemptID || job.EndTime != nil {
+		t.Fatalf("job after bounded absence = status %q run %v end %v", job.Status, job.LatestRunID, job.EndTime)
+	}
+}
+
+func TestApplyBatchStatusesIgnoresUnresolvedObservationForOldAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "retried worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	old, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAttemptID := *old.LatestRunID
+	if err := db.CloseAttempt(database, jobID, db.StatusFailed, nil, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RequeueFreshAttemptByTarget(database, jobID, "studio", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[int64]queueBatchStatus{
+		jobID: {State: queueStateUnresolvedCandidate, RunID: oldAttemptID, FromR2: true},
+	}
+	t0 := time.Unix(2_000_000, 0)
+	if updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: current}, statuses, time.Second, time.Minute, t0); err != nil {
+		t.Fatal(err)
+	} else if updated != 0 {
+		t.Fatalf("stale observation updated %d jobs, want 0", updated)
+	}
+	if updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: current}, statuses, time.Second, time.Minute, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	} else if updated != 0 {
+		t.Fatalf("bounded stale observation updated %d jobs, want 0", updated)
+	}
+	current, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != db.StatusRunning || current.LatestRunID == nil || *current.LatestRunID == oldAttemptID {
+		t.Fatalf("current attempt changed: status=%q run=%v old=%d", current.Status, current.LatestRunID, oldAttemptID)
+	}
+	if current.Metadata != nil && current.Metadata.Reconciliation != nil {
+		t.Fatalf("stale observation wrote reconciliation metadata: %+v", current.Metadata.Reconciliation)
 	}
 }

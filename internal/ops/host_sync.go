@@ -149,7 +149,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	var activeJobs []*db.Job
 	if mode != SyncModeRepair {
 		// Step 1: Sync active jobs
-		activeJobs, err = db.ListActiveJobs(database, host)
+		activeJobs, err = db.ListJobsForReconciliation(database, host)
 		if err != nil {
 			return result, err
 		}

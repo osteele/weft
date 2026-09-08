@@ -7,7 +7,7 @@ import (
 
 func TestIsTerminal(t *testing.T) {
 	terminal := []string{Completed, Dead, Failed, Killed, Canceled, Draft}
-	nonTerminal := []string{Starting, Running, Queued, Paused, PendingPlacement}
+	nonTerminal := []string{Starting, Running, Queued, Paused, Unresolved, PendingPlacement}
 
 	for _, s := range terminal {
 		if !IsTerminal(s) {
@@ -56,6 +56,9 @@ func TestValidateTransition_Valid(t *testing.T) {
 		{Failed, Queued, false},
 		{Dead, Running, false},
 		{Draft, Queued, false},
+		{Unresolved, Running, false},
+		{Unresolved, Completed, false},
+		{Unresolved, Failed, false},
 		// Authoritative
 		{Failed, Completed, true},
 		{Dead, Completed, true},

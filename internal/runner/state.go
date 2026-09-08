@@ -123,7 +123,8 @@ func LoadState(path string) (*State, error) {
 	return s, nil
 }
 
-// Save writes state to a JSON file, pruning finished entries older than 24h.
+// Save writes state to a JSON file, pruning finished entries after the shared
+// runner-state retention window.
 func (s *State) Save(path string) error {
 	return s.saveAt(path, time.Now())
 }
@@ -171,9 +172,9 @@ func (s *State) saveAt(path string, now time.Time) error {
 	return nil
 }
 
-// pruneFinished removes finished entries older than 24 hours relative to now.
+// pruneFinished removes entries older than the runner-state retention window.
 func (s *State) pruneFinished(now time.Time) {
-	cutoff := now.Unix() - 86400
+	cutoff := now.Add(-24 * time.Hour).Unix()
 	for id, f := range s.Finished {
 		if f.FinishedAt < cutoff {
 			delete(s.Finished, id)

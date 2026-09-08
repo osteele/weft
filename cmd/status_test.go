@@ -108,6 +108,7 @@ func TestIsWaitTerminalStatus(t *testing.T) {
 		db.StatusFailed,
 		db.StatusKilled,
 		db.StatusCanceled,
+		db.StatusUnresolved,
 	}
 	for _, s := range waitTerminal {
 		if !isWaitTerminalStatus(s) {
@@ -138,6 +139,7 @@ func TestShouldAttemptSync(t *testing.T) {
 		db.StatusStarting,
 		db.StatusPaused,
 		db.StatusQueued,
+		db.StatusUnresolved,
 	}
 	for _, s := range syncable {
 		if !shouldAttemptSync(s) {

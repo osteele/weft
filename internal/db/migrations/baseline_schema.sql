@@ -313,7 +313,7 @@ CREATE TABLE IF NOT EXISTS "job_attempts" (
 		predecessor_attempt_id INTEGER REFERENCES job_attempts(id), target_id INTEGER REFERENCES execution_targets(id), error_diagnosis_backfilled INTEGER NOT NULL DEFAULT 0,
 
 		UNIQUE(job_id, attempt_number),
-		CONSTRAINT job_attempts_status_check CHECK (status IN ('starting', 'running', 'completed', 'dead', 'queued', 'failed', 'killed', 'canceled', 'paused', 'draft', 'pending_placement')),
+		CONSTRAINT job_attempts_status_check CHECK (status IN ('starting', 'running', 'completed', 'dead', 'queued', 'failed', 'killed', 'canceled', 'paused', 'unresolved', 'draft', 'pending_placement')),
 		CONSTRAINT job_attempts_cloud_outcome_check CHECK (
 			cloud_outcome IS NULL OR cloud_outcome IN ('completed','failed','canceled','orphaned','superseded','preempted')
 		)

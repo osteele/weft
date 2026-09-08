@@ -132,3 +132,42 @@ func TestInventoryQueueR2BridgeProcessesInboxWhenStatePublishFails(t *testing.T)
 		t.Fatalf("inbox request was not processed after state failure: %s", commands)
 	}
 }
+
+func TestInventoryQueueR2BridgePublishesWorkerEvidence(t *testing.T) {
+	root := t.TempDir()
+	queueDir := filepath.Join(root, "queue")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	state := opsqueue.RunnerState{
+		Running: map[string]opsqueue.RunnerJobState{
+			"42": {RunID: 1042, StartedAt: 1_700_000_000},
+		},
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(queueDir, opsqueue.StateFileName())
+	if err := os.WriteFile(stateFile, encoded, 0644); err != nil {
+		t.Fatal(err)
+	}
+	objects := map[string]string{}
+	bridge := &inventoryQueueR2Bridge{
+		bucket: "bucket", host: "studio", stateFile: stateFile, now: time.Now,
+		put: func(_, key, data string) error { objects[key] = data; return nil },
+	}
+
+	if err := bridge.publishState(); err != nil {
+		t.Fatal(err)
+	}
+	stateKey, _ := inventoryqueue.StateKey("studio")
+	var published inventoryqueue.State
+	if err := json.Unmarshal([]byte(objects[stateKey]), &published); err != nil {
+		t.Fatal(err)
+	}
+	running := published.Runner.Running["42"]
+	if running.StatusFile != opsqueue.ObservationAbsent || running.Process != opsqueue.ObservationAbsent {
+		t.Fatalf("published evidence = status %q process %q, want both absent", running.StatusFile, running.Process)
+	}
+}

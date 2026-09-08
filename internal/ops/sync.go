@@ -33,8 +33,10 @@ func None[T any]() Option[T]    { return opscore.None[T]() }
 
 // SyncOptions configures sync behavior
 type SyncOptions struct {
-	Timeout     time.Duration
-	SkipSamples bool
+	Timeout           time.Duration
+	SkipSamples       bool
+	QueueUnknownAfter time.Duration
+	Now               func() time.Time
 }
 
 // StatusFileResult contains the result of reading a status file
@@ -142,7 +144,8 @@ func CacheCompletedJobLog(job *db.Job, timeout time.Duration) {
 // DefaultSyncOptions returns default sync options
 func DefaultSyncOptions() SyncOptions {
 	return SyncOptions{
-		Timeout: 5 * time.Second,
+		Timeout:           5 * time.Second,
+		QueueUnknownAfter: effectiveQueueUnknownAfter(0),
 	}
 }
 
@@ -161,6 +164,7 @@ const (
 	queueStatePaused
 	queueStateQueued
 	queueStateDead
+	queueStateUnresolvedCandidate
 	// queueStatePreflightRejected signals that the runner refused to start an
 	// attempt before any startTime was stamped. Carries a populated
 	// FailureReason; ExitCode is always nil and Mtime carries the rejection

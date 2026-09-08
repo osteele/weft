@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -159,6 +160,16 @@ func (b *inventoryQueueR2Bridge) publishState() error {
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("read runner state: %w", err)
+	}
+	logDir := filepath.Clean(filepath.Join(filepath.Dir(b.stateFile), "..", "logs"))
+	for idText, running := range state.Running {
+		jobID, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil {
+			continue
+		}
+		running.StatusFile = statusFileObservation(logDir, jobID, running.RunID)
+		running.Process = processObservation(logDir, jobID)
+		state.Running[idText] = running
 	}
 	envelope := inventoryqueue.State{
 		Version: inventoryqueue.Version, Host: b.host,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -48,6 +49,11 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 
 	statuses, err := fetchQueueBatchStatus(host, jobIDs, timeout)
 	if err != nil {
+		for _, job := range jobs {
+			if clearErr := clearQueueOutcomeUnknown(database, job); clearErr != nil {
+				slog.Warn("failed to reset queue absence observation after batch probe error", "component", "sync", "job_id", job.ID, "error", clearErr)
+			}
+		}
 		if hostUsesR2Queue(host) {
 			updated := syncMissingR2Completions(database, jobs, nil)
 			updated += syncInventoryPublicationReports(database, jobs)
@@ -93,7 +99,7 @@ func syncMissingR2Completions(database *sql.DB, jobs []*db.Job, statuses map[int
 		if job == nil || job.LastSyncedStatus == "" {
 			continue
 		}
-		if observed, ok := statuses[job.ID]; ok && observed.State != queueStateRunning {
+		if observed, ok := statuses[job.ID]; ok && observed.State != queueStateRunning && observed.State != queueStateUnresolvedCandidate {
 			continue
 		}
 		result, err := syncJobStatusFromR2ForBatch(database, job)
@@ -109,6 +115,10 @@ func syncMissingR2Completions(database *sql.DB, jobs []*db.Job, statuses map[int
 
 // applyBatchStatuses processes pre-fetched batch statuses for a set of jobs.
 func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.Job, statuses map[int64]queueBatchStatus, timeout time.Duration) (int, error) {
+	return applyBatchStatusesAt(database, jobIDs, jobByID, statuses, timeout, effectiveQueueUnknownAfter(0), time.Now())
+}
+
+func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.Job, statuses map[int64]queueBatchStatus, timeout, unknownAfter time.Duration, now time.Time) (int, error) {
 	var updated int
 	for _, jobID := range jobIDs {
 		job := jobByID[jobID]
@@ -117,12 +127,26 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 		}
 		status, ok := statuses[jobID]
 		if !ok {
+			if err := clearQueueOutcomeUnknown(database, job); err != nil {
+				return updated, err
+			}
+			continue
+		}
+		if status.RunID != 0 && (job.LatestRunID == nil || status.RunID != *job.LatestRunID) {
+			slog.Debug("ignoring stale queue status", "component", "sync", "job_id", job.ID, "remote_run_id", status.RunID, "latest_run_id", job.LatestRunID)
+			continue
+		}
+		if status.State == queueStateUnresolvedCandidate && status.RunID == 0 {
+			slog.Debug("ignoring unfenced unresolved queue observation", "component", "sync", "job_id", job.ID)
 			continue
 		}
 		syncSourceExecutionMetadata(database, job, status)
 
 		switch status.State {
 		case queueStateQueued:
+			if err := clearQueueOutcomeUnknown(database, job); err != nil {
+				return updated, err
+			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 				if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
@@ -145,6 +169,9 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				updated++
 			}
 		case queueStateRunning:
+			if err := clearQueueOutcomeUnknown(database, job); err != nil {
+				return updated, err
+			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
 				if status.FromR2 && status.Mtime > 0 {
@@ -178,11 +205,19 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 					return updated, err
 				}
 				updated++
+			case db.StatusUnresolved:
+				if err := db.MarkRunningFromUnresolved(database, job.ID); err != nil {
+					return updated, err
+				}
+				updated++
 			}
 			if status.GPUDevices != "" {
 				syncGPUDevicesToMetadata(database, job, status.GPUDevices)
 			}
 		case queueStatePaused:
+			if err := clearQueueOutcomeUnknown(database, job); err != nil {
+				return updated, err
+			}
 			recordQueueDispatchOK(database, job.ID)
 			if job.StartTime == 0 {
 				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
@@ -200,9 +235,22 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 					return updated, err
 				}
 				updated++
+			case db.StatusUnresolved:
+				if err := db.MarkPausedFromUnresolved(database, job.ID); err != nil {
+					return updated, err
+				}
+				updated++
 			}
 			if status.GPUDevices != "" {
 				syncGPUDevicesToMetadata(database, job, status.GPUDevices)
+			}
+		case queueStateUnresolvedCandidate:
+			becameUnresolved, err := observeQueueOutcomeUnresolved(database, job, now, unknownAfter)
+			if err != nil {
+				return updated, err
+			}
+			if becameUnresolved {
+				updated++
 			}
 		case queueStateDead:
 			if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
@@ -348,8 +396,12 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 				continue
 			}
 			if _, ok := wanted[id]; ok {
+				observedState := queueStateRunning
+				if running.StatusFile == opsqueue.ObservationAbsent && running.Process == opsqueue.ObservationAbsent {
+					observedState = queueStateUnresolvedCandidate
+				}
 				results[id] = queueBatchStatus{
-					State: queueStateRunning, RunID: running.RunID, Mtime: running.StartedAt,
+					State: observedState, RunID: running.RunID, Mtime: running.StartedAt,
 					GPUDevices: strings.Join(running.GPUDevices, ","), FromR2: true,
 				}
 			}
@@ -465,6 +517,15 @@ func parseQueueBatchStatusOutput(stdout string, capacity int) map[int64]queueBat
 				gpuDevs = parts[3]
 			}
 			results[id] = queueBatchStatus{State: queueStateRunning, GPUDevices: gpuDevs, Source: parseBatchSourceExecution(parts, 4)}
+		case "UNRESOLVED_CANDIDATE":
+			if len(parts) < 4 {
+				continue
+			}
+			runID, err := strconv.ParseInt(parts[3], 10, 64)
+			if err != nil || runID <= 0 {
+				continue
+			}
+			results[id] = queueBatchStatus{State: queueStateUnresolvedCandidate, RunID: runID}
 		case "PAUSED":
 			gpuDevs := ""
 			if len(parts) >= 4 {

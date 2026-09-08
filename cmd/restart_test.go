@@ -206,6 +206,86 @@ print("train")
 	}
 }
 
+func TestRestartUnresolvedJobCreatesFreshAttempt(t *testing.T) {
+	restore := inventory.SetHosts([]inventory.HostSpec{{Name: "host-alpha"}})
+	t.Cleanup(restore)
+
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host-alpha", t.TempDir(), "true", "unknown outcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("running job has no attempt id")
+	}
+	previousAttemptID := *job.LatestRunID
+	t0 := time.Unix(2_000_000, 0)
+	if _, err := db.ObserveQueueWorkerAbsent(database, jobID, previousAttemptID, t0, 15*time.Minute, "worker absent"); err != nil {
+		t.Fatal(err)
+	}
+	if becameUnresolved, err := db.ObserveQueueWorkerAbsent(database, jobID, previousAttemptID, t0.Add(15*time.Minute), 15*time.Minute, "worker absent"); err != nil {
+		t.Fatal(err)
+	} else if !becameUnresolved {
+		t.Fatal("job did not become unresolved")
+	}
+
+	captureStdout(t, func() {
+		if err := restartJob(database, jobID, restartOverrides{}); err != nil {
+			t.Fatalf("restartJob: %v", err)
+		}
+	})
+
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("status = %q, want queued", job.Status)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID == previousAttemptID {
+		t.Fatalf("attempt id = %v, want a fresh attempt after %d", job.LatestRunID, previousAttemptID)
+	}
+	if job.Metadata != nil && job.Metadata.Reconciliation != nil {
+		t.Fatalf("fresh attempt retained stale reconciliation metadata: %+v", job.Metadata.Reconciliation)
+	}
+}
+
+func TestSetJobDiskMetadataPreservesReconciliation(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "true", "metadata preservation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciliation := &db.JobReconciliationMetadata{
+		StatusUnknownSince: time.Unix(2_000_000, 0).Unix(),
+	}
+	if err := db.SetJobMetadata(database, jobID, &db.JobMetadata{Reconciliation: reconciliation}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setJobDiskMetadata(database, job, nil); err != nil {
+		t.Fatal(err)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Metadata == nil || job.Metadata.Reconciliation == nil || job.Metadata.Reconciliation.StatusUnknownSince != reconciliation.StatusUnknownSince {
+		t.Fatalf("reconciliation metadata = %+v, want %+v", job.Metadata, reconciliation)
+	}
+}
+
 func TestRestartSourcePinFailureDoesNotMutateJob(t *testing.T) {
 	database := db.SetupTestDB(t)
 	dir := t.TempDir()

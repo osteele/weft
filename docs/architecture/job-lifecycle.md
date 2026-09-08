@@ -7,8 +7,8 @@ and `specs/status-sync.allium` (remote→local reconciliation).
 
 ## The transition graph is pinned
 
-Stored statuses: `draft, queued, starting, running, paused, completed,
-failed, dead, killed, canceled`. The spec's transition graph and the Go
+Stored statuses: `draft, queued, starting, running, paused, unresolved,
+completed, failed, dead, killed, canceled`. The spec's transition graph and the Go
 table (`internal/status/status.go`) are kept identical edge-for-edge by
 `internal/status/spec_transitions_test.go` — change one and the test forces
 you to change the other. `ValidateTransition` enforces the graph; edges
@@ -84,8 +84,14 @@ times.
   record, PID/payload cleanup).
 - **Kill reasons** (`<job>.kill_reason` file) discriminate user kills from
   watchdog and shutdown kills and flow into the completion record.
-- **Orphan recovery** marks attempts `dead` when the process vanished; this
-  is a guess that authoritative completions may later correct (above).
+- **Orphan recovery** writes a completion record and releases runner occupancy
+  on every recovery path. If reconciliation instead confirms that both the
+  status file and worker process are absent but cannot determine the outcome,
+  it starts a durable 15-minute observation window. Sustained absence moves
+  the open attempt to `unresolved`: no exit code or end time is invented, the
+  last positive remote status remains recorded, and placement capacity is
+  released. Probe errors do not advance the window. Later process evidence
+  restores the same attempt; a later completion record supplies its outcome.
 
 ## Requeue and retry
 

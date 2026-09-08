@@ -904,7 +904,7 @@ func logContentHasExitMarker(content string) bool {
 
 func isWaitTerminalStatus(status string) bool {
 	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusSkipped, db.StatusUnresolved:
 		return true
 	default:
 		return false
@@ -913,7 +913,7 @@ func isWaitTerminalStatus(status string) bool {
 
 func shouldAttemptSync(status string) bool {
 	switch status {
-	case db.StatusRunning, db.StatusStarting, db.StatusPaused, db.StatusQueued:
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused, db.StatusQueued, db.StatusUnresolved:
 		return true
 	default:
 		return false

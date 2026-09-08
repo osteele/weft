@@ -271,41 +271,6 @@ func TestSyncJobNoChangeWhenStartingAndSessionGone(t *testing.T) {
 	}
 }
 
-func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
-	database := db.SetupTestDB(t)
-
-	jobID, err := db.RecordQueued(database, "dead-host", "/tmp", "echo dead", "dead job")
-	if err != nil {
-		t.Fatalf("record queued job: %v", err)
-	}
-	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-
-	job, _ := db.GetJobByID(database, jobID)
-
-	prober := &remote.MockProber{
-		CompletedResult: remote.ProbeFalse,
-		CurrentResult:   remote.ProbeFalse,
-		InQueueResult:   remote.ProbeFalse,
-		ProcessResult:   remote.ProbeFalse,
-	}
-	host := &remote.MockHost{}
-
-	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second})
-	if err != nil {
-		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
-	}
-	if !syncResult.Updated {
-		t.Fatalf("expected job to be marked failed")
-	}
-
-	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusFailed {
-		t.Fatalf("expected failed status, got %s", updated.Status)
-	}
-}
-
 func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -447,10 +412,11 @@ func TestProbeRemoteStatusIgnoresStaleCompletionRunID(t *testing.T) {
 
 func TestProbeQueueRunnerJobStatusRequiresCompleteAbsenceEvidence(t *testing.T) {
 	tests := []struct {
-		name   string
-		job    *db.Job
-		remote mockQueueRemote
-		want   string
+		name          string
+		job           *db.Job
+		remote        mockQueueRemote
+		want          string
+		wantCandidate bool
 	}{
 		{
 			name: "one negative probe with all others unknown preserves queued",
@@ -465,7 +431,7 @@ func TestProbeQueueRunnerJobStatusRequiresCompleteAbsenceEvidence(t *testing.T) 
 			want: db.StatusQueued,
 		},
 		{
-			name: "all probes negative declares running job dead",
+			name: "all probes negative make a running job an unresolved candidate",
 			job:  &db.Job{ID: 2, Host: "queue-host", Status: db.StatusRunning},
 			remote: mockQueueRemote{
 				statusOption: Some(false),
@@ -474,7 +440,8 @@ func TestProbeQueueRunnerJobStatusRequiresCompleteAbsenceEvidence(t *testing.T) 
 				inQueue:      Some(false),
 				process:      Some(false),
 			},
-			want: db.StatusDead,
+			want:          db.StatusRunning,
+			wantCandidate: true,
 		},
 		{
 			name: "all probes negative preserves active queued job for redispatch",
@@ -504,12 +471,12 @@ func TestProbeQueueRunnerJobStatusRequiresCompleteAbsenceEvidence(t *testing.T) 
 			restore := setQueueRemoteClientForTesting(tt.remote)
 			defer restore()
 
-			got, err := probeQueueRunnerJobStatus(tt.job, time.Second)
+			got, err := probeQueueRunnerJobObservation(tt.job, time.Second)
 			if err != nil {
-				t.Fatalf("probeQueueRunnerJobStatus: %v", err)
+				t.Fatalf("probeQueueRunnerJobObservation: %v", err)
 			}
-			if got != tt.want {
-				t.Fatalf("status = %q, want %q", got, tt.want)
+			if got.Status != tt.want || got.UnresolvedCandidate != tt.wantCandidate {
+				t.Fatalf("observation = %+v, want status %q candidate=%v", got, tt.want, tt.wantCandidate)
 			}
 		})
 	}
@@ -1103,5 +1070,223 @@ func TestSyncQueueRunnerJobDoesNotMarkRecentlyQueuedDead(t *testing.T) {
 	updated, _ := db.GetJobByID(database, jobID)
 	if updated.Status != db.StatusQueued {
 		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+}
+
+func TestSyncQueueRunnerJobBoundsAbsentWorkerAsUnresolved(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo test", "missing outcome")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := *job.LatestRunID
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeFalse,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeFalse,
+		PausedResult:    remote.ProbeFalse,
+	}
+	host := &remote.MockHost{}
+	t0 := time.Unix(2_000_000, 0)
+	bound := time.Minute
+
+	result, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{
+		Timeout: time.Second, SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return t0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated {
+		t.Fatal("first absent observation changed status")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("status before bound = %q, want running", job.Status)
+	}
+
+	result, err = SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{
+		Timeout: time.Second, SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return t0.Add(bound) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Updated {
+		t.Fatal("sustained absence did not update status")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusUnresolved {
+		t.Fatalf("status after bound = %q, want unresolved", job.Status)
+	}
+	if job.LatestRunID == nil || *job.LatestRunID != attemptID || job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("unresolved attempt was closed or replaced: run=%v end=%v exit=%v", job.LatestRunID, job.EndTime, job.ExitCode)
+	}
+	active, err := db.CountQueueRunnerActiveByHost(database, "queue-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("queue capacity still counts unresolved attempt: %d", active)
+	}
+
+	live := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeTrue,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeTrue,
+		PausedResult:    remote.ProbeFalse,
+	}
+	result, err = SyncQueueRunnerJobWithProber(database, job, live, host, SyncOptions{Timeout: time.Second, SkipSamples: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Updated {
+		t.Fatal("positive process evidence did not restore the attempt")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.LatestRunID == nil || *job.LatestRunID != attemptID {
+		t.Fatalf("restored attempt = status %q run %v, want running run %d", job.Status, job.LatestRunID, attemptID)
+	}
+}
+
+func TestSyncAndReconcileLateCompletionResolvesUnresolvedAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "true", "late completion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := *job.LatestRunID
+	t0 := time.Unix(2_000_000, 0)
+	if _, err := db.ObserveQueueWorkerAbsent(database, jobID, attemptID, t0, time.Minute, "worker absent"); err != nil {
+		t.Fatal(err)
+	}
+	if becameUnresolved, err := db.ObserveQueueWorkerAbsent(database, jobID, attemptID, t0.Add(time.Minute), time.Minute, "worker absent"); err != nil {
+		t.Fatal(err)
+	} else if !becameUnresolved {
+		t.Fatal("job did not become unresolved")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := setQueueRemoteClientForTesting(mockQueueRemote{
+		statusExitCode: 1,
+		statusOption:   Some(true),
+		statusRunID:    attemptID,
+	})
+	t.Cleanup(restore)
+
+	result, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.NewStatus != db.StatusFailed {
+		t.Fatalf("reconcile result = %+v, want failed", result)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusFailed || job.LatestRunID == nil || *job.LatestRunID != attemptID {
+		t.Fatalf("resolved attempt = status %q run %v, want failed run %d", job.Status, job.LatestRunID, attemptID)
+	}
+}
+
+func TestSyncQueueRunnerJobUnknownProbeBreaksAbsenceWindow(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo test", "unknown process probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeFalse,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeFalse,
+		PausedResult:    remote.ProbeFalse,
+	}
+	t0 := time.Unix(2_000_000, 0)
+	bound := time.Minute
+	if _, err := SyncQueueRunnerJobWithProber(database, job, absent, &remote.MockHost{}, SyncOptions{
+		Timeout: time.Second, SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return t0 },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Metadata == nil || job.Metadata.Reconciliation == nil || job.Metadata.Reconciliation.StatusUnknownSince != t0.Unix() {
+		t.Fatalf("first absence timestamp = %+v, want %d", job.Metadata, t0.Unix())
+	}
+
+	unknown := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeUnknown,
+		InQueueResult:   remote.ProbeUnknown,
+		ProcessResult:   remote.ProbeUnknown,
+		PausedResult:    remote.ProbeUnknown,
+	}
+	if result, err := SyncQueueRunnerJobWithProber(database, job, unknown, &remote.MockHost{}, SyncOptions{
+		Timeout: time.Second, SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return t0.Add(bound) },
+	}); err != nil {
+		t.Fatal(err)
+	} else if result.Updated {
+		t.Fatal("unknown process probe changed status")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("status = %q, want running", job.Status)
+	}
+	if job.Metadata != nil && job.Metadata.Reconciliation != nil && job.Metadata.Reconciliation.StatusUnknownSince != 0 {
+		t.Fatalf("unknown probe did not break the absence window: %+v", job.Metadata.Reconciliation)
+	}
+
+	if result, err := SyncQueueRunnerJobWithProber(database, job, absent, &remote.MockHost{}, SyncOptions{
+		Timeout: time.Second, SkipSamples: true, QueueUnknownAfter: bound, Now: func() time.Time { return t0.Add(2 * bound) },
+	}); err != nil {
+		t.Fatal(err)
+	} else if result.Updated {
+		t.Fatal("first confirmed absence after unknown probe changed status")
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusRunning || job.Metadata == nil || job.Metadata.Reconciliation == nil || job.Metadata.Reconciliation.StatusUnknownSince != t0.Add(2*bound).Unix() {
+		t.Fatalf("absence window did not restart: status=%q metadata=%+v", job.Status, job.Metadata)
 	}
 }

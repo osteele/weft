@@ -223,6 +223,7 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 	}
 	running := make([]*db.Job, 0)
 	paused := make([]*db.Job, 0)
+	unresolved := make([]*db.Job, 0)
 	placing := make([]*db.Job, 0)
 	launching := make([]*db.Job, 0)
 	queued := make([]*db.Job, 0)
@@ -243,6 +244,8 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 			running = append(running, job)
 		case string(jobview.BucketPaused):
 			paused = append(paused, job)
+		case string(jobview.BucketUnresolved):
+			unresolved = append(unresolved, job)
 		case string(jobview.BucketPlacing):
 			placing = append(placing, job)
 		case string(jobview.BucketLaunching):
@@ -260,13 +263,14 @@ func buildGroupedStatusRowsWithOptions(jobs []*db.Job, width int, opts groupedSt
 		}
 	}
 
-	for _, s := range [][]*db.Job{running, paused, placing, launching, queued, unplaced, completions, failedJobs, killedCanceled} {
+	for _, s := range [][]*db.Job{running, paused, unresolved, placing, launching, queued, unplaced, completions, failedJobs, killedCanceled} {
 		sort.SliceStable(s, func(i, j int) bool { return s[i].ID < s[j].ID })
 	}
 
 	sections := []groupedStatusSection{
 		{title: "Running", key: "running", jobs: running},
 		{title: "Paused", key: "paused", jobs: paused},
+		{title: "Unresolved", key: "unresolved", jobs: unresolved},
 		{title: "Queued", key: "queued", jobs: queued},
 		{title: "Placing", key: "placing", jobs: placing},
 		{title: "Launching", key: "launching", jobs: launching},

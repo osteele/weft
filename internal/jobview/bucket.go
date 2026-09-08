@@ -12,6 +12,7 @@ type Bucket string
 const (
 	BucketRunning        Bucket = "running"
 	BucketPaused         Bucket = "paused"
+	BucketUnresolved     Bucket = "unresolved"
 	BucketPlacing        Bucket = "placing"
 	BucketLaunching      Bucket = "launching"
 	BucketQueued         Bucket = "queued"
@@ -126,6 +127,8 @@ func ClassifyBucket(job *db.Job, input ClassifyInput) Bucket {
 		return BucketRunning
 	case db.StatusPaused:
 		return BucketPaused
+	case db.StatusUnresolved:
+		return BucketUnresolved
 	case db.StatusPendingPlacement:
 		if job.TargetKind() == db.JobTargetUnplaced {
 			return BucketUnplaced

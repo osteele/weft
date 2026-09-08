@@ -175,4 +175,11 @@ func TestStatusDerivation_OpenMoveSplitsIntoSourceAndTargetRows(t *testing.T) {
 	}
 }
 
+func TestClassifyBucket_Unresolved(t *testing.T) {
+	job := &db.Job{Status: db.StatusUnresolved, Host: "cool30"}
+	if got := ClassifyBucket(job, ClassifyInput{}); got != BucketUnresolved {
+		t.Fatalf("ClassifyBucket(unresolved) = %q, want %q", got, BucketUnresolved)
+	}
+}
+
 func intPtr(v int) *int { return &v }

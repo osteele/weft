@@ -619,7 +619,7 @@ func randomTerminalStatus(rng *rand.Rand) (string, *int) {
 
 func randomAttemptStatus(rng *rand.Rand) string {
 	statuses := []string{
-		StatusQueued, StatusStarting, StatusRunning, StatusPaused,
+		StatusQueued, StatusStarting, StatusRunning, StatusPaused, StatusUnresolved,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
 	}
 	return statuses[rng.IntN(len(statuses))]

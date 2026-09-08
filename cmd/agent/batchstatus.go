@@ -48,10 +48,16 @@ func batchStatus(jobIDs []int64) {
 			}
 			gpuDevs := gpuDevicesForJob(state, idStr)
 			source := sourceExecutionStatus(logDir, jobID)
-			processState := checkProcessState(logDir, jobID)
+			processState, processEvidence := inspectProcessState(logDir, jobID)
 			switch processState {
 			case "paused":
 				fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, source)
+			case "":
+				if processEvidence == opsqueue.ObservationAbsent && statusFileObservation(logDir, jobID, running.RunID) == opsqueue.ObservationAbsent {
+					fmt.Printf("JOB|%d|UNRESOLVED_CANDIDATE|%d\n", jobID, running.RunID)
+					continue
+				}
+				fmt.Printf("JOB|%d|CURRENT|%s%s\n", jobID, gpuDevs, source)
 			default:
 				fmt.Printf("JOB|%d|CURRENT|%s%s\n", jobID, gpuDevs, source)
 			}
@@ -73,10 +79,16 @@ func batchStatus(jobIDs []int64) {
 			}
 			gpuDevs := gpuDevicesForJob(state, idStr)
 			source := sourceExecutionStatus(logDir, jobID)
-			processState := checkProcessState(logDir, jobID)
+			processState, processEvidence := inspectProcessState(logDir, jobID)
 			switch processState {
 			case "paused":
 				fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, source)
+			case "":
+				if processEvidence == opsqueue.ObservationAbsent && statusFileObservation(logDir, jobID, running.RunID) == opsqueue.ObservationAbsent {
+					fmt.Printf("JOB|%d|UNRESOLVED_CANDIDATE|%d\n", jobID, running.RunID)
+					continue
+				}
+				fmt.Printf("JOB|%d|RUNNING|%s%s\n", jobID, gpuDevs, source)
 			default:
 				fmt.Printf("JOB|%d|RUNNING|%s%s\n", jobID, gpuDevs, source)
 			}
@@ -111,7 +123,7 @@ func batchStatus(jobIDs []int64) {
 
 		// Check if process exists (not in state but has pid file)
 		gpuDevs := gpuDevicesForJob(state, idStr)
-		processState := checkProcessState(logDir, jobID)
+		processState, _ := inspectProcessState(logDir, jobID)
 		switch processState {
 		case "paused":
 			fmt.Printf("JOB|%d|PAUSED|%s%s\n", jobID, gpuDevs, sourceExecutionStatus(logDir, jobID))
@@ -230,26 +242,58 @@ func gpuDevicesForJob(state *runner.State, idStr string) string {
 	return ""
 }
 
-// checkProcessState reads the PID file and checks process state.
-// Returns "running", "paused", or "" (not found).
+// checkProcessState reads the PID files and returns "running", "paused", or
+// empty when no live process is confirmed.
 func checkProcessState(logDir string, jobID int64) string {
-	pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
-	if pgid, ok := runner.ReadPIDFile(pgidPath); ok && runner.CheckPIDAlive(pgid) {
-		if runner.CheckProcessStopped(pgid) {
-			return "paused"
-		}
-		return "running"
-	}
+	state, _ := inspectProcessState(logDir, jobID)
+	return state
+}
 
-	pidPath := filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID))
-	if pid, ok := runner.ReadPIDFile(pidPath); ok && runner.CheckPIDAlive(pid) {
+func statusFileObservation(logDir string, jobID, expectedRunID int64) string {
+	path := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return opsqueue.ObservationAbsent
+		}
+		return opsqueue.ObservationUnknown
+	}
+	var exitCode int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &exitCode); err != nil {
+		return opsqueue.ObservationUnknown
+	}
+	if expectedRunID != 0 && completionRunID(logDir, jobID) != expectedRunID {
+		return opsqueue.ObservationUnknown
+	}
+	return opsqueue.ObservationPresent
+}
+
+func inspectProcessState(logDir string, jobID int64) (string, string) {
+	unknown := false
+	for _, suffix := range []string{"pgid", "pid"} {
+		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, suffix))
+		pid, found, err := runner.ReadPIDFileDetailed(path)
+		if err != nil {
+			unknown = true
+			continue
+		}
+		if !found || !runner.CheckPIDAlive(pid) || runner.CheckProcessZombie(pid) {
+			continue
+		}
 		if runner.CheckProcessStopped(pid) {
-			return "paused"
+			return "paused", opsqueue.ObservationPresent
 		}
-		return "running"
+		return "running", opsqueue.ObservationPresent
 	}
+	if unknown {
+		return "", opsqueue.ObservationUnknown
+	}
+	return "", opsqueue.ObservationAbsent
+}
 
-	return ""
+func processObservation(logDir string, jobID int64) string {
+	_, observation := inspectProcessState(logDir, jobID)
+	return observation
 }
 
 // parseBatchStatusArgs parses "batch-status id1 id2 ..." arguments.

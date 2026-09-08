@@ -408,6 +408,62 @@ func TestCheckProcessState_UsesPortableStoppedDetection(t *testing.T) {
 	}
 }
 
+func TestBatchStatus_AbsentWorkerIsUnresolvedCandidate(t *testing.T) {
+	for _, current := range []bool{false, true} {
+		name := "running"
+		if current {
+			name = "current"
+		}
+		t.Run(name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+			queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+			if err := os.MkdirAll(queueDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			state := runner.NewState()
+			state.Running["42"] = runner.RunningJobState{RunID: 1042}
+			if current {
+				jobID := int64(42)
+				state.Current = &jobID
+			}
+			if err := state.Save(filepath.Join(queueDir, "default.state.json")); err != nil {
+				t.Fatal(err)
+			}
+
+			output := captureStdout(t, func() { batchStatus([]int64{42}) })
+			if got := strings.TrimSpace(output); got != "JOB|42|UNRESOLVED_CANDIDATE|1042" {
+				t.Fatalf("batchStatus output = %q", got)
+			}
+		})
+	}
+}
+
+func TestBatchStatus_UnreadablePIDDoesNotClaimWorkerAbsent(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	queueDir := filepath.Join(homeDir, ".cache", "weft", "queue")
+	logDir := filepath.Join(homeDir, ".cache", "weft", "logs")
+	if err := os.MkdirAll(queueDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(logDir, "42.pid"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	current := int64(42)
+	state := runner.NewState()
+	state.Current = &current
+	state.Running["42"] = runner.RunningJobState{RunID: 1042}
+	if err := state.Save(filepath.Join(queueDir, "default.state.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	output := captureStdout(t, func() { batchStatus([]int64{42}) })
+	if got := strings.TrimSpace(output); got != "JOB|42|CURRENT|" {
+		t.Fatalf("batchStatus output = %q, want unknown evidence preserved as current", got)
+	}
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 

@@ -244,12 +244,13 @@ var (
 // allowedStatusTransitions defines which status transitions are valid for the edit command.
 // These are statuses that can be transitioned TO queued.
 var requeueableStatuses = map[string]bool{
-	db.StatusKilled:    true,
-	db.StatusDead:      true,
-	db.StatusFailed:    true,
-	db.StatusCanceled:  true,
-	db.StatusSkipped:   true,
-	db.StatusCompleted: true,
+	db.StatusKilled:     true,
+	db.StatusDead:       true,
+	db.StatusFailed:     true,
+	db.StatusCanceled:   true,
+	db.StatusSkipped:    true,
+	db.StatusCompleted:  true,
+	db.StatusUnresolved: true,
 }
 
 // addQueueHostFlag adds the --host flag to a queue subcommand

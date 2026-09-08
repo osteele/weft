@@ -539,6 +539,7 @@ func jobStatusValues() []string {
 		StatusKilled,
 		StatusCanceled,
 		StatusPaused,
+		StatusUnresolved,
 		StatusDraft,
 		StatusPendingPlacement,
 	}
@@ -898,6 +899,7 @@ const (
 	StatusCanceled         = status.Canceled
 	StatusSkipped          = status.Skipped
 	StatusPaused           = status.Paused
+	StatusUnresolved       = status.Unresolved
 	StatusDraft            = status.Draft
 	StatusPendingPlacement = status.PendingPlacement
 )
@@ -4310,9 +4312,10 @@ func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {
 	return queryJobs(db, query, cutoff, StatusCompleted, StatusFailed, StatusDead, limit)
 }
 
-// ListUniqueRunningHosts returns all unique hosts with running jobs
+// ListUniqueRunningHosts returns all unique hosts with running or unresolved
+// jobs that still require remote reconciliation.
 func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE status IN (?, ?, ?) AND tombstoned = 0`, StatusRunning, StatusStarting, StatusPaused)
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE status IN (?, ?, ?, ?) AND tombstoned = 0`, StatusRunning, StatusStarting, StatusPaused, StatusUnresolved)
 	if err != nil {
 		return nil, err
 	}
@@ -4329,21 +4332,22 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
-// ListUniqueActiveHosts returns unique hosts with running, queued, or pending draft jobs
+// ListUniqueActiveHosts returns unique hosts with jobs that require execution,
+// reconciliation, or pending draft cleanup.
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`
 		SELECT DISTINCT host FROM (
 			SELECT host FROM job_status
 			WHERE tombstoned = 0
 			AND (
-				status IN (?, ?, ?, ?)
+				status IN (?, ?, ?, ?, ?)
 				OR (status = ? AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?))
 			)
 			UNION
 			SELECT host FROM deferred_operations WHERE host != ''
 		)
 		WHERE host != ''`,
-		StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusDraft, StatusDraft, StatusDraft)
+		StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusUnresolved, StatusDraft, StatusDraft, StatusDraft)
 	if err != nil {
 		return nil, err
 	}
@@ -4379,13 +4383,15 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
-// ListHostsWithQueueRunnerJobs returns unique hosts that have queued/running queue-runner jobs.
+// ListHostsWithQueueRunnerJobs returns unique hosts that have queued, running,
+// or unresolved queue-runner jobs. Unresolved jobs need continued observation
+// but do not count as occupied execution capacity.
 func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM job_status
 		WHERE (backend IS NULL OR backend = ?)
-		AND status IN (?, ?, ?, ?)
+		AND status IN (?, ?, ?, ?, ?)
 		AND tombstoned = 0`,
-		BackendQueueRunner, StatusQueued, StatusRunning, StatusStarting, StatusPaused)
+		BackendQueueRunner, StatusQueued, StatusRunning, StatusStarting, StatusPaused, StatusUnresolved)
 	if err != nil {
 		return nil, err
 	}
@@ -4422,6 +4428,16 @@ func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
+// ListJobsForReconciliation returns queue-runner jobs whose remote state still
+// needs observation. Unlike ListActiveJobs, this includes unresolved attempts;
+// callers must not use it for placement capacity accounting.
+func ListJobsForReconciliation(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM job_status
+		WHERE host = ? AND effective_target_kind = ? AND status IN (?, ?, ?, ?, ?) AND tombstoned = 0
+		ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusUnresolved)
+}
+
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM job_status
@@ -4430,15 +4446,16 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db, query, host, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
-// ListActiveOnPremJobs returns all non-cloud active jobs with host assignments.
+// ListActiveOnPremJobs returns all on-prem jobs that need execution,
+// reconciliation, or display as unresolved.
 func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE effective_target_kind = ?
-		AND status IN (?, ?, ?, ?) AND tombstoned = 0
+		AND status IN (?, ?, ?, ?, ?) AND tombstoned = 0
 		ORDER BY host ASC,
 			CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END,
 			id ASC`, jobSelectColumns)
-	return queryJobs(db, query, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued)
+	return queryJobs(db, query, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusUnresolved)
 }
 
 // ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed

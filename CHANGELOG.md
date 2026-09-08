@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Queue-runner recovery**: A job with a confirmed-absent status file and
+  worker process becomes `unresolved` after 15 minutes. This state releases
+  placement capacity without inventing a terminal outcome, and accepts either
+  late completion evidence or an explicit restart.
 - **`queue add` command**: Fixed database error when adding jobs to queue
   (`NOT NULL constraint failed: jobs.start_time`). Queued jobs now correctly
   have NULL start_time until they begin running.

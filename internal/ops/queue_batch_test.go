@@ -33,6 +33,23 @@ func TestParseQueueBatchStatusSanitizesRemoteFailureReason(t *testing.T) {
 	}
 }
 
+func TestParseQueueBatchStatusRequiresAttemptForUnresolvedObservation(t *testing.T) {
+	statuses := parseQueueBatchStatusOutput("JOB|42|UNRESOLVED_CANDIDATE|1042\n", 1)
+	status, ok := statuses[42]
+	if !ok || status.State != queueStateUnresolvedCandidate || status.RunID != 1042 {
+		t.Fatalf("parsed status = %+v, present=%v", status, ok)
+	}
+	for _, malformed := range []string{
+		"JOB|42|UNRESOLVED_CANDIDATE\n",
+		"JOB|42|UNRESOLVED_CANDIDATE|0\n",
+		"JOB|42|UNRESOLVED_CANDIDATE|not-a-run\n",
+	} {
+		if got := parseQueueBatchStatusOutput(malformed, 1); len(got) != 0 {
+			t.Fatalf("malformed unresolved status %q parsed as %+v", malformed, got)
+		}
+	}
+}
+
 func TestBatchSyncPersistsAttemptSourceVerification(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "source verification")

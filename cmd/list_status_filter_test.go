@@ -40,7 +40,7 @@ func TestBlockedIsRefusedWithItsOwnExplanation(t *testing.T) {
 func TestEveryStoredStatusIsAccepted(t *testing.T) {
 	for _, s := range []string{
 		"draft", "pending_placement", "queued", "starting", "running",
-		"completed", "failed", "dead", "killed", "canceled", "skipped", "paused",
+		"completed", "failed", "dead", "killed", "canceled", "skipped", "paused", "unresolved",
 	} {
 		if err := validateStatusFilter(s); err != nil {
 			t.Errorf("stored status %q was refused: %v", s, err)

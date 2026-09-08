@@ -198,6 +198,8 @@ config {
 
     -- R2 fetch timeout
     r2_marker_timeout: Duration = 3.seconds
+    -- Sustained, confirmed queue-worker absence before unresolved status.
+    queue_outcome_unknown_bound: Duration = 15.minutes
 
     -- External scheduler status query timeout. This keeps SkyPilot refreshes
     -- from blocking TUI/list updates behind cloud-provider or SSH sync work.
@@ -248,6 +250,26 @@ rule R2PullInventoryQueue {
     -- Pinned source closures are materialized from R2; no SSH or rsync is
     -- required. Legacy unpinned jobs and --needs staging are unsupported on
     -- this transport and fail visibly.
+}
+
+-- A missing completion marker cannot distinguish a live attempt from one whose
+-- worker exited before publishing its outcome. Only confirmed absence of both
+-- the attempt's status file and worker process starts the durable observation
+-- window; a failed probe remains unknown and does not advance it.
+rule QueueWorkerAbsenceBecomesUnresolved {
+    when: QueueWorkerAndStatusConfirmedAbsent(job)
+
+    if QueueAbsenceAge(job.latest_attempt) < queue_outcome_unknown_bound:
+        ensures: JobStatusPreserved(job)
+    else:
+        ensures: job.status = unresolved
+        ensures: job.latest_attempt.exit_code = null
+        ensures: job.latest_attempt.end_time = null
+        ensures: JobDoesNotConsumePlacementCapacity(job)
+
+    -- The exact attempt id fences every observation and transition. Positive
+    -- queued/running/paused evidence clears the window. A later completion
+    -- supplies the outcome and may transition unresolved to completed/failed.
 }
 
 -- Payload-bearing jobs fail closed at remote dispatch until the active runner
