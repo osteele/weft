@@ -68,6 +68,56 @@ func TestRunSingleJob_EchoHello(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_TorchPreflightTimeoutWritesTerminalStatus(t *testing.T) {
+	logDir := t.TempDir()
+	workingDir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(workingDir, "pyproject.toml"),
+		[]byte("[project]\nname = \"preflight-timeout\"\nversion = \"0.1.0\"\ndependencies = [\"torch\"]\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	fakeBash := filepath.Join(fakeBin, "bash")
+	script := "#!/bin/sh\nprintf '%s\\n' '" + torchPreflightPythonStartedMarker + "' '" + torchPreflightTorchImportedMarker + "'\nexec sleep 10\n"
+	if err := os.WriteFile(fakeBash, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const jobID = 420
+	ei, err := RunSingleJob(SingleJobConfig{
+		JobID:          jobID,
+		Job:            opsqueue.CommandJob{Cmd: "python train.py", GPU: "0"},
+		LogDir:         logDir,
+		WorkingDir:     workingDir,
+		SampleInterval: 10 * time.Millisecond,
+		SetupTimeout:   100 * time.Millisecond,
+		SetupPrewarmed: true,
+		SkipProbes:     true,
+	})
+	if err == nil {
+		t.Fatal("RunSingleJob returned nil error after torch preflight timeout")
+	}
+	if ei.ExitCode != ExitCodeSetupTimeout {
+		t.Fatalf("exit code = %d, want %d", ei.ExitCode, ExitCodeSetupTimeout)
+	}
+
+	paths := NewJobPaths(logDir, jobID)
+	code, ok := ReadStatusFile(paths.Status)
+	if !ok {
+		t.Fatal("torch preflight timeout did not write the terminal status file")
+	}
+	if code != ExitCodeSetupTimeout {
+		t.Fatalf("status exit code = %d, want %d", code, ExitCodeSetupTimeout)
+	}
+	if _, statErr := os.Stat(paths.Completion); statErr != nil {
+		t.Fatalf("completion record missing after torch preflight timeout: %v", statErr)
+	}
+}
+
 func TestRunSingleJob_DefaultTMPDIR(t *testing.T) {
 	logDir := t.TempDir()
 	workingDir := t.TempDir()

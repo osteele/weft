@@ -317,6 +317,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			now := time.Now().Unix()
 			phases.SetupEnd = now
 			failureReason, _ := db.ClassifyInfraFailure(torchPreflightFailurePhase(failureStage), ei.ExitCode, "")
+			WriteStatusFile(paths, ei)
 			WriteFailureReasonFile(paths, failureReason)
 			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
 			WritePhasesFile(paths, phases)
