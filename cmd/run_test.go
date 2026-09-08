@@ -1416,6 +1416,9 @@ func newRunTestCommand() *cobra.Command {
 
 func resetRunGlobals(t *testing.T) {
 	t.Helper()
+	originalEdgeSubmit := activeEdgeSubmit
+	t.Cleanup(func() { activeEdgeSubmit = originalEdgeSubmit })
+	activeEdgeSubmit = nil
 	originalPinSource := pinRunSourceSnapshotFunc
 	t.Cleanup(func() { pinRunSourceSnapshotFunc = originalPinSource })
 	pinRunSourceSnapshotFunc = func(_ context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {

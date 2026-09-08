@@ -109,3 +109,38 @@ func TestEdgeViewAbsentSkipsValidation(t *testing.T) {
 		t.Fatal("absent [edge.view] reported configured")
 	}
 }
+
+func TestEdgeSubmissionIntervalsParseDefaultAndValidate(t *testing.T) {
+	cfg, err := loadTOMLConfig(t, "[edge]\nrole = \"edge\"\nadmission_wait_seconds = 7\npoll_interval_seconds = 3\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Edge.AdmissionWait(); got != 7*time.Second {
+		t.Fatalf("admission wait = %s", got)
+	}
+	if got := cfg.Edge.PollInterval(); got != 3*time.Second {
+		t.Fatalf("poll interval = %s", got)
+	}
+
+	defaultCfg, err := loadTOMLConfig(t, "[edge]\nrole = \"edge\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultCfg.Edge.AdmissionWait() != DefaultEdgeAdmissionWait || defaultCfg.Edge.PollInterval() != DefaultEdgePollInterval {
+		t.Fatalf("defaults = %s, %s", defaultCfg.Edge.AdmissionWait(), defaultCfg.Edge.PollInterval())
+	}
+	expectCfg, err := loadTOMLConfig(t, "[edge.expect.job]\ntypical_minutes = 2.5\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := expectCfg.Edge.AdmissionWait(); got != 150*time.Second {
+		t.Fatalf("admission wait from job expectation = %s, want 2m30s", got)
+	}
+
+	if _, err := loadTOMLConfig(t, "[edge]\npoll_interval_seconds = 0\n"); err == nil || !strings.Contains(err.Error(), "poll_interval_seconds") {
+		t.Fatalf("zero poll interval error = %v", err)
+	}
+	if _, err := loadTOMLConfig(t, "[edge]\nadmission_wait_seconds = 0\n"); err == nil || !strings.Contains(err.Error(), "admission_wait_seconds") {
+		t.Fatalf("zero admission wait error = %v", err)
+	}
+}

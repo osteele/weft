@@ -38,7 +38,7 @@ estimation queries. Use --raw for the JSONL file as the agent wrote it. Use
 }
 
 func runJobTimeseries(_ *cobra.Command, args []string) error {
-	jobID, err := ids.ParseJobID(args[0])
+	jobID, err := resolveJobID(args[0])
 	if err != nil {
 		return usageErrorf("invalid job ID %q", args[0])
 	}

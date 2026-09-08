@@ -176,6 +176,11 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	} else if shouldPublishEdgeView(cfg) {
 		go runEdgeViewPublisher(ctx, database, cfg)
 	}
+	if !cfg.Edge.IsEdge() && cfg.Edge.Inbound.Bucket == "" {
+		fmt.Fprintln(os.Stderr, "edge inbox poller not configured; set [edge.inbound] to accept edge submissions")
+	} else if shouldPollEdgeInbox(cfg) {
+		go runEdgeInboxPoller(ctx, database, cfg)
+	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))

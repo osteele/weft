@@ -242,6 +242,8 @@ type QueueJobParams struct {
 	// the environment here, because this function also runs inside long-lived
 	// processes that may have inherited an unrelated session's environment.
 	SubmitterSession string
+	// EdgeProvenance is set only by the authenticated hub inbox poller.
+	EdgeProvenance *db.EdgeSubmissionProvenance
 	// Metadata is persisted to job_attempts.job_metadata as part of the same
 	// RecordQueuedJob call. Writing metadata inside RecordQueuedJob (rather
 	// than the caller doing a follow-up SetJobMetadata) avoids a race where a
@@ -401,7 +403,7 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	// immediately afterwards fires a lifecycle trigger that snapshots those
 	// columns, so writing them later in this transaction would leave the
 	// queued event with empty routing metadata.
-	ident := db.SubmissionIdentity{Project: project, SubmitterSession: params.SubmitterSession}
+	ident := db.SubmissionIdentity{Project: project, SubmitterSession: params.SubmitterSession, Edge: params.EdgeProvenance}
 	var jobID int64
 	if draft {
 		if explicitID {

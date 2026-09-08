@@ -51,6 +51,7 @@ const (
 	prefixRoot    = "edge/v1/"
 	PrefixInbox   = prefixRoot + "inbox/"
 	PrefixPayload = prefixRoot + "payload/"
+	PrefixSource  = prefixRoot + "source/"
 	PrefixAck     = prefixRoot + "ack/"
 )
 
@@ -69,4 +70,5 @@ const (
 
 func InboxKey(nonce string) string    { return PrefixInbox + nonce }
 func PayloadKey(digest string) string { return PrefixPayload + digest }
+func SourceKey(digest string) string  { return PrefixSource + digest }
 func AckKey(nonce string) string      { return PrefixAck + nonce + ".json" }

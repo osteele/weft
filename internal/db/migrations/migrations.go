@@ -194,11 +194,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddRawTelemetryStorage},
 		&goose.GoFunc{RunDB: dropAddRawTelemetryStorage},
 	)
+	addEdgeSubmissionProvenance := goose.NewGoMigration(
+		60,
+		&goose.GoFunc{RunDB: applyAddEdgeSubmissionProvenance},
+		&goose.GoFunc{RunDB: dropAddEdgeSubmissionProvenance},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -1083,6 +1088,58 @@ func dropAddRawTelemetryStorage(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func applyAddEdgeSubmissionProvenance(ctx context.Context, db *sql.DB) error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"edge_submitter_host", `ALTER TABLE jobs ADD COLUMN edge_submitter_host TEXT`},
+		{"edge_signing_key_id", `ALTER TABLE jobs ADD COLUMN edge_signing_key_id TEXT`},
+		{"edge_deployment_source_digest", `ALTER TABLE jobs ADD COLUMN edge_deployment_source_digest TEXT`},
+		{"edge_submission_nonce", `ALTER TABLE jobs ADD COLUMN edge_submission_nonce TEXT`},
+	}
+	for _, column := range columns {
+		exists, err := columnExists(ctx, db, "jobs", column.name)
+		if err != nil {
+			return fmt.Errorf("inspect jobs.%s: %w", column.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, column.ddl); err != nil {
+			return fmt.Errorf("add jobs.%s: %w", column.name, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_edge_submission_nonce ON jobs(edge_submission_nonce) WHERE edge_submission_nonce IS NOT NULL AND edge_submission_nonce != ''`); err != nil {
+		return fmt.Errorf("create edge submission nonce index: %w", err)
+	}
+	return nil
+}
+
+func dropAddEdgeSubmissionProvenance(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_jobs_edge_submission_nonce`); err != nil {
+		return fmt.Errorf("drop edge submission nonce index: %w", err)
+	}
+	for _, column := range []string{
+		"edge_submission_nonce",
+		"edge_deployment_source_digest",
+		"edge_signing_key_id",
+		"edge_submitter_host",
+	} {
+		exists, err := columnExists(ctx, db, "jobs", column)
+		if err != nil {
+			return fmt.Errorf("inspect jobs.%s: %w", column, err)
+		}
+		if !exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, `ALTER TABLE jobs DROP COLUMN `+column); err != nil {
+			return fmt.Errorf("drop jobs.%s: %w", column, err)
+		}
+	}
+	return nil
+}
+
 // HasPending reports whether any migration has not yet been applied to db.
 func HasPending(ctx context.Context, db *sql.DB) (bool, error) {
 	p, err := newProvider(db)
@@ -1108,7 +1165,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

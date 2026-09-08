@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -592,6 +594,24 @@ func recordQueuedJobSingleWriter(database *sql.DB, params ops.QueueJobParams) (i
 	return recordQueuedJobMutationFunc(context.Background(), database, params)
 }
 
+type runRequestParts ops.QueueJobParams
+
+// buildRunRequest is the database-free half of run submission. Both local and
+// edge paths pass through it after flags and script metadata have been folded
+// into one queue request.
+func buildRunRequest(parts runRequestParts) ops.QueueJobParams {
+	return ops.QueueJobParams(parts)
+}
+
+// recordAndPlaceRunRequest is the durable half shared by local run and the hub
+// inbox poller. An edge provenance value is attached only after admission.
+type runRequestRecorder func(context.Context, *sql.DB, ops.QueueJobParams) (int64, error)
+
+func recordAndPlaceRunRequest(ctx context.Context, database *sql.DB, request ops.QueueJobParams, provenance *db.EdgeSubmissionProvenance, record runRequestRecorder) (int64, error) {
+	request.EdgeProvenance = provenance
+	return record(ctx, database, request)
+}
+
 func parseRunJobIDFlags() error {
 	var err error
 	if runKillJobID, err = parseOptionalJobIDFlag("kill", runKillJobIDRaw); err != nil {
@@ -612,6 +632,25 @@ func parseRunJobIDFlags() error {
 func runRun(cmd *cobra.Command, args []string) error {
 	if err := parseRunJobIDFlags(); err != nil {
 		return err
+	}
+	edgeSubmit := activeEdgeSubmit != nil
+	if edgeSubmit {
+		switch {
+		case runKillJobID > 0:
+			return fmt.Errorf("--kill is a job-control request and is not served by the edge submission path in this phase")
+		case runFrom > 0:
+			return fmt.Errorf("--from requires a hub job lookup and is not served by the edge submission path in this phase")
+		case len(runAffinity) > 0:
+			return fmt.Errorf("--affinity requires hub machine identity resolution and is not served by the edge submission path in this phase")
+		case runDraft || runDryRun || runIfOnline:
+			return fmt.Errorf("draft, dry-run, and if-online modes require hub-local execution and are not served by the edge submission path")
+		case runAfter > 0 || runAfterAny > 0:
+			return fmt.Errorf("job dependencies require hub job resolution and are not served by the edge submission path in this phase")
+		case len(runPayloads) > 0:
+			return fmt.Errorf("--payload uses the results store and is not served by the isolated edge submission path in this phase")
+		case runWait || runFollow:
+			return fmt.Errorf("--wait and --follow require post-admission hub state; submit without them and address the admitted job by nonce")
+		}
 	}
 	if runIfOnline && (runDraft || runAfter > 0 || runAfterAny > 0 || runNoSync) {
 		return fmt.Errorf("--if-online cannot be combined with --draft, dependencies, or --no-sync")
@@ -647,11 +686,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Open database early for --from support
-	database, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+	var database *sql.DB
+	if !edgeSubmit {
+		database, err = db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer database.Close()
 	}
-	defer database.Close()
 
 	var host, command string
 	// All --needs specs flow into jobs.needs and are classified later at
@@ -772,7 +814,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Validate command against blocked patterns
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
 	setUsageHintsFromConfig(cfg)
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
@@ -1226,12 +1271,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(runNeeds) > 0 {
-		resolvedHost, allNeeds, err := resolveArtifactNeedsPlacement(database, runNeeds, host)
-		if err != nil {
-			return fmt.Errorf("--needs: %w", err)
+		if edgeSubmit {
+			resolvedNeeds = append([]string(nil), runNeeds...)
+		} else {
+			resolvedHost, allNeeds, err := resolveArtifactNeedsPlacement(database, runNeeds, host)
+			if err != nil {
+				return fmt.Errorf("--needs: %w", err)
+			}
+			host = resolvedHost
+			resolvedNeeds = allNeeds
 		}
-		host = resolvedHost
-		resolvedNeeds = allNeeds
 	}
 	requestedProvider, hasRequestedProvider := db.RequestedProvider(runTags)
 	if runIfOnline && (hasRequestedProvider || db.HasRentalTag(runTags) || db.IsLaunchHost(host)) {
@@ -1252,7 +1301,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// rental-tagged jobs, draft submissions, and the fast auto-submit path.
 	// The daemon/autopilot performs predictor-backed placement after the job
 	// is durably recorded.
-	predictorNeeded := host == "" && !db.HasRentalTag(runTags) && !runDraft && !fastAutoSubmit
+	predictorNeeded := !edgeSubmit && host == "" && !db.HasRentalTag(runTags) && !runDraft && !fastAutoSubmit
 	if predictorNeeded {
 		endPredictor := rec.Phase("predictor", "checking predictor")
 		err := ensurePredictorUsableFunc(cmd, cfg, "placement prediction")
@@ -1274,7 +1323,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpu = ""
 	}
 	// Query OOM history for this command
-	oomFloor, _ := db.OOMFloor(database, command)
+	oomFloor := 0
+	if !edgeSubmit {
+		oomFloor, _ = db.OOMFloor(database, command)
+	}
 	if oomFloor > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "OOM history: requiring >=%dGB GPU memory (prior failure on %dGB GPU)\n", oomFloor, oomFloor-1)
 	}
@@ -1315,7 +1367,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// consumers co-locate with their producers and can read outputs from
 	// the shared workdir (the classifier in internal/campaign/
 	// needs_classify.go does the actual routing at launch time).
-	placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
+	if !edgeSubmit {
+		placementConstraints.PreferredInstanceIDs = campaign.PreferredInstanceIDsFromNeeds(database, resolvedNeeds)
+	}
 
 	var capturedPayloads []db.JobPayload
 	if !runDryRun {
@@ -1327,7 +1381,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if runIdempotencyKey != "" {
+	if !edgeSubmit && runIdempotencyKey != "" {
 		if existingID, ok, lookupErr := db.FindJobIDBySubmitToken(database, submitToken); lookupErr != nil {
 			return fmt.Errorf("look up idempotency key: %w", lookupErr)
 		} else if ok {
@@ -1346,7 +1400,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if shouldValidateRentalJobImage(host, runTags, runDraft, runDryRun) {
+	if !edgeSubmit && shouldValidateRentalJobImage(host, runTags, runDraft, runDryRun) {
 		endImageProbe := rec.Phase("submit", "validating container image")
 		ctx, cancel := context.WithTimeout(context.Background(), campaign.ImageProbeTimeout)
 		err := validateRentalJobImageFunc(ctx, cfg, localDir, command)
@@ -1397,7 +1451,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	endSourcePin := rec.Phase("source", "pinning source snapshot")
-	sourceMeta, err = pinRunSourceSnapshotFunc(context.Background(), localDir, runInputs, []string{command})
+	var edgeSourceDigest string
+	var edgeSourceClosure []byte
+	if edgeSubmit {
+		sourceMeta, edgeSourceDigest, edgeSourceClosure, err = buildEdgeSourceClosure(localDir, runInputs)
+	} else {
+		sourceMeta, err = pinRunSourceSnapshotFunc(context.Background(), localDir, runInputs, []string{command})
+	}
 	endSourcePin()
 	if err != nil {
 		return fmt.Errorf("pin source snapshot: %w", err)
@@ -1408,7 +1468,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	buildRunQueueParams := func(targetHost string) ops.QueueJobParams {
-		return ops.QueueJobParams{
+		return buildRunRequest(runRequestParts{
 			Host:             targetHost,
 			WorkingDir:       workingDir,
 			Command:          command,
@@ -1437,7 +1497,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 			MaxComputeCap:    persistMaxComputeCap,
 			SubmitToken:      submitToken,
 			SubmitterSession: runSubmitterSession,
-		}
+		})
+	}
+
+	if edgeSubmit {
+		return submitEdgeJob(cmd.Context(), cmd.OutOrStdout(), activeEdgeSubmit, cfg,
+			buildRunQueueParams(host), edgeSourceDigest, edgeSourceClosure)
 	}
 
 	// Route through local placement for non-draft, non-dependency submissions.
@@ -1571,7 +1636,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		endSubmit := rec.Phase("submit", "submitting job")
-		jobID, err := recordQueuedJobSingleWriter(database, params)
+		jobID, err := recordAndPlaceRunRequest(cmd.Context(), database, params, nil, recordQueuedJobMutationFunc)
 		endSubmit()
 		if err != nil {
 			return fmt.Errorf("submit job: %w", err)
@@ -2158,6 +2223,56 @@ func buildJobSourceMetadata(localDir string, inputs []string, commands []string)
 		_ = os.Remove(tmpPath)
 	}
 	return jobSourceMetadataFromManifest(manifest, false), nil
+}
+
+func buildEdgeSourceClosure(localDir string, inputs []string) (*db.JobSourceMetadata, string, []byte, error) {
+	snapshot, err := srcsync.BuildSourceSnapshot(localDir, inputs)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer snapshot.Cleanup()
+	tarPath, rootHash, err := srcsync.CreateSourceTarball(snapshot.Dir)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	defer os.Remove(tarPath)
+	body, err := os.ReadFile(tarPath)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("read source closure: %w", err)
+	}
+	sum := sha256.Sum256(body)
+	contentDigest := "sha256:" + hex.EncodeToString(sum[:])
+	r2Key := dataplane.SourceTarballV2(rootHash)
+	manifestHash, err := dataplane.SourceManifestSHA256([]dataplane.SourceManifestRoot{{
+		MountBasename: filepath.Base(localDir),
+		Hash:          rootHash,
+		R2Key:         r2Key,
+	}})
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("identify source closure: %w", err)
+	}
+	root := db.JobSourceRootMetadata{
+		LocalPath:     localDir,
+		MountBasename: filepath.Base(localDir),
+		Hash:          rootHash,
+		R2Key:         r2Key,
+		SizeBytes:     int64(len(body)),
+	}
+	meta := &db.JobSourceMetadata{
+		Hash:  manifestHash,
+		Roots: []db.JobSourceRootMetadata{root},
+		Pin: &db.JobSourcePinMetadata{
+			Hash: manifestHash,
+			Roots: []db.JobSourcePinRootMetadata{{
+				LocalPath:     localDir,
+				MountBasename: filepath.Base(localDir),
+				Hash:          rootHash,
+				R2Key:         r2Key,
+				SizeBytes:     int64(len(body)),
+			}},
+		},
+	}
+	return meta, contentDigest, body, nil
 }
 
 func pinRunSourceSnapshot(ctx context.Context, localDir string, inputs []string, commands []string) (*db.JobSourceMetadata, error) {

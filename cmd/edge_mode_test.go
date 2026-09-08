@@ -103,6 +103,9 @@ func captureGate(t *testing.T, cfg *config.Config, args []string) (stdout, stder
 	prevMirror := activeEdgeMirror
 	activeEdgeMirror = nil
 	defer func() { activeEdgeMirror = prevMirror }()
+	prevSubmit := activeEdgeSubmit
+	activeEdgeSubmit = nil
+	defer func() { activeEdgeSubmit = prevSubmit }()
 	resolved := findCmd(t, strings.TrimSpace(strings.Join(args, " ")))
 	var outBuf, errBuf bytes.Buffer
 	resolved.SetOut(&outBuf)
@@ -201,9 +204,30 @@ func TestEdgeMirrorServedEntriesAreMirrorCommands(t *testing.T) {
 	}
 }
 
-func TestEdgeGateSubmitCommandBlocked(t *testing.T) {
-	_, stderr, err := captureGate(t, edgeConfig("edge"), []string{"run", "echo hi"})
-	assertBlocked(t, err, stderr, edgeCauseNoSubmitPath)
+func TestEdgeGateUnservedSubmitCommandsStillBlocked(t *testing.T) {
+	for path, entry := range edgeCommandModes {
+		if entry.mode != edgeModeSubmit {
+			continue
+		}
+		if _, served := edgeSubmitServed[path]; served {
+			continue
+		}
+		_, stderr, err := captureGate(t, edgeConfig("edge"), strings.Fields(path))
+		assertBlocked(t, err, stderr, edgeCauseNoSubmitPath)
+	}
+}
+
+func TestEdgeSubmitServedEntriesAreSubmitCommands(t *testing.T) {
+	for path := range edgeSubmitServed {
+		entry, ok := edgeCommandModes[path]
+		if !ok {
+			t.Errorf("%s: served but not classified", path)
+			continue
+		}
+		if entry.mode != edgeModeSubmit {
+			t.Errorf("%s: served but classified %s", path, entry.mode)
+		}
+	}
 }
 
 func assertBlocked(t *testing.T, err error, stderr, cause string) {

@@ -4,41 +4,16 @@ Planned and in-progress work. Completed work lives in the commit log, not here.
 
 ## Edge submission
 
-The protocol core, key management, and diagnostics are in place. What remains is
-everything that makes a submission actually become a job.
+The protocol core, key management, diagnostics, hub view, and job submission
+path are in place.
 
-### End-to-end submission
+### Edge command parity, phase 4
 
-**A signed submission from studio appears in the hub's job list, with the
-submitting host and deployment source digest recorded on the job row.**
+The gate, ledger refusal, hub view, first mirror reads, and end-to-end job
+submission from `docs/planning/edge-command-parity.md` are in place. What
+remains:
 
-This is the acceptance criterion the feature exists to satisfy, and nothing
-outside tests currently calls `edge.Submit` or `edge.Admit`. It needs three
-pieces, and the first two should land together so the writer and its reader
-arrive at the same time:
-
-- **A submit command on the edge.** Tars the working tree through weft's
-  existing source-closure machinery (`internal/sync`), uploads the payload,
-  commits the pointer.
-- **An inbox poller on the hub.** Reads `edge/v1/inbox/`, runs `edge.Admit`,
-  creates the job row with its provenance, writes the acknowledgement. Until
-  this exists `weft edge wait` cannot succeed, because nothing writes acks.
-- **Provenance on the job row.** Submitting host and deployment source digest,
-  stored where `weft info` can show them.
-
-Two acceptance criteria are blocked behind this and cannot be checked before it:
-that a retried submission with the same nonce creates no second job (proven at
-package level, but "no second job" is not observable without job rows), and that
-a submission refused for each distinct reason surfaces that reason to the
-submitter.
-
-### Edge command parity, phases 3–4
-
-The gate, ledger refusal, hub view, and first mirror reads from
-`docs/planning/edge-command-parity.md` are in place. What remains:
-- **Submission end to end (phase 3).** The submit command, the inbox poller,
-  and provenance on the job row — the "End-to-end submission" item above.
-- **Control and fact payload kinds (phase 4).** `weft.job-control/v1` and
+- **Control and fact payload kinds.** `weft.job-control/v1` and
   `weft.bug-report/v1`, moving the submit-classified control commands and
   `bug report`/`note` from blocked to working.
 
@@ -126,14 +101,6 @@ an unreadable signal must refuse rather than admit, since a check that reads
 "cannot tell" as "fine" is the failure it exists to prevent; and any wait
 before retrying should be jittered, because independent pollers on a fixed
 backoff retry in lockstep and re-create the condition they waited out.
-
-### Reconcile the two spend limits
-
-`[edge] max_spend_usd` gates edge submission admission; `spending_limit`
-("maximum cost per job in dollars") predates it. Two similarly-named knobs with
-an undocumented division is a hazard on its own. When the poller lands, decide
-whether the edge ceiling feeds the existing limit or the two are explicitly
-distinguished, and say which in both config comments.
 
 ### Cumulative spend accounting
 

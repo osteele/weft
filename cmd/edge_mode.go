@@ -460,11 +460,23 @@ func applyEdgeGate(cfg *config.Config, args []string) error {
 		activeEdgeMirror = runtime
 		return nil
 	case edgeModeSubmit:
-		return edgeBlock(resolved, args, &EdgeGateError{
-			Outcome:  "blocked",
-			Detail:   edgeCauseNoSubmitPath,
-			ExitCode: edgeExitBlocked,
-		})
+		if _, served := edgeSubmitServed[path]; !served {
+			return edgeBlock(resolved, args, &EdgeGateError{
+				Outcome:  "blocked",
+				Detail:   edgeCauseNoSubmitPath,
+				ExitCode: edgeExitBlocked,
+			})
+		}
+		runtime, _, err := edgeRuntime("")
+		if err != nil {
+			return edgeBlock(resolved, args, &EdgeGateError{
+				Outcome:  "blocked",
+				Detail:   err.Error(),
+				ExitCode: edgeExitBlocked,
+			})
+		}
+		activeEdgeSubmit = runtime
+		return nil
 	}
 	return nil
 }

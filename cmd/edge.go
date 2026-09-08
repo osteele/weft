@@ -192,6 +192,7 @@ var edgeDoctorCmd = &cobra.Command{
 				fmt.Fprintf(cmd.OutOrStdout(), "Role:      %s\n", role)
 				fmt.Fprintln(cmd.OutOrStdout(), "Transport: unavailable")
 				printEdgeViewDoctor(cmd, loaded, role, override)
+				printEdgeInboxDoctor(cmd, loaded, role)
 			}
 			return err
 		}
@@ -291,14 +292,35 @@ var edgeDoctorCmd = &cobra.Command{
 			}
 		}
 		fmt.Printf("\nRound trip ok in %s.\n", total.Round(time.Millisecond))
-		// The caveat belongs to the configured hub, not the unconfigured one:
-		// there is no inbox poller and no submit command yet, so a hub that
-		// looks ready is exactly the one whose operator needs telling.
-		fmt.Println("\nNote: this build has no inbox poller and no submit command, so " +
-			"nothing produces or consumes submissions yet.")
-		fmt.Println("`weft edge wait` cannot succeed until an acknowledgement writer exists.")
+		printEdgeInboxDoctor(cmd, cfg, rt.Role)
 		return nil
 	},
+}
+
+func printEdgeInboxDoctor(cmd *cobra.Command, cfg *config.Config, role string) {
+	if role == "edge" {
+		return
+	}
+	fmt.Fprintln(cmd.OutOrStdout())
+	if cfg == nil || cfg.Edge.Inbound.Bucket == "" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Inbox:     poller not configured")
+		return
+	}
+	state, err := loadEdgeInboxState()
+	if err != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Inbox:     poller state unreadable: %v\n", err)
+		return
+	}
+	if state.LastSuccessfulPoll.IsZero() {
+		fmt.Fprintln(cmd.OutOrStdout(), "Inbox:     no successful poll recorded")
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "Inbox:     last polled %s ago (%s), %d pointer(s) pending\n",
+			edgeview.FormatAge(time.Since(state.LastSuccessfulPoll)),
+			state.LastSuccessfulPoll.UTC().Format(time.RFC3339), state.PendingPointers)
+	}
+	if state.PollError != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Inbox error: %s\n", state.PollError)
+	}
 }
 
 func printEdgeViewDoctor(cmd *cobra.Command, cfg *config.Config, role, override string) {
@@ -418,8 +440,6 @@ var edgeWaitCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Println("Note: this build has no acknowledgement writer, so a submission cannot " +
-			"yet be acknowledged. This wait will report no-ack until one exists.")
 		expect := edgeExpectation(cfg, class)
 
 		// Measure from the submission, not from this process. A wait that

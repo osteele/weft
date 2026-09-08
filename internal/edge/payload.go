@@ -22,7 +22,8 @@ type WeftJobPayload struct {
 	WorkingDir        string            `json:"working_dir,omitempty"`
 	Project           string            `json:"project,omitempty"`
 	Description       string            `json:"description,omitempty"`
-	SourceArchive     []byte            `json:"source_archive,omitempty"`
+	SourceDigest      string            `json:"source_digest,omitempty"`
+	QueueParams       json.RawMessage   `json:"queue_params,omitempty"`
 	SpendCeilingUSD   float64           `json:"spend_ceiling_usd"`
 	TargetConstraints TargetConstraints `json:"target_constraints"`
 }

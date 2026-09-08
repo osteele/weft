@@ -98,6 +98,10 @@ type Job struct {
 	// opaque string. Empty means the submission was not attributable to a
 	// session, which is a normal value rather than an error.
 	SubmitterSession     string
+	EdgeSubmitterHost    string
+	EdgeSigningKeyID     string
+	EdgeDeploymentDigest string
+	EdgeSubmissionNonce  string
 	RawAttemptStatus     string `json:"-"` // Authoritative attempt enum before job_status exit-code normalization
 	LaunchID             *int64 // Cloud instance ID if this job is part of a cloud instance
 	CampaignJobIndex     *int   // Position within a cloud campaign sequence, if assigned
@@ -2411,6 +2415,16 @@ func RecordQueuedWithGPUAndIDTx(tx *sql.Tx, id int64, host, workingDir, command,
 type SubmissionIdentity struct {
 	Project          string
 	SubmitterSession string
+	Edge             *EdgeSubmissionProvenance
+}
+
+// EdgeSubmissionProvenance records the authenticated origin of a job admitted
+// from the edge inbox.
+type EdgeSubmissionProvenance struct {
+	SubmitterHost          string `json:"submitter_host"`
+	SigningKeyID           string `json:"signing_key_id"`
+	DeploymentSourceDigest string `json:"deployment_source_digest"`
+	Nonce                  string `json:"nonce"`
 }
 
 func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
@@ -2435,6 +2449,7 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 		requestedStatus = StatusQueued
 	}
 	var project, projectRoot, session any
+	var edgeHost, edgeKey, edgeDigest, edgeNonce any
 	if ident.Project != "" {
 		project = ident.Project
 		if root := workdir.VerifiedProjectRoot(ident.Project, workingDir); root != "" {
@@ -2444,10 +2459,16 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 	if strings.TrimSpace(ident.SubmitterSession) != "" {
 		session = strings.TrimSpace(ident.SubmitterSession)
 	}
+	if ident.Edge != nil {
+		edgeHost = strings.TrimSpace(ident.Edge.SubmitterHost)
+		edgeKey = strings.TrimSpace(ident.Edge.SigningKeyID)
+		edgeDigest = strings.TrimSpace(ident.Edge.DeploymentSourceDigest)
+		edgeNonce = strings.TrimSpace(ident.Edge.Nonce)
+	}
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			 	working_dir = excluded.working_dir,
 			 	command = excluded.command,
@@ -2457,8 +2478,13 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 			 	requested_status = excluded.requested_status,
 			 	project = COALESCE(excluded.project, jobs.project),
 			 	project_root = COALESCE(excluded.project_root, jobs.project_root),
-			 	submitter_session = COALESCE(excluded.submitter_session, jobs.submitter_session)`,
+			 	submitter_session = COALESCE(excluded.submitter_session, jobs.submitter_session),
+			 	edge_submitter_host = COALESCE(excluded.edge_submitter_host, jobs.edge_submitter_host),
+			 	edge_signing_key_id = COALESCE(excluded.edge_signing_key_id, jobs.edge_signing_key_id),
+			 	edge_deployment_source_digest = COALESCE(excluded.edge_deployment_source_digest, jobs.edge_deployment_source_digest),
+			 	edge_submission_nonce = COALESCE(excluded.edge_submission_nonce, jobs.edge_submission_nonce)`,
 			id, workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
+			edgeHost, edgeKey, edgeDigest, edgeNonce,
 		)
 		if err != nil {
 			return 0, err
@@ -2472,9 +2498,10 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
+		edgeHost, edgeKey, edgeDigest, edgeNonce,
 	)
 	if err != nil {
 		return 0, err
@@ -5755,6 +5782,64 @@ func PopulateSubmitterSessions(db *sql.DB, jobs []*Job) error {
 		}
 	}
 	return nil
+}
+
+// PopulateEdgeSubmissionProvenance fills authenticated edge origin fields from
+// the owning jobs rows. Empty fields identify an ordinary hub-side submission.
+func PopulateEdgeSubmissionProvenance(db *sql.DB, jobs []*Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	byID := make(map[int64][]*Job, len(jobs))
+	ids := make([]any, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if _, ok := byID[job.ID]; !ok {
+			ids = append(ids, job.ID)
+		}
+		byID[job.ID] = append(byID[job.ID], job)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
+	if err != nil {
+		return fmt.Errorf("read edge submission provenance: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var host, key, digest, nonce sql.NullString
+		if err := rows.Scan(&id, &host, &key, &digest, &nonce); err != nil {
+			return fmt.Errorf("scan edge submission provenance: %w", err)
+		}
+		for _, job := range byID[id] {
+			job.EdgeSubmitterHost = host.String
+			job.EdgeSigningKeyID = key.String
+			job.EdgeDeploymentDigest = digest.String
+			job.EdgeSubmissionNonce = nonce.String
+		}
+	}
+	return rows.Err()
+}
+
+// FindJobIDByEdgeNonce resolves an admitted edge submission nonce.
+func FindJobIDByEdgeNonce(db dbExecer, nonce string) (int64, bool, error) {
+	nonce = strings.TrimSpace(nonce)
+	if nonce == "" {
+		return 0, false, nil
+	}
+	var jobID int64
+	err := db.QueryRow(`SELECT id FROM jobs WHERE edge_submission_nonce = ? LIMIT 1`, nonce).Scan(&jobID)
+	if err == nil {
+		return jobID, true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return 0, false, err
 }
 
 // PopulateProjectRoots fills in Job.ProjectRoot from the owning jobs row in

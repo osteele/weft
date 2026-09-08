@@ -85,6 +85,51 @@ func TestUpIsIdempotentOnPopulatedSchema(t *testing.T) {
 	}
 }
 
+func TestEdgeSubmissionProvenanceMigrationIsReversibleAndIdempotent(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.ExecContext(ctx, `CREATE TABLE jobs (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create jobs: %v", err)
+	}
+	if err := applyAddEdgeSubmissionProvenance(ctx, database); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if err := applyAddEdgeSubmissionProvenance(ctx, database); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	for _, column := range []string{
+		"edge_submitter_host", "edge_signing_key_id",
+		"edge_deployment_source_digest", "edge_submission_nonce",
+	} {
+		exists, err := columnExists(ctx, database, "jobs", column)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", column, err)
+		}
+		if !exists {
+			t.Errorf("jobs.%s was not added", column)
+		}
+	}
+	if err := dropAddEdgeSubmissionProvenance(ctx, database); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	for _, column := range []string{
+		"edge_submitter_host", "edge_signing_key_id",
+		"edge_deployment_source_digest", "edge_submission_nonce",
+	} {
+		exists, err := columnExists(ctx, database, "jobs", column)
+		if err != nil {
+			t.Fatalf("inspect dropped %s: %v", column, err)
+		}
+		if exists {
+			t.Errorf("jobs.%s remains after drop", column)
+		}
+	}
+}
+
 func TestUpRepairsCampaignAffinityColumnAfterAppliedV24(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sql.Open("sqlite", dbPath)

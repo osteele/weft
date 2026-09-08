@@ -1437,7 +1437,7 @@ func runArtifactAdd(cmd *cobra.Command, args []string) error {
 }
 
 func parseJobID(raw string) (int64, error) {
-	id, err := ids.ParseJobID(raw)
+	id, err := resolveJobID(raw)
 	if err != nil || id <= 0 {
 		return 0, usageErrorf("invalid job id %q", raw)
 	}

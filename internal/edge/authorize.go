@@ -63,9 +63,8 @@ type Authorization struct {
 	// EffectiveSpendCeilingUSD is the lower of the requested ceiling and the
 	// grant, and is what an admitted submission is authorized to commit.
 	//
-	// Nothing reads it yet: there is no poller to carry it onto a job row and
-	// no placement path that consults it, so today it is the value admission
-	// was decided against rather than a limit anything enforces.
+	// The inbox poller carries this value into the durable job request before
+	// the ordinary recording and placement path sees it.
 	EffectiveSpendCeilingUSD float64
 	// Targets is the set of execution targets this submission may use, after
 	// intersecting the request with the allowlist.

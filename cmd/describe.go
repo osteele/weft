@@ -62,7 +62,7 @@ func init() {
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
-	jobID, err := ids.ParseJobID(args[0])
+	jobID, err := resolveJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}

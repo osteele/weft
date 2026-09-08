@@ -61,6 +61,9 @@ func buildJobStatusPresentation(database *sql.DB, jobID int64, statusHints bool)
 	if job == nil {
 		return jobPresentationView{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
+	if err := db.PopulateEdgeSubmissionProvenance(database, []*db.Job{job}); err != nil {
+		return jobPresentationView{}, err
+	}
 	hydrateQueueBlockedReasons([]*db.Job{job})
 	applyAttemptOutcomeOverrides(database, []*db.Job{job})
 
@@ -81,6 +84,9 @@ func buildJobInfoPresentation(database *sql.DB, jobID int64) (jobPresentationVie
 	}
 	if job == nil {
 		return jobPresentationView{}, fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
+	}
+	if err := db.PopulateEdgeSubmissionProvenance(database, []*db.Job{job}); err != nil {
+		return jobPresentationView{}, err
 	}
 	hydrateQueueBlockedReasons([]*db.Job{job})
 	formattedID := ids.FormatJobID(job.ID)

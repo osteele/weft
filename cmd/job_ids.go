@@ -1,17 +1,23 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
 )
 
 // ParseJobIDs parses command-line arguments into a deduplicated, sorted list of job IDs.
-// Supports individual IDs (123 / wj123), ranges (123:127 / wj123:127 / wj123:wj127
-// / 123::127 / 123...127), and comma-separated lists (123,124,125).
+// Supports individual IDs (123 / wj123 / an edge submission nonce), ranges
+// (123:127 / wj123:127 / wj123:wj127 / 123::127 / 123...127), and
+// comma-separated lists (123,124,125).
 // Prints a warning to stderr if duplicates are found.
 //
 // Syntax:
@@ -131,11 +137,57 @@ func parseJobIDArg(arg string) ([]int64, error) {
 	}
 
 	// Single ID
-	id, err := ids.ParseJobID(arg)
+	id, err := resolveJobID(arg)
 	if err != nil {
-		return nil, fmt.Errorf("invalid job ID %q: expected a numeric or wj-prefixed ID", arg)
+		return nil, err
 	}
 	return []int64{id}, nil
+}
+
+func resolveJobID(raw string) (int64, error) {
+	if id, err := ids.ParseJobID(raw); err == nil {
+		return id, nil
+	}
+	if _, err := edge.NonceTime(raw); err != nil {
+		return 0, fmt.Errorf("invalid job ID %q: expected a numeric, wj-prefixed ID, or edge submission nonce", raw)
+	}
+	if activeEdgeMirror != nil {
+		cfg, err := config.Load()
+		if err != nil {
+			return 0, err
+		}
+		transport, err := edgeTransport(cfg, "")
+		if err != nil {
+			return 0, err
+		}
+		ack, err := edgeFetchAck(context.Background(), &edge.Runtime{Transport: transport}, raw)
+		if err != nil {
+			if errors.Is(err, edge.ErrNotFound) {
+				return 0, fmt.Errorf("submission %s has no acknowledgement; its job id is assigned on admission; wait with `weft edge wait %s`", raw, raw)
+			}
+			return 0, fmt.Errorf("resolve edge submission nonce %s: %w", raw, err)
+		}
+		if !ack.Accepted {
+			return 0, fmt.Errorf("submission %s was refused: %s: %s", raw, ack.ReasonCode, ack.Detail)
+		}
+		if ack.JobID <= 0 {
+			return 0, fmt.Errorf("submission %s is admitted but has no assigned job id yet; wait with `weft edge wait %s`", raw, raw)
+		}
+		return ack.JobID, nil
+	}
+	database, err := db.OpenForReading()
+	if err != nil {
+		return 0, fmt.Errorf("open database to resolve edge submission nonce: %w", err)
+	}
+	defer database.Close()
+	jobID, found, err := db.FindJobIDByEdgeNonce(database, raw)
+	if err != nil {
+		return 0, fmt.Errorf("resolve edge submission nonce: %w", err)
+	}
+	if !found {
+		return 0, fmt.Errorf("edge submission nonce %s has no admitted job", raw)
+	}
+	return jobID, nil
 }
 
 // ParseJobIDsForJobCommand parses job IDs for a command that operates only on
@@ -156,9 +208,9 @@ func parseOptionalJobIDFlag(name, raw string) (int64, error) {
 	if raw == "" {
 		return 0, nil
 	}
-	id, err := ids.ParseJobID(raw)
+	id, err := resolveJobID(raw)
 	if err != nil || id <= 0 {
-		return 0, usageErrorf("invalid --%s job ID %q: expected a numeric or wj-prefixed ID", name, raw)
+		return 0, usageErrorf("invalid --%s job ID %q: expected a numeric, wj-prefixed ID, or edge submission nonce", name, raw)
 	}
 	return id, nil
 }

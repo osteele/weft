@@ -2307,8 +2307,24 @@ The hub view serves these mirror commands:
 - `weft incidents`
 
 Other mirror-classified commands remain blocked until their view sections are
-implemented. Submit-classified commands such as `run`, `cancel`, and `edit`
-remain blocked until the submission path is connected end to end.
+implemented. `weft run` and `weft job run` submit signed job requests through
+the inbound store. They capture the current working tree, so uncommitted files
+are part of the submitted source closure just as they are for a hub-local run.
+Other submit-classified commands remain blocked until their payload kind and
+hub handler are implemented.
+
+An admitted submission prints the hub-assigned job id, for example `wj123`. If
+the acknowledgement does not arrive within the configured admission wait, the
+command prints the submission nonce instead. The submission still stands: a
+missing acknowledgement is unknown, never failure. Use `weft edge wait NONCE`
+to wait again. Any command argument documented as a job id also accepts that
+nonce; on the edge it resolves through the acknowledgement, and on the hub it
+resolves through the admitted job row.
+
+The edge waits for `[edge.expect.job].typical_minutes`, sixty
+seconds by default; `[edge] admission_wait_seconds` overrides that bound. The
+hub polls every fifteen seconds by default; `[edge] poll_interval_seconds`
+sets another positive interval.
 
 Each mirrored text result ends with its source and publication age:
 

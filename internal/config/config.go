@@ -440,6 +440,12 @@ type EdgeConfig struct {
 	// SubmitterHost is the name this edge submits under. It must match the
 	// host bound to its key on the hub.
 	SubmitterHost string `yaml:"submitter_host" toml:"submitter_host"`
+	// AdmissionWaitSeconds bounds the submit command's initial wait for a hub
+	// acknowledgement. An absent value uses the job expectation and then
+	// the sixty-second protocol default.
+	AdmissionWaitSeconds *int `yaml:"admission_wait_seconds" toml:"admission_wait_seconds"`
+	// PollIntervalSeconds is the hub inbox cadence (default 15 seconds).
+	PollIntervalSeconds *int `yaml:"poll_interval_seconds" toml:"poll_interval_seconds"`
 
 	// Hub-side settings.
 
@@ -456,8 +462,8 @@ type EdgeConfig struct {
 	// is zero, which authorizes nothing rather than everything.
 	//
 	// It governs ADMISSION: a submission declaring more than the effective
-	// ceiling is refused. It does not yet cap any dollar, because nothing
-	// downstream reads the resulting authorization — see docs/ROADMAP.md.
+	// ceiling is refused. The inbox poller writes the effective value into the
+	// job's ordinary max-spend override, where rental enforcement reads it.
 	// It is also per submission, with no running total, so it bounds what one
 	// submission may commit rather than what a plan may spend in aggregate.
 	MaxSpendUSD float64 `yaml:"max_spend_usd" toml:"max_spend_usd"`
@@ -472,6 +478,42 @@ type EdgeConfig struct {
 	// Expectation envelopes, per job class, so the wait command can say
 	// whether an elapsed time is normal without a code change.
 	Expect map[string]ExpectConfig `yaml:"expect" toml:"expect"`
+}
+
+const (
+	DefaultEdgeAdmissionWait = time.Minute
+	DefaultEdgePollInterval  = 15 * time.Second
+)
+
+// AdmissionWait is the bounded edge-side acknowledgement wait.
+func (c EdgeConfig) AdmissionWait() time.Duration {
+	if c.AdmissionWaitSeconds != nil {
+		return time.Duration(*c.AdmissionWaitSeconds) * time.Second
+	}
+	if job, ok := c.Expect["job"]; ok && job.TypicalMinutes > 0 {
+		return time.Duration(job.TypicalMinutes * float64(time.Minute))
+	}
+	return DefaultEdgeAdmissionWait
+}
+
+// PollInterval is the hub's inbox polling cadence.
+func (c EdgeConfig) PollInterval() time.Duration {
+	if c.PollIntervalSeconds != nil {
+		return time.Duration(*c.PollIntervalSeconds) * time.Second
+	}
+	return DefaultEdgePollInterval
+}
+
+// Validate rejects intervals that would disable submission progress while
+// leaving the channel configured.
+func (c EdgeConfig) Validate() error {
+	if c.AdmissionWaitSeconds != nil && *c.AdmissionWaitSeconds <= 0 {
+		return fmt.Errorf("edge.admission_wait_seconds must be positive")
+	}
+	if c.PollIntervalSeconds != nil && *c.PollIntervalSeconds <= 0 {
+		return fmt.Errorf("edge.poll_interval_seconds must be positive")
+	}
+	return c.View.Validate()
 }
 
 // ExpectConfig declares how long work of some class is expected to take, and
@@ -1440,7 +1482,7 @@ func Load() (*Config, error) {
 		}
 	}
 
-	if err := cfg.Edge.View.Validate(); err != nil {
+	if err := cfg.Edge.Validate(); err != nil {
 		return cfg, err
 	}
 

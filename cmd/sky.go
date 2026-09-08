@@ -112,7 +112,7 @@ func runSkyImport(cmd *cobra.Command, args []string) error {
 		obs.Command = strings.TrimSpace(skyImportCommand)
 	}
 	if strings.TrimSpace(skyImportJob) != "" {
-		jobID, err := ids.ParseJobID(skyImportJob)
+		jobID, err := resolveJobID(skyImportJob)
 		if err != nil {
 			return fmt.Errorf("parse --job: %w", err)
 		}

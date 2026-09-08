@@ -36,6 +36,7 @@ credentials that grant no access to results.
 
 ```text
 edge/v1/payload/<payload-digest>     content-addressed payload blobs
+edge/v1/source/<source-digest>       content-addressed working-tree closures
 edge/v1/inbox/<nonce>                the pointer; a framed, signed envelope
 edge/v1/ack/<nonce>.json             hub-written acknowledgement
 ```
@@ -74,11 +75,14 @@ the third instance of it will too.
 The order is load-bearing. An interrupted submission must never leave a
 pointer to a payload that is not fully present.
 
-1. Write the payload to `edge/v1/payload/<digest>`. Content-addressed, so a
+1. Write the working-tree closure to `edge/v1/source/<digest>` when the
+   submission names one. It is a separate content-addressed object because a
+   source closure can be much larger than the job request.
+2. Write the payload to `edge/v1/payload/<digest>`. Content-addressed, so a
    partial or repeated write is harmless and a retry is free.
-2. Write the pointer to `edge/v1/inbox/<nonce>` with `If-None-Match: *`.
+3. Write the pointer to `edge/v1/inbox/<nonce>` with `If-None-Match: *`.
 
-Step 2 is the commit point. The conditional write makes it atomic: the first
+Step 3 is the commit point. The conditional write makes it atomic: the first
 writer wins and a retry of an already-committed submission fails the
 precondition, which the edge reports as *already submitted*, not as an error.
 
@@ -160,6 +164,7 @@ For `weft.job-submission/v1` the payload is:
   "command": "uv run train.py",
   "working_dir": "...",
   "project": "...",
+  "source_digest": "sha256:...",
   "spend_ceiling_usd": 5.0,
   "target_constraints": { "hosts": ["studio"], "gpu": "nvidia>=24GB" }
 }

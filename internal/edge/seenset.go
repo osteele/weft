@@ -100,6 +100,20 @@ func (s *FileSeenSet) Record(nonce string, submittedAt time.Time) error {
 	return nil
 }
 
+// Forget removes a record when admission could not reach its durable effect.
+// Pollers use it only to roll back a synchronous hub-side failure such as a
+// locked database; protocol refusals remain terminal.
+func (s *FileSeenSet) Forget(nonce string) error {
+	path, err := s.path(nonce)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove seen record %s: %w", nonce, err)
+	}
+	return nil
+}
+
 // Prune removes records older than the retention window.
 //
 // Retention must exceed the submission TTL. A nonce whose record is dropped

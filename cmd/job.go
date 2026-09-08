@@ -1711,6 +1711,10 @@ func renderJobInfoFromLedger(w, errW io.Writer, database *sql.DB, job *db.Job) e
 	// Show full job details
 	fmt.Fprintf(w, "Job ID:      %s\n", ids.FormatJobID(job.ID))
 	fmt.Fprintf(w, "Host:        %s\n", job.TargetDisplay())
+	if job.EdgeSubmitterHost != "" {
+		fmt.Fprintf(w, "Submitted from: %s (key %s, deployment %s, nonce %s)\n",
+			job.EdgeSubmitterHost, job.EdgeSigningKeyID, job.EdgeDeploymentDigest, job.EdgeSubmissionNonce)
+	}
 	printJobLifecycleProof(w, database, job)
 	// Show status with waiting info. Tombstoned annotation comes
 	// inline so the operator notices it before reading further —

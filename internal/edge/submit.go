@@ -13,6 +13,11 @@ import (
 type SubmitRequest struct {
 	SubmitterHost          string
 	DeploymentSourceDigest string
+	// SourceClosure is the working-tree snapshot named by SourceDigest in a
+	// job payload. It is stored separately because source trees can be much
+	// larger than the signed request document.
+	SourceClosure []byte
+	SourceDigest  string
 	// Kind names the payload schema. The hub routes to a validator by this
 	// value rather than inferring one.
 	Kind PayloadKind
@@ -27,10 +32,12 @@ type SubmitRequest struct {
 type SubmitResult struct {
 	Nonce         string
 	PayloadDigest string
+	SourceDigest  string
 	Committed     bool
 }
 
-// Submit publishes a submission: payload first, pointer last.
+// Submit publishes a submission: source closure first when present, payload
+// second, and pointer last.
 //
 // The order is load-bearing. An interrupted submission must never leave a
 // pointer to a payload that is not fully present, so the payload is written to
@@ -53,13 +60,29 @@ func Submit(ctx context.Context, t Transport, signer *Signer, req SubmitRequest,
 
 	sum := sha256.Sum256(req.Payload)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
+	if len(req.SourceClosure) == 0 && req.SourceDigest != "" {
+		return nil, fmt.Errorf("source digest %s has no source closure", req.SourceDigest)
+	}
+	if len(req.SourceClosure) > 0 {
+		sourceSum := sha256.Sum256(req.SourceClosure)
+		actual := "sha256:" + hex.EncodeToString(sourceSum[:])
+		if req.SourceDigest == "" {
+			req.SourceDigest = actual
+		}
+		if req.SourceDigest != actual {
+			return nil, fmt.Errorf("source closure digest is %s, want %s", actual, req.SourceDigest)
+		}
+		if err := t.Put(ctx, SourceKey(req.SourceDigest), req.SourceClosure); err != nil {
+			return nil, fmt.Errorf("upload source closure: %w", err)
+		}
+	}
 
 	nonce, err := NewNonce(now)
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. Payload, content-addressed. Rewriting the same bytes to the same key
+	// 2. Payload, content-addressed. Rewriting the same bytes to the same key
 	// is a no-op, so this step needs no conditional write and is safe to retry.
 	if err := t.Put(ctx, PayloadKey(digest), req.Payload); err != nil {
 		return nil, fmt.Errorf("upload payload: %w", err)
@@ -79,18 +102,46 @@ func Submit(ctx context.Context, t Transport, signer *Signer, req SubmitRequest,
 		return nil, err
 	}
 
-	// 2. Pointer. The commit point.
+	// 3. Pointer. The commit point.
 	err = t.PutIfAbsent(ctx, InboxKey(nonce), object)
 	if errors.Is(err, ErrAlreadyExists) {
 		// The nonce is freshly generated, so this is all but impossible; if it
 		// happens, the submission is already committed and creating a second
 		// one would be the bug.
-		return &SubmitResult{Nonce: nonce, PayloadDigest: digest, Committed: false}, nil
+		return &SubmitResult{Nonce: nonce, PayloadDigest: digest, SourceDigest: req.SourceDigest, Committed: false}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("commit submission pointer: %w", err)
 	}
-	return &SubmitResult{Nonce: nonce, PayloadDigest: digest, Committed: true}, nil
+	return &SubmitResult{Nonce: nonce, PayloadDigest: digest, SourceDigest: req.SourceDigest, Committed: true}, nil
+}
+
+// FetchSourceClosure retrieves and digest-checks the source object named by a
+// verified job payload. A missing object is a terminal protocol refusal. A
+// transport error leaves the submission status unknown so the poller retries.
+func FetchSourceClosure(ctx context.Context, t Transport, nonce, digest string) ([]byte, *Refusal, error) {
+	if digest == "" {
+		return nil, refuse(ReasonPayloadMismatch,
+			"submission %s has no source_digest", nonce), nil
+	}
+	data, err := t.Get(ctx, SourceKey(digest))
+	if errors.Is(err, ErrNotFound) {
+		return nil, refuse(ReasonPayloadMismatch,
+			"submission %s points at source closure %s, which is not present in the inbound store",
+			nonce, digest), nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("source closure %s for submission %s could not be read; status is unknown: %w",
+			digest, nonce, err)
+	}
+	sum := sha256.Sum256(data)
+	actual := "sha256:" + hex.EncodeToString(sum[:])
+	if actual != digest {
+		return nil, refuse(ReasonPayloadMismatch,
+			"submission %s declares source closure %s but the stored object hashes to %s",
+			nonce, digest, actual), nil
+	}
+	return data, nil, nil
 }
 
 // FetchPayload retrieves and verifies the payload a verified envelope points

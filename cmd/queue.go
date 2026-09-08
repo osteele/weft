@@ -907,7 +907,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueFront(cmd *cobra.Command, args []string) error {
-	jobID, err := ids.ParseJobID(args[0])
+	jobID, err := resolveJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -954,7 +954,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 }
 
 func runEdit(cmd *cobra.Command, args []string) error {
-	jobID, err := ids.ParseJobID(args[0])
+	jobID, err := resolveJobID(args[0])
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
@@ -1644,7 +1644,7 @@ func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64
 				if value == "" {
 					continue
 				}
-				depID, err := ids.ParseJobID(value)
+				depID, err := resolveJobID(value)
 				if err != nil {
 					return fmt.Errorf("%w: %q", errInvalidDepJobID, part)
 				}

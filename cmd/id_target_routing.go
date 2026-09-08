@@ -3,6 +3,7 @@ package cmd
 import (
 	"strings"
 
+	"github.com/osteele/weft/internal/edge"
 	"github.com/spf13/cobra"
 )
 
@@ -53,6 +54,16 @@ func resolveIDTargetKind(args []string) (idTargetKind, error) {
 	}
 	if sawInstance {
 		return idTargetInstance, nil
+	}
+	allNonces := len(args) > 0
+	for _, arg := range args {
+		if _, err := edge.NonceTime(strings.TrimSpace(arg)); err != nil {
+			allNonces = false
+			break
+		}
+	}
+	if allNonces {
+		return idTargetJob, nil
 	}
 	return idTargetUnknown, usageErrorf("ambiguous ID(s): use wj... for jobs or wi... for instances")
 }

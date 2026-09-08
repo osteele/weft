@@ -1293,7 +1293,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
 	}
-	jobID, err := ids.ParseJobID(args[1])
+	jobID, err := resolveJobID(args[1])
 	if err != nil {
 		return fmt.Errorf("invalid job ID %q: %w", args[1], err)
 	}

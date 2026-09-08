@@ -297,6 +297,9 @@ func buildJobListModel(database *sql.DB, args []string) (*jobListView, error) {
 	if err := db.PopulateSubmitterSessions(database, jobs); err != nil {
 		return nil, err
 	}
+	if err := db.PopulateEdgeSubmissionProvenance(database, jobs); err != nil {
+		return nil, err
+	}
 	return &jobListView{Jobs: jobs, Selection: currentJobListJSONSelection()}, nil
 }
 

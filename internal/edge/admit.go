@@ -14,6 +14,7 @@ type Admission struct {
 	Envelope      Envelope
 	Authorization Authorization
 	Payload       []byte
+	SourceClosure []byte
 	// Job is the parsed payload for KindWeftJobSubmission.
 	Job *WeftJobPayload
 	// SigningHost is the authenticated identity, taken from the keyring entry
@@ -93,8 +94,9 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 	// no handler here is a programming error rather than a bad submission, so
 	// it fails loudly rather than being admitted unvalidated.
 	var (
-		job  *WeftJobPayload
-		auth *Authorization
+		job           *WeftJobPayload
+		auth          *Authorization
+		sourceClosure []byte
 	)
 	switch env.PayloadKind {
 	case KindWeftJobSubmission:
@@ -105,6 +107,15 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 		auth, refusal = Authorize(verified, job, opts.Policy)
 		if refusal != nil {
 			return nil, refusal, nil
+		}
+		if job.SourceDigest != "" {
+			sourceClosure, refusal, err = FetchSourceClosure(ctx, t, env.Nonce, job.SourceDigest)
+			if err != nil {
+				return nil, nil, err
+			}
+			if refusal != nil {
+				return nil, refusal, nil
+			}
 		}
 	case KindPlanEnded:
 		ended, refusal := ParsePlanEndedPayload(payload)
@@ -149,6 +160,7 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 		Envelope:      env,
 		Authorization: *auth,
 		Payload:       payload,
+		SourceClosure: sourceClosure,
 		Job:           job,
 		SigningHost:   verified.SigningHost(),
 		KeyID:         verified.KeyID(),

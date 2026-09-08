@@ -144,6 +144,35 @@ func TestRoundTripAdmitsSignedSubmission(t *testing.T) {
 	}
 }
 
+func TestAdmitFetchesAndDigestChecksSourceClosure(t *testing.T) {
+	h := newHarness(t)
+	closure := []byte("source closure")
+	sum := sha256.Sum256(closure)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	request := jobRequest(WeftJobPayload{
+		Command: "echo hello", SourceDigest: digest, SpendCeilingUSD: 5,
+		TargetConstraints: TargetConstraints{Hosts: []string{"studio"}},
+	})
+	request.SourceClosure = closure
+	request.SourceDigest = digest
+	res := h.submit(request)
+	if err := h.tr.Put(context.Background(), SourceKey(digest), []byte("tampered source closure")); err != nil {
+		t.Fatalf("tamper source object: %v", err)
+	}
+
+	_, refusal := h.admitNonce(res.Nonce)
+	if refusal == nil || refusal.Code != ReasonPayloadMismatch {
+		t.Fatalf("refusal = %#v, want %s", refusal, ReasonPayloadMismatch)
+	}
+	seen, err := h.seen.Seen(res.Nonce)
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if seen {
+		t.Fatal("source mismatch was recorded as admitted")
+	}
+}
+
 // A retried submission with the same nonce must create no second job. This is
 // the property that stops a retry loop from launching three paid rentals.
 func TestReplayedNonceRefusedAfterAdmission(t *testing.T) {
