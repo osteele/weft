@@ -155,6 +155,14 @@ func TestShouldRedispatchSyncedJob(t *testing.T) {
 			wantRedispatch: false,
 		},
 		{
+			name:           "pending job with stale payload attempt is re-dispatched",
+			job:            pendingJob,
+			state:          state,
+			payloads:       map[int64]remoteJobPayload{5: {observed: true, exists: true, runID: 6, runIDOK: true}},
+			payloadErr:     nil,
+			wantRedispatch: true,
+		},
+		{
 			name:           "pending job with unreadable run id remains unknown",
 			job:            pendingJob,
 			state:          state,
