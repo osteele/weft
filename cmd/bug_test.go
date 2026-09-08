@@ -241,6 +241,81 @@ func TestGitHubBugReportCreatesIssueWithMetadata(t *testing.T) {
 	}
 }
 
+// This kills the mutation that records post-close recurrences without
+// surfacing them: weft bug show must print the count and recency, and
+// weft bug list must resurface a closed bug under repeated recent recurrence
+// while keeping a single straggler out of the default list.
+func TestBugShowAndListSurfacePostCloseRecurrences(t *testing.T) {
+	db.SetupTestBugDB(t)
+	setupLocalBugTrackerConfig(t)
+	restoreBugFlags(t)
+
+	bugReportFingerprint = "cli.recurring.invariant"
+	if err := runBugReport(&cobra.Command{}, []string{"recurring", "invariant"}); err != nil {
+		t.Fatalf("runBugReport: %v", err)
+	}
+	bugCloseReason = "fixed"
+	if err := runBugClose(&cobra.Command{}, []string{"wb1"}); err != nil {
+		t.Fatalf("runBugClose: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		err := runBugReport(&cobra.Command{}, []string{"recurring", "invariant"})
+		if err == nil || !strings.Contains(err.Error(), "recurrence recorded") {
+			t.Fatalf("report %d against closed bug: err = %v, want recurrence-recorded error", i+1, err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := runBugShow(&cobra.Command{}, []string{"wb1"}); err != nil {
+			t.Fatalf("runBugShow: %v", err)
+		}
+	})
+	if !strings.Contains(out, "Status:      closed") {
+		t.Fatalf("show output lost the close verdict = %q", out)
+	}
+	if !strings.Contains(out, "Recurrences after close: 2 (most recent ") {
+		t.Fatalf("show output missing post-close recurrences = %q", out)
+	}
+
+	out = captureStdout(t, func() {
+		if err := runBugList(&cobra.Command{}, nil); err != nil {
+			t.Fatalf("runBugList: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wb1") {
+		t.Fatalf("default list did not resurface a closed bug with repeated recent recurrences = %q", out)
+	}
+
+	// A single post-close report stays out of the default list.
+	bugReportFingerprint = "cli.straggler.invariant"
+	if err := runBugReport(&cobra.Command{}, []string{"straggler", "invariant"}); err != nil {
+		t.Fatalf("runBugReport second: %v", err)
+	}
+	if err := runBugClose(&cobra.Command{}, []string{"wb2"}); err != nil {
+		t.Fatalf("runBugClose second: %v", err)
+	}
+	if err := runBugReport(&cobra.Command{}, []string{"straggler", "invariant"}); err == nil {
+		t.Fatal("expected closed-fingerprint error for straggler report")
+	}
+	out = captureStdout(t, func() {
+		if err := runBugList(&cobra.Command{}, nil); err != nil {
+			t.Fatalf("runBugList with straggler: %v", err)
+		}
+	})
+	if strings.Contains(out, "wb2") {
+		t.Fatalf("default list surfaced a single straggler = %q", out)
+	}
+	bugListAll = true
+	out = captureStdout(t, func() {
+		if err := runBugList(&cobra.Command{}, nil); err != nil {
+			t.Fatalf("runBugList --all: %v", err)
+		}
+	})
+	if !strings.Contains(out, "wb2") {
+		t.Fatalf("list --all dropped a closed bug with a recurrence = %q", out)
+	}
+}
+
 func setupLocalBugTrackerConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()

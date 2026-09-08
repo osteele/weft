@@ -204,11 +204,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddEdgeAuthorizedTargets},
 		&goose.GoFunc{RunDB: dropAddEdgeAuthorizedTargets},
 	)
+	addBugRecurrenceColumns := goose.NewGoMigration(
+		63,
+		&goose.GoFunc{RunDB: applyAddBugRecurrenceColumns},
+		&goose.GoFunc{RunDB: dropAddBugRecurrenceColumns},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets, addBugRecurrenceColumns),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -265,6 +270,39 @@ func dropAddOnStartProbeSeenColumn(ctx context.Context, db *sql.DB) error {
 	// the presence of indexes and FKs. Down is best-effort; the index
 	// drop above is the load-bearing part for a clean re-up.
 	_, _ = db.ExecContext(ctx, `ALTER TABLE launches DROP COLUMN first_onstart_probe_seen_unix`)
+	return nil
+}
+
+// applyAddBugRecurrenceColumns adds the post-close recurrence counters to the
+// legacy bugs table in this database. SQLite has no ALTER TABLE ... ADD COLUMN
+// IF NOT EXISTS, so the ALTER is guarded by a pragma_table_info check — the
+// standalone bug ledger adds the same columns through the equivalent check in
+// initBugSchema, and the two schemas stay shaped alike.
+func applyAddBugRecurrenceColumns(ctx context.Context, db *sql.DB) error {
+	for _, col := range []struct{ name, ddl string }{
+		{"recurrences", `ALTER TABLE bugs ADD COLUMN recurrences INTEGER NOT NULL DEFAULT 0`},
+		{"last_recurrence_at", `ALTER TABLE bugs ADD COLUMN last_recurrence_at INTEGER NOT NULL DEFAULT 0`},
+	} {
+		exists, err := columnExists(ctx, db, "bugs", col.name)
+		if err != nil {
+			return fmt.Errorf("inspect bugs columns: %w", err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("add bugs.%s column: %w", col.name, err)
+		}
+	}
+	return nil
+}
+
+func dropAddBugRecurrenceColumns(ctx context.Context, db *sql.DB) error {
+	for _, col := range []string{"last_recurrence_at", "recurrences"} {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE bugs DROP COLUMN %s`, col)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1190,7 +1228,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61, 63}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

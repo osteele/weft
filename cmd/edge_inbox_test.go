@@ -1418,6 +1418,65 @@ func TestEdgeClosedBugFingerprintDrainsAsActionFailure(t *testing.T) {
 	}
 }
 
+// This kills the mutation that records a post-close recurrence only when the
+// caller treats the closed-fingerprint error as success: the hub must record
+// the occurrence even though the edge report drains as a refusal.
+func TestEdgeClosedBugFingerprintRecordsRecurrence(t *testing.T) {
+	transport, err := edge.NewFSTransport(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobsDB := db.SetupTestDB(t)
+	bugDB := db.SetupTestBugDB(t)
+	bug, _, err := db.ReportBug(bugDB, db.BugReport{Title: "closed edge invariant", Fingerprint: "closed-edge-recurrent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CloseBug(bugDB, bug.ID, "fixed"); err != nil {
+		t.Fatal(err)
+	}
+	hub, signers := edgeControlFixture(t, transport)
+	payload, err := edge.EncodeWeftBugReportPayload(edge.WeftBugReportPayload{
+		ReportID: "recurrent-report", Action: edge.BugReportCreate,
+		Title: "closed edge invariant", Fingerprint: "closed-edge-recurrent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := edge.Submit(context.Background(), transport, signers["plan-owner"], edge.SubmitRequest{
+		SubmitterHost: "edge-alpha", Kind: edge.KindWeftBugReport, Payload: payload,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if pending, err := pollEdgeInboxOnce(context.Background(), jobsDB, edgeInboxDeps{
+		Transport: transport, Runtime: hub, HubHost: "hub-alpha",
+	}); err != nil || pending != 0 {
+		t.Fatalf("poll: pending=%d err=%v", pending, err)
+	}
+	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Accepted || ack.ReasonCode != string(edge.ReasonActionFailed) {
+		t.Fatalf("closed-fingerprint acknowledgement = %#v", ack)
+	}
+	bugs, err := db.ListBugs(bugDB, true)
+	if err != nil || len(bugs) != 1 {
+		t.Fatalf("bugs=%#v err=%v", bugs, err)
+	}
+	if bugs[0].Status != "closed" {
+		t.Fatalf("status = %q, want the close verdict to stand", bugs[0].Status)
+	}
+	if bugs[0].Recurrences != 1 {
+		t.Fatalf("recurrences = %d, want the refused edge report recorded", bugs[0].Recurrences)
+	}
+	if bugs[0].Occurrences != 1 {
+		t.Fatalf("occurrences = %d, want the pre-close count unchanged", bugs[0].Occurrences)
+	}
+}
+
 // This kills the mutation that treats confirmed absence of a bug as an
 // unknown database failure and retains its note pointer.
 func TestEdgeMissingBugNoteDrainsAsActionFailure(t *testing.T) {

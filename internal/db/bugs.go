@@ -34,6 +34,12 @@ type Bug struct {
 	UpdatedAt   int64
 	ClosedAt    *int64
 	CloseReason string
+	// Recurrences counts reports of this fingerprint that arrived while the
+	// bug was closed; a close verdict does not discard later observations.
+	// Pre-close reports are counted in Occurrences.
+	Recurrences int
+	// LastRecurrenceAt is the most recent post-close report, 0 when none.
+	LastRecurrenceAt int64
 }
 
 type BugNote struct {
@@ -60,11 +66,21 @@ type BugReport struct {
 type bugFingerprintClosedError struct {
 	bugID       int64
 	fingerprint string
+	recurrences int
+	// lastRecurrenceAt is 0 only when the error is built without having
+	// recorded the recurrence, which the ReportBug closed path never does.
+	lastRecurrenceAt int64
 }
 
 func (e *bugFingerprintClosedError) Error() string {
 	bugRef := FormatBugID(e.bugID)
-	return fmt.Sprintf("bug %s with fingerprint %q is closed; use `weft bug reopen %s` to reopen it, or report with a different --fingerprint", bugRef, e.fingerprint, bugRef)
+	recorded := ""
+	if e.recurrences > 0 {
+		recorded = fmt.Sprintf("recurrence recorded (%d since close, most recent %s); ",
+			e.recurrences, time.Unix(e.lastRecurrenceAt, 0).Format("2006-01-02 15:04:05"))
+	}
+	return fmt.Sprintf("bug %s with fingerprint %q is closed; %suse `weft bug reopen %s` to reopen it, or report with a different --fingerprint",
+		bugRef, e.fingerprint, recorded, bugRef)
 }
 
 // IsBugFingerprintClosed reports whether the bug ledger confirmed that a
@@ -150,7 +166,9 @@ func initBugSchema(database *sql.DB) error {
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			closed_at INTEGER,
-			close_reason TEXT NOT NULL DEFAULT ''
+			close_reason TEXT NOT NULL DEFAULT '',
+			recurrences INTEGER NOT NULL DEFAULT 0,
+			last_recurrence_at INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_open_fingerprint
 			ON bugs(fingerprint)
@@ -178,7 +196,49 @@ func initBugSchema(database *sql.DB) error {
 			return err
 		}
 	}
+	return ensureBugColumns(database)
+}
+
+// bugColumnDDLs maps each bugs column that post-dates the original schema to
+// its ALTER TABLE statement. bugs.db has no version counter (see
+// checkDevBuildMayMigrate for why that is deliberate), so schema evolution is
+// idempotent column checks on every open.
+func bugColumnDDLs() [][2]string {
+	return [][2]string{
+		{"recurrences", `ALTER TABLE bugs ADD COLUMN recurrences INTEGER NOT NULL DEFAULT 0`},
+		{"last_recurrence_at", `ALTER TABLE bugs ADD COLUMN last_recurrence_at INTEGER NOT NULL DEFAULT 0`},
+	}
+}
+
+func ensureBugColumns(database *sql.DB) error {
+	for _, col := range bugColumnDDLs() {
+		present, err := bugColumnPresent(database, col[0])
+		if err != nil {
+			return err
+		}
+		if present {
+			continue
+		}
+		if _, err := database.Exec(col[1]); err != nil {
+			// A concurrent opener can add the column between the check and
+			// the ALTER; the column existing now is success, anything else
+			// is a real failure.
+			if present, err := bugColumnPresent(database, col[0]); err == nil && present {
+				continue
+			}
+			return err
+		}
+	}
 	return nil
+}
+
+func bugColumnPresent(database *sql.DB, name string) (bool, error) {
+	var count int
+	err := database.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('bugs') WHERE name = ?`, name).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func importLegacyBugs(database *sql.DB) error {
@@ -228,6 +288,16 @@ func legacyHasBugTables(database *sql.DB) bool {
 	return err == nil && count == 2
 }
 
+// readLegacyBugs reads the bug ledger that older builds kept inside jobs.db,
+// for one-time import into bugs.db.
+//
+// It deliberately does not carry recurrences or last_recurrence_at. Those
+// columns exist in the jobs.db table so its schema stays consistent with the
+// golden fixture, but no write path can populate them: every caller of
+// ReportBug and CloseBug takes its handle from OpenBugDB, which opens bugs.db.
+// A legacy row therefore always holds the DEFAULT 0, and selecting it would
+// import a zero over a zero. Should bug writes ever reach jobs.db again, these
+// two columns must join this query, the scan, and insertImportedBug together.
 func readLegacyBugs(database *sql.DB) ([]Bug, error) {
 	rows, err := database.Query(`
 		SELECT id, status, title, kind, scope, likelihood, severity, fingerprint,
@@ -238,7 +308,32 @@ func readLegacyBugs(database *sql.DB) ([]Bug, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanBugs(rows)
+	var bugs []Bug
+	for rows.Next() {
+		var bug Bug
+		var jobID sql.NullInt64
+		var closedAt sql.NullInt64
+		var host, summary, detail, closeReason sql.NullString
+		if err := rows.Scan(
+			&bug.ID, &bug.Status, &bug.Title, &bug.Kind, &bug.Scope, &bug.Likelihood, &bug.Severity,
+			&bug.Fingerprint, &jobID, &host, &summary, &detail, &bug.Occurrences,
+			&bug.CreatedAt, &bug.UpdatedAt, &closedAt, &closeReason,
+		); err != nil {
+			return nil, err
+		}
+		if jobID.Valid {
+			bug.JobID = &jobID.Int64
+		}
+		if closedAt.Valid {
+			bug.ClosedAt = &closedAt.Int64
+		}
+		bug.Host = host.String
+		bug.Summary = summary.String
+		bug.Detail = detail.String
+		bug.CloseReason = closeReason.String
+		bugs = append(bugs, bug)
+	}
+	return bugs, rows.Err()
 }
 
 func importLegacyBug(database, legacy *sql.DB, bug Bug) error {
@@ -383,7 +478,36 @@ func ReportBug(database *sql.DB, report BugReport) (*Bug, bool, error) {
 			return nil, false, closedErr
 		}
 		if closedErr == nil {
-			return nil, false, &bugFingerprintClosedError{bugID: closedID, fingerprint: report.Fingerprint}
+			// A close is a verdict about the cause, not a gag order on
+			// observations: the recurrence is recorded against the closed bug
+			// and committed before the error is returned, so the record does
+			// not depend on how any caller handles the error. The verdict
+			// stands — reporting never reopens.
+			if _, err := tx.Exec(`
+				UPDATE bugs
+				   SET recurrences = recurrences + 1,
+				       last_recurrence_at = ?,
+				       updated_at = ?,
+				       job_id = COALESCE(job_id, ?),
+				       host = CASE WHEN host = '' THEN ? ELSE host END
+				 WHERE id = ?`,
+				now, now, nullableBugInt64(report.JobID), report.Host, closedID,
+			); err != nil {
+				return nil, false, err
+			}
+			if strings.TrimSpace(report.Note) != "" {
+				if _, err := tx.Exec(`INSERT INTO bug_notes (bug_id, body, created_at) VALUES (?, ?, ?)`, closedID, strings.TrimSpace(report.Note), now); err != nil {
+					return nil, false, err
+				}
+			}
+			var recurrences int
+			if err := tx.QueryRow(`SELECT recurrences FROM bugs WHERE id = ?`, closedID).Scan(&recurrences); err != nil {
+				return nil, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, false, err
+			}
+			return nil, false, &bugFingerprintClosedError{bugID: closedID, fingerprint: report.Fingerprint, recurrences: recurrences, lastRecurrenceAt: now}
 		}
 		result, err := tx.Exec(`
 			INSERT INTO bugs
@@ -462,9 +586,15 @@ func AddBugNote(database *sql.DB, id int64, body string) error {
 
 func CloseBug(database *sql.DB, id int64, reason string) error {
 	now := time.Now().Unix()
+	// Recurrence counters describe the interval since the CURRENT close, which
+	// is what `bug show` reports and what the default listing tests. Carrying
+	// them across a close would let a bug that recurred during an earlier
+	// closed interval resurface immediately after a later close, with nothing
+	// having happened since that close.
 	result, err := database.Exec(`
 		UPDATE bugs
-		   SET status = 'closed', closed_at = ?, close_reason = ?, updated_at = ?
+		   SET status = 'closed', closed_at = ?, close_reason = ?, updated_at = ?,
+		       recurrences = 0, last_recurrence_at = 0
 		 WHERE id = ? AND status = 'open'`,
 		now, strings.TrimSpace(reason), now, id,
 	)
@@ -519,7 +649,7 @@ func GetBug(database *sql.DB, id int64) (*Bug, error) {
 	rows, err := database.Query(`
 		SELECT id, status, title, kind, scope, likelihood, severity, fingerprint,
 		       job_id, host, summary, detail, occurrences, created_at, updated_at,
-		       closed_at, close_reason
+		       closed_at, close_reason, recurrences, last_recurrence_at
 		  FROM bugs WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -535,17 +665,39 @@ func GetBug(database *sql.DB, id int64) (*Bug, error) {
 	return &bugs[0], nil
 }
 
+// closedBugRecurrenceFloor is how far back a post-close recurrence stays
+// visible in the default bug list (see ListBugs).
+const closedBugRecurrenceFloor = 7 * 24 * time.Hour
+
+// minRecurrencesToListClosed is how many post-close reports a closed bug needs
+// before the default bug list resurfaces it (see ListBugs).
+const minRecurrencesToListClosed = 2
+
+// ListBugs lists bugs newest-activity first. With includeClosed=false it lists
+// open bugs plus closed bugs whose fingerprint is still being observed: at
+// least minRecurrencesToListClosed reports since close, the most recent within
+// closedBugRecurrenceFloor. The count floor keeps a single straggler — a job
+// that hit the fault just before the fix landed and reported after the close —
+// from resurfacing a fixed bug, and the recency floor keeps the default list
+// about ongoing problems rather than history; weft bug show and
+// weft bug list --all always report the full recurrence count.
 func ListBugs(database *sql.DB, includeClosed bool) ([]Bug, error) {
 	query := `
 		SELECT id, status, title, kind, scope, likelihood, severity, fingerprint,
 		       job_id, host, summary, detail, occurrences, created_at, updated_at,
-		       closed_at, close_reason
+		       closed_at, close_reason, recurrences, last_recurrence_at
 		  FROM bugs`
 	if !includeClosed {
-		query += ` WHERE status = 'open'`
+		query += `
+		  WHERE status = 'open'
+		     OR (recurrences >= ? AND last_recurrence_at >= ?)`
 	}
 	query += ` ORDER BY status ASC, updated_at DESC, id DESC`
-	rows, err := database.Query(query)
+	var args []any
+	if !includeClosed {
+		args = append(args, minRecurrencesToListClosed, time.Now().Add(-closedBugRecurrenceFloor).Unix())
+	}
+	rows, err := database.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -602,6 +754,7 @@ func scanBugs(rows *sql.Rows) ([]Bug, error) {
 			&bug.ID, &bug.Status, &bug.Title, &bug.Kind, &bug.Scope, &bug.Likelihood, &bug.Severity,
 			&bug.Fingerprint, &jobID, &host, &summary, &detail, &bug.Occurrences,
 			&bug.CreatedAt, &bug.UpdatedAt, &closedAt, &closeReason,
+			&bug.Recurrences, &bug.LastRecurrenceAt,
 		); err != nil {
 			return nil, err
 		}

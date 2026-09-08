@@ -442,6 +442,13 @@ func printBug(bug *db.Bug) {
 		fmt.Printf("Host:        %s\n", bug.Host)
 	}
 	fmt.Printf("Occurrences: %d\n", bug.Occurrences)
+	if bug.Recurrences > 0 {
+		line := fmt.Sprintf("Recurrences after close: %d", bug.Recurrences)
+		if bug.LastRecurrenceAt > 0 {
+			line += fmt.Sprintf(" (most recent %s)", formatBugUnixTime(bug.LastRecurrenceAt))
+		}
+		fmt.Println(line)
+	}
 	fmt.Printf("Created:     %s\n", formatBugUnixTime(bug.CreatedAt))
 	fmt.Printf("Updated:     %s\n", formatBugUnixTime(bug.UpdatedAt))
 	if bug.ClosedAt != nil {
