@@ -72,6 +72,7 @@ type Constraints struct {
 	Project              string   `enforce:"-"`            // For predictor-based scoring; empty = skip
 	Tags                 []string `enforce:"-"`            // Driving tags translate into other axes (cpu-intensive -> cpu_cores, interruptible -> instance routing, benchmark -> idle-host scoring)
 	RequiredCapabilities []string `enforce:"capability"`
+	AuthorizedTargets    []string `enforce:"authorized_target"`
 
 	// PreferredInstanceIDs is a soft preference toward reusing these specific
 	// rental instances. Used to co-locate a consumer on its --needs
@@ -143,6 +144,7 @@ type ConstraintSource struct {
 	Project                string
 	Tags                   []string
 	RequiredCapabilities   []string
+	AuthorizedTargets      []string
 	PreferredInstanceIDs   []int64
 	LocalDir               string
 	PersistedMaxComputeCap string
@@ -180,6 +182,7 @@ func resolveConstraints(src ConstraintSource, failOnRuntimeFloorError bool) (Res
 		Project:              src.Project,
 		Tags:                 src.Tags,
 		RequiredCapabilities: slices.Clone(src.RequiredCapabilities),
+		AuthorizedTargets:    slices.Clone(src.AuthorizedTargets),
 		PreferredInstanceIDs: src.PreferredInstanceIDs,
 		SelfJobID:            src.SelfJobID,
 	}
@@ -281,6 +284,7 @@ func ConstraintSourceFromJob(j *db.Job) ConstraintSource {
 		CLIOverrides:           j.CLIResourceOverrides,
 		ErrorDiagnosis:         j.ErrorDiagnosis,
 		SelfJobID:              j.ID,
+		AuthorizedTargets:      slices.Clone(j.EdgeAuthorizedTargets),
 	}
 	if j.GPUMemGB != nil {
 		src.GPUMemGB = *j.GPUMemGB

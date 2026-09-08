@@ -2030,17 +2030,18 @@ func quickReuseCompatible(group InstanceGroup, cap InstanceCapacity) bool {
 
 func placementConstraintsFromGroup(group InstanceGroup) placement.Constraints {
 	return placement.Constraints{
-		GPUClass:         group.GPUClass,
-		Provider:         group.Provider,
-		NumGPUs:          group.NumGPUs,
-		GPUMemGB:         group.GPUMemGB,
-		CPUCores:         group.CPUCores,
-		CPUMemGB:         group.CPUMemGB,
-		Interconnect:     group.Interconnect,
-		MaxComputeCap:    group.MaxComputeCap,
-		MinComputeCap:    group.MinComputeCap,
-		MinCUDAVersion:   group.MinCUDAVersion,
-		MinDriverVersion: group.MinDriverVersion,
+		GPUClass:          group.GPUClass,
+		Provider:          group.Provider,
+		NumGPUs:           group.NumGPUs,
+		GPUMemGB:          group.GPUMemGB,
+		CPUCores:          group.CPUCores,
+		CPUMemGB:          group.CPUMemGB,
+		Interconnect:      group.Interconnect,
+		MaxComputeCap:     group.MaxComputeCap,
+		MinComputeCap:     group.MinComputeCap,
+		MinCUDAVersion:    group.MinCUDAVersion,
+		MinDriverVersion:  group.MinDriverVersion,
+		AuthorizedTargets: append([]string(nil), group.AuthorizedTargets...),
 	}
 }
 

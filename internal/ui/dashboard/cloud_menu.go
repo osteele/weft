@@ -203,6 +203,7 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 				err: err,
 			}
 		}
+		offers, _ = campaign.FilterOffersByAuthorizedTargets(group, offers)
 
 		// Sort and limit to top 5 by cost
 		cloud.SortOffersByCost(offers)

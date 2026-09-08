@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS "jobs" (
 		placement_reasons TEXT,
 		campaign_job_index INTEGER,
 		requested_status TEXT
-	, gpu_mem_max_gb INTEGER, cli_overrides TEXT, max_compute_cap TEXT, priority INTEGER NOT NULL DEFAULT 0, job_metadata TEXT, placement_blocked TEXT);
+	, gpu_mem_max_gb INTEGER, cli_overrides TEXT, max_compute_cap TEXT, priority INTEGER NOT NULL DEFAULT 0, job_metadata TEXT, placement_blocked TEXT, edge_authorized_targets TEXT);
 CREATE TABLE IF NOT EXISTS external_job_bindings (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -1028,6 +1028,7 @@ CREATE VIEW IF NOT EXISTS job_status AS
 			j.placement_reasons,
 			j.cli_overrides,
 			j.placement_blocked,
+			j.edge_authorized_targets,
 			CASE WHEN la.end_time IS NOT NULL
 			          AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
 			     THEN NULL ELSE COALESCE(et.launch_id, la.launch_id) END AS launch_id,

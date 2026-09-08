@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +387,23 @@ func TestInstanceGroupHasComputeIntensiveJob(t *testing.T) {
 	empty := InstanceGroup{}
 	if empty.HasComputeIntensiveJob() {
 		t.Error("expected HasComputeIntensiveJob() = false for empty group")
+	}
+}
+
+// This kills mutations that drop the persisted edge target grant while
+// grouping jobs or merge jobs whose authorized target sets differ.
+func TestGroupByGPUSupremumPreservesAuthorizedTargets(t *testing.T) {
+	groups := GroupByGPUSupremum([]*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "a100", EdgeAuthorizedTargets: []string{"host-alpha"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "a100", EdgeAuthorizedTargets: []string{"host-beta"}},
+	})
+	if len(groups) != 2 {
+		t.Fatalf("group count = %d, want 2 distinct authorization sets", len(groups))
+	}
+	got := []string{strings.Join(groups[0].AuthorizedTargets, ","), strings.Join(groups[1].AuthorizedTargets, ",")}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"host-alpha", "host-beta"}) {
+		t.Fatalf("group authorized targets = %v", got)
 	}
 }
 

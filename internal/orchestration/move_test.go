@@ -506,6 +506,37 @@ func TestBuildNewOptionsWithSurvivalAndTelemetry_ExcludesTorchPreflightMachine(t
 	}
 }
 
+// This establishes at the move option-building and offer-ranking level used by
+// the autopilot that authenticated job targets bind every new-rental choice. It
+// kills deriving authorization only from the move path's InstanceGroup literal.
+func TestBuildOptionsWithSurvivalAndTelemetry_EnforcesJobAuthorizedTargets(t *testing.T) {
+	job := &db.Job{
+		ID:                    1907,
+		Status:                db.StatusQueued,
+		GPUClass:              "A100",
+		EdgeAuthorizedTargets: []string{"host-alpha"},
+	}
+	client := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+			return []cloud.Offer{{
+				ProviderID: "rental-outside-grant", Provider: cloud.ProviderVastai,
+				GPUName: "A100", GPUMemGB: 80, NumGPUs: 1, CostPerHour: 0.20,
+			}}, nil
+		},
+	}
+
+	options, err := BuildOptionsWithSurvivalAndTelemetry(
+		nil, []cloud.Client{client}, job, nil, nil, 0, 0, nil, 0, nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildOptionsWithSurvivalAndTelemetry: %v", err)
+	}
+	if len(options) != 0 {
+		t.Fatalf("move options = %#v, want no destination outside [host-alpha]", options)
+	}
+}
+
 func TestBuildNewOptionsWithSurvivalAndTelemetry_RecordsOfferSnapshot(t *testing.T) {
 	database := db.SetupTestDB(t)
 	job := &db.Job{

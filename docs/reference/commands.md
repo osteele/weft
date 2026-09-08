@@ -2085,6 +2085,7 @@ weft queue add --after-any wj42 titan 'python cleanup.py' # Run after job wj42 c
 
 Edit a queued or draft job’s metadata—description, working directory, command, environment variables, tags, or dependencies.
 Draft edits are local-only; queued edits are propagated to the remote queue entry when the job is already placed on a host.
+Running and starting jobs accept description changes and non-placement tag changes. Other edits are refused for their current state.
 `weft queue edit` is an alias for this command and accepts the same flags.
 
 ```bash
@@ -2310,6 +2311,10 @@ Other mirror-classified commands remain blocked until their view sections are
 implemented. `weft run` and `weft job run` submit signed job requests through
 the inbound store. They capture the current working tree, so uncommitted files
 are part of the submitted source closure just as they are for a hub-local run.
+When no host is named, the hub records the job as unplaced and the ordinary
+placement engine chooses among the edge policy's allowed targets under the
+job's GPU, input, and other constraints. The acknowledgement reports
+`placement_pending` until a host is selected.
 
 The job-control payload serves these commands and their `weft job ...`
 spellings:
@@ -2324,15 +2329,24 @@ Each control submission names one job. An accepted acknowledgement prints what
 the hub performed, such as `Job wj42: cancel completed`. A refused request
 prints the check and its detail. By default, a plan may control only jobs whose
 hub provenance names the same signing key. The hub can widen this with
-`[edge] allow_foreign_job_control = true`. Restart retains the ordinary spend
-boundary and is refused if the job's existing spend ceiling exceeds the plan's
-grant. `edit --max-spend` is checked against the same boundary, and an edit
-that requeues work cannot retain a ceiling above the grant.
+`[edge] allow_foreign_job_control = true`. A restart or edit that names no spend
+ceiling preserves an existing cap below the plan grant and clamps an absent or
+higher cap to the grant. An explicit edge `edit --max-spend` installs its
+admitted value; `edit --max-spend 0` means the full plan grant, not an unlimited
+cleared ceiling. Any required reduction is stored before the job becomes
+dispatchable. Every edit that can start work is checked with that resulting
+ceiling. A control refused for the job's current state completes with an
+`action_failed` result. Process-global flags such as `--verbose`, `--allow-stale`,
+and the selected edge view transport are not included in the signed job-control
+flags.
 
 `weft bug report` and `weft bug note` submit fact records to the hub's separate
 bug database. Their accepted results match the hub form, such as `Reported
 wb12: source sync invariant` or `Added note to wb12`. The path does not require
 a terminal, so runtime invariant reporting can use it unattended.
+State-based operation failures, such as reporting a fingerprint whose bug is
+closed, return `action_failed` and drain the pointer. A storage or database
+failure leaves the result unknown and the pointer pending.
 
 Submit-classified commands outside these lists remain blocked until their
 payload kind and hub handler are implemented.

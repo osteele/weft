@@ -30,6 +30,18 @@ type runpodDriverProbeMockClient struct {
 	probedPodID string
 }
 
+// This kills bypassing authenticated targets through a direct LaunchInstance
+// caller after offer selection.
+func TestLaunchInstanceRejectsOfferOutsideJobAuthorizedTargets(t *testing.T) {
+	group := InstanceGroup{Jobs: []*db.Job{{ID: 42, EdgeAuthorizedTargets: []string{"host-alpha"}}}}
+	offer := cloud.Offer{Provider: cloud.ProviderVastai, ProviderID: "outside-grant", GPUName: "A100"}
+
+	_, err := LaunchInstance(nil, nil, nil, nil, group, offer, LaunchOpts{}, cloud.R2Config{}, cloud.CreateOpts{}, R2Assets{}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "outside the jobs' authenticated execution targets") {
+		t.Fatalf("LaunchInstance error = %v, want authenticated-target rejection", err)
+	}
+}
+
 func (m *runpodDriverProbeMockClient) ProbeDriverVersion(_ context.Context, podID string) (string, error) {
 	m.probedPodID = podID
 	return m.probeOutput, m.probeErr

@@ -956,6 +956,58 @@ func filterOffersByInterconnect(offers []cloud.Offer, group InstanceGroup) ([]cl
 	return filtered, removed
 }
 
+func authorizedTargetsForGroup(group InstanceGroup) ([]string, bool) {
+	var allowed []string
+	constrained := false
+	for _, job := range group.Jobs {
+		if job == nil || len(job.EdgeAuthorizedTargets) == 0 {
+			continue
+		}
+		if !constrained {
+			allowed = append([]string(nil), job.EdgeAuthorizedTargets...)
+			constrained = true
+			continue
+		}
+		intersection := make([]string, 0, len(allowed))
+		for _, target := range allowed {
+			for _, candidate := range job.EdgeAuthorizedTargets {
+				if strings.EqualFold(strings.TrimSpace(target), strings.TrimSpace(candidate)) {
+					intersection = append(intersection, target)
+					break
+				}
+			}
+		}
+		allowed = intersection
+	}
+	if constrained {
+		return allowed, true
+	}
+	if len(group.AuthorizedTargets) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), group.AuthorizedTargets...), true
+}
+
+// FilterOffersByAuthorizedTargets applies every job's authenticated target
+// grant. Group fields are only a fallback for callers that have no job rows.
+func FilterOffersByAuthorizedTargets(group InstanceGroup, offers []cloud.Offer) ([]cloud.Offer, int) {
+	targets, constrained := authorizedTargetsForGroup(group)
+	if !constrained {
+		return offers, 0
+	}
+	if len(targets) == 0 {
+		return nil, len(offers)
+	}
+	constraints := placement.Constraints{AuthorizedTargets: targets}
+	allowed := make([]cloud.Offer, 0, len(offers))
+	for _, offer := range offers {
+		if placement.EvaluateEligibility(constraints, TargetSpecFromOffer(offer)).Eligible {
+			allowed = append(allowed, offer)
+		}
+	}
+	return allowed, len(offers) - len(allowed)
+}
+
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
 func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
 	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy.Profile(), minSurvival)
@@ -976,6 +1028,10 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 //
 // Returns the surviving offers and whether any remain.
 func applyEligibilityFilters(group InstanceGroup, offers []cloud.Offer, st *OfferFilterStats, survivalModel *bidding.SurvivalModel, minSurvival float64) ([]cloud.Offer, bool) {
+	offers, _ = FilterOffersByAuthorizedTargets(group, offers)
+	if len(offers) == 0 {
+		return offers, false
+	}
 	if skuFiltered, removed, requestedGB := filterOffersBySKUMemory(offers, group); removed > 0 {
 		slog.Debug("filtered offers by exact SKU memory",
 			"gpu_class", group.GPUClass, "required_gb", requestedGB,

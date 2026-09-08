@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/compat"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -117,6 +118,25 @@ func TestEvaluateEligibilityRequiredCapabilities(t *testing.T) {
 	target.AgentSlotsRemaining = &remaining
 	if got := EvaluateEligibility(Constraints{RequiredCapabilities: []string{"agent:codex"}}, target); got.Eligible {
 		t.Fatal("agent capability with exhausted shared concurrency accepted")
+	}
+}
+
+// This kills mutations that drop edge-authorized targets while deriving job
+// constraints, remove their hard filter, or treat it as advisory.
+func TestEvaluateEligibilityAuthorizedTargets(t *testing.T) {
+	constraints := ConstraintsFromJob(&db.Job{EdgeAuthorizedTargets: []string{"host-alpha", "HOST-BETA"}})
+	if got := strings.Join(constraints.AuthorizedTargets, ","); got != "host-alpha,HOST-BETA" {
+		t.Fatalf("job constraints authorized targets = %q", got)
+	}
+	if verdict := EvaluateEligibility(constraints, TargetSpec{Name: "host-beta"}); !verdict.Eligible {
+		t.Fatalf("authorized target rejected: %v", verdict.Messages())
+	}
+	verdict := EvaluateEligibility(constraints, TargetSpec{Name: "host-gamma"})
+	if verdict.Eligible {
+		t.Fatal("target outside edge authorization was eligible")
+	}
+	if len(verdict.Reasons) != 1 || verdict.Reasons[0].Kind != ReasonAuthorizedTarget || verdict.Reasons[0].Message != `target "host-gamma" is outside the authorized targets [host-alpha HOST-BETA]` {
+		t.Fatalf("outside-target reasons = %#v", verdict.Reasons)
 	}
 }
 

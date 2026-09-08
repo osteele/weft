@@ -78,6 +78,35 @@ version = "12.8.1.170"
 	}
 }
 
+// This kills omitting the authenticated-target filter from the dashboard's
+// direct provider-search path, which would display an unauthorized rental.
+func TestFetchCloudOffersFiltersJobAuthorizedTargets(t *testing.T) {
+	m := &Model{
+		appConfig: &config.Config{},
+		cloudClients: []cloud.Client{
+			&cloud.MockClient{
+				ProviderVal: cloud.ProviderVastai,
+				SearchOffersFunc: func(cloud.OfferConstraints) ([]cloud.Offer, error) {
+					return []cloud.Offer{{
+						Provider: cloud.ProviderVastai, ProviderID: "outside-grant",
+						GPUName: "A100", GPUMemGB: 80, CostPerHour: 1,
+					}}, nil
+				},
+			},
+		},
+	}
+	job := &db.Job{ID: 1996, GPUClass: "A100", EdgeAuthorizedTargets: []string{"host-alpha"}}
+
+	msg := m.fetchCloudOffers(job)()
+	loaded, ok := msg.(cloudOffersLoadedMsg)
+	if !ok || loaded.err != nil {
+		t.Fatalf("fetchCloudOffers msg = %#v", msg)
+	}
+	if len(loaded.offerings) != 1 || loaded.offerings[0].Source != "local" {
+		t.Fatalf("offerings = %#v, want only the local option", loaded.offerings)
+	}
+}
+
 func TestJobMatchesHostFilterRecentIncludesCloudAndUnplacedJobs(t *testing.T) {
 	m := Model{
 		jobHostFilterMode: hostFilterRecent,

@@ -2024,13 +2024,16 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 	// membership_rank is a final tiebreaker so the current row wins over the
 	// historical row for the same job when deduplicating below.
 	query := fmt.Sprintf(`SELECT %s FROM launch_job_membership
-		WHERE membership_launch_id = ?
-		  AND tombstoned = 0
+		JOIN jobs edge_job ON edge_job.id = launch_job_membership.id
+		WHERE launch_job_membership.membership_launch_id = ?
+		  AND launch_job_membership.tombstoned = 0
 		ORDER BY
-			CASE WHEN campaign_job_index IS NOT NULL THEN 0 ELSE 1 END ASC,
-			campaign_job_index ASC,
-			id ASC,
-			membership_rank ASC`, qualifiedJobSelectColumns("launch_job_membership"))
+			CASE WHEN launch_job_membership.campaign_job_index IS NOT NULL THEN 0 ELSE 1 END ASC,
+			launch_job_membership.campaign_job_index ASC,
+			launch_job_membership.id ASC,
+			launch_job_membership.membership_rank ASC`, qualifiedJobSelectColumnsWithOverrides("launch_job_membership", map[string]string{
+		"edge_authorized_targets": "edge_job.edge_authorized_targets",
+	}))
 	all, err := queryJobs(database, query, instanceID)
 	if err != nil {
 		return nil, err

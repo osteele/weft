@@ -13,9 +13,29 @@ import (
 
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/spf13/cobra"
 )
+
+// This kills the mutation that lets an edge restart with zero job IDs loop
+// over an empty target set and report success.
+func TestRunRestartEdgeRequiresJobID(t *testing.T) {
+	previousRuntime := activeEdgeSubmit
+	previousUnplaced := restartUnplaced
+	t.Cleanup(func() {
+		activeEdgeSubmit = previousRuntime
+		restartUnplaced = previousUnplaced
+	})
+	activeEdgeSubmit = &edge.Runtime{Role: "edge"}
+	restartUnplaced = false
+	command := &cobra.Command{Use: "restart"}
+
+	err := runRestart(command, nil)
+	if err == nil || !isUsageError(err) || err.Error() != "requires at least one job ID, or use --unplaced" {
+		t.Fatalf("runRestart error = %v, want exact edge usage error", err)
+	}
+}
 
 func TestEnsureDispatchAfterRestart(t *testing.T) {
 	origStatus := daemonStatusFunc

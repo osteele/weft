@@ -257,10 +257,7 @@ func handleEdgeJobSubmission(ctx context.Context, database *sql.DB, deps edgeInb
 	if request.Command != admission.Job.Command || request.WorkingDir != admission.Job.WorkingDir || request.Project != admission.Job.Project {
 		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonMalformed, Detail: "job request fields do not match the authenticated payload"}, nil
 	}
-	if request.Host == "" {
-		request.Host = admission.Authorization.Targets[0]
-	}
-	if !edgeRequestTargetAllowed(request.Host, admission.Authorization.Targets) {
+	if request.Host != "" && !edgeRequestTargetAllowed(request.Host, admission.Authorization.Targets) {
 		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonTargetNotAllowed, Detail: fmt.Sprintf("authenticated job request target %q is outside the authorized targets %v", request.Host, admission.Authorization.Targets)}, nil
 	}
 	sourceKey, err := prepareEdgeSource(&request, admission.SourceClosure)
@@ -278,6 +275,7 @@ func handleEdgeJobSubmission(ctx context.Context, database *sql.DB, deps edgeInb
 	provenance := &db.EdgeSubmissionProvenance{
 		SubmitterHost: admission.SigningHost, SigningKeyID: admission.KeyID,
 		DeploymentSourceDigest: admission.Envelope.DeploymentSourceDigest, Nonce: admission.Envelope.Nonce,
+		AuthorizedTargets: append([]string(nil), admission.Authorization.Targets...),
 	}
 	jobID, err := recordAndPlaceRunRequest(ctx, database, request, provenance,
 		func(ctx context.Context, database *sql.DB, request ops.QueueJobParams) (int64, error) {
@@ -288,7 +286,10 @@ func handleEdgeJobSubmission(ctx context.Context, database *sql.DB, deps edgeInb
 	}
 	ack := acceptedEdgeAck(admission, deps.HubHost, ids.FormatJobID(jobID))
 	ack.JobID = jobID
-	ack.Phase = "placed"
+	ack.Phase = "placement_pending"
+	if request.Host != "" {
+		ack.Phase = "placed"
+	}
 	return ack, nil, nil
 }
 
@@ -321,26 +322,21 @@ func handleEdgeJobControl(database *sql.DB, deps edgeInboxDeps, admission *edge.
 		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonMalformed, Detail: err.Error()}, nil
 	}
 	jobRef := ids.FormatJobID(payload.JobID)
-	_, editsSpend := payload.Flags["max-spend"]
-	editStartsWork := payload.Action == edge.ControlEdit &&
-		(payload.Flags["retry"] == "true" || payload.Flags["status"] == db.StatusQueued)
-	if payload.Action == edge.ControlRestart || (editStartsWork && !editsSpend) {
-		job, err := db.GetJobByID(database, payload.JobID)
-		if err != nil {
-			return edge.Ack{}, nil, fmt.Errorf("read retained spend request for %s: %w", jobRef, err)
-		}
-		if job == nil {
-			return edge.Ack{}, &edge.Refusal{Code: edge.ReasonJobControlAuthority, Detail: "job-control authority check failed: job is no longer present"}, nil
-		}
-		if job.CLIResourceOverrides != nil && job.CLIResourceOverrides.MaxSpendCents != nil {
-			requested := float64(*job.CLIResourceOverrides.MaxSpendCents) / 100
-			if requested > admission.Authorization.EffectiveSpendCeilingUSD {
-				return edge.Ack{}, &edge.Refusal{Code: edge.ReasonOverSpendCeiling,
-					Detail: fmt.Sprintf("job-control spend check failed: job %s retains a $%.2f ceiling, above this plan's $%.2f grant",
-						jobRef, requested, admission.Authorization.EffectiveSpendCeilingUSD)}, nil
-			}
-		}
+	job, err := db.GetJobByID(database, payload.JobID)
+	if err != nil {
+		return edge.Ack{}, nil, fmt.Errorf("read job-control target %s: %w", jobRef, err)
 	}
+	if job == nil {
+		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonActionFailed, Detail: fmt.Sprintf("job %s not found", jobRef)}, nil
+	}
+	if refusal := edgeJobControlStateRefusal(payload, job); refusal != nil {
+		return edge.Ack{}, refusal, nil
+	}
+	// A control that names no spend ceiling may narrow the stored ceiling to the
+	// admitted grant, but it cannot widen an existing lower ceiling. An explicit
+	// edit --max-spend installs its admitted value, including the plan grant when
+	// the edge requested zero.
+	spendCeilingCents := edgeControlSpendCeilingOverride(payload, job, int(math.Round(admission.Authorization.EffectiveSpendCeilingUSD*100)))
 
 	previous := activeEdgeSubmit
 	activeEdgeSubmit = nil
@@ -358,20 +354,78 @@ func handleEdgeJobControl(database *sql.DB, deps edgeInboxDeps, admission *edge.
 	case edge.ControlUnpause:
 		err = runUnpause(cmd, args)
 	case edge.ControlRestart:
-		err = runRestart(cmd, args)
+		err = runRestartWithSpendCeiling(cmd, args, spendCeilingCents)
 	case edge.ControlMarkProcessed:
 		err = setProcessedTag(args, true)
 	case edge.ControlMarkUnprocessed:
 		err = setProcessedTag(args, false)
 	case edge.ControlEdit:
-		err = runEdit(cmd, args)
+		err = runEditWithSpendCeiling(cmd, args, spendCeilingCents)
 	default:
 		return edge.Ack{}, &edge.Refusal{Code: edge.ReasonMalformed, Detail: fmt.Sprintf("unknown job-control action %q", payload.Action)}, nil
 	}
 	if err != nil {
+		var stateDecision *jobStateDecisionError
+		if isUsageError(err) || errors.Is(err, errFlagConflict) || errors.Is(err, db.ErrJobNotFound) || errors.As(err, &stateDecision) {
+			return edge.Ack{}, &edge.Refusal{Code: edge.ReasonActionFailed, Detail: fmt.Sprintf("%s %s: %v", payload.Action, jobRef, err)}, nil
+		}
 		return edge.Ack{}, nil, fmt.Errorf("%s %s: %w", payload.Action, jobRef, err)
 	}
 	return acceptedEdgeAck(admission, deps.HubHost, fmt.Sprintf("Job %s: %s completed", jobRef, payload.Action)), nil, nil
+}
+
+func edgeControlSpendCeilingOverride(payload *edge.WeftJobControlPayload, job *db.Job, admittedCents int) *int {
+	if payload.Action == edge.ControlEdit {
+		if _, explicitlyRequested := payload.Flags["max-spend"]; explicitlyRequested {
+			return &admittedCents
+		}
+	}
+	if job.CLIResourceOverrides != nil && job.CLIResourceOverrides.MaxSpendCents != nil &&
+		*job.CLIResourceOverrides.MaxSpendCents <= admittedCents {
+		return nil
+	}
+	return &admittedCents
+}
+
+func edgeJobControlStateRefusal(payload *edge.WeftJobControlPayload, job *db.Job) *edge.Refusal {
+	status := job.EffectiveStatus()
+	detail := ""
+	switch payload.Action {
+	case edge.ControlPause:
+		if job.Backend == db.BackendSkyPilot {
+			detail = fmt.Sprintf("job %s is owned by SkyPilot and cannot be marked draft", ids.FormatJobID(job.ID))
+		}
+	case edge.ControlResume:
+		if job.IsRentalJob() {
+			detail = fmt.Sprintf("job %s: resume is not supported for rental jobs", ids.FormatJobID(job.ID))
+		} else if status != db.StatusPaused {
+			detail = fmt.Sprintf("job %s is %s; only paused jobs can be resumed", ids.FormatJobID(job.ID), status)
+		}
+	case edge.ControlUnpause:
+		if job.Backend == db.BackendSkyPilot && status == db.StatusDraft {
+			detail = fmt.Sprintf("cannot change status of SkyPilot job %s through Weft's local execution controls", ids.FormatJobID(job.ID))
+		}
+	case edge.ControlRestart:
+		if job.Backend == db.BackendSkyPilot {
+			detail = fmt.Sprintf("SkyPilot job %s cannot be restarted by Weft; submit a new external job instead", ids.FormatJobID(job.ID))
+		} else if status == db.StatusRunning || status == db.StatusStarting {
+			detail = fmt.Sprintf("job %s is currently %s; kill it first if you want to retry", ids.FormatJobID(job.ID), status)
+		}
+	case edge.ControlEdit:
+		if job.Backend == db.BackendSkyPilot {
+			detail = fmt.Sprintf("SkyPilot job %s cannot be edited through Weft; change executor-owned fields in SkyPilot", ids.FormatJobID(job.ID))
+		} else if startsWork := payload.Flags["retry"] == "true" || payload.Flags["status"] == db.StatusQueued; startsWork && status != db.StatusQueued && !requeueableStatuses[status] {
+			detail = fmt.Sprintf("cannot change job %s from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", ids.FormatJobID(job.ID), status)
+		}
+	case edge.ControlCancel, edge.ControlKill:
+		if db.IsTerminalStatus(status) {
+			detail = fmt.Sprintf("job %s is %s; nothing to %s", ids.FormatJobID(job.ID), status, payload.Action)
+		}
+	}
+	if detail == "" {
+		return nil
+	}
+	return &edge.Refusal{Code: edge.ReasonActionFailed, Detail: detail}
 }
 
 func handleEdgeBugReport(deps edgeInboxDeps, admission *edge.Admission) (edge.Ack, *edge.Refusal, error) {
@@ -393,6 +447,9 @@ func handleEdgeBugReport(deps edgeInboxDeps, admission *edge.Admission) (edge.Ac
 			Summary: payload.Summary, Detail: payload.Detail, Note: payload.Note,
 		})
 		if err != nil {
+			if db.IsBugFingerprintClosed(err) {
+				return edge.Ack{}, &edge.Refusal{Code: edge.ReasonActionFailed, Detail: err.Error()}, nil
+			}
 			return edge.Ack{}, nil, err
 		}
 		verb := "Reported"
@@ -417,113 +474,157 @@ func handleEdgeBugReport(deps edgeInboxDeps, admission *edge.Admission) (edge.Ac
 	}
 }
 
+func edgeVerifyOptions(runtime *edge.Runtime) edge.VerifyOptions {
+	return edge.VerifyOptions{
+		Keyring: runtime.Keyring, Kinds: runtime.Kinds, Now: time.Now(),
+		DefaultTTL: time.Hour, ClockSkew: time.Minute,
+	}
+}
+
+func recoverSeenEdgePointer(ctx context.Context, database *sql.DB, deps edgeInboxDeps, key, nonce string, object []byte) (bool, error) {
+	if ack, err := edgeFetchAck(ctx, deps.Runtime, nonce); err == nil && ack != nil {
+		if err := deps.Transport.Delete(ctx, key); err != nil {
+			return false, fmt.Errorf("delete acknowledged edge pointer %s: %w", nonce, err)
+		}
+		return true, nil
+	} else if err != nil && !errors.Is(err, edge.ErrNotFound) {
+		return false, fmt.Errorf("recover acknowledgement for %s: %w", nonce, err)
+	}
+
+	verified, refusal, err := edge.VerifyRecorded(object, edgeVerifyOptions(deps.Runtime))
+	if err != nil {
+		return false, fmt.Errorf("authenticate recorded edge pointer %s: %w", nonce, err)
+	}
+	if refusal != nil {
+		return false, fmt.Errorf("authenticate recorded edge pointer %s: %s", nonce, refusal.Detail)
+	}
+	envelope := verified.Envelope()
+	if envelope.Nonce != nonce {
+		return false, fmt.Errorf("recorded edge pointer key nonce %s does not match authenticated envelope nonce %s", nonce, envelope.Nonce)
+	}
+
+	switch envelope.PayloadKind {
+	case edge.KindWeftJobSubmission:
+		jobID, found, err := db.FindJobIDByEdgeNonce(database, nonce)
+		if err != nil {
+			return false, fmt.Errorf("recover admitted nonce %s: %w", nonce, err)
+		}
+		if !found {
+			if err := forgetEdgeNonce(deps.Runtime.Seen, nonce); err != nil {
+				return false, fmt.Errorf("nonce %s has no job row and could not be rolled back: %w", nonce, err)
+			}
+			return false, fmt.Errorf("nonce %s has no job row; rolled back admission for retry", nonce)
+		}
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return false, fmt.Errorf("read recovered job %s: %w", ids.FormatJobID(jobID), err)
+		}
+		phase := "placement_pending"
+		if job != nil && job.Host != "" {
+			phase = "placed"
+		}
+		now := time.Now().UTC()
+		ack := edge.Ack{Version: 1, Nonce: nonce, Accepted: true, JobID: jobID,
+			Phase: phase, HubHost: deps.HubHost, AckedAt: now, PhaseSince: now}
+		if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
+			return false, err
+		}
+	case edge.KindWeftJobControl, edge.KindWeftBugReport, edge.KindPlanEnded:
+		admission := &edge.Admission{Envelope: envelope}
+		ack := acceptedEdgeAck(admission, deps.HubHost, "Submission accepted; original action detail is unavailable")
+		if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("recorded payload kind %q has no recovery policy", envelope.PayloadKind)
+	}
+	if err := deps.Transport.Delete(ctx, key); err != nil {
+		return false, fmt.Errorf("delete recovered edge pointer %s: %w", nonce, err)
+	}
+	return true, nil
+}
+
+func processEdgeInboxPointer(ctx context.Context, database *sql.DB, deps edgeInboxDeps, key string) (bool, error) {
+	nonce := strings.TrimPrefix(key, edge.PrefixInbox)
+	if nonce == "" || strings.Contains(nonce, "/") {
+		return false, fmt.Errorf("invalid edge inbox key %q", key)
+	}
+	object, err := deps.Transport.Get(ctx, key)
+	if errors.Is(err, edge.ErrNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read edge pointer %s: %w", nonce, err)
+	}
+	already, err := deps.Runtime.Seen.Seen(nonce)
+	if err != nil {
+		return false, fmt.Errorf("check seen nonce %s: %w", nonce, err)
+	}
+	if already {
+		return recoverSeenEdgePointer(ctx, database, deps, key, nonce, object)
+	}
+
+	admission, refusal, err := edge.Admit(ctx, deps.Transport, object, edge.AdmitOptions{
+		Verify: edgeVerifyOptions(deps.Runtime),
+		Policy: deps.Runtime.Policy,
+		Seen:   deps.Runtime.Seen,
+		ControlJobs: func(jobID int64) (string, bool, error) {
+			return db.FindJobEdgeSigningKey(database, jobID)
+		},
+	})
+	if err != nil {
+		return false, fmt.Errorf("admit edge submission %s: %w", nonce, err)
+	}
+	if refusal != nil {
+		if err := writeEdgeAck(ctx, deps.Transport, refusalAck(nonce, deps.HubHost, refusal, time.Now().UTC())); err != nil {
+			return false, err
+		}
+		if refusal.Quarantine {
+			return false, nil
+		}
+		if err := deps.Transport.Delete(ctx, key); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	ack, handlingRefusal, err := handleEdgeAdmission(ctx, database, deps, admission)
+	if err != nil {
+		if rollbackErr := forgetEdgeAdmission(deps.Runtime.Seen, deps.Runtime.Kinds, admission); rollbackErr != nil {
+			return false, fmt.Errorf("handle admitted submission %s: %w; seen rollback failed: %v", nonce, err, rollbackErr)
+		}
+		return false, fmt.Errorf("handle admitted submission %s: %w", nonce, err)
+	}
+	if handlingRefusal != nil {
+		ack = refusalAck(nonce, deps.HubHost, handlingRefusal, time.Now().UTC())
+	}
+	if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
+		return false, err
+	}
+	if err := deps.Transport.Delete(ctx, key); err != nil {
+		return false, err
+	}
+	fmt.Fprintf(os.Stderr, "edge inbox handled %s (%s)\n", nonce, admission.Envelope.PayloadKind)
+	return true, nil
+}
+
 func pollEdgeInboxOnce(ctx context.Context, database *sql.DB, deps edgeInboxDeps) (int, error) {
 	keys, err := deps.Transport.List(ctx, edge.PrefixInbox)
 	if err != nil {
 		return 0, fmt.Errorf("list edge inbox: %w", err)
 	}
 	pending := len(keys)
+	var keyErrors []error
 	for _, key := range keys {
-		nonce := strings.TrimPrefix(key, edge.PrefixInbox)
-		if nonce == "" || strings.Contains(nonce, "/") {
-			return pending, fmt.Errorf("invalid edge inbox key %q", key)
-		}
-		already, err := deps.Runtime.Seen.Seen(nonce)
+		drained, err := processEdgeInboxPointer(ctx, database, deps, key)
 		if err != nil {
-			return pending, fmt.Errorf("check seen nonce %s: %w", nonce, err)
+			keyErrors = append(keyErrors, fmt.Errorf("edge inbox key %s: %w", key, err))
+			continue
 		}
-		if already {
-			if ack, ackErr := edgeFetchAck(ctx, deps.Runtime, nonce); ackErr == nil && ack != nil {
-				if err := deps.Transport.Delete(ctx, key); err != nil {
-					return pending, err
-				}
-				pending--
-				continue
-			} else if ackErr != nil && !errors.Is(ackErr, edge.ErrNotFound) {
-				return pending, fmt.Errorf("recover acknowledgement for %s: %w", nonce, ackErr)
-			}
-			jobID, found, err := db.FindJobIDByEdgeNonce(database, nonce)
-			if err != nil {
-				return pending, fmt.Errorf("recover admitted nonce %s: %w", nonce, err)
-			}
-			if !found {
-				return pending, fmt.Errorf("nonce %s is recorded in the seen-set but has no job row", nonce)
-			}
-			job, err := db.GetJobByID(database, jobID)
-			if err != nil {
-				return pending, fmt.Errorf("read recovered job %s: %w", ids.FormatJobID(jobID), err)
-			}
-			phase := "placement_pending"
-			if job != nil && job.Host != "" {
-				phase = "placed"
-			}
-			now := time.Now().UTC()
-			ack := edge.Ack{Version: 1, Nonce: nonce, Accepted: true, JobID: jobID,
-				Phase: phase, HubHost: deps.HubHost, AckedAt: now, PhaseSince: now}
-			if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
-				return pending, err
-			}
-			if err := deps.Transport.Delete(ctx, key); err != nil {
-				return pending, err
-			}
+		if drained {
 			pending--
-			continue
 		}
-
-		object, err := deps.Transport.Get(ctx, key)
-		if errors.Is(err, edge.ErrNotFound) {
-			pending--
-			continue
-		}
-		if err != nil {
-			return pending, fmt.Errorf("read edge pointer %s: %w", nonce, err)
-		}
-		admission, refusal, err := edge.Admit(ctx, deps.Transport, object, edge.AdmitOptions{
-			Verify: edge.VerifyOptions{
-				Keyring: deps.Runtime.Keyring, Kinds: deps.Runtime.Kinds, Now: time.Now(),
-				DefaultTTL: time.Hour, ClockSkew: time.Minute,
-			},
-			Policy: deps.Runtime.Policy,
-			Seen:   deps.Runtime.Seen,
-			ControlJobs: func(jobID int64) (string, bool, error) {
-				return db.FindJobEdgeSigningKey(database, jobID)
-			},
-		})
-		if err != nil {
-			return pending, fmt.Errorf("admit edge submission %s: %w", nonce, err)
-		}
-		if refusal != nil {
-			if err := writeEdgeAck(ctx, deps.Transport, refusalAck(nonce, deps.HubHost, refusal, time.Now().UTC())); err != nil {
-				return pending, err
-			}
-			if !refusal.Quarantine {
-				if err := deps.Transport.Delete(ctx, key); err != nil {
-					return pending, err
-				}
-				pending--
-			}
-			continue
-		}
-		ack, handlingRefusal, err := handleEdgeAdmission(ctx, database, deps, admission)
-		if err != nil {
-			if rollbackErr := forgetEdgeAdmission(deps.Runtime.Seen, deps.Runtime.Kinds, admission); rollbackErr != nil {
-				return pending, fmt.Errorf("handle admitted submission %s: %w; seen rollback failed: %v", nonce, err, rollbackErr)
-			}
-			return pending, fmt.Errorf("handle admitted submission %s: %w", nonce, err)
-		}
-		if handlingRefusal != nil {
-			ack = refusalAck(nonce, deps.HubHost, handlingRefusal, time.Now().UTC())
-		}
-		if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
-			return pending, err
-		}
-		if err := deps.Transport.Delete(ctx, key); err != nil {
-			return pending, err
-		}
-		pending--
-		fmt.Fprintf(os.Stderr, "edge inbox handled %s (%s)\n", nonce, admission.Envelope.PayloadKind)
 	}
-	return pending, nil
+	return pending, errors.Join(keyErrors...)
 }
 
 func runEdgeInboxPoller(ctx context.Context, database *sql.DB, cfg *config.Config) {

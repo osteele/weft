@@ -84,6 +84,8 @@ type restartOverrides struct {
 	DiskMaxGB           *int
 	HasMinSurvival      bool
 	MinSurvival         float64
+	HasMaxSpend         bool
+	MaxSpendCents       *int
 }
 
 func init() {
@@ -92,6 +94,10 @@ func init() {
 }
 
 func runRestart(cmd *cobra.Command, args []string) error {
+	return runRestartWithSpendCeiling(cmd, args, nil)
+}
+
+func runRestartWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCents *int) error {
 	overrides, err := parseRestartOverrides(cmd)
 	if err != nil {
 		return err
@@ -100,7 +106,16 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		if restartUnplaced {
 			return fmt.Errorf("--unplaced requires a hub job lookup; name the jobs to restart from an edge")
 		}
+		if len(args) == 0 {
+			return usageErrorf("requires at least one job ID, or use --unplaced")
+		}
 		return submitEdgeJobControls(cmd, args, edge.ControlRestart, ParseJobIDs)
+	}
+	if spendCeilingCents != nil {
+		ceiling := *spendCeilingCents
+		overrides.HasMaxSpend = true
+		overrides.MaxSpendCents = &ceiling
+		overrides.HasAny = true
 	}
 
 	database, err := db.Open()
@@ -337,6 +352,14 @@ func applyRestartOverrides(database restartExecer, job *db.Job, overrides restar
 
 	if !overrides.HasAny {
 		return updates, nil
+	}
+	if overrides.HasMaxSpend {
+		if err := updateJobCLIResourceOverrides(database, job, func(current *db.CLIResourceOverrides) {
+			current.MaxSpendCents = cloneIntPtr(overrides.MaxSpendCents)
+		}); err != nil {
+			return nil, fmt.Errorf("update max-spend override: %w", err)
+		}
+		updates = append(updates, fmt.Sprintf("max-spend: $%.2f", float64(*overrides.MaxSpendCents)/100))
 	}
 	if overrides.GPU != "" {
 		if err := db.SetJobGPU(database, job.ID, overrides.GPU); err != nil {

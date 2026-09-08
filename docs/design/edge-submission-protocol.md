@@ -87,7 +87,17 @@ writer wins and a retry of an already-committed submission fails the
 precondition, which the edge reports as *already submitted*, not as an error.
 
 The hub polls `edge/v1/inbox/`, and for each pointer it has not yet processed,
-runs [verification](#verification-order) and then admission.
+runs [verification](#verification-order) and then admission. A failure for one
+pointer does not stop the pass; the hub continues through the listed keys and
+reports their errors together.
+
+The seen-set is the durable admission boundary. If a job submission is recorded
+there but has no job row, recovery removes that nonce so the next pass can
+re-admit it through the idempotent record path. The other registered kinds do
+not create job rows. A recorded job control, bug report, or plan-ended payload
+therefore receives a generic accepted acknowledgement and its pointer drains.
+Recovery authenticates the stored envelope again, but does not repeat freshness
+or replay checks whose successful result is already recorded.
 
 ## Frame
 
@@ -130,6 +140,15 @@ different times; see [Verification order](#verification-order).
   "payload_digest": "sha256:..."
 }
 ```
+
+An empty `target_constraints.hosts` means the hub chooses from its configured
+allowlist. The admitted target set is stored on the job, the job remains
+unplaced, and ordinary placement applies the job's GPU, input, and other
+constraints within that set. The target set is a hard eligibility filter for
+every later placement attempt, including automatic moves and direct dashboard
+launches. Each placement path evaluates the authorization stored on its job
+rows. An acknowledgement for this case has phase `placement_pending`; `placed`
+requires a concrete host.
 
 | Field | Meaning |
 | --- | --- |
@@ -208,10 +227,16 @@ signed the verified control envelope. A confirmed missing job or a different
 key is refused with `job_control_authority`; an unreadable provenance lookup is
 unknown and remains pending. Hub configuration may set
 `allow_foreign_job_control = true` to widen this authority deliberately.
-Restart also passes through the same spend-ceiling authorization used for a
-job submission. An edit that changes `--max-spend` authenticates that value as
-an authority field, and an edit that requeues work cannot retain a ceiling
-above the requesting plan's grant.
+Restart and edit also pass through the spend-ceiling authorization used for a
+job submission. A control that names no ceiling preserves an existing ceiling
+below the plan grant and clamps an absent or higher ceiling to that grant. An
+edit that names `--max-spend` installs the admitted requested ceiling. On an
+edge, `edit --max-spend 0` requests the full plan grant; it never clears the
+job's enforced ceiling. The hub commits any required ceiling reduction before
+the job becomes dispatchable. A confirmed decision that the requested action
+is invalid for the current job or bug state is acknowledged as `action_failed`
+and drains. A database, locking, or I/O failure leaves the result unknown and
+the pointer pending for a later pass.
 
 ## Verification order
 
@@ -273,7 +298,9 @@ never causes one to be skipped:
   configuration; no submission can extend it. It can never include the hub's
   own host, which is enforced when the policy is constructed rather than per
   submission, so a misconfiguration fails at startup rather than on the first
-  submission that exploits it.
+  submission that exploits it. An empty host request authorizes the whole
+  allowlist without selecting one member. The admitted set is persisted on the
+  job and remains a hard placement constraint.
 - **Spend ceiling.** The payload's `spend_ceiling_usd` is checked against the
   hub's configured maximum.
 

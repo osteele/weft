@@ -97,22 +97,23 @@ type Job struct {
 	// SubmitterSession identifies the agent session that ran `weft run`, as an
 	// opaque string. Empty means the submission was not attributable to a
 	// session, which is a normal value rather than an error.
-	SubmitterSession     string
-	EdgeSubmitterHost    string
-	EdgeSigningKeyID     string
-	EdgeDeploymentDigest string
-	EdgeSubmissionNonce  string
-	RawAttemptStatus     string `json:"-"` // Authoritative attempt enum before job_status exit-code normalization
-	LaunchID             *int64 // Cloud instance ID if this job is part of a cloud instance
-	CampaignJobIndex     *int   // Position within a cloud campaign sequence, if assigned
-	LatestRunID          *int64 // Latest execution attempt row for this logical job
-	QueueBlockedReason   string // Transient UI-only queue gate reason; not persisted
-	DisplayAttemptID     int64  `json:"-"` // Transient UI-only attempt row override; 0 means authoritative job row
-	DisplayAttemptNumber int    `json:"-"` // Transient UI-only attempt number for expanded move rows
-	DisplayMoveSource    string `json:"-"` // Transient UI-only move source label
-	DisplayMoveTarget    string `json:"-"` // Transient UI-only move target label
-	DisplayMovePhase     string `json:"-"` // Transient UI-only move phase for list/detail views
-	DisplayMoveDim       bool   `json:"-"` // Transient UI-only marker for non-authoritative attempts
+	SubmitterSession      string
+	EdgeSubmitterHost     string
+	EdgeSigningKeyID      string
+	EdgeDeploymentDigest  string
+	EdgeSubmissionNonce   string
+	EdgeAuthorizedTargets []string
+	RawAttemptStatus      string `json:"-"` // Authoritative attempt enum before job_status exit-code normalization
+	LaunchID              *int64 // Cloud instance ID if this job is part of a cloud instance
+	CampaignJobIndex      *int   // Position within a cloud campaign sequence, if assigned
+	LatestRunID           *int64 // Latest execution attempt row for this logical job
+	QueueBlockedReason    string // Transient UI-only queue gate reason; not persisted
+	DisplayAttemptID      int64  `json:"-"` // Transient UI-only attempt row override; 0 means authoritative job row
+	DisplayAttemptNumber  int    `json:"-"` // Transient UI-only attempt number for expanded move rows
+	DisplayMoveSource     string `json:"-"` // Transient UI-only move source label
+	DisplayMoveTarget     string `json:"-"` // Transient UI-only move target label
+	DisplayMovePhase      string `json:"-"` // Transient UI-only move phase for list/detail views
+	DisplayMoveDim        bool   `json:"-"` // Transient UI-only marker for non-authoritative attempts
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -509,7 +510,7 @@ type PlacementMeta struct {
 	RunnerUpScore       float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked, edge_authorized_targets`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -2421,10 +2422,11 @@ type SubmissionIdentity struct {
 // EdgeSubmissionProvenance records the authenticated origin of a job admitted
 // from the edge inbox.
 type EdgeSubmissionProvenance struct {
-	SubmitterHost          string `json:"submitter_host"`
-	SigningKeyID           string `json:"signing_key_id"`
-	DeploymentSourceDigest string `json:"deployment_source_digest"`
-	Nonce                  string `json:"nonce"`
+	SubmitterHost          string   `json:"submitter_host"`
+	SigningKeyID           string   `json:"signing_key_id"`
+	DeploymentSourceDigest string   `json:"deployment_source_digest"`
+	Nonce                  string   `json:"nonce"`
+	AuthorizedTargets      []string `json:"authorized_targets"`
 }
 
 func recordQueuedWithGPU(db dbExecer, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
@@ -2449,7 +2451,7 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 		requestedStatus = StatusQueued
 	}
 	var project, projectRoot, session any
-	var edgeHost, edgeKey, edgeDigest, edgeNonce any
+	var edgeHost, edgeKey, edgeDigest, edgeNonce, edgeTargets any
 	if ident.Project != "" {
 		project = ident.Project
 		if root := workdir.VerifiedProjectRoot(ident.Project, workingDir); root != "" {
@@ -2464,27 +2466,33 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 		edgeKey = strings.TrimSpace(ident.Edge.SigningKeyID)
 		edgeDigest = strings.TrimSpace(ident.Edge.DeploymentSourceDigest)
 		edgeNonce = strings.TrimSpace(ident.Edge.Nonce)
+		if data, marshalErr := json.Marshal(ident.Edge.AuthorizedTargets); marshalErr != nil {
+			return 0, fmt.Errorf("encode edge authorized targets: %w", marshalErr)
+		} else {
+			edgeTargets = string(data)
+		}
 	}
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce, edge_authorized_targets)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
-			 	working_dir = excluded.working_dir,
-			 	command = excluded.command,
-			 	description = excluded.description,
-			 	gpu = excluded.gpu,
-			 	placement_host = excluded.placement_host,
-			 	requested_status = excluded.requested_status,
-			 	project = COALESCE(excluded.project, jobs.project),
-			 	project_root = COALESCE(excluded.project_root, jobs.project_root),
-			 	submitter_session = COALESCE(excluded.submitter_session, jobs.submitter_session),
-			 	edge_submitter_host = COALESCE(excluded.edge_submitter_host, jobs.edge_submitter_host),
-			 	edge_signing_key_id = COALESCE(excluded.edge_signing_key_id, jobs.edge_signing_key_id),
-			 	edge_deployment_source_digest = COALESCE(excluded.edge_deployment_source_digest, jobs.edge_deployment_source_digest),
-			 	edge_submission_nonce = COALESCE(excluded.edge_submission_nonce, jobs.edge_submission_nonce)`,
+				working_dir = excluded.working_dir,
+				command = excluded.command,
+				description = excluded.description,
+				gpu = excluded.gpu,
+				placement_host = excluded.placement_host,
+				requested_status = excluded.requested_status,
+				project = COALESCE(excluded.project, jobs.project),
+				project_root = COALESCE(excluded.project_root, jobs.project_root),
+				submitter_session = COALESCE(excluded.submitter_session, jobs.submitter_session),
+				edge_submitter_host = COALESCE(excluded.edge_submitter_host, jobs.edge_submitter_host),
+				edge_signing_key_id = COALESCE(excluded.edge_signing_key_id, jobs.edge_signing_key_id),
+				edge_deployment_source_digest = COALESCE(excluded.edge_deployment_source_digest, jobs.edge_deployment_source_digest),
+				edge_submission_nonce = COALESCE(excluded.edge_submission_nonce, jobs.edge_submission_nonce),
+				edge_authorized_targets = COALESCE(excluded.edge_authorized_targets, jobs.edge_authorized_targets)`,
 			id, workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
-			edgeHost, edgeKey, edgeDigest, edgeNonce,
+			edgeHost, edgeKey, edgeDigest, edgeNonce, edgeTargets,
 		)
 		if err != nil {
 			return 0, err
@@ -2498,10 +2506,10 @@ func recordQueuedWithIdentity(db dbExecer, id int64, host, workingDir, command, 
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (working_dir, command, description, created_at, gpu, placement_host, requested_status, project, project_root, submitter_session, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce, edge_authorized_targets)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		workingDir, command, description, now, gpu, host, requestedStatus, project, projectRoot, session,
-		edgeHost, edgeKey, edgeDigest, edgeNonce,
+		edgeHost, edgeKey, edgeDigest, edgeNonce, edgeTargets,
 	)
 	if err != nil {
 		return 0, err
@@ -3518,6 +3526,7 @@ type jobScanFields struct {
 	campaignJobIndex sql.NullInt64
 	latestRunID      sql.NullInt64
 	placementBlocked sql.NullString
+	edgeTargets      sql.NullString
 }
 
 // scanDests returns pointers to all scan targets in jobSelectColumns order.
@@ -3539,6 +3548,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.placementMeta, &f.placementReasons, &f.cliOverrides,
 		&f.cloudInstanceID, &f.campaignJobIndex, &f.latestRunID,
 		&f.placementBlocked,
+		&f.edgeTargets,
 	}
 }
 
@@ -3653,6 +3663,7 @@ func (f *jobScanFields) populateJob(j *Job) {
 	j.PlacementMeta = decodePlacementMeta(f.placementMeta)
 	j.PlacementReasons = decodeStringSlice(f.placementReasons)
 	j.PlacementBlockedJSON = f.placementBlocked.String
+	j.EdgeAuthorizedTargets = decodeStringSlice(f.edgeTargets)
 	j.CLIResourceOverrides = decodeCLIResourceOverrides(f.cliOverrides)
 	if f.cloudInstanceID.Valid {
 		j.LaunchID = &f.cloudInstanceID.Int64
@@ -5804,15 +5815,15 @@ func PopulateEdgeSubmissionProvenance(db *sql.DB, jobs []*Job) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := db.Query(`SELECT id, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
+	rows, err := db.Query(`SELECT id, edge_submitter_host, edge_signing_key_id, edge_deployment_source_digest, edge_submission_nonce, edge_authorized_targets FROM jobs WHERE id IN (`+sqlPlaceholders(len(ids))+`)`, ids...)
 	if err != nil {
 		return fmt.Errorf("read edge submission provenance: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id int64
-		var host, key, digest, nonce sql.NullString
-		if err := rows.Scan(&id, &host, &key, &digest, &nonce); err != nil {
+		var host, key, digest, nonce, targets sql.NullString
+		if err := rows.Scan(&id, &host, &key, &digest, &nonce, &targets); err != nil {
 			return fmt.Errorf("scan edge submission provenance: %w", err)
 		}
 		for _, job := range byID[id] {
@@ -5820,6 +5831,7 @@ func PopulateEdgeSubmissionProvenance(db *sql.DB, jobs []*Job) error {
 			job.EdgeSigningKeyID = key.String
 			job.EdgeDeploymentDigest = digest.String
 			job.EdgeSubmissionNonce = nonce.String
+			job.EdgeAuthorizedTargets = decodeStringSlice(targets)
 		}
 	}
 	return rows.Err()

@@ -130,6 +130,33 @@ func TestEdgeSubmissionProvenanceMigrationIsReversibleAndIdempotent(t *testing.T
 	}
 }
 
+// This kills the mutation that registers migration 61 without adding the
+// durable edge-authorized target column to an existing jobs table.
+func TestEdgeAuthorizedTargetsMigrationIsIdempotent(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer database.Close()
+	ctx := context.Background()
+	if _, err := database.ExecContext(ctx, `CREATE TABLE jobs (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create jobs: %v", err)
+	}
+	if err := applyAddEdgeAuthorizedTargets(ctx, database); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if err := applyAddEdgeAuthorizedTargets(ctx, database); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	exists, err := columnExists(ctx, database, "jobs", "edge_authorized_targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("jobs.edge_authorized_targets was not added")
+	}
+}
+
 func TestUpRepairsCampaignAffinityColumnAfterAppliedV24(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := sql.Open("sqlite", dbPath)

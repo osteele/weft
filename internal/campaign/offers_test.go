@@ -30,6 +30,38 @@ func TestCheapestOffer(t *testing.T) {
 	}
 }
 
+// This kills the mutation that drops edge target authorization before cloud
+// offer eligibility, which would let an inventory-only grant escape to rent.
+func TestApplyEligibilityFiltersRejectsCloudOutsideAuthorizedTargets(t *testing.T) {
+	offers, ok := applyEligibilityFilters(
+		InstanceGroup{Jobs: []*db.Job{{EdgeAuthorizedTargets: []string{"host-alpha"}}}},
+		[]cloud.Offer{{Provider: cloud.ProviderVastai, ProviderID: "123", GPUName: "A100", NumGPUs: 1, GPUMemGB: 80}},
+		&OfferFilterStats{}, nil, 0,
+	)
+	if ok || len(offers) != 0 {
+		t.Fatalf("offers=%#v ok=%t, want hard authorization rejection", offers, ok)
+	}
+}
+
+// Two grants with nothing in common authorize nothing. An empty intersection is
+// the most restrictive input, so passing the offers through would fail open on
+// exactly the case that most needs the filter.
+func TestFilterOffersByAuthorizedTargetsRejectsAllOnDisjointGrants(t *testing.T) {
+	offers, removed := FilterOffersByAuthorizedTargets(
+		InstanceGroup{Jobs: []*db.Job{
+			{EdgeAuthorizedTargets: []string{"host-alpha"}},
+			{EdgeAuthorizedTargets: []string{"host-beta"}},
+		}},
+		[]cloud.Offer{
+			{Provider: cloud.ProviderVastai, ProviderID: "1", GPUName: "A100", NumGPUs: 1, GPUMemGB: 80},
+			{Provider: cloud.ProviderVastai, ProviderID: "2", GPUName: "H100", NumGPUs: 1, GPUMemGB: 80},
+		},
+	)
+	if len(offers) != 0 || removed != 2 {
+		t.Fatalf("offers=%#v removed=%d, want every offer rejected for disjoint grants", offers, removed)
+	}
+}
+
 func TestOfferPriceQuantilesCents(t *testing.T) {
 	minCents, medianCents, p75Cents := OfferPriceQuantilesCents([]cloud.Offer{
 		{CostPerHour: 3.00},

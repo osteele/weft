@@ -90,24 +90,25 @@ type EligibilityReason struct {
 type EligibilityReasonKind string
 
 const (
-	ReasonCordoned        EligibilityReasonKind = "cordoned"
-	ReasonOverloaded      EligibilityReasonKind = "overloaded"
-	ReasonOptInOnly       EligibilityReasonKind = "opt_in_only"
-	ReasonCompatibility   EligibilityReasonKind = "compatibility"
-	ReasonGPUClass        EligibilityReasonKind = "gpu_class"
-	ReasonGPUMemory       EligibilityReasonKind = "gpu_memory"
-	ReasonGPUCount        EligibilityReasonKind = "gpu_count"
-	ReasonGPUAvailability EligibilityReasonKind = "gpu_availability"
-	ReasonComputeCapMax   EligibilityReasonKind = "compute_cap_max"
-	ReasonComputeCapMin   EligibilityReasonKind = "compute_cap_min"
-	ReasonCUDAChain       EligibilityReasonKind = "cuda_chain"
-	ReasonMachinePin      EligibilityReasonKind = "machine_pin"
-	ReasonProvider        EligibilityReasonKind = "provider"
-	ReasonCPUCores        EligibilityReasonKind = "cpu_cores"
-	ReasonHostRAM         EligibilityReasonKind = "host_ram"
-	ReasonInterconnect    EligibilityReasonKind = "interconnect"
-	ReasonCapability      EligibilityReasonKind = "host_capability"
-	ReasonCapabilityBusy  EligibilityReasonKind = "host_capability_busy"
+	ReasonCordoned         EligibilityReasonKind = "cordoned"
+	ReasonOverloaded       EligibilityReasonKind = "overloaded"
+	ReasonOptInOnly        EligibilityReasonKind = "opt_in_only"
+	ReasonCompatibility    EligibilityReasonKind = "compatibility"
+	ReasonGPUClass         EligibilityReasonKind = "gpu_class"
+	ReasonGPUMemory        EligibilityReasonKind = "gpu_memory"
+	ReasonGPUCount         EligibilityReasonKind = "gpu_count"
+	ReasonGPUAvailability  EligibilityReasonKind = "gpu_availability"
+	ReasonComputeCapMax    EligibilityReasonKind = "compute_cap_max"
+	ReasonComputeCapMin    EligibilityReasonKind = "compute_cap_min"
+	ReasonCUDAChain        EligibilityReasonKind = "cuda_chain"
+	ReasonMachinePin       EligibilityReasonKind = "machine_pin"
+	ReasonProvider         EligibilityReasonKind = "provider"
+	ReasonCPUCores         EligibilityReasonKind = "cpu_cores"
+	ReasonHostRAM          EligibilityReasonKind = "host_ram"
+	ReasonInterconnect     EligibilityReasonKind = "interconnect"
+	ReasonCapability       EligibilityReasonKind = "host_capability"
+	ReasonCapabilityBusy   EligibilityReasonKind = "host_capability_busy"
+	ReasonAuthorizedTarget EligibilityReasonKind = "authorized_target"
 )
 
 func (r EligibilityReason) String() string {
@@ -241,6 +242,14 @@ func EvaluateEligibility(c Constraints, t TargetSpec) Verdict {
 	}
 	if t.OptInOnly && !t.ExplicitlyNamed {
 		return fail(ReasonOptInOnly, "host is opt-in only (specify with --host)", 0, 0)
+	}
+	if len(c.AuthorizedTargets) > 0 {
+		allowed := slices.ContainsFunc(c.AuthorizedTargets, func(name string) bool {
+			return strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(t.Name))
+		})
+		if !allowed {
+			return fail(ReasonAuthorizedTarget, fmt.Sprintf("target %q is outside the authorized targets %v", t.Name, c.AuthorizedTargets), 0, 0)
+		}
 	}
 	for _, required := range c.RequiredCapabilities {
 		required = strings.ToLower(strings.TrimSpace(required))

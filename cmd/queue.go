@@ -955,6 +955,10 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 }
 
 func runEdit(cmd *cobra.Command, args []string) error {
+	return runEditWithSpendCeiling(cmd, args, nil)
+}
+
+func runEditWithSpendCeiling(cmd *cobra.Command, args []string, spendCeilingCents *int) error {
 	if activeEdgeSubmit != nil {
 		return submitEdgeJobControls(cmd, args, edge.ControlEdit, ParseJobIDsForJobCommand)
 	}
@@ -967,6 +971,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	)
 	if err != nil {
 		return err
+	}
+	if spendCeilingCents != nil {
+		ceiling := *spendCeilingCents
+		rentalPolicyFlags.maxSpendCents = &ceiling
 	}
 
 	statusChanged := cmd.Flags().Changed("status") || editRetry
@@ -1099,14 +1107,25 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	editWasDraft := effectiveStatus == db.StatusDraft
 
 	// Editing anything that affects placement can invalidate a cached blocker.
-	placementBlockedChanged := statusChanged || placementTagChanges ||
+	placementBlockedChanged := statusChanged || placementTagChanges || spendCeilingCents != nil ||
 		cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") || cmd.Flags().Changed("project") ||
 		envChanged || dependsChanged || queueEditClearDeps || gpuClassChanged || gpuMemChanged ||
 		rentalPolicyChanged || providerChanged || runpodCloudTypeChanged || inputsChanged || needsChanged
 
 	var updates []string
+	if spendCeilingCents != nil {
+		if err := updateJobCLIResourceOverrides(database, job, func(overrides *db.CLIResourceOverrides) {
+			overrides.MaxSpendCents = cloneIntPtr(spendCeilingCents)
+		}); err != nil {
+			return fmt.Errorf("update admitted spend ceiling: %w", err)
+		}
+		if !cmd.Flags().Changed("max-spend") {
+			updates = append(updates, fmt.Sprintf("max-spend: $%.2f", float64(*spendCeilingCents)/100))
+		}
+	}
 
-	// Handle status change first (requeue), since other field updates require job to be queued
+	// Install the admitted spend ceiling before making a job dispatchable. Other
+	// field updates follow the requeue because they require the job to be queued.
 	var wasRequeued bool
 	var oldStatus string
 	previousInputs := append([]string(nil), job.Inputs...)
@@ -1615,7 +1634,15 @@ func editNonQueuedJobError(jobID int64, status string) error {
 	if requeueableStatuses[status] {
 		message += fmt.Sprintf("\nSolution: use `weft edit %s --retry ...` to requeue and apply edits, or `weft restart %s ...` to retry with overrides.", jobRef, jobRef)
 	}
-	return fmt.Errorf("%s", message)
+	return &jobStateDecisionError{message: message}
+}
+
+type jobStateDecisionError struct {
+	message string
+}
+
+func (e *jobStateDecisionError) Error() string {
+	return e.message
 }
 
 func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, []db.JobDependencyRef, error) {

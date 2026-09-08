@@ -146,7 +146,11 @@ func submitEdgeJob(ctx context.Context, out io.Writer, rt *edge.Runtime, cfg *co
 
 func changedCommandFlags(cmd *cobra.Command) map[string]string {
 	flags := map[string]string{}
-	cmd.Flags().Visit(func(flag *pflag.Flag) {
+	rootPersistent := cmd.Root().PersistentFlags()
+	cmd.NonInheritedFlags().VisitAll(func(flag *pflag.Flag) {
+		if !flag.Changed || rootPersistent.Lookup(flag.Name) != nil {
+			return
+		}
 		flags[flag.Name] = flag.Value.String()
 	})
 	if len(flags) == 0 {

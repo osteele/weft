@@ -57,6 +57,23 @@ type BugReport struct {
 	Note        string
 }
 
+type bugFingerprintClosedError struct {
+	bugID       int64
+	fingerprint string
+}
+
+func (e *bugFingerprintClosedError) Error() string {
+	bugRef := FormatBugID(e.bugID)
+	return fmt.Sprintf("bug %s with fingerprint %q is closed; use `weft bug reopen %s` to reopen it, or report with a different --fingerprint", bugRef, e.fingerprint, bugRef)
+}
+
+// IsBugFingerprintClosed reports whether the bug ledger confirmed that a
+// fingerprint belongs to a closed bug.
+func IsBugFingerprintClosed(err error) bool {
+	var target *bugFingerprintClosedError
+	return errors.As(err, &target)
+}
+
 func FormatBugID(id int64) string {
 	return fmt.Sprintf("%s%d", bugPrefix, id)
 }
@@ -366,7 +383,7 @@ func ReportBug(database *sql.DB, report BugReport) (*Bug, bool, error) {
 			return nil, false, closedErr
 		}
 		if closedErr == nil {
-			return nil, false, fmt.Errorf("bug %s with fingerprint %q is closed; use `weft bug reopen %s` to reopen it, or report with a different --fingerprint", FormatBugID(closedID), report.Fingerprint, FormatBugID(closedID))
+			return nil, false, &bugFingerprintClosedError{bugID: closedID, fingerprint: report.Fingerprint}
 		}
 		result, err := tx.Exec(`
 			INSERT INTO bugs

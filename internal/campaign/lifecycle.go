@@ -2277,6 +2277,9 @@ func LaunchInstance(
 			return 0, fmt.Errorf("job %s is managed by SkyPilot and cannot be launched on a Weft rental", ids.FormatJobID(job.ID))
 		}
 	}
+	if eligible, _ := FilterOffersByAuthorizedTargets(group, []cloud.Offer{offer}); len(eligible) == 0 {
+		return 0, fmt.Errorf("offer %s is outside the jobs' authenticated execution targets", offer.Key())
+	}
 	if r2Assets.Client == nil {
 		return 0, ErrR2ClientRequired
 	}

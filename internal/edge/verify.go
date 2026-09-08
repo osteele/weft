@@ -62,6 +62,17 @@ type VerifyOptions struct {
 // answer is UNKNOWN — some store could not be consulted — and the caller must
 // retry rather than refuse, or a network hiccup would discard valid work.
 func Verify(object []byte, seen SeenSet, opts VerifyOptions) (*VerifiedEnvelope, *Refusal, error) {
+	return verifyEnvelope(object, seen, opts, false)
+}
+
+// VerifyRecorded authenticates an envelope that the seen-set says was already
+// admitted. Freshness and replay checks are admission gates, so recovery does
+// not repeat them after their result is durable.
+func VerifyRecorded(object []byte, opts VerifyOptions) (*VerifiedEnvelope, *Refusal, error) {
+	return verifyEnvelope(object, nil, opts, true)
+}
+
+func verifyEnvelope(object []byte, seen SeenSet, opts VerifyOptions, recorded bool) (*VerifiedEnvelope, *Refusal, error) {
 	// 1. Frame.
 	f, refusal := parseFrame(object)
 	if refusal != nil {
@@ -146,25 +157,27 @@ func Verify(object []byte, seen SeenSet, opts VerifyOptions) (*VerifiedEnvelope,
 	// 8. Freshness, against the kind's own time-to-live. Staleness means
 	// different things per kind, so the value is configuration rather than a
 	// constant.
-	ttl := kindPolicy.TTL
-	if ttl == 0 {
-		ttl = opts.DefaultTTL
-	}
-	if kindPolicy.NeverExpires {
-		ttl = 0
-	}
-	if ttl > 0 {
-		age := opts.Now.Sub(env.SubmittedAt)
-		if age > ttl {
-			return nil, refuse(ReasonExpired,
-				"submission %s of kind %s was signed %s ago, beyond that kind's %s time-to-live",
-				env.Nonce, env.PayloadKind, age.Round(time.Second), ttl), nil
+	if !recorded {
+		ttl := kindPolicy.TTL
+		if ttl == 0 {
+			ttl = opts.DefaultTTL
 		}
-	}
-	if skew := env.SubmittedAt.Sub(opts.Now); skew > opts.ClockSkew {
-		return nil, refuse(ReasonFutureDated,
-			"submission %s is dated %s in the future, beyond the %s allowance",
-			env.Nonce, skew.Round(time.Second), opts.ClockSkew), nil
+		if kindPolicy.NeverExpires {
+			ttl = 0
+		}
+		if ttl > 0 {
+			age := opts.Now.Sub(env.SubmittedAt)
+			if age > ttl {
+				return nil, refuse(ReasonExpired,
+					"submission %s of kind %s was signed %s ago, beyond that kind's %s time-to-live",
+					env.Nonce, env.PayloadKind, age.Round(time.Second), ttl), nil
+			}
+		}
+		if skew := env.SubmittedAt.Sub(opts.Now); skew > opts.ClockSkew {
+			return nil, refuse(ReasonFutureDated,
+				"submission %s is dated %s in the future, beyond the %s allowance",
+				env.Nonce, skew.Round(time.Second), opts.ClockSkew), nil
+		}
 	}
 
 	// 9. Replay. A re-uploaded packet carries a valid signature, so only the

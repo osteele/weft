@@ -60,17 +60,18 @@ func normalizedGPUCount(n int) int {
 // SlotGPUs marks groups whose jobs run concurrently, one single-GPU job per
 // visible device on a multi-GPU rental.
 type InstanceGroup struct {
-	GPUClass        string // Normalized GPU class (uppercase), e.g. "H100"
-	Provider        string // Requested provider ("vastai" or "runpod"), empty = any
-	RunpodCloudType string // RunPod cloud type override ("community" or "secure"), empty = config/default
-	NumGPUs         int    // Exact number of GPUs requested on one host/rental (0/1 = one)
-	SlotGPUs        bool   // Run one single-GPU job per GPU concurrently on this rental
-	GPUMemGB        int    // Supremum of GPU memory across all jobs in the group
-	CPUCores        int    // Minimum effective CPU cores/vCPUs
-	CPUMemGB        int    // Supremum of host/system RAM (effective) across all jobs in the group
-	Interconnect    string // Requested intra-host interconnect; see placement.InterconnectValues
-	MaxGPUMemGB     int    // Legacy metadata retained for old rows; not used for placement
-	DiskGB          int    // Estimated disk space needed (0 = use default)
+	GPUClass          string   // Normalized GPU class (uppercase), e.g. "H100"
+	Provider          string   // Requested provider ("vastai" or "runpod"), empty = any
+	RunpodCloudType   string   // RunPod cloud type override ("community" or "secure"), empty = config/default
+	NumGPUs           int      // Exact number of GPUs requested on one host/rental (0/1 = one)
+	SlotGPUs          bool     // Run one single-GPU job per GPU concurrently on this rental
+	GPUMemGB          int      // Supremum of GPU memory across all jobs in the group
+	CPUCores          int      // Minimum effective CPU cores/vCPUs
+	CPUMemGB          int      // Supremum of host/system RAM (effective) across all jobs in the group
+	Interconnect      string   // Requested intra-host interconnect; see placement.InterconnectValues
+	AuthorizedTargets []string // Authenticated execution-target grant for edge jobs; empty for hub-local jobs
+	MaxGPUMemGB       int      // Legacy metadata retained for old rows; not used for placement
+	DiskGB            int      // Estimated disk space needed (0 = use default)
 	// JobDiskGB holds per-job disk floors so SplitToParallel can size each
 	// single-job candidate; EstimateGroupDisks fills it for multi-job groups.
 	JobDiskGB        map[int64]int
@@ -105,6 +106,7 @@ func cloneInstanceGroupWithJobs(g InstanceGroup, jobs []*db.Job) InstanceGroup {
 	clone := g
 	clone.Jobs = append([]*db.Job(nil), jobs...)
 	clone.VastCapAdd = append([]string(nil), g.VastCapAdd...)
+	clone.AuthorizedTargets = append([]string(nil), g.AuthorizedTargets...)
 	clone.JobDiskGB = pruneJobDiskGB(g.JobDiskGB, jobs)
 	return clone
 }
@@ -132,16 +134,17 @@ func pruneJobDiskGB(disk map[int64]int, jobs []*db.Job) map[int64]int {
 }
 
 type jobPlacementIntent struct {
-	GPUClass        string
-	Provider        string
-	RunpodCloudType string
-	NumGPUs         int
-	GPUMemGB        int
-	CPUCores        int
-	CPUMemGB        int
-	Interconnect    string
-	Preemptible     bool
-	RentalPolicy    rentalPolicyKey
+	GPUClass          string
+	Provider          string
+	RunpodCloudType   string
+	NumGPUs           int
+	GPUMemGB          int
+	CPUCores          int
+	CPUMemGB          int
+	Interconnect      string
+	Preemptible       bool
+	RentalPolicy      rentalPolicyKey
+	AuthorizedTargets []string
 }
 
 func placementIntentForJob(job *db.Job) jobPlacementIntent {
@@ -154,31 +157,33 @@ func placementIntentForJob(job *db.Job) jobPlacementIntent {
 		mem = *job.GPUMemGB
 	}
 	return jobPlacementIntent{
-		GPUClass:        strings.TrimSpace(job.GPUClass),
-		Provider:        provider,
-		RunpodCloudType: job.RequestedRunpodCloudType(),
-		NumGPUs:         job.RequestedGPUCount(),
-		GPUMemGB:        mem,
-		CPUCores:        job.RequestedCPUCores(),
-		CPUMemGB:        job.RequestedCPUMemGB(),
-		Interconnect:    strings.TrimSpace(job.RequestedInterconnect()),
-		Preemptible:     job.UsesPreemptiblePlacement(),
-		RentalPolicy:    rentalPolicyForJob(job),
+		GPUClass:          strings.TrimSpace(job.GPUClass),
+		Provider:          provider,
+		RunpodCloudType:   job.RequestedRunpodCloudType(),
+		NumGPUs:           job.RequestedGPUCount(),
+		GPUMemGB:          mem,
+		CPUCores:          job.RequestedCPUCores(),
+		CPUMemGB:          job.RequestedCPUMemGB(),
+		Interconnect:      strings.TrimSpace(job.RequestedInterconnect()),
+		Preemptible:       job.UsesPreemptiblePlacement(),
+		RentalPolicy:      rentalPolicyForJob(job),
+		AuthorizedTargets: append([]string(nil), job.EdgeAuthorizedTargets...),
 	}
 }
 
 func (intent jobPlacementIntent) newGroup(job *db.Job) InstanceGroup {
 	return InstanceGroup{
-		GPUClass:        strings.ToUpper(intent.GPUClass),
-		Provider:        intent.Provider,
-		RunpodCloudType: intent.RunpodCloudType,
-		NumGPUs:         intent.NumGPUs,
-		GPUMemGB:        intent.GPUMemGB,
-		CPUCores:        intent.CPUCores,
-		CPUMemGB:        intent.CPUMemGB,
-		Interconnect:    intent.Interconnect,
-		Preemptible:     intent.Preemptible,
-		Jobs:            []*db.Job{job},
+		GPUClass:          strings.ToUpper(intent.GPUClass),
+		Provider:          intent.Provider,
+		RunpodCloudType:   intent.RunpodCloudType,
+		NumGPUs:           intent.NumGPUs,
+		GPUMemGB:          intent.GPUMemGB,
+		CPUCores:          intent.CPUCores,
+		CPUMemGB:          intent.CPUMemGB,
+		Interconnect:      intent.Interconnect,
+		Preemptible:       intent.Preemptible,
+		AuthorizedTargets: append([]string(nil), intent.AuthorizedTargets...),
+		Jobs:              []*db.Job{job},
 	}
 }
 
@@ -201,8 +206,25 @@ func (intent jobPlacementIntent) matchesGroup(g InstanceGroup) bool {
 	if !strings.EqualFold(strings.TrimSpace(g.Interconnect), intent.Interconnect) {
 		return false
 	}
+	if !equalTargetSetsFold(g.AuthorizedTargets, intent.AuthorizedTargets) {
+		return false
+	}
 	if vramTierOf(g.GPUMemGB) != vramTierOf(intent.GPUMemGB) {
 		return false
+	}
+	return true
+}
+
+func equalTargetSetsFold(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, target := range a {
+		if !slices.ContainsFunc(b, func(candidate string) bool {
+			return strings.EqualFold(strings.TrimSpace(target), strings.TrimSpace(candidate))
+		}) {
+			return false
+		}
 	}
 	return true
 }

@@ -109,6 +109,7 @@ SELECT
 	j.placement_reasons,
 	j.cli_overrides,
 	j.placement_blocked,
+	j.edge_authorized_targets,
 	CASE WHEN la.end_time IS NOT NULL
 	          AND COALESCE(la.cloud_outcome, '') IN ('orphaned', 'canceled')
 	     THEN NULL ELSE COALESCE(et.launch_id, la.launch_id) END AS launch_id,
