@@ -709,13 +709,15 @@ func TestLeaseWindowFloorIsEnforced(t *testing.T) {
 	}
 }
 
-// The window is a crash backstop, so it must be long enough that a plan running
-// normally is not interrupted by it. Nothing renews automatically, so a window
-// shorter than a working day would lapse live plans and require manual repair.
-func TestDefaultWindowIsABackstopNotAHeartbeat(t *testing.T) {
-	if w := DefaultLeaseConfig().Window; w < 12*time.Hour {
-		t.Errorf("default window is %s; with no automatic renewal a short window "+
-			"lapses plans that are merely running long", w)
+// The window must tolerate several missed checks while still expiring
+// abandoned authority promptly.
+func TestDefaultLeaseAllowsSeveralMissedRenewals(t *testing.T) {
+	lease := DefaultLeaseConfig()
+	if lease.Window/lease.Interval < 3 {
+		t.Errorf("default lease %+v tolerates fewer than three missed renewals", lease)
+	}
+	if lease.Window > 12*time.Hour {
+		t.Errorf("default window %s leaves abandoned authority live too long", lease.Window)
 	}
 }
 

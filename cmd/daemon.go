@@ -181,6 +181,9 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	} else if shouldPollEdgeInbox(cfg) {
 		go runEdgeInboxPoller(ctx, database, cfg)
 	}
+	if shouldRenewEdgeKeys(cfg) {
+		go runEdgeKeyRenewer(ctx, cfg)
+	}
 	wakeSnapshot, snapshotErr := readAutopilotWakeSnapshot(database)
 	if snapshotErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))

@@ -38,11 +38,9 @@ type Key struct {
 	PublicKey string `json:"public_key"`
 	// PlanID names the plan execution this key was minted for.
 	PlanID string `json:"plan_id,omitempty"`
-	// Project records which project a plan belongs to. It is provenance and
-	// gates nothing: no code branches on it, and none is intended to.
-	//
-	// It is here so a human or a tool reading the keyring can tell which plan
-	// a key serves without consulting another system.
+	// Project names the project whose settled remote ownership gates renewal.
+	// Empty values are retained for old rows but never renewed automatically:
+	// the hub cannot safely join them to an ownership record.
 	Project   string    `json:"project,omitempty"`
 	NotBefore time.Time `json:"not_before"`
 	NotAfter  time.Time `json:"not_after"`
@@ -290,44 +288,28 @@ func SaveKey(dir string, k Key) error {
 	return nil
 }
 
-// LeaseConfig governs how long a plan's submission authority lasts.
-//
-// The window is a backstop, not the primary control. Authority normally ends
-// when the plan explicitly terminates, by submitting a signed plan-ended
-// request. The window exists for the case where nothing terminates it — a
-// crashed session, an abandoned plan, a machine that went away — so that
-// authority expires by omission rather than requiring an action that may never
-// come.
-//
-// It bounds forgetting, not theft. Against someone holding a stolen key the
-// window buys nothing while the plan is live, because whatever would extend the
-// legitimate key extends the stolen one identically. What it collects is
-// authority nobody is using and nobody remembered to close.
-//
-// Nothing renews automatically. `weft edge key renew` is the manual instrument
-// for a plan that legitimately outruns one window.
+// LeaseConfig governs the sliding validity window for a plan's authority.
 type LeaseConfig struct {
-	// Window is how long a grant lasts before it lapses.
+	// Window is how long a successful renewal keeps a grant valid.
 	Window time.Duration
+	// Interval is how often the hub rechecks project ownership.
+	Interval time.Duration
 }
 
 // MinLeaseWindow is a clock-skew floor.
 //
 // Verification refuses a submission dated in the future and bounds staleness by
 // TTL, so at hour scale a few minutes of drift between hosts is harmless while
-// at minute scale it becomes a refusal storm. The floor is unlikely to bind
-// given the default window, but the hazard it guards is real and independent of
-// how long the window is.
+// at minute scale it becomes a refusal storm.
 const MinLeaseWindow = time.Hour
 
-// DefaultLeaseConfig is a single day.
-//
-// A crash backstop does not need fine granularity: the cost of collecting
-// abandoned authority a few hours later is small, and the cost of lapsing a
-// live plan that simply ran long is an interruption someone has to notice and
-// repair by hand.
+// DefaultLeaseConfig gives the hub several missed renewal opportunities before
+// a live plan lapses.
 func DefaultLeaseConfig() LeaseConfig {
-	return LeaseConfig{Window: 24 * time.Hour}
+	return LeaseConfig{
+		Window:   6 * time.Hour,
+		Interval: time.Hour,
+	}
 }
 
 // Validate rejects a configuration that would make renewal fragile.
@@ -338,14 +320,24 @@ func (c LeaseConfig) Validate() error {
 				"shorter windows cause spurious refusals from ordinary host drift",
 			c.Window, MinLeaseWindow)
 	}
+	if c.Interval <= 0 {
+		return fmt.Errorf("edge lease renewal interval must be positive")
+	}
+	if c.Interval >= c.Window {
+		return fmt.Errorf(
+			"edge lease renewal interval %s must be shorter than window %s; "+
+				"otherwise one delayed check lapses a live plan",
+			c.Interval, c.Window)
+	}
 	return nil
 }
 
 // Renew slides a key's admission window forward.
 //
-// The hub calls this only while it can see the plan is still executing. It
-// needs no contact with the edge: verification is hub-side, so the hub moves
-// the window unilaterally and the edge never learns the window exists.
+// The hub calls this only after independently observing that the key's project
+// remains under settled remote ownership on the bound host. It needs no
+// contact with the edge: verification is hub-side, so the hub moves the window
+// unilaterally and the edge never learns the window exists.
 //
 // Renewal refuses a revoked key, because revocation is a statement about the
 // key itself that renewal must not quietly undo.

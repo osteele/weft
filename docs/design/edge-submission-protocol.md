@@ -335,6 +335,7 @@ handed to a host.
   "key_id": "studio-plan-42",
   "host": "studio",
   "plan_id": "plan-42",
+  "project": "lm2",
   "public_key": "base64...",
   "not_before": "2026-09-04T00:00:00Z",
   "not_after": "2026-09-04T06:00:00Z",
@@ -343,46 +344,36 @@ handed to a host.
 }
 ```
 
-### The window is a backstop
+### Authority is a lease, not a grant
 
-`not_after` bounds how long a plan's authority lasts if nothing ends it. Nothing
-renews it automatically.
+`not_after` is short and slides forward while the hub can verify that the key's
+project remains under settled remote ownership on the key's host. Renewal is
+hub-side: the edge cannot assert its own liveness or extend its authority.
 
-Authority normally ends by explicit termination: the plan submits a signed
-`weft.plan-ended/v1` request when it reaches terminal disposition, and the hub
-closes the window. The backstop is for the case where that never arrives — a
-crashed session, an abandoned plan, a machine that went away — so that authority
-**expires by omission rather than requiring an action that may never come.**
+The daemon reads `research-site status --json`, requires schema
+`research-site.status/v1`, and joins rows to keys by exact project name. It
+renews only an unrevoked, unexpired key whose unique project row has
+`owned_by: "remote"`, `settled: true`, and a `remote_host` matching the key's
+host. A missing, duplicate, malformed, unsettled, local, or mismatched row does
+not renew the key. Source errors leave ownership unknown and do not become
+evidence that the project is local.
 
-That is the whole of what the window buys, and it is narrower than it looks.
-It does not bound theft: against someone holding a stolen key, anything that
-would extend the legitimate key extends the stolen one identically, so a short
-window buys nothing while the plan is live. It does not bound a runaway plan
-either, since elapsed time says nothing about whether a plan is behaving, and a
-plan can burn its ceiling in ten minutes or dribble it across days — spend is
-bounded by the per-plan ceiling, not by the window. What the window collects is
-authority nobody is using and nobody remembered to close.
+Renewal is conditioned at project granularity because that is the liveness
+state the hub can observe. It cannot see an individual plan's coordination
+lease on the edge. A returned tree therefore stops renewal, but an abandoned
+plan on a still-owned project keeps renewing until the project returns.
 
-A day is the default, because a crash backstop does not need fine granularity.
-Collecting abandoned authority a few hours later costs little; lapsing a live
-plan that merely ran long costs an interruption someone must notice and repair.
-
-**A plan that legitimately outruns its window is extended by hand**, with
-`weft edge key renew`. A plan whose window has already lapsed is not renewed at
-all — extending past a closed window would readmit everything signed during the
-gap — but a lapsed key that was never revoked can be re-registered with the same
-public key via `weft edge key add`, which needs no round trip to the edge and
-mints no new private key.
-
-`weft edge doctor` reports lapsed and near-lapse keys, because with no automatic
-renewal a lapse is a state a person resolves rather than a symptom of a stopped
-mechanism.
+The default is a six-hour window checked hourly. This tolerates several missed
+checks while making expiry, rather than an open-ended credential, the outcome
+when ownership evidence disappears. A window that has lapsed is never reopened:
+doing so would retroactively admit every submission signed during the gap. The
+manual `weft edge key renew` command follows the same rule.
 
 **Window length has a floor set by clock skew, not by security.** Verification
 refuses future-dated submissions and bounds staleness by TTL, so a few minutes
-of drift between hosts is harmless at hour scale and produces a refusal storm at
-minute scale. The floor is one hour. It is unlikely to bind at the default
-window, but the hazard is real and independent of how long the window is.
+of drift between hosts is harmless at hour scale and produces a refusal storm
+at minute scale. The floor is one hour. The renewal interval must be shorter
+than the window so one delayed check does not lapse a live plan.
 
 ### Ending a plan
 
@@ -398,8 +389,8 @@ Three paths close a grant, whichever comes first:
 2. **Edge-signalled end.** The edge submits a `weft.plan-ended/v1` payload
    through the ordinary inbound path. This is the normal path when a plan
    reaches terminal disposition.
-3. **Window expiry.** The grant reaches `not_after` and lapses. The backstop
-   for a crash that signalled nothing.
+3. **Lease expiry.** Renewal stops because ownership is no longer settled and
+   remote, or because the hub cannot verify it before the window ends.
 
 Path 2 does not weaken the rule that an edge must never assert its own
 liveness. That rule exists because a compromised edge extending its own window
@@ -420,7 +411,7 @@ Two outcomes with different subjects, from one field and one flag:
 
 | Action | Mechanism | Meaning |
 | --- | --- | --- |
-| Plan ends normally | set `not_after` to now | Bounds **admission**. Nothing new is accepted; everything already admitted stands and stays verifiable. |
+| Plan ends normally | stop renewing, or set `not_after` to now | Bounds **admission**. Nothing new is accepted; everything already admitted stands and stays verifiable. |
 | Key believed compromised | set `revoked_at` | Repudiates **evidence**. Past signatures stop proving anything. |
 
 The first works only because key validity is judged against the envelope's
@@ -470,8 +461,8 @@ an edge validates its loaded key against its configured plan before signing. Wit
 registered and the edge would sign with one the hub has never seen — surfacing
 as a bad-signature refusal whose message points nowhere near the cause.
 
-This round trip happens exactly **once per plan**. Nothing recurs, so there is
-no ongoing channel to the edge at all.
+This round trip happens exactly **once per plan**. Renewal is hub-local, so
+there is no recurring channel to the edge.
 
 **The SSH host key is the root of trust for edge identity.** A public key needs
 integrity, not confidentiality, and host-key verification is exactly that. The
@@ -497,22 +488,25 @@ spend grant, and payload verification are what remain. That is exactly why
 those are enforced independently of the signature.
 
 **Grants close at different speeds.** A plan that ends cleanly closes its grant
-immediately, by signalling. A plan that crashes keeps its grant until the window
-expires, up to a day.
+immediately, by signalling. A plan whose project returns home stops renewing
+and closes within one window. A crashed plan on a project that remains remotely
+owned keeps its grant until the project returns; project ownership is the
+finest liveness fact available to the hub.
 
 **Nothing caps a plan's total spend.** The ceiling is enforced per submission
 with no cumulative accounting, so a plan holding a live key can spend up to its
 ceiling as many times as it submits. The ceiling bounds the blast radius of any
 one submission, not the plan.
 
-**The window bounds forgetting, not theft.** While a plan runs, its key is live
-on the host, so a host compromise during the plan is exactly as bad as it would
-be with a permanent key. If a host runs several plans at once, several live keys
-coexist, and per-plan isolation is then only as strong as file permissions
-there. A key exfiltrated to a log or a backup works until the window expires;
-rotating the keypair more often would narrow that, at the cost of a key pull per
-rotation, and is the natural hardening step if key-at-rest exfiltration becomes
-a live concern rather than a hypothetical.
+**Renewal makes hub availability a liveness dependency.** If the hub daemon
+cannot obtain valid ownership evidence for one window, a live plan's key
+lapses. The design accepts that cost because the edge use case is hub compute
+saturation, not a sleeping hub.
+
+**A sliding window does not bound one-time key exfiltration.** A copied key
+works while the hub keeps renewing the original. Rotating the keypair each
+window would narrow that exposure, at the cost of a recurring authenticated
+key pull, and remains a hardening option rather than part of this protocol.
 
 It is not a PKI. There is no certificate chain, no delegation, and no
 revocation distribution beyond the hub's own keyring.

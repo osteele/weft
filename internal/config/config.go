@@ -470,13 +470,12 @@ type EdgeConfig struct {
 	// AllowForeignJobControl lets a plan control jobs admitted under other keys.
 	// It defaults to false, preserving plan-scoped authority.
 	AllowForeignJobControl bool `yaml:"allow_foreign_job_control" toml:"allow_foreign_job_control"`
-	// LeaseWindowHours is how long a plan's authority lasts before it lapses
-	// (default 24).
-	//
-	// Nothing renews automatically. The window is a backstop for a plan that
-	// never terminates explicitly; a plan that legitimately outruns it is
-	// extended by hand with `weft edge key renew`.
+	// LeaseWindowHours is how long a plan's authority remains valid without a
+	// successful hub-side renewal (default 6).
 	LeaseWindowHours float64 `yaml:"lease_window_hours" toml:"lease_window_hours"`
+	// LeaseRenewIntervalHours is how often the hub rechecks project ownership
+	// before extending eligible plan keys (default 1).
+	LeaseRenewIntervalHours float64 `yaml:"lease_renew_interval_hours" toml:"lease_renew_interval_hours"`
 
 	// Expectation envelopes, per job class, so the wait command can say
 	// whether an elapsed time is normal without a code change.

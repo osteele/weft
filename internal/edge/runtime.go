@@ -33,17 +33,18 @@ type Runtime struct {
 // as a plain struct so internal/edge does not import internal/config and
 // create a cycle.
 type RuntimeConfig struct {
-	Role                   string
-	SigningKeyPath         string
-	PlanID                 string
-	SubmitterHost          string
-	KeyringDir             string
-	SeenDir                string
-	AllowedTargets         []string
-	MaxSpendUSD            float64
-	AllowForeignJobControl bool
-	HubHost                string
-	LeaseWindowHours       float64
+	Role                    string
+	SigningKeyPath          string
+	PlanID                  string
+	SubmitterHost           string
+	KeyringDir              string
+	SeenDir                 string
+	AllowedTargets          []string
+	MaxSpendUSD             float64
+	AllowForeignJobControl  bool
+	HubHost                 string
+	LeaseWindowHours        float64
+	LeaseRenewIntervalHours float64
 	// AllowMissingSigner lets diagnostics assemble an edge runtime before any
 	// key has been minted. The first command run on a new edge is `doctor`,
 	// and it must be able to report what is missing rather than fail on it.
@@ -125,6 +126,9 @@ func NewRuntime(t Transport, cfg RuntimeConfig) (*Runtime, error) {
 	rt.Lease = DefaultLeaseConfig()
 	if cfg.LeaseWindowHours > 0 {
 		rt.Lease.Window = time.Duration(cfg.LeaseWindowHours * float64(time.Hour))
+	}
+	if cfg.LeaseRenewIntervalHours > 0 {
+		rt.Lease.Interval = time.Duration(cfg.LeaseRenewIntervalHours * float64(time.Hour))
 	}
 	if err := rt.Lease.Validate(); err != nil {
 		return nil, err

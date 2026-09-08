@@ -144,3 +144,16 @@ func TestEdgeSubmissionIntervalsParseDefaultAndValidate(t *testing.T) {
 		t.Fatalf("zero admission wait error = %v", err)
 	}
 }
+
+func TestEdgeLeaseSettingsParse(t *testing.T) {
+	cfg, err := loadTOMLConfig(t, "[edge]\nlease_window_hours = 8.0\nlease_renew_interval_hours = 2.0\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Edge.LeaseWindowHours != 8 || cfg.Edge.LeaseRenewIntervalHours != 2 {
+		t.Fatalf("lease settings = %g, %g", cfg.Edge.LeaseWindowHours, cfg.Edge.LeaseRenewIntervalHours)
+	}
+	if UnknownTOMLKeys != nil {
+		t.Fatalf("lease settings reported unknown: %v", UnknownTOMLKeys)
+	}
+}

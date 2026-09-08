@@ -34,7 +34,7 @@ func init() {
 	edgeKeyAddCmd.Flags().String("host", "", "Host this key is bound to (required)")
 	edgeKeyAddCmd.Flags().String("public-key", "", "Base64 ed25519 public key (required)")
 	edgeKeyAddCmd.Flags().Float64("spend-ceiling", 0, "Spend granted to this plan, in USD")
-	edgeKeyAddCmd.Flags().String("project", "", "Project this plan belongs to (recorded as provenance; gates nothing)")
+	edgeKeyAddCmd.Flags().String("project", "", "Project whose settled remote ownership gates renewal")
 	edgeKeyListCmd.Flags().Bool("json", false, "Print machine-readable JSON")
 	edgeKeyRevokeCmd.Flags().Bool("compromised", false,
 		"Repudiate the key's past signatures as well as refusing new ones")
@@ -75,18 +75,19 @@ func edgeRuntimeOpts(transportOverride string, allowMissingSigner bool) (*edge.R
 				"submitted work off the hub: %w", err)
 	}
 	rt, err := edge.NewRuntime(transport, edge.RuntimeConfig{
-		Role:                   cfg.Edge.Role,
-		SigningKeyPath:         edgePlanKeyPath(cfg, cfg.Edge.PlanID),
-		PlanID:                 cfg.Edge.PlanID,
-		SubmitterHost:          cfg.Edge.SubmitterHost,
-		KeyringDir:             edgeKeyringDir(cfg),
-		SeenDir:                edgeSeenDir(cfg),
-		AllowedTargets:         cfg.Edge.AllowedTargets,
-		MaxSpendUSD:            cfg.Edge.MaxSpendUSD,
-		AllowForeignJobControl: cfg.Edge.AllowForeignJobControl,
-		HubHost:                hostname,
-		LeaseWindowHours:       cfg.Edge.LeaseWindowHours,
-		AllowMissingSigner:     allowMissingSigner,
+		Role:                    cfg.Edge.Role,
+		SigningKeyPath:          edgePlanKeyPath(cfg, cfg.Edge.PlanID),
+		PlanID:                  cfg.Edge.PlanID,
+		SubmitterHost:           cfg.Edge.SubmitterHost,
+		KeyringDir:              edgeKeyringDir(cfg),
+		SeenDir:                 edgeSeenDir(cfg),
+		AllowedTargets:          cfg.Edge.AllowedTargets,
+		MaxSpendUSD:             cfg.Edge.MaxSpendUSD,
+		AllowForeignJobControl:  cfg.Edge.AllowForeignJobControl,
+		HubHost:                 hostname,
+		LeaseWindowHours:        cfg.Edge.LeaseWindowHours,
+		LeaseRenewIntervalHours: cfg.Edge.LeaseRenewIntervalHours,
+		AllowMissingSigner:      allowMissingSigner,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -231,10 +232,8 @@ var edgeDoctorCmd = &cobra.Command{
 					soon++
 				}
 			}
-			// Nothing renews on its own, so a lapse is a state a person
-			// resolves rather than a symptom of a stopped renewer.
 			if lapsed > 0 || soon > 0 {
-				fmt.Printf("           %d lapsed, %d lapsing within %s — extend a still-running plan with `weft edge key renew <key-id>`\n",
+				fmt.Printf("           %d lapsed, %d lapsing within %s\n",
 					lapsed, soon, nearLapse)
 			}
 			spend := fmt.Sprintf("$%.2f", rt.Policy.MaxSpendUSD)
@@ -242,11 +241,12 @@ var edgeDoctorCmd = &cobra.Command{
 				spend = "unset (no spending authorized)"
 			}
 			fmt.Printf("Policy:    targets %v, max spend %s\n", rt.Policy.AllowedTargets, spend)
-			fmt.Printf("Lease:     %s window, not renewed automatically\n", rt.Lease.Window)
+			fmt.Printf("Lease:     %s window renewed every %s while project ownership remains settled and remote\n",
+				rt.Lease.Window, rt.Lease.Interval)
 			if len(keys) == 0 {
 				fmt.Println("\nNo keys registered. Mint one on the edge and register it here:")
 				fmt.Println("  ssh agent@<edge> 'weft edge key mint --plan <plan-id>'")
-				fmt.Println("  weft edge key add --host <edge> --plan <plan-id> --public-key <key>")
+				fmt.Println("  weft edge key add --host <edge> --plan <plan-id> --project <project> --public-key <key>")
 			}
 		}
 
@@ -392,9 +392,8 @@ func sortedStringMapKeys[V any](values map[string]V) []string {
 	return keys
 }
 
-// nearLapse is how close to expiry a key is worth calling out. Nothing renews
-// automatically, so this is the warning a person acts on before a live plan
-// loses its authority.
+// nearLapse is how close to expiry a key is worth calling out. A near lapse
+// indicates that renewal is deferred or failing and needs investigation.
 const nearLapse = 2 * time.Hour
 
 func describeKey(k edge.Key, now time.Time) string {
@@ -646,8 +645,8 @@ var edgeKeyAddCmd = &cobra.Command{
 		pubKey, _ := cmd.Flags().GetString("public-key")
 		ceiling, _ := cmd.Flags().GetFloat64("spend-ceiling")
 		project, _ := cmd.Flags().GetString("project")
-		if host == "" || pubKey == "" {
-			return fmt.Errorf("--host and --public-key are required")
+		if host == "" || pubKey == "" || project == "" {
+			return fmt.Errorf("--host, --project, and --public-key are required")
 		}
 		if _, err := base64.StdEncoding.DecodeString(pubKey); err != nil {
 			return fmt.Errorf("--public-key is not valid base64: %w", err)
@@ -694,8 +693,7 @@ var edgeKeyAddCmd = &cobra.Command{
 			fmt.Printf(", spend ceiling $%.2f", ceiling)
 		}
 		fmt.Println(".")
-		fmt.Println("Renew while the plan runs with `weft edge key renew`; stop the plan by " +
-			"letting the window lapse.")
+		fmt.Println("The hub daemon renews this key while the project's ownership is settled on this host.")
 		return nil
 	},
 }
@@ -839,6 +837,9 @@ func edgeLeaseConfig(cfg *config.Config) (edge.LeaseConfig, error) {
 	lease := edge.DefaultLeaseConfig()
 	if cfg.Edge.LeaseWindowHours > 0 {
 		lease.Window = time.Duration(cfg.Edge.LeaseWindowHours * float64(time.Hour))
+	}
+	if cfg.Edge.LeaseRenewIntervalHours > 0 {
+		lease.Interval = time.Duration(cfg.Edge.LeaseRenewIntervalHours * float64(time.Hour))
 	}
 	if err := lease.Validate(); err != nil {
 		return edge.LeaseConfig{}, err
