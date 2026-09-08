@@ -10,19 +10,6 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 )
 
-func TestAgentLogPath(t *testing.T) {
-	path := agentLogPath()
-	if path == "" {
-		t.Fatal("agentLogPath() returned empty string")
-	}
-	if !strings.Contains(path, "agent-operations.log") {
-		t.Errorf("expected path to contain 'agent-operations.log', got %s", path)
-	}
-	if !strings.Contains(path, ".cache/weft") {
-		t.Errorf("expected path to contain '.cache/weft', got %s", path)
-	}
-}
-
 func TestOpsLogInitialization(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "test-agent-ops.log")
@@ -64,17 +51,6 @@ func TestAgentOpConstants(t *testing.T) {
 		if !strings.HasPrefix(op, "agent.") {
 			t.Errorf("agent op %q should have 'agent.' prefix", op)
 		}
-	}
-}
-
-func TestAgentLogPathRespectsHome(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-
-	os.Setenv("HOME", "/custom/home")
-	path := agentLogPath()
-	if !strings.HasSuffix(path, "agent-operations.log") {
-		t.Errorf("expected path to end with 'agent-operations.log', got %s", path)
 	}
 }
 

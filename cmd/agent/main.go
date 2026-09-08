@@ -2,17 +2,12 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/artifacts"
-	"github.com/osteele/weft/internal/logging"
-	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -21,93 +16,86 @@ import (
 // The value is a deterministic local source hash in normal builds.
 var version = "dev"
 
-// agentLogPath returns the path for the agent's operations log.
-func agentLogPath() string {
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		home = "/tmp"
-	}
-	return home + "/.cache/weft/agent-operations.log"
-}
+// agentUsageText names every valid subcommand. An unrecognized argument
+// must exit with this text: a subcommand missing from it would turn a
+// typo into a hard failure on a host runner or cloud instance.
+const agentUsageText = `usage: weft-agent <subcommand> [args]
+
+subcommands:
+  version | --version   print the agent version and exit
+  run-queue             run the queue runner (tmux-managed)
+  run-job               run a single queued job
+  run-instance          run a cloud instance worker (run-campaign is an alias)
+  grace-wait            poll R2 for control messages during the grace period
+  r2                    host-side R2 content helpers (content-info, put-content)
+  heartbeat-sidecar     upload instance heartbeats to R2
+  batch-status          print compact status for job ids
+`
 
 func main() {
-	// Handle --version without initializing logging
-	if len(os.Args) > 1 && os.Args[1] == "--version" {
+	os.Exit(runAgentArgs(os.Args))
+}
+
+// runAgentArgs dispatches an os.Args-style argument vector. Bare invocation
+// has no caller in this repository and no behavior beyond idling until a
+// signal; over ssh with a timeout it left an orphaned agent on the remote
+// host. There is no fall-through into starting an agent from here.
+func runAgentArgs(args []string) int {
+	if len(args) > 1 {
+		return runAgentSubcommand(args[1], args[2:])
+	}
+	fmt.Fprint(os.Stderr, agentUsageText)
+	return 2
+}
+
+// runAgentSubcommand dispatches one subcommand and returns the process exit
+// code. There is no fall-through: anything unrecognized is a usage error,
+// never an agent start.
+func runAgentSubcommand(name string, rest []string) int {
+	switch name {
+	case "--version", "version":
 		fmt.Printf("weft-agent %s\n", version)
-		os.Exit(0)
-	}
+		return 0
 
-	// Handle run-queue subcommand
-	if len(os.Args) > 1 && os.Args[1] == "run-queue" {
-		runQueue(os.Args[2:])
-		return
-	}
+	case "run-queue":
+		runQueue(rest)
+		return 0
 
-	// Handle run-job subcommand
-	if len(os.Args) > 1 && os.Args[1] == "run-job" {
-		runJob(os.Args[2:])
-		return
-	}
+	case "run-job":
+		runJob(rest)
+		return 0
 
-	// Handle cloud instance worker subcommands. run-campaign is kept as a
-	// compatibility alias for manifests and cached agents that still use it.
-	if len(os.Args) > 1 && (os.Args[1] == "run-instance" || os.Args[1] == "run-campaign") {
-		runInstance(os.Args[2:])
-		return
-	}
+	// run-campaign is kept as a compatibility alias for manifests and
+	// cached agents that still use it.
+	case "run-instance", "run-campaign":
+		runInstance(rest)
+		return 0
 
-	// Handle grace-wait subcommand
-	if len(os.Args) > 1 && os.Args[1] == "grace-wait" {
-		graceWait(os.Args[2:])
-		return
-	}
+	case "grace-wait":
+		graceWait(rest)
+		return 0
 
-	// Handle r2 subcommand (host-side checkpoint digest/upload for wb44 staging)
-	if len(os.Args) > 1 && os.Args[1] == "r2" {
-		runR2Command(os.Args[2:])
-		return
-	}
+	case "r2":
+		runR2Command(rest)
+		return 0
 
-	// Handle heartbeat-sidecar subcommand
-	if len(os.Args) > 1 && os.Args[1] == "heartbeat-sidecar" {
-		runHeartbeatSidecar(os.Args[2:])
-		return
-	}
+	case "heartbeat-sidecar":
+		runHeartbeatSidecar(rest)
+		return 0
 
-	// Handle batch-status subcommand
-	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
-		jobIDs, err := parseBatchStatusArgs(os.Args[2:])
+	case "batch-status":
+		jobIDs, err := parseBatchStatusArgs(rest)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "batch-status: %v\n", err)
-			os.Exit(2)
+			return 2
 		}
 		batchStatus(jobIDs)
-		return
+		return 0
+
+	default:
+		fmt.Fprintf(os.Stderr, "weft-agent: unknown subcommand %q\n\n%s", name, agentUsageText)
+		return 2
 	}
-
-	// Initialize structured logging (JSON for agent, debug-level for remote diagnostics)
-	logging.Setup(os.Stderr, "json")
-	logging.SetLevel(slog.LevelDebug)
-
-	// Initialize ops logging
-	if err := oplog.Init(agentLogPath(), 0); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to init ops log: %v\n", err)
-	} else {
-		defer oplog.Close()
-	}
-
-	oplog.Log(oplog.OpAgentStart, oplog.WithDetail(version))
-
-	// Set up graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	fmt.Printf("weft-agent %s\n", version)
-	fmt.Println("Agent started. Waiting for signal to stop.")
-
-	sig := <-sigCh
-	oplog.Log(oplog.OpAgentStop, oplog.WithDetailf("signal: %s", sig))
-	fmt.Printf("\nReceived %s, shutting down.\n", sig)
 }
 
 func runQueue(args []string) {

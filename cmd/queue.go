@@ -765,6 +765,15 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Runner: STOPPED")
 	}
 
+	// The R2 state envelope is the only surface that records which agent
+	// build the runner process is executing. Hosts on the SSH transport
+	// never publish it, so no agent-version line exists for them.
+	if ops.HostUsesR2Queue(host) {
+		for _, line := range queueAgentVersionLines(host, readRunningAgentVersion(host), readDeployedAgentVersion(host)) {
+			fmt.Println(line)
+		}
+	}
+
 	// Get currently running job
 	currentFile := opsqueue.CurrentFilePath()
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
@@ -790,6 +799,99 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// versionReading is one agent-version observation. The three states are
+// distinct: known (a version), confirmed absent (the source exists but
+// reports no version), and unknown (the source could not be read).
+type versionReading struct {
+	version string
+	absent  bool
+	err     error
+	// note qualifies the reading: it explains an absence or ages a known
+	// version.
+	note string
+}
+
+func (r versionReading) known() bool { return r.err == nil && !r.absent }
+
+// describe renders the reading for display. Absence and unreadability must
+// stay visibly distinct from a version string; a blank would read as a
+// match against any other blank.
+func (r versionReading) describe() string {
+	switch {
+	case r.err != nil:
+		return "unknown (" + r.err.Error() + ")"
+	case r.absent:
+		if r.note != "" {
+			return "unknown (" + r.note + ")"
+		}
+		return "unknown"
+	case r.note != "":
+		return r.version + " (" + r.note + ")"
+	default:
+		return r.version
+	}
+}
+
+// readRunningAgentVersion reads the version the runner last published with
+// its state envelope. Staleness qualifies the reading but does not void it:
+// the version names the process that published, and the age says how much
+// to trust that the process is still alive.
+func readRunningAgentVersion(host string) versionReading {
+	view, err := ops.FetchR2StateView(host)
+	if err != nil {
+		return versionReading{err: err}
+	}
+	if view.Absent {
+		return versionReading{absent: true, note: "no state published"}
+	}
+	var note string
+	if view.Stale {
+		note = "state stale"
+		if age := view.Age; age > 0 {
+			note = fmt.Sprintf("state published %s ago", db.FormatDuration(int64(age/time.Second)))
+		}
+	}
+	if view.State.AgentVersion == "" {
+		return versionReading{absent: true, note: joinNote("not reported by the running agent", note)}
+	}
+	return versionReading{version: view.State.AgentVersion, note: note}
+}
+
+// readDeployedAgentVersion reads the version of the binary installed on the
+// host. Reading it requires SSH and fails independently of the running
+// version; a failure is unknown, never a mismatch.
+func readDeployedAgentVersion(host string) versionReading {
+	ver, err := agentdeploy.RemoteAgentVersion(host)
+	if err != nil {
+		return versionReading{err: err}
+	}
+	if ver == "" {
+		return versionReading{absent: true, note: "not installed"}
+	}
+	return versionReading{version: ver}
+}
+
+func joinNote(note, qualifier string) string {
+	if qualifier == "" {
+		return note
+	}
+	return note + "; " + qualifier
+}
+
+// queueAgentVersionLines renders the agent-version lines for `weft queue
+// status`. The running and deployed readings fail independently: either may
+// be unknown without failing the other or the command. A known/known
+// disagreement is stated in words so no reader has to compare hashes by eye.
+func queueAgentVersionLines(host string, running, deployed versionReading) []string {
+	lines := []string{fmt.Sprintf("Agent: running %s, deployed %s", running.describe(), deployed.describe())}
+	if running.known() && deployed.known() && running.version != deployed.version {
+		lines = append(lines, fmt.Sprintf(
+			"MISMATCH: the runner is executing agent %s but the deployed binary is %s; 'weft queue update %s' re-execs the runner on the deployed build",
+			running.version, deployed.version, host))
+	}
+	return lines
 }
 
 func runQueueUpdate(cmd *cobra.Command, args []string) error {

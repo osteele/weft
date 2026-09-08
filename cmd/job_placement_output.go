@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/blockreason"
 	"github.com/osteele/weft/internal/daemoncontrol"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/explain"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/queueblock"
 )
@@ -53,7 +54,20 @@ func placementSummary(job *db.Job) string {
 }
 
 func queueReasonSummary(database *sql.DB, job *db.Job) string {
+	// A recorded blocker outranks queue position for placed targets: both
+	// can be true at once, but naming the ahead job as the cause sends the
+	// operator to act on a job that is not the problem. Unplaced jobs keep
+	// the diagnose-pointing handling in the switch below.
 	if database != nil {
+		switch job.TargetKind() {
+		case db.JobTargetInventoryHost, db.JobTargetRentalInstance:
+			if blocker := recordedBlocker(database, job); blocker != "" {
+				if running := runningJobAhead(database, job); running != nil {
+					return fmt.Sprintf("%s (also waiting behind %s)", blocker, ids.FormatJobID(running.ID))
+				}
+				return blocker
+			}
+		}
 		if running := runningJobAhead(database, job); running != nil {
 			return "waiting behind " + ids.FormatJobID(running.ID)
 		}
@@ -156,6 +170,20 @@ func normalQueueRange(job *db.Job) string {
 	}
 }
 
+// recordedBlocker returns the blocking reason recorded on the job itself —
+// the host-reported queue block, or a high-confidence explanation — when one
+// is more proximate than queue position. Empty means no such blocker is
+// recorded and head-of-line waiting, if any, is the whole story.
+func recordedBlocker(database *sql.DB, job *db.Job) string {
+	if display := queueblock.Display(job, nil); display.Kind != "" && display.Reason != "" {
+		return display.Kind + ": " + display.Reason
+	}
+	if x := explain.ForJob(database, job, time.Now()); explanationHasHighConfidenceBlocker(x) {
+		return explanationBlockerSummary(x)
+	}
+	return ""
+}
+
 func queuedAction(database *sql.DB, job *db.Job) string {
 	if job == nil {
 		return "wait; keep monitoring at the job level"
@@ -166,12 +194,26 @@ func queuedAction(database *sql.DB, job *db.Job) string {
 		}
 		return "wait; autopilot owns placement, monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
 	}
+	monitor := "monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
+	behind := ""
 	if database != nil {
 		if running := runningJobAhead(database, job); running != nil {
-			return "wait; queued behind " + ids.FormatJobID(running.ID) + ", monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
+			behind = "queued behind " + ids.FormatJobID(running.ID)
 		}
 	}
-	return "wait; no manual retry or kill indicated, monitor with weft status " + ids.FormatJobID(job.ID) + " --wait"
+	// The operative blocker comes first. Head-of-line position survives
+	// only as parenthetical context; pointing the reader at the ahead job
+	// as the cause is how a blocked job's diagnosis goes wrong.
+	if blocker := recordedBlocker(database, job); blocker != "" {
+		if behind != "" {
+			return "wait; " + blocker + " (also " + behind + "), " + monitor
+		}
+		return "wait; " + blocker + ", " + monitor
+	}
+	if behind != "" {
+		return "wait; " + behind + ", " + monitor
+	}
+	return "wait; no manual retry or kill indicated, " + monitor
 }
 
 func runningJobAhead(database *sql.DB, job *db.Job) *db.Job {
