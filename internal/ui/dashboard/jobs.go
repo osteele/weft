@@ -579,10 +579,20 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 	if m.database == nil {
 		return nil
 	}
+	if job.EffectiveStatus() == db.StatusPendingPlacement && m.coreService == nil {
+		return nil
+	}
 
 	jobID := job.ID
 	return func() tea.Msg {
-		result, err := ops.CancelQueuedJob(m.database, job, ops.OptionsForMode(ops.TimeoutFast))
+		var result ops.Result
+		var err error
+		if job.EffectiveStatus() == db.StatusPendingPlacement {
+			operation, requestErr := m.coreService.RequestStatus(jobID, db.StatusCanceled, ops.TimeoutFast)
+			result, err = operation.Outcome, requestErr
+		} else {
+			result, err = ops.CancelQueuedJob(m.database, job, ops.OptionsForMode(ops.TimeoutFast))
+		}
 		if err != nil {
 			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
 		}

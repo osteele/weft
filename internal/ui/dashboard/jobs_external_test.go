@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
@@ -118,6 +119,38 @@ func TestDashboardCancelQueuedJobRecordsCanceledStatus(t *testing.T) {
 	}
 	if refreshed.Status != db.StatusCanceled {
 		t.Fatalf("queued cancel status = %q, want canceled", refreshed.Status)
+	}
+}
+
+func TestDashboardCancelPendingPlacementJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "true", "pending placement job", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetPendingStatus(database, jobID, db.StatusPendingPlacement); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := Model{
+		database:    database,
+		coreService: core.NewServiceWithDB(database),
+	}
+
+	msg := model.cancelQueuedJob(job)()
+	result, ok := msg.(jobKilledMsg)
+	if !ok || result.err != nil || !result.cancelled {
+		t.Fatalf("cancel result = %#v", msg)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.EffectiveStatus() != db.StatusCanceled {
+		t.Fatalf("pending-placement cancel status = %q, want canceled", refreshed.EffectiveStatus())
 	}
 }
 
