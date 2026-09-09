@@ -56,7 +56,7 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 		onProgress = func(string) {}
 	}
 
-	localVer, err := LocalAgentVersion()
+	localVer, err := LocalAgentVersionForTarget(spec.OS, spec.Arch)
 	if err != nil {
 		return false, fmt.Errorf("local agent version: %w", err)
 	}
@@ -112,6 +112,11 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 		// Cross-compiled binary doesn't run (e.g. GLIBC mismatch). Fall back to native build.
 		slog.Debug("cross-compiled agent incompatible, building natively", "component", "agentdeploy", "host", host, "error", err)
 		onProgress("cached agent is not runnable there; building natively")
+		if err := ensureCurrentBuildVersionMatchesInstalledIdentity(localVer, spec.OS, spec.Arch); err != nil {
+			return false, fmt.Errorf(
+				"cached agent for %s/%s is not runnable on %s; native rebuild refused: %w",
+				spec.OS, spec.Arch, host, err)
+		}
 		if err := BuildOnHostWithProgress(host, localVer, spec.OS, spec.Arch, onProgress); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}

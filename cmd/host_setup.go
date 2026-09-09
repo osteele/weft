@@ -133,7 +133,7 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, " warning: %v\n", agentErr)
 		}
 	} else if deployed {
-		ver, _ := agentdeploy.LocalAgentVersion()
+		ver, _ := agentdeploy.LocalAgentVersionForTarget(spec.OS, spec.Arch)
 		if ver != "" {
 			fmt.Fprintf(os.Stderr, " deployed (version %s)\n", ver)
 		} else {

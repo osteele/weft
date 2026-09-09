@@ -17,7 +17,7 @@ build:
             echo "Starting background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
             (
                 printf '[%s] prewarm start (%s)\n' "$(date -u +%FT%TZ)" "${label}"
-                if weft build-agents --targets linux-amd64; then
+                if weft build-agents --targets linux-amd64 --from-source; then
                     printf '[%s] prewarm ok (%s)\n' "$(date -u +%FT%TZ)" "${label}"
                 else
                     status=$?
@@ -66,7 +66,7 @@ install:
             echo "Starting background agent prewarm via installed weft (log: ${PREWARM_LOG})..."
             (
                 printf '[%s] prewarm start (%s)\n' "$(date -u +%FT%TZ)" "${label}"
-                if weft build-agents --targets linux-amd64; then
+                if weft build-agents --targets linux-amd64 --from-source; then
                     printf '[%s] prewarm ok (%s)\n' "$(date -u +%FT%TZ)" "${label}"
                 else
                     status=$?
@@ -97,6 +97,14 @@ install:
     echo "Installing weft..."
     start_agent_prewarm "install"
     go install .
+    GOBIN_DIR="$(go env GOBIN)"
+    if [ -z "${GOBIN_DIR}" ]; then
+        GOPATH_VALUE="$(go env GOPATH)"
+        GOBIN_DIR="${GOPATH_VALUE%%:*}/bin"
+    fi
+    if ! "${GOBIN_DIR}/weft" build-agents --targets linux-amd64 --from-source --record-installed-identity; then
+        echo "warning: agent prewarm and identity recording failed; installed CLI and docs remain available"
+    fi
     if [ -f "${HOME}/Library/LaunchAgents/com.osteele.weft.daemon.plist" ]; then
         echo "Updating daemon service and transitioning to installed binary..."
         weft daemon install
@@ -282,11 +290,11 @@ build-agents:
     #!/usr/bin/env bash
     set -euo pipefail
     if command -v weft >/dev/null 2>&1; then
-        if weft build-agents --targets linux-amd64; then
+        if weft build-agents --targets linux-amd64 --from-source; then
             exit 0
         fi
     fi
-    go run . build-agents --targets linux-amd64
+    go run . build-agents --targets linux-amd64 --from-source
 
 # Build agent binary for a target (default: current platform)
 build-agent target="local":

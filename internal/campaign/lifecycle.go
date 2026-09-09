@@ -310,7 +310,7 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 // StartR2AssetStagingWithReporter starts uploading shared assets and reports
 // coarse asset phase changes via reporter.
 func StartR2AssetStagingWithReporter(r2Cfg cloud.R2Config, groups []InstanceGroup, reporter AssetStageReporter) (*R2AssetStager, error) {
-	agentVersion, err := agentdeploy.LocalAgentVersion()
+	agentVersion, err := agentdeploy.LocalAgentVersionForTarget("linux", "amd64")
 	if err != nil {
 		return nil, fmt.Errorf("local agent version: %w", err)
 	}

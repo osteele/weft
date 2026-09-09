@@ -6,8 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`host agent-status --json` evidence**: Schema version 2 reports the desired
+  agent fingerprint per host target and removes the document-level
+  `desired_version`; rows include `desired_error` when target resolution fails.
+
 ### Fixed
 
+- **Rental preparation outside the Weft checkout**: Installed CLI builds use
+  their recorded, prewarmed agent identity when invoked from another project,
+  so cloud jobs no longer remain blocked while resolving the agent binary.
 - **Queue-runner recovery**: A job with a confirmed-absent status file and
   worker process becomes `unresolved` after 15 minutes. This state releases
   placement capacity without inventing a terminal outcome, and accepts either

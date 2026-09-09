@@ -28,12 +28,17 @@ ssh titan 'tmux kill-session -t weft-runner 2>/dev/null; true'
 
 - `internal/agentdeploy/deploy.go` — `EnsureAgentUpToDate`, deploys via scp + atomic rename
 - `internal/agentdeploy/build.go` — `EnsureBuilt`, local cache at `~/Library/Caches/weft/builds/<version>/` on macOS (or platform `os.UserCacheDir()/weft/builds/<version>/`)
-- `internal/agentdeploy/version.go` — `LocalAgentVersion`, prefers a deterministic source hash (with VCS fallback)
+- `internal/agentdeploy/version.go` — `LocalAgentVersionForTarget`; source-checkout executables hash the agent inputs, while installed executables use the adjacent `.agent-version.json` identity for targets it records as prepared and use the source hash for other targets
 - Remote binary path: `~/.cache/weft/bin/weft-agent`
 
 ## Background prewarm notes
 
-`just build` and `just install` start a best-effort prewarm (`weft build-agents --targets linux-amd64`) before the local build/install work, then wait for the prewarm before the recipe exits. This overlaps local work with agent preparation while ensuring chained commands do not race an old background `weft` process.
+`just build` and `just install` start a best-effort prewarm (`weft build-agents --targets linux-amd64 --from-source`) before the local build/install work, then wait for the prewarm before the recipe exits. This overlaps local work with agent preparation while ensuring chained commands do not race an old background `weft` process. After installing the CLI, `just install` runs the new binary with `--from-source --record-installed-identity`; a successful agent build records the executable-bound identity used outside the source checkout. If that identity has no cached binary for a requested target, Weft builds the target only when the current source has the same identity. Otherwise, rerun `just install` or use both `--from-source` and `--record-installed-identity` so the rebuilt agent and recorded identity change together.
+
+The checkout binary and installed CLI intentionally have separate identities:
+`./weft` follows the current source tree, while the installed CLI follows its
+recorded prepared targets. Switching between them after agent source changes
+can redeploy and restart an on-prem runner.
 
 If you suspect prewarm/build issues, inspect:
 

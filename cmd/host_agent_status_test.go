@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,9 @@ func TestBuildHostAgentStatusRowsClassifiesFreshnessAndSkew(t *testing.T) {
 		},
 	}
 
-	rows := buildHostAgentStatusRows(hosts, observations, desired, now)
+	rows := buildHostAgentStatusRows(hosts, observations, func(string, string) (string, error) {
+		return desired, nil
+	}, now)
 	if len(rows) != 4 {
 		t.Fatalf("rows = %#v", rows)
 	}
@@ -77,7 +80,7 @@ func TestWriteHostAgentStatusJSONPublishesVersionedEvidence(t *testing.T) {
 		RunningVersion: "old", QueueProtocolVersion: 1, RunningObservedAt: 990,
 	}}
 	var output bytes.Buffer
-	if err := writeHostAgentStatusJSON(&output, rows, "desired", now); err != nil {
+	if err := writeHostAgentStatusJSON(&output, rows, now); err != nil {
 		t.Fatal(err)
 	}
 	var document map[string]any
@@ -87,6 +90,9 @@ func TestWriteHostAgentStatusJSONPublishesVersionedEvidence(t *testing.T) {
 	if document["schema_version"] != float64(hostAgentStatusSchemaVersion) {
 		t.Fatalf("schema_version = %#v", document["schema_version"])
 	}
+	if _, ok := document["desired_version"]; ok {
+		t.Fatalf("document-level desired_version must not represent heterogeneous targets: %#v", document)
+	}
 	hosts, ok := document["hosts"].([]any)
 	if !ok || len(hosts) != 1 {
 		t.Fatalf("hosts = %#v", document["hosts"])
@@ -94,5 +100,86 @@ func TestWriteHostAgentStatusJSONPublishesVersionedEvidence(t *testing.T) {
 	host, ok := hosts[0].(map[string]any)
 	if !ok || host["deployed_observed_at"] != float64(900) || host["running_observed_at"] != float64(990) {
 		t.Fatalf("host evidence = %#v", hosts[0])
+	}
+}
+
+func TestBuildHostAgentStatusRowsResolvesDesiredVersionPerHost(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	hosts := []inventory.HostSpec{
+		{Name: "amd", OS: "linux", Arch: "amd64"},
+		{Name: "arm", OS: "linux", Arch: "arm64"},
+	}
+	observations := []db.HostAgentState{
+		{
+			Host: "amd", DeployedVersion: "amd-version", DeployedObservedAt: 900,
+			RunningVersion: "amd-version", QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+		},
+		{
+			Host: "arm", DeployedVersion: "arm-version", DeployedObservedAt: 900,
+			RunningVersion: "arm-version", QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+		},
+	}
+	rows := buildHostAgentStatusRows(hosts, observations, func(goos, goarch string) (string, error) {
+		if goos+"-"+goarch == "linux-arm64" {
+			return "arm-version", nil
+		}
+		return "amd-version", nil
+	}, now)
+
+	if rows[0].DesiredVersion != "amd-version" || rows[0].Status != "current" {
+		t.Fatalf("amd row = %#v", rows[0])
+	}
+	if rows[1].DesiredVersion != "arm-version" || rows[1].Status != "current" {
+		t.Fatalf("arm row = %#v", rows[1])
+	}
+}
+
+func TestBuildHostAgentStatusRowsResolvesEachTargetOnce(t *testing.T) {
+	hosts := []inventory.HostSpec{
+		{Name: "first", OS: "linux", Arch: "amd64"},
+		{Name: "second", OS: "linux", Arch: "amd64"},
+	}
+	calls := 0
+	rows := buildHostAgentStatusRows(hosts, nil, func(_, _ string) (string, error) {
+		calls++
+		return "desired", nil
+	}, time.Unix(1_000, 0))
+
+	if calls != 1 {
+		t.Fatalf("resolver calls = %d, want 1", calls)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
+func TestBuildHostAgentStatusRowsIsolatesDesiredVersionFailure(t *testing.T) {
+	now := time.Unix(1_000, 0)
+	hosts := []inventory.HostSpec{
+		{Name: "unresolved", OS: "linux", Arch: "arm64"},
+		{Name: "current", OS: "linux", Arch: "amd64"},
+	}
+	observations := []db.HostAgentState{
+		{
+			Host: "unresolved", RunningVersion: "old",
+			QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+		},
+		{
+			Host: "current", DeployedVersion: "desired", DeployedObservedAt: 900,
+			RunningVersion: "desired", QueueProtocolVersion: opsqueue.QueueProtocolVersion, RunningObservedAt: 990,
+		},
+	}
+	rows := buildHostAgentStatusRows(hosts, observations, func(_, goarch string) (string, error) {
+		if goarch == "arm64" {
+			return "", errors.New("identity unavailable")
+		}
+		return "desired", nil
+	}, now)
+
+	if rows[0].Status != "unknown" || !strings.Contains(rows[0].Reason, "identity unavailable") {
+		t.Fatalf("unresolved row = %#v", rows[0])
+	}
+	if rows[1].Status != "current" {
+		t.Fatalf("current row = %#v", rows[1])
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,20 @@ import (
 
 	"github.com/osteele/weft/internal/ssh"
 )
+
+const (
+	installedAgentIdentitySchemaVersion = 3
+	installedAgentIdentitySuffix        = ".agent-version.json"
+)
+
+type installedAgentIdentity struct {
+	SchemaVersion             int      `json:"schema_version"`
+	AgentVersion              string   `json:"agent_version"`
+	PreparedTargets           []string `json:"prepared_targets"`
+	RecordedAt                int64    `json:"recorded_at"`
+	ExecutableSize            int64    `json:"executable_size"`
+	ExecutableModTimeUnixNano int64    `json:"executable_mod_time_unix_nano"`
+}
 
 // RepoRoot returns the root directory of the weft source tree.
 // First tries the CWD-based VCS root, validating it contains the weft go.mod.
@@ -67,16 +82,203 @@ func compileTimeRoot() string {
 	return root
 }
 
-// LocalAgentVersion returns a stable version string for the agent binary.
-// It prefers a deterministic source hash computed from the cmd/agent build
-// inputs, plus go.mod/go.sum. If hashing fails (for example, go is unavailable),
-// it falls back to VCS-derived versions.
-func LocalAgentVersion() (string, error) {
+func installedAgentIdentityPathForExecutable(executable string) string {
+	return executable + installedAgentIdentitySuffix
+}
+
+// RecordInstalledAgentIdentity writes the agent fingerprint and prepared
+// targets associated with the installed CLI. The sidecar lets that CLI stage a
+// matching cached agent binary outside the Weft source checkout.
+func RecordInstalledAgentIdentity(version string, preparedTargets []string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate weft executable: %w", err)
+	}
+	return recordInstalledAgentIdentityAt(
+		installedAgentIdentityPathForExecutable(executable),
+		executable,
+		version,
+		preparedTargets,
+		time.Now(),
+	)
+}
+
+func recordInstalledAgentIdentityAt(path, executable, version string, preparedTargets []string, recordedAt time.Time) error {
+	if !validAgentVersion(version) {
+		return fmt.Errorf("invalid agent version %q", version)
+	}
+	preparedTargets, err := normalizePreparedTargets(preparedTargets)
+	if err != nil {
+		return err
+	}
+	executableInfo, err := os.Stat(executable)
+	if err != nil {
+		return fmt.Errorf("inspect weft executable: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create installed agent identity directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".agent-version-*")
+	if err != nil {
+		return fmt.Errorf("create installed agent identity: %w", err)
+	}
+	tmpPath := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("set installed agent identity permissions: %w", err)
+	}
+	if err := json.NewEncoder(tmp).Encode(installedAgentIdentity{
+		SchemaVersion:             installedAgentIdentitySchemaVersion,
+		AgentVersion:              version,
+		PreparedTargets:           preparedTargets,
+		RecordedAt:                recordedAt.Unix(),
+		ExecutableSize:            executableInfo.Size(),
+		ExecutableModTimeUnixNano: executableInfo.ModTime().UnixNano(),
+	}); err != nil {
+		return fmt.Errorf("encode installed agent identity: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync installed agent identity: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close installed agent identity: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("install agent identity: %w", err)
+	}
+	keep = true
+	return nil
+}
+
+func readInstalledAgentIdentity(path, executable string) (string, error) {
+	identity, err := readInstalledAgentIdentityRecord(path, executable)
+	if err != nil {
+		return "", err
+	}
+	return identity.AgentVersion, nil
+}
+
+func readInstalledAgentIdentityRecord(path, executable string) (installedAgentIdentity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return installedAgentIdentity{}, err
+	}
+	var identity installedAgentIdentity
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return installedAgentIdentity{}, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if identity.SchemaVersion != installedAgentIdentitySchemaVersion {
+		return installedAgentIdentity{}, fmt.Errorf(
+			"unsupported installed agent identity schema %d in %s",
+			identity.SchemaVersion, path)
+	}
+	if identity.RecordedAt <= 0 {
+		return installedAgentIdentity{}, fmt.Errorf("installed agent identity in %s has no recording time", path)
+	}
+	if !validAgentVersion(identity.AgentVersion) {
+		return installedAgentIdentity{}, fmt.Errorf("installed agent identity in %s has invalid version %q", path, identity.AgentVersion)
+	}
+	if _, err := normalizePreparedTargets(identity.PreparedTargets); err != nil {
+		return installedAgentIdentity{}, fmt.Errorf("installed agent identity in %s: %w", path, err)
+	}
+	executableInfo, err := os.Stat(executable)
+	if err != nil {
+		return installedAgentIdentity{}, fmt.Errorf("inspect weft executable: %w", err)
+	}
+	if identity.ExecutableSize != executableInfo.Size() ||
+		identity.ExecutableModTimeUnixNano != executableInfo.ModTime().UnixNano() {
+		return installedAgentIdentity{}, fmt.Errorf("installed agent identity in %s belongs to a different executable", path)
+	}
+	return identity, nil
+}
+
+func normalizePreparedTargets(targets []string) ([]string, error) {
+	normalized := make([]string, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		target = strings.TrimSpace(target)
+		if !validAgentVersion(target) || !strings.Contains(target, "-") {
+			return nil, fmt.Errorf("invalid prepared agent target %q", target)
+		}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		normalized = append(normalized, target)
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("installed agent identity has no prepared targets")
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func validAgentVersion(version string) bool {
+	if version == "" || len(version) > 128 {
+		return false
+	}
+	for _, r := range version {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || r == '.' || r == '_' || r == '+' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// LocalAgentVersionForTarget resolves the identity of the agent binary for a
+// specific GOOS/GOARCH target. An installed identity applies only to targets
+// that were prepared before the identity was recorded.
+func LocalAgentVersionForTarget(goos, goarch string) (string, error) {
+	return localAgentVersionForTarget(goos + "-" + goarch)
+}
+
+func localAgentVersionForTarget(target string) (string, error) {
+	repoRoot, rootErr := RepoRoot()
+	executable, executableErr := os.Executable()
+	return resolveLocalAgentVersionForTarget(repoRoot, rootErr, executable, executableErr, target)
+}
+
+// LocalAgentSourceVersion resolves the agent version from the current Weft
+// source checkout, ignoring any installed executable identity.
+func LocalAgentSourceVersion() (string, error) {
 	repoRoot, err := RepoRoot()
 	if err != nil {
 		return "", err
 	}
+	return agentVersionFromRepoRoot(repoRoot)
+}
 
+func resolveLocalAgentVersionForTarget(repoRoot string, rootErr error, executable string, executableErr error, target string) (string, error) {
+	if rootErr == nil {
+		if executableErr == nil && !pathWithinRoot(executable, repoRoot) {
+			identityPath := installedAgentIdentityPathForExecutable(executable)
+			version, identityErr := readInstalledAgentVersionForTarget(identityPath, executable, target)
+			if identityErr == nil {
+				return version, nil
+			}
+			slog.Debug(
+				"installed agent identity unavailable; using source checkout",
+				"component", "agentdeploy",
+				"path", identityPath,
+				"target", target,
+				"error", identityErr,
+			)
+		}
+		return agentVersionFromRepoRoot(repoRoot)
+	}
+
+	return installedAgentVersionFallbackForTarget(rootErr, executable, executableErr, target)
+}
+
+func agentVersionFromRepoRoot(repoRoot string) (string, error) {
 	if version, err := localAgentSourceVersion(repoRoot); err == nil {
 		return version, nil
 	}
@@ -90,6 +292,63 @@ func LocalAgentVersion() (string, error) {
 	}
 
 	return "", fmt.Errorf("cannot compute local agent version for %s", repoRoot)
+}
+
+func installedAgentVersionFallbackForTarget(rootErr error, executable string, executableErr error, target string) (string, error) {
+	if executableErr != nil {
+		return "", fmt.Errorf("%w; installed agent identity unavailable: %v", rootErr, executableErr)
+	}
+	identityPath := installedAgentIdentityPathForExecutable(executable)
+	version, identityErr := readInstalledAgentVersionForTarget(identityPath, executable, target)
+	if identityErr != nil {
+		return "", fmt.Errorf("%w; installed agent identity unavailable: %v", rootErr, identityErr)
+	}
+	return version, nil
+}
+
+func readInstalledAgentVersionForTarget(path, executable, target string) (string, error) {
+	identity, err := readInstalledAgentIdentityRecord(path, executable)
+	if err != nil {
+		return "", err
+	}
+	if target != "" && !identityIncludesTarget(identity, target) {
+		return "", fmt.Errorf("installed agent identity in %s has no prepared target %s", path, target)
+	}
+	return identity.AgentVersion, nil
+}
+
+func identityIncludesTarget(identity installedAgentIdentity, target string) bool {
+	for _, prepared := range identity.PreparedTargets {
+		if prepared == target {
+			return true
+		}
+	}
+	return false
+}
+
+func installedAgentIdentityForCurrentExecutableTarget(goos, goarch string) (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate weft executable: %w", err)
+	}
+	return readInstalledAgentVersionForTarget(
+		installedAgentIdentityPathForExecutable(executable),
+		executable,
+		goos+"-"+goarch,
+	)
+}
+
+func pathWithinRoot(path, root string) bool {
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedPath)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 type goListPackage struct {

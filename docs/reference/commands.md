@@ -2036,9 +2036,11 @@ it does not assert which version is running now. `unknown` means a required
 observation has not been recorded. Host setup, full sync, queue updates, and
 normal runner status probes refresh the cache.
 
-The JSON document has `schema_version: 1` and preserves both observation
-timestamps as Unix seconds. Consumers must distinguish an absent timestamp
-from an observed empty legacy version.
+The JSON document has `schema_version: 2`. Each host row carries its
+target-specific `desired_version` and may carry `desired_error` when that
+version cannot be resolved. Both observation timestamps remain Unix seconds;
+consumers must distinguish an absent timestamp from an observed empty legacy
+version.
 
 ### weft queue
 

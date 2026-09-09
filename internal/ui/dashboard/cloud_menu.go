@@ -299,7 +299,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			Jobs:             []*db.Job{job},
 		}})[0]
 
-		agentVer, err := agentdeploy.LocalAgentVersion()
+		agentVer, err := agentdeploy.LocalAgentVersionForTarget("linux", "amd64")
 		if err != nil {
 			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("local agent version: %w", err)}
 		}

@@ -1,6 +1,7 @@
 package agentdeploy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -179,6 +180,27 @@ func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	}
 }
 
+func TestEnsureBuildVersionMatchesInstalledIdentityRejectsDifferentSource(t *testing.T) {
+	err := ensureBuildVersionMatchesInstalledIdentity(
+		"installed123",
+		"linux",
+		"arm64",
+		func() (string, error) { return "installed123", nil },
+		func() (string, error) { return "source456", nil },
+	)
+	if !errors.Is(err, errAgentIdentityMismatch) {
+		t.Fatalf("error = %v, want errAgentIdentityMismatch", err)
+	}
+	if errors.Is(err, ErrAgentNotAvailable) {
+		t.Fatalf("identity mismatch must not trigger native fallback: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot label a linux/arm64 build") ||
+		!strings.Contains(err.Error(), "source checkout has agent version source456") ||
+		!strings.Contains(err.Error(), "--from-source --record-installed-identity") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
 	version := "test-skip-extract-" + t.Name()
 	path := CachePath(version, "linux", "amd64")
@@ -300,11 +322,11 @@ func TestEnsureBuilt_ExtractFromFilesystem(t *testing.T) {
 }
 
 func TestLocalAgentVersion_HashFormatAndStability(t *testing.T) {
-	version1, err := LocalAgentVersion()
+	version1, err := LocalAgentVersionForTarget("linux", "amd64")
 	if err != nil {
 		t.Fatalf("LocalAgentVersion: %v", err)
 	}
-	version2, err := LocalAgentVersion()
+	version2, err := LocalAgentVersionForTarget("linux", "amd64")
 	if err != nil {
 		t.Fatalf("LocalAgentVersion second call: %v", err)
 	}
@@ -314,6 +336,152 @@ func TestLocalAgentVersion_HashFormatAndStability(t *testing.T) {
 	if !regexp.MustCompile(`^[0-9a-f]{12}$`).MatchString(version1) {
 		t.Fatalf("LocalAgentVersion = %q, want 12 lowercase hex chars", version1)
 	}
+}
+
+func TestResolveLocalAgentVersionPrefersInstalledSidecarOutsideRepo(t *testing.T) {
+	repoRoot, err := RepoRoot()
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	const version = "installed123"
+	if err := recordInstalledAgentIdentityAt(path, executable, version, []string{"linux-amd64"}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("recordInstalledAgentIdentityAt: %v", err)
+	}
+
+	got, err := resolveLocalAgentVersionForTarget(repoRoot, nil, executable, nil, "linux-amd64")
+	if err != nil {
+		t.Fatalf("resolveLocalAgentVersionForTarget: %v", err)
+	}
+	if got != version {
+		t.Fatalf("version = %q, want installed identity %q", got, version)
+	}
+}
+
+func TestResolveLocalAgentVersionUsesSourceForUnpreparedTarget(t *testing.T) {
+	repoRoot, err := RepoRoot()
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	want, err := agentVersionFromRepoRoot(repoRoot)
+	if err != nil {
+		t.Fatalf("agentVersionFromRepoRoot: %v", err)
+	}
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	if err := recordInstalledAgentIdentityAt(path, executable, "installed123", []string{"linux-amd64"}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("recordInstalledAgentIdentityAt: %v", err)
+	}
+
+	got, err := resolveLocalAgentVersionForTarget(repoRoot, nil, executable, nil, "linux-arm64")
+	if err != nil {
+		t.Fatalf("resolveLocalAgentVersionForTarget: %v", err)
+	}
+	if got != want {
+		t.Fatalf("version = %q, want source version %q", got, want)
+	}
+}
+
+func TestInstalledAgentVersionFallbackReadsVersionedSidecar(t *testing.T) {
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	const version = "abc123def456"
+	if err := recordInstalledAgentIdentityAt(path, executable, version, []string{"linux-amd64"}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("recordInstalledAgentIdentityAt: %v", err)
+	}
+
+	got, err := installedAgentVersionFallbackForTarget(
+		errors.New("weft source tree not found"),
+		executable,
+		nil,
+		"linux-amd64",
+	)
+	if err != nil {
+		t.Fatalf("installedAgentVersionFallback: %v", err)
+	}
+	if got != version {
+		t.Fatalf("version = %q, want %q", got, version)
+	}
+}
+
+func TestInstalledAgentVersionFallbackRejectsUnknownManifestSchema(t *testing.T) {
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	if err := os.WriteFile(path, []byte(`{"schema_version":4,"agent_version":"abc123def456","recorded_at":1700000000}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := installedAgentVersionFallbackForTarget(
+		errors.New("weft source tree not found"),
+		executable,
+		nil,
+		"linux-amd64",
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported installed agent identity schema 4") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestInstalledAgentVersionFallbackPreservesSourceAndManifestErrors(t *testing.T) {
+	rootErr := errors.New("weft source tree not found")
+	executable := filepath.Join(t.TempDir(), "weft")
+	_, err := installedAgentVersionFallbackForTarget(rootErr, executable, nil, "linux-amd64")
+	if err == nil || !strings.Contains(err.Error(), rootErr.Error()) || !strings.Contains(err.Error(), "installed agent identity unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestInstalledAgentIdentityRejectsReplacedExecutable(t *testing.T) {
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	if err := recordInstalledAgentIdentityAt(path, executable, "abc123def456", []string{"linux-amd64"}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("recordInstalledAgentIdentityAt: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("replacement binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readInstalledAgentIdentity(path, executable)
+	if err == nil || !strings.Contains(err.Error(), "belongs to a different executable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveLocalAgentVersionFallsBackFromStaleSidecar(t *testing.T) {
+	repoRoot, err := RepoRoot()
+	if err != nil {
+		t.Fatalf("RepoRoot: %v", err)
+	}
+	want, err := agentVersionFromRepoRoot(repoRoot)
+	if err != nil {
+		t.Fatalf("agentVersionFromRepoRoot: %v", err)
+	}
+	executable := writeTestExecutable(t, "binary")
+	path := installedAgentIdentityPathForExecutable(executable)
+	if err := recordInstalledAgentIdentityAt(path, executable, "stale123", []string{"linux-amd64"}, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("recordInstalledAgentIdentityAt: %v", err)
+	}
+	if err := os.WriteFile(executable, []byte("replacement binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveLocalAgentVersionForTarget(repoRoot, nil, executable, nil, "linux-amd64")
+	if err != nil {
+		t.Fatalf("resolveLocalAgentVersionForTarget: %v", err)
+	}
+	if got != want {
+		t.Fatalf("version = %q, want source version %q", got, want)
+	}
+}
+
+func writeTestExecutable(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "weft")
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestHashVersionFromFiles_DeterministicOrdering(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	hostAgentStatusSchemaVersion = 1
+	hostAgentStatusSchemaVersion = 2
 	hostAgentRuntimeFreshness    = 2 * time.Minute
 )
 
@@ -41,6 +41,7 @@ type hostAgentStatusRow struct {
 	Status               string `json:"status"`
 	Reason               string `json:"reason"`
 	DesiredVersion       string `json:"desired_version"`
+	DesiredError         string `json:"desired_error,omitempty"`
 	DeployedVersion      string `json:"deployed_version"`
 	DeployedObservedAt   int64  `json:"deployed_observed_at"`
 	RunningVersion       string `json:"running_version"`
@@ -49,17 +50,12 @@ type hostAgentStatusRow struct {
 }
 
 type hostAgentStatusDocument struct {
-	SchemaVersion  int                  `json:"schema_version"`
-	GeneratedAt    int64                `json:"generated_at"`
-	DesiredVersion string               `json:"desired_version"`
-	Hosts          []hostAgentStatusRow `json:"hosts"`
+	SchemaVersion int                  `json:"schema_version"`
+	GeneratedAt   int64                `json:"generated_at"`
+	Hosts         []hostAgentStatusRow `json:"hosts"`
 }
 
 func runHostAgentStatus(cmd *cobra.Command, _ []string) error {
-	desired, err := agentdeploy.LocalAgentVersion()
-	if err != nil {
-		return fmt.Errorf("determine desired agent version: %w", err)
-	}
 	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return fmt.Errorf("load inventory hosts: %w", err)
@@ -75,29 +71,52 @@ func runHostAgentStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	now := time.Now()
-	rows := buildHostAgentStatusRows(hosts, observations, desired, now)
+	rows := buildHostAgentStatusRows(hosts, observations, agentdeploy.LocalAgentVersionForTarget, now)
 	if hostAgentStatusJSON {
-		return writeHostAgentStatusJSON(cmd.OutOrStdout(), rows, desired, now)
+		return writeHostAgentStatusJSON(cmd.OutOrStdout(), rows, now)
 	}
 	return writeHostAgentStatusTable(cmd.OutOrStdout(), rows, now)
 }
 
-func buildHostAgentStatusRows(hosts []inventory.HostSpec, observations []db.HostAgentState, desired string, now time.Time) []hostAgentStatusRow {
+func buildHostAgentStatusRows(
+	hosts []inventory.HostSpec,
+	observations []db.HostAgentState,
+	resolveDesired func(goos, goarch string) (string, error),
+	now time.Time,
+) []hostAgentStatusRow {
 	byHost := make(map[string]db.HostAgentState, len(observations))
 	for _, observation := range observations {
 		byHost[observation.Host] = observation
 	}
+	type targetKey struct {
+		goos   string
+		goarch string
+	}
+	type desiredResult struct {
+		version string
+		err     error
+	}
+	desiredByTarget := make(map[targetKey]desiredResult)
 	rows := make([]hostAgentStatusRow, 0, len(hosts))
 	for _, host := range hosts {
 		observation := byHost[host.Name]
+		key := targetKey{goos: host.OS, goarch: host.Arch}
+		desired, ok := desiredByTarget[key]
+		if !ok {
+			desired.version, desired.err = resolveDesired(host.OS, host.Arch)
+			desiredByTarget[key] = desired
+		}
 		row := hostAgentStatusRow{
 			Host:                 host.Name,
-			DesiredVersion:       desired,
+			DesiredVersion:       desired.version,
 			DeployedVersion:      observation.DeployedVersion,
 			DeployedObservedAt:   observation.DeployedObservedAt,
 			RunningVersion:       observation.RunningVersion,
 			QueueProtocolVersion: observation.QueueProtocolVersion,
 			RunningObservedAt:    observation.RunningObservedAt,
+		}
+		if desired.err != nil {
+			row.DesiredError = desired.err.Error()
 		}
 		row.Status, row.Reason = classifyHostAgentStatus(row, now)
 		rows = append(rows, row)
@@ -122,6 +141,12 @@ func classifyHostAgentStatus(row hostAgentStatusRow, now time.Time) (string, str
 	if row.QueueProtocolVersion < opsqueue.QueueProtocolVersion {
 		return "stale", fmt.Sprintf("runner protocol %d is older than required version %d", row.QueueProtocolVersion, opsqueue.QueueProtocolVersion)
 	}
+	if row.DesiredError != "" {
+		return "unknown", "desired agent version unavailable: " + row.DesiredError
+	}
+	if row.DesiredVersion == "" {
+		return "unknown", "desired agent version is unavailable"
+	}
 	if row.RunningVersion != row.DesiredVersion {
 		return "stale", "running agent differs from the desired build"
 	}
@@ -134,14 +159,13 @@ func classifyHostAgentStatus(row hostAgentStatusRow, now time.Time) (string, str
 	return "current", "desired, deployed, and running versions agree"
 }
 
-func writeHostAgentStatusJSON(w io.Writer, rows []hostAgentStatusRow, desired string, now time.Time) error {
+func writeHostAgentStatusJSON(w io.Writer, rows []hostAgentStatusRow, now time.Time) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(hostAgentStatusDocument{
-		SchemaVersion:  hostAgentStatusSchemaVersion,
-		GeneratedAt:    now.Unix(),
-		DesiredVersion: desired,
-		Hosts:          rows,
+		SchemaVersion: hostAgentStatusSchemaVersion,
+		GeneratedAt:   now.Unix(),
+		Hosts:         rows,
 	})
 }
 

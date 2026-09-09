@@ -30,7 +30,7 @@ func targetKey(version, goos, goarch string) string {
 // StartBackgroundPrewarm triggers a best-effort background build for the
 // requested target. It returns immediately and never reports errors to callers.
 func StartBackgroundPrewarm(goos, goarch string) {
-	version, err := LocalAgentVersion()
+	version, err := LocalAgentVersionForTarget(goos, goarch)
 	if err != nil {
 		slog.Debug("skip agent prewarm: local version unavailable", "component", "agentdeploy", "error", err)
 		return

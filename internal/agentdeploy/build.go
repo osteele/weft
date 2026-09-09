@@ -18,6 +18,8 @@ import (
 // than treating this as a fatal error.
 var ErrAgentNotAvailable = errors.New("agent binary not available for this platform")
 
+var errAgentIdentityMismatch = errors.New("installed agent identity does not match build source")
+
 // ExtractFunc is the function signature for extracting an agent binary.
 // Tests can replace it with SetExtractFunc to avoid requiring real binaries.
 type ExtractFunc func(version, goos, goarch, outputPath string) error
@@ -97,6 +99,9 @@ func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onP
 
 	onProgress("extracting bundled agent")
 	if err := extractFunc(version, goos, goarch, path); err != nil {
+		if guardErr := ensureCurrentBuildVersionMatchesInstalledIdentity(version, goos, goarch); guardErr != nil {
+			return "", fmt.Errorf("no cached agent binary for %s/%s: %w", goos, goarch, guardErr)
+		}
 		if errBuild := buildOnDemand(version, goos, goarch, path, output, onProgress); errBuild != nil {
 			if errors.Is(err, ErrAgentNotAvailable) {
 				return "", errBuild
@@ -106,6 +111,45 @@ func EnsureBuiltWithProgress(version, goos, goarch string, output io.Writer, onP
 	}
 
 	return path, nil
+}
+
+func ensureCurrentBuildVersionMatchesInstalledIdentity(version, goos, goarch string) error {
+	return ensureBuildVersionMatchesInstalledIdentity(
+		version,
+		goos,
+		goarch,
+		func() (string, error) {
+			return installedAgentIdentityForCurrentExecutableTarget(goos, goarch)
+		},
+		LocalAgentSourceVersion,
+	)
+}
+
+func ensureBuildVersionMatchesInstalledIdentity(
+	version, goos, goarch string,
+	installedIdentity func() (string, error),
+	sourceIdentity func() (string, error),
+) error {
+	installedVersion, identityErr := installedIdentity()
+	if identityErr != nil || installedVersion != version {
+		return nil
+	}
+	sourceVersion, sourceErr := sourceIdentity()
+	if sourceErr == nil && sourceVersion == version {
+		return nil
+	}
+	reason := "the source checkout is unavailable"
+	if sourceErr == nil {
+		reason = fmt.Sprintf("the source checkout has agent version %s", sourceVersion)
+	}
+	return fmt.Errorf(
+		"%w: installed agent identity %s cannot label a %s/%s build because %s; rerun just install or rebuild with --from-source --record-installed-identity",
+		errAgentIdentityMismatch,
+		version,
+		goos,
+		goarch,
+		reason,
+	)
 }
 
 // acquireBuildLock serializes concurrent builds targeting the same output path.
@@ -189,7 +233,7 @@ func BinariesVersion() (string, error) {
 // CheckAgentBinariesCurrent verifies that the local agent binary for
 // linux/amd64 is available and matches the current version.
 func CheckAgentBinariesCurrent() error {
-	version, err := LocalAgentVersion()
+	version, err := LocalAgentVersionForTarget("linux", "amd64")
 	if err != nil {
 		return fmt.Errorf("determine agent version: %w", err)
 	}

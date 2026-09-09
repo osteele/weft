@@ -217,18 +217,21 @@ rule HostAgentStatusSurface {
     when: QueryHostAgentStatus(json_output)
 
     -- legacy annotation: @guidance
-        -- The query reads only HostAgentObservation records and the local
-        -- desired source fingerprint. It performs no SSH, provider, or R2
-        -- request. Its rows cover every configured inventory host.
+        -- The query reads only HostAgentObservation records and resolves the
+        -- local desired fingerprint for each host's OS and architecture. It
+        -- performs no SSH, provider, or R2 request. Its rows cover every
+        -- configured inventory host, and one target's resolution failure does
+        -- not prevent other rows from being reported.
         --
         -- current requires equal desired, deployed, and running fingerprints,
         -- a compatible queue protocol, and a running observation at most two
         -- minutes old. An older runtime observation is stale_observation,
         -- never stale or current. Missing required evidence is unknown.
         --
-        -- JSON output has schema_version 1 and includes both observation
-        -- timestamps. Text and JSON expose the evidence behind the status.
-        -- Implementation: cmd/host_agent_status.go.
+        -- JSON output has schema_version 2. Each host row includes its
+        -- target-specific desired_version and may include desired_error, plus
+        -- both observation timestamps. Text and JSON expose the evidence
+        -- behind the status. Implementation: cmd/host_agent_status.go.
 }
 
 -- A group of identical GPUs on a host. Multiple GPUSpecs may appear on

@@ -48,11 +48,14 @@ error so an updated agent can process the command. Unsupported operations fail
 the same way instead of being discarded.
 
 `weft host agent-status` projects the cached observations for every inventory
-host without contacting any host. It reports `current` only when the desired,
-deployed, and running fingerprints agree, the runner protocol is compatible,
-and the running observation is at most two minutes old. Older running
-observations are `stale-observation`, not evidence that the recorded version is
-still running. `--json` emits schema version 1 with the source timestamps.
+host without contacting any host. It resolves the desired fingerprint for each
+host's OS and architecture, and reports `current` only when that fingerprint
+matches the deployed and running fingerprints, the runner protocol is
+compatible, and the running observation is at most two minutes old. Older
+running observations are `stale-observation`, not evidence that the recorded
+version is still running. `--json` emits schema version 2; each host row carries
+its target-specific desired version or a resolution error, plus the source
+timestamps.
 
 ## Source sync: the working tree, not commits
 
