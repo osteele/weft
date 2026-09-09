@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS job_lifecycle_events (
     event_id          TEXT PRIMARY KEY,
     job_id            INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     event_sequence    INTEGER NOT NULL,
-    attempt_id        INTEGER NOT NULL,
+    attempt_id        INTEGER REFERENCES job_attempts(id) ON DELETE CASCADE,
     attempt_number    INTEGER NOT NULL,
     event_kind        TEXT NOT NULL,
     status            TEXT NOT NULL,
@@ -21,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_job_lifecycle_events_occurred
 CREATE UNIQUE INDEX IF NOT EXISTS idx_job_lifecycle_events_sequence
     ON job_lifecycle_events(job_id, event_sequence);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_job_lifecycle_events_terminal_once
-    ON job_lifecycle_events(job_id, attempt_id, event_kind, status)
+    ON job_lifecycle_events(job_id, COALESCE(attempt_id, 0), event_kind, status)
     WHERE event_kind = 'job.terminal';
 
 CREATE TABLE IF NOT EXISTS lifecycle_hook_registrations (
@@ -98,7 +98,36 @@ BEGIN
 END;
 -- +goose StatementEnd
 
+-- Jobs that become terminal before an attempt exists still own lifecycle
+-- events. This is the normal shape for dependency skips and pre-launch
+-- cancellation.
+-- +goose StatementBegin
+CREATE TRIGGER IF NOT EXISTS jobs_lifecycle_attemptless_terminal_update
+AFTER UPDATE OF requested_status ON jobs
+FOR EACH ROW
+WHEN NEW.requested_status IN ('killed', 'canceled', 'skipped')
+ AND COALESCE(OLD.requested_status, '') != NEW.requested_status
+ AND NOT EXISTS (
+     SELECT 1 FROM authoritative_job_attempts WHERE job_id = NEW.id
+ )
+BEGIN
+    INSERT OR IGNORE INTO job_lifecycle_events (
+        event_id, job_id, event_sequence, attempt_id, attempt_number,
+        event_kind, status, occurred_at, project, project_root, submitter_session
+    )
+    VALUES (
+        lower(hex(randomblob(16))), NEW.id,
+        (SELECT COALESCE(MAX(event_sequence), 0) + 1
+           FROM job_lifecycle_events WHERE job_id = NEW.id),
+        NULL, 0, 'job.terminal', NEW.requested_status, unixepoch(),
+        COALESCE(NEW.project, ''), COALESCE(NEW.project_root, ''),
+        COALESCE(NEW.submitter_session, '')
+    );
+END;
+-- +goose StatementEnd
+
 -- +goose Down
+DROP TRIGGER IF EXISTS jobs_lifecycle_attemptless_terminal_update;
 DROP TRIGGER IF EXISTS job_attempts_lifecycle_status_insert;
 DROP TRIGGER IF EXISTS job_attempts_lifecycle_status_update;
 DROP INDEX IF EXISTS idx_lifecycle_hook_deliveries_due;

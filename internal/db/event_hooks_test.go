@@ -163,3 +163,37 @@ func TestTerminalBackfillIsScopedToLatestAuthoritativeAttempt(t *testing.T) {
 		t.Fatalf("distinct terminal attempt ids = %d, want 2", distinctAttempts)
 	}
 }
+
+func TestAttemptlessTerminalRequestEmitsLifecycleEvent(t *testing.T) {
+	database := SetupTestDB(t)
+	result, err := database.Exec(
+		`INSERT INTO jobs (working_dir, command, requested_status, project, project_root, submitter_session)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		t.TempDir(), "true", StatusQueued, "project-a", "/project-a", "session-a",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusSkipped, jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	claims, err := ClaimLifecycleHookDeliveries(database, "hook-a", jobID, 0, time.Now(), time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("attempt-less claims = %d, want one terminal event", len(claims))
+	}
+	event := claims[0].Event
+	if event.EventKind != "job.terminal" || event.Status != StatusSkipped || event.AttemptID != 0 || event.AttemptNumber != 0 {
+		t.Fatalf("attempt-less event = %+v", event)
+	}
+	if event.Project != "project-a" || event.ProjectRoot != "/project-a" || event.SubmitterSession != "session-a" {
+		t.Fatalf("attempt-less routing metadata = %+v", event)
+	}
+}

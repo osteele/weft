@@ -409,3 +409,73 @@ func TestV45RepairRollsBackDeduplicationAndIndexReplacementOnFailure(t *testing.
 		t.Fatal("failed migration did not restore the legacy binding index")
 	}
 }
+
+func TestAttemptlessTerminalMigrationPreservesAttemptForeignKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ctx := context.Background()
+	if err := Up(ctx, database); err != nil {
+		t.Fatalf("initial Up: %v", err)
+	}
+
+	if _, err := database.ExecContext(ctx, `PRAGMA writable_schema = ON`); err != nil {
+		t.Fatalf("enable writable schema: %v", err)
+	}
+	result, err := database.ExecContext(ctx, `
+		UPDATE sqlite_schema
+		   SET sql = REPLACE(
+		       sql,
+		       'attempt_id        INTEGER REFERENCES job_attempts(id) ON DELETE CASCADE',
+		       'attempt_id        INTEGER NOT NULL'
+		   )
+		 WHERE type = 'table' AND name = 'job_lifecycle_events'`)
+	if err != nil {
+		t.Fatalf("restore v64 lifecycle schema: %v", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		t.Fatalf("restored lifecycle table rows = %d, err = %v; want 1", rows, err)
+	}
+	if _, err := database.ExecContext(ctx, `PRAGMA writable_schema = RESET`); err != nil {
+		t.Fatalf("reset writable schema: %v", err)
+	}
+	if _, err := database.ExecContext(ctx, `DELETE FROM goose_db_version WHERE version_id > 64`); err != nil {
+		t.Fatalf("rewind goose version: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	database, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer database.Close()
+	if err := Up(ctx, database); err != nil {
+		t.Fatalf("upgrade from v64: %v", err)
+	}
+
+	var notNull int
+	if err := database.QueryRowContext(ctx, `
+		SELECT "notnull"
+		  FROM pragma_table_info('job_lifecycle_events')
+		 WHERE name = 'attempt_id'`).Scan(&notNull); err != nil {
+		t.Fatalf("inspect attempt_id nullability: %v", err)
+	}
+	if notNull != 0 {
+		t.Fatalf("attempt_id notnull = %d, want nullable", notNull)
+	}
+
+	var refTable, onDelete string
+	if err := database.QueryRowContext(ctx, `
+		SELECT "table", on_delete
+		  FROM pragma_foreign_key_list('job_lifecycle_events')
+		 WHERE "from" = 'attempt_id'`).Scan(&refTable, &onDelete); err != nil {
+		t.Fatalf("inspect attempt_id foreign key: %v", err)
+	}
+	if refTable != "job_attempts" || onDelete != "CASCADE" {
+		t.Fatalf("attempt_id foreign key = %s ON DELETE %s, want job_attempts ON DELETE CASCADE", refTable, onDelete)
+	}
+}

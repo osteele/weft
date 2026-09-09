@@ -310,7 +310,7 @@ table job_lifecycle_events
   col 0 event_id TEXT notnull=0 default=<none> pk=1
   col 1 job_id INTEGER notnull=1 default=<none> pk=0
   col 2 event_sequence INTEGER notnull=1 default=<none> pk=0
-  col 3 attempt_id INTEGER notnull=1 default=<none> pk=0
+  col 3 attempt_id INTEGER notnull=0 default=<none> pk=0
   col 4 attempt_number INTEGER notnull=1 default=<none> pk=0
   col 5 event_kind TEXT notnull=1 default=<none> pk=0
   col 6 status TEXT notnull=1 default=<none> pk=0
@@ -318,9 +318,10 @@ table job_lifecycle_events
   col 8 project TEXT notnull=1 default=<none> pk=0
   col 9 project_root TEXT notnull=1 default=<none> pk=0
   col 10 submitter_session TEXT notnull=1 default=<none> pk=0
+  fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=CASCADE
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=CASCADE
   unique-index (event_id) origin=pk partial=0
-  unique-index (job_id,attempt_id,event_kind,status) origin=c partial=1
+  unique-index (job_id,,event_kind,status) origin=c partial=1
   unique-index (job_id,event_sequence) origin=c partial=0
 table job_open_attempts
   col 0 job_id INTEGER notnull=1 default=<none> pk=0
@@ -855,6 +856,8 @@ trigger job_timeseries_validate_job_run_ownership_on_insert
   sql CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_insert BEFORE INSERT ON job_timeseries FOR EACH ROW WHEN NEW.attempt_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = NEW.attempt_id AND job_id = NEW.job_id) BEGIN SELECT RAISE(ABORT, 'job_timeseries.attempt_id must reference an attempt owned by job_timeseries.job_id'); END
 trigger job_timeseries_validate_job_run_ownership_on_update
   sql CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_update BEFORE UPDATE OF job_id, attempt_id ON job_timeseries FOR EACH ROW WHEN NEW.attempt_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = NEW.attempt_id AND job_id = NEW.job_id) BEGIN SELECT RAISE(ABORT, 'job_timeseries.attempt_id must reference an attempt owned by job_timeseries.job_id'); END
+trigger jobs_lifecycle_attemptless_terminal_update
+  sql CREATE TRIGGER jobs_lifecycle_attemptless_terminal_update AFTER UPDATE OF requested_status ON jobs FOR EACH ROW WHEN NEW.requested_status IN ('killed', 'canceled', 'skipped') AND COALESCE(OLD.requested_status, '') != NEW.requested_status AND NOT EXISTS ( SELECT 1 FROM authoritative_job_attempts WHERE job_id = NEW.id ) BEGIN INSERT OR IGNORE INTO job_lifecycle_events ( event_id, job_id, event_sequence, attempt_id, attempt_number, event_kind, status, occurred_at, project, project_root, submitter_session ) VALUES ( lower(hex(randomblob(16))), NEW.id, (SELECT COALESCE(MAX(event_sequence), 0) + 1 FROM job_lifecycle_events WHERE job_id = NEW.id), NULL, 0, 'job.terminal', NEW.requested_status, unixepoch(), COALESCE(NEW.project, ''), COALESCE(NEW.project_root, ''), COALESCE(NEW.submitter_session, '') ); END
 trigger launch_live_state_orphan_open_queued_attempts_on_insert
   sql CREATE TRIGGER launch_live_state_orphan_open_queued_attempts_on_insert AFTER INSERT ON launch_live_state FOR EACH ROW WHEN lower( CASE WHEN instr(COALESCE(NEW.instance_phase, ''), ':') > 0 THEN substr(NEW.instance_phase, 1, instr(NEW.instance_phase, ':') - 1) ELSE COALESCE(NEW.instance_phase, '') END ) = 'destroying' BEGIN UPDATE jobs SET requested_status = 'queued' WHERE id IN ( SELECT job_id FROM job_attempts WHERE launch_id = NEW.launch_id AND end_time IS NULL AND status IN ('queued', 'pending_placement') ); UPDATE job_attempts SET status = 'canceled', end_time = strftime('%s','now'), cloud_outcome = 'orphaned', pending_status = NULL WHERE launch_id = NEW.launch_id AND end_time IS NULL AND status IN ('queued', 'pending_placement'); END
 trigger launch_live_state_orphan_open_queued_attempts_on_update

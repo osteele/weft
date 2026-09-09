@@ -35,24 +35,22 @@ func EnsureJobTerminalEvent(database *sql.DB, jobID int64, status string, occurr
 		return fmt.Errorf("ensure terminal job event: nil database")
 	}
 	_, err := database.Exec(`
-		INSERT INTO job_lifecycle_events (
+		INSERT OR IGNORE INTO job_lifecycle_events (
 			event_id, job_id, event_sequence, attempt_id, attempt_number,
 			event_kind, status, occurred_at, project, project_root, submitter_session
 		)
 		SELECT ?, j.id,
 		       (SELECT COALESCE(MAX(event_sequence), 0) + 1
 		          FROM job_lifecycle_events WHERE job_id = j.id),
-		       a.id, a.attempt_number, 'job.terminal', ?, ?,
+		       a.id, COALESCE(a.attempt_number, 0), 'job.terminal', ?, ?,
 		       COALESCE(j.project, ''), COALESCE(j.project_root, ''),
 		       COALESCE(j.submitter_session, '')
 		FROM jobs AS j
-		JOIN authoritative_job_attempts AS a ON a.job_id = j.id
-		  AND a.id = (SELECT a2.id FROM authoritative_job_attempts AS a2
-		              WHERE a2.job_id = j.id
-		              ORDER BY a2.attempt_number DESC LIMIT 1)
-		WHERE j.id = ?
-		ON CONFLICT(job_id, attempt_id, event_kind, status)
-		WHERE event_kind = 'job.terminal' DO NOTHING`,
+		LEFT JOIN authoritative_job_attempts AS a
+		  ON a.id = (SELECT a2.id FROM authoritative_job_attempts AS a2
+		             WHERE a2.job_id = j.id
+		             ORDER BY a2.attempt_number DESC LIMIT 1)
+		WHERE j.id = ?`,
 		uuid.NewString(), status, occurredAt.Unix(), jobID)
 	if err != nil {
 		return fmt.Errorf("ensure terminal job event for job %d: %w", jobID, err)
@@ -161,7 +159,7 @@ func ClaimLifecycleHookDeliveries(database *sql.DB, hookID string, materializeJo
 		delivery.LeaseToken = token
 		delivery.Event.SchemaVersion = JobEventSchemaVersion
 		if err := tx.QueryRow(`
-			SELECT e.event_id, e.job_id, e.event_sequence, e.attempt_id,
+			SELECT e.event_id, e.job_id, e.event_sequence, COALESCE(e.attempt_id, 0),
 			       e.attempt_number, e.event_kind, e.status, e.occurred_at,
 			       e.project, e.project_root, e.submitter_session, d.attempts
 			FROM job_lifecycle_events AS e
