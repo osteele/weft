@@ -132,10 +132,11 @@ func sourceFilesForPackage(repoRoot, packagePattern, label, goos, goarch string)
 	cmd.Dir = repoRoot
 	if goos != "" || goarch != "" {
 		baseEnv := os.Environ()
-		targetEnv := make([]string, 0, len(baseEnv)+2)
+		targetEnv := make([]string, 0, len(baseEnv)+3)
 		for _, entry := range baseEnv {
 			if (goos != "" && strings.HasPrefix(entry, "GOOS=")) ||
-				(goarch != "" && strings.HasPrefix(entry, "GOARCH=")) {
+				(goarch != "" && strings.HasPrefix(entry, "GOARCH=")) ||
+				strings.HasPrefix(entry, "CGO_ENABLED=") {
 				continue
 			}
 			targetEnv = append(targetEnv, entry)
@@ -146,6 +147,7 @@ func sourceFilesForPackage(repoRoot, packagePattern, label, goos, goarch string)
 		if goarch != "" {
 			targetEnv = append(targetEnv, "GOARCH="+goarch)
 		}
+		targetEnv = append(targetEnv, "CGO_ENABLED=1")
 		cmd.Env = targetEnv
 	}
 	out, err := cmd.Output()

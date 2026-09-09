@@ -98,8 +98,9 @@ func BuildCLIOnHost(host, version, goos, goarch string) error {
 
 	tmp := RemoteCLIPath + ".tmp"
 	buildCmd := fmt.Sprintf(
-		`mkdir -p %s && cd %s && %s build -buildvcs=false -ldflags "-X github.com/osteele/weft/cmd.Version=%s" -o %s . && chmod +x %s && mv %s %s`,
-		RemoteCLIDir, remoteAgentBuildDir, gobin, version, tmp, tmp, tmp, RemoteCLIPath,
+		`mkdir -p %s && cd %s && CGO_ENABLED=1 GOOS=%s GOARCH=%s %s build -buildvcs=false -ldflags "-X github.com/osteele/weft/cmd.Version=%s" -o %s . && chmod +x %s && mv %s %s`,
+		RemoteCLIDir, remoteAgentBuildDir, shellQuote(goos), shellQuote(goarch),
+		gobin, version, tmp, tmp, tmp, RemoteCLIPath,
 	)
 	_, stderr, err := sshRunWithTimeoutFunc(host, buildCmd, 10*time.Minute)
 	if err != nil {

@@ -115,7 +115,8 @@ func TestBuildCLIOnHostBuildsCurrentSourceAtomically(t *testing.T) {
 		t.Fatalf("build target/timeout = %q/%s", buildHost, buildTimeout)
 	}
 	for _, want := range []string{
-		"go build -buildvcs=false",
+		"CGO_ENABLED=1 GOOS=linux GOARCH=amd64",
+		"/usr/local/go/bin/go build -buildvcs=false",
 		"-X github.com/osteele/weft/cmd.Version=abc123def456",
 		"-o ~/.local/bin/weft.tmp .",
 		"mv ~/.local/bin/weft.tmp ~/.local/bin/weft",

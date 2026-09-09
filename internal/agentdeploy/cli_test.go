@@ -162,10 +162,11 @@ func TestLocalCLIVersionUsesTargetPlatformFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"go.mod":           "module example.com/targethash\n\ngo 1.23.0\n",
-		"main.go":          "package main\n\nfunc main() {}\n",
-		"target_linux.go":  "//go:build linux\n\npackage main\n\nconst targetValue = \"linux-v1\"\n",
-		"target_darwin.go": "//go:build darwin\n\npackage main\n\nconst targetValue = \"darwin-v1\"\n",
+		"go.mod":              "module example.com/targethash\n\ngo 1.23.0\n",
+		"main.go":             "package main\n\nfunc main() {}\n",
+		"target_linux.go":     "//go:build linux\n\npackage main\n\nconst targetValue = \"linux\"\n",
+		"target_linux_cgo.go": "//go:build linux && cgo\n\npackage main\n\nconst targetCgoValue = \"linux-cgo-v1\"\n",
+		"target_darwin.go":    "//go:build darwin\n\npackage main\n\nconst targetValue = \"darwin\"\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
@@ -181,8 +182,8 @@ func TestLocalCLIVersionUsesTargetPlatformFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(
-		filepath.Join(root, "target_linux.go"),
-		[]byte("//go:build linux\n\npackage main\n\nconst targetValue = \"linux-v2\"\n"),
+		filepath.Join(root, "target_linux_cgo.go"),
+		[]byte("//go:build linux && cgo\n\npackage main\n\nconst targetCgoValue = \"linux-cgo-v2\"\n"),
 		0o644,
 	); err != nil {
 		t.Fatal(err)
@@ -197,7 +198,7 @@ func TestLocalCLIVersionUsesTargetPlatformFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if linuxAfter == linuxBefore {
-		t.Fatal("Linux CLI version ignored a changed Linux-only source file")
+		t.Fatal("Linux CLI version ignored a changed Linux-only cgo source file")
 	}
 	if darwinAfter != darwinBefore {
 		t.Fatalf("Darwin CLI version changed after Linux-only edit: %q != %q", darwinAfter, darwinBefore)
