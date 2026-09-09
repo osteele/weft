@@ -102,6 +102,9 @@ func TestQueueCommandSerialization(t *testing.T) {
 			if roundTrip.Op != tt.cmd.Op {
 				t.Fatalf("op = %q, want %q", roundTrip.Op, tt.cmd.Op)
 			}
+			if roundTrip.ProtocolVersion != QueueProtocolVersion {
+				t.Errorf("protocol_version = %d, want %d", roundTrip.ProtocolVersion, QueueProtocolVersion)
+			}
 			if tt.cmd.Job != nil && tt.cmd.Job.SourceManifest != nil {
 				if roundTrip.Job == nil || roundTrip.Job.SourceManifest == nil || roundTrip.Job.SourceManifest.SHA256 != tt.cmd.Job.SourceManifest.SHA256 {
 					t.Fatalf("source manifest did not survive round trip: %#v", roundTrip.Job)

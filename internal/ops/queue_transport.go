@@ -171,5 +171,8 @@ func fetchR2RunnerState(host string) (*opsqueue.RunnerState, error) {
 	if view.Stale {
 		return nil, fmt.Errorf("R2 runner state for %s is stale (updated %s)", host, view.State.UpdatedAt.Format(time.RFC3339))
 	}
-	return &view.State.Runner, nil
+	state := &view.State.Runner
+	state.AgentVersion = view.State.AgentVersion
+	state.UpdatedAt = view.State.UpdatedAt.Unix()
+	return state, nil
 }

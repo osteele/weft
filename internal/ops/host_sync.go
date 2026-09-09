@@ -899,6 +899,9 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 	if stateErr != nil {
 		syncLog.Debug("could not read runner state", "host", host, "error", stateErr)
 	}
+	if stateErr == nil {
+		recordHostAgentRuntimeObservation(database, host, state, time.Now())
+	}
 
 	// Forward reconcile: re-dispatch syncedJobs that the runner doesn't know
 	// about. We gate on stateErr (not state) so the no-state-file case —
@@ -1012,7 +1015,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 
 	// Resolve backend once for this host (all jobs share the same backend).
 	backend := jobs[0].Backend
-	contacted := false
+	contacted := stateErr == nil
 	if backend == "" {
 		var err error
 		backend, err = ResolveBackend(host, timeout)
@@ -1343,6 +1346,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 		} else if job.WorkingDir != "" {
 			sourceSHA256 = sourceSHAByDir[workdir.ToTildeRelative(job.WorkingDir)]
 		}
+		if protocolErr := queueProtocolCompatibilityError(host, state); protocolErr != nil {
+			recordDeferred(job.ID, protocolErr.Error(), nil)
+			continue
+		}
 		// Stamp the per-job source marker. The runner reads this file (not
 		// the rolling .weft-source.sha256) so peer-job syncs to the same
 		// working dir won't invalidate this job's preflight provenance
@@ -1359,7 +1366,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout, sourceTime
 				syncLog.Debug("per-job source marker write failed", "job_id", job.ID, "working_dir", job.WorkingDir, "host", job.Host, "error", err)
 			}
 		}
-		if err := AppendJobToQueueWithSourceAndR2(database, job, timeout, sourceSHA256, sourceR2Key); err != nil {
+		if err := appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state); err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				recordDeferred(job.ID, "queue append deferred (host unreachable)", err)
 				return ensured, contacted, nil

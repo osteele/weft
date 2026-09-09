@@ -16,6 +16,9 @@ func mockSSHForReconcile(t *testing.T) {
 	t.Helper()
 	mockQueueSourceSync(t, "test-source-sha")
 	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
+		if strings.Contains(cmd, "__WEFT_NO_STATE_FILE__") {
+			return currentRunnerStateJSON + "\n", "", 0
+		}
 		// Accept all SSH commands — we're testing the merge logic, not SSH.
 		return "", "", 0
 	})

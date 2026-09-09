@@ -32,6 +32,9 @@ func TestQueueEntryForJobCarriesAttemptRunID(t *testing.T) {
 func TestQueueJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return currentRunnerStateJSON + "\n", "", 0
+		}
 		if strings.Contains(command, "jq -e") {
 			return "NO\n", "", 0
 		}
@@ -130,6 +133,9 @@ func TestQueueJob_PoolTimeout(t *testing.T) {
 func TestQueueJob_ExtractsGPU(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return currentRunnerStateJSON + "\n", "", 0
+		}
 		if strings.Contains(command, "jq -e") {
 			return "NO\n", "", 0
 		}

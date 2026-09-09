@@ -16,16 +16,20 @@ import (
 
 const remoteBinDir = "~/.cache/weft/bin"
 
-// EnsureAgentOptions tunes how EnsureAgentUpToDateWithOptions reports progress.
+// EnsureAgentOptions tunes how EnsureAgentUpToDateWithOptions reports progress
+// and records successful verification.
 //   - Output receives raw subprocess stdout/stderr from the underlying builder
 //     (rsync, flyctl, ssh build). Defaults to os.Stderr; pass io.Discard from
 //     TUI contexts to avoid corrupting the screen.
 //   - OnProgress receives coarse phase events ("starting fly builder",
 //     "syncing source", "building", "downloading"). Use this to render a
 //     status line.
+//   - OnVerified receives the fingerprint after the installed binary has run
+//     and matched the desired build.
 type EnsureAgentOptions struct {
 	Output     io.Writer
 	OnProgress BuildProgressFunc
+	OnVerified func(version string)
 }
 
 // EnsureAgentUpToDate checks whether the remote agent is current, and if not,
@@ -67,6 +71,9 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	}
 
 	if localVer == remoteVer {
+		if opts.OnVerified != nil {
+			opts.OnVerified(localVer)
+		}
 		return false, nil
 	}
 
@@ -115,6 +122,9 @@ func EnsureAgentUpToDateWithOptions(host string, spec inventory.HostSpec, opts E
 	}
 	if deployedVer != localVer {
 		return false, fmt.Errorf("deployed agent version mismatch on %s: want %s, got %q (binary may be incompatible)", host, localVer, deployedVer)
+	}
+	if opts.OnVerified != nil {
+		opts.OnVerified(localVer)
 	}
 
 	// Send a restart command so the runner re-execs with the new binary,

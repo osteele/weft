@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/agentenv"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/queuerunner"
@@ -111,7 +113,18 @@ func runHostSetup(cmd *cobra.Command, args []string) error {
 
 	// Step 4: Deploy agent binary
 	fmt.Fprintf(os.Stderr, "  [%d/%d] Deploying agent...", nextStep(), totalSteps)
-	deployed, agentErr := agentdeploy.EnsureAgentUpToDate(host, spec)
+	agentOpts := agentdeploy.EnsureAgentOptions{Output: os.Stderr}
+	if database, dbErr := db.Open(); dbErr == nil {
+		defer database.Close()
+		agentOpts.OnVerified = func(version string) {
+			if err := db.RecordHostAgentDeployment(database, host, version, time.Now()); err != nil {
+				fmt.Fprintf(os.Stderr, " warning: failed to cache verified agent: %v;", err)
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, " warning: provenance cache unavailable: %v;", dbErr)
+	}
+	deployed, agentErr := agentdeploy.EnsureAgentUpToDateWithOptions(host, spec, agentOpts)
 	agentReady := agentErr == nil
 	if agentErr != nil {
 		if errors.Is(agentErr, agentdeploy.ErrAgentNotAvailable) {

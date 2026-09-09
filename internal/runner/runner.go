@@ -197,6 +197,7 @@ func (r *Runner) Run() error {
 		return fmt.Errorf("load state: %w", err)
 	}
 	r.state.SetCapabilities(r.Capabilities)
+	r.state.SetAgentIdentity(r.AgentVersion, opsqueue.QueueProtocolVersion)
 
 	// Write PID file
 	os.WriteFile(r.pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)

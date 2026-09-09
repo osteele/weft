@@ -14,15 +14,18 @@ import (
 // State tracks the runner's persistent state, saved to {queue}.state.json.
 // Compatible with the bash runner's state format.
 type State struct {
-	mu             sync.RWMutex
-	Capabilities   []string                    `json:"capabilities,omitempty"`
-	Cursor         string                      `json:"cursor"`
-	CursorLine     int                         `json:"cursor_line"`
-	Pending        []int64                     `json:"pending"`
-	PendingReasons map[string]string           `json:"pending_reasons,omitempty"`
-	Current        *int64                      `json:"current"`
-	Running        map[string]RunningJobState  `json:"running,omitempty"`
-	Finished       map[string]FinishedJobState `json:"finished,omitempty"`
+	mu                   sync.RWMutex
+	AgentVersion         string                      `json:"agent_version,omitempty"`
+	QueueProtocolVersion int                         `json:"queue_protocol_version,omitempty"`
+	UpdatedAt            int64                       `json:"updated_at,omitempty"`
+	Capabilities         []string                    `json:"capabilities,omitempty"`
+	Cursor               string                      `json:"cursor"`
+	CursorLine           int                         `json:"cursor_line"`
+	Pending              []int64                     `json:"pending"`
+	PendingReasons       map[string]string           `json:"pending_reasons,omitempty"`
+	Current              *int64                      `json:"current"`
+	Running              map[string]RunningJobState  `json:"running,omitempty"`
+	Finished             map[string]FinishedJobState `json:"finished,omitempty"`
 
 	// StopRequested is not persisted — it's set from the command log each time.
 	StopRequested bool `json:"-"`
@@ -31,6 +34,13 @@ type State struct {
 func (s *State) SetCapabilities(capabilities []string) {
 	s.mu.Lock()
 	s.Capabilities = slices.Clone(capabilities)
+	s.mu.Unlock()
+}
+
+func (s *State) SetAgentIdentity(agentVersion string, queueProtocolVersion int) {
+	s.mu.Lock()
+	s.AgentVersion = agentVersion
+	s.QueueProtocolVersion = queueProtocolVersion
 	s.mu.Unlock()
 }
 
@@ -137,6 +147,7 @@ func (s *State) saveAt(path string, now time.Time) error {
 	defer s.mu.Unlock()
 
 	s.pruneFinished(now)
+	s.UpdatedAt = now.Unix()
 
 	data, err := json.Marshal(s)
 	if err != nil {

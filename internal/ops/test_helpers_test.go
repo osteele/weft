@@ -10,6 +10,8 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
+const currentRunnerStateJSON = `{"agent_version":"test-agent","queue_protocol_version":1,"updated_at":1700000000,"pending":[],"current":null,"capabilities":[]}`
+
 type sshMockResponse struct {
 	Contains string
 	Stdout   string

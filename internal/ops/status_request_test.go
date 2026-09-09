@@ -53,6 +53,9 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 
 	var sawSourceSHA bool
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return currentRunnerStateJSON + "\n", "", 0
+		}
 		if strings.Contains(command, "source_sha256") && strings.Contains(command, "queued-source-sha") {
 			sawSourceSHA = true
 		}

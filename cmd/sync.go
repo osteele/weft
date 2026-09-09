@@ -138,7 +138,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Deploy agent binary and start queue runners only in full mode (after sync completes)
 	if syncFull {
-		deployAgentsToHosts(hosts)
+		deployAgentsToHosts(database, hosts)
 		if !syncNoQueueStart {
 			startQueueRunnersForQueuedHosts(database)
 		}
@@ -481,13 +481,20 @@ func syncCloudInstanceOpslogs(ctx context.Context, r2Client *r2.Client, database
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated
 // or missing version. Errors are logged as warnings — agent deploy is best-effort.
-func deployAgentsToHosts(hosts []string) {
+func deployAgentsToHosts(database *sql.DB, hosts []string) {
 	for _, host := range hosts {
 		spec := inventory.FindHost(host)
 		if spec == nil {
 			continue // Host not in inventory, skip agent deploy
 		}
-		deployed, err := agentdeploy.EnsureAgentUpToDate(host, *spec)
+		deployed, err := agentdeploy.EnsureAgentUpToDateWithOptions(host, *spec, agentdeploy.EnsureAgentOptions{
+			Output: os.Stderr,
+			OnVerified: func(version string) {
+				if err := db.RecordHostAgentDeployment(database, host, version, time.Now()); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to cache verified agent for %s: %v\n", host, err)
+				}
+			},
+		})
 		if err != nil {
 			if errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
 				fmt.Fprintf(os.Stderr, "Warning: agent binary for %s/%s is unavailable and no builder succeeded\n", spec.OS, spec.Arch)

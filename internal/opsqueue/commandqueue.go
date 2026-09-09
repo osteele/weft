@@ -23,6 +23,10 @@ const (
 const CapabilityJobPayloadV1 = "job-payload-v1"
 const CapabilityArtifactNeedV1 = "artifact-need-v1"
 
+// QueueProtocolVersion is the highest queue command schema this agent
+// understands. Version 0 is the legacy unversioned schema.
+const QueueProtocolVersion = 1
+
 const (
 	ObservationPresent = "present"
 	ObservationAbsent  = "absent"
@@ -69,11 +73,12 @@ type CommandJob struct {
 // QueueCommand represents a command in the append-only command log.
 // The CLI appends commands; the queue runner reads and processes them.
 type QueueCommand struct {
-	Timestamp string      `json:"ts"`
-	Op        string      `json:"op"`
-	JobID     int64       `json:"job_id,omitempty"` // For priority, cancel ops
-	Job       *CommandJob `json:"job,omitempty"`    // For add op
-	Env       []string    `json:"env,omitempty"`    // For restart ops
+	ProtocolVersion int         `json:"protocol_version,omitempty"`
+	Timestamp       string      `json:"ts"`
+	Op              string      `json:"op"`
+	JobID           int64       `json:"job_id,omitempty"` // For priority, cancel ops
+	Job             *CommandJob `json:"job,omitempty"`    // For add op
+	Env             []string    `json:"env,omitempty"`    // For restart ops
 }
 
 // CommandsFileName returns the path to the commands file for a queue.
@@ -89,8 +94,9 @@ func CommandsFilePath() string {
 // NewAddCommand creates a command to add a job to the queue.
 func NewAddCommand(entry QueueEntry) QueueCommand {
 	return QueueCommand{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        OpAdd,
+		ProtocolVersion: QueueProtocolVersion,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Op:              OpAdd,
 		Job: &CommandJob{
 			ID:               entry.JobID,
 			RunID:            entry.RunID,
@@ -125,26 +131,29 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 // NewPriorityCommand creates a command to move a job to the front of the queue.
 func NewPriorityCommand(jobID int64) QueueCommand {
 	return QueueCommand{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        OpPriority,
-		JobID:     jobID,
+		ProtocolVersion: QueueProtocolVersion,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Op:              OpPriority,
+		JobID:           jobID,
 	}
 }
 
 // NewCancelCommand creates a command to remove a job from the queue.
 func NewCancelCommand(jobID int64) QueueCommand {
 	return QueueCommand{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        OpCancel,
-		JobID:     jobID,
+		ProtocolVersion: QueueProtocolVersion,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Op:              OpCancel,
+		JobID:           jobID,
 	}
 }
 
 // NewStopCommand creates a command for graceful queue runner shutdown.
 func NewStopCommand() QueueCommand {
 	return QueueCommand{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        OpStop,
+		ProtocolVersion: QueueProtocolVersion,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Op:              OpStop,
 	}
 }
 
@@ -156,9 +165,10 @@ func NewRestartCommand() QueueCommand {
 // NewRestartCommandWithEnv creates a restart command with environment overrides.
 func NewRestartCommandWithEnv(env []string) QueueCommand {
 	return QueueCommand{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        OpRestart,
-		Env:       env,
+		ProtocolVersion: QueueProtocolVersion,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		Op:              OpRestart,
+		Env:             env,
 	}
 }
 
@@ -233,6 +243,9 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 
 // RunnerState represents the queue runner's internal state.
 type RunnerState struct {
+	AgentVersion                    string                         `json:"agent_version,omitempty"`
+	QueueProtocolVersion            int                            `json:"queue_protocol_version,omitempty"`
+	UpdatedAt                       int64                          `json:"updated_at,omitempty"`
 	Capabilities                    []string                       `json:"capabilities,omitempty"`
 	Cursor                          string                         `json:"cursor"`
 	CursorLine                      int                            `json:"cursor_line"`

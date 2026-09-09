@@ -115,12 +115,17 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 
 		var cmd opsqueue.QueueCommand
 		if err := json.Unmarshal(line, &cmd); err != nil {
-			// Skip malformed lines
+			fmt.Fprintf(os.Stderr, "warning: skip malformed queue command at line %d: %v\n", lineNum, err)
 			state.SetCursorLine(lineNum)
 			if errors.Is(readErr, io.EOF) {
 				break
 			}
 			continue
+		}
+		if cmd.ProtocolVersion > opsqueue.QueueProtocolVersion {
+			return result, fmt.Errorf(
+				"queue command at line %d requires protocol %d; this agent supports %d",
+				lineNum, cmd.ProtocolVersion, opsqueue.QueueProtocolVersion)
 		}
 
 		state.mu.Lock()
@@ -187,6 +192,10 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 			result.RestartRequested = true
 			result.RestartEnv = append([]string(nil), cmd.Env...)
 			return result, nil
+
+		default:
+			state.mu.Unlock()
+			return result, fmt.Errorf("unsupported queue command operation %q at line %d", cmd.Op, lineNum)
 		}
 
 		state.Cursor = cmd.Timestamp

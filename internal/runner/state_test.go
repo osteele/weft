@@ -82,6 +82,7 @@ func TestState_SaveLoad(t *testing.T) {
 
 	s := NewState()
 	s.SetCapabilities([]string{opsqueue.CapabilityJobPayloadV1})
+	s.SetAgentIdentity("abc123def456", opsqueue.QueueProtocolVersion)
 	s.Cursor = "2024-01-01T00:00:00Z"
 	s.CursorLine = 5
 	s.AddPending(10)
@@ -112,6 +113,15 @@ func TestState_SaveLoad(t *testing.T) {
 	}
 	if !slices.Contains(loaded.Capabilities, opsqueue.CapabilityJobPayloadV1) {
 		t.Fatalf("capabilities = %v", loaded.Capabilities)
+	}
+	if loaded.AgentVersion != "abc123def456" {
+		t.Errorf("agent_version = %q, want abc123def456", loaded.AgentVersion)
+	}
+	if loaded.QueueProtocolVersion != opsqueue.QueueProtocolVersion {
+		t.Errorf("queue_protocol_version = %d, want %d", loaded.QueueProtocolVersion, opsqueue.QueueProtocolVersion)
+	}
+	if loaded.UpdatedAt == 0 {
+		t.Error("updated_at was not recorded")
 	}
 	if loaded.CursorLine != s.CursorLine {
 		t.Errorf("cursor_line: got %d, want %d", loaded.CursorLine, s.CursorLine)

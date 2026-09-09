@@ -10,6 +10,7 @@ import (
 func TestRunJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "__WEFT_NO_STATE_FILE__", Stdout: currentRunnerStateJSON + "\n"},
 		{Contains: "mkdir", Stdout: ""},
 		{Contains: "printf", Stdout: ""},
 	})

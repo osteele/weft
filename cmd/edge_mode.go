@@ -288,6 +288,7 @@ var edgeCommandModes = map[string]edgeModeEntry{
 
 	// --- disabled: host inventory ---
 	"host capability observe": {edgeModeDisabled, edgeReasonInventory},
+	"host agent-status":       {edgeModeDisabled, edgeReasonInventory},
 	"host data":               {edgeModeDisabled, edgeReasonInventory},
 	"host discover":           {edgeModeDisabled, edgeReasonInventory},
 	"host doctor":             {edgeModeDisabled, edgeReasonInventory},

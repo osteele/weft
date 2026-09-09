@@ -2017,6 +2017,29 @@ Use `--skip-prerequisites` only when the target account already has the required
 tools on its job PATH. Python jobs submitted through `uv run ...` require `uv`
 to be available to the account that runs the queue agent.
 
+#### weft host agent-status
+
+Show the last observed agent identity for every inventory host:
+
+```bash
+weft host agent-status
+weft host agent-status --json
+```
+
+The command reads local SQLite state and makes no SSH or R2 requests. Each row
+shows the desired agent fingerprint, the last verified deployed fingerprint,
+the latest running fingerprint and queue protocol, and the age of the running
+observation. `current` requires matching fingerprints, a compatible queue
+protocol, and a running observation no more than two minutes old.
+`stale-observation` means the cached runner identity is older than that limit;
+it does not assert which version is running now. `unknown` means a required
+observation has not been recorded. Host setup, full sync, queue updates, and
+normal runner status probes refresh the cache.
+
+The JSON document has `schema_version: 1` and preserves both observation
+timestamps as Unix seconds. Consumers must distinguish an absent timestamp
+from an observed empty legacy version.
+
 ### weft queue
 
 Manage job queues for CPU-capped execution on remote hosts.

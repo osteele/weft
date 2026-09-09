@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 )
 
@@ -234,5 +235,58 @@ func TestEnsureQueueRunnerStartedRestartsRunningAgentAfterDeploy(t *testing.T) {
 	}
 	if !started || !restarted {
 		t.Fatalf("started=%v restarted=%v, want true/true", started, restarted)
+	}
+}
+
+func TestEnsureQueueRunnerStartedRecordsVerifiedAgent(t *testing.T) {
+	originalFindHostSpec := findHostSpecFunc
+	originalEnsureAgentUpToDate := ensureAgentUpToDateFunc
+	originalLoadConfig := loadConfigFunc
+	originalGetSlackWebhook := getSlackWebhookFunc
+	originalDeployNotifyScript := deployNotifyScriptFunc
+	originalBuildRunnerEnvPrefix := buildRunnerEnvPrefixFunc
+	originalEnsureRunnerStarted := ensureRunnerStartedFunc
+	t.Cleanup(func() {
+		findHostSpecFunc = originalFindHostSpec
+		ensureAgentUpToDateFunc = originalEnsureAgentUpToDate
+		loadConfigFunc = originalLoadConfig
+		getSlackWebhookFunc = originalGetSlackWebhook
+		deployNotifyScriptFunc = originalDeployNotifyScript
+		buildRunnerEnvPrefixFunc = originalBuildRunnerEnvPrefix
+		ensureRunnerStartedFunc = originalEnsureRunnerStarted
+	})
+
+	const (
+		host    = "host-alpha"
+		version = "verified123456"
+	)
+	findHostSpecFunc = func(name string) *inventory.HostSpec {
+		return &inventory.HostSpec{Name: name, OS: "linux", Arch: "amd64"}
+	}
+	ensureAgentUpToDateFunc = func(_ string, _ inventory.HostSpec, opts agentdeploy.EnsureAgentOptions) (bool, error) {
+		if opts.OnVerified == nil {
+			t.Fatal("OnVerified callback was not configured")
+		}
+		opts.OnVerified(version)
+		return false, nil
+	}
+	loadConfigFunc = func() (*config.Config, error) { return &config.Config{}, nil }
+	getSlackWebhookFunc = func() string { return "" }
+	deployNotifyScriptFunc = func(host, webhook string) {}
+	buildRunnerEnvPrefixFunc = func() string { return "" }
+	ensureRunnerStartedFunc = func(host, envPrefix, r2Bucket, r2QueueHost string, setupTimeout time.Duration) (bool, error) {
+		return false, nil
+	}
+
+	database := db.SetupTestDB(t)
+	if _, err := EnsureQueueRunnerStartedQuietWithDatabase(database, host); err != nil {
+		t.Fatalf("EnsureQueueRunnerStartedQuietWithDatabase: %v", err)
+	}
+	observations, err := db.ListHostAgentStates(database)
+	if err != nil {
+		t.Fatalf("ListHostAgentStates: %v", err)
+	}
+	if len(observations) != 1 || observations[0].Host != host || observations[0].DeployedVersion != version {
+		t.Fatalf("observations = %#v", observations)
 	}
 }

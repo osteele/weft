@@ -529,7 +529,9 @@ func (w *Worker) doSync(host string, mode ops.SyncMode) {
 		UseBatchSync: true,
 		Mode:         mode,
 		Logger:       ops.NewSilentSyncLogger(),
-	}, EnsureQueueRunnerStartedQuiet)
+	}, func(host string) (bool, error) {
+		return EnsureQueueRunnerStartedQuietWithDatabase(w.database, host)
+	})
 	if err != nil {
 		result.Error = err
 		return
@@ -546,6 +548,20 @@ func (w *Worker) doSync(host string, mode ops.SyncMode) {
 		result.HostFull = hostStatus.Host
 		if hostStatus.ExtraOutput != "" {
 			result.QueueStatus = queuerunner.ParseStatus(hostStatus.ExtraOutput)
+			if result.QueueStatus.StatePresent && result.QueueStatus.StateReadable {
+				observedAt := time.Now()
+				if result.QueueStatus.StateUpdatedAt > 0 {
+					observedAt = time.Unix(result.QueueStatus.StateUpdatedAt, 0)
+				}
+				if err := db.RecordHostAgentRuntime(
+					w.database, host, result.QueueStatus.AgentVersion,
+					result.QueueStatus.QueueProtocolVersion, observedAt); err != nil {
+					if result.HostWarning != "" {
+						result.HostWarning += "; "
+					}
+					result.HostWarning += fmt.Sprintf("cache runner identity: %v", err)
+				}
+			}
 			if result.HostFull != nil {
 				result.HostFull.QueueStatus = hostinfo.QueueCheckChecked
 				result.HostFull.QueueRunnerActive = result.QueueStatus.RunnerActive

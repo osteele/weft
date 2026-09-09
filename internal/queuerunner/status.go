@@ -11,16 +11,26 @@ import (
 
 // StatusInfo captures queue runner state and queue depth.
 type StatusInfo struct {
-	RunnerActive   bool
-	QueuedJobCount int
-	CurrentJob     string
-	StopPending    bool
-	BlockedReasons map[int64]string
+	RunnerActive         bool
+	StatePresent         bool
+	StateReadable        bool
+	AgentVersion         string
+	QueueProtocolVersion int
+	StateUpdatedAt       int64
+	QueuedJobCount       int
+	CurrentJob           string
+	StopPending          bool
+	BlockedReasons       map[int64]string
 }
 
 // StatusCommand returns the SSH command that gathers queue runner status.
 func StatusCommand() string {
 	return ssh.TmuxCommand(`has-session -t 'weft-queue-default' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"`) + `; ` +
+		`test -f ~/.cache/weft/queue/default.state.json && echo "STATE:yes" || echo "STATE:no"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -e . ~/.cache/weft/queue/default.state.json >/dev/null 2>&1 && echo "STATE_READABLE:yes" || echo "STATE_READABLE:no"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '.agent_version // ""' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/AGENT_VERSION:/' || echo "AGENT_VERSION:"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '.queue_protocol_version // 0' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/QUEUE_PROTOCOL:/' || echo "QUEUE_PROTOCOL:0"; ` +
+		`PATH="$HOME/.local/bin:$PATH" jq -r '.updated_at // 0' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/STATE_UPDATED:/' || echo "STATE_UPDATED:0"; ` +
 		`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; ` +
 		`PATH="$HOME/.local/bin:$PATH" jq -r '.pending | length // 0' ~/.cache/weft/queue/default.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; ` +
 		`PATH="$HOME/.local/bin:$PATH" jq -r '(.pending_reasons // {}) as $reasons | (.pending // [])[]? as $job | ($reasons[($job|tostring)] // empty) | select(length > 0) | "BLOCKED:\($job):\(.)"' ~/.cache/weft/queue/default.state.json 2>/dev/null || true; ` +
@@ -41,6 +51,16 @@ func ParseStatus(output string) *StatusInfo {
 			switch key {
 			case "RUNNER":
 				info.RunnerActive = value == "yes"
+			case "STATE":
+				info.StatePresent = value == "yes"
+			case "STATE_READABLE":
+				info.StateReadable = value == "yes"
+			case "AGENT_VERSION":
+				info.AgentVersion = value
+			case "QUEUE_PROTOCOL":
+				fmt.Sscanf(value, "%d", &info.QueueProtocolVersion)
+			case "STATE_UPDATED":
+				fmt.Sscanf(value, "%d", &info.StateUpdatedAt)
 			case "CURRENT":
 				info.CurrentJob = value
 			case "DEPTH":

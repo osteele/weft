@@ -1,6 +1,7 @@
 package hostsync
 
 import (
+	"database/sql"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/slack"
@@ -35,14 +37,20 @@ var (
 // Subprocess output from agent builds is streamed to os.Stderr; for callers
 // that render their own UI (autopilot/TUI) use EnsureQueueRunnerStartedQuiet.
 func EnsureQueueRunnerStarted(host string) (bool, error) {
-	return ensureQueueRunnerStarted(host, agentdeploy.EnsureAgentOptions{Output: os.Stderr})
+	return ensureQueueRunnerStarted(nil, host, agentdeploy.EnsureAgentOptions{Output: os.Stderr})
 }
 
 // EnsureQueueRunnerStartedQuiet is like EnsureQueueRunnerStarted but suppresses
 // raw subprocess output and publishes build phases via
 // agentdeploy.SetBuildPhase so a TUI can render them.
 func EnsureQueueRunnerStartedQuiet(host string) (bool, error) {
-	return ensureQueueRunnerStarted(host, agentdeploy.EnsureAgentOptions{
+	return EnsureQueueRunnerStartedQuietWithDatabase(nil, host)
+}
+
+// EnsureQueueRunnerStartedQuietWithDatabase also records the installed agent
+// fingerprint after deployment verification succeeds.
+func EnsureQueueRunnerStartedQuietWithDatabase(database *sql.DB, host string) (bool, error) {
+	return ensureQueueRunnerStarted(database, host, agentdeploy.EnsureAgentOptions{
 		Output: io.Discard,
 		OnProgress: func(phase string) {
 			agentdeploy.SetBuildPhase(host, phase)
@@ -51,10 +59,17 @@ func EnsureQueueRunnerStartedQuiet(host string) (bool, error) {
 	})
 }
 
-func ensureQueueRunnerStarted(host string, agentOpts agentdeploy.EnsureAgentOptions) (bool, error) {
+func ensureQueueRunnerStarted(database *sql.DB, host string, agentOpts agentdeploy.EnsureAgentOptions) (bool, error) {
 	spec := findHostSpecFunc(host)
 	deployed := false
 	if spec != nil {
+		if database != nil {
+			agentOpts.OnVerified = func(version string) {
+				if err := db.RecordHostAgentDeployment(database, host, version, time.Now()); err != nil {
+					slog.Warn("failed to cache verified agent", "component", "hostsync", "host", host, "error", err)
+				}
+			}
+		}
 		var err error
 		deployed, err = ensureAgentUpToDateFunc(host, *spec, agentOpts)
 		if err != nil {

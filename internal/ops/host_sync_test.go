@@ -589,6 +589,9 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 
 	// Mock SSH so AppendJobToQueue and ResolveBackend succeed
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return currentRunnerStateJSON + "\n", "", 0
+		}
 		return "", "", 0
 	})
 
@@ -623,7 +626,7 @@ func TestEnsureQueuedJobsOnRemote_DefersPayloadForIncapableRunner(t *testing.T) 
 	appendCount := 0
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
-			return `{"pending":[],"current":null,"capabilities":[]}` + "\n", "", 0
+			return `{"agent_version":"test-agent","queue_protocol_version":1,"pending":[],"current":null,"capabilities":[]}` + "\n", "", 0
 		}
 		if strings.Contains(command, `"op":"add"`) {
 			appendCount++
@@ -732,7 +735,7 @@ func TestEnsureQueuedJobsOnRemote_UsesPinnedClosureAfterWorkingTreeChanges(t *te
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		switch {
 		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
-			return "__WEFT_NO_STATE_FILE__\n", "", 0
+			return `{"agent_version":"test-agent","queue_protocol_version":1,"pending":[],"current":null}` + "\n", "", 0
 		case strings.Contains(command, `"op":"add"`):
 			addCommand = command
 			return "", "", 0
@@ -970,8 +973,8 @@ func TestEnsureQueuedJobsOnRemote_SourceSyncLeaseContentionDefers(t *testing.T) 
 	if ensured != 0 {
 		t.Errorf("ensured = %d, want 0", ensured)
 	}
-	if contacted {
-		t.Error("contacted = true, want false")
+	if !contacted {
+		t.Error("contacted = false, want true after the runner-state probe reached the host")
 	}
 	if syncCalls != 0 {
 		t.Fatalf("syncCalls = %d, want 0", syncCalls)
@@ -1098,7 +1101,7 @@ func TestEnsureQueuedJobsOnRemote_RedispatchesSyncedQueuedJobWithMissingPayload(
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		switch {
 		case strings.Contains(command, "__WEFT_NO_STATE_FILE__"):
-			return fmt.Sprintf(`{"pending":[%d],"current":null}`, jobID) + "\n", "", 0
+			return fmt.Sprintf(`{"agent_version":"test-agent","queue_protocol_version":1,"pending":[%d],"current":null}`, jobID) + "\n", "", 0
 		case strings.Contains(command, "job-${id}.json"):
 			return fmt.Sprintf("%d\tMISSING\n", jobID), "", 0
 		case strings.Contains(command, `"op":"add"`):

@@ -294,6 +294,69 @@ func TestProcessCommands_MissingFile(t *testing.T) {
 	}
 }
 
+func TestProcessCommands_RejectsFutureProtocolWithoutAdvancingCursor(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		ProtocolVersion: opsqueue.QueueProtocolVersion + 1,
+		Timestamp:       "2024-01-01T00:00:00Z",
+		Op:              opsqueue.OpAdd,
+		Job:             &opsqueue.CommandJob{ID: 42, Cmd: "echo hello"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	_, err := cp.ProcessCommands(state)
+	if err == nil || !strings.Contains(err.Error(), "requires protocol") {
+		t.Fatalf("error = %v, want protocol incompatibility", err)
+	}
+	if state.CursorLine != 0 {
+		t.Fatalf("CursorLine = %d, want 0 so an upgraded agent can retry", state.CursorLine)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("Pending = %v, want no accepted job", state.Pending)
+	}
+}
+
+func TestProcessCommands_RejectsUnknownOperationWithoutAdvancingCursor(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		ProtocolVersion: opsqueue.QueueProtocolVersion,
+		Timestamp:       "2024-01-01T00:00:00Z",
+		Op:              "future-operation",
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	_, err := cp.ProcessCommands(state)
+	if err == nil || !strings.Contains(err.Error(), "unsupported queue command operation") {
+		t.Fatalf("error = %v, want unsupported operation", err)
+	}
+	if state.CursorLine != 0 {
+		t.Fatalf("CursorLine = %d, want 0 so a compatible agent can retry", state.CursorLine)
+	}
+}
+
+func TestProcessCommands_AcceptsLegacyUnversionedCommand(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo hello"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || state.Pending[0] != 42 {
+		t.Fatalf("Pending = %v, want [42]", state.Pending)
+	}
+}
+
 func TestProcessCommands_RestartCarriesEnv(t *testing.T) {
 	dir := t.TempDir()
 	cmdFile := filepath.Join(dir, "default.commands")

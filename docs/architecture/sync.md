@@ -28,6 +28,32 @@ host's mailbox. It reuses the submit-time R2 source closure described below, so
 dispatch requires neither SSH nor rsync. Legacy unpinned jobs and inventory
 jobs with `--needs` still require the direct-host staging path.
 
+### Agent identity and queue compatibility
+
+The queue runner writes three identity fields to `default.state.json`: its
+source fingerprint, the highest queue-command protocol it understands, and the
+state timestamp. Direct SSH status probes and R2 runner-state envelopes cache
+these fields in the local database. Successful agent deployment verification
+separately records the fingerprint that ran after installation. The deployed
+and running observations have independent timestamps; a missing observation
+means the controller has not confirmed that fact.
+
+Every new queue command carries `protocol_version`. Version 0 remains the
+legacy unversioned schema; current writers emit version 1. Before appending a
+command, the controller requires runner state that reports a compatible
+protocol. Missing state and older protocols defer dispatch with an instruction
+to run `weft queue update HOST`. If an agent encounters a command from a newer
+protocol, it leaves its cursor at that command and exits with a compatibility
+error so an updated agent can process the command. Unsupported operations fail
+the same way instead of being discarded.
+
+`weft host agent-status` projects the cached observations for every inventory
+host without contacting any host. It reports `current` only when the desired,
+deployed, and running fingerprints agree, the runner protocol is compatible,
+and the running observation is at most two minutes old. Older running
+observations are `stale-observation`, not evidence that the recorded version is
+still running. `--json` emits schema version 1 with the source timestamps.
+
 ## Source sync: the working tree, not commits
 
 Weft ships the working directory's **filesystem state**. Uncommitted edits are

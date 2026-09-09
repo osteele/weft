@@ -14,14 +14,24 @@ func TestParseStatus(t *testing.T) {
 		{
 			name: "all fields present",
 			output: `RUNNER:yes
+STATE:yes
+STATE_READABLE:yes
+AGENT_VERSION:abc123def456
+QUEUE_PROTOCOL:1
+STATE_UPDATED:1720000000
 CURRENT:123
 DEPTH:5
 STOP:no`,
 			want: StatusInfo{
-				RunnerActive:   true,
-				CurrentJob:     "123",
-				QueuedJobCount: 5,
-				StopPending:    false,
+				RunnerActive:         true,
+				CurrentJob:           "123",
+				QueuedJobCount:       5,
+				StopPending:          false,
+				StatePresent:         true,
+				StateReadable:        true,
+				AgentVersion:         "abc123def456",
+				QueueProtocolVersion: 1,
+				StateUpdatedAt:       1720000000,
 			},
 		},
 		{
@@ -98,6 +108,21 @@ STOP:no`,
 			got := ParseStatus(tt.output)
 			if got.RunnerActive != tt.want.RunnerActive {
 				t.Errorf("RunnerActive = %v, want %v", got.RunnerActive, tt.want.RunnerActive)
+			}
+			if got.StatePresent != tt.want.StatePresent {
+				t.Errorf("StatePresent = %v, want %v", got.StatePresent, tt.want.StatePresent)
+			}
+			if got.StateReadable != tt.want.StateReadable {
+				t.Errorf("StateReadable = %v, want %v", got.StateReadable, tt.want.StateReadable)
+			}
+			if got.AgentVersion != tt.want.AgentVersion {
+				t.Errorf("AgentVersion = %q, want %q", got.AgentVersion, tt.want.AgentVersion)
+			}
+			if got.QueueProtocolVersion != tt.want.QueueProtocolVersion {
+				t.Errorf("QueueProtocolVersion = %d, want %d", got.QueueProtocolVersion, tt.want.QueueProtocolVersion)
+			}
+			if got.StateUpdatedAt != tt.want.StateUpdatedAt {
+				t.Errorf("StateUpdatedAt = %d, want %d", got.StateUpdatedAt, tt.want.StateUpdatedAt)
 			}
 			if got.CurrentJob != tt.want.CurrentJob {
 				t.Errorf("CurrentJob = %q, want %q", got.CurrentJob, tt.want.CurrentJob)

@@ -166,6 +166,71 @@ entity HostCapabilityObservation {
         -- internal/db/host_capability_observations.go.
 }
 
+-- The controller's independent last observations of the installed agent and
+-- the running queue process. These are cache records, not host configuration.
+entity HostAgentObservation {
+    host: String
+    deployed_version: String?
+    deployed_observed_at: Timestamp?
+    running_version: String?
+    queue_protocol_version: Integer?
+    running_observed_at: Timestamp?
+
+    -- legacy annotation: @guidance
+        -- A deployment observation is written only after the installed binary
+        -- executes and reports the desired source fingerprint. A runtime
+        -- observation comes from a parsed runner state file or a fresh R2
+        -- state envelope. One observation must not overwrite the other.
+        --
+        -- No row or timestamp means the controller did not observe the fact.
+        -- An empty running_version with a runtime timestamp means a legacy
+        -- runner was positively observed without identity support.
+        --
+        -- Implementation: internal/db/host_agent_state.go,
+        -- internal/agentdeploy/deploy.go, internal/ops/host_sync.go.
+}
+
+enum HostAgentStatus { current | stale | stale_observation | unknown }
+
+rule InventoryQueueProtocolCompatibility {
+    when: QueueCommandDispatchRequested(host, command)
+
+    requires: FreshRunnerState(host)
+    requires: runner_state(host).queue_protocol_version >= command.protocol_version
+
+    -- legacy annotation: @guidance
+        -- New commands carry protocol_version 1. A missing runner state or a
+        -- lower reported version defers dispatch and directs the operator to
+        -- `weft queue update HOST`; the controller never appends a command it
+        -- has not proven the runner can interpret.
+        --
+        -- A runner that reads a command above its supported version returns an
+        -- error without advancing its cursor. Unknown operations do the same.
+        -- Version 0 remains the accepted legacy command schema so an upgraded
+        -- runner can finish an already-written command log.
+        --
+        -- Implementation: internal/ops/queue.go,
+        -- internal/runner/commands.go, internal/opsqueue/commandqueue.go.
+}
+
+rule HostAgentStatusSurface {
+    when: QueryHostAgentStatus(json_output)
+
+    -- legacy annotation: @guidance
+        -- The query reads only HostAgentObservation records and the local
+        -- desired source fingerprint. It performs no SSH, provider, or R2
+        -- request. Its rows cover every configured inventory host.
+        --
+        -- current requires equal desired, deployed, and running fingerprints,
+        -- a compatible queue protocol, and a running observation at most two
+        -- minutes old. An older runtime observation is stale_observation,
+        -- never stale or current. Missing required evidence is unknown.
+        --
+        -- JSON output has schema_version 1 and includes both observation
+        -- timestamps. Text and JSON expose the evidence behind the status.
+        -- Implementation: cmd/host_agent_status.go.
+}
+
 -- A group of identical GPUs on a host. Multiple GPUSpecs may appear on
 -- one host when hardware is heterogeneous (e.g. cool100 has A100s +
 -- 2080 Tis).

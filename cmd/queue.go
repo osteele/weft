@@ -906,6 +906,11 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("host %q is not in the local inventory; run 'weft host discover %s' first", host, host)
 	}
 
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
 	// Step 1: deploy the latest agent binary if the remote version differs.
 	progress := func(phase string) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", host, phase)
@@ -913,6 +918,11 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 	deployed, err := agentdeploy.EnsureAgentUpToDateWithOptions(host, *spec, agentdeploy.EnsureAgentOptions{
 		Output:     cmd.ErrOrStderr(),
 		OnProgress: progress,
+		OnVerified: func(version string) {
+			if err := db.RecordHostAgentDeployment(database, host, version, time.Now()); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to cache verified agent: %v\n", err)
+			}
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("deploy agent on %s: %w", host, err)

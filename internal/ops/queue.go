@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -36,10 +37,18 @@ func AppendJobToQueueWithSource(database *sql.DB, job *db.Job, timeout time.Dura
 // job (Layer D fallback): it downloads the tarball, extracts into a per-job
 // dir, and skips the marker check.
 func AppendJobToQueueWithSourceAndR2(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string) error {
-	return appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil)
+	state, err := fetchRemoteRunnerState(job.Host, timeout)
+	if err != nil {
+		return fmt.Errorf("read queue runner protocol: %w", err)
+	}
+	recordHostAgentRuntimeObservation(database, job.Host, state, time.Now())
+	return appendJobToQueueWithSourceManifest(database, job, timeout, sourceSHA256, sourceR2Key, nil, state)
 }
 
-func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest) error {
+func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout time.Duration, sourceSHA256, sourceR2Key string, sourceManifest *opsqueue.SourceManifest, state *opsqueue.RunnerState) error {
+	if err := queueProtocolCompatibilityError(job.Host, state); err != nil {
+		return err
+	}
 	pinned, ok, err := pinnedQueueSourceManifest(job)
 	if err != nil {
 		return err
@@ -67,17 +76,11 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 			return err
 		}
 	}
-	if len(artifactNeeds) > 0 {
-		state, stateErr := fetchRemoteRunnerState(job.Host, timeout)
-		if stateErr != nil {
-			return fmt.Errorf("read queue runner capabilities: %w", stateErr)
-		}
-		if state != nil && !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
-			return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
-				opsqueue.CapabilityArtifactNeedV1,
-				"agent update required before dispatch",
-			))
-		}
+	if len(artifactNeeds) > 0 && !state.Supports(opsqueue.CapabilityArtifactNeedV1) {
+		return errors.New(opsqueue.MissingRunnerCapabilityBlockDetail(
+			opsqueue.CapabilityArtifactNeedV1,
+			"agent update required before dispatch",
+		))
 	}
 	command := payloadGuardedCommand(job.Command, payloads)
 	command = artifactNeedsGuardedCommand(command, artifactNeeds)
@@ -112,6 +115,33 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
 	return appendQueueCommand(job.Host, addCmd, opts)
+}
+
+func queueProtocolCompatibilityError(host string, state *opsqueue.RunnerState) error {
+	if state == nil {
+		return fmt.Errorf(
+			"queue runner protocol version on %s is unknown (required=%d); run `weft queue update %s`",
+			host, opsqueue.QueueProtocolVersion, host)
+	}
+	if state.QueueProtocolVersion < opsqueue.QueueProtocolVersion {
+		return fmt.Errorf(
+			"queue runner protocol version on %s is %d, older than required version %d; run `weft queue update %s`",
+			host, state.QueueProtocolVersion, opsqueue.QueueProtocolVersion, host)
+	}
+	return nil
+}
+
+func recordHostAgentRuntimeObservation(database *sql.DB, host string, state *opsqueue.RunnerState, observedAt time.Time) {
+	if database == nil || state == nil {
+		return
+	}
+	if state.UpdatedAt > 0 {
+		observedAt = time.Unix(state.UpdatedAt, 0)
+	}
+	if err := db.RecordHostAgentRuntime(
+		database, host, state.AgentVersion, state.QueueProtocolVersion, observedAt); err != nil {
+		slog.Warn("failed to record host agent runtime observation", "host", host, "error", err)
+	}
 }
 
 // payloadGuardedCommand makes a payload-bearing queue entry fail closed on an

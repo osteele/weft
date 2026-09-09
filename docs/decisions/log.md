@@ -37,3 +37,11 @@ achieve Q, accepting D.*
   lifetime policy, to bound setup and command time with one portable contract,
   accepting another duration field in submission metadata and runner wire
   formats.
+
+- **2026-09-09** — In the context of inventory agent fleet visibility, facing
+  the choice between live SSH fan-out and durable local observations, we
+  decided for independently timestamped deployment and runner records with a
+  freshness-bounded cached status command, and neglected network probes on the
+  read path, to make fleet inspection fast and available while hosts are
+  offline, accepting eventual consistency and explicit `unknown` or
+  `stale-observation` states.

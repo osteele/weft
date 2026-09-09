@@ -63,6 +63,12 @@ func TestAppendJobToQueueWiresPayloadGuard(t *testing.T) {
 		appendQueueCommandSSH = originalAppend
 	})
 	loadQueueConfig = func() (*config.Config, error) { return &config.Config{}, nil }
+	mockSSHFunc(t, func(_, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return `{"agent_version":"test-agent","queue_protocol_version":1,"capabilities":["job-payload-v1"],"pending":[]}` + "\n", "", 0
+		}
+		return "", "", 0
+	})
 	var sent opsqueue.QueueCommand
 	appendQueueCommandSSH = func(_ string, command opsqueue.QueueCommand, _ opsqueue.AppendCommandOptions) error {
 		sent = command
@@ -73,6 +79,45 @@ func TestAppendJobToQueueWiresPayloadGuard(t *testing.T) {
 	}
 	if sent.Job == nil || !strings.Contains(sent.Job.Cmd, "WEFT_PAYLOAD_DIR") || !strings.HasSuffix(sent.Job.Cmd, job.Command) {
 		t.Fatalf("queued command = %#v", sent.Job)
+	}
+}
+
+func TestAppendJobToQueueRejectsLegacyRunnerProtocol(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "true", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLoad := loadQueueConfig
+	originalAppend := appendQueueCommandSSH
+	t.Cleanup(func() {
+		loadQueueConfig = originalLoad
+		appendQueueCommandSSH = originalAppend
+	})
+	loadQueueConfig = func() (*config.Config, error) { return &config.Config{}, nil }
+	appended := false
+	appendQueueCommandSSH = func(_ string, _ opsqueue.QueueCommand, _ opsqueue.AppendCommandOptions) error {
+		appended = true
+		return nil
+	}
+	mockSSHFunc(t, func(_, command string) (string, string, int) {
+		if strings.Contains(command, "__WEFT_NO_STATE_FILE__") {
+			return `{"pending":[]}` + "\n", "", 0
+		}
+		return "", "", 0
+	})
+
+	err = AppendJobToQueue(database, job, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "older than required") ||
+		!strings.Contains(err.Error(), "weft queue update host-alpha") {
+		t.Fatalf("error = %v, want actionable protocol incompatibility", err)
+	}
+	if appended {
+		t.Fatal("job was appended to a legacy runner")
 	}
 }
 
@@ -117,7 +162,7 @@ func TestAppendIsolatedJobResolvesNamedAssetForAgentStaging(t *testing.T) {
 			if supportsArtifactNeeds {
 				capabilities = `["artifact-need-v1"]`
 			}
-			return `{"capabilities":` + capabilities + `,"pending":[]}` + "\n", "", 0
+			return `{"agent_version":"test-agent","queue_protocol_version":1,"capabilities":` + capabilities + `,"pending":[]}` + "\n", "", 0
 		}
 		return "", "", 0
 	})

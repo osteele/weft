@@ -220,6 +220,14 @@ table failure_label_reviews
   col 7 reviewed_at INTEGER notnull=0 default=<none> pk=0
   fk attempt_id -> job_attempts(id) on_update=NO ACTION on_delete=NO ACTION
   fk job_id -> jobs(id) on_update=NO ACTION on_delete=NO ACTION
+table host_agent_state
+  col 0 host TEXT notnull=0 default=<none> pk=1
+  col 1 deployed_version TEXT notnull=0 default=<none> pk=0
+  col 2 deployed_observed_at INTEGER notnull=0 default=<none> pk=0
+  col 3 running_version TEXT notnull=0 default=<none> pk=0
+  col 4 queue_protocol_version INTEGER notnull=0 default=<none> pk=0
+  col 5 running_observed_at INTEGER notnull=0 default=<none> pk=0
+  unique-index (host) origin=pk partial=0
 table host_capability_observations
   col 0 host TEXT notnull=1 default=<none> pk=1
   col 1 label TEXT notnull=1 default=<none> pk=2
