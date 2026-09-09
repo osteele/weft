@@ -7,7 +7,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
@@ -98,7 +97,7 @@ func TestDashboardExternalCancelAndUnsupportedControlsDoNotForgeTerminalState(t 
 
 func TestDashboardCancelQueuedJobRecordsCanceledStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp", "true", "queued job")
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "true", "queued job", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +105,7 @@ func TestDashboardCancelQueuedJobRecordsCanceledStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := Model{
-		database:    database,
-		coreService: core.NewServiceWithDB(database),
-	}
+	model := Model{database: database}
 
 	msg := model.cancelQueuedJob(job)()
 	result, ok := msg.(jobKilledMsg)

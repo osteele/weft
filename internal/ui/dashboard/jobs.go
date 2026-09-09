@@ -576,21 +576,21 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 	if job.Backend == db.BackendSkyPilot {
 		return m.cancelExternalJob(job)
 	}
-	if m.coreService == nil {
+	if m.database == nil {
 		return nil
 	}
 
 	jobID := job.ID
 	return func() tea.Msg {
-		result, err := m.coreService.RequestStatus(jobID, db.StatusCanceled, ops.TimeoutFast)
+		result, err := ops.CancelQueuedJob(m.database, job, ops.OptionsForMode(ops.TimeoutFast))
 		if err != nil {
 			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
 		}
 		return jobKilledMsg{
 			jobID:     jobID,
-			deferred:  result.Outcome.Deferred,
+			deferred:  result.Deferred,
 			cancelled: true,
-			message:   result.Outcome.Message,
+			message:   result.Message,
 		}
 	}
 }
