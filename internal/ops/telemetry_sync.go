@@ -12,13 +12,24 @@ import (
 	"github.com/osteele/weft/internal/telemetryarchive"
 )
 
+var runTelemetrySyncSSH = ssh.RunWithTimeout
+
 // syncJobTelemetry fetches richer telemetry JSONL from a remote host and imports
 // any new samples into the local telemetry tables.
 func syncJobTelemetry(database *sql.DB, job *db.Job, timeout time.Duration) error {
 	if job == nil {
 		return nil
 	}
-	if db.IsTerminalStatus(job.Status) && job.LatestRunID != nil {
+	current, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		return fmt.Errorf("refresh job before telemetry sync: %w", err)
+	}
+	if current == nil {
+		return nil
+	}
+	job = current
+	terminal := db.IsTerminalStatus(job.Status) && job.LatestRunID != nil
+	if terminal {
 		obj, objErr := db.GetRawTelemetryObject(database, *job.LatestRunID, db.TelemetryRawKind)
 		rollup, rollupErr := db.GetRichTelemetryRollup(database, *job.LatestRunID)
 		if objErr != nil {
@@ -41,23 +52,21 @@ func syncJobTelemetry(database *sql.DB, job *db.Job, timeout time.Duration) erro
 	}
 
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", session.SimpleTelemetryFile(job.ID))
-	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
+	stdout, _, err := runTelemetrySyncSSH(job.Host, cmd, timeout)
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		return nil
 	}
 
 	samples := db.ParseTelemetrySamplesJSONL(stdout, lastTS)
-
-	if len(samples) == 0 {
-		return nil
+	if len(samples) > 0 {
+		if err := db.InsertTelemetrySamples(database, job.ID, samples); err != nil {
+			return fmt.Errorf("insert telemetry: %w", err)
+		}
+		if err := db.RefreshJobTelemetrySummary(database, job.ID); err != nil {
+			return fmt.Errorf("refresh telemetry summary: %w", err)
+		}
 	}
-	if err := db.InsertTelemetrySamples(database, job.ID, samples); err != nil {
-		return fmt.Errorf("insert telemetry: %w", err)
-	}
-	if err := db.RefreshJobTelemetrySummary(database, job.ID); err != nil {
-		return fmt.Errorf("refresh telemetry summary: %w", err)
-	}
-	if db.IsTerminalStatus(job.Status) && job.LatestRunID != nil {
+	if terminal {
 		allSamples := db.ParseTelemetrySamplesJSONL(stdout, 0)
 		rollup, err := db.BuildRichTelemetryRollupForJob(database, job.ID, *job.LatestRunID, allSamples)
 		if err != nil {
@@ -66,6 +75,7 @@ func syncJobTelemetry(database *sql.DB, job *db.Job, timeout time.Duration) erro
 		if err := telemetryarchive.FinalizeRich(database, job.ID, *job.LatestRunID, []byte(stdout), rollup, telemetryarchive.RemoteCopy{}); err != nil {
 			return fmt.Errorf("archive telemetry: %w", err)
 		}
+		return nil
 	}
 	if err := upsertTelemetryPhaseMetrics(database, job, samples); err != nil {
 		return fmt.Errorf("upsert telemetry phase metrics: %w", err)
