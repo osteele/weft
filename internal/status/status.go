@@ -85,6 +85,7 @@ var transitions = []TransitionRule{
 	{From: Queued, To: Failed, UpdatesSynced: true},
 	{From: Queued, To: Paused, UpdatesSynced: false},
 	{From: Queued, To: Draft, UpdatesSynced: false},
+	{From: Queued, To: Unresolved, UpdatesSynced: false},
 
 	// --- From pending_placement ---
 	{From: PendingPlacement, To: Queued, UpdatesSynced: false},

@@ -232,6 +232,47 @@ func TestApplyBatchStatusesBoundsAbsentR2WorkerAsUnresolved(t *testing.T) {
 	}
 }
 
+func TestApplyBatchStatusesCanAgeQueuedAttemptAsUnresolved(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "unobserved start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptID := *job.LatestRunID
+	statuses := map[int64]queueBatchStatus{
+		jobID: {State: queueStateUnresolvedCandidate, RunID: attemptID, FromR2: true},
+	}
+	t0 := time.Unix(2_000_000, 0)
+	bound := time.Minute
+
+	if updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, bound, t0); err != nil {
+		t.Fatal(err)
+	} else if updated != 0 {
+		t.Fatalf("first absent observation updated %d jobs, want 0", updated)
+	}
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := applyBatchStatusesAt(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second, bound, t0.Add(bound)); err != nil {
+		t.Fatal(err)
+	} else if updated != 1 {
+		t.Fatalf("bounded absent observation updated %d jobs, want 1", updated)
+	}
+
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != db.StatusUnresolved || job.LatestRunID == nil || *job.LatestRunID != attemptID || job.EndTime != nil {
+		t.Fatalf("queued job after bounded absence = status %q run %v end %v", job.Status, job.LatestRunID, job.EndTime)
+	}
+}
+
 func TestApplyBatchStatusesIgnoresUnresolvedObservationForOldAttempt(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "studio", "/tmp", "true", "retried worker")

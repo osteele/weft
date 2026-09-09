@@ -233,6 +233,7 @@ entity Job {
         queued -> killed
         queued -> dead
         queued -> failed
+        queued -> unresolved
         queued -> draft
         starting -> running
         starting -> completed
