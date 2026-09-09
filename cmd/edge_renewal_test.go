@@ -68,6 +68,45 @@ func TestRenewEdgeKeysOnceRenewsSettledRemoteProjectOnKeyHost(t *testing.T) {
 	}
 }
 
+func TestRenewEdgeKeyOnceRequiresSettledRemoteOwnership(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	lease := edge.DefaultLeaseConfig()
+	dir := t.TempDir()
+	originalDeadline := now.Add(5 * time.Hour)
+	writeRenewalTestKey(t, dir, edge.Key{
+		KeyID: "studio-plan-7", Host: "studio", PlanID: "plan-7", Project: "lm2",
+		NotBefore: now.Add(-time.Hour), NotAfter: originalDeadline,
+	})
+	ring, err := edge.LoadKeyring(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := renewEdgeKeyOnce(context.Background(), ring, "studio-plan-7", lease, now,
+		renewalStatusRunner(t, []researchSiteProject{{
+			Project: "lm2", OwnedBy: "local", Settled: true, RemoteHost: "studio",
+		}}, nil))
+	if len(report.Renewed) != 0 || len(report.Deferred) != 1 {
+		t.Fatalf("manual renewal bypassed ownership: %+v", report)
+	}
+	key, _ := ring.Lookup("studio-plan-7")
+	if !key.NotAfter.Equal(originalDeadline) {
+		t.Fatalf("deadline moved without remote ownership: %s", key.NotAfter)
+	}
+
+	report = renewEdgeKeyOnce(context.Background(), ring, "studio-plan-7", lease, now,
+		renewalStatusRunner(t, []researchSiteProject{{
+			Project: "lm2", OwnedBy: "remote", Settled: true, RemoteHost: "agent@studio",
+		}}, nil))
+	if len(report.Renewed) != 1 || report.Renewed[0] != "studio-plan-7" {
+		t.Fatalf("settled remote ownership did not renew exact key: %+v", report)
+	}
+	key, _ = ring.Lookup("studio-plan-7")
+	if !key.NotAfter.Equal(now.Add(lease.Window)) {
+		t.Fatalf("renewed deadline = %s, want %s", key.NotAfter, now.Add(lease.Window))
+	}
+}
+
 func TestRenewEdgeKeysOnceRequiresUnambiguousSettledRemoteOwnership(t *testing.T) {
 	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
 	lease := edge.DefaultLeaseConfig()

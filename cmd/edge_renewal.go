@@ -107,7 +107,44 @@ func renewEdgeKeysOnce(
 	if len(keys) == 0 {
 		return report
 	}
+	return renewAuthorizedEdgeKeys(ctx, ring, keys, lease, now, runStatus, report)
+}
 
+func renewEdgeKeyOnce(
+	ctx context.Context,
+	ring *edge.Keyring,
+	keyID string,
+	lease edge.LeaseConfig,
+	now time.Time,
+	runStatus researchSiteStatusRunner,
+) edgeRenewalReport {
+	var report edgeRenewalReport
+	if err := lease.Validate(); err != nil {
+		report.Problems = append(report.Problems, err.Error())
+		return report
+	}
+	if ring == nil {
+		report.Problems = append(report.Problems, "no keyring")
+		return report
+	}
+	report.Problems = append(report.Problems, ring.Problems...)
+	key, ok := ring.Lookup(keyID)
+	if !ok {
+		report.Problems = append(report.Problems, fmt.Sprintf("no key with id %q", keyID))
+		return report
+	}
+	return renewAuthorizedEdgeKeys(ctx, ring, []edge.Key{key}, lease, now, runStatus, report)
+}
+
+func renewAuthorizedEdgeKeys(
+	ctx context.Context,
+	ring *edge.Keyring,
+	keys []edge.Key,
+	lease edge.LeaseConfig,
+	now time.Time,
+	runStatus researchSiteStatusRunner,
+	report edgeRenewalReport,
+) edgeRenewalReport {
 	stdout, stderr, commandErr := runStatus(ctx)
 	status, parseErr := parseResearchSiteStatus(stdout)
 	if parseErr != nil {

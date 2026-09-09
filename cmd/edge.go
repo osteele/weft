@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/secrets"
 	"github.com/spf13/cobra"
 )
 
@@ -740,8 +741,9 @@ var edgeKeyListCmd = &cobra.Command{
 var edgeKeyRenewCmd = &cobra.Command{
 	Use:   "renew <key-id>",
 	Short: "Slide a key's admission window forward",
-	Long: "Called while the hub can see the plan still executing. Renewal is hub-local:\n" +
-		"it contacts nothing, and the edge never learns the window exists.\n\n" +
+	Long: "Renews only while research-site reports the key's project under settled remote\n" +
+		"ownership on the key's host. The check and renewal run on the hub; the edge\n" +
+		"never learns the window exists.\n\n" +
 		"Not renewing is how a plan ends. Its authority lapses on its own.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -758,13 +760,21 @@ var edgeKeyRenewCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := ring.Renew(args[0], time.Now(), lease); err != nil {
-			return err
+		report := renewEdgeKeyOnce(cmd.Context(), ring, args[0], lease, time.Now(), runResearchSiteStatus)
+		for _, problem := range report.Problems {
+			fmt.Fprintf(os.Stderr, "edge key renewal warning: %s\n", secrets.RedactText(problem))
+		}
+		for _, deferred := range report.Deferred {
+			fmt.Fprintf(os.Stderr, "edge key renewal deferred: %s\n", secrets.RedactText(deferred))
+		}
+		if len(report.Renewed) != 1 {
+			reasons := append(append([]string{}, report.Problems...), report.Deferred...)
+			if len(reasons) == 0 {
+				reasons = append(reasons, "ownership did not authorize renewal")
+			}
+			return fmt.Errorf("renew key %s: %s", args[0], secrets.RedactText(strings.Join(reasons, "; ")))
 		}
 		key, _ := ring.Lookup(args[0])
-		if err := edge.SaveKey(dir, key); err != nil {
-			return err
-		}
 		fmt.Printf("Renewed %s until %s.\n", key.KeyID, key.NotAfter.UTC().Format(time.RFC3339))
 		return nil
 	},
