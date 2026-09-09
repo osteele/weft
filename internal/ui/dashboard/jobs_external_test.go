@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
@@ -92,6 +93,35 @@ func TestDashboardExternalCancelAndUnsupportedControlsDoNotForgeTerminalState(t 
 				}
 			}
 		})
+	}
+}
+
+func TestDashboardCancelQueuedJobRecordsCanceledStatus(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp", "true", "queued job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := Model{
+		database:    database,
+		coreService: core.NewServiceWithDB(database),
+	}
+
+	msg := model.cancelQueuedJob(job)()
+	result, ok := msg.(jobKilledMsg)
+	if !ok || result.err != nil || !result.cancelled {
+		t.Fatalf("cancel result = %#v", msg)
+	}
+	refreshed, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Status != db.StatusCanceled {
+		t.Fatalf("queued cancel status = %q, want canceled", refreshed.Status)
 	}
 }
 

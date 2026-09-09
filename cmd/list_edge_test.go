@@ -93,6 +93,31 @@ func TestJobListEdgeJSONParity(t *testing.T) {
 	}
 }
 
+func TestBuildJobListModelCarriesKillAttribution(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const killedAt = int64(1_700_000_000)
+	if err := db.SetKillRequestedStatus(database, jobID, "session:edge-killer", "blocked queue", killedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := buildJobListModel(database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.Jobs) != 1 {
+		t.Fatalf("jobs = %d, want 1", len(model.Jobs))
+	}
+	job := model.Jobs[0]
+	if job.KillActor != "session:edge-killer" || job.KillReason != "blocked queue" ||
+		job.KilledAt == nil || *job.KilledAt != killedAt {
+		t.Fatalf("published kill attribution = actor %q reason %q at %v", job.KillActor, job.KillReason, job.KilledAt)
+	}
+}
+
 // TestJobListEdgeTableParity: the edge's table is the hub's renderer run on
 // the published model, byte-equal up to the provenance line.
 func TestJobListEdgeTableParity(t *testing.T) {
