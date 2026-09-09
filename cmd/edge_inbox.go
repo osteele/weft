@@ -419,8 +419,8 @@ func edgeJobControlStateRefusal(payload *edge.WeftJobControlPayload, job *db.Job
 	case edge.ControlRestart:
 		if job.Backend == db.BackendSkyPilot {
 			detail = fmt.Sprintf("SkyPilot job %s cannot be restarted by Weft; submit a new external job instead", ids.FormatJobID(job.ID))
-		} else if status == db.StatusRunning || status == db.StatusStarting {
-			detail = fmt.Sprintf("job %s is currently %s; kill it first if you want to retry", ids.FormatJobID(job.ID), status)
+		} else if status != db.StatusQueued && !requeueableStatuses[status] {
+			detail = fmt.Sprintf("cannot retry job with status '%s'; must be queued, killed, dead, failed, canceled, skipped, completed, or unresolved", status)
 		}
 	case edge.ControlEdit:
 		if job.Backend == db.BackendSkyPilot {
@@ -541,8 +541,12 @@ func recoverSeenEdgePointer(ctx context.Context, database *sql.DB, deps edgeInbo
 			return false, err
 		}
 	case edge.KindWeftJobControl, edge.KindWeftBugReport, edge.KindPlanEnded:
-		admission := &edge.Admission{Envelope: envelope}
-		ack := acceptedEdgeAck(admission, deps.HubHost, "Submission accepted; original action detail is unavailable")
+		now := time.Now().UTC()
+		ack := edge.Ack{
+			Version: 1, Nonce: nonce, Accepted: true,
+			Phase: "outcome_unknown", HubHost: deps.HubHost, AckedAt: now, PhaseSince: now,
+			Detail: "Submission was admitted before the hub restarted; whether its action ran is unknown",
+		}
 		if err := writeEdgeAck(ctx, deps.Transport, ack); err != nil {
 			return false, err
 		}

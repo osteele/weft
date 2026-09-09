@@ -812,12 +812,23 @@ func TestEdgeInboxRecoversSeenControlWithoutJobSubmissionRow(t *testing.T) {
 		t.Fatalf("recovery poll: pending=%d err=%v", pending, err)
 	}
 	ack, err := edgeFetchAck(context.Background(), hub, result.Nonce)
-	if err != nil || !ack.Accepted || !strings.Contains(ack.Detail, "original action detail is unavailable") {
+	if err != nil || !ack.Accepted || ack.Phase != "outcome_unknown" || !strings.Contains(ack.Detail, "whether its action ran is unknown") {
 		t.Fatalf("recovery acknowledgement=%#v err=%v", ack, err)
 	}
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil || job.EffectiveStatus() != db.StatusQueued {
 		t.Fatalf("recovered control reran action: job=%#v err=%v", job, err)
+	}
+}
+
+func TestEdgeRestartRefusesNonRequeueableStatusBeforeExecution(t *testing.T) {
+	job := &db.Job{ID: 42, Host: "host-alpha", Status: db.StatusPaused}
+	refusal := edgeJobControlStateRefusal(
+		&edge.WeftJobControlPayload{Action: edge.ControlRestart, JobID: job.ID},
+		job,
+	)
+	if refusal == nil || refusal.Code != edge.ReasonActionFailed || !strings.Contains(refusal.Detail, "cannot retry job with status 'paused'") {
+		t.Fatalf("restart refusal = %#v", refusal)
 	}
 }
 

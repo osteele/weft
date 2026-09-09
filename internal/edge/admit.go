@@ -150,7 +150,7 @@ func Admit(ctx context.Context, t Transport, object []byte, opts AdmitOptions) (
 		}
 		// Honoring this only ever reduces authority, so it needs no
 		// authorization step beyond the signature and the self-scope check.
-		refusal, err := ApplyPlanEnded(opts.Verify.Keyring, verified, ended, opts.Verify.Now)
+		refusal, err := ApplyPlanEnded(opts.Verify.Keyring, verified, ended, env.SubmittedAt)
 		if err != nil {
 			return nil, nil, err
 		}

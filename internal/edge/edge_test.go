@@ -1305,6 +1305,29 @@ func TestPlanEndPersistsAcrossReload(t *testing.T) {
 	}
 }
 
+func TestPlanEndClosesAuthorityAtSignedTime(t *testing.T) {
+	h := newHarness(t)
+	h.planKey("plan-7", 5.0)
+	submittedAt := h.nowFunc()
+	res := h.submit(planEndedRequest("plan-7"))
+	object, err := h.tr.Get(context.Background(), InboxKey(res.Nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := h.admitOpts()
+	opts.Verify.Now = submittedAt.Add(30 * time.Minute)
+	if _, refusal, err := Admit(context.Background(), h.tr, object, opts); err != nil || refusal != nil {
+		t.Fatalf("delayed plan end failed: %v %v", err, refusal)
+	}
+	key, ok := h.ring.Lookup("studio-test")
+	if !ok {
+		t.Fatal("key vanished")
+	}
+	if !key.NotAfter.Equal(submittedAt) {
+		t.Fatalf("authority ended at %s, want signed time %s", key.NotAfter, submittedAt)
+	}
+}
+
 // Hub-side faults are errors, not verdicts on the submission.
 func TestPlanEndedHubFaultIsAnErrorNotARefusal(t *testing.T) {
 	h := newHarness(t)
