@@ -101,15 +101,15 @@ type goListPackage struct {
 }
 
 func localAgentSourceVersion(repoRoot string) (string, error) {
-	files, err := sourceFilesForPackage(repoRoot, "./cmd/agent", "agent")
+	files, err := sourceFilesForPackage(repoRoot, "./cmd/agent", "agent", "", "")
 	if err != nil {
 		return "", err
 	}
 	return hashVersionFromFiles(repoRoot, files)
 }
 
-func localCLISourceVersion(repoRoot string) (string, error) {
-	files, err := sourceFilesForPackage(repoRoot, ".", "CLI")
+func localCLISourceVersion(repoRoot, goos, goarch string) (string, error) {
+	files, err := sourceFilesForPackage(repoRoot, ".", "CLI", goos, goarch)
 	if err != nil {
 		return "", err
 	}
@@ -117,10 +117,10 @@ func localCLISourceVersion(repoRoot string) (string, error) {
 }
 
 func agentSourceFiles(repoRoot string) ([]string, error) {
-	return sourceFilesForPackage(repoRoot, "./cmd/agent", "agent")
+	return sourceFilesForPackage(repoRoot, "./cmd/agent", "agent", "", "")
 }
 
-func sourceFilesForPackage(repoRoot, packagePattern, label string) ([]string, error) {
+func sourceFilesForPackage(repoRoot, packagePattern, label, goos, goarch string) ([]string, error) {
 	// `go list -deps -json` can take 10–20s on a cold build cache. A short
 	// budget makes the source hash silently lose to a VCS fallback, which lets
 	// uncommitted changes inherit a stale deployed binary's version.
@@ -130,6 +130,24 @@ func sourceFilesForPackage(repoRoot, packagePattern, label string) ([]string, er
 
 	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", packagePattern)
 	cmd.Dir = repoRoot
+	if goos != "" || goarch != "" {
+		baseEnv := os.Environ()
+		targetEnv := make([]string, 0, len(baseEnv)+2)
+		for _, entry := range baseEnv {
+			if (goos != "" && strings.HasPrefix(entry, "GOOS=")) ||
+				(goarch != "" && strings.HasPrefix(entry, "GOARCH=")) {
+				continue
+			}
+			targetEnv = append(targetEnv, entry)
+		}
+		if goos != "" {
+			targetEnv = append(targetEnv, "GOOS="+goos)
+		}
+		if goarch != "" {
+			targetEnv = append(targetEnv, "GOARCH="+goarch)
+		}
+		cmd.Env = targetEnv
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

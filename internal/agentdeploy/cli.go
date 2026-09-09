@@ -52,7 +52,7 @@ func RemoteCLIVersion(host string) (string, error) {
 // there by design, because the private key must be generated where it will be
 // used and never travel. A host with only the agent binary cannot run it.
 func EnsureCLIOnHost(host string, spec inventory.HostSpec) (bool, error) {
-	localVer, err := localCLIVersionFunc()
+	localVer, err := localCLIVersionFunc(spec.OS, spec.Arch)
 	if err != nil {
 		return false, err
 	}
@@ -89,10 +89,10 @@ var (
 // LocalCLIVersion fingerprints the Go source that builds the CLI. The
 // fingerprint includes uncommitted working-tree changes, matching the source
 // snapshot BuildCLIOnHost sends to the target.
-func LocalCLIVersion() (string, error) {
+func LocalCLIVersion(goos, goarch string) (string, error) {
 	root, err := RepoRoot()
 	if err != nil {
 		return "", err
 	}
-	return localCLISourceVersion(root)
+	return localCLISourceVersion(root, goos, goarch)
 }

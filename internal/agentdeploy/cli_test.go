@@ -2,6 +2,8 @@ package agentdeploy
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -63,7 +65,7 @@ func TestRemoteCLIVersionDistinguishesAbsenceFailureAndVersion(t *testing.T) {
 func TestEnsureCLIOnHostBuildsNativeCLIAndVerifiesVersion(t *testing.T) {
 	defer restoreCLITestFuncs()()
 
-	localCLIVersionFunc = func() (string, error) { return "abc123def456", nil }
+	localCLIVersionFunc = func(string, string) (string, error) { return "abc123def456", nil }
 	remoteCalls := 0
 	remoteCLIVersionFunc = func(host string) (string, error) {
 		remoteCalls++
@@ -96,7 +98,7 @@ func TestEnsureCLIOnHostBuildsNativeCLIAndVerifiesVersion(t *testing.T) {
 func TestEnsureCLIOnHostSkipsMatchingVersion(t *testing.T) {
 	defer restoreCLITestFuncs()()
 
-	localCLIVersionFunc = func() (string, error) { return "abc123def456", nil }
+	localCLIVersionFunc = func(string, string) (string, error) { return "abc123def456", nil }
 	remoteCLIVersionFunc = func(string) (string, error) { return "abc123def456", nil }
 	buildCLIOnHostFunc = func(string, string, string, string) error {
 		t.Fatal("matching CLI triggered a native build")
@@ -115,7 +117,7 @@ func TestEnsureCLIOnHostSkipsMatchingVersion(t *testing.T) {
 func TestEnsureCLIOnHostRejectsUnverifiedBuild(t *testing.T) {
 	defer restoreCLITestFuncs()()
 
-	localCLIVersionFunc = func() (string, error) { return "abc123def456", nil }
+	localCLIVersionFunc = func(string, string) (string, error) { return "abc123def456", nil }
 	remoteCalls := 0
 	remoteCLIVersionFunc = func(string) (string, error) {
 		remoteCalls++
@@ -133,11 +135,11 @@ func TestEnsureCLIOnHostRejectsUnverifiedBuild(t *testing.T) {
 }
 
 func TestLocalCLIVersionHashFormatAndStability(t *testing.T) {
-	version1, err := LocalCLIVersion()
+	version1, err := LocalCLIVersion("linux", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
-	version2, err := LocalCLIVersion()
+	version2, err := LocalCLIVersion("linux", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +153,53 @@ func TestLocalCLIVersionHashFormatAndStability(t *testing.T) {
 		if !strings.ContainsRune("0123456789abcdef", char) {
 			t.Fatalf("CLI source version = %q, contains non-hex %q", version1, char)
 		}
+	}
+}
+
+func TestLocalCLIVersionUsesTargetPlatformFiles(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"go.mod":           "module example.com/targethash\n\ngo 1.23.0\n",
+		"main.go":          "package main\n\nfunc main() {}\n",
+		"target_linux.go":  "//go:build linux\n\npackage main\n\nconst targetValue = \"linux-v1\"\n",
+		"target_darwin.go": "//go:build darwin\n\npackage main\n\nconst targetValue = \"darwin-v1\"\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	linuxBefore, err := localCLISourceVersion(root, "linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	darwinBefore, err := localCLISourceVersion(root, "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "target_linux.go"),
+		[]byte("//go:build linux\n\npackage main\n\nconst targetValue = \"linux-v2\"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	linuxAfter, err := localCLISourceVersion(root, "linux", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	darwinAfter, err := localCLISourceVersion(root, "darwin", "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linuxAfter == linuxBefore {
+		t.Fatal("Linux CLI version ignored a changed Linux-only source file")
+	}
+	if darwinAfter != darwinBefore {
+		t.Fatalf("Darwin CLI version changed after Linux-only edit: %q != %q", darwinAfter, darwinBefore)
 	}
 }
