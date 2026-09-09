@@ -408,9 +408,10 @@ timestamp with different semantics.
 
 ## Compatibility
 
-The older `watch_jobs` request remains supported for `weft status --wait`
-compatibility. New clients should use `subscribe` with
-`resource: "job_status"`.
+The older `watch_jobs` request remains supported for legacy clients.
+`weft status --wait` uses `subscribe` with `resource: "job_status"`. It
+reconnects after EOF, preserves the pending job set and absolute wait deadline,
+and consumes the replacement subscription's initial snapshot.
 
 CLI JSON/JSONL remains the recommended external process boundary. Over time,
 those commands should prefer daemon subscriptions internally and retain direct

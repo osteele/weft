@@ -512,15 +512,39 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	if len(order) == 0 {
 		return true, nil
 	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	pendingTimeoutErr := func() error {
+		pendingIDs := make([]int64, 0, len(pending))
+		for id := range pending {
+			pendingIDs = append(pendingIDs, id)
+		}
+		return fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+	}
+	waitError := func(err error) error {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return pendingTimeoutErr()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("daemon watch: %w", err)
+	}
 	paths := daemoncontrol.DefaultPaths()
 	if _, _, err := ensureDaemonStartedFunc(paths, 2*time.Second); err != nil {
 		return false, nil
 	}
 	watcher, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
 	if err != nil {
+		if ctx.Err() != nil {
+			return true, waitError(err)
+		}
 		return false, nil
 	}
-	defer watcher.Close()
+	defer func() { watcher.Close() }()
 
 	reportChange := func(job *db.Job) {
 		if job == nil {
@@ -531,29 +555,48 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 			printJobStatusLineWithContext(database, job)
 		}
 	}
-	pendingTimeoutErr := func() error {
-		pendingIDs := make([]int64, 0, len(pending))
-		for id := range pending {
-			pendingIDs = append(pendingIDs, id)
-		}
-		return fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
-	}
 
-	received := false
+	emptyReconnects := 0
 	for len(pending) > 0 {
 		event, err := watcher.Next()
 		if err != nil {
-			if !received && errors.Is(err, io.EOF) {
-				return false, nil
+			if ctx.Err() != nil {
+				return true, waitError(err)
 			}
-			return true, fmt.Errorf("daemon watch: %w", err)
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return true, waitError(err)
+			}
+			// A repeatedly broken stream must fail even when the job wait
+			// has no deadline. Only a fresh snapshot restores observation.
+			if emptyReconnects >= 3 {
+				return true, waitError(err)
+			}
+			emptyReconnects++
+			watcher.Close()
+			// A daemon restart drops observation, not the jobs. Retain the
+			// pending set and accept the replacement's initial snapshot.
+			select {
+			case <-ctx.Done():
+				return true, waitError(ctx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+			remaining := time.Duration(0)
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining = time.Until(deadline)
+			}
+			replacement, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, remaining, 2*time.Second)
+			if err != nil {
+				return true, waitError(err)
+			}
+			watcher = replacement
+			continue
 		}
-		received = true
 		switch event.Type {
 		case daemonapi.EventSubscriptionSnapshot, daemonapi.EventDone:
 			if event.Snapshot == nil {
 				continue
 			}
+			emptyReconnects = 0
 			for _, snapshot := range event.Snapshot.Jobs {
 				if _, ok := pending[snapshot.ID]; !ok {
 					continue

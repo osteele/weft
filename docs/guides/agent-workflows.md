@@ -20,6 +20,13 @@ weft log wj42
 successfully only when they succeed. It is designed to replace shell polling
 loops such as `while true; do weft status ...; sleep ...; done`.
 
+If the daemon restarts, `status --wait` reconnects after a subscription EOF and
+resumes from a fresh snapshot. Reconnection preserves the original
+`--wait-timeout` budget. If reconnection fails, the command reports an
+observation error; that error does not establish a terminal job outcome.
+Use `weft status` or `weft info` to retrieve the recorded job state before
+deciding whether another submission is needed.
+
 When a queued job is still waiting for placement or dispatch, `weft run`,
 `weft status`, `weft status --wait`, and `weft info` print expectation lines:
 

@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Job waits across daemon restarts**: `status --wait` reconnects after a
+  subscription EOF while preserving pending jobs and the original wait timeout.
 - **Rental preparation outside the Weft checkout**: Installed CLI builds use
   their recorded, prewarmed agent identity when invoked from another project,
   so cloud jobs no longer remain blocked while resolving the agent binary.

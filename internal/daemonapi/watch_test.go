@@ -1055,14 +1055,15 @@ func startActivityLoopTest(t *testing.T, database *sql.DB, sub SubscriptionReque
 	}
 	sub.MaxEventBytes = maxEventBytes
 	serverSide, clientSide := net.Pipe()
+	watcher := &Subscription{conn: clientSide, decoder: json.NewDecoder(clientSide)}
 	t.Cleanup(func() {
 		_ = serverSide.Close()
-		_ = clientSide.Close()
+		_ = watcher.Close()
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go runActivitySubscriptionLoop(ctx, database, json.NewEncoder(serverSide), "test-sub", sub, 0, nil, nil, heartbeat)
-	return &Subscription{conn: clientSide, decoder: json.NewDecoder(clientSide)}
+	return watcher
 }
 
 func TestBuildActivityPayloadCanOmitFormattedFields(t *testing.T) {

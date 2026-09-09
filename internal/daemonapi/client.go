@@ -20,6 +20,7 @@ type Subscription struct {
 	conn    net.Conn
 	decoder *json.Decoder
 	Ready   Event
+	stop    func() bool
 }
 
 func DialWatchJobs(ctx context.Context, socketPath string, jobIDs []int64, timeout time.Duration) (*Watcher, error) {
@@ -52,6 +53,14 @@ func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionReque
 	if err != nil {
 		return nil, err
 	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	connected := false
+	defer func() {
+		if !connected {
+			stop()
+			conn.Close()
+		}
+	}()
 	req := Request{
 		Type:      RequestSubscribe,
 		ClientPID: os.Getpid(),
@@ -59,24 +68,21 @@ func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionReque
 	}
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(req); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("send subscribe request: %w", err)
 	}
 	decoder := json.NewDecoder(conn)
 	var ready Event
 	if err := decoder.Decode(&ready); err != nil {
-		conn.Close()
 		return nil, fmt.Errorf("read subscribe ready: %w", err)
 	}
 	if ready.Type == EventError {
-		conn.Close()
 		return nil, fmt.Errorf("subscribe %s: %s", sub.Resource, ready.Error)
 	}
 	if ready.Type != EventSubscriptionReady {
-		conn.Close()
 		return nil, fmt.Errorf("subscribe %s: unexpected response %q", sub.Resource, ready.Type)
 	}
-	return &Subscription{conn: conn, decoder: decoder, Ready: ready}, nil
+	connected = true
+	return &Subscription{conn: conn, decoder: decoder, Ready: ready, stop: stop}, nil
 }
 
 func DialSubscribeJobStatus(ctx context.Context, socketPath string, jobIDs []int64, timeout time.Duration) (*Subscription, error) {
@@ -218,5 +224,8 @@ func (s *Subscription) Next() (Event, error) {
 }
 
 func (s *Subscription) Close() error {
+	if s.stop != nil {
+		s.stop()
+	}
 	return s.conn.Close()
 }
