@@ -21,6 +21,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/queueblock"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/util"
 )
 
 type onPremHostSummary struct {
@@ -339,7 +340,7 @@ func activeJobPriority(job *db.Job) int {
 func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("=== System Watch %s ===\n\n", now.Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("=== System Watch %s ===\n\n", util.FormatCLITime(now, "2006-01-02 15:04:05")))
 
 	b.WriteString(fmt.Sprintf("RENTAL INSTANCES (%d)\n", len(snapshot.Launches)))
 	if snapshot.CloudDegraded && snapshot.CloudReason != "" {

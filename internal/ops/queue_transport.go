@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/inventoryqueue"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/util"
 )
 
 const (
@@ -169,7 +170,7 @@ func fetchR2RunnerState(host string) (*opsqueue.RunnerState, error) {
 		return nil, fmt.Errorf("read R2 runner state for %s: no state published", host)
 	}
 	if view.Stale {
-		return nil, fmt.Errorf("R2 runner state for %s is stale (updated %s)", host, view.State.UpdatedAt.Format(time.RFC3339))
+		return nil, fmt.Errorf("R2 runner state for %s is stale (updated %s)", host, util.FormatCLITime(view.State.UpdatedAt, "2006-01-02 15:04:05"))
 	}
 	state := &view.State.Runner
 	state.AgentVersion = view.State.AgentVersion

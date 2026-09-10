@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -229,7 +230,7 @@ func runProjectSpent(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if len(rows) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "No project spend found since %s\n", since.Format(time.RFC3339))
+		fmt.Fprintf(cmd.OutOrStdout(), "No project spend found since %s\n", util.FormatCLITime(since, "2006-01-02 15:04:05"))
 		return nil
 	}
 
@@ -246,6 +247,6 @@ func runProjectSpent(cmd *cobra.Command, _ []string) error {
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("flush output: %w", err)
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "\nSince %s\n", since.Format(time.RFC3339))
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "\nSince %s\n", util.FormatCLITime(since, "2006-01-02 15:04:05"))
 	return err
 }

@@ -45,3 +45,10 @@ achieve Q, accepting D.*
   read path, to make fleet inspection fast and available while hosts are
   offline, accepting eventual consistency and explicit `unknown` or
   `stale-observation` states.
+
+- **2026-09-10** — In the context of a CLI whose expected users are agents,
+  facing timestamps that depend on the observer's workstation, we decided for
+  UTC by default with explicit timezone markers and an opt-in local or named
+  timezone, and neglected local time as the CLI default, to make times
+  comparable across machines, accepting different default clock displays
+  between the CLI and the local-time TUI.

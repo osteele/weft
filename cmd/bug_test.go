@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -241,12 +242,10 @@ func TestGitHubBugReportCreatesIssueWithMetadata(t *testing.T) {
 	}
 }
 
-// This kills the mutation that records post-close recurrences without
-// surfacing them: weft bug show must print the count and recency, and
-// weft bug list must resurface a closed bug under repeated recent recurrence
-// while keeping a single straggler out of the default list.
+// Closed-bug details expose post-close count and recency. Repeated reports
+// resurface the bug in the default list, while a single straggler stays hidden.
 func TestBugShowAndListSurfacePostCloseRecurrences(t *testing.T) {
-	db.SetupTestBugDB(t)
+	database := db.SetupTestBugDB(t)
 	setupLocalBugTrackerConfig(t)
 	restoreBugFlags(t)
 
@@ -260,24 +259,41 @@ func TestBugShowAndListSurfacePostCloseRecurrences(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		err := runBugReport(&cobra.Command{}, []string{"recurring", "invariant"})
-		if err == nil || !strings.Contains(err.Error(), "recurrence recorded") {
-			t.Fatalf("report %d against closed bug: err = %v, want recurrence-recorded error", i+1, err)
+		if !db.IsBugFingerprintClosed(err) {
+			t.Fatalf("report %d against closed bug: err = %v, want closed-fingerprint error", i+1, err)
 		}
 	}
 
-	out := captureStdout(t, func() {
+	bug, err := db.GetBug(database, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the recurrence time distinct from creation and closure so another
+	// timestamp cannot conceal a missing recurrence row.
+	if _, err := database.Exec(`UPDATE bugs SET created_at = ?, updated_at = ?, closed_at = ? WHERE id = 1`,
+		bug.LastRecurrenceAt-2*86400, bug.LastRecurrenceAt-86400, bug.LastRecurrenceAt-86400); err != nil {
+		t.Fatal(err)
+	}
+	shown := captureStdout(t, func() {
 		if err := runBugShow(&cobra.Command{}, []string{"wb1"}); err != nil {
 			t.Fatalf("runBugShow: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Status:      closed") {
-		t.Fatalf("show output lost the close verdict = %q", out)
+	if !slices.Contains(strings.Fields(shown), "closed") {
+		t.Fatalf("show output lost the closed status:\n%s", shown)
 	}
-	if !strings.Contains(out, "Recurrences after close: 2 (most recent ") {
-		t.Fatalf("show output missing post-close recurrences = %q", out)
+	hasRecurrence := false
+	for _, line := range strings.Split(shown, "\n") {
+		if strings.Contains(line, formatBugUnixTime(bug.LastRecurrenceAt)) && slices.Contains(strings.Fields(line), "2") {
+			hasRecurrence = true
+			break
+		}
+	}
+	if !hasRecurrence {
+		t.Fatalf("show output missing the post-close count and recency:\n%s", shown)
 	}
 
-	out = captureStdout(t, func() {
+	out := captureStdout(t, func() {
 		if err := runBugList(&cobra.Command{}, nil); err != nil {
 			t.Fatalf("runBugList: %v", err)
 		}

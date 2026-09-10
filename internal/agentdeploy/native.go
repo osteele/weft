@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/util"
 )
 
 const remoteAgentBuildDir = "~/.cache/weft/agent-build"
@@ -72,7 +73,7 @@ func BuildOnHostWithProgress(host, version, goos, goarch string, onProgress Buil
 		return fmt.Errorf(
 			"build failed on %s of a working tree synced at %s (a snapshot, not a commit: "+
 				"uncommitted edits are included and no revision need reproduce this): %s",
-			host, syncedAt.Format(time.RFC3339), strings.TrimSpace(stderr))
+			host, util.FormatCLITime(syncedAt, "2006-01-02 15:04:05"), strings.TrimSpace(stderr))
 	}
 
 	return nil
@@ -106,7 +107,7 @@ func BuildCLIOnHost(host, version, goos, goarch string) error {
 	if err != nil {
 		return fmt.Errorf(
 			"CLI build failed on %s from a working tree synced at %s (a snapshot, not a commit): %s",
-			host, syncedAt.Format(time.RFC3339), strings.TrimSpace(stderr))
+			host, util.FormatCLITime(syncedAt, "2006-01-02 15:04:05"), strings.TrimSpace(stderr))
 	}
 	return nil
 }

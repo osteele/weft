@@ -1004,7 +1004,7 @@ func TestShowJobPrintsKillAttribution(t *testing.T) {
 		}
 	})
 	for _, want := range []string{
-		"Killed At:    " + time.Unix(1_700_000_000, 0).Format("2006-01-02 15:04:05"),
+		"Killed At:    2023-11-14 22:13:20 UTC",
 		"Kill Actor:   osteele@laptop",
 		"Kill Reason:  clearing blocker",
 	} {

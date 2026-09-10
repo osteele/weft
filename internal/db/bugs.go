@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/util"
 )
 
 const bugPrefix = "wb"
@@ -77,7 +79,7 @@ func (e *bugFingerprintClosedError) Error() string {
 	recorded := ""
 	if e.recurrences > 0 {
 		recorded = fmt.Sprintf("recurrence recorded (%d since close, most recent %s); ",
-			e.recurrences, time.Unix(e.lastRecurrenceAt, 0).Format("2006-01-02 15:04:05"))
+			e.recurrences, util.FormatCLITime(time.Unix(e.lastRecurrenceAt, 0), "2006-01-02 15:04:05"))
 	}
 	return fmt.Sprintf("bug %s with fingerprint %q is closed; %suse `weft bug reopen %s` to reopen it, or report with a different --fingerprint",
 		bugRef, e.fingerprint, recorded, bugRef)

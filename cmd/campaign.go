@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -215,7 +216,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(w, "ID\tSTATUS\tINSTANCES\tEST. COST\tACTUAL COST\tCREATED\n")
 
 	for _, c := range campaigns {
-		created := time.Unix(c.CreatedAt, 0).Format("01/02 15:04")
+		created := util.FormatCLITime(time.Unix(c.CreatedAt, 0), "01/02 15:04")
 		instances, _ := db.GetCampaignInstances(database, c.ID)
 		estCost := campaign.FormatEstimatedCostCents(c.EstimatedCostCents)
 		actualCost := campaignActualCost(instances)
@@ -250,9 +251,9 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Campaign %d\n", c.ID)
 	fmt.Printf("  Status:     %s\n", c.Status)
-	fmt.Printf("  Created:    %s\n", time.Unix(c.CreatedAt, 0).Format(time.RFC3339))
+	fmt.Printf("  Created:    %s\n", util.FormatCLITime(time.Unix(c.CreatedAt, 0), "2006-01-02 15:04:05"))
 	if c.EndedAt != nil {
-		fmt.Printf("  Ended:      %s\n", time.Unix(*c.EndedAt, 0).Format(time.RFC3339))
+		fmt.Printf("  Ended:      %s\n", util.FormatCLITime(time.Unix(*c.EndedAt, 0), "2006-01-02 15:04:05"))
 	}
 	if c.DistinctMachines {
 		covered, err := db.CampaignCoveredMachineIDs(database, c.ID)

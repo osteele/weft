@@ -793,9 +793,9 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		}
 		deadline := "—"
 		if target.DeadlineUnix != nil && *target.DeadlineUnix > 0 {
-			deadline = time.Unix(*target.DeadlineUnix, 0).Format("01/02 15:04")
+			deadline = util.FormatCLITime(time.Unix(*target.DeadlineUnix, 0), "01/02 15:04")
 		}
-		updated := time.Unix(target.UpdatedAt, 0).Format("01/02 15:04")
+		updated := util.FormatCLITime(time.Unix(target.UpdatedAt, 0), "01/02 15:04")
 
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 			executionTargetDisplayID(target), target.Kind, statusStr, gpuSpec, executionTargetGPUCount(target), jobs, current, backing, deadline, updated)
@@ -1042,7 +1042,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if detail := ci.CordonDetail(); detail != "" {
 			fmt.Printf("  Cordoned: %s\n", detail)
 			if ci.CordonedAt != nil {
-				fmt.Printf("  Cordoned at: %s\n", time.Unix(*ci.CordonedAt, 0).Format("01/02 15:04"))
+				fmt.Printf("  Cordoned at: %s\n", util.FormatCLITime(time.Unix(*ci.CordonedAt, 0), "01/02 15:04"))
 			}
 		}
 
@@ -1139,7 +1139,7 @@ func printInventoryTargetStatus(database *sql.DB, host string) (bool, error) {
 		}
 		fmt.Printf("  Queue depth: %d\n", target.QueueDepth)
 		if target.LastObservedAt != nil {
-			fmt.Printf("  Last observed: %s\n", time.Unix(*target.LastObservedAt, 0).Format(time.RFC3339))
+			fmt.Printf("  Last observed: %s\n", util.FormatCLITime(time.Unix(*target.LastObservedAt, 0), "2006-01-02 15:04:05"))
 		}
 		return true, nil
 	}

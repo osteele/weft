@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/secrets"
+	"github.com/osteele/weft/internal/util"
 )
 
 const (
@@ -232,12 +233,12 @@ func narrationBlocks(tick Tick) ([]map[string]any, []map[string]any) {
 	}
 	var tail strings.Builder
 	tail.WriteString("CURRENT_STATE (snapshot at ")
-	tail.WriteString(tick.Now.Local().Format("15:04:05"))
+	tail.WriteString(util.FormatCLITime(tick.Now, "15:04:05"))
 	tail.WriteString("):\n")
 	tail.WriteString(tick.CurrentSnapshot)
 	tail.WriteString("\n\nCHANGES (transitions since ")
 	if !tick.Since.IsZero() {
-		tail.WriteString(tick.Since.Local().Format("15:04:05"))
+		tail.WriteString(util.FormatCLITime(tick.Since, "15:04:05"))
 	} else {
 		tail.WriteString("the previous snapshot")
 	}

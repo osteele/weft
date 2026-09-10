@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -148,7 +149,7 @@ func printClassAuthorizations(cmd *cobra.Command, database *sql.DB) error {
 	for _, a := range rows {
 		fmt.Fprintf(cmd.OutOrStdout(), "%s ≥%dGB  up to $%.2f/hr  set %s",
 			a.GPUClass, a.GPUMemGB, float64(a.UpToCents)/100.0,
-			a.CreatedAt.Format("2006-01-02"),
+			util.FormatCLITime(a.CreatedAt, "2006-01-02"),
 		)
 		if a.Note != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "  note=%q", a.Note)

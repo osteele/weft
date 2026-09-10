@@ -528,10 +528,10 @@ A clean detection looks like:
 
 ```
 Detected credit-exhaustion incident on vastai:
-  Burst:    6 instances destroyed within 6m53s, peak 2026-06-01 08:24:04 CST
+  Burst:    6 instances destroyed within 6m53s, peak 2026-06-01 00:24:04 UTC
   Silence:  5m1s (no vastai instance reached running)
-  Recovery: 2026-06-01 08:29:05 CST  (wi3419)
-  Window:   2026-06-01 08:02:11 CST → 2026-06-01 08:29:05 CST
+  Recovery: 2026-06-01 00:29:05 UTC  (wi3419)
+  Window:   2026-06-01 00:02:11 UTC → 2026-06-01 00:29:05 UTC
   ...
 ```
 

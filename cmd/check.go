@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -164,7 +165,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			}
 			if job.StartTime > 0 {
 				startTime := time.Unix(job.StartTime, 0)
-				fmt.Printf("Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
+				fmt.Printf("Started: %s\n", util.FormatCLITime(startTime, "2006-01-02 15:04:05"))
 			}
 
 			if job.Status == db.StatusRunning && job.StartTime > 0 {

@@ -7,6 +7,14 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/util"
+)
+
+// Base layouts for CLI human time output. They are marker-free; FormatCLITime
+// appends the zone suffix.
+const (
+	cliStartedLayout  = "01/02 15:04"
+	cliKilledAtLayout = "2006-01-02 15:04:05"
 )
 
 // columnDef defines a displayable column for job list output.
@@ -29,8 +37,43 @@ func (c columnDef) effectiveJSONKey() string {
 	return c.key
 }
 
-// allColumnDefs returns all available column definitions.
-func allColumnDefs() []columnDef {
+// allColumnDefs returns all available column definitions. The cli flag
+// selects the CLI time presentation (configurable location with a zone
+// suffix) for the human `started`/`killed_at` values; the local presentation
+// is shared with the interactive TUI and the post-TUI exit summaries and
+// always renders local time. JSON values are UTC RFC3339 on both surfaces.
+func allColumnDefs(cli bool) []columnDef {
+	started := columnDef{
+		key: "started", title: "TIME", width: 11,
+		value:     func(job *db.Job) string { return formatJobListTime(job) },
+		jsonValue: cliJobListJSONTime,
+	}
+	killedAt := columnDef{
+		key: "killed_at", title: "KILLED_AT", width: 20,
+		value: func(job *db.Job) string {
+			if job.KilledAt == nil {
+				return ""
+			}
+			return time.Unix(*job.KilledAt, 0).Format(time.RFC3339)
+		},
+		jsonValue: func(job *db.Job) any {
+			if job.KilledAt == nil {
+				return nil
+			}
+			return time.Unix(*job.KilledAt, 0).UTC().Format(time.RFC3339)
+		},
+	}
+	if cli {
+		started.value = func(job *db.Job) string {
+			return util.FormatCLIUnixTimeOr(jobListDisplayTime(job), cliStartedLayout, "-")
+		}
+		killedAt.value = func(job *db.Job) string {
+			if job.KilledAt == nil {
+				return ""
+			}
+			return util.FormatCLITime(time.Unix(*job.KilledAt, 0), cliKilledAtLayout)
+		}
+	}
 	return []columnDef{
 		{
 			key: "check", title: "", width: 2,
@@ -63,17 +106,7 @@ func allColumnDefs() []columnDef {
 			key: "status_code", title: "STATUS_CODE", width: 14,
 			value: func(job *db.Job) string { return job.EffectiveStatus() },
 		},
-		{
-			key: "started", title: "TIME", width: 11,
-			value: func(job *db.Job) string { return formatJobListTime(job) },
-			jsonValue: func(job *db.Job) any {
-				t := jobListDisplayTime(job)
-				if t <= 0 {
-					return nil
-				}
-				return time.Unix(t, 0).Format(time.RFC3339)
-			},
-		},
+		started,
 		{
 			key: "project", title: "PROJECT", width: 0, // computed from data
 			value: func(job *db.Job) string { return formatJobListProject(job) },
@@ -160,28 +193,24 @@ func allColumnDefs() []columnDef {
 			key: "kill_reason", title: "KILL_REASON", width: 24,
 			value: func(job *db.Job) string { return job.KillReason },
 		},
-		{
-			key: "killed_at", title: "KILLED_AT", width: 20,
-			value: func(job *db.Job) string {
-				if job.KilledAt == nil {
-					return ""
-				}
-				return time.Unix(*job.KilledAt, 0).Format(time.RFC3339)
-			},
-			jsonValue: func(job *db.Job) any {
-				if job.KilledAt == nil {
-					return nil
-				}
-				return time.Unix(*job.KilledAt, 0).Format(time.RFC3339)
-			},
-		},
+		killedAt,
 	}
 }
 
+// cliJobListJSONTime renders the started JSON value as UTC RFC3339 with a
+// literal Z, independent of the configured CLI location.
+func cliJobListJSONTime(job *db.Job) any {
+	t := jobListDisplayTime(job)
+	if t <= 0 {
+		return nil
+	}
+	return time.Unix(t, 0).UTC().Format(time.RFC3339)
+}
+
 // columnDefMap returns a map of key -> columnDef for quick lookup.
-func columnDefMap() map[string]columnDef {
+func columnDefMap(cli bool) map[string]columnDef {
 	m := make(map[string]columnDef)
-	for _, c := range allColumnDefs() {
+	for _, c := range allColumnDefs(cli) {
 		m[c.key] = c
 	}
 	return m
@@ -198,19 +227,20 @@ var defaultJSONColumnKeys = []string{"id", "job_id", "host", "status", "status_c
 // (same as the wide table but without the checkmark column).
 var defaultTSVColumnKeys = []string{"id", "host", "status", "started", "project", "description"}
 
-// resolveColumns validates and resolves column names to columnDefs.
-// If keys is nil or empty, defaultKeys is used.
+// resolveColumns validates and resolves column names to columnDefs using the
+// CLI presentation (this is the JSON/TSV path; table rendering selects its own
+// surface's defs). If keys is nil or empty, defaultKeys is used.
 func resolveColumns(keys []string, defaultKeys []string) ([]columnDef, error) {
 	if len(keys) == 0 {
 		keys = defaultKeys
 	}
-	m := columnDefMap()
+	m := columnDefMap(true)
 	cols := make([]columnDef, 0, len(keys))
 	for _, k := range keys {
 		c, ok := m[k]
 		if !ok {
 			valid := make([]string, 0, len(m))
-			for _, cd := range allColumnDefs() {
+			for _, cd := range allColumnDefs(true) {
 				valid = append(valid, cd.key)
 			}
 			return nil, fmt.Errorf("unknown column %q (valid: %s)", k, strings.Join(valid, ", "))

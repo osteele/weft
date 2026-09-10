@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/edgeview"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/secrets"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -318,7 +319,7 @@ func printEdgeInboxDoctor(cmd *cobra.Command, cfg *config.Config, role string) {
 	} else {
 		fmt.Fprintf(cmd.OutOrStdout(), "Inbox:     last polled %s ago (%s), %d pointer(s) pending\n",
 			edgeview.FormatAge(time.Since(state.LastSuccessfulPoll)),
-			state.LastSuccessfulPoll.UTC().Format(time.RFC3339), state.PendingPointers)
+			util.FormatCLITime(state.LastSuccessfulPoll, "2006-01-02 15:04:05"), state.PendingPointers)
 	}
 	if state.PollError != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Inbox error: %s\n", state.PollError)
@@ -341,7 +342,7 @@ func printEdgeViewDoctor(cmd *cobra.Command, cfg *config.Config, role, override 
 			fmt.Fprintln(cmd.OutOrStdout(), "View:      no successful publish recorded")
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "View:      last published %s ago (%s)\n",
-				edgeview.FormatAge(time.Since(state.LastSuccessfulPublish)), state.LastSuccessfulPublish.UTC().Format(time.RFC3339))
+				edgeview.FormatAge(time.Since(state.LastSuccessfulPublish)), util.FormatCLITime(state.LastSuccessfulPublish, "2006-01-02 15:04:05"))
 		}
 		if state.PublishError != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "View error: %s\n", state.PublishError)
@@ -401,14 +402,14 @@ func describeKey(k edge.Key, now time.Time) string {
 	state := "active"
 	switch {
 	case k.RevokedAt != nil:
-		state = "REVOKED " + k.RevokedAt.UTC().Format(time.RFC3339)
+		state = "REVOKED " + util.FormatCLITime(*k.RevokedAt, "2006-01-02 15:04:05")
 	case !k.NotAfter.IsZero() && now.After(k.NotAfter):
-		state = "LAPSED " + k.NotAfter.UTC().Format(time.RFC3339)
+		state = "LAPSED " + util.FormatCLITime(k.NotAfter, "2006-01-02 15:04:05")
 	case !k.NotAfter.IsZero() && k.NotAfter.Sub(now) < nearLapse:
 		state = fmt.Sprintf("lapses in %s (%s)",
-			k.NotAfter.Sub(now).Round(time.Minute), k.NotAfter.UTC().Format(time.RFC3339))
+			k.NotAfter.Sub(now).Round(time.Minute), util.FormatCLITime(k.NotAfter, "2006-01-02 15:04:05"))
 	case !k.NotAfter.IsZero():
-		state = "valid until " + k.NotAfter.UTC().Format(time.RFC3339)
+		state = "valid until " + util.FormatCLITime(k.NotAfter, "2006-01-02 15:04:05")
 	}
 	plan := k.PlanID
 	if plan == "" {
@@ -689,7 +690,7 @@ var edgeKeyAddCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("Registered %s for host %s until %s",
-			key.KeyID, host, key.NotAfter.UTC().Format(time.RFC3339))
+			key.KeyID, host, util.FormatCLITime(key.NotAfter, "2006-01-02 15:04:05"))
 		if ceiling > 0 {
 			fmt.Printf(", spend ceiling $%.2f", ceiling)
 		}
@@ -714,6 +715,15 @@ var edgeKeyListCmd = &cobra.Command{
 		}
 		keys := ring.List()
 		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			for i := range keys {
+				key := &keys[i]
+				key.NotBefore = key.NotBefore.UTC()
+				key.NotAfter = key.NotAfter.UTC()
+				if key.RevokedAt != nil {
+					revokedAt := key.RevokedAt.UTC()
+					key.RevokedAt = &revokedAt
+				}
+			}
 			// Machine-readable so a consumer reads the facts rather than
 			// parsing the display line, which carries the same values in a
 			// shape that is not a contract.
@@ -775,7 +785,7 @@ var edgeKeyRenewCmd = &cobra.Command{
 			return fmt.Errorf("renew key %s: %s", args[0], secrets.RedactText(strings.Join(reasons, "; ")))
 		}
 		key, _ := ring.Lookup(args[0])
-		fmt.Printf("Renewed %s until %s.\n", key.KeyID, key.NotAfter.UTC().Format(time.RFC3339))
+		fmt.Printf("Renewed %s until %s.\n", key.KeyID, util.FormatCLITime(key.NotAfter, "2006-01-02 15:04:05"))
 		return nil
 	},
 }

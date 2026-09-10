@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/secrets"
 	"github.com/osteele/weft/internal/syncorch"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -189,7 +190,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: read autopilot wake state: %s\n", secrets.RedactText(snapshotErr.Error()))
 	}
 
-	fmt.Printf("[%s] daemon started pid=%d\n", time.Now().Format("15:04:05"), pid)
+	fmt.Printf("[%s] daemon started pid=%d\n", util.FormatCLITime(time.Now(), "15:04:05"), pid)
 	reconciler := campaign.NewReconciler()
 	pass := 0
 	runAutopilot := true
@@ -497,7 +498,7 @@ func emitDaemonPass(p daemonPassResult, wait time.Duration) {
 	if p.runErr != nil && !errors.Is(p.runErr, orchestration.ErrAutopilotPaused) && !errors.Is(p.runErr, orchestration.ErrAutopilotBusy) {
 		parts = append(parts, fmt.Sprintf("err=%q", secrets.RedactText(p.runErr.Error())))
 	}
-	fmt.Printf("[%s] %s (next in %s)\n", time.Now().Format("15:04:05"), strings.Join(parts, " "), wait.Truncate(time.Second))
+	fmt.Printf("[%s] %s (next in %s)\n", util.FormatCLITime(time.Now(), "15:04:05"), strings.Join(parts, " "), wait.Truncate(time.Second))
 }
 
 func runDaemonStart(cmd *cobra.Command, args []string) error {

@@ -1189,8 +1189,8 @@ func TestBuildActivityPayloadPublishesActiveRunawayBreakers(t *testing.T) {
 	if got.Reason != campaign.RunawayBreakerReasonInfraFailures {
 		t.Fatalf("runaway breaker reason = %q, want %q", got.Reason, campaign.RunawayBreakerReasonInfraFailures)
 	}
-	if got.TrippedAt != trippedAt.Format(time.RFC3339) {
-		t.Fatalf("runaway breaker tripped_at = %q, want %q", got.TrippedAt, trippedAt.Format(time.RFC3339))
+	if got.TrippedAt != trippedAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("runaway breaker tripped_at = %q, want %q", got.TrippedAt, trippedAt.UTC().Format(time.RFC3339))
 	}
 	if got.Chain != 1 || got.Orphaned != 2 || got.InfraFailures != 3 || got.SpendCents != 125 || got.Window != "24h0m0s" {
 		t.Fatalf("runaway breaker metrics = %+v", got)

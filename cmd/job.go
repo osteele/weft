@@ -27,6 +27,7 @@ import (
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/osteele/weft/internal/retrypolicy"
 	"github.com/osteele/weft/internal/ui/terminal"
+	"github.com/osteele/weft/internal/util"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -1280,7 +1281,18 @@ func lifecycleUnixValue(ts *int64) string {
 }
 
 func formatUnixTime(t int64) string {
-	return fmt.Sprintf("%s", time.Unix(t, 0).Format("2006-01-02 15:04:05"))
+	return util.FormatCLITime(time.Unix(t, 0), "2006-01-02 15:04:05")
+}
+
+func formatCLIRFC3339(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value
+	}
+	return util.FormatCLITime(t, "2006-01-02 15:04:05")
 }
 
 // printAttemptsSection prints a per-attempt history table for jobs with

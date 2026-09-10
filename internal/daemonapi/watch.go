@@ -901,7 +901,7 @@ func runawayBreakerViews(infos []campaign.RunawayBreakerInfo, project string) []
 			CampaignID:    info.CampaignID,
 			Project:       info.Project,
 			Reason:        info.Reason,
-			TrippedAt:     info.TrippedAt.Format(time.RFC3339),
+			TrippedAt:     info.TrippedAt.UTC().Format(time.RFC3339),
 			Chain:         info.Chain,
 			Orphaned:      info.Orphaned,
 			InfraFailures: info.InfraFails,

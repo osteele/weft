@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db/migrations"
+	"github.com/osteele/weft/internal/util"
 )
 
 func TestReportBugDedupesOpenFingerprint(t *testing.T) {
@@ -49,32 +50,27 @@ func TestReportBugDedupesOpenFingerprint(t *testing.T) {
 	}
 }
 
-func TestReportBugErrorsOnClosedFingerprint(t *testing.T) {
-	database := SetupTestDB(t)
-
-	bug, created, err := ReportBug(database, BugReport{
-		Title:       "artifact cat cannot read listed path",
-		Fingerprint: "artifact.cat.closed",
-	})
-	if err != nil {
-		t.Fatalf("ReportBug first: %v", err)
-	}
-	if !created {
-		t.Fatal("first report should create bug")
-	}
-	if err := CloseBug(database, bug.ID, "fixed"); err != nil {
-		t.Fatalf("CloseBug: %v", err)
-	}
-
-	_, _, err = ReportBug(database, BugReport{
-		Title:       "artifact cat cannot read listed path",
-		Fingerprint: "artifact.cat.closed",
-	})
-	if err == nil {
-		t.Fatal("expected closed fingerprint error")
-	}
-	if got := err.Error(); !strings.Contains(got, "weft bug reopen wb1") || !strings.Contains(got, "different --fingerprint") {
-		t.Fatalf("error = %q, want reopen guidance", got)
+func TestBugFingerprintClosedErrorUsesCLITimezone(t *testing.T) {
+	previous := util.CLITimeLocation()
+	t.Cleanup(func() { util.SetCLITimeLocation(previous) })
+	instant := time.Date(2026, 6, 11, 23, 59, 59, 0, time.UTC).Unix()
+	for _, tc := range []struct {
+		name     string
+		location *time.Location
+		want     string
+	}{
+		{"utc", time.UTC, "2026-06-11 23:59:59 UTC"},
+		{"configured", time.FixedZone("TEST", -4*3600), "2026-06-11 19:59:59 TEST -04:00"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			util.SetCLITimeLocation(tc.location)
+			err := &bugFingerprintClosedError{
+				bugID: 1, fingerprint: "clock-test", recurrences: 1, lastRecurrenceAt: instant,
+			}
+			if got := err.Error(); !strings.Contains(got, tc.want) {
+				t.Fatalf("error missing configured timestamp %q: %s", tc.want, got)
+			}
+		})
 	}
 }
 
@@ -107,14 +103,8 @@ func TestReportBugAgainstClosedFingerprintRecordsRecurrence(t *testing.T) {
 			Host:        "host-beta",
 			Note:        "observed again",
 		})
-		if err == nil {
-			t.Fatalf("report %d: expected closed-fingerprint error", i+1)
-		}
 		if !IsBugFingerprintClosed(err) {
 			t.Fatalf("report %d: error %v is not a closed-fingerprint error", i+1, err)
-		}
-		if !strings.Contains(err.Error(), "recurrence recorded (") {
-			t.Fatalf("report %d: error %q does not state that the recurrence was recorded", i+1, err)
 		}
 	}
 

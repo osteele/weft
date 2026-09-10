@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/spf13/cobra"
@@ -67,7 +66,7 @@ func runJobRepairSyncState(_ *cobra.Command, _ []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "JOB\tHOST\tSTATUS\tPENDING\tLAST_SYNCED\tENDED")
 	for _, row := range found {
-		ended := time.Unix(row.EndTime, 0).Format("2006-01-02 15:04:05")
+		ended := formatUnixTime(row.EndTime)
 		lastSynced := row.LastSyncedStatus
 		if lastSynced == "" {
 			lastSynced = "-"

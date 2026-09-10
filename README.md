@@ -368,6 +368,8 @@ Minimal examples:
 
 ```toml
 default_command = "tui"
+# CLI only: "UTC", "local", or an IANA name such as "America/New_York".
+cli_timezone = "UTC"
 
 [cloud.ssh]
 identity_file = "~/.ssh/weft_cloud_ed25519"
@@ -379,6 +381,10 @@ exclude_dirs = ["data", "runs"]
 [runpod]
 # cloud_type = "secure" # default is "community"
 ```
+
+Interactive TUI timestamps stay local. See
+[Timestamp display](docs/reference/commands.md#timestamp-display) for CLI
+timezone and machine-readable output conventions.
 
 Use `.weft.toml` for project-level source excludes, output directories, cloud
 image overrides, and runtime disk requirements. Use the provider guides for

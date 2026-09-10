@@ -66,7 +66,7 @@ func FormatSnapshot(s *Snapshot) string {
 		Instances []instOut         `json:"instances,omitempty"`
 		Jobs      []formattedJobOut `json:"jobs,omitempty"`
 	}{
-		At: now.Format(time.RFC3339),
+		At: now.UTC().Format(time.RFC3339),
 	}
 	if autopilotNeedsSnapshotContext(s.Autopilot) {
 		out.Autopilot = &autopilotOut{
@@ -241,7 +241,7 @@ func FormatLifecycleEvents(events []db.LifecycleEvent) string {
 	for _, event := range events {
 		out.Events = append(out.Events, eventOut{
 			ID:            event.ID,
-			At:            time.Unix(event.OccurredAt, 0).Format(time.RFC3339),
+			At:            time.Unix(event.OccurredAt, 0).UTC().Format(time.RFC3339),
 			Kind:          event.EventKind,
 			LaunchID:      event.LaunchID,
 			CampaignID:    event.CampaignID,

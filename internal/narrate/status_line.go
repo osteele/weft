@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/jobview"
 	"github.com/osteele/weft/internal/sessioninbox"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/util"
 )
 
 const (
@@ -236,7 +237,7 @@ func BuildStatusLine(s *Snapshot, budgetCentsPerHour int, unprocessed Unprocesse
 // is the available terminal column width (used to abbreviate project names
 // when they overflow). 0 disables width-based truncation.
 func (sl StatusLine) HeaderLines(width int) []string {
-	tsPrefix := sl.Now.Local().Format("15:04:05") + " | "
+	tsPrefix := util.FormatCLITime(sl.Now, "15:04:05") + " | "
 	indent := strings.Repeat(" ", len(tsPrefix))
 	bodyWidth := 0
 	if width > 0 {

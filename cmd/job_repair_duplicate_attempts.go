@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"text/tabwriter"
-	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
@@ -110,7 +109,7 @@ func formatOptionalUnix(value *int64) string {
 	if value == nil || *value == 0 {
 		return "-"
 	}
-	return time.Unix(*value, 0).Format("2006-01-02 15:04:05")
+	return formatUnixTime(*value)
 }
 
 func nonEmptyOrDash(value string) string {

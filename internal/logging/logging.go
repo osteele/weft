@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/osteele/weft/internal/secrets"
+	"github.com/osteele/weft/internal/util"
 )
 
 // LevelOff is a log level high enough to suppress all output.
@@ -18,8 +19,17 @@ var level slog.LevelVar
 // mode "json" uses JSONHandler (for agent); anything else uses TextHandler.
 func Setup(w io.Writer, mode string) *slog.Logger {
 	opts := &slog.HandlerOptions{
-		Level:       &level,
-		ReplaceAttr: redactAttr,
+		Level: &level,
+		ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
+			if len(groups) == 0 && attr.Key == slog.TimeKey && attr.Value.Kind() == slog.KindTime {
+				if mode == "json" {
+					attr.Value = slog.TimeValue(attr.Value.Time().UTC())
+				} else {
+					attr.Value = slog.StringValue(util.FormatCLITime(attr.Value.Time(), "2006-01-02 15:04:05.000"))
+				}
+			}
+			return redactAttr(groups, attr)
+		},
 	}
 	var handler slog.Handler
 	if mode == "json" {

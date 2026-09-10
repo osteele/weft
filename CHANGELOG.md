@@ -12,6 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   agent fingerprint per host target and removes the document-level
   `desired_version`; rows include `desired_error` when target resolution fails.
 
+- **CLI timestamp display**: Human-readable timestamps default to explicitly
+  marked UTC for agent readers. `cli_timezone` selects UTC, local time, or an
+  IANA timezone; interactive TUI displays stay local. Structured timestamp
+  strings in JSON use UTC. TSV timestamp columns use human display formatting;
+  `killed_at` changes from RFC3339 to a zone-marked display string.
+
 ### Fixed
 
 - **Automatic daemon recovery during job waits**: `status --wait` starts a

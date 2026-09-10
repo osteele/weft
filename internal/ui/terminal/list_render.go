@@ -55,15 +55,15 @@ const cordonMarker = "⊘"
 const overloadMarker = "!"
 
 func renderJobListPlain(jobs []*db.Job, width int) string {
-	return renderJobListPlainWithOptions(jobs, width, nil, false)
+	return renderJobListPlainSurface(jobs, width, nil, false, false)
 }
 
-func renderJobListPlainWithOptions(jobs []*db.Job, width int, columnKeys []string, noTruncate bool) string {
+func renderJobListPlainSurface(jobs []*db.Job, width int, columnKeys []string, noTruncate bool, cli bool) string {
 	if len(jobs) == 0 {
 		return "No jobs found\n"
 	}
 
-	layout := newJobListLayout(width, jobs, columnKeys, noTruncate)
+	layout := newJobListLayoutSurface(width, jobs, columnKeys, noTruncate, cli)
 	lines := make([]string, 0, len(jobs)+1)
 	if noTruncate {
 		lines = append(lines, formatJobListHeader(layout))
@@ -176,10 +176,18 @@ func responsiveColumnKeys(width int) []string {
 }
 
 func newJobListLayout(width int, jobs []*db.Job, columnKeys []string, noTruncate bool) jobListLayout {
-	return newJobListLayoutWithCordon(width, jobs, columnKeys, noTruncate, cordonedTargets{})
+	return newJobListLayoutSurface(width, jobs, columnKeys, noTruncate, false)
+}
+
+func newJobListLayoutSurface(width int, jobs []*db.Job, columnKeys []string, noTruncate bool, cli bool) jobListLayout {
+	return newJobListLayoutSurfaceWithCordon(width, jobs, columnKeys, noTruncate, cordonedTargets{}, cli)
 }
 
 func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, noTruncate bool, cordoned cordonedTargets) jobListLayout {
+	return newJobListLayoutSurfaceWithCordon(width, jobs, columnKeys, noTruncate, cordoned, false)
+}
+
+func newJobListLayoutSurfaceWithCordon(width int, jobs []*db.Job, columnKeys []string, noTruncate bool, cordoned cordonedTargets, cli bool) jobListLayout {
 	if width <= 0 {
 		width = 120
 	}
@@ -189,7 +197,7 @@ func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, 
 	}
 
 	projectWidth := computeProjectWidth(jobs)
-	defs := columnDefMap()
+	defs := columnDefMap(cli)
 	columns := make([]columnDef, 0, len(columnKeys))
 	hasDescription := false
 
@@ -200,6 +208,12 @@ func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, 
 		}
 		if key == "project" && cd.width == 0 {
 			cd.width = projectWidth
+		}
+		if cli && (key == "started" || key == "killed_at") {
+			// Zone suffixes make CLI time fields variable width; size the
+			// field from the actual formatted values instead of a fixed
+			// width so no value truncates.
+			cd.width = cliTimeColumnWidth(cd, jobs)
 		}
 		if key == "description" {
 			hasDescription = true
@@ -219,6 +233,21 @@ func newJobListLayoutWithCordon(width int, jobs []*db.Job, columnKeys []string, 
 	}
 
 	return jobListLayout{width: width, columns: columns, cordoned: cordoned}
+}
+
+// cliTimeColumnWidth returns the display width needed for the widest title or
+// formatted value in a CLI time column.
+func cliTimeColumnWidth(cd columnDef, jobs []*db.Job) int {
+	w := lipgloss.Width(cd.title)
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		if vw := lipgloss.Width(cd.value(job)); vw > w {
+			w = vw
+		}
+	}
+	return w
 }
 
 func decorateHostColumnForCordon(cd columnDef, cordoned cordonedTargets) columnDef {

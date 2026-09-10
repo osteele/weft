@@ -395,7 +395,7 @@ func runHostJobs(cmd *cobra.Command, args []string) error {
 }
 
 func formatHostJobStarted(startTime int64) string {
-	return util.FormatUnixTimeOr(startTime, "01/02 15:04", util.EmptyCellCLI)
+	return util.FormatCLIUnixTimeOr(startTime, "01/02 15:04", util.EmptyCellCLI)
 }
 
 func runHostLoad(cmd *cobra.Command, args []string) error {

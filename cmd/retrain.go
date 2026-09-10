@@ -64,7 +64,7 @@ func runRetrain(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(cmd.OutOrStdout(), "\nModels trained successfully:\n")
 	fmt.Fprintf(cmd.OutOrStdout(), "  Jobs:       %d\n", meta.JobCount)
-	fmt.Fprintf(cmd.OutOrStdout(), "  Trained at: %s\n", meta.TrainedAt)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Trained at: %s\n", formatCLIRFC3339(meta.TrainedAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "  Models:     %d\n", len(meta.Models))
 
 	return nil

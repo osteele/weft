@@ -203,12 +203,16 @@ func WriteListPlainOutput(output string) error {
 	return writeListPlainOutput(output)
 }
 
+// RenderJobListPlain renders the flat job list for CLI output, with time
+// columns in the configurable CLI location. The interactive TUI and its
+// post-TUI exit summaries keep rendering in local time via the internal
+// local-surface helpers.
 func RenderJobListPlain(jobs []*db.Job, width int) string {
-	return renderJobListPlain(jobs, width)
+	return renderJobListPlainSurface(jobs, width, nil, false, true)
 }
 
 func RenderJobListPlainWithOptions(jobs []*db.Job, width int, columnKeys []string, noTruncate bool) string {
-	return renderJobListPlainWithOptions(jobs, width, columnKeys, noTruncate)
+	return renderJobListPlainSurface(jobs, width, columnKeys, noTruncate, true)
 }
 
 func RenderJobListGroupedStatusPlain(jobs []*db.Job, width int) string {
@@ -285,8 +289,11 @@ func RenderProjectListPlain(groups []ProjectGroup, width int) string {
 	return renderProjectListPlain(groups, width)
 }
 
+// RenderProjectJobsPlain renders per-project job lists for CLI output with
+// the CLI time presentation; the post-TUI exit summary uses the local
+// surface.
 func RenderProjectJobsPlain(groups []ProjectGroup, width int) string {
-	return renderProjectJobsPlain(groups, width)
+	return renderProjectJobsPlainSurface(groups, width, true)
 }
 
 func RenderProjectWatchPlain(groups []ProjectGroup, width int, now time.Time, recentWindow time.Duration) string {

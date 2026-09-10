@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/util"
 )
 
 func TestTruncateDisplayWidthPreservesANSIReset(t *testing.T) {
@@ -231,7 +233,7 @@ func TestRenderJobListPlainNoTruncate(t *testing.T) {
 		},
 	}
 
-	out := renderJobListPlainWithOptions(jobs, 80, nil, true)
+	out := RenderJobListPlainWithOptions(jobs, 80, nil, true)
 	if strings.Contains(out, "…") {
 		t.Fatalf("no-truncate output should not contain ellipsis:\n%s", out)
 	}
@@ -251,7 +253,7 @@ func TestRenderJobListPlainWithColumns(t *testing.T) {
 		},
 	}
 
-	out := renderJobListPlainWithOptions(jobs, 120, []string{"id", "status", "description"}, false)
+	out := RenderJobListPlainWithOptions(jobs, 120, []string{"id", "status", "description"}, false)
 	if !strings.Contains(out, "ID") {
 		t.Fatalf("output missing ID header:\n%s", out)
 	}
@@ -261,5 +263,60 @@ func TestRenderJobListPlainWithColumns(t *testing.T) {
 	// Should NOT contain HOST since we only selected id, status, description
 	if strings.Contains(out, "HOST") {
 		t.Fatalf("output should not contain HOST header:\n%s", out)
+	}
+}
+
+func TestListTimePresentationSeparatesCLIAndLocal(t *testing.T) {
+	previous := util.CLITimeLocation()
+	t.Cleanup(func() { util.SetCLITimeLocation(previous) })
+	ts := time.Date(2026, 6, 11, 23, 59, 59, 0, time.UTC).Unix()
+	jobs := []*db.Job{{ID: 42, Status: db.StatusRunning, StartTime: ts, KilledAt: &ts}}
+	localOutput := renderJobListPlain(jobs, 120)
+	cases := []struct {
+		name     string
+		location *time.Location
+		started  string
+		killed   string
+	}{
+		{"utc", time.UTC, "06/11 23:59 UTC", "2026-06-11 23:59:59 UTC"},
+		{"named", time.FixedZone("LONG-TEST-ZONE", 2*3600), "06/12 01:59 LONG-TEST-ZONE +02:00", "2026-06-12 01:59:59 LONG-TEST-ZONE +02:00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			util.SetCLITimeLocation(tc.location)
+			table := RenderJobListPlainWithOptions(jobs, 120, []string{"started", "killed_at"}, false)
+			for _, want := range []string{tc.started, tc.killed} {
+				if !strings.Contains(table, want) {
+					t.Errorf("CLI table missing complete timestamp %q:\n%s", want, table)
+				}
+			}
+			cols, err := ResolveColumns([]string{"started", "killed_at"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tsv bytes.Buffer
+			if err := PrintJobsTSV(&tsv, jobs, cols); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(tsv.String(), tc.started+"\t"+tc.killed) {
+				t.Errorf("CLI TSV times = %q", tsv.String())
+			}
+			var jsonOutput bytes.Buffer
+			if err := PrintJobsJSON(&jsonOutput, jobs, cols); err != nil {
+				t.Fatal(err)
+			}
+			var records []map[string]any
+			if err := json.Unmarshal(jsonOutput.Bytes(), &records); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"started", "killed_at"} {
+				if got := records[0][key]; got != "2026-06-11T23:59:59Z" {
+					t.Errorf("JSON %s = %v, want fixed UTC instant", key, got)
+				}
+			}
+			if got := renderJobListPlain(jobs, 120); got != localOutput {
+				t.Errorf("CLI timezone changed TUI/local output:\nbefore: %s\nafter: %s", localOutput, got)
+			}
+		})
 	}
 }

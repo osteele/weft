@@ -254,21 +254,21 @@ func buildAutopilotStateView(state *db.AutopilotState) autopilotStateView {
 	view.LastPassSummary = state.LastPassSummary
 	view.LastPassError = state.LastPassError
 	if !state.PausedAt.IsZero() {
-		s := state.PausedAt.Format(time.RFC3339)
+		s := state.PausedAt.UTC().Format(time.RFC3339)
 		view.PausedAt = &s
 	}
 	if !state.PassStartedAt.IsZero() {
-		s := state.PassStartedAt.Format(time.RFC3339)
+		s := state.PassStartedAt.UTC().Format(time.RFC3339)
 		view.PassStartedAt = &s
 		view.PassAgeSeconds = int64(now.Sub(state.PassStartedAt) / time.Second)
 	}
 	if !state.LastHeartbeat.IsZero() {
-		s := state.LastHeartbeat.Format(time.RFC3339)
+		s := state.LastHeartbeat.UTC().Format(time.RFC3339)
 		view.HeartbeatAt = &s
 		view.HeartbeatAgeS = int64(now.Sub(state.LastHeartbeat) / time.Second)
 	}
 	if !state.LastPassFinishedAt.IsZero() {
-		s := state.LastPassFinishedAt.Format(time.RFC3339)
+		s := state.LastPassFinishedAt.UTC().Format(time.RFC3339)
 		view.LastPassFinishedAt = &s
 	}
 	if changed, err := processguard.ActiveRunnerBinaryChanged(state.ActiveBinary); err == nil && changed {
@@ -396,7 +396,7 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 			fmt.Fprintf(&b, " by %s", view.PausedBy)
 		}
 		if view.PausedAt != nil {
-			fmt.Fprintf(&b, " at %s", *view.PausedAt)
+			fmt.Fprintf(&b, " at %s", formatCLIRFC3339(*view.PausedAt))
 		}
 		if view.PausedReason != "" {
 			fmt.Fprintf(&b, " — %s", view.PausedReason)
@@ -406,7 +406,7 @@ func formatAutopilotStatusText(view autopilotStateView) string {
 	default:
 		fmt.Fprint(&b, "autopilot: idle")
 		if view.LastPassFinishedAt != nil {
-			fmt.Fprintf(&b, " — last pass finished %s", *view.LastPassFinishedAt)
+			fmt.Fprintf(&b, " — last pass finished %s", formatCLIRFC3339(*view.LastPassFinishedAt))
 		}
 		if view.LastPassSummary != "" {
 			fmt.Fprintf(&b, " (%s)", view.LastPassSummary)
@@ -586,7 +586,7 @@ func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
 			Scope:      info.ScopeLabel(),
 			CampaignID: info.CampaignID,
 			Project:    info.Project,
-			TrippedAt:  info.TrippedAt.Format(time.RFC3339),
+			TrippedAt:  info.TrippedAt.UTC().Format(time.RFC3339),
 			AgeSeconds: int64(time.Since(info.TrippedAt).Seconds()),
 			Chain:      info.Chain,
 			Orphaned:   info.Orphaned,
@@ -613,7 +613,7 @@ func runAutopilotBlocked(cmd *cobra.Command, args []string) error {
 		for _, v := range views {
 			age := time.Duration(v.AgeSeconds) * time.Second
 			fmt.Printf("%s\n", v.Scope)
-			fmt.Printf("  tripped %s ago (%s)\n", age.Truncate(time.Second), v.TrippedAt)
+			fmt.Printf("  tripped %s ago (%s)\n", age.Truncate(time.Second), formatCLIRFC3339(v.TrippedAt))
 			fmt.Printf("  metrics: chain=%d orphaned=%d infra_failures=%d spend=$%.2f window=%s\n",
 				v.Chain, v.Orphaned, v.InfraFails, float64(v.SpendCents)/100.0, v.Window)
 			if len(v.Jobs) > 0 {

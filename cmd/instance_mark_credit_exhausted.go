@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/credit"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -263,7 +264,7 @@ func printIncidentBanner(w io.Writer, inc *credit.Incident) {
 	fmt.Fprintf(w, "Detected credit-exhaustion incident on %s:\n", inc.Provider)
 	burstSpan := inc.BurstEnd.Sub(inc.BurstStart).Truncate(time.Second)
 	fmt.Fprintf(w, "  Burst:    %d instances destroyed within %s, peak %s\n",
-		inc.BurstCount, burstSpan, inc.BurstEnd.Local().Format("2006-01-02 15:04:05 MST"))
+		inc.BurstCount, burstSpan, util.FormatCLITime(inc.BurstEnd, "2006-01-02 15:04:05"))
 	if inc.Ongoing {
 		fmt.Fprintf(w, "  Silence:  %s and counting (no %s instance has reached running)\n",
 			inc.Silence.Truncate(time.Second), inc.Provider)
@@ -273,16 +274,16 @@ func printIncidentBanner(w io.Writer, inc *credit.Incident) {
 			inc.Silence.Truncate(time.Second), inc.Provider)
 		if inc.RecoveryLaunch != nil {
 			fmt.Fprintf(w, "  Recovery: %s  (%s)\n",
-				inc.Recovery.Local().Format("2006-01-02 15:04:05 MST"),
+				util.FormatCLITime(inc.Recovery, "2006-01-02 15:04:05"),
 				ids.FormatInstanceID(inc.RecoveryLaunch.ID))
 		} else {
 			fmt.Fprintf(w, "  Recovery: %s\n",
-				inc.Recovery.Local().Format("2006-01-02 15:04:05 MST"))
+				util.FormatCLITime(inc.Recovery, "2006-01-02 15:04:05"))
 		}
 	}
 	fmt.Fprintf(w, "  Window:   %s → %s\n\n",
-		inc.WindowStart.Local().Format("2006-01-02 15:04:05 MST"),
-		inc.WindowEnd.Local().Format("2006-01-02 15:04:05 MST"))
+		util.FormatCLITime(inc.WindowStart, "2006-01-02 15:04:05"),
+		util.FormatCLITime(inc.WindowEnd, "2006-01-02 15:04:05"))
 }
 
 func printIncidentRejections(w io.Writer, rejections []credit.Rejection) {
@@ -291,7 +292,7 @@ func printIncidentRejections(w io.Writer, rejections []credit.Rejection) {
 	for _, r := range rejections {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
 			r.Provider,
-			r.BurstEnd.Local().Format("2006-01-02 15:04"),
+			util.FormatCLITime(r.BurstEnd, "2006-01-02 15:04"),
 			r.BurstCount,
 			r.Reason,
 			r.Detail,
@@ -516,7 +517,7 @@ func printMarkCreditExhaustedRejections(w io.Writer, rejected []rejectedReclassi
 		t := r.launch
 		ended := "-"
 		if t.EndedAt != nil {
-			ended = time.Unix(*t.EndedAt, 0).Local().Format("2006-01-02 15:04")
+			ended = util.FormatCLITime(time.Unix(*t.EndedAt, 0), "2006-01-02 15:04")
 		}
 		reason := t.TerminationReason
 		if reason == "" {
@@ -539,7 +540,7 @@ func printMarkCreditExhaustedPreview(w io.Writer, targets []*db.Launch) {
 	for _, t := range targets {
 		ended := "-"
 		if t.EndedAt != nil {
-			ended = time.Unix(*t.EndedAt, 0).Local().Format("2006-01-02 15:04")
+			ended = util.FormatCLITime(time.Unix(*t.EndedAt, 0), "2006-01-02 15:04")
 		}
 		reason := t.TerminationReason
 		if reason == "" {

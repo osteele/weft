@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/retrypolicy"
+	"github.com/osteele/weft/internal/util"
 )
 
 func summaryInterval(elapsed time.Duration) time.Duration {
@@ -71,9 +72,9 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 	if campaignID > 0 {
 		switch mode {
 		case watchModeCampaign:
-			fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
+			fmt.Printf("Campaign %d — launched %s\n\n", campaignID, util.FormatCLITime(launchTime, "2006-01-02 15:04"))
 		case watchModeInstances:
-			fmt.Printf("Launched %s\n\n", launchTime.Format("2006-01-02 15:04"))
+			fmt.Printf("Launched %s\n\n", util.FormatCLITime(launchTime, "2006-01-02 15:04"))
 		}
 	}
 	if summary := formatWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now(), estimateLine); summary != "" {

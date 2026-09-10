@@ -62,7 +62,7 @@ func printBlackboardStatus(status *blackboard.Status) {
 			parts = append(parts, "runner="+status.Autopilot.Runner)
 		}
 		if status.Autopilot.HeartbeatAt != "" {
-			parts = append(parts, "heartbeat="+status.Autopilot.HeartbeatAt)
+			parts = append(parts, "heartbeat="+formatCLIRFC3339(status.Autopilot.HeartbeatAt))
 		}
 		fmt.Println("Autopilot:", strings.Join(parts, " "))
 	}

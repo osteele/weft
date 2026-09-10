@@ -246,6 +246,10 @@ func renderProjectListPlain(groups []projectGroup, width int) string {
 }
 
 func renderProjectJobsPlain(groups []projectGroup, width int) string {
+	return renderProjectJobsPlainSurface(groups, width, false)
+}
+
+func renderProjectJobsPlainSurface(groups []projectGroup, width int, cli bool) string {
 	if len(groups) == 0 {
 		return "No jobs found\n"
 	}
@@ -254,7 +258,7 @@ func renderProjectJobsPlain(groups []projectGroup, width int) string {
 	for _, group := range groups {
 		allJobs = append(allJobs, group.Jobs...)
 	}
-	layout := newJobListLayout(width, allJobs, nil, false)
+	layout := newJobListLayoutSurface(width, allJobs, nil, false, cli)
 	var b strings.Builder
 	for i, group := range groups {
 		if i > 0 {

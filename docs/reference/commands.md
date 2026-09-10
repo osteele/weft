@@ -2,6 +2,35 @@
 
 This is the canonical CLI reference for `weft` commands. For end-to-end workflows, see [Workflow Guide](../guides/workflow-guide.md) and [Cloud GPU Instances](../guides/instances.md).
 
+## Timestamp display
+
+Human-readable CLI timestamps default to UTC and include a `UTC` marker.
+The CLI's expected users are agents, so its default does not depend on the
+observer's workstation timezone.
+
+Set the top-level `cli_timezone` option in `~/.config/weft/config.toml`:
+
+```toml
+cli_timezone = "UTC" # Default; also accepts "local" or an IANA timezone name.
+```
+
+- `"UTC"` or an omitted setting uses UTC.
+- `"local"` uses the workstation's local timezone.
+- A name such as `"America/New_York"` uses that zone's offset at each
+  timestamp, including daylight-saving changes.
+
+Non-UTC selections include the abbreviation and numeric offset, for example
+`2026-09-09 19:15:03 EDT -04:00`. Invalid timezone names produce an error.
+The interactive TUI and its exit summaries stay local, regardless of this
+option.
+
+TSV timestamp columns, including `killed_at`, use the human-readable
+`cli_timezone` rendering. Structured timestamp fields in CLI JSON output use
+RFC3339 UTC strings ending in `Z`; use `--json` when consuming timestamps programmatically.
+Numeric Unix fields remain numeric. Human-readable text embedded in JSON
+follows `cli_timezone`. The option does not change input parsing, relative
+ages or durations, stored timestamps, or raw job-log contents.
+
 ## Commands
 
 ### weft provider

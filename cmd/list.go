@@ -963,9 +963,9 @@ func showJob(database *sql.DB, id int64) error {
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
 	printExternalBindingSummary(os.Stdout, database, job, "External:     ", "              ")
-	fmt.Printf("Start Time:   %s\n", util.FormatUnixTimeOr(job.StartTime, "2006-01-02 15:04:05", util.EmptyCellCLI))
+	fmt.Printf("Start Time:   %s\n", util.FormatCLIUnixTimeOr(job.StartTime, "2006-01-02 15:04:05", util.EmptyCellCLI))
 	if job.EndTime != nil {
-		fmt.Printf("End Time:     %s\n", time.Unix(*job.EndTime, 0).Format("2006-01-02 15:04:05"))
+		fmt.Printf("End Time:     %s\n", util.FormatCLITime(time.Unix(*job.EndTime, 0), "2006-01-02 15:04:05"))
 		if job.StartTime > 0 && *job.EndTime >= job.StartTime {
 			duration := *job.EndTime - job.StartTime
 			fmt.Printf("Duration:     %s\n", db.FormatDuration(duration))

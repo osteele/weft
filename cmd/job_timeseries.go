@@ -118,8 +118,8 @@ func printTimeseriesSummary(summary *db.TimeseriesSummary) {
 	fmt.Printf("Timeseries for %s run=%d (%d samples)\n",
 		ids.FormatJobID(summary.JobID), summary.AttemptID, summary.SampleCount)
 	fmt.Printf("  span:        %s → %s (%s)\n",
-		time.Unix(summary.TSMin, 0).Format(time.RFC3339),
-		time.Unix(summary.TSMax, 0).Format(time.RFC3339),
+		formatUnixTime(summary.TSMin),
+		formatUnixTime(summary.TSMax),
 		(time.Duration(summary.TSMax-summary.TSMin) * time.Second).String())
 	if summary.LastDiskTotalBytes > 0 {
 		fmt.Printf("  disk total:  %s (last sample)\n", formatBytes(summary.LastDiskTotalBytes))

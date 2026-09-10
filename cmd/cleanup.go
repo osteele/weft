@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -311,7 +312,7 @@ func formatCleanupTime(ts *int64) string {
 	if ts == nil || *ts == 0 {
 		return "unknown"
 	}
-	return time.Unix(*ts, 0).Format("2006-01-02 15:04:05")
+	return util.FormatCLITime(time.Unix(*ts, 0), "2006-01-02 15:04:05")
 }
 
 func cleanupFinishedSessions(host string) (int, error) {

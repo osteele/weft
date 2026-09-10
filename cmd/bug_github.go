@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/util"
 )
 
 const (
@@ -370,13 +371,13 @@ func printGitHubIssue(issue githubIssue) {
 		fmt.Printf("URL:         %s\n", issue.URL)
 	}
 	if !issue.CreatedAt.IsZero() {
-		fmt.Printf("Created:     %s\n", issue.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+		fmt.Printf("Created:     %s\n", util.FormatCLITime(issue.CreatedAt, "2006-01-02 15:04:05"))
 	}
 	if !issue.UpdatedAt.IsZero() {
-		fmt.Printf("Updated:     %s\n", issue.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+		fmt.Printf("Updated:     %s\n", util.FormatCLITime(issue.UpdatedAt, "2006-01-02 15:04:05"))
 	}
 	if issue.ClosedAt != nil && !issue.ClosedAt.IsZero() {
-		fmt.Printf("Closed:      %s\n", issue.ClosedAt.Local().Format("2006-01-02 15:04:05"))
+		fmt.Printf("Closed:      %s\n", util.FormatCLITime(*issue.ClosedAt, "2006-01-02 15:04:05"))
 	}
 	if strings.TrimSpace(issue.Body) != "" {
 		fmt.Println("Detail:")
@@ -390,7 +391,7 @@ func printGitHubIssue(issue githubIssue) {
 			if author == "" {
 				author = "unknown"
 			}
-			fmt.Printf("- %s %s: %s\n", comment.CreatedAt.Local().Format("2006-01-02 15:04:05"), author, firstGitHubBugCommentLine(comment.Body))
+			fmt.Printf("- %s %s: %s\n", util.FormatCLITime(comment.CreatedAt, "2006-01-02 15:04:05"), author, firstGitHubBugCommentLine(comment.Body))
 		}
 	}
 }

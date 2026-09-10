@@ -190,6 +190,9 @@ entity InstanceLiveState {
 -- ==========================================================================
 
 config {
+    -- Human-readable CLI output. Interactive TUI output remains local.
+    cli_timezone: String = "UTC"
+
     -- SSH sync timeouts
     default_ssh_timeout: Duration = 5.seconds
     fast_ssh_timeout: Duration = 2.seconds
@@ -2185,6 +2188,27 @@ rule ActivitySubscriptionJobFeed {
         -- docs/design/daemon-subscription-api.md. Implementation:
         -- internal/daemonapi/watch.go resource=activity and
         -- internal/narrate/snapshot.go JobView.
+}
+
+-- CLI readers are expected to be agents, so the default must not depend on
+-- the observer's workstation timezone. Interactive displays remain local.
+rule TimestampDisplayRespectsSurface {
+    when: WeftTimestampRendered(timestamp, surface)
+
+    if InteractiveTUIDisplay(surface):
+        ensures: TimestampUsesLocalTimezone(timestamp)
+    else if HumanReadableCLIDisplay(surface) or TSVTimestampColumn(surface):
+        ensures: TimestampUsesConfiguredCLITimezone(timestamp, cli_timezone)
+        ensures: TimestampIncludesTimezoneMarker(timestamp)
+        ensures: NonUTCMarkerIncludesNumericOffset(timestamp)
+    else if CLIJSONTimestampString(surface):
+        ensures: TimestampUsesRFC3339UTC(timestamp)
+
+    -- cli_timezone accepts UTC (also the empty/default value), local, or an
+    -- IANA name. Invalid names fail before CLI output; named zones use the
+    -- offset applicable at the timestamp, including daylight-saving changes.
+    -- Configuration changes presentation only: stored epochs, numeric JSON
+    -- fields, relative durations, input parsing, and raw job logs are intact.
 }
 
 -- Socket probes distinguish confirmed staleness from unknown reachability.

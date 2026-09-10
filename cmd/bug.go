@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/edge"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/util"
 )
 
 var (
@@ -467,10 +468,7 @@ func printBug(bug *db.Bug) {
 }
 
 func formatBugUnixTime(ts int64) string {
-	if ts <= 0 {
-		return ""
-	}
-	return time.Unix(ts, 0).Format("2006-01-02 15:04:05")
+	return util.FormatCLIUnixTimeOr(ts, "2006-01-02 15:04:05", "")
 }
 
 func ageString(ts int64) string {

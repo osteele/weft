@@ -76,7 +76,7 @@ threshold caused the trip:
 
 ```
 global (project=<all>)
-  tripped 7h40m33s ago (2026-05-02T02:16:09+08:00)
+  tripped 7h40m33s ago (2026-05-01 18:16:09 UTC)
   metrics: chain=2 orphaned=8 infra_failures=0 spend=$0.41 window=24h0m0s
   jobs (11): wj1238, wj1241, wj1656, wj1657, wj1662, wj1663, wj1664, wj1677, wj1678, wj1679, wj1680
 

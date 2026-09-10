@@ -33,6 +33,10 @@ type Config struct {
 	// Example: aliases.uj = "job list --unprocessed --watch"
 	Aliases map[string]string `yaml:"aliases" toml:"aliases"`
 
+	// CLITimezone selects human-readable CLI time: UTC (default), local, or an
+	// IANA timezone name. Interactive TUI displays always use local time.
+	CLITimezone string `yaml:"cli_timezone" toml:"cli_timezone"`
+
 	// TUI polling intervals (in seconds)
 	// SyncInterval is the legacy TUI sync interval (seconds).
 	// Deprecated in favor of SyncActiveInterval/SyncIdleInterval.
@@ -142,6 +146,23 @@ type Config struct {
 	// AutomapDirs lists local prefixes that should reuse the same relative path
 	// on remote hosts; defaults to ["~"].
 	AutomapDirs []string `yaml:"automap_dirs" toml:"automap_dirs"`
+}
+
+// CLILocation resolves the CLI display timezone before command execution.
+func (c *Config) CLILocation() (*time.Location, error) {
+	name := strings.TrimSpace(c.CLITimezone)
+	switch {
+	case name == "" || strings.EqualFold(name, "UTC"):
+		return time.UTC, nil
+	case strings.EqualFold(name, "local"):
+		return time.Local, nil
+	default:
+		location, err := time.LoadLocation(name)
+		if err != nil {
+			return nil, fmt.Errorf("cli_timezone %q: expected UTC, local, or an IANA timezone: %w", c.CLITimezone, err)
+		}
+		return location, nil
+	}
 }
 
 const (
@@ -1017,6 +1038,7 @@ type PredictorConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		DefaultCommand:      "help",
+		CLITimezone:         "UTC",
 		SyncInterval:        15,
 		SyncActiveInterval:  15,
 		SyncIdleInterval:    60,

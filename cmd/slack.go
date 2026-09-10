@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/slack"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -53,5 +54,5 @@ func defaultSlackTestMessage(now time.Time, hostname func() (string, error)) str
 	if err != nil || strings.TrimSpace(host) == "" {
 		host = "unknown-host"
 	}
-	return fmt.Sprintf("weft Slack webhook test from %s at %s", host, now.Format(time.RFC3339))
+	return fmt.Sprintf("weft Slack webhook test from %s at %s", host, util.FormatCLITime(now, "2006-01-02 15:04:05"))
 }

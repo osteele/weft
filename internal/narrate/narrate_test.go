@@ -1,6 +1,7 @@
 package narrate
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -170,7 +171,7 @@ func TestFormatPriorRecap_EmptyAndNonEmpty(t *testing.T) {
 
 func TestFormatSnapshot_StableJSON(t *testing.T) {
 	snap := &Snapshot{
-		Time: time.Unix(1700000000, 0).UTC(),
+		Time: time.Unix(1700000000, 0).In(time.FixedZone("SOURCE", 2*3600)),
 		Jobs: map[int64]JobView{
 			2: {ID: 2, Status: "running", Host: "cool30"},
 			1: {ID: 1, Status: "queued"},
@@ -178,6 +179,13 @@ func TestFormatSnapshot_StableJSON(t *testing.T) {
 		Autopilot: AutopilotView{State: "idle"},
 	}
 	out := FormatSnapshot(snap)
+	var snapshot struct{ At string }
+	if err := json.Unmarshal([]byte(out), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.At != "2023-11-14T22:13:20Z" {
+		t.Fatalf("snapshot at = %q, want canonical UTC", snapshot.At)
+	}
 	idxOne := strings.Index(out, `"id":1`)
 	idxTwo := strings.Index(out, `"id":2`)
 	if idxOne < 0 || idxTwo < 0 || idxOne > idxTwo {
@@ -387,6 +395,18 @@ func TestFormatLifecycleEventsAndFallback(t *testing.T) {
 		{ID: 11, OccurredAt: 1710000001, EventKind: db.EventReconcileGraceExpired, LaunchID: 42, Detail: "grace expired"},
 	}
 	formatted := FormatLifecycleEvents(events)
+	var timeline struct{ Events []struct{ At string } }
+	if err := json.Unmarshal([]byte(formatted), &timeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline.Events) != len(events) {
+		t.Fatalf("event count = %d, want %d", len(timeline.Events), len(events))
+	}
+	for i, event := range timeline.Events {
+		if want := time.Unix(events[i].OccurredAt, 0).UTC().Format(time.RFC3339); event.At != want {
+			t.Errorf("event %d at = %q, want %q", i, event.At, want)
+		}
+	}
 	for _, want := range []string{`"id":10`, `"kind":"relaunch.launch_success"`, `"instance_id":42`, `"detail":"grace expired"`} {
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted events missing %q: %s", want, formatted)

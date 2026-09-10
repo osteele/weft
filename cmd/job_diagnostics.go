@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -46,7 +45,7 @@ func printJobKillAttribution(w io.Writer, database *sql.DB, job *db.Job) {
 	if attribution.KilledAt == nil {
 		return
 	}
-	fmt.Fprintf(w, "Killed At:    %s\n", time.Unix(*attribution.KilledAt, 0).Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(w, "Killed At:    %s\n", formatUnixTime(*attribution.KilledAt))
 	fmt.Fprintf(w, "Kill Actor:   %s\n", attribution.Actor)
 	if attribution.Reason != "" {
 		fmt.Fprintf(w, "Kill Reason:  %s\n", attribution.Reason)
@@ -106,7 +105,7 @@ func jobPublicationDiagnosticLines(database *sql.DB, job *db.Job) []string {
 func formatPublicationFacet(label, state string, completedAt *int64) string {
 	line := label + ": " + state
 	if completedAt != nil {
-		line += " at " + time.Unix(*completedAt, 0).Format("2006-01-02 15:04:05")
+		line += " at " + formatUnixTime(*completedAt)
 	}
 	return line
 }

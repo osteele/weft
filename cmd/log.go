@@ -31,6 +31,7 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/sshaudit"
 	"github.com/osteele/weft/internal/status"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -1648,7 +1649,7 @@ func parseLaunchHostInstanceID(host string) (int64, bool) {
 // formatOpsEntry formats and prints a single operations log entry
 func formatOpsEntry(entry oplog.Entry) {
 	// Format: TIME OP [job:ID] [host:HOST] [DETAIL] [ERROR]
-	timestamp := entry.Time.Local().Format("2006-01-02 15:04:05")
+	timestamp := util.FormatCLITime(entry.Time, "2006-01-02 15:04:05")
 
 	var parts []string
 	parts = append(parts, timestamp)
@@ -1730,7 +1731,7 @@ func runEventsLog(cmd *cobra.Command) error {
 }
 
 func formatLifecycleEvent(e db.LifecycleEvent) {
-	ts := time.Unix(e.OccurredAt, 0).Local().Format("2006-01-02 15:04:05")
+	ts := formatUnixTime(e.OccurredAt)
 
 	var parts []string
 	parts = append(parts, ts, e.EventKind)

@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/orchestration"
 	"github.com/osteele/weft/internal/secrets"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -170,7 +171,7 @@ func runAutopilotRunLoop(cmd *cobra.Command, args []string) error {
 
 		ev := autopilotRunPassEvent{
 			Pass:       pass,
-			StartedAt:  started.Format(time.RFC3339),
+			StartedAt:  started.UTC().Format(time.RFC3339),
 			DurationMS: duration.Milliseconds(),
 		}
 		if result != nil {
@@ -336,7 +337,7 @@ func emitPausedEvent(pass int, wait time.Duration) {
 	if autopilotRunJSON {
 		ev := autopilotRunPassEvent{
 			Pass:       pass,
-			StartedAt:  time.Now().Format(time.RFC3339),
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
 			Outcome:    outcomePaused,
 			NextWaitMS: wait.Milliseconds(),
 			Note:       "autopilot is paused — resume with `weft autopilot resume`",
@@ -345,7 +346,7 @@ func emitPausedEvent(pass int, wait time.Duration) {
 		return
 	}
 	fmt.Printf("[%s] pass %d: paused (next check in %s)\n",
-		time.Now().Format("15:04:05"), pass, wait.Truncate(time.Second))
+		util.FormatCLITime(time.Now(), "15:04:05"), pass, wait.Truncate(time.Second))
 }
 
 func emitPassEvent(ev autopilotRunPassEvent) {
@@ -373,7 +374,7 @@ func emitPassEvent(ev autopilotRunPassEvent) {
 		parts = append(parts, ev.Note)
 	}
 	fmt.Printf("[%s] %s (next in %s)\n",
-		time.Now().Format("15:04:05"),
+		util.FormatCLITime(time.Now(), "15:04:05"),
 		strings.Join(parts, " "),
 		time.Duration(ev.NextWaitMS)*time.Millisecond)
 

@@ -2437,7 +2437,7 @@ func printJobSourceMetadata(w io.Writer, source *db.JobSourceMetadata) {
 			fmt.Fprintf(w, " %s", shortHash(source.Execution.VerifiedSHA256))
 		}
 		if source.Execution.VerifiedAt > 0 {
-			fmt.Fprintf(w, " at %s", time.Unix(source.Execution.VerifiedAt, 0).Format(time.RFC3339))
+			fmt.Fprintf(w, " at %s", formatUnixTime(source.Execution.VerifiedAt))
 		}
 		if source.Execution.AgentVersion != "" {
 			fmt.Fprintf(w, " (agent %s)", source.Execution.AgentVersion)

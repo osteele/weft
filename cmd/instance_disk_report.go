@@ -75,7 +75,7 @@ func runInstanceDiskReport(_ *cobra.Command, args []string) error {
 
 	fmt.Printf("Disk-failure report for %s\n", ids.FormatInstanceID(instanceID))
 	if rep.TimestampUnix > 0 {
-		fmt.Printf("  reported_at:    %s\n", time.Unix(rep.TimestampUnix, 0).Format(time.RFC3339))
+		fmt.Printf("  reported_at:    %s\n", formatUnixTime(rep.TimestampUnix))
 	}
 	if rep.Phase != "" {
 		fmt.Printf("  phase:          %s\n", rep.Phase)

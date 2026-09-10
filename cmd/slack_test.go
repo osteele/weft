@@ -59,7 +59,7 @@ func TestRunSlackTestSurfacesPostFailure(t *testing.T) {
 func TestDefaultSlackTestMessageIncludesHostAndTime(t *testing.T) {
 	now := time.Date(2026, 5, 9, 18, 30, 0, 0, time.UTC)
 	got := defaultSlackTestMessage(now, func() (string, error) { return "host-a", nil })
-	if !strings.Contains(got, "host-a") || !strings.Contains(got, "2026-05-09T18:30:00Z") {
+	if !strings.Contains(got, "host-a") || !strings.Contains(got, "2026-05-09 18:30:00 UTC") {
 		t.Fatalf("default message = %q, want host and timestamp", got)
 	}
 }

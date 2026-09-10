@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
+	"github.com/osteele/weft/internal/util"
 	"github.com/spf13/cobra"
 )
 
@@ -139,8 +140,8 @@ func runTelemetry(cmd *cobra.Command, args []string) error {
 		first := time.Unix(out.TimeMin, 0)
 		last := time.Unix(out.TimeMax, 0)
 		fmt.Printf("  Time range: %s — %s (%s)\n",
-			first.Format("15:04:05"),
-			last.Format("15:04:05"),
+			util.FormatCLITime(first, "15:04:05"),
+			util.FormatCLITime(last, "15:04:05"),
 			last.Sub(first).Round(time.Second))
 		if g := out.GPU; g != nil {
 			// A range needs both ends; report whichever the source could
