@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/osteele/weft/internal/opsqueue"
 )
@@ -24,9 +25,10 @@ type CommandProcessor struct {
 
 // CommandResult describes the outcome of processing all new commands.
 type CommandResult struct {
-	StopRequested    bool
-	RestartRequested bool
-	RestartEnv       []string
+	StopRequested        bool
+	RestartRequested     bool
+	RestartEnv           []string
+	RecoveredCompletions []PostJobCapture
 }
 
 // NewCommandProcessor creates a processor for the given commands file.
@@ -54,20 +56,29 @@ func (cp *CommandProcessor) jobIsLive(state *State, jobID int64) bool {
 	return false
 }
 
-func (cp *CommandProcessor) sameAttemptTerminalDuplicate(state *State, job *opsqueue.CommandJob) bool {
+// sameAttemptTerminalRecord returns durable completion evidence for a duplicate add.
+func (cp *CommandProcessor) sameAttemptTerminalRecord(state *State, job *opsqueue.CommandJob) (CompletionRecord, bool) {
 	if job == nil || job.RunID == 0 || cp.logDir == "" || cp.jobIsLive(state, job.ID) {
-		return false
+		return CompletionRecord{}, false
 	}
 	completionFile := filepath.Join(cp.logDir, fmt.Sprintf("%d.completion.json", job.ID))
 	data, err := os.ReadFile(completionFile)
 	if err != nil {
-		return false
+		return CompletionRecord{}, false
 	}
-	var rec CompletionRecord
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return false
+	var parsed struct {
+		CompletionRecord
+		ExitCode *int `json:"exit_code"`
 	}
-	return rec.RunID == job.RunID && rec.RunID != 0
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return CompletionRecord{}, false
+	}
+	rec := parsed.CompletionRecord
+	if rec.RunID != job.RunID || rec.RunID == 0 || rec.EndTime <= 0 || parsed.ExitCode == nil {
+		return CompletionRecord{}, false
+	}
+	rec.ExitCode = *parsed.ExitCode
+	return rec, true
 }
 
 // ProcessCommands reads new lines from the commands file and applies them to the state.
@@ -132,11 +143,21 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 		switch cmd.Op {
 		case opsqueue.OpAdd:
 			if cmd.Job != nil {
-				if cp.sameAttemptTerminalDuplicate(state, cmd.Job) {
+				jobIDStr := strconv.FormatInt(cmd.Job.ID, 10)
+				if rejected, ok := state.Rejected[jobIDStr]; ok && cmd.Job.RunID > 0 && rejected.RunID == cmd.Job.RunID {
 					state.removePendingLocked(cmd.Job.ID)
-					if exitCode, ok := ReadStatusFile(filepath.Join(cp.logDir, fmt.Sprintf("%d.status", cmd.Job.ID))); ok {
-						state.recordFinishedLocked(strconv.FormatInt(cmd.Job.ID, 10), exitCode, 0)
+					break
+				}
+				if rec, dup := cp.sameAttemptTerminalRecord(state, cmd.Job); dup {
+					state.removePendingLocked(cmd.Job.ID)
+					state.Finished[jobIDStr] = FinishedJobState{
+						ExitCode: rec.ExitCode, FinishedAt: rec.EndTime, ObservedAt: time.Now().Unix(),
 					}
+					result.RecoveredCompletions = append(result.RecoveredCompletions, PostJobCapture{
+						JobID: cmd.Job.ID, RunID: rec.RunID, WorkDir: rec.RuntimeWorkingDir,
+						LogDir: cp.logDir, ExitCode: rec.ExitCode, StartTime: rec.StartTime,
+						OutputDirs: cmd.Job.OutputDirs,
+					})
 					break
 				}
 				live := cp.jobIsLive(state, cmd.Job.ID)
@@ -167,6 +188,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 						}
 					}
 					if !live {
+						delete(state.Rejected, jobIDStr)
 						state.addPendingLocked(cmd.Job.ID)
 						// Cancel any pending stop — new work arrived.
 						state.StopRequested = false
@@ -179,6 +201,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 
 		case opsqueue.OpCancel:
 			state.removePendingLocked(cmd.JobID)
+			delete(state.Rejected, strconv.FormatInt(cmd.JobID, 10))
 			removeJobFile(cp.queueDir, cmd.JobID)
 
 		case opsqueue.OpStop:

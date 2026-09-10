@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,8 @@ type Runner struct {
 	finalizingWorkdirs map[string]int
 	processesMu        sync.Mutex
 	lastSampleTime     time.Time
+	restartRequested   bool
+	restartEnv         []string
 	nowFunc            func() time.Time
 	AgentVersion       string
 	Capabilities       []string
@@ -66,8 +69,9 @@ type Runner struct {
 	benchmarkLastReason string
 
 	// Lifecycle hooks (optional, best-effort)
-	OnJobStart  func(jobID, runID int64, logPath string) func() // returns stop function for live upload
-	OnJobFinish func(jobID, runID int64, logDir string, exitCode int)
+	OnJobStart            func(jobID, runID int64, logPath string) func() // returns stop function for live upload
+	OnJobFinish           func(jobID, runID int64, logDir string, exitCode int)
+	RecoverJobPublication func(context.Context, PostJobCapture)
 
 	// PostJobManager coordinates post-job artifact capture with subsequent
 	// starts. Runners call WaitForWorkdir before starting a job, then
@@ -198,6 +202,7 @@ func (r *Runner) Run() error {
 	}
 	r.state.SetCapabilities(r.Capabilities)
 	r.state.SetAgentIdentity(r.AgentVersion, opsqueue.QueueProtocolVersion)
+	r.saveState()
 
 	// Write PID file
 	os.WriteFile(r.pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
@@ -232,7 +237,47 @@ func (r *Runner) Run() error {
 	fmt.Printf("State file: %s\n", r.stateFile)
 	fmt.Printf("PID: %d\n\n", os.Getpid())
 
+	// Recover retained terminal evidence before consuming retry commands that
+	// may archive the original attempt's files.
+	if r.RecoverJobPublication != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		r.recoverRetainedPublications(ctx)
+		cancel()
+	}
 	return r.mainLoop()
+}
+
+func (r *Runner) recoverRetainedPublications(ctx context.Context) {
+	visited := 0
+	for idText := range r.state.Finished {
+		if err := ctx.Err(); err != nil {
+			slog.Warn("startup publication recovery budget exhausted; retained records remain for a later recovery",
+				"remaining", len(r.state.Finished)-visited, "error", err)
+			return
+		}
+		visited++
+		jobID, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil {
+			slog.Warn("invalid finished job ID", "job_id", idText, "error", err)
+			continue
+		}
+		rec, err := ReadCompletionRecord(NewJobPaths(r.logDir, jobID))
+		if err != nil {
+			slog.Warn("read retained completion for publication recovery", "job_id", jobID, "error", err)
+			continue
+		}
+		if rec.RunID > 0 && rec.EndTime > 0 {
+			if rec.OutputDirs == nil {
+				slog.Warn("retained completion has no output-directory metadata; recovering conventional outputs only",
+					"job_id", jobID, "run_id", rec.RunID)
+			}
+			r.RecoverJobPublication(ctx, PostJobCapture{
+				JobID: jobID, RunID: rec.RunID, WorkDir: rec.RuntimeWorkingDir,
+				LogDir: r.logDir, ExitCode: rec.ExitCode, StartTime: rec.StartTime,
+				OutputDirs: rec.OutputDirs,
+			})
+		}
+	}
 }
 
 func (r *Runner) mainLoop() error {
@@ -271,6 +316,8 @@ func (r *Runner) mainLoop() error {
 	}
 }
 
+var execRunner = syscall.Exec
+
 func (r *Runner) tick() error {
 	// Process new commands
 	result, err := r.cmdProc.ProcessCommands(r.state)
@@ -278,12 +325,37 @@ func (r *Runner) tick() error {
 		fmt.Fprintf(os.Stderr, "process commands: %v\n", err)
 	}
 
+	for _, capture := range result.RecoveredCompletions {
+		if r.RecoverJobPublication != nil {
+			r.RecoverJobPublication(context.Background(), capture)
+		}
+	}
 	if result.RestartRequested {
+		r.restartRequested = true
+		r.restartEnv = result.RestartEnv
+	}
+	if r.restartRequested {
+		// Hold the finalization lock through exec. A waiter that has not yet
+		// entered finalization retains its Running entry for recovery.
+		r.processesMu.Lock()
+		if len(r.finalizingWorkdirs) > 0 {
+			r.processesMu.Unlock()
+			r.saveState()
+			return nil
+		}
 		r.saveState()
-		// Re-exec ourselves
 		oplog.Log("cmd.restart")
-		exe, _ := os.Executable()
-		syscall.Exec(exe, os.Args, mergeEnvVars(os.Environ(), result.RestartEnv))
+		exe, err := os.Executable()
+		if err == nil {
+			err = execRunner(exe, os.Args, mergeEnvVars(os.Environ(), r.restartEnv))
+		}
+		r.processesMu.Unlock()
+		r.restartRequested = false
+		r.restartEnv = nil
+		if err != nil {
+			oplog.Log("cmd.restart.failed", oplog.WithError(err))
+			slog.Error("runner re-exec failed; continuing supervision", "error", err)
+		}
 	}
 
 	// Refresh running jobs (check for completion)
@@ -706,7 +778,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	wallStartedAt := time.Now()
 	if requested := requestedGPUCount(job); requested > 1 && len(gpuDevices) < requested {
 		detail := fmt.Sprintf("gpu_count_preflight_failed: requested=%d visible=%d", requested, len(gpuDevices))
-		return r.rejectPreflight(jobID, paths, db.FailureReasonGPUCountPreflightFailed, detail)
+		return r.rejectPreflight(job, paths, db.FailureReasonGPUCountPreflightFailed, detail)
 	}
 
 	// Expand ~ in working directory (needed for the preflight marker read).
@@ -731,12 +803,12 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	if job.SourceManifest != nil {
 		if r.EnsureSourceManifestFromR2 == nil {
 			detail := fmt.Sprintf("pinned_source_unavailable: source_manifest=%s but the runner has no manifest materializer", job.SourceManifest.SHA256)
-			return r.rejectPreflight(jobID, paths, db.FailureReasonPinnedSourceUnavailable, detail)
+			return r.rejectPreflight(job, paths, db.FailureReasonPinnedSourceUnavailable, detail)
 		}
 		perJobRoot := perJobSourceDir(jobID)
 		manifestDir, err := r.EnsureSourceManifestFromR2(jobID, *job.SourceManifest, perJobRoot)
 		if err != nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonPinnedSourceFetchFailed, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
+			return r.rejectPreflight(job, paths, db.FailureReasonPinnedSourceFetchFailed, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
 		}
 		expandedDir = manifestDir
 		sourceExecution = &SourceExecutionMetadata{
@@ -752,11 +824,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	} else if job.SourceR2Key != "" {
 		if r.EnsureSourceFromR2 == nil {
 			detail := fmt.Sprintf("r2_isolated_source_unavailable: SourceR2Key=%s but the runner has no EnsureSourceFromR2 hook", job.SourceR2Key)
-			return r.rejectPreflight(jobID, paths, db.FailureReasonR2IsolatedSourceUnavailable, detail)
+			return r.rejectPreflight(job, paths, db.FailureReasonR2IsolatedSourceUnavailable, detail)
 		}
 		perJobDir := perJobSourceDir(jobID)
 		if err := r.EnsureSourceFromR2(jobID, job.SourceR2Key, perJobDir); err != nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonR2IsolatedSourceFetchFailed, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
+			return r.rejectPreflight(job, paths, db.FailureReasonR2IsolatedSourceFetchFailed, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
 		}
 		expandedDir = perJobDir
 		sourceExecution = &SourceExecutionMetadata{
@@ -777,11 +849,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		markerSHA, err := srcsync.ReadSourceMarkerForJob(expandedDir, jobID)
 		if err != nil {
 			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker unreadable in %s (%v)", job.SourceSHA, expandedDir, err)
-			return r.rejectPreflight(jobID, paths, db.FailureReasonSourceProvenanceMismatch, msg)
+			return r.rejectPreflight(job, paths, db.FailureReasonSourceProvenanceMismatch, msg)
 		}
 		if markerSHA != job.SourceSHA {
 			msg := fmt.Sprintf("source_provenance_mismatch: expected=%s, marker=%s", job.SourceSHA, markerSHA)
-			return r.rejectPreflight(jobID, paths, db.FailureReasonSourceProvenanceMismatch, msg)
+			return r.rejectPreflight(job, paths, db.FailureReasonSourceProvenanceMismatch, msg)
 		}
 		sourceExecution = &SourceExecutionMetadata{
 			DispatchMode:     "live_rsync_marker",
@@ -798,13 +870,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	artifactNeedsStaged := false
 	if len(job.ArtifactNeeds) > 0 {
 		if r.EnsureArtifactNeedsFromR2 == nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, "artifact staging unavailable: runner has no R2 artifact materializer")
+			return r.rejectPreflight(job, paths, db.FailureReasonArtifactStageFailed, "artifact staging unavailable: runner has no R2 artifact materializer")
 		}
 		if err := r.EnsureArtifactNeedsFromR2(jobID, expandedDir, job.ArtifactNeeds); err != nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact staging failed: %v", err))
+			return r.rejectPreflight(job, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact staging failed: %v", err))
 		}
 		if err := writeArtifactNeedSatisfiedMarkers(r.logDir, job.ArtifactNeeds); err != nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact marker write failed: %v", err))
+			return r.rejectPreflight(job, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("artifact marker write failed: %v", err))
 		}
 		artifactNeedsStaged = true
 	}
@@ -812,11 +884,11 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	payloadDir := ""
 	if len(job.Payloads) > 0 {
 		if r.EnsurePayloadsFromR2 == nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, "payload staging unavailable: runner has no R2 payload materializer")
+			return r.rejectPreflight(job, paths, db.FailureReasonArtifactStageFailed, "payload staging unavailable: runner has no R2 payload materializer")
 		}
 		stagedDir, payloadErr := r.EnsurePayloadsFromR2(jobID, job.Payloads)
 		if payloadErr != nil {
-			return r.rejectPreflight(jobID, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("payload staging failed: %v", payloadErr))
+			return r.rejectPreflight(job, paths, db.FailureReasonArtifactStageFailed, fmt.Sprintf("payload staging failed: %v", payloadErr))
 		}
 		payloadDir = stagedDir
 	}
@@ -936,6 +1008,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		GPUMemGB:                 gpuMemGB,
 		RAMReservationKB:         job.RAMReservationKB,
 		DiskPath:                 expandedDir,
+		OutputDirs:               job.OutputDirs,
 		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
 		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
 	})
@@ -1104,10 +1177,10 @@ func (r *Runner) finishFailedSetup(jobID int64, paths JobPaths, ei ExitInfo, sta
 // attempt as started. It writes the failure_reason file and a
 // preflight_rejected sentinel (no status file, no meta, no log header), emits
 // oplog.OpJobStartFailed, and removes the job from the runner queue so it
-// won't be re-attempted on the next sweep. The batch-status
-// reconciler picks up the sentinel and closes the attempt with NULL
-// timestamps and the populated failure reason.
-func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason, detail string) error {
+// won't be re-attempted on the next sweep. Reconciliation closes the attempt
+// with its rejection time and failure reason, without a process start or exit.
+func (r *Runner) rejectPreflight(job *opsqueue.CommandJob, paths JobPaths, reason, detail string) error {
+	jobID := job.ID
 	appendSetupLog(paths.Log, []byte("weft: "+detail+"\n"))
 	if err := WriteFailureReasonFile(paths, reason); err != nil {
 		slog.Warn("preflight reject: write failure_reason failed",
@@ -1117,6 +1190,16 @@ func (r *Runner) rejectPreflight(jobID int64, paths JobPaths, reason, detail str
 		slog.Warn("preflight reject: write sentinel failed",
 			"component", "runner", "job_id", jobID, "error", err)
 	}
+	r.state.mu.Lock()
+	if r.state.Rejected == nil {
+		r.state.Rejected = make(map[string]opsqueue.RunnerRejectedState)
+	}
+	r.state.removePendingLocked(jobID)
+	r.state.Rejected[strconv.FormatInt(jobID, 10)] = opsqueue.RunnerRejectedState{
+		RunID: job.RunID, RejectedAt: r.now().Unix(), FailureReason: reason, Detail: detail,
+	}
+	r.state.mu.Unlock()
+	r.saveState()
 	oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithDetail(detail))
 	removeJobFile(r.queueDir, jobID)
 	return fmt.Errorf("preflight rejected: %s", detail)
@@ -1221,9 +1304,8 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	// draining, or cleanup callback can block. The attempt fence prevents a
 	// delayed waiter from releasing a newer retry of the same logical job.
 	expected := RunningJobState{RunID: rj.Data.RunID, StartedAt: startTime}
-	if r.PostJobManager != nil {
-		r.beginPostJobFinalization(runDir)
-	}
+	r.beginPostJobFinalization(runDir)
+	defer r.endPostJobFinalization(runDir)
 	released := r.state.FinishRunningAttempt(jobIDStr, expected, ei.ExitCode, endTime)
 	if released {
 		oplog.LogJob("job.slot_released", jobID, "", oplog.WithDetailf("run_id=%d exit=%d", rj.Data.RunID, ei.ExitCode))
@@ -1262,7 +1344,6 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			OutputDirs: rj.Data.OutputDirs,
 			CleanupDir: cleanupDir,
 		})
-		r.endPostJobFinalization(runDir)
 	}
 	if r.OnJobFinish != nil {
 		r.OnJobFinish(jobID, rj.Data.RunID, filepath.Dir(paths.Log), ei.ExitCode)

@@ -822,8 +822,12 @@ rule ResyncAfterRemediation {
 -- The expected/observed marker detail is written to the job log. The status
 -- file, meta file, and log header are NOT written. The job
 -- file is removed from the runner queue so the runner does not retry it.
--- The job remains queued in Weft's view, so the autopilot or
--- user can replan it.
+-- Runner state also publishes the rejection's run ID, timestamp, failure
+-- reason, and diagnostic detail. R2-pull hosts reconcile this state without
+-- requiring SSH or a process-completion marker. A repeated add for that run
+-- preserves the rejection; a new run ID admits an explicit retry.
+-- Reconciliation reports the failed admission. An explicit retry uses a
+-- new attempt identity.
 --
 -- Pinned manifest jobs validate and materialize the complete closure first.
 -- Legacy R2-isolated jobs then retain the single-tarball path. Only legacy
@@ -875,9 +879,9 @@ rule RunnerPreflightProvenanceCheck {
 }
 
 -- Record a preflight rejection. No JobAttempt fields are mutated here;
--- the runner just writes the two sidecar files and removes the job
--- from its queue. The corresponding attempt closure on the sync side lives
--- in status-sync.allium (PreflightRejectionReconciled).
+-- the runner writes diagnostic sidecars and durable, attempt-fenced rejection
+-- state before removing the queue entry. The corresponding attempt closure
+-- lives in status-sync.allium (PreflightRejectionReconciled).
 rule PreflightRejected {
     when: PreflightRejected(job, outcome, reason)
 
@@ -885,6 +889,7 @@ rule PreflightRejected {
         PreflightFailureReasonWritten(job: job, reason: reason)
         PreflightDiagnosticWrittenToJobLog(job: job)
         PreflightSentinelWritten(job: job, rejected_at: now)
+        RunnerRejectionPublished(job: job, run_id: job.latest_attempt.id, rejected_at: now, reason: reason)
         OpJobStartFailedLogged(job: job, reason: reason)
         RunnerQueueFileRemoved(job: job)
 

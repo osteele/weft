@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -727,6 +728,136 @@ func TestStartJob_R2IsolatedSourceFetchFailureRejectsPreflight(t *testing.T) {
 	}
 }
 
+func TestPreflightRejectionSurvivesRestartAndDuplicateDispatch(t *testing.T) {
+	r, _ := initTestRunner(t)
+	job := &opsqueue.CommandJob{
+		ID: 7500, RunID: 42559, Dir: t.TempDir(), Cmd: "echo must-not-run",
+		SourceR2Key: "sources/unavailable.tar.gz",
+	}
+	r.EnsureSourceFromR2 = func(int64, string, string) error {
+		return errors.New("download tarball: signal: killed")
+	}
+	if err := r.startJob(job.ID, job, nil); err == nil {
+		t.Fatal("expected source admission failure")
+	}
+	reloaded, err := LoadState(r.stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected, ok := reloaded.Rejected["7500"]
+	if !ok || rejected.RunID != job.RunID || rejected.RejectedAt <= 0 || rejected.FailureReason != db.FailureReasonR2IsolatedSourceFetchFailed {
+		t.Fatalf("lost rejection after restart: %+v", rejected)
+	}
+	if err := reloaded.saveAt(r.stateFile, r.now().Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err = LoadState(r.stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmdFile := filepath.Join(r.queueDir, "rejection.commands")
+	cp := NewCommandProcessor(cmdFile, r.queueDir, r.logDir)
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{Op: opsqueue.OpAdd, Job: job})
+	if _, err := cp.ProcessCommands(reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.PendingEmpty() {
+		t.Fatal("duplicate dispatch requeued a rejected attempt")
+	}
+	if _, err := os.Stat(NewJobPaths(r.logDir, job.ID).PreflightRejected); err != nil {
+		t.Fatalf("duplicate dispatch archived rejection evidence: %v", err)
+	}
+	job.RunID++
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{Op: opsqueue.OpAdd, Job: job})
+	if _, err := cp.ProcessCommands(reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := reloaded.PeekPending(); !ok || id != job.ID {
+		t.Fatal("new attempt could not enter the queue")
+	}
+	if _, ok := reloaded.Rejected["7500"]; ok {
+		t.Fatal("new attempt inherited old rejection")
+	}
+	r.state = reloaded
+	if err := r.startJob(job.ID, job, nil); err == nil {
+		t.Fatal("expected the retried source admission to fail")
+	}
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{Op: opsqueue.OpCancel, JobID: job.ID})
+	if _, err := cp.ProcessCommands(reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.Rejected["7500"]; ok {
+		t.Fatal("cancelled job remains in published rejection state")
+	}
+}
+
+func TestRetainedPublicationRecoverySharesDeadline(t *testing.T) {
+	r, _ := initTestRunner(t)
+	for id := int64(1); id <= 3; id++ {
+		rs := RunningJobState{RunID: id, StartedAt: r.now().Unix() - 1}
+		if err := WriteCompletionRecord(NewJobPaths(r.logDir, id), ExitInfo{}, rs, "", "", rs.StartedAt, r.now().Unix(), nil); err != nil {
+			t.Fatal(err)
+		}
+		r.state.Finished[strconv.FormatInt(id, 10)] = FinishedJobState{FinishedAt: r.now().Unix()}
+	}
+	calls := 0
+	r.RecoverJobPublication = func(ctx context.Context, _ PostJobCapture) {
+		calls++
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+			t.Fatal("publication recovery lost its aggregate deadline")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	r.recoverRetainedPublications(ctx)
+	if calls != 1 {
+		t.Fatalf("recovery continued after its deadline: %d calls", calls)
+	}
+	if len(r.state.Finished) != 3 {
+		t.Fatal("deadline discarded retained completion evidence")
+	}
+}
+
+func TestRetainedPublicationRecoveryDiscoversCustomOutputs(t *testing.T) {
+	r, _ := initTestRunner(t)
+	cleanupRunnerProcesses(t, r)
+	job := &opsqueue.CommandJob{
+		ID: 7167, RunID: 42224, Dir: t.TempDir(),
+		Cmd:        "mkdir -p metrics && printf recovered > metrics/result.txt",
+		OutputDirs: []string{"metrics"},
+	}
+	finished := make(chan struct{})
+	r.OnJobFinish = func(int64, int64, string, int) { close(finished) }
+	if err := r.startJob(job.ID, job, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("job did not finish")
+	}
+	restored := New(Config{QueueDir: r.queueDir, LogDir: r.logDir})
+	var err error
+	restored.state, err = LoadState(r.stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered []OutputFile
+	restored.RecoverJobPublication = func(_ context.Context, capture PostJobCapture) {
+		var err error
+		recovered, err = DiscoverJobOutputsSince(capture.WorkDir, capture.OutputDirs, nil, time.Unix(capture.StartTime, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	restored.recoverRetainedPublications(context.Background())
+	if !slices.ContainsFunc(recovered, func(f OutputFile) bool { return f.RelPath == "metrics/result.txt" }) {
+		t.Fatalf("custom output lost during startup recovery: %+v", recovered)
+	}
+}
+
 func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
 	r, _ := initTestRunner(t)
 	r.AgentVersion = "agent-test"
@@ -999,6 +1130,73 @@ func TestWaitForJob_ReleasesSlotBeforeFinishHook(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("finish hook did not return")
+	}
+}
+
+func TestRestartWaitsForTerminalPublication(t *testing.T) {
+	r, _ := initTestRunner(t)
+	r.cmdProc = NewCommandProcessor(r.commandsFile, r.queueDir, r.logDir)
+	originalExec := execRunner
+	t.Cleanup(func() { execRunner = originalExec })
+	executed := false
+	execRunner = func(string, []string, []string) error {
+		executed = true
+		return syscall.ENOEXEC
+	}
+	job := &opsqueue.CommandJob{ID: 388, RunID: 92, Dir: t.TempDir(), Cmd: "true"}
+	entered, release := make(chan struct{}), make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	r.OnJobFinish = func(int64, int64, string, int) {
+		close(entered)
+		<-release
+	}
+	if err := r.startJob(job.ID, job, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("job never reached terminal publication")
+	}
+	appendCmd(t, r.commandsFile, opsqueue.QueueCommand{Op: opsqueue.OpRestart})
+	if err := r.tick(); err != nil {
+		t.Fatal(err)
+	}
+	if executed {
+		t.Fatal("restart interrupted terminal publication")
+	}
+	if r.state.RunningCount() != 0 {
+		t.Fatal("publication retained a scheduler slot")
+	}
+	close(release)
+	released = true
+	// Wait only for the finisher, not a scheduler tick or remote upload.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.processesMu.Lock()
+		done := len(r.finalizingWorkdirs) == 0
+		r.processesMu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal finalization did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := r.tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !executed {
+		t.Fatal("consumed restart request was lost after finalization")
+	}
+	if r.restartRequested {
+		t.Fatal("failed re-exec retained a restart request that prevents supervision")
 	}
 }
 

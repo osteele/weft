@@ -1294,19 +1294,18 @@ rule WrapperZombieRecovered {
 -- per-job provenance check (source-data-sync.allium §
 -- RunnerPreflightProvenanceCheck) refused to stamp start_time; the
 -- batch-status reconciliation closes the attempt as failed
--- with NULL start_time / exit_code, end_time = 0, and a populated
--- failure_reason. The Job itself stays queued so the autopilot or user
--- can replan it.
+-- with NULL start_time / exit_code, the rejection timestamp as end_time,
+-- and a populated failure_reason. The job reflects the failed admission;
+-- a retry creates a new attempt.
 rule PreflightRejectionClosesAttempt {
     when: PreflightRejectionReported(job, reason)
     requires: job.latest_attempt.start_time = null
 
     ensures: job.latest_attempt.status = failed
     ensures: job.latest_attempt.failure_reason = reason
-    ensures: job.latest_attempt.end_time = 0
+    ensures: job.latest_attempt.end_time > 0
     ensures: job.latest_attempt.exit_code = null
-    -- Job stays queued; no RecordJobCompletion call.
-    ensures: job.status = queued
+    ensures: job.status = failed
 
     -- legacy annotation: @guidance
         -- Implementation anchors:
@@ -2930,15 +2929,9 @@ invariant TerminalJobsHaveEndTime {
         -- either NULL (not yet ended, OR cloud terminal pending
         -- backfill) or a positive unix timestamp.
         --
-        -- Carve-out for preflight-rejected attempts (see
-        -- PreflightRejectionClosesAttempt): the attempt closes with
-        -- end_time = 0 by design, paired with start_time = null and
-        -- exit_code = null, because there is no execution boundary to
-        -- record. This is consistent with the invariant because the
-        -- containing Job stays in `queued` (not terminal); only the
-        -- specific attempt row carries end_time = 0. is_preflight_rejected
-        -- on the attempt narrows display surfaces to the "preflight-
-        -- rejected" rendering without touching the job's terminal status.
+        -- Preflight-rejected attempts close at the rejection timestamp.
+        -- Their null start_time and exit_code distinguish admission failure
+        -- from an executed command.
         --
         -- RecordCloudJobCompletion (cloud terminal writer) prefers the
         -- agent's authoritative end_time from <jobID>.completion.json,

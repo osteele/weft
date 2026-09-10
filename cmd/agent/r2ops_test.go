@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +74,21 @@ func TestR2Get_PropagatesNonMissingErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("error = %v, want permission denied", err)
+	}
+}
+
+func TestR2RecoveryRequestsRespectCancellation(t *testing.T) {
+	fakeBinDir := writeFakeRclone(t, t.TempDir())
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if value, err := r2GetContext(context.Background(), "test-bucket", "value"); err != nil || value != "hello world" {
+		t.Fatalf("positive control: value=%q, error=%v", value, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r2GetContext(ctx, "test-bucket", "value"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expired recovery still read R2: %v", err)
+	}
+	if err := r2PutReaderContext(ctx, "test-bucket", "value", strings.NewReader("0")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expired recovery still published to R2: %v", err)
 	}
 }

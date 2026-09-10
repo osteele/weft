@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/opsqueue"
 )
@@ -667,6 +669,65 @@ func TestProcessCommands_Add_IgnoresSameRunTerminalDuplicate(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("same-run duplicate should not archive status, got %v", matches)
+	}
+}
+
+// Re-observing an old completion preserves its execution timestamp while
+// retaining the terminal entry long enough for the submitter to reconcile.
+func TestProcessCommands_Add_SameRunDuplicateWithoutStatusKeepsFinishedEntry(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	const jobID int64 = 4242
+	const runID int64 = 99
+	endTime := time.Now().Add(-48 * time.Hour).Unix()
+	data, err := json.Marshal(CompletionRecord{RunID: runID, ExitCode: 3, EndTime: endTime})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4242.completion.json"), data, 0644); err != nil {
+		t.Fatalf("seed completion: %v", err)
+	}
+	state.AddPending(jobID)
+
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: jobID, RunID: runID, Cmd: "echo dup", Dir: "/tmp"},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if slices.Contains(state.Pending, jobID) {
+		t.Fatalf("same-run terminal duplicate should not remain pending, got %v", state.Pending)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "job-4242.json")); !os.IsNotExist(err) {
+		t.Fatalf("duplicate add must not rewrite the job file, stat err=%v", err)
+	}
+	finished, ok := state.Finished[strconv.FormatInt(jobID, 10)]
+	if !ok {
+		t.Fatal("drop left no Finished entry; submitter would see confirmed absence and re-dispatch forever")
+	}
+	if finished.ExitCode != 3 || finished.FinishedAt != endTime {
+		t.Fatalf("Finished = %+v, want exit=3 finished_at from the completion record", finished)
+	}
+
+	// The entry must be durable: a zero FinishedAt is pruned on the next
+	// save, resurrecting the ghost after one state write.
+	statePath := filepath.Join(dir, "state.json")
+	if err := state.Save(statePath); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	reloaded, err := LoadState(statePath)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if _, ok := reloaded.Finished[strconv.FormatInt(jobID, 10)]; !ok {
+		t.Fatal("Finished entry did not survive a state save/load round trip")
 	}
 }
 

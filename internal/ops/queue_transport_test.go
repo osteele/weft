@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -132,6 +133,76 @@ func TestFetchQueueBatchStatusMapsFreshR2RunnerState(t *testing.T) {
 	}
 	if statuses[44].State != queueStateUnresolvedCandidate || statuses[44].RunID != 8 || !statuses[44].FromR2 {
 		t.Fatalf("unexpected absent-worker status: %+v", statuses[44])
+	}
+}
+
+func TestR2PreflightRejectionReconcilesWithoutRedispatch(t *testing.T) {
+	originalLoad, originalStore := loadQueueConfig, newInventoryQueueStore
+	t.Cleanup(func() { loadQueueConfig, newInventoryQueueStore = originalLoad, originalStore })
+	loadQueueConfig = func() (*config.Config, error) {
+		return &config.Config{Hosts: map[string]config.HostConfig{
+			"host-alpha": {QueueTransport: queueTransportR2Pull},
+		}}, nil
+	}
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueued(database, "host-alpha", "/tmp", "echo test", "rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job.LatestRunID == nil {
+		t.Fatalf("missing queued attempt: job=%+v err=%v", job, err)
+	}
+	runID := *job.LatestRunID
+	key, _ := inventoryqueue.StateKey("host-alpha")
+	state := opsqueue.RunnerState{
+		Rejected: map[string]opsqueue.RunnerRejectedState{
+			fmt.Sprint(jobID): {RunID: runID, RejectedAt: time.Now().Unix(),
+				FailureReason: db.FailureReasonPinnedSourceFetchFailed, Detail: "source archive rejected"},
+		},
+		PendingPayloadInventoryComplete: true,
+	}
+	encoded, err := json.Marshal(inventoryqueue.State{
+		Version: inventoryqueue.Version, Host: "host-alpha", UpdatedAt: time.Now(), Runner: state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeInventoryQueueStore{objects: map[string][]byte{key: encoded}}
+	newInventoryQueueStore = func() (inventoryQueueStore, error) { return store, nil }
+	statuses, err := fetchQueueBatchStatus("host-alpha", []int64{jobID}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads, err := remoteJobPayloadsFromRunnerState([]*db.Job{job}, &state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldRedispatchSyncedJob(job, &state, payloads, nil) {
+		t.Fatal("rejected attempt was redispatched as a missing payload")
+	}
+	// A stale rejection must neither suppress a new attempt nor close it.
+	newRunID := runID + 1
+	job.LatestRunID = &newRunID
+	if !shouldRedispatchSyncedJob(job, &state, payloads, nil) {
+		t.Fatal("old rejection blocked a new attempt")
+	}
+	if n, err := applyBatchStatuses(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second); err != nil || n != 0 {
+		t.Fatalf("stale rejection applied: updated=%d err=%v", n, err)
+	}
+	job.LatestRunID = &runID
+	if _, err := applyBatchStatuses(database, []int64{jobID}, map[int64]*db.Job{jobID: job}, statuses, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != db.StatusFailed || result.FailureReason != db.FailureReasonPinnedSourceFetchFailed || result.StartTime != 0 || result.ExitCode != nil {
+		t.Fatalf("rejection misrepresented as execution: %+v", result)
 	}
 }
 

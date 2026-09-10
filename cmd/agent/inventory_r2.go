@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/oplog"
@@ -52,6 +54,27 @@ func setupInventoryR2(r *runner.Runner, r2Bucket string) {
 		}
 	}
 	r.PostJobManager = newInventoryPostJobManager(r2Bucket)
+	r.RecoverJobPublication = func(ctx context.Context, capture runner.PostJobCapture) {
+		marker, err := r2GetContext(ctx, r2Bucket, r2keys.JobAttemptComplete(capture.JobID, capture.RunID))
+		if err != nil {
+			oplog.Log(oplog.OpR2Get, oplog.WithJobID(capture.JobID),
+				oplog.WithDetail("inventory completion recovery"), oplog.WithError(err))
+			return
+		}
+		if marker != "" {
+			return
+		}
+		// Queue the durable snapshot before publishing the terminal marker.
+		// Existing descriptor recovery deduplicates an interrupted handoff.
+		if capture.WorkDir != "" {
+			r.PostJobManager.StartPostJob(capture)
+		}
+		if err := r2PutReaderContext(ctx, r2Bucket, r2keys.JobAttemptComplete(capture.JobID, capture.RunID),
+			strings.NewReader(fmt.Sprintf("%d", capture.ExitCode))); err != nil {
+			oplog.Log(oplog.OpR2Put, oplog.WithJobID(capture.JobID),
+				oplog.WithDetail("inventory completion recovery"), oplog.WithError(err))
+		}
+	}
 
 	fmt.Printf("R2 uploads enabled (bucket=%s)\n", r2Bucket)
 }

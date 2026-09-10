@@ -698,8 +698,11 @@ rule RemoteJobResumed {
 -- runner wrote alongside the sentinel.
 --
 -- Wire format:
---   JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>
+--   JOB|<id>|PREFLIGHT_REJECTED|<ts>|<failure_reason>|<agent_version>|<run_id>
 --
+-- Legacy agents may omit the version and run ID. R2-pull hosts publish
+-- the same attempt-fenced observation in runner.rejected, with a separate
+-- diagnostic detail field. A rejection from a different run is ignored.
 -- Distinct from:
 --   JOB|<id>|COMPLETED|<exit_code>|<mtime>|<run_id>|<failure_reason><source_execution_fields>
 rule AgentBatchStatusReportsPreflightRejection {
@@ -734,12 +737,9 @@ rule AgentBatchStatusReportsPreflightRejection {
         --                                 § PreflightRejected).
 }
 
--- Sync-side handling for PREFLIGHT_REJECTED. The attempt is closed as
--- failed with exit_code = NULL and end_time = 0; the job stays queued
--- (no RecordJobCompletion call). A dedup-windowed
--- EventQueueDispatchFailed lifecycle event is inserted so `weft job
--- diagnose` surfaces the reason via LatestInventoryDispatchBlock with
--- the existing wait/replan options at high confidence.
+-- Sync-side handling for PREFLIGHT_REJECTED closes the matching attempt as
+-- failed with a rejection end_time and NULL start_time / exit_code.
+-- EventQueueDispatchFailed preserves its diagnostic for job inspection.
 rule PreflightRejectionReconciled {
     when: BatchStatusLineReceived(line)
     requires: line.state = preflight_rejected
@@ -749,7 +749,7 @@ rule PreflightRejectionReconciled {
 
     -- Persist the reason on the open attempt FIRST (while it is still the
     -- latest open attempt; SetJobRemoteState targets the latest open),
-    -- then close the attempt without exit_code / end_time.
+    -- then close the attempt at rejection time without a process exit code.
     ensures: JobFailureReasonStored(job: job, reason: reason)
     ensures: EventQueueDispatchFailedRecorded(job: job, detail: reason)
     ensures: PreflightRejectionReported(job: job, reason: reason)
@@ -762,7 +762,7 @@ rule PreflightRejectionReconciled {
         --                                    inserts the lifecycle event with
         --                                    dispatchEventDedupeWindow.
         --   internal/db/attempts.go        — CloseAttempt(StatusFailed,
-        --                                    nil, 0)
+        --                                    nil, rejection_timestamp)
         -- See job-lifecycle.allium § PreflightRejectionClosesAttempt for
         -- the attempt-shape semantics this rule produces.
 }
@@ -804,7 +804,7 @@ rule AgentDeployRestart {
     when: AgentBinaryDeployed(host)
 
     -- Send restart command via queue command log, not kill signal.
-    -- The runner picks up the restart on its next tick and re-execs.
+    -- The runner defers re-exec until terminal handoffs and marker callbacks finish.
     ensures: RunnerRestartRequested(host)
 
     -- legacy annotation: @guidance
@@ -812,6 +812,13 @@ rule AgentDeployRestart {
         -- Running jobs continue in their subprocesses. Exit codes survive
         -- because commands are wrapped with exit-capture shell code:
         --   cmd; EXIT_CODE=$?; echo $EXIT_CODE > {jobID}.status; exit $EXIT_CODE
+        -- Retained completions are checked for missing R2 markers at startup.
+        -- A confirmed-missing marker replays durable publication; an unknown
+        -- lookup logs its failure without replacing publication state.
+        -- Startup R2 requests share one 15-second budget. Exhaustion reports
+        -- the unprocessed count and preserves those records for later recovery.
+        -- Recovery uses the output directories persisted with the attempt;
+        -- older records without that metadata warn before using conventional dirs.
         -- When the restarted runner finds a dead PID with a wrapper-written
         -- status file, it reads the real exit code instead of defaulting to 1.
         --

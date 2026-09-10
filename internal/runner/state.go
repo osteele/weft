@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // State tracks the runner's persistent state, saved to {queue}.state.json.
@@ -26,6 +28,9 @@ type State struct {
 	Current              *int64                      `json:"current"`
 	Running              map[string]RunningJobState  `json:"running,omitempty"`
 	Finished             map[string]FinishedJobState `json:"finished,omitempty"`
+	// Keep rejection fences until cancellation or a newer attempt; age alone
+	// does not prove the submitter observed the rejection.
+	Rejected map[string]opsqueue.RunnerRejectedState `json:"rejected,omitempty"`
 
 	// StopRequested is not persisted — it's set from the command log each time.
 	StopRequested bool `json:"-"`
@@ -60,6 +65,7 @@ type RunningJobState struct {
 	GPUMemGB         int      `json:"gpu_mem_gb,omitempty"`
 	RAMReservationKB int64    `json:"ram_reservation_kb,omitempty"`
 	DiskPath         string   `json:"disk_path,omitempty"`
+	OutputDirs       []string `json:"output_dirs,omitempty"`
 
 	// Resource usage tracking (updated during sampling)
 	RusageUserCPU string `json:"rusage_user_cpu,omitempty"`
@@ -89,6 +95,7 @@ type RunningJobState struct {
 type FinishedJobState struct {
 	ExitCode   int   `json:"exit_code"`
 	FinishedAt int64 `json:"finished_at"`
+	ObservedAt int64 `json:"observed_at,omitempty"`
 }
 
 // NewState creates an empty state.
@@ -98,6 +105,7 @@ func NewState() *State {
 		PendingReasons: make(map[string]string),
 		Running:        make(map[string]RunningJobState),
 		Finished:       make(map[string]FinishedJobState),
+		Rejected:       make(map[string]opsqueue.RunnerRejectedState),
 	}
 }
 
@@ -129,6 +137,9 @@ func LoadState(path string) (*State, error) {
 	}
 	if s.PendingReasons == nil {
 		s.PendingReasons = make(map[string]string)
+	}
+	if s.Rejected == nil {
+		s.Rejected = make(map[string]opsqueue.RunnerRejectedState)
 	}
 	return s, nil
 }
@@ -187,7 +198,7 @@ func (s *State) saveAt(path string, now time.Time) error {
 func (s *State) pruneFinished(now time.Time) {
 	cutoff := now.Add(-24 * time.Hour).Unix()
 	for id, f := range s.Finished {
-		if f.FinishedAt < cutoff {
+		if max(f.FinishedAt, f.ObservedAt) < cutoff {
 			delete(s.Finished, id)
 		}
 	}

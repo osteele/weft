@@ -29,7 +29,11 @@ var uploadOpslogMu sync.Mutex
 
 // r2Get reads the content of an R2 key via rclone. Returns ("", nil) if the key doesn't exist.
 func r2Get(bucket, key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)
+	return r2GetContext(context.Background(), bucket, key)
+}
+
+func r2GetContext(ctx context.Context, bucket, key string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, r2Timeout)
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "rclone", "cat", fmt.Sprintf("r2:%s/%s", bucket, key))
@@ -61,7 +65,11 @@ func r2Put(bucket, key, content string) error {
 var r2PutForAgent = r2Put
 
 func r2PutReader(bucket, key string, body io.Reader) error {
-	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)
+	return r2PutReaderContext(context.Background(), bucket, key, body)
+}
+
+func r2PutReaderContext(ctx context.Context, bucket, key string, body io.Reader) error {
+	ctx, cancel := context.WithTimeout(ctx, r2Timeout)
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "rclone", "rcat", fmt.Sprintf("r2:%s/%s", bucket, key))

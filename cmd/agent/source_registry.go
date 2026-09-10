@@ -544,5 +544,9 @@ func downloadSourceToCache(bucket, r2Key, cachePath string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "rclone", "copyto", fmt.Sprintf("r2:%s/%s", bucket, r2Key), cachePath)
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return fmt.Errorf("source download timed out after 2m: %w", ctx.Err())
+	}
+	return err
 }

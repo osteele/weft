@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Job-wait transport failures**: `status --wait` falls back to remote status
+  polling when daemon recovery fails, preserving the original wait deadline.
+- **Inventory queue admission failures**: R2-pull hosts publish attempt-fenced
+  preflight rejections and diagnostics instead of repeatedly redispatching
+  rejected source downloads or archives.
+- **Terminal publication across runner updates**: Re-exec waits for completion
+  handoff and marker callbacks. Startup and duplicate terminal deliveries recover
+  missing publication through the durable post-job queue without executing the
+  command again. Completion records preserve custom output directories; startup
+  R2 recovery shares a 15-second budget and reports unprocessed retained records.
 - **Automatic daemon recovery during job waits**: `status --wait` starts a
   confirmed-absent daemon and resumes observation within a bounded recovery
   window. Live processes and ambiguous socket failures remain untouched.

@@ -253,6 +253,7 @@ type RunnerState struct {
 	Current                         *int64                         `json:"current"`
 	Running                         map[string]RunnerJobState      `json:"running,omitempty"`
 	Finished                        map[string]RunnerFinishedState `json:"finished,omitempty"`
+	Rejected                        map[string]RunnerRejectedState `json:"rejected,omitempty"`
 	PendingPayloads                 map[string]RunnerPayloadState  `json:"pending_payloads,omitempty"`
 	PendingPayloadInventoryComplete bool                           `json:"pending_payload_inventory_complete,omitempty"`
 	PendingPayloadInventoryError    string                         `json:"pending_payload_inventory_error,omitempty"`
@@ -278,6 +279,15 @@ func (s *RunnerState) Supports(capability string) bool {
 type RunnerFinishedState struct {
 	ExitCode   int   `json:"exit_code"`
 	FinishedAt int64 `json:"finished_at"`
+}
+
+// RunnerRejectedState records admission failure, not a process exit.
+// RunID fences redispatch and reconciliation to the rejected attempt.
+type RunnerRejectedState struct {
+	RunID         int64  `json:"run_id"`
+	RejectedAt    int64  `json:"rejected_at"`
+	FailureReason string `json:"failure_reason"`
+	Detail        string `json:"detail,omitempty"`
 }
 
 // RunnerPayloadState is one queue payload file observed while publishing the

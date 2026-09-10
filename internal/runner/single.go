@@ -418,6 +418,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	rs.GPUDevices = gpuDevices
 	rs.GPUMemGB = GetJobGPUMem(job, DefaultGPUMemGB)
 	rs.DiskPath = diskProbePath
+	rs.OutputDirs = job.OutputDirs
 	rs.TelemetryIntervalSeconds = int64(cfg.SampleInterval / time.Second)
 	rs.TelemetryAdvancedGPU = telemetryPolicy.CollectAdvancedGPU
 

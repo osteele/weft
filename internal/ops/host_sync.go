@@ -625,6 +625,9 @@ func isJobInRunnerState(jobID int64, state *opsqueue.RunnerState) bool {
 	if _, ok := state.Running[jobIDStr]; ok {
 		return true
 	}
+	if _, ok := state.Rejected[jobIDStr]; ok {
+		return true
+	}
 	_, ok := state.Finished[jobIDStr]
 	return ok
 }
@@ -771,6 +774,9 @@ func queuedJobMaterializedInRunner(job *db.Job, state *opsqueue.RunnerState, pay
 		return false
 	}
 	jobIDStr := strconv.FormatInt(job.ID, 10)
+	if rejected, ok := state.Rejected[jobIDStr]; ok && job.LatestRunID != nil && rejected.RunID > 0 && rejected.RunID == *job.LatestRunID {
+		return true
+	}
 	if _, ok := state.Finished[jobIDStr]; ok {
 		return true
 	}

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/session"
@@ -651,7 +652,8 @@ type PublicationReport struct {
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
-	RuntimeWorkingDir string `json:"runtime_working_dir,omitempty"`
+	RuntimeWorkingDir string   `json:"runtime_working_dir,omitempty"`
+	OutputDirs        []string `json:"output_dirs"`
 
 	RunID            int64               `json:"run_id,omitempty"`
 	ExitCode         int                 `json:"exit_code"`
@@ -763,6 +765,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		StartTime:        startTime,
 		EndTime:          endTime,
 		OutputFiles:      outputFiles,
+		OutputDirs:       config.EffectiveOutputDirs(rs.OutputDirs),
 	}
 	rec.RuntimeWorkingDir = rs.DiskPath
 	if ei.Signaled {

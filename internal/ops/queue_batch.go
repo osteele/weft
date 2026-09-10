@@ -21,6 +21,7 @@ type queueBatchStatus struct {
 	RunID         int64
 	GPUDevices    string
 	FailureReason string
+	FailureDetail string
 	AgentVersion  string
 	Source        *db.JobSourceExecutionMetadata
 	FromR2        bool
@@ -270,21 +271,20 @@ func applyBatchStatusesAt(database *sql.DB, jobIDs []int64, jobByID map[int64]*d
 				updated++
 			}
 		case queueStatePreflightRejected:
-			// The runner rejected the attempt before stamping a startTime
-			// (currently: source provenance mismatch). Persist failure_reason
-			// FIRST (while the attempt is still open — SetJobRemoteState
-			// targets the latest open attempt), then close it without
-			// exit_code or end_time. Record a dispatch-failed lifecycle event
-			// so `weft job diagnose` surfaces the reason via
-			// LatestInventoryDispatchBlock. The job stays in queued so the
-			// autopilot / user can replan it.
+			// Persist the reason while this is still the open attempt, then
+			// close it at rejection time without a process start or exit code.
+			// The dispatch event preserves the diagnostic for job inspection.
 			if status.FailureReason != "" {
 				if err := db.SetJobRemoteState(database, job.ID, "", status.FailureReason); err != nil {
 					slog.Warn("failed to record failure reason", "component", "sync", "job_id", job.ID, "error", err)
 				}
-				recordPreflightDispatchBlock(database, job.ID, status.FailureReason)
+				detail := status.FailureDetail
+				if detail == "" {
+					detail = status.FailureReason
+				}
+				recordPreflightDispatchBlock(database, job.ID, detail)
 			}
-			if err := db.CloseAttempt(database, job.ID, db.StatusFailed, nil, 0); err != nil {
+			if err := db.CloseAttempt(database, job.ID, db.StatusFailed, nil, status.Mtime); err != nil {
 				return updated, err
 			}
 			updated++
@@ -416,6 +416,25 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 				results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: finished.FinishedAt, FromR2: true}
 			}
 		}
+		for idText, rejected := range state.Rejected {
+			id, err := strconv.ParseInt(idText, 10, 64)
+			if err != nil {
+				slog.Warn("invalid rejected job ID in runner state", "job_id", idText, "error", err)
+				continue
+			}
+			if _, ok := wanted[id]; !ok {
+				continue
+			}
+			if rejected.RunID <= 0 || rejected.RejectedAt <= 0 || !db.IsKnownFailureReason(rejected.FailureReason) {
+				slog.Warn("invalid preflight rejection in runner state", "job_id", id, "run_id", rejected.RunID)
+				continue
+			}
+			results[id] = queueBatchStatus{
+				State: queueStatePreflightRejected, RunID: rejected.RunID,
+				Mtime: rejected.RejectedAt, FailureReason: rejected.FailureReason,
+				FailureDetail: rejected.Detail, AgentVersion: state.AgentVersion, FromR2: true,
+			}
+		}
 		return results, nil
 	}
 	if timeout <= 0 {
@@ -510,7 +529,16 @@ func parseQueueBatchStatusOutput(stdout string, capacity int) map[int64]queueBat
 			if failureReasonTrusted && len(parts) >= 6 {
 				agentVersion = strings.TrimSpace(parts[5])
 			}
-			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason, AgentVersion: agentVersion}
+			var runID int64
+			if len(parts) >= 7 {
+				var err error
+				runID, err = strconv.ParseInt(parts[6], 10, 64)
+				if err != nil || runID <= 0 {
+					slog.Warn("invalid preflight rejection run ID", "job_id", id, "run_id", parts[6])
+					continue
+				}
+			}
+			results[id] = queueBatchStatus{State: queueStatePreflightRejected, Mtime: mtime, FailureReason: failureReason, AgentVersion: agentVersion, RunID: runID}
 		case "CURRENT", "RUNNING":
 			gpuDevs := ""
 			if len(parts) >= 4 {
