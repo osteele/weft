@@ -31,10 +31,11 @@ a five-second startup allowance; it is a policy limit, not a measured latency
 guarantee. Only the first reconnect attempt in an episode may start a daemon.
 Repeated connections that close before a snapshot are also bounded.
 
-If recovery fails, the command reports an observation error; that error does
-not establish a terminal job outcome. Use `weft status` or `weft info` to
-retrieve the recorded job state before deciding whether another submission
-is needed.
+If recovery fails or the subscription breaks, the command logs the observation
+failure and continues by polling remote status and the local database.
+`--wait-timeout` bounds both phases together; reconnecting or switching to
+polling does not reset it. A broken subscription does not change job state
+or justify submitting the job again.
 
 When a queued job is still waiting for placement or dispatch, `weft run`,
 `weft status`, `weft status --wait`, and `weft info` print expectation lines:

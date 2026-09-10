@@ -494,6 +494,13 @@ func waitForJobsCompletion(ctx context.Context, database *sql.DB, jobs []jobStat
 	}
 	fmt.Println()
 
+	// The daemon and its polling fallback share one user wait budget.
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, timeout, errWaitTimeout)
+		defer cancel()
+	}
+
 	hasPendingExternal := false
 	for _, req := range jobs {
 		if _, ok := pending[req.ID]; ok && req.Job != nil && req.Job.Backend == db.BackendSkyPilot {
@@ -545,16 +552,22 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 		}
 		return fmt.Errorf("daemon watch: %w", err)
 	}
-	paths := daemoncontrol.DefaultPaths()
-	if _, _, err := ensureDaemonStartedFunc(paths, 2*time.Second); err != nil {
-		return false, nil
-	}
-	watcher, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
-	if err != nil {
+	fallback := func(err error) (bool, error) {
 		if waitContextError() != nil {
 			return true, waitError(err)
 		}
+		// This ends daemon observation, so emit at most one fallback warning
+		// per wait instead of logging each reconnect attempt.
+		slog.Warn("daemon watch unavailable; falling back to status polling", "component", "status", "error", err)
 		return false, nil
+	}
+	paths := daemoncontrol.DefaultPaths()
+	if _, _, err := ensureDaemonStartedFunc(paths, 2*time.Second); err != nil {
+		return fallback(err)
+	}
+	watcher, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
+	if err != nil {
+		return fallback(err)
 	}
 	defer func() { watcher.Close() }()
 
@@ -577,12 +590,14 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 				return true, waitError(err)
 			}
 			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-				return true, waitError(err)
+				// The stream broke but the wait has not: fall back to remote
+				// status sync and database reads rather than failing a healthy
+				// wait on an observation problem.
+				return fallback(err)
 			}
-			// A repeatedly broken stream must fail even when the job wait
-			// has no deadline. Only a fresh snapshot restores observation.
+			// Only a fresh snapshot restores low-latency observation.
 			if emptyReconnects >= 3 {
-				return true, waitError(err)
+				return fallback(err)
 			}
 			emptyReconnects++
 			if recoveryDeadline.IsZero() {
@@ -598,7 +613,9 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 			}
 			replacement, err := recoverDaemonSubscription(ctx, paths, order, recoveryDeadline, emptyReconnects == 1)
 			if err != nil {
-				return true, waitError(err)
+				// Recovery exhausted while the wait is still live: sync remote
+				// status and poll the database instead of failing observation.
+				return fallback(err)
 			}
 			watcher = replacement
 			continue
@@ -636,7 +653,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 			if event.Error == context.DeadlineExceeded.Error() {
 				return true, pendingTimeoutErr()
 			}
-			return true, fmt.Errorf("daemon watch: %s", event.Error)
+			return fallback(errors.New(event.Error))
 		}
 	}
 	return true, nil
@@ -711,9 +728,20 @@ func waitForJobsCompletionPolling(ctx context.Context, database *sql.DB, final m
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	var deadline time.Time
 	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, timeout, errWaitTimeout)
+		defer cancel()
+	}
+	waitError := func() error {
+		if errors.Is(context.Cause(ctx), errWaitTimeout) {
+			pendingIDs := make([]int64, 0, len(pending))
+			for id := range pending {
+				pendingIDs = append(pendingIDs, id)
+			}
+			return fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+		}
+		return ctx.Err()
 	}
 
 	reportChange := func(job *db.Job) {
@@ -727,12 +755,8 @@ func waitForJobsCompletionPolling(ctx context.Context, database *sql.DB, final m
 	}
 
 	for len(pending) > 0 {
-		if timeout > 0 && !time.Now().Before(deadline) {
-			pendingIDs := make([]int64, 0, len(pending))
-			for id := range pending {
-				pendingIDs = append(pendingIDs, id)
-			}
-			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+		if ctx.Err() != nil {
+			return final, waitError()
 		}
 
 		// One SkyPilot queue snapshot refreshes every selected binding. Querying
@@ -752,15 +776,7 @@ func waitForJobsCompletionPolling(ctx context.Context, database *sql.DB, final m
 			}
 		}
 		if len(externalJobs) > 0 {
-			syncCtx := ctx
-			var cancel context.CancelFunc
-			if timeout > 0 {
-				syncCtx, cancel = context.WithDeadline(ctx, deadline)
-			}
-			_ = syncExternalStatusJobs(syncCtx, database, externalJobs)
-			if cancel != nil {
-				cancel()
-			}
+			_ = syncExternalStatusJobs(ctx, database, externalJobs)
 		}
 
 		for _, id := range order {
@@ -846,17 +862,13 @@ func waitForJobsCompletionPolling(ctx context.Context, database *sql.DB, final m
 			break
 		}
 
-		if timeout > 0 && time.Now().After(deadline) {
-			pendingIDs := make([]int64, 0, len(pending))
-			for id := range pending {
-				pendingIDs = append(pendingIDs, id)
-			}
-			return final, fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
+		if ctx.Err() != nil {
+			return final, waitError()
 		}
 
 		select {
 		case <-ctx.Done():
-			return final, ctx.Err()
+			return final, waitError()
 		case <-ticker.C:
 		}
 	}

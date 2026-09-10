@@ -110,8 +110,10 @@ an episode may initiate recovery, with at most one process-start request.
 Transient connection failures retry with backoff within that budget.
 Three consecutive subscriptions that reach readiness but close before a
 snapshot exhaust the retry allowance.
-A fresh snapshot resets the episode. Exhaustion reports an observation error
-and does not mutate job state.
+A fresh snapshot resets the episode. Exhaustion ends daemon observation: the
+caller logs the observation failure and falls back to remote status sync and
+database polling under the original job-wait deadline. Observation failure
+does not mutate job state.
 
 ## Request
 
