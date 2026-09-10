@@ -99,7 +99,7 @@ func AcquireLock(paths Paths) (*Lock, error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("daemon lock already held: %s", paths.LockFile)
+			return nil, fmt.Errorf("daemon lock already held: %s: %w", paths.LockFile, err)
 		}
 		return nil, fmt.Errorf("lock daemon lock file: %w", err)
 	}
@@ -238,11 +238,11 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 		// A confirmed stale pathname can be left for the replacement daemon to
 		// remove after it owns the process lock. Any other dial failure is
 		// unknown evidence and must not trigger cleanup or restart.
-		if status.Live && isConfirmedStaleSocketError(socketErr) {
+		if status.Live && IsConfirmedStaleSocketError(socketErr) {
 			status, err = restartForEnsure(paths, 5*time.Second, wait)
 			return status, EnsureRestarted, err
 		}
-		if !isConfirmedStaleSocketError(socketErr) {
+		if !IsConfirmedStaleSocketError(socketErr) {
 			return status, EnsureNoop, socketErr
 		}
 	} else if ok {
@@ -280,7 +280,7 @@ func EnsureCurrent(paths Paths, wait time.Duration) (Status, EnsureAction, error
 		return status, EnsureRestarted, err
 	}
 	if status.Installed {
-		if err := Load(paths); err != nil {
+		if err := Load(context.Background(), paths); err != nil {
 			return status, EnsureNoop, err
 		}
 	} else {
@@ -474,6 +474,10 @@ func StartDetached(paths Paths) (int, error) {
 	} else if status.Live {
 		return status.PID, fmt.Errorf("daemon already running with PID %d", status.PID)
 	}
+	return startDetachedProcess(paths)
+}
+
+func startDetachedProcess(paths Paths) (int, error) {
 	if err := os.MkdirAll(filepath.Dir(paths.PIDFile), 0o755); err != nil {
 		return 0, err
 	}
@@ -506,7 +510,7 @@ func StartDetached(paths Paths) (int, error) {
 func EnsureSocketAvailable(paths Paths, timeout time.Duration) error {
 	info, ok, err := SocketDaemonInfo(paths, timeout)
 	if err != nil {
-		if !isConfirmedStaleSocketError(err) {
+		if !IsConfirmedStaleSocketError(err) {
 			return fmt.Errorf("daemon socket availability unknown; preserving %s: %w", paths.SocketFile, err)
 		}
 		if removeErr := os.Remove(paths.SocketFile); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -561,7 +565,9 @@ func socketPathExists(path string) (bool, error) {
 	return true, nil
 }
 
-func isConfirmedStaleSocketError(err error) bool {
+// IsConfirmedStaleSocketError distinguishes a missing or refusing endpoint
+// from unknown reachability, such as a timeout or permission failure.
+func IsConfirmedStaleSocketError(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist)
 }
 
@@ -582,7 +588,7 @@ func Restart(paths Paths, stopTimeout, wait time.Duration) (Status, error) {
 		return Status{}, err
 	}
 	if IsInstalled(paths) {
-		if err := Load(paths); err != nil {
+		if err := Load(context.Background(), paths); err != nil {
 			return Status{}, err
 		}
 	} else if _, err := StartDetached(paths); err != nil {

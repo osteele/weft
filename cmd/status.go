@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -524,12 +525,23 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 		}
 		return fmt.Errorf("%w waiting for jobs: %s", errWaitTimeout, ids.FormatJobIDListCompact(pendingIDs))
 	}
+	waitContextError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A socket deadline can fire before the context timer is scheduled.
+		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
 	waitError := func(err error) error {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		ctxErr := waitContextError()
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
 			return pendingTimeoutErr()
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if ctxErr != nil {
+			return ctxErr
 		}
 		return fmt.Errorf("daemon watch: %w", err)
 	}
@@ -539,7 +551,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	}
 	watcher, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, timeout, 2*time.Second)
 	if err != nil {
-		if ctx.Err() != nil {
+		if waitContextError() != nil {
 			return true, waitError(err)
 		}
 		return false, nil
@@ -557,6 +569,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	}
 
 	emptyReconnects := 0
+	var recoveryDeadline time.Time
 	for len(pending) > 0 {
 		event, err := watcher.Next()
 		if err != nil {
@@ -572,6 +585,9 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 				return true, waitError(err)
 			}
 			emptyReconnects++
+			if recoveryDeadline.IsZero() {
+				recoveryDeadline = time.Now().Add(daemoncontrol.RecoveryWindow)
+			}
 			watcher.Close()
 			// A daemon restart drops observation, not the jobs. Retain the
 			// pending set and accept the replacement's initial snapshot.
@@ -580,11 +596,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 				return true, waitError(ctx.Err())
 			case <-time.After(100 * time.Millisecond):
 			}
-			remaining := time.Duration(0)
-			if deadline, ok := ctx.Deadline(); ok {
-				remaining = time.Until(deadline)
-			}
-			replacement, err := dialDaemonSubscribeJobs(ctx, paths.SocketFile, order, remaining, 2*time.Second)
+			replacement, err := recoverDaemonSubscription(ctx, paths, order, recoveryDeadline, emptyReconnects == 1)
 			if err != nil {
 				return true, waitError(err)
 			}
@@ -597,6 +609,7 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 				continue
 			}
 			emptyReconnects = 0
+			recoveryDeadline = time.Time{}
 			for _, snapshot := range event.Snapshot.Jobs {
 				if _, ok := pending[snapshot.ID]; !ok {
 					continue
@@ -629,11 +642,56 @@ func waitForJobsCompletionViaDaemon(ctx context.Context, database *sql.DB, final
 	return true, nil
 }
 
+func recoverDaemonSubscription(ctx context.Context, paths daemoncontrol.Paths, order []int64, deadline time.Time, allowStart bool) (*daemonapi.Subscription, error) {
+	recoveryCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	dial := func() (*daemonapi.Subscription, error) {
+		if err := recoveryCtx.Err(); err != nil {
+			return nil, err
+		}
+		connectDeadline, _ := recoveryCtx.Deadline()
+		timeout := time.Duration(0)
+		if waitDeadline, ok := ctx.Deadline(); ok {
+			timeout = time.Until(waitDeadline)
+		}
+		return daemonapi.DialSubscribeJobStatus(ctx, paths.SocketFile, order, timeout, max(time.Until(connectDeadline), time.Nanosecond))
+	}
+	backoff := 100 * time.Millisecond
+	for {
+		watcher, err := dial()
+		if err == nil {
+			return watcher, nil
+		}
+		// EOF alone says nothing about process liveness. Only an absent or
+		// refusing endpoint warrants the non-destructive lifecycle check.
+		if allowStart && daemoncontrol.IsConfirmedStaleSocketError(err) {
+			allowStart = false
+			if err := daemoncontrol.RecoverAbsent(recoveryCtx, paths); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		var transportErr net.Error
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.As(err, &transportErr) {
+			return nil, err
+		}
+		// Retrying observation needs no authority to mutate process state.
+		// This includes connections accepted during the old daemon's exit.
+		select {
+		case <-recoveryCtx.Done():
+			return nil, fmt.Errorf("daemon reconnection: %w; last connection error: %v", recoveryCtx.Err(), err)
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, time.Second)
+	}
+}
+
 func dialDaemonSubscribeJobs(ctx context.Context, socketPath string, order []int64, timeout time.Duration, wait time.Duration) (*daemonapi.Subscription, error) {
 	deadline := time.Now().Add(wait)
 	var lastErr error
 	for {
-		watcher, err := daemonapi.DialSubscribeJobStatus(ctx, socketPath, order, timeout)
+		connectTimeout := max(time.Until(deadline), time.Nanosecond)
+		watcher, err := daemonapi.DialSubscribeJobStatus(ctx, socketPath, order, timeout, connectTimeout)
 		if err == nil {
 			return watcher, nil
 		}

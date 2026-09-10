@@ -20,6 +20,59 @@ import (
 	"github.com/osteele/weft/internal/ops"
 )
 
+func TestSubscriptionConnectDeadlineEndsAtReadiness(t *testing.T) {
+	socketPath := fmt.Sprintf("/tmp/weft-connect-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(4 * time.Second))
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			done <- err
+			return
+		}
+		encoder := json.NewEncoder(conn)
+		if err := encoder.Encode(Event{Type: EventSubscriptionReady}); err != nil {
+			done <- err
+			return
+		}
+		select {
+		case <-ctx.Done():
+			done <- ctx.Err()
+		case <-release:
+			done <- encoder.Encode(Event{Type: EventDone})
+		}
+	}()
+	const connectTimeout = time.Second
+	sub, err := DialSubscribe(ctx, socketPath, SubscriptionRequest{Resource: ResourceJobStatus}, connectTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	time.Sleep(connectTimeout + 10*time.Millisecond)
+	close(release)
+	event, err := sub.Next()
+	if err != nil || event.Type != EventDone {
+		t.Fatalf("healthy subscription expired with its handshake deadline: event=%+v err=%v", event, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrepareSocketPathPreservesExistingSocket(t *testing.T) {
 	socketPath := fmt.Sprintf("/tmp/weft-daemonapi-existing-%d-%d.sock", os.Getpid(), time.Now().UnixNano())
 	listener, err := net.Listen("unix", socketPath)
@@ -95,7 +148,7 @@ func TestSubscribeJobStatusEmitsVersionedSnapshots(t *testing.T) {
 	}
 	defer server.Close()
 
-	sub, err := DialSubscribeJobStatus(ctx, server.socketPath, []int64{101}, 0)
+	sub, err := DialSubscribeJobStatus(ctx, server.socketPath, []int64{101}, 0, 0)
 	if err != nil {
 		t.Fatalf("DialSubscribeJobStatus: %v", err)
 	}
@@ -148,7 +201,7 @@ func TestSubscribeProjectWatchFiltersByProject(t *testing.T) {
 		Resource: ResourceProjectWatch,
 		Project:  "augur",
 		Follow:   true,
-	})
+	}, 0)
 	if err != nil {
 		t.Fatalf("DialSubscribe: %v", err)
 	}

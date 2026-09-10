@@ -34,7 +34,7 @@ func TestDaemonWaitReconnect(t *testing.T) {
 	defer stop()
 	serverDone := make(chan error, 1)
 	go func() {
-		for attempt := range 2 {
+		for attempt := range 3 {
 			conn, err := listener.Accept()
 			if err != nil {
 				serverDone <- err
@@ -48,6 +48,12 @@ func TestDaemonWaitReconnect(t *testing.T) {
 				return
 			}
 			if attempt == 1 {
+				// A retiring daemon can accept the reconnect, then close
+				// it before its readiness reply. Observation should retry.
+				conn.Close()
+				continue
+			}
+			if attempt == 2 {
 				exitCode := 0
 				if err := db.CloseAttempt(database, jobID, db.StatusCompleted, &exitCode, time.Now().Unix()); err != nil {
 					conn.Close()

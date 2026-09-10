@@ -47,9 +47,17 @@ func DialWatchJobs(ctx context.Context, socketPath string, jobIDs []int64, timeo
 	return &Watcher{conn: conn, decoder: json.NewDecoder(conn)}, nil
 }
 
-func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionRequest) (*Subscription, error) {
+// DialSubscribe bounds connection establishment and readiness by connectTimeout;
+// after readiness, only ctx controls the subscription's lifetime.
+func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionRequest, connectTimeout time.Duration) (*Subscription, error) {
+	connectCtx := ctx
+	if connectTimeout > 0 {
+		var cancel context.CancelFunc
+		connectCtx, cancel = context.WithTimeout(ctx, connectTimeout)
+		defer cancel()
+	}
 	dialer := net.Dialer{}
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	conn, err := dialer.DialContext(connectCtx, "unix", socketPath)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +69,11 @@ func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionReque
 			conn.Close()
 		}
 	}()
+	if deadline, ok := connectCtx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
+	}
 	req := Request{
 		Type:      RequestSubscribe,
 		ClientPID: os.Getpid(),
@@ -81,11 +94,14 @@ func DialSubscribe(ctx context.Context, socketPath string, sub SubscriptionReque
 	if ready.Type != EventSubscriptionReady {
 		return nil, fmt.Errorf("subscribe %s: unexpected response %q", sub.Resource, ready.Type)
 	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
 	connected = true
 	return &Subscription{conn: conn, decoder: decoder, Ready: ready, stop: stop}, nil
 }
 
-func DialSubscribeJobStatus(ctx context.Context, socketPath string, jobIDs []int64, timeout time.Duration) (*Subscription, error) {
+func DialSubscribeJobStatus(ctx context.Context, socketPath string, jobIDs []int64, timeout, connectTimeout time.Duration) (*Subscription, error) {
 	sub := SubscriptionRequest{
 		Resource: ResourceJobStatus,
 		JobIDs:   append([]int64(nil), jobIDs...),
@@ -96,12 +112,12 @@ func DialSubscribeJobStatus(ctx context.Context, socketPath string, jobIDs []int
 			sub.TimeoutSeconds = 1
 		}
 	}
-	return DialSubscribe(ctx, socketPath, sub)
+	return DialSubscribe(ctx, socketPath, sub, connectTimeout)
 }
 
 func DialSubscribeActivity(ctx context.Context, socketPath string, sub SubscriptionRequest) (*Subscription, error) {
 	sub.Resource = ResourceActivity
-	return DialSubscribe(ctx, socketPath, sub)
+	return DialSubscribe(ctx, socketPath, sub, 0)
 }
 
 func DialDaemonInfo(ctx context.Context, socketPath string) (DaemonInfo, error) {

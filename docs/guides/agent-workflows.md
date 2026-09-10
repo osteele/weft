@@ -20,12 +20,21 @@ weft log wj42
 successfully only when they succeed. It is designed to replace shell polling
 loops such as `while true; do weft status ...; sleep ...; done`.
 
-If the daemon restarts, `status --wait` reconnects after a subscription EOF and
-resumes from a fresh snapshot. Reconnection preserves the original
-`--wait-timeout` budget. If reconnection fails, the command reports an
-observation error; that error does not establish a terminal job outcome.
-Use `weft status` or `weft info` to retrieve the recorded job state before
-deciding whether another submission is needed.
+If the daemon connection closes, `status --wait` reconnects and resumes from a
+fresh snapshot. If the daemon is confirmed absent, the waiter starts it through
+launchd or as a detached process. Concurrent waiters coordinate that start.
+Recovery never stops a live daemon or deletes a socket whose state is unknown.
+
+Each recovery episode has a 15-second budget, shortened by the remaining
+`--wait-timeout`. This allows launchd's default 10-second respawn throttle plus
+a five-second startup allowance; it is a policy limit, not a measured latency
+guarantee. Only the first reconnect attempt in an episode may start a daemon.
+Repeated connections that close before a snapshot are also bounded.
+
+If recovery fails, the command reports an observation error; that error does
+not establish a terminal job outcome. Use `weft status` or `weft info` to
+retrieve the recorded job state before deciding whether another submission
+is needed.
 
 When a queued job is still waiting for placement or dispatch, `weft run`,
 `weft status`, `weft status --wait`, and `weft info` print expectation lines:

@@ -14,6 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Automatic daemon recovery during job waits**: `status --wait` starts a
+  confirmed-absent daemon and resumes observation within a bounded recovery
+  window. Live processes and ambiguous socket failures remain untouched.
 - **Job waits across daemon restarts**: `status --wait` reconnects after a
   subscription EOF while preserving pending jobs and the original wait timeout.
 - **Rental preparation outside the Weft checkout**: Installed CLI builds use

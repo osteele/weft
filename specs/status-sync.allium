@@ -2197,8 +2197,40 @@ rule DaemonSocketObservationIsNonDestructive {
     else:
         ensures: DaemonSocketPathPreserved()
 
-    if RecordedDaemonPIDIsLive() and DaemonSocketPathIsConfirmedMissing():
+    if DaemonLifecycleRefreshRequested() and
+       RecordedDaemonPIDIsLive() and DaemonSocketPathIsConfirmedMissing():
         ensures: DaemonLifecycleRestartedToRestoreSocket()
+}
+
+-- Reconnecting an established status wait has narrower process authority than
+-- an initial lifecycle refresh. Observation failure is not a job outcome.
+rule StatusWaitRecoversConfirmedDaemonAbsence {
+    when: JobStatusSubscriptionDisconnected(wait)
+
+    ensures: OriginalJobWaitDeadlinePreserved(wait)
+    ensures: PendingJobsAndLastReportedStatusesPreserved(wait)
+    ensures: RecoveryBudgetBoundedBy(wait, 15.seconds)
+    ensures: ConcurrentRecoveryStartersSerialized()
+
+    if FirstReconnectSinceLastSnapshot(wait) and
+       DaemonSocketConfirmedMissingOrRefusing() and
+       DaemonProcessLockAcquired() and
+       RecordedDaemonPIDMissingOrConfirmedDead():
+        ensures: DaemonMayBeStartedWithoutStoppingAnotherProcess()
+        ensures: InstalledLaunchdServiceOrDetachedDaemonUsed()
+    else:
+        ensures: NoDaemonStartedByThisReconnect()
+
+    ensures: RecoveryDoesNotStopLiveOrUnknownProcesses()
+    ensures: RecoveryDoesNotRemoveSocketPaths()
+    ensures: JobStatusesUnchangedByObservationFailure()
+
+    -- The 15-second policy budget covers launchd's default ten-second spawn
+    -- throttle plus five seconds of startup allowance, not a measured latency
+    -- guarantee. The original job-wait deadline may end recovery sooner.
+    -- Transient transport failures back off within the same recovery budget.
+    -- Three ready subscriptions that close without a snapshot exhaust the
+    -- retry allowance. A fresh snapshot resets both allowances.
 }
 
 -- Principle: DB as source of truth (read-side discipline).

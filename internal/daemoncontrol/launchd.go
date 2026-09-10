@@ -1,6 +1,7 @@
 package daemoncontrol
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,7 +163,7 @@ func writeLaunchdPlist(paths Paths, binary string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return Load(paths)
+	return Load(context.Background(), paths)
 }
 
 func Uninstall(paths Paths) error {
@@ -173,14 +174,14 @@ func Uninstall(paths Paths) error {
 	return nil
 }
 
-func Load(paths Paths) error {
-	out, err := exec.Command("launchctl", "load", paths.PlistFile).CombinedOutput()
+func Load(ctx context.Context, paths Paths) error {
+	out, err := exec.CommandContext(ctx, "launchctl", "load", paths.PlistFile).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	text := strings.TrimSpace(string(out))
 	if strings.Contains(text, "already loaded") || strings.Contains(text, "Load failed: 5") {
-		return exec.Command("launchctl", "start", Label).Run()
+		return exec.CommandContext(ctx, "launchctl", "start", Label).Run()
 	}
 	if text == "" {
 		return err

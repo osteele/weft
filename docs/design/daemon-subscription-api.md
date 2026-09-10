@@ -93,6 +93,26 @@ while holding the singleton process lock, may remove a path whose refusal is
 confirmed stale. If the recorded daemon PID is live but the pathname is
 missing, lifecycle control restarts the daemon to recreate it.
 
+After a lost job subscription, recovery starts a daemon only when the endpoint
+is missing or refuses connections, the recorded PID is absent or returns
+`ESRCH`, and the singleton process lock is available. A separate recovery lock
+serializes concurrent waiters through process start and endpoint readiness.
+A live PID, held process lock, unreadable identity, unrecognized socket
+protocol, or failed probe is insufficient authority to start or stop a process.
+Recovery never invokes binary replacement or socket removal.
+
+The recovery budget is 15 seconds (launchd's documented default 10-second
+`ThrottleInterval` plus a five-second startup allowance), capped by the
+caller's remaining job-wait deadline. Connection establishment and subscription
+readiness share that budget; a successful subscription retains the job-wait
+deadline rather than the shorter connection deadline. The first reconnect in
+an episode may initiate recovery, with at most one process-start request.
+Transient connection failures retry with backoff within that budget.
+Three consecutive subscriptions that reach readiness but close before a
+snapshot exhaust the retry allowance.
+A fresh snapshot resets the episode. Exhaustion reports an observation error
+and does not mutate job state.
+
 ## Request
 
 ```json
