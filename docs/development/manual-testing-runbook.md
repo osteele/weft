@@ -5,7 +5,7 @@ Tests are categorized by whether they can be run by an agent (automated) or requ
 
 ## Prerequisites
 
-- Access to a remote host (e.g., `studio`, `titan`)
+- Access to a remote host (e.g., `studio`, `cool30`)
 - `weft` CLI installed locally
 - Network connectivity to the remote host
 

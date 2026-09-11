@@ -1,46 +1,75 @@
 # Agent Deployment
 
-The `weft-agent` binary runs on remote hosts (titan, atlas) and is auto-deployed
-by `EnsureAgentUpToDate()` during TUI sync. To manually re-deploy, follow the
-steps below.
+The `weft-agent` binary runs on on-prem queue-runner hosts and cloud
+instances. Deployment is normally automatic: `EnsureAgentUpToDate`
+(`internal/agentdeploy/deploy.go`) compares local and remote agent versions
+during source sync and job dispatch, deploys a matching build, and the queue
+runner re-execs into the new binary while preserving pending and running job
+state.
 
-## Cross-compile on studio
+## Deploy to an edge host
 
-Always cross-compile on studio — it's ~5x faster than localhost:
+weft's CLI deploys to edge hosts directly:
 
 ```bash
-# 1. Sync sources to studio
-rsync -az --exclude .jj --exclude dist --exclude .git . studio:~/code/research-tools/weft/
-
-# 2. Cross-compile on studio
-ssh studio 'cd ~/code/research-tools/weft && GOOS=linux GOARCH=amd64 go build -o dist/weft-agent-linux-amd64 ./cmd/agent'
-
-# 3. Copy back locally (for EnsureBuilt cache) and/or deploy to target host
-scp studio:~/code/research-tools/weft/dist/weft-agent-linux-amd64 dist/weft-agent-linux-amd64
-scp dist/weft-agent-linux-amd64 titan:~/.cache/weft/bin/weft-agent
-ssh titan 'chmod +x ~/.cache/weft/bin/weft-agent'
-
-# 4. Kill the runner session so it restarts with the new binary
-ssh titan 'tmux kill-session -t weft-runner 2>/dev/null; true'
+just deploy-agent <host>     # or: weft queue update <host>
 ```
+
+`weft queue update <host>`:
+
+1. Deploys the current agent binary if the remote version differs
+   (`EnsureAgentUpToDateWithOptions`), verifying the deployed binary by
+   fingerprint before recording the deployment.
+2. Starts the queue runner if it is not running; otherwise sends a restart op
+   so the running process re-execs into the new binary — the tmux session,
+   pending jobs, and the currently running job all survive.
+
+Hosts must be in the local inventory first (`weft host discover <hostname>`).
+
+## SSH accounts
+
+Hosts without an `ssh_user` override in `~/.config/weft/config.toml` resolve
+through the user's `~/.ssh/config` entry for the host name. Give a host a
+dedicated worker account with:
+
+```toml
+[hosts.studio]
+ssh_user = "agent"
+ssh_identity_file = "~/.ssh/agent_studio_ed25519"
+```
+
+Deploys always target the configured worker account and never the personal
+login on the same host. studio is configured this way: weft operations target
+`agent@studio` with a dedicated identity file, never the personal account.
 
 ## Key files
 
-- `internal/agentdeploy/deploy.go` — `EnsureAgentUpToDate`, deploys via scp + atomic rename
-- `internal/agentdeploy/build.go` — `EnsureBuilt`, local cache at `~/Library/Caches/weft/builds/<version>/` on macOS (or platform `os.UserCacheDir()/weft/builds/<version>/`)
-- `internal/agentdeploy/version.go` — `LocalAgentVersionForTarget`; source-checkout executables hash the agent inputs, while installed executables use the adjacent `.agent-version.json` identity for targets it records as prepared and use the source hash for other targets
-- Remote binary path: `~/.cache/weft/bin/weft-agent`
+- `internal/agentdeploy/deploy.go` — `EnsureAgentUpToDate`: compare, deploy,
+  verify.
+- `internal/agentdeploy/build.go` — `EnsureBuilt`, local build cache at
+  `~/Library/Caches/weft/builds/<version>/` (platform `os.UserCacheDir()`).
+- `internal/agentdeploy/version.go` — `LocalAgentVersionForTarget`;
+  source-checkout executables hash the agent inputs, while installed
+  executables use the adjacent `.agent-version.json` identity for targets
+  recorded as prepared.
+- Remote binary path: `~/.cache/weft/bin/weft-agent`.
 
-## Background prewarm notes
+## Building agent binaries
 
-`just build` and `just install` start a best-effort prewarm (`weft build-agents --targets linux-amd64 --from-source`) before the local build/install work, then wait for the prewarm before the recipe exits. This overlaps local work with agent preparation while ensuring chained commands do not race an old background `weft` process. After installing the CLI, `just install` runs the new binary with `--from-source --record-installed-identity`; a successful agent build records the executable-bound identity used outside the source checkout. If that identity has no cached binary for a requested target, Weft builds the target only when the current source has the same identity. Otherwise, rerun `just install` or use both `--from-source` and `--record-installed-identity` so the rebuilt agent and recorded identity change together.
+`just build` and `just install` rebuild the agent binaries: a background
+prewarm runs `weft build-agents --targets linux-amd64 --from-source`, and the
+recipe waits for it before building the CLI. Plain `go build` does NOT rebuild
+the embedded agent binaries — deploying a stale agent produces an error.
 
-The checkout binary and installed CLI intentionally have separate identities:
-`./weft` follows the current source tree, while the installed CLI follows its
-recorded prepared targets. Switching between them after agent source changes
-can redeploy and restart an on-prem runner.
+If no cached binary exists for a host's platform, deployment falls back to a
+native build on the host itself (`BuildOnHostWithProgress`).
 
-If you suspect prewarm/build issues, inspect:
+The checkout binary and installed CLI carry separate identities: `./weft`
+follows the current source tree, while the installed CLI follows its recorded
+prepared targets. Switching between them after agent source changes can
+redeploy and restart an on-prem runner.
+
+If you suspect prewarm/build issues:
 
 ```bash
 tail -n 100 ~/.cache/weft/agent-prewarm.log
