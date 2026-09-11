@@ -214,11 +214,16 @@ func newProvider(db *sql.DB) (*goose.Provider, error) {
 		&goose.GoFunc{RunDB: applyAddJobKillAttribution},
 		&goose.GoFunc{RunDB: dropAddJobKillAttribution},
 	)
+	addJobCPUReserveCores := goose.NewGoMigration(
+		67,
+		&goose.GoFunc{RunDB: applyAddJobCPUReserveCores},
+		&goose.GoFunc{RunDB: dropAddJobCPUReserveCores},
+	)
 	return goose.NewProvider(
 		goose.DialectSQLite3,
 		db,
 		sub,
-		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets, addBugRecurrenceColumns, addJobKillAttribution),
+		goose.WithGoMigrations(baseline, addProbeSeen, addAbandonedAttempts, addMoveIntentTargetHost, addMoveTargetAttempts, addMoveIntentTargetRequest, repairMoveIntentLaunchConfirmTrigger, addResultsVerifyDetail, addCampaignMachineAntiAffinity, repairCampaignAffinityMachines, addLaunchRunpodCloudType, addCheckpointAssetMetadata, addJobSubmitToken, repairCloudStartingJobStatus, optimizeJobStatusLatestAttempt, addExternalSyncWarning, dropSpeculativeHostRegistry, addLaunchDriverVersion, addAgentProtocol, addLaunchNVLinkBandwidth, addJobProgressChangedAt, addExternalCancelIntent, addCancelRequestedAt, addJobSubmitterSession, addJobProjectRoot, addHFPrewarmTransferMetrics, refreshJobStatusForDependencySkips, addRawTelemetryStorage, addEdgeSubmissionProvenance, addEdgeAuthorizedTargets, addBugRecurrenceColumns, addJobKillAttribution, addJobCPUReserveCores),
 		goose.WithDisableGlobalRegistry(true),
 	)
 }
@@ -1240,6 +1245,26 @@ func dropAddEdgeAuthorizedTargets(context.Context, *sql.DB) error {
 	return nil
 }
 
+func applyAddJobCPUReserveCores(ctx context.Context, db *sql.DB) error {
+	exists, err := columnExists(ctx, db, "jobs", "cpu_reserve_cores")
+	if err != nil {
+		return fmt.Errorf("inspect jobs.cpu_reserve_cores: %w", err)
+	}
+	if !exists {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN cpu_reserve_cores INTEGER`); err != nil {
+			return fmt.Errorf("add jobs.cpu_reserve_cores: %w", err)
+		}
+	}
+	if err := recreateAuthoritativeJobStatusView(ctx, db); err != nil {
+		return fmt.Errorf("refresh job status for cpu_reserve_cores: %w", err)
+	}
+	return nil
+}
+
+func dropAddJobCPUReserveCores(context.Context, *sql.DB) error {
+	return nil
+}
+
 // HasPending reports whether any migration has not yet been applied to db.
 func HasPending(ctx context.Context, db *sql.DB) (bool, error) {
 	p, err := newProvider(db)
@@ -1265,7 +1290,7 @@ func Version(ctx context.Context, db *sql.DB) int64 {
 
 // goMigrationVersions enumerates versions implemented as Go migrations.
 // Keep in sync with the goose.WithGoMigrations call in newProvider.
-var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61, 63, 64}
+var goMigrationVersions = []int64{9, 18, 19, 20, 21, 22, 23, 24, 26, 27, 28, 30, 31, 32, 35, 37, 39, 40, 43, 44, 45, 48, 49, 52, 55, 56, 58, 60, 61, 63, 64, 67}
 
 // Target returns the highest migration version this binary knows about — the
 // version a fully-migrated database should report. It is the v1 baseline plus

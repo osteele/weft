@@ -468,6 +468,9 @@ func init() {
 	jobDescribeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES)")
 	jobDescribeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	jobDescribeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	jobDescribeCmd.Flags().IntVar(&describeCPUCores, "cpu-cores", 0, "Set minimum CPU cores/vCPUs for rental placement (0 clears)")
+	jobDescribeCmd.Flags().IntVar(&describeCPUMem, "cpu-mem", 0, "Set host/system RAM floor in GB (0 clears)")
+	jobDescribeCmd.Flags().IntVar(&describeCPUReserve, "cpu-reserve", 0, "Set per-job CPU reservation in cores, normalized on the destination host (0 clears)")
 	jobDescribeCmd.Flags().StringVar(&describeProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 
 	// Flags for job cleanup

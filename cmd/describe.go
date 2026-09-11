@@ -12,16 +12,19 @@ import (
 )
 
 var (
-	describeMessage   string
-	describeProject   string
-	describeDirectory string
-	describeCommand   string
-	describeGPU       string
-	describeGPUs      string
-	describeGPUMem    int
-	describeCPU       int
-	describeGPUClass  string
-	describeProvider  string
+	describeMessage    string
+	describeProject    string
+	describeDirectory  string
+	describeCommand    string
+	describeGPU        string
+	describeGPUs       string
+	describeGPUMem     int
+	describeCPU        int
+	describeCPUCores   int
+	describeCPUMem     int
+	describeCPUReserve int
+	describeGPUClass   string
+	describeProvider   string
 )
 
 var describeCmd = &cobra.Command{
@@ -53,10 +56,13 @@ func init() {
 	describeCmd.Flags().StringVar(&describeProject, "project", "", "Set project name")
 	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory")
 	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command")
-	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
+	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	describeCmd.Flags().IntVar(&describeCPUCores, "cpu-cores", 0, "Set minimum CPU cores/vCPUs for rental placement (0 clears)")
+	describeCmd.Flags().IntVar(&describeCPUMem, "cpu-mem", 0, "Set host/system RAM floor in GB (0 clears)")
+	describeCmd.Flags().IntVar(&describeCPUReserve, "cpu-reserve", 0, "Set per-job CPU reservation in cores, normalized on the destination host (0 clears)")
 	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES)")
 	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
-	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB)")
 	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	describeCmd.Flags().StringVar(&describeProvider, "provider", "", "Cloud provider preference for rental placement (vastai or runpod)")
 }
@@ -86,7 +92,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %s not found", ids.FormatJobID(jobID))
 	}
 	if job.Backend == db.BackendSkyPilot {
-		for _, flag := range []string{"directory", "command", "gpu", "gpus", "gpu-mem", "cpu", "gpu-class", "provider"} {
+		for _, flag := range []string{"directory", "command", "gpu", "gpus", "gpu-mem", "cpu", "cpu-cores", "cpu-mem", "cpu-reserve", "gpu-class", "provider"} {
 			if cmd.Flags().Changed(flag) {
 				return fmt.Errorf("SkyPilot execution fields cannot be changed by Weft; submit a new external job instead")
 			}
@@ -118,13 +124,16 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
 	hasCPU := cmd.Flags().Changed("cpu")
+	hasCPUCores := cmd.Flags().Changed("cpu-cores")
+	hasCPUMem := cmd.Flags().Changed("cpu-mem")
+	hasCPUReserve := cmd.Flags().Changed("cpu-reserve")
 	hasGPUClass := gpuClassValue != ""
 	hasProvider := cmd.Flags().Changed("provider")
 
 	// Check if trying to update command/directory/gpu/allotments on a job that
 	// may already have run.
 	effectiveStatus := job.EffectiveStatus()
-	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasProvider) && effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
+	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasCPUCores || hasCPUMem || hasCPUReserve || hasProvider) && effectiveStatus != db.StatusQueued && effectiveStatus != db.StatusDraft {
 		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued or draft jobs (job %s has status: %s)", ids.FormatJobID(jobID), effectiveStatus)
 	}
 
@@ -262,6 +271,47 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "cpu: cleared")
 		}
 	}
+
+	// Update the CPU placement floor if provided. Like --gpu-mem, the value
+	// lives in the job's CLI resource overrides so retry replays it.
+	if hasCPUCores {
+		if err := setJobCLICPUCoresOverride(database, job, intPtrOrNil(describeCPUCores)); err != nil {
+			return fmt.Errorf("update CPU cores: %w", err)
+		}
+		if describeCPUCores > 0 {
+			updates = append(updates, fmt.Sprintf("cpu-cores: %d", describeCPUCores))
+		} else {
+			updates = append(updates, "cpu-cores: cleared")
+		}
+	}
+
+	// Update the host-RAM floor if provided. The raw pre-headroom value is
+	// stored, matching `weft run --cpu-mem` semantics; RequestedCPUMemGB
+	// applies headroom unless the job is strict.
+	if hasCPUMem {
+		if err := setJobCLICPUMemOverride(database, job, intPtrOrNil(describeCPUMem)); err != nil {
+			return fmt.Errorf("update CPU memory: %w", err)
+		}
+		if describeCPUMem > 0 {
+			updates = append(updates, fmt.Sprintf("cpu-mem: %d GB", describeCPUMem))
+		} else {
+			updates = append(updates, "cpu-mem: cleared")
+		}
+	}
+
+	// Update the per-job CPU reservation (cores) if provided.
+	if hasCPUReserve {
+		reservePtr := intPtrOrNil(describeCPUReserve)
+		if err := db.SetJobCPUReserveCores(database, jobID, reservePtr); err != nil {
+			return fmt.Errorf("update CPU reserve: %w", err)
+		}
+		job.CPUReserveCores = reservePtr
+		if reservePtr != nil {
+			updates = append(updates, fmt.Sprintf("cpu-reserve: %d cores", describeCPUReserve))
+		} else {
+			updates = append(updates, "cpu-reserve: cleared")
+		}
+	}
 	if hasProvider {
 		normalizedProvider, providerErr := normalizeProviderFlag(describeProvider)
 		if providerErr != nil {
@@ -286,7 +336,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	}
 
 	needsRemoteUpdate := effectiveStatus == db.StatusQueued && job.Host != "" &&
-		(hasDescription || cmd.Flags().Changed("project") || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU)
+		(hasDescription || cmd.Flags().Changed("project") || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU || hasCPUCores || hasCPUMem || hasCPUReserve)
 	if needsRemoteUpdate {
 		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
 		if err != nil {

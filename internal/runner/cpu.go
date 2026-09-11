@@ -95,6 +95,23 @@ func (cfg CPUConfig) DefaultGPUAllotment(cpuCount int) int {
 	return pct
 }
 
+// ReserveCoresAllotment normalizes an absolute per-job core reservation
+// against a host's core count: ceil(cores/cpuCount*100). Cores are absolute,
+// so the same reservation yields different percentages on different hosts;
+// the value must be resolved on the destination host at dispatch time. A
+// reservation larger than the host normalizes above 100%, which the
+// admission gate treats as "this job runs alone". cpuCount <= 0 cannot
+// happen on a real host; treat it as "reserve the whole host".
+func ReserveCoresAllotment(cores, cpuCount int) int {
+	if cores <= 0 {
+		return 0
+	}
+	if cpuCount <= 0 {
+		return 100
+	}
+	return (cores*100 + cpuCount - 1) / cpuCount
+}
+
 // SampleCount returns the number of samples to keep in the sliding window.
 func (cfg CPUConfig) SampleCount() int {
 	if cfg.SampleInterval <= 0 {

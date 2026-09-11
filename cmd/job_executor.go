@@ -110,6 +110,7 @@ type queueJobOptions struct {
 	GPUMemMaxGB      *int   // Legacy GPU memory upper metadata; ignored by placement
 	CPUCores         int
 	CPUMemGB         int
+	CPUReserveCores  int
 	Interconnect     string
 	Dependencies     []queueDependency
 	AutoStart        bool
@@ -298,6 +299,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		GPUMemMaxGB:      gpuMemMaxGB,
 		Interconnect:     interconnect,
 		CPUCores:         cpuCores,
+		CPUReserveCores:  opts.CPUReserveCores,
 		DepSpec:          encodeQueueDependencies(opts.Dependencies),
 		Inputs:           opts.Inputs,
 		BestEffortInputs: opts.BestEffortInputs,

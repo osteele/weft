@@ -151,6 +151,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--nvlink-required`: Alias for `--interconnect nvlink`
 - `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
+- `--cpu-reserve N`: Reserve N CPU cores for this job on whichever host runs it. Cores are absolute; the runner normalizes them to a percent of the destination host's cores (rounded up), so the same reservation is portable across hosts. A percent allotment set later with `weft job describe --cpu` wins over the reservation.
 - `--provider vastai|runpod`: Restrict rental placement to one cloud provider. Use this for provider-specific testing; omit it for normal automatic provider selection.
 - `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
 - `--max-hourly-rate USD`: Reject rental offers whose total recurring rate, including storage for the requested disk size, exceeds this amount. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
@@ -2087,11 +2088,23 @@ After a two-minute warm-up, the runner observes each job's full process tree and
 adapts its CPU allotment when persistent 15-second samples show sustained over-
 or under-use. This can release capacity for another queued job without treating
 a short startup spike as steady demand.
-NVIDIA GPU jobs must also obtain compatible device capacity and VRAM headroom.
+GPU jobs must also obtain compatible device capacity and VRAM headroom.
 The CPU gate still applies to them, with a smaller default allotment for
 GPU-bound work. The runner does not measure or reserve Apple/MPS utilization.
 CPU allotments and NVIDIA GPU memory reservations can be set via
 `weft job describe --cpu <percent>` and `--gpu-mem <gb>`.
+
+A job submitted with `--cpu-reserve N` normalizes N absolute cores against
+the cores of the host that runs the job (rounded up to a percent), so the
+reservation survives requeue, restart, and `weft job describe` edits and is
+re-normalized if the job lands on a different host. An explicit
+`--cpu <percent>` overrides the normalized reservation; without either, the
+runner applies its per-job default.
+`weft job describe` can also edit the placement floors after submission:
+`--cpu-cores N` (rental core floor, `0` clears), `--cpu-mem GB` (host-RAM
+floor; the stored value is pre-headroom, so placement adds 2 GB unless the
+job is strict), and `--cpu-reserve N` (`0` clears). All three flow into the
+remote queue entry for queued jobs.
 
 `exclusive` and `benchmark-isolation` jobs run alone. A benchmark job also
 waits for consecutive idle checks covering CPU and RAM, plus NVIDIA GPU

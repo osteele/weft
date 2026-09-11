@@ -127,6 +127,7 @@ var (
 	runGPUMemStrict             bool
 	runInterconnect             string
 	runCPUCores                 int
+	runCPUReserve               int
 	runCPUMem                   int
 	runCPUMemStrict             bool
 	runDiskGB                   int
@@ -558,6 +559,7 @@ func init() {
 	runCmd.Flags().IntVar(&runCPUCores, "cpu-cores", 0, "Minimum effective CPU cores/vCPUs for rental placement")
 	runCmd.Flags().IntVar(&runCPUMem, "cpu-mem", 0, "Minimum host/system RAM in GB; filters rental offers and gates on-prem hosts")
 	runCmd.Flags().BoolVar(&runCPUMemStrict, "cpu-mem-strict", false, "Use exact cpu-mem matching without default safety headroom")
+	runCmd.Flags().IntVar(&runCPUReserve, "cpu-reserve", 0, "Per-job CPU reservation in cores, normalized on the destination host (e.g. 2 reserves 2 of the host's cores)")
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().IntVar(&runDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB (may lower the request below the estimate)")
@@ -1204,11 +1206,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runGPUCount < 0 {
 		return fmt.Errorf("--gpus must be >= 1")
 	}
-	if runCPUCores < 0 {
-		return fmt.Errorf("--cpu-cores must be >= 1")
-	}
-	if runCPUMem < 0 {
-		return fmt.Errorf("--cpu-mem must be >= 1")
+	if err := validateRunResourceFlags(runCPUCores, runCPUMem, runCPUReserve); err != nil {
+		return err
 	}
 	var normalizeErr error
 	runInterconnect, normalizeErr = normalizeInterconnect(runInterconnect)
@@ -1510,6 +1509,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Inputs:           runInputs,
 			Payloads:         capturedPayloads,
 			BestEffortInputs: bestEffortInputs,
+			CPUReserveCores:  runCPUReserve,
 			Outputs:          runOutputs,
 			OutputDirs:       outputDirs,
 			Produces:         runProduces,
@@ -1988,6 +1988,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			CPUMemGB:         db.EffectiveCPUMemGB(runCPUMem, runCPUMemStrict),
 			Interconnect:     runInterconnect,
 			Dependencies:     deps,
+			CPUReserveCores:  runCPUReserve,
 			AutoStart:        true,
 			Inputs:           runInputs,
 			BestEffortInputs: bestEffortInputs,
@@ -3270,6 +3271,23 @@ func bestEffortAutoDetectedInputs(finalInputs, autoDetectedInputs, explicitInput
 		}
 	}
 	return bestEffort
+}
+
+// validateRunResourceFlags checks the CPU-related resource flags for
+// malformed values. --cpu-reserve and --cpu are not in conflict here: a
+// percent allotment can only be set after submission (weft describe), not on
+// this command.
+func validateRunResourceFlags(cpuCores, cpuMem, cpuReserve int) error {
+	if cpuCores < 0 {
+		return fmt.Errorf("--cpu-cores must be >= 1")
+	}
+	if cpuMem < 0 {
+		return fmt.Errorf("--cpu-mem must be >= 1")
+	}
+	if cpuReserve < 0 {
+		return fmt.Errorf("--cpu-reserve must be >= 0")
+	}
+	return nil
 }
 
 // intPtrOrNil returns a pointer to v if v > 0, or nil otherwise.

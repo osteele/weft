@@ -59,6 +59,7 @@ type CommandJob struct {
 	GPUMem           *int            `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
 	Interconnect     string          `json:"interconnect,omitempty"`
 	CPUCores         int             `json:"cpu_cores,omitempty"`
+	CPUReserveCores  int             `json:"cpu_reserve_cores,omitempty"` // absolute per-job CPU reservation in cores, normalized to percent by the runner host
 	RAMReservationKB int64           `json:"ram_reservation_kb,omitempty"`
 	WallTimeSeconds  int             `json:"wall_time_seconds,omitempty"`
 	Tags             []string        `json:"tags,omitempty"`
@@ -115,6 +116,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			GPUMem:           entry.GPUMemGB,
 			Interconnect:     entry.Interconnect,
 			CPUCores:         entry.CPUCores,
+			CPUReserveCores:  entry.CPUReserveCores,
 			RAMReservationKB: entry.RAMReservationKB,
 			WallTimeSeconds:  entry.WallTimeSeconds,
 			Tags:             entry.Tags,

@@ -129,6 +129,62 @@ func TestRunDescribeRejectsExternalExecutionFieldMutation(t *testing.T) {
 	}
 }
 
+func TestRunDescribeUpdatesCPUResourceEdits(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordDraftJob(database, "", "/tmp/project", "echo old", "draft", "", "")
+	if err != nil {
+		t.Fatalf("record draft job: %v", err)
+	}
+
+	resetDescribeState()
+	t.Cleanup(resetDescribeState)
+	cmd := newDescribeTestCommand()
+	for flag, value := range map[string]string{"cpu-cores": "8", "cpu-mem": "32", "cpu-reserve": "2"} {
+		if err := cmd.Flags().Set(flag, value); err != nil {
+			t.Fatalf("set %s flag: %v", flag, err)
+		}
+	}
+	captureStdout(t, func() {
+		if err := runDescribe(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runDescribe: %v", err)
+		}
+	})
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.RequestedCPUCores() != 8 {
+		t.Fatalf("RequestedCPUCores = %d, want 8", job.RequestedCPUCores())
+	}
+	if job.RequestedCPUMemGB() != 32+db.CPUMemHeadroomGB {
+		t.Fatalf("RequestedCPUMemGB = %d, want %d", job.RequestedCPUMemGB(), 32+db.CPUMemHeadroomGB)
+	}
+	if job.CPUReserveCores == nil || *job.CPUReserveCores != 2 {
+		t.Fatalf("CPUReserveCores = %#v, want 2", job.CPUReserveCores)
+	}
+
+	// A zero value clears the reservation.
+	resetDescribeState()
+	cmd = newDescribeTestCommand()
+	if err := cmd.Flags().Set("cpu-reserve", "0"); err != nil {
+		t.Fatalf("set cpu-reserve flag: %v", err)
+	}
+	captureStdout(t, func() {
+		if err := runDescribe(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runDescribe clear: %v", err)
+		}
+	})
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after clear: %v", err)
+	}
+	if job.CPUReserveCores != nil {
+		t.Fatalf("CPUReserveCores after clear = %#v, want nil", job.CPUReserveCores)
+	}
+}
+
 func resetDescribeState() {
 	describeMessage = ""
 	describeProject = ""
@@ -138,6 +194,9 @@ func resetDescribeState() {
 	describeGPUs = ""
 	describeGPUMem = 0
 	describeCPU = 0
+	describeCPUCores = 0
+	describeCPUMem = 0
+	describeCPUReserve = 0
 	describeGPUClass = ""
 	describeProvider = ""
 }
@@ -152,6 +211,9 @@ func newDescribeTestCommand() *cobra.Command {
 	cmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs")
 	cmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	cmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	cmd.Flags().IntVar(&describeCPUCores, "cpu-cores", 0, "Set minimum CPU cores/vCPUs for rental placement")
+	cmd.Flags().IntVar(&describeCPUMem, "cpu-mem", 0, "Set host/system RAM floor in GB")
+	cmd.Flags().IntVar(&describeCPUReserve, "cpu-reserve", 0, "Set per-job CPU reservation in cores")
 	cmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation")
 	cmd.Flags().StringVar(&describeProvider, "provider", "", "Cloud provider preference for rental placement")
 	return cmd

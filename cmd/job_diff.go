@@ -68,6 +68,7 @@ type normalizedJobRecord struct {
 	GPUMemMaxGB          *int                        `json:"gpu_mem_max_gb,omitempty"`
 	MaxComputeCap        string                      `json:"max_compute_cap,omitempty"`
 	CPUAllotment         *int                        `json:"cpu_allotment,omitempty"`
+	CPUReserveCores      *int                        `json:"cpu_reserve_cores,omitempty"`
 	Priority             int                         `json:"priority,omitempty"`
 	Env                  []string                    `json:"env,omitempty"`
 	Tags                 []string                    `json:"tags,omitempty"`
@@ -219,6 +220,7 @@ func normalizeJobRecord(job *db.Job, attempts []db.JobAttempt) *normalizedJobRec
 		GPUMemMaxGB:          job.GPUMemMaxGB,
 		MaxComputeCap:        job.MaxComputeCap,
 		CPUAllotment:         job.CPUAllotment,
+		CPUReserveCores:      job.CPUReserveCores,
 		Priority:             job.Priority,
 		Env:                  redactEnvVars(job.EnvVars),
 		Tags:                 sortedCopy(job.Tags),
@@ -291,6 +293,7 @@ func diffNormalizedJobs(a, b *normalizedJobRecord) jobDiffRecord {
 		{"gpu_mem_max_gb", a.GPUMemMaxGB, b.GPUMemMaxGB},
 		{"max_compute_cap", a.MaxComputeCap, b.MaxComputeCap},
 		{"cpu_allotment", a.CPUAllotment, b.CPUAllotment},
+		{"cpu_reserve_cores", a.CPUReserveCores, b.CPUReserveCores},
 		{"priority", a.Priority, b.Priority},
 		{"env", a.Env, b.Env},
 		{"tags", a.Tags, b.Tags},

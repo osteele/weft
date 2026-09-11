@@ -185,3 +185,28 @@ func TestNewAddCommandCarriesRAMReservation(t *testing.T) {
 		t.Fatalf("RAMReservationKB = %v, want 123456", cmd.Job)
 	}
 }
+
+func TestNewAddCommandCarriesCPUReserveCores(t *testing.T) {
+	cmd := NewAddCommand(QueueEntry{JobID: 42, Command: "true", CPUReserveCores: 2})
+	if cmd.Job == nil || cmd.Job.CPUReserveCores != 2 {
+		t.Fatalf("CPUReserveCores = %v, want 2", cmd.Job)
+	}
+
+	data, err := json.Marshal(cmd.Job)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"cpu_reserve_cores":2`) {
+		t.Fatalf("payload missing cpu_reserve_cores: %s", data)
+	}
+
+	// Zero means "no reservation" and is omitted, so older agents that
+	// ignore unknown fields are unaffected.
+	legacy, err := json.Marshal(NewAddCommand(QueueEntry{JobID: 43, Command: "true"}).Job)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if strings.Contains(string(legacy), "cpu_reserve_cores") {
+		t.Fatalf("zero reserve must be omitted from the wire payload: %s", legacy)
+	}
+}

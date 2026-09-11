@@ -108,6 +108,15 @@ entity Job {
     -- the CLI.
     cpu_allotment: Integer?
 
+    -- Absolute per-job CPU reservation in cores, declared at submission via
+    -- `weft run --cpu-reserve`. Unlike cpu_allotment (destination-relative
+    -- percent) and cpu_cores (a placement floor matched against the
+    -- submitting host list), this value is portable across hosts: the runner
+    -- normalizes it against the destination's core count at dispatch.
+    -- Persists across requeue, restart, and `weft job describe` edits;
+    -- value 0 or null means "no reservation".
+    cpu_reserve_cores: Integer?
+
     -- Placement
     host: Host?
     target_kind: TargetKind
@@ -2047,11 +2056,18 @@ rule QueueRunnerDispatch {
 
     -- CPU capacity gate: the sum of local allotments for running jobs plus
     -- the initial allotment for the candidate must not exceed the host target.
-    -- This applies to CPU and GPU jobs. An unset CPU allotment is derived from
-    -- default_cpu_allotment_cores for ordinary jobs or
-    -- default_gpu_cpu_allotment_cores for GPU jobs. Measured one-minute host
-    -- load at or above host_load_ceiling blocks every new start independently
-    -- of declared allotments.
+    -- This applies to CPU and GPU jobs. The candidate's initial allotment is
+    -- resolved in precedence order: an explicit cpu_allotment percent wins;
+    -- otherwise a cpu_reserve_cores reservation is normalized against this
+    -- host's core count as ceil(cores / host_cores * 100), so a reservation
+    -- larger than the host normalizes above 100% and the job runs alone;
+    -- otherwise the allotment is derived from default_cpu_allotment_cores
+    -- for ordinary jobs or default_gpu_cpu_allotment_cores for GPU jobs.
+    -- The reservation is a property of the job, so it survives requeue and
+    -- describe edits and re-normalizes if placement moves the job to a host
+    -- with a different core count. Measured one-minute host load at or above
+    -- host_load_ceiling blocks every new start independently of declared
+    -- allotments.
 
     -- RAM capacity gate: reserve max(effective declared cpu_mem,
     -- predicted peak-RSS upper bound). Live host usage already includes the

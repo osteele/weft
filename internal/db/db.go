@@ -63,6 +63,7 @@ type Job struct {
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	GPUClass             string // GPU class name (e.g., "A100") — resolved to device at runtime
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
+	CPUReserveCores      *int   // Per-job CPU reservation in absolute cores; normalized to percent on the host that runs the job (nil/0 = none)
 	GPUMemGB             *int   // GPU memory reservation in GB per device (nil = use default)
 	GPUMemMaxGB          *int   // Legacy GPU memory upper metadata; ignored by placement
 	MaxComputeCap        string // CUDA compute-capability cap: "" = unresolved, placement.MaxComputeCapAny = unbounded, "X.Y" = numeric
@@ -343,6 +344,18 @@ func (j *Job) RequestedCPUCores() int {
 	return *j.CLIResourceOverrides.CPUCores
 }
 
+// RequestedCPUReserveCores returns the absolute per-job CPU reservation in
+// cores, or 0 when none was declared. Unlike RequestedCPUCores — a placement
+// floor matched against the host list at submit time — this value is
+// normalized against whichever host actually runs the job, so consumers must
+// resolve it at dispatch, not before placement.
+func (j *Job) RequestedCPUReserveCores() int {
+	if j == nil || j.CPUReserveCores == nil || *j.CPUReserveCores < 0 {
+		return 0
+	}
+	return *j.CPUReserveCores
+}
+
 // CPUMemHeadroomGB is the safety margin added to a non-strict --cpu-mem
 // declaration: host-RAM transients (e.g. multi-copy weight processing during
 // model load) spike above steady-state, so the placement floor sits a little
@@ -530,7 +543,7 @@ type PlacementMeta struct {
 	RunnerUpScore       float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked, edge_authorized_targets`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, priority, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, gpu, gpu_class, cpu_allotment, cpu_reserve_cores, gpu_mem_gb, gpu_mem_max_gb, max_compute_cap, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, cli_overrides, launch_id, campaign_job_index, latest_run_id, placement_blocked, edge_authorized_targets`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -2683,6 +2696,11 @@ func SetJobCPUAllotment(db dbExecer, jobID int64, allotment *int) error {
 	return setJobNullableInt(db, jobID, "cpu_allotment", allotment)
 }
 
+// SetJobCPUReserveCores updates the per-job CPU reservation in cores (nil clears it).
+func SetJobCPUReserveCores(db dbExecer, jobID int64, cores *int) error {
+	return setJobNullableInt(db, jobID, "cpu_reserve_cores", cores)
+}
+
 // SetJobGPUMemGB updates the GPU memory reservation in GB per device (nil clears it).
 func SetJobGPUMemGB(db dbExecer, jobID int64, gpuMemGB *int) error {
 	return setJobNullableInt(db, jobID, "gpu_mem_gb", gpuMemGB)
@@ -3559,6 +3577,7 @@ type jobScanFields struct {
 	gpu              sql.NullString
 	gpuClass         sql.NullString
 	cpuAllotment     sql.NullInt64
+	cpuReserveCores  sql.NullInt64
 	gpuMemGB         sql.NullInt64
 	gpuMemMaxGB      sql.NullInt64
 	maxComputeCap    sql.NullString
@@ -3606,7 +3625,7 @@ func (f *jobScanFields) scanDests(j *Job) []any {
 		&f.priority, &f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
 		&j.Status, &f.errorMsg, &f.backend, &f.remoteID, &f.remoteState,
 		&f.failureReason, &f.gpu, &f.gpuClass,
-		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB, &f.maxComputeCap,
+		&f.cpuAllotment, &f.cpuReserveCores, &f.gpuMemGB, &f.gpuMemMaxGB, &f.maxComputeCap,
 		&f.envVars, &f.tags, &f.depSpec,
 		&f.inputs, &f.observedInputs, &f.outputs, &f.outputDirs,
 		&f.produces, &f.needs, &f.project, &f.tombstoned,
@@ -3657,6 +3676,10 @@ func (f *jobScanFields) populateJob(j *Job) {
 	if f.cpuAllotment.Valid {
 		val := int(f.cpuAllotment.Int64)
 		j.CPUAllotment = &val
+	}
+	if f.cpuReserveCores.Valid {
+		val := int(f.cpuReserveCores.Int64)
+		j.CPUReserveCores = &val
 	}
 	if f.gpuMemGB.Valid {
 		val := int(f.gpuMemGB.Int64)

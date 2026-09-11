@@ -78,6 +78,14 @@ func cloneCLIResourceOverrides(source *db.CLIResourceOverrides) *db.CLIResourceO
 		v := *source.CPUCores
 		clone.CPUCores = &v
 	}
+	if source.CPUMemGB != nil {
+		v := *source.CPUMemGB
+		clone.CPUMemGB = &v
+	}
+	if source.CPUMemStrict != nil {
+		v := *source.CPUMemStrict
+		clone.CPUMemStrict = &v
+	}
 	return &clone
 }
 
@@ -111,6 +119,18 @@ func setJobCLIGPUMemOverride(database restartExecer, job *db.Job, gpuMemGB *int)
 		// headroom again on every later retry.
 		strict := true
 		snap.GPUMemStrict = &strict
+	})
+}
+
+func setJobCLICPUCoresOverride(database restartExecer, job *db.Job, cpuCores *int) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.CPUCores = cloneIntPtr(cpuCores)
+	})
+}
+
+func setJobCLICPUMemOverride(database restartExecer, job *db.Job, cpuMemGB *int) error {
+	return updateJobCLIResourceOverrides(database, job, func(snap *db.CLIResourceOverrides) {
+		snap.CPUMemGB = cloneIntPtr(cpuMemGB)
 	})
 }
 

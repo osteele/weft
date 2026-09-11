@@ -676,6 +676,9 @@ func formatResourceRequest(job *db.Job) string {
 	if job.GPUMemGB != nil {
 		parts = append(parts, fmt.Sprintf("≥%dGB", *job.GPUMemGB))
 	}
+	if job.CPUReserveCores != nil && *job.CPUReserveCores > 0 {
+		parts = append(parts, fmt.Sprintf("cpu-reserve %dc", *job.CPUReserveCores))
+	}
 	return strings.Join(parts, " ")
 }
 

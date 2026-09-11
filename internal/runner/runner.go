@@ -1851,9 +1851,14 @@ func (r *Runner) warmupActive() bool {
 }
 
 func (r *Runner) jobAllotment(job *opsqueue.CommandJob) int {
-	// Check explicit CPU field
+	// Explicit CPU percent wins: it is already destination-relative.
 	if job.CPU != nil && *job.CPU > 0 {
 		return *job.CPU
+	}
+	// An explicit core reservation is absolute, so normalize it against
+	// this host's core count.
+	if job.CPUReserveCores > 0 {
+		return ReserveCoresAllotment(job.CPUReserveCores, r.cpuCount)
 	}
 	// GPU jobs get a lower default (GPU-bound, need fewer CPU cores)
 	if job.GPU != "" || job.GPUClass != "" || job.GPUMem != nil {

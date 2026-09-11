@@ -1491,6 +1491,7 @@ func resetRunGlobals(t *testing.T) {
 	runGPUMemStrict = false
 	runInterconnect = ""
 	runCPUCores = 0
+	runCPUReserve = 0
 	runCPUMem = 0
 	runCPUMemStrict = false
 	runDiskGB = 0
@@ -1511,6 +1512,17 @@ func resetRunGlobals(t *testing.T) {
 	runSecretVars = nil
 	runPayloads = nil
 	validateRentalJobImageFunc = campaign.ValidateJobImageAvailability
+}
+
+// Resource flags must stay registered on `weft run`: the cpu-reserve
+// addition once displaced the cpu-mem registration, which made every
+// `--cpu-mem` invocation fail with an unknown-flag error.
+func TestRunCmdRegistersResourceFlags(t *testing.T) {
+	for _, name := range []string{"cpu-cores", "cpu-mem", "cpu-mem-strict", "cpu-reserve", "interconnect"} {
+		if flag := runCmd.Flags().Lookup(name); flag == nil {
+			t.Fatalf("run flag %q not registered", name)
+		}
+	}
 }
 
 func TestBestEffortAutoDetectedInputsExcludesExplicitRefs(t *testing.T) {
@@ -1582,5 +1594,28 @@ func TestNormalizeInterconnectAcceptsUniform(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nvlink-uniform") {
 		t.Fatalf("error %q does not name nvlink-uniform", err)
+	}
+}
+
+func TestValidateRunResourceFlags(t *testing.T) {
+	if err := validateRunResourceFlags(4, 32, 2); err != nil {
+		t.Fatalf("valid values rejected: %v", err)
+	}
+	for _, tt := range []struct {
+		name             string
+		cpuCores, cpuMem int
+		cpuReserve       int
+		want             string
+	}{
+		{"negative cpu-cores", -1, 0, 0, "--cpu-cores"},
+		{"negative cpu-mem", 0, -1, 0, "--cpu-mem"},
+		{"negative cpu-reserve", 0, 0, -1, "--cpu-reserve"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRunResourceFlags(tt.cpuCores, tt.cpuMem, tt.cpuReserve)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validateRunResourceFlags() = %v, want %s error", err, tt.want)
+			}
+		})
 	}
 }

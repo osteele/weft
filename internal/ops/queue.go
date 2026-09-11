@@ -101,6 +101,7 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		GPUMemGB:         job.GPUMemGB,
 		Interconnect:     job.RequestedInterconnect(),
 		CPUCores:         job.RequestedCPUCores(),
+		CPUReserveCores:  job.RequestedCPUReserveCores(),
 		RAMReservationKB: jobRAMReservationKB(job),
 		WallTimeSeconds:  int(job.WallTime() / time.Second),
 		Tags:             job.Tags,
@@ -225,24 +226,25 @@ func pinnedQueueSourceManifest(job *db.Job) (*opsqueue.SourceManifest, bool, err
 
 // QueueJobParams contains parameters for queueing a new job
 type QueueJobParams struct {
-	Host         string
-	WorkingDir   string
-	Command      string
-	Description  string
-	Project      string
-	EnvVars      []string
-	Tags         []string
-	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
-	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
-	GPUCount     int    // Exact GPU count requested on this host
-	GPUMemGB     *int   // GPU memory reservation in GB per device
-	Interconnect string
-	CPUCores     int
-	GPUMemMaxGB  *int // Legacy GPU memory upper metadata; ignored by placement
-	DepSpec      string
-	CPUAllotment *int
-	OutputDirs   []string // convention-based output directories from .weft.toml
-	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
+	Host            string
+	WorkingDir      string
+	Command         string
+	Description     string
+	Project         string
+	EnvVars         []string
+	Tags            []string
+	GPU             string // Explicit GPU setting; if empty, extracted from EnvVars
+	GPUClass        string // GPU class name (e.g., "A100") — resolved to device at runtime
+	GPUCount        int    // Exact GPU count requested on this host
+	GPUMemGB        *int   // GPU memory reservation in GB per device
+	Interconnect    string
+	CPUCores        int
+	CPUReserveCores int  // absolute cores; normalized to a percent of the destination host at dispatch
+	GPUMemMaxGB     *int // Legacy GPU memory upper metadata; ignored by placement
+	DepSpec         string
+	CPUAllotment    *int
+	OutputDirs      []string // convention-based output directories from .weft.toml
+	Inputs          []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
 	// BestEffortInputs are inputs that came only from source/command auto-detection.
 	// Failed cloud prewarm for these refs warns and continues.
 	BestEffortInputs []string
@@ -461,6 +463,12 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 	if params.CPUAllotment != nil {
 		if err := db.SetJobCPUAllotment(tx, jobID, params.CPUAllotment); err != nil {
 			return 0, fmt.Errorf("record CPU allotment: %w", err)
+		}
+	}
+	if params.CPUReserveCores > 0 {
+		reserve := params.CPUReserveCores
+		if err := db.SetJobCPUReserveCores(tx, jobID, &reserve); err != nil {
+			return 0, fmt.Errorf("record CPU reserve cores: %w", err)
 		}
 	}
 	if gpuMemGB != nil {
