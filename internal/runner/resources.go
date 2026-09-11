@@ -232,7 +232,9 @@ func HostMemoryStatsKB() (totalKB, usedKB, availableKB int64) {
 
 // HostLoadAvg1 returns the system 1-minute load average (the same value
 // surfaced by `uptime`). Returns 0 if it cannot be determined. Used by the
-// agent heartbeat so the dashboard can render a CPU bar for cloud rentals.
+// runner's host load gate and measured-load admission.
+var hostLoadAvg1 = HostLoadAvg1
+
 func HostLoadAvg1() float64 {
 	if runtime.GOOS == "linux" {
 		data, err := os.ReadFile("/proc/loadavg")

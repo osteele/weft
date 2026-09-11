@@ -429,6 +429,9 @@ type pendingStartDecision struct {
 	benchmarkIdleReason string
 	resolvedGPUDevices  []string
 	waitedForPostJob    bool
+	// allotment is the reservation granted by the admission decision;
+	// zero means startJob computes the default estimate.
+	allotment int
 }
 
 func (r *Runner) evaluatePendingJob(jobID int64, waitForPostJob bool) (pendingStartDecision, bool) {
@@ -491,8 +494,22 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 		currentAllotment := r.state.TotalAllotment()
 		nextAllotment := r.jobAllotment(job)
 		if currentAllotment+nextAllotment > r.cpuConfig.HostUtilizationTarget {
-			decision.reason = fmt.Sprintf("cpu gate: %d%% + %d%% > %d%% target", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget)
-			return decision
+			// Idle running jobs hold their decayed reservations
+			// indefinitely, so floor-saturated books (three 10% floors plus
+			// a default estimate, for example) would wedge the queue while
+			// the host is measured-idle. A default-estimated candidate may
+			// start at the largest reservation the books afford; explicit
+			// percent and core-reserve declarations are never reduced.
+			// Post-warmup observation refines the granted reservation, and
+			// the host load gate still caps real overload.
+			admitted := false
+			if (job.CPU == nil || *job.CPU <= 0) && job.CPUReserveCores <= 0 {
+				admitted = r.tryMeasuredLoadAdmission(&decision, currentAllotment, nextAllotment)
+			}
+			if !admitted {
+				decision.reason = fmt.Sprintf("cpu gate: %d%% + %d%% > %d%% target", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget)
+				return decision
+			}
 		}
 	}
 
@@ -501,7 +518,7 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 	// BLAS/OMP overdraft beyond declared cores, and any other source of
 	// load the per-job CPU allotment system has no visibility into.
 	if r.cpuConfig.HostLoadCeiling > 0 && r.cpuCount > 0 {
-		loadPct := int((HostLoadAvg1() * 100.0) / float64(r.cpuCount))
+		loadPct := int((hostLoadAvg1() * 100.0) / float64(r.cpuCount))
 		if loadPct >= r.cpuConfig.HostLoadCeiling {
 			decision.reason = fmt.Sprintf("host load gate: %d%% >= %d%% ceiling (1-min loadavg / %d cores)", loadPct, r.cpuConfig.HostLoadCeiling, r.cpuCount)
 			return decision
@@ -556,6 +573,29 @@ func (r *Runner) evaluateLoadedPendingJob(jobID int64, job *opsqueue.CommandJob,
 	decision.canStart = true
 	decision.resolvedGPUDevices = resolvedGPUDevices
 	return decision
+}
+
+// tryMeasuredLoadAdmission admits a default-estimated candidate that the
+// allotment books cannot fit: it starts at the largest reservation the
+// books afford (never below MinAllotment) and only when measured 1-minute
+// host load is under the utilization target. On success it records the
+// granted reservation on the decision.
+func (r *Runner) tryMeasuredLoadAdmission(decision *pendingStartDecision, currentAllotment, nextAllotment int) bool {
+	if r.cpuConfig.HostLoadCeiling <= 0 || r.cpuCount <= 0 {
+		return false
+	}
+	loadPct := int((hostLoadAvg1() * 100.0) / float64(r.cpuCount))
+	if loadPct >= r.cpuConfig.HostUtilizationTarget {
+		return false
+	}
+	headroom := r.cpuConfig.HostUtilizationTarget - currentAllotment
+	if headroom < r.cpuConfig.MinAllotment {
+		return false
+	}
+	granted := min(nextAllotment, headroom)
+	decision.allotment = granted
+	oplog.LogJob("job.measured_load_admission", decision.jobID, "", oplog.WithDetailf("books=%d+%d target=%d load=%d%% granted=%d", currentAllotment, nextAllotment, r.cpuConfig.HostUtilizationTarget, loadPct, granted))
+	return true
 }
 
 func (r *Runner) requeueUnreadablePending(jobID int64) {
@@ -665,7 +705,7 @@ func (r *Runner) startPendingJob(decision pendingStartDecision) {
 	job := decision.job
 	// Start the job
 	slog.Info("job starting", "component", "runner", "job_id", jobID, "running_count", r.state.RunningCount(), "gpu_class", job.GPUClass, "resolved_gpu", decision.resolvedGPUDevices)
-	err := r.startJob(jobID, job, decision.resolvedGPUDevices)
+	err := r.startJob(jobID, job, decision.resolvedGPUDevices, decision.allotment)
 	if err == errRequeue {
 		slog.Debug("job requeued", "component", "runner", "job_id", jobID)
 		r.state.AddPending(jobID)
@@ -757,7 +797,9 @@ func (s *processDeadlineState) finish() bool {
 	return timedOut
 }
 
-func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUDevices []string) error {
+// An optional reservedAllotment from the admission decision (measured-load
+// admission) overrides the default estimate in jobAllotment.
+func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUDevices []string, reservedAllotment ...int) error {
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	command := job.Cmd
 	if command == "" {
@@ -1032,7 +1074,13 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	// before entering the synchronous setup command so status transports do
 	// not keep reporting the old pending snapshot for the duration of a slow
 	// environment build.
-	allotment := r.jobAllotment(job)
+	allotment := 0
+	if len(reservedAllotment) > 0 {
+		allotment = reservedAllotment[0]
+	}
+	if allotment <= 0 {
+		allotment = r.jobAllotment(job)
+	}
 	gpuMemGB := GetJobGPUMem(job, DefaultGPUMemGB)
 	telemetryPolicy := TelemetryPolicyForJob(job)
 	r.state.AddRunning(jobIDStr, RunningJobState{

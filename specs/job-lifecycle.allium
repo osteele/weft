@@ -2068,6 +2068,19 @@ rule QueueRunnerDispatch {
     -- with a different core count. Measured one-minute host load at or above
     -- host_load_ceiling blocks every new start independently of declared
     -- allotments.
+    --
+    -- Measured-load admission: when the bookkeeping gate blocks a candidate
+    -- that declared neither cpu_allotment nor cpu_reserve_cores (a default
+    -- estimate), and measured one-minute host load is below
+    -- host_cpu_utilization_target, the runner admits the candidate at
+    -- min(initial estimate, target - running sum), never below
+    -- min_cpu_allotment. If the affordable amount is below min_cpu_allotment,
+    -- or the host is measured busy, the candidate waits. Admission keeps the
+    -- running sum at or under the target; post-warmup observation
+    -- (AdaptiveCPUAllotment) refines the granted reservation. Sampling does
+    -- not run during a job's synchronous setup phase, so a quiet setup is
+    -- never counted as idleness and a large-model load after startup raises
+    -- the reservation instead of having had it decayed away.
 
     -- RAM capacity gate: reserve max(effective declared cpu_mem,
     -- predicted peak-RSS upper bound). Live host usage already includes the
@@ -2103,6 +2116,12 @@ rule QueueRunnerDispatch {
     -- adaptive increases on currently running jobs), the runner does
     -- NOT preempt — it simply refuses to start additional jobs until
     -- the sum drops below the target again.
+    -- This no-preemption guidance is unchanged, but a default-estimated
+    -- candidate blocked only by bookkeeping may start under measured-load
+    -- admission (see the CPU capacity gate above): idle running jobs hold
+    -- decayed reservations indefinitely, and without this the queue wedges
+    -- once enough floor reservations accumulate, even on a measured-idle
+    -- host.
     --
     -- Shared hosts: the exclusivity rule applies only to our own
     -- jobs. Other users' jobs on the same GPU are tolerated; we do

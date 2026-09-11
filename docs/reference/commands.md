@@ -2106,6 +2106,15 @@ floor; the stored value is pre-headroom, so placement adds 2 GB unless the
 job is strict), and `--cpu-reserve N` (`0` clears). All three flow into the
 remote queue entry for queued jobs.
 
+When the allotment books cannot fit a candidate that declared neither
+`--cpu <percent>` nor `--cpu-reserve` (a default estimate), the runner admits
+it at the largest reservation the books afford, never below the 10% minimum,
+while measured one-minute load is below the utilization target. Sampling does
+not run during a job's setup phase, so a quiet setup is not counted as
+idleness; a job that loads a large model after startup keeps its granted
+reservation until real use is observed, and sustained use then raises it. The
+host-load ceiling still caps overload.
+
 `exclusive` and `benchmark-isolation` jobs run alone. A benchmark job also
 waits for consecutive idle checks covering CPU and RAM, plus NVIDIA GPU
 utilization and VRAM when `nvidia-smi` is available. Apple/MPS utilization is
