@@ -124,23 +124,23 @@ func createSourceTarballWithWorkers(localDir string, excludes, overlayInputs []s
 			if err != nil {
 				return fmt.Errorf("read symlink %s: %w", relPath, err)
 			}
+			if !symlinkTargetWithinRoot(slashRelPath, filepath.ToSlash(linkTarget)) {
+				// Out-of-root link (absolute target, or a relative one
+				// leaving the tree): snapshot the target's content instead
+				// of the link. The extractor rejects escaping links, and a
+				// preserved link would dangle on the remote host anyway.
+				externalInfo, err := os.Stat(path)
+				if err != nil {
+					return fmt.Errorf("symlink %s -> %s: %w (out-of-tree symlink targets must exist to be snapshotted)", relPath, linkTarget, err)
+				}
+				return snapshotExternalTarget(tw, path, slashRelPath, externalInfo, map[string]struct{}{}, 1, &totalBytes, maxBytes, excludes)
+			}
 		}
 
-		header, err := tar.FileInfoHeader(info, linkTarget)
+		header, err := newCanonicalTarHeader(slashRelPath, info, linkTarget)
 		if err != nil {
 			return fmt.Errorf("file info header for %s: %w", relPath, err)
 		}
-		header.Name = slashRelPath
-		// Zero out timestamps/uid/gid for deterministic hashing —
-		// identical source content produces the same tarball hash
-		// regardless of when files were modified.
-		header.ModTime = time.Time{}
-		header.AccessTime = time.Time{}
-		header.ChangeTime = time.Time{}
-		header.Uid = 0
-		header.Gid = 0
-		header.Uname = ""
-		header.Gname = ""
 
 		if err := tw.WriteHeader(header); err != nil {
 			return fmt.Errorf("write header for %s: %w", relPath, err)
@@ -185,6 +185,147 @@ func createSourceTarballWithWorkers(localDir string, excludes, overlayInputs []s
 	}
 
 	return tmpPath, hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// newCanonicalTarHeader builds a tar header with name set and timestamps and
+// ownership zeroed, so identical source content produces identical canonical
+// tar streams regardless of when files were modified.
+func newCanonicalTarHeader(name string, info os.FileInfo, linkTarget string) (*tar.Header, error) {
+	header, err := tar.FileInfoHeader(info, linkTarget)
+	if err != nil {
+		return nil, err
+	}
+	header.Name = name
+	header.ModTime = time.Time{}
+	header.AccessTime = time.Time{}
+	header.ChangeTime = time.Time{}
+	header.Uid = 0
+	header.Gid = 0
+	header.Uname = ""
+	header.Gname = ""
+	return header, nil
+}
+
+// maxExternalSnapshotDepth bounds how deep snapshotExternalTarget follows the
+// content behind out-of-root symlinks. The visited-realpath set catches true
+// cycles; this cap backstops pathological link chains.
+const maxExternalSnapshotDepth = 32
+
+// snapshotExternalTarget writes the real content behind an out-of-root symlink
+// into tw as plain entries rooted at the link's archive name, keeping the
+// archive self-contained: an absolute link preserved verbatim would dangle on
+// the remote host, and the extractor rejects links escaping the extraction
+// root. With tw nil it only measures the bytes the entries would occupy, for
+// source size estimation.
+//
+// Symlinks encountered inside the external tree are followed rather than
+// preserved, so nothing behind an external link can trip extraction-time
+// symlink validation. Child entries are checked against excludes by their
+// archive-relative name, matching the main walk: an excluded directory skips
+// its whole subtree. totalBytes accumulates regular-file bytes; maxBytes > 0
+// enforces the same size cap as the main walk. active holds visited real
+// directories for cycle detection; depth is the link-follow budget.
+func snapshotExternalTarget(tw *tar.Writer, path, destName string, info os.FileInfo, active map[string]struct{}, depth int, totalBytes *int64, maxBytes int64, excludes []string) error {
+	switch {
+	case info.Mode().IsRegular():
+		if tw == nil {
+			*totalBytes += info.Size()
+			return nil
+		}
+		return writeExternalFileEntry(tw, path, destName, info, totalBytes, maxBytes)
+	case info.IsDir():
+		if depth > maxExternalSnapshotDepth {
+			return fmt.Errorf("symlink chain under %s exceeds %d levels; refusing to snapshot a probable cycle", path, maxExternalSnapshotDepth)
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", path, err)
+		}
+		if _, cyclic := active[resolved]; cyclic {
+			return fmt.Errorf("symlink cycle through %s", resolved)
+		}
+		active[resolved] = struct{}{}
+		defer delete(active, resolved)
+		if tw != nil {
+			header, err := newCanonicalTarHeader(destName, info, "")
+			if err != nil {
+				return fmt.Errorf("file info header for %s: %w", destName, err)
+			}
+			if err := tw.WriteHeader(header); err != nil {
+				return fmt.Errorf("write header for %s: %w", destName, err)
+			}
+		}
+		// ReadDir returns entries sorted by name, keeping the archive
+		// deterministic.
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return fmt.Errorf("read directory %s: %w", path, err)
+		}
+		for _, entry := range entries {
+			childDest := destName + "/" + entry.Name()
+			childPath := filepath.Join(path, entry.Name())
+			// Stat follows links: everything behind the external tree is
+			// flattened, so no escaping link can reappear deeper down.
+			childInfo, err := os.Stat(childPath)
+			if err != nil {
+				// Vendored trees can carry stale links; skip rather than fail
+				// the whole snapshot, but say so in the log.
+				slog.Warn("skipping unreadable entry behind external symlink", "component", "sync", "path", childPath, "error", err)
+				continue
+			}
+			if shouldExclude(childDest, childInfo, excludes) {
+				slog.Debug("skipping excluded entry behind external symlink", "component", "sync", "path", childPath)
+				continue
+			}
+			if err := snapshotExternalTarget(tw, childPath, childDest, childInfo, active, depth+1, totalBytes, maxBytes, excludes); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		slog.Debug("skipping non-regular entry behind external symlink", "component", "sync", "path", path, "mode", info.Mode())
+		return nil
+	}
+}
+
+// writeExternalFileEntry writes one regular file's header and content into tw.
+func writeExternalFileEntry(tw *tar.Writer, path, name string, info os.FileInfo, totalBytes *int64, maxBytes int64) error {
+	header, err := newCanonicalTarHeader(name, info, "")
+	if err != nil {
+		return fmt.Errorf("file info header for %s: %w", name, err)
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("write header for %s: %w", name, err)
+	}
+	*totalBytes += info.Size()
+	if maxBytes > 0 && *totalBytes > maxBytes {
+		return fmt.Errorf("%w: content behind external symlink at %s exceeds %s limit", ErrSourceTooLarge, name, formatSize(maxBytes))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", name, err)
+	}
+	defer f.Close()
+	if _, err := io.Copy(tw, f); err != nil {
+		return fmt.Errorf("copy %s: %w", name, err)
+	}
+	return nil
+}
+
+// externalSymlinkBytes measures the bytes the snapshot carries behind an
+// out-of-root symlink, mirroring snapshotExternalTarget with tw nil. destName
+// is the link's slash-relative path in the snapshot, so child entries are
+// exclusion-checked by their archive-relative names.
+func externalSymlinkBytes(path, destName string, excludes []string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	if err := snapshotExternalTarget(nil, path, destName, info, map[string]struct{}{}, 1, &total, 0, excludes); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 // collectSizeReport walks localDir (respecting excludes) and returns a

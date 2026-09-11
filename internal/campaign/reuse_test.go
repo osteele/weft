@@ -2158,6 +2158,24 @@ func TestValidateJobSourceForCloudAppliesCapToResidualTarball(t *testing.T) {
 	}
 }
 
+// TestValidateJobSourceForCloudRejectsExternalSymlinkOverCap: content behind
+// an out-of-root symlink rides in the residual tarball undiverted, so the
+// pre-claim cap must see it. Regression for the reuse-validation gap found by
+// the wb122 follow-up review.
+func TestValidateJobSourceForCloudRejectsExternalSymlinkOverCap(t *testing.T) {
+	external := t.TempDir()
+	writeSparseTestFile(t, filepath.Join(external, "big.bin"), weftsync.MaxSourceTarballBytes+1)
+	dir := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	job := &db.Job{ID: 1, WorkingDir: dir}
+	err := ValidateJobSourceForCloud(job)
+	if !errors.Is(err, weftsync.ErrSourceTooLarge) {
+		t.Fatalf("ValidateJobSourceForCloud accepted out-of-root symlink content over the cap: %v", err)
+	}
+}
+
 // The reuse matcher must enforce the same axes the offer chain enforces at
 // launch: a constraint checked on new instances and dropped on reuse is
 // silently unmet whenever a reusable instance happens to be available.

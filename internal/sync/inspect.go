@@ -404,6 +404,24 @@ func estimateSnapshotBytesWithInputs(localDir string, inputs []string, divertAtB
 			}
 			return nil
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Mirror createSourceTarballWithWorkers: out-of-root links are
+			// dereferenced into the tarball, and the blob walk never sees
+			// their content, so it ships undiverted — count it in full.
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", relPath, err)
+			}
+			if symlinkTargetWithinRoot(filepath.ToSlash(relPath), filepath.ToSlash(linkTarget)) {
+				return nil
+			}
+			externalBytes, err := externalSymlinkBytes(path, filepath.ToSlash(relPath), excludes)
+			if err != nil {
+				return fmt.Errorf("measure content behind symlink %s: %w", relPath, err)
+			}
+			total += externalBytes
+			return nil
+		}
 		if info.Mode().IsRegular() && (divertAtBytes <= 0 || info.Size() < divertAtBytes) {
 			total += info.Size()
 		}

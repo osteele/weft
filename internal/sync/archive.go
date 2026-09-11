@@ -89,15 +89,28 @@ func safeExtractTarget(destDir, name string) (string, error) {
 	return filepath.Join(destDir, name), nil
 }
 
+// symlinkTargetWithinRoot reports whether a symlink entry named name with raw
+// target linkname resolves within the extraction root. Absolute targets never
+// do: Join(dir, "/abs") relativizes them, so IsAbs must be checked first.
+// Creation (tarball.go) and extraction (this file) share the predicate so both
+// sides agree on which links an archive may carry verbatim.
+func symlinkTargetWithinRoot(name, linkname string) bool {
+	if filepath.IsAbs(linkname) {
+		return false
+	}
+	return filepath.IsLocal(filepath.Join(filepath.Dir(name), linkname))
+}
+
 // checkSymlinkWithinRoot rejects symlink entries whose link target is absolute
 // or resolves outside the extraction root. Tarballs are self-produced, so this
 // is hardening against corrupt or mis-built archives rather than a security
-// boundary.
+// boundary: createSourceTarballWithWorkers snapshots out-of-root links as
+// plain content at creation time, so well-built archives carry none.
 func checkSymlinkWithinRoot(name, linkname string) error {
 	if filepath.IsAbs(linkname) {
 		return fmt.Errorf("tar symlink %q has absolute target %q", name, linkname)
 	}
-	if !filepath.IsLocal(filepath.Join(filepath.Dir(name), linkname)) {
+	if !symlinkTargetWithinRoot(name, linkname) {
 		return fmt.Errorf("tar symlink %q target %q escapes extraction root", name, linkname)
 	}
 	return nil

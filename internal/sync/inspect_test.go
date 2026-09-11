@@ -191,3 +191,34 @@ func TestEstimateSnapshotBytesWithInputs(t *testing.T) {
 		t.Errorf("total = %d, want %d (overlay path counted once)", total2, want2)
 	}
 }
+
+// TestEstimateCloudSourceTarballBytesCountsExternalSymlinkContent pins the
+// estimator to the real cloud tarball's semantics: content behind an
+// out-of-root symlink ships undiverted — the blob walk never sees it — so it
+// counts in full even above the diversion threshold. Regression for the
+// pre-claim validation gap found by the wb122 follow-up review.
+func TestEstimateCloudSourceTarballBytesCountsExternalSymlinkContent(t *testing.T) {
+	external := t.TempDir()
+	big := filepath.Join(external, "big.bin")
+	if err := os.WriteFile(big, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(big, LargeSourceBlobThresholdBytes+1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, ".env"), []byte("SECRET=1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(srcDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	total, _, err := EstimateCloudSourceTarballBytesWithInputs(srcDir, nil)
+	if err != nil {
+		t.Fatalf("EstimateCloudSourceTarballBytesWithInputs: %v", err)
+	}
+	want := LargeSourceBlobThresholdBytes + int64(1024)
+	if total != want {
+		t.Errorf("estimate = %d, want %d (external content must not be diverted)", total, want)
+	}
+}

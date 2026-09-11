@@ -530,6 +530,23 @@ func includedSourceBytes(localDir string, excludes []string) (int64, error) {
 		}
 		if info.Mode().IsRegular() {
 			total += info.Size()
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Content behind an out-of-root link is snapshotted into the
+			// tarball (tarball.go), so it counts toward the size estimate.
+			linkTarget, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read symlink %s: %w", relPath, err)
+			}
+			if symlinkTargetWithinRoot(filepath.ToSlash(relPath), filepath.ToSlash(linkTarget)) {
+				return nil
+			}
+			externalBytes, err := externalSymlinkBytes(path, filepath.ToSlash(relPath), excludes)
+			if err != nil {
+				return fmt.Errorf("measure content behind symlink %s: %w", relPath, err)
+			}
+			total += externalBytes
 		}
 		return nil
 	})

@@ -89,9 +89,15 @@ target:
   object kinds are deduped by existence probes. Bootstrap and agent refresh
   extract the tarball, materialize each blob at its root-relative path, and
   verify each raw blob's SHA-256.
-  Symlinks remain in the tarball; extraction rejects tar-slip entries
-  (absolute paths, `..` escapes, and out-of-root symlink targets; see
-  `archive.go`).
+  Symlinks whose targets resolve within the root remain in the tarball.
+  Out-of-root links (absolute targets, or relative ones leaving the tree)
+  are dereferenced at creation: the target's content is snapshotted as
+  plain entries under the same source excludes as in-tree entries, so
+  trees that vendor out-of-tree content as absolute
+  symlinks (e.g. `~/.claude/skills`) produce self-contained archives
+  instead of failing extraction on the remote host. Extraction still
+  rejects tar-slip entries (absolute paths, `..` escapes, and out-of-root
+  symlink targets; see `archive.go`).
   Fresh launches and instance reuse consume the stored per-job manifest. Rows
   created before submit-time pinning have no pin and retain dispatch-time
   snapshot derivation.

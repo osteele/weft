@@ -62,6 +62,197 @@ func TestTarballRoundTripPreservesSymlink(t *testing.T) {
 	}
 }
 
+// TestTarballDereferencesOutOfRootSymlink is the wb122 regression test: trees
+// that vendor out-of-tree content as absolute symlinks (e.g. ~/.claude/skills)
+// could never run remotely — the extractor rejects escaping links, so every
+// job failed with pinned_source_fetch_failed after the full queue wait.
+// Creation now snapshots the link target's content as plain entries.
+func TestTarballDereferencesOutOfRootSymlink(t *testing.T) {
+	external := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(external, "skill-a"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "skill-a", "SKILL.md"), []byte("skill a body"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "top.txt"), []byte("external top"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("skill-a", filepath.Join(external, "inner-rel")); err != nil {
+		t.Fatal(err)
+	}
+	// Excluded names behind the link must not ship: the dereference applies
+	// the same source excludes as in-tree entries.
+	if err := os.WriteFile(filepath.Join(external, ".env"), []byte("SECRET=1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(external, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, ".git", "HEAD"), []byte("ref"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srcDir := t.TempDir()
+	// Absolute dir link: the ~/.claude/skills shape.
+	if err := os.Symlink(external, filepath.Join(srcDir, "skills")); err != nil {
+		t.Fatal(err)
+	}
+	// Absolute file link in a subdirectory.
+	if err := os.MkdirAll(filepath.Join(srcDir, "vendor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(external, "top.txt"), filepath.Join(srcDir, "vendor", "top.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// Relative link that leaves the tree.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "rel.txt"), []byte("relative"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	relTarget, err := filepath.Rel(srcDir, filepath.Join(outside, "rel.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(relTarget, filepath.Join(srcDir, "rel-link")); err != nil {
+		t.Fatal(err)
+	}
+	// In-tree links are still preserved as links, even pointing at a
+	// dereferenced out-of-root snapshot.
+	if err := os.Symlink("skills", filepath.Join(srcDir, "alias")); err != nil {
+		t.Fatal(err)
+	}
+
+	tarPath, hash, err := CreateSourceTarball(srcDir)
+	if err != nil {
+		t.Fatalf("createSourceTarball: %v", err)
+	}
+	defer os.Remove(tarPath)
+
+	destDir := t.TempDir()
+	if err := ExtractTarball(tarPath, destDir); err != nil {
+		t.Fatalf("ExtractTarball: %v", err)
+	}
+
+	// The out-of-root links became real content.
+	if info, err := os.Lstat(filepath.Join(destDir, "skills")); err != nil {
+		t.Fatalf("Lstat(skills): %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("skills is %v, want a real directory", info.Mode())
+	}
+	assertFileContent(t, filepath.Join(destDir, "skills", "skill-a", "SKILL.md"), "skill a body")
+	assertFileContent(t, filepath.Join(destDir, "vendor", "top.txt"), "external top")
+	assertFileContent(t, filepath.Join(destDir, "rel-link"), "relative")
+	// Links inside external content are flattened too, so nothing in the
+	// archive can trip extraction-time symlink validation.
+	assertFileContent(t, filepath.Join(destDir, "skills", "inner-rel", "SKILL.md"), "skill a body")
+	for _, excluded := range []string{".env", filepath.Join(".git", "HEAD")} {
+		if fileExists(filepath.Join(destDir, "skills", excluded)) {
+			t.Errorf("excluded path %s was snapshotted behind the external symlink", excluded)
+		}
+	}
+	if got, err := os.Readlink(filepath.Join(destDir, "alias")); err != nil || got != "skills" {
+		t.Fatalf("Readlink(alias) = %q, %v; want %q", got, err, "skills")
+	}
+
+	// Snapshotting is deterministic.
+	tarPath2, hash2, err := CreateSourceTarball(srcDir)
+	if err != nil {
+		t.Fatalf("createSourceTarball again: %v", err)
+	}
+	defer os.Remove(tarPath2)
+	if hash != hash2 {
+		t.Errorf("hash changed across identical snapshots: %s vs %s", hash, hash2)
+	}
+}
+
+// TestTarballRejectsDanglingOutOfRootSymlink: a broken out-of-tree link cannot
+// be snapshotted. Failing at submission with a clear error beats failing
+// extraction after the upload and queue wait.
+func TestTarballRejectsDanglingOutOfRootSymlink(t *testing.T) {
+	srcDir := t.TempDir()
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), filepath.Join(srcDir, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := createSourceTarballWithOverlays(srcDir, nil, nil)
+	if err == nil {
+		t.Fatal("createSourceTarball accepted a dangling out-of-root symlink")
+	}
+	if !strings.Contains(err.Error(), "gone") {
+		t.Errorf("error %q does not name the broken link", err)
+	}
+}
+
+// TestTarballRejectsExternalSymlinkCycle: out-of-root links whose content
+// cycles back through the tree must fail creation instead of recursing
+// forever.
+func TestTarballRejectsExternalSymlinkCycle(t *testing.T) {
+	external := t.TempDir()
+	srcDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(external, "x"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// src/a -> external/x; external/x/b -> src/c; src/c -> external.
+	if err := os.Symlink(filepath.Join(external, "x"), filepath.Join(srcDir, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(srcDir, "c"), filepath.Join(external, "x", "b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(srcDir, "c")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := createSourceTarballWithOverlays(srcDir, nil, nil)
+	if err == nil {
+		t.Fatal("createSourceTarball accepted an external symlink cycle")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error %q does not report a cycle", err)
+	}
+}
+
+// TestIncludedSourceBytesCountsExternalSymlinkContent keeps SizeBytes (disk
+// estimation) consistent with what the tarball carries behind out-of-root
+// links.
+func TestIncludedSourceBytesCountsExternalSymlinkContent(t *testing.T) {
+	external := t.TempDir()
+	payload := bytes.Repeat([]byte("x"), 4096)
+	if err := os.WriteFile(filepath.Join(external, "big.txt"), payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(srcDir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	total, err := IncludedSourceBytes(srcDir)
+	if err != nil {
+		t.Fatalf("IncludedSourceBytes: %v", err)
+	}
+	if total != int64(len(payload)) {
+		t.Errorf("IncludedSourceBytes = %d, want %d", total, len(payload))
+	}
+}
+
+// assertFileContent fails the test unless path is a regular file with exactly
+// the given content (in particular, not a symlink).
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("Lstat(%s): %v", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("%s is still a symlink", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	if string(data) != want {
+		t.Errorf("%s = %q, want %q", path, data, want)
+	}
+}
+
 // TestProvenanceHashChangesWithSymlinkTarget is a regression test: provenance
 // hashing was symlink-blind, so trees differing only in a link target hashed
 // identically and stale-source preflight checks passed incorrectly.
