@@ -145,6 +145,7 @@ func TestQueueEnvVarsForJob_GPUParity(t *testing.T) {
 // TestQueueEntryForJob_GPUParity verifies that queueEntryForJob produces
 // equivalent entries regardless of how the GPU was specified.
 func TestQueueEntryForJob_GPUParity(t *testing.T) {
+	database := db.SetupTestDB(t)
 	gpuMem := intPtr(20)
 
 	t.Run("--gpu flag produces entry with GPU field and CUDA env var", func(t *testing.T) {
@@ -153,7 +154,10 @@ func TestQueueEntryForJob_GPUParity(t *testing.T) {
 			GPU: "0", GPUMemGB: gpuMem,
 			EnvVars: []string{"FOO=bar"},
 		}
-		entry := queueEntryForJob(job, nil, "")
+		entry, err := queueEntryForJob(database, job, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if entry.GPU != "0" {
 			t.Errorf("expected GPU=0, got %q", entry.GPU)
 		}
@@ -169,7 +173,10 @@ func TestQueueEntryForJob_GPUParity(t *testing.T) {
 			GPU: "", GPUMemGB: gpuMem,
 			EnvVars: []string{"FOO=bar", "CUDA_VISIBLE_DEVICES=0"},
 		}
-		entry := queueEntryForJob(job, nil, "")
+		entry, err := queueEntryForJob(database, job, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 		assertHasCUDADevice(t, entry.EnvVars, "0")
 		if entry.GPUMemGB == nil || *entry.GPUMemGB != 20 {
 			t.Errorf("expected GPUMemGB=20, got %v", entry.GPUMemGB)
@@ -182,7 +189,10 @@ func TestQueueEntryForJob_GPUParity(t *testing.T) {
 			GPUClass: "A100", GPUMemGB: gpuMem,
 			EnvVars: []string{"FOO=bar"},
 		}
-		entry := queueEntryForJob(job, nil, "")
+		entry, err := queueEntryForJob(database, job, nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if entry.GPUClass != "A100" {
 			t.Errorf("expected GPUClass=A100, got %q", entry.GPUClass)
 		}

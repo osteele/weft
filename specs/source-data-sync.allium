@@ -200,6 +200,11 @@ contract AgentStagingContract {
 		-- Rental reuse rejects agents predating this wire field. Inventory
 		-- queue entries also carry a command guard so an older runner that
 		-- ignores unknown JSON fields fails before the user command executes.
+		-- A queue entry rebuilt outside admission (describe edits, deferred
+		-- updates, requeues) regenerates through the same builder as the
+		-- admitted entry: payloads and named-asset needs are re-read from
+		-- the database and the fail-closed guards re-applied, so a rebuild
+		-- cannot drop staged inputs.
 }
 
 -- ==========================================================================

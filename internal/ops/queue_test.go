@@ -12,14 +12,18 @@ import (
 )
 
 func TestQueueEntryForJobCarriesAttemptRunID(t *testing.T) {
+	database := db.SetupTestDB(t)
 	runID := int64(41721)
-	entry := queueEntryForJob(&db.Job{
+	entry, err := queueEntryForJob(database, &db.Job{
 		ID:          6665,
 		Host:        "studio",
 		WorkingDir:  "/tmp/project",
 		Command:     "uv run train.py",
 		LatestRunID: &runID,
 	}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if entry.RunID != runID {
 		t.Fatalf("queue entry run ID = %d, want %d", entry.RunID, runID)
 	}

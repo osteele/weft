@@ -57,11 +57,28 @@ func hasCUDAEnvVar(envVars []string) bool {
 	return false
 }
 
-func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.QueueEntry {
+// queueEntryForJob rebuilds the canonical queue entry for a queued job.
+// Payloads and named-asset needs are re-read from the database and their
+// fail-closed command guards re-applied, so every rebuilt entry (describe
+// edits, deferred updates, requeues) stages exactly what admission accepted.
+func queueEntryForJob(database *sql.DB, job *db.Job, envVars []string, depSpec string) (opsqueue.QueueEntry, error) {
+	payloads, err := queuePayloadsForJob(database, job.ID)
+	if err != nil {
+		return opsqueue.QueueEntry{}, fmt.Errorf("list job payloads: %w", err)
+	}
+	artifactNeeds := []opsqueue.ArtifactNeed(nil)
+	if hostUsesR2Queue(job.Host) {
+		artifactNeeds, err = resolveNamedAssetNeeds(database, job.Needs)
+		if err != nil {
+			return opsqueue.QueueEntry{}, err
+		}
+	}
+	command := payloadGuardedCommand(job.Command, payloads)
+	command = artifactNeedsGuardedCommand(command, artifactNeeds)
 	entry := opsqueue.QueueEntry{
 		JobID:            job.ID,
 		WorkingDir:       job.WorkingDir,
-		Command:          job.Command,
+		Command:          command,
 		Description:      job.Description,
 		EnvVars:          queueEnvVarsForJob(job, envVars),
 		DepSpec:          depSpec,
@@ -79,11 +96,13 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) opsqueue.Qu
 		Outputs:          job.Outputs,
 		Produces:         job.Produces,
 		Needs:            job.Needs,
+		Payloads:         payloads,
+		ArtifactNeeds:    artifactNeeds,
 	}
 	if job.LatestRunID != nil {
 		entry.RunID = *job.LatestRunID
 	}
-	return entry
+	return entry, nil
 }
 
 func writeQueueJobFile(host string, entry opsqueue.QueueEntry, timeout time.Duration) error {
@@ -137,14 +156,19 @@ func commandJobForQueueEntry(entry opsqueue.QueueEntry) opsqueue.CommandJob {
 		Tags:             entry.Tags,
 		Produces:         entry.Produces,
 		Needs:            entry.Needs,
+		ArtifactNeeds:    entry.ArtifactNeeds,
+		Payloads:         entry.Payloads,
 	}
 }
 
-func applyQueueUpdate(job *db.Job, envVars []string, depSpec string, timeout time.Duration) error {
+func applyQueueUpdate(database *sql.DB, job *db.Job, envVars []string, depSpec string, timeout time.Duration) error {
 	if job == nil {
 		return fmt.Errorf("job is nil")
 	}
-	entry := queueEntryForJob(job, envVars, depSpec)
+	entry, err := queueEntryForJob(database, job, envVars, depSpec)
+	if err != nil {
+		return err
+	}
 	if hostUsesR2Queue(job.Host) {
 		resolvedEnv, err := secrets.ResolveEnvVars(entry.EnvVars)
 		if err != nil {
@@ -268,7 +292,7 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 	}
 
 	timeout := queueOpTimeout(opts)
-	if err := applyQueueUpdate(job, job.EnvVars, job.DepSpec, timeout); err != nil {
+	if err := applyQueueUpdate(database, job, job.EnvVars, job.DepSpec, timeout); err != nil {
 		if isQueueConnectionError(err) {
 			return Result{
 				Success:  true,
@@ -379,7 +403,7 @@ func ProcessDeferredQueueOps(database *sql.DB, host string, timeout time.Duratio
 				_ = db.DeleteDeferredOperation(database, op.ID)
 				continue
 			}
-			if err := applyQueueUpdate(job, job.EnvVars, job.DepSpec, timeout); err != nil {
+			if err := applyQueueUpdate(database, job, job.EnvVars, job.DepSpec, timeout); err != nil {
 				if isQueueConnectionError(err) {
 					return result, nil
 				}

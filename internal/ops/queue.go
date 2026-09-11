@@ -16,7 +16,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ids"
 	"github.com/osteele/weft/internal/opsqueue"
-	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -222,15 +221,6 @@ func pinnedQueueSourceManifest(job *db.Job) (*opsqueue.SourceManifest, bool, err
 		})
 	}
 	return manifest, true, nil
-}
-
-// UpdateQueueEntryParams contains parameters for updating an existing queue entry
-type UpdateQueueEntryParams struct {
-	Host    string
-	Job     *db.Job
-	EnvVars []string
-	DepSpec string
-	Timeout time.Duration
 }
 
 // QueueJobParams contains parameters for queueing a new job
@@ -687,76 +677,4 @@ func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions)
 		JobID:   job.ID,
 		Message: fmt.Sprintf("Job %s added to queue", ids.FormatJobID(job.ID)),
 	}, nil
-}
-
-// UpdateQueueEntry updates an existing job's entry in the remote queue file.
-func UpdateQueueEntry(params UpdateQueueEntryParams) error {
-	if params.Job == nil {
-		return fmt.Errorf("job is nil")
-	}
-
-	entry := queueEntryForJob(params.Job, params.EnvVars, params.DepSpec)
-	if err := writeQueueJobFile(params.Host, entry, params.Timeout); err != nil {
-		if isQueueConnectionError(err) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("update queue entry: %w", err)
-	}
-	return nil
-}
-
-// UpdateQueuedJobEntry refreshes a queued job entry on the remote host.
-func UpdateQueuedJobEntry(job *db.Job, envVars []string, depSpec string) error {
-	if job == nil {
-		return fmt.Errorf("job is nil")
-	}
-
-	entryJob := &db.Job{
-		ID:           job.ID,
-		Host:         job.Host,
-		WorkingDir:   job.WorkingDir,
-		Command:      job.Command,
-		Description:  job.Description,
-		EnvVars:      append([]string(nil), job.EnvVars...),
-		DepSpec:      job.DepSpec,
-		CPUAllotment: job.CPUAllotment,
-		GPU:          job.GPU,
-		GPUClass:     job.GPUClass,
-		GPUMemGB:     job.GPUMemGB,
-		Tags:         append([]string(nil), job.Tags...),
-		OutputDirs:   append([]string(nil), job.OutputDirs...),
-		Outputs:      append([]string(nil), job.Outputs...),
-		Produces:     append([]string(nil), job.Produces...),
-		Needs:        append([]string(nil), job.Needs...),
-	}
-
-	needEnv := len(envVars) == 0
-	needDir := entryJob.WorkingDir == ""
-	needCmd := entryJob.Command == ""
-
-	if needEnv || needDir || needCmd {
-		entry, err := queuefile.FetchEntry(job.Host, job.ID)
-		if err != nil {
-			return err
-		}
-		if needDir && entry.WorkingDir != "" {
-			entryJob.WorkingDir = entry.WorkingDir
-		}
-		if needCmd && entry.Command != "" {
-			entryJob.Command = entry.Command
-		}
-		if entryJob.Description == "" && entry.Description != "" {
-			entryJob.Description = entry.Description
-		}
-		if needEnv {
-			envVars = entry.EnvVars
-		}
-	}
-
-	return UpdateQueueEntry(UpdateQueueEntryParams{
-		Host:    job.Host,
-		Job:     entryJob,
-		EnvVars: envVars,
-		DepSpec: depSpec,
-	})
 }

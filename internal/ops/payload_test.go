@@ -39,6 +39,72 @@ func TestPayloadGuardedCommandFailsClosedOnOldAgent(t *testing.T) {
 	}
 }
 
+// A queue entry rebuilt outside admission (describe edit, deferred update,
+// requeue) must re-stage the payloads admission accepted; dropping them
+// stranded wj7685 with an unset WEFT_PAYLOAD_DIR (wb126).
+func TestQueueEntryForJobRebuildsStagedInputs(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "agent-execution-worker execute --prompt-payload execution-prompt", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("ab", 32)
+	if err := db.InsertJobPayload(database, db.JobPayload{
+		JobID: jobID, Name: "execution-prompt", StoredPath: "payloads/" + digest,
+		SizeBytes: 7, SHA256: digest, R2Key: "assets/" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := queueEntryForJob(database, job, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Payloads) != 1 || entry.Payloads[0].Name != "execution-prompt" || entry.Payloads[0].SHA256 != digest {
+		t.Fatalf("rebuilt payloads = %+v", entry.Payloads)
+	}
+	if !strings.Contains(entry.Command, "WEFT_PAYLOAD_DIR") || !strings.HasSuffix(entry.Command, job.Command) {
+		t.Fatalf("rebuilt command = %q", entry.Command)
+	}
+}
+
+func TestApplyQueueUpdatePreservesPayloads(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "agent-execution-worker execute --prompt-payload execution-prompt", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("ab", 32)
+	if err := db.InsertJobPayload(database, db.JobPayload{
+		JobID: jobID, Name: "execution-prompt", StoredPath: "payloads/" + digest,
+		SizeBytes: 7, SHA256: digest, R2Key: "assets/" + digest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var written string
+	mockSSHFunc(t, func(_, command string) (string, string, int) {
+		written = command
+		return "", "", 0
+	})
+	if err := applyQueueUpdate(database, job, job.EnvVars, job.DepSpec, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// The ssh command carries the job JSON through Go %q quoting, so match
+	// on payload identity rather than exact quote placement.
+	if !strings.Contains(written, "payloads") || !strings.Contains(written, "execution-prompt") || !strings.Contains(written, "WEFT_PAYLOAD_DIR") {
+		t.Fatalf("queue job file write = %q", written)
+	}
+}
+
 func TestAppendJobToQueueWiresPayloadGuard(t *testing.T) {
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueuedWithGPU(database, "host-alpha", "/tmp/project", "python train.py", "", "")
