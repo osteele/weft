@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,32 @@ func TestJobStatusCmdHasStatusFlags(t *testing.T) {
 		if flag := jobStatusCmd.Flags().Lookup(name); flag == nil {
 			t.Fatalf("job status flag %q not found", name)
 		}
+	}
+}
+
+func TestStatusCommandRunningJobExitsSuccessfully(t *testing.T) {
+	if os.Getenv("WEFT_STATUS_RUNNING_EXIT_HELPER") == "1" {
+		database := db.SetupTestDB(t)
+		_, jobID := createRentalQueuedJobWithInstance(t, database)
+		if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+			t.Fatalf("MarkQueuedJobRunning: %v", err)
+		}
+
+		rootCmd.SetArgs([]string{"status", fmt.Sprint(jobID), "--no-sync"})
+		if _, err := rootCmd.ExecuteC(); err != nil {
+			t.Fatalf("status command: %v", err)
+		}
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestStatusCommandRunningJobExitsSuccessfully$")
+	command.Env = append(os.Environ(), "WEFT_STATUS_RUNNING_EXIT_HELPER=1")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running-job status exited unsuccessfully: %v\n%s", err, output)
+	}
+	if !bytes.Contains(output, []byte("Status:   running")) {
+		t.Fatalf("running-job status output did not report running:\n%s", output)
 	}
 }
 
@@ -378,7 +406,7 @@ func TestRunJobInfoSkipsQuickSyncWhenDaemonSyncIsFresh(t *testing.T) {
 
 func TestRunJobInfoUsesCachedActiveRentalJobByDefault(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, _ := createRentalQueuedJobWithInstance(t, database)
+	_, jobID := createRentalQueuedJobWithInstance(t, database)
 	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
@@ -413,7 +441,7 @@ func TestRunJobInfoUsesCachedActiveRentalJobByDefault(t *testing.T) {
 
 func TestRunJobInfoSyncsActiveRentalJobWithSync(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, _ := createRentalQueuedJobWithInstance(t, database)
+	_, jobID := createRentalQueuedJobWithInstance(t, database)
 	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}

@@ -76,11 +76,12 @@ When targeting jobs, IDs can be specified individually or as ranges:
 
 Duplicate IDs are automatically removed with a warning.
 
-Exit codes (single job only):
-  0: Job completed successfully
-  1: Job failed or error
-  2: Job is still running
-  3: Job not found
+Exit codes:
+  0: Status query completed successfully, regardless of job state
+  1: Command failed, or --wait observed an unsuccessful job
+  3: Requested single job was not found
+
+Without --wait, inspect --json output to determine the job state.
 
 Examples:
   weft status              # Show all active jobs

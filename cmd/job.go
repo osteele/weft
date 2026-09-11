@@ -81,6 +81,10 @@ var jobStatusCmd = &cobra.Command{
 Shows job metadata including command, host, status, exit code, and timing.
 Supports checking multiple jobs at once.
 
+Without --wait, a successful query exits 0 regardless of job state; inspect
+--json output to determine that state. With --wait, the command exits 0 only
+when every requested job succeeds.
+
 Examples:
   weft job status 42          # Single job
   weft job status 42 43 44    # Multiple jobs

@@ -795,11 +795,13 @@ weft job status --wait wj42 wj43 wj44   # wait for all (exits 0 only if all succ
 
 Duplicate IDs are automatically removed with a warning.
 
-**Exit codes (single job only):**
-- `0`: Job completed successfully
-- `1`: Job failed or error
-- `2`: Job is still running
-- `3`: Job not found
+**Exit codes:**
+- `0`: Status query completed successfully, regardless of job state
+- `1`: Command failed, or `--wait` observed an unsuccessful job
+- `3`: Requested single job was not found
+
+Without `--wait`, inspect `--json` output to determine the job state. A running,
+failed, killed, or canceled job does not make a successful status query fail.
 
 **Examples:**
 ```bash
