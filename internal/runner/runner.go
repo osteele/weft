@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -678,6 +679,34 @@ func (r *Runner) startPendingJob(decision pendingStartDecision) {
 
 var errRequeue = fmt.Errorf("requeue")
 
+// RetryablePreflightError marks an infrastructure failure that happened before
+// the user command started and can be retried against the same accepted job.
+type RetryablePreflightError struct {
+	err error
+}
+
+func (e *RetryablePreflightError) Error() string {
+	return e.err.Error()
+}
+
+func (e *RetryablePreflightError) Unwrap() error {
+	return e.err
+}
+
+// MarkRetryablePreflight preserves an accepted job when source acquisition
+// fails transiently instead of recording a terminal preflight rejection.
+func MarkRetryablePreflight(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RetryablePreflightError{err: err}
+}
+
+func isRetryablePreflight(err error) bool {
+	var target *RetryablePreflightError
+	return errors.As(err, &target)
+}
+
 func (r *Runner) annotateBenchmarkWarmupWait() {
 	jobID, ok := r.state.PeekPending()
 	if !ok {
@@ -808,6 +837,10 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		perJobRoot := perJobSourceDir(jobID)
 		manifestDir, err := r.EnsureSourceManifestFromR2(jobID, *job.SourceManifest, perJobRoot)
 		if err != nil {
+			if isRetryablePreflight(err) {
+				slog.Warn("pinned source fetch will retry", "component", "runner", "job_id", jobID, "error", err)
+				return errRequeue
+			}
 			return r.rejectPreflight(job, paths, db.FailureReasonPinnedSourceFetchFailed, fmt.Sprintf("pinned_source_fetch_failed: %v", err))
 		}
 		expandedDir = manifestDir
@@ -828,6 +861,10 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		}
 		perJobDir := perJobSourceDir(jobID)
 		if err := r.EnsureSourceFromR2(jobID, job.SourceR2Key, perJobDir); err != nil {
+			if isRetryablePreflight(err) {
+				slog.Warn("isolated source fetch will retry", "component", "runner", "job_id", jobID, "error", err)
+				return errRequeue
+			}
 			return r.rejectPreflight(job, paths, db.FailureReasonR2IsolatedSourceFetchFailed, fmt.Sprintf("r2_isolated_source_fetch_failed: %v", err))
 		}
 		expandedDir = perJobDir

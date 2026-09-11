@@ -911,6 +911,63 @@ func TestStartJob_PinnedManifestTakesPrecedenceOverLegacyR2Key(t *testing.T) {
 	}
 }
 
+func TestStartJob_RetryablePinnedManifestFetchRequeues(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(713)
+	r.EnsureSourceManifestFromR2 = func(_ int64, _ opsqueue.SourceManifest, _ string) (string, error) {
+		return "", MarkRetryablePreflight(errors.New("source transfer timed out"))
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:  jobID,
+		Dir: t.TempDir(),
+		Cmd: "echo should-not-run",
+		SourceManifest: &opsqueue.SourceManifest{
+			SHA256: strings.Repeat("a", 64),
+			Roots:  []opsqueue.SourceRoot{{MountBasename: "project", Hash: strings.Repeat("b", 64), R2Key: "sources/project.tar.gz"}},
+		},
+	}, nil)
+	if err != errRequeue {
+		t.Fatalf("startJob err = %v, want %v", err, errRequeue)
+	}
+
+	assertJobNotStarted(t, r.logDir, jobID)
+	paths := NewJobPaths(r.logDir, jobID)
+	if _, err := os.Stat(paths.PreflightRejected); !os.IsNotExist(err) {
+		t.Fatalf("preflight rejection marker exists after retryable failure: %v", err)
+	}
+	if _, err := os.Stat(paths.FailureReason); !os.IsNotExist(err) {
+		t.Fatalf("failure reason exists after retryable failure: %v", err)
+	}
+}
+
+func TestStartJob_RetryableLegacySourceFetchRequeues(t *testing.T) {
+	r, _ := initTestRunner(t)
+	jobID := int64(714)
+	r.EnsureSourceFromR2 = func(_ int64, _, _ string) error {
+		return MarkRetryablePreflight(errors.New("source transfer timed out"))
+	}
+
+	err := r.startJob(jobID, &opsqueue.CommandJob{
+		ID:          jobID,
+		Dir:         t.TempDir(),
+		Cmd:         "echo should-not-run",
+		SourceR2Key: "sources/project.tar.gz",
+	}, nil)
+	if err != errRequeue {
+		t.Fatalf("startJob err = %v, want %v", err, errRequeue)
+	}
+
+	assertJobNotStarted(t, r.logDir, jobID)
+	paths := NewJobPaths(r.logDir, jobID)
+	if _, err := os.Stat(paths.PreflightRejected); !os.IsNotExist(err) {
+		t.Fatalf("preflight rejection marker exists after retryable failure: %v", err)
+	}
+	if _, err := os.Stat(paths.FailureReason); !os.IsNotExist(err) {
+		t.Fatalf("failure reason exists after retryable failure: %v", err)
+	}
+}
+
 func TestStartJob_PinnedManifestStagesNamedAssetInRuntimeDirectory(t *testing.T) {
 	r, _ := initTestRunner(t)
 	cleanupRunnerProcesses(t, r)

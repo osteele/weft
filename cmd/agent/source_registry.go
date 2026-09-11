@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/runner"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
 
@@ -546,7 +547,7 @@ func downloadSourceToCache(bucket, r2Key, cachePath string) error {
 	cmd.Stderr = os.Stderr
 	err := cmd.Run()
 	if ctx.Err() != nil {
-		return fmt.Errorf("source download timed out after 2m: %w", ctx.Err())
+		return runner.MarkRetryablePreflight(fmt.Errorf("source download timed out after 2m: %w", ctx.Err()))
 	}
 	return err
 }
