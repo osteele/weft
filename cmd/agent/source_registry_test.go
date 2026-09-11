@@ -153,6 +153,26 @@ func TestFetchSourceManifestRejectsTamperedRoot(t *testing.T) {
 	}
 }
 
+func TestPinnedSourceDownloadPublishesCacheAtomically(t *testing.T) {
+	objectDir := t.TempDir()
+	writeSourceTarball(t, objectDir, "project.tar.gz", map[string]string{"version.txt": "submitted\n"})
+	installFakeRcloneForSourceTarballs(t, objectDir)
+	resetSourceUpdateState(t)
+
+	root := opsqueue.SourceRoot{
+		Hash:  canonicalTarballSHA256(t, filepath.Join(objectDir, "project.tar.gz")),
+		R2Key: "sources/project.tar.gz",
+	}
+	t.Setenv("RCLONE_PARTIAL_FAIL_KEY", root.R2Key)
+	err := ensurePinnedSourceTarballCached("test-bucket", root)
+	if err == nil {
+		t.Fatal("ensurePinnedSourceTarballCached returned nil after partial download")
+	}
+	if _, err := os.Stat(sourceCachePath(root.R2Key)); !os.IsNotExist(err) {
+		t.Fatalf("failed download published cache path: %v", err)
+	}
+}
+
 func canonicalTarballSHA256(t *testing.T, filename string) string {
 	t.Helper()
 	f, err := os.Open(filename)

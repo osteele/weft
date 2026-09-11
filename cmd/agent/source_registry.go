@@ -24,6 +24,8 @@ import (
 	srcsync "github.com/osteele/weft/internal/sync"
 )
 
+const sourceTarballCopyTimeout = 20 * time.Minute
+
 // sourceCacheDir returns the directory where the agent keeps the most recent
 // source tarball for each RemoteDir, so it can re-extract on demand if a
 // job's working directory is found empty/incomplete at start. Overridable
@@ -538,16 +540,34 @@ func verifySourceTarballSHA256(filename, expected string) error {
 }
 
 func downloadSourceToCache(bucket, r2Key, cachePath string) error {
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	cacheDir := filepath.Dir(cachePath)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir cache: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "rclone", "copyto", fmt.Sprintf("r2:%s/%s", bucket, r2Key), cachePath)
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return runner.MarkRetryablePreflight(fmt.Errorf("source download timed out after 2m: %w", ctx.Err()))
+	tempFile, err := os.CreateTemp(cacheDir, ".source-download-*")
+	if err != nil {
+		return fmt.Errorf("create temporary source download: %w", err)
 	}
-	return err
+	tempPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close temporary source download: %w", err)
+	}
+	defer os.Remove(tempPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), sourceTarballCopyTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "rclone", "copyto", fmt.Sprintf("r2:%s/%s", bucket, r2Key), tempPath)
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		return runner.MarkRetryablePreflight(fmt.Errorf("source download timed out after %s: %w", sourceTarballCopyTimeout, ctx.Err()))
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, cachePath); err != nil {
+		return fmt.Errorf("publish source download: %w", err)
+	}
+	return nil
 }

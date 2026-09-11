@@ -475,6 +475,12 @@ source_for_key() {
 copy_key() {
   key="$1"
   dest="$2"
+  if [ "${RCLONE_PARTIAL_FAIL_KEY:-}" = "$key" ]; then
+    mkdir -p "$(dirname "$dest")"
+    printf 'partial download' > "$dest"
+    echo "forced partial failure for $key" >&2
+    return 1
+  fi
   if [ "${RCLONE_FAIL_KEY:-}" = "$key" ]; then
     echo "forced failure for $key" >&2
     return 1
