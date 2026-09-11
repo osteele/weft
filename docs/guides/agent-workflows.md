@@ -113,18 +113,20 @@ submitter_session_env_vars`. The value is opaque to Weft: it is stored and
 re-exported unchanged.
 
 It is empty whenever no session can be identified — a job submitted from a
-plain shell, or one recorded by a process that is not the submitter. Treat
-empty as "no addressee" and fall back to whatever unaddressed delivery you
-would otherwise have done, rather than dropping the notification; the session
-that submitted a long job may well have exited before it finished.
+plain shell, or one recorded by a process that is not the submitter. A harness
+that exports none of those variables can pass `weft run --submitter-session ID`
+to record an explicit routing identity. Do not infer an owner from the
+sessions present when a job finishes.
 
 Submitter sessions beginning with `agent-review-daemon/` are reserved for
 review-worker jobs. Weft records their lifecycle events for structured hooks
 but skips the legacy notification command, preventing worker completion from
 being mistaken for a user job notification.
 
-With [agent-mail](https://github.com/osteele/agent-mail), which broadcasts on
-an empty or unresolvable `--session`:
+With [agent-mail](https://github.com/osteele/agent-mail), an empty, unknown, or
+ambiguous explicit `--session` is an error, not permission to broadcast. The
+job and its completion remain in Weft for triage when a notification cannot
+reach its owner:
 
 ```toml
 [notifications]
