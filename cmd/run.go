@@ -1704,7 +1704,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 				admittedConstraints.SelfJobID = jobID
 				verdict := placement.CheckHostConstraintsWithActiveJobs(database, *spec, admittedConstraints)
 				if !verdict.Eligible {
-					if deleteErr := db.DeleteJob(database, jobID); deleteErr != nil {
+					// The admission bookkeeping lost the race, so no
+					// dispatch was attempted: the record is fresh and
+					// cannot have attempts.
+					if deleteErr := db.DeleteQueuedJobIfNeverStarted(database, jobID); deleteErr != nil {
 						return fmt.Errorf("capability admission failed and cleanup of %s failed: %v", ids.FormatJobID(jobID), deleteErr)
 					}
 					if runJSON {
@@ -1729,9 +1732,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 			job, getErr := db.GetJobByID(database, jobID)
 			accepted := getErr == nil && job != nil && job.LastSyncedStatus == db.StatusQueued
 			if !accepted {
-				if deleteErr := db.DeleteJob(database, jobID); deleteErr != nil {
+				deleteErr := db.DeleteQueuedJobIfNeverStarted(database, jobID)
+				if errors.Is(deleteErr, db.ErrJobAlreadyStarted) {
+					accepted = true
+					job, _ = db.GetJobByID(database, jobID)
+					fmt.Fprintf(cmd.ErrOrStderr(), "Note: job %s dispatched and started before the receipt check; keeping it\n", ids.FormatJobID(jobID))
+				} else if deleteErr != nil {
 					return fmt.Errorf("immediate dispatch failed and cleanup of %s failed: %v (sync: %v)", ids.FormatJobID(jobID), deleteErr, syncErr)
 				}
+			}
+			if !accepted {
 				if runJSON {
 					_ = emitRunReceipt(cmd, runSubmissionReceipt{
 						PlacementDecision: "not_accepted",

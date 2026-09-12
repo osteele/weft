@@ -848,9 +848,12 @@ rule OnlineOnlyAdmissionContract {
         -- recorded. A capability-slot race is checked again after recording;
         -- losing it deletes that provisional local Job. Failure to establish
         -- the remote queue acknowledgment also deletes the local Job before
-        -- returning not_accepted. Cleanup is db.DeleteJob, not cancellation or
-        -- tombstoning. If that deletion itself fails, the command returns a
-        -- cleanup error instead of claiming a safe not_accepted result.
+        -- returning not_accepted. Cleanup is db.DeleteQueuedJobIfNeverStarted,
+        -- not cancellation or tombstoning: it refuses with
+        -- ErrJobAlreadyStarted when execution evidence exists, and the command
+        -- then treats the job as accepted instead of deleting it. Any other
+        -- deletion failure returns a cleanup error instead of claiming a safe
+        -- not_accepted result.
         -- Source pinning can precede admission and is not the Job record this
         -- cleanup removes.
         --
@@ -862,7 +865,8 @@ rule OnlineOnlyAdmissionContract {
         --
         -- Implementation: cmd/run.go — runRun (`runIfOnline`, the post-record
         -- CheckHostConstraintsWithActiveJobs check, ops.SyncHost acknowledgment,
-        -- and db.DeleteJob cleanup); cmd/run_receipt.go — runSubmissionReceipt.
+        -- and db.DeleteQueuedJobIfNeverStarted cleanup);
+        -- cmd/run_receipt.go — runSubmissionReceipt.
 }
 
 rule WarnWhenUVPythonBypassesPEP723Environment {

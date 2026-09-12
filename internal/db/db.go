@@ -3472,7 +3472,69 @@ func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
 	return err
 }
 
-// DeleteJob removes a job from the database without touching remote files
+// ErrJobAlreadyStarted reports that a job has attempt history, so deletion
+// would discard execution evidence; the caller should treat the job as real.
+var ErrJobAlreadyStarted = errors.New("job has started and cannot be deleted")
+
+// DeleteQueuedJobIfNeverStarted removes a job that never reached execution:
+// a draft or queued record whose attempts never got a start time, together
+// with its submission-scoped children. A job that is executing or finished -
+// dispatch proof - is refused with ErrJobAlreadyStarted instead of dying on
+// a foreign-key violation (wb131). Every dispatched job carries at least a
+// queued attempt row, so attempt existence alone proves nothing.
+func DeleteQueuedJobIfNeverStarted(db *sql.DB, id int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var started int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND start_time IS NOT NULL AND start_time > 0`, id).Scan(&started); err != nil {
+		return err
+	}
+	if started > 0 {
+		return ErrJobAlreadyStarted
+	}
+	// Prune only never-executed attempt rows (status queued or draft); any
+	// surviving attempt row means the job progressed past submission.
+	if _, err := tx.Exec(`DELETE FROM job_attempts WHERE job_id = ? AND status IN (?, ?) AND (start_time IS NULL OR start_time = 0)`, id, StatusQueued, StatusDraft); err != nil {
+		return err
+	}
+	var remaining int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM job_attempts WHERE job_id = ?`, id).Scan(&remaining); err != nil {
+		return err
+	}
+	if remaining > 0 {
+		return ErrJobAlreadyStarted
+	}
+	// Submission-scoped children the telemetry and placement writes may have
+	// created before dispatch; each has a non-CASCADE FK to jobs, so every
+	// child goes before the parent row.
+	for _, stmt := range []string{
+		`DELETE FROM placement_decisions WHERE job_id = ?`,
+		`DELETE FROM prediction_history WHERE job_id = ?`,
+		`DELETE FROM placement_intents WHERE job_id = ?`,
+		`DELETE FROM job_payloads WHERE job_id = ?`,
+		`DELETE FROM job_lifecycle_events WHERE job_id = ?`,
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			return err
+		}
+	}
+	res, err := tx.Exec(`DELETE FROM jobs WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return nil // already gone
+	}
+	return tx.Commit()
+}
+
+// DeleteJob removes a job record outright.
 func DeleteJob(db *sql.DB, id int64) error {
 	_, err := db.Exec(`DELETE FROM jobs WHERE id = ?`, id)
 	return err
