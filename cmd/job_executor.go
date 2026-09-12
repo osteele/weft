@@ -111,6 +111,7 @@ type queueJobOptions struct {
 	CPUCores         int
 	CPUMemGB         int
 	CPUReserveCores  int
+	SetupPolicy      string
 	Interconnect     string
 	Dependencies     []queueDependency
 	AutoStart        bool
@@ -300,6 +301,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Interconnect:     interconnect,
 		CPUCores:         cpuCores,
 		CPUReserveCores:  opts.CPUReserveCores,
+		SetupPolicy:      opts.SetupPolicy,
 		DepSpec:          encodeQueueDependencies(opts.Dependencies),
 		Inputs:           opts.Inputs,
 		BestEffortInputs: opts.BestEffortInputs,

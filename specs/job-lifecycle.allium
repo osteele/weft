@@ -117,6 +117,13 @@ entity Job {
     -- value 0 or null means "no reservation".
     cpu_reserve_cores: Integer?
 
+    -- Environment-ownership declaration. Empty or "auto" means the runner
+    -- detects and runs target-project setup (uv sync and friends) before the
+    -- command. "none" means the job owns its environment - an installed
+    -- worker that never imports the target env - so detected setup never
+    -- runs, on any launch surface. Survives requeue and describe rebuilds.
+    setup_policy: String = ""
+
     -- Placement
     host: Host?
     target_kind: TargetKind
@@ -2081,6 +2088,12 @@ rule QueueRunnerDispatch {
     -- not run during a job's synchronous setup phase, so a quiet setup is
     -- never counted as idleness and a large-model load after startup raises
     -- the reservation instead of having had it decayed away.
+    --
+    -- Environment ownership: a job declaring setup_policy "none" skips
+    -- detected target-project setup entirely. Detected setup is a
+    -- convenience for jobs that import the target environment, not an
+    -- obligation; installed workers must start even when the target
+    -- project's dependencies cannot resolve inside the source snapshot.
 
     -- RAM capacity gate: reserve max(effective declared cpu_mem,
     -- predicted peak-RSS upper bound). Live host usage already includes the

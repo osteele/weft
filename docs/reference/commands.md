@@ -152,6 +152,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--same-host`: Require all requested GPUs on one host; this is currently the only supported multi-GPU launch semantic
 - `--cpu-cores N`: Require at least N effective CPU cores/vCPUs on rental offers
 - `--cpu-reserve N`: Reserve N CPU cores for this job on whichever host runs it. Cores are absolute; the runner normalizes them to a percent of the destination host's cores (rounded up), so the same reservation is portable across hosts. A percent allotment set later with `weft job describe --cpu` wins over the reservation.
+- `--setup none`: Declare that the job owns its environment, so the runner never runs the target project's detected setup (`uv sync` and friends). Use this for installed workers and other commands that never import the target environment; survives requeue and `weft job describe` rebuilds. Omit the flag (or `--setup auto`) for normal auto-detection.
 - `--provider vastai|runpod`: Restrict rental placement to one cloud provider. Use this for provider-specific testing; omit it for normal automatic provider selection.
 - `--runpod-cloud-type community|secure`: For RunPod-bound jobs, choose the RunPod cloud type for this job. A non-empty value records the job as RunPod-bound without changing global defaults.
 - `--max-hourly-rate USD`: Reject rental offers whose total recurring rate, including storage for the requested disk size, exceeds this amount. A group in which every job has an explicit rate cap may launch beyond the autopilot's global hourly soft target, provided the selected offer satisfies every cap.
@@ -2114,6 +2115,13 @@ not run during a job's setup phase, so a quiet setup is not counted as
 idleness; a job that loads a large model after startup keeps its granted
 reservation until real use is observed, and sustained use then raises it. The
 host-load ceiling still caps overload.
+
+Some commands never import the target environment: installed workers such as
+`agent-execution-worker` run from their own package, and a project's `uv sync`
+can fail outright when its path dependencies point outside a single-root
+source snapshot. `weft run --setup none` records that environment ownership on
+the job; the runner then skips detected setup on every launch surface instead
+of silently standing up an environment the command does not use.
 
 `exclusive` and `benchmark-isolation` jobs run alone. A benchmark job also
 waits for consecutive idle checks covering CPU and RAM, plus NVIDIA GPU

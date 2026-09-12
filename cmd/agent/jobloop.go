@@ -269,7 +269,7 @@ func setupPrewarmEligible(currentDir string, job cloud.AgentJob, nextDir string)
 	if len(hfInputAssets(job.Inputs)) > 0 {
 		return true
 	}
-	setupCmd := runner.DetectSetupCommand(nextDir)
+	setupCmd := runner.ResolveSetupCommand(job.SetupPolicy, nextDir)
 	if setupCmd == "" {
 		return false
 	}
@@ -384,7 +384,7 @@ func setupWeight(job cloud.AgentJob) int {
 	if workDir == "" {
 		return 0
 	}
-	setupCmd := runner.DetectSetupCommand(workDir)
+	setupCmd := runner.ResolveSetupCommand(job.SetupPolicy, workDir)
 	if setupCmd == "" {
 		return 0
 	}
@@ -478,7 +478,7 @@ func runSetupPrewarm(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, 
 		return success
 	}
 
-	setupCmd := runner.DetectSetupCommand(workDir)
+	setupCmd := runner.ResolveSetupCommand(job.SetupPolicy, workDir)
 	if setupCmd == "" {
 		return success
 	}

@@ -99,6 +99,7 @@ func queueEntryForJob(database *sql.DB, job *db.Job, envVars []string, depSpec s
 		Needs:            job.Needs,
 		Payloads:         payloads,
 		ArtifactNeeds:    artifactNeeds,
+		SetupPolicy:      job.SetupPolicy,
 	}
 	if job.LatestRunID != nil {
 		entry.RunID = *job.LatestRunID
@@ -160,6 +161,7 @@ func commandJobForQueueEntry(entry opsqueue.QueueEntry) opsqueue.CommandJob {
 		Needs:            entry.Needs,
 		ArtifactNeeds:    entry.ArtifactNeeds,
 		Payloads:         entry.Payloads,
+		SetupPolicy:      entry.SetupPolicy,
 	}
 }
 

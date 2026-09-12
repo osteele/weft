@@ -23,6 +23,17 @@ const direnvSetupCommand = `direnv allow && eval "$(direnv export bash)"`
 
 var uvSystemPythonPath = "/opt/conda/bin/python"
 
+// ResolveSetupCommand applies the job's environment-ownership declaration
+// before content detection: policy "none" means the job owns its environment
+// (an installed worker that never imports the target env), so detected setup
+// must not run (wb129). Empty policy or "auto" detects from the working dir.
+func ResolveSetupCommand(policy, workingDir string) string {
+	if policy == "none" {
+		return ""
+	}
+	return DetectSetupCommand(workingDir)
+}
+
 // DetectSetupCommand checks for environment manager marker files in the
 // working directory and returns the appropriate setup command to run before
 // the job command. Returns "" if no environment manager is detected.

@@ -101,6 +101,7 @@ SELECT
 	j.gpu_class,
 	j.cpu_allotment,
 	j.cpu_reserve_cores,
+	j.setup_policy,
 	j.gpu_mem_gb,
 	j.gpu_mem_max_gb,
 	j.max_compute_cap,

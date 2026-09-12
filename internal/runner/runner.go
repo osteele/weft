@@ -1017,7 +1017,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		envVars = append(envVars, dotenvVars...)
 	}
 
-	setupCmd := DetectSetupCommand(expandedDir)
+	setupCmd := ResolveSetupCommand(job.SetupPolicy, expandedDir)
 	if setupCmd == "uv sync" {
 		scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
 		if reason := SetupSkipReason(setupCmd, expandedDir, command, scriptMeta); reason != "" {

@@ -69,6 +69,7 @@ type CommandJob struct {
 	Needs            []string        `json:"needs,omitempty"`       // artifact specs this job needs
 	ArtifactNeeds    []ArtifactNeed  `json:"artifact_needs,omitempty"`
 	Payloads         []Payload       `json:"payloads,omitempty"`
+	SetupPolicy      string          `json:"setup,omitempty"` // "" = auto-detect, "none" = the job owns its environment
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -126,6 +127,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Needs:            entry.Needs,
 			ArtifactNeeds:    entry.ArtifactNeeds,
 			Payloads:         entry.Payloads,
+			SetupPolicy:      entry.SetupPolicy,
 		},
 	}
 }

@@ -128,6 +128,7 @@ var (
 	runInterconnect             string
 	runCPUCores                 int
 	runCPUReserve               int
+	runSetupPolicy              string
 	runCPUMem                   int
 	runCPUMemStrict             bool
 	runDiskGB                   int
@@ -560,6 +561,7 @@ func init() {
 	runCmd.Flags().IntVar(&runCPUMem, "cpu-mem", 0, "Minimum host/system RAM in GB; filters rental offers and gates on-prem hosts")
 	runCmd.Flags().BoolVar(&runCPUMemStrict, "cpu-mem-strict", false, "Use exact cpu-mem matching without default safety headroom")
 	runCmd.Flags().IntVar(&runCPUReserve, "cpu-reserve", 0, "Per-job CPU reservation in cores, normalized on the destination host (e.g. 2 reserves 2 of the host's cores)")
+	runCmd.Flags().StringVar(&runSetupPolicy, "setup", "", "Environment ownership: omit to auto-detect target-project setup, or \"none\" when the job owns its environment (e.g. installed workers)")
 	runCmd.Flags().IntVar(&runDiskGB, "disk", 0, "Rental instance disk floor in GB")
 	runCmd.Flags().IntVar(&runRuntimeDiskGB, "runtime-disk", 0, "Extra rental scratch/cache disk headroom in GB")
 	runCmd.Flags().IntVar(&runDiskMaxGB, "disk-max", 0, "Cap the estimated rental disk at this many GB (may lower the request below the estimate)")
@@ -1209,6 +1211,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err := validateRunResourceFlags(runCPUCores, runCPUMem, runCPUReserve); err != nil {
 		return err
 	}
+	if err := validateSetupPolicy(runSetupPolicy); err != nil {
+		return err
+	}
 	var normalizeErr error
 	runInterconnect, normalizeErr = normalizeInterconnect(runInterconnect)
 	if normalizeErr != nil {
@@ -1510,6 +1515,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Payloads:         capturedPayloads,
 			BestEffortInputs: bestEffortInputs,
 			CPUReserveCores:  runCPUReserve,
+			SetupPolicy:      runSetupPolicy,
 			Outputs:          runOutputs,
 			OutputDirs:       outputDirs,
 			Produces:         runProduces,
@@ -1989,6 +1995,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Interconnect:     runInterconnect,
 			Dependencies:     deps,
 			CPUReserveCores:  runCPUReserve,
+			SetupPolicy:      runSetupPolicy,
 			AutoStart:        true,
 			Inputs:           runInputs,
 			BestEffortInputs: bestEffortInputs,
@@ -3288,6 +3295,16 @@ func validateRunResourceFlags(cpuCores, cpuMem, cpuReserve int) error {
 		return fmt.Errorf("--cpu-reserve must be >= 0")
 	}
 	return nil
+}
+
+// validateSetupPolicy accepts the documented environment-ownership values.
+func validateSetupPolicy(policy string) error {
+	switch policy {
+	case "", "auto", "none":
+		return nil
+	default:
+		return fmt.Errorf("--setup must be \"auto\" or \"none\"; got %q", policy)
+	}
 }
 
 // intPtrOrNil returns a pointer to v if v > 0, or nil otherwise.

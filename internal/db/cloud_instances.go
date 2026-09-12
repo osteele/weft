@@ -2034,6 +2034,7 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 			launch_job_membership.membership_rank ASC`, qualifiedJobSelectColumnsWithOverrides("launch_job_membership", map[string]string{
 		"edge_authorized_targets": "edge_job.edge_authorized_targets",
 		"cpu_reserve_cores":       "edge_job.cpu_reserve_cores",
+		"setup_policy":            "edge_job.setup_policy",
 	}))
 	all, err := queryJobs(database, query, instanceID)
 	if err != nil {

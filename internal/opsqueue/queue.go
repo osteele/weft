@@ -78,6 +78,7 @@ type QueueEntry struct {
 	Needs            []string
 	ArtifactNeeds    []ArtifactNeed
 	Payloads         []Payload
+	SetupPolicy      string
 }
 
 // Payload is the queue protocol identity of one immutable job input artifact.

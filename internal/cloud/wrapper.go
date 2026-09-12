@@ -18,6 +18,7 @@ type AgentJob struct {
 	GPUMemGB        int      `json:"gpu_mem_gb,omitempty"`
 	Interconnect    string   `json:"interconnect,omitempty"`
 	CPUCores        int      `json:"cpu_cores,omitempty"`
+	SetupPolicy     string   `json:"setup,omitempty"` // "" = auto-detect, "none" = the job owns its environment
 	WallTimeSeconds int      `json:"wall_time_seconds,omitempty"`
 	OutputDirs      []string `json:"output_dirs,omitempty"`
 	Outputs         []string `json:"outputs,omitempty"`

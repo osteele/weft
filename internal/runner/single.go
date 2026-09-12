@@ -196,7 +196,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 	scriptMeta, _ := dataloc.ScanScriptMeta(expandedDir, command)
 
-	setupCmd := DetectSetupCommand(expandedDir)
+	setupCmd := ResolveSetupCommand(job.SetupPolicy, expandedDir)
 	if setupCmd == "uv sync" {
 		if reason := SetupSkipReason(setupCmd, expandedDir, command, scriptMeta); reason != "" {
 			slog.Info("skipping project uv sync",

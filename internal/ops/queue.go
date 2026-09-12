@@ -111,6 +111,7 @@ func appendJobToQueueWithSourceManifest(database *sql.DB, job *db.Job, timeout t
 		Needs:            job.Needs,
 		ArtifactNeeds:    artifactNeeds,
 		Payloads:         payloads,
+		SetupPolicy:      job.SetupPolicy,
 	}
 	addCmd := opsqueue.NewAddCommand(entry)
 	opts := opsqueue.AppendCommandOptions{Timeout: timeout}
@@ -239,8 +240,9 @@ type QueueJobParams struct {
 	GPUMemGB        *int   // GPU memory reservation in GB per device
 	Interconnect    string
 	CPUCores        int
-	CPUReserveCores int  // absolute cores; normalized to a percent of the destination host at dispatch
-	GPUMemMaxGB     *int // Legacy GPU memory upper metadata; ignored by placement
+	CPUReserveCores int    // absolute cores; normalized to a percent of the destination host at dispatch
+	SetupPolicy     string // "" = auto-detect target setup, "none" = the job owns its environment
+	GPUMemMaxGB     *int   // Legacy GPU memory upper metadata; ignored by placement
 	DepSpec         string
 	CPUAllotment    *int
 	OutputDirs      []string // convention-based output directories from .weft.toml
@@ -469,6 +471,11 @@ func recordQueuedJobTx(tx *sql.Tx, explicitJobID int64, params QueueJobParams, e
 		reserve := params.CPUReserveCores
 		if err := db.SetJobCPUReserveCores(tx, jobID, &reserve); err != nil {
 			return 0, fmt.Errorf("record CPU reserve cores: %w", err)
+		}
+	}
+	if params.SetupPolicy != "" {
+		if err := db.SetJobSetupPolicy(tx, jobID, params.SetupPolicy); err != nil {
+			return 0, fmt.Errorf("record setup policy: %w", err)
 		}
 	}
 	if gpuMemGB != nil {

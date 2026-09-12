@@ -1619,3 +1619,15 @@ func TestValidateRunResourceFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSetupPolicy(t *testing.T) {
+	for _, valid := range []string{"", "auto", "none"} {
+		if err := validateSetupPolicy(valid); err != nil {
+			t.Fatalf("validateSetupPolicy(%q) = %v, want nil", valid, err)
+		}
+	}
+	err := validateSetupPolicy("uv sync")
+	if err == nil || !strings.Contains(err.Error(), "--setup") {
+		t.Fatalf("validateSetupPolicy(uv sync) = %v, want --setup error", err)
+	}
+}

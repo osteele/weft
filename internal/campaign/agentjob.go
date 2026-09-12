@@ -37,6 +37,7 @@ func newAgentJob(job *db.Job, remoteDir string) cloud.AgentJob {
 		GPUCount:         job.RequestedGPUCount(),
 		Interconnect:     job.RequestedInterconnect(),
 		CPUCores:         job.RequestedCPUCores(),
+		SetupPolicy:      job.SetupPolicy,
 		WallTimeSeconds:  int(job.WallTime() / time.Second),
 		OutputDirs:       append([]string(nil), job.OutputDirs...),
 		Outputs:          append([]string(nil), job.Outputs...),
