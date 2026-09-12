@@ -1268,6 +1268,21 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 			return false, false
 		}
 		if err := client.DestroyInstance(providerID); err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
+			// The retry loop re-runs this on the next reconcile pass, so the
+			// provider error must live where operators look: wi7795 recorded
+			// 52 failed destroy attempts while weft info showed completion
+			// unknown and nothing but the daemon log carried the cause.
+			destroyIntent.LastError = err.Error()
+			if updateErr := db.UpdateLaunchTerminationIntent(database, ci.ID, destroyIntent); updateErr != nil {
+				slog.Warn("failed to record destroy failure on termination intent", "component", "reconcile", "instance", ci.ID, "error", updateErr)
+			}
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventReconcileDestroyFailed,
+				LaunchID:  ci.ID,
+				GPUSpec:   ci.GPUSpec,
+				Detail:    action.StallMessage,
+				ErrorText: err.Error(),
+			})
 			slog.Warn("failed to destroy instance, deferring terminal status to next reconcile pass", "component", "reconcile", "instance", ci.ID, "provider", providerID, "error", err)
 			return false, false
 		}

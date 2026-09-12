@@ -81,6 +81,7 @@ const (
 	EventReconcileSelfDestructFail  = "reconcile.self_destruct_failed"
 	EventReconcileEmptyStatus       = "reconcile.empty_status_timeout"
 	EventReconcileSafetyNetDestroy  = "reconcile.safety_net_destroy"
+	EventReconcileDestroyFailed     = "reconcile.destroy_failed"
 	EventReconcileOrphanSweep       = "reconcile.orphan_sweep"
 	EventReconcileStalePlannedReap  = "reconcile.stale_planned_reap"
 	EventReconcileDonorComplete     = "reconcile.donor_complete"

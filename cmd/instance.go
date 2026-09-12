@@ -303,7 +303,7 @@ func runInstanceAudit(cmd *cobra.Command, args []string) error {
 		case "unknown":
 			unknown++
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Instance %s: provider=%s provider_instance_id=%s db_status=%s provider_status=%s resource=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
+		lifecycle := fmt.Sprintf("Instance %s: provider=%s provider_instance_id=%s db_status=%s provider_status=%s resource=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s",
 			ids.FormatInstanceID(launch.ID),
 			lifecycleValue(launch.Provider),
 			lifecycleValue(launch.EffectiveProviderID()),
@@ -314,6 +314,7 @@ func runInstanceAudit(cmd *cobra.Command, args []string) error {
 			lifecycleUnixValue(lifecycleTeardownStartedAt(launch)),
 			lifecycleUnixValue(lifecycleTeardownCompletedAt(launch)),
 		)
+		fmt.Fprintln(cmd.OutOrStdout(), lifecycle+lifecycleTeardownDiagnostics(launch))
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Summary: %d instance(s), %d remaining, %d unknown\n", len(launches), remaining, unknown)
 	return nil

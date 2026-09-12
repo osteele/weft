@@ -1136,7 +1136,7 @@ func printJobLifecycleProof(w io.Writer, database *sql.DB, job *db.Job) {
 			fmt.Fprintf(w, "Lifecycle:   target_kind=%s instance_id=%s\n", targetKind, ids.FormatInstanceID(*launchID))
 			return
 		}
-		fmt.Fprintf(w, "Lifecycle:   target_kind=%s provider=%s instance_id=%s provider_instance_id=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s\n",
+		lifecycle := fmt.Sprintf("Lifecycle:   target_kind=%s provider=%s instance_id=%s provider_instance_id=%s teardown_policy=%s teardown_started_at=%s teardown_completed_at=%s",
 			lifecycleTargetKind(job, launch),
 			lifecycleValue(launch.Provider),
 			ids.FormatInstanceID(launch.ID),
@@ -1145,6 +1145,8 @@ func printJobLifecycleProof(w io.Writer, database *sql.DB, job *db.Job) {
 			lifecycleUnixValue(lifecycleTeardownStartedAt(launch)),
 			lifecycleUnixValue(lifecycleTeardownCompletedAt(launch)),
 		)
+		lifecycle += lifecycleTeardownDiagnostics(launch)
+		fmt.Fprintln(w, lifecycle)
 		return
 	}
 	fmt.Fprintf(w, "Lifecycle:   target_kind=%s\n", targetKind)
@@ -1291,10 +1293,32 @@ func formatUnixTime(t int64) string {
 	return util.FormatCLITime(time.Unix(t, 0), "2006-01-02 15:04:05")
 }
 
+// lifecycleTeardownDiagnostics explains a teardown that started but has not
+// succeeded: without it a stalled provider destroy (52 failed attempts on
+// wi7795) renders as a bare unknown completion time.
+func lifecycleTeardownDiagnostics(launch *db.Launch) string {
+	if launch == nil || launch.TerminationIntent == nil {
+		return ""
+	}
+	intent := launch.TerminationIntent
+	if intent.DestroyStartedAtUnix == 0 || intent.DestroySucceededAtUnix > 0 {
+		return ""
+	}
+	diagnostics := fmt.Sprintf(" teardown_attempts=%d", intent.DestroyAttempts)
+	if intent.LastAttemptAtUnix > 0 {
+		diagnostics += fmt.Sprintf(" teardown_last_attempt_at=%s", formatUnixTime(intent.LastAttemptAtUnix))
+	}
+	if intent.LastError != "" {
+		diagnostics += fmt.Sprintf(" teardown_last_error=%q", intent.LastError)
+	}
+	return diagnostics
+}
+
 func formatCLIRFC3339(value string) string {
 	if value == "" {
 		return "unknown"
 	}
+
 	t, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return value

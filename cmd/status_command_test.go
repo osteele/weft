@@ -662,6 +662,69 @@ func TestRunJobInfoShowsRentalLifecycleProof(t *testing.T) {
 	}
 }
 
+// An in-flight teardown with failed provider destroys must surface its
+// attempts and last error; a bare "completion unknown" hid 45 minutes of
+// failing destroys on wi7795 (wb128).
+func TestRunJobInfoShowsFailingTeardownDiagnostics(t *testing.T) {
+	stubEmptyQueueStatus(t)
+
+	database := db.SetupTestDB(t)
+	now := time.Now().Unix()
+	started := now - 40
+	launchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, launchID, "vast-stalled"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, db.LaunchHost(launchID), "/tmp", "echo hi", "stalled teardown", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// Attach the job while the launch is still accepting work, then record
+	// the destroying intent: an active intent refuses new job assignments.
+	if err := db.UpdateLaunchTerminationIntent(database, launchID, &instanceintent.Marker{
+		State:                  instanceintent.StateDestroying,
+		TerminalStatus:         db.LaunchStatusFailed,
+		TerminationReason:      db.TerminationReasonSpendCapReached,
+		RequestedAtUnix:        started - 1,
+		DestroyStartedAtUnix:   started,
+		DestroySucceededAtUnix: 0,
+		DestroyAttempts:        52,
+		LastAttemptAtUnix:      now - 3,
+		LastError:              "vastai: destroy request timed out",
+	}); err != nil {
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
+	}
+
+	restoreJobInfoFlags(t)
+	jobInfoNoSync = true
+
+	out := captureStdout(t, func() {
+		if err := runJobInfo(&cobra.Command{}, []string{fmt.Sprint(jobID)}); err != nil {
+			t.Fatalf("runJobInfo: %v", err)
+		}
+	})
+	for _, want := range []string{
+		"teardown_started_at=" + formatUnixTime(started),
+		"teardown_completed_at=unknown",
+		"teardown_attempts=52",
+		"teardown_last_attempt_at=" + formatUnixTime(now-3),
+		`teardown_last_error="vastai: destroy request timed out"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("info output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunJobInfoUnplacedQueuedStatusIsDisambiguated(t *testing.T) {
 	stubEmptyQueueStatus(t)
 
