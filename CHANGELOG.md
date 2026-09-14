@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **CLI completion with pending hooks**: Commands exit without draining the
   lifecycle-hook backlog. The daemon retains responsibility for durable retries,
   so slow hooks do not delay completed JSON queries.
+- **Online-only admission cleanup**: Refused submissions remove attempt-bound
+  telemetry before deleting provisional attempts, avoiding foreign-key failures
+  while preserving execution evidence and transactional rollback.
 - **Job-wait transport failures**: `status --wait` falls back to remote status
   polling when daemon recovery fails, preserving the original wait deadline.
 - **Inventory queue admission failures**: R2-pull hosts publish attempt-fenced

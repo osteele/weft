@@ -3496,6 +3496,20 @@ func DeleteQueuedJobIfNeverStarted(db *sql.DB, id int64) error {
 	if started > 0 {
 		return ErrJobAlreadyStarted
 	}
+	// Submission telemetry can reference both the job and its provisional
+	// attempts through non-CASCADE foreign keys. Remove these children before
+	// their parents; refusing execution evidence rolls back the entire cleanup.
+	for _, stmt := range []string{
+		`DELETE FROM placement_decisions WHERE job_id = ?`,
+		`DELETE FROM prediction_history WHERE job_id = ?`,
+		`DELETE FROM placement_intents WHERE job_id = ?`,
+		`DELETE FROM job_payloads WHERE job_id = ?`,
+		`DELETE FROM job_lifecycle_events WHERE job_id = ?`,
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			return err
+		}
+	}
 	// Prune only never-executed attempt rows (status queued or draft); any
 	// surviving attempt row means the job progressed past submission.
 	if _, err := tx.Exec(`DELETE FROM job_attempts WHERE job_id = ? AND status IN (?, ?) AND (start_time IS NULL OR start_time = 0)`, id, StatusQueued, StatusDraft); err != nil {
@@ -3507,20 +3521,6 @@ func DeleteQueuedJobIfNeverStarted(db *sql.DB, id int64) error {
 	}
 	if remaining > 0 {
 		return ErrJobAlreadyStarted
-	}
-	// Submission-scoped children the telemetry and placement writes may have
-	// created before dispatch; each has a non-CASCADE FK to jobs, so every
-	// child goes before the parent row.
-	for _, stmt := range []string{
-		`DELETE FROM placement_decisions WHERE job_id = ?`,
-		`DELETE FROM prediction_history WHERE job_id = ?`,
-		`DELETE FROM placement_intents WHERE job_id = ?`,
-		`DELETE FROM job_payloads WHERE job_id = ?`,
-		`DELETE FROM job_lifecycle_events WHERE job_id = ?`,
-	} {
-		if _, err := tx.Exec(stmt, id); err != nil {
-			return err
-		}
 	}
 	res, err := tx.Exec(`DELETE FROM jobs WHERE id = ?`, id)
 	if err != nil {

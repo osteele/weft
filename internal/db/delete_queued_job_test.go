@@ -7,9 +7,8 @@ import (
 	"time"
 )
 
-// The --if-online cleanup path deletes a freshly submitted record when the
-// host does not acknowledge dispatch. A bare DELETE FROM jobs died on a
-// foreign-key violation once the job had execution history (wb131).
+// Online-only refusal may delete provisional jobs, but must retain execution
+// evidence and its submission metadata.
 func TestDeleteQueuedJobIfNeverStarted(t *testing.T) {
 	t.Run("deletes a fresh queued job and its submission children", func(t *testing.T) {
 		database := SetupTestDB(t)
@@ -23,10 +22,14 @@ func TestDeleteQueuedJobIfNeverStarted(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("InsertJobPayload: %v", err)
 		}
-		// Telemetry rows have a non-CASCADE FK to jobs; they must go before
-		// the parent or the delete dies exactly like wb131's cleanup did.
-		if _, err := database.Exec(`INSERT INTO placement_decisions (job_id, decision_kind, created_at) VALUES (?, 'run', strftime('%s','now'))`, jobID); err != nil {
+		// Admission telemetry references the provisional attempt as well as its job.
+		if _, err := database.Exec(`INSERT INTO placement_decisions (job_id, attempt_id, decision_kind, created_at)
+			SELECT job_id, id, 'run', strftime('%s','now') FROM job_attempts WHERE job_id = ?`, jobID); err != nil {
 			t.Fatalf("insert placement decision: %v", err)
+		}
+		if _, err := database.Exec(`INSERT INTO prediction_history (job_id, attempt_id, target, created_at)
+			SELECT job_id, id, 'runtime', strftime('%s','now') FROM job_attempts WHERE job_id = ?`, jobID); err != nil {
+			t.Fatalf("insert prediction history: %v", err)
 		}
 
 		if err := DeleteQueuedJobIfNeverStarted(database, jobID); err != nil {
@@ -79,8 +82,14 @@ func TestDeleteQueuedJobIfNeverStarted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RecordQueued: %v", err)
 		}
-		if err := UpdateQueuedToRunning(database, jobID); err != nil {
-			t.Fatalf("UpdateQueuedToRunning: %v", err)
+		if _, err := database.Exec(`UPDATE job_attempts SET status = 'running', start_time = NULL WHERE job_id = ?`, jobID); err != nil {
+			t.Fatal(err)
+		}
+		if err := InsertJobPayload(database, JobPayload{
+			JobID: jobID, Name: "execution-prompt", StoredPath: "payloads/hash",
+			SizeBytes: 3, SHA256: "ab", R2Key: "assets/hash",
+		}); err != nil {
+			t.Fatal(err)
 		}
 
 		err = DeleteQueuedJobIfNeverStarted(database, jobID)
@@ -89,6 +98,13 @@ func TestDeleteQueuedJobIfNeverStarted(t *testing.T) {
 		}
 		if job, _ := GetJobByID(database, jobID); job == nil {
 			t.Fatal("running job row was deleted")
+		}
+		var payloads int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM job_payloads WHERE job_id = ?`, jobID).Scan(&payloads); err != nil {
+			t.Fatal(err)
+		}
+		if payloads != 1 {
+			t.Fatalf("refused cleanup lost submission metadata: payload rows = %d", payloads)
 		}
 	})
 }
