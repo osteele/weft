@@ -89,8 +89,9 @@ Delivery is tracked independently for each `(event_id, hook ID)`. A hook failure
 does not block another hook or change job state. Pending delivery is durable and
 at least once: a crashed or retrying hook can receive the same `event_id` again,
 so consumers must commit idempotently before returning `handled`.
-The resident Weft daemon retries due deliveries on each reconciliation pass;
-ordinary CLI invocations also drain due structured-hook deliveries.
+The resident Weft daemon retries due deliveries on each reconciliation pass.
+CLI completion does not drain the hook backlog or wait for hook acknowledgements.
+Keep the daemon running to deliver pending retries.
 
 ### Legacy Job-Completion Command
 

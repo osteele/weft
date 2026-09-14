@@ -114,7 +114,6 @@ func Execute() error {
 	}
 
 	executedCmd, err := rootCmd.ExecuteC()
-	drainConfiguredLifecycleHooks(cfg)
 	if err == nil {
 		return nil
 	}
@@ -136,20 +135,6 @@ func Execute() error {
 
 	printCommandError(executedCmd, err)
 	return err
-}
-
-func drainConfiguredLifecycleHooks(cfg *config.Config) {
-	if cfg == nil || len(cfg.Events.Hooks) == 0 || os.Getenv("WEFT_EVENT_ID") != "" {
-		return
-	}
-	database, err := db.Open()
-	if err != nil {
-		slog.Warn("lifecycle hook retry drain: open database", "error", err)
-		return
-	}
-	defer database.Close()
-
-	dispatchConfiguredLifecycleHooks(database, cfg)
 }
 
 func dispatchConfiguredLifecycleHooks(database *sql.DB, cfg *config.Config) {

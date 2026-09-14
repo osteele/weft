@@ -20,6 +20,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **CLI completion with pending hooks**: Commands exit without draining the
+  lifecycle-hook backlog. The daemon retains responsibility for durable retries,
+  so slow hooks do not delay completed JSON queries.
 - **Job-wait transport failures**: `status --wait` falls back to remote status
   polling when daemon recovery fails, preserving the original wait deadline.
 - **Inventory queue admission failures**: R2-pull hosts publish attempt-fenced

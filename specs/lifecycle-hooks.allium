@@ -90,10 +90,17 @@ invariant DeliveryIsAtLeastOnce {
 }
 
 rule RetryDueDeliveries {
-    when: WeftDaemonReconciliationPass() or WeftCLICommandCompletes()
+    when: WeftDaemonReconciliationPass()
     ensures:
         EveryDuePendingStructuredHookDeliveryIsEligibleForClaim()
         LegacyNotificationDeliveryIsNotDrainedOutsideItsTerminalTransition()
+}
+
+rule CompleteCLICommand {
+    when: WeftCLICommandCompletes()
+    ensures:
+        CLIExitDoesNotDrainLifecycleHookBacklog()
+        PendingHookDeliveriesRemainAvailableToDaemon()
 }
 
 rule LegacyNotificationCompatibility {
