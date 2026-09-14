@@ -8,6 +8,10 @@
 --   - Host capability model (static YAML + discovered)
 --   - GPUSpec and GPU class normalization / matching rules
 --   - Placement Constraints, eligibility filters, and scoring
+--   - Binding-path coverage: every path that binds a job to hardware
+--     evaluates freshly assembled constraints (BindingPathsAreExhaustive,
+--     EveryBindingEvaluatesFreshConstraints,
+--     ConstraintsAreExplicitFrozenDerivedFresh)
 --   - Data asset locality tracking and scan/download rules
 --   - Host discovery via SSH
 --
@@ -18,6 +22,11 @@
 --     (see status-sync.allium; this spec only models the data model)
 --   - Predictor internals, Monte Carlo simulation, CPU perf lookup tables
 --     (implementation details of scoring)
+--   - Submission preconditions (agent binary staged for the exact
+--     submitting build, R2 reachability): these gate whether a job
+--     reaches placement at all; a failure there is pre-placement and
+--     outside the binding invariant (owned by source-data-sync /
+--     job-lifecycle surfaces)
 --
 -- Naming: enum literals use underscores (e.g. min_generation).
 -- Normalized GPU class strings use the implementation form (lowercase,
@@ -880,6 +889,62 @@ contract ConstraintSystemCoverage {
         -- SKU memory noted as the standing candidate for widening.
 }
 
+-- ConstraintSystemCoverage governs AXES (which systems check which
+-- constraint fields). This contract governs PATHS: the complete set of
+-- code paths that may bind a job to hardware. A path that binds without
+-- evaluating is a defect on any surface — capabilities went unhonored
+-- from the unplaced pool (wb109), replan placed a job onto a host lacking
+-- a required capability (wb110), retry re-queued to the same
+-- driver-incompatible host (wb94), and re-placement violated the declared
+-- GPU memory floor (wb130); each was a path re-binding without a full
+-- eligibility pass.
+contract BindingPathsAreExhaustive {
+    -- The eight binding paths and their implementations:
+        --   submit: job-lifecycle PlaceJob calls SelectBestHost here
+        --   cloud_spill: PlaceWithFallback's spill branch (control passes
+        --     to campaign-lifecycle's launch workflow)
+        --   fast_submit_reuse: FastSubmitOnPremReuse (cmd/run.go
+        --     evaluateRecentOnPremPlacement)
+        --   autopilot_inventory: placeInventoryOnPrem
+        --     (internal/orchestration/autopilot.go) via placement.Evaluate
+        --   hostsync_unplaced_pool: checkUnplacedJobs
+        --     (internal/app/hostsync/worker.go) via placement.Evaluate
+        --   retry / replan: job-lifecycle re-placement, re-entering
+        --     evaluation with constraints assembled at that decision
+        --   explicit_host: ExplicitHostBypassesPolicyNotCompatibility
+        --   job_move: job-move.allium (moving a placed job to another host
+        --     is a re-binding and re-enters evaluation)
+        -- A path that writes jobs.host or claims an instance without
+        -- routing through evaluation violates this contract. The coverage
+        -- test counterpart should enumerate these paths the way
+        -- TestConstraintSystemCoverage enumerates axes.
+}
+
+rule ConstraintsAreExplicitFrozenDerivedFresh {
+    when: ConstraintsAssembledForDecision(job)
+
+    -- Freezing is defined relative to the CURRENT submission/retry intent,
+    -- not the original submission's values. Stored operator overrides
+    -- (--gpus, --cuda-driver-min, --affinity, provider, tags) persist until
+    -- explicitly changed. Retry replays the CURRENT [tool.weft] script
+    -- declarations and clears removed script constraints
+    -- (job-lifecycle.allium retry; cmd/restart.go); placement evaluates
+    -- those effective persisted values. Runtime compatibility floors
+    -- (compute-capability range, CUDA/driver) are freshly derived from the
+    -- tree that will execute at that decision: the refreshed working tree
+    -- after retry (wb89), the pinned manifest otherwise. A user override
+    -- outranks inference at any decision and may lower or clear the floor.
+    --
+    -- Fix-forward is deliberate: a retry after the user corrects a torch
+    -- pin must not inherit the floors that failed the first attempt
+    -- (wb94). Freezing script-declared axes at their original values would
+    -- poison every retry with the original mistake.
+    --
+    -- The split is observable in Constraints: user-explicit axes equal the
+    -- values persisted at submit; source-derived axes equal a fresh
+    -- derivation over the execution tree for this decision.
+}
+
 rule BuildConstraintsFromJob {
     when: EvaluateBuildConstraintsFromJob()
 
@@ -943,13 +1008,17 @@ rule EvaluateEligibility {
     -- error output.
 
     -- 0a. Cordoned targets take no new auto-placed work. (weft instance
-    --     cordon / host-level cordon; explicit --host bypasses the scorer.)
-    requires: not target.cordoned
+    --     cordon / host-level cordon.) The explicitly_named exception below
+    --     scopes the override to operator-forced --host targeting and is
+    --     audited; auto-placed work (including campaign-lifecycle's
+    --     placement pass, which states its own unconditional cordon rule)
+    --     never receives it.
+    requires: target.explicitly_named or not target.cordoned
 
     -- 0b. Overloaded hosts are ineligible; merely busy hosts stay eligible
     --     with a scoring penalty. Implementation: placement.AssessHostLoad —
     --     rejection reasons "host overloaded: <detail>".
-    requires: target.load.state != overloaded
+    requires: target.explicitly_named or target.load.state != overloaded
 
     -- 1. Opt-in exclusion. Hosts marked opt-in-only in config are
     --    eligible only for jobs that explicitly name them.
@@ -1187,6 +1256,40 @@ rule EvaluateEligibility {
         -- than the torch wheel supports (wj2365 / RTX PRO 4500 Blackwell on
         -- 2026-06-02), so fail-open on the upper bound can silently dispatch
         -- a torch-2.6 (sm_9.0) job onto sm_12.0 silicon.
+}
+
+rule ExplicitHostBypassesPolicyNotCompatibility {
+    when: ExplicitHostTargeted(job, host)
+
+    -- An explicit --host skips candidate scoring and ranking, and may
+    -- override POLICY gates — cordon (clause 0a), overload (clause 0b),
+    -- opt-in-only (clause 1) — with an audit event recording the override:
+    -- who forced what onto a cordoned or busy host is a fact worth keeping
+    -- (wb113's lesson: unattributed state changes are defects).
+    --
+    -- It never overrides COMPATIBILITY axes: required capabilities,
+    -- GPU class/count/memory, compute-capability range, CUDA/driver
+    -- floors, machine pin. Violating those reads as a broken run, not an
+    -- overridden preference.
+    --
+    -- Unknown host facts are not violations: as in clause 1c, an
+    -- inventory record omitting a fact (0) does not disqualify, so --host
+    -- onto a stale-inventory host still works; it fails only on KNOWN
+    -- incompatibility, with placement reasons.
+    requires: CompatibilitySatisfied(host, job.constraints)
+        -- compatibility axes: c.required_capabilities subset of
+        --   host.capabilities; MatchGPU for class; per-device memory and
+        --   count clauses; compute-capability range; min CUDA/driver floors
+
+    if host.cordoned or host.load.state = overloaded or host.opt_in_only:
+        ensures: PolicyOverrideAudited(job, host)
+
+    -- legacy annotation: @guidance
+        -- PolicyOverrideAudited is produced by the CLI explicit-host path
+        -- (cmd/run.go --host handling): the submission emits the audit
+        -- event naming the job, host, and operator before the assignment is
+        -- written. Until that emission exists in code, the explicitly_named
+        -- exception must not be honored on cordoned or overloaded targets.
 }
 
 -- =========================================================================
@@ -1876,6 +1979,32 @@ invariant TargetSatisfiesRequestedGPUCount {
         -- the same time, because the first job's reservation leaves too few
         -- free devices for the second. Rental instances account for queued
         -- work through estimated wait/completion time instead (wb41 note).
+}
+
+invariant EveryBindingEvaluatesFreshConstraints {
+    -- Every event that binds a job to hardware — an on-prem jobs.host
+    -- assignment or a cloud instance claim — is preceded, within the same
+    -- decision, by a full EvaluateEligibility pass over constraints
+    -- assembled at that decision
+    -- (ConstraintsAreExplicitFrozenDerivedFresh). The paths enumerated in
+    -- BindingPathsAreExhaustive are the only writers of a binding; a
+    -- binding recorded without a same-decision eligibility pass is a
+    -- defect regardless of which surface wrote it. History: wb109, wb110,
+    -- wb94, wb130.
+    for job in Jobs:
+        for target in job.selected_targets:
+            EligibilityPassRecordedForBinding(job, target)
+}
+
+invariant PlacementDiagnosisExplainsAdmission {
+    -- Diagnosis that quotes a candidate offer or host for an unplaced job
+    -- must show the constraint check that admits it, not just the quote.
+    -- A GPU offer quoted as the exact match for a CPU-only job reads as
+    -- misrouting without the admitting check (wb163).
+    -- PlacementReasonsExplainUnplaced covers the unplaced direction; this
+    -- covers the matched direction.
+    for diagnosis in PlacementDiagnoses where diagnosis.quoted_candidate != null:
+        diagnosis.admission_reasons.length > 0
 }
 
 -- =========================================================================
